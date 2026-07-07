@@ -46,6 +46,7 @@ from imbue.mngr_kanpan.testing import make_board_snapshot
 from imbue.mngr_kanpan.testing import make_mngr_ctx_with_config
 from imbue.mngr_kanpan.testing import make_pr_field
 from imbue.mngr_kanpan.tui import BOARD_SECTION_ORDER
+from imbue.mngr_kanpan.tui import PEEK_TAIL_LINE_COUNT
 from imbue.mngr_kanpan.tui import _BUILTIN_COLUMN_DEFS
 from imbue.mngr_kanpan.tui import _BUILTIN_COMMAND_KEY_DELETE
 from imbue.mngr_kanpan.tui import _BUILTIN_COMMAND_KEY_EXECUTE
@@ -69,6 +70,7 @@ from imbue.mngr_kanpan.tui import _build_field_color_palette
 from imbue.mngr_kanpan.tui import _build_mark_palette
 from imbue.mngr_kanpan.tui import _carry_forward_fields
 from imbue.mngr_kanpan.tui import _clear_focus
+from imbue.mngr_kanpan.tui import _close_peek
 from imbue.mngr_kanpan.tui import _compute_board_column_widths
 from imbue.mngr_kanpan.tui import _compute_footer_display
 from imbue.mngr_kanpan.tui import _dispatch_command
@@ -84,9 +86,12 @@ from imbue.mngr_kanpan.tui import _get_name_cell_markup
 from imbue.mngr_kanpan.tui import _get_state_attr
 from imbue.mngr_kanpan.tui import _is_field_stale
 from imbue.mngr_kanpan.tui import _is_focus_on_first_selectable
+from imbue.mngr_kanpan.tui import _last_nonempty_line
 from imbue.mngr_kanpan.tui import _load_user_commands
 from imbue.mngr_kanpan.tui import _on_batch_item_poll
+from imbue.mngr_kanpan.tui import _on_peek_reply_poll
 from imbue.mngr_kanpan.tui import _on_transient_expire
+from imbue.mngr_kanpan.tui import _peek_body_from_capture
 from imbue.mngr_kanpan.tui import _prune_orphaned_marks
 from imbue.mngr_kanpan.tui import _refresh_display
 from imbue.mngr_kanpan.tui import _render_footer
@@ -1822,3 +1827,83 @@ def test_resolve_section_order_custom_list() -> None:
     custom = [BoardSection.STILL_COOKING, BoardSection.MUTED]
     result = _resolve_section_order(custom)
     assert result == (BoardSection.STILL_COOKING, BoardSection.MUTED)
+
+
+# =============================================================================
+# Peek panel
+# =============================================================================
+
+
+def test_last_nonempty_line_returns_last_meaningful_line() -> None:
+    assert _last_nonempty_line("first\nsecond\n\n") == "second"
+
+
+def test_last_nonempty_line_all_blank_returns_empty() -> None:
+    assert _last_nonempty_line("   \n\n") == ""
+
+
+def test_peek_body_from_capture_keeps_trailing_tail() -> None:
+    stdout = "\n".join(f"line{i}" for i in range(30)) + "\n\n\n"
+    result = subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
+    body_lines = _peek_body_from_capture(result).split("\n")
+    # Trailing blank lines are dropped and only the last PEEK_TAIL_LINE_COUNT remain.
+    assert len(body_lines) == PEEK_TAIL_LINE_COUNT
+    assert body_lines[-1] == "line29"
+
+
+def test_peek_body_from_capture_reports_failure() -> None:
+    result = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="host unreachable")
+    assert "host unreachable" in _peek_body_from_capture(result)
+
+
+def test_peek_body_from_capture_empty_output() -> None:
+    result = subprocess.CompletedProcess(args=[], returncode=0, stdout="\n\n", stderr="")
+    assert _peek_body_from_capture(result) == "(no recent output)"
+
+
+def test_on_peek_reply_poll_success_renders_sent() -> None:
+    state = _make_state()
+    state.peek_status_text = Text("")
+    future: Future[subprocess.CompletedProcess[str]] = Future()
+    future.set_result(subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""))
+    state.peek_reply_future = future
+    _on_peek_reply_poll(cast(Any, _make_mock_loop()), (state, "agent-a"))
+    assert state.peek_reply_future is None
+    assert "sent to agent-a" in state.peek_status_text.text
+
+
+def test_on_peek_reply_poll_failure_shows_last_error_line() -> None:
+    state = _make_state()
+    state.peek_status_text = Text("")
+    future: Future[subprocess.CompletedProcess[str]] = Future()
+    future.set_result(
+        subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="pane dump\nActual error line")
+    )
+    state.peek_reply_future = future
+    _on_peek_reply_poll(cast(Any, _make_mock_loop()), (state, "agent-a"))
+    assert "send failed: Actual error line" in state.peek_status_text.text
+
+
+def test_close_peek_restores_footer_and_clears_state() -> None:
+    entry = _make_entry(name="agent-a")
+    state = _make_state_with_walker((entry,))
+    original_footer = Text("keybinding-bar")
+    state.frame.footer = original_footer
+    # Simulate an open panel.
+    state.peek_agent_name = AgentName("agent-a")
+    state.saved_footer = original_footer
+    state.frame.footer = Text("peek-panel")
+    state.peek_body_text = Text("body")
+    state.peek_input = Text("reply")
+
+    _close_peek(state)
+
+    assert state.peek_agent_name is None
+    assert state.frame.footer is original_footer
+    assert state.peek_body_text is None
+
+
+def test_close_peek_when_not_open_is_noop() -> None:
+    state = _make_state()
+    _close_peek(state)
+    assert state.peek_agent_name is None

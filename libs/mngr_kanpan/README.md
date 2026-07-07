@@ -4,6 +4,17 @@ All-seeing agent tracker. The name combines Sino-Japanese 看 (*kan*, "to look",
 
 Launch with `mngr kanpan`. Requires the `gh` CLI to be installed and authenticated.
 
+## Attach, peek, and reply
+
+Interact with an agent without leaving the board:
+
+- **Attach** (`Enter` or `→`): enter the focused agent's full interactive session (equivalent to `mngr connect`). The board suspends while you are attached and restores when you detach (tmux's `Ctrl-b d`), so you return to the board rather than a bare shell.
+- **Peek** (`Space`): open a live panel below the board showing the focused agent's recent pane output, refreshed every couple of seconds. The board stays visible above it.
+  - While the panel is open: `↑`/`↓` switch the peeked agent, `→` (on an empty reply) attaches, `Esc` closes the panel.
+- **Reply**: type into the panel's `reply>` input and press `Enter` to send the message to that agent (equivalent to `mngr message`). The send runs in the background, so the panel stays live and you can watch the reply land in the peeked output. Sending to a stopped or non-interactive agent reports the error inline.
+
+These are builtins; they do not need any configuration.
+
 ## Filtering
 
 Filter which agents appear on the board using CEL expressions:

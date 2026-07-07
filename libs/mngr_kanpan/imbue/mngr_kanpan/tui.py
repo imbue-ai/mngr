@@ -19,6 +19,7 @@ from urwid.event_loop.main_loop import MainLoop
 from urwid.widget.attr_map import AttrMap
 from urwid.widget.columns import Columns
 from urwid.widget.divider import Divider
+from urwid.widget.edit import Edit
 from urwid.widget.filler import Filler
 from urwid.widget.frame import Frame
 from urwid.widget.listbox import ListBox
@@ -82,6 +83,12 @@ SPINNER_FRAMES: tuple[str, ...] = ("|", "/", "-", "\\")
 SPINNER_INTERVAL_SECONDS: float = 0.15
 TRANSIENT_MESSAGE_SECONDS: float = 3.0
 
+# Peek panel: number of trailing pane lines to show, and how often to re-capture
+# while the panel is open.
+PEEK_TAIL_LINE_COUNT: int = 14
+PEEK_REFRESH_SECONDS: float = 2.0
+PEEK_REPLY_PROMPT: str = "reply> "
+
 PALETTE = [
     ("header", "white", "dark blue"),
     ("footer", "white", "dark blue"),
@@ -113,6 +120,11 @@ PALETTE = [
     ("stale_focus", "dark gray,standout", ""),
     ("error_text", "light red", ""),
     ("notification", "white", "dark magenta"),
+    # Peek panel
+    ("peek_header", "white", "dark blue"),
+    ("peek_hint", "dark gray", ""),
+    ("peek_status", "light green", ""),
+    ("peek_status_error", "light red", ""),
 ]
 
 # Display order: most mature first (like Linear), muted always last
@@ -373,6 +385,27 @@ class _KanpanState(MutableModel):
     # CEL filter expressions passed from CLI
     include_filters: tuple[str, ...] = ()
     exclude_filters: tuple[str, ...] = ()
+    # --- Peek panel (None name => panel closed) ---
+    # Name of the agent currently shown in the peek panel.
+    peek_agent_name: AgentName | None = None
+    # Original frame footer (keybinding bar), restored when the panel closes.
+    saved_footer: Any = None
+    # Widgets owned by the open panel (set while peek_agent_name is not None).
+    peek_header_text: Any = None
+    peek_body_text: Any = None
+    peek_input: Any = None
+    peek_status_text: Any = None
+    # In-flight `mngr capture` for the peeked agent, polled by the peek alarm.
+    peek_capture_future: Future[subprocess.CompletedProcess[str]] | None = None
+    # Handle for the pending live-capture alarm (None if none scheduled).
+    peek_alarm: Any = None
+    # In-flight `mngr message` reply, polled to report success/failure.
+    peek_reply_future: Future[subprocess.CompletedProcess[str]] | None = None
+    # Dedicated executor for peek captures and replies. Kept separate from the
+    # shared `executor` (and sized for two workers) so a slow reply -- `mngr
+    # message` waits up to ~90s to confirm submission -- cannot freeze the live
+    # capture loop or a board refresh.
+    peek_executor: ThreadPoolExecutor | None = None
 
 
 class _KanpanInputHandler(MutableModel):
@@ -384,6 +417,13 @@ class _KanpanInputHandler(MutableModel):
         """Handle keyboard input. Returns True if handled, None to pass through."""
         if isinstance(key, tuple):
             return None
+        # While the peek panel is open it owns the keyboard; printable keys have
+        # already been consumed by its reply Edit before reaching here.
+        if self.state.peek_agent_name is not None:
+            return _handle_peek_key(self.state, key)
+        if key == " ":
+            _toggle_peek(self.state)
+            return True
         if key in ("q", "ctrl c"):
             raise ExitMainLoop()
         if key == "U":
@@ -392,6 +432,9 @@ class _KanpanInputHandler(MutableModel):
         cmd = self.state.commands.get(key)
         if cmd is not None:
             _dispatch_command(self.state, key, cmd)
+            return True
+        if key in ("enter", "right"):
+            _attach_to_focused_agent(self.state)
             return True
         if key == "up":
             if _is_focus_on_first_selectable(self.state):
@@ -834,6 +877,328 @@ def _on_mute_persist_poll(loop: MainLoop, data: tuple[_KanpanState, Future[bool]
             _show_transient_message(state, f"  Failed to persist mute for {agent_name}: {e}")
     else:
         loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_mute_persist_poll, data)
+
+
+def _attach_to_focused_agent(state: _KanpanState) -> None:  # pragma: no cover
+    """Suspend the board and attach to the focused agent's session, restoring on return.
+
+    Runs ``mngr connect`` as a child process that takes over the terminal (locally it
+    execs ``tmux attach``), so the board's MainLoop is stopped for the duration and
+    restarted when the user detaches. Connecting in-process is not an option: the
+    connect API replaces the running process via ``execvpe``, which would tear down
+    the board itself.
+    """
+    entry = _get_focused_entry(state)
+    if entry is None:
+        return
+    loop = state.loop
+    if loop is None:
+        return
+
+    # Attaching is an explicit full-screen takeover, so force it through even when
+    # kanpan itself is running inside tmux: `mngr connect` otherwise refuses a
+    # nested attach unless is_nested_tmux_allowed is set. Dropping TMUX from the
+    # child env is a no-op when kanpan runs in a plain terminal.
+    attach_env = {key: value for key, value in os.environ.items() if key not in ("TMUX", "TMUX_PANE")}
+
+    loop.stop()
+    try:
+        subprocess.run(["mngr", "connect", str(entry.name)], env=attach_env)
+    finally:
+        loop.start()
+        loop.screen.clear()
+
+    _start_local_refresh(loop, state)
+
+
+def _find_entry_by_name(state: _KanpanState, name: AgentName | None) -> AgentBoardEntry | None:
+    """Find the board entry with the given name among the currently displayed rows."""
+    if name is None:
+        return None
+    for entry in state.index_to_entry.values():
+        if entry.name == name:
+            return entry
+    return None
+
+
+def _focus_row_by_name(state: _KanpanState, name: AgentName) -> None:
+    """Move the board's list focus to the row for the named agent, if present."""
+    if state.list_walker is None:
+        return
+    for idx, entry in state.index_to_entry.items():
+        if entry.name == name:
+            state.list_walker.set_focus(idx)
+            return
+
+
+def _run_capture(agent_name: str) -> subprocess.CompletedProcess[str]:  # pragma: no cover
+    """Capture the agent's tmux pane content. Called from a background thread."""
+    return subprocess.run(["mngr", "capture", agent_name], capture_output=True, text=True, timeout=30)
+
+
+def _run_message(agent_name: str, message: str) -> subprocess.CompletedProcess[str]:  # pragma: no cover
+    """Send a message to the agent. Called from a background thread.
+
+    The timeout sits above ``mngr message``'s own ~90s submission-confirmation
+    wait so a delivered message is not cut off and misreported as a failure.
+    """
+    return subprocess.run(["mngr", "message", agent_name, "-m", message], capture_output=True, text=True, timeout=100)
+
+
+def _ensure_peek_executor(state: _KanpanState) -> ThreadPoolExecutor:
+    """Return the peek executor, creating it on first use."""
+    if state.peek_executor is None:
+        state.peek_executor = ThreadPoolExecutor(max_workers=2)
+    return state.peek_executor
+
+
+@pure
+def _last_nonempty_line(text: str) -> str:
+    """Return the last non-blank line of `text` (mngr errors append pane dumps)."""
+    lines = [line for line in text.strip().splitlines() if line.strip()]
+    return lines[-1] if lines else ""
+
+
+@pure
+def _peek_body_from_capture(result: subprocess.CompletedProcess[str]) -> str:
+    """Reduce a captured pane to the trailing lines shown in the peek panel."""
+    if result.returncode != 0:
+        detail = result.stderr.strip() or f"exited with code {result.returncode}"
+        return f"(no output: {detail})"
+    lines = result.stdout.rstrip("\n").split("\n")
+    end = len(lines)
+    while end > 0 and not lines[end - 1].strip():
+        end -= 1
+    tail = lines[max(0, end - PEEK_TAIL_LINE_COUNT) : end]
+    if not tail:
+        return "(no recent output)"
+    return "\n".join(tail)
+
+
+def _build_peek_panel(state: _KanpanState) -> Pile:
+    """Build the peek panel widget (shown in place of the footer) and stash its parts."""
+    state.peek_header_text = Text("")
+    state.peek_body_text = Text("", wrap="clip")
+    state.peek_input = Edit(caption=("peek_hint", PEEK_REPLY_PROMPT))
+    state.peek_status_text = Text("")
+    hint = Text(("peek_hint", "  enter: send / attach   up/down: switch   right: enter   esc: close"))
+    panel = Pile(
+        [
+            Divider("─"),
+            AttrMap(state.peek_header_text, "peek_header"),
+            state.peek_body_text,
+            Divider("─"),
+            state.peek_input,
+            state.peek_status_text,
+            hint,
+        ]
+    )
+    # Focus the reply input so typed keys land in it.
+    panel.focus_position = 4
+    return panel
+
+
+def _update_peek_header(state: _KanpanState) -> None:
+    """Refresh the peek header line from the currently peeked agent."""
+    if state.peek_header_text is None:
+        return
+    entry = _find_entry_by_name(state, state.peek_agent_name)
+    if entry is None:
+        state.peek_header_text.set_text("  Peek")
+        return
+    state.peek_header_text.set_text(f"  Peek: {entry.name}  ·  {entry.state}  ·  {entry.provider_name}")
+
+
+def _cancel_peek_alarm(state: _KanpanState) -> None:
+    """Cancel any pending live-capture alarm for the peek panel."""
+    if state.peek_alarm is not None and state.loop is not None:
+        state.loop.remove_alarm(state.peek_alarm)
+    state.peek_alarm = None
+
+
+def _start_peek_capture(state: _KanpanState) -> None:
+    """Kick off a background capture for the peeked agent and poll for it."""
+    if state.peek_agent_name is None or state.loop is None:
+        return
+    executor = _ensure_peek_executor(state)
+    state.peek_capture_future = executor.submit(_run_capture, str(state.peek_agent_name))
+    state.peek_alarm = state.loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_peek_capture_poll, state)
+
+
+def _on_peek_capture_poll(loop: MainLoop, state: _KanpanState) -> None:
+    """Poll the in-flight capture; render it and schedule the next one while open."""
+    state.peek_alarm = None
+    future = state.peek_capture_future
+    if future is None or state.peek_agent_name is None:
+        return
+    if not future.done():
+        state.peek_alarm = loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_peek_capture_poll, state)
+        return
+
+    state.peek_capture_future = None
+    try:
+        body = _peek_body_from_capture(future.result())
+    except (subprocess.SubprocessError, OSError) as e:
+        body = f"(capture failed: {e})"
+    if state.peek_body_text is not None:
+        state.peek_body_text.set_text(body)
+    if state.peek_agent_name is not None:
+        state.peek_alarm = loop.set_alarm_in(PEEK_REFRESH_SECONDS, _on_peek_capture_tick, state)
+
+
+def _on_peek_capture_tick(loop: MainLoop, state: _KanpanState) -> None:
+    """Alarm callback that starts the next live capture."""
+    state.peek_alarm = None
+    if state.peek_agent_name is not None:
+        _start_peek_capture(state)
+
+
+def _open_peek(state: _KanpanState) -> None:
+    """Open the peek panel for the focused agent."""
+    entry = _get_focused_entry(state)
+    if entry is None:
+        return
+    state.peek_agent_name = entry.name
+    state.focused_agent_name = entry.name
+    panel = _build_peek_panel(state)
+    state.saved_footer = state.frame.footer
+    state.frame.footer = panel
+    state.frame.focus_position = "footer"
+    _update_peek_header(state)
+    if state.peek_body_text is not None:
+        state.peek_body_text.set_text("(loading...)")
+    _start_peek_capture(state)
+
+
+def _close_peek(state: _KanpanState) -> None:
+    """Close the peek panel and restore the footer and board focus."""
+    if state.peek_agent_name is None:
+        return
+    closed_name = state.peek_agent_name
+    _cancel_peek_alarm(state)
+    state.peek_capture_future = None
+    state.peek_agent_name = None
+    if state.saved_footer is not None:
+        state.frame.footer = state.saved_footer
+        state.saved_footer = None
+    state.frame.focus_position = "body"
+    state.focused_agent_name = closed_name
+    _focus_row_by_name(state, closed_name)
+    state.peek_header_text = None
+    state.peek_body_text = None
+    state.peek_input = None
+    state.peek_status_text = None
+
+
+def _toggle_peek(state: _KanpanState) -> None:
+    """Toggle the peek panel for the focused agent."""
+    if state.peek_agent_name is not None:
+        _close_peek(state)
+    else:
+        _open_peek(state)
+
+
+def _peek_move(state: _KanpanState, delta: int) -> None:
+    """Re-target the open peek panel to the row `delta` steps away."""
+    if state.peek_agent_name is None:
+        return
+    ordered = [entry for _idx, entry in sorted(state.index_to_entry.items())]
+    names = [entry.name for entry in ordered]
+    if state.peek_agent_name not in names:
+        return
+    current_index = names.index(state.peek_agent_name)
+    new_index = min(max(current_index + delta, 0), len(ordered) - 1)
+    if new_index == current_index:
+        return
+
+    target = ordered[new_index]
+    state.peek_agent_name = target.name
+    state.focused_agent_name = target.name
+    _focus_row_by_name(state, target.name)
+    _update_peek_header(state)
+    if state.peek_body_text is not None:
+        state.peek_body_text.set_text("(loading...)")
+    if state.peek_status_text is not None:
+        state.peek_status_text.set_text("")
+    _cancel_peek_alarm(state)
+    state.peek_capture_future = None
+    _start_peek_capture(state)
+
+
+def _attach_from_peek(state: _KanpanState) -> None:
+    """Close the peek panel and attach to the agent that was being peeked."""
+    name = state.peek_agent_name
+    _close_peek(state)
+    if name is None:
+        return
+    _focus_row_by_name(state, name)
+    _attach_to_focused_agent(state)
+
+
+def _submit_peek_reply(state: _KanpanState) -> None:
+    """Send the reply-input text to the peeked agent, or attach when it is empty."""
+    if state.peek_agent_name is None or state.peek_input is None:
+        return
+    text = state.peek_input.get_edit_text().strip()
+    if not text:
+        _attach_from_peek(state)
+        return
+    executor = _ensure_peek_executor(state)
+    agent_name = str(state.peek_agent_name)
+    state.peek_reply_future = executor.submit(_run_message, agent_name, text)
+    state.peek_input.set_edit_text("")
+    if state.peek_status_text is not None:
+        state.peek_status_text.set_text(("peek_hint", "  sending..."))
+    if state.loop is not None:
+        state.loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_peek_reply_poll, (state, agent_name))
+
+
+def _on_peek_reply_poll(loop: MainLoop, data: tuple[_KanpanState, str]) -> None:
+    """Poll the in-flight reply and report success/failure in the panel status line."""
+    state, agent_name = data
+    future = state.peek_reply_future
+    if future is None:
+        return
+    if not future.done():
+        loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_peek_reply_poll, data)
+        return
+
+    state.peek_reply_future = None
+    if state.peek_status_text is None:
+        return
+    try:
+        result = future.result()
+        if result.returncode == 0:
+            state.peek_status_text.set_text(("peek_status", f"  sent to {agent_name}"))
+        else:
+            detail = _last_nonempty_line(result.stderr) or f"exited with code {result.returncode}"
+            state.peek_status_text.set_text(("peek_status_error", f"  send failed: {detail}"))
+    except (subprocess.SubprocessError, OSError) as e:
+        state.peek_status_text.set_text(("peek_status_error", f"  send failed: {e}"))
+
+
+def _handle_peek_key(state: _KanpanState, key: str) -> bool | None:
+    """Route keys while the peek panel is open. Printable keys reach the reply Edit."""
+    if key in ("esc", "ctrl c"):
+        _close_peek(state)
+        return True
+    if key == "enter":
+        _submit_peek_reply(state)
+        return True
+    if key == "up":
+        _peek_move(state, -1)
+        return True
+    if key == "down":
+        _peek_move(state, 1)
+        return True
+    if key == "right":
+        # -> attaches only from an empty input. With text present the Edit owns ->
+        # for cursor movement; swallow the boundary case so a stray -> at end of
+        # text never discards a half-typed reply by attaching.
+        if state.peek_input is not None and not state.peek_input.get_edit_text().strip():
+            _attach_from_peek(state)
+        return True
+    return None
 
 
 def _dispatch_command(state: _KanpanState, key: str, cmd: KanpanCommand) -> None:
@@ -1681,6 +2046,8 @@ def run_kanpan(
     action_parts = [
         f"{key}: {cmd.name}" for key, cmd in commands.items() if _mark_color(cmd) is None and key not in mark_keys
     ]
+    action_parts.append("space: peek")
+    action_parts.append("enter: connect")
     action_parts.append("q: quit")
     keybindings = "  ".join(mark_parts + ["|"] + action_parts) + "  "
 
@@ -1753,3 +2120,5 @@ def run_kanpan(
             logger.enable("imbue")
             if state.executor is not None:
                 state.executor.shutdown(wait=False)
+            if state.peek_executor is not None:
+                state.peek_executor.shutdown(wait=False)
