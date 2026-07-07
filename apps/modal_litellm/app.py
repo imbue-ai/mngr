@@ -130,16 +130,25 @@ LITELLM_CONFIG = {
     },
     "litellm_settings": {
         "drop_params": True,
+        # The retry-count key below is LiteLLM's own config name, not a variable
+        # we chose, so the ratchet discouraging a "num" naming prefix (prefer
+        # count/idx) is a misfire on it.
         "num_retries": 0,
     },
 }
 
 
-def _write_config_file() -> str:
-    """Write the litellm config to a temp YAML file and return the path."""
+def _write_config_file(config_path: str) -> str:
+    """Write the litellm config to ``config_path`` and return that path.
+
+    LiteLLM's proxy config format is YAML, so this is the one place the in-memory
+    ``LITELLM_CONFIG`` becomes the file the proxy loads. The caller supplies the
+    path: ``litellm_app`` passes the deployed location it points
+    ``CONFIG_FILE_PATH`` at, and unit tests pass a unique temp path so they never
+    share on-disk state.
+    """
     import yaml
 
-    config_path = "/tmp/litellm_config.yaml"
     with open(config_path, "w") as f:
         yaml.dump(LITELLM_CONFIG, f)
     return config_path
@@ -172,7 +181,7 @@ app = modal.App(name=f"llm-{_DEPLOY_ENV}", image=image)
 )
 @modal.asgi_app()
 def litellm_app():
-    config_path = _write_config_file()
+    config_path = _write_config_file("/tmp/litellm_config.yaml")
     os.environ["CONFIG_FILE_PATH"] = config_path
     os.environ["WORKER_CONFIG"] = json.dumps(
         {
