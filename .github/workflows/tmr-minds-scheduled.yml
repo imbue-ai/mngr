@@ -31,6 +31,11 @@ permissions:
   contents: write
   pull-requests: write
   issues: write
+  # The `run` job calls the reusable tmr.yml, whose job fetches its credentials
+  # from Vault via a GitHub OIDC token. A called reusable workflow's job
+  # permissions are capped by the caller's, so id-token: write must be granted
+  # here for that Vault auth to succeed.
+  id-token: write
 
 # Don't let two scheduled firings of this variant overlap (see the mngr wrapper
 # for the rationale). Independent group from the mngr variant.
