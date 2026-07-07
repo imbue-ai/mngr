@@ -200,12 +200,12 @@ def _send_message_to_agent(
     # already exited (a ctrl-c, a crash, or an OOM shed leaves tmux holding the
     # pane open on a bare shell). In both cases there is no agent to deliver to, so
     # a raw send would just type the message into a dead shell and silently lose
-    # it. ensure_agent_started revives the agent first (tearing down a DONE husk so
-    # the relaunch actually happens) before we send.
+    # it. ensure_agent_started revives the agent first (should_revive_done_agent
+    # tears down a DONE husk so the relaunch actually happens) before we send.
     lifecycle_state = agent.get_lifecycle_state()
     if lifecycle_state in (AgentLifecycleState.STOPPED, AgentLifecycleState.DONE):
         if is_start_desired:
-            ensure_agent_started(agent, host, is_start_desired=True)
+            ensure_agent_started(agent, host, is_start_desired=True, should_revive_done_agent=True)
         else:
             error_msg = f"Agent is not running (state: {lifecycle_state.value})"
             with result_lock:

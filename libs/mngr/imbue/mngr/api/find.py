@@ -351,7 +351,12 @@ def ensure_host_started(
             assert_never(unreachable)
 
 
-def ensure_agent_started(agent: AgentInterface, host: OnlineHostInterface, is_start_desired: bool) -> None:
+def ensure_agent_started(
+    agent: AgentInterface,
+    host: OnlineHostInterface,
+    is_start_desired: bool,
+    should_revive_done_agent: bool = False,
+) -> None:
     """Ensure an agent is started, starting it if needed and desired.
 
     If the agent is not live and is_start_desired is True, (re)starts it.
@@ -359,9 +364,14 @@ def ensure_agent_started(agent: AgentInterface, host: OnlineHostInterface, is_st
 
     A DONE agent is a special case of "not live": its main process has exited but
     tmux still holds the session open (e.g. after a ctrl-c, a crash, or an OOM
-    shed). ``start_agents`` short-circuits on an existing session, so the husk is
-    torn down first -- mirroring ``mngr start --restart`` -- otherwise the relaunch
-    would silently no-op and the agent would stay dead.
+    shed). ``start_agents`` short-circuits on an existing session, so truly
+    reviving a DONE agent requires tearing the husk down first -- mirroring
+    ``mngr start --restart``. That teardown is destructive (it kills the lingering
+    session and every window in it), so it only happens when
+    ``should_revive_done_agent`` is True (the message path, which needs a live
+    agent to deliver to). Read-only callers that just need the husk's pane content
+    (e.g. ``capture``) leave it False: the start then no-ops on the existing
+    session, preserving the pane exactly as it was left.
     """
     lifecycle_state = agent.get_lifecycle_state()
     if lifecycle_state not in (
@@ -371,7 +381,7 @@ def ensure_agent_started(agent: AgentInterface, host: OnlineHostInterface, is_st
         AgentLifecycleState.WAITING,
     ):
         if is_start_desired:
-            if lifecycle_state == AgentLifecycleState.DONE:
+            if lifecycle_state == AgentLifecycleState.DONE and should_revive_done_agent:
                 logger.info("Agent {} is DONE with a lingering tmux session; stopping it before restart", agent.name)
                 host.stop_agents([agent.id])
             logger.info("Agent {} is stopped, starting it", agent.name)
