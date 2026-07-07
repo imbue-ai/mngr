@@ -49,6 +49,8 @@ from imbue.minds.desktop_client.backup_provisioning import configure_backups_for
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
+from imbue.minds.desktop_client.lima_image_prefetch import LimaImageCreateGate
+from imbue.minds.desktop_client.lima_image_prefetch import prebaked_image_mngr_setting_args
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
@@ -57,6 +59,7 @@ from imbue.minds.errors import BackupProvisioningError
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
+from imbue.minds.lima_image.primitives import get_current_image_arch
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
@@ -514,6 +517,13 @@ _FAST_MODE_PREVENT: Final[str] = "prevent"
 # ``imbue.mngr_imbue_cloud.errors.FastPathUnavailableError``.
 _FAST_PATH_UNAVAILABLE_ERROR_CLASS: Final[str] = "FastPathUnavailableError"
 
+# How long a gated Lima create blocks waiting for the prefetched image to become
+# ready before surfacing a retryable error. Generous because a cold first-run
+# download of a multi-GB image can take a while; the background prefetch usually
+# wins this race long before a user clicks create.
+_PREBAKED_IMAGE_WAIT_TIMEOUT_SECONDS: Final[float] = 1800.0
+_PREBAKED_IMAGE_POLL_INTERVAL_SECONDS: Final[float] = 1.0
+
 
 def provider_instance_name_for_launch(
     launch_mode: LaunchMode,
@@ -558,6 +568,7 @@ def provider_instance_name_for_launch(
 def _build_mngr_create_command(
     launch_mode: LaunchMode,
     host_name: HostName,
+    display_name: str = "",
     imbue_cloud_account: str | None = None,
     imbue_cloud_repo_url: str | None = None,
     imbue_cloud_branch_or_tag: str | None = None,
@@ -568,6 +579,7 @@ def _build_mngr_create_command(
     docker_runtime: DockerRuntime = DockerRuntime.RUNC,
     original_minds_version: str | None = None,
     original_branch: str | None = None,
+    prebaked_lima_image_qcow2_path: Path | None = None,
 ) -> list[str]:
     """Build the ``mngr create`` command for a freshly-provisioned workspace.
 
@@ -673,8 +685,12 @@ def _build_mngr_create_command(
         "--no-connect",
         "--format",
         "jsonl",
+        # The workspace's arbitrary human-readable display name lives on the
+        # primary (system-services) agent; the host's normalized slug name lives
+        # on the host itself. There is no ``workspace`` label. Falls back to the
+        # host name when no separate display name is supplied.
         "--label",
-        f"workspace={host_name}",
+        f"workspace_display_name={display_name or host_name}",
         # Pin the agent's per-workspace branch to the host name. mngr's
         # default for ``--branch`` is ``:mngr/*`` where ``*`` expands to the
         # agent name, but our agent name is the constant ``system-services``
@@ -735,6 +751,14 @@ def _build_mngr_create_command(
         case LaunchMode.LIMA:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "lima"])
             mngr_command.extend(_remote_host_env_flags())
+            # When the caller resolved a ready pre-baked image (issue 2306),
+            # point Lima at the local qcow2 via the provider's existing per-arch
+            # image-url override, so the VM boots the baked toolchain instead of
+            # building it. No provider code change is needed to consume it.
+            if prebaked_lima_image_qcow2_path is not None:
+                mngr_command.extend(
+                    prebaked_image_mngr_setting_args(get_current_image_arch(), prebaked_lima_image_qcow2_path)
+                )
         case LaunchMode.VULTR:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "vultr"])
             mngr_command.extend(_remote_host_env_flags())
@@ -935,6 +959,7 @@ def run_mngr_create(
     launch_mode: LaunchMode,
     workspace_dir: Path | None,
     host_name: HostName,
+    display_name: str = "",
     on_output: OutputCallback | None = None,
     imbue_cloud_account: str | None = None,
     imbue_cloud_repo_url: str | None = None,
@@ -948,6 +973,7 @@ def run_mngr_create(
     docker_runtime: DockerRuntime = DockerRuntime.RUNC,
     original_minds_version: str | None = None,
     original_branch: str | None = None,
+    prebaked_lima_image_qcow2_path: Path | None = None,
     *,
     parent_cg: ConcurrencyGroup | None = None,
 ) -> tuple[AgentId, HostId]:
@@ -977,6 +1003,7 @@ def run_mngr_create(
     mngr_command = _build_mngr_create_command(
         launch_mode,
         host_name,
+        display_name,
         imbue_cloud_account=imbue_cloud_account,
         imbue_cloud_repo_url=imbue_cloud_repo_url,
         imbue_cloud_branch_or_tag=imbue_cloud_branch_or_tag,
@@ -987,6 +1014,7 @@ def run_mngr_create(
         docker_runtime=docker_runtime,
         original_minds_version=original_minds_version,
         original_branch=original_branch,
+        prebaked_lima_image_qcow2_path=prebaked_lima_image_qcow2_path,
     )
 
     # Build the subprocess env from the parent's env + any secrets we inject
@@ -1100,6 +1128,7 @@ class _MngrCreateAttemptParams(FrozenModel):
     launch_mode: LaunchMode
     workspace_dir: Path | None
     host_name: HostName
+    display_name: str
     on_output: OutputCallback
     latchkey_env: Mapping[str, str] | None
     account_email: str | None
@@ -1113,6 +1142,8 @@ class _MngrCreateAttemptParams(FrozenModel):
     docker_runtime: DockerRuntime
     original_minds_version: str | None
     original_branch: str | None
+    # Resolved ready pre-baked Lima qcow2 path (issue 2306), or None to build in-VM.
+    prebaked_lima_image_qcow2_path: Path | None = None
 
 
 def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams) -> tuple[AgentId, HostId]:
@@ -1127,6 +1158,7 @@ def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams
         launch_mode=params.launch_mode,
         workspace_dir=params.workspace_dir,
         host_name=params.host_name,
+        display_name=params.display_name,
         on_output=params.on_output,
         latchkey_env=params.latchkey_env,
         imbue_cloud_account=params.account_email if is_imbue_cloud else None,
@@ -1149,6 +1181,7 @@ def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams
         docker_runtime=params.docker_runtime,
         original_minds_version=params.original_minds_version,
         original_branch=params.original_branch,
+        prebaked_lima_image_qcow2_path=params.prebaked_lima_image_qcow2_path,
         parent_cg=params.parent_cg,
     )
 
@@ -1232,6 +1265,15 @@ class AgentCreator(MutableModel):
         description=(
             "Dispatcher for surfacing failures from background tasks (e.g. the detached "
             "Cloudflare tunnel setup task) to the user as OS notifications."
+        ),
+    )
+    lima_image_gate: LimaImageCreateGate | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "Pre-baked Lima image create gate (issue 2306). When set and the create matches the "
+            "default workspace (Lima + default FCT repo + current release tag), the create gates on "
+            "the verified image and points Lima at it; None disables the path."
         ),
     )
     mngr_forward_port: int = Field(
@@ -1322,6 +1364,7 @@ class AgentCreator(MutableModel):
         self,
         repo_source: str,
         host_name: str = "",
+        display_name: str = "",
         branch: str = "",
         launch_mode: LaunchMode = LaunchMode.DOCKER,
         ai_provider: AIProvider = AIProvider.SUBSCRIPTION,
@@ -1382,6 +1425,10 @@ class AgentCreator(MutableModel):
         # input fails inside the background thread with an error_message
         # rather than crashing this synchronous entry point.
         effective_name = host_name.strip() if host_name.strip() else extract_repo_name(repo_source)
+        # The arbitrary human-readable display name. Falls back to the host-name
+        # slug when the caller did not supply a separate display name (e.g. an
+        # auto-generated ``workspace-N``).
+        effective_display_name = display_name.strip() if display_name.strip() else effective_name
         effective_branch = branch.strip()
 
         creation_id = CreationId()
@@ -1398,6 +1445,7 @@ class AgentCreator(MutableModel):
                 creation_id,
                 repo_source,
                 effective_name,
+                effective_display_name,
                 effective_branch,
                 log_queue,
                 launch_mode,
@@ -1461,6 +1509,7 @@ class AgentCreator(MutableModel):
         creation_id: CreationId,
         repo_source: str,
         host_name: str,
+        display_name: str,
         branch: str,
         log_queue: queue.Queue[str],
         launch_mode: LaunchMode,
@@ -1623,12 +1672,14 @@ class AgentCreator(MutableModel):
                             self._statuses[cid_str] = AgentCreationStatus.PROVISIONING_AI
                         log_queue.put(f"[minds] Minting LiteLLM virtual key for account {account_email}...")
                         try:
+                            # No host_name metadata: the key is minted before the
+                            # host exists (so no host id is available), and the host
+                            # name is mutable, so it would only go stale on rename.
                             key_material: LiteLLMKeyMaterial = self.imbue_cloud_cli.create_litellm_key(
                                 account=account_email,
                                 alias=None,
                                 max_budget=100.0,
                                 budget_duration="1d",
-                                metadata={"host_name": host_name},
                             )
                         except ImbueCloudCliError as exc:
                             raise MngrCommandError(f"Failed to create LiteLLM key: {exc}") from exc
@@ -1683,6 +1734,26 @@ class AgentCreator(MutableModel):
                 parsed_host = HostName(host_name)
                 log_queue.put("[minds] Creating workspace '{}' (mode: {})...".format(host_name, launch_mode.value))
 
+                # Pre-baked Lima image gate (issue 2306): for the default
+                # workspace (Lima + default FCT repo + current release tag) wait on
+                # the prefetched, verified image and point Lima at it. Returns None
+                # (build in-VM) for any non-default create or unpublished version;
+                # raises a retryable error if a published image can't be readied.
+                prebaked_lima_image_qcow2_path: Path | None = None
+                if self.lima_image_gate is not None:
+                    if launch_mode is LaunchMode.LIMA:
+                        log_queue.put("[minds] Checking for a pre-baked Lima image...")
+                    prebaked_lima_image_qcow2_path = self.lima_image_gate.resolve_qcow2_for_create(
+                        is_lima_launch_mode=launch_mode is LaunchMode.LIMA,
+                        repo_url=repo_source or "",
+                        branch_or_tag=branch_or_tag,
+                        environ=os.environ,
+                        wait_timeout_seconds=_PREBAKED_IMAGE_WAIT_TIMEOUT_SECONDS,
+                        poll_interval_seconds=_PREBAKED_IMAGE_POLL_INTERVAL_SECONDS,
+                    )
+                    if prebaked_lima_image_qcow2_path is not None:
+                        log_queue.put("[minds] Using pre-baked Lima image (fast create).")
+
                 # ``fast_mode`` is the only knob that varies between the fast-
                 # path and slow-path attempts; bundle the rest of the per-
                 # creation inputs so each attempt takes just it.
@@ -1690,6 +1761,7 @@ class AgentCreator(MutableModel):
                     launch_mode=launch_mode,
                     workspace_dir=workspace_dir,
                     host_name=parsed_host,
+                    display_name=display_name or str(parsed_host),
                     on_output=emit_log,
                     latchkey_env=latchkey_setup.env,
                     account_email=account_email,
@@ -1703,6 +1775,7 @@ class AgentCreator(MutableModel):
                     docker_runtime=docker_runtime,
                     original_minds_version=original_minds_version or None,
                     original_branch=branch or None,
+                    prebaked_lima_image_qcow2_path=prebaked_lima_image_qcow2_path,
                 )
 
                 if launch_mode is LaunchMode.IMBUE_CLOUD:

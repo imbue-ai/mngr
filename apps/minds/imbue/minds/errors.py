@@ -97,3 +97,41 @@ class BackupProvisioningError(MindError):
     """Raised when configuring restic backups for a workspace fails."""
 
     ...
+
+
+class LimaImageError(MindError):
+    """Base exception for the pre-baked Lima image cache."""
+
+    ...
+
+
+class LimaImageDownloadError(LimaImageError):
+    """Raised when downloading/assembling a published image fails (network, disk, desync)."""
+
+    ...
+
+
+class LimaImageVerificationError(LimaImageError):
+    """Raised when a downloaded manifest signature or assembled image hash does not verify.
+
+    An unverified image is never used: this is a hard failure (the create is
+    blocked with a retryable error) rather than a fall-through to build-in-VM.
+    """
+
+    ...
+
+
+class LimaImageToolError(LimaImageError):
+    """Raised when a required external tool (desync, minisign, qemu-img) is missing or errors."""
+
+    ...
+
+
+class InvalidSha256HexError(LimaImageError, ValueError):
+    """Raised when a string is not a valid lowercase hex SHA-256 digest.
+
+    Subclasses ``ValueError`` so pydantic treats it as a validation failure when
+    raised from the ``Sha256Hex`` primitive's constructor.
+    """
+
+    ...

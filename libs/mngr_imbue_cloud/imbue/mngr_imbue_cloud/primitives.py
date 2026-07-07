@@ -48,27 +48,6 @@ class BareMetalServerDbId(NonEmptyStr):
     """Database id of a bare_metal_servers row (server-side UUID)."""
 
 
-# Wire / DB values for pool_hosts.backend_kind. Kept lowercase to match the
-# connector's existing lowercase column conventions (status = available/leased/...).
-BACKEND_KIND_OVH_VPS: Final[str] = "ovh_vps"
-BACKEND_KIND_SLICE: Final[str] = "slice"
-_BACKEND_KINDS: Final[frozenset[str]] = frozenset({BACKEND_KIND_OVH_VPS, BACKEND_KIND_SLICE})
-
-
-class InvalidBackendKind(ValueError):
-    """Raised when a pool-host backend_kind is not a recognized value."""
-
-
-class BackendKind(NonEmptyStr):
-    """How a pool host's underlying machine is provided: 'ovh_vps' or 'slice'."""
-
-    def __new__(cls, value: str) -> Self:
-        normalized = value.strip().lower()
-        if normalized not in _BACKEND_KINDS:
-            raise InvalidBackendKind(f"backend_kind must be one of {sorted(_BACKEND_KINDS)}, got '{value}'")
-        return super().__new__(cls, normalized)
-
-
 # Wire / DB values for bare_metal_servers.status, in lifecycle order. The box
 # advances ORDERED -> DELIVERED -> INSTALLING -> READY (or -> FAILED from any
 # non-terminal state); the admin command moves it forward one step per run.

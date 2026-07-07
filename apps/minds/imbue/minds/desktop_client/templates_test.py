@@ -182,14 +182,14 @@ def test_render_sharing_editor_workspace_link_interpolates_agent_id() -> None:
 
 def test_render_landing_page_with_no_agents_shows_empty_state() -> None:
     html = render_landing_page(accessible_agent_ids=())
-    assert "No projects yet" in html
+    assert "No workspaces yet" in html
 
 
 def test_render_landing_page_discovering_shows_auto_refresh() -> None:
     html = render_landing_page(accessible_agent_ids=(), is_discovering=True)
     assert "Discovering agents" in html
     assert "reload" in html
-    assert "No projects yet" not in html
+    assert "No workspaces yet" not in html
     assert "/goto/" not in html
 
 
@@ -233,7 +233,7 @@ def test_render_create_form_has_default_values() -> None:
 
 def test_render_create_form_has_optional_name_field() -> None:
     # The advanced view exposes an explicit "Name" (host_name) field so a user
-    # can name the mind; left empty, the server auto-names it (mind-N).
+    # can name the workspace; left empty, the server auto-names it (workspace-N).
     html = render_create_form()
     assert 'name="host_name"' in html
 
@@ -525,14 +525,14 @@ def test_resolve_create_host_name_uses_submitted_value() -> None:
     assert str(resolve_create_host_name("my-workspace")) == "my-workspace"
 
 
-def test_resolve_create_host_name_generates_mind_name_when_empty() -> None:
-    # No submitted name and no existing workspaces -> the first ``mind-N`` name.
-    assert str(resolve_create_host_name("")) == "mind-1"
+def test_resolve_create_host_name_generates_workspace_name_when_empty() -> None:
+    # No submitted name and no existing workspaces -> the first ``workspace-N`` name.
+    assert str(resolve_create_host_name("")) == "workspace-1"
 
 
-def test_resolve_create_host_name_picks_next_free_mind_name() -> None:
+def test_resolve_create_host_name_picks_next_free_workspace_name() -> None:
     # The fallback skips names already in use across providers.
-    assert str(resolve_create_host_name("", {"mind-1", "mind-2"})) == "mind-3"
+    assert str(resolve_create_host_name("", {"workspace-1", "workspace-2"})) == "workspace-3"
 
 
 def test_make_unique_host_name_numbered_empty_is_one() -> None:

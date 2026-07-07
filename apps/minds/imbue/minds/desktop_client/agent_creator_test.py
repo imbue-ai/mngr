@@ -201,6 +201,26 @@ def test_build_mngr_create_command_omits_color_label_when_unset() -> None:
     assert "color=" not in joined
 
 
+def test_build_mngr_create_command_points_lima_at_prebaked_image_when_provided() -> None:
+    """A resolved pre-baked image path is lifted into a ``-S providers.lima.default_image_url_*`` override."""
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.LIMA,
+        host_name=HostName("hello"),
+        prebaked_lima_image_qcow2_path=Path("/data/lima-images/image.qcow2"),
+    )
+    joined = " ".join(command)
+    assert "-S providers.lima.default_image_url_" in joined
+    assert "/data/lima-images/image.qcow2" in joined
+
+
+def test_build_mngr_create_command_omits_prebaked_image_override_when_unset() -> None:
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.LIMA,
+        host_name=HostName("hello"),
+    )
+    assert "default_image_url" not in " ".join(command)
+
+
 def test_build_mngr_create_command_stamps_original_minds_version_label() -> None:
     """The resolved template ref is stamped as an immutable
     ``original_minds_version`` label so the version API can report what
@@ -1226,7 +1246,9 @@ def test_start_creation_imbue_cloud_ai_with_local_compute_mints_litellm_key(tmp_
 
     assert len(cli.create_calls) == 1
     assert cli.create_calls[0]["account"] == "alice@imbue.com"
-    assert cli.create_calls[0]["metadata"] == {"host_name": "my-workspace"}
+    # The LiteLLM key no longer carries host_name metadata (the host name is
+    # mutable and the key is minted before the host exists).
+    assert cli.create_calls[0]["metadata"] is None
 
 
 # Deterministic sync test, but the setup spins up fresh ConcurrencyGroups and a

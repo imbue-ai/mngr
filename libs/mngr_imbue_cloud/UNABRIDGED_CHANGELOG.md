@@ -4,6 +4,32 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-06
+
+Updated the per-host-bounded discovery override to accept the new cross-poll read registry parameter (unused by this batch provider, which reads all hosts in one bounded pass). No behavioral change for this provider.
+
+Updated the Imbue Cloud provider for mngr's new per-provider discovery: it now implements the bounded `discover_hosts_and_agents_within_timeouts` discovery entry point. Because Imbue Cloud discovery reads all leased hosts and their agents in one batched pass, individual host reads are not separately bounded -- the provider is still bounded by the provider-level discovery error timeout, and no host is marked UNKNOWN by this path.
+
+`ImbueCloudProvider.rename_host` is now implemented: a leased host can be renamed by updating its mutable `host_name` via the connector. The lease's `host_db_id` remains the durable identity, so a rename never touches the VPS or container and works whether or not the container is running.
+
+The pre-baked pool host is no longer stamped with a `workspace=<name>` label at bake time; workspace identity lives on the host name and host id, not on a label.
+
+Integrates the "simple names" work: `ImbueCloudProvider.rename_host` is now implemented (a leased host is renamed by updating its mutable `host_name` via the connector, without touching the VPS or container, whether or not it is running), and pre-baked pool hosts are no longer stamped with a `workspace=<name>` label -- workspace identity lives on the host name and host id.
+
+## 2026-07-01
+
+Removed the legacy OVH-VPS pool-host backend from `mngr imbue_cloud admin pool`. Pool hosts are now exclusively bare-metal slices (lima VMs carved on our bare-metal boxes).
+
+- `admin pool create` is slice-only: the `--backend` flag and the OVH-VPS-only flags (`--tag`, `--management-public-key-file`, `--no-recycle`) are gone, and `--server-id` (the bare-metal box to bake onto) is required.
+
+- `admin pool destroy` always tears down the slice's lima VM before dropping the row (the OVH-VPS cancel path is removed); `--skip-vps-cancel` still skips teardown when the VM is already gone.
+
+- Dropped the `backend_kind` discriminator (CLI/value/column) — there is only one backend now.
+
+OVH as the bare-metal-box supplier is unchanged: box ordering, OVH catalog pricing, region/datacenter validation, and the `bare_metal_servers` records all remain.
+
+Added a new async/await ratchet (`test_prevent_async_await`) that freezes the current amount of `async def` / `await` usage in this project and fails if new async code is added. We strongly prefer synchronous code: it is far easier to debug, and our software is intentionally low-scale, so async provides no benefit. Existing usage is grandfathered in at its current count; the count can only decrease.
+
 ## 2026-06-28
 
 Accelerated imbue_cloud bare-metal slice bakes by building the forever-claude-template (FCT) image once per box instead of once per slice.

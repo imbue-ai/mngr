@@ -277,13 +277,6 @@ class OkResponse(FrozenModel):
     ok: bool = Field(description="Whether the operation succeeded")
 
 
-class BugReportResponse(FrozenModel):
-    """Acknowledgement for a submitted bug report."""
-
-    ok: bool = Field(description="Whether the report was accepted")
-    event_id: str | None = Field(default=None, description="Id of the recorded report event, when one was written")
-
-
 class WorkspaceLifecycleResponse(FrozenModel):
     """Result of a workspace host start/stop action."""
 

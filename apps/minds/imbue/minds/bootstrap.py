@@ -733,7 +733,7 @@ def list_disabled_provider_names(*, root_name: str | None = None) -> list[str]:
     """Return provider names that minds' active settings file marks ``is_enabled = false``.
 
     Used by the providers panel to enumerate the disabled set (which discovery
-    skips and so are absent from the FullDiscoverySnapshotEvent). Reads only
+    skips and so are absent from the per-provider discovery snapshots). Reads only
     minds' active settings file -- providers defined only in mngr's own
     settings.toml with is_enabled=false are not surfaced here. Returns an
     empty list when the file does not exist yet (fresh install).
