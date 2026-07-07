@@ -46,7 +46,8 @@ def test_read_grandparent_pid_returns_alive_grandparent() -> None:
     run pytest directly under PID 1, leaving no grandparent; in that case the
     helper correctly returns ``None`` and the test skips.
     """
-    grandparent_pid = _read_grandparent_pid()
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        grandparent_pid = _read_grandparent_pid(cg)
     if grandparent_pid is None:
         pytest.skip("No resolvable grandparent in this process tree (e.g. offload sandbox)")
     assert grandparent_pid > 1
@@ -65,7 +66,8 @@ def test_read_ppid_via_ps_returns_parent_pid_of_a_child_process() -> None:
     """
     child = subprocess.Popen(["sleep", "51763"])
     try:
-        resolved_ppid = _read_ppid_via_ps(child.pid)
+        with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+            resolved_ppid = _read_ppid_via_ps(child.pid, cg)
     finally:
         child.terminate()
         child.wait()
@@ -79,7 +81,7 @@ def test_start_grandparent_death_watcher_starts_thread_when_resolvable() -> None
         threads = [t for t in cg._threads if t.thread.name == "grandparent-death-watcher"]
         # If the test runner has no resolvable grandparent (very unusual), the
         # watcher is a no-op; both shapes are valid.
-        if _read_grandparent_pid() is None:
+        if _read_grandparent_pid(cg) is None:
             assert threads == []
             return
         assert len(threads) == 1

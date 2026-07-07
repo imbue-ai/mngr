@@ -2,7 +2,6 @@ import os
 import signal
 import threading
 from typing import Final
-from uuid import uuid4
 
 from loguru import logger
 
@@ -74,7 +73,7 @@ def _read_ppid_via_proc(pid: int) -> int | None:
     return None
 
 
-def _read_ppid_via_ps(pid: int, concurrency_group: ConcurrencyGroup | None = None) -> int | None:
+def _read_ppid_via_ps(pid: int, concurrency_group: ConcurrencyGroup) -> int | None:
     """Return the parent PID of ``pid`` using ``ps``, or ``None`` if unknown.
 
     This is the cross-platform fallback for platforms without ``/proc`` -- most
@@ -83,14 +82,9 @@ def _read_ppid_via_ps(pid: int, concurrency_group: ConcurrencyGroup | None = Non
     the header). Returns ``None`` when the process is gone, ``ps`` is unavailable
     or times out, or the output can't be parsed as an integer.
 
-    The ``ps`` subprocess is spawned through a ``ConcurrencyGroup`` so it is
-    tracked and reaped like every other child. Callers that already own a group
-    (the grandparent-death watcher) pass it in; a short-lived group is created
-    otherwise.
+    The ``ps`` subprocess is spawned through the caller's ``ConcurrencyGroup``
+    so it is tracked and reaped as part of the caller's own process tree.
     """
-    if concurrency_group is None:
-        with ConcurrencyGroup(name=f"read-ppid-via-ps-{uuid4().hex}") as owned_group:
-            return _read_ppid_via_ps(pid, owned_group)
     try:
         result = concurrency_group.run_process_to_completion(
             ["ps", "-o", "ppid=", "-p", str(pid)],
@@ -110,7 +104,7 @@ def _read_ppid_via_ps(pid: int, concurrency_group: ConcurrencyGroup | None = Non
         return None
 
 
-def _read_grandparent_pid(concurrency_group: ConcurrencyGroup | None = None) -> int | None:
+def _read_grandparent_pid(concurrency_group: ConcurrencyGroup) -> int | None:
     """Return the grandparent process's PID, or ``None``.
 
     Resolves the parent of ``os.getppid()`` -- reading ``/proc`` where it exists
@@ -118,8 +112,7 @@ def _read_grandparent_pid(concurrency_group: ConcurrencyGroup | None = None) -> 
     ``None`` when the parent already exited, no grandparent can be resolved, or
     the parent has no real grandparent (PPid <= 1, i.e. already orphaned to init).
 
-    ``concurrency_group`` is threaded down to the ``ps`` fallback so the spawned
-    process is tracked; it is optional so the helper stays callable standalone.
+    ``concurrency_group`` owns any ``ps`` subprocess spawned by the fallback.
     """
     parent_pid = os.getppid()
     if parent_pid <= 1:
