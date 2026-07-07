@@ -1,6 +1,7 @@
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import Callable
+from collections.abc import Iterable
 from collections.abc import Iterator
 from concurrent.futures import Future
 from concurrent.futures import wait
@@ -81,6 +82,27 @@ def _compute_idle_seconds(
     return (datetime.now(timezone.utc) - latest_activity).total_seconds()
 
 
+def _ssh_info_from_host(host: HostInterface) -> SSHInfo | None:
+    """Build SSHInfo from a host's SSH endpoint, or None for a local host / an offline host.
+
+    Only online hosts expose a connection endpoint; the returned endpoint (user/host/port/key)
+    is static config, so this does not open a new SSH session.
+    """
+    if not isinstance(host, OnlineHostInterface):
+        return None
+    ssh_connection = host.get_ssh_connection_info()
+    if ssh_connection is None:
+        return None
+    user, hostname, port, key_path = ssh_connection
+    return SSHInfo(
+        user=user,
+        host=hostname,
+        port=port,
+        key_path=key_path,
+        command=f"ssh -i {key_path} -p {port} {user}@{hostname}",
+    )
+
+
 def _build_host_details_from_host(
     host: HostInterface,
     host_ref: DiscoveredHost,
@@ -91,21 +113,11 @@ def _build_host_details_from_host(
     Returns the HostDetails and the SSH activity time (needed for agent idle calculation).
     """
     # Build SSH info if this is a remote host (only available for online hosts)
-    ssh_info: SSHInfo | None = None
+    ssh_info: SSHInfo | None = _ssh_info_from_host(host)
 
     is_locked: bool | None = None
     locked_time: datetime | None = None
     if isinstance(host, OnlineHostInterface):
-        ssh_connection = host.get_ssh_connection_info()
-        if ssh_connection is not None:
-            user, hostname, port, key_path = ssh_connection
-            ssh_info = SSHInfo(
-                user=user,
-                host=hostname,
-                port=port,
-                key_path=key_path,
-                command=f"ssh -i {key_path} -p {port} {user}@{hostname}",
-            )
         boot_time = host.get_boot_time()
         uptime_seconds = host.get_uptime_seconds()
         resource = host.get_provider_resources()
@@ -281,12 +293,16 @@ def _discover_agents_on_host(
     provider: "ProviderInstanceInterface",
     host_id: HostId,
     timeout_seconds: float | None = None,
-) -> list[DiscoveredAgent]:
-    """Discover agents on a host, disconnecting afterward.
+) -> tuple[list[DiscoveredAgent], SSHInfo | None]:
+    """Discover agents on a host (and capture its SSH endpoint), disconnecting afterward.
 
     When ``timeout_seconds`` is set (the per-host-bounded discovery path), the
     host's reads are bounded by that wall-clock so a wedged host self-terminates
     its reads rather than hanging the (potentially abandoned) discovery thread.
+
+    The SSH endpoint is read from the already-connected host (no extra connection) so the
+    streaming discovery poller can re-emit it as a ``HOST_SSH_INFO`` event; it is ``None``
+    for local hosts.
     """
     # FIXME: wrap this in a bounded retry (e.g. tenacity) so a *transient*
     # connection failure (timeout, connection refused, banner reset) is retried
@@ -298,15 +314,16 @@ def _discover_agents_on_host(
     # (e.g. SSH), where a transient blip would otherwise propagate as a
     # ProviderDiscoveryError.
     with connected_host(provider, host_id) as host:
-        return host.discover_agents(timeout_seconds=timeout_seconds)
+        agents = host.discover_agents(timeout_seconds=timeout_seconds)
+        return agents, _ssh_info_from_host(host)
 
 
 def _discover_agents_on_host_with_offline_fallback(
     provider: "ProviderInstanceInterface",
     host_ref: DiscoveredHost,
     timeout_seconds: float | None = None,
-) -> list[DiscoveredAgent]:
-    """Discover a host's agents, falling back to the provider's offline view on connection error.
+) -> tuple[list[DiscoveredAgent], SSHInfo | None]:
+    """Discover a host's agents (and its SSH endpoint), falling back to the provider's offline view on connection error.
 
     The host was reachable enough to be discovered, but enumerating its agents
     over SSH failed (sshd crashed, banner reset, auth failure, ...). Rather than
@@ -330,7 +347,9 @@ def _discover_agents_on_host_with_offline_fallback(
             host_ref.host_name,
             e,
         )
-        return provider.to_offline_host(host_ref.host_id).discover_agents()
+        # A host that just failed to connect has no reachable SSH endpoint to emit (a
+        # tunnel to it would fail anyway); recover its agents but report no SSH info.
+        return provider.to_offline_host(host_ref.host_id).discover_agents(), None
 
 
 @pure
@@ -352,13 +371,42 @@ def bounded_result_from_agents_by_host(
     return BoundedProviderDiscoveryResult(hosts=hosts, agents=agents, host_ssh_infos=tuple(host_ssh_infos))
 
 
+def collect_cached_host_ssh_infos(
+    provider: "ProviderInstanceInterface",
+    hosts: Iterable[DiscoveredHost],
+) -> list[tuple[HostId, SSHInfo]]:
+    """Best-effort per-host SSH endpoints for a batch provider's streaming discovery.
+
+    Batch providers (vps, modal) read hosts in bulk without the per-host connection the base
+    bounded path makes, so they can't capture SSH inline. This reads the (cheap, local) SSH
+    endpoint off each RUNNING host's already-cached host object, so the streaming poller can
+    re-emit it as a ``HOST_SSH_INFO`` event. A host whose object can't be read (not running,
+    offline, or uncached) contributes nothing -- a tunnel to it would fail anyway. Providers
+    that already have a cheaper source (imbue_cloud builds it straight from the lease) do not
+    need this.
+    """
+    host_ssh_infos: list[tuple[HostId, SSHInfo]] = []
+    for host in hosts:
+        if host.host_state != HostState.RUNNING:
+            continue
+        try:
+            host_obj = provider.get_host(host.host_id)
+        except (MngrError, OSError) as e:
+            logger.debug("Skipping SSH info for host {}: {}", host.host_id, e)
+            continue
+        ssh_info = _ssh_info_from_host(host_obj)
+        if ssh_info is not None:
+            host_ssh_infos.append((host.host_id, ssh_info))
+    return host_ssh_infos
+
+
 def _set_host_agents_future(
     provider: "ProviderInstanceInterface",
     host_ref: DiscoveredHost,
-    future: "Future[list[DiscoveredAgent]]",
+    future: "Future[tuple[list[DiscoveredAgent], SSHInfo | None]]",
     timeout_seconds: float,
 ) -> None:
-    """Read one host's agents on a daemon thread, recording the outcome on ``future``.
+    """Read one host's agents and SSH endpoint on a daemon thread, recording the outcome on ``future``.
 
     Captures the expected discovery failure modes onto the future so a failed
     host can be treated as UNKNOWN rather than crashing the poll. ``timeout_seconds``
@@ -368,11 +416,11 @@ def _set_host_agents_future(
     only resolves its future late.
     """
     try:
-        agents = provider.read_host_agents_for_bounded_discovery(host_ref, timeout_seconds)
+        agents_and_ssh = provider.read_host_agents_for_bounded_discovery(host_ref, timeout_seconds)
     except (MngrError, OSError) as e:
         future.set_exception(e)
     else:
-        future.set_result(agents)
+        future.set_result(agents_and_ssh)
     finally:
         cleanup_thread_local_resources()
 
@@ -390,8 +438,8 @@ class HostDiscoveryReadRegistry(MutableModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    future_by_host_id: dict[HostId, "Future[list[DiscoveredAgent]]"] = Field(
-        default_factory=dict, description="In-flight per-host agent-read futures, keyed by host id"
+    future_by_host_id: dict[HostId, "Future[tuple[list[DiscoveredAgent], SSHInfo | None]]"] = Field(
+        default_factory=dict, description="In-flight per-host (agents, ssh_info) read futures, keyed by host id"
     )
 
 
@@ -620,7 +668,7 @@ class ProviderInstanceInterface(MutableModel, ABC):
         host_refs = self.discover_hosts(cg=cg, include_destroyed=include_destroyed)
         logger.trace("Loaded {} host(s) from provider {}", len(host_refs), self.name)
 
-        future_by_host_ref: dict[DiscoveredHost, Future[list[DiscoveredAgent]]] = {}
+        future_by_host_ref: dict[DiscoveredHost, Future[tuple[list[DiscoveredAgent], SSHInfo | None]]] = {}
         with mngr_executor(parent_cg=cg, name=f"load_agents_{self.name}", max_workers=32) as executor:
             for host_ref in host_refs:
                 future_by_host_ref[host_ref] = executor.submit(
@@ -632,7 +680,10 @@ class ProviderInstanceInterface(MutableModel, ABC):
         results: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
         for host_ref, future in future_by_host_ref.items():
             try:
-                results[host_ref] = future.result()
+                # This batch path is used by ``mngr list``, which sources SSH info separately
+                # (via ``get_host_and_agent_details``), so the captured endpoint is unused here.
+                agents, _ssh_info = future.result()
+                results[host_ref] = agents
             except HostConnectionError as e:
                 # The host was reachable enough to be discovered, but enumerating
                 # its agents failed (sshd crashed, banner reset, auth failure,
@@ -676,13 +727,14 @@ class ProviderInstanceInterface(MutableModel, ABC):
         self,
         host_ref: DiscoveredHost,
         timeout_seconds: float,
-    ) -> list[DiscoveredAgent]:
-        """Read one host's agents (with offline fallback) for the per-host-bounded discovery path.
+    ) -> tuple[list[DiscoveredAgent], SSHInfo | None]:
+        """Read one host's agents and SSH endpoint (with offline fallback) for the per-host-bounded discovery path.
 
         A seam used by ``discover_hosts_and_agents_within_timeouts``: each host's read
         runs through this method on its own daemon thread so a slow host can be
         abandoned. ``timeout_seconds`` bounds each of the host's reads so an abandoned
-        thread self-terminates rather than running forever. Tests override it to inject
+        thread self-terminates rather than running forever. The SSH endpoint (``None`` for
+        local hosts) lets the poller re-emit ``HOST_SSH_INFO``. Tests override it to inject
         a controllable per-host delay without a live host connection.
         """
         return _discover_agents_on_host_with_offline_fallback(self, host_ref, timeout_seconds)
@@ -721,7 +773,7 @@ class ProviderInstanceInterface(MutableModel, ABC):
         # Decide, per host, whether to spawn a fresh read or reuse an in-flight one from a
         # prior poll. Each fresh read runs on its own daemon thread via _set_host_agents_future,
         # which calls read_host_agents_for_bounded_discovery (overridable for testing).
-        future_by_host_ref: dict[DiscoveredHost, Future[list[DiscoveredAgent]]] = {}
+        future_by_host_ref: dict[DiscoveredHost, Future[tuple[list[DiscoveredAgent], SSHInfo | None]]] = {}
         skipped_unknown_host_ids: list[HostId] = []
         for host_ref in host_refs:
             in_flight = active_registry.future_by_host_id.get(host_ref.host_id)
@@ -744,7 +796,7 @@ class ProviderInstanceInterface(MutableModel, ABC):
                 # harvest loop below clears it so the next poll starts a fresh read.
                 future_by_host_ref[host_ref] = in_flight
                 continue
-            host_future: Future[list[DiscoveredAgent]] = Future()
+            host_future: Future[tuple[list[DiscoveredAgent], SSHInfo | None]] = Future()
             active_registry.future_by_host_id[host_ref.host_id] = host_future
             future_by_host_ref[host_ref] = host_future
             cg.start_new_thread(
@@ -763,6 +815,7 @@ class ProviderInstanceInterface(MutableModel, ABC):
 
         discovered_hosts: list[DiscoveredHost] = []
         discovered_agents: list[DiscoveredAgent] = []
+        host_ssh_infos: list[tuple[HostId, SSHInfo]] = []
         unknown_host_ids: list[HostId] = []
         for host_ref, host_future in future_by_host_ref.items():
             # A host that did not finish in time, or whose read failed, is unknown
@@ -774,8 +827,12 @@ class ProviderInstanceInterface(MutableModel, ABC):
                 if host_future.done():
                     active_registry.future_by_host_id.pop(host_ref.host_id, None)
                 continue
+            agents, ssh_info = host_future.result()
             discovered_hosts.append(host_ref)
-            discovered_agents.extend(host_future.result())
+            discovered_agents.extend(agents)
+            # Carry the host's SSH endpoint so the streaming poller re-emits it as HOST_SSH_INFO.
+            if ssh_info is not None:
+                host_ssh_infos.append((host_ref.host_id, ssh_info))
             active_registry.future_by_host_id.pop(host_ref.host_id, None)
 
         # Drop registry entries for hosts no longer discovered (e.g. destroyed while wedged)
@@ -787,6 +844,7 @@ class ProviderInstanceInterface(MutableModel, ABC):
         return BoundedProviderDiscoveryResult(
             hosts=tuple(discovered_hosts),
             agents=tuple(discovered_agents),
+            host_ssh_infos=tuple(host_ssh_infos),
             unknown_host_ids=tuple(skipped_unknown_host_ids) + tuple(unknown_host_ids),
         )
 
