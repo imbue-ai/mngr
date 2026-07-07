@@ -1135,18 +1135,21 @@ _RECOVERY_SCRIPT: Final[str] = """\
           healthyPollArmed = true;
           scheduleHealthyPoll();
         }
-        // While INDETERMINATE (no trustworthy evidence to classify), re-run the
-        // heavy probe on a slow cadence so we still converge to a real verdict if
-        // the workspace is genuinely wedged but host-reachable. Slow on purpose:
-        // each heavy probe can take tens of seconds, and the cheap liveness poll
-        // above already does the fast recovery work -- this is only the slow
-        // convergence path. Re-render via applyHealth (not renderLoading) so the
-        // "Reconnecting" state stays put while the background probe is in flight.
+        // While INDETERMINATE (no trustworthy evidence to classify), or after a
+        // probe request was dropped entirely (see runProbe), re-run the heavy probe
+        // on a slow cadence so we still converge to a real verdict if the workspace
+        // is genuinely wedged but host-reachable. Slow on purpose: each heavy probe
+        // can take tens of seconds, and the cheap liveness poll above already does
+        // the fast recovery work -- this is only the slow convergence path.
+        // Re-render via applyHealth (not renderLoading) so the "Reconnecting" state
+        // stays put while the background probe is in flight. ``autoDispatch`` is
+        // threaded through so a reprobe on the restart_failed entry (autoDispatch
+        // off) never starts auto-dispatching the restarts that entry suppresses.
         var INDETERMINATE_REPROBE_MS = 8000;
-        function scheduleIndeterminateReprobe() {
+        function scheduleIndeterminateReprobe(autoDispatch) {
           setTimeout(function () {
-            fetchHealth().then(function (data) { applyHealth(data, true); }, function () {
-              scheduleIndeterminateReprobe();
+            fetchHealth().then(function (data) { applyHealth(data, autoDispatch); }, function () {
+              scheduleIndeterminateReprobe(autoDispatch);
             });
           }, INDETERMINATE_REPROBE_MS);
         }
@@ -1312,21 +1315,25 @@ _RECOVERY_SCRIPT: Final[str] = """\
             scheduleRefresh();
             return;
           }
+          // No trustworthy evidence to classify (probe timed out, or discovery has
+          // not re-observed the host since the outage). Show a live "reconnecting"
+          // state and keep checking -- never a verdict or an auto-restart off
+          // non-evidence -- on EITHER entry path. Checked before the restart_failed
+          // branch below so an indeterminate result there also keeps checking
+          // rather than rendering a dead "Workspace unresponsive" verdict off
+          // non-evidence. The cheap liveness poll (armed by renderReconnecting)
+          // does the fast recovery; the slow re-probe converges to a real tier,
+          // preserving autoDispatch so the restart_failed entry stays no-dispatch.
+          if (tier === 'indeterminate') {
+            renderReconnecting();
+            scheduleIndeterminateReprobe(autoDispatch);
+            return;
+          }
           if (!autoDispatch) {
             // restart_failed entry: render unresponsive so the failure reason and
             // the diagnostics list both stay visible (renderUnresponsive keeps the
             // healthy-poll running so a self-recovery still returns the user home).
             renderUnresponsive();
-            return;
-          }
-          // No trustworthy evidence to classify (probe timed out, or discovery has
-          // not re-observed the host since the outage). Show a live "reconnecting"
-          // state and keep checking -- never a verdict or an auto-restart off
-          // non-evidence. The cheap liveness poll (armed by renderReconnecting)
-          // does the fast recovery; the slow re-probe converges to a real tier.
-          if (tier === 'indeterminate') {
-            renderReconnecting();
-            scheduleIndeterminateReprobe();
             return;
           }
           // ``auto_dispatched=1`` marks these as recovery-page auto-restarts (not
@@ -1358,7 +1365,16 @@ _RECOVERY_SCRIPT: Final[str] = """\
           fetchHealth().then(function (data) {
             applyHealth(data, autoDispatch);
           }, function () {
-            renderUnresponsive();
+            // The probe request itself failed -- most often the machine slept and
+            // Chromium aborted the in-flight fetch (a dropped request is absence of
+            // evidence, not proof the workspace is down). Treat it exactly like an
+            // INDETERMINATE verdict: render the live "reconnecting" state and retry
+            // the probe on the slow cadence (preserving autoDispatch), while the
+            // cheap liveness poll armed by renderReconnecting returns the user home
+            // the instant the workspace answers. This is the post-sleep strand fix:
+            // a dropped request no longer dead-ends on a static unresponsive verdict.
+            renderReconnecting();
+            scheduleIndeterminateReprobe(autoDispatch);
           });
         }
 

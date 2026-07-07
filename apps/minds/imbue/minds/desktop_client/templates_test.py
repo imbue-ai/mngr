@@ -897,13 +897,47 @@ def test_render_recovery_page_indeterminate_renders_reconnecting_not_a_verdict()
     apply_block = html[apply_start : html.find("function ", apply_start + 1)]
     assert "'indeterminate'" in apply_block
     assert "renderReconnecting()" in apply_block
-    assert "scheduleIndeterminateReprobe()" in apply_block
+    assert "scheduleIndeterminateReprobe(autoDispatch)" in apply_block
     assert apply_block.find("'indeterminate'") < apply_block.find("postRestart")
+    # The indeterminate branch must precede the restart_failed (!autoDispatch)
+    # branch so an indeterminate result on that entry also keeps checking rather
+    # than rendering the "Workspace unresponsive" verdict off non-evidence.
+    assert apply_block.find("'indeterminate'") < apply_block.find("if (!autoDispatch)")
     # renderReconnecting shows a spinner and no restart button, and arms the poll.
     recon_start = html.find("function renderReconnecting")
     recon_block = html[recon_start : html.find("function ", recon_start + 1)]
     assert "show(hostBtn, false)" in recon_block
     assert "armHealthyPoll()" in recon_block
+
+
+def test_render_recovery_page_dropped_probe_request_reconnects_not_a_verdict() -> None:
+    """A probe request that fails outright must reconnect-and-retry, not dead-end.
+
+    This is the post-macOS-sleep strand: Chromium aborts the in-flight health
+    fetch when the machine suspends, so ``fetchHealth`` rejects. The old handler
+    rendered the terminal "Workspace unresponsive" verdict and never re-probed,
+    stranding the user even after the workspace came back. The rejection handler
+    must instead render the live "reconnecting" state and schedule a retry
+    (preserving autoDispatch), so the cheap liveness poll returns the user home
+    and the slow re-probe converges to a real tier.
+    """
+    html = render_recovery_page(
+        agent_id=_AGENT_A,
+        return_to="https://example.test/workspace",
+        initial_status="stuck",
+        initial_error="",
+    )
+    # runProbe contains an inline ``function (data)`` callback, so slice to the
+    # next top-level statement (the hostBtn click handler) rather than the next
+    # ``function `` token.
+    probe_start = html.find("function runProbe(")
+    probe_block = html[probe_start : html.find("hostBtn.addEventListener", probe_start)]
+    # The success path still applies the health payload...
+    assert "applyHealth(data, autoDispatch)" in probe_block
+    # ...and the rejection path reconnects + retries instead of a static verdict.
+    assert "renderReconnecting()" in probe_block
+    assert "scheduleIndeterminateReprobe(autoDispatch)" in probe_block
+    assert "renderUnresponsive()" not in probe_block
 
 
 def test_render_recovery_page_every_wait_state_arms_the_homeward_poll() -> None:
