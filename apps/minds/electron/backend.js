@@ -22,6 +22,44 @@ for (const stream of [process.stdout, process.stderr]) {
 
 let backendProcess = null;
 
+// Backend stdout JSONL event fields that carry secrets and must be masked
+// before the raw line is written to minds.log (which is uploaded with bug
+// reports). Keyed by event type; each value lists the fields to redact.
+//   * login_url: the URL embeds a single-use one-time login code.
+//   * mngr_forward_started: the freshly-minted mngr-forward preauth cookie.
+const SECRET_STDOUT_EVENT_FIELDS = {
+  login_url: ['login_url', 'message'],
+  mngr_forward_started: ['preauth_cookie'],
+};
+
+const REDACTED_PLACEHOLDER = '***';
+
+/**
+ * Return a copy of a backend stdout line safe to persist to minds.log.
+ *
+ * If the line is a JSON event carrying secrets (see SECRET_STDOUT_EVENT_FIELDS)
+ * its secret fields are replaced with a placeholder; every other line is
+ * returned unchanged. The parsed event used by the in-process handlers is
+ * derived from the ORIGINAL line, so redaction never affects behavior -- only
+ * what is written to disk.
+ */
+function redactStdoutLineForLog(line) {
+  if (!line.trim()) return line;
+  let event;
+  try {
+    event = JSON.parse(line);
+  } catch {
+    return line;
+  }
+  const secretFields = event && typeof event === 'object' ? SECRET_STDOUT_EVENT_FIELDS[event.event] : undefined;
+  if (!secretFields) return line;
+  const redacted = { ...event };
+  for (const field of secretFields) {
+    if (field in redacted) redacted[field] = REDACTED_PLACEHOLDER;
+  }
+  return JSON.stringify(redacted);
+}
+
 /**
  * Find an available port by briefly binding to port 0.
  */
@@ -277,9 +315,18 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
       // Parse JSONL events from stdout for the login URL
       let stdoutBuffer = '';
 
+      // Flush any buffered (newline-less) trailing stdout to the log so a final
+      // fragment emitted right before exit is never dropped. Redacted like every
+      // other logged line.
+      const flushStdoutBufferToLog = () => {
+        if (stdoutBuffer) {
+          logStream.write(redactStdoutLineForLog(stdoutBuffer) + '\n');
+          stdoutBuffer = '';
+        }
+      };
+
       child.stdout.on('data', (data) => {
         const text = data.toString();
-        logStream.write(text);
         stdoutBuffer += text;
 
         const lines = stdoutBuffer.split('\n');
@@ -287,6 +334,12 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
         stdoutBuffer = lines.pop() || '';
 
         for (const line of lines) {
+          // Log every complete line, but mask secret-bearing event fields
+          // (the mngr-forward preauth cookie, the one-time login code) first:
+          // minds.log is uploaded with bug reports, so credentials must never
+          // land in it. The in-process handlers below still parse the original
+          // line, so they receive the real values.
+          logStream.write(redactStdoutLineForLog(line) + '\n');
           if (!line.trim()) continue;
           try {
             const event = JSON.parse(line);
@@ -339,6 +392,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
       });
 
       child.on('error', (err) => {
+        flushStdoutBufferToLog();
         logStream.end();
         if (!isResolved) {
           isResolved = true;
@@ -348,6 +402,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
 
       child.on('exit', (code) => {
         backendProcess = null;
+        flushStdoutBufferToLog();
         logStream.end();
         if (!isResolved) {
           isResolved = true;
