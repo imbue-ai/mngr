@@ -72,7 +72,7 @@ jobs:
       # Injected as MODAL_TOKEN_ID / MODAL_TOKEN_SECRET into the job env for the
       # offload run below.
       - name: Fetch Modal credentials from Vault
-        uses: imbue-ai/use-vault-secrets@2375c28b61513dadebebdce845c109a01777a197
+        uses: imbue-ai/use-vault-secrets@main
         with:
           role: mngr_ci_gh
           secrets: |
@@ -257,7 +257,7 @@ jobs:
       # imbue Modal workspace token (id + secret) from Vault, migrated off the
       # MODAL_TOKEN_ID variable + MODAL_TOKEN_SECRET GitHub Actions secret.
       - name: Fetch Modal credentials from Vault
-        uses: imbue-ai/use-vault-secrets@2375c28b61513dadebebdce845c109a01777a197
+        uses: imbue-ai/use-vault-secrets@main
         with:
           role: mngr_ci_gh
           secrets: |
@@ -309,7 +309,7 @@ jobs:
       # Injected as MODAL_TOKEN_ID / MODAL_TOKEN_SECRET into the job env for the
       # offload run below.
       - name: Fetch Modal credentials from Vault
-        uses: imbue-ai/use-vault-secrets@2375c28b61513dadebebdce845c109a01777a197
+        uses: imbue-ai/use-vault-secrets@main
         with:
           role: mngr_ci_gh
           secrets: |
@@ -492,7 +492,7 @@ jobs:
       # imbue Modal workspace token (id + secret) from Vault, migrated off the
       # MODAL_TOKEN_ID variable + MODAL_TOKEN_SECRET GitHub Actions secret.
       - name: Fetch Modal credentials from Vault
-        uses: imbue-ai/use-vault-secrets@2375c28b61513dadebebdce845c109a01777a197
+        uses: imbue-ai/use-vault-secrets@main
         with:
           role: mngr_ci_gh
           secrets: |
@@ -754,7 +754,7 @@ jobs:
       # and forwarded into the offload sandbox by the just recipe below. Read via
       # the minds-scoped minds_ci_test_gh role.
       - name: Fetch Anthropic key from Vault
-        uses: imbue-ai/use-vault-secrets@2375c28b61513dadebebdce845c109a01777a197
+        uses: imbue-ai/use-vault-secrets@main
         with:
           role: minds_ci_test_gh
           secrets: |
@@ -766,7 +766,7 @@ jobs:
       # repository-only binding, so minds_ci_test_gh stays scoped to minds/ci.
       # Exported as MODAL_TOKEN_ID / MODAL_TOKEN_SECRET.
       - name: Fetch Modal credentials from Vault
-        uses: imbue-ai/use-vault-secrets@2375c28b61513dadebebdce845c109a01777a197
+        uses: imbue-ai/use-vault-secrets@main
         with:
           role: mngr_ci_gh
           secrets: |

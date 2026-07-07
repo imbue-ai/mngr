@@ -198,7 +198,7 @@ jobs:
       # role. NOTE: this self-hosted macOS runner must have curl + jq on PATH,
       # which the use-vault-secrets action shells out to.
       - name: Fetch ToDesktop credentials from Vault
-        uses: imbue-ai/use-vault-secrets@2375c28b61513dadebebdce845c109a01777a197
+        uses: imbue-ai/use-vault-secrets@main
         with:
           role: minds_release_gh
           secrets: |
@@ -438,7 +438,7 @@ jobs:
       # Actions secret). This self-hosted macOS runner must have curl + jq on
       # PATH, which the use-vault-secrets action shells out to.
       - name: Fetch Anthropic key from Vault
-        uses: imbue-ai/use-vault-secrets@2375c28b61513dadebebdce845c109a01777a197
+        uses: imbue-ai/use-vault-secrets@main
         with:
           role: mngr_ci_gh
           secrets: |
@@ -1092,7 +1092,7 @@ jobs:
       # webhook was unset.
       - name: Fetch Slack webhook from Vault
         continue-on-error: true
-        uses: imbue-ai/use-vault-secrets@2375c28b61513dadebebdce845c109a01777a197
+        uses: imbue-ai/use-vault-secrets@main
         with:
           role: mngr_ci_gh
           secrets: |

@@ -44,7 +44,7 @@ jobs:
       # migrated off the ANTHROPIC_API_KEY / MODAL_TOKEN_SECRET GitHub Actions
       # secrets and the MODAL_TOKEN_ID variable.
       - name: Fetch credentials from Vault
-        uses: imbue-ai/use-vault-secrets@2375c28b61513dadebebdce845c109a01777a197
+        uses: imbue-ai/use-vault-secrets@main
         with:
           role: mngr_ci_gh
           secrets: |
@@ -57,7 +57,7 @@ jobs:
       # the pre-migration behaviour when the AWS_* secrets were unset.
       - name: Fetch AWS credentials from Vault (optional)
         continue-on-error: true
-        uses: imbue-ai/use-vault-secrets@2375c28b61513dadebebdce845c109a01777a197
+        uses: imbue-ai/use-vault-secrets@main
         with:
           role: mngr_ci_gh
           secrets: |

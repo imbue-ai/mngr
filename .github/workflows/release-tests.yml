@@ -27,7 +27,7 @@ jobs:
       # Anthropic key from Vault (migrated off the ANTHROPIC_API_KEY GitHub
       # Actions secret).
       - name: Fetch Anthropic key from Vault
-        uses: imbue-ai/use-vault-secrets@2375c28b61513dadebebdce845c109a01777a197
+        uses: imbue-ai/use-vault-secrets@main
         with:
           role: mngr_ci_gh
           secrets: |
@@ -82,7 +82,7 @@ jobs:
       # secrets and the MODAL_TOKEN_ID variable. The GitHub-hosted macOS runners
       # in this matrix have curl + jq preinstalled, which the action needs.
       - name: Fetch Anthropic key and Modal credentials from Vault
-        uses: imbue-ai/use-vault-secrets@2375c28b61513dadebebdce845c109a01777a197
+        uses: imbue-ai/use-vault-secrets@main
         with:
           role: mngr_ci_gh
           secrets: |
