@@ -132,3 +132,12 @@ class ModalProviderConfig(ProviderInstanceConfig):
             "while the host is online."
         ),
     )
+    is_vm_runtime_enabled: bool = Field(
+        default=True,
+        description=(
+            "Whether to run sandboxes on Modal's VM runtime (https://modal.com/docs/guide/vm-sandboxes) "
+            "instead of the default gVisor runtime. When True (default), sandboxes are created with "
+            "``experimental_options={'vm_runtime': True}``, which provides stronger isolation and "
+            "broader syscall compatibility. When False, sandboxes use Modal's default runtime."
+        ),
+    )

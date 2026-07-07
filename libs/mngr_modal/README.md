@@ -39,4 +39,7 @@ Configure the Modal provider in your mngr settings:
 default_cpu = 2.0
 default_memory = 4.0
 default_sandbox_timeout = 1800
+# Run sandboxes on Modal's VM runtime (https://modal.com/docs/guide/vm-sandboxes).
+# Defaults to true; set to false to use Modal's default gVisor runtime.
+is_vm_runtime_enabled = true
 ```

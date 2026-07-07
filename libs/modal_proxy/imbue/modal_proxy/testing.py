@@ -389,6 +389,7 @@ class FakeModalInterface(ModalInterface):
         region: str | None = None,
         cidr_allowlist: Sequence[str] | None = None,
         volumes: Mapping[str, VolumeInterface] | None = None,
+        experimental_options: Mapping[str, bool] | None = None,
     ) -> SandboxInterface:
         sandbox_id = f"sb-{uuid.uuid4().hex}"
         sandbox = FakeSandbox(sandbox_id=sandbox_id)

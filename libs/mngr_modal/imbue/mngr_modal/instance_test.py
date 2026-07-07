@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 import pytest
 
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import MngrError
@@ -260,6 +261,23 @@ def test_modal_provider_supports_volumes(modal_provider: ModalProviderInstance) 
 def test_modal_provider_supports_mutable_tags(modal_provider: ModalProviderInstance) -> None:
     """Modal provider supports mutable tags via Modal's sandbox.set_tags() API."""
     assert modal_provider.supports_mutable_tags is True
+
+
+def test_vm_runtime_enabled_by_default(modal_provider: ModalProviderInstance) -> None:
+    """The provider config defaults to running sandboxes on Modal's VM runtime."""
+    assert modal_provider.config.is_vm_runtime_enabled is True
+    assert modal_provider._build_experimental_options() == {"vm_runtime": True}
+
+
+def test_build_experimental_options_none_when_vm_runtime_disabled(modal_provider: ModalProviderInstance) -> None:
+    """When the VM runtime is disabled, no experimental_options are sent to Modal."""
+    disabled_config = modal_provider.config.model_copy_update(
+        to_update(modal_provider.config.field_ref().is_vm_runtime_enabled, False)
+    )
+    disabled = modal_provider.model_copy_update(
+        to_update(modal_provider.field_ref().config, disabled_config)
+    )
+    assert disabled._build_experimental_options() is None
 
 
 def test_get_host_volume_name_uses_config_prefix(modal_provider: ModalProviderInstance) -> None:
