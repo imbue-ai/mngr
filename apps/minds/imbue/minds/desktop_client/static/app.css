@@ -377,6 +377,27 @@ html {
 }
 
 /*
+ * Custom tooltip bubble -- shared appearance for the two render backends in
+ * static/tooltip_triggers.js: the overlay surface (static/overlay.js, used by
+ * the chrome titlebar + the modal pages) and the in-page fallback that
+ * first-party content-view pages (e.g. the workspace-row buttons in
+ * Landing.jinja) render themselves, because that view has no ``window.minds``
+ * bridge. Both build the bubble in JS, so this is the "shared across files"
+ * case that gets a named ``@apply`` class (see README) instead of an inline
+ * utility string -- one definition keeps the two backends visually identical.
+ * Layout that differs per backend (position / left / top / z-index) is set in
+ * JS; this class is appearance only. ``type-helper`` is the 12px/1.4 hints
+ * role and ``shadow-overlay`` the menus/modals/tooltips elevation; the
+ * max-width + whitespace/pointer-events keep it a compact, non-interactive
+ * label. The max-width is generous enough that short button labels (e.g.
+ * "Open in new window") stay on one line; ``text-center`` centers the lines
+ * when a longer label does wrap.
+ */
+.minds-tooltip {
+  @apply inline-flex items-center gap-1.5 max-w-[400px] py-1 px-2 rounded-md bg-surface-inverse text-inverse-primary type-helper shadow-overlay whitespace-normal text-center pointer-events-none;
+}
+
+/*
  * Inline ``<code>`` pill: light-gray rounded chip for service names,
  * file paths, etc. inline inside prose. The pill style is used by
  * Sharing.jinja's heading + sharing.js (which rebuilds that heading

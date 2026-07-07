@@ -601,8 +601,17 @@ class OuterHost(OuterHostInterface):
         remote_filename: str,
         filename_or_io: str | IO[bytes],
         remote_temp_filename: str | None = None,
+        timeout_seconds: float | None = None,
     ) -> bool:
-        """Read a file from the host. Raises FileNotFoundError if not found."""
+        """Read a file from the host. Raises FileNotFoundError if not found.
+
+        When ``timeout_seconds`` is set, the remote SFTP read is bounded by that
+        wall-clock: a stalled transfer raises ``socket.timeout`` on the SFTP
+        channel, which (after transient retries) surfaces as a
+        ``HostConnectionError``. Used by the per-host-bounded discovery read so a
+        wedged host cannot hang the read forever; other callers leave it ``None``
+        (unbounded, prior behavior).
+        """
         with (
             self._notify_on_connection_error(),
             self._translate_ssh_errors(
@@ -611,7 +620,9 @@ class OuterHost(OuterHostInterface):
                 failed="Could not read file due to connection error",
             ),
         ):
-            return self._get_file_with_transient_retry(remote_filename, filename_or_io, remote_temp_filename)
+            return self._get_file_with_transient_retry(
+                remote_filename, filename_or_io, remote_temp_filename, timeout_seconds
+            )
 
     @_retry_on_transient_ssh_error
     def _get_file_with_transient_retry(
@@ -619,6 +630,7 @@ class OuterHost(OuterHostInterface):
         remote_filename: str,
         filename_or_io: str | IO[bytes],
         remote_temp_filename: str | None = None,
+        timeout_seconds: float | None = None,
     ) -> bool:
         self._ensure_connected()
         if not isinstance(filename_or_io, str):
@@ -626,7 +638,7 @@ class OuterHost(OuterHostInterface):
             filename_or_io.truncate(0)
         try:
             if not self.is_local:
-                return self._get_file_via_paramiko(remote_filename, filename_or_io)
+                return self._get_file_via_paramiko(remote_filename, filename_or_io, timeout_seconds)
             return self.connector.host.get_file(
                 remote_filename,
                 filename_or_io,
@@ -671,16 +683,25 @@ class OuterHost(OuterHostInterface):
         self,
         remote_filename: str,
         filename_or_io: str | IO[bytes],
+        timeout_seconds: float | None = None,
     ) -> bool:
         """Download a file using a dedicated paramiko SFTP channel.
 
         Creates a fresh SFTPClient from the shared SSH transport for each call.
         This is thread-safe because paramiko transports can multiplex channels.
+
+        When ``timeout_seconds`` is set, the SFTP channel is given that socket
+        timeout so a stalled transfer raises ``socket.timeout`` (a ``TimeoutError``)
+        instead of blocking forever.
         """
         transport = self._get_paramiko_transport()
         sftp = self._create_sftp_client(transport)
         if sftp is None:
             raise HostConnectionError("Failed to create SFTP channel from transport")
+        if timeout_seconds is not None:
+            channel = sftp.get_channel()
+            if channel is not None:
+                channel.settimeout(timeout_seconds)
         try:
             if isinstance(filename_or_io, str):
                 sftp.get(remote_filename, filename_or_io)
@@ -990,6 +1011,24 @@ class OuterHost(OuterHostInterface):
     def read_text_file(self, path: Path, encoding: str = "utf-8") -> str:
         """Read a file and return its contents as a string."""
         return self.read_file(path).decode(encoding)
+
+    def read_file_within_timeout(self, path: Path, timeout_seconds: float) -> bytes:
+        """Read a file's bytes, bounding the remote read by ``timeout_seconds``.
+
+        Like :meth:`read_file` but the remote SFTP transfer self-terminates on a
+        stall (surfacing as ``HostConnectionError``) instead of hanging. Local
+        reads ignore the timeout. Used by the per-host-bounded discovery read so
+        an abandoned read cannot leak a thread that runs forever.
+        """
+        if self.is_local:
+            return path.read_bytes()
+        output = io.BytesIO()
+        self._get_file(str(path), output, timeout_seconds=timeout_seconds)
+        return output.getvalue()
+
+    def read_text_file_within_timeout(self, path: Path, timeout_seconds: float, encoding: str = "utf-8") -> str:
+        """Read a file's text, bounding the remote read by ``timeout_seconds``."""
+        return self.read_file_within_timeout(path, timeout_seconds).decode(encoding)
 
     def write_text_file(
         self,

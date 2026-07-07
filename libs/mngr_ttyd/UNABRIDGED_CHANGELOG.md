@@ -4,6 +4,10 @@ Full, unedited changelog entries for the `mngr_ttyd` project, consolidated night
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-01
+
+Added a new async/await ratchet (`test_prevent_async_await`) that freezes the current amount of `async def` / `await` usage in this project and fails if new async code is added. We strongly prefer synchronous code: it is far easier to debug, and our software is intentionally low-scale, so async provides no benefit. Existing usage is grandfathered in at its current count; the count can only decrease.
+
 ## 2026-06-25
 
 Fixed copy-paste in the browser terminal. The plugin now serves its own OSC 52-capable web client to the stock `ttyd` binary via `ttyd -I`, so copying text inside a tmux session running in the browser terminal reaches the system clipboard (the released `ttyd` 1.7.7 client has no OSC 52 handler). `mouse on` is kept, so mouse-wheel scroll and in-app mouse continue to work. The client is vendored gzip-compressed and decompressed onto each agent host during provisioning; if it is missing, `ttyd` cleanly falls back to its built-in client. Rebuild it with `scripts/build_patched_ttyd_client.sh`.

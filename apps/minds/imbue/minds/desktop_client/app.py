@@ -35,6 +35,9 @@ from imbue.minds.desktop_client.agent_creator import make_workspace_probe_client
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
 from imbue.minds.desktop_client.api_schema import create_api_schema_blueprint
 from imbue.minds.desktop_client.api_v1 import create_api_v1_blueprint
+from imbue.minds.desktop_client.assist_chat import AssistSupport
+from imbue.minds.desktop_client.assist_chat import check_assist_support
+from imbue.minds.desktop_client.assist_chat import spawn_assist_chat
 from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
@@ -51,6 +54,7 @@ from imbue.minds.desktop_client.destroying import read_destroying
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
+from imbue.minds.desktop_client.help_modal_requests import OpenHelpRequest
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.mind_liveness import compute_mind_liveness_by_agent_id
 from imbue.minds.desktop_client.mind_liveness import get_shutdown_capable_workspace_agent_ids
@@ -99,6 +103,7 @@ from imbue.minds.desktop_client.templates import render_inbox_unavailable_fragme
 from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
+from imbue.minds.desktop_client.templates import render_overlay_host_page
 from imbue.minds.desktop_client.templates import render_recovery_page
 from imbue.minds.desktop_client.templates import render_settings_page
 from imbue.minds.desktop_client.templates import render_sharing_editor
@@ -114,8 +119,13 @@ from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
+from imbue.minds.utils.mngr_caller import MngrCaller
+from imbue.minds.utils.mngr_caller import get_default_mngr_caller
+from imbue.minds.utils.sentry.core import latchkey_forward_sentry_consent_path
+from imbue.minds.utils.sentry.core import write_latchkey_forward_sentry_consent
 from imbue.mngr.api.discovery_events import DISCOVERY_STREAM_POLL_INTERVAL_SECONDS
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 
 _PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
@@ -182,12 +192,17 @@ def _should_emit_system_interface_status(
     unconditionally -- they do not trigger the redirect, and the user is already on
     the recovery page when they apply. Only the passive-discovery resolver tracks
     snapshot freshness; for any other resolver the redirect is not gated.
+
+    Freshness is scoped to the *workspace's own provider*: each provider is
+    discovered on its own decoupled loop, so this gate compares against the last
+    snapshot of the agent's provider (falling back to the aggregate when that
+    provider is not yet known), not a single global snapshot.
     """
     if status != AgentHealth.STUCK:
         return True
     if not isinstance(backend_resolver, MngrCliBackendResolver):
         return True
-    _, last_full_snapshot_at = backend_resolver.get_freshness_timestamps()
+    last_snapshot_at = _workspace_provider_snapshot_at(backend_resolver, agent_id)
     onset = tracker.get_failure_run_started_wall_at(agent_id) if tracker is not None else None
     # When discovery is *persistently* stale -- the producer/consumer pipeline has
     # stalled, not merely a provider being down -- no post-onset snapshot ever
@@ -197,8 +212,29 @@ def _should_emit_system_interface_status(
     # dead consumer) escalates to a terminal BLOCKED app-takeover -- so the user is
     # never left stranded on the "Loading workspace" loader here with no recourse.
     if onset is None:
-        return _is_discovery_fresh(last_full_snapshot_at)
-    return last_full_snapshot_at is not None and last_full_snapshot_at >= onset
+        return _is_discovery_fresh(last_snapshot_at)
+    return last_snapshot_at is not None and last_snapshot_at >= onset
+
+
+def _workspace_provider_snapshot_at(backend_resolver: MngrCliBackendResolver, agent_id: AgentId) -> datetime | None:
+    """Last per-provider snapshot time for ``agent_id``'s provider, or the aggregate fallback.
+
+    The recovery redirect gates on whether discovery has re-observed *this
+    workspace's* host since the outage began. Because each provider is discovered
+    on its own decoupled loop, a healthy provider keeps emitting fresh snapshots
+    even while an unrelated provider is down -- so the gate must use the
+    workspace's own provider's snapshot time, not a single global one. When the
+    agent's provider is known, its snapshot time is returned even if ``None`` (no
+    snapshot of that provider has completed yet, so freshness cannot be
+    established and the caller treats it as stale). Only when the agent's provider
+    is *unknown* (it has not appeared in discovery at all) do we fall back to the
+    aggregate snapshot time across all providers.
+    """
+    info = backend_resolver.get_agent_display_info(agent_id)
+    if info is not None and info.provider_name is not None:
+        return backend_resolver.get_last_snapshot_at_for_provider(ProviderInstanceName(info.provider_name))
+    _, aggregate_snapshot_at = backend_resolver.get_freshness_timestamps()
+    return aggregate_snapshot_at
 
 
 def _discovery_health_payload(health: DiscoveryHealth) -> dict[str, str]:
@@ -431,6 +467,7 @@ def _handle_consent_submit() -> Response:
         minds_config.set_report_unexpected_errors(report)
         minds_config.set_include_error_logs(include_logs and report)
         minds_config.set_error_reporting_consent_given(True)
+        _sync_latchkey_forward_sentry_consent(minds_config)
     return make_response(status_code=200, content='{"ok": true}', media_type="application/json")
 
 
@@ -452,22 +489,57 @@ def _handle_error_reporting_settings() -> Response:
             minds_config.set_report_unexpected_errors(bool(body["report_unexpected_errors"]))
         if "include_logs" in body:
             minds_config.set_include_error_logs(bool(body["include_logs"]))
+        _sync_latchkey_forward_sentry_consent(minds_config)
     return make_response(status_code=200, content='{"ok": true}', media_type="application/json")
+
+
+def _sync_latchkey_forward_sentry_consent(minds_config: MindsConfig) -> None:
+    """Rewrite the detached ``mngr latchkey forward`` daemon's live consent file after a consent change.
+
+    The daemon reads this file live (per event) to gate what it sends, so rewriting it here is what
+    makes a grant/revoke take effect on the running daemon without respawning it.
+    """
+    write_latchkey_forward_sentry_consent(
+        latchkey_forward_sentry_consent_path(minds_config.data_dir),
+        is_error_reporting_enabled=minds_config.get_report_unexpected_errors(),
+        is_log_inclusion_enabled=minds_config.get_include_error_logs(),
+    )
 
 
 def _handle_help_page() -> Response:
     """Render the get-help modal page (GET /help).
 
     Intentionally unauthenticated: reporting a bug must work even when sign-in itself is broken. The
-    ``workspace`` query param (set by the titlebar button) scopes the optional workspace section.
+    ``workspace`` query param (set by the titlebar button) scopes the optional workspace section. The
+    ``assist`` query param (``1``) marks the workspace as reachable/healthy enough to host an
+    ``/assist`` chat; the titlebar only sets it when the displayed workspace is healthy, so the
+    agent-help option stays disabled on a loading/stuck workspace (whose chat couldn't be reached).
     """
     minds_config: MindsConfig | None = get_state().minds_config
     include_logs_setting = minds_config.get_include_error_logs() if minds_config else False
     workspace_agent_id = request.args.get("workspace", "")
+    assist_available = request.args.get("assist") == "1"
+    description = request.args.get("description", "")
+    # An in-workspace agent's escalation opens this modal via the open_help flow with
+    # ``agent_report=1``. In that case the modal frames the pre-filled report as the
+    # agent's submission (titled with the workspace it came from) and drops the
+    # have-an-agent-help / report-a-bug choice -- we are already reporting. The
+    # workspace name is best-effort (empty for an unknown/label-less workspace).
+    is_agent_report = request.args.get("agent_report") == "1"
+    workspace_name = ""
+    if is_agent_report and workspace_agent_id:
+        try:
+            workspace_name = get_state().backend_resolver.get_workspace_name(AgentId(workspace_agent_id)) or ""
+        except ValueError:
+            workspace_name = ""
     return make_html_response(
         content=render_help_page(
             include_logs_setting=include_logs_setting,
             workspace_agent_id=workspace_agent_id,
+            assist_available=assist_available,
+            description=description,
+            is_agent_report=is_agent_report,
+            workspace_name=workspace_name,
         )
     )
 
@@ -475,8 +547,9 @@ def _handle_help_page() -> Response:
 def _handle_help_report() -> Response:
     """Collect and submit a user-submitted bug report from the help form (POST /help/report).
 
-    Unauthenticated for the same reason as the page: the user may be reporting a sign-in problem. The
-    shared collector also backs the ``/api/v1`` bug-report route, so both paths produce identical reports.
+    Unauthenticated for the same reason as the page: the user may be reporting a sign-in problem. An
+    agent-initiated report (the ``/api/v1`` route) lands here too: that route pre-fills this same form
+    rather than submitting, so the human-reviewed send always flows through this collector.
     """
     body = request.get_json(silent=True, force=True)
     if not isinstance(body, dict):
@@ -503,6 +576,87 @@ def _handle_help_report() -> Response:
         content=json.dumps({"ok": True, "event_id": event_id}),
         media_type="application/json",
     )
+
+
+def _handle_help_assist() -> Response:
+    """Spawn an in-workspace ``/assist`` chat to help with a problem (POST /help/assist).
+
+    Only valid when the help flow was opened from a loaded workspace: the body carries that
+    workspace's agent id and the user's description. Before spawning, we probe the workspace for the
+    ``/assist`` skill and return 409 if it lacks it (an older FCT template) or 502 if the workspace is
+    unreachable -- so we never spawn a chat that could only hang. Otherwise the desktop app runs
+    ``mngr create`` inside that workspace's container (via ``mngr exec``) to spawn a new chat seeded
+    with ``/assist <description>``; the system interface auto-opens its tab. The call blocks until
+    ``mngr create`` finishes so the get-help modal can hold its "starting..." state until the chat
+    exists, then returns 200 on success or 502 if the spawn failed.
+    """
+    body = request.get_json(silent=True, force=True)
+    if not isinstance(body, dict):
+        return make_response(
+            status_code=400, content='{"error": "Request body must be a JSON object"}', media_type="application/json"
+        )
+    description = str(body.get("description", "")).strip()
+    if not description:
+        return make_response(
+            status_code=400, content='{"error": "A description is required"}', media_type="application/json"
+        )
+    workspace_agent_id_raw = str(body.get("workspace_agent_id", "")).strip()
+    if not workspace_agent_id_raw:
+        return make_response(
+            status_code=400,
+            content='{"error": "Agent help is only available inside a workspace"}',
+            media_type="application/json",
+        )
+    try:
+        workspace_agent_id = AgentId(workspace_agent_id_raw)
+    except ValueError:
+        return make_response(
+            status_code=400, content='{"error": "Invalid workspace_agent_id"}', media_type="application/json"
+        )
+
+    state = get_state()
+    mngr_caller = state.mngr_caller or get_default_mngr_caller()
+
+    # Refuse before spawning if this workspace can't actually host an /assist chat.
+    # Workspaces created from an FCT predating the /assist skill would otherwise accept
+    # the ``mngr create`` but hang on the ``/assist`` message (an unknown slash command
+    # never submits a prompt, so the send blocks to its full timeout) and leave a
+    # half-created chat behind. The probe is a quick filesystem check inside the
+    # container; on an unsupported/unreachable workspace we return a clear error the
+    # modal turns into a "report a bug instead" screen rather than a dead spinner.
+    support = check_assist_support(mngr_caller, workspace_agent_id)
+    if support is AssistSupport.UNSUPPORTED:
+        return make_response(
+            status_code=409,
+            content=json.dumps(
+                {"error": "This workspace doesn't have the agent-assist skill, so an agent can't help here yet."}
+            ),
+            media_type="application/json",
+        )
+    if support is AssistSupport.UNREACHABLE:
+        return make_response(
+            status_code=502,
+            content=json.dumps(
+                {"error": "Couldn't reach this workspace to start an agent. It may be starting up or unavailable."}
+            ),
+            media_type="application/json",
+        )
+
+    # Wait for the create to finish before responding so the get-help modal keeps its
+    # "starting..." state until the chat exists, rather than dismissing into a blank gap
+    # while the agent boots. The cheroot WSGI pool (50 threads) absorbs the blocking call.
+    started = spawn_assist_chat(
+        mngr_caller=mngr_caller,
+        workspace_agent_id=workspace_agent_id,
+        description=description,
+    )
+    if not started:
+        return make_response(
+            status_code=502,
+            content=json.dumps({"error": "Could not start an agent in this workspace. Please try again."}),
+            media_type="application/json",
+        )
+    return make_response(status_code=200, content=json.dumps({"ok": True}), media_type="application/json")
 
 
 def _handle_welcome_page() -> Response:
@@ -863,6 +1017,20 @@ def _handle_chrome_sidebar() -> Response:
     return make_html_response(content=html)
 
 
+def _handle_chrome_overlay() -> Response:
+    """Serve the always-warm overlay host page loaded into the shared modal WebContentsView.
+
+    Loaded once at window creation (see createBundleOverlayView in electron/main.js) and
+    kept mounted for the window's life. It hosts every overlay -- the migrated
+    workspace menu / inbox / help / sign-in modals (as mount-on-demand iframes,
+    created when opened and destroyed when closed) and hover tooltips -- as
+    in-page DOM driven over IPC, so overlays open without a
+    per-open page load. Unauthenticated, like /_chrome: the host shell renders
+    for all users and the overlays it hosts handle their own auth.
+    """
+    return make_html_response(content=render_overlay_host_page())
+
+
 def _handle_dev_styleguide() -> Response:
     """Render the design-system styleguide page."""
     return make_html_response(content=render_dev_styleguide_page())
@@ -890,6 +1058,7 @@ def _handle_chrome_events() -> Response:
     """
     authenticated = _is_request_authenticated()
     backend_resolver = get_state().backend_resolver
+    help_broker = get_state().help_modal_request_broker
 
     def _event_generator() -> Iterator[str]:
         if not authenticated:
@@ -907,11 +1076,22 @@ def _handle_chrome_events() -> Response:
         # in the main generator loop so each subscriber sees every event.
         health_queue: queue.Queue[tuple[str, AgentHealth]] = queue.Queue()
 
+        # Agent-initiated "open the pre-filled report modal" requests arrive on a
+        # Flask request thread (the /api/v1 report route) via the broker. We
+        # accumulate them per-connection and drain them in the loop, the same
+        # way health transitions are handled.
+        open_help_queue: queue.Queue[OpenHelpRequest] = queue.Queue()
+
         def _on_change() -> None:
             change_event.set()
 
         def _on_health_change(agent_id: AgentId, status: AgentHealth) -> None:
             _enqueue_health_change(health_queue, change_event, agent_id, status)
+
+        # Subscribe this connection's queue + wake event directly (no callback)
+        # so the broker fans open-help requests onto it the same way health
+        # transitions reach ``health_queue``.
+        help_broker.subscribe(open_help_queue, change_event)
 
         if isinstance(backend_resolver, MngrCliBackendResolver):
             backend_resolver.add_on_change_callback(_on_change)
@@ -1042,6 +1222,18 @@ def _handle_chrome_events() -> Response:
                 if shutdown_event.is_set():
                     break
 
+                while not open_help_queue.empty():
+                    help_request = open_help_queue.get_nowait()
+                    yield "data: {}\n\n".format(
+                        json.dumps(
+                            {
+                                "type": "open_help",
+                                "description": help_request.description,
+                                "workspace_agent_id": help_request.workspace_agent_id,
+                            }
+                        )
+                    )
+
                 while not health_queue.empty():
                     aid_str, status = health_queue.get_nowait()
                     # Leaving STUCK clears the redirect latch so a later re-STUCK
@@ -1141,6 +1333,7 @@ def _handle_chrome_events() -> Response:
                         json.dumps({"type": "requests", **current_requests_payload, "auto_open": auto_open})
                     )
         finally:
+            help_broker.unsubscribe(open_help_queue, change_event)
             if isinstance(backend_resolver, MngrCliBackendResolver):
                 backend_resolver.remove_on_change_callback(_on_change)
             if tracker is not None:
@@ -1458,10 +1651,10 @@ def _handle_recovery_page(
     initial_error = (tracker.get_last_restart_error(aid) or "") if tracker is not None else ""
     return_to = _sanitize_recovery_return_to(request.args.get("return_to", ""))
     is_explicit_restart = request.args.get("intent", "") == "restart"
-    # The recovery page renders from ``render_status`` and then auto-refreshes
-    # itself while a restart is in flight; every refresh re-runs this handler,
-    # so the live tracker state is re-read each tick. A HEALTHY tracker needs
-    # special handling rather than rendering a misleading "not responding" page.
+    # The recovery page renders from ``render_status`` and then polls itself in
+    # the background while a restart is in flight; every poll re-runs this
+    # handler, so the live tracker state is re-read each tick. A HEALTHY tracker
+    # needs special handling rather than rendering a misleading "not responding" page.
     render_status = initial_status
     if initial_status == AgentHealth.HEALTHY.value:
         if is_explicit_restart:
@@ -1490,7 +1683,11 @@ def _handle_recovery_page(
         initial_error=initial_error,
         ssh_command=_ssh_command_for_agent(backend_resolver, aid),
     )
-    return make_html_response(content=html_body)
+    # Expose the rendered status so the page's background convergence poll can
+    # tell "still restarting" (keep waiting, no reload) from a state change
+    # (reload to render the new state) without a focus-stealing full reload on
+    # every tick. See the recovery script's ``scheduleRefresh``.
+    return make_html_response(content=html_body, headers={"X-Recovery-Status": render_status})
 
 
 def _is_discovery_fresh(last_full_snapshot_at: datetime | None) -> bool:
@@ -2050,6 +2247,7 @@ def create_desktop_client(
     minds_api_key: str | None = None,
     latchkey_forward_supervisor: LatchkeyForwardSupervisor | None = None,
     discovery_health_watchdog: DiscoveryHealthWatchdog | None = None,
+    mngr_caller: MngrCaller | None = None,
 ) -> Flask:
     """Create the bare-origin minds Flask application.
 
@@ -2118,6 +2316,7 @@ def create_desktop_client(
         minds_api_key=minds_api_key,
         latchkey_forward_supervisor=latchkey_forward_supervisor,
         discovery_health_watchdog=discovery_health_watchdog,
+        mngr_caller=mngr_caller,
     )
     set_state(app, state)
 
@@ -2150,6 +2349,7 @@ def create_desktop_client(
     # Chrome (persistent shell) routes
     app.add_url_rule("/_chrome", view_func=_handle_chrome_page)
     app.add_url_rule("/_chrome/sidebar", view_func=_handle_chrome_sidebar)
+    app.add_url_rule("/_chrome/overlay", view_func=_handle_chrome_overlay)
     app.add_url_rule("/_chrome/events", view_func=_handle_chrome_events)
 
     app.add_url_rule("/_dev/styleguide", view_func=_handle_dev_styleguide)
@@ -2160,6 +2360,7 @@ def create_desktop_client(
     app.add_url_rule("/_chrome/error-reporting", view_func=_handle_error_reporting_settings, methods=["POST"])
     app.add_url_rule("/help", view_func=_handle_help_page)
     app.add_url_rule("/help/report", view_func=_handle_help_report, methods=["POST"])
+    app.add_url_rule("/help/assist", view_func=_handle_help_assist, methods=["POST"])
     app.add_url_rule("/welcome", view_func=_handle_welcome_page)
     app.add_url_rule("/login", view_func=_handle_login)
     app.add_url_rule("/authenticate", view_func=_handle_authenticate)

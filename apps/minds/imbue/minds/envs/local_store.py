@@ -3,10 +3,12 @@
 Per-dev-env state is split into two files under ``~/.minds-<env-name>/``:
 
 * ``client.toml`` (mode 0644) -- non-secret config (connector + LiteLLM
-  URLs). Shape is exactly :class:`ClientEnvConfig`, so the same file
-  can be passed to ``minds run --config-file`` directly. ``write_client_config``
-  refuses to serialize anything other than the URL fields so a dev
-  ``client.toml`` is shape-identical to a staging / production one.
+  URLs, plus the optional pre-baked Lima image source: a CDN URL and its
+  minisign public key). Shape is exactly :class:`ClientEnvConfig`, so the
+  same file can be passed to ``minds run --config-file`` directly.
+  ``write_client_config`` serializes only :class:`ClientEnvConfig` fields
+  (never a ``[secrets]`` block) so a dev ``client.toml`` is shape-identical
+  to a staging / production one.
 * ``secrets.toml`` (mode 0600) -- the values ``minds env deploy``
   generated on this machine (Neon DSN, SuperTokens connection URI,
   SuperTokens API key). Staging / production fetch the same values from
@@ -87,6 +89,15 @@ def write_client_config(
     doc = tomlkit.document()
     doc["connector_url"] = str(config.connector_url)
     doc["litellm_proxy_url"] = str(config.litellm_proxy_url)
+    # Pre-baked Lima image source (issue 2306). Both are optional and only
+    # emitted when set, so an env that doesn't configure a chunk store omits
+    # them entirely and the desktop client falls back to building in-VM. They
+    # are public (a CDN URL + a minisign public key), never secrets, so they
+    # belong in client.toml alongside the other URLs rather than secrets.toml.
+    if config.lima_image_base_url is not None:
+        doc["lima_image_base_url"] = str(config.lima_image_base_url)
+    if config.lima_image_minisign_public_key is not None:
+        doc["lima_image_minisign_public_key"] = config.lima_image_minisign_public_key
 
     tmp = target.with_suffix(target.suffix + ".tmp")
     tmp.write_text(tomlkit.dumps(doc))

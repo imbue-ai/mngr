@@ -279,7 +279,7 @@ def _auth_error_response(exc: AuthBackendError | ImbueCloudCliError) -> Response
 # enable the remote (Imbue Cloud) compute preset. Used when no explicit
 # ``?message=`` is supplied alongside a ``return_to``.
 _REMOTE_SIGNIN_EXPLAINER: Final[str] = (
-    "Sign in or create an Imbue account to run your mind on Imbue Cloud. "
+    "Sign in or create an Imbue account to run your workspace on Imbue Cloud. "
     "You can also go back and run it directly on your computer."
 )
 

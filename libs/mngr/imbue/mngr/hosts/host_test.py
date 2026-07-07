@@ -14,6 +14,7 @@ from typing import cast
 
 import pluggy
 import pytest
+from paramiko import Channel
 from paramiko import ChannelException
 from paramiko import SSHException
 from pyinfra.api.command import StringCommand
@@ -1004,7 +1005,7 @@ def test_build_start_agent_shell_command_includes_onboarding_hook(
 
     assert "set-hook" in result
     assert "display-popup" in result
-    assert "client-attached" in result
+    assert "client-attached[99]" in result
 
 
 def test_build_start_agent_shell_command_no_onboarding_hook_by_default(
@@ -1012,13 +1013,50 @@ def test_build_start_agent_shell_command_no_onboarding_hook_by_default(
     temp_host_dir: Path,
     temp_work_dir: Path,
 ) -> None:
-    """When onboarding_text is None (default), no hook or popup should appear."""
+    """When onboarding_text is None (default), the onboarding popup hook should not appear.
+
+    The persistent SIGWINCH repaint hook (client-attached[98]) is always set, so only
+    the onboarding popup and its [99] slot should be absent here.
+    """
     agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
     result = _build_command_with_defaults(agent, temp_host_dir)
 
-    assert "set-hook" not in result
     assert "display-popup" not in result
-    assert "client-attached" not in result
+    assert "client-attached[99]" not in result
+
+
+def test_build_start_agent_shell_command_includes_sigwinch_hook(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """A persistent client-attached SIGWINCH repaint hook is always set, even with no
+    onboarding text, so every attach (not just `mngr connect`) repaints the agent."""
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    result = _build_command_with_defaults(agent, temp_host_dir)
+
+    # Persistent hook in slot [98] (distinct from the one-shot onboarding [99]),
+    # running the shipped script via run-shell -b against this session's window.
+    assert "set-hook" in result
+    assert "client-attached[98]" in result
+    assert "run-shell -b" in result
+    assert "commands/sigwinch_panes.sh" in result
+    # It must be persistent: no self-removal (set-hook -u) like the onboarding hook has.
+    assert "set-hook -u -t" not in result
+
+
+def test_build_start_agent_shell_command_sigwinch_hook_targets_named_window(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """The SIGWINCH hook passes the primary window name to the script (not the literal
+    :0 index), so the manual-pin guard holds regardless of the user's tmux base-index."""
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    result = _build_command_with_defaults(agent, temp_host_dir, primary_window_name="primary")
+
+    assert "sigwinch_panes.sh" in result
+    assert f"mngr-{agent.name} primary" in result
 
 
 # =========================================================================
@@ -1053,7 +1091,7 @@ def test_build_start_agent_shell_command_includes_onboarding_hook_tmux_user(
 
     assert "set-hook" in result
     assert "display-popup" in result
-    assert "client-attached" in result
+    assert "client-attached[99]" in result
 
 
 # =========================================================================
@@ -1471,14 +1509,58 @@ def test_is_transient_ssh_error(exception: BaseException, expected: bool) -> Non
     assert _is_transient_ssh_error(exception) is expected
 
 
+class _FakeLockChannel:
+    """Fake paramiko Channel for the SSH host-lock exec path.
+
+    ``recv`` yields the acquired marker so ``_wait_for_remote_lock_acquired``
+    returns immediately; ``shutdown_write``/``close`` are counted so tests can
+    assert the lock is released on exit.
+    """
+
+    def __init__(self) -> None:
+        self.exec_command_call_count = 0
+        self.shutdown_write_call_count = 0
+        self.close_call_count = 0
+        self._recv_chunks = [_LOCK_ACQUIRED_MARKER.encode() + b"\n"]
+        self._recv_call_count = 0
+
+    def exec_command(self, command: str) -> None:
+        self.exec_command_call_count += 1
+
+    def recv(self, size: int) -> bytes:
+        idx = self._recv_call_count
+        self._recv_call_count += 1
+        if idx < len(self._recv_chunks):
+            return self._recv_chunks[idx]
+        return b""
+
+    def shutdown_write(self) -> None:
+        self.shutdown_write_call_count += 1
+
+    def close(self) -> None:
+        self.close_call_count += 1
+
+
 class _FakeTransport:
     """Fake paramiko transport for testing."""
 
-    def __init__(self, *, is_active: bool = True) -> None:
+    def __init__(self, *, is_active: bool = True, open_session_results: list[object] | None = None) -> None:
         self._is_active = is_active
+        self._open_session_results: list[object] = open_session_results if open_session_results is not None else []
+        self.open_session_call_count = 0
 
     def is_active(self) -> bool:
         return self._is_active
+
+    def open_session(self) -> object:
+        idx = self.open_session_call_count
+        self.open_session_call_count += 1
+        if idx < len(self._open_session_results):
+            result = self._open_session_results[idx]
+            if isinstance(result, Exception):
+                raise result
+            return result
+        raise AssertionError("open_session called more times than configured")
 
 
 class _BaseFakeSFTP:
@@ -1869,6 +1951,7 @@ def test_get_file_wraps_timeout_error_in_host_connection_error(
             remote_filename: str,
             filename_or_io: str | IO[bytes],
             remote_temp_filename: str | None = None,
+            timeout_seconds: float | None = None,
         ) -> bool:
             raise TimeoutError("Timed out reading output")
 
@@ -1884,6 +1967,87 @@ def test_get_file_wraps_timeout_error_in_host_connection_error(
 
     with pytest.raises(HostConnectionError, match="timed out while reading file"):
         host._get_file("/remote/file.txt", io.BytesIO())
+
+
+def test_discover_agents_threads_timeout_into_directory_and_file_reads(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """When a per-host timeout is given, discover_agents bounds *both* reads it makes.
+
+    Change 1: an unbounded discovery read can leave an abandoned thread running forever.
+    Here we assert discover_agents(timeout_seconds=T) threads T into the directory listing
+    and into the per-agent data.json read (using the timeout-carrying read helper), rather
+    than falling back to the unbounded ``read_text_file`` path.
+    """
+    agent_id = AgentId.generate()
+    agent_data = {
+        "id": str(agent_id),
+        "name": "recorded-agent",
+        "type": "claude",
+        "work_dir": "/tmp/work",
+    }
+    recorded_list_timeouts: list[float | None] = []
+    recorded_read_timeouts: list[float] = []
+
+    class _RecordingReadHost(Host):
+        def _list_directory(self, path: Path, timeout_seconds: float | None = None) -> list[str]:
+            recorded_list_timeouts.append(timeout_seconds)
+            return [str(agent_id)]
+
+        def read_text_file_within_timeout(self, path: Path, timeout_seconds: float, encoding: str = "utf-8") -> str:
+            recorded_read_timeouts.append(timeout_seconds)
+            return json.dumps(agent_data)
+
+        def read_text_file(self, path: Path, encoding: str = "utf-8") -> str:
+            raise AssertionError("bounded discovery must not use the unbounded read_text_file path")
+
+    fake = _FakeHostWithSSH(ssh_client=_FakeSSHClient(transport_return=_FakeTransport()))
+    connector = PyinfraConnector(cast(PyinfraHost, fake))
+    host = _RecordingReadHost(
+        id=HostId.generate(),
+        host_name=HostName("test"),
+        connector=connector,
+        provider_instance=local_provider,
+        mngr_ctx=local_provider.mngr_ctx,
+    )
+
+    refs = host.discover_agents(timeout_seconds=7.0)
+
+    assert [ref.agent_id for ref in refs] == [agent_id]
+    assert recorded_list_timeouts == [7.0]
+    assert recorded_read_timeouts == [7.0]
+
+
+def test_read_file_within_timeout_applies_timeout_to_sftp_channel(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """read_file_within_timeout must set the SFTP channel's socket timeout.
+
+    Change 1: bounding the per-agent ``data.json`` read is what stops an abandoned
+    discovery thread from hanging forever on a stalled SFTP transfer. This exercises
+    the real ``read_text_file_within_timeout`` -> ``_get_file`` -> ``_get_file_via_paramiko``
+    path (not a stubbed read) and asserts the timeout actually reaches the channel.
+    """
+    recorded_settimeouts: list[float] = []
+    file_contents = b'{"hello": "world"}'
+
+    class _RecordingChannel:
+        def settimeout(self, timeout_seconds: float) -> None:
+            recorded_settimeouts.append(timeout_seconds)
+
+    class _TimeoutRecordingSFTP(_BaseFakeSFTP):
+        def get_channel(self) -> _RecordingChannel:
+            return _RecordingChannel()
+
+        def getfo(self, remote_path: str, fl: IO[bytes]) -> None:
+            fl.write(file_contents)
+
+    host = _create_host_with_custom_sftp(local_provider, _TimeoutRecordingSFTP)
+
+    result = host.read_text_file_within_timeout(Path("/remote/data.json"), 7.0)
+
+    assert result == file_contents.decode()
+    assert recorded_settimeouts == [7.0]
 
 
 def test_put_file_wraps_timeout_error_in_host_connection_error(
@@ -2062,6 +2226,7 @@ def test_get_file_wraps_ssh_exception_in_host_connection_error(
             remote_filename: str,
             filename_or_io: str | IO[bytes],
             remote_temp_filename: str | None = None,
+            timeout_seconds: float | None = None,
         ) -> bool:
             raise SSHException("connection lost")
 
@@ -2687,6 +2852,61 @@ def test_host_lock_cooperatively_acquires_and_releases_blocking(
     # The lock file persists (stable inode) but is no longer held.
     assert (host.host_dir / "host_lock").exists()
     assert host.is_lock_held() is False
+
+
+def test_hold_remote_host_lock_retries_transient_ssh_error_and_reconnects(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """A dropped connection during lock acquisition should disconnect, reconnect, and retry.
+
+    Reproduces the CI failure where a mapper host's SSH transport died
+    ("Connection reset by peer" -> "SSH session not active"): the first
+    ``open_session`` raises, we disconnect so the retry rebuilds the connection,
+    and the second attempt acquires the lock.
+    """
+    channel = _FakeLockChannel()
+    transport = _FakeTransport(open_session_results=[SSHException("SSH session not active"), channel])
+    fake = _FakeHostWithSSH(ssh_client=_FakeSSHClient(transport_return=transport))
+    host = _create_host_with_fake_connector(local_provider, fake)
+
+    with host.lock_cooperatively(timeout_seconds=None):
+        pass
+
+    assert transport.open_session_call_count == 2
+    assert fake.disconnect_call_count == 1
+    # The acquired channel is released (EOF + close) when the block exits.
+    assert channel.shutdown_write_call_count == 1
+    assert channel.close_call_count == 1
+
+
+def test_hold_remote_host_lock_wraps_persistent_ssh_error_in_host_connection_error(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """A lock-acquisition SSH error that survives the retries must surface as HostConnectionError.
+
+    Wrapping the raw paramiko ``SSHException`` in an ``MngrError`` subclass is what
+    lets a many-host caller (the mapreduce orchestrator) isolate one unreachable
+    host instead of crashing the whole run. ``_open_remote_lock_channel`` is
+    overridden to raise immediately so the test does not pay the real retry backoff.
+    """
+
+    class _HostWithImmediateLockSSHFailure(Host):
+        def _open_remote_lock_channel(self, lock_file_path: Path, timeout_seconds: float | None) -> Channel:
+            raise SSHException("SSH session not active")
+
+    fake = _FakePyinfraHost()
+    connector = PyinfraConnector(cast(PyinfraHost, fake))
+    host = _HostWithImmediateLockSSHFailure(
+        id=HostId.generate(),
+        host_name=HostName("test"),
+        connector=connector,
+        provider_instance=local_provider,
+        mngr_ctx=local_provider.mngr_ctx,
+    )
+
+    with pytest.raises(HostConnectionError, match="Could not acquire host lock"):
+        with host.lock_cooperatively(timeout_seconds=None):
+            pass
 
 
 def test_host_lock_cooperatively_is_mutually_exclusive(

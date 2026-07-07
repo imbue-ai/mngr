@@ -3,6 +3,8 @@ name: Vet
 permissions:
   contents: read
   pull-requests: write
+  # Lets the use-vault-secrets step below mint a GitHub OIDC token for Vault.
+  id-token: write
 
 on:
   pull_request:
@@ -12,9 +14,15 @@ jobs:
   vet:
     if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
-    env:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
     steps:
+      # Anthropic key from Vault (migrated off the ANTHROPIC_API_KEY GitHub
+      # Actions secret). Injected as ANTHROPIC_API_KEY for the vet action below.
+      - name: Fetch Anthropic key from Vault
+        uses: imbue-ai/use-vault-secrets@main
+        with:
+          role: mngr_ci_gh
+          secrets: |
+            mngr/ci/ANTHROPIC_API_KEY
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.event.pull_request.head.sha }}

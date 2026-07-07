@@ -12,6 +12,7 @@ from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import ServiceLogParseError
 from imbue.minds.desktop_client.backend_resolver import ServiceLogRecord
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
+from imbue.minds.desktop_client.backend_resolver import WORKSPACE_DISPLAY_NAME_LABEL
 from imbue.minds.desktop_client.backend_resolver import parse_agent_ids_from_json
 from imbue.minds.desktop_client.backend_resolver import parse_agents_from_json
 from imbue.minds.desktop_client.backend_resolver import parse_service_log_records
@@ -1048,3 +1049,77 @@ def test_backend_resolver_interface_default_get_agent_display_info_returns_none_
 
     resolver = MinimalResolver()
     assert resolver.get_agent_display_info(_AGENT_A) is None
+
+
+# -- workspace name override (optimistic rename) tests ----------------
+#
+# A UI rename writes the new name via ``mngr label`` / ``mngr rename``, but
+# the settings page reads the name from the discovery-fed cache, which lags.
+# ``set_workspace_name_override`` masks that lag until discovery re-reads the
+# renamed labels; these tests cover a display-only rename and a slug rename.
+
+
+def test_workspace_name_override_masks_stale_discovery_then_is_swept() -> None:
+    """A display-only rename override wins over the stale label, then is dropped once discovery agrees."""
+    resolver = MngrCliBackendResolver()
+    host = HostId.generate()
+    agent = AgentId.generate()
+
+    def _snapshot(display_name: str) -> ParsedAgentsResult:
+        return ParsedAgentsResult(
+            agent_ids=(agent,),
+            discovered_agents=(
+                _workspace_agent(host, agent, extra_labels={WORKSPACE_DISPLAY_NAME_LABEL: display_name}),
+            ),
+        )
+
+    resolver.update_agents(_snapshot("old-name"))
+    assert resolver.get_workspace_name(agent) == "old-name"
+
+    # The optimistic override wins immediately, before discovery re-reads the label.
+    resolver.set_workspace_name_override(agent, "New Name", None)
+    assert resolver.get_workspace_name(agent) == "New Name"
+
+    # A still-stale snapshot (label not yet updated) does not clobber the override.
+    resolver.update_agents(_snapshot("old-name"))
+    assert resolver.get_workspace_name(agent) == "New Name"
+
+    # Once discovery reports the new name, the override is swept: a later snapshot
+    # with a different name is reflected directly (proving no override lingers).
+    resolver.update_agents(_snapshot("New Name"))
+    resolver.update_agents(_snapshot("Another Name"))
+    assert resolver.get_workspace_name(agent) == "Another Name"
+
+
+def test_workspace_name_override_covers_host_name_on_slug_rename() -> None:
+    """A slug-changing rename optimistically overrides both the display name and the host name."""
+    resolver = MngrCliBackendResolver()
+    host = HostId.generate()
+    agent = AgentId.generate()
+
+    def _snapshot(display_name: str, slug: str) -> ParsedAgentsResult:
+        return ParsedAgentsResult(
+            agent_ids=(agent,),
+            discovered_agents=(
+                _workspace_agent(host, agent, extra_labels={WORKSPACE_DISPLAY_NAME_LABEL: display_name}),
+            ),
+            host_name_by_host_id={str(host): slug},
+        )
+
+    resolver.update_agents(_snapshot("Old Name", "old-slug"))
+    assert resolver.get_workspace_name(agent) == "Old Name"
+    assert resolver.get_host_name(agent) == "old-slug"
+
+    resolver.set_workspace_name_override(agent, "New Name", "new-slug")
+    assert resolver.get_workspace_name(agent) == "New Name"
+    assert resolver.get_host_name(agent) == "new-slug"
+
+    # A stale snapshot clobbers neither field.
+    resolver.update_agents(_snapshot("Old Name", "old-slug"))
+    assert resolver.get_host_name(agent) == "new-slug"
+
+    # Discovery agreeing on both fields sweeps the override; a later change flows through.
+    resolver.update_agents(_snapshot("New Name", "new-slug"))
+    resolver.update_agents(_snapshot("Other Name", "other-slug"))
+    assert resolver.get_workspace_name(agent) == "Other Name"
+    assert resolver.get_host_name(agent) == "other-slug"

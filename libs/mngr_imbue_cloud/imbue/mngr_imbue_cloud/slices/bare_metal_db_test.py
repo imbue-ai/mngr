@@ -186,4 +186,5 @@ def test_fetch_unleased_slice_teardown_targets_query_excludes_leased_and_removin
     # Leased slices are torn down by their agent's release path; removing rows are
     # already mid-teardown by the connector sweep -- both must be excluded here.
     assert "NOT IN ('leased', 'removing')" in _SELECT_UNLEASED_SLICE_TEARDOWN_TARGETS_SQL
-    assert "backend_kind = 'slice'" in _SELECT_UNLEASED_SLICE_TEARDOWN_TARGETS_SQL
+    # The inner JOIN on bare_metal_server_id already restricts to slice rows.
+    assert "JOIN bare_metal_servers" in _SELECT_UNLEASED_SLICE_TEARDOWN_TARGETS_SQL

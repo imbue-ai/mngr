@@ -629,11 +629,11 @@
   })();
 </script>
 {% endset %}
-<Base title="Projects" scripts={{ _scripts }}>
+<Base title="Workspaces" scripts={{ _scripts }}>
   <PageContainer>
     {% if agent_ids %}
       <div class="flex items-center justify-between mb-4" data-landing-agent-ids="{{ agent_ids | map('string') | join(',') }}">
-        <h1 class="type-heading text-primary">Projects</h1>
+        <h1 class="type-heading text-primary">Workspaces</h1>
         <ButtonLink href="/create" variant="primary">Create</ButtonLink>
       </div>
 
@@ -695,35 +695,35 @@
                         extra="landing-start-btn"
                         :style="start_btn_style"
                         onclick="event.stopPropagation(); window.landingStartClick(this)"
-                        title="Start mind"
-                        aria-label="Start mind">
+                        data-tooltip="Start workspace"
+                        aria-label="Start workspace">
                   <Icon16 name="play" />
                 </Button>
                 <Button variant="ghost" size="icon"
                         extra="landing-stop-btn"
                         :style="stop_btn_style"
                         onclick="event.stopPropagation(); window.landingStopClick(this)"
-                        title="Stop mind"
-                        aria-label="Stop mind">
+                        data-tooltip="Stop workspace"
+                        aria-label="Stop workspace">
                   <Icon16 name="pause" />
                 </Button>
               {% else %}
                 <Button variant="ghost" size="icon"
                         onclick="event.stopPropagation(); window.landingRestartClick(this)"
-                        title="Restart workspace"
+                        data-tooltip="Restart workspace"
                         aria-label="Restart workspace">
                   <Icon16 name="restart" />
                 </Button>
               {% endif %}
               <Button variant="ghost" size="icon"
                       onclick="event.stopPropagation(); window.landingOpenInNewWindow(this)"
-                      title="Open in new window"
+                      data-tooltip="Open in new window"
                       aria-label="Open workspace in new window">
                 <Icon16 name="arrow-up-right" />
               </Button>
               <Button variant="ghost" size="icon"
                       onclick={{ "event.stopPropagation(); window.location='/workspace/" ~ agent_id ~ "/settings'" }}
-                      title="Settings"
+                      data-tooltip="Settings"
                       aria-label="Workspace settings">
                 <Icon16 name="settings" />
               </Button>
@@ -739,7 +739,7 @@
         <script>setTimeout(function() { location.reload(); }, 2000);</script>
       {% else %}
         <div class="text-center py-12">
-          <p class="text-tertiary mb-6">No projects yet</p>
+          <p class="text-tertiary mb-6">No workspaces yet</p>
           <ButtonLink href="/create" variant="primary">Create</ButtonLink>
         </div>
       {% endif %}
