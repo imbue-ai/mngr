@@ -18,7 +18,6 @@ from pydantic import ConfigDict
 from urwid.canvas import TextCanvas
 from urwid.event_loop.abstract_loop import ExitMainLoop
 from urwid.event_loop.main_loop import MainLoop
-from urwid.signals import connect_signal
 from urwid.widget.attr_map import AttrMap
 from urwid.widget.columns import Columns
 from urwid.widget.divider import Divider
@@ -404,8 +403,6 @@ class _KanpanState(MutableModel):
     peek_alarm: Any = None
     # In-flight `mngr message` reply, polled to report success/failure.
     peek_reply_future: Future[subprocess.CompletedProcess[str]] | None = None
-    # Footer hint line inside the panel; its text depends on whether a reply is typed.
-    peek_hint_text: Any = None
     # Dedicated executor for peek captures and replies. Kept separate from the
     # shared `executor` (and sized for two workers) so a slow reply -- `mngr
     # message` waits up to ~90s to confirm submission -- cannot freeze the live
@@ -438,7 +435,7 @@ class _KanpanInputHandler(MutableModel):
         if cmd is not None:
             _dispatch_command(self.state, key, cmd)
             return True
-        if key in ("enter", "right"):
+        if key == "enter":
             _attach_to_focused_agent(self.state)
             return True
         if key == "up":
@@ -1042,7 +1039,7 @@ def _build_peek_panel(state: _KanpanState) -> Pile:
     state.peek_body_text = Text("", wrap="clip")
     state.peek_input = Edit(caption=("peek_hint", PEEK_REPLY_PROMPT))
     state.peek_status_text = Text("")
-    state.peek_hint_text = Text("")
+    hint = Text(("peek_hint", "  enter: send reply   ·   esc: close"))
     panel = Pile(
         [
             Divider("─"),
@@ -1051,29 +1048,12 @@ def _build_peek_panel(state: _KanpanState) -> Pile:
             Divider("─"),
             state.peek_input,
             state.peek_status_text,
-            state.peek_hint_text,
+            hint,
         ]
     )
     # Focus the reply input so typed keys land in it.
     panel.focus_position = 4
-    connect_signal(state.peek_input, "change", _on_peek_input_change, user_args=[state])
-    _update_peek_hint(state, has_text=False)
     return panel
-
-
-def _update_peek_hint(state: _KanpanState, has_text: bool) -> None:
-    """Set the panel footer hint to state exactly what Enter does right now."""
-    if state.peek_hint_text is None:
-        return
-    if has_text:
-        state.peek_hint_text.set_text(("peek_hint", "  enter send   ·   esc close"))
-    else:
-        state.peek_hint_text.set_text(("peek_hint", "  ↑↓ switch agent   ·   enter/→ attach   ·   esc close"))
-
-
-def _on_peek_input_change(state: _KanpanState, _edit: Edit, new_text: str) -> None:
-    """Keep the footer hint in sync with whether a reply is typed (send vs attach)."""
-    _update_peek_hint(state, bool(new_text.strip()))
 
 
 def _update_peek_header(state: _KanpanState) -> None:
@@ -1122,7 +1102,7 @@ def _on_peek_capture_poll(loop: MainLoop, state: _KanpanState) -> None:
         state.peek_body_text.set_text(body)
     # A menu can't be driven from here (reply is text-only), so point the user at attach.
     if state.peek_status_text is not None and _looks_like_selection(body):
-        state.peek_status_text.set_text(("peek_hint", "  selection detected — press → to attach and choose"))
+        state.peek_status_text.set_text(("peek_hint", "  selection detected — esc, then enter to attach and choose"))
     if state.peek_agent_name is not None:
         state.peek_alarm = loop.set_alarm_in(PEEK_REFRESH_SECONDS, _on_peek_capture_tick, state)
 
@@ -1169,7 +1149,6 @@ def _close_peek(state: _KanpanState) -> None:
     state.peek_body_text = None
     state.peek_input = None
     state.peek_status_text = None
-    state.peek_hint_text = None
 
 
 def _toggle_peek(state: _KanpanState) -> None:
@@ -1180,54 +1159,12 @@ def _toggle_peek(state: _KanpanState) -> None:
         _open_peek(state)
 
 
-def _peek_move(state: _KanpanState, delta: int) -> None:
-    """Re-target the open peek panel to the row `delta` steps away."""
-    if state.peek_agent_name is None:
-        return
-    ordered = [entry for _idx, entry in sorted(state.index_to_entry.items())]
-    names = [entry.name for entry in ordered]
-    if state.peek_agent_name not in names:
-        return
-    current_index = names.index(state.peek_agent_name)
-    new_index = min(max(current_index + delta, 0), len(ordered) - 1)
-    if new_index == current_index:
-        return
-
-    target = ordered[new_index]
-    state.peek_agent_name = target.name
-    state.focused_agent_name = target.name
-    _focus_row_by_name(state, target.name)
-    _update_peek_header(state)
-    if state.peek_body_text is not None:
-        state.peek_body_text.set_text("(loading...)")
-    if state.peek_status_text is not None:
-        state.peek_status_text.set_text("")
-    # Discard any half-typed reply so it can't be sent to the newly focused agent.
-    if state.peek_input is not None:
-        state.peek_input.set_edit_text("")
-    _update_peek_hint(state, has_text=False)
-    _cancel_peek_alarm(state)
-    state.peek_capture_future = None
-    _start_peek_capture(state)
-
-
-def _attach_from_peek(state: _KanpanState) -> None:
-    """Close the peek panel and attach to the agent that was being peeked."""
-    name = state.peek_agent_name
-    _close_peek(state)
-    if name is None:
-        return
-    _focus_row_by_name(state, name)
-    _attach_to_focused_agent(state)
-
-
 def _submit_peek_reply(state: _KanpanState) -> None:
-    """Send the reply-input text to the peeked agent, or attach when it is empty."""
+    """Send the reply-input text to the peeked agent; a no-op when the input is empty."""
     if state.peek_agent_name is None or state.peek_input is None:
         return
     text = state.peek_input.get_edit_text().strip()
     if not text:
-        _attach_from_peek(state)
         return
     executor = _ensure_peek_executor(state)
     agent_name = str(state.peek_agent_name)
@@ -1270,19 +1207,6 @@ def _handle_peek_key(state: _KanpanState, key: str) -> bool | None:
         return True
     if key == "enter":
         _submit_peek_reply(state)
-        return True
-    if key == "up":
-        _peek_move(state, -1)
-        return True
-    if key == "down":
-        _peek_move(state, 1)
-        return True
-    if key == "right":
-        # -> attaches only from an empty input. With text present the Edit owns ->
-        # for cursor movement; swallow the boundary case so a stray -> at end of
-        # text never discards a half-typed reply by attaching.
-        if state.peek_input is not None and not state.peek_input.get_edit_text().strip():
-            _attach_from_peek(state)
         return True
     return None
 
@@ -2133,7 +2057,7 @@ def run_kanpan(
         f"{key}: {cmd.name}" for key, cmd in commands.items() if _mark_color(cmd) is None and key not in mark_keys
     ]
     action_parts.append("space: peek")
-    action_parts.append("enter/→: attach")
+    action_parts.append("enter: attach")
     action_parts.append("q: quit")
     keybindings = "  ".join(mark_parts + ["|"] + action_parts) + "  "
 

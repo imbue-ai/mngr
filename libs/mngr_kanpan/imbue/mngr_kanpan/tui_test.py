@@ -101,7 +101,6 @@ from imbue.mngr_kanpan.tui import _on_peek_capture_poll
 from imbue.mngr_kanpan.tui import _on_peek_reply_poll
 from imbue.mngr_kanpan.tui import _on_transient_expire
 from imbue.mngr_kanpan.tui import _peek_body_from_capture
-from imbue.mngr_kanpan.tui import _peek_move
 from imbue.mngr_kanpan.tui import _prune_orphaned_marks
 from imbue.mngr_kanpan.tui import _refresh_display
 from imbue.mngr_kanpan.tui import _render_footer
@@ -116,7 +115,6 @@ from imbue.mngr_kanpan.tui import _unmark_all
 from imbue.mngr_kanpan.tui import _unmark_focused
 from imbue.mngr_kanpan.tui import _update_mark_count_footer
 from imbue.mngr_kanpan.tui import _update_peek_header
-from imbue.mngr_kanpan.tui import _update_peek_hint
 from imbue.mngr_kanpan.tui import _update_row_mark
 from imbue.mngr_kanpan.tui import _update_snapshot_mute
 from imbue.mngr_kanpan.tui import resolve_board_layout
@@ -1937,16 +1935,6 @@ def test_looks_like_selection_ignores_plain_numbered_list() -> None:
     assert not _looks_like_selection(plain)
 
 
-def test_update_peek_hint_switches_between_send_and_attach() -> None:
-    state = _make_state()
-    state.peek_hint_text = Text("")
-    _update_peek_hint(state, has_text=False)
-    assert "attach" in str(state.peek_hint_text.text)
-    _update_peek_hint(state, has_text=True)
-    assert "send" in str(state.peek_hint_text.text)
-    assert "attach" not in str(state.peek_hint_text.text)
-
-
 def test_on_peek_reply_poll_success_renders_sent() -> None:
     state = _make_state()
     state.peek_status_text = Text("")
@@ -2093,13 +2081,14 @@ def test_handle_peek_key_esc_closes_panel() -> None:
     assert state.peek_agent_name is None
 
 
-def test_handle_peek_key_right_with_text_does_not_attach() -> None:
+def test_handle_peek_key_arrows_are_not_handled() -> None:
     state = _make_state()
     _build_peek_panel(state)
     state.peek_agent_name = AgentName("agent-a")
-    state.peek_input.set_edit_text("hello")
-    # -> is swallowed (returns True) without attaching while the input has text.
-    assert _handle_peek_key(state, "right") is True
+    # Arrows are not panel actions: they fall through (None) to the reply Edit for
+    # cursor movement, and never attach or switch the peeked agent.
+    for key in ("up", "down", "left", "right"):
+        assert _handle_peek_key(state, key) is None
     assert state.peek_agent_name == AgentName("agent-a")
 
 
@@ -2121,33 +2110,13 @@ def test_toggle_peek_closes_when_already_open() -> None:
     assert state.peek_agent_name is None
 
 
-def test_submit_peek_reply_empty_input_attaches_and_closes() -> None:
+def test_submit_peek_reply_empty_input_is_noop() -> None:
     entry = _make_entry(name="agent-a")
     state = _make_state_with_walker((entry,))
     _build_peek_panel(state)
-    original_footer = Text("bar")
-    state.saved_footer = original_footer
     state.frame.footer = Text("panel")
     state.peek_agent_name = AgentName("agent-a")
-    # loop is None, so the attach short-circuits after closing the panel.
+    # An empty reply sends nothing and leaves the panel open (attach is a board action).
     _submit_peek_reply(state)
-    assert state.peek_agent_name is None
-
-
-def test_peek_move_without_target_is_noop() -> None:
-    state = _make_state_with_walker((_make_entry(name="agent-a"),))
-    state.peek_agent_name = None
-    _peek_move(state, 1)
-    assert state.peek_agent_name is None
-
-
-def test_peek_move_clears_typed_reply_for_new_agent() -> None:
-    entries = (_make_entry(name="agent-a"), _make_entry(name="agent-b"))
-    state = _make_state_with_walker(entries)
-    _build_peek_panel(state)
-    state.peek_agent_name = AgentName("agent-a")
-    state.peek_input.set_edit_text("meant for agent-a")
-    _peek_move(state, 1)
-    assert state.peek_agent_name == AgentName("agent-b")
-    # A reply typed for the previous agent is discarded, not carried to the new one.
-    assert state.peek_input.get_edit_text() == ""
+    assert state.peek_agent_name == AgentName("agent-a")
+    assert state.peek_reply_future is None
