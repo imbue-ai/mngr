@@ -290,11 +290,12 @@ minds-test-electron-flow *args: minds-css
 minds-css:
   bash -c '. apps/minds/scripts/select_node_version.sh && cd apps/minds && pnpm run build:css'
 
-# Stand up (or reuse) an independent forever-claude-template ("fct") checkout
-# nested in the current mngr checkout at .external_worktrees/forever-claude-template
-# -- the CLAUDE.md convention for developing fct alongside mngr. Defaults the fct
-# branch to the current mngr branch; override with a positional arg. It is a full
-# clone (survives deletion of any other clone/cache) and needs no configuration.
+# Create an independent forever-claude-template ("fct") checkout nested in the
+# current mngr checkout at .external_worktrees/forever-claude-template -- the
+# CLAUDE.md convention for developing fct alongside mngr. Defaults the fct branch
+# to the current mngr branch; override with a positional arg. Errors if a checkout
+# already exists or the branch is already on fct. It is a full clone (survives
+# deletion of any other clone/cache) and needs no configuration.
 # Set FCT_DIR (gitignored apps/minds/.env or your shell) to a local fct clone to
 # make the clone fast -- purely a speed hint, no lasting dependency is created.
 fct-worktree branch="" base="origin/main":

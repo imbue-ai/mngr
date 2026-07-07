@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Stand up (or reuse) an independent forever-claude-template ("fct") checkout
-# nested in the current mngr checkout at .external_worktrees/forever-claude-template.
+# Create an independent forever-claude-template ("fct") checkout nested in the
+# current mngr checkout at .external_worktrees/forever-claude-template. Errors if
+# one is already there (remove it to recreate) or if the branch already exists on fct.
 #
 #   just fct-worktree                 # fct on the SAME branch as this mngr checkout
 #   just fct-worktree wz/other        # override branch
@@ -39,8 +40,8 @@ if [ -z "${FCT_DIR:-}" ] && [ -f "$repo_root/apps/minds/.env" ]; then
     set -a; . "$repo_root/apps/minds/.env"; set +a
 fi
 ref_args=()
-if [ -n "${FCT_DIR:-}" ] && [ -d "$FCT_DIR/.git" ]; then
-    ref_args=(--reference-if-able "$FCT_DIR/.git" --dissociate)
+if [ -n "${FCT_DIR:-}" ] && git -C "$FCT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+    ref_args=(--reference-if-able "$FCT_DIR" --dissociate)
 fi
 
 # GH_TOKEN (agents have it) authenticates the private clone; operators without it
