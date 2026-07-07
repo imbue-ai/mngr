@@ -185,7 +185,6 @@ def wait_for_state(
         if timeout_seconds is not None and elapsed >= timeout_seconds:
             is_waiting = False
         else:
-            # Sleep for the poll interval
             time.sleep(interval_seconds)
 
     final_elapsed = time.monotonic() - start_time
