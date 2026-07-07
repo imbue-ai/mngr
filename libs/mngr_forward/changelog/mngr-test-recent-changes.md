@@ -1,1 +1,0 @@
-Integrates the "simple names" work: the `mngr forward` label-filter help example now uses `has(agent.labels.is_primary)` instead of the removed `workspace` label, matching the new workspace-discovery filter.

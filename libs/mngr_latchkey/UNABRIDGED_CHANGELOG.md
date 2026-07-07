@@ -4,6 +4,40 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-06
+
+Simplifies how cross-workspace (`minds-workspaces`) permission grants are stored, and removes the rule-ordering fragility that a granted grant depended on.
+
+Previously the cross-workspace management API was given its own `minds-workspaces` detent scope. Because that scope and the agent baseline's `latchkey-self` scope both match on the gateway-self domain alone, two same-domain rules ended up in a host's `latchkey_permissions.json`, and detent's first-matching-scope-wins evaluation made the rule *order* load-bearing (a domain-only catch-all placed first would shadow and veto the narrower grant). The cross-workspace verbs now attach as permissions on the single `latchkey-self` scope instead -- exactly like file-sharing and accounts -- so there is only ever one gateway-self rule and rule order no longer affects whether a grant takes effect. The order-normalizing machinery added to keep the catch-all last (in both the gateway's approve merge and `register_agent_for_host`) is gone.
+
+Because the cross-workspace verbs no longer sit under a dedicated detent scope, the `MINDS_WORKSPACES_SCOPE` constant is gone from `workspace_permissions.py`, and the now-unused `scope` and `gateway_self_host` fields are dropped from the shared `workspace_permissions.json` catalog (only `path_prefix` and `verbs` are still consumed). The migration that reconstructs the historical two-scope layout carries its own frozen copies of the legacy scope name, gateway-self host, and path prefix, so it cannot drift with the live verb catalog.
+
+Adds a small, reversible data-format migration mechanism. The plugin records the on-disk data-format version in a `data-format-version` file at the root of its data directory (`<latchkey_directory>/mngr_latchkey/`); a `migrations` package holds one `up`/`down` migration per version. On `Latchkey.initialize()` the recorded version is reconciled against the version the installed code targets, applying the intervening migrations in the correct direction and re-stamping the file. The first migration folds any existing host file's `minds-workspaces` rule into its `latchkey-self` rule (and drops the now-defunct scope schema), so grants written by older builds keep working after an upgrade; its `down` reverses the fold. To keep it a stable historical artifact, that migration depends on no live plugin code: it carries its own frozen copies of the legacy scope constants, permissions-file model, on-disk layout, and read/write helpers, so it keeps performing the same rewrite even if the store model, its serialization, or the directory layout later change.
+
+`mngr latchkey forward` (the long-running gateway/reverse-tunnel supervisor daemon) now reports errors to Sentry, using the shared error-reporting machinery in `imbue_common`. It reports to whichever Sentry project the embedder points it at, tagged with the `mngr-latchkey-forward` service name so its events are distinguishable, and attaches its own structured (`events.jsonl`) and raw (`latchkey_forward.log`) logs.
+
+Reporting is off by default and configured entirely via `MNGR_LATCHKEY_SENTRY_*` environment variables (deliberately namespaced `MNGR_LATCHKEY_*`, not `LATCHKEY_*`, to distinguish `mngr latchkey` from the upstream core `latchkey` project). The daemon owns no Sentry project / environment definitions of its own -- it receives concrete values as strings. The (mostly static) infrastructure is snapshotted into its environment at spawn:
+
+- `MNGR_LATCHKEY_SENTRY_DSN` -- the Sentry DSN to report to.
+
+- `MNGR_LATCHKEY_SENTRY_ENVIRONMENT` -- the Sentry environment label.
+
+- `MNGR_LATCHKEY_SENTRY_RELEASE` and `MNGR_LATCHKEY_SENTRY_GIT_SHA` -- the release version and git SHA events are tagged with.
+
+- `MNGR_LATCHKEY_SENTRY_S3_BUCKET` -- the S3 bucket for log/traceback attachments; empty means there is no bucket, so nothing is uploaded.
+
+Sentry initializes whenever `DSN`, `ENVIRONMENT`, `RELEASE`, and `GIT_SHA` are all present (the daemon has no fallback of its own; run standalone without them it does nothing).
+
+Whether the daemon actually *sends* reports (and attaches logs) is gated by a live consent file at `MNGR_LATCHKEY_SENTRY_CONSENT_FILE`, read on every event. This lets the embedder toggle consent on a running daemon -- a grant/revoke takes effect immediately, with no respawn -- exactly mirroring how the minds backend gates its own Sentry on live user settings.
+
+When the minds desktop client spawns the daemon, it publishes the infrastructure variables automatically (resolving the DSN / environment / bucket from its own Sentry settings) and maintains the consent file from the user's error-reporting settings, rewriting it whenever the user changes consent.
+
+Unhandled exceptions that escape the supervisor are now logged through loguru before the process exits, so their Sentry reports carry the daemon's logs + traceback as attachments (an exception captured directly by the SDK's excepthook integration would otherwise bypass that handler and arrive with no logs). Expected `click` control-flow exits are left as-is and not reported as errors.
+
+Migrated the `mngr latchkey forward` discovery consumer to the per-provider discovery model. It now folds each `DISCOVERY_PROVIDER` snapshot and every incremental discovery event into the shared `DiscoveryStateAggregator` instead of hand-rolling its own prior-vs-fresh reconciliation. A snapshot is authoritative only for its own provider, so one provider's poll no longer affects another provider's agents, and retain-on-provider-error is handled inside the aggregator. Legacy global `DISCOVERY_FULL` snapshot handling has been removed.
+
+Fixed a span-awareness gap: a per-provider snapshot no longer re-establishes a reverse tunnel for an agent that was destroyed during that snapshot's discovery span (the snapshot's discovery callbacks are now restricted to agents the aggregator actually kept).
+
 ## 2026-07-01
 
 Added a new async/await ratchet (`test_prevent_async_await`) that freezes the current amount of `async def` / `await` usage in this project and fails if new async code is added. We strongly prefer synchronous code: it is far easier to debug, and our software is intentionally low-scale, so async provides no benefit. Existing usage is grandfathered in at its current count; the count can only decrease.

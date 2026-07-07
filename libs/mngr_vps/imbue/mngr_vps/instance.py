@@ -65,6 +65,7 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.interfaces.provider_instance import HostDiscoveryReadRegistry
 from imbue.mngr.interfaces.provider_instance import bounded_result_from_agents_by_host
+from imbue.mngr.interfaces.provider_instance import collect_cached_host_ssh_infos
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -1598,7 +1599,10 @@ class VpsProvider(BaseProviderInstance):
         reads to de-duplicate across polls.
         """
         agents_by_host = self.discover_hosts_and_agents(cg=cg, include_destroyed=include_destroyed)
-        return bounded_result_from_agents_by_host(agents_by_host)
+        # Surface each running host's SSH endpoint (read from the host object the batch discovery
+        # just cached) so the streaming poller re-emits it as HOST_SSH_INFO for tunneling consumers.
+        host_ssh_infos = collect_cached_host_ssh_infos(self, agents_by_host.keys())
+        return bounded_result_from_agents_by_host(agents_by_host, host_ssh_infos=host_ssh_infos)
 
     def discover_hosts_and_agents(
         self,
