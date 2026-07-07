@@ -132,6 +132,15 @@ _PERM_MINDS_API_PROXY_REPORT: Final[str] = "minds-api-proxy-report-allow"
 _MINDS_API_SCHEMA_INBOUND_PATH: Final[str] = "/minds-api-proxy/api/schema"
 _PERM_MINDS_API_SCHEMA: Final[str] = "minds-api-schema-read"
 
+# The read-only host-timezone endpoint (the desktop client reports the IANA
+# timezone of the machine it runs on). Granted to every agent by default for
+# the same reasons as the API schema document: not agent-scoped (the timezone
+# is identical for all callers) and carries no per-target data, so a workspace
+# (e.g. its scheduler resolving "3 AM" in the user's local time) can always
+# fetch it. Rides the same domain-only ``latchkey-self`` scope.
+_MINDS_API_TIMEZONE_INBOUND_PATH: Final[str] = "/minds-api-proxy/api/v1/timezone"
+_PERM_MINDS_API_TIMEZONE: Final[str] = "minds-api-timezone-read"
+
 # The minds desktop client's cross-workspace management API
 # (``/api/v1/workspaces/...``) is gated by a separate ``minds-workspaces`` detent
 # scope. Its scope + per-verb permission schemas are NOT part of this agent
@@ -194,6 +203,8 @@ _AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissi
                 _PERM_MINDS_API_PROXY_PER_AGENT,
                 # Every agent may read the (non-agent-scoped) API schema document.
                 _PERM_MINDS_API_SCHEMA,
+                # Every agent may read the (non-agent-scoped) host timezone.
+                _PERM_MINDS_API_TIMEZONE,
             ],
         },
     ),
@@ -274,6 +285,13 @@ _AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissi
             "properties": {
                 "method": {"const": "GET"},
                 "path": {"const": _MINDS_API_SCHEMA_INBOUND_PATH},
+            },
+            "required": ["method", "path"],
+        },
+        _PERM_MINDS_API_TIMEZONE: {
+            "properties": {
+                "method": {"const": "GET"},
+                "path": {"const": _MINDS_API_TIMEZONE_INBOUND_PATH},
             },
             "required": ["method", "path"],
         },

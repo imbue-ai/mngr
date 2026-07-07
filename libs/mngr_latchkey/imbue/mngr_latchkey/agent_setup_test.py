@@ -114,6 +114,7 @@ def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
                 "latchkey-self-read-available-permissions",
                 "minds-api-proxy-per-agent",
                 "minds-api-schema-read",
+                "minds-api-timezone-read",
             ],
         },
     ]
@@ -174,6 +175,13 @@ def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
     assert schemas["minds-api-schema-read"]["properties"] == {
         "method": {"const": "GET"},
         "path": {"const": "/minds-api-proxy/api/schema"},
+    }
+    # Likewise every agent may read the (non-agent-scoped) host timezone by
+    # default: a GET pinned to the proxy's inbound /api/v1/timezone path, so a
+    # workspace scheduler can always resolve the user's local time.
+    assert schemas["minds-api-timezone-read"]["properties"] == {
+        "method": {"const": "GET"},
+        "path": {"const": "/minds-api-proxy/api/v1/timezone"},
     }
 
 

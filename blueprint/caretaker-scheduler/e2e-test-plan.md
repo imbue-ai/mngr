@@ -1,5 +1,12 @@
 # End-to-end test plan: scheduler + Caretaker + minds blink
 
+> **SUPERSEDED (historical record).** Steps referencing the custom scheduler
+> (`scheduler list`, `runtime/scheduled_tasks.toml`, `runtime/scheduler/*`) and
+> the create-time timezone write no longer apply: FCT now uses stock cron +
+> anacron, and the timezone is pulled at boot from the desktop client's
+> `GET /api/v1/timezone` (check `/etc/timezone` in the container instead of
+> `runtime/scheduler/timezone`). See `CONTRACT.md`'s superseded banner.
+
 Exercises the whole feature as a real user would: create a workspace, let the
 nightly Caretaker appear, watch the new tab blink, meet it, grant consent, and
 confirm catch-up. Where waiting for real time (3 AM, a real reboot) is

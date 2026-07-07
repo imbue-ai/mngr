@@ -1,5 +1,24 @@
 # Caretaker/Scheduler — FROZEN interface contract
 
+> **SUPERSEDED (historical record).** This contract coordinated the original
+> parallel build and no longer describes the shipped design. What changed since:
+>
+> - The custom `libs/scheduler` was removed from FCT. Recurring jobs use stock
+>   **cron + anacron** (cron daemon under supervisord; anacron for daily jobs
+>   with missed-run catch-up). `runtime/scheduled_tasks.toml`,
+>   `runtime/scheduler/`, and the `scheduler` CLI no longer exist; the Caretaker
+>   is a daily `/etc/anacrontab` entry baked into the image.
+> - The timezone is **pulled, not pushed**: the minds desktop client serves
+>   `GET /api/v1/timezone` (the machine's own IANA timezone), baseline-granted
+>   to workspace agents through the latchkey gateway; the FCT bootstrap fetches
+>   it at each boot and sets the container's `/etc/localtime` + `/etc/timezone`.
+>   Nothing writes `runtime/scheduler/timezone`, and the create request carries
+>   no timezone field.
+> - Caretaker preferences moved from `preferences.toml` to a plain-language
+>   `runtime/caretaker/permissions.md` (its existence marks the Caretaker as
+>   introduced), and `run_caretaker.sh` was generalized into
+>   `scripts/run_task_agent.sh <skill>`.
+
 All phases are implemented in parallel off `origin/main` and merged sequentially (1→2→3→4 in the FCT repo, 5 in the minds monorepo). Because the phases are built before phase 1's code exists in their worktrees, **every cross-phase reference below is frozen**. Do not deviate from these names, paths, or signatures — if you think one is wrong, leave a clear note in your final report rather than changing it unilaterally.
 
 Full design context: read `/Users/prestonseay/Desktop/mngr/blueprint/caretaker-scheduler/plan-caretaker-scheduler.md`.

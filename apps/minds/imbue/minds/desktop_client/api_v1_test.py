@@ -7,6 +7,7 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -103,7 +104,6 @@ class _RecordingAgentCreator(AgentCreator):
         backup_request: BackupSetupRequest | None = None,
         color: str | None = None,
         original_minds_version: str = "",
-        timezone: str = "",
     ) -> CreationId:
         self._last_call = {
             "repo_source": repo_source,
@@ -117,7 +117,6 @@ class _RecordingAgentCreator(AgentCreator):
             "anthropic_api_key": anthropic_api_key,
             "color": color,
             "original_minds_version": original_minds_version,
-            "timezone": timezone,
         }
         return CreationId()
 
@@ -532,48 +531,27 @@ def test_create_workspace_full_surface_returns_202_and_threads_fields(
     assert str(creator.last_call["branch"]) == "main"
 
 
-def test_create_workspace_threads_submitted_timezone_to_creator(
-    tmp_path: Path,
-    root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
-) -> None:
-    # A valid submitted IANA timezone reaches the creator so the new workspace's
-    # scheduler runs nightly tasks in the user's local time.
-    creator = _make_recording_creator(tmp_path, root_concurrency_group, notification_dispatcher)
-    client = _client_with_agent_creator(
-        tmp_path, root_concurrency_group, notification_dispatcher, agent_creator=creator
-    )
+def test_timezone_returns_valid_iana_name_or_empty(tmp_path: Path) -> None:
+    # The endpoint reports the machine's own timezone, so the value is
+    # host-dependent: assert the contract (a loadable IANA name, or "" when
+    # undeterminable) rather than a specific zone.
+    client = _client_with_workspace(tmp_path, AgentId())
 
-    response = client.post(
-        "/api/v1/workspaces",
-        headers=_auth_header(),
-        json={"git_url": "https://example/repo", "timezone": "America/New_York"},
-    )
+    response = client.get("/api/v1/timezone", headers=_auth_header())
 
-    assert response.status_code == 202
-    assert str(creator.last_call["timezone"]) == "America/New_York"
+    assert response.status_code == 200
+    tz_name = json.loads(response.data)["timezone"]
+    assert isinstance(tz_name, str)
+    if tz_name:
+        ZoneInfo(tz_name)
 
 
-def test_create_workspace_drops_unknown_timezone(
-    tmp_path: Path,
-    root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
-) -> None:
-    # An unrecognized timezone is dropped (the creator gets "") rather than
-    # rejecting the create; the scheduler falls back to the host clock.
-    creator = _make_recording_creator(tmp_path, root_concurrency_group, notification_dispatcher)
-    client = _client_with_agent_creator(
-        tmp_path, root_concurrency_group, notification_dispatcher, agent_creator=creator
-    )
+def test_timezone_requires_auth(tmp_path: Path) -> None:
+    client = _client_with_workspace(tmp_path, AgentId())
 
-    response = client.post(
-        "/api/v1/workspaces",
-        headers=_auth_header(),
-        json={"git_url": "https://example/repo", "timezone": "Not/AZone"},
-    )
+    response = client.get("/api/v1/timezone")
 
-    assert response.status_code == 202
-    assert str(creator.last_call["timezone"]) == ""
+    assert response.status_code == 401
 
 
 def test_create_workspace_requires_api_key_for_api_key_provider(

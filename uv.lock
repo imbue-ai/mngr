@@ -3354,6 +3354,7 @@ dependencies = [
     { name = "tenacity" },
     { name = "tomlkit" },
     { name = "traceback-with-variables" },
+    { name = "tzlocal" },
     { name = "werkzeug" },
     { name = "wsgidav" },
 ]
@@ -3391,6 +3392,7 @@ requires-dist = [
     { name = "tenacity" },
     { name = "tomlkit", specifier = ">=0.12.0" },
     { name = "traceback-with-variables", specifier = ">=2.0" },
+    { name = "tzlocal", specifier = ">=5" },
     { name = "werkzeug", specifier = ">=3.0" },
     { name = "wsgidav", specifier = ">=4.3" },
 ]

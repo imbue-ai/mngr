@@ -104,6 +104,17 @@ class EmptyResponse(FrozenModel):
     """An empty ``{}`` success body (e.g. an idempotent dismissal)."""
 
 
+class TimezoneResponse(FrozenModel):
+    """The host machine's timezone, for callers that need the user's local time."""
+
+    timezone: str = Field(
+        description=(
+            "IANA timezone of the machine the desktop client runs on (e.g. America/Los_Angeles); "
+            "empty string when it cannot be determined"
+        )
+    )
+
+
 class AgentNotificationRequest(ApiRequestModel):
     """Body for sending a desktop notification on behalf of an agent."""
 
@@ -138,10 +149,6 @@ class CreateWorkspaceRequest(ApiRequestModel):
     host_name: str | None = Field(default=None, description="Workspace/host name; auto-assigned (mind-N) when omitted")
     branch: str | None = Field(default=None, description="Branch/tag to create from")
     color: str | None = Field(default=None, description="Hex color for the workspace tile")
-    timezone: str | None = Field(
-        default=None,
-        description="Browser IANA timezone (e.g. America/New_York) for the workspace scheduler; host clock when omitted",
-    )
     launch_mode: LaunchMode | None = Field(default=None, description="Compute provider (default DOCKER)")
     ai_provider: AIProvider | None = Field(
         default=None, description="How to obtain Anthropic credentials (default SUBSCRIPTION)"

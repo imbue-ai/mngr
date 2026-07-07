@@ -8,8 +8,6 @@ importing the app module.
 """
 
 from typing import Final
-from zoneinfo import ZoneInfo
-from zoneinfo import ZoneInfoNotFoundError
 
 from loguru import logger
 
@@ -83,27 +81,3 @@ def color_for_new_workspace(raw_color: object) -> str:
     if stripped:
         logger.warning("Ignoring malformed create-request color {!r}; using the default workspace color.", stripped)
     return DEFAULT_WORKSPACE_COLOR
-
-
-def validate_create_timezone(raw_timezone: object) -> str:
-    """Validate a create request's submitted IANA timezone, or return ``""``.
-
-    The create form/API carries the browser's
-    ``Intl.DateTimeFormat().resolvedOptions().timeZone`` so the scheduler
-    can run "3 AM" in the user's local time. A missing or unrecognized
-    value is treated as "unknown" (returns ``""``) rather than rejecting
-    the create -- the scheduler falls back to the host clock. Validating
-    against the system tz database here also keeps anything unexpected from
-    reaching the ``mngr exec`` write.
-    """
-    stripped = str(raw_timezone).strip() if raw_timezone is not None else ""
-    if not stripped:
-        return ""
-    try:
-        ZoneInfo(stripped)
-    except (ZoneInfoNotFoundError, ValueError):
-        logger.warning(
-            "Ignoring unrecognized create-request timezone {!r}; scheduler will use the host clock.", stripped
-        )
-        return ""
-    return stripped

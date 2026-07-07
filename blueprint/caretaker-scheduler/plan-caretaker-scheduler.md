@@ -1,5 +1,12 @@
 # Plan: Scheduled tasks + the Caretaker nightly agent
 
+> **SUPERSEDED (historical record).** The design below shipped and was then
+> revised: the custom `libs/scheduler` was replaced by stock cron + anacron in
+> FCT, and the timezone is no longer captured/pushed at create time -- the minds
+> desktop client now serves `GET /api/v1/timezone` and the FCT bootstrap pulls
+> it through the latchkey gateway at each boot to set the container timezone.
+> See `CONTRACT.md`'s superseded banner for the full delta.
+
 ## Refined prompt
 
 > I want the following system added to minds. (Note: some of these changes may be done in the forever-claude-template.)
