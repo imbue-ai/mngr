@@ -49,6 +49,7 @@ from imbue.minds.desktop_client.backup_workspace_scripts import build_workspace_
 from imbue.minds.desktop_client.backup_workspace_scripts import extract_marker_json
 from imbue.minds.errors import BackupProvisioningError
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 
 # One exec runs the whole check; sized to cover a first-encounter `git fetch
@@ -112,7 +113,7 @@ def is_workspace_online(resolver: BackendResolverInterface, agent_id: AgentId) -
     display_info = resolver.get_agent_display_info(agent_id)
     if display_info is None:
         return False
-    host_state = resolver.get_host_state(display_info.host_id)
+    host_state = resolver.get_host_state(HostId(display_info.host_id))
     return host_state == HostState.RUNNING
 
 
@@ -149,7 +150,9 @@ def classify_check_payload(
             details.append(service_detail)
 
     env_payload = payload.get("env")
-    env_info = env_payload if isinstance(env_payload, dict) else {}
+    env_info: dict[str, object] = (
+        {str(key): value for key, value in env_payload.items()} if isinstance(env_payload, dict) else {}
+    )
     is_env_present = bool(env_info.get("present"))
     env_sha = str(env_info.get("sha256", ""))
     env_to_adopt: str | None = None

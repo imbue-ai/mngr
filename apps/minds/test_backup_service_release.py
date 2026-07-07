@@ -40,6 +40,7 @@ from imbue.minds.primitives import BackupProvider
 from imbue.minds.testing import BackupReleaseWorkspace
 from imbue.minds.testing import run_git_for_backup_test
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 
 # The fixed host id conftest.make_resolver_with_data assigns to every agent.
@@ -48,7 +49,7 @@ _RESOLVER_HOST_ID = "host-00000000000000000000000000000000"
 
 def _resolver_for(agent_id: AgentId) -> MngrCliBackendResolver:
     resolver = make_resolver_with_data(agents_json=make_agents_json(agent_id))
-    resolver.set_host_state_override(_RESOLVER_HOST_ID, HostState.RUNNING)
+    resolver.set_host_state_override(HostId(_RESOLVER_HOST_ID), HostState.RUNNING)
     return resolver
 
 

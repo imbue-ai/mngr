@@ -105,7 +105,7 @@ def run_backup_update_sequence(
     paths: WorkspacePaths,
     resolver: BackendResolverInterface,
     registry: WorkspaceOperationRegistryInterface,
-    parent_cg: ConcurrencyGroup,
+    parent_cg: ConcurrencyGroup | None,
     is_stop_chats: bool,
 ) -> None:
     """Worker-thread entry point: run the whole update operation for one workspace.
@@ -133,7 +133,7 @@ def _run_update_phases(
     paths: WorkspacePaths,
     resolver: BackendResolverInterface,
     registry: WorkspaceOperationRegistryInterface,
-    parent_cg: ConcurrencyGroup,
+    parent_cg: ConcurrencyGroup | None,
     is_stop_chats: bool,
 ) -> None:
     # Phase 1: gate + wait (cancellable; nothing has been mutated yet).
@@ -212,7 +212,7 @@ def _wait_for_quiet_workspace(
     *,
     agent_id: AgentId,
     registry: WorkspaceOperationRegistryInterface,
-    parent_cg: ConcurrencyGroup,
+    parent_cg: ConcurrencyGroup | None,
     is_stop_chats: bool,
 ) -> bool:
     """Poll the gate probe until no backup tick is in flight; returns False when the op ended.
@@ -256,7 +256,7 @@ def run_backup_configure_sequence(
     request: BackupSetupRequest,
     imbue_cloud_cli: ImbueCloudCli | None,
     paths: WorkspacePaths,
-    parent_cg: ConcurrencyGroup,
+    parent_cg: ConcurrencyGroup | None,
     registry: WorkspaceOperationRegistryInterface,
     is_destination_change: bool,
 ) -> None:
