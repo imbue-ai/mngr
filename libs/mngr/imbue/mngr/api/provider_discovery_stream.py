@@ -60,6 +60,16 @@ def _discover_one_provider(
     stalling the whole provider's snapshot. ``registry`` carries in-flight per-host
     reads across polls so a wedged host is not re-read on every poll.
     """
+    # Each poll is its own discovery cycle, so clear the provider's per-cycle caches
+    # first. A provider instance is built once at stream startup and reused for every
+    # poll; without this reset its per-cycle caches (e.g. imbue_cloud's leased-hosts
+    # list, which is even cached when empty) become process-lifetime caches, so any
+    # change after startup -- a host leased later, a host destroyed -- is never seen.
+    # Every on-demand discovery path (mngr list, the snapshot side-effect) already
+    # passes reset_caches=True for exactly this reason; the streaming poller must match.
+    # The cross-poll wedged-host registry is a separate object and is intentionally
+    # left untouched.
+    provider.reset_caches()
     return provider.discover_hosts_and_agents_within_timeouts(
         cg=mngr_ctx.concurrency_group,
         host_discovery_timeout_seconds=host_discovery_timeout_seconds,
