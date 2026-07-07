@@ -1,1 +1,0 @@
-Integrates the "simple names" work: adds `POST /hosts/{host_db_id}/rename` to update a leased host's mutable `host_name`. Ownership is enforced (403 for a host leased by another user, 404 for a missing or not-leased host) and the new name is validated against mngr's SafeName regex. This backs the workspace-rename flow; the host's durable identity (its lease id) is unchanged.

@@ -1,3 +1,0 @@
-Lima hosts can now be renamed. `LimaProviderInstance.rename_host` updates the logical host name on the host record (a local, offline-writable store), so it works whether or not the VM is running.
-
-New Lima VMs now derive their limactl instance name from the immutable host id (`<prefix><host_id>`) rather than the host name, so a rename never leaves the VM's instance name out of sync with the host name (limactl has no native rename). Existing VMs created under the old `<prefix><host_name>` scheme keep working unchanged, since discovery reads the host name and instance name from the persisted record rather than parsing the instance name.

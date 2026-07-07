@@ -4,6 +4,18 @@ A concise, human-friendly summary of changes for repo-level dev tooling: CI work
 
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
+## 2026-07-06
+
+### Added
+
+- Added: Design plans for overlay-surface + custom tooltips (`blueprint/overlay-surface-tooltips/`), per-provider discovery (`blueprint/per-provider-discovery/`, plus follow-up spec `spec-bounded-per-host-discovery.md`), persistent terminals (`blueprint/persistent-terminals/`), the SIGWINCH attach-hook implementation (`specs/sigwinch-attach-hook/spec.md`), and simplifying workspace names (`blueprint/simplify-workspace-names/`).
+- Added: Paired forever-claude-template worktree in the minds snapshot bake — `scripts/snapshot_minds_e2e_state.py` now materializes the FCT branch matching the current mngr branch (else `main`) with the current mngr vendored into `vendor/mngr`, baked into the snapshot image via a separate upload. Workspace-creation tests now exercise coordinated mngr+FCT changes together instead of the released FCT tag. `just minds-test-electron` materializes the worktree before the local run.
+
+### Changed
+
+- Changed: Raised the repo-wide bash strict-mode ratchet from 11 to 12 (`test_meta_ratchets.py::test_prevent_bash_without_strict_mode`) to account for `libs/mngr/imbue/mngr/resources/sigwinch_panes.sh`, a best-effort tmux repaint sweep that deliberately uses `set -uo pipefail` (omitting `-e`). Refreshed the test's stale docstring.
+- Changed: Excluded `/imbue_common/sentry` from coverage.
+
 ## 2026-07-01
 
 ### Added

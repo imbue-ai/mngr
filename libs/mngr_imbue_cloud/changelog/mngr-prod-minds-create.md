@@ -1,0 +1,5 @@
+Fixed two ways imbue_cloud's streaming (per-provider) discovery underfed consumers, leaving a cloud workspace stuck loading in the minds app.
+
+- `discover_hosts_and_agents` read each agent's raw data but only kept its id and name, so the `DiscoveredAgent` it emitted had no `certified_data` and therefore no labels -- even though the same raw data (and its labels) is what the richer `get_host_and_agent_details` path reads. Any consumer that filters agents by label got nothing back: most visibly, the minds system_interface forward runs with `--agent-include has(agent.labels.is_primary)`, so every streaming snapshot silently filtered out the workspace's primary agent. The streaming refs now carry the raw per-agent data as `certified_data`, matching the rich path, so labels flow through.
+
+- The streaming discovery result now includes each discovered host's SSH endpoint (built from its lease, pointing at the container's inner sshd), so the discovery poller can re-emit `HOST_SSH_INFO` events. Without this the forward could not learn the host's SSH endpoint from the streaming path and refused to dial the host's loopback-registered service URL.

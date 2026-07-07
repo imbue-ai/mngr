@@ -4,6 +4,44 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-06
+
+Bounded per-host discovery reads so a wedged host can no longer leak background threads or be re-read on every poll.
+
+- The per-host-bounded discovery path now threads the provider's `host_discovery_timeout_seconds` down as a hard per-command timeout on the discovery reads (the agent-directory listing and each `data.json` read). A host that connects and then stalls mid-read now self-terminates its reads (surfacing as a connection error that falls back to the host's last-known offline agents) instead of leaving an abandoned discovery thread running forever.
+
+- Added cross-poll per-host de-duplication: a host whose previous discovery read is still in flight is not re-read on the next poll (its still-running read is reused), bounding accumulation to at most one in-flight read per host. Each such skip is logged as a warning -- with the per-command timeout in place this should essentially never fire, so it acts as a precise "host wedged past its timeout" alarm.
+
+- Connect-phase timeouts are unchanged (already bounded); batch providers (modal / vps / imbue_cloud) are unaffected (they read all hosts in one bounded pass and spawn no per-host reads).
+
+Made provider discovery per-provider and resilient to slow/hung providers, so a single stuck provider can no longer block discovery of all the others.
+
+- Each provider is now discovered independently and emits its own `ProviderDiscoverySnapshotEvent`, authoritative only for its own provider. `mngr observe --discovery-only` runs one decoupled poll loop per provider, and `mngr list` writes one per-provider snapshot per provider as a side-effect.
+
+- The legacy global `FullDiscoverySnapshotEvent` / `DISCOVERY_FULL` snapshot is no longer produced and all live usages were removed, but the type is kept (deprecated) so historical on-disk discovery logs still parse.
+
+- Added per-provider discovery cadence and timeout settings to each `[providers.<name>]` block: `discovery_poll_interval_seconds` (default 30), `discovery_warn_seconds` (default 20), `discovery_error_timeout_seconds` (default 120), and per-host / per-agent `host_discovery_timeout_seconds` / `agent_discovery_timeout_seconds` (default 30, validated to stay below the provider error timeout). A slow host whose read exceeds its timeout surfaces as explicitly UNKNOWN (its previously-known agents retained as unknown) instead of holding up its whole provider's snapshot.
+
+- A hung provider is bounded without killing threads: discovery warns after the warn threshold, then emits a per-provider `DiscoveryError` after the error timeout while the abandoned read keeps running; its late result is accepted on a later poll.
+
+- Added a shared, span-aware discovery state aggregator (`DiscoveryStateAggregator`) so a host/agent state change that arrives while a provider is mid-discovery is no longer clobbered by that older in-flight snapshot. All discovery consumers now reconcile through it. The aggregator's retain/drop rule supersedes the former `partition_removed_agents_by_provider_error` helper, which has been removed now that every consumer reconciles through the aggregator.
+
+- Kept shell-completion fast: the TAB-completion replay scan stops at the most recent legacy full snapshot instead of parsing every snapshot line in the (potentially large) discovery events file.
+
+- Preserved read-after-write consistency for agent/host resolution: an agent created (or destroyed) during a provider's in-flight discovery span is no longer lost (or resurrected) when resolving it from the event stream. The stream replay used by `mngr stop --stop-host` (and the cached-snapshot attach used by `mngr forward --observe-via-file`) now replays back to each provider's snapshot span start and applies the same span-aware rule as the aggregator, and `mngr stop` falls back to a live discovery for any agent not yet in the stream -- so stopping a just-created agent works immediately.
+
+Changed: agents now repaint on *every* tmux attach, not just on `mngr connect`. The post-attach `SIGWINCH` redraw nudge moved from `mngr connect`'s SSH wrapper into a per-session tmux `client-attached` hook set when the agent is created, so a plain `tmux attach`, the ttyd agent terminal, or a web-shell attach all trigger a clean redraw too.
+
+This resolves the garbled-pane / failed-send symptom seen when a client attaches at a different terminal size than the agent's session was created at: previously the agent's TUI could be left showing a stale, unpainted frame (which also broke message sending, since the paste-visibility check could not read the corrupted pane).
+
+Note: only newly created agents get the hook. Agents already running when you upgrade will not get the repaint nudge on attach (the old `mngr connect` nudge has been removed) until they are recreated.
+
+`mngr rename --host <agent> <new-name>` now renames the host of the referenced agent (previously a `[future]` placeholder). Only the provider's logical host name changes; the agent name, tmux session, env file, and git branch are untouched. Not all providers support host renaming (e.g. `ssh` host names remain user-owned).
+
+Host names are now length-capped (`HostName`, 63 characters -- the DNS-label limit), since they end up in provider-side identifiers with their own length limits. The cap is generous so existing host-name generators are unaffected; callers that derive a pretty slug from arbitrary text apply their own smaller target on top. Agent names and provider instance names are unaffected. Auto-generated host names are kept within the cap.
+
+Integrates the "simple names" work: `mngr rename --host <agent> <new-name>` now renames the referenced agent's host (previously a `[future]` placeholder), changing only the provider's logical host name (the agent name, tmux session, env file, and git branch are untouched; not all providers support it). Host names are now length-capped at 63 characters (the DNS-label limit) since they flow into provider-side identifiers. Agent names and provider instance names are unaffected.
+
 ## 2026-07-01
 
 Bumped the release Dockerfile's `CLAUDE_CODE_VERSION` from `2.1.141` to `2.1.160` to match the pin in forever-claude-template's `.mngr/settings.toml` (`[agent_types.claude].version`). The two had drifted, which the `test_claude_code_version_matches_forever_claude_template_pin` release test flags because a mismatch makes agent provisioning fail with "Claude version mismatch".
