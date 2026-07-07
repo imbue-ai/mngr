@@ -24,6 +24,7 @@ const REQUIRED = [
   path.join(RESOURCES, 'uv', 'uv'),
   path.join(RESOURCES, 'git', 'bin', 'git'),
   path.join(RESOURCES, 'lima', 'bin', 'limactl'),
+  path.join(RESOURCES, 'qemu', 'bin', 'qemu-img'),
 ];
 
 const missing = REQUIRED.filter((p) => !fs.existsSync(p));

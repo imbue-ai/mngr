@@ -205,6 +205,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
         const gitBinDir = paths.getGitBinDir();
         const limaBinDir = paths.getLimaBinDir();
         const desyncBinDir = paths.getDesyncBinDir();
+        const qemuImgBinDir = paths.getQemuImgBinDir();
         const uvCacheDir = paths.getUvCacheDir();
         const uvPythonDir = paths.getUvPythonDir();
         const pyprojectDir = paths.getPyprojectDir();
@@ -245,7 +246,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           : systemPath;
         env = {
           ...process.env,
-          PATH: `${uvBinDir}:${gitBinDir}:${limaBinDir}:${desyncBinDir}:${augmentedSystemPath}`,
+          PATH: `${uvBinDir}:${gitBinDir}:${limaBinDir}:${desyncBinDir}:${qemuImgBinDir}:${augmentedSystemPath}`,
           UV_CACHE_DIR: uvCacheDir,
           UV_PYTHON_INSTALL_DIR: uvPythonDir,
           MINDS_ELECTRON: '1',
@@ -255,6 +256,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           MINDS_LATCHKEY_BINARY: paths.getLatchkeyPath(),
           MINDS_LATCHKEY_DIRECTORY: paths.getLatchkeyDirectory(),
           MINDS_RESTIC_BINARY: paths.getResticPath(),
+          MINDS_QEMU_IMG_BINARY: paths.getQemuImgPath(),
           // Tell the packaged latchkey shim which Electron binary to use as Node.
           MINDS_ELECTRON_EXEC_PATH: process.execPath,
           // Set VIRTUAL_ENV to the per-user venv so `uv run --active` uses

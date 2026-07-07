@@ -28,6 +28,15 @@ const RESTIC_VERSION = '0.18.1';
 // desync: content-defined-chunking client used to fetch the pre-baked Lima image
 // (issue #2306). Only bundled on macOS/Linux (the Lima launch mode's platforms).
 const DESYNC_VERSION = '1.0.3';
+// qemu-img: converts the pre-baked Lima image raw<->qcow2 (issue #2306). Only
+// bundled on macOS/Linux (the Lima launch mode's platforms). No upstream static
+// build exists (qemu-img links glib; macOS has no static libc), so we ship a
+// relocated, self-contained payload -- qemu-img plus its dylib closure under
+// lib/, load paths rewritten to @executable_path/../lib -- produced by
+// scripts/build-qemu-payload.sh and hosted as a GitHub release asset. See
+// docs/desktop-app.md for the produce/host/pin runbook.
+const QEMU_IMG_VERSION = '10.2.2';
+const QEMU_PAYLOAD_BASE_URL = `https://github.com/imbue-ai/mngr/releases/download/qemu-img-v${QEMU_IMG_VERSION}`;
 
 /**
  * SHA256 hashes for each downloaded archive, pinned by filename.
@@ -36,10 +45,13 @@ const DESYNC_VERSION = '1.0.3';
  * - uv: https://github.com/astral-sh/uv/releases/download/<version>/<file>.sha256
  * - MinGit: https://github.com/git-for-windows/git/releases/tag/<tag> release notes
  * - restic: https://github.com/restic/restic/releases/download/v<version>/SHA256SUMS
+ * - qemu-img: emitted by scripts/build-qemu-payload.sh for the exact tarball
+ *   uploaded to the qemu-img-v<version> GitHub release (no upstream checksum
+ *   exists; we produce and host the payload ourselves).
  *
- * Update this map whenever UV_VERSION, GIT_FOR_WINDOWS_VERSION, or
- * RESTIC_VERSION changes. If a download hash doesn't match an entry
- * here, the script aborts before extracting or executing any
+ * Update this map whenever UV_VERSION, GIT_FOR_WINDOWS_VERSION,
+ * RESTIC_VERSION, or QEMU_IMG_VERSION changes. If a download hash doesn't
+ * match an entry here, the script aborts before extracting or executing any
  * downloaded bytes.
  */
 const EXPECTED_SHA256 = {
@@ -56,6 +68,10 @@ const EXPECTED_SHA256 = {
   'desync_1.0.3_darwin_amd64.tar.gz':   'ab029448074428dc757d2235109dd557e9f34e4865052432a6ea7c431f0a5a19',
   'desync_1.0.3_linux_amd64.tar.gz':    'ad4dd9e91b57eef8627d2038df09281d7f38dca02eeca0e66592b54087619953',
   'desync_1.0.3_linux_arm64.tar.gz':    '9008e297f527634efe94688f67c7a49a534c561bf43d223e50f64bec899c15ca',
+  // The other three qemu-img targets (darwin-x86_64, linux-x86_64, linux-aarch64)
+  // are pinned once produced on a matching host and uploaded; until then a build
+  // for those targets aborts loudly in verifyChecksum. See docs/desktop-app.md.
+  'qemu-img-10.2.2-darwin-aarch64.tar.gz': '0d00444127c4b71e8f822bcc576496859d3224ffcf3fed7816f461a0f3f4477c',
 };
 
 const MAX_REDIRECTS = 5;
@@ -102,6 +118,16 @@ function getDesyncDownloadUrl({ platform, arch }) {
     throw new Error(`Unsupported desync arch: ${arch}`);
   }
   return `https://github.com/folbricht/desync/releases/download/v${DESYNC_VERSION}/desync_${DESYNC_VERSION}_${platform}_${goArch}.tar.gz`;
+}
+
+function getQemuImgDownloadUrl({ platform, arch }) {
+  // The self-contained payload is published per os/arch as
+  // qemu-img-<ver>-<os>-<arch>.tar.gz (arch is aarch64/x86_64, matching
+  // getPlatformArch). Win32 has no Lima launch mode and is never fetched.
+  if (platform === 'win32') {
+    throw new Error('qemu-img is not bundled on Windows (no Lima launch mode).');
+  }
+  return `${QEMU_PAYLOAD_BASE_URL}/qemu-img-${QEMU_IMG_VERSION}-${platform}-${arch}.tar.gz`;
 }
 
 /**
@@ -297,6 +323,40 @@ async function downloadDesync(resourcesDir, { platform, arch }) {
   console.log(`[download-binaries] desync installed at ${desyncBinary}`);
 }
 
+async function downloadQemuImg(resourcesDir, { platform, arch }) {
+  // qemu-img serves the Lima launch mode only (macOS/Linux); Windows has no
+  // Lima launch mode, so there is nothing to fetch there.
+  if (platform === 'win32') {
+    console.log('[download-binaries] Skipping qemu-img on win32 (no Lima launch mode).');
+    return;
+  }
+  const qemuDir = path.join(resourcesDir, 'qemu');
+  if (fs.existsSync(qemuDir)) fs.rmSync(qemuDir, { recursive: true });
+  fs.mkdirSync(qemuDir, { recursive: true });
+
+  const url = getQemuImgDownloadUrl({ platform, arch });
+  const filename = path.basename(new URL(url).pathname);
+  console.log(`[download-binaries] Downloading qemu-img from ${url}...`);
+
+  const archive = await download(url);
+  verifyChecksum(archive, filename);
+
+  // The payload tars bin/ + lib/ at its root, so extract without stripping:
+  // resources/qemu/bin/qemu-img loads its closure from resources/qemu/lib/
+  // via the @executable_path/../lib load paths baked in at production time.
+  const tarPath = path.join(qemuDir, 'qemu.tar.gz');
+  fs.writeFileSync(tarPath, archive);
+  execSync(`tar xzf "${tarPath}" -C "${qemuDir}"`, { stdio: 'inherit' });
+  fs.unlinkSync(tarPath);
+
+  const qemuImgBinary = path.join(qemuDir, 'bin', 'qemu-img');
+  if (!fs.existsSync(qemuImgBinary)) {
+    throw new Error(`qemu-img binary not found at ${qemuImgBinary} after extraction`);
+  }
+  fs.chmodSync(qemuImgBinary, 0o755);
+  console.log(`[download-binaries] qemu-img installed at ${qemuImgBinary}`);
+}
+
 /**
  * Recursively copy Apple's git libexec tree into destDir, dereferencing
  * symlinks into real file copies.
@@ -439,6 +499,7 @@ async function downloadBinaries(resourcesDir) {
     downloadGit(resourcesDir, { platform }),
     downloadRestic(resourcesDir, { platform, arch }),
     downloadDesync(resourcesDir, { platform, arch }),
+    downloadQemuImg(resourcesDir, { platform, arch }),
   ]);
 
   console.log('[download-binaries] Done.');
@@ -458,6 +519,7 @@ beforeInstall.downloadGit = downloadGit;
 beforeInstall.downloadUv = downloadUv;
 beforeInstall.downloadRestic = downloadRestic;
 beforeInstall.downloadDesync = downloadDesync;
+beforeInstall.downloadQemuImg = downloadQemuImg;
 beforeInstall.download = download;
 module.exports = beforeInstall;
 

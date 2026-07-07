@@ -246,6 +246,31 @@ def test_bundled_limactl_is_signed_with_virtualization_entitlement() -> None:
     )
 
 
+def test_bundled_qemu_img_payload_is_in_signing_list() -> None:
+    """Guard: the bundled qemu-img payload must be signed by ToDesktop.
+
+    qemu-img ships as a relocated, self-contained payload (bin/qemu-img plus
+    its dylib closure under lib/). Under the hardened runtime every shipped
+    Mach-O must be code-signed with the app's Developer ID or notarization
+    rejects the build and the dylibs fail to load. So both the executable and
+    its dylib closure must appear in ``mac.additionalBinariesToSign``. If a
+    future change stages qemu-img without listing it (or its dylibs) here, the
+    packaged app breaks; this catches that at test time.
+    """
+    todesktop = _load_todesktop_config()
+    additional = todesktop.get("mac", {}).get("additionalBinariesToSign", [])
+    assert "resources/qemu/bin/qemu-img" in additional, (
+        "todesktop.js mac.additionalBinariesToSign must include the bundled "
+        f"qemu-img so ToDesktop signs it under the hardened runtime; got {additional}."
+    )
+    signed_dylibs = [p for p in additional if p.startswith("resources/qemu/lib/") and p.endswith(".dylib")]
+    assert signed_dylibs, (
+        "todesktop.js mac.additionalBinariesToSign must include the qemu-img "
+        "dylib closure (resources/qemu/lib/*.dylib); every shipped Mach-O must "
+        f"be signed for notarization. Got {additional}."
+    )
+
+
 def test_bundle_latchkey_uses_pnpm_deploy_against_lockfile() -> None:
     """Guard: bundleLatchkey() must use ``pnpm deploy --prod`` so the shipped
     latchkey tree is pinned by ``pnpm-lock.yaml``, not a fresh registry resolve.

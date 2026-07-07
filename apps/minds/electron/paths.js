@@ -52,6 +52,21 @@ function getDesyncBinDir() {
 }
 
 /**
+ * Path to the bundled qemu-img, used to convert the pre-baked Lima image
+ * raw<->qcow2 (issue #2306). Ships as a self-contained payload under
+ * ``resources/qemu/``: ``bin/qemu-img`` loads its dylib closure from the
+ * sibling ``lib/`` via @executable_path/../lib. build.js / download-binaries.js
+ * stage it per target platform.
+ */
+function getQemuImgPath() {
+  return path.join(getResourcesDir(), 'qemu', 'bin', 'qemu-img');
+}
+
+function getQemuImgBinDir() {
+  return path.dirname(getQemuImgPath());
+}
+
+/**
  * Path to the bundled restic binary used by the desktop client to
  * provision and query per-workspace backup repositories.
  *
@@ -238,6 +253,8 @@ module.exports = {
   getLimaBinDir,
   getDesyncPath,
   getDesyncBinDir,
+  getQemuImgPath,
+  getQemuImgBinDir,
   getLatchkeyPath,
   getLatchkeyDirectory,
   getResticPath,
