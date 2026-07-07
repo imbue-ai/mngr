@@ -47,6 +47,10 @@ from imbue.minds.desktop_client.api_auth import require_api_or_cookie_auth
 from imbue.minds.desktop_client.api_models import AccountsResponse
 from imbue.minds.desktop_client.api_models import AgentNotificationRequest
 from imbue.minds.desktop_client.api_models import ApiErrorResponse
+from imbue.minds.desktop_client.api_models import BackupOperationStatusResponse
+from imbue.minds.desktop_client.api_models import BackupServiceConfigureRequest
+from imbue.minds.desktop_client.api_models import BackupServiceUpdateRequest
+from imbue.minds.desktop_client.api_models import BackupVerificationToggleRequest
 from imbue.minds.desktop_client.api_models import BugReportRequest
 from imbue.minds.desktop_client.api_models import CreateOperationStatusResponse
 from imbue.minds.desktop_client.api_models import CreateWorkspaceRequest
@@ -62,6 +66,7 @@ from imbue.minds.desktop_client.api_models import RestartWorkspaceRequest
 from imbue.minds.desktop_client.api_models import SharingReadinessResponse
 from imbue.minds.desktop_client.api_models import SharingToggleResponse
 from imbue.minds.desktop_client.api_models import SshConnectionResponse
+from imbue.minds.desktop_client.api_models import WorkspaceBackupHealthResponse
 from imbue.minds.desktop_client.api_models import WorkspaceBackupsResponse
 from imbue.minds.desktop_client.api_models import WorkspaceLifecycleResponse
 from imbue.minds.desktop_client.api_models import WorkspaceListResponse
@@ -151,6 +156,20 @@ _ROUTE_MODELS: Final[Mapping[tuple[str, str], _RouteModels]] = {
     ),
     ("GET", "/api/v1/workspaces/{agent_id}/sharing/{service_name}/readiness"): _RouteModels(
         response_model=SharingReadinessResponse
+    ),
+    ("GET", "/api/v1/workspaces/backup-health"): _RouteModels(response_model=WorkspaceBackupHealthResponse),
+    ("POST", "/api/v1/workspaces/{agent_id}/backup-service/update"): _RouteModels(
+        request_model=BackupServiceUpdateRequest, response_model=OperationHandleResponse, success_status=202
+    ),
+    ("POST", "/api/v1/workspaces/{agent_id}/backup-service/update/cancel"): _RouteModels(response_model=EmptyResponse),
+    ("POST", "/api/v1/workspaces/{agent_id}/backup-service/configure"): _RouteModels(
+        request_model=BackupServiceConfigureRequest, response_model=OperationHandleResponse, success_status=202
+    ),
+    ("POST", "/api/v1/workspaces/{agent_id}/backup-service/verification"): _RouteModels(
+        request_model=BackupVerificationToggleRequest, response_model=EmptyResponse
+    ),
+    ("GET", "/api/v1/workspaces/operations/backup/{operation_id}"): _RouteModels(
+        response_model=BackupOperationStatusResponse
     ),
 }
 

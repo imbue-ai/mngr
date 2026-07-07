@@ -13,7 +13,9 @@ stopped or destroyed workspace's backups stay reachable for status checks
 and restores.
 """
 
+import hashlib
 import os
+from datetime import datetime
 from pathlib import Path
 
 from imbue.minds.config.data_types import WorkspacePaths
@@ -21,6 +23,9 @@ from imbue.minds.errors import BackupProvisioningError
 from imbue.mngr.primitives import AgentId
 
 _BACKUP_ENV_DIRNAME = "backup_envs"
+# Timestamp format for archived canonical envs (and the workspace-side
+# `restic.env.<date>` rotation) -- filesystem-safe, sortable, UTC.
+ENV_ARCHIVE_TIMESTAMP_FORMAT = "%Y%m%dT%H%M%SZ"
 
 
 def backup_env_dir(paths: WorkspacePaths) -> Path:
@@ -66,6 +71,29 @@ def write_canonical_env(paths: WorkspacePaths, agent_id: AgentId, content: str) 
         tmp_path.rename(path)
     except OSError as e:
         raise BackupProvisioningError(f"Could not write canonical restic.env at {path}: {e}") from e
+
+
+def env_content_sha256(content: str) -> str:
+    """Hex sha256 of an env file's exact bytes (the drift-comparison currency)."""
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def archive_canonical_env(paths: WorkspacePaths, agent_id: AgentId, *, now: datetime) -> Path | None:
+    """Move the canonical restic.env aside to ``<agent_id>.env.<timestamp>``.
+
+    Used before re-provisioning a workspace against a new destination so the
+    old repository stays reachable through the archived copy. Returns the
+    archive path, or None when no canonical env exists.
+    """
+    path = canonical_env_path(paths, agent_id)
+    if not path.is_file():
+        return None
+    archive_path = path.with_name(f"{path.name}.{now.strftime(ENV_ARCHIVE_TIMESTAMP_FORMAT)}")
+    try:
+        path.rename(archive_path)
+    except OSError as e:
+        raise BackupProvisioningError(f"Could not archive canonical restic.env at {path}: {e}") from e
+    return archive_path
 
 
 def parse_restic_env(content: str) -> dict[str, str]:
