@@ -64,6 +64,29 @@ def test_set_and_get_auto_open_requests_panel(tmp_path: Path) -> None:
     assert config.get_auto_open_requests_panel() is True
 
 
+def test_error_reporting_settings_default_off(tmp_path: Path) -> None:
+    """Consent and both error-reporting toggles default to off on a fresh install."""
+    config = _make_config(tmp_path)
+    assert config.get_error_reporting_consent_given() is False
+    assert config.get_report_unexpected_errors() is False
+    assert config.get_include_error_logs() is False
+
+
+def test_error_reporting_settings_round_trip(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    config.set_error_reporting_consent_given(True)
+    config.set_report_unexpected_errors(True)
+    config.set_include_error_logs(True)
+    assert config.get_error_reporting_consent_given() is True
+    assert config.get_report_unexpected_errors() is True
+    assert config.get_include_error_logs() is True
+    # A new instance reads the same persisted values.
+    reloaded = _make_config(tmp_path)
+    assert reloaded.get_error_reporting_consent_given() is True
+    assert reloaded.get_report_unexpected_errors() is True
+    assert reloaded.get_include_error_logs() is True
+
+
 def test_persistence_across_instances(tmp_path: Path) -> None:
     """Config written by one instance is readable by a new instance."""
     config1 = _make_config(tmp_path)

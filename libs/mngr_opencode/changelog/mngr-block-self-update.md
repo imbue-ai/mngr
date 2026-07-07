@@ -1,3 +1,0 @@
-Added a `version` field to the opencode agent type that pins the installed opencode CLI: installation runs the opencode installer with `VERSION=<version>` and provisioning verifies the installed opencode matches, erroring on a mismatch.
-
-Added an `update_policy` field that governs opencode's startup auto-update. `NEVER` writes `"autoupdate": false` into the per-agent `opencode.json` so opencode does not update itself on launch; `AUTO` leaves auto-update enabled; `ASK` behaves like `AUTO`. When unset, it defaults to `NEVER` (auto-update disabled) -- set `AUTO` to re-enable it. An explicit `autoupdate` key in `config_overrides` always wins.

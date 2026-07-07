@@ -1,7 +1,10 @@
-"""Minimal test for the SSE-based redirect flow on the creating page.
+"""Minimal test for the redirect flow on the creating page.
 
-No Docker, no agent creation -- just tests that the SSE stream delivers
-the done event and the browser JS redirects.
+No Docker, no agent creation -- just tests that the creating page redirects
+into the workspace once creation completes. Completion is driven by the
+creating page's status poll against the v1 operations resource
+(``/api/v1/workspaces/operations/create/<creation_id>``); the SSE stream on
+that resource carries only the live log lines.
 
 Run from the repo root:
     just test apps/minds/test_sse_redirect.py::test_sse_redirect_on_done
@@ -30,6 +33,8 @@ from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.primitives import CreationId
+from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.mngr.primitives import AgentId
 
@@ -42,7 +47,7 @@ def _find_free_port() -> int:
 
 @pytest.mark.release
 def test_sse_redirect_on_done(tmp_path: Path) -> None:
-    """Test that the creating page SSE stream delivers the done event and the browser redirects."""
+    """Test that the creating page detects completion (via the v1 status poll) and the browser redirects."""
     logger.remove()
     logger.add(
         sys.stderr, level="DEBUG", format="{time:HH:mm:ss.SSS} | {level:<7} | {name}:{function}:{line} - {message}"
@@ -65,19 +70,30 @@ def test_sse_redirect_on_done(tmp_path: Path) -> None:
         system_interface_health_tracker=SystemInterfaceHealthTracker(),
     )
 
-    # Manually set up a fake agent creation that completes immediately
+    # Manually set up a fake agent creation that completes immediately. The
+    # creation is keyed by a minds-internal ``CreationId`` (the handle the
+    # ``/creating/<id>`` page and the ``operations/create/<id>`` resource use);
+    # the canonical ``AgentId`` is a separate namespace, known only once the
+    # inner ``mngr create`` returns, and is what the redirect ultimately targets.
+    creation_id = CreationId()
     agent_id = AgentId()
     log_queue: queue.Queue[str] = queue.Queue()
 
     with creator._lock:
-        creator._statuses[str(agent_id)] = AgentCreationStatus.INITIALIZING
-        creator._log_queues[str(agent_id)] = log_queue
+        creator._statuses[str(creation_id)] = AgentCreationStatus.INITIALIZING
+        creator._launch_modes[str(creation_id)] = LaunchMode.DOCKER
+        creator._host_names[str(creation_id)] = "test-workspace"
+        creator._log_queues[str(creation_id)] = log_queue
 
+    # ``paths`` mounts the ``/api/v1`` blueprint, which the creating page's JS
+    # polls for status/logs (``operations/create/<creation_id>``); without it
+    # those routes 404 and the page never learns the creation finished.
     app = create_desktop_client(
         auth_store=auth_store,
         backend_resolver=resolver,
         http_client=None,
         agent_creator=creator,
+        paths=paths,
     )
 
     server = make_server(host, port, app, threaded=True)
@@ -104,11 +120,11 @@ def test_sse_redirect_on_done(tmp_path: Path) -> None:
                 page.goto(f"http://{host}:{port}/login?one_time_code={code}")
                 page.wait_for_url(re.compile(r"/$|/create"), timeout=5000)
 
-                # Go directly to the creating page, which now opens on the
-                # onboarding question flow (the workspace is created in the
-                # background while the user answers).
-                page.goto(f"http://{host}:{port}/creating/{agent_id}")
-                page.wait_for_selector("#onboarding", state="attached", timeout=5000)
+                # Go directly to the creating page, which shows the loading /
+                # progress screen while the workspace is created in the
+                # background and redirects into it once creation completes.
+                page.goto(f"http://{host}:{port}/creating/{creation_id}")
+                page.wait_for_selector("#creating", state="attached", timeout=5000)
                 logger.info("On creating page, waiting for SSE stream to connect...")
 
                 # Give the EventSource time to connect
@@ -121,32 +137,26 @@ def test_sse_redirect_on_done(tmp_path: Path) -> None:
                 log_queue.put("[test] Almost done...")
                 threading.Event().wait(0.5)
 
-                # Set status to DONE and put sentinel. Once DONE is published
-                # the page records the redirect URL (via the SSE done event and
-                # the status poll); the actual redirect fires when the user
-                # finishes the questions.
+                # Set status to DONE with the resolved agent id + redirect URL,
+                # then put the log sentinel. The creating page's status poll
+                # (`operations/create/<creation_id>`) is the authoritative
+                # completion signal: once it returns DONE + redirect_url the page
+                # navigates to the workspace on its own. The redirect URL is the
+                # canonical `/goto/<agent>/` route the real creator populates.
                 with creator._lock:
-                    creator._statuses[str(agent_id)] = AgentCreationStatus.DONE
-                    creator._redirect_urls[str(agent_id)] = f"/agents/{agent_id}/"
+                    creator._statuses[str(creation_id)] = AgentCreationStatus.DONE
+                    creator._canonical_agent_ids[str(creation_id)] = agent_id
+                    creator._redirect_urls[str(creation_id)] = f"/goto/{agent_id}/"
 
                 log_queue.put("[test] Agent created successfully.")
                 log_queue.put(LOG_SENTINEL)
 
-                # Walk the three onboarding questions accepting their
-                # pre-selected defaults; finishing the last one enters the
-                # workspace because creation has already completed.
-                logger.info("Walking onboarding questions...")
-                for question_screen in ("q1", "q2", "q3"):
-                    next_button = f'[data-screen="{question_screen}"] .js-next'
-                    page.wait_for_selector(next_button, state="visible", timeout=5000)
-                    page.click(next_button)
-
-                logger.info("Questions done, waiting for browser redirect...")
+                logger.info("Creation done, waiting for browser redirect...")
 
                 # Wait for the redirect
-                page.wait_for_url(re.compile(r"/agents/"), timeout=10000)
+                page.wait_for_url(re.compile(r"/goto/"), timeout=10000)
                 logger.info("Redirect happened! URL: {}", page.url)
-                assert f"/agents/{agent_id}" in page.url
+                assert f"/goto/{agent_id}" in page.url
 
             finally:
                 browser.close()

@@ -26,24 +26,26 @@ import json
 import threading
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from subprocess import TimeoutExpired
 from typing import Final
 
 from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.concurrency_group.local_process import RunningProcess
 from imbue.imbue_common.mutable_model import MutableModel
-from imbue.mngr.api.discovery_events import AgentDestroyedEvent
+from imbue.mngr.api.discovery_aggregator import DiscoveryStateAggregator
 from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
 from imbue.mngr.api.discovery_events import DiscoveryErrorEvent
-from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
+from imbue.mngr.api.discovery_events import DiscoveryEvent
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
+from imbue.mngr.api.discovery_events import ProviderDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
-from imbue.mngr.api.discovery_events import partition_removed_agents_by_provider_error
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
@@ -60,6 +62,24 @@ class DiscoveryStreamError(LatchkeyError, RuntimeError):
 # path via the ``mngr_binary`` field for environments where ``mngr`` is
 # not on ``PATH``.
 MNGR_BINARY: Final[str] = "mngr"
+
+# Failure modes that bouncing the observe subprocess can surface from the
+# ``ConcurrencyGroup`` -- both tearing the old child down (``terminate``)
+# and spawning the replacement (``run_process_in_background``). Beyond a
+# plain ``OSError`` / ``RuntimeError``, a force-kill that overruns its
+# grace period raises ``TimeoutExpired``, and the group's strand/shutdown
+# checks raise ``ConcurrencyGroupError`` or wrap failures in a
+# ``ConcurrencyExceptionGroup``. A bounce runs on the long-lived SIGHUP
+# watcher thread, so it must treat any of these as "the bounce did not
+# complete" (log and carry on) rather than let an unexpected type escape
+# and kill the watcher, which would silently disable every later refresh.
+_OBSERVE_BOUNCE_ERRORS: Final = (
+    OSError,
+    RuntimeError,
+    TimeoutExpired,
+    ConcurrencyGroupError,
+    ConcurrencyExceptionGroup,
+)
 
 # Callback signatures fired by the consumer for every observe-stream
 # transition that matters to the plugin. Tuples instead of bespoke
@@ -101,14 +121,18 @@ class DiscoveryStreamConsumer(MutableModel):
     _on_agent_discovered_callbacks: list[OnAgentDiscoveredCallback] = PrivateAttr(default_factory=list)
     _on_agent_destroyed_callbacks: list[OnAgentDestroyedCallback] = PrivateAttr(default_factory=list)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
-    # agent_id_str -> host_id_str. Tracked so we can look up the SSH
-    # info of an agent's host as soon as a HostSSHInfoEvent arrives.
-    _host_id_by_agent_id: dict[str, str] = PrivateAttr(default_factory=dict)
+    # Single source of truth for which agents/hosts are present. Folds every
+    # parsed discovery event (per-provider snapshots plus incrementals) into one
+    # span-aware, per-provider-scoped view, and reports the membership delta we
+    # turn into discovered/destroyed callbacks. The agent's host_id and
+    # provider_name are read back from its DiscoveredAgent rather than tracked
+    # separately here.
+    _aggregator: DiscoveryStateAggregator = PrivateAttr(default_factory=DiscoveryStateAggregator)
+    # host_id_str -> SSH info. The aggregator does not retain SSH connection
+    # info, so we keep it here to re-fire the discovery callback (with the SSH
+    # info now available) for every agent on a host when its HostSSHInfoEvent
+    # arrives after the agents were discovered.
     _ssh_by_host_id: dict[str, RemoteSSHInfo] = PrivateAttr(default_factory=dict)
-    # agent_id_str -> provider_name. Cached so we can re-fire the
-    # discovery callback (after a late HostSSHInfoEvent) without losing
-    # the provider name that came with the original AgentDiscoveryEvent.
-    _provider_by_agent_id: dict[str, str] = PrivateAttr(default_factory=dict)
     _process: RunningProcess | None = PrivateAttr(default=None)
 
     def add_on_agent_discovered_callback(self, callback: OnAgentDiscoveredCallback) -> None:
@@ -127,10 +151,18 @@ class DiscoveryStreamConsumer(MutableModel):
         """Spawn the ``mngr observe`` subprocess and begin dispatching events."""
         if self._process is not None:
             raise DiscoveryStreamError("DiscoveryStreamConsumer.start already called")
+        # ``is_checked_by_group=False``: this is a long-running stream that we
+        # stop explicitly via ``.terminate()`` (on bounce and on shutdown),
+        # which delivers SIGTERM and yields a non-zero exit code. Left checked,
+        # that deliberate teardown would surface as a ``ProcessError`` ->
+        # ``ConcurrencyExceptionGroup`` the next time the group inspects its
+        # strands (e.g. the respawn below, or supervisor exit), turning every
+        # intentional bounce into a spurious failure.
         self._process = self.concurrency_group.run_process_in_background(
             command=self._observe_command(),
             on_output=self._on_observe_output,
             cwd=Path.home(),
+            is_checked_by_group=False,
         )
 
     def bounce_observe(self) -> None:
@@ -150,15 +182,19 @@ class DiscoveryStreamConsumer(MutableModel):
         logger.info("Bouncing mngr observe subprocess")
         try:
             self._process.terminate()
-        except (OSError, RuntimeError) as e:
+        except _OBSERVE_BOUNCE_ERRORS as e:
             logger.warning("Failed to terminate observe process during bounce: {}", e)
+        # ``is_checked_by_group=False`` for the same reason as ``start``: the
+        # replacement stream is also stopped explicitly, so its eventual
+        # SIGTERM exit must not be checked.
         try:
             self._process = self.concurrency_group.run_process_in_background(
                 command=self._observe_command(),
                 on_output=self._on_observe_output,
                 cwd=Path.home(),
+                is_checked_by_group=False,
             )
-        except (OSError, RuntimeError) as e:
+        except _OBSERVE_BOUNCE_ERRORS as e:
             logger.warning("Failed to respawn observe process during bounce: {}", e)
             self._process = None
 
@@ -168,7 +204,11 @@ class DiscoveryStreamConsumer(MutableModel):
             return
         try:
             self._process.terminate()
-        except (OSError, RuntimeError) as e:
+        except _OBSERVE_BOUNCE_ERRORS as e:
+            # Same terminate() failure modes as a bounce (notably TimeoutExpired
+            # on a force-kill overrun): swallow them so the rest of the forward
+            # shutdown sequence (tunnel cleanup, gateway stop, forward-info
+            # deletion) still runs instead of being aborted mid-teardown.
             logger.trace("Error terminating observe subprocess: {}", e)
         self._process = None
 
@@ -192,17 +232,34 @@ class DiscoveryStreamConsumer(MutableModel):
             return
         self._handle_discovery_event(event)
 
-    def _handle_discovery_event(self, event: Any) -> None:
-        if isinstance(event, FullDiscoverySnapshotEvent):
-            self._handle_full_snapshot(event)
+    def _handle_discovery_event(self, event: DiscoveryEvent) -> None:
+        # Fold every event into the shared aggregator first; it is the single
+        # source of truth for membership and reports exactly which agents
+        # appeared or disappeared (per-provider scoped, span-aware, and with
+        # provider-error retention all handled internally). We then turn that
+        # delta into destruction callbacks and fire discovery callbacks for the
+        # agents this event carries.
+        delta = self._aggregator.apply_event(event)
+        for aid_str in delta.removed_agent_ids:
+            self._safely_call_destroyed(AgentId(aid_str))
+
+        if isinstance(event, ProviderDiscoverySnapshotEvent):
+            # Fire discovered only for snapshot agents the aggregator actually kept.
+            # It is span-aware: an agent whose own destroy/state-change event landed
+            # during this snapshot's discovery span is deliberately not re-added, so
+            # firing discovered from the raw event.agents would re-establish a reverse
+            # tunnel for an agent the aggregator already considers gone.
+            present_agent_ids = self._aggregator.get_agent_by_id()
+            for agent in event.agents:
+                if str(agent.agent_id) in present_agent_ids:
+                    self._fire_discovered(agent)
+        elif isinstance(event, AgentDiscoveryEvent):
+            self._fire_discovered(event.agent)
         elif isinstance(event, HostSSHInfoEvent):
             self._handle_host_ssh_info(event)
-        elif isinstance(event, AgentDiscoveryEvent):
-            self._handle_agent_discovered(event)
-        elif isinstance(event, AgentDestroyedEvent):
-            self._handle_agent_destroyed(event)
         elif isinstance(event, HostDestroyedEvent):
-            self._handle_host_destroyed(event)
+            with self._lock:
+                self._ssh_by_host_id.pop(str(event.host_id), None)
         elif isinstance(event, DiscoveryErrorEvent):
             logger.warning(
                 "Discovery error from {}: {} ({})",
@@ -211,94 +268,32 @@ class DiscoveryStreamConsumer(MutableModel):
                 event.error_type,
             )
         else:
-            logger.trace("Ignoring discovery event of type {}", type(event).__name__)
-
-    def _handle_full_snapshot(self, event: FullDiscoverySnapshotEvent) -> None:
-        # Snapshots replace the entire known agent set, but only for providers
-        # that succeeded this poll: an agent absent because its provider errored
-        # is retained (its reverse tunnel stays up) rather than torn down. We
-        # fire the destruction callback only for genuinely-dropped agents, then
-        # fire the discovery callback for every agent in the new snapshot.
-        new_agents: dict[str, DiscoveredAgent] = {str(agent.agent_id): agent for agent in event.agents}
-        with self._lock:
-            prior_host_id_by_agent_id = dict(self._host_id_by_agent_id)
-            prior_provider_by_agent_id = dict(self._provider_by_agent_id)
-            removed = prior_host_id_by_agent_id.keys() - new_agents.keys()
-            partition = partition_removed_agents_by_provider_error(
-                removed_agent_ids=removed,
-                provider_name_by_prior_agent_id=prior_provider_by_agent_id,
-                error_by_provider_name=event.error_by_provider_name,
-            )
-            new_host_id_by_agent_id = {aid_str: str(agent.host_id) for aid_str, agent in new_agents.items()}
-            new_provider_by_agent_id = {aid_str: str(agent.provider_name) for aid_str, agent in new_agents.items()}
-            # Carry retained agents forward from prior state so they keep their
-            # host/provider mapping and survive the next snapshot's diff too.
-            for aid_str in partition.retained:
-                new_host_id_by_agent_id[aid_str] = prior_host_id_by_agent_id[aid_str]
-                new_provider_by_agent_id[aid_str] = prior_provider_by_agent_id[aid_str]
-            self._host_id_by_agent_id = new_host_id_by_agent_id
-            self._provider_by_agent_id = new_provider_by_agent_id
-
-        if partition.retained:
-            logger.debug(
-                "Retained {} agent(s) through a provider discovery error; keeping their reverse tunnels: {}",
-                len(partition.retained),
-                sorted(partition.retained),
-            )
-        for aid_str in partition.dropped:
-            self._safely_call_destroyed(AgentId(aid_str))
-
-        for agent in new_agents.values():
-            ssh_info = self._ssh_for_agent(agent.agent_id)
-            self._safely_call_discovered(agent.agent_id, agent.host_id, ssh_info, str(agent.provider_name))
+            # Remaining event types (AgentDestroyedEvent, HostDiscoveryEvent, and
+            # the ignored legacy FullDiscoverySnapshotEvent) need no extra work
+            # here: destruction callbacks were already fired from the delta above,
+            # and these events carry nothing requiring a discovery callback.
+            logger.trace("No discovery callback to fire for event of type {}", type(event).__name__)
 
     def _handle_host_ssh_info(self, event: HostSSHInfoEvent) -> None:
         ssh_info = _convert_ssh_info(event.ssh)
         host_id_str = str(event.host_id)
         with self._lock:
             self._ssh_by_host_id[host_id_str] = ssh_info
-            agents_on_host = [
-                (AgentId(aid_str), self._provider_by_agent_id.get(aid_str, "unknown"))
-                for aid_str, hid_str in self._host_id_by_agent_id.items()
-                if hid_str == host_id_str
-            ]
         # Re-fire the discovery callback for every agent on this host so
-        # ``LatchkeyDiscoveryHandler`` can set up the reverse tunnel
-        # now that SSH info is finally available.
-        for agent_id, provider_name in agents_on_host:
-            self._safely_call_discovered(agent_id, HostId(host_id_str), ssh_info, provider_name)
+        # ``LatchkeyDiscoveryHandler`` can set up the reverse tunnel now that
+        # SSH info is finally available. The aggregator is the authoritative
+        # record of which agents are currently on this host.
+        agents_on_host = [agent for agent in self._aggregator.get_agents() if str(agent.host_id) == host_id_str]
+        for agent in agents_on_host:
+            self._safely_call_discovered(agent.agent_id, agent.host_id, ssh_info, str(agent.provider_name))
 
-    def _handle_agent_discovered(self, event: AgentDiscoveryEvent) -> None:
-        agent = event.agent
-        aid_str = str(agent.agent_id)
-        with self._lock:
-            self._host_id_by_agent_id[aid_str] = str(agent.host_id)
-            self._provider_by_agent_id[aid_str] = str(agent.provider_name)
-        ssh_info = self._ssh_for_agent(agent.agent_id)
+    def _fire_discovered(self, agent: DiscoveredAgent) -> None:
+        ssh_info = self._ssh_for_host(agent.host_id)
         self._safely_call_discovered(agent.agent_id, agent.host_id, ssh_info, str(agent.provider_name))
 
-    def _handle_agent_destroyed(self, event: AgentDestroyedEvent) -> None:
-        self._destroy_agent(event.agent_id)
-
-    def _handle_host_destroyed(self, event: HostDestroyedEvent) -> None:
-        for agent_id in event.agent_ids:
-            self._destroy_agent(agent_id)
+    def _ssh_for_host(self, host_id: HostId) -> RemoteSSHInfo | None:
         with self._lock:
-            self._ssh_by_host_id.pop(str(event.host_id), None)
-
-    def _destroy_agent(self, agent_id: AgentId) -> None:
-        aid_str = str(agent_id)
-        with self._lock:
-            self._host_id_by_agent_id.pop(aid_str, None)
-            self._provider_by_agent_id.pop(aid_str, None)
-        self._safely_call_destroyed(agent_id)
-
-    def _ssh_for_agent(self, agent_id: AgentId) -> RemoteSSHInfo | None:
-        with self._lock:
-            host_id = self._host_id_by_agent_id.get(str(agent_id))
-            if host_id is None:
-                return None
-            return self._ssh_by_host_id.get(host_id)
+            return self._ssh_by_host_id.get(str(host_id))
 
     def _safely_call_discovered(
         self,

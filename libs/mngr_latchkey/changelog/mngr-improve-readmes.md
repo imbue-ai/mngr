@@ -1,1 +1,0 @@
-Reorganized the README: high-level user info (CLI, wiring an agent, settings, logs, permissions overview) is up top, and the deeper detail (the full gateway HTTP-extension reference and the Python embedding API) now lives in a clearly-marked Reference section below.

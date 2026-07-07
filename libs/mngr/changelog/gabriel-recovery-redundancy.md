@@ -1,1 +1,0 @@
-Exposed the discovery polling cadence as a public constant (`DISCOVERY_STREAM_POLL_INTERVAL_SECONDS` in `imbue.mngr.api.discovery_events`, previously a private `_`-prefixed value). Consumers such as minds derive freshness thresholds from it, so deriving the threshold from the cadence keeps the two from silently drifting apart.

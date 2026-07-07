@@ -33,7 +33,17 @@ from typing import Final
 
 import pytest
 
+from imbue.mngr.primitives import AgentId
+from imbue.mngr_latchkey.agent_setup import _AGENT_BASELINE_PERMISSIONS
+from imbue.mngr_latchkey.workspace_permissions import WORKSPACE_VERBS
+
 _NODE_BINARY: Final[str | None] = shutil.which("node")
+
+# A syntactically valid AgentId (``agent-`` + 32 hex chars) used as the request
+# author in tests. The gateway validates agent_id against this exact format (see
+# ``VALID_AGENT_ID_PATTERN`` in permission_requests.mjs), so a body must carry a
+# conforming id or the POST is rejected with 400.
+_VALID_AGENT_ID: Final[str] = "agent-" + "0" * 32
 
 _EXTENSION_PATH: Final[Path] = Path(__file__).resolve().parent / "permission_requests.mjs"
 
@@ -46,6 +56,13 @@ _POLL_INTERVAL_SECONDS: Final[float] = 0.02
 _FILE_SHARING_SCOPE_NAME: Final[str] = "latchkey-self"
 _FILE_SHARING_PROXY_PATH_PREFIX: Final[str] = "/minds-api-proxy/api/v1/files"
 _FILE_SHARING_PERMISSION_PREFIX: Final[str] = "minds-file-server-"
+
+# The cross-workspace verbs also attach to the pre-existing ``latchkey-self``
+# scope (like file-sharing and accounts): the grant rule is keyed here, and no
+# ``minds-workspaces`` scope schema is minted. ``_LEGACY_WORKSPACES_SCOPE_NAME``
+# is the scope an older build used and that must no longer appear on disk.
+_WORKSPACE_GRANT_SCOPE_NAME: Final[str] = "latchkey-self"
+_LEGACY_WORKSPACES_SCOPE_NAME: Final[str] = "minds-workspaces"
 _FILE_SHARING_READ_METHODS: Final[tuple[str, ...]] = (
     "GET",
     "HEAD",
@@ -231,7 +248,7 @@ def test_post_creates_predefined_request_with_target_and_effect(
     status, body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "needs slack",
             "type": "predefined",
             "payload": {"scope": "slack-api", "permissions": ["slack-read-all"]},
@@ -239,7 +256,7 @@ def test_post_creates_predefined_request_with_target_and_effect(
     )
     assert status == 201
     parsed = json.loads(body)
-    assert parsed["agent_id"] == "agent-1"
+    assert parsed["agent_id"] == _VALID_AGENT_ID
     assert parsed["rationale"] == "needs slack"
     # The persisted/streamed shape renames the wire field ``type`` to
     # ``request_type`` to avoid shadowing the Python ``type`` builtin
@@ -270,7 +287,7 @@ def test_post_creates_file_sharing_request_with_schemas_and_rules(
     status, body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "needs to access example data",
             "type": "file-sharing",
             "payload": {"path": target_path, "access": access},
@@ -354,7 +371,7 @@ def test_file_sharing_pattern_matches_percent_encoded_request_path(
     status, body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "needs the shared directory",
             "type": "file-sharing",
             "payload": {"path": target_path, "access": "READ"},
@@ -407,7 +424,7 @@ def test_post_expands_tilde_home_path_in_file_sharing(
     status, body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "wants something in the home directory",
             "type": "file-sharing",
             "payload": {"path": requested_path, "access": "READ"},
@@ -437,7 +454,7 @@ def test_post_rejects_tilde_user_notation_in_file_sharing(
     status, body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "file-sharing",
             "payload": {"path": "~otheruser/secret.txt", "access": "READ"},
@@ -456,7 +473,7 @@ def test_post_rejects_tilde_traversal_in_file_sharing(
     status, body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "file-sharing",
             "payload": {"path": "~/../etc/passwd", "access": "READ"},
@@ -474,7 +491,7 @@ def test_approve_with_tilde_path_override_expands_home(
     create_status, create_body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "needs a file",
             "type": "file-sharing",
             "payload": {"path": "/home/example/requested.txt", "access": "READ"},
@@ -508,7 +525,7 @@ def test_read_and_write_grants_for_same_path_coexist_in_persisted_record(
     read_status, read_body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "r",
             "type": "file-sharing",
             "payload": {"path": target_path, "access": "READ"},
@@ -517,7 +534,7 @@ def test_read_and_write_grants_for_same_path_coexist_in_persisted_record(
     write_status, write_body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "w",
             "type": "file-sharing",
             "payload": {"path": target_path, "access": "WRITE"},
@@ -551,7 +568,7 @@ def test_post_rejects_missing_or_invalid_access_in_file_sharing(
     status, body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "file-sharing",
             "payload": missing_or_invalid_payload,
@@ -566,7 +583,7 @@ def test_post_rejects_unknown_type(node_extension: tuple[str, Path, Path]) -> No
     status, body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "wholesale",
             "payload": {},
@@ -576,12 +593,481 @@ def test_post_rejects_unknown_type(node_extension: tuple[str, Path, Path]) -> No
     assert "type" in json.loads(body)["error"]
 
 
+# -- POST /permission-requests: accounts type --
+
+
+def test_post_creates_accounts_request_with_fixed_permission_under_latchkey_self(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    base_url, _latchkey_directory, _permissions_config_path = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "needs to discover an account to associate",
+            "type": "accounts",
+            "payload": {},
+        },
+    )
+    assert status == 201
+    parsed = json.loads(body)
+    assert parsed["request_type"] == "accounts"
+    assert parsed["payload"] == {}
+    effect = parsed["effect"]
+    # A single fixed permission under the pre-existing ``latchkey-self`` scope --
+    # no new scope is minted (mirrors file-sharing).
+    assert effect["rules"] == [{"latchkey-self": ["minds-accounts-read"]}]
+    schema = effect["schemas"]["minds-accounts-read"]
+    assert schema["properties"]["method"] == {"const": "GET"}
+    assert schema["properties"]["path"]["pattern"] == r"^/minds-api-proxy/api/v1/accounts(/|$)"
+
+
+def test_post_rejects_accounts_payload_with_fields(node_extension: tuple[str, Path, Path]) -> None:
+    base_url, *_ = node_extension
+    status, _body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "x",
+            "type": "accounts",
+            "payload": {"permissions": ["minds-accounts-read"]},
+        },
+    )
+    assert status == 400
+
+
+# -- POST /permission-requests: workspace type --
+
+
+def test_post_creates_workspace_request_with_target_and_effect(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    base_url, latchkey_directory, permissions_config_path = node_extension
+    target_id = str(AgentId.generate())
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "needs to destroy a sibling workspace",
+            "type": "workspace",
+            "payload": {
+                "permissions": ["minds-workspaces-destroy"],
+                "target_workspace_id": target_id,
+            },
+        },
+    )
+    assert status == 201, body
+    parsed = json.loads(body)
+    assert parsed["request_type"] == "workspace"
+    assert parsed["payload"] == {
+        "permissions": ["minds-workspaces-destroy"],
+        "target_workspace_id": target_id,
+    }
+    assert parsed["target"] == str(permissions_config_path)
+    # The effect is a self-contained patch (a uniquely-named per-target verb
+    # schema + a grant rule attaching it to the ``latchkey-self`` scope), applied
+    # via /approve like file-sharing -- not an informational rules-only stub. No
+    # ``minds-workspaces`` scope schema is minted.
+    effect = parsed["effect"]
+    per_target_name = f"minds-workspaces-destroy-{target_id}"
+    assert effect["rules"] == [{_WORKSPACE_GRANT_SCOPE_NAME: [per_target_name]}]
+    assert set(effect["schemas"].keys()) == {per_target_name}
+    # The per-target schema pins the single target's destroy path.
+    perm_schema = effect["schemas"][per_target_name]
+    assert perm_schema["properties"]["method"] == {"const": "POST"}
+    path_pattern = re.compile(perm_schema["properties"]["path"]["pattern"])
+    prefix = "/minds-api-proxy/api/v1/workspaces"
+    assert path_pattern.fullmatch(f"{prefix}/{target_id}/destroy")
+    # A different workspace id is not covered by the single-target grant.
+    other_id = str(AgentId.generate())
+    assert not path_pattern.fullmatch(f"{prefix}/{other_id}/destroy")
+    stored = next((latchkey_directory / "permission_requests" / "v2").iterdir())
+    assert json.loads(stored.read_text()) == parsed
+
+
+def test_post_creates_workspace_request_all_workspaces_uses_wildcard(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    base_url, *_ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "needs ssh to any workspace",
+            "type": "workspace",
+            "payload": {"permissions": ["minds-workspaces-ssh"], "target_workspace_id": None},
+        },
+    )
+    assert status == 201, body
+    effect = json.loads(body)["effect"]
+    # With no target, the targeted verb is keyed by the plain verb name and its
+    # path uses the ``[^/]+`` id wildcard (an "all workspaces" grant).
+    assert effect["rules"] == [{_WORKSPACE_GRANT_SCOPE_NAME: ["minds-workspaces-ssh"]}]
+    ssh_schema = effect["schemas"]["minds-workspaces-ssh"]
+    path_pattern = re.compile(ssh_schema["properties"]["path"]["pattern"])
+    prefix = "/minds-api-proxy/api/v1/workspaces"
+    assert path_pattern.fullmatch(f"{prefix}/{AgentId.generate()}/ssh")
+    assert path_pattern.fullmatch(f"{prefix}/{AgentId.generate()}/ssh")
+
+
+def test_post_creates_workspace_request_multi_method_verb(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    # A verb whose catalog ``method`` is an array (here ``minds-workspaces-recover``
+    # matches GET + POST) produces a schema whose ``method`` is an ``enum`` of all
+    # its methods, and whose targeted path pattern includes the verb's suffix.
+    base_url, *_ = node_extension
+    target_id = str(AgentId.generate())
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "needs to recover a sibling workspace",
+            "type": "workspace",
+            "payload": {
+                "permissions": ["minds-workspaces-recover"],
+                "target_workspace_id": target_id,
+            },
+        },
+    )
+    assert status == 201, body
+    effect = json.loads(body)["effect"]
+    per_target_name = f"minds-workspaces-recover-{target_id}"
+    perm_schema = effect["schemas"][per_target_name]
+    # Multi-method verb -> enum of every method (order-independent).
+    assert perm_schema["properties"]["method"] == {"enum": ["GET", "POST"]}
+    path_pattern = re.compile(perm_schema["properties"]["path"]["pattern"])
+    prefix = "/minds-api-proxy/api/v1/workspaces"
+    # The suffix admits both the health and restart sub-paths for this target.
+    assert path_pattern.fullmatch(f"{prefix}/{target_id}/health")
+    assert path_pattern.fullmatch(f"{prefix}/{target_id}/restart")
+    # A different workspace id is not covered by the single-target grant.
+    assert not path_pattern.fullmatch(f"{prefix}/{AgentId.generate()}/health")
+
+
+def test_approve_workspace_override_recomputes_and_accumulates(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    """Approving a workspace request with an override splices the recomputed effect.
+
+    Two successive approvals for different targets accumulate as distinct,
+    uniquely-named per-target schemas through the gateway's schema-by-name merge.
+    """
+    base_url, _latchkey_directory, permissions_config_path = node_extension
+    target_a = str(AgentId.generate())
+    target_b = str(AgentId.generate())
+
+    for target in (target_a, target_b):
+        status, body = _post_json(
+            f"{base_url}/permission-requests",
+            {
+                "agent_id": _VALID_AGENT_ID,
+                "rationale": "destroy a sibling",
+                "type": "workspace",
+                "payload": {"permissions": ["minds-workspaces-destroy"], "target_workspace_id": target},
+            },
+        )
+        assert status == 201, body
+        request_id = json.loads(body)["request_id"]
+        # Approve with an override echoing the request's verbs + selected target.
+        status, approve_body = _http(
+            f"{base_url}/permission-requests/approve/{request_id}",
+            method="POST",
+            headers={"Content-Type": "application/json"},
+            body=json.dumps({"permissions": ["minds-workspaces-destroy"], "target_workspace_id": target}).encode(
+                "utf-8"
+            ),
+        )[0:3:2]
+        assert status == 200, approve_body
+
+    applied = json.loads(permissions_config_path.read_text())
+    # Both targets accumulated as distinct per-target schemas, both referenced
+    # by the single minds-workspaces rule.
+    name_a = f"minds-workspaces-destroy-{target_a}"
+    name_b = f"minds-workspaces-destroy-{target_b}"
+    assert name_a in applied["schemas"]
+    assert name_b in applied["schemas"]
+    rule = next(r for r in applied["rules"] if list(r.keys()) == [_WORKSPACE_GRANT_SCOPE_NAME])
+    assert name_a in rule[_WORKSPACE_GRANT_SCOPE_NAME]
+    assert name_b in rule[_WORKSPACE_GRANT_SCOPE_NAME]
+
+
+def test_approve_workspace_all_override_grants_broadly(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    """An ``all`` override (null target) grants the broad verb schema."""
+    base_url, _latchkey_directory, permissions_config_path = node_extension
+    target = str(AgentId.generate())
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "destroy a sibling",
+            "type": "workspace",
+            "payload": {"permissions": ["minds-workspaces-destroy"], "target_workspace_id": target},
+        },
+    )
+    assert status == 201, body
+    request_id = json.loads(body)["request_id"]
+    status = _http(
+        f"{base_url}/permission-requests/approve/{request_id}",
+        method="POST",
+        headers={"Content-Type": "application/json"},
+        body=json.dumps({"permissions": ["minds-workspaces-destroy"], "target_workspace_id": None}).encode("utf-8"),
+    )[0]
+    assert status == 200
+    applied = json.loads(permissions_config_path.read_text())
+    # The broad (all-workspaces) schema is keyed by the plain verb name.
+    assert "minds-workspaces-destroy" in applied["schemas"]
+    assert f"minds-workspaces-destroy-{target}" not in applied["schemas"]
+
+
+def test_approve_workspace_grant_folds_into_latchkey_self_on_real_baseline(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    """A workspace grant approved on top of the real agent baseline lands on ``latchkey-self``.
+
+    The verbs attach as permissions on the single domain-only ``latchkey-self``
+    scope the baseline already declares (like file-sharing and accounts), so no
+    second gateway-self rule and no ``minds-workspaces`` scope schema appear.
+    Because there is only ever one gateway-self rule, detent's
+    first-matching-scope-wins evaluation reaches the grant regardless of order.
+
+    Unlike the other approve tests, this one seeds the target file with the real
+    baseline first, so the fold onto the pre-existing ``latchkey-self`` rule is
+    exercised (the others start empty).
+    """
+    base_url, _latchkey_directory, permissions_config_path = node_extension
+    # Seed the exact per-host baseline a live host has: the per-agent gate followed
+    # by the domain-only ``latchkey-self`` rule.
+    permissions_config_path.write_text(json.dumps(_AGENT_BASELINE_PERMISSIONS.model_dump()))
+
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "manage sibling workspaces",
+            "type": "workspace",
+            "payload": {
+                "permissions": ["minds-workspaces-read", "minds-workspaces-create"],
+                "target_workspace_id": None,
+            },
+        },
+    )
+    assert status == 201, body
+    request_id = json.loads(body)["request_id"]
+    status, approve_body = _http(
+        f"{base_url}/permission-requests/approve/{request_id}",
+        method="POST",
+        headers={"Content-Type": "application/json"},
+        body=json.dumps(
+            {"permissions": ["minds-workspaces-read", "minds-workspaces-create"], "target_workspace_id": None}
+        ).encode("utf-8"),
+    )[0:3:2]
+    assert status == 200, approve_body
+
+    applied = json.loads(permissions_config_path.read_text())
+    rule_keys = [next(iter(rule.keys())) for rule in applied["rules"]]
+    # The grant folds onto the single ``latchkey-self`` rule: no ``minds-workspaces``
+    # rule, and no duplicate gateway-self rule was introduced.
+    assert _LEGACY_WORKSPACES_SCOPE_NAME not in rule_keys
+    assert rule_keys.count(_WORKSPACE_GRANT_SCOPE_NAME) == 1
+    latchkey_self_rule = next(rule for rule in applied["rules"] if _WORKSPACE_GRANT_SCOPE_NAME in rule)
+    granted = latchkey_self_rule[_WORKSPACE_GRANT_SCOPE_NAME]
+    assert {"minds-workspaces-read", "minds-workspaces-create"}.issubset(set(granted))
+    # No ``minds-workspaces`` scope schema is emitted.
+    assert _LEGACY_WORKSPACES_SCOPE_NAME not in applied["schemas"]
+
+
+def test_approve_workspace_rejects_unknown_verb_in_override(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    base_url, *_ = node_extension
+    target = str(AgentId.generate())
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "destroy a sibling",
+            "type": "workspace",
+            "payload": {"permissions": ["minds-workspaces-destroy"], "target_workspace_id": target},
+        },
+    )
+    request_id = json.loads(body)["request_id"]
+    status, approve_body = _http(
+        f"{base_url}/permission-requests/approve/{request_id}",
+        method="POST",
+        headers={"Content-Type": "application/json"},
+        body=json.dumps({"permissions": ["minds-workspaces-teleport"]}).encode("utf-8"),
+    )[0:3:2]
+    assert status == 400
+    assert "permissions" in json.loads(approve_body)["error"]
+
+
+def test_post_creates_workspace_request_without_target(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    base_url, *_ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "needs to create + list workspaces",
+            "type": "workspace",
+            "payload": {"permissions": ["minds-workspaces-read", "minds-workspaces-create"]},
+        },
+    )
+    assert status == 201, body
+    parsed = json.loads(body)
+    # An omitted target normalizes to null in the persisted payload.
+    assert parsed["payload"]["target_workspace_id"] is None
+    assert parsed["payload"]["permissions"] == ["minds-workspaces-read", "minds-workspaces-create"]
+
+
+def test_post_accepts_all_python_workspace_verbs(node_extension: tuple[str, Path, Path]) -> None:
+    # Cross-language drift guard: every verb the Python
+    # ``workspace_permissions`` source of truth defines must be accepted by the
+    # gateway's hard-coded ``VALID_WORKSPACE_VERBS`` set.
+    base_url, *_ = node_extension
+    python_verbs = [verb.permission for verb in WORKSPACE_VERBS]
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "all verbs",
+            "type": "workspace",
+            "payload": {"permissions": python_verbs},
+        },
+    )
+    assert status == 201, body
+
+
+def test_post_rejects_unknown_workspace_verb(node_extension: tuple[str, Path, Path]) -> None:
+    base_url, *_ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "x",
+            "type": "workspace",
+            "payload": {"permissions": ["minds-workspaces-teleport"]},
+        },
+    )
+    assert status == 400
+    assert "permissions" in json.loads(body)["error"]
+
+
+def test_post_rejects_empty_workspace_permissions(node_extension: tuple[str, Path, Path]) -> None:
+    base_url, *_ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "x",
+            "type": "workspace",
+            "payload": {"permissions": []},
+        },
+    )
+    assert status == 400
+    assert "permissions" in json.loads(body)["error"]
+
+
+def test_post_rejects_invalid_workspace_target_id(node_extension: tuple[str, Path, Path]) -> None:
+    base_url, *_ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "x",
+            "type": "workspace",
+            "payload": {
+                "permissions": ["minds-workspaces-destroy"],
+                "target_workspace_id": "not-an-agent-id",
+            },
+        },
+    )
+    assert status == 400
+    assert "target_workspace_id" in json.loads(body)["error"]
+
+
+def test_post_rejects_extraneous_workspace_payload_field(node_extension: tuple[str, Path, Path]) -> None:
+    base_url, *_ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "x",
+            "type": "workspace",
+            "payload": {"permissions": ["minds-workspaces-read"], "bonus": 1},
+        },
+    )
+    assert status == 400
+    assert "bonus" in json.loads(body)["error"]
+
+
+@pytest.mark.parametrize(
+    "malformed_agent_id",
+    [
+        pytest.param("ENV_AGENT", id="placeholder-from-crash-report"),
+        pytest.param("agent-1", id="right-prefix-wrong-length"),
+        pytest.param("agent-" + "g" * 32, id="non-hex-characters"),
+        pytest.param("agent-" + "0" * 31, id="one-char-too-short"),
+        pytest.param("agent-" + "0" * 33, id="one-char-too-long"),
+        pytest.param("0" * 32, id="missing-agent-prefix"),
+    ],
+)
+def test_post_rejects_malformed_agent_id(
+    node_extension: tuple[str, Path, Path],
+    malformed_agent_id: str,
+) -> None:
+    # A malformed agent_id is rejected at the gateway with a 400 -- so the agent
+    # is notified at its tool call -- and is never persisted. Otherwise the
+    # consumer's ``AgentId(...)`` parse would raise later and kill the
+    # permission-requests consumer thread.
+    base_url, latchkey_directory, _permissions_config_path = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": malformed_agent_id,
+            "rationale": "x",
+            "type": "predefined",
+            "payload": {"scope": "slack-api", "permissions": ["slack-read-all"]},
+        },
+    )
+    assert status == 400, body
+    assert "agent_id" in json.loads(body)["error"]
+    persisted_dir = latchkey_directory / "permission_requests" / "v2"
+    persisted = list(persisted_dir.iterdir()) if persisted_dir.exists() else []
+    assert persisted == [], f"a rejected request must not be persisted, found {persisted}"
+
+
+def test_post_accepts_generated_agent_id(node_extension: tuple[str, Path, Path]) -> None:
+    # Cross-language drift guard: a real id minted by the Python ``AgentId``
+    # source of truth must satisfy the gateway's JS ``VALID_AGENT_ID_PATTERN``.
+    # If the two ever diverge, this 201 assertion fails.
+    base_url, _latchkey_directory, _permissions_config_path = node_extension
+    generated_agent_id = AgentId.generate()
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": generated_agent_id,
+            "rationale": "x",
+            "type": "predefined",
+            "payload": {"scope": "slack-api", "permissions": ["slack-read-all"]},
+        },
+    )
+    assert status == 201, body
+    parsed = json.loads(body)
+    # The persisted agent_id round-trips back through the Python validator.
+    assert AgentId(parsed["agent_id"]) == generated_agent_id
+
+
 def test_post_rejects_relative_path_in_file_sharing(node_extension: tuple[str, Path, Path]) -> None:
     base_url, *_ = node_extension
     status, body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "file-sharing",
             "payload": {"path": "relative/path.txt"},
@@ -603,7 +1089,7 @@ def test_post_rejects_traversal_in_file_sharing(node_extension: tuple[str, Path,
         status, body = _post_json(
             f"{base_url}/permission-requests",
             {
-                "agent_id": "agent-1",
+                "agent_id": _VALID_AGENT_ID,
                 "rationale": "x",
                 "type": "file-sharing",
                 "payload": {"path": traversal_path},
@@ -620,7 +1106,7 @@ def test_post_rejects_path_outside_mount_roots(node_extension: tuple[str, Path, 
     status, body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "wants a system file",
             "type": "file-sharing",
             "payload": {"path": "/etc/passwd", "access": "READ"},
@@ -640,7 +1126,7 @@ def test_post_accepts_path_under_temp_root(node_extension: tuple[str, Path, Path
     status, body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "share a scratch file",
             "type": "file-sharing",
             "payload": {"path": "/tmp/scratch/output.txt", "access": "WRITE"},
@@ -654,7 +1140,7 @@ def test_post_rejects_extraneous_top_level_field(node_extension: tuple[str, Path
     status, body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "predefined",
             "payload": {"scope": "slack-api", "permissions": ["slack-read-all"]},
@@ -671,7 +1157,7 @@ def test_post_rejects_unknown_scope_in_predefined(node_extension: tuple[str, Pat
     status, body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "predefined",
             "payload": {"scope": "made-up-api", "permissions": ["slack-read-all"]},
@@ -689,7 +1175,7 @@ def test_post_rejects_unknown_permission_in_predefined(node_extension: tuple[str
     status, body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "predefined",
             "payload": {"scope": "slack-api", "permissions": ["slack-read-all", "made-up-perm"]},
@@ -713,7 +1199,7 @@ def test_post_accepts_any_permission_for_known_scope(node_extension: tuple[str, 
     status, body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "predefined",
             "payload": {"scope": scope, "permissions": ["any"]},
@@ -731,7 +1217,7 @@ def test_post_rejects_permission_from_a_different_scope(node_extension: tuple[st
     status, body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "predefined",
             "payload": {"scope": "slack-api", "permissions": ["github-read-all"]},
@@ -747,7 +1233,7 @@ def test_post_rejects_extraneous_payload_field(node_extension: tuple[str, Path, 
     status, body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "file-sharing",
             "payload": {"path": "/tmp/ok.txt", "access": "READ", "extra": "no"},
@@ -764,13 +1250,13 @@ def test_get_returns_all_pending_requests(node_extension: tuple[str, Path, Path]
     base_url, *_ = node_extension
     payloads = [
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "predefined",
             "payload": {"scope": "slack-api", "permissions": ["slack-read-all"]},
         },
         {
-            "agent_id": "agent-2",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "y",
             "type": "file-sharing",
             "payload": {"path": "/tmp/visible.txt", "access": "READ"},
@@ -799,7 +1285,7 @@ def test_approve_writes_target_permissions_for_file_sharing(
     create_status, create_body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "needs to read example data",
             "type": "file-sharing",
             "payload": {"path": target_path, "access": "READ"},
@@ -839,7 +1325,7 @@ def test_approve_merges_predefined_into_existing_rules(
     create_status, create_body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "wants more slack",
             "type": "predefined",
             "payload": {"scope": "slack-api", "permissions": ["slack-write-all"]},
@@ -861,7 +1347,7 @@ def test_approve_creates_target_when_missing(node_extension: tuple[str, Path, Pa
     create_status, create_body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "predefined",
             "payload": {"scope": "slack-api", "permissions": ["slack-read-all"]},
@@ -904,7 +1390,7 @@ def test_approve_preserves_symlink_at_target_path(
     create_status, create_body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "predefined",
             "payload": {"scope": "slack-api", "permissions": ["slack-read-all"]},
@@ -946,7 +1432,7 @@ def test_approve_with_path_override_recomputes_file_sharing_effect(
     create_status, create_body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "needs a file",
             "type": "file-sharing",
             "payload": {"path": requested_path, "access": "READ"},
@@ -982,7 +1468,7 @@ def test_approve_with_path_override_preserves_requested_access_mode(
     create_status, create_body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "needs to write",
             "type": "file-sharing",
             "payload": {"path": "/home/example/orig", "access": "WRITE"},
@@ -1011,7 +1497,7 @@ def test_approve_rejects_path_override_for_predefined_request(
     create_status, create_body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "predefined",
             "payload": {"scope": "slack-api", "permissions": ["slack-read-all"]},
@@ -1037,7 +1523,7 @@ def test_approve_rejects_traversal_in_path_override(
     create_status, create_body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "file-sharing",
             "payload": {"path": "/home/example/ok.txt", "access": "READ"},
@@ -1061,7 +1547,7 @@ def test_approve_rejects_path_override_outside_mount_roots(
     create_status, create_body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "file-sharing",
             "payload": {"path": "/home/example/ok.txt", "access": "READ"},
@@ -1087,7 +1573,7 @@ def test_approve_rejects_extraneous_field_in_override_body(
     create_status, create_body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "file-sharing",
             "payload": {"path": "/home/example/ok.txt", "access": "READ"},
@@ -1108,7 +1594,7 @@ def test_delete_removes_pending_request(node_extension: tuple[str, Path, Path]) 
     create_status, create_body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "file-sharing",
             "payload": {"path": "/tmp/data.txt", "access": "WRITE"},

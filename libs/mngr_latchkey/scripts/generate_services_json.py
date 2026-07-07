@@ -294,10 +294,11 @@ def build_services_catalog(builtin_schemas_directory: Path) -> dict[str, list[di
 
     # Emit services in curated order, serializing each entry to a plain dict.
     ordered_service_names = sorted(entries_by_service_name, key=_service_sort_key)
-    return {
+    catalog: dict[str, list[dict[str, object]]] = {
         service_name: [entry.model_dump() for entry in entries_by_service_name[service_name]]
         for service_name in ordered_service_names
     }
+    return catalog
 
 
 def _write_catalog(catalog: Mapping[str, object], output_path: Path) -> None:

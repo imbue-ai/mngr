@@ -377,6 +377,27 @@ html {
 }
 
 /*
+ * Custom tooltip bubble -- shared appearance for the two render backends in
+ * static/tooltip_triggers.js: the overlay surface (static/overlay.js, used by
+ * the chrome titlebar + the modal pages) and the in-page fallback that
+ * first-party content-view pages (e.g. the workspace-row buttons in
+ * Landing.jinja) render themselves, because that view has no ``window.minds``
+ * bridge. Both build the bubble in JS, so this is the "shared across files"
+ * case that gets a named ``@apply`` class (see README) instead of an inline
+ * utility string -- one definition keeps the two backends visually identical.
+ * Layout that differs per backend (position / left / top / z-index) is set in
+ * JS; this class is appearance only. ``type-helper`` is the 12px/1.4 hints
+ * role and ``shadow-overlay`` the menus/modals/tooltips elevation; the
+ * max-width + whitespace/pointer-events keep it a compact, non-interactive
+ * label. The max-width is generous enough that short button labels (e.g.
+ * "Open in new window") stay on one line; ``text-center`` centers the lines
+ * when a longer label does wrap.
+ */
+.minds-tooltip {
+  @apply inline-flex items-center gap-1.5 max-w-[400px] py-1 px-2 rounded-md bg-surface-inverse text-inverse-primary type-helper shadow-overlay whitespace-normal text-center pointer-events-none;
+}
+
+/*
  * Inline ``<code>`` pill: light-gray rounded chip for service names,
  * file paths, etc. inline inside prose. The pill style is used by
  * Sharing.jinja's heading + sharing.js (which rebuilds that heading
@@ -391,61 +412,6 @@ html {
   padding: 0.125rem 0.375rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.95em;
-}
-
-/*
- * Onboarding option cards (creating-page question flow). Selection state
- * and the editable-textarea reveal are driven by the `.opt-selected` class
- * (toggled by static/creating.js); kept here rather than as Tailwind
- * utilities because they depend on parent-state selectors.
- */
-.opt {
-  display: flex;
-  gap: 12px;
-  padding: 12px;
-  border: 1px solid var(--c-border-subtle);
-  border-radius: var(--radius-lg);
-  cursor: pointer;
-  background: var(--c-fill-subtle);
-}
-.opt:hover {
-  border-color: var(--c-border-strong);
-}
-.opt-selected {
-  border-color: var(--c-accent);
-  background: rgb(from var(--c-accent) r g b / 0.06);
-}
-.opt-radio {
-  flex: 0 0 auto;
-  width: 17px;
-  height: 17px;
-  border-radius: 50%;
-  border: 1.5px solid var(--c-border-strong);
-  margin-top: 2px;
-  position: relative;
-}
-.opt-selected .opt-radio {
-  border-color: var(--c-accent);
-}
-.opt-selected .opt-radio::after {
-  content: '';
-  position: absolute;
-  inset: 3.5px;
-  border-radius: 50%;
-  background: var(--c-accent);
-}
-.opt-body {
-  flex: 1;
-  min-width: 0;
-}
-.opt-edit {
-  display: none;
-}
-.opt-editable.opt-selected .opt-desc {
-  display: none;
-}
-.opt-editable.opt-selected .opt-edit {
-  display: block;
 }
 
 .spinner {

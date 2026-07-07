@@ -56,7 +56,21 @@ def test_prevent_bare_except() -> None:
 
 
 def test_prevent_broad_exception_catch() -> None:
-    rc.check_broad_exception_catch(_DIR, snapshot(0))
+    # One catch is the top-level error boundary in ``_forward_command``: a long-running daemon's
+    # unhandled exception must be logged through loguru (so the Sentry report carries the daemon's
+    # logs + traceback, rather than being captured attachment-less by the SDK excepthook) and then
+    # re-raised so the CLI still exits non-zero. It deliberately catches ``Exception`` because any
+    # unexpected fault should be reported; it does not swallow (it re-raises).
+    #
+    # Another instance is the SIGHUP bounce watcher in ``cli.py``
+    # (``_run_sighup_bounce_watcher``). It is a long-lived daemon thread that
+    # must survive *any* single bounce's failure: an uncaught exception there
+    # kills the thread and silently turns every later provider refresh into a
+    # no-op for the supervisor's whole life. ``bounce_observe`` already catches
+    # the specific concurrency-group teardown/respawn errors it expects; the
+    # broad catch here is the deliberate last-resort safety net for a daemon
+    # loop, exactly the case where crashing is worse than continuing.
+    rc.check_broad_exception_catch(_DIR, snapshot(2))
 
 
 def test_prevent_base_exception_catch() -> None:
@@ -127,6 +141,10 @@ def test_prevent_functools_partial() -> None:
 
 def test_prevent_exit_stack() -> None:
     rc.check_exit_stack(_DIR, snapshot(0))
+
+
+def test_prevent_async_await() -> None:
+    rc.check_async_await(_DIR, snapshot(3))
 
 
 # --- Hardcoded paths ---

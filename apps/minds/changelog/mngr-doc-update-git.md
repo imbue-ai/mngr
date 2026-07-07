@@ -1,3 +1,0 @@
-Added `apps/minds/docs/vendor-mngr-sync.md` as the single source of truth for how FCT's `vendor/mngr` is synced: the two mechanisms (`git archive` for reproducible, committed release snapshots; `rsync` for working-tree dev iteration and pool bakes), the shared rsync form and where its exclude constants live (`pool_bake.py`), the three paths that populate `vendor/mngr` from the monorepo, and a note that `vendor/mngr` and `vendor/tk` are plain snapshots -- not git subtrees or submodules.
-
-Pointed `release.md` (the vendor-refresh step) and `host-pool-setup.md` (the `--mngr-source` bake rsync) at the new doc instead of partially re-explaining the mechanisms in place.

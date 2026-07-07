@@ -142,10 +142,18 @@ test-offload-minds-snapshot snapshot_image_id args="":
     fi
     just _generate-dockerignore
     trap "rm -f .dockerignore" EXIT
+    # Forward the Anthropic key (for the suite's live checks) into the offload
+    # sandbox when present. Its value is masked in CI logs by the Vault
+    # use-vault-secrets action even though offload --trace echoes args.
+    EXTRA_ENV_ARGS=()
+    if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+        EXTRA_ENV_ARGS+=(--env "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}")
+    fi
     offload -c offload-modal-minds-snapshot.toml run --trace \
         --override-image-id "{{snapshot_image_id}}" \
         --env "GITHUB_HEAD_REF=${GITHUB_HEAD_REF:-}" \
-        --env "GITHUB_REF_NAME=${GITHUB_REF_NAME:-}" {{args}} || [[ $? -eq 2 ]]
+        --env "GITHUB_REF_NAME=${GITHUB_REF_NAME:-}" \
+        ${EXTRA_ENV_ARGS[@]+"${EXTRA_ENV_ARGS[@]}"} {{args}} || [[ $? -eq 2 ]]
 
     # Copy results to the main worktree so new worktrees inherit baselines via COPY mode.
     MAIN_WORKTREE=$(git worktree list --porcelain | head -1 | sed 's/^worktree //')
@@ -239,18 +247,46 @@ minds-test-deployment-only *tests:
   uv run python apps/minds/scripts/test_deployments.py deployment-only {{tests}}
 
 # End-to-end acceptance test that drives the real Electron minds app to create
-# a local Docker workspace from forever-claude-template. Wraps the invocation
-# with `xvfb-run` so it works on headless Linux CI runners. macOS users with
-# a real display can run the underlying pytest directly without xvfb-run.
-# Requires apps/minds/node_modules/ to be installed (`cd apps/minds && pnpm install`).
-minds-test-electron *args:
-  xvfb-run -a uv run pytest apps/minds/test_desktop_client_e2e.py::test_create_local_docker_workspace_via_electron -v --no-cov --cov-fail-under=0 {{args}}
+# a local Docker workspace from forever-claude-template using the manual
+# `api_key` AI provider, then sends a chat message and asserts the agent replies.
+# Wraps the invocation with `xvfb-run` so it works on headless Linux. macOS users
+# with a real display can run the underlying pytest directly without xvfb-run.
+# Requires apps/minds/node_modules/ (`cd apps/minds && pnpm install`) and a real
+# ANTHROPIC_API_KEY exported (the api_key path calls the official Anthropic API;
+# the test skips without it). Depends on `minds-css` because the test launches
+# `electron main.js` directly (not via `pnpm start`), so nothing else compiles
+# the gitignored stylesheet. The test lives in the snapshot-resume suite (it
+# runs in CI in the snapshot offload stage, reusing that image's warm Electron
+# toolchain) but creates its own fresh workspace, so it runs fine locally too.
+# The test itself only consumes the FCT worktree (erroring if absent), so this
+# recipe first materializes it (paired FCT branch + vendored mngr) unless an
+# operator worktree is already present, mirroring the CI snapshot bake.
+minds-test-electron *args: minds-css
+  uv run python -c 'from imbue.minds.desktop_client.fct_worktree import materialize_paired_fct_worktree; materialize_paired_fct_worktree()'
+  xvfb-run -a uv run pytest apps/minds/test_snapshot_resume.py::test_create_apikey_workspace_and_chat_via_electron -v --no-cov --cov-fail-under=0 {{args}}
+
+# Drive the FULL Electron workspace lifecycle end-to-end (create local Docker
+# workspace -> send a chat message + await reply -> open a terminal -> navigate
+# home -> destroy via the v1 settings flow), wrapped in `xvfb-run` for headless
+# Linux. Unlike `minds-test-electron` (create-only pytest acceptance test), this
+# is an operator/debug harness: it needs Docker + live AI creds, so activate an
+# env with a logged-in account first, e.g.
+#   eval "$(uv run minds env activate dev-josh-1)"
+# It also needs the FCT external worktree's vendor/mngr synced to this checkout
+# (otherwise the initial chat agent fails to create on settings the vendored mngr
+# doesn't recognize, and the chat step hangs on "Waiting for initial chat
+# agent..."); run `just sync-vendor-mngr .external_worktrees/forever-claude-template`
+# first (the minds-dev-workflow does this on every startup).
+# Screenshots of each step land in /tmp/minds-electron-flow/.
+minds-test-electron-flow *args: minds-css
+  xvfb-run -a uv run --package minds python apps/minds/scripts/electron_full_flow_e2e.py {{args}}
 
 # Compile the minds desktop client's Tailwind v4 stylesheet
 # (static/app.css -> static/app.min.css, minified + tree-shaken) via the
-# pinned @tailwindcss/cli. Runs automatically as a pnpm `postinstall` hook
-# and is watched live by `just minds-start`, so normally you do not need to
-# invoke this recipe -- use it after nuking static/ or to force a rebuild.
+# pinned @tailwindcss/cli. `just minds-start` rebuilds + watches it live (its
+# `prestart` hook builds it once, then `watch:css` keeps it fresh), and
+# packaged builds compile it in scripts/build.js, so normally you do not need
+# to invoke this recipe -- use it after nuking static/ or to force a rebuild.
 minds-css:
   bash -c '. apps/minds/scripts/select_node_version.sh && cd apps/minds && pnpm run build:css'
 
@@ -281,6 +317,9 @@ sync-vendor-mngr fct="":
         echo "Error: $fct/vendor/mngr not found"
         exit 1
     fi
+    # Resolve to an absolute path: the recipe `cd`s into $fct/vendor/mngr and
+    # later back to $fct, so a relative arg would break the second cd.
+    fct="$(cd "$fct" && pwd)"
     if [ -n "$(git -C "$fct" status --porcelain)" ]; then
         echo "Error: $fct has uncommitted changes; resolve them first:"
         git -C "$fct" status --short
@@ -325,14 +364,17 @@ deploy *args:
 # Start the minds desktop client (electron) in dev mode against the
 # activated env. Sources .env if present, scrubs any ambient
 # ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL (see below), and sets
-# MINDS_WORKSPACE_* env vars so the create-form auto-fills "repository",
-# "name", and "branch":
+# MINDS_WORKSPACE_* env vars so the create-form auto-fills "repository" and
+# "branch":
 #   MINDS_WORKSPACE_GIT_URL = .external_worktrees/forever-claude-template/
 #       (REQUIRED -- recipe fails if missing; create the worktree with
 #       `git -C ~/project/forever-claude-template worktree add` before
 #       running minds-start).
 #   MINDS_WORKSPACE_BRANCH  = the FCT worktree's current branch.
-#   MINDS_WORKSPACE_NAME    = "mindtest".
+# The workspace name is never prefilled: the create form generates a `mind-N`
+# name -- matching a shipped binary -- unless you type one into the form's
+# advanced "Name" field. Type a name there if you want a predictable handle for
+# `just propagate-changes <name>` / `just forward-system-interface <name>`.
 # Also sets MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1, the explicit opt-in that
 # tells the desktop client to honor those MINDS_WORKSPACE_* vars. Without it
 # (i.e. a normal `minds run`) the form ignores any stray MINDS_WORKSPACE_* in
@@ -363,10 +405,11 @@ minds-install:
     . apps/minds/scripts/select_node_version.sh || exit 2
     cd apps/minds && pnpm install
 
-# Override agent_name / branch / fct (FCT worktree path) via positional args
-# (just has no name=value form for recipe params -- pass them in order):
-#   just minds-start my-agent my-branch
-#   just minds-start mindtest "" .external_worktrees/my-fct-worktree   # 3rd arg = fct
+# Override branch / fct (FCT worktree path) via positional args (just has no
+# name=value form for recipe params -- pass them in order):
+#   just minds-start                     # launch against the worktree's branch
+#   just minds-start my-branch           # pin the FCT branch to `my-branch`
+#   just minds-start "" .external_worktrees/my-fct-worktree   # 2nd arg = fct
 # `fct` defaults to .external_worktrees/forever-claude-template; an absolute
 # path is used as-is, a relative one is resolved against the mngr root. This
 # is what gets synced (vendor/mngr/) and exported as MINDS_WORKSPACE_GIT_URL,
@@ -374,7 +417,7 @@ minds-install:
 # Refuses to start if another minds-start is already running in this
 # worktree (PID file under /tmp keyed by worktree path). Use `just
 # minds-stop` to kill the running instance first.
-minds-start agent_name="mindtest" branch="" fct="":
+minds-start branch="" fct="":
     #!/bin/bash
     set -ueo pipefail
     if [ -z "${MINDS_ROOT_NAME:-}" ]; then
@@ -455,9 +498,7 @@ minds-start agent_name="mindtest" branch="" fct="":
     else
         export MINDS_WORKSPACE_BRANCH="$(git -C "$fct_wt" rev-parse --abbrev-ref HEAD)"
     fi
-    export MINDS_WORKSPACE_NAME="{{agent_name}}"
     echo "MINDS_WORKSPACE_GIT_URL=$MINDS_WORKSPACE_GIT_URL"
-    echo "MINDS_WORKSPACE_NAME=$MINDS_WORKSPACE_NAME"
     echo "MINDS_WORKSPACE_BRANCH=$MINDS_WORKSPACE_BRANCH"
     echo "$$" > "$pid_file"
     trap 'rm -f "$pid_file"' EXIT
@@ -930,18 +971,16 @@ create-new-mind-repo repo_name parent_dir="$HOME/project":
 # DSN from their per-env secrets.toml. Activate a minds env first:
 #   eval "$(uv run minds env activate <name>)"
 #
-# Pool hosts are baked as bare-metal SLICES (recipes below). Baking new OVH
-# classic VPS pool hosts is DEPRECATED and no longer supported; existing OVH VPS
-# rows can still be listed (`just list-pool-hosts`) and destroyed
-# (`just destroy-pool-host`).
+# Pool hosts are baked as bare-metal SLICES (recipes below). List them with
+# `just list-pool-hosts` and remove them with `just destroy-pool-host`.
 
 # === minds bare-metal SLICES (carved on a pre-registered bare-metal box) ===
 #
 # These bake "slices": lima/QEMU VMs carved on a bare-metal box you already
 # ordered, `mngr imbue_cloud admin server register`ed, and `... prep`ped
-# (status `ready`). They are thin wrappers over `minds pool create --backend
-# slice` (the default), which resolves the tier's pool key (+ host_pool DSN for
-# shared tiers) from Vault automatically.
+# (status `ready`). They are thin wrappers over `minds pool create`, which
+# resolves the tier's pool key (+ host_pool DSN for shared tiers) from Vault
+# automatically.
 #
 # Prereqs: activate a minds env first (`eval "$(uv run minds env activate <name>)"`)
 # AND `vault login -method=oidc` (the wrapper's Vault reads need a live token).
@@ -954,7 +993,6 @@ create-new-mind-repo repo_name parent_dir="$HOME/project":
 # Dev slice bake from a working tree (identity = its origin remote + current branch).
 bake-slice-dev region workspace_dir="$HOME/project/forever-claude-template" count="1" *extra_args:
     uv run minds pool create \
-        --backend slice \
         --count "{{count}}" \
         --region "{{region}}" \
         --workspace-dir "{{workspace_dir}}" \
@@ -966,7 +1004,6 @@ bake-slice-dev region workspace_dir="$HOME/project/forever-claude-template" coun
 # per-slice sizing without baking.
 bake-slice-prod region tag count="1" *extra_args:
     uv run minds pool create \
-        --backend slice \
         --count "{{count}}" \
         --region "{{region}}" \
         --from-tag "{{tag}}" \
@@ -997,19 +1034,16 @@ list-pool-hosts:
 backfill-pool-host-keys:
     uv run minds pool backfill-host-keys
 
-# Destroy a single pool host: tear down its underlying machine, then drop its
-# pool_hosts row. The teardown mirrors the row's backend -- cancel the OVH VPS for
-# an ovh_vps row, or destroy the lima VM (freeing the box slot) for a slice row.
-# Find the id with `just list-pool-hosts`. Extra flags forward to `minds pool
-# destroy` (e.g. --force to drop a non-released row, --skip-vps-cancel if the
-# underlying machine is already gone).
+# Destroy a single pool host: destroy its slice lima VM (freeing the box slot),
+# then drop its pool_hosts row. Find the id with `just list-pool-hosts`. Extra
+# flags forward to `minds pool destroy` (e.g. --force to drop a non-released row,
+# --skip-vps-cancel if the slice VM is already gone).
 #
 #   just destroy-pool-host <pool-host-id>
 #
-# Note: the steady-state teardown is automatic -- the connector releases a host
-# when its lease ends and an hourly Modal cron (`cleanup_removing_pool_hosts`)
-# sweeps any stragglers; `minds env destroy` removes every VPS for a whole tier.
-# This recipe is the manual single-host escape hatch.
+# Note: the steady-state teardown is automatic -- the connector destroys a host's
+# slice VM when its lease ends. `minds env destroy` tears down a whole env's
+# unleased slices. This recipe is the manual single-host escape hatch.
 destroy-pool-host pool_host_id *extra_args:
     uv run minds pool destroy "{{pool_host_id}}" {{extra_args}}
 
@@ -1051,6 +1085,10 @@ changelog-trigger:
     # load the repo's .mngr/settings.toml, whose plugins won't import here.
     export MNGR_ROOT_NAME="mngr-changelog-schedule"
     unset MNGR_HOST_DIR MNGR_PREFIX
+    # Pin the user_id (and thus the Modal environment) to the committed constant
+    # so the on-demand run targets the same deployment changelog_deploy.sh
+    # created, regardless of this machine's random per-profile user_id.
+    export MNGR_USER_ID="$(uv run python scripts/changelog_schedule_utils.py --print-user-id)"
     provider="$(uv run python scripts/changelog_schedule_utils.py --print-provider)"
     disable_args="$(uv run python scripts/changelog_schedule_utils.py --print-disable-plugin-args)"
     uv run mngr schedule run changelog-consolidation --provider "$provider" $disable_args

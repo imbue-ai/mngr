@@ -1004,7 +1004,7 @@ def test_build_start_agent_shell_command_includes_onboarding_hook(
 
     assert "set-hook" in result
     assert "display-popup" in result
-    assert "client-attached" in result
+    assert "client-attached[99]" in result
 
 
 def test_build_start_agent_shell_command_no_onboarding_hook_by_default(
@@ -1012,13 +1012,50 @@ def test_build_start_agent_shell_command_no_onboarding_hook_by_default(
     temp_host_dir: Path,
     temp_work_dir: Path,
 ) -> None:
-    """When onboarding_text is None (default), no hook or popup should appear."""
+    """When onboarding_text is None (default), the onboarding popup hook should not appear.
+
+    The persistent SIGWINCH repaint hook (client-attached[98]) is always set, so only
+    the onboarding popup and its [99] slot should be absent here.
+    """
     agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
     result = _build_command_with_defaults(agent, temp_host_dir)
 
-    assert "set-hook" not in result
     assert "display-popup" not in result
-    assert "client-attached" not in result
+    assert "client-attached[99]" not in result
+
+
+def test_build_start_agent_shell_command_includes_sigwinch_hook(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """A persistent client-attached SIGWINCH repaint hook is always set, even with no
+    onboarding text, so every attach (not just `mngr connect`) repaints the agent."""
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    result = _build_command_with_defaults(agent, temp_host_dir)
+
+    # Persistent hook in slot [98] (distinct from the one-shot onboarding [99]),
+    # running the shipped script via run-shell -b against this session's window.
+    assert "set-hook" in result
+    assert "client-attached[98]" in result
+    assert "run-shell -b" in result
+    assert "commands/sigwinch_panes.sh" in result
+    # It must be persistent: no self-removal (set-hook -u) like the onboarding hook has.
+    assert "set-hook -u -t" not in result
+
+
+def test_build_start_agent_shell_command_sigwinch_hook_targets_named_window(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """The SIGWINCH hook passes the primary window name to the script (not the literal
+    :0 index), so the manual-pin guard holds regardless of the user's tmux base-index."""
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    result = _build_command_with_defaults(agent, temp_host_dir, primary_window_name="primary")
+
+    assert "sigwinch_panes.sh" in result
+    assert f"mngr-{agent.name} primary" in result
 
 
 # =========================================================================
@@ -1053,7 +1090,7 @@ def test_build_start_agent_shell_command_includes_onboarding_hook_tmux_user(
 
     assert "set-hook" in result
     assert "display-popup" in result
-    assert "client-attached" in result
+    assert "client-attached[99]" in result
 
 
 # =========================================================================
@@ -1381,6 +1418,49 @@ def test_stop_agents_treats_tmux_no_current_target_as_benign(
 
     host, _ = _make_stop_agents_test_host(local_provider, cast(AgentInterface, agent), handle)
     assert get_cleanup_failures(lambda: host.stop_agents([agent.id])) == []
+
+
+def test_reap_agent_process_tree_kills_pane_and_env_marked_orphans_but_not_the_session(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """reap_agent_process_tree kills the pane descendants AND the MNGR_AGENT_ID-tagged
+    orphans (reparented to PID 1), with SIGTERM then SIGKILL, but does NOT kill the
+    tmux session itself.
+
+    Regression: a long-lived daemon launched under an agent (the FCT bootstrap's
+    supervisord and its ttyd) could be orphaned to PID 1 on an abrupt teardown and
+    outlive the agent, holding a fixed port (EADDRINUSE on the next relaunch). The
+    shared reap must catch such orphans via the env marker, which a pane/tree walk
+    misses. It must NOT kill the session, so callers can reap-then-relaunch in place.
+    """
+    agent = make_test_agent_details("reap-tree-agent")
+    pane_pid = "55502"
+    orphan_pid = "55501"
+
+    def handle(command: str) -> CommandResult:
+        if "list-windows" in command:
+            return CommandResult(stdout="0", stderr="", success=True)
+        if "list-panes" in command:
+            return CommandResult(stdout=pane_pid, stderr="", success=True)
+        # The env-marker /proc scan that finds orphans reparented to PID 1.
+        if "MNGR_AGENT_ID" in command:
+            return CommandResult(stdout=orphan_pid, stderr="", success=True)
+        return CommandResult(stdout="", stderr="", success=True)
+
+    host, recorded = _make_stop_agents_test_host(local_provider, cast(AgentInterface, agent), handle)
+
+    failures = host.reap_agent_process_tree(cast(AgentInterface, agent))
+
+    assert failures == []
+    commands = [command for command, _ in recorded]
+    # It ran the env-marker orphan scan.
+    assert any("MNGR_AGENT_ID" in command for command in commands)
+    # It killed BOTH the pane pid and the env-marked orphan, via SIGTERM and SIGKILL.
+    kill_commands = " ".join(c for c in commands if "kill -TERM" in c or "kill -KILL" in c)
+    assert "kill -TERM" in kill_commands and "kill -KILL" in kill_commands
+    assert pane_pid in kill_commands and orphan_pid in kill_commands
+    # It must NOT kill the tmux session -- that's stop_agents' job, not the reap's.
+    assert not any("kill-session" in command for command in commands)
 
 
 def test_execute_idempotent_command_raises_command_timeout_error_on_local_timeout(
@@ -1826,6 +1906,7 @@ def test_get_file_wraps_timeout_error_in_host_connection_error(
             remote_filename: str,
             filename_or_io: str | IO[bytes],
             remote_temp_filename: str | None = None,
+            timeout_seconds: float | None = None,
         ) -> bool:
             raise TimeoutError("Timed out reading output")
 
@@ -1841,6 +1922,87 @@ def test_get_file_wraps_timeout_error_in_host_connection_error(
 
     with pytest.raises(HostConnectionError, match="timed out while reading file"):
         host._get_file("/remote/file.txt", io.BytesIO())
+
+
+def test_discover_agents_threads_timeout_into_directory_and_file_reads(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """When a per-host timeout is given, discover_agents bounds *both* reads it makes.
+
+    Change 1: an unbounded discovery read can leave an abandoned thread running forever.
+    Here we assert discover_agents(timeout_seconds=T) threads T into the directory listing
+    and into the per-agent data.json read (using the timeout-carrying read helper), rather
+    than falling back to the unbounded ``read_text_file`` path.
+    """
+    agent_id = AgentId.generate()
+    agent_data = {
+        "id": str(agent_id),
+        "name": "recorded-agent",
+        "type": "claude",
+        "work_dir": "/tmp/work",
+    }
+    recorded_list_timeouts: list[float | None] = []
+    recorded_read_timeouts: list[float] = []
+
+    class _RecordingReadHost(Host):
+        def _list_directory(self, path: Path, timeout_seconds: float | None = None) -> list[str]:
+            recorded_list_timeouts.append(timeout_seconds)
+            return [str(agent_id)]
+
+        def read_text_file_within_timeout(self, path: Path, timeout_seconds: float, encoding: str = "utf-8") -> str:
+            recorded_read_timeouts.append(timeout_seconds)
+            return json.dumps(agent_data)
+
+        def read_text_file(self, path: Path, encoding: str = "utf-8") -> str:
+            raise AssertionError("bounded discovery must not use the unbounded read_text_file path")
+
+    fake = _FakeHostWithSSH(ssh_client=_FakeSSHClient(transport_return=_FakeTransport()))
+    connector = PyinfraConnector(cast(PyinfraHost, fake))
+    host = _RecordingReadHost(
+        id=HostId.generate(),
+        host_name=HostName("test"),
+        connector=connector,
+        provider_instance=local_provider,
+        mngr_ctx=local_provider.mngr_ctx,
+    )
+
+    refs = host.discover_agents(timeout_seconds=7.0)
+
+    assert [ref.agent_id for ref in refs] == [agent_id]
+    assert recorded_list_timeouts == [7.0]
+    assert recorded_read_timeouts == [7.0]
+
+
+def test_read_file_within_timeout_applies_timeout_to_sftp_channel(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """read_file_within_timeout must set the SFTP channel's socket timeout.
+
+    Change 1: bounding the per-agent ``data.json`` read is what stops an abandoned
+    discovery thread from hanging forever on a stalled SFTP transfer. This exercises
+    the real ``read_text_file_within_timeout`` -> ``_get_file`` -> ``_get_file_via_paramiko``
+    path (not a stubbed read) and asserts the timeout actually reaches the channel.
+    """
+    recorded_settimeouts: list[float] = []
+    file_contents = b'{"hello": "world"}'
+
+    class _RecordingChannel:
+        def settimeout(self, timeout_seconds: float) -> None:
+            recorded_settimeouts.append(timeout_seconds)
+
+    class _TimeoutRecordingSFTP(_BaseFakeSFTP):
+        def get_channel(self) -> _RecordingChannel:
+            return _RecordingChannel()
+
+        def getfo(self, remote_path: str, fl: IO[bytes]) -> None:
+            fl.write(file_contents)
+
+    host = _create_host_with_custom_sftp(local_provider, _TimeoutRecordingSFTP)
+
+    result = host.read_text_file_within_timeout(Path("/remote/data.json"), 7.0)
+
+    assert result == file_contents.decode()
+    assert recorded_settimeouts == [7.0]
 
 
 def test_put_file_wraps_timeout_error_in_host_connection_error(
@@ -2019,6 +2181,7 @@ def test_get_file_wraps_ssh_exception_in_host_connection_error(
             remote_filename: str,
             filename_or_io: str | IO[bytes],
             remote_temp_filename: str | None = None,
+            timeout_seconds: float | None = None,
         ) -> bool:
             raise SSHException("connection lost")
 

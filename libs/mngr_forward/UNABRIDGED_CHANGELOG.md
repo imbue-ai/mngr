@@ -4,6 +4,35 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-01
+
+Added a new async/await ratchet (`test_prevent_async_await`) that freezes the current amount of `async def` / `await` usage in this project and fails if new async code is added. We strongly prefer synchronous code: it is far easier to debug, and our software is intentionally low-scale, so async provides no benefit. Existing usage is grandfathered in at its current count; the count can only decrease.
+
+## 2026-06-28
+
+Respawns a dead per-agent events stream instead of skipping it forever, fixing a case where the forward got permanently stuck serving the "Loading workspace" / 503 page after an agent's host restarted.
+
+Each tracked agent has a long-lived `mngr event <id> services requests --follow` child whose output is the only thing that populates the resolver's per-agent service map; with the service-forwarding strategy, `resolve` returns None (a 503) until that map contains the requested service URL. When the agent's host restarts (e.g. after a reboot), the `--follow` connection breaks and the child exits non-zero, but the old `_start_events_stream` guard skipped any agent already present in `_events_processes` -- including the now-dead entry -- so the stream was never respawned, the service map stayed empty, and the proxy returned 503 indefinitely even though discovery (including fresh SSH info) had fully recovered. `_start_events_stream` now treats a dead entry as absent: it drops the exited child, logs the respawn, and starts a fresh stream. Respawns ride the periodic discovery snapshot, which rate-limits them to the snapshot cadence, and already-known services are preserved across the respawn.
+
+## 2026-06-23
+
+The websocket forward path now emits a `system_interface_backend_failure` envelope when the backend connection fails (unresolved target, SSH-tunnel setup failure, refused host-loopback dial, or a connect-time backend-websocket failure), matching what the HTTP/SSE paths already did. Previously only HTTP failures emitted this envelope, so a consumer like minds could go blind to a dead system interface whose only live channel was a websocket: an already-loaded SPA whose backend died would silently retry its websocket forever, never enrolling the agent as a recovery probe suspect, so the recovery redirect never fired and the user was stranded on a frozen workspace. The websocket path now feeds the same recovery signal as HTTP.
+
+## 2026-06-22
+
+Added a `mngr forward --on-error {abort,continue}` flag (default `abort`). Under
+`continue`, the `--no-observe` startup snapshot tolerates an
+unauthenticated/unreachable provider: it runs `mngr list --on-error continue` and
+forwards the agents the healthy providers reported instead of failing to start.
+The flag affects only `--no-observe`; the observe and `--observe-via-file` modes
+already tolerate provider errors and are unchanged.
+
+## 2026-06-19
+
+Removed the now-vestigial `ForwardPluginConfig.merge_with` override; the config merge is routed through the overlay pipeline, which reproduces the same assign-by-default semantics. No user-visible behavior change.
+
+Trimmed the README to user-relevant content and tightened it for concision.
+
 ## 2026-06-11
 
 Hardened reverse SSH tunnel teardown so a half-dead connection no longer orphans the forwarded port on the remote sshd (which made the next run's port forward request get denied):

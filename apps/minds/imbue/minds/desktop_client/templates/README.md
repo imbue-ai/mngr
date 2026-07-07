@@ -28,7 +28,8 @@ root of `templates/`. Auth-flow components live under `templates/auth/`.
 | `PageContainer` | Centered `max-w-[720px]` body wrapper. Default for in-app settings-style pages (Landing, Accounts, WorkspaceSettings, Sharing, Destroying). |
 | `PageNarrowContainer` | Centered, narrow page layout for auth flow + form pages. Width/padding only -- no surface chrome. `padding="default"` (`p-8`, auth) or `"form"` (`p-6`, Create); `max_width` is a Tailwind utility. |
 | `Card` | Card surface with `layout`/`padding`/`interactive`/`tag`/`href` props. Pulls `.minds-card` from `app.css` for the shared shell. |
-| `Modal` | Overlay dialog with backdrop. Used for confirmation dialogs (Welcome's skip-account prompt, WorkspaceSettings' destroy modal). |
+| `PresetCard` | Selectable `<button role="radio">` card (the create page's "where to run" presets). Pure Tailwind: dashed neutral border by default, accent border + tint via `aria-checked:` variants when selected, `hover:shadow-raised` lift. Props: `preset` (the `data-preset` value), `selected`, `extra` (parent-owned sizing). |
+| `Modal` | Overlay dialog with backdrop. Used for confirmation dialogs (e.g. WorkspaceSettings' destroy modal). |
 | `PermissionsHeader` / `PermissionsForm` / `PermissionsError` / `PermissionsManualCredentials` | Composable building blocks for the latchkey permission-request detail fragments (`pages.LatchkeyPredefinedPermission`, `pages.LatchkeyFileSharingPermission`). The surrounding modal chrome lives in the inbox shell (`pages.Inbox`), not in a separate dialog primitive. |
 
 ### Interactive
@@ -70,17 +71,36 @@ root of `templates/`. Auth-flow components live under `templates/auth/`.
 
 ### CSS classes for JS-rendered surfaces
 
-JavaScript can't call JinjaX components. When you build HTML in JS (e.g.
-`Landing.jinja`'s providers panel, `sharing.js`'s ACL rows), reference
-these CSS-only tokens defined in `static/app.css` so both sides stay
-in sync:
+JavaScript can't call JinjaX components, so JS-built HTML is styled with
+Tailwind directly -- `static/app.css` declares `static/*.js` as a Tailwind
+`@source`, so utility classes written into a `className` string are
+generated exactly as they are in a template. Rule of thumb:
+
+- **Used in a single place** (a one-off element built in one JS file):
+  write the utilities inline on the element. No CSS class -- see the
+  workspace-accent dot colored per row in `sidebar_workspace_row.js` for
+  an example.
+- **A shape repeated across files** (or that must stay in sync with a
+  JinjaX component): give it a named class in `static/app.css` and define
+  it with `@apply` on the same utilities, then reference the class from
+  both sides. Prefer `@apply` over hand-written CSS values so spacing /
+  type / radius still resolve through the scale (and its ratchets) rather
+  than drifting into raw magic numbers. See `.minds-tooltip`, shared by the
+  overlay backend (`overlay.js`) and the in-page backend
+  (`tooltip_triggers.js`).
+
+Most recipe classes below predate this guidance and use raw token CSS
+(`var(--...)`); they still work and keep JS-built HTML matching its JinjaX
+twin (`.minds-card` ↔ `Card.jinja`). New shared classes should use `@apply`
+instead (e.g. `.minds-tooltip`):
 
 | Class | Role |
 |---|---|
 | `.minds-card` | Card surface (bg-surface-primary, border-default, rounded-lg). Match `Card.jinja`. |
+| `.minds-tooltip` | Custom tooltip bubble (uses `@apply`). Shared appearance for the overlay tooltip (`overlay.js`) and the in-page fallback (`tooltip_triggers.js`); positioning is set per-backend in JS. |
 | `.spinner` / `.spinner-accent` | Animated circular spinner (token-driven ring/top; `-accent` uses the accent token). Match `Spinner.jinja`. |
 | `.code-pill` | Inline `<code>` pill (bg-fill-subtle, rounded-md, monospace, 0.95em). Match `Sharing.jinja`'s service-name pills. |
-| `.accent-spine` | Vertical workspace-accent stripe on the left edge. Used by Landing project rows + Destroying. |
+| `.accent-spine` | Vertical workspace-accent stripe on the left edge. Used by Landing workspace rows + Destroying. |
 | `.sidebar-dot` | Per-workspace accent circle in the workspace menu rows. Sized by Tailwind (`w-2.5 h-2.5 rounded-full`); colored inline per workspace by `sidebar.js` / `chrome.js`. Not an app.css class -- listed here as the accent-surface to keep in sync. (The workspace row itself carries the `.sidebar-item` class purely as a JS selector hook + `is-current` / `is-stale` state marker; it has no app.css styling.) |
 | `.titlebar-surface` / `.titlebar-btn-danger` | Titlebar self-theming. `.titlebar-surface` (toggled on the bar by `chrome.js` while a workspace accent is active) derives a black/white contrast from `--titlebar-bg` in pure CSS (lch relative color) and re-bases the foreground text tokens on it, so the title + buttons read on any accent -- no JS luminance. `-danger` keeps the destructive red hover regardless of accent. |
 

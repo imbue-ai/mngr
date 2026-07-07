@@ -172,6 +172,17 @@ PREVENT_ASYNCIO_IMPORT = RegexRatchetRule(
     pattern_string=r"\bimport\s+asyncio\b|\bfrom\s+asyncio\b",
 )
 
+PREVENT_ASYNC_AWAIT = RegexRatchetRule(
+    rule_name="async def / await usages",
+    rule_description=(
+        "Avoid async/await. We strongly prefer synchronous code: it is far easier to read, debug, and "
+        "reason about, and our software is intentionally low-scale, so async provides no benefit. There "
+        "are almost no valid exceptions. Write blocking, synchronous code instead (poll with wait_for, "
+        "use threads via ConcurrencyGroup if you need concurrency)."
+    ),
+    pattern_string=r"\basync\s+def\b|\bawait\b",
+)
+
 PREVENT_PANDAS_IMPORT = RegexRatchetRule(
     rule_name="pandas imports",
     rule_description="pandas is banned per style guide. Use polars instead",
@@ -494,7 +505,7 @@ PREVENT_HARDCODED_CLAUDE_DIR = RegexRatchetRule(
         "Use the accessor functions from claude_config.py instead of hardcoding "
         "Path.home() / '.claude' or Path.home() / '.claude.json'. "
         "For the config directory: get_claude_config_dir() / get_user_claude_config_dir(). "
-        "For the user config file: find_user_claude_config(). "
+        "For the user config file: find_user_config_in_isolated_mode(). "
         "This allows paths to be overridden via CLAUDE_CONFIG_DIR "
         "and ORIGINAL_CLAUDE_CONFIG_DIR environment variables."
     ),

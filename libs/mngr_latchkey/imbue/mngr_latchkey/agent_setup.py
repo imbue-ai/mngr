@@ -100,6 +100,45 @@ _MINDS_API_PROXY_PER_AGENT_PATH_PATTERN: Final[str] = rf"^{_MINDS_API_PROXY_PER_
 _SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED: Final[str] = "minds-api-proxy-per-agent-unauthorized"
 _PERM_MINDS_API_PROXY_PER_AGENT: Final[str] = "minds-api-proxy-per-agent"
 
+# The per-agent bug-report route is reachable by ANY in-workspace agent without
+# per-agent registration. An agent escalates a bug report by POSTing its
+# diagnosis here; the effect is that the desktop app pops the report-a-bug modal
+# pre-filled for a human to review and submit (the agent never sends to Sentry
+# itself). Because detent stops at the first matching scope, a rule allowing this
+# exact path must come before the unauthorized gate below. This is an interim
+# bypass pending the broader minds-API-surface latchkey work; the route's
+# bearer-key auth still applies, so only requests that came through the gateway
+# reach it.
+_MINDS_API_PROXY_REPORT_PATH_PATTERN: Final[str] = rf"^{_MINDS_API_PROXY_PER_AGENT_PATH_PREFIX}[^/]+/report$"
+_SCOPE_MINDS_API_PROXY_REPORT: Final[str] = "minds-api-proxy-report"
+_PERM_MINDS_API_PROXY_REPORT: Final[str] = "minds-api-proxy-report-allow"
+
+# The version-agnostic, read-only API schema endpoint (an OpenAPI document
+# describing every gateway-reachable ``/api/v*`` route). Granted to every agent
+# by default -- unlike the per-agent endpoints it is not agent-scoped (the schema
+# is identical for all callers) and carries no per-target data, so a workspace
+# can always discover the Minds API surface. This is the *inbound* path the
+# gateway matches on; the proxy strips ``/minds-api-proxy`` before forwarding to
+# the desktop client's ``/api/schema``. It lives as a permission on the
+# ``latchkey-self`` scope (like ``read-self-permissions``). That scope is
+# domain-only, so it matches every gateway-self request; within the single
+# matching rule detent allows a request that matches any one of the rule's
+# listed permission schemas. All gateway-self grants minds produces -- schema
+# read, file-sharing, accounts, and the cross-workspace verbs -- attach as
+# permissions on this one scope, so there is only ever a single gateway-self
+# rule and rule order never affects the verdict.
+_MINDS_API_SCHEMA_INBOUND_PATH: Final[str] = "/minds-api-proxy/api/schema"
+_PERM_MINDS_API_SCHEMA: Final[str] = "minds-api-schema-read"
+
+# The minds desktop client's cross-workspace management API
+# (``/api/v1/workspaces/...``) attaches its per-verb permission schemas to the
+# ``latchkey-self`` scope, just like file-sharing and accounts. Those schemas are
+# NOT part of this agent baseline: they are self-contained in the ``workspace``
+# permission request's precomputed effect and unioned onto the ``latchkey-self``
+# rule when the user approves a grant (see ``permission_requests.mjs``'s
+# ``computeWorkspaceEffect`` and the ``workspace_permissions`` module). Nothing
+# about them needs to exist here.
+
 # Exact prefix/suffix wrapping each agent id inside an ``anyOf`` entry's
 # path pattern. Shared by the build + extract helpers so the two cannot
 # drift apart.
@@ -139,6 +178,9 @@ def _extract_agent_id_from_anyof_entry(entry: JsonValue) -> str:
 
 _AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissionsConfig(
     rules=(
+        # The bug-report route is allowed for any agent (see note above), so it must be matched
+        # before the unauthorized gate -- detent stops at the first matching scope.
+        {_SCOPE_MINDS_API_PROXY_REPORT: [_PERM_MINDS_API_PROXY_REPORT]},
         # Unauthorized agents trying to access agent-scoped Minds API endpoint get an empty list of permissions, leading to immediate rejection.
         {_SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED: []},
         {
@@ -148,10 +190,33 @@ _AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissi
                 _PERM_READ_AVAILABLE_PERMISSIONS,
                 # Requests that made it through the first rule (= not unauthorized agents) can now access the agent-scoped Minds API endpoint.
                 _PERM_MINDS_API_PROXY_PER_AGENT,
+                # Every agent may read the (non-agent-scoped) API schema document.
+                _PERM_MINDS_API_SCHEMA,
             ],
         },
     ),
     schemas={
+        _SCOPE_MINDS_API_PROXY_REPORT: {
+            "properties": {
+                "domain": {"const": _GATEWAY_SELF_HOST},
+                "method": {"const": "POST"},
+                "path": {
+                    "type": "string",
+                    "pattern": _MINDS_API_PROXY_REPORT_PATH_PATTERN,
+                },
+            },
+            "required": ["domain", "method", "path"],
+        },
+        _PERM_MINDS_API_PROXY_REPORT: {
+            "properties": {
+                "method": {"const": "POST"},
+                "path": {
+                    "type": "string",
+                    "pattern": _MINDS_API_PROXY_REPORT_PATH_PATTERN,
+                },
+            },
+            "required": ["method", "path"],
+        },
         _SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED: {
             "properties": {
                 "domain": {"const": _GATEWAY_SELF_HOST},
@@ -200,6 +265,13 @@ _AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissi
                     "type": "string",
                     "pattern": _AVAILABLE_PERMISSIONS_PATH_PATTERN,
                 },
+            },
+            "required": ["method", "path"],
+        },
+        _PERM_MINDS_API_SCHEMA: {
+            "properties": {
+                "method": {"const": "GET"},
+                "path": {"const": _MINDS_API_SCHEMA_INBOUND_PATH},
             },
             "required": ["method", "path"],
         },

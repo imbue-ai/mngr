@@ -4,6 +4,44 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-01
+
+Removed all OVH logic from the remote connector service. Pool hosts are now exclusively bare-metal slices, so releasing a host destroys its slice's lima VM and the connector makes no OVH API calls.
+
+- The `/hosts/{id}/release` route is slice-only (no OVH tag-strip/cancel); a failed teardown returns 5xx and leaves the row `removing`.
+
+- Removed the OVH cleanup sweep from the hourly `cleanup_removing_pool_hosts` cron; the cron now only runs the alert-only slice-box reconcile.
+
+- Dropped the `ovh` Python dependency and the `ovh-<env>` Modal secret from the deployment.
+
+- Added migration `012_drop_pool_host_backend_kind.sql`: deletes any residual `ovh_vps` rows and drops the `pool_hosts.backend_kind` column.
+
+Known follow-up: a slice row left in `removing` by a crashed inline release is no longer auto-swept (only alert-only reconcile remains).
+
+Added a new async/await ratchet (`test_prevent_async_await`) that freezes the current amount of `async def` / `await` usage in this project and fails if new async code is added. We strongly prefer synchronous code: it is far easier to debug, and our software is intentionally low-scale, so async provides no benefit. Existing usage is grandfathered in at its current count; the count can only decrease.
+
+## 2026-06-26
+
+Added scope docstrings to this package's release tests so the TMR (test
+map-reduce) harness can anchor each test's intended scope on its docstring
+rather than on a tutorial block. Docstring-only; no test logic changed.
+
+## 2026-06-24
+
+Updated the `cleanup_released_hosts.py` operator docstring for the new "split" Vault secret layout: OVH credentials are now sourced per key from `secrets/minds/<tier>/ovh/<KEY>` (value at `.data.data.value`) and the host-pool DSN from `secrets/minds/<tier>/neon/DATABASE_URL`, instead of the old flat single-entry layout.
+
+## 2026-06-23
+
+The host-lease and slice-teardown paths now pin SSH host keys instead of trust-on-first-use.
+
+Added nullable `outer_host_public_key` / `container_host_public_key` columns to `pool_hosts` and `box_host_public_key` to `bare_metal_servers` (migration 011). `POST /hosts/lease` returns both pool-host keys and injects the user's key over SSH while strictly verifying each sshd against its recorded host key; a row missing its keys is not leasable (503, pointing at the one-time backfill). `GET /hosts` also returns the keys. Slice teardown and the reconcile sweep verify the bare-metal box against its recorded host key. The management SSH client no longer uses `AutoAddPolicy`.
+
+## 2026-06-21
+
+The hourly pool-host cleanup cron now also audits each bare-metal box's lima slices against the pool database, scoped to this deployment's own environment (via `MINDS_ENV_NAME`).
+
+It logs two kinds of divergence: a slice stamped for this env that is present on a box but has no database row, and a database row whose VM has vanished from its box. The audit is alert-only -- it never auto-deletes (a row-less stamped slice is usually a bake mid-flight, and this cron runs independently of bakes, so deleting here could race a live bake). Actual orphan reaping stays with the bake-time reaper. Other environments' slices and legacy un-stamped slices are never inspected, so the audit is safe on a box shared by multiple dev environments.
+
 ## 2026-06-15
 
 OVH bare-metal slices support:

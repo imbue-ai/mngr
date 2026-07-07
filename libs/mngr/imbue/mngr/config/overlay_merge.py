@@ -342,6 +342,66 @@ def _remark_static_leaves(dumped: dict[str, Any], static_paths: set[tuple[str, .
     return dumped
 
 
+def _restore_model_fields_set(
+    merged: ModelT,
+    base: BaseModel | None,
+    override: BaseModel | None,
+) -> ModelT:
+    """Rebuild ``merged`` so its ``model_fields_set`` (and that of every nested sub-model
+    and registry entry) is the **union of the base's and the override's actually-set
+    fields**, rather than the "all non-defaulted fields" set that ``model_validate``
+    produces.
+
+    ``model_validate`` (the reparse in ``merge_models_via_overlay``) does not preserve the
+    per-model ``model_fields_set``: a freshly-validated model reports every field present in
+    its dict as set. That breaks any *subsequent* merge that relies on ``exclude_unset``
+    semantics -- most visibly ``parent_type`` inheritance, which runs at
+    ``resolve_agent_type`` time on an already-layer-merged config: a child agent type whose
+    only set field is ``parent_type`` would, after a whole-config merge, have all its
+    default-valued fields look explicitly set, and so clobber the parent's non-default
+    values during inheritance.
+
+    Reconstructing the set as ``base.model_fields_set | override.model_fields_set`` restores
+    the invariant the merge already honors on the value side (only fields a layer actually
+    set win): a field is "set" on the merged model iff some input layer set it. The walk
+    mirrors ``_to_operator_dict``: recurse into sub-model fields (live value is a
+    ``BaseModel``) and into each ``RegistryField`` entry, pairing the merged node with the
+    corresponding base/override node (absent on a side -> empty set). Uses ``model_construct``
+    (no revalidation) so already-validated nested instances -- including concrete registry
+    subclasses -- are carried through untouched.
+    """
+    base_set = base.model_fields_set if base is not None else frozenset()
+    override_set = override.model_fields_set if override is not None else frozenset()
+    fields_set = set(base_set) | set(override_set)
+
+    registry_field_names = get_registry_field_names(type(merged))
+    base_submodels = _submodel_values(base) if base is not None else {}
+    override_submodels = _submodel_values(override) if override is not None else {}
+    base_entries = _container_entry_models(base, registry_field_names) if base is not None else {}
+    override_entries = _container_entry_models(override, registry_field_names) if override is not None else {}
+
+    new_values: dict[str, Any] = {}
+    for field_name, value in dict(merged).items():
+        if field_name in registry_field_names and isinstance(value, dict):
+            base_entry_models = base_entries.get(field_name, {})
+            override_entry_models = override_entries.get(field_name, {})
+            new_values[field_name] = {
+                key: (
+                    _restore_model_fields_set(entry, base_entry_models.get(key), override_entry_models.get(key))
+                    if isinstance(entry, BaseModel)
+                    else entry
+                )
+                for key, entry in value.items()
+            }
+        elif isinstance(value, BaseModel):
+            new_values[field_name] = _restore_model_fields_set(
+                value, base_submodels.get(field_name), override_submodels.get(field_name)
+            )
+        else:
+            new_values[field_name] = value
+    return type(merged).model_construct(_fields_set=fields_set, **new_values)
+
+
 def merge_models_via_overlay(
     base: ModelT,
     override: BaseModel,
@@ -398,7 +458,12 @@ def merge_models_via_overlay(
 
     merged_dict = _from_operator_dict(lower(pipeline.merged_patch), base, override)
     merged_dict = _reparse_container_entries(merged_dict, registry_field_names, pipeline.merged_entry_models)
-    return config_class.model_validate(merged_dict), pipeline.all_narrowings
+    # ``model_validate`` marks every present field as set; restore the per-model
+    # ``model_fields_set`` to the union of the inputs' set fields so a later ``exclude_unset``
+    # merge (notably ``parent_type`` inheritance) does not treat defaulted fields as
+    # explicitly set. See ``_restore_model_fields_set``.
+    merged = _restore_model_fields_set(config_class.model_validate(merged_dict), base, override)
+    return merged, pipeline.all_narrowings
 
 
 class _OverlayPipelineResult(BaseModel):

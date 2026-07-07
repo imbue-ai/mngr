@@ -1,1 +1,0 @@
-The GCP provider's `project_id` config field now defaults to `None` instead of `""`, making "unset" explicit and matching the other optional identifier fields (`default_region`, `default_zone`, `service_account_email`). Resolution behavior is unchanged: an unset `project_id` still falls back to the project Application Default Credentials resolves from the environment.

@@ -2,7 +2,17 @@
 # Reset the mac-runner to a clean state for a verification run.
 # Wipes Minds state and the installed .app; preserves Lima's base-image cache.
 # Optional arg: a .zip URL to download and install as the fresh app.
-set -euo pipefail
+#
+# Deliberately NOT `set -e`: this is a best-effort cleanup of a non-ephemeral
+# self-hosted runner, and every step must run even if an earlier one fails.
+# Under `set -e` a single unguarded failure (e.g. a `df`/`find` pipe, a
+# `defaults read`) aborts the script and SKIPS the remaining cleanup, leaking
+# Lima VMs / disk. So instead: run every step best-effort, then VERIFY the end
+# state (no surviving minds-e2e VMs, no ~/.minds, app removed) and exit
+# non-zero if the runner is not actually clean -- otherwise a leaked VM rots
+# the runner silently. Callers surface that exit code (the post-test cleanup
+# step no longer swallows it with `|| true`). The install block fails loud too.
+set -uo pipefail
 
 log() { printf '[reset] %s\n' "$*" >&2; }
 
@@ -106,13 +116,40 @@ done
 sudo rm -rf /Applications/minds.app
 
 URL="${1:-}"
+
+# Verify the cleanup actually reached a clean state. The steps above are
+# best-effort and swallow their own failures, so without this check a pinned
+# Lima VM or a busy ~/.minds would leak silently and rot this non-ephemeral
+# runner. Assert the post-conditions and exit non-zero so the caller's job
+# goes red. A pure cleanup (no install URL) also expects the app to be gone;
+# when a URL is given the install below puts a fresh one back.
+cleanup_failed=0
+surviving_vms=$(find "$HOME/.lima" -maxdepth 1 -type d -name 'minds-e2e*' 2>/dev/null | wc -l | tr -d ' ')
+if [[ "$surviving_vms" -gt 0 ]]; then
+  log "ERROR: $surviving_vms minds-e2e* VM dir(s) survived cleanup under ~/.lima"
+  cleanup_failed=1
+fi
+if [[ -e "$HOME/.minds" ]]; then
+  log "ERROR: ~/.minds survived cleanup"
+  cleanup_failed=1
+fi
+if [[ -z "$URL" && -e /Applications/minds.app ]]; then
+  log "ERROR: /Applications/minds.app survived cleanup"
+  cleanup_failed=1
+fi
+if [[ "$cleanup_failed" -ne 0 ]]; then
+  log "cleanup did not reach a clean state; failing so the dirty runner is visible"
+  exit 1
+fi
+
 if [[ -n "$URL" ]]; then
   log "downloading fresh app from $URL"
   TMP=$(mktemp -d)
   trap 'rm -rf "$TMP"' EXIT
-  curl -fSL --silent --show-error -o "$TMP/minds.zip" "$URL"
-  unzip -q -d "$TMP" "$TMP/minds.zip"
-  sudo mv "$TMP/minds.app" /Applications/minds.app
+  # Install must fail loud: a run must never proceed against a stale app.
+  curl -fSL --silent --show-error -o "$TMP/minds.zip" "$URL" || { log "ERROR: app download failed"; exit 1; }
+  unzip -q -d "$TMP" "$TMP/minds.zip" || { log "ERROR: app unzip failed"; exit 1; }
+  sudo mv "$TMP/minds.app" /Applications/minds.app || { log "ERROR: app install (mv) failed"; exit 1; }
   # xattr -dr returns non-zero when some signed-bundle internals refuse the
   # delete with "Operation not permitted"; we only care about the top-level
   # quarantine bit so Gatekeeper lets the app launch. Per-file failures

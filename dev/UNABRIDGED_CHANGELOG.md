@@ -4,6 +4,290 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-01
+
+Split the mngr and minds release test suites cleanly.
+
+Renamed the two jobs in `.github/workflows/release-tests.yml` to make it explicit they cover the *mngr* release suite: `test-docker-release` -> `test-mngr-release-docker` and `test-release` -> `test-mngr-release`. Both jobs now exclude the whole `apps/minds` tree by path (`--ignore apps/minds`) instead of enumerating minds markers, so the mngr release run never touches minds tests.
+
+Folded all minds `@release` tests into the minds release job (`test-minds-release` in `ci.yml`): in addition to the `minds_deployment` group, it now installs Chromium and runs the plain minds `@release` tests (`-m 'release and not minds_deployment and not minds_services and not minds_snapshot_resume'`). This keeps the two release procedures separate (mngr = `v*` tag / dispatch; minds = manual `run_minds_release_tests` dispatch). Updated the stale `test-docker-release` reference in `offload-modal-release.toml`.
+
+Bumped the pinned Claude Code CLI version from `2.1.141` to `2.1.160` (matching forever-claude-template) in the release-tests workflow, the `tmr-setup` action, and the minds snapshot build script, so they stay aligned with the release Dockerfile pin.
+
+Cleaned up dev-level files for the OVH-VPS removal.
+
+- Removed `--backend slice` from the `bake-slice-{dev,prod}` justfile recipes (the flag no longer exists) and reframed the pool recipe comments to slice-only. The `destroy-pool-host` note still correctly states that `minds env destroy` tears down a whole env's unleased slices.
+
+- Deleted the unused `scripts/remove_old_flat_vault_secrets.py`.
+
+- Deleted obsolete specs/blueprints that only described the removed behavior: `specs/swap-pool-to-ovh/`, `blueprint/deprecate-ovh-vps/`, and `blueprint/disable-ovh-qemu-backups/`.
+
+Added a design doc (`blueprint/ratchet-async-await/`) describing the new monorepo-wide async/await ratchet that freezes and gradually reduces `async def` / `await` usage.
+
+## 2026-06-30
+
+Updated the minds error-reporting / get-help design doc (`blueprint/minds-error-reporting-help/`) to record the phase-3 design: the in-workspace agent-help flow escalates by opening a pre-filled report modal for human review rather than submitting or raising an inbox permission request, the outer app spawns the `/assist` chat via `mngr create` against the workspace's container host, and `/update-self` gains a recognizable merge-commit convention.
+
+Added the operator-run build + publish pipeline for the pre-baked Lima VM image (issue #2306). These scripts run locally on the release operator's machines (not in CI), so the R2 credentials and the minisign signing key never touch GitHub.
+
+- Replaced the stale Packer/QEMU image pipeline with a Lima-based bake (`scripts/build-lima-image.sh` + `scripts/lima_image/bake_provision.sh`; removed `scripts/packer/`). Baking with Lima means the image is produced by the same virtualizer that consumes it (`vz` on Apple Silicon, accelerated QEMU on Linux), so the artifact is guaranteed Lima-bootable and the macOS build host needs no separate QEMU/Packer toolchain. It boots the Debian 12 base (matching the Lima provider), runs the exact forever-claude-template build scripts (`setup_system`/`install_dependencies`/`build_workspace` + Playwright) to bake the toolchain, applies cheap reproducibility cleanups for small deltas, then flattens the Lima disk to a standalone qcow2 (Lima format) + raw (what gets chunked). Builds one arch per native host (amd64 on a KVM Linux host, arm64 on an Apple-Silicon Mac).
+
+- Added `scripts/lima_image/publish.py`: chunks the raw image with `desync`, signs the per-release root manifest with `minisign`, and uploads the new chunks + index + signed manifest to Cloudflare R2 (via the S3 API or the Cloudflare REST object API). Content-addressed chunks already present are skipped, so re-publishing a near-identical image only uploads the changed chunks.
+
+- Removed the obsolete `scripts/publish-lima-image.sh`.
+
+- Added the implementation spec under `blueprint/lima-image-cache/`.
+
+Fixed the scheduled TMR CI workflow, which had been failing at the `tmr-setup` step with `ImportError: cannot import name 'find_user_claude_config'`. The pre-trust step inlined a Python heredoc that imported `find_user_claude_config`, a function that was renamed to `find_user_config_in_isolated_mode`; the rename updated every call site except the one buried in the workflow's heredoc, which no grep or type checker could see.
+
+The `tmr-setup` action now invokes a real module (`scripts/pretrust_claude_checkout.py`) instead of an inline heredoc, so future renames of the claude-config API are caught by `ty` rather than only at CI runtime.
+
+Added the operator-run build + publish pipeline for the pre-baked Lima VM image (issue #2306). These scripts run locally on the release operator's machines (not in CI), so the R2 credentials and the minisign signing key never touch GitHub.
+
+- Replaced the stale Packer/QEMU image pipeline with a Lima-based bake (`scripts/build-lima-image.sh` + `scripts/lima_image/bake_provision.sh`; removed `scripts/packer/`). Baking with Lima means the image is produced by the same virtualizer that consumes it (`vz` on Apple Silicon, accelerated QEMU on Linux), so the artifact is guaranteed Lima-bootable and the macOS build host needs no separate QEMU/Packer toolchain. It boots the Debian 12 base (matching the Lima provider), runs the exact forever-claude-template build scripts (`setup_system`/`install_dependencies`/`build_workspace` + Playwright) to bake the toolchain, applies cheap reproducibility cleanups for small deltas, then flattens the Lima disk to a standalone qcow2 (Lima format) + raw (what gets chunked). Builds one arch per native host (amd64 on a KVM Linux host, arm64 on an Apple-Silicon Mac).
+
+- Added `scripts/lima_image/publish.py`: chunks the raw image with `desync`, signs the per-release root manifest with `minisign`, and uploads the new chunks + index + signed manifest to Cloudflare R2 (via the S3 API or the Cloudflare REST object API). Content-addressed chunks already present are skipped, so re-publishing a near-identical image only uploads the changed chunks.
+
+- Removed the obsolete `scripts/publish-lima-image.sh`.
+
+- Added the implementation spec under `blueprint/lima-image-cache/`.
+
+Raise the `minds-launch-to-msg.yml` build timeouts so a fresh ToDesktop bundle can finish. The `pnpm dist` step budget goes 45 -> 70 min and the build job budget 60 -> 85 min. A fresh dual-arch cloud build (serial sign + notarize x64 + arm64, plus a ~15-min final packaging phase) runs ~43 min even with a fast source download, and ~60+ min when ToDesktop's source-download phase stalls -- so the old 45-min step budget timed out mid-notarize on back-to-back scheduled runs, and because the workflow cancels the in-progress build on timeout, the SHA could never go green. The 70/85 split preserves the ~15-min margin the post-failure cancel step needs to tear an orphaned build down.
+
+Update the Slack notification's build link: the single `binary` link (which pointed at the ToDesktop dashboard) becomes `todesktop(mac-arm64)` -- `todesktop` links to the dashboard build page and `mac-arm64` links to the arm64 `.dmg` download.
+
+## 2026-06-29
+
+Added a blueprint planning document (`blueprint/hostname-live-validation/`) for live validation of the mind-creation Name field.
+
+## 2026-06-28
+
+Added an implementation plan for accelerating imbue_cloud slice bakes (build the FCT image once per box, docker-load it per slice) at `blueprint/accelerate-slice-bake/plan-accelerate-slice-bake.md`.
+
+Add a `just minds-test-electron-flow` recipe that drives the full minds Electron workspace lifecycle end-to-end under `xvfb` (create a local Docker workspace -> send a chat message and await the agent's reply -> open a terminal -> navigate home -> destroy via the v1 settings flow), complementing the create-only `just minds-test-electron` acceptance test.
+
+Also fix `just sync-vendor-mngr` to resolve the forever-claude-template path to an absolute path before use, so passing a relative path no longer breaks the recipe's second `cd`.
+
+Added a design/blueprint document at `blueprint/minds-workspace-api/plan-minds-workspace-api.md` capturing the plan for the versioned Minds workspace API (cross-workspace, backup, version, and SSH capabilities reachable by agents through the latchkey gateway).
+
+Updates `blueprint/minds-workspace-api/HANDOFF.md` for the SSH work: marks SSH access between workspaces (item #5) as done -- grant pruning plus refresh-not-stack are wired in (in `apps/minds`), and the remote->local SSH tunnel broker is now implemented. Corrects the earlier (incorrect) "blocker" note: a local Docker/Lima target uses an SSH connector, so the hub *can* resolve its `127.0.0.1:<published port>` endpoint and brokers a reverse tunnel into the calling workspace.
+
+Adds `openapi-spec-validator` to the root dev dependency group; it validates the minds `GET /api/schema` OpenAPI document in tests (test-only -- not shipped in the minds wheel).
+
+Adds `blueprint/minds-api-spectree/plan-minds-api-spectree.md`: the design + implementation-status doc for converting the minds `/api/v1` to spectree + pydantic validation (records what landed, the spectree-2.0.1 behaviors that shaped the approach, and the resolved design decisions).
+
+CI: the minds snapshot test pipeline now stands up a real per-run minds `ci-*` environment that the test stage exercises with live tests, and tears it down afterward.
+
+- New `build-minds-ci-env` job (parallel to `build-minds-snapshot`) deploys the per-run env via the deployment-tests orchestrator and publishes its per-run secrets to Vault.
+
+- `test-minds-snapshot` now depends on both build jobs and additionally runs the `minds_services` tests (login + mint LiteLLM key + live LLM call) on the runner against the per-run env.
+
+- New `destroy-minds-ci-env` job (`always()`) tears the per-run env down after the test stage; a new parallel `cleanup-minds-ci-envs` job sweeps leaked `ci-*` envs older than 1 hour as a backstop.
+
+- New Vault-OIDC auth in these jobs uses the `minds_ci_env_gh` / `minds_ci_test_gh` roles (env `minds-ci-env` / `minds-ci-test`); the ci-env jobs deploy to the minds-dev Modal workspace via `MINDS_DEV_MODAL_TOKEN_*`; the snapshot-test offload pin is unified to `0.9.10`.
+
+- New `workflow_dispatch` input `run_minds_release_tests` + `test-minds-release` job: the manual release tier that runs the heavy `minds_deployment` tests (deploy / rollback / round-trip), each minting + destroying its own ephemeral env.
+
+- Standing up a per-run `ci-*` env is now opt-in: `build-minds-ci-env`, `cleanup-minds-ci-envs`, `destroy-minds-ci-env`, and the `minds_services` step in `test-minds-snapshot` run ONLY on a `workflow_dispatch` with `run_minds_release_tests=true` (the same switch that gates `test-minds-release`). Normal pushes/PRs no longer create any ci env -- `test-minds-snapshot` still runs the `minds_snapshot_resume` tests (which need only the built snapshot image), via `always()` + a `build-minds-snapshot` success gate so the opt-in (skipped) ci-env build does not skip the whole job.
+
+- Removed the dedicated `test-docker-electron` CI job and consolidated all Electron e2e coverage into the `test-minds-snapshot` stage. The Electron create+chat test now carries the `minds_snapshot_resume` mark and runs in the snapshot offload sandbox, reusing the snapshot image's already-baked Electron/Playwright/Xvfb toolchain instead of a separate job that cold-installed Node/pnpm/Electron/xvfb on every push. The `test-docker` filter dropped its `not minds_electron` exclusion (the marker is gone), and `just minds-test-electron` now runs the consolidated test locally.
+
+Adds the minds workspace-API blueprint plan and handoff doc under `blueprint/minds-workspace-api/`, and updates root `justfile` recipes supporting the minds app and workspace-API development workflow.
+
+Updates those blueprint docs to match the shipped permission design: the cross-workspace permissions use a `minds-workspaces` scope whose schemas (including per-target ones) arrive with each grant and merge by name, rather than the originally-planned per-host `anyOf` allowlist synced at startup. The plan carries a superseded-notice pointing at `apps/minds/docs/latchkey-permissions.md`, and the handoff now reflects current status (telegram/per-target/create-parity done; SSH remote→local broker outstanding; old UI routes still in use enumerated).
+
+Adds a new plan, `blueprint/minds-api-route-consolidation/plan-minds-api-route-consolidation.md`, for consolidating the leftover desktop-client UI routes onto a single, consistently-authed `/api/v1` surface (workspace/desktop/provider vocabulary, three new per-target `minds-workspaces` verbs, unified auth, and the browser create-flow repoint).
+
+Pin the changelog-consolidation schedule's mngr `user_id` to a committed constant (`USER_ID` in `scripts/changelog_schedule_utils.py`, exposed via `--print-user-id`). `changelog_deploy.sh` and the `changelog-trigger` justfile recipe now export it as `MNGR_USER_ID`, so deploys and on-demand triggers always target the same Modal environment (`mngr-changelog-schedule-<user_id>`) regardless of which machine runs them. Previously the environment name depended on a random per-profile `user_id`, so redeploying from a fresh checkout would silently fork the schedule into a new, empty environment instead of replacing the live one.
+
+`just minds-start` no longer takes an `agent_name` argument or sets `MINDS_WORKSPACE_NAME`. Its parameters are now `branch` and `fct` (positional, in that order): `just minds-start my-branch`, or `just minds-start "" .external_worktrees/my-fct-worktree`. The workspace always gets an automatic `mind-N` name unless you type one into the create form's advanced "Name" field -- type a name there if you want a predictable handle for `just propagate-changes <name>` / `just forward-system-interface <name>`.
+
+## 2026-06-26
+
+Changed: Bumped the offload CI pin in `.github/workflows/ci.yml` from `0.9.9` to `0.9.10` (cargo cache key, version check, and `cargo install` invocation updated to match).
+
+`scripts/tutorial_matcher.py` now reads the tutorial block from each test
+function's docstring (under a `Tutorial block:` section) instead of from a
+`write_tutorial_block(...)` call, matching the new docstring-anchored scheme for
+TMR. Added `specs/docstring-anchored-tmr.md` describing the overall change.
+
+The `sync-tutorial-to-e2e-tests` skill now emits the docstring format (verbatim
+`Tutorial block:` section plus a `Scope:` section) and crystallizes the implicit
+requirements of each block's commands into the scope, rather than calling
+`write_tutorial_block`.
+
+The TMR workflow (`.github/workflows/tmr.yml`, including the daily scheduled run)
+now defaults to all of mngr's release tests (`libs/mngr` with
+`-m "release and not docker and not docker_sdk"`) rather than only the e2e
+tutorial subset. Docker-marked release tests are excluded because they need a
+real Docker daemon and run on a GitHub runner in `release-tests.yml`, not on the
+Modal hosts TMR provisions.
+
+Added a fast, realistic minds-workspace **snapshot test suite** that runs in GitHub CI, and reconciled it with the latest `main`. This consolidates the work from #2226 (wire the snapshot suite into CI) and #2275 (CI secrets via Vault); see those PRs for the development history.
+
+Wired the suite into CI as two jobs: `build-minds-snapshot` builds a fresh Modal `vm_runtime` snapshot image (Docker-in-Docker + a real Electron-created forever-claude-template workspace, `docker stop`ped for a clean, deterministic state) once per run and exposes its image id; the dependent `test-minds-snapshot` job boots straight from that image via offload's `--override-image-id` and runs the `minds_snapshot_resume` suite. Both run on every PR (blocking), skip fork PRs, and have a one-click `DISABLE_MINDS_SNAPSHOT_CI` repo-variable kill switch.
+
+`scripts/snapshot_minds_e2e_state.py` builds the outer image, drives the shared Electron create-flow runner (no pytest, no agent destroy), `docker stop`s the workspace container, snapshots the filesystem, and prints a per-phase timing summary (`PHASE_TIMING ...`). It pins the exact Node (24.15.0) / pnpm (10.33.4) / claude-code versions minds requires, builds the Tailwind stylesheet (`pnpm run build:css`) so the onboarding flow is not silently stuck on a missing `.hidden` rule, forces `docker_runtime=runc` in the sandbox, runs `uv sync` and `pnpm install` concurrently behind a cached pre-repo Playwright layer, and supports `--image-id-output <path>` to hand the image id to the test job without scraping stdout.
+
+CI secrets now use the public `imbue-ai/use-vault-secrets` action (pinned by SHA); only `test-minds-snapshot` needs a secret (`ANTHROPIC_API_KEY` from Vault via OIDC). depot.dev was evaluated for the inner FCT container build and removed: for this ephemeral build-then-run-locally flow it measured ~2.5 min slower (it must export and re-download the whole image into the sandbox daemon), so the build uses the local docker builder.
+
+`offload-modal-minds-snapshot.toml` boots from the snapshot image and runs a single non-retrying group (a real failure should surface, not be masked), with `cpu_cores=4` / `memory_gb=8` and `vm_runtime=true` to match what produced the image so the resumed Docker-in-Docker state has the headroom to come back up. `scripts/cleanup_modal_snapshot_images.py` reclaims the snapshot images (Modal has no list-images API): it keeps a durable ledger in a Modal `Dict` with `record` / `delete` / `sweep --max-age-hours` modes, wired so the build job records each image, the test job deletes it on a fully successful run, and the periodic `cleanup-modal-environments` job sweeps leaked images as a safety net. `justfile` gains `test-offload-minds-snapshot <image-id>` and scopes the `minds_snapshot_resume` mark out of the other offload configs.
+
+The repo-wide bash strict-mode ratchet (`test_meta_ratchets.py::test_prevent_bash_without_strict_mode`) now relies on `find_bash_scripts_without_strict_mode` skipping `.minds/template/` (those are declarative secret-schema templates, not runnable scripts). The recorded snapshot is lowered from 17 to 11, pinned to the offload-CI count (the local checkout sees 10; CI counts one extra, `mac-runner-reset.sh`, only because its thin-diff image serves a stale base-image copy predating that file's own strict-mode line).
+
+`scripts/remove_old_flat_vault_secrets.py` now treats a soft-deleted Vault secret (one whose latest version has a `deletion_time`, so `vault kv get` returns a null `data.data` rather than exit-2) as absent and skips it, instead of crashing the run.
+
+Add a blueprint plan (`blueprint/minds-google-oauth-fallback/`) for the Minds Google OAuth fallback: inserting a Minds-owned Google OAuth attempt between the credential-validity check and the self-setup browser flow, gated to `google-` services. Planning artifact only, no code changes.
+
+`minds-launch-to-msg.yml`: the `macos_launch` job now checks out the trigger ref for the e2e harness (playwright spec + fixtures), matching `launch_to_msg`, instead of pinning the checkout to `commit_sha`. Previously the binary *and* the test harness were both pinned to `commit_sha`, so harness fixes on the dispatched branch were never exercised by `macos_launch` while `launch_to_msg` did pick them up — the two jobs silently tested different code. The binary under test is still pinned to `commit_sha` via the build artifact.
+
+`minds-launch-to-msg.yml`: the post-test cleanup step no longer swallows the reset script's exit code with `|| true`. The reset script now verifies the runner reached a clean state (no leaked Lima VM / `~/.minds` / app) after its best-effort cleanup and exits non-zero otherwise, so a cleanup failure that would silently rot the self-hosted runner now fails the job.
+
+## 2026-06-25
+
+Bumped the offload CI pin in `.github/workflows/ci.yml` from `0.9.7` to `0.9.9` (the latest release), updating the cargo cache key, the version check, and the `cargo install` invocation.
+
+Add the blueprint planning document for the minds error-reporting & "get help" work (`blueprint/minds-error-reporting-help/`), which scopes the full four-phase design (consent + settings, report-a-bug + API, in-workspace agent help, out-of-workspace agent help). Phases 1-2 are implemented in this PR; phases 3-4 will follow as stacked PRs.
+
+`just minds-start` no longer defaults the workspace name to `mindtest`. Its `agent_name` argument now defaults to empty, so a plain `just minds-start` leaves `MINDS_WORKSPACE_NAME` unset and the create form generates an automatic `mind-N` name -- matching what a shipped binary does. Pass a name (`just minds-start my-agent`) to pin the workspace name explicitly; a pinned name is used verbatim and a collision errors at create time rather than being auto-suffixed to `mindtest-2`.
+
+Changed: The nightly changelog consolidation automation now merges its PR immediately instead of leaving it for a human to review and merge. The in-run accuracy review remains the quality gate.
+
+Added a design doc, `specs/tmr-bounded-convergence-and-normalization.md`, for improving the e2e tests TMR generates: bounding per-test complexity via a tutorial-anchored convergence objective (with deletion as a first-class action), and a suite-level normalization stage in the reducer (utility extraction gated on the tutorial-1:1 predicate, plus a FIXME-resolution/escalation lifecycle verified on offload). No build or tooling behavior change.
+
+Added a design blueprint (`blueprint/gateway-agent-id-validation/`) documenting the decision to reject a malformed permission-request `agent_id` at the latchkey gateway (the agent's HTTP tool call) instead of only guarding against it defensively on the consumer side.
+
+## 2026-06-24
+
+Removed the minds app's `postinstall` CSS-compile hook (it broke ToDesktop's `--prod` cloud install). To cover the one path that compiled CSS only as an install side-effect -- the `minds_electron` end-to-end test, which launches `electron main.js` directly rather than through `pnpm start` -- the CSS build is now wired in explicitly: a "Build Tailwind CSS for the e2e app" step in the CI e2e job, and a `minds-css` dependency on the `just minds-test-electron` recipe.
+
+`scripts/install.sh` now runs `mngr config wizard` as a final step to populate common user-scope configuration (e.g. whether to isolate the Claude config dir for local agents). Like the other steps, it prompts before changing anything and is safe to re-run.
+
+`scripts/push_vault_from_file.py` now writes each declared key as its own single-`value` leaf at `secrets/minds/<tier>/<service>/<KEY>` (the new "split" Vault secret layout) instead of a single flat KV entry with many fields.
+
+Added `scripts/remove_old_flat_vault_secrets.py`, a one-off cleanup tool that deletes the old flat per-service Vault entries for a tier (`secrets/minds/<tier>/<service>`) once they have been mirrored into the split layout. It refuses to delete any entry whose split mirror is missing or whose keys/values disagree, defaults to a dry-run, and requires `--yes` to actually delete.
+
+`scripts/changelog_deploy.sh` now reads its `GH_TOKEN` / `ANTHROPIC_API_KEY` from the split layout (`secrets/mngr/dev/github/GH_TOKEN` and `secrets/mngr/dev/anthropic/ANTHROPIC_API_KEY`, value under `.data.data.value`) instead of the old flat entries.
+
+## 2026-06-23
+
+Added the discovery-health-watchdog design doc (`blueprint/discovery-health-watchdog/plan-discovery-health-watchdog.md`): an app-global watchdog that detects a stalled or dead workspace-discovery pipeline (via snapshot-freshness age for a producer stall and the consumer's unexpected-exit signal), self-heals it with a cheap-to-heavy producer re-kick ladder (supervisor bounce, then restart), and surfaces a terminal app-level "blocked" recovery screen when self-healing is exhausted.
+
+Updated the remote-mind-recovery blueprint (`blueprint/remote-mind-recovery/plan-remote-mind-recovery.md`): collapsed the recovery page's redundant second sampler of host/provider state onto the passive discovery resolver, then revised the post-outage handling. Rather than a transient `REACHABILITY_UNCONFIRMED` recovery tier plus a client-side convergence loop, the redirect to the recovery page is now gated on fresh discovery, so the recovery page always classifies from trustworthy state. A further revision section collapses the two backend-unreachable tiers (`PROVIDER_UNAVAILABLE` / `WORKSPACE_UNREACHABLE`) into a single `BACKEND_UNREACHABLE` tier.
+
+Add the `traceback-with-variables` dependency to the workspace (used by the minds Sentry integration to format tracebacks with local variables), which updates the root `uv.lock`.
+
+Added a `just minds-start-cloud` recipe for launching the minds desktop client in dev mode to test the `imbue_cloud` provider against pre-baked pool slices.
+
+Unlike `just minds-start` (which targets local Lima/Docker dev and forces local-worktree create-form defaults), `minds-start-cloud` leaves the form's shipped fallbacks in place -- the canonical forever-claude-template remote plus `FALLBACK_BRANCH` -- so an `imbue_cloud` create matches and fast-path leases a slice baked at that tag instead of dropping to the slow rebuild path. It also skips the live-mngr to `vendor/mngr/` rsync, which is irrelevant to an already-baked pool slice.
+
+Added a `just backfill-pool-host-keys` recipe that wraps `minds pool backfill-host-keys` for the activated minds env -- the one-time SSH host-key backfill to run once per tier after deploying the host-key-pinning connector.
+
+Consolidated the docs describing how FCT's `vendor/mngr` is kept in sync, so the `git archive` (release) vs `rsync` (dev/bake) mechanisms are explained in one canonical place (`apps/minds/docs/vendor-mngr-sync.md`) instead of being re-described in each skill.
+
+Trimmed the duplicated rsync-form explanation out of the `minds-dev-workflow` skill and pointed the `minds-justfile` skill's `sync-vendor-mngr` entry at the canonical doc. Also corrected the `minds-dev-workflow` skill's "Editable installs" note to attribute `uv tool install -e` to `scripts/build_workspace.sh` (which the Dockerfile invokes) rather than the Dockerfile directly, and to name the actual mngr install target (`vendor/mngr/libs/mngr`).
+
+Added the implementation plan `blueprint/pin-imbue-cloud-host-keys/` for removing trust-on-first-use (TOFU) from the imbue_cloud pool flow by pinning all SSH host keys.
+
+Added an optional `fct` argument to the `just minds-start` recipe, letting you point a launch at a specific forever-claude-template worktree (the directory synced into `vendor/mngr/` and exported as `MINDS_WORKSPACE_GIT_URL`) instead of the fixed `.external_worktrees/forever-claude-template`. An absolute path is used as-is; a relative one is resolved against the mngr root. Omitting it keeps the previous default, so existing invocations are unchanged.
+
+Rewrote the `release-minds` skill to be a thin pointer to `apps/minds/docs/release.md`, the canonical release runbook, instead of describing its own (now-obsolete) release flow.
+
+The old skill assumed a `~/project/minds_prod` clone and a long-lived `minds_v<version>` release branch, and walked through a manual `vendor/mngr` sync — none of which matches the documented process (release from `main` via two PRs, `just sync-vendor-mngr`, and `minds-v<version>` tags on both repos). The skill now resolves the target version from its args and defers entirely to the runbook, so the release process is maintained in exactly one place.
+
+## 2026-06-22
+
+Renamed the `just minds-tailwind` recipe to `just minds-css`: it now compiles the minds desktop client's Tailwind v4 stylesheet (`static/app.css` -> minified `static/app.min.css`) via the pinned `@tailwindcss/cli`, instead of fetching the Tailwind Play CDN JS bundle. The `.gitignore` entry tracks the new compiled artifact (`app.min.css`) in place of the retired `tailwind.js`.
+
+- Added the design blueprint for handling unauthenticated providers consistently
+  under `blueprint/consistent-provider-auth-failures/`.
+
+- The `forward-system-interface` justfile recipe now resolves an agent's id with
+  `mngr list --on-error continue`, so an unauthenticated/unreachable provider no
+  longer aborts the lookup of a local agent.
+
+- Added the design blueprint for robust provider-error handling across minds
+  discovery and `mngr list` callers under
+  `blueprint/robust-minds-list-provider-errors/`.
+
+Added an implementation blueprint for the minds desktop client's FastAPI-to-Flask migration under `blueprint/minds-flask-migration/`.
+
+Added a `blueprint/` planning document (`blueprint/remove-system-interface-asyncio/`) capturing the implementation plan for migrating the Minds app's system interface off asyncio (FastAPI -> Flask + flask-sock, served by a threaded Werkzeug HTTP/1.1 server). The migration itself is implemented in the `forever-claude-template` repo, not in this monorepo.
+
+Added the design plan document for unifying the `mngr start` host lock with the cooperative host lock (`blueprint/unify-remote-host-lock/`). No runtime or tooling behavior changes at the repo-root level.
+
+## 2026-06-21
+
+- Added the design blueprint for the sshd / agent restart-robustness work under
+  `blueprint/sshd-restart-robustness/`.
+
+Added the implementation plan for sharing a bare-metal slice box across developer environments under `blueprint/share-bare-metal-across-dev-envs/`.
+
+## 2026-06-20
+
+Removed the `bake-pool-host-{dev,prod}` justfile recipes (they baked OVH classic VPS pool hosts, now deprecated). Pool hosts are baked as bare-metal slices via the `bake-slice-{dev,prod}` recipes; `list-pool-hosts` and `destroy-pool-host` are unchanged and still cover legacy OVH VPS rows. The `minds-justfile` and `minds-dev-workflow` skill docs were updated to match (slice bakes are the documented path; OVH VPS baking is marked deprecated).
+
+## 2026-06-19
+
+Added a design doc for extending minds' workspace-recovery flow to remote (Imbue Cloud) minds: a blueprint plan under `blueprint/remote-mind-recovery/`. No build/tooling behavior change.
+
+Added `specs/bare-providers/` (spec.md + concise.md): a design proposal for
+running agents directly on a cloud VM with no Docker container, as a second
+config-selected shape of the aws/gcp/azure providers. Introduces a
+substrate-x-realizer architecture (a `HostRealizer` seam injected like the existing
+`VpsClient`) so "with Docker" vs "without Docker" becomes a reusable axis rather
+than a per-cloud class matrix, with a staged rollout that later folds
+local/docker/lima/ssh into the same grid. Also adds `specs/uncertainties.md` noting
+that the bare mode supersedes the "single mode of operation" framing in
+`specs/vps-docker-provider/spec.md`, and `specs/bare-providers/extraction_design.md`
+giving the implementation-level `HostRealizer` seam contract, state-ownership
+split, host-record evolution, and per-method migration for Stage 1.
+
+Updated the root pytest coverage config to track the renamed `imbue.mngr_vps`
+package (was `imbue.mngr_vps_docker`).
+
+Registered the new `overlay` workspace library in the root `pyproject.toml`: added it as a `[tool.uv.sources]` workspace source, and added `--cov=imbue.overlay` to the shared coverage flags so the library is measured in the offload combined-coverage gate (and the `test_top_level_cov_flags_are_union_of_subproject_cov_flags` meta-ratchet stays satisfied).
+
+Added a new runtime dependency at the repo root (recorded in ``uv.lock``): ``google-cloud-storage>=2.18``, used by the GCP provider's new offline ``host_dir`` GCS state bucket. No top-level config or build tooling changes; the dependency is declared in ``libs/mngr_gcp/pyproject.toml`` and propagates to the lockfile.
+
+Removed a monorepo-development-only paragraph (the `~/.local/bin` pre-commit shim note) from the top-level README so the published PyPI README stays focused on user-relevant content.
+
+`make_cli_docs.py` now also generates the provider/agent config tables in each plugin README from the Pydantic field descriptions (the source of truth, also shown by `mngr config`), spliced between markers and verified by the docs `--check` gate so the tables can no longer drift from the code.
+
+The `regenerate-cli-docs` pre-commit hook now runs `make_cli_docs.py --check` (non-mutating, covering every generated file) instead of regenerating in place and diffing only the mngr command docs, and its trigger now includes the provider/agent `config.py` / `plugin.py` sources and generated provider READMEs. Previously, drift in the generated provider README tables could slip past the hook.
+
+The provider/agent config tables are rendered entirely from the model: each table only names its config class and which inherited base fields to also surface, and the field names, defaults, and descriptions are derived automatically (a small per-field override covers non-literal defaults like "gcloud/ADC default"). A field added to a config model now appears in its table automatically, so it can't silently vanish.
+
+Vendored `specs/provider-release-tests.md` (the common provider release-test suite proposal, originally authored in PR #2142) into the tree so the new provider release harness ships alongside the design doc its docstrings cite as the source of truth for the trip definitions and the still-owed future trips.
+
+## Provider specs: cross-provider review + prescriptive shape doc, accurate against current code
+
+Added a set of provider specs under `specs/` covering all nine `mngr` provider plugins (modal, aws, azure, gcp, vultr, ovh, lima, docker, ssh), then brought them into agreement with the `mngr/bare-providers` merge and verified every claim and citation against the current code. Common to all: the package/class rename (`mngr_vps_docker` -> `mngr_vps`, `VpsDockerProvider` -> `VpsProvider`, `VpsDockerHostRecord` -> `VpsHostRecord`, `VpsDockerHostStore` -> `VpsHostStore`, `VpsDockerError` -> `VpsError`, `MinimalVpsDockerProvider` -> `MinimalVpsProvider`) and the realizer/isolation architecture (a `HostRealizer` seam with `DockerRealizer` for `isolation=CONTAINER` and `BareRealizer` for `isolation=NONE`, selected by config). Citations are file+symbol (no line numbers, which rot on every refactor).
+
+- `specs/provider-uniformity-review.md` (descriptive current state): cross-provider review with a ranked findings table, six lifecycle matrices (create / stop / stop --stop-host / start / destroy / cleanup), a `CleanupFailedGroup` adoption matrix, defaults table, tag/label conventions, error-classification table, snapshot matrix, build-args table, test-coverage gaps, and a recommendations punch list. Re-ranked the findings (the `--stop-host` leak, Azure auto-shutdown billing, idle self-stop, and stopped-host visibility are now resolved for the cloud trio, open only for Vultr/OVH) and added an isolation/realizer section and the state-bucket discovery story. Corrected against current code: machine stop/start is layered via the base `OfflineCapableVpsProvider` plus per-cloud `_pause_cloud_instance`/`_resume_cloud_instance` hooks (no subclass `stop_host` overrides); curated `ProviderUnavailableError` help text is uniform across AWS/GCP/Azure and Modal raises `ProviderUnavailableError` on missing creds (both former findings resolved); dropped the removed agent-tag-mirror subsystem (`TagMirrorVpsProvider`, per-agent EC2 tags, agent caps) in favor of the required state bucket; `supports_snapshots` is realizer-class-derived (`isinstance(_realizer, SnapshotCapableRealizer)`); cloud-trio release coverage is the shared `run_provider_release_trip{1..4}` harness over CONTAINER and bare.
+
+- `specs/provider-shape.md` (prescriptive contract): what an `mngr` provider OUGHT to look like -- user contract (including the N-agents-per-host invariant), capability-flag honesty, shared defaults (security/CIDR, idle, auto-shutdown, resources, regions, sizes, images, tags, keys, exposure), lifecycle override hooks, error classification, operator commands, test requirements, anti-patterns, taxonomy table, implementer checklist, and open design questions (MUST/SHOULD/MAY). Incorporated the realizer/isolation contract (bare isolation requires a real machine stop/start lifecycle or must reject `isolation=NONE` via `BareIsolationNotSupportedError`; bare placements are not snapshot-capable). Corrected against current code: all three clouds extend `OfflineCapableVpsProvider` directly (the removed agent-tag-mirror subsystem and `TagMirrorVpsProvider` are gone); offline reconstruction is backed by an external `HostStateStore` (required state bucket on AWS/Azure, GCE metadata on GCP) with no agent cap; the cloud-trio `allowed_ssh_cidrs` default is uniformly open `("0.0.0.0/0",)` with a warning (key-only SSH is the control; no AWS-vs-trio posture mismatch); curated `ProviderUnavailableError` help text is uniform across the trio. Split the anti-patterns into resolved (Azure auto-shutdown billing, `--stop-host` leave-VM-running on GCP/Azure, stopped-host discovery dropping providers, AWS/GCP default help text, Modal wrong-error-class on missing creds) and still-real (SSH `supports_shutdown_hosts` lie, `supports_volumes` True-but-`[]`, snapshot-arg no-op, Docker `0.0.0.0:22`, Modal underscore tags).
+
+- `specs/implementing-a-provider.md` (dev guide): walkthrough for adding a new provider plugin, organized around user-visible behaviors, plus a Common Gotchas section. Added the realizer-seam and isolation-mode guidance and refreshed the stop/start, capability-flag, N-agents, and cost-safety sections. Corrected against current code: the realizer factory is `_realizer_for_isolation` (not `_build_realizer`); all three clouds extend `OfflineCapableVpsProvider` directly (no `TagMirrorVpsProvider`); machine stop/start is via the `_pause_cloud_instance`/`_resume_cloud_instance` hooks; the idle-watcher machinery (`_create_shutdown_script`/`_install_idle_watcher`) lives in the base, not the AWS/Azure backends; `supports_snapshots` is realizer-class-derived; Modal/AWS/GCP credential errors are now contract-compliant; dropped the removed per-agent EC2 tag mirror and its agent cap.
+
+- `specs/provider-release-tests.md` (release-test proposal): originally proposed a common release-test suite of five multi-step "trips" (full lifecycle + sketchy kill + GC; second-agent-on-same-host; idle auto-shutdown; snapshot-survives-destroy; error classification). Since that proposal has landed, condensed the doc to a remaining-gaps tracker: the shared `run_provider_release_trip{1..4}` harness and the AWS/GCP/Azure coverage (parametrized over container and bare isolation) are cited as implemented, and the doc retains only the confirmed-open gaps (Vultr/OVH and Lima/Docker/SSH not on the harness, the N-agents Trip 1b, a standalone offline-host_dir trip, `supports_volumes` honesty, `--snapshot`-at-create on the VPS family, and the container-ingress probe).
+
+- `specs/cleanup-error-aggregation.md`: cite/naming refresh only (the core model is unchanged) -- VPS-family container teardown now lives behind `DockerRealizer.teardown_placement`, the already-gone helper is `is_vps_resource_already_gone`, and the provider count was corrected; left the separate local-docker `DockerHostStore` path untouched.
+
+- Documented Vault setup for pool/slice bakes in the `minds-dev-workflow` skill: bakes need an interactive `vault login -method=oidc`, the minds wrappers auto-apply the imbue HCP `VAULT_ADDR`/`VAULT_NAMESPACE` defaults (from `vault_reader.py`) so they work with just the token, and raw `vault`/`mngr imbue_cloud admin` commands need those two exported (a `127.0.0.1:8200` "connection refused" means a missing address, not a logged-out session).
+
+## 2026-06-18
+
+The `identify-*` skills (`identify-doc-code-disagreements`, `identify-inconsistencies`, `identify-outdated-docstrings`, `identify-style-issues`) now accept a `target_path` argument instead of a bare library name. You can scope them to a whole library (`libs/mngr` or just `mngr`) or to any subdirectory within one (e.g. `libs/mngr/imbue/mngr/cli`). Each skill resolves the scan scope and its containing library, gathers the containing library's context, and writes findings to the containing library's `_tasks/` folder.
+
+Added a new `identify-suspicious-edge-cases` skill that flags over-broad exception catches, fallback `else` branches, defensive guards, and unnecessary `| None` types under a given path.
+
+Add a design spec (`specs/provider-state-bucket/`) for giving the AWS and Azure providers a cloud object-storage bucket (S3 / Azure Blob) that holds mngr control-plane state, so a stopped instance's host record, agent metadata, and `host_dir` are all readable offline without hitting the 256-char EC2/VM tag-value limit.
+
+The spec covers: `prepare`/`cleanup` creating and tearing down the bucket plus a best-effort bucket-write identity (AWS IAM instance profile / Azure managed identity, provisioned when the `is_offline_host_dir_enabled` provider config field is on); moving the per-agent tag mirror into the bucket via the existing `persist_agent_data` / `list_persisted_agent_data_for_host` hooks; and an on-by-default `host_dir` offline volume backed by an on-box sync daemon (instance-push) read back through `get_volume_for_host()` -> `OfflineHostWithVolume`. GCP is intentionally out of scope (its per-instance metadata allowance is sufficient).
+
+Added `moto[s3]` to the root dev dependency group for in-memory S3 unit tests of the new AWS state bucket.
+
 ## 2026-06-17
 
 Added a design doc (`specs/agent-plugin-parity/capability-mixins.md`) proposing a code-derived agent capability taxonomy: capability mixins plus a registry that generates the parity matrix from the agent classes, replacing the hand-maintained table and guarding against doc/code drift.

@@ -18,7 +18,6 @@ from typing import Any
 from typing import cast
 
 import pytest
-from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.event_envelope import EventId
@@ -27,15 +26,14 @@ from imbue.imbue_common.event_envelope import IsoTimestamp
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.forward_cli import _redact_secrets
-from imbue.minds.desktop_client.notification import NotificationDispatcher
-from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
 from imbue.mngr.api.discovery_events import DiscoveryError
-from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
 from imbue.mngr.api.discovery_events import HostDiscoveryEvent
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
+from imbue.mngr.api.discovery_events import ProviderDiscoverySnapshotEvent
+from imbue.mngr.api.discovery_events import make_provider_discovery_snapshot_event
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
@@ -53,6 +51,11 @@ _HOST_ID_1 = HostId("host-" + "0" * 31 + "1")
 _AGENT_ID_1: AgentId = AgentId("agent-" + "0" * 31 + "1")
 _AGENT_ID_2: AgentId = AgentId("agent-" + "0" * 31 + "2")
 _SERVICE_WEB: ServiceName = ServiceName("web")
+# Wall-clock span bounding a provider's discovery poll. The aggregator uses these
+# to refuse clobbering an item whose own incremental event landed mid-span; tests
+# here feed no such events, so any fixed span suffices.
+_DISCOVERY_STARTED_AT = datetime(2026, 5, 3, 0, 0, 0, tzinfo=timezone.utc)
+_DISCOVERY_FINISHED_AT = datetime(2026, 5, 3, 0, 0, 1, tzinfo=timezone.utc)
 
 
 def _next_event_id(counter: list[int]) -> EventId:
@@ -67,6 +70,32 @@ def _make_agent(agent_id: AgentId, host_id: HostId = _HOST_ID_1) -> DiscoveredAg
         agent_name=AgentName(f"agent-name-{agent_id[-4:]}"),
         provider_name=ProviderInstanceName("local"),
         certified_data={"labels": {}},
+    )
+
+
+def _make_host(host_id: HostId, state: HostState) -> DiscoveredHost:
+    return DiscoveredHost(
+        host_id=host_id,
+        host_name=HostName(f"host-name-{host_id[-4:]}"),
+        provider_name=ProviderInstanceName("local"),
+        host_state=state,
+    )
+
+
+def _provider_snapshot(
+    agents: tuple[DiscoveredAgent, ...],
+    hosts: tuple[DiscoveredHost, ...] = (),
+    provider_name: str = "local",
+    error: DiscoveryError | None = None,
+) -> ProviderDiscoverySnapshotEvent:
+    """Build a per-provider discovery snapshot for the ``local`` provider by default."""
+    return make_provider_discovery_snapshot_event(
+        provider_name=ProviderInstanceName(provider_name),
+        agents=agents,
+        hosts=hosts,
+        discovery_started_at=_DISCOVERY_STARTED_AT,
+        discovery_finished_at=_DISCOVERY_FINISHED_AT,
+        error=error,
     )
 
 
@@ -170,24 +199,16 @@ def test_envelope_with_non_dict_payload_is_ignored(consumer: EnvelopeStreamConsu
     assert consumer.resolver.list_known_agent_ids() == ()
 
 
-# --- observe stream: full snapshot ----------------------------------------
+# --- observe stream: per-provider snapshot --------------------------------
 
 
-def test_full_snapshot_populates_resolver_and_fires_discovered_callbacks(
+def test_provider_snapshot_populates_resolver_and_fires_discovered_callbacks(
     consumer: EnvelopeStreamConsumer,
 ) -> None:
-    counter = [0]
     discovered: list[tuple[AgentId, RemoteSSHInfo | None, str]] = []
     consumer.add_on_agent_discovered_callback(lambda aid, ssh, prov: discovered.append((aid, ssh, prov)))
 
-    snapshot = FullDiscoverySnapshotEvent(
-        timestamp=_TIMESTAMP,
-        event_id=_next_event_id(counter),
-        source=_EVENT_SOURCE,
-        agents=(_make_agent(_AGENT_ID_1), _make_agent(_AGENT_ID_2)),
-        hosts=(),
-    )
-    _dispatch(consumer, _observe_envelope(snapshot))
+    _dispatch(consumer, _observe_envelope(_provider_snapshot((_make_agent(_AGENT_ID_1), _make_agent(_AGENT_ID_2)))))
 
     known = set(consumer.resolver.list_known_agent_ids())
     assert known == {_AGENT_ID_1, _AGENT_ID_2}
@@ -199,74 +220,57 @@ def test_full_snapshot_populates_resolver_and_fires_discovered_callbacks(
     assert all(entry[2] == "local" for entry in discovered)
 
 
-def test_full_snapshot_freshness_uses_producer_timestamp(consumer: EnvelopeStreamConsumer) -> None:
-    """``last_full_snapshot_at`` reflects the producer's poll time, not receive time.
+def test_provider_snapshot_freshness_uses_discovery_finished_at(consumer: EnvelopeStreamConsumer) -> None:
+    """Snapshot freshness reflects the provider's poll-completion time, not receive time.
 
     The recovery redirect compares the snapshot timestamp against a locally-recorded
-    outage onset, so it must be *when discovery observed the world* (the envelope
-    timestamp), not when this consumer happened to read the line.
+    outage onset, so it must be *when discovery finished observing the provider*
+    (``discovery_finished_at``), not when this consumer happened to read the line.
     """
-    counter = [0]
-    snapshot = FullDiscoverySnapshotEvent(
-        timestamp=_TIMESTAMP,
-        event_id=_next_event_id(counter),
-        source=_EVENT_SOURCE,
-        agents=(_make_agent(_AGENT_ID_1),),
+    _dispatch(consumer, _observe_envelope(_provider_snapshot((_make_agent(_AGENT_ID_1),))))
+
+    last_event_at, last_snapshot_at = consumer.resolver.get_freshness_timestamps()
+    assert last_snapshot_at == _DISCOVERY_FINISHED_AT
+    assert last_event_at == _DISCOVERY_FINISHED_AT
+
+
+def test_provider_snapshot_freshness_is_tracked_per_provider(consumer: EnvelopeStreamConsumer) -> None:
+    """Each provider's snapshot updates only its own last-snapshot time."""
+    early = datetime(2026, 5, 3, 0, 0, 0, tzinfo=timezone.utc)
+    late = datetime(2026, 5, 3, 0, 5, 0, tzinfo=timezone.utc)
+    docker_snapshot = make_provider_discovery_snapshot_event(
+        provider_name=ProviderInstanceName("docker"),
+        agents=(),
         hosts=(),
+        discovery_started_at=early,
+        discovery_finished_at=early,
     )
-    _dispatch(consumer, _observe_envelope(snapshot))
-
-    last_event_at, last_full_snapshot_at = consumer.resolver.get_freshness_timestamps()
-    expected = datetime(2026, 5, 3, 0, 0, 0, tzinfo=timezone.utc)
-    assert last_full_snapshot_at == expected
-    assert last_event_at == expected
-
-
-def test_full_snapshot_freshness_falls_back_to_receive_time_on_bad_timestamp(
-    consumer: EnvelopeStreamConsumer,
-) -> None:
-    """An unparseable envelope timestamp falls back to the consumer's receive time."""
-    counter = [0]
-    before = datetime.now(timezone.utc)
-    snapshot = FullDiscoverySnapshotEvent(
-        timestamp=IsoTimestamp("not-a-real-timestamp"),
-        event_id=_next_event_id(counter),
-        source=_EVENT_SOURCE,
-        agents=(_make_agent(_AGENT_ID_1),),
+    modal_snapshot = make_provider_discovery_snapshot_event(
+        provider_name=ProviderInstanceName("modal"),
+        agents=(),
         hosts=(),
+        discovery_started_at=late,
+        discovery_finished_at=late,
     )
-    _dispatch(consumer, _observe_envelope(snapshot))
-    after = datetime.now(timezone.utc)
+    _dispatch(consumer, _observe_envelope(docker_snapshot))
+    _dispatch(consumer, _observe_envelope(modal_snapshot))
 
-    _, last_full_snapshot_at = consumer.resolver.get_freshness_timestamps()
-    assert last_full_snapshot_at is not None
-    assert before <= last_full_snapshot_at <= after
+    resolver = consumer.resolver
+    assert resolver.get_last_snapshot_at_for_provider(ProviderInstanceName("docker")) == early
+    assert resolver.get_last_snapshot_at_for_provider(ProviderInstanceName("modal")) == late
+    # The aggregate is the max across providers.
+    _, aggregate = resolver.get_freshness_timestamps()
+    assert aggregate == late
 
 
 def test_subsequent_snapshot_fires_destroyed_for_dropped_agents(
     consumer: EnvelopeStreamConsumer,
 ) -> None:
-    counter = [0]
     destroyed: list[AgentId] = []
     consumer.add_on_agent_destroyed_callback(lambda aid: destroyed.append(aid))
 
-    first = FullDiscoverySnapshotEvent(
-        timestamp=_TIMESTAMP,
-        event_id=_next_event_id(counter),
-        source=_EVENT_SOURCE,
-        agents=(_make_agent(_AGENT_ID_1), _make_agent(_AGENT_ID_2)),
-        hosts=(),
-    )
-    _dispatch(consumer, _observe_envelope(first))
-
-    second = FullDiscoverySnapshotEvent(
-        timestamp=_TIMESTAMP,
-        event_id=_next_event_id(counter),
-        source=_EVENT_SOURCE,
-        agents=(_make_agent(_AGENT_ID_1),),
-        hosts=(),
-    )
-    _dispatch(consumer, _observe_envelope(second))
+    _dispatch(consumer, _observe_envelope(_provider_snapshot((_make_agent(_AGENT_ID_1), _make_agent(_AGENT_ID_2)))))
+    _dispatch(consumer, _observe_envelope(_provider_snapshot((_make_agent(_AGENT_ID_1),))))
 
     assert destroyed == [_AGENT_ID_2]
     assert set(consumer.resolver.list_known_agent_ids()) == {_AGENT_ID_1}
@@ -276,35 +280,21 @@ def test_snapshot_retains_agent_whose_provider_errored_then_drops_on_clean(
     consumer: EnvelopeStreamConsumer,
 ) -> None:
     """An agent omitted because its provider errored is retained (and surfaced stale); a clean snapshot drops it."""
-    counter = [0]
     destroyed: list[AgentId] = []
     consumer.add_on_agent_destroyed_callback(lambda aid: destroyed.append(aid))
 
-    first = FullDiscoverySnapshotEvent(
-        timestamp=_TIMESTAMP,
-        event_id=_next_event_id(counter),
-        source=_EVENT_SOURCE,
-        agents=(_make_agent(_AGENT_ID_1), _make_agent(_AGENT_ID_2)),
-        hosts=(),
-    )
-    _dispatch(consumer, _observe_envelope(first))
+    _dispatch(consumer, _observe_envelope(_provider_snapshot((_make_agent(_AGENT_ID_1), _make_agent(_AGENT_ID_2)))))
 
     # Snapshot omits agent 2 but its provider 'local' errored: agent 2 is
     # retained in the resolver (no destroyed callback) and the error is
     # surfaced so the workspace list can render it stale.
-    errored = FullDiscoverySnapshotEvent(
-        timestamp=_TIMESTAMP,
-        event_id=_next_event_id(counter),
-        source=_EVENT_SOURCE,
-        agents=(_make_agent(_AGENT_ID_1),),
-        hosts=(),
-        error_by_provider_name={
-            ProviderInstanceName("local"): DiscoveryError(
-                type_name="RuntimeError",
-                message="discovery failed",
-                provider_name=ProviderInstanceName("local"),
-            )
-        },
+    errored = _provider_snapshot(
+        (_make_agent(_AGENT_ID_1),),
+        error=DiscoveryError(
+            type_name="RuntimeError",
+            message="discovery failed",
+            provider_name=ProviderInstanceName("local"),
+        ),
     )
     _dispatch(consumer, _observe_envelope(errored))
     assert destroyed == []
@@ -312,16 +302,11 @@ def test_snapshot_retains_agent_whose_provider_errored_then_drops_on_clean(
     assert ProviderInstanceName("local") in consumer.resolver.get_provider_errors()
 
     # Clean snapshot (no provider error) still omits agent 2 -> dropped now.
-    clean = FullDiscoverySnapshotEvent(
-        timestamp=_TIMESTAMP,
-        event_id=_next_event_id(counter),
-        source=_EVENT_SOURCE,
-        agents=(_make_agent(_AGENT_ID_1),),
-        hosts=(),
-    )
-    _dispatch(consumer, _observe_envelope(clean))
+    _dispatch(consumer, _observe_envelope(_provider_snapshot((_make_agent(_AGENT_ID_1),))))
     assert destroyed == [_AGENT_ID_2]
     assert set(consumer.resolver.list_known_agent_ids()) == {_AGENT_ID_1}
+    # A clean snapshot clears the prior error for that provider.
+    assert ProviderInstanceName("local") not in consumer.resolver.get_provider_errors()
 
 
 # --- observe stream: host ssh info ----------------------------------------
@@ -332,14 +317,7 @@ def test_host_ssh_info_refires_discovery_with_ssh_info(consumer: EnvelopeStreamC
     discovered: list[tuple[AgentId, RemoteSSHInfo | None, str]] = []
     consumer.add_on_agent_discovered_callback(lambda aid, ssh, prov: discovered.append((aid, ssh, prov)))
 
-    snapshot = FullDiscoverySnapshotEvent(
-        timestamp=_TIMESTAMP,
-        event_id=_next_event_id(counter),
-        source=_EVENT_SOURCE,
-        agents=(_make_agent(_AGENT_ID_1, host_id=_HOST_ID_1),),
-        hosts=(),
-    )
-    _dispatch(consumer, _observe_envelope(snapshot))
+    _dispatch(consumer, _observe_envelope(_provider_snapshot((_make_agent(_AGENT_ID_1, host_id=_HOST_ID_1),))))
 
     ssh_event = HostSSHInfoEvent(
         timestamp=_TIMESTAMP,
@@ -376,14 +354,7 @@ def test_agent_destroyed_clears_resolver_services_and_fires_callback(
     destroyed: list[AgentId] = []
     consumer.add_on_agent_destroyed_callback(lambda aid: destroyed.append(aid))
 
-    snapshot = FullDiscoverySnapshotEvent(
-        timestamp=_TIMESTAMP,
-        event_id=_next_event_id(counter),
-        source=_EVENT_SOURCE,
-        agents=(_make_agent(_AGENT_ID_1),),
-        hosts=(),
-    )
-    _dispatch(consumer, _observe_envelope(snapshot))
+    _dispatch(consumer, _observe_envelope(_provider_snapshot((_make_agent(_AGENT_ID_1),))))
     # Seed a service so we can confirm it's cleared on destruction.
     consumer.resolver.update_services(_AGENT_ID_1, {"web": "http://127.0.0.1:9100"})
 
@@ -406,15 +377,11 @@ def test_host_destroyed_destroys_all_agents_on_host(consumer: EnvelopeStreamCons
     destroyed: list[AgentId] = []
     consumer.add_on_agent_destroyed_callback(lambda aid: destroyed.append(aid))
 
-    snapshot = FullDiscoverySnapshotEvent(
-        timestamp=_TIMESTAMP,
-        event_id=_next_event_id(counter),
-        source=_EVENT_SOURCE,
-        agents=(
+    snapshot = _provider_snapshot(
+        (
             _make_agent(_AGENT_ID_1, host_id=_HOST_ID_1),
             _make_agent(_AGENT_ID_2, host_id=_HOST_ID_1),
         ),
-        hosts=(),
     )
     _dispatch(consumer, _observe_envelope(snapshot))
 
@@ -434,22 +401,9 @@ def test_host_destroyed_destroys_all_agents_on_host(consumer: EnvelopeStreamCons
 # --- observe stream: host state threading ---------------------------------
 
 
-def _make_host(host_id: HostId, state: HostState) -> DiscoveredHost:
-    return DiscoveredHost(
-        host_id=host_id,
-        host_name=HostName(f"host-name-{host_id[-4:]}"),
-        provider_name=ProviderInstanceName("local"),
-        host_state=state,
-    )
-
-
-def test_full_snapshot_threads_host_state_into_resolver(consumer: EnvelopeStreamConsumer) -> None:
-    counter = [0]
-    snapshot = FullDiscoverySnapshotEvent(
-        timestamp=_TIMESTAMP,
-        event_id=_next_event_id(counter),
-        source=_EVENT_SOURCE,
-        agents=(_make_agent(_AGENT_ID_1, host_id=_HOST_ID_1),),
+def test_provider_snapshot_threads_host_state_into_resolver(consumer: EnvelopeStreamConsumer) -> None:
+    snapshot = _provider_snapshot(
+        (_make_agent(_AGENT_ID_1, host_id=_HOST_ID_1),),
         hosts=(_make_host(_HOST_ID_1, HostState.RUNNING),),
     )
     _dispatch(consumer, _observe_envelope(snapshot))
@@ -459,11 +413,8 @@ def test_full_snapshot_threads_host_state_into_resolver(consumer: EnvelopeStream
 
 def test_host_discovered_event_updates_host_state(consumer: EnvelopeStreamConsumer) -> None:
     counter = [0]
-    snapshot = FullDiscoverySnapshotEvent(
-        timestamp=_TIMESTAMP,
-        event_id=_next_event_id(counter),
-        source=_EVENT_SOURCE,
-        agents=(_make_agent(_AGENT_ID_1, host_id=_HOST_ID_1),),
+    snapshot = _provider_snapshot(
+        (_make_agent(_AGENT_ID_1, host_id=_HOST_ID_1),),
         hosts=(_make_host(_HOST_ID_1, HostState.RUNNING),),
     )
     _dispatch(consumer, _observe_envelope(snapshot))
@@ -479,13 +430,17 @@ def test_host_discovered_event_updates_host_state(consumer: EnvelopeStreamConsum
     assert consumer.resolver.get_host_state(_HOST_ID_1) is HostState.STOPPED
 
 
-def test_host_destroyed_event_marks_host_state_destroyed(consumer: EnvelopeStreamConsumer) -> None:
+def test_host_destroyed_event_forgets_host_and_its_agents(consumer: EnvelopeStreamConsumer) -> None:
+    """A HostDestroyedEvent drops the host and its agents outright (terminal removal).
+
+    Unlike a snapshot that re-lists a host with state ``DESTROYED`` during its
+    persistence window, an explicit destroy event is terminal: the shared
+    aggregator forgets the host and every agent on it, so the resolver reports
+    neither.
+    """
     counter = [0]
-    snapshot = FullDiscoverySnapshotEvent(
-        timestamp=_TIMESTAMP,
-        event_id=_next_event_id(counter),
-        source=_EVENT_SOURCE,
-        agents=(_make_agent(_AGENT_ID_1, host_id=_HOST_ID_1),),
+    snapshot = _provider_snapshot(
+        (_make_agent(_AGENT_ID_1, host_id=_HOST_ID_1),),
         hosts=(_make_host(_HOST_ID_1, HostState.RUNNING),),
     )
     _dispatch(consumer, _observe_envelope(snapshot))
@@ -499,6 +454,23 @@ def test_host_destroyed_event_marks_host_state_destroyed(consumer: EnvelopeStrea
     )
     _dispatch(consumer, _observe_envelope(host_destroyed))
 
+    assert consumer.resolver.get_host_state(_HOST_ID_1) is None
+    assert consumer.resolver.list_known_agent_ids() == ()
+
+
+def test_provider_snapshot_carries_destroyed_host_state(consumer: EnvelopeStreamConsumer) -> None:
+    """A provider snapshot re-listing a host with state DESTROYED surfaces that state.
+
+    During the destroyed-host persistence window the provider keeps the host in
+    its snapshot with ``host_state=DESTROYED``; the resolver surfaces it so
+    active-workspace surfaces drop it while a restore view can still see it.
+    """
+    snapshot = _provider_snapshot(
+        (_make_agent(_AGENT_ID_1, host_id=_HOST_ID_1),),
+        hosts=(_make_host(_HOST_ID_1, HostState.DESTROYED),),
+    )
+    _dispatch(consumer, _observe_envelope(snapshot))
+
     assert consumer.resolver.get_host_state(_HOST_ID_1) is HostState.DESTROYED
 
 
@@ -506,15 +478,7 @@ def test_host_destroyed_event_marks_host_state_destroyed(consumer: EnvelopeStrea
 
 
 def test_event_services_envelope_updates_resolver_services(consumer: EnvelopeStreamConsumer) -> None:
-    counter = [0]
-    snapshot = FullDiscoverySnapshotEvent(
-        timestamp=_TIMESTAMP,
-        event_id=_next_event_id(counter),
-        source=_EVENT_SOURCE,
-        agents=(_make_agent(_AGENT_ID_1),),
-        hosts=(),
-    )
-    _dispatch(consumer, _observe_envelope(snapshot))
+    _dispatch(consumer, _observe_envelope(_provider_snapshot((_make_agent(_AGENT_ID_1),))))
 
     register_payload = {
         "timestamp": _TIMESTAMP,
@@ -656,44 +620,18 @@ def test_terminate_is_no_op_when_no_process_attached(consumer: EnvelopeStreamCon
     consumer.terminate()
 
 
-# --- intentional vs unintentional exit notification ---------------------------
+# --- intentional vs unintentional exit reporting ------------------------------
 
 
-class _RecordingNotificationDispatcher(NotificationDispatcher):
-    """Test-only NotificationDispatcher that records dispatch calls instead of dispatching.
-
-    Records into the ``recorded`` list passed at construction time. We cannot
-    use a Pydantic ``PrivateAttr`` because the parent class is a ``FrozenModel``
-    and we want to keep the test fixture self-contained; the list is held via
-    a closure on the subclass-defined ``dispatch`` override below.
-    """
-
-    _recorded: list[tuple[NotificationRequest, str]] = PrivateAttr(default_factory=list)
-
-    def dispatch(
-        self,
-        request: NotificationRequest,
-        agent_display_name: str,
-    ) -> None:
-        self._recorded.append((request, agent_display_name))
-
-    @property
-    def recorded(self) -> list[tuple[NotificationRequest, str]]:
-        return self._recorded
-
-
-def _make_recording_dispatcher() -> _RecordingNotificationDispatcher:
-    return _RecordingNotificationDispatcher(is_electron=False, is_macos=False)
-
-
-def test_intentional_terminate_suppresses_subprocess_died_notification() -> None:
-    """After consumer.terminate(), the lifecycle watcher must not surface the
-    resulting non-zero exit code as a CRITICAL "Forwarding subprocess died"
-    notification -- minds itself asked the subprocess to stop.
+def test_intentional_terminate_does_not_report_exit() -> None:
+    """After consumer.terminate(), the lifecycle watcher must not report the
+    resulting exit to the on_unexpected_exit callbacks -- minds itself asked
+    the subprocess to stop, so the pipeline is not unexpectedly down.
     """
     resolver = MngrCliBackendResolver()
-    dispatcher = _make_recording_dispatcher()
-    consumer = EnvelopeStreamConsumer(resolver=resolver, notification_dispatcher=dispatcher)
+    consumer = EnvelopeStreamConsumer(resolver=resolver)
+    reported: list[int] = []
+    consumer.add_on_unexpected_exit_callback(reported.append)
     fake = _FakeProcess(pid=4242)
     # Simulate SIGTERM -> exit code -15 after terminate() is called.
     fake.returncode = -15
@@ -702,33 +640,30 @@ def test_intentional_terminate_suppresses_subprocess_died_notification() -> None
     consumer.terminate()
     # Drive the lifecycle watcher synchronously; in production this runs on a
     # ConcurrencyGroup thread that calls process.wait().
-    consumer._wait_and_notify_on_exit()
+    consumer._wait_and_report_exit()
 
-    assert dispatcher.recorded == [], (
-        f"Intentional shutdown should not dispatch a notification, got: {dispatcher.recorded!r}"
-    )
+    assert reported == [], f"Intentional shutdown should not report an exit, got: {reported!r}"
 
 
-def test_unintentional_subprocess_crash_dispatches_notification() -> None:
-    """If the subprocess exits non-zero without minds calling terminate(),
-    the lifecycle watcher must still surface a CRITICAL notification so the
-    user knows agent traffic is no longer being forwarded.
+def test_unintentional_subprocess_exit_reports_to_callback() -> None:
+    """If the subprocess exits without minds calling terminate(), the lifecycle
+    watcher reports the exit code once to the on_unexpected_exit callbacks so
+    the watchdog can transition the app-global state to BLOCKED.
     """
     resolver = MngrCliBackendResolver()
-    dispatcher = _make_recording_dispatcher()
-    consumer = EnvelopeStreamConsumer(resolver=resolver, notification_dispatcher=dispatcher)
+    consumer = EnvelopeStreamConsumer(resolver=resolver)
+    reported: list[int] = []
+    consumer.add_on_unexpected_exit_callback(reported.append)
     fake = _FakeProcess(pid=4242)
     # Arbitrary non-zero crash exit code.
     fake.returncode = 17
     _attach_fake(consumer, fake)
 
-    consumer._wait_and_notify_on_exit()
+    consumer._wait_and_report_exit()
+    # A second drain must not re-fire (reported at most once per consumer).
+    consumer._wait_and_report_exit()
 
-    assert len(dispatcher.recorded) == 1
-    request, agent_display_name = dispatcher.recorded[0]
-    assert request.title is not None
-    assert "died" in request.title.lower()
-    assert agent_display_name == "Minds"
+    assert reported == [17]
 
 
 def test_attach_twice_raises(consumer: EnvelopeStreamConsumer) -> None:

@@ -72,9 +72,9 @@ become Vault entries in step 4.
   Neon org (any name; the staging tier uses `creates_resources=false`
   so minds never creates or names it). Inside the project, create two
   databases: `host_pool` and `litellm_cost`. Capture:
-  - Pooled `DATABASE_URL` for `host_pool` (becomes `neon.DATABASE_URL`)
+  - Pooled `DATABASE_URL` for `host_pool` (becomes `neon/DATABASE_URL`)
   - Pooled `DATABASE_URL` for `litellm_cost` (becomes
-    `litellm.DATABASE_URL`)
+    `litellm/DATABASE_URL`)
   - Direct (non-pooled) DSN for `host_pool` (for the optional manual
     sanity check; `minds env deploy` also runs migrations through
     the pooled URL, but the direct one is handy for `psql`)
@@ -112,12 +112,12 @@ become Vault entries in step 4.
   Capture the client id and secret.
 
 - [ ] **Bare-metal box supplier credentials** for staging (currently
-  OVH; also used to tear down legacy OVH VPS hosts). Generate the
-  AK/AS/CK trio at <https://api.us.ovhcloud.com/createApp> for the
-  `ovh-us` endpoint with the scopes the pool flows need (see
-  `host-pool-setup.md`). These can be skipped on the first deploy (the
-  entry is optional -- deploy logs a warning and proceeds), but pool
-  host creation and `minds env destroy` cleanup both require it.
+  OVH). Generate the AK/AS/CK trio at
+  <https://api.us.ovhcloud.com/createApp> for the `ovh-us` endpoint with
+  the scopes the box-ordering flows need (see `host-pool-setup.md`). The
+  operator sources these into their shell when ordering bare-metal boxes
+  via `mngr imbue_cloud admin server`; no deployed service or deploy step
+  reads them, so they are not required for the first deploy.
 
 - [ ] **Anthropic API key** for the staging LiteLLM proxy backend. Either
   mint a dedicated key under a staging-tagged Anthropic account or
@@ -136,7 +136,7 @@ become Vault entries in step 4.
   ```bash
   openssl rand -hex 32
   ```
-  Captured for the `litellm.LITELLM_MASTER_KEY` Vault entry. Treat as
+  Captured for the `litellm/LITELLM_MASTER_KEY` Vault leaf. Treat as
   a secret; this key has admin authority over the LiteLLM proxy.
 
 ---
@@ -218,8 +218,8 @@ Modal-pushed entries (consumed by the deployed apps at runtime):
   Push via the `@<path>` syntax so the key file never leaves your
   laptop:
   ```bash
-  vault kv put -mount=secrets minds/staging/pool-ssh \
-      POOL_SSH_PRIVATE_KEY=@.minds/staging/pool_management_key/id_ed25519
+  vault kv put -mount=secrets minds/staging/pool-ssh/POOL_SSH_PRIVATE_KEY \
+      value=@.minds/staging/pool_management_key/id_ed25519
   ```
   (Or fill the template file with the multi-line value if you'd
   rather route through `push_vault_from_file.py`.)
@@ -243,14 +243,13 @@ never pushed to Modal):
 
 - [ ] **`secrets/minds/staging/ovh`** -- `OVH_APPLICATION_KEY`,
   `OVH_APPLICATION_SECRET`, `OVH_CONSUMER_KEY` (the bare-metal box
-  supplier credentials, currently OVH; also used to tear down legacy
-  OVH VPS hosts). Skippable on first deploy (deploy warns and
-  continues), but required before `mngr imbue_cloud admin pool create`
-  or `minds env destroy` can succeed.
+  supplier credentials, currently OVH). Not read by any deploy step;
+  the operator sources them into their shell to order bare-metal boxes
+  via `mngr imbue_cloud admin server`.
 
 After every push:
 
-- [ ] Spot-check with `vault kv get -mount=secrets minds/staging/<service>`.
+- [ ] Spot-check the keys with `vault kv list -mount=secrets minds/staging/<service>`.
 
 ---
 
@@ -283,7 +282,7 @@ This is the safety-gated command from `environments.md`. What it does:
 1. Snapshots the Neon project's default branch (so recover can roll
    back).
 2. Runs the pool-hosts schema migrations against the `host_pool` DB
-   (via `secrets/minds/staging/neon.DATABASE_URL`).
+   (via `secrets/minds/staging/neon/DATABASE_URL`).
 3. Mints a tier generation id and stores it at
    `secrets/minds/staging/generation` in Vault.
 4. Pushes a Modal Secret per service in `[secrets].services`
@@ -298,8 +297,6 @@ This is the safety-gated command from `environments.md`. What it does:
 
 Watch the deploy logs. On the first run, expect:
 
-- `WARNING: Vault read for ovh failed ...` if you skipped the
-  bare-metal box supplier credentials entry. Safe to ignore.
 - Per-app deploy lines ending with
   `https://minds-staging--rsc-staging-api.modal.run` and
   `https://minds-staging--llm-staging-proxy.modal.run`. The deploy
@@ -323,8 +320,7 @@ Only needed if you want the staging desktop client to use IMBUE_CLOUD
 launch mode. DOCKER mode (`--template main --template docker`) works
 without any pool hosts.
 
-Pool hosts are baked as bare-metal **slices** (baking new OVH classic VPS
-pool hosts is deprecated and no longer supported). You first need a
+Pool hosts are baked as bare-metal **slices**. You first need a
 bare-metal box that is registered + prepped (`status=ready`) via the
 `mngr imbue_cloud admin server` commands -- see
 [host-pool-setup.md](./host-pool-setup.md) step 5. With staging activated,
@@ -335,7 +331,7 @@ just bake-slice-prod US-WEST-OR v0.3.0 1 --server-id <bare-metal-server-id>
 ```
 
 `just bake-slice-prod <region> <tag> [count] [extra flags]` wraps
-`minds pool create --backend slice`, which derives the pool SSH key from
+`minds pool create`, which derives the pool SSH key from
 the tier's Vault entry and -- for staging/production -- reads the host_pool
 DSN from `secrets/minds/staging/neon`. You do NOT export any of those by
 hand. See [host-pool-setup.md](./host-pool-setup.md) step 5 for the full

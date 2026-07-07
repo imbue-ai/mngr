@@ -8,14 +8,17 @@ spawning code; this file replaces them with a thin consumer that:
   ``mngr latchkey forward`` instead of running its own observe;
 - reads stdout line-by-line on a background thread and parses each line as a
   ``ForwardEnvelope``;
-- dispatches by ``stream``: ``observe`` lines drive the surviving
-  ``MngrCliBackendResolver`` plus a set of ``on_agent_discovered`` /
-  ``on_agent_destroyed`` callbacks; ``event`` lines drive the resolver's
+- dispatches by ``stream``: ``observe`` lines are folded into a shared
+  ``DiscoveryStateAggregator`` (the span-aware, per-provider reconciler), whose
+  view is then pushed into the surviving ``MngrCliBackendResolver`` and fanned
+  out to a set of ``on_agent_discovered`` / ``on_agent_destroyed`` callbacks;
+  ``event`` lines drive the resolver's
   service map and fan out to request callbacks; ``forward`` lines
   feed the ``system_interface_backend_failure`` health tracker and the
   ``listening`` port handshake;
-- watches the subprocess for premature exit and surfaces stderr + exit code
-  via ``NotificationDispatcher``.
+- watches the subprocess for premature exit and reports it (the consumer is
+  dead, so the discovery pipeline is down) to the discovery-health watchdog
+  via registered ``on_unexpected_exit`` callbacks.
 
 Provider-set changes are picked up by bouncing the detached ``mngr latchkey
 forward`` supervisor (the single discovery observer); the tailer here then sees
@@ -48,23 +51,17 @@ from imbue.minds.desktop_client.backend_resolver import REQUESTS_EVENT_SOURCE_NA
 from imbue.minds.desktop_client.backend_resolver import SERVICES_EVENT_SOURCE_NAME
 from imbue.minds.desktop_client.backend_resolver import ServiceDeregisteredRecord
 from imbue.minds.desktop_client.backend_resolver import parse_service_log_record
-from imbue.minds.desktop_client.notification import NotificationDispatcher
-from imbue.minds.desktop_client.notification import NotificationRequest
-from imbue.minds.desktop_client.notification import NotificationUrgency
 from imbue.minds.errors import EnvelopeStreamConsumerError
 from imbue.minds.utils.secret_redaction import redact_secret_flag_values
-from imbue.mngr.api.discovery_events import AgentDestroyedEvent
-from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
+from imbue.mngr.api.discovery_aggregator import AggregatorDelta
+from imbue.mngr.api.discovery_aggregator import DiscoveryStateAggregator
 from imbue.mngr.api.discovery_events import DiscoveryErrorEvent
+from imbue.mngr.api.discovery_events import DiscoveryEvent
 from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
-from imbue.mngr.api.discovery_events import HostDestroyedEvent
-from imbue.mngr.api.discovery_events import HostDiscoveryEvent
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
+from imbue.mngr.api.discovery_events import ProviderDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
-from imbue.mngr.api.discovery_events import partition_removed_agents_by_provider_error
 from imbue.mngr.primitives import AgentId
-from imbue.mngr.primitives import DiscoveredAgent
-from imbue.mngr.primitives import HostState
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
@@ -74,28 +71,7 @@ _PREAUTH_TOKEN_LENGTH: Final[int] = 64
 OnAgentDiscoveredCallback = Callable[[AgentId, RemoteSSHInfo | None, str], None]
 OnAgentDestroyedCallback = Callable[[AgentId], None]
 OnSystemInterfaceBackendFailureCallback = Callable[[AgentId, SystemInterfaceBackendFailureReason, int | None], None]
-
-
-def _full_snapshot_observed_at(event: FullDiscoverySnapshotEvent) -> datetime:
-    """Producer-side poll time of a full snapshot, for freshness comparisons.
-
-    The envelope ``timestamp`` is stamped when the discovery producer finished the
-    poll, so the host states the snapshot carries were observed at that instant.
-    Minds gates the recovery redirect on whether a snapshot postdates an outage's
-    onset, so it must compare against *when discovery observed the world*, not when
-    minds happened to receive the line -- using the producer time removes the
-    receive-tail-latency slop between the two. The producer and this consumer run
-    on the same machine, so the timestamps share a clock. Falls back to the receive
-    time if the envelope timestamp is unparseable (which only loosens the gate back
-    to the prior receive-time behavior).
-    """
-    try:
-        return datetime.fromisoformat(event.timestamp)
-    except ValueError:
-        logger.warning(
-            "Full discovery snapshot carried an unparseable timestamp {!r}; using receive time", event.timestamp
-        )
-        return datetime.now(timezone.utc)
+OnUnexpectedExitCallback = Callable[[int], None]
 
 
 class ForwardSubprocessConfig(FrozenModel):
@@ -110,7 +86,7 @@ class ForwardSubprocessConfig(FrozenModel):
 
     service: str = Field(default="system_interface", description="Service name to forward")
     agent_include: tuple[str, ...] = Field(
-        default=("has(agent.labels.workspace) && has(agent.labels.is_primary)",),
+        default=("has(agent.labels.is_primary)",),
         description="CEL include filters passed to --agent-include",
     )
     reverse_specs: tuple[str, ...] = Field(
@@ -129,24 +105,25 @@ class EnvelopeStreamConsumer(MutableModel):
     """
 
     resolver: MngrCliBackendResolver = Field(frozen=True, description="Resolver to feed observe + event lines into")
-    notification_dispatcher: NotificationDispatcher | None = Field(
-        default=None,
-        description="Dispatcher used to surface plugin-exit failures to the user",
-    )
 
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
-    _agent_host_map: dict[str, str] = PrivateAttr(default_factory=dict)
+    # The shared span-aware, per-provider discovery reconciler. Every parsed
+    # observe event is folded into it; its accumulated view is what we push into
+    # the resolver and fan out as discovered/destroyed callbacks.
+    _aggregator: DiscoveryStateAggregator = PrivateAttr(default_factory=DiscoveryStateAggregator)
+    # SSH connection info keyed by host id. The aggregator does not model SSH info
+    # (it carries no agent/host membership), so it is tracked here and joined onto
+    # the agents on each host when building the resolver's view.
     _ssh_by_host_id: dict[str, RemoteSSHInfo] = PrivateAttr(default_factory=dict)
-    _host_state_by_host_id: dict[str, HostState] = PrivateAttr(default_factory=dict)
-    _discovered_agents: dict[str, DiscoveredAgent] = PrivateAttr(default_factory=dict)
     _services_by_agent: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
     _on_agent_discovered_callbacks: list[OnAgentDiscoveredCallback] = PrivateAttr(default_factory=list)
     _on_agent_destroyed_callbacks: list[OnAgentDestroyedCallback] = PrivateAttr(default_factory=list)
     _on_system_interface_backend_failure_callbacks: list[OnSystemInterfaceBackendFailureCallback] = PrivateAttr(
         default_factory=list
     )
+    _on_unexpected_exit_callbacks: list[OnUnexpectedExitCallback] = PrivateAttr(default_factory=list)
     _process: subprocess.Popen[bytes] | None = PrivateAttr(default=None)
-    _has_notified_exit: bool = PrivateAttr(default=False)
+    _has_reported_exit: bool = PrivateAttr(default=False)
     _intentional_shutdown: bool = PrivateAttr(default=False)
     # Set once the plugin emits its `listening` envelope; `_listening_port`
     # then holds the port the plugin actually bound. `wait_for_listening`
@@ -186,6 +163,17 @@ class EnvelopeStreamConsumer(MutableModel):
         with self._lock:
             self._on_system_interface_backend_failure_callbacks.append(callback)
 
+    def add_on_unexpected_exit_callback(self, callback: OnUnexpectedExitCallback) -> None:
+        """Register a callback fired once when the plugin subprocess exits unexpectedly.
+
+        The callback receives the subprocess exit code. It fires only for an
+        exit minds did not ask for (i.e. not after :meth:`terminate`), and at
+        most once per consumer. The discovery-health watchdog registers here so
+        a dead consumer transitions the app-global state straight to BLOCKED.
+        """
+        with self._lock:
+            self._on_unexpected_exit_callbacks.append(callback)
+
     # -- Subprocess lifecycle ---------------------------------------------
 
     def attach(self, process: subprocess.Popen[bytes]) -> None:
@@ -222,7 +210,7 @@ class EnvelopeStreamConsumer(MutableModel):
             is_checked=False,
         )
         concurrency_group.start_new_thread(
-            target=self._wait_and_notify_on_exit,
+            target=self._wait_and_report_exit,
             name="mngr-forward-lifecycle-watcher",
             daemon=True,
             is_checked=False,
@@ -249,9 +237,8 @@ class EnvelopeStreamConsumer(MutableModel):
         """Stop the plugin subprocess (SIGTERM, then SIGKILL on timeout).
 
         Sets ``_intentional_shutdown`` *before* signalling the subprocess
-        so the lifecycle watcher (``_wait_and_notify_on_exit``) does not
-        surface the resulting non-zero exit code as a CRITICAL "Forwarding
-        subprocess died" notification.
+        so the lifecycle watcher (``_wait_and_report_exit``) does not report
+        the resulting exit to the watchdog as a dead pipeline.
         """
         process = self._process
         if process is None:
@@ -286,34 +273,30 @@ class EnvelopeStreamConsumer(MutableModel):
             if stripped:
                 logger.debug("mngr forward stderr: {}", stripped)
 
-    def _wait_and_notify_on_exit(self) -> None:
+    def _wait_and_report_exit(self) -> None:
         process = self._process
         if process is None:
             return
         exit_code = process.wait()
-        # If minds asked the subprocess to stop (lifespan shutdown), the
-        # non-zero exit code is the expected SIGTERM/SIGKILL signal, not a
-        # crash. Surfacing it as a CRITICAL notification on every clean
-        # shutdown trains the user to ignore the notification entirely,
-        # which defeats its purpose for the crash-on-its-own case.
+        # If minds asked the subprocess to stop (lifespan shutdown), the exit is
+        # expected -- not a dead pipeline.
         if self._intentional_shutdown:
             logger.debug("mngr forward exited with code {} after intentional shutdown", exit_code)
             return
-        if exit_code != 0 and not self._has_notified_exit:
-            self._has_notified_exit = True
-            logger.error("mngr forward exited with code {}", exit_code)
-            if self.notification_dispatcher is not None:
-                self.notification_dispatcher.dispatch(
-                    NotificationRequest(
-                        title="Forwarding subprocess died",
-                        message=(
-                            f"`mngr forward` exited with code {exit_code}. The minds desktop client "
-                            "is no longer forwarding agent traffic; restart minds to recover."
-                        ),
-                        urgency=NotificationUrgency.CRITICAL,
-                    ),
-                    agent_display_name="Minds",
-                )
+        # Any unasked-for exit means the consumer (and thus the discovery
+        # pipeline + traffic proxy) is down. Report it once to the watchdog,
+        # which owns the user-facing surfacing (the app-global BLOCKED screen).
+        if self._has_reported_exit:
+            return
+        self._has_reported_exit = True
+        logger.error("mngr forward exited unexpectedly with code {}", exit_code)
+        with self._lock:
+            callbacks = list(self._on_unexpected_exit_callbacks)
+        for callback in callbacks:
+            try:
+                callback(exit_code)
+            except (OSError, RuntimeError, ValueError) as e:
+                logger.warning("on_unexpected_exit callback failed: {}", e)
 
     # -- Envelope parsing + dispatch --------------------------------------
 
@@ -353,193 +336,126 @@ class EnvelopeStreamConsumer(MutableModel):
             return
         if event is None:
             return
-        # Snapshot handler bumps both last_event_at and last_full_snapshot_at
-        # via update_providers; it does not flow through the
-        # record_discovery_event_received path. Dispatch the snapshot first,
-        # then bump last_event_at once for every other event type below.
+        # The legacy global snapshot is superseded by per-provider snapshots, which
+        # the shared aggregator reconciles; minds drops the legacy event here too
+        # (consuming both would double-count agents during the transition window).
         if isinstance(event, FullDiscoverySnapshotEvent):
-            self._handle_full_snapshot(event)
+            logger.trace("Ignoring legacy full discovery snapshot; minds consumes per-provider snapshots")
             return
-        self.resolver.record_discovery_event_received(datetime.now(timezone.utc))
+        # SSH info carries no agent/host membership, so the aggregator does not
+        # model it; record it here before folding the event in so the agents view
+        # we push below joins the info onto the agents on this host.
         if isinstance(event, HostSSHInfoEvent):
-            self._handle_host_ssh_info(event)
-        elif isinstance(event, HostDiscoveryEvent):
-            self._handle_host_discovered(event)
-        elif isinstance(event, AgentDiscoveryEvent):
-            self._handle_agent_discovered(event)
-        elif isinstance(event, AgentDestroyedEvent):
-            self._handle_agent_destroyed(event.agent_id)
-        elif isinstance(event, HostDestroyedEvent):
-            # Record the terminal state first so any snapshot that re-lists this
-            # host during the destroyed-host persistence window is recognized as
-            # destroyed, then tear down the agents that were on it.
-            with self._lock:
-                self._host_state_by_host_id[str(event.host_id)] = HostState.DESTROYED
-                self._ssh_by_host_id.pop(str(event.host_id), None)
-            for aid in event.agent_ids:
-                self._handle_agent_destroyed(aid)
-        elif isinstance(event, DiscoveryErrorEvent):
+            self._record_host_ssh_info(event)
+        delta = self._aggregator.apply_event(event)
+        if isinstance(event, ProviderDiscoverySnapshotEvent):
+            # A per-provider snapshot is also a discovery event, so update_providers
+            # bumps last_event_at; merge just this provider's state + freshness.
+            self.resolver.update_providers(
+                provider_name=event.provider_name,
+                provider=event.provider,
+                error=event.error,
+                last_snapshot_at=event.discovery_finished_at,
+            )
+        else:
+            self._record_incremental_event(event)
+        self._push_agents_view()
+        self._fire_membership_delta(delta)
+        # A HostSSHInfoEvent changes no membership (empty delta), so the agents on
+        # the host were already announced without SSH info; re-announce them now
+        # that their host's SSH info is known.
+        if isinstance(event, HostSSHInfoEvent):
+            self._refire_discovered_for_host(str(event.host_id))
+
+    def _record_incremental_event(self, event: DiscoveryEvent) -> None:
+        """Log a discovery error (if any) and bump the resolver's last-event time for a non-snapshot event.
+
+        Incremental events (agent/host discovered or destroyed, SSH info, errors)
+        are not snapshots, so they advance only ``last_event_at`` -- the
+        per-provider snapshot freshness is bumped solely by ``update_providers``.
+        """
+        if isinstance(event, DiscoveryErrorEvent):
             logger.warning(
                 "Discovery error from {}: {} ({})", event.source_name, event.error_message, event.error_type
             )
-        else:
-            # parse_discovery_event_line returns the union we already
-            # exhaustively enumerated above; an unknown event type means
-            # mngr added a new discovery type the plugin still passes
-            # through. Log once at trace-level so it's visible without
-            # being noisy.
-            logger.trace("Ignoring unknown discovery event: {}", type(event).__name__)
+        self.resolver.record_discovery_event_received(datetime.now(timezone.utc))
 
-    def _handle_full_snapshot(self, event: FullDiscoverySnapshotEvent) -> None:
-        # Agents present in this snapshot.
-        fresh_agents: dict[str, DiscoveredAgent] = {}
-        fresh_host_map: dict[str, str] = {}
-        for agent in event.agents:
-            fresh_agents[str(agent.agent_id)] = agent
-            fresh_host_map[str(agent.agent_id)] = str(agent.host_id)
-        with self._lock:
-            prior_agents = dict(self._discovered_agents)
-            prior_host_map = dict(self._agent_host_map)
-            removed = prior_agents.keys() - fresh_agents.keys()
-            # An agent absent because its provider errored is retained (kept in
-            # the resolver and surfaced as stale via error_by_provider_name)
-            # rather than dropped; only genuinely-removed agents fire destroyed.
-            partition = partition_removed_agents_by_provider_error(
-                removed_agent_ids=removed,
-                provider_name_by_prior_agent_id={
-                    aid_str: str(agent.provider_name) for aid_str, agent in prior_agents.items()
-                },
-                error_by_provider_name=event.error_by_provider_name,
-            )
-            merged_agents = dict(fresh_agents)
-            merged_host_map = dict(fresh_host_map)
-            for aid_str in partition.retained:
-                merged_agents[aid_str] = prior_agents[aid_str]
-                merged_host_map[aid_str] = prior_host_map[aid_str]
-            self._discovered_agents = merged_agents
-            self._agent_host_map = merged_host_map
-            ssh_info_by_agent = {
-                aid: self._ssh_by_host_id[hid] for aid, hid in merged_host_map.items() if hid in self._ssh_by_host_id
-            }
-            # Rebuild host state from this snapshot's hosts (a destroyed host
-            # lingers here with host_state=DESTROYED for its persistence window).
-            # Retained agents' hosts are absent from an errored provider's
-            # snapshot, so carry their last-known state forward.
-            prior_host_state = dict(self._host_state_by_host_id)
-            merged_host_state: dict[str, HostState] = {
-                str(host.host_id): host.host_state for host in event.hosts if host.host_state is not None
-            }
-            for aid_str in partition.retained:
-                retained_host_id = merged_host_map[aid_str]
-                if retained_host_id not in merged_host_state and retained_host_id in prior_host_state:
-                    merged_host_state[retained_host_id] = prior_host_state[retained_host_id]
-            self._host_state_by_host_id = merged_host_state
-            host_state_snapshot = dict(merged_host_state)
-        # Push the merged set (fresh + retained) so retained agents stay listed
-        # in the workspace UI; their provider_name lets the workspace list mark
-        # them stale by cross-referencing the errored providers below.
-        self.resolver.update_agents(
-            ParsedAgentsResult(
-                agent_ids=tuple(agent.agent_id for agent in merged_agents.values()),
-                discovered_agents=tuple(merged_agents.values()),
-                ssh_info_by_agent_id=ssh_info_by_agent,
-                host_state_by_host_id=host_state_snapshot,
-            )
-        )
-        # Push provider state + freshness timestamp through the resolver so the
-        # providers panel can render OK / Error badges, the workspace list can
-        # mark retained agents stale, and the "time since last full discovery
-        # event" counter updates -- without parsing the discovery stream itself.
-        self.resolver.update_providers(
-            providers=event.providers,
-            error_by_provider_name=event.error_by_provider_name,
-            last_full_snapshot_at=_full_snapshot_observed_at(event),
-        )
-        if partition.retained:
-            logger.debug(
-                "Retained {} agent(s) through a provider discovery error; surfacing as stale: {}",
-                len(partition.retained),
-                sorted(partition.retained),
-            )
-        for aid_str in partition.dropped:
-            self._fire_destroyed(AgentId(aid_str))
-        # Only (re)fire discovery for agents actually present in this snapshot;
-        # retained agents were already announced and stay set up.
-        for agent in fresh_agents.values():
-            ssh_info = ssh_info_by_agent.get(str(agent.agent_id))
-            self._fire_discovered(agent.agent_id, ssh_info, str(agent.provider_name))
+    def _build_agents_result(self) -> ParsedAgentsResult:
+        """Project the aggregator's agents + hosts (joined with SSH info) into a ParsedAgentsResult.
 
-    def _build_agents_result_locked(self) -> ParsedAgentsResult:
-        """Snapshot the current agent/ssh/host-state maps into a ParsedAgentsResult.
-
-        Must be called while ``self._lock`` is held: it reads the shared mutable
-        maps. Callers push the result to the resolver *after* releasing the lock.
-        Centralizing this keeps the per-event handlers from each re-deriving (and
-        having to re-thread every new resolver-snapshot field through) the same
-        merged view.
+        The aggregator is the source of truth for agent / host membership and host
+        lifecycle state. SSH info is tracked here (the aggregator does not model
+        it) and joined onto each agent via its host id.
         """
-        agent_ids = tuple(AgentId(aid) for aid in self._agent_host_map)
-        ssh_info_by_agent = {
-            aid: self._ssh_by_host_id[hid] for aid, hid in self._agent_host_map.items() if hid in self._ssh_by_host_id
+        agents = self._aggregator.get_agents()
+        hosts = self._aggregator.get_hosts()
+        with self._lock:
+            ssh_by_host_id = dict(self._ssh_by_host_id)
+        ssh_info_by_agent_id = {
+            str(agent.agent_id): ssh_by_host_id[str(agent.host_id)]
+            for agent in agents
+            if str(agent.host_id) in ssh_by_host_id
         }
-        discovered = tuple(self._discovered_agents.values())
-        host_state_snapshot = dict(self._host_state_by_host_id)
+        host_state_by_host_id = {str(host.host_id): host.host_state for host in hosts if host.host_state is not None}
+        # Capture every known host's normalized name (regardless of whether its state
+        # is known) so the resolver's display-name fallback and host-name collision
+        # checks have it.
+        host_name_by_host_id = {str(host.host_id): str(host.host_name) for host in hosts}
         return ParsedAgentsResult(
-            agent_ids=agent_ids,
-            discovered_agents=discovered,
-            ssh_info_by_agent_id=ssh_info_by_agent,
-            host_state_by_host_id=host_state_snapshot,
+            agent_ids=tuple(agent.agent_id for agent in agents),
+            discovered_agents=tuple(agents),
+            ssh_info_by_agent_id=ssh_info_by_agent_id,
+            host_state_by_host_id=host_state_by_host_id,
+            host_name_by_host_id=host_name_by_host_id,
         )
 
-    def _handle_host_ssh_info(self, event: HostSSHInfoEvent) -> None:
+    def _push_agents_view(self) -> None:
+        """Push the aggregator's current agents / hosts view into the resolver."""
+        self.resolver.update_agents(self._build_agents_result())
+
+    def _fire_membership_delta(self, delta: AggregatorDelta) -> None:
+        """Fire destroyed / discovered callbacks for the agents the delta removed or added.
+
+        A removed agent also has its accumulated service map cleared from both this
+        consumer and the resolver. A discovered agent's SSH info is looked up from
+        its host (populated by a prior ``HostSSHInfoEvent``, if any). A removed
+        host's cached SSH info is forgotten so the map does not grow without bound.
+        """
+        agent_by_id = self._aggregator.get_agent_by_id()
+        for host_id_str in delta.removed_host_ids:
+            with self._lock:
+                self._ssh_by_host_id.pop(host_id_str, None)
+        for agent_id_str in delta.removed_agent_ids:
+            agent_id = AgentId(agent_id_str)
+            with self._lock:
+                self._services_by_agent.pop(agent_id_str, None)
+            self.resolver.update_services(agent_id, {})
+            self._fire_destroyed(agent_id)
+        for agent_id_str in delta.added_agent_ids:
+            agent = agent_by_id.get(agent_id_str)
+            if agent is None:
+                continue
+            self._fire_discovered(agent.agent_id, self._ssh_for_host(str(agent.host_id)), str(agent.provider_name))
+
+    def _record_host_ssh_info(self, event: HostSSHInfoEvent) -> None:
+        """Store the SSH connection info carried by a HostSSHInfoEvent, keyed by host id."""
         ssh_info = RemoteSSHInfo(
             user=event.ssh.user, host=event.ssh.host, port=event.ssh.port, key_path=event.ssh.key_path
         )
-        host_id_str = str(event.host_id)
         with self._lock:
-            self._ssh_by_host_id[host_id_str] = ssh_info
-            agents_on_host = [AgentId(aid) for aid, hid in self._agent_host_map.items() if hid == host_id_str]
-            agents_result = self._build_agents_result_locked()
-        self.resolver.update_agents(agents_result)
-        for agent_id in agents_on_host:
-            self._fire_discovered(agent_id, ssh_info, self._provider_name_for_agent(agent_id))
+            self._ssh_by_host_id[str(event.host_id)] = ssh_info
 
-    def _handle_host_discovered(self, event: HostDiscoveryEvent) -> None:
-        if event.host.host_state is None:
-            return
-        with self._lock:
-            self._host_state_by_host_id[str(event.host.host_id)] = event.host.host_state
-            agents_result = self._build_agents_result_locked()
-        self.resolver.update_agents(agents_result)
+    def _refire_discovered_for_host(self, host_id_str: str) -> None:
+        """Re-announce every agent on a host, carrying the host's now-known SSH info."""
+        ssh_info = self._ssh_for_host(host_id_str)
+        for agent in self._aggregator.get_agents():
+            if str(agent.host_id) == host_id_str:
+                self._fire_discovered(agent.agent_id, ssh_info, str(agent.provider_name))
 
-    def _handle_agent_discovered(self, event: AgentDiscoveryEvent) -> None:
-        agent = event.agent
-        aid_str = str(agent.agent_id)
+    def _ssh_for_host(self, host_id_str: str) -> RemoteSSHInfo | None:
+        """Return the SSH connection info recorded for ``host_id_str``, or None."""
         with self._lock:
-            self._agent_host_map[aid_str] = str(agent.host_id)
-            self._discovered_agents[aid_str] = agent
-            ssh_info = self._ssh_by_host_id.get(str(agent.host_id))
-            agents_result = self._build_agents_result_locked()
-        self.resolver.update_agents(agents_result)
-        self._fire_discovered(agent.agent_id, ssh_info, str(agent.provider_name))
-
-    def _handle_agent_destroyed(self, agent_id: AgentId) -> None:
-        aid_str = str(agent_id)
-        with self._lock:
-            self._discovered_agents.pop(aid_str, None)
-            self._agent_host_map.pop(aid_str, None)
-            self._services_by_agent.pop(aid_str, None)
-            agents_result = self._build_agents_result_locked()
-        self.resolver.update_agents(agents_result)
-        self.resolver.update_services(agent_id, {})
-        self._fire_destroyed(agent_id)
-
-    def _provider_name_for_agent(self, agent_id: AgentId) -> str:
-        with self._lock:
-            agent = self._discovered_agents.get(str(agent_id))
-        if agent is None:
-            return "unknown"
-        return str(agent.provider_name)
+            return self._ssh_by_host_id.get(host_id_str)
 
     def _fire_discovered(
         self,
@@ -680,7 +596,6 @@ class EnvelopeStreamConsumer(MutableModel):
 def start_mngr_forward(
     config: ForwardSubprocessConfig,
     resolver: MngrCliBackendResolver,
-    notification_dispatcher: NotificationDispatcher | None = None,
 ) -> tuple[EnvelopeStreamConsumer, str]:
     """Spawn the ``mngr forward`` subprocess and attach an envelope consumer.
 
@@ -734,10 +649,7 @@ def start_mngr_forward(
         env=env,
         cwd=str(Path.home()),
     )
-    consumer = EnvelopeStreamConsumer(
-        resolver=resolver,
-        notification_dispatcher=notification_dispatcher,
-    )
+    consumer = EnvelopeStreamConsumer(resolver=resolver)
     consumer.attach(process)
     return consumer, preauth_cookie
 

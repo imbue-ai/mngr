@@ -18,16 +18,22 @@ from imbue.skitwright.expect import expect
 # which performs full provider discovery, so it needs more than the default 10s.
 @pytest.mark.timeout(120)
 def test_create_default(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # running mngr create is strictly better than running claude!
-    # (if you use the alias `mngr c`, it's no more letters to type :-D)
-    # running this command launches your default agent immediately *in a new worktree*
-    mngr create
-    # the defaults are the following: agent=your configured default (stored under `[commands.create] type`
-    # in user settings; `scripts/install.sh` interactively prompts you to pick one as part of
-    # `mngr extras -i`, and you can re-run `mngr extras config` later to pick or change it),
-    # provider=local, project=current dir
-    """)
+    """Tutorial block:
+        # running mngr create is strictly better than running claude!
+        # (if you use the alias `mngr c`, it's no more letters to type :-D)
+        # running this command launches your default agent immediately *in a new worktree*
+        mngr create
+        # the defaults are the following: agent=your configured default (stored under `[commands.create] type`
+        # in user settings; `scripts/install.sh` interactively prompts you to pick one as part of
+        # `mngr extras -i`, and you can re-run `mngr extras config` later to pick or change it),
+        # provider=local, project=current dir
+
+    Scope: among the overlapping BASIC CREATION tests, this one focuses on the
+    worktree default -- bare `mngr create` launches an agent in a new worktree
+    (not in-place): the created agent's work_dir is a generated worktree path, the
+    agent is actually running (state RUNNING/WAITING), and exec-ing `pwd` inside it
+    resolves to that same worktree directory.
+    """
     result = e2e.run(
         "mngr create my-task --type command --no-ensure-clean -- sleep 100070",
         comment="running mngr create is strictly better than running claude!",
@@ -70,12 +76,17 @@ def test_create_default(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_create_in_place(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # you can run the agent in-place (directly in your source directory) without any transfer:
         mngr create my-task --transfer=none
         # mngr defaults to creating a new worktree for each agent because the whole point of mngr is to let you run multiple agents in parallel.
         # without creating a new worktree for each, they will make conflicting changes with one another.
-    """)
+
+    Scope: `--transfer=none` runs the agent in-place in the source directory
+    rather than a generated worktree -- the created agent's work_dir equals the
+    session cwd, and exec-ing `pwd` inside the running agent reports that same
+    source directory.
+    """
     result = e2e.run(
         "mngr create my-task --transfer=none --type command --no-ensure-clean -- sleep 100071",
         comment="if you want the default behavior of claude (starting in-place), you can specify that",
@@ -135,13 +146,19 @@ def test_create_in_place(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 def test_create_short_forms(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # you can name the agent type explicitly as a positional argument, or use the short form for the
-    # command itself (`mngr c` is an alias for `mngr create`). For example, when claude is your default
-    # agent type, `mngr c my-task` is equivalent to `mngr create my-task claude`:
-    mngr create my-task claude
-    mngr c my-task
-    """)
+    """Tutorial block:
+        # you can name the agent type explicitly as a positional argument, or use the short form for the
+        # command itself (`mngr c` is an alias for `mngr create`). For example, when claude is your default
+        # agent type, `mngr c my-task` is equivalent to `mngr create my-task claude`:
+        mngr create my-task claude
+        mngr c my-task
+
+    Scope: the two forms in the block -- a positional agent type
+    (`mngr create <name> <type>`) and the `mngr c` short-form alias for
+    `mngr create`. Both create running agents; the positional type is actually
+    honored (resolves to the given type rather than silently falling back to a
+    default), and `mngr c` behaves like `mngr create`.
+    """
     # Test the "mngr create <name> <type>" form, where the agent type is given as
     # a positional argument (the tutorial's `mngr create my-task claude`). We pass
     # `command` positionally -- exactly where the tutorial puts `claude` -- so the
@@ -196,10 +213,16 @@ def test_create_short_forms(e2e: E2eSession) -> None:
 # the test; without it there is no tracked Modal usage, so no BLOCKED violation.
 @pytest.mark.timeout(120)
 def test_create_codex_agent(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # you can also specify a different agent (ex: codex)
-    mngr create my-task codex
-    """)
+    """Tutorial block:
+        # you can also specify a different agent (ex: codex)
+        mngr create my-task codex
+
+    Scope: the positional `codex` argument selects the codex agent type (a real
+    plugin, not the `command` stub) -- the created agent appears in `mngr list`
+    with type "codex", confirming the type resolved rather than falling back to a
+    default. Created with --no-auto-start since this host has no codex binary; the
+    real codex run is covered by the plugin's own release test.
+    """
     # codex is a real agent-type plugin (imbue-mngr-codex), not a command-driven
     # stub, so it cannot be faked with a `command` override. This Modal host
     # has no codex binary or auth, so the agent is created *without launching it*
@@ -231,13 +254,17 @@ def test_create_codex_agent(e2e: E2eSession) -> None:
 # full provider discovery, so the default 10s pytest-timeout is too tight.
 @pytest.mark.timeout(120)
 def test_create_with_agent_args(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # you can specify the arguments to the *agent* (ie, send args to the agent rather than mngr)
-    # by using `--` to separate the agent arguments from the mngr arguments:
-    mngr create my-task -- --model opus
-    # that command passes the "--model opus" flag to your default agent (e.g. claude, when claude
-    # is configured as the default)
-    """)
+    """Tutorial block:
+        # you can specify the arguments to the *agent* (ie, send args to the agent rather than mngr)
+        # by using `--` to separate the agent arguments from the mngr arguments:
+        mngr create my-task -- --model opus
+        # that command passes the "--model opus" flag to your default agent (e.g. claude, when claude
+        # is configured as the default)
+
+    Scope: arguments after `--` are forwarded to the agent rather than consumed by
+    mngr -- they appear in the created agent's stored command string (both the
+    command itself and the trailing `--model opus` flag).
+    """
     # `--` is consumed by _CreateCommand.parse_args the first time it appears,
     # so everything after it becomes agent_args and is joined with spaces into
     # the stored command. The test asserts on the stored command string only,
@@ -263,17 +290,19 @@ def test_create_with_agent_args(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_create_agent_args_require_dash_separator(e2e: E2eSession) -> None:
-    """Unhappy path for the same tutorial block: without the `--` separator, an
-    agent-targeted flag like `--model opus` is parsed as an (unknown) mngr
-    option and rejected, rather than being forwarded to the agent. This is the
-    failure mode that motivates the `--` separator the tutorial teaches."""
-    e2e.write_tutorial_block("""
-    # you can specify the arguments to the *agent* (ie, send args to the agent rather than mngr)
-    # by using `--` to separate the agent arguments from the mngr arguments:
-    mngr create my-task -- --model opus
-    # that command passes the "--model opus" flag to your default agent (e.g. claude, when claude
-    # is configured as the default)
-    """)
+    """Tutorial block:
+        # you can specify the arguments to the *agent* (ie, send args to the agent rather than mngr)
+        # by using `--` to separate the agent arguments from the mngr arguments:
+        mngr create my-task -- --model opus
+        # that command passes the "--model opus" flag to your default agent (e.g. claude, when claude
+        # is configured as the default)
+
+    Scope: the unhappy path of the same `--` block. Without the `--` separator, an
+    agent-targeted flag like `--model opus` is parsed as an (unknown) mngr option
+    and rejected with "No such option" before any agent is created -- the failure
+    mode that motivates the separator the tutorial teaches -- so nothing is left
+    behind in the listing.
+    """
     # Omitting the `--` separator: mngr's own parser sees `--model`, which is not
     # a recognized create option, so the command must fail before any agent is
     # created.
@@ -302,11 +331,15 @@ def test_create_agent_args_require_dash_separator(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_create_named_agent(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # when creating agents to accomplish tasks, it's recommended that you give them a name to make it easier to manage them:
-    mngr create my-task
-    # that command gives the agent a name of "my-task". If you don't specify a name, mngr will generate a random one for you.
-    """)
+    """Tutorial block:
+        # when creating agents to accomplish tasks, it's recommended that you give them a name to make it easier to manage them:
+        mngr create my-task
+        # that command gives the agent a name of "my-task". If you don't specify a name, mngr will generate a random one for you.
+
+    Scope: passing a name to `mngr create` gives the agent exactly that name -- it
+    appears in `mngr list` under the given name, is running, and is reachable in
+    its own name-derived worktree (exec `pwd` references the "my-task-<hash>" dir).
+    """
     expect(
         e2e.run(
             "mngr create my-task --type command --no-ensure-clean -- sleep 100074",
@@ -339,15 +372,17 @@ def test_create_named_agent(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_create_unnamed_agent_gets_random_name(e2e: E2eSession) -> None:
-    """Alternative path for the same tutorial block: the block documents that "If
-    you don't specify a name, mngr will generate a random one for you." This test
-    omits the name argument entirely and verifies a non-empty random name is
-    generated and actually addresses the running agent."""
-    e2e.write_tutorial_block("""
-    # when creating agents to accomplish tasks, it's recommended that you give them a name to make it easier to manage them:
-    mngr create my-task
-    # that command gives the agent a name of "my-task". If you don't specify a name, mngr will generate a random one for you.
-    """)
+    """Tutorial block:
+        # when creating agents to accomplish tasks, it's recommended that you give them a name to make it easier to manage them:
+        mngr create my-task
+        # that command gives the agent a name of "my-task". If you don't specify a name, mngr will generate a random one for you.
+
+    Scope: the alternative path of the same block -- "If you don't specify a name,
+    mngr will generate a random one for you." Omitting the name yields exactly one
+    agent with a non-empty, hyphenated coolname slug (not the tutorial's explicit
+    "my-task"), and that generated name actually addresses the running agent (its
+    worktree is named after it and exec by that name works).
+    """
     # Omit the name argument so mngr falls back to its random name generator
     # (default style "coolname", a hyphen-separated multi-word slug).
     expect(
@@ -394,11 +429,17 @@ def test_create_unnamed_agent_gets_random_name(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_create_with_json_output(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # you can control output format for scripting:
-    mngr create my-task --no-connect --format json
-    # (--quiet suppresses all output)
-    """)
+    """Tutorial block:
+        # you can control output format for scripting:
+        mngr create my-task --no-connect --format json
+        # (--quiet suppresses all output)
+
+    Scope: the `--format json` half of the block. A successful create prints a
+    machine-readable JSON object on stdout carrying the new agent's identifiers
+    (agent_id, host_id), and those same ids identify the agent that
+    `mngr list --format json` reports (with the expected name) and which is
+    actually running -- the contract that lets a script chain the two commands.
+    """
     create_result = e2e.run(
         "mngr create my-task --no-connect --type command --no-ensure-clean --format json -- sleep 100075",
         comment="you can control output format for scripting",
@@ -440,14 +481,17 @@ def test_create_with_json_output(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_create_with_quiet_output(e2e: E2eSession) -> None:
-    # Shares the BASIC CREATION output-format tutorial block, but exercises the
-    # "--quiet suppresses all output" line that test_create_with_json_output
-    # only documents without verifying.
-    e2e.write_tutorial_block("""
-    # you can control output format for scripting:
-    mngr create my-task --no-connect --format json
-    # (--quiet suppresses all output)
-    """)
+    """Tutorial block:
+        # you can control output format for scripting:
+        mngr create my-task --no-connect --format json
+        # (--quiet suppresses all output)
+
+    Scope: the `--quiet` half of the same block (counterpart to
+    test_create_with_json_output, which only documents this line). `--quiet`
+    suppresses all console output -- both stdout (no JSON to parse) and stderr (no
+    provider-discovery warnings) are empty on a successful create -- while still
+    actually creating the agent (it appears running in `mngr list`).
+    """
     create_result = e2e.run(
         "mngr create my-task --quiet --no-connect --type command --no-ensure-clean -- sleep 100078",
         comment="--quiet suppresses all output",
@@ -483,11 +527,16 @@ def test_create_with_quiet_output(e2e: E2eSession) -> None:
 # test; without it there is no tracked Modal usage, so no violation.
 @pytest.mark.timeout(60)
 def test_create_copy(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # you can create a full copy (an independent git mirror) instead of a worktree:
         mngr create my-task --transfer=git-mirror
         # (a plain rsync copy is used by default if you're not in a git repo)
-    """)
+
+    Scope: `--transfer=git-mirror` creates an independent copy rather than a
+    worktree -- the agent's work_dir is a separate directory holding a real `.git`
+    *directory* (not a worktree gitlink file) that carries over the source's commit
+    history ("Initial commit" present in `git log`).
+    """
     expect(
         e2e.run(
             "mngr create my-task --transfer=git-mirror --type command --no-ensure-clean --no-connect -- sleep 100900",
@@ -549,10 +598,16 @@ def test_create_copy(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_create_clone(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # you can create a full git "clone" instead of a worktree or copy: this transfers the repo via git, giving the agent its own independent copy with a separate working directory and git history (this is also the default when the source and target are on different hosts):
         mngr create my-task --transfer=git-mirror
-    """)
+
+    Scope: this block frames `--transfer=git-mirror` as a full git clone. Sibling
+    test_create_copy already covers the `.git`-directory / history basics; this
+    test focuses on clone fidelity -- the clone lives in a separate work_dir, its
+    HEAD SHA is byte-identical to the source's transferred history, and it is
+    checked out on its own fresh per-agent branch (mngr/my-task).
+    """
     pwd_result = e2e.run("pwd", comment="Get the source dir for comparison")
     expect(pwd_result).to_succeed()
     source_dir = pwd_result.stdout.strip()
@@ -622,10 +677,16 @@ def test_create_clone(e2e: E2eSession) -> None:
 @pytest.mark.modal
 @pytest.mark.timeout(120)
 def test_create_with_snapshot_fictional(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # you can use an existing snapshot instead of building a new host from scratch:
         mngr create my-task --provider modal --snapshot snap-123abc
-    """)
+
+    Scope: the unhappy path of the `--snapshot` block. A nonexistent snapshot id
+    is actually handed to the Modal provider and rejected -- the command exits
+    non-zero with an error that references the bad snapshot id (proving it got far
+    enough to load the image, not an earlier failure) and fails cleanly without a
+    Python traceback.
+    """
     # The fictional snapshot id won't exist in any modal environment, so mngr
     # reaches the Modal provider (initializing the environment and attempting to
     # load the snapshot image) and then fails. We verify it exits with an error
@@ -660,11 +721,16 @@ def test_create_with_snapshot_fictional(e2e: E2eSession) -> None:
 # which performs full provider discovery, so it needs more than the default 10s.
 @pytest.mark.timeout(120)
 def test_create_headless(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # mngr is very much meant to be used for scripting and automation, so nothing requires interactivity.
-    # if you want to be sure that interactivity is disabled, you can use the --headless flag:
-    mngr create my-task --headless
-    """)
+    """Tutorial block:
+        # mngr is very much meant to be used for scripting and automation, so nothing requires interactivity.
+        # if you want to be sure that interactivity is disabled, you can use the --headless flag:
+        mngr create my-task --headless
+
+    Scope: `--headless` creates the agent non-interactively (no prompts) -- the
+    agent appears RUNNING/WAITING in `mngr list` and is actually running inside its
+    own dedicated worktree (exec `pwd` reports the "my-task-<hash>" worktree
+    directory), proving it was provisioned and launched, not merely recorded.
+    """
     expect(
         e2e.run(
             "mngr create my-task --type command --no-ensure-clean --headless -- sleep 100076",

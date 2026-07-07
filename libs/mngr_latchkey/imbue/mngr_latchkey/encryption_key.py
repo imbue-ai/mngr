@@ -65,6 +65,23 @@ def encryption_key_path(latchkey_directory: Path) -> Path:
     return latchkey_directory / ENCRYPTION_KEY_FILENAME
 
 
+def inject_encryption_key_into_env(env: dict[str, str], encryption_key: SecretStr | None) -> None:
+    """Set ``LATCHKEY_ENCRYPTION_KEY`` in ``env`` from the per-directory key.
+
+    An operator-set value already present in ``env`` (typically inherited
+    from ``os.environ``) always wins; the per-directory key only fills the
+    var in when the operator has not set one globally. Passing this var on
+    every latchkey spawn keeps Latchkey's startup key-resolution from ever
+    falling through to the system keychain (which on macOS pops a keychain
+    access dialog).
+    """
+    if encryption_key is None:
+        return
+    if env.get(LATCHKEY_ENCRYPTION_KEY_ENV_VAR):
+        return
+    env[LATCHKEY_ENCRYPTION_KEY_ENV_VAR] = encryption_key.get_secret_value()
+
+
 def load_or_create_encryption_key(latchkey_directory: Path) -> SecretStr:
     """Return the encryption key for ``latchkey_directory``, creating it on first call.
 

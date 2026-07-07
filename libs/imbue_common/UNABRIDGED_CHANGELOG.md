@@ -4,6 +4,24 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-01
+
+Added the shared `PREVENT_ASYNC_AWAIT` ratchet rule (in `common_ratchets.py`) and the `check_async_await` wrapper (in `standard_ratchet_checks.py`). This powers a new per-project `test_prevent_async_await` ratchet across the whole monorepo that freezes `async def` / `await` usage and prevents new async code from being added. We strongly prefer synchronous code: it is far easier to debug, and our software is intentionally low-scale, so async provides no benefit.
+
+## 2026-06-26
+
+`find_bash_scripts_without_strict_mode` (the helper behind the repo-wide bash strict-mode ratchet) now skips `*.sh` files under `.minds/template/`. Those are declarative secret-schema templates -- commented `export KEY=` files sourced by the deploy tooling (`scripts/push_vault_from_file.py`, `minds env deploy`) and copied per-tier, never executed standalone -- so `set -euo pipefail` is meaningless for them and they are not the class of runnable script the ratchet guards. This also removes a local-vs-CI count skew, since those templates were already absent from the offload build context.
+
+## 2026-06-24
+
+Updated the `PREVENT_HARDCODED_CLAUDE_DIR` ratchet's guidance text to reference
+the renamed `find_user_config_in_isolated_mode()` accessor (was
+`find_user_claude_config()`). No behavior change.
+
+## 2026-06-19
+
+Clarified the README's one-line description of the library's purpose.
+
 ## 2026-06-11
 
 Fixed a bug in the `PREVENT_BUILTIN_EXCEPTION_RAISES` ratchet regex: a trailing `\b` after the opening paren meant it only matched raises whose first argument started with a word character (e.g. `raise OSError(msg)`), missing the common `raise ValueError("literal")` and `raise OSError()` forms. The ratchet now also excludes test files (consistent with tests legitimately raising built-in exceptions to simulate error conditions). Replaced the direct `ValueError` raises in the constrained `primitives` types and the `RegexPattern` validator with dedicated `InvalidPrimitiveValueError` / `InvalidRegexPatternError` exception types.

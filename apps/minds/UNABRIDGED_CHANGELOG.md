@@ -4,6 +4,766 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-01
+
+The minds release-tier tests (`deployment_tests/`, marked `minds_deployment` / `minds_services`) now also carry `@pytest.mark.release`, so the whole release suite -- mngr and minds -- is discoverable by the `release` tag rather than by path.
+
+All minds release tests now run from the minds release job (`test-minds-release` in `ci.yml`, manual `run_minds_release_tests` dispatch), never from the mngr release workflow. That job now runs the heavy `minds_deployment` group (via the deployment orchestrator) and then the plain minds `@release` tests that need no ci env -- `test_claude_version_alignment`, `test_sse_redirect` (Chromium installed in-job), and `test_aws_workspace_release` (skips without AWS opt-in) -- selected by tag. Previously those three ran in the mngr release workflow on `v*` tags; they now run on the minds release dispatch instead, matching the minds release procedure.
+
+Fixed two pre-existing failures in the plain minds release tests that folding them into the minds release job surfaced:
+
+- `test_sse_redirect` was stale: it drove `/creating/<agent-id>`, but the creating page now takes a `CreationId` and polls the v1 operations resource (`/api/v1/workspaces/operations/create/<creation_id>`) for completion. Reworked it to key the fake creation by a `CreationId`, mount the `/api/v1` blueprint (pass `paths`), and assert the canonical `/goto/<agent>/` redirect.
+
+- `test_claude_version_alignment` was failing on a real drift (the release Dockerfile pinned an older Claude Code version than forever-claude-template); fixed by bumping the pin (see the mngr changelog).
+
+Docs updated: `deployment_tests/README.md` and `docs/testing-overview.md`.
+
+Removed the legacy OVH-VPS pool-host path from the minds env tooling. Pool hosts are bare-metal slices only.
+
+- `minds pool create` is slice-only: dropped `--backend` and the OVH-VPS-only flags; `--server-id` is required.
+
+- `minds env destroy` no longer tags/terminates OVH VPSes (deleted the `envs/providers/ovh_tags.py` module and its env-teardown step).
+
+- Stopped reading the `<tier>/ovh` Vault entry during deploy and dropped the `ovh` Modal secret from the connector deployment. The `<tier>/ovh` Vault entry and `.minds/template/ovh.sh` remain, reframed for operator-sourced bare-metal box ordering (`mngr imbue_cloud admin server`).
+
+- Dropped the now-unused `imbue-mngr-ovh` dependency from the minds package (the shipped Electron bundle keeps it, since `mngr_imbue_cloud`'s bare-metal box ordering still uses it).
+
+The direct OVH provider (`mngr create @host.ovh`) is unaffected.
+
+Added a new async/await ratchet (`test_prevent_async_await`) that freezes the current amount of `async def` / `await` usage in this project and fails if new async code is added. We strongly prefer synchronous code: it is far easier to debug, and our software is intentionally low-scale, so async provides no benefit. Existing usage is grandfathered in at its current count; the count can only decrease.
+
+Release minds v0.3.5: bump `apps/minds/package.json` to `0.3.5` and point the shipped binary's `FALLBACK_BRANCH` at the `minds-v0.3.5` forever-claude-template tag. This rolls up all mngr/minds changes that landed on `main` since `minds-v0.3.4`, notably:
+
+- The "get help" flow now spawns an `/assist` chat in the loaded workspace and frames the help modal as an agent submission for agent-escalated reports, with a full loading state that auto-closes on success.
+
+- UI copy renamed from "project" to "workspace" throughout (Login window title, page copy, and the "Back to workspaces" back-link).
+
+- Release tests split by tag: the minds release suite (`minds_deployment` / `minds_services` plus the plain minds `@release` tests) now runs from the minds release job rather than the mngr release workflow.
+
+## 2026-06-30
+
+Workspace recovery page: the "Report a problem" link no longer appears on the transient "Loading workspace" spinner. It is now shown only on the terminal states that offer an action -- "Workspace unresponsive" (restart), the restart-dispatch error, and "Can't connect to ..." (provider unreachable, retry) -- where there is an actual failure to report.
+
+Get-help / error reporting (in progress): an in-workspace agent that wants to file a bug report no longer submits to Sentry directly. The authenticated report route now asks the desktop app to open the report-a-bug modal -- pre-filled with the agent's description and scoped to that workspace -- so a human reviews what to attach and submits it through the normal report path. A human now gates every send.
+
+Get help: "Have an agent help fix the problem" is now available in the get-help modal when you're in a loaded workspace (and is the default choice there). Choosing it and describing the problem spawns a new chat in that workspace that diagnoses the issue and fixes what it can. While the chat is being created the modal shows a loading spinner, then closes itself once the chat is ready and its tab has opened in the workspace; it surfaces an error if the spawn fails.
+
+Get help: when the modal is opened by an in-workspace agent's escalation (rather than by you clicking the help button), it now reads "An agent in workspace <name> wants to submit this report:" and hides the "have an agent help" / "report a bug" choice -- a report is already underway, so there is nothing to pick. The pre-filled description and the report controls are unchanged, and it opens in the window showing that workspace.
+
+Accelerated local Lima workspace creation by adding a pre-baked Lima VM image cache, distributed via `desync` content-defined-chunking deltas (issue #2306). For the default workspace (the current release tag + the default forever-claude-template repo), a Lima create now boots a pre-built image instead of building the full toolchain in the VM on every create.
+
+- Added a new `imbue.minds.lima_image` package that downloads, verifies, and assembles the current release's pre-baked image: a signed root manifest (verified in pure Python against an Ed25519/minisign public key), a content-addressed chunk store, and a per-(version, arch) index. The "ensure current image present" operation is idempotent and resumable, seeds incremental upgrades from the previously-installed image, verifies the assembled image's hash before use, converts it to qcow2 for Lima, and keeps only the current version on disk.
+
+- The desktop app starts the image prefetch as a background worker as early as possible at startup (`minds run`), writing progress to a per-env state file. A Lima create gates on the verified image and points Lima at it via the provider's existing `providers.lima.default_image_url_*` override (no Lima provider code change). If the create runs before the download finishes, it blocks and shows progress (faster than rebuilding).
+
+- Fallback behavior: when no image is published for the selected release+arch, the app warns and builds the workspace in-VM as before; when a published image fails to download or verify, the create fails with a clear, retryable error (downloads resume on retry) rather than silently rebuilding. Background auto-retry runs while the app is open. A `MINDS_DISABLE_LIMA_IMAGE_CACHE=1` env var disables the path entirely (for testing/dev).
+
+- The per-env chunk-store base URL and trusted minisign public key come from `client.toml` (`lima_image_base_url`, `lima_image_minisign_public_key`); when unset, the pre-baked path is disabled and the app builds in-VM. Each minds env keeps its own image cache under its data root. The dev-env `client.toml` writer round-trips these two fields when set, so a dev env can opt into a pre-baked image source; `apps/minds/docs/release.md` documents the per-tier setup + per-release publish runbook.
+
+- Bundled the `desync` binary alongside `uv`/`git`/`lima` in the Electron resources (macOS/Linux) and added it to the backend PATH.
+
+Accelerated local Lima workspace creation by adding a pre-baked Lima VM image cache, distributed via `desync` content-defined-chunking deltas (issue #2306). For the default workspace (the current release tag + the default forever-claude-template repo), a Lima create now boots a pre-built image instead of building the full toolchain in the VM on every create.
+
+- Added a new `imbue.minds.lima_image` package that downloads, verifies, and assembles the current release's pre-baked image: a signed root manifest (verified in pure Python against an Ed25519/minisign public key), a content-addressed chunk store, and a per-(version, arch) index. The "ensure current image present" operation is idempotent and resumable, seeds incremental upgrades from the previously-installed image, verifies the assembled image's hash before use, converts it to qcow2 for Lima, and keeps only the current version on disk.
+
+- The desktop app starts the image prefetch as a background worker as early as possible at startup (`minds run`), writing progress to a per-env state file. A Lima create gates on the verified image and points Lima at it via the provider's existing `providers.lima.default_image_url_*` override (no Lima provider code change). If the create runs before the download finishes, it blocks and shows progress (faster than rebuilding).
+
+- Fallback behavior: when no image is published for the selected release+arch, the app warns and builds the workspace in-VM as before; when a published image fails to download or verify, the create fails with a clear, retryable error (downloads resume on retry) rather than silently rebuilding. Background auto-retry runs while the app is open. A `MINDS_DISABLE_LIMA_IMAGE_CACHE=1` env var disables the path entirely (for testing/dev).
+
+- The per-env chunk-store base URL and trusted minisign public key come from `client.toml` (`lima_image_base_url`, `lima_image_minisign_public_key`); when unset, the pre-baked path is disabled and the app builds in-VM. Each minds env keeps its own image cache under its data root. The dev-env `client.toml` writer round-trips these two fields when set, so a dev env can opt into a pre-baked image source; `apps/minds/docs/release.md` documents the per-tier setup + per-release publish runbook.
+
+- Bundled the `desync` binary alongside `uv`/`git`/`lima` in the Electron resources (macOS/Linux) and added it to the backend PATH.
+
+## 2026-06-29
+
+The create-a-mind form now validates the advanced "Name" field live as you type, so a bad or already-used name is caught immediately instead of failing partway through creation.
+
+As you type, the field shows a specific message for any format problem (for example, dots aren't allowed, or a name can't start or end with a dash or underscore).
+
+It also checks availability: if a name is already taken by an active mind on the selected compute provider (and account, for Imbue Cloud), the field says so right away. Names freed by destroyed minds are treated as available, and the check is case-insensitive. Pressing Create with a known-invalid or taken name surfaces the inline error instead of starting creation; once you change the name (or switch provider/account/region) a previous "taken" result no longer blocks Create for the new name.
+
+The desktop UI now refers to the unit you create as a "workspace" instead of a "mind" (the product is still called Minds).
+
+Auto-generated workspace names now use the workspace-N pattern (e.g. workspace-1) instead of mind-N.
+
+The landing page says "Workspaces" instead of "Projects" (heading, window title, and empty-state text).
+
+Onboarding copy was updated accordingly: the create screen ("Create a workspace", the heading "Where should it run?", and the my-workspace name placeholder), the sign-in prompt ("To run your workspace on Imbue Cloud…" and the "Back to workspace setup" link), and the landing Start/Stop workspace controls.
+
+The rename also covers the rest of the UI that still said "project": the "Back to workspaces" links and window titles, the create screen's "No account (private workspace)" option, "Creating your workspace…", and the "Destroy workspace" controls in workspace settings.
+
+## 2026-06-28
+
+Added a dedicated permission flow for the cross-workspace management API (`/api/v1/workspaces/...`), alongside the existing `predefined` (service-catalog) and `file-sharing` permission types.
+
+- Introduced a `WORKSPACE_PERMISSION` request type and a `LatchkeyWorkspacePermissionRequestEvent`: an agent that hits a 403 on a cross-workspace call files a `type=workspace` request naming the `minds-workspaces` verbs it wants and, for verbs that act on a specific workspace, the target workspace id.
+
+- Added a `WorkspacePermissionGrantHandler` and its inbox dialog (`LatchkeyWorkspacePermission`): the user picks which verbs to grant (read / create / destroy / lifecycle / backups-export / ssh) and, when the request names a target workspace, whether the target-scoped verbs apply to only that workspace or to all workspaces. The grant is applied through the gateway's standard approve endpoint (with a recompute-on-approval override body), exactly like file-sharing -- the desktop client never writes the permissions file directly, and no host resolution is needed.
+
+- The `read` and `create` verbs are all-or-nothing; the `destroy`, `lifecycle`, `backups-export`, and `ssh` verbs are target-scoped and accumulate one approved target workspace at a time (each becomes a uniquely-named per-target schema), so granting access to another workspace adds to the set rather than replacing it.
+
+- Updated `apps/minds/docs/latchkey-permissions.md` with a "Cross-workspace management API permissions" section describing the verbs, the target axis, and the self-contained grant effect.
+
+Wire the agent-facing `/api/v1/workspaces` create route up to full backup + tunnel parity, and point the browser UI's lifecycle / destroy / backup-export flows at the versioned API.
+
+- Extracted the create-orchestration helpers (backup-request builder, post-creation tunnel/account callback, region resolve/persist) out of `app.py` into a new shared `workspace_create.py` so both the browser create form and the `/api/v1/workspaces` create route build the exact same thing. `POST /api/v1/workspaces` now accepts the `backup_*` fields, provisions restic backups, injects the Cloudflare tunnel token, and persists the chosen region just like the desktop form does.
+
+- The landing page's start/stop buttons now call `POST /api/v1/workspaces/<id>/start|stop`, the workspace-settings destroy button and the destroy detail page (status poll + SSE log tail + retry) now use `POST /api/v1/workspaces/<id>/destroy` and `/api/v1/workspaces/operations/<id>`, and backup download now lists snapshots via `GET /api/v1/workspaces/<id>/backups` and exports the most recent via `POST .../backups/<snapshot>/export`. No user-visible behavior change.
+
+- The Electron shell's single-row Stop relay and the `launch_to_msg_e2e` harness's destroy poll were repointed to the same v1 routes, so the legacy `/api/destroy-agent/<id>`, `/api/destroying/<id>/status`, `/api/destroying/<id>/log`, and `/api/backup-export/<id>` routes (and their handlers) are now removed. The legacy `/api/agents/<id>/start-host`/`stop-host` lifecycle routes, the batch `/api/minds/stop-hosts`, `restart-host`, the create routes, the destroy-dismiss action, and `/api/backup-status` are retained (they have no v1 equivalent yet or remain in active use).
+
+- Added `apps/minds/scripts/electron_full_flow_e2e.py`, an operator harness that drives the whole Electron workspace lifecycle (create local Docker workspace -> chat message + reply -> terminal -> home -> v1 destroy) against the real app over CDP. Used to verify the v1 lifecycle/destroy repointing end-to-end; runnable via `just minds-test-electron-flow`.
+
+- Removed the legacy `POST /api/create-agent` JSON create endpoint (and its `_handle_create_agent_api` handler, tests, and the e2e duplicate-name conflict check). The browser create form and the versioned `POST /api/v1/workspaces` are now the create paths. The per-creation sub-routes `/api/create-agent/<id>/{onboarding,status,logs}` (used by the creating page) remain.
+
+- Extracted the host start/stop logic into a shared `workspace_lifecycle.py` (`perform_mind_host_action`) so the agent-facing `POST /api/v1/workspaces/<id>/start|stop` now does the same system-services resolution and optimistic host-state override the browser/Electron controls do. The legacy `/api/agents/<id>/start-host` and `/stop-host` routes are removed (the landing buttons and the Electron shell call the v1 routes); `restart-host` and the batch `/api/minds/stop-hosts` stay (no v1 equivalent yet).
+
+- A malformed workspace/operation id in any `/api/v1/workspaces/...` path now returns 400 (via a blueprint error handler for `InvalidRandomIdError`) instead of a logged 500.
+
+- The Electron full-flow harness now also round-trips the v1 stop/start lifecycle (a STEP 4 between terminal and home) so `perform_mind_host_action` is exercised against real Docker end-to-end.
+
+Begin work on the versioned Minds workspace API (cross-workspace capabilities reachable by agents through the latchkey gateway). See `blueprint/minds-workspace-api/plan-minds-workspace-api.md` for the full design.
+
+- Added `restic_cli.list_snapshots` plus a `ResticSnapshot` data type and a `parse_restic_snapshots` parser, so a workspace's backup snapshots can be enumerated (not just the latest). This is the foundation for backup listing and per-snapshot export in the new API.
+
+- Fixed the permission-grant flow to treat an `UNKNOWN` latchkey credential status as "proceed" rather than "needs credential setup". Only `MISSING`/`INVALID` now trigger the browser-auth or manual-credentials path. This stops the dialog from spuriously prompting for credentials when latchkey cannot vouch for a credential it does not manage (e.g. a `rawCurl` credential, or the minds-internal API scopes served by a gateway extension), and is a prerequisite for granting those scopes.
+
+- The `/api/v1/workspaces` routes now accept either the central bearer key (agents, via the latchkey gateway) or the desktop client's session cookie, so the browser UI can call the same versioned API as agents (one HTTP surface). The agent-only notifications route stays bearer-only.
+
+- The agent-facing create route (`POST /api/v1/workspaces`) now accepts `account_id` (resolved to the imbue_cloud account email), `anthropic_api_key`, and `region`, with the same up-front validation as the desktop create form (account required for IMBUE_CLOUD, API key required for API_KEY) -- so an agent can spawn a peer on a chosen cloud account or with a supplied key. (Backup provisioning and Cloudflare tunnel injection for agent-created peers remain a follow-up.)
+
+- Added `POST /api/v1/workspaces/<id>/ssh` to establish temporary SSH access into a workspace. The caller generates its own keypair and sends only the public key (plus its own self-reported workspace id); the hub appends the key to the target's `authorized_keys`, tagged with the requester and a 24h expiry so it can be pruned, and returns the target's SSH connection info. Private keys never move. This works for remote (cloud) targets, which are reachable directly; brokering a forwarding tunnel for the remote-to-local-target case is not yet implemented (the route returns 501 for a local target).
+
+- Added the cross-workspace mutation routes under `/api/v1/workspaces/`: create a peer workspace (returns an operation handle to poll), destroy a workspace (its backups are retained), and start/stop a workspace's host (blocks until the transition resolves). Long-running create/destroy are modeled as operations polled at `/api/v1/workspaces/operations/<operation_id>`, with their logs streamed as server-sent events at `/api/v1/workspaces/operations/<operation_id>/logs`. (The lean create path covers the common case; account/billing binding, backup provisioning, and tunnel injection for agent-created peers still route through the desktop UI create flow.)
+
+- Added the versioned cross-workspace read API under `/api/v1/workspaces/` (reachable by agents through the latchkey gateway's `minds-api-proxy`, gated by the `minds-workspaces` permission scope): list all workspaces (including destroyed-but-still-backed-up ones), get a workspace's detail, read its version info (`original_minds_version` label plus, when the workspace is online, the git-derived current version and upgrade-merge history), list its restic backup snapshots, and export a chosen snapshot as a downloadable zip. Backup listing and export work even when the target workspace is offline or destroyed, because the hub holds each workspace's `restic.env`.
+
+- Workspaces are now stamped at creation time with an immutable `original_minds_version` label (the resolved template ref -- a `minds-v*` tag in production, or a branch/`main` in dev). This is the one version fact knowable for a workspace even when it is offline, and backs the version-reporting API.
+
+- The destroy-operation status polled at `/api/v1/workspaces/operations/<id>` now keys "done" on the workspace's whole host being gone (not just the workspace agent), matching the desktop UI's destroy-status logic: a destroy that removed only the workspace agent while the host's `system-services` kept it alive now reports `failed` instead of a false `done`. The host-liveness computation is shared via a single `destroying.is_host_still_active` helper.
+
+- Removed all Telegram functionality from the minds desktop client: the `/api/v1/agents/<id>/telegram` and `/api/agents/<id>/telegram/*` routes, the `TelegramSetupOrchestrator`, the entire `imbue/minds/telegram/` package and `scripts/create_telegram_bot.py`, the Telegram sections of the landing and workspace-settings pages, and the `TelegramError` exception hierarchy. Workspaces communicate via the web UI (inbound) and the notifications API (outbound); the notifications route is unchanged. (Telegram teardown in the forever-claude-template repo is tracked separately.)
+
+Continues the minds workspace-API SSH work (handoff item #5) and documents the minds test landscape.
+
+- Wires grant pruning into the cross-workspace SSH route. `POST /api/v1/workspaces/<id>/ssh` no longer blindly appends to the target's `authorized_keys`: it now reads the file back over `mngr exec`, prunes any expired minds-owned grant lines, drops any still-valid grant the same requester already holds (so a re-request refreshes rather than stacks), appends the new (TTL-tagged) grant, and writes the whole body back in one rewrite. Repeated SSH grants therefore can no longer let stale or duplicate grant lines accumulate on a target. The pruning/compose logic lives in a new pure, unit-tested `workspace_ssh.compose_pruned_authorized_keys` (wrapping the previously-unwired `prune_expired_grant_lines`). The read-back uses a non-login shell so login-profile output can never leak into the rewritten file.
+
+- Fixes the cross-workspace SSH route (`POST /api/v1/workspaces/<id>/ssh`) 502'ing on every call. The handler read and rewrote the target's `authorized_keys` via `mngr exec <target> -- bash -c <script>`, but `mngr exec`'s CLI is `mngr exec [AGENTS]... COMMAND` (the command is a single trailing positional), so the `bash`/`-c` tokens were parsed as extra agent names and the call errored with `Not a valid agent name or ID: '-c'` -- so the grant never completed and the requesting agent never received an SSH endpoint (latchkey/detent authorization itself worked). The read and write now pass the command as `mngr exec`'s single `COMMAND` argument (`mngr exec <target> "<command>"`); `mngr exec` already runs it in a shell with the agent's env sourced, so `~` expands and the (silent) env prefix means the read's stdout is just the file body. This supersedes the earlier note about a "non-login shell" read-back -- that `bash -c` wrapping was itself the cause of the failure. Adds a regression test that captures the `mngr exec` argv and asserts the single-command form.
+
+- Reads the target's `authorized_keys` over `mngr exec --format json` and extracts the command's own stdout from the structured envelope, instead of capturing mngr's default human-format stdout. In human format `mngr exec` appends a `Command succeeded on agent <name>` status line to stdout after the command's output; capturing that raw wrote the status line straight back into the target's `authorized_keys`, and because the prune step only drops minds-owned grant lines, a fresh copy accumulated on every re-grant. (This supersedes the earlier note that the read's stdout "is just the file body".) The regression test's fake `mngr` now emits a realistic JSON envelope and asserts the rewritten body never contains the envelope text or a status line.
+
+- Adds `apps/minds/docs/testing-overview.md`: a map of every kind of minds test (unit/integration, acceptance/release, the Electron e2e, the modal-snapshot stage, deployment suites, and the JS/Playwright tests), which CI job runs each, and a backlog of end-to-end tests worth adding -- highlighting the ones that fit the modal-snapshot stage (a pre-baked workspace-in-Docker image) so they can fan out in parallel in offload without an imbue_cloud login.
+
+- Implements the cross-workspace SSH tunnel broker so a workspace can reach a *local* (Docker/Lima) target, not just a remote one. A local target's sshd is published on the hub's `127.0.0.1:<port>` (discovery already carries this), so the route now brokers a reverse SSH tunnel into the *calling* workspace's container (reusing `mngr_forward`'s `SSHTunnelManager`) and returns a `127.0.0.1:<port>` endpoint the caller connects to with its own key; remote targets keep returning their direct address. Re-requests refresh the same tunnel rather than stacking. The tunnel manager is owned by the desktop client's lifetime and torn down on shutdown. New helper module `workspace_ssh_tunnel.py` (`is_loopback_host`, `broker_reverse_tunnel_into_caller`).
+
+- Adds a self-describing API schema endpoint: `GET /api/schema` returns an OpenAPI 3.1 document describing every Minds API route an agent can reach through the latchkey gateway (everything under `/api/v*` except the cookie-only `/desktop` namespace and the WebDAV `/files` mount, which agents can't reach). The path/method inventory is generated at request time from the live Flask routes (so it never drifts), with request/response body schemas layered on from pydantic models. The endpoint is default-allowed for every workspace by the gateway baseline, so a new agent can discover the API immediately. A test validates the generated document against the official OpenAPI validator and asserts its paths exactly match the gateway-reachable routes. New module `api_schema.py`.
+
+- Extracts the `/api/v1` request/response pydantic models into a new lower module `api_models.py` (imported by the schema, and intended to be imported by the handlers), as the single source of truth for the API contract. This is the first, non-breaking step of converting the API to spectree-based request/response validation (see `blueprint/minds-api-spectree/plan-minds-api-spectree.md`); behavior is unchanged.
+
+- Lays the spectree-conversion groundwork (still non-breaking; see the same plan): adds `spectree` as a dependency; extracts the shared auth decorator and JSON-response helpers into a new `api_auth.py` (so the schema/handlers no longer create an import cycle through `api_v1`); and adds `api_spec.py` -- a single spectree instance whose request-validation failures are reshaped, by one hook, into the stable `422 {"errors": [{"field", "message"}]}` contract (`field` is the dotted pydantic location). No routes are decorated yet, so behavior is unchanged.
+
+- Converts the `/api/v1` request-body validation to spectree + pydantic models as the single source of truth. Every JSON-body route (notifications, create, restart, ssh, patch-workspace, sharing-enable, bug-report, provider-toggle) is now decorated with `@require_api_or_cookie_auth` (outer) + `@API_SPEC.validate(json=...)` (inner): auth still runs first (an unauthenticated request gets 401, never a pre-auth 422), and a structurally invalid body (missing/wrong-typed field, bad enum/scope value, non-object) now returns the uniform `422 {"errors": [{"field", "message"}]}` instead of each handler's ad-hoc 400. Each handler keeps its value-semantic checks (the create form's inline `{error, field}` / sign-up `redirect_url` backstop, the empty-after-strip and provider rules, the readiness SSRF guard, the 404/409/501/502 paths), so those behaviors are unchanged. Request models ignore unknown keys (so routes that forward extra fields, like bug reports, are not newly rejected); the provider toggle uses a strict bool (a non-boolean is rejected, not coerced), matching the prior hand-written checks.
+
+- Front-end converted in lockstep: a new shared `static/api_errors.js` normalizes any API error body -- the new `422 {"errors": [...]}` list or the create form's `400 {error, field, redirect_url}` -- into one `{message, field, redirect_url}`. The create form and the sharing editor route their server-error display through it, so a structural error still surfaces a human message and (for create) rings the offending field. (Color/account settings bodies are always structurally valid and keep their bespoke semantic-error handling.)
+
+- Restructures operation polling from a single untyped `/api/v1/workspaces/operations/<id>` resource to type-segmented `/api/v1/workspaces/operations/<type>/<id>` routes (`type` in `create | destroy | restart`), with matching `/logs` and (for destroy) `DELETE`. The old untyped routes are removed. Because each route now knows its operation type, the id no longer has to be disambiguated by prefix, and the workaround where a destroy and a (never-pruned) restart record for the same workspace agent id could shadow each other is gone -- each typed endpoint reads only its own store and returns a precise per-type response model (`CreateOperationStatusResponse` / `DestroyOperationStatusResponse` / `RestartOperationStatusResponse`). The creating and destroying pages poll the typed URL they already know the type for.
+
+- Repoints the `launch_to_msg_e2e` harness onto the type-segmented operation routes: its create-status poll now hits `GET /api/v1/workspaces/operations/create/<id>` and its destroy-status poll `GET /api/v1/workspaces/operations/destroy/<id>`, matching the removal of the untyped route (the old untyped poll would 404 -- silently timing out create and falsely reporting destroy as already done).
+
+- Gives the workspace start/stop routes real named handlers (`_handle_workspace_start` / `_handle_workspace_stop` wrapping a shared helper) instead of anonymous lambdas, so each carries a docstring and the response decorator. The published `/api/schema` now documents both (summary + `WorkspaceLifecycleResponse`) instead of leaving them blank, and they are response-enforced and covered by the drift-guard test like every other fixed-shape route.
+
+- Merges `main` and reconciles the recovery-page restart rework that landed there with this branch's restructured restart endpoint: `main` added an `auto_dispatched` marker so a recovery-page auto-restart no-ops when the workspace already self-recovered to HEALTHY (avoiding bouncing a healthy backend) while it was still classifying the tier. Because this branch moved restart from `app.py`'s old `/restart-host` / `/restart-system-interface` query-param routes onto the consolidated JSON-body `POST /api/v1/workspaces/<id>/restart`, the marker is now an `auto_dispatched` field on `RestartWorkspaceRequest` (and the recovery page sends it in the JSON body); the skip-if-already-HEALTHY guard runs before the restart is claimed, exactly as on `main`. A manual restart carries no marker and always proceeds.
+
+- Makes the pydantic models the single source of truth for *responses* too, not just requests. The JSON success routes with a fixed shape -- list/get workspaces, create/destroy/restart operation handles, ssh connection info, version, backups, lifecycle start/stop, notifications, bug-report, sharing enable/disable/readiness, provider toggle, state-container stop -- now return their pydantic response model instance, declared via `@API_SPEC.validate(resp=...)`. spectree serializes the instance (it does not re-validate an already-typed instance, so there is no serialization-drift 500); error paths still return explicit responses and pass through untouched. The published `/api/schema` documents these same response models, and a new drift-guard test asserts the documented response model equals the one each handler actually enforces, so the doc can never silently diverge from the wire contract. A handful of genuinely dynamic-shaped responses stay documentation-only because a fixed model would change their wire output: `patch-workspace` (returns only the keys that were set), `sharing-status` (passes through the imbue_cloud plugin's policy dict), and the two `/desktop` list-of-entries routes. (The operation-status poll, once a three-shape dynamic response, is enforced per-type after the route restructure above.)
+
+- Surfaces `git_url` in the workspace detail/list response (`GET /api/v1/workspaces` and `/api/v1/workspaces/<id>`), sourced from the agent's `remote` label (the repo URL or local path the workspace was created from). Previously the detail readout carried no creation-source URL, so an agent inspecting a workspace saw it as null/absent even though the value was known. The host name is already exposed as the existing `name` field (the `workspace` label), so no separate `host_name` field is added.
+
+- Makes workspace account-association usable from the API and stops it silently accepting bad values. `PATCH /api/v1/workspaces/<id>` with `account_id` previously wrote whatever string it was given (returning a false `200`, then the bogus value was unresolvable and garbage-collected) -- so an agent passing the account's *email* "succeeded" yet nothing was bound, and sharing stayed blocked. Now the value is resolved against the signed-in accounts and accepts **either the account id or its email**; an id/email matching no signed-in account is rejected with `404` instead of a fake success; and the response echoes the resolved `account_id` + `account_email`. The workspace detail/list response (`WorkspaceSummary`) also gains `account_id` + `account_email` so a caller can confirm the association (previously there was no account field at all). This lets an agent associate a workspace with `josh@imbue.com` directly and then enable sharing.
+
+- Surfaces `branch` in the workspace detail/list response, the branch/tag the workspace was created from. Create now stamps the create-time `branch` value as an immutable `original_branch` label (mirroring `original_minds_version`), and the detail reads it back. It records the literal value from the create form / API `branch` field, so it is null when none was specified (the provider's default branch was used), and is distinct from `original_minds_version` (the resolved template ref, which for imbue_cloud can be a semver tag rather than a branch).
+
+- Adds a `HEALTHY` dispatch tier to the workspace host-health probe and makes the classifier consult the live in-container HTTP probe. Previously `GET /api/v1/workspaces/<id>/health` classified *any* workspace whose container was running and whose `mngr exec` worked as `interface_unresponsive` -- purely by elimination, ignoring the probe that actually GETs `/` inside the container -- so a perfectly healthy workspace reported `dispatch_tier: interface_unresponsive` while every individual probe answered yes. The classifier now returns `HEALTHY` when the container is up, exec works, and the inner web server answers `GET /` with 200 (a direct 200 is trusted over the slower background health tracker that gates the recovery page); it only falls through to `interface_unresponsive` (the in-place surgical restart) when that 200 is not confirmed -- a listening-but-not-answering interface is exactly the wedge that restart fixes. The recovery page treats `HEALTHY` as "nothing to restart" and reloads the recovery route (which 302s the user back to the workspace once the tracker agrees) instead of bouncing a working backend. This also closes a latent race where a workspace that self-recovered between the outer health gate and the slow in-container probe could be needlessly restarted.
+
+- The cross-workspace SSH route now logs a warning when it cannot parse the target's `authorized_keys` read (the `mngr exec --format json` output is malformed), so the failure is visible server-side instead of only surfacing as a 502 to the caller.
+
+- Adds `GET /api/v1/accounts`, which lists the accounts signed in on this device (`account_id` + `email` + `display_name`) so an agent can discover the id/email to pass to the workspace-association `PATCH`. It is gated by a new `minds-accounts-read` permission that is **not** in the agent baseline, so -- unlike `/api/schema` -- an agent must request it and the user must grant it before it can enumerate accounts (account identities aren't exposed by default). The grant is modelled on file-sharing: a new `accounts` permission-request type whose approval mints a single fixed permission under the existing `latchkey-self` scope (no new detent scope). It is all-or-nothing with no parameters, so its request payload is empty; the streamed permission-request payload is now selected by `request_type` (rather than by pydantic shape) since the empty `accounts` payload is otherwise indistinguishable from the all-defaulted `workspace` payload. New desktop grant handler (`latchkey/handlers/accounts.py`) + dialog, request event type, and `AccountSummary`/`AccountsResponse` models.
+
+- Makes workspace sharing-disable idempotent and stops leaking subprocess tracebacks to API callers. Disabling a service that is already absent from its tunnel (e.g. a repeated `DELETE /api/v1/workspaces/<id>/sharing/<service>`) is now a no-op success instead of a 502 -- `disable_sharing` checks the tunnel's service list (the same authoritative source `get_sharing_status` reads) and only calls the connector when there is something to remove. Separately, a failed `mngr imbue_cloud` subprocess no longer puts its raw stderr (often a multi-line Python traceback from a connector transport error) into the exception *message* that the route surfaces to the caller: the full output is logged server-side and the API gets a clean message. Together with the connector-side transient-transport retry (see the `mngr_imbue_cloud` changelog), this fixes the intermittent `502 tunnels list failed` flakes an agent hit when toggling sharing through the v1 API.
+
+- Sharing now **requires at least one email** to grant access to, and rejects an empty list. Previously `PUT /api/v1/workspaces/<id>/sharing/<service>` with no `emails` created the tunnel + registered the service but applied **no Cloudflare Access policy**, leaving the service **publicly reachable** and the readiness probe permanently red (it waits for a Cloudflare Access redirect that never appears). `EnableSharingRequest.emails` is now required (`min_length=1`, so an empty/missing list is a `422`), and `enable_sharing_via_cloudflare` refuses an empty list up front (before any tunnel/service side effects) and always applies the Access policy -- a share can no longer be created without one.
+
+Added a per-run minds CI environment to the snapshot test pipeline so live tests can run against a real, isolated cloud env that is stood up before the run and destroyed after, plus a manual release tier for the heavier deploy tests.
+
+- The deployment-tests orchestrator (`apps/minds/scripts/test_deployments.py`) now actually deploys a `ci-*` env (`_deploy_shared_env`), creates a fixed verified CI test user against it, publishes the env's freshly-minted per-env secrets to Vault, destroys envs by name (`_destroy_env`, reconstructing `secrets.toml` from Vault when run on a different machine), and sweeps leaked `ci-*` Modal envs by age (`_sweep_stale_envs` + a new `sweep` command). These were previously stubs.
+
+- Per-env dynamic secrets (the env's own SuperTokens app + Neon DSNs) are handed between jobs via an env-name-keyed Vault path (`secrets/minds/ci/runs/<env-name>/shared-<role>`); the `shared_env` fixture resolves them from injected env vars or Vault, and a new `ci_test_user` fixture supplies the fixed CI credentials.
+
+- New `minds_services` integration test: log in to the per-run env as the fixed CI user, mint a LiteLLM key, and make a live LLM call.
+
+- Test tiers: both `minds_services` and `minds_deployment` (deploy / rollback / round-trip) need a remote `ci-*` env, so both run only in the manual release tier (`workflow_dispatch` with `run_minds_release_tests=true`); normal pushes run only `minds_snapshot_resume` (which needs just the built snapshot image, not a ci env). See `apps/minds/deployment_tests/README.md` for the capability-mark + tier matrix and local-invocation recipes.
+
+- Fixed a `minds env recover` bug surfaced by the rollback test: after an auto-rollback, the rolled-back app's broken containers were never terminated because the Modal app-id lookup matched the app name against `Name`/`name`/`App` but `modal app list --json` reports it under `Description`. The lookup silently found nothing, so the failed version's containers kept serving (and `/version` kept reporting the failed deploy_id) until they idled out. `_find_modal_app_id` now also checks `Description`; the parsing is extracted into a pure `_select_deployed_app_id` with regression unit tests against the real JSON shape.
+
+- `test_litellm_via_workspace` and `test_signup_tunnel` are wired into the flow but remain `@pytest.mark.skip`ped with explicit notes: their bodies are still stubs and need debugging (real FCT Docker workspace creation, Cloudflare tunnels, the mail.tm signup flow) before they will pass.
+
+- New end-to-end Electron test `test_create_apikey_workspace_and_chat_via_electron` (in `test_snapshot_resume.py`, mark `minds_snapshot_resume`): drives the real Electron desktop app to create a local Docker workspace via the manual `api_key` AI provider (typing a real Anthropic key into the create form) and asserts the agent in the workspace's `system_interface` answers a chat message. The create driver (`e2e_workspace_runner.py`) gained an `API_KEY`-provider path and an `on_workspace_ready` hook to run the chat round-trip on the same Electron session.
+
+- Consolidated all Electron e2e coverage into the modal-snapshot stage: the test runs in the snapshot offload sandbox, reusing the snapshot image's warm Electron/Playwright/Xvfb toolchain (a new `xvfb_display` fixture supplies the display the sandbox lacks). The standalone `test_desktop_client_e2e.py` create-only test and its dedicated `test-docker-electron` CI job were removed; `just minds-test-electron` now runs the new test locally.
+
+Continues the minds workspace-API work and merges the latest `main` into the branch.
+
+- Adds a versioned `/api/v1/workspaces` cross-workspace management API that lets an agent in one workspace act on others: list, get detail, version, list/export backups, create, destroy, start/stop (with operation-status polling and SSE operation logs), and establish SSH access to remote targets. All routes are dual-authenticated (central `MINDS_API_KEY` bearer or session cookie).
+
+- Reconciles with `main`: keeps `main`'s new per-agent bug-report route (`POST /api/v1/agents/<id>/report`) and adopts `main`'s removal of the create-flow onboarding questions (the onboarding module, endpoint, and the related `UserDataPreference` enum are gone; the create form now goes straight to the setting-up screen). The legacy `/api/create-agent` JSON route is removed in favor of the v1 surface.
+
+- Repoints the desktop-client frontend (browser JS, Jinja templates, and the Electron shell) onto the consolidated `/api/v1` routes: destroy-card dismiss now uses `DELETE /api/v1/workspaces/operations/<id>`; workspace color and account association/disassociation use `PATCH /api/v1/workspaces/<id>`; provider enable/disable uses `PATCH /api/v1/desktop/providers/<name>` (and surfaces the 409 "provider still has active workspaces" rejection to the user); the landing page derives each tile's backup badge from per-workspace `GET /api/v1/workspaces/<id>/backups` (fanned out over the workspace list, with the "Created N ago" fallback read from `GET /api/v1/workspaces`) instead of the removed batch route; sharing uses the `GET/PUT/DELETE /api/v1/workspaces/<id>/sharing/<service>` (+`/readiness`) resource with JSON request/response bodies; and the Electron recovery restart and desktop quit flow use `POST /api/v1/workspaces/<id>/restart` (`scope: services|host`), `GET /api/v1/desktop/running-workspaces`, `POST /api/v1/desktop/stop-hosts`, and `POST /api/v1/desktop/state-container/stop`.
+
+- Adds the versioned recovery routes: `GET /api/v1/workspaces/<id>/health` returns the recovery diagnostics (probe list + dispatch tier), and `POST /api/v1/workspaces/<id>/restart` (`scope: services|host`, optional `host_already_stopped` for the host scope) dispatches a restart and returns an operation handle (`{operation_id, kind: "restart"}`) followed via the `/api/v1/workspaces/operations/<id>` (+`/logs`) resource, just like create and destroy. Restart status and a status-log stream are tracked in a new in-memory workspace-operation registry. The host-health probe and restart worker were extracted into a new `workspace_recovery` module so the API surface no longer depends on the desktop app module.
+
+- Moves the browser create flow onto the same `POST /api/v1/workspaces` endpoint agents use, so the two create paths can no longer drift. The create form now submits via a JS `fetch` (instead of a native HTML POST to `/create`); on success it navigates to `/creating/<operation_id>`, and validation errors are rendered inline from a structured JSON `400` (`{error, field}`, placed next to the offending input). The `/api/v1/workspaces` route gained the full create field surface the form needs: automatic `mind-N` naming when no name is given, an optional `color`, imbue_cloud template-version resolution, and the no-account imbue_cloud sign-up backstop (a `400` carrying `{redirect_url}`). The `/creating/<id>` page now polls the v1 operations resource (`GET /api/v1/workspaces/operations/<id>` + `/logs`) for status and live logs. The parallel create routes -- the `POST /create` form handler and the `/api/create-agent/<id>/status` + `/api/create-agent/<id>/logs` routes -- are removed; the `GET /create` form page and the `/creating/<id>` progress page remain.
+
+- Fixes a bug where a workspace's lingering in-memory restart record (the registry is never pruned for the app session) shadowed a later destroy of that same workspace in the `/api/v1/workspaces/operations/<id>` status and logs resources, causing the destroy progress page to report the stale restart instead of the live destroy. The on-disk destroy record now takes precedence over the restart registry in both handlers.
+
+- Final cleanup pass: removes the now-superseded legacy desktop-client JSON routes from `app.py` (workspace color, account associate/disassociate, provider toggle, the recovery host-health/restart-system-interface/restart-host trio, the `/api/minds/running|stop-hosts|stop-state-container` quit-flow endpoints, and the batch `/api/backup-status`) along with their handlers and now-dead helpers; only the `/agents/<id>/recovery` page route remains (its JS now drives the versioned `GET /api/v1/workspaces/<id>/health` and `POST /api/v1/workspaces/<id>/restart` routes). Repoints the recovery page's restart dispatch to send a `{scope, host_already_stopped}` JSON body, and the `launch_to_msg_e2e` harness's create poll to `GET /api/v1/workspaces/operations/<id>`.
+
+Restores two UX indicators lost in the route consolidation: the per-workspace `GET /api/v1/workspaces/<id>/backups` response now includes an `is_backing_up` flag (so the landing page shows the live "Backing up…" badge again), and the create-operation status (`GET /api/v1/workspaces/operations/<id>`) now includes a `status_text` stage caption (so the creating page shows live stage text like "Cloning repository…" again).
+
+Removed the `MINDS_WORKSPACE_NAME` dev override. The create form's workspace name now resolves from just two sources: a name typed into the advanced "Name" field (used verbatim), else the next free automatic `mind-N`. A stray `MINDS_WORKSPACE_NAME` left in the shell is silently ignored on every tier, under any opt-in state. The sibling `MINDS_WORKSPACE_GIT_URL` / `MINDS_WORKSPACE_BRANCH` prefills and the `MINDS_USE_LOCAL_WORKSPACE_DEFAULTS` opt-in are unchanged. The Electron acceptance-test runner no longer threads the name through an env var (it already types the name into the form and destroys the agent by that typed name).
+
+The `propagate_changes` dev script no longer reads `MINDS_WORKSPACE_NAME` to pick the target agent: select the agent with `--agent NAME`, or rely on auto-discovery when exactly one agent is running.
+
+## 2026-06-27
+
+Fixed AWS workspaces failing to start ("workspace unresponsive"). On the AWS
+provider path the container's `/run` lives on gVisor's gofer-backed filesystem,
+which rejects `os.link()` of a socket inode with `EOPNOTSUPP`. supervisord
+installs its control socket via a hard link, so on AWS that link failed forever
+("Unlinking stale socket"), and supervisord never started `system_interface` or
+any other service. The per-region `[providers.aws-<region>]` blocks minds writes
+now include `default_start_args = ["--tmpfs", "/run"]`, mounting `/run` as a
+tmpfs where the hard link succeeds. Scoped to the AWS blocks only; the
+ovh/vultr/imbue_cloud paths (which already provide a tmpfs `/run`) are unchanged.
+
+Changed: the discovery-pipeline health watchdog no longer gives up on a stalled discovery *producer*. Previously a producer stall ran one bounce + one restart and then, if freshness still hadn't returned, surfaced the terminal "Minds has disconnected from your workspaces" takeover screen — a dead end that even "Restart Minds" couldn't reliably clear, since a freshly-respawned supervisor could re-stall the same way. Now a stall keeps the app in the silent, background `reconnecting` state and keeps retrying forever: one bounce, then repeated supervisor restarts on a capped exponential backoff (15s → 30s → 60s → 120s → … capped at 5 min). The backoff is deliberate — a full restart re-provisions every managed host, so hammering a merely-slow producer would make things worse.
+
+Changed: the stall signal is now the age of the last discovery *event* (any update from the producer) rather than the last full *snapshot*. A producer that is alive and still emitting — just slow to complete a full re-poll because, say, one provider is down — is now correctly treated as healthy and left alone, rather than being needlessly bounced/restarted. (A dead supervisor manifests the same way, since its discovery producer stops emitting, so the freshness signal covers it too.)
+
+Changed: the full-screen "disconnected from your workspaces" takeover is now reserved for the genuinely-unusable case — the forwarding subprocess (which is also the HTTP traffic proxy) dying. A producer stall, where the currently-open workspace still works, no longer escalates to that screen.
+
+Fixed: when the takeover screen does appear, its "Show details" panel is now populated with the tail of the log instead of being an empty box, matching the app's other error screens.
+
+Fixed a slow cold-start / wake-from-sleep load where opening a perfectly healthy imbue-cloud workspace would sit on "Loading workspace…" for tens of seconds and then needlessly restart the workspace's system services.
+
+On a cold start the freshly-spawned `mngr forward` has not yet resolved the workspace's route, so probes fail (`UNRESOLVED` / 503) for the ~10s it takes discovery to warm up. That warm-up was being mistaken for an outage: the workspace was marked STUCK and the recovery flow auto-restarted it.
+
+Two fixes:
+
+- Suspect enrollment now ignores an `UNRESOLVED` backend failure outright. `UNRESOLVED` means the forward has no route for the agent at all -- a cold-start warm-up (which self-resolves) or a genuinely-gone agent (which a restart cannot revive) -- and a restart routes through the forward either way. A workspace that is present but unreachable does not land here: discovery retains its route, so the dial failure surfaces as `CONNECT_ERROR` / a 5xx, which still enrolls and still drives recovery.
+
+- The recovery page's auto-dispatched restart now no-ops if the workspace has already recovered to HEALTHY by the time it fires (the host-health probe is slow, so the background probe loop can flip the workspace healthy while it is in flight). A manual restart is unaffected and always proceeds.
+
+Also added focused diagnostic logging at the system-interface health / recovery lifecycle points (suspect enrollment with the failure reason, the HEALTHY → STUCK transition with its failure-run duration, the recovery → HEALTHY transition, and restart dispatch / auto-dispatch skip), and removed a stale recovery-gate FIXME now that the discovery-health watchdog backstops a persistently-stalled pipeline with its BLOCKED app-takeover.
+
+Fixed window-reopening bugs:
+
+Windows restored on app relaunch now reopen to the mind they were showing, instead of all landing on the main page. (Workspace windows were persisted with the agent subdomain stripped off, so they reopened against the minds backend root; they are now persisted and restored by agent identity.)
+
+A reopened "create workspace" window whose creation no longer exists (after an app restart, or a failed creation) now redirects to the landing page instead of getting stuck on a black "Unknown agent creation" screen.
+
+Quitting with "Shut down all" stops the docker state container that holds local minds' host records; the app now restarts it early on the next launch, before discovery runs. Without this, reopening right after "Shut down all" could find the state backend still down, discover zero local minds, and drop the restored windows onto the create-workspace form.
+
+Launching with Docker paused (or otherwise unable to start that state container) no longer crashes the app with "Failed to start minds". The launch-time restart is best-effort, but the failure was escaping wrapped in a ConcurrencyExceptionGroup that the surrounding handler could not catch; the docker cleanup helpers now raise their DockerCleanupError outside the concurrency-group scope, so the handler catches it and startup proceeds (discovery degrades gracefully rather than aborting). The same wrapping affected the quit-time stop and env teardown paths, which are fixed too.
+
+Window restore no longer drops a window just because its mind is missing from the first discovery snapshot. Providers enumerate at different speeds on cold start (a cloud mind can appear in ~1s while local docker minds take ~15-20s), so the first "complete" snapshot could be missing the local minds entirely. Restore now keeps a window if its mind is known from the persisted last-good topology (carried across restarts), dropping it only on positive evidence the mind was destroyed -- so a slow provider can no longer cost you a window.
+
+## 2026-06-26
+
+Added the `minds_snapshot_resume` test suite and reconciled it with the latest `main` (which had merged the error-reporting/Sentry work into the minds desktop client). This consolidates the snapshot-test work from #2226 and #2275; see those PRs for the development history.
+
+`apps/minds/test_snapshot_resume.py` exercises a sandbox booted from a minds-workspace snapshot:
+
+- asserts the snapshot captured a `docker stop`ped FCT workspace container in a clean `exited` state;
+
+- a `running_workspace` fixture resumes it (docker-start the container, restart the system-services agent so the bootstrap respawns its services) and asserts that `system_interface` serves HTTP, the system-services agent is alive, and the core services (system_interface, web, terminal) re-register in `runtime/applications.toml`;
+
+- `test_minds_recovery_restores_dead_system_interface` drives minds' real recovery flow end-to-end: it breaks the workspace (stops system-services), confirms minds' in-container recovery probe diagnoses `system_interface` as unhealthy, performs minds' surgical restart, and confirms recovery.
+
+The shared Electron e2e create-flow driver (`imbue/minds/desktop_client/e2e_workspace_runner.py`) -- used by both the `minds_electron` acceptance test and the snapshot build script -- now streams the Electron renderer's console output, JS errors, and failed requests into the run log, so a renderer-side fault during workspace creation is diagnosable from CI output instead of being hidden behind Electron's main-process-only stderr.
+
+The create flow was re-verified end-to-end against the merged frontend (Electron launch, advanced-config create form, FCT Docker workspace build + start, `system_interface` render); no selector or flow changes were required, and the `test_ratchets.py` snapshots were reconciled with the merge.
+
+Release minds v0.3.4: bump `apps/minds/package.json` to `0.3.4` and point the shipped binary's `FALLBACK_BRANCH` at the `minds-v0.3.4` forever-claude-template tag. This rolls up all mngr/minds changes that landed on `main` since `minds-v0.3.3`.
+
+Also overhauled the release runbook (`apps/minds/docs/release.md`):
+
+- Reframed the release as two **branches**, not "two PRs": neither `main` is branch-protected, so a PR is never a merge gate. A PR's only role is as a CI surface, because `ci.yml` runs on PRs and on push to `main` but **not on a bare branch push**. The FCT `vendor/mngr` refresh is opened as a PR purely to run its `test` job (it is generated and reproduction-verified, not reviewed).
+
+- Named the actual critical path: the `minds-launch-to-msg` end-to-end run is the only verification `main` never does and is the wall-clock long pole, so fire it as early as the FCT branch exists; traditional CI on a version-bump-only mngr branch is redundant with a green `main` and should not be serialized against.
+
+- Replaced the unreliable `diff -r` vendor-match check with a content-exact `git ls-tree` blob-hash comparison of the FCT vendor tree against the tagged mngr SHA's tree. The only expected delta is the files FCT's `**/.minds/` gitignore strips (Vault policies + deploy scripts, not part of the installed mngr package).
+
+Bump the bundled Latchkey version to 2.19.1.
+
+When a mind needs a Google API and its credentials are not valid, Minds now tries the Minds-provided Google OAuth consent screen first, and only falls back to the old "create your own Google project" self-setup flow if that fails. Most users no longer see the self-setup step. The flow applies to an explicit list of OAuth Google services (Gmail, Calendar, Drive, Docs, Sheets, People, Analytics); `google-directions` (which uses an API key, not OAuth) and all non-Google services are unchanged.
+
+This logic now lives entirely in the shared Latchkey wrapper's browser sign-in, so granting a permission runs the same sign-in path for every service. The sign-in is attempted optimistically and only registers the Minds OAuth client when the service has no client yet, which avoids an expensive per-service credential probe. A user's own Google OAuth client is never cleared -- only a Minds client that we just registered and that then failed to sign in is discarded before the self-setup fallback runs.
+
+CI: fixed a flaky `launch-to-msg` timeout in the chat-reply checks (the failure that blocked the minds-v0.3.4 release run). The chat only auto-scrolls to a new message when the transcript is already pinned to the bottom; after the e2e navigates away and back (cross-workspace follow-up) or reloads, the view stays scrolled up, and the virtualized transcript leaves the just-sent prompt and the agent's reply in unmounted rows absent from `document.body.innerText`. The reply-count waits then timed out (8 min) even though the agent had replied.
+
+All chat-transcript reads — the first-message reply, the cross-workspace follow-ups, and the post-reload history check — now scroll the transcript to its tail before reading, via a shared `wait_for_function` helper that scrolls on every poll. Previously only the Slack canned-body check did this.
+
+CI: hardened the `launch-to-msg` end-to-end test against several behaviors introduced on `main`:
+
+- Treat the creating page auto-navigating to the workspace as creation success. On `DONE`, `creating.js` redirects the page to the workspace origin, so the `/api/create-agent/<id>/status` poll then hit the workspace (HTML, not JSON) and read an empty status -- the test never observed `DONE` and timed out after 900s. It now recognizes the workspace URL as done (and skips its own redirect when already there).
+
+- Tear the app down with SIGTERM (then a bounded SIGKILL fallback) instead of a graceful close, so the new "Shut down running minds?" quit prompt -- a native Electron dialog a headless test cannot click -- does not block teardown until the test timeout. SIGTERM is routed through the same shutdown chain but flagged headless, matching `just minds-stop`.
+
+- Scroll the chat transcript to the live tail before checking for the agent's reply (the chat virtualizes off-screen rows, so a reply rendered below the fold was absent from the DOM the test read).
+
+- Made the self-hosted mac-runner reset (`mac-runner-reset.sh`) best-effort *and* fail-loud on a dirty runner: dropped `set -e` so a single failing cleanup step (e.g. a `df`/`find` pipe) can no longer abort the script and skip the remaining Lima-VM / disk cleanup; then, after every step runs, the script verifies the end state (no surviving `minds-e2e` Lima VM, no `~/.minds`, app removed) and exits non-zero if the runner is not actually clean. The post-test cleanup step no longer wraps it in `|| true`, so a leaked VM that would otherwise silently rot this non-ephemeral runner now fails the job. The optional app-install block still fails loud so a run never proceeds against a stale app.
+
+- Dismiss the new post-login "Help improve Minds" error-reporting consent screen (`Consent.jinja`) before creating workspaces, so the home-page "both tiles render" assertion sees the home page rather than the consent screen.
+
+- Fixed the `macos_launch` smoke test's worker-exit hang (and the resulting red job despite a passing assertion): the app spawns detached helpers (the minds python backend, a `mngr latchkey forward` supervisor in its own process group, the crashpad handler) that outlive the main process and keep the Playwright worker's inherited stdio sockets open, so the worker was force-killed after 300s. Teardown now reaps those processes by command pattern and unrefs stdout/stderr so the worker exits cleanly.
+
+## 2026-06-25
+
+Error reporting is now controlled by the user instead of environment variables.
+
+On first launch (and once after upgrading), Minds shows a consent screen -- the "Help improve Minds" screen -- that explains error reporting and lets you opt into "Report unexpected errors" and "Include logs" (both default off; "Include logs" only appears once reporting is on). The same two toggles live permanently on a new Settings page, reached from the "Settings" entry in the sidebar, and take effect immediately, with no restart.
+
+Error reporting is no longer tied to having an Imbue account: choosing "Continue without an account" now also shows the "Help improve Minds" consent screen before you reach the create form, so anyone can opt in (or out).
+
+Sentry now always initializes, but what it sends is gated live by these settings: with reporting off, automatic errors are never sent; with reporting on but logs off, errors are sent without log/traceback attachments. Manual bug reports (see below) are always sent regardless. The `MINDS_SENTRY_ENABLED` and `MINDS_SENTRY_S3_UPLOADS` environment variables no longer gate any of this.
+
+This now covers every layer: the browser web UI and the Electron main process report automatic errors only, so both honor the same "Report unexpected errors" setting as the backend. A page boots its Sentry SDK only while reporting is on (re-evaluated on each navigation), and the Electron shell drops main-process events while it is off (re-checked per event) -- both without a restart. The `MINDS_SENTRY_ENABLED` opt-in switch has been fully retired.
+
+A new "get help" button (question mark) sits in the top bar next to the inbox. It opens a modal with two options: "have an agent help fix the problem" (coming soon, disabled for now) and "report a bug to Imbue". Reporting a bug sends your description to Imbue along with a few basics (version, OS), plus a set of optional, top-level checkboxes: app diagnostics (accounts, known workspaces, system resources), workspace details (when opened from a workspace), and a recorded "remote access" request flag. Those checkboxes remember their last state across reports. Logs are attached when the include-logs setting is on, or via a one-off checkbox when it is off. When a report is sent, the modal shows a copyable Sentry reference ID you can quote when following up. The same report can also be submitted by an in-workspace agent through a new authenticated `/api/v1/agents/<id>/report` endpoint.
+
+In dev (`just minds-start`), the Electron main process no longer starts the native-crash (Crashpad) reporter that the Sentry SDK enables by default. Now that Sentry always initializes, its Crashpad handler would spawn and outlive the app on quit, holding open the stderr pipe that the dev launcher reads; `just minds-start` then hung after every quit instead of exiting. Packaged builds are unaffected and keep native-crash reporting.
+
+Interrupting the app (Ctrl-C / a normal shutdown) no longer files a spurious error report. A KeyboardInterrupt reaching the process is now dropped before it is sent to Sentry, and a clean process exit is ignored too; a genuine fatal exit (non-zero exit code) or any real error during shutdown is still reported.
+
+The get-help modal now dims the workspace behind it (revealing it through a translucent backdrop) instead of covering it with an opaque page surface, matching the inbox modal.
+
+The error screens now carry a report button too. The workspace-recovery page (workspace unresponsive / backend unreachable) has a "Report a problem" link that opens the same get-help modal. The full-app error takeover also has a "Report a bug" button: when the backend is still running it opens the full modal, and when the backend is down it files a report of the on-screen error directly from the app shell and shows the reference ID. That backend-down report attaches basic host info (version, OS, CPU/memory/disk), and -- mirroring the get-help flow -- your recent logs (including the backend's own log, which is still on disk) when you have opted into log inclusion: the "Include logs" setting, or a one-off "Include recent logs" checkbox shown on the error screen when that setting is off. So a crash report is useful even when the backend that would normally gather that detail has stopped, while still respecting your log-inclusion choice.
+
+The workspace-recovery diagnostics now match the forever-claude-template's move from its custom bootstrap service manager to supervisord. The in-container probe that used to read `services.toml` (now deleted) instead asks supervisord directly whether the system interface is running (`supervisorctl -c /code/supervisord.conf status system_interface`) and sources the inner port from the `[program:system_interface]` section of `supervisord.conf`. The port-listening and inner web-server checks are unchanged. A stale `tmux ls` capture of the old per-service windows (which no longer exist) was dropped.
+
+The "Workspace misconfigured" recovery state is gone. It existed only to flag a `services.toml` that failed to declare the system interface -- a shape that can no longer occur. A system interface that is down while the container is up and reachable now classifies as "unresponsive" and offers an in-place restart, which is the correct recovery; the supervisorctl status is shown as diagnostic detail rather than steering a separate screen.
+
+Docs updated to describe the supervisord model (services are `[program:*]` sections supervised by supervisord, started by the bootstrap which execs `supervisord -n`; deferred-install is the one-shot `[program:deferred-install]`).
+
+Show the welcome / sign-in screen whenever the desktop app is functionally empty -- signed out of every account and with no workspaces -- so signed-out users are nudged to sign in again before using the app.
+
+Previously a leftover window from a prior session (e.g. a plain home/`/` window) counted as "restorable" at startup and silently reopened, landing the user on the create page even with no accounts and no workspaces. The cold-start landing decision now treats "no accounts AND no workspaces" as empty and routes to `/welcome` regardless of any stale window-state. A signed-out user who still has workspaces is unaffected (they land on home / their restored windows, not a welcome wall).
+
+The startup landing precedence (welcome > create > restore) was extracted into a pure `electron/startup-routing.js` helper and is covered by `node:test` unit tests (`pnpm --dir apps/minds test:unit`).
+
+"Continue without an account" on the welcome screen now goes straight to the create page instead of first opening a confirmation dialog explaining what an account unlocks.
+
+Reworked the "create a mind" screen into a simpler two-step flow. Instead of a name + color + a stack of provider dropdowns, you now just choose where to run the mind: "Imbue Cloud" (recommended) or "Directly on your computer", as two preset cards. The full provider / repository / branch configuration is still available behind an "Advanced Configuration" link on the same page (with a "Back to simple configuration" link to return); picking a card just fills those advanced fields with that preset's defaults.
+
+The workspace name and color are now chosen automatically -- the name as the next free `mind-N` (the smallest `N` not already used by an existing workspace across any provider, so a gap left by a destroyed `mind-2` is reused before climbing to `mind-4`) and the color as the first unused palette entry -- so neither is asked for on the create screen.
+
+Choosing the Imbue Cloud (remote) preset while signed out no longer bounces you to a separate sign-in page when you click the card. Clicking a card only selects it, and the button stays labelled "Create". Pressing "Create" with Imbue Cloud selected while signed out opens an in-page sign-in / sign-up modal (with an explainer about what running on Imbue Cloud needs) layered over the create screen; once you sign in, the screen reloads in place and you press "Create" again to start creation. If you sign up with a new email and password from that modal, you verify your email as usual and are then returned to the create screen to continue -- instead of being dropped on the accounts page and losing your place. Closing the modal leaves you on the picker to run locally instead. If you are signed in but have the account picker on "No account (private project)" with Imbue Cloud selected, pressing "Create" outlines the picker in red with a message below it explaining you must pick an account (it is no longer shown proactively while you click between the two presets); it clears as soon as you choose one. (Picking the local "Directly on your computer" preset still needs no account at all.)
+
+The "Imbue Cloud" (remote) card is now selected by default on the create screen for everyone, including users without an account -- previously a user without an account landed with the local "Directly on your computer" card preselected.
+
+Removed the three onboarding questions ("Is it OK if I get to know you?", "What should we start with?", "How do you want to deal with permissions?") that used to appear between submitting the create form and the setting-up screen. Submitting the create form now goes straight to the workspace setup/progress screen; this onboarding step is moving into the workspace template itself. The related backend (the answer-applier that ran a local user-context scan, sent the initial problem to the chat agent, and wrote a permissions preference into workspace memory) and the `POST /api/create-agent/{id}/onboarding` endpoint were removed as well.
+
+Refined the look of the two preset cards on the create screen. The selectable edge is now an outline rather than a border: an unselected card shows a thin (1px) dashed neutral outline and the selected card a 2px solid blue outline (with no fill tint), with the change eased so it animates instead of snapping. Because outlines do not take up layout space, the card and its contents no longer shift when selection moves between them. The cards also respond to the pointer -- lifting up 1px (with the existing shadow) on hover, then settling back down and shrinking slightly (a 0.99 scale) while pressed. The "Recommended" badge on the Imbue Cloud card is now bold with normal letter spacing (previously wide-tracked and not bold). The cards' feature-list text now uses the primary (full-contrast) text color rather than the muted secondary one, so it matches the card headings.
+
+Swapped the plain checkmarks in the preset cards' feature lists for the new "badge-check" icons, sized at 16px and nudged down 2px to sit on the text line. The Imbue Cloud (remote) card uses a filled badge in the accent blue, and the local "Directly on your computer" card an unfilled outline badge that simply inherits the color of its adjacent feature text. (The two icons -- `badge-check` and `badge-check-filled` -- were added to the shared 16px icon set, so they are now available throughout the desktop client.)
+
+Adjusted the spacing and layout of the create screen. There is now more breathing room (48px) under the "Where do you want to run your mind?" heading, and 64px above the "Create" button. The account picker and "Advanced Configuration" toggle line, previously above the preset cards, now sits below them (32px under the cards), with the advanced configuration controls opening 32px below that line. The "Advanced Configuration" / "Back to simple configuration" toggle is no longer accent-colored -- it now uses the same muted styling as the welcome screen's "Continue without an account" link (tertiary text, darkening on hover). Shortened the Imbue Cloud card's "Agents run even if your computer is off" feature line to "Runs even if your computer is off". On that account/advanced-config line, the two controls are now pushed to opposite ends instead of being centered with a middot between them: the account picker is left-aligned under the left card and the "Advanced Configuration" toggle right-aligned under the right card. "Advanced Configuration" no longer has a trailing ellipsis, and "Back to simple configuration" now uses an up arrow instead of a left arrow.
+
+In the sign-in modal, the explanatory line ("To run your mind on Imbue Cloud, sign in or create an Imbue account...") now sits directly below the heading rather than above it, and uses the primary (full-contrast) text color instead of the muted secondary one. It replaces the per-tab subheading ("Sign up to enable sharing" / "Sign in to your Imbue account"), which is now hidden in the modal, and tracks the active tab so it reads correctly under both the "Create account" and "Sign in" headings. The standalone auth page is unchanged -- it still shows those subheadings.
+
+The create screen's advanced configuration now has a "Name" field at the top, so you can name the mind exactly instead of always getting the auto-generated `mind-N` name. Leave it empty to keep the automatic name; an invalid name is rejected with an inline error (and your typed value is preserved).
+
+Tidied the advanced configuration layout to match the design: the helper captions for the rows that pair a label with a dropdown (the AWS-credentials note under "Compute provider", and "Where the machine is created..." under "Region") now sit beneath their label on the left rather than under the dropdown on the right. A dashed divider now separates the provider / region dropdowns from the repository / branch fields below.
+
+The create screen's sign-in modal now opens in the app's true overlay layer -- the same full-window layer that hosts the requests inbox -- so it covers everything, including the title bar, and is centered over the whole window rather than only over the create page's content area. (Previously it was an in-page dialog inside the create page, so it could not cover the title bar.) Behavior is otherwise unchanged: pressing "Create" with Imbue Cloud selected while signed out brings it up, a successful sign-in returns you to the create screen (signed in) to press "Create" again, signing up takes you through email verification and back to the create screen, and closing it leaves you on the picker to run locally.
+
+The `MINDS_WORKSPACE_NAME` dev override (honored only under the `MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1` opt-in, e.g. from `just minds-start`) is now used verbatim instead of being auto-suffixed on collision: a pinned name that is already taken now errors at create time -- exactly like a name typed into the form's "Name" field -- rather than being silently renamed to `mindtest-2`. Only the automatic `mind-N` fallback (used when no name is submitted or pinned) still searches for the next free name.
+
+Bump bundled Latchkey version to 2.19.1.
+
+Report frontend (browser) JavaScript errors from the desktop client's web UI to Sentry, mirroring the existing Python backend error reporting. Every page rendered through the JinjaX `Base` layout now boots the vendored `@sentry/browser` SDK (`static/sentry.browser.min.js`, booted by `static/sentry_init.js`) so unhandled errors in the web UI are captured.
+
+Frontend reporting reuses the backend's single opt-in switch (`MINDS_SENTRY_ENABLED`, default off) and environment selection (activated minds env -> production / staging / development), so enabling Sentry lights up the backend and frontend together under the same environment, release, and `git_sha` tag.
+
+All of minds' JavaScript -- the browser web UI and the Electron main process -- reports to one shared set of JavaScript Sentry projects (production / staging / dev), kept separate from the backend's Python projects (a single Sentry project is tied to one platform, so mixing a Python and a JavaScript SDK in one project is discouraged; the browser and Electron SDKs are both JavaScript and share one project set fine). The DSNs currently ship as placeholders -- no Sentry bootstrap/init happens until real DSNs are filled in (`imbue/minds/utils/sentry/frontend.py` for the browser, and a synchronized copy in `electron/sentry.js` for the Electron main process), so a misconfigured DSN never breaks the page or the app.
+
+Report Electron main-process errors to Sentry via `@sentry/electron`, initialized as early as possible in `electron/main.js` so startup failures (window creation, env setup, backend spawn) are captured. It reuses the same `MINDS_SENTRY_ENABLED` opt-in, environment selection, release + `git_sha` tagging, and (per the above) the same JavaScript Sentry projects as the browser web UI.
+
+Fixed: a permission request whose `agent_id` is not a valid `agent-…` id (e.g. an agent that hand-crafts the `POST /permission-requests` body and supplies a placeholder like `ENV_AGENT`) no longer crashes the `latchkey-permission-requests-consumer` thread. Such ids are now rejected up front at the gateway (see the `mngr_latchkey` changelog), so they never reach the consumer. As defense-in-depth, the consumer loop now catches *any* error while processing a single streamed request, logs it with a full traceback, and skips just that request instead of letting the error kill the thread — which previously stopped every permission request, for any agent or service, from reaching the UI until restart (and re-crashed on the same record each restart). The desktop client also continues to hide from the list any request whose agent can't be resolved.
+
+## 2026-06-24
+
+Hardened the Sentry error-reporting path for failures that happen *inside* Sentry event processing (the `before_send` hook, Sentry callbacks, and the HTTP transport).
+
+Consolidated both legs of reporting such a failure into the `log_error_inside_sentry` helper: it now always records the failure in the local app log (so it is never lost) and reports it to Sentry via a minimal event. Previously only the `before_send` path logged locally, so failures in Sentry callbacks and the transport left nothing in the local log.
+
+The local log line is marked so a new loguru filter on the Sentry event handler drops it, preventing it from becoming a second, separate Sentry event.
+
+Made `log_error_inside_sentry` non-reentrant. Reporting goes through `capture_event`, which re-runs the whole `before_send` chain; if the failure being reported originates in `before_send` itself, that previously recursed until the stack was exhausted. The helper now drops nested calls so reporting is attempted at most once.
+
+Fixed the ToDesktop build (and the scheduled `minds launch-to-first-message` health check) failing on every commit since the Tailwind v4 migration. ToDesktop's cloud builder installs the app with `pnpm recursive install --prod`, which omits devDependencies but still runs lifecycle scripts; the `postinstall` hook compiled CSS via the `tailwindcss` CLI (a devDependency), so the install aborted with "command not found" before any platform could be packaged.
+
+Removed the `postinstall` hook entirely rather than guarding it. Compiling CSS is a build-artifact step, not an install step, and the install never needed it: packaged builds already ship the compiled `app.min.css` inside the minds wheel (force-included by `scripts/build.js`), and `pnpm start` compiles + watches the stylesheet via its `prestart` hook. The CSS is now built only at its genuine consumption points.
+
+Released minds v0.3.3. Bumped the app version and pinned the baked `FALLBACK_BRANCH` to the `minds-v0.3.3` forever-claude-template tag. This release also carries the Tailwind v4 CSS migration fix: CSS is now compiled at its real consumption points (packaging, dev, e2e) instead of in a `postinstall` hook, so ToDesktop's `pnpm recursive install --prod` cloud build no longer fails.
+
+Switched all minds Vault reads/writes to the "split" secret layout. Each service entry is now a Vault *directory* whose children are single-field leaf secrets (`secrets/minds/<tier>/<service>/<KEY>` holds `{"value": ...}`), instead of one flat KV entry with many fields. `read_vault_kv` now lists the service directory and reads each leaf's `value` to reconstruct the `{key: value}` dict callers expect, `write_vault_kv` writes each key as its own leaf, and `delete_vault_kv` removes every leaf. Deploy, host-pool, paid-admin, generation-id, and deployment-test code paths are unchanged at the call site but read the new locations only; there is no fallback to the old flat layout. Vault setup, host-pool, and staging-bringup docs were updated to document the split layout and corrected the example `vault kv put`/`get` commands.
+
+## 2026-06-23
+
+Fixed the local-Docker Electron e2e test (`test_create_local_docker_workspace_via_electron`), which started failing once the discovery-health watchdog landed.
+
+The desktop client now spawns the discovery-pipeline supervisor (`mngr latchkey forward`) and the imbue_cloud account-discovery poll (`mngr imbue_cloud auth list`) from `$HOME`, matching its other laptop-side `mngr` invocations (notably the `mngr forward` consumer). Previously they inherited minds' working directory, which in a dev checkout is the monorepo root, so their `mngr` children loaded `<repo>/.mngr/settings.toml`. Under a pytest run that tripped mngr's config guard: the supervisor never started, the discovery producer emitted no snapshots, and the new watchdog escalated the stall to a terminal BLOCKED app takeover that tore down the page mid-creation. This also removes the repeated "Failed to list imbue_cloud accounts" warnings that spammed every dev session.
+
+Minds now watches the health of its own workspace-discovery pipeline and tries to recover it automatically. The pipeline keeps the workspace list, the per-workspace liveness dots, and the recovery flow up to date; previously, if it silently stalled (the background discovery process stopped producing updates) nothing noticed, and if it crashed outright you only got a notification telling you to restart the app by hand.
+
+The new watchdog detects a stall by watching how long it has been since the last discovery update, and self-heals by re-kicking the discovery producer -- first with a cheap nudge that leaves your open workspace untouched, then, if that doesn't help, a heavier restart. While it is healing in the background, nothing interrupts you: an already-open workspace keeps working and there is no banner, only the existing "time since last discovery" indicator in the providers panel.
+
+If the pipeline can't be recovered -- the healing attempts are exhausted, the discovery consumer died, or a fresh launch never managed a first update -- minds now takes over the whole app with a clear "lost track of your workspaces" screen and a "Restart Minds" button, instead of leaving you stuck on an indefinite "Loading workspace" page or relying on a notification you might miss. The old "Forwarding subprocess died -- restart minds" notification is removed in favor of this screen.
+
+Workspace recovery now reads the host's lifecycle state and its provider's reachability from the same passive discovery data the rest of minds already uses (the workspace list, the providers panel), instead of firing its own separate `mngr list` each time the recovery page loads. Having two independent samplers of the same state could let the recovery page disagree with the sidebar; collapsing to one source removes that inconsistency. As a side benefit the recovery page now responds effectively instantly (it reads in-memory state rather than waiting on a network round-trip), and a dropped connection can no longer strand the diagnostic on a slow probe.
+
+Minds now waits until discovery has actually re-observed the workspace *after* a connection drops before taking you to the recovery page -- not merely until some recent snapshot exists. In the brief window right after a drop, the latest snapshot can still predate the outage and report the container as running even though it just stopped; acting on that would show wrong diagnostics (a stopped container marked "RUNNING") and ask you to confirm a restart for a container that is already stopped. So minds keeps you on the "Loading workspace" screen until a snapshot taken after the outage lands (typically within one discovery poll, a few seconds), then takes you straight to the right place: a stopped container is recognized as stopped and its restart is dispatched automatically with nothing to confirm, a genuinely-wedged-but-running workspace still asks before a disruptive host restart, and a provider that is down routes to the "Can't connect to ..." page (which reconnects you automatically once it recovers). The redirect fires the moment that post-outage snapshot arrives, with no extra delay.
+
+When the workspace's backend can't be reached -- the provider's connector is down, the local Docker daemon is stopped or paused, or your login has expired -- minds now shows a single "Can't connect to ..." page in place of the two nearly identical ones it used to pick between based on the kind of error (a split that could send the same "Docker isn't available right now" situation to either page, and left one of them unable to reconnect you on its own). The page surfaces the provider's own error verbatim (e.g. Docker's "Docker Desktop is manually paused. Unpause it through the Whale menu or Dashboard.") rather than a message minds hand-authors per provider, offers a Retry, and always returns you to the workspace automatically once the backend recovers.
+
+Port the Sentry error-reporting setup into the minds backend. `minds run` now calls `setup_sentry()` during startup (after logging is configured) so the Python backend reports errors (and attaches logs) to Sentry.
+
+Enable the Sentry Flask integration so reported errors from web backend endpoints carry request context (transaction name, URL, method, query string, headers).
+
+Add uploading of log files and traceback-with-locals attachments to S3 for Sentry error reports. The log-collection logic now matches the minds log layout: a flat logs directory (`~/.minds/logs`) containing the live Python backend JSONL log, its timestamp-suffixed rotated siblings, and the Electron log, all gzip-compressed on upload. Sentry's `log_folder` is now the minds logs directory (exposed as `WorkspacePaths.log_dir`) rather than the data directory.
+
+Select the Sentry DSN and S3 bucket from the activated minds env (`minds env activate`): production reports to the production Sentry project and bucket, staging to the staging project and bucket, and every other env (dev-*, ci-*, or no activated env) to the dev Sentry project with no S3 uploads (so dev machines never ship potentially-sensitive attachments off-box).
+
+Gate all of Sentry behind the `MINDS_SENTRY_ENABLED` env var (default off): unless it is explicitly set, `minds run` does not initialize Sentry and the backend sends nothing to Sentry at all.
+
+S3 attachment uploads remain separately opt-in via the `MINDS_SENTRY_S3_UPLOADS` env var (default off, even in production and staging), since the uploaded logs and traceback-with-locals attachments can carry potentially-sensitive data. When enabled, the bucket follows the environment; development never uploads regardless of the flag.
+
+Report the desktop app version (from `package.json`) as the Sentry release and the git SHA the build was cut from as the `git_sha` tag. The Electron launcher passes both to the Python backend via `MINDS_RELEASE_ID`/`MINDS_GIT_SHA` (resolving the SHA live from the checkout in dev and from the build-time `build-info.json` in packaged builds); bare source runs fall back to reading `package.json` and report an `unknown` SHA.
+
+Do not attach any user PII to Sentry error reports: the unused user-context wiring (`global_user_context` / `sentry_sdk.set_user`) has been removed, and `send_default_pii=False` is kept.
+
+Flush Sentry (and any pending S3 attachment uploads) during the desktop client's shutdown teardown, so errors captured late in a session -- including any logged while shutting down -- are sent before the process exits. The flush uses a short timeout so an unreachable Sentry/S3 endpoint cannot noticeably delay app exit.
+
+Disable Sentry performance tracing (`traces_sample_rate=0.0`): minds uses Sentry for error reporting, not performance monitoring, so it no longer emits a transaction per HTTP request. Error reports still carry full request context via the Flask integration.
+
+Added `minds pool backfill-host-keys`, an env-aware wrapper around `mngr imbue_cloud admin pool backfill-host-keys`. It resolves the staging / production host_pool DSN from the tier's `<vault_prefix>/neon.DATABASE_URL` Vault entry (exactly like `minds pool list` / `destroy`), so the operator never hand-passes `--database-url`. Run it once per tier after deploying the host-key-pinning connector to keyscan + record SSH host keys for pool rows and bare-metal boxes baked before the host-key columns existed, restoring leasing / prep for those hosts.
+
+Added `apps/minds/docs/vendor-mngr-sync.md` as the single source of truth for how FCT's `vendor/mngr` is synced: the two mechanisms (`git archive` for reproducible, committed release snapshots; `rsync` for working-tree dev iteration and pool bakes), the shared rsync form and where its exclude constants live (`pool_bake.py`), the three paths that populate `vendor/mngr` from the monorepo, and a note that `vendor/mngr` and `vendor/tk` are plain snapshots -- not git subtrees or submodules.
+
+Pointed `release.md` (the vendor-refresh step) and `host-pool-setup.md` (the `--mngr-source` bake rsync) at the new doc instead of partially re-explaining the mechanisms in place.
+
+Updated the host-pool setup docs to reflect that `mngr imbue_cloud admin server prep` now strictly pins the box's recorded sshd host key (no trust-on-first-use): use `server setup` (OS reinstall, which injects the key) or the one-time `admin pool backfill-host-keys` keyscan before prepping a box.
+
+## 2026-06-22
+
+Replaced the desktop client's runtime Tailwind (Play CDN JIT) with a compiled Tailwind v4 build step. The chrome's styles now come from a single minified, tree-shaken stylesheet (`app.min.css`) built ahead of time from `static/app.css` -- no runtime JIT, fully offline, and smaller. This is the foundation for an upcoming light/dark design-token system.
+
+What changed for developers:
+
+- `static/tokens.css` is gone; its hand-written tokens + component CSS now live in `static/app.css` (the Tailwind v4 source entry), which compiles to the gitignored `static/app.min.css`.
+
+- Build the stylesheet with `just minds-css` (replaces `just minds-tailwind`). It also runs automatically on `pnpm install` (postinstall) and is rebuilt before packaging by `scripts/build.js`.
+
+- `just minds-start` now runs the compiler in `--watch` mode alongside Electron, so class changes rebuild live. Because the sheet is compiled, a new/changed Tailwind class only takes effect after a rebuild.
+
+- The compiled sheet is force-included into the wheel via `[tool.hatch.build] artifacts`; `@tailwindcss/cli` and `tailwindcss` are pinned to exact versions.
+
+Began the light/dark design-token system, starting with text colors:
+
+- New themeable text utilities: `text-primary` / `-secondary` / `-tertiary` (text on the current surface) and `text-inverse-*` (text on an inverted surface). Pure black/white at three alpha steps; regular and inverse mirror each other and swap between light and dark.
+
+- Tokens are built in two layers in `app.css`: a per-mode value layer (`:root`/`.light` for light, `.dark` for dark) and an `@theme inline` token layer. Switching the whole app between modes is a single `.dark` class on `<html>` -- no component changes. A `.light` scope can force a light island under a dark ancestor (and vice versa).
+
+- The dev styleguide (`/_dev/styleguide`) gains a light/dark toggle (persisted in `localStorage`, honored app-wide via a pre-paint script in `Base.jinja`) and a "Text color tokens" section showing both modes side by side.
+
+- Migrated the on-light text call sites off the raw zinc ramp to these tokens (`text-zinc-900/800/700` → `text-primary`, `-600/-500` → `text-secondary`, `-400` → `text-tertiary`) across templates, vanilla JS, and the shared button/input class constants. On-dark / inverse text (e.g. log boxes, the primary button label) is intentionally left until the chrome and button stages.
+
+Added themeable border tokens (next design-system category): `border-subtle` / `border-default` / `border-strong` (Figma's 10% / 16% / 25% alpha), pure black in light and pure white in dark.
+
+- Migrated the border call sites: `border-zinc-200` → `border-default` (standard surfaces), form-control borders (`INPUT_BASE`) → `border-strong` to match Figma's form fields, `border-zinc-300` → `border-strong`, `border-zinc-100` → `border-subtle`. On-dark borders (the bg-black menus / log boxes) and status/accent borders are left for their stages.
+
+- Retired the v4 border-compat shim: the global default border color now resolves to the `border-default` token, so every bare `border` is themeable without naming a color. Standard borders are now slightly more defined and inputs noticeably so, matching Figma.
+
+Added themeable surface + fill tokens (next category): surfaces `bg-surface-primary` (solid base; white in light, pure black in dark), `bg-surface-inverse` (its mirror -- the neutral accent, pairs with `text-inverse-*` for primary buttons), and `bg-surface-overlay` (the inverse color at 20%, for backdrops); fills `bg-fill-subtle` / `-hover` / `-active` (translucent tints; Figma's `selected` dropped as redundant).
+
+- Migrated the background call sites: `bg-white` → `bg-surface-primary` (page, cards, inputs), `bg-zinc-100` / `bg-zinc-50` → `bg-fill-subtle`, `hover:bg-zinc-*` → `hover:bg-fill-hover`, modal/drawer scrims (`bg-black/20-30`) → `bg-surface-overlay`. The primary button is now `bg-surface-inverse text-inverse-primary` with an `opacity-90` hover (it flips: black button/white text in light, white/black in dark). On-dark fixed islands (the bg-black floating menus, bg-zinc-900 log boxes, on-dark white tints) are left for the chrome stage.
+
+- Added `color-scheme: light` / `dark` to the theme roots so native controls (form fields, scrollbars, autofill, caret) render in the right scheme.
+
+With surfaces tokenized, dark mode now renders correctly across page/cards/text/borders/buttons. (Light mode is unchanged.)
+
+Added status / feedback tokens (Figma): `important` / `success` / `warning` / `info` (one solid hue each, mode-independent) + `focus-ring`. Notice / badge backgrounds derive from a single hue via an opacity modifier (e.g. `bg-success/12 border-success/30 text-success`), which adapts to the surface in both modes.
+
+- Migrated the status call sites: Notice and StatusBadge variants, inline status text/boxes, the danger button (`bg-important/10 text-important`), and status pills now use the tokens; the solid success button is `bg-success` with fixed white text. Focus rings (inputs, color swatches) now use `focus-ring`. Link / selection blue is intentionally left as-is (not part of the status set).
+
+Reworked the titlebar to self-theme from the workspace color in pure CSS. The bar derives a black/white contrast from `--titlebar-bg` via relative color (`lch(from …)`) on a `.titlebar-surface` scope and re-bases the foreground tokens on it, so the title and buttons read correctly on any workspace color (dark or light) -- with no JavaScript luminance and no server-side foreground calculation. `chrome.js` now just toggles `.titlebar-surface` alongside `--titlebar-bg`; the `TitlebarButton` and page title are plain tokens (`text-secondary` / `text-primary` / `hover:bg-fill-hover`). Neutral chrome (no workspace) follows the app's own tokens.
+
+- Removed the now-dead foreground machinery this replaced: the SSE workspaces payload no longer carries an `accent_fg` triple, the accent-preview IPC bridge (`content-relay-preload.js` / `main.js`) no longer takes an `accentFg` argument, and `pick_workspace_foreground` (plus its sRGB-luminance helpers) is gone from `workspace_color.py`. `workspace_accent.js` keeps only the `normalizeHex` helper.
+
+Made the always-dark surfaces (the floating workspace menu and the log / terminal / credential boxes) `.dark`-scoped islands styled with tokens (`bg-surface-primary`, `border-subtle`, `text-primary` / `text-secondary`, `hover:bg-fill-hover`, `bg-fill-active` for the selected row) instead of raw `bg-black` / `text-white/NN`. They stay dark regardless of the app theme but now derive their colors from the design tokens.
+
+Added the accent / interactive token (last color family): a single mode-independent `accent` (a blue, `#0069d9`, chosen to clear WCAG AA as link text on both the white and pure-black surfaces) behind links, selected states, focus rings, and progress. Solid for selection / progress (`bg-accent`, `border-accent`); lighter rings and tints derive via an opacity modifier (`ring-accent/40`, `bg-accent/15`).
+
+- Unified the two blues that had coexisted: the form focus ring (previously a separate Apple-blue `focus-ring` token) and the raw Tailwind `blue-600` used for links / selection / progress now both resolve to the one `accent` token. The standalone `focus-ring` token is gone.
+
+- Migrated the call sites: `Link` (and `sharing.js` links), the ghost-Button "link" recipe (`Create` / `Latchkey` "Configure" / "Adjust"), the `Opt` selected state + textarea focus, the color-picker selection / focus rings, the create-flow progress bar + pulse dot, the accent spinner, the form-control focus ring (`INPUT_BASE`), the auth "waiting" notice, and the Landing "Backing up" badge. The styleguide gains an "Accent / interactive token" section (light + dark) and drops `focus` from the status grid.
+
+Tokenized the last hardcoded-neutral component recipes in `app.css` so they theme in dark mode: the `.code-pill` background (`fill-subtle`), the `.opt` onboarding cards (`fill-subtle` background, `border-subtle` / `border-strong` borders + radio), the `.spinner` ring + top (`border-subtle` / `text-primary`), and the color hex-input pill background (`surface-primary`). The spinner now stays visible on dark surfaces too (e.g. the Destroying island), where its near-black top was previously invisible. The intentionally-always-dark elements (color-swatch rims, the close-button-hover red) are unchanged.
+
+Tokenized the dev styleguide page's own chrome (`/_dev/styleguide`) so its light/dark toggle now themes the whole page, not just the demo panels. Migrated the section headers, captions, demo-card frames, and footer file-refs from raw zinc/white onto the design tokens; converted the text/border demo "Dark" panels (and the Icon12 chrome-glyph demo) from hardcoded `#18181b` to `.dark` token islands; and refreshed the link / ghost-link demos to the shipped recipes. Removed the now-obsolete "legacy zinc" text-ramp section (the migration it was waiting on is complete).
+
+Tightened the corner-radius scale to four steps -- `rounded-sm` 2px / `rounded-md` 4px / `rounded-lg` 8px / `rounded-xl` 16px (plus `rounded-full` / `rounded-none`), defined in `app.css` `@theme`. The old 6px and 12px values round down: buttons / badges / inputs land at 4-8px and cards / modals / log boxes at 8px (the previous 12px). `rounded-xl` (16px) is reserved for the largest surfaces. The chrome content frame keeps a structural `rounded-[12px]` -- that 12px still matches Electron's `CONTENT_CORNER_RADIUS` and the OS window's outer rounding, so it stays the one documented exception to the scale. Styleguide radius section updated to the four steps.
+
+Constrained the spacing scale to a fixed subset of Tailwind's native steps. `--spacing` stays the stock `0.25rem` (so `p-1` = 4px, `p-4` = 16px -- standard Tailwind, with all its docs / tooling / IntelliSense intact). Padding / margin / gap are limited to ten steps: `0.5 / 1 / 1.5 / 2 / 3 / 4 / 6 / 8 / 12 / 16` (= 2 / 4 / 6 / 8 / 12 / 16 / 24 / 32 / 48 / 64 px).
+
+- The handful of off-scale spacings were snapped to the nearest step, e.g. inputs/buttons tighten slightly (`py-2.5` -> `py-2`, `px-3.5` -> `px-3`). Width / height / inset stay free for layout (component sizes untouched), and large fixed dimensions keep their explicit `[NNpx]` values.
+
+- The styleguide gains a "Spacing scale" section listing the allowed steps and their px values.
+
+Added two guard tests that hold the scales: padding / margin / gap must use the constrained spacing steps, and corner radius must use `rounded-sm/-md/-lg/-xl` / `-full` / `-none` (no `rounded-2xl`/`-3xl`/`-xs`, no arbitrary `rounded-[..]` except the documented content-frame `rounded-[12px]`). Both scan the authored source while skipping SVG path data. The radius guard caught the floating workspace menu's `rounded-[10px]`, now snapped to `rounded-lg` (8px).
+
+Added the type ramp (Figma): six semantic roles defined as `@utility` in `app.css`, each bundling font-size + weight + line-height (and uppercase + tracking for the section eyebrow), so a text element's role is a single class. Color stays orthogonal -- compose with `text-primary` / `-secondary` / `-tertiary`.
+
+- `type-heading-lg` 24/bold, `type-heading` 18/semibold, `type-label` 14/semibold, `type-body` 14/regular, `type-helper` 12/regular, `type-section` 12/semibold/all-caps. Sizes reuse Tailwind's native steps (24/18/14/12 = text-2xl/lg/sm/xs).
+
+- Migrated every content-text site to a role (strict four sizes): 20px headings collapse to `type-heading` (18), the Welcome 30px splash to `type-heading-lg` (24), and 10/11/13px captions to `type-helper` (12) / `type-body` (14). `font-medium` is dropped app-wide (the ramp is 400/600) -- block roles bundle their weight and inline emphasis is now `font-semibold`. Components (FormLabel, SectionHeader, StatusBadge, Button + inputs, ...), pages, and JS-built DOM all use the roles; the ghost-Button "link" recipe uses `!type-helper`.
+
+- The styleguide gains a "Type ramp" section demoing the six roles. A guard test keeps content text on the roles: no raw font-size utilities or `font-medium` in the authored source (SVG path data skipped); inline `font-normal` / `font-semibold` / `font-bold` stay allowed.
+
+- Fixed a `Notice` regression from the migration: the role swap dropped the separating space in the component's runtime class concat, fusing `my-2` with the variant background (e.g. `my-2bg-info/12`) so every notice banner lost its vertical margin and background tint. Restored the space.
+
+- Fixed the same dropped-space regression in the Landing page's JS-built badges: the role swap turned `text-sm font-medium ` (trailing space) into `type-label` (no trailing space), so the four `'... type-label' + tone` concatenations for the mind container-state, provider-status, and backup-status badges fused into an invalid `type-labelbg-...` class -- silently dropping both the type role and the tone color. Restored the separating space.
+
+Dropped the unused `--shadow-seam` token. It was only ever demoed in the styleguide (no real surface applied it -- the titlebar drop shadow it once named is gone), so the definition, both styleguide demos, and its drift-guard entry were removed.
+
+Added an elevation scale: two box-shadow steps defined in `app.css` `@theme` (generating `shadow-raised` / `shadow-overlay`), with a styleguide "Elevation" section and a guard.
+
+- `shadow-raised` is the subtle hover lift on interactive cards (the prior `shadow-sm` value, so cards are unchanged). `shadow-overlay` is the soft floating shadow for surfaces above the page -- menus, modals, tooltips -- taken from Figma's `minds-elevation-1` (two 8%-black drop shadows: `0 1px 1px` + `0 3px 12px`).
+
+- Migrated the call sites: interactive cards / CardPage / Creating card -> `shadow-raised`; the floating workspace menu (previously a heavy `0 12px 32px` at 25%), the modal, and the inbox panel -> `shadow-overlay` (softer and now uniform). A guard test allows only `shadow-raised` / `shadow-overlay` / `shadow-none` -- raw Tailwind shadow steps and arbitrary `shadow-[..]` are disallowed.
+
+Reorganized the dev styleguide page (`/_dev/styleguide`) into two labeled groups with clearer separation -- **Design System** (the foundational tokens plus the shared icon set) and **Patterns & Components** (the composed primitives) -- and added a sticky left-hand table of contents for jumping between sections.
+
+- The light/dark toggle is now a fixed top-right control: it stays visible at any scroll position and floats over the page (no backing bar). It's rebuilt on the `Button` secondary primitive instead of bespoke button classes, so the styleguide's own chrome uses the design system it documents.
+
+- Moved the 24px / 12px icon catalogs up into the Design System group (icons are a shared primitive ramp, like the color and type tokens); moved the workspace-accent picker and the color swatches down into Patterns & Components.
+
+- Each section is a scroll anchor carrying a `scroll-mt` offset, so a TOC jump lands the heading below the viewport top rather than flush against it. `dev_styleguide.js` adds an `IntersectionObserver` scrollspy that marks the active section's link via `aria-current="page"` (styled in `app.css`).
+
+- The color-swatch demo now shows the same three swatches per row (selected / default / disabled) at both the `md` and `sm` sizes, with a little more vertical space between the two rows -- so the size comparison is apples-to-apples.
+
+- Fixed the selected color swatch's selection ring: the gap between the swatch and the accent ring is now a real transparent gap (via `outline` + `outline-offset`) instead of a hardcoded white rim, so it shows the background in every mode rather than flashing a stray white border in dark mode. Applies to both the settings (`md`) and create-form (`sm`) pickers.
+
+Aligned the `Button` primitive with the Figma button component (node 342-4059). The default (md) size now uses the Figma padding -- `px-4 py-2` (16px / 8px) instead of `px-3 py-2` -- and the variant recipes were reworked:
+
+- **Secondary** has no fill at rest: it's a `border-default` outline with `text-primary`, and only tints (`bg-fill-hover` on hover, `bg-fill-active` on press) on interaction.
+
+- **Ghost** is now exactly secondary minus the border (transparent at rest, same hover/press fills).
+
+- **Danger** is a solid semantic fill -- `bg-important` with white text -- replacing the previous subtle red tint; it dims slightly on hover/press.
+
+- **Primary** (solid inverse surface) and **success** (solid green) keep their fills and now dim via opacity on hover/press to match. Every variant carries a 1px border (visible only on secondary, transparent elsewhere) so all variants render at the same height. Disabled opacity moved from 30% to 40% to match Figma.
+
+- All button sizes now use `rounded-md`, which is 6px (see the radius-scale change below) -- so buttons match Figma's 6px corner.
+
+Redefined the `rounded-md` radius step from 4px to 6px (scale: 2 / 6 / 8 / 16). md is the default control radius, so buttons, form inputs, badges, and color swatches all round at 6px now, matching Figma.
+
+Gave buttons a focus ring drawn **outside** the button via `outline` + `outline-offset` (keyboard focus only, `focus-visible`), so it no longer overwrites the variant border; the offset gap is transparent in every mode.
+
+Aligned form inputs (TextInput / Select / Textarea) with Figma's text field (node 345-4059): 12px padding (`p-3`), a tertiary-colored placeholder, a subtle `fill-subtle` tint on hover, and a focus ring drawn outside the field (`outline-offset`) that keeps the `border-strong` border instead of recoloring it (replacing the previous border-recolor + inner ring).
+
+Lifted the accent color in dark mode to a brighter blue (`#0069d9` -> `#4d9bff`). On the pure-black dark surface the original accent read too dark: low-opacity tints (`accent/15`, `/40`) nearly vanished and link text was hard to read. The brighter dark-mode value keeps links, focus rings, selection tints, and progress legible (and clears WCAG AA as link text on black). Light mode is unchanged.
+
+Decluttered the dev styleguide previews: dropped the redundant "Light" / "Dark" labels from the dual-mode token previews (the white/black cards are self-evident), removed the decorative card frame (border / background / padding) from the single-mode previews (Type ramp, Spacing, Corner radius) so the samples sit directly on the page, and dropped the borders from the corner-radius demo shapes (each is now just its filled shape).
+
+Gave the primary button a pressed state: it dims to 70% opacity on `:active` (a step below the 80% hover) -- toned down from an earlier 60% once the press scale (below) was added to carry the feedback.
+
+Gave the styleguide's floating light/dark toggle an opaque surface background (`.styleguide-toggle` in app.css) so it stays legible while floating over page content; the hover/active fills are composited over that surface as a background-image gradient rather than replacing it (a translucent fill background-color would let content show through).
+
+Updated the status / feedback semantic hues (mode-independent): `success` `#5c8a3c` -> `#0c8106`, `warning` `#d49a2c` -> `#b45300`, `info` `#527ea3` -> `#166fc7`, `important` (error / failed) `#f50d00` -> `#d90c00`. All the derived notice / badge tints and status text pick up the new hues automatically.
+
+Further decluttered the styleguide previews: dropped the background from the Elevation section (the two shadow cards now sit on the page, where the drop shadows still read), and removed the card frame (border / background / padding) from the single-mode component examples (buttons, form controls, spinner, notices, links, icons, badges, opt, oauth, section header, dialog close, the workspace-accent picker). The frame is kept only where it carries meaning: the dual-mode token cards, the colored self-theming titlebar surfaces, the dark sidebar / chrome-glyph islands, the accent-spine card, and the page-container / modal backdrop illustrations.
+
+Tuned the radius scale and a couple of tokens:
+
+- `rounded-sm` moved from 2px to 4px (scale is now 4 / 6 / 8 / 16).
+
+- `Notice` banners are now borderless tinted boxes: an 8%-opacity hue fill (`bg-<hue>/8`) with the hue as text, no border (down from a 12% fill + bordered box).
+
+Refined the titlebar buttons (`TitlebarButton`): the foreground is now always `text-primary` (full contrast, re-based per-workspace by `.titlebar-surface`) instead of resting at `text-secondary` and brightening on hover, and the `nav` variant is a square icon button sized by padding (`p-1.5` around the icon -> 28x28) rather than a fixed `w-8 h-7`. Its flex wrappers (the titlebar nav group in the chrome and the styleguide demo) use `items-center` so the button stays its square size instead of stretching to the titlebar height. The `control` variant (min / max / close) keeps its OS-matching `w-9 h-[38px]` geometry but also picks up the always-`text-primary` foreground.
+
+The titlebar workspace title now uses the `type-label` role (14px / semibold) instead of `type-helper` (12px / regular), in both the chrome (`#page-title`) and the styleguide demo -- so the active workspace name reads as a proper title.
+
+Titlebar buttons now show an accent keyboard-focus outline (`focus-visible:outline-2 outline-accent`, no offset) instead of falling back to the browser's default focus ring, which auto-contrasted to a stray white ring on the dark / colored titlebar.
+
+Reworked the `Select` dropdown to match Figma (node 345-4060): the native OS arrow is hidden (`appearance-none`) and replaced with a themeable `chevron-down` `Icon24` overlaid on the right (inherits `text-secondary`, `pointer-events-none` so clicks fall through), inset from the right edge with room reserved via `pr-8`. Added a `chevron-down` glyph to the `Icon24` set. The width prop now sizes the wrapper that anchors the chevron; the `<select>` fills it.
+
+Restyled the status badges (`StatusBadge`):
+
+- **Neutral** keeps its muted fill but now uses secondary text.
+
+- **Done / Failed / Info** (success / error / info) use the full status color as a solid background with white text, instead of a low-opacity tint with colored text.
+
+- **Warning** uses a dedicated yellow caution surface (`--c-warning-surface`, `hsl(49 100% 50% / 0.2)`) with the warning foreground -- a solid yellow with white text would be unreadable, and a tint of the brown-orange warning hue reads muddy. The warning `Notice` uses the same yellow surface.
+
+- The styleguide now shows a full second row of `xs` badges (every variant) instead of a single "Tiny" badge tacked onto the end.
+
+All buttons now scale to 98% on `:active` (a subtle press-in), animated via `transition` (which also smooths the hover/press color + opacity changes). The primary button's active dim was eased from 60% to 70% opacity to match -- the scale now carries most of the press feedback.
+
+Tuned the button press feedback: the scale-down now animates over 100ms on the standard ease-in-out curve (`duration-100 ease-in-out`, i.e. `cubic-bezier(0.4, 0, 0.2, 1)`), and the press (`:active`) no longer changes color/opacity on any variant -- the press is now scale-only, so the scale carries the whole press feedback.
+
+Listed cards no longer touch: the Manage Accounts page's account cards and the workspace-settings Sharing section's list of shareable chats/interfaces now sit in a `flex flex-col gap-2` container (8px gap), so the spacing is owned by the parent rather than added as margin on the `Card`.
+
+The "Back to projects" back-link now renders at the `type-helper` size (12px) instead of inheriting the larger default body size, so it matches the link-style affordance scale -- applied on the Manage Accounts, Workspace Settings, and Destroying pages.
+
+Lifted the titlebar's red notification dot into a reusable `Badge` component (`templates/Badge.jinja`, from Figma node 330-4472). It has two shapes: the bare 8px `important` dot (the default, shown when no count is passed) and a count pill that shows a number in a solid `important` capsule (`min-w-[16px]` keeps a single digit circular; it grows for wider numbers and caps at "99+"). Added a `type-badge` type role (10px / bold / 12 line-height) for the count text -- the one deliberate sub-12px role, reserved for the compact pill. The styleguide's "Notification badge" section shows both shapes (the 4 / 12 / 99+ pills and the dot) alongside the in-context titlebar example.
+
+Switched the titlebar requests button from the corner dot to the inline count (Figma node 330-4463): the pending-request count now sits in a pill beside the messages icon (icon + badge in a `gap-[3px]` row, the gap collapsing to nothing when there are no requests) instead of a dot overlapping the icon's top-right corner. `chrome.js` already received the count over SSE; it now writes it into the pill (mirroring the 99+ cap) and shows/hides the badge as the count changes.
+
+Fixed the requests badge showing a stray "0" pill when there were no pending requests. The badge was hidden with a `hidden` *class*, but the count pill bakes in `inline-flex`, which beats Tailwind's `.hidden` utility in the cascade -- so the class never hid it. It's now hidden with the native `hidden` *attribute* (whose `[hidden] { display: none !important }` base rule wins), set in the template at rest and toggled by `chrome.js` via `badge.hidden`. The `Badge` docstring documents that callers must hide it with the attribute, not the class.
+
+Fixed the same `inline-flex`-beats-`.hidden` bug on the Landing page's per-row health and backup badges, which were "hidden" by a `.hidden` class and so left an empty, space-taking pill in the row (a phantom gap) when there was nothing to show. Both now drive visibility through inline `display` -- `style="display:none"` at rest and `badge.style.display` in the show/hide paths -- matching how the same file already hides the start/stop buttons and the mind-state badge. (The backup-download link next to them is a plain `<a>` with no baked-in display, so its `.hidden` toggle still works and is unchanged.)
+
+Removed the decorative color/state transitions so interface state changes flip instantly, keeping motion only where it's intrinsic to a component. Hover, focus, and selected-state color/border/background changes no longer fade: the secondary/ghost button fills, form-input hover tint and focus ring, titlebar buttons, interactive `Card` hover, the inbox row + close buttons, the dialog close button, the create-flow account `Select`, and the onboarding `Opt` cards/textarea all switch immediately. The button press is now scoped to `transition-transform`, so the 98% press scale still eases over 100ms while its hover/press color + opacity changes flip instantly. Genuine component motion is untouched: the spinner spin, the creating-screen progress bar and pulse dot, the inbox drawer slide-in, and the disclosure chevron rotation.
+
+Stripped the card chrome off the auth/form page wrapper and renamed it `CardPage` -> `PageNarrowContainer`. It no longer paints a surface: the border, rounding, drop shadow, and redundant background are gone, so it's now a plain centered, max-width column (width + padding only) -- the narrow analog of `PageContainer`. The auth flow (login, signup, signin, forgot/check-email, oauth-close, settings, auth-error) and the workspace-creation form now render their content directly on the page background instead of inside a floating card. Padding (`p-8` default / `p-6` form) and the per-page `max_width` are unchanged.
+
+The styleguide's icon catalogs (24px / 12px) are now left-aligned (`items-start`) instead of centered: both the icon row and each icon-over-label cell align to the start, so each icon sits flush-left above its name rather than centered over a variable-width label.
+
+Folded the dev styleguide's workspace-color (accent hex) picker into the "Accent spine" section and dropped the standalone "Workspace accent" section. The accent spine's left stripe is the only surface in the catalog that renders the per-workspace accent, so the picker now lives right beside its live demo: pick a hex and the stripe updates immediately. The picker is now a single compact row (label + color input + hex readout) with no separate preview swatch, and the TOC loses its "Workspace accent" entry.
+
+Bumped the dark-mode background opacity on the `success` / `error` / `info` notice and badge surfaces so their shape stays visible on the pure-black dark surface. The status hues are deep, so the prior 8%-opacity tint (`bg-<hue>/8`) rendered as solid black in dark mode -- the green / red / blue backing was effectively invisible. The tint now goes through a per-mode surface token (`--c-success-surface` / `--c-important-surface` / `--c-info-surface`), staying at 8% in light mode (unchanged) and lifting to 22% in dark mode. This mirrors the existing `--c-warning-surface` pattern; the warning notice already used a bright caution fill and is unchanged. The `Notice` variants and the styleguide status demos now reference these tokens.
+
+Lifted the status / feedback hues themselves in dark mode (they were previously mode-independent). The deep light-mode hues went muddy and low-contrast on the pure-black surface -- both as foreground text and as the derived notice tints -- so `.dark` now overrides each: `success` `#0c8106` -> `#12be09`, `important` (error) `#d90c00` -> `#fb1f13`, `warning` `#b45300` -> `#ff851a`, `info` `#166fc7` -> `#4396ea`. Light mode is unchanged. Because the notice / badge surface tints derive from the active hue via relative color, they pick up the brighter dark values automatically; status text (`text-success` etc.) is now legible on black too.
+
+Unified the dev styleguide's section headings. Every "Patterns & Components" section (Titlebar buttons, Notification badge, Window controls, Cards, ...) previously used a small uppercase eyebrow (`type-section text-secondary`) for its title, while the "Design System" sections used the larger `type-heading text-primary` heading -- so the two groups read at different levels. The 21 pattern-section titles are now the same `type-heading text-primary` `<h2>` as the Design System sections, so both groups share one heading level. The type-ramp's `type-section` role demo and the modal preview's inner heading are unchanged.
+
+Renamed the `Icon24` stroke-icon component to `Icon16` (and its `ICONS_24` path-data catalog to `ICONS_16`) to match what it actually renders: 16px by default (`md` = `w-4`), never 24px. The "24" only ever named lucide's authoring grid -- the `viewBox` stays `0 0 24 24` -- while every call site draws the icon at 16 / 14 / 20px. All call sites move to the new name (the titlebar nav + requests glyphs, the `Select` dropdown chevron, the Landing workspace-row play/stop/restart/open/settings actions, and the settings button), as does the dev styleguide's icon section (now headed "Icons -- 16px (Icon16)", TOC entry "Icons (16px)", anchor `#icons-16`).
+
+Then replaced the icon set itself with a new 16x16 set from Figma (the "Icon" frame, node 857-5091), dropping every old lucide glyph. The component shell is now fill-based -- a `viewBox="0 0 16 16"` SVG defaulting to `fill="currentColor"` -- because each new glyph is a filled outline (Figma's "Vector (Stroke)" flattened to a single path); Figma's hardcoded black is stripped so every icon takes the parent's text color. `play` is the lone stroked glyph and carries its own `fill="none" stroke="currentColor"` to match the set's line weight; `settings` (drawn on a 15-unit grid) and `chevron-down-small` (a small centered glyph) are nudged into the 16-unit frame with a `<g transform>`.
+
+- The set: `menu`, `home`, `user`, `inbox`, `settings`, `chevron-right` / `-left` / `-down` / `-up` / `-down-small`, `plus`, `close`, `restart`, `arrow-up-right`, `check`, `play`, `pause`.
+
+- Call sites remapped to the new names: the titlebar Back / Forward buttons use `chevron-left` / `chevron-right`, the requests button uses `inbox` (was `messages`), and the Landing workspace-row stop button uses the `pause` glyph (was the square `stop`; its tooltip still reads "Stop mind"). `play`, `restart`, `arrow-up-right`, `settings`, `menu`, `home`, and the `Select` chevron keep their names; the unused `external` glyph is gone. The dev styleguide's icon catalog now lists all 17.
+
+- Folded the remaining hand-rolled inline icons onto the set so every in-app glyph comes from one source: the modal dialog close button (`DialogCloseButton`) and the inbox modal's close button both render `Icon16 close` at 16px; the Latchkey predefined-permission checkmark renders `Icon16 check`; and the floating sidebar's "New workspace" / account rows (`SidebarBottom`) render `Icon16 plus` / `user`. The Google / GitHub brand marks (`auth.OauthIcon`) and the 12x12 window-control glyphs (`Icon12`) stay separate.
+
+- The floating sidebar's per-workspace row icons are built in JavaScript (`sidebar_workspace_row.js`), which can't call the `Icon16` JinjaX component, so they were migrated by hand: `buildIconButton`'s inline SVG shell is now fill-based (`fill="currentColor"`, no stroke) and the open-in-new arrow / settings gear path constants were swapped to the new `arrow-up-right` / `settings` glyphs, so the sidebar rows match the rest of the app.
+
+Tightened and refined the shared form-control shell (`INPUT_BASE`, used by TextInput / Select / Textarea):
+
+- Padding drops from 12px to 8px (`p-3` -> `p-2`).
+
+- The single-line TextInput / Select gain tight leading (`leading-tight`) for a more compact field; the multi-line Textarea keeps `type-body`'s roomier 1.5 leading so its wrapped lines stay legible.
+
+- The hover cue changes from a fill tint (`hover:bg-fill-subtle`) to a darker border edge (`hover:border-stronger`) -- a quieter signal than tinting the whole field. This adds a fourth border token, `border-stronger` (40% black in light / white in dark, vs `border-strong`'s 25%), surfaced in the styleguide's border-token section.
+
+- The Select dropdown chevron moves 4px closer to the field edge (12px -> 8px inset).
+
+The styleguide's Textarea sample is now a natural two-line sentence instead of three meta lines of class names.
+
+Restructured the titlebar into three flex sections sized 1 / 2 / 1 (left controls | title | right controls), so the workspace title always sits in the exact horizontal center of the window regardless of how wide each side's controls are. Previously only the center grew (`flex-1`), so the title was centered within the *leftover* space and drifted off-center whenever the two sides differed in width. Each side now owns its platform's OS window controls: the left section reserves the macOS traffic-light strip with a fixed `shrink-0` spacer div *inside* its flex box -- not a left padding, which (with `box-sizing: border-box`) would clamp the equal-width left section's flex base size up to the padding, making it that much wider than the right and pushing the title ~36px off-center; a spacer instead lives inside the section, which `min-w-0` lets shrink to its 1/4 flex share, so both sides keep equal width and the center stays truly centered. The right section holds the requests button plus the app-drawn min/max/close controls (non-mac). `min-w-0` on each section lets it shrink to its flex share so the ratio -- and the centering -- holds at the 800px minimum window width. The dev styleguide's titlebar demo mirrors the same 1/2/1 layout.
+
+Bump bundled Latchkey version to 2.17.2.
+
+Fix `just minds-build` failing during `uv lock` with "no version of overlay==0.1.0".
+
+`imbue-mngr` now depends on the unpublished workspace package `overlay`, but it was missing from the build's hand-maintained bundled-package lists, so no wheel was built for it and uv fell back to (nonexistent) PyPI. Added `overlay` to all four mirrored lists (`scripts/build.js`, `electron/env-setup.js`, `scripts/build_test.py`, and `electron/pyproject/pyproject.toml`) so it is bundled as a wheel and resolved locally.
+
+Bump the minds desktop app to 0.3.2 and point `FALLBACK_BRANCH` at the `minds-v0.3.2` forever-claude-template tag, so a shipped 0.3.2 binary clones the FCT snapshot it was verified against.
+
+Replaced the minds desktop client's FastAPI/asyncio web stack with a synchronous Flask app served by a graceful cheroot WSGI server.
+
+This is an internal framework swap with no user-visible behavior change: every route, path, status code, header, redirect, and Server-Sent-Events stream behaves as before. Notable internals:
+
+- The bare-origin server (`minds run`) now runs on a threaded cheroot WSGI server instead of uvicorn. cheroot speaks HTTP/1.1 with keep-alive (reusing connections) and streams Server-Sent-Events chunk-by-chunk, matching the wire behavior the prior uvicorn server provided -- which the Electron shell depends on (it consumes the one-time login code with a request that 307-redirects and awaits the followed response before loading the UI). Shutdown is unchanged in spirit -- on SIGINT/SIGTERM it flips the shutdown flag and wakes the live SSE streams *before* the server drains, so streams end cleanly with no tracebacks, then closes the HTTP client, stops the discovery/permission consumers, and drains the root concurrency group.
+
+- Server-Sent-Events endpoints (creation logs, the chrome workspace/events stream) are now plain synchronous generators. One unavoidable mechanism change: a browser that closes a stream is noticed on the next write attempt rather than proactively (WSGI exposes no disconnect signal); stream cleanup still runs and there is no functional or UX difference.
+
+- The WebDAV file server under `/api/v1/files` is mounted directly as a WSGI app (the `a2wsgi` ASGI bridge is gone). The `/api/v1` REST API and the `/auth` SuperTokens pages are now Flask blueprints.
+
+- Removed the `fastapi`, `uvicorn`, `a2wsgi`, `python-multipart`, and `websockets` dependencies; added `flask`, `cheroot` (the keep-alive WSGI server), and a direct `werkzeug` dependency (the dispatcher mount and HTTP-exception handling import it directly).
+
+- Raised the Electron shell's initial chrome-state fetch timeout from 4s to 10s. On startup the backend computes `has_accounts` (a cold `mngr imbue_cloud auth list` subprocess that can take ~5s on the first call) before emitting the first workspace-list event; under the old 4s timeout a slow first call returned no state, which the startup path treated as unauthenticated and routed an already-signed-in user to the onboarding page instead of the create page. The longer timeout absorbs the cold-call latency.
+
+Hardened workspace post-create setup against slow `mngr` invocations:
+
+- Bumped the onboarding permissions-preference `mngr exec` timeout from 30s to 60s, so writing the Q3 permissions preference into the workspace doesn't time out (and abort with exit -15) when host-side `mngr` is slow (e.g. under heavy load or cold provider discovery).
+
+- Added debug logging around each `mngr imbue_cloud …` subprocess (subcommand, elapsed time, returncode, and whether it timed out) so a slow or timed-out post-create operation (Cloudflare tunnel create, backup bucket create, etc.) is attributable instead of surfacing only as a bare "exit -15".
+
+## 2026-06-21
+
+- The Electron e2e workspace runner (`create_workspace_via_electron`) now accepts
+  `launch_mode`, `region`, and `account_label`, so it can drive workspace creation
+  in compute modes other than local Docker (e.g. Lima, AWS). Used to live-test the
+  container/VM restart-recovery behavior.
+
+Multiple developer environments can now safely share a single bare-metal slice box.
+
+`minds pool create --backend slice` now stamps the activated environment into each slice's lima names (forwarded as `--slice-env-name`), so a shared box can attribute every slice to an env and reconciliation only ever touches the right env's slices.
+
+`minds env destroy` now tears down the env's unleased pool slices on their bare-metal boxes before deleting the per-env database, so a destroyed env no longer leaks its baked pool VMs on shared boxes. Leased slices continue to be torn down via their agent's release path.
+
+## 2026-06-20
+
+Deprecated baking new OVH classic VPS pool hosts. Imbue Cloud pool hosts are now baked exclusively as bare-metal slices.
+
+`minds pool create` now defaults to `--backend slice`; `--backend ovh_vps` fails fast (before any Vault / credential resolution) with a deprecation error pointing at `--backend slice`. Existing OVH VPS pool hosts keep working and can still be listed (`minds pool list`) and destroyed (`minds pool destroy`, `minds env destroy`).
+
+The host-pool docs (`host-pool-setup.md` and related) were rewritten around the bare-metal slice workflow; OVH is now described only as the current internal supplier of bare-metal boxes and in a "Legacy OVH VPS teardown" section. The per-tier OVH credentials are reframed as bare-metal box supplier credentials (still required, since they order the slice boxes and tear down legacy VPS hosts).
+
+## 2026-06-19
+
+Fix creating a mind from a remote git URL (e.g. a GitHub HTTPS URL) when no branch is specified.
+
+Cloning a remote repo without an explicit branch left the local clone on a detached HEAD (the no-branch path checked out `FETCH_HEAD` detached, and -- unlike the branch-given path -- nothing renamed it to a real local branch afterward). That left `refs/heads/*` empty, so the downstream `mngr create` mirror push, which only pushes `refs/heads/*` + `refs/tags/*`, failed with `No refs in common and none specified; doing nothing` / `the remote end hung up unexpectedly`.
+
+The no-branch clone now uses a plain `git clone`, which resolves the remote's default branch natively and leaves a real named local branch checked out (whatever the remote's default is -- `main`, `master`, etc.). The explicit-branch path is unchanged (it still uses `git fetch` so that a branch, tag, or commit SHA all work).
+
+Workspace recovery now understands remote (Imbue Cloud) minds, not just local docker/lima ones. When the recovery probe finds that the workspace's provider is unreachable -- your network is down, Imbue Cloud is having an outage, or (locally) the docker daemon is stopped -- it shows a dedicated "Can't connect to ..." page with a Retry button and no restart option, because a restart routes through that same unreachable backend and cannot help. The page reconnects automatically (with a backed-off poll) once the provider is reachable again.
+
+When the provider is reachable but rejects the request for another reason (expired login, no account configured), recovery now shows a plain "Can't reach your workspace" message with the reason instead of offering a restart that cannot fix an auth/account problem.
+
+When the recovery diagnostic can't even list your workspace's provider within its (now much shorter) timeout -- the signature of a full network outage -- recovery now treats that as "provider unreachable" and shows the Retry page instead of the destructive "Workspace unresponsive" page. Previously a dropped connection left the diagnostic spinning on "Loading workspace" for up to two minutes and then offered a restart that could not help.
+
+The "Retry" button on the provider-unreachable page now uses the same prominent, full-width primary-button styling as the "Restart workspace" button, instead of falling back to the unstyled native browser button.
+
+Reworked the in-app `mngr` CLI caller (`MngrCaller`) to stop relying on `multiprocessing`'s fork-without-exec (forkserver), which is unreliable on macOS.
+
+Instead of forking children from a preloaded forkserver, `MngrCaller` now keeps a single pre-warmed, single-use `mngr` process running ahead of time: a freshly execed Python interpreter that has already imported `imbue.mngr.main` and is blocked reading one request off an anonymous socket. Each `call` hands the argv to the waiting warm process over the socket, reads back stdout/stderr/exit-code, and the warm process then exits. As soon as a warm process is claimed for use, a replacement is spawned so the next call again finds one ready.
+
+The transport is an anonymous, connected `socketpair` (no rendezvous file on disk): the parent keeps one end and passes the other end's file descriptor to the child at spawn time. The connection is live from the moment the child is forked, so there is no listen/connect handshake and no readiness polling -- if the warm process is still importing `mngr`, the request simply buffers in the socket until it is ready. This makes the "no warm process ready yet" case correct by construction.
+
+Warm processes are cleaned up on every exit path: the idle one is terminated promptly during graceful shutdown (so it doesn't make the root concurrency group wait out its shutdown timeout and log a spurious "strand did not finish in time" warning), and an orphaned warm process whose parent was hard-killed self-exits when it sees its socket close, so none are ever left hanging around.
+
+This avoids paying mngr's multi-second interpreter+import startup cost on the request path while sidestepping fork-without-exec entirely. No user-visible behavior change to `mngr message` delivery; this is an internal robustness and portability improvement.
+
+Updated imports for the `mngr_vps_docker` -> `mngr_vps` package rename: the VPS
+provider is no longer Docker-only, so the package and its shape-agnostic base
+classes dropped "Docker" from their names (`VpsDockerProvider` -> `VpsProvider`,
+`VpsDockerProviderConfig` -> `VpsProviderConfig`, `VpsDockerHostRecord` ->
+`VpsHostRecord`, `VpsDockerHostStore` -> `VpsHostStore`, `VpsDockerError` ->
+`VpsError`). Import-only change; no behavior difference.
+
+Bump the bundled latchkey CLI to 2.17.1.
+
+## 2026-06-18
+
+Closed a remaining `agent_creator_test` timeout-flake gap. A separate change raised the shared `_wait_until_finished` poll deadline to 30s to match the creation tests' `@pytest.mark.timeout(30)`, but `test_start_creation_api_key_ai_without_key_fails_with_clear_message` (a fourth caller of the helper) carried no per-test timeout and so was still governed by the global 10s pytest-timeout -- which would pre-empt the 30s poll under heavy parallel CI load. It now carries `@pytest.mark.timeout(30)` like its siblings. Test-only change.
+
+Stabilized the minds agent-creator litellm-key tests under offload CI contention: the `_wait_until_finished` poll deadline was raised from 10s to 30s. It only caps a poll that returns the instant creation reaches a terminal state, so passing tests are unaffected; it just stops heavy test setup under CI load from tripping a spurious timeout (matching the `@pytest.mark.timeout(30)` already on those tests).
+
 ## 2026-06-17
 
 Reworked how workspace accent colors interact with the minds app shell:

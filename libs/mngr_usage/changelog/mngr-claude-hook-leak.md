@@ -1,1 +1,0 @@
-Removed the now-vestigial `UsagePluginConfig.merge_with` override; the config merge is routed through the overlay pipeline, which reproduces the same assign-by-default semantics. No user-visible behavior change.

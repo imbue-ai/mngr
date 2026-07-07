@@ -1,0 +1,69 @@
+{#def default_to_signup, intro="" #}
+{#
+  The two-tab sign-up / sign-in form (email/password + OAuth), shared by the
+  standalone auth page (``auth.SignupSignin``) and the in-page sign-in modal on
+  the create screen. All interactivity is in ``static/auth.js``, which binds by
+  the element ids below (``signup-form``, ``signin-form``, the ``data-show-tab``
+  / ``data-oauth`` links). ``default_to_signup`` picks which tab is visible on
+  first paint; the inline links flip between them client-side.
+
+  ``intro`` is optional explanatory copy (used by the sign-in modal to explain
+  why the user is being asked to sign in). When set it replaces each tab's
+  subheading; when unset the standalone auth page shows its subheading instead.
+
+  Because auth.js binds by id, this form must appear at most once per page.
+#}
+<div id="signup-tab" class="{% if not default_to_signup %}hidden{% endif %}">
+  <h1 class="type-heading-lg text-primary mb-2">Create account</h1>
+  {% if intro %}<p class="type-body text-primary mb-6">{{ intro }}</p>{% else %}<p class="text-secondary mb-6">Sign up to enable sharing</p>{% endif %}
+  <Notice variant="error" id="signup-error" class="hidden"></Notice>
+  <form id="signup-form">
+    <div class="mb-4">
+      <FormLabel target="signup-email">Email</FormLabel>
+      <TextInput type="email" name="email" id="signup-email" required radius="lg" autocomplete="email" />
+    </div>
+    <div class="mb-4">
+      <FormLabel target="signup-password">Password</FormLabel>
+      <TextInput type="password" name="password" id="signup-password" required radius="lg" autocomplete="new-password" minlength={{ 8 }} />
+    </div>
+    <ButtonSubmit variant="primary" size="lg" block id="signup-btn">Create account</ButtonSubmit>
+  </form>
+  <div class="flex items-center my-4 text-tertiary type-helper">
+    <span class="flex-1 border-b border-default"></span>
+    <span class="px-3">or</span>
+    <span class="flex-1 border-b border-default"></span>
+  </div>
+  <auth.OauthButton provider="google" extra="mb-2" />
+  <auth.OauthButton provider="github" />
+  <div class="text-center mt-4 type-body text-secondary">
+    Already have an account? <Link href="#" weight="medium" data-show-tab="signin">Sign in</Link>
+  </div>
+</div>
+
+<div id="signin-tab" class="{% if default_to_signup %}hidden{% endif %}">
+  <h1 class="type-heading-lg text-primary mb-2">Sign in</h1>
+  {% if intro %}<p class="type-body text-primary mb-6">{{ intro }}</p>{% else %}<p class="text-secondary mb-6">Sign in to your Imbue account</p>{% endif %}
+  <Notice variant="error" id="signin-error" class="hidden"></Notice>
+  <form id="signin-form">
+    <div class="mb-4">
+      <FormLabel target="signin-email">Email</FormLabel>
+      <TextInput type="email" name="email" id="signin-email" required radius="lg" autocomplete="email" />
+    </div>
+    <div class="mb-4">
+      <FormLabel target="signin-password">Password</FormLabel>
+      <TextInput type="password" name="password" id="signin-password" required radius="lg" autocomplete="current-password" />
+    </div>
+    <div class="text-right -mt-2 mb-4"><Link href="/auth/forgot-password" extra="type-helper">Forgot password?</Link></div>
+    <ButtonSubmit variant="primary" size="lg" block id="signin-btn">Sign in</ButtonSubmit>
+  </form>
+  <div class="flex items-center my-4 text-tertiary type-helper">
+    <span class="flex-1 border-b border-default"></span>
+    <span class="px-3">or</span>
+    <span class="flex-1 border-b border-default"></span>
+  </div>
+  <auth.OauthButton provider="google" extra="mb-2" />
+  <auth.OauthButton provider="github" />
+  <div class="text-center mt-4 type-body text-secondary">
+    Don't have an account? <Link href="#" weight="medium" data-show-tab="signup">Create one</Link>
+  </div>
+</div>

@@ -1,1 +1,0 @@
-Reduced flakiness in `test_run_mngr_raw_returns_finished_process`. Its `_run_mngr_raw` subprocess budget was 10s, which under heavy parallel CI load left no headroom for a cold `mngr` start and intermittently raised `CliError` before the command actually finished. The budget is now 25s, under the test's existing 30s `pytest.mark.timeout` backstop. Test-only change.

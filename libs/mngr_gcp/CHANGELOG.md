@@ -6,6 +6,28 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Bare placement (`isolation=NONE`) — the idle agent runs `shutdown -P now` as the VM's root, which on GCE stops the instance; the container-only sentinel + host-side systemd watcher is skipped. Bare release tests added.
+- Added: SSH host keys are unique per host — each GCP host gets its own VPS/VM-root and container sshd host keypair at create time.
+- Added: Offline `host_dir` support, matching the AWS / Azure shape. A stopped GCE instance's `host_dir` is now readable without SSH; capture is operator-driven at `mngr stop` to a Google Cloud Storage state bucket. `mngr gcp prepare` creates the bucket (default name `mngr-state-<project_id>`, overridable via `state_bucket_name`); `mngr gcp cleanup` deletes it (`--force` to delete when it still holds offline state).
+- Added: `is_offline_host_dir_enabled` config field (default on) to disable offline `host_dir` capture without removing the bucket.
+- Added: A running bare GCP host is discoverable with the default provider config — a `mngr-isolation` metadata item stamped at create lets discovery resolve placement from the cloud API without SSH.
+
+### Changed
+
+- Changed: GCP now stores the **full** host record (config, IP, host keys) in instance metadata (`mngr-host-state` + per-agent `mngr-agent-<id>` values), matching AWS / Azure offline behavior. mngr host identity (host id, created-at) moved out of GCE labels into instance metadata; only `mngr-provider` remains a label (the discovery filter). Host id is now stored verbatim and created-at as an ISO-8601 timestamp (no more GCE-charset lowercasing / `%Y-%m-%dt%H-%M-%S` encoding).
+- Changed: **Backward incompatibility:** a GCE instance created before this change carries its host id / created-at only in labels, so an *already-running* pre-upgrade host will no longer resolve by id for offline discovery / `mngr start`, and its reconstructed created-at falls back to `now()`. Destroy and recreate such hosts. Online hosts reachable over SSH are unaffected (they resolve via the on-volume records).
+- Changed: Unauthenticated GCP now raises the shared `ProviderNotAuthorizedError`; reported consistently with the other cloud providers in `mngr list`.
+- Changed: GCP missing-credential help text now points at `gcloud auth application-default login` and the project/ADC setup instead of generic "start Docker" guidance.
+- Changed: `project_id` config field now defaults to `None` instead of `""`, matching the other optional identifier fields. Resolution behavior is unchanged: an unset `project_id` still falls back to the project ADC resolves from the environment.
+- Changed: GCP hosts inherit the shared VPS host-setup fix that registers the gVisor (runsc) runtime with `--overlay2=none`, so an agent container's writable layer persists across a `docker stop`/`start` or host reboot instead of being lost to the default per-sandbox overlay.
+- Changed: Host-side idle-watcher systemd unit renamed from `mngr-gcp-idle-watcher` to the shared `mngr-idle-watcher`.
+
+### Fixed
+
+- Fixed: Renaming a host now re-stamps the `mngr-host-name` instance metadata (the cheap identity tag offline discovery reads), so a host renamed and then stopped lists under its new name rather than its old one.
+
 ## [v0.1.2] - 2026-06-18
 
 ### Added

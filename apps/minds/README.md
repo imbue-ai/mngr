@@ -8,7 +8,7 @@ The minds app creates and manages persistent Claude agents running in Docker con
 
 - A local web interface accessible through the desktop client
 - Optional global access via Cloudflare tunnels (with Google OAuth protection)
-- Background services (web server, terminal, telegram bot, etc.) managed by a bootstrap service manager
+- Background services (web server, terminal, etc.) supervised by supervisord
 - The ability to expose application ports via both local and global URLs
 
 ## Getting started
@@ -38,7 +38,7 @@ Then visit the login URL printed in the terminal to create your first agent.
 3. Inside each minds container, the "primary" agent (`system-services`) runs only the bootstrap and background services -- its window-0 command is `sleep infinity && claude`, so claude never actually starts (the trailing `&& claude` is unreachable; it exists only so `assemble_command` keeps producing a claude-shaped invocation). The user's actual chat agent is a separate `mngr` agent created by the bootstrap on first boot (named after the host) and shares the services agent's `CLAUDE_CONFIG_DIR` so auth, plugins, marketplaces, and sessions are configured once and inherited by every other agent. Destroying chat agents no longer affects services; the services agent is hidden from the UI agent list (it carries `is_primary=true`) and protected against direct destroy.
 
 4. Inside the services agent's Docker container:
-   - A **bootstrap service manager** watches `services.toml` and starts/stops tmux windows for each service
+   - The bootstrap (`uv run bootstrap`) runs first-boot setup and then execs `supervisord -n`, which supervises the background services declared as `[program:*]` sections in `supervisord.conf`
    - On first boot the bootstrap also writes `CLAUDE_CONFIG_DIR` to the host env file and creates the initial chat agent (gated by `runtime/initial_chat_created`)
    - Services register their ports via `scripts/forward_port.py` into `runtime/applications.toml`
    - An **app watcher** service monitors `applications.toml` and writes server events to `events.jsonl` for discovery

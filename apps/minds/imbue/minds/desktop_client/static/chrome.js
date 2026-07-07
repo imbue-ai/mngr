@@ -140,6 +140,16 @@
   // must never write to ``currentTitleAgentId`` or trigger recovery, or a
   // stuck agent in another window will hijack this window's content view.
   var currentTitleAgentId = null;
+  // Whether the displayed workspace's content is actually reachable (a real
+  // workspace) rather than the "Loading workspace" proxy loader that
+  // mngr_forward serves at the workspace URL while the backend is unreachable.
+  // Pushed by main.js over ``current-workspace-changed`` (from the content
+  // view's HTTP status) so the get-help modal keeps "have an agent help"
+  // disabled while a workspace is loading/stuck -- a state the health-tracker
+  // ``systemInterfaceStatusByAgent`` signal doesn't cover during startup. In
+  // browser mode there is no such signal (the content frame is cross-origin), so
+  // it defaults to true there, leaving that mode's behavior unchanged.
+  var currentWorkspaceContentReady = !isElectron;
   // Per-agent {accent} map populated from each SSE ``workspaces`` payload.
   // ``applyTitleAccent`` reads from this cache so accent application is
   // synchronous.
@@ -277,6 +287,10 @@
     });
   }
 
+  // Custom titlebar tooltips: the titlebar buttons carry ``data-tooltip``
+  // labels and are wired by the shared /_static/tooltip_triggers.js (included
+  // by Chrome.jinja), which is the same script the overlay's modal pages use.
+
   // -- Title + URL tracking -------------------------------------------------
   function refreshAuthStatus() {
     fetch('/auth/api/status').then(function (r) { return r.json(); }).then(updateAuthUI).catch(function () {});
@@ -311,7 +325,8 @@
     // while the content view is ACTUALLY displaying that workspace, and null on
     // every other screen (including the workspace's own settings / sharing
     // screens). It drives the recovery-redirect lock ONLY -- not the accent.
-    window.minds.onCurrentWorkspaceChanged(function (agentId) {
+    window.minds.onCurrentWorkspaceChanged(function (agentId, contentReady) {
+      currentWorkspaceContentReady = !!contentReady;
       setDisplayedWorkspaceAgentId(agentId || null);
     });
     // The titlebar accent is a pure function of the current screen, pushed by
@@ -383,6 +398,8 @@
   if (!isElectron) {
     var newWsBtn = document.getElementById('sidebar-new-workspace');
     if (newWsBtn) newWsBtn.onclick = function () { navigateContent('/create'); closeSidebar(); };
+    var settingsBtn = document.getElementById('sidebar-settings');
+    if (settingsBtn) settingsBtn.onclick = function () { navigateContent('/settings'); closeSidebar(); };
     var accountBtn = document.getElementById('sidebar-account');
     if (accountBtn) {
       accountBtn.onclick = function () {
@@ -395,6 +412,27 @@
   document.getElementById('requests-toggle').onclick = function () {
     if (isElectron) window.minds.toggleInbox();
     else navigateContent('/inbox');
+  };
+
+  // Get-help opens the help modal (report a bug). Pass the currently-displayed
+  // workspace id along so the report can scope workspace context; in Electron the
+  // modal is the shared overlay view, in browser mode it loads into the content frame.
+  document.getElementById('help-toggle').onclick = function () {
+    var aid = currentTitleAgentId || '';
+    // Agent-help spawns an /assist chat *inside* the displayed workspace, so it is only usable when
+    // that workspace is actually reachable: on a loading/stuck workspace the new chat couldn't be
+    // seen or reached (and the spawn would fail). Gate the option on BOTH signals -- a truthy
+    // systemInterfaceStatusByAgent entry means stuck/restarting, and currentWorkspaceContentReady is
+    // false while the content view shows the "Loading workspace" proxy loader (which the stuck signal
+    // doesn't cover during startup) -- while still passing the workspace id so a bug report stays
+    // scoped to it even when it's down.
+    var assistAvailable = !!aid && !systemInterfaceStatusByAgent[aid] && currentWorkspaceContentReady;
+    if (isElectron) {
+      window.minds.toggleHelp(aid, assistAvailable);
+    } else {
+      var helpQuery = aid ? '?workspace=' + encodeURIComponent(aid) + (assistAvailable ? '&assist=1' : '') : '';
+      navigateContent('/help' + helpQuery);
+    }
   };
 
   // -- Open a permission request from workspace content (browser mode) -------
@@ -413,10 +451,21 @@
       if (!frame || e.source !== frame.contentWindow) return;
       var data = e.data;
       if (!data || typeof data !== 'object') return;
-      if (data.type !== 'minds:open-request-modal') return;
-      var requestId = data.requestId;
-      if (typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(requestId)) return;
-      navigateContent('/inbox?selected=' + encodeURIComponent(requestId));
+      if (data.type === 'minds:open-request-modal') {
+        var requestId = data.requestId;
+        if (typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(requestId)) return;
+        navigateContent('/inbox?selected=' + encodeURIComponent(requestId));
+        return;
+      }
+      // Error pages (e.g. the recovery page) ask to open the get-help / report-a-bug
+      // modal. There's no overlay in browser mode, so navigate the content frame to
+      // /help, scoped to the workspace when the page supplied a valid agent id.
+      if (data.type === 'minds:open-help') {
+        var agentId = data.agentId;
+        var scoped = typeof agentId === 'string' && /^agent-[a-f0-9]{1,64}$/i.test(agentId) ? agentId : '';
+        navigateContent('/help' + (scoped ? '?workspace=' + encodeURIComponent(scoped) : ''));
+        return;
+      }
     });
   }
 
@@ -486,25 +535,6 @@
 
   function handleChromeEvent(data) {
     try {
-      if (data.type === 'freeform_accent_preview') {
-        // Create-form preview: no workspace yet, so there's no agentId
-        // to key the cache by. Paint the CSS variables directly and
-        // drop the SSE replay target so a background ``workspaces``
-        // tick (a liveness flip or rename in any workspace) doesn't
-        // repaint the previous workspace's accent over the preview
-        // while the user is still on the create form. main drops this
-        // override when the window leaves ``/create``: it force-sends an
-        // ``accent-changed`` (the new workspace on submit, or null ->
-        // neutral chrome on abandon) even when the accent value didn't
-        // change -- see ``hasFreeformAccentPreview`` in electron/main.js.
-        if (data.accent) {
-          lastRequestedAccentAgentId = null;
-          document.documentElement.style.setProperty('--workspace-accent', data.accent);
-          document.documentElement.style.setProperty('--titlebar-bg', data.accent);
-          setTitlebarSurface(true);
-        }
-        return;
-      }
       if (data.type === 'workspace_accent_preview') {
         // Optimistic single-workspace cache update + repaint, emitted by
         // main.js when the settings page in this bundle picks a color.

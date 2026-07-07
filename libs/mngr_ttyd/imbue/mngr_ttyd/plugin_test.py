@@ -7,6 +7,7 @@ from typing import cast
 
 from imbue.mngr.interfaces.host import NamedCommand
 from imbue.mngr_ttyd.plugin import TTYD_COMMAND
+from imbue.mngr_ttyd.plugin import TTYD_INDEX_FILENAME
 from imbue.mngr_ttyd.plugin import TTYD_INSTALL_COMMAND
 from imbue.mngr_ttyd.plugin import TTYD_SERVICE_NAME
 from imbue.mngr_ttyd.plugin import TTYD_VERSION
@@ -177,12 +178,47 @@ def test_on_after_provisioning_writes_agent_script(tmp_path: Path) -> None:
         agent=cast(Any, SimpleNamespace(id=agent_id)), host=cast(Any, host), mngr_ctx=cast(Any, SimpleNamespace())
     )
 
-    assert len(host.written_files) == 1
-    script_path, content, mode = host.written_files[0]
+    script_writes = [w for w in host.written_files if w[0].name == "agent.sh"]
+    assert len(script_writes) == 1
+    script_path, content, mode = script_writes[0]
     assert script_path == host_dir / "agents" / agent_id / "commands" / "ttyd" / "agent.sh"
     assert mode == "0755"
     assert b"#!/bin/bash" in content
     assert b"tmux attach" in content
+
+
+def test_on_after_provisioning_installs_web_client(tmp_path: Path) -> None:
+    """Verify that on_after_provisioning installs the OSC 52-capable web client served via -I."""
+    host_dir = tmp_path / "host"
+    host_dir.mkdir()
+    agent_id = "test-agent-456"
+
+    host = _FakeTtydHost(host_dir)
+
+    on_after_provisioning(
+        agent=cast(Any, SimpleNamespace(id=agent_id)), host=cast(Any, host), mngr_ctx=cast(Any, SimpleNamespace())
+    )
+
+    index_writes = [w for w in host.written_files if w[0].name == TTYD_INDEX_FILENAME]
+    assert len(index_writes) == 1
+    index_path, content, mode = index_writes[0]
+    assert index_path == host_dir / "agents" / agent_id / "commands" / "ttyd" / TTYD_INDEX_FILENAME
+    # Served as a static asset, so it must not be executable.
+    assert mode == "0644"
+    # The vendored client must actually register an OSC 52 handler and carry the
+    # empty-target patch, otherwise tmux copies still never reach the clipboard.
+    text = content.decode()
+    assert "registerOscHandler(52" in text
+    assert "isSystemSelection" in text
+
+
+def test_ttyd_command_serves_custom_client_via_index() -> None:
+    """Verify the ttyd command conditionally serves the custom client via -I."""
+    # The client path is under the agent's commands/ttyd dir.
+    assert f"commands/ttyd/{TTYD_INDEX_FILENAME}" in TTYD_COMMAND
+    # -I is added only when the file exists, so a missing client falls back to the
+    # built-in one rather than ttyd refusing to start.
+    assert '$([ -f "$_TTYD_INDEX" ] && echo -I "$_TTYD_INDEX")' in TTYD_COMMAND
 
 
 def test_agent_script_honors_target_agent_name_arg(tmp_path: Path) -> None:

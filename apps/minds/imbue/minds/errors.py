@@ -99,25 +99,39 @@ class BackupProvisioningError(MindError):
     ...
 
 
-class TelegramError(MindError):
-    """Base exception for all telegram-related errors."""
+class LimaImageError(MindError):
+    """Base exception for the pre-baked Lima image cache."""
 
     ...
 
 
-class TelegramCredentialError(TelegramError, ValueError):
-    """Raised when telegram credentials are invalid or missing."""
+class LimaImageDownloadError(LimaImageError):
+    """Raised when downloading/assembling a published image fails (network, disk, desync)."""
 
     ...
 
 
-class TelegramCredentialExtractionError(TelegramError, ValueError):
-    """Raised when credential extraction from the browser fails."""
+class LimaImageVerificationError(LimaImageError):
+    """Raised when a downloaded manifest signature or assembled image hash does not verify.
+
+    An unverified image is never used: this is a hard failure (the create is
+    blocked with a retryable error) rather than a fall-through to build-in-VM.
+    """
 
     ...
 
 
-class TelegramBotCreationError(TelegramError):
-    """Raised when bot creation via BotFather fails."""
+class LimaImageToolError(LimaImageError):
+    """Raised when a required external tool (desync, minisign, qemu-img) is missing or errors."""
+
+    ...
+
+
+class InvalidSha256HexError(LimaImageError, ValueError):
+    """Raised when a string is not a valid lowercase hex SHA-256 digest.
+
+    Subclasses ``ValueError`` so pydantic treats it as a validation failure when
+    raised from the ``Sha256Hex`` primitive's constructor.
+    """
 
     ...

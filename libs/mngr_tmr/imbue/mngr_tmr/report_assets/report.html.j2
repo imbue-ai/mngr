@@ -9,6 +9,8 @@
     has_artifacts     -- bool                                whether to inject the asciinema head + JS + panels
     artifact_panels   -- list[PanelView]                     slide-in panels (one per agent that has artifacts)
     integrator        -- IntegratorResult | None             reduced-branch summary (drives merged-status cells)
+    escalation_views  -- list[{title, detail_html}]          integrator blockers surfaced to the user (detail pre-rendered)
+    normalization_views -- list[{summary_html}]              suite-wide cleanups the integrator applied (summary pre-rendered)
     run_commands      -- list[(label, cmd)]                  top-of-report command hints (and reintegrate is used in BLOCKED hint)
     reintegrate_cmd   -- str                                 pre-extracted "Reintegrate" command (HTML-escaped)
     asciinema_css_url -- str                                 only meaningful when has_artifacts
@@ -49,6 +51,27 @@
 {%- for label, cmd in run_commands %}
       <div class="run-cmd"><span class="run-cmd-label">{{ label }}:</span> <code>{{ cmd }}</code></div>
 {%- endfor %}
+    </div>
+{%- endif %}
+{%- if escalation_views %}
+    <div class="escalations">
+      <h2 style="color: rgb(244, 67, 54);">Escalations ({{ escalation_views|length }})</h2>
+      <p>These cross-cutting blockers could not be resolved automatically and need your attention:</p>
+      <ul>
+{%- for esc in escalation_views %}
+        <li><strong>{{ esc.title }}</strong><div class="md">{{ esc.detail_html|safe }}</div></li>
+{%- endfor %}
+      </ul>
+    </div>
+{%- endif %}
+{%- if normalization_views %}
+    <div class="normalizations">
+      <h2>Suite normalizations ({{ normalization_views|length }})</h2>
+      <ul>
+{%- for norm in normalization_views %}
+        <li class="md">{{ norm.summary_html|safe }}</li>
+{%- endfor %}
+      </ul>
     </div>
 {%- endif %}
 {%- for section in sections %}

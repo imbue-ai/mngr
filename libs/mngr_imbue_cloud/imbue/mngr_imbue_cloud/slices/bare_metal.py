@@ -74,10 +74,22 @@ DEFAULT_SLICE_PORT_RANGE_END: Final[int] = 32000
 # slice provider so they always agree.
 _SLICE_BASE_IMAGE_RELPATH: Final[str] = ".cache/mngr-slice-base/debian-base.qcow2"
 
+# Box dir holding the per-box cached FCT image tar (a ``docker save`` of the built
+# image), so slices on the box ``docker load`` it instead of each rebuilding from
+# the Dockerfile. Under the lima service user's home (the box has no Docker, only a
+# tar file); created once at ``server prep``. Shared by the prep script and the box
+# image cache so they always agree.
+_SLICE_FCT_CACHE_RELDIR: Final[str] = ".cache/mngr-slice-fct"
+
 
 def slice_base_image_path(lima_service_user: str) -> str:
     """Absolute path of the box-staged slice guest OS image for ``lima_service_user``."""
     return f"/home/{lima_service_user}/{_SLICE_BASE_IMAGE_RELPATH}"
+
+
+def box_fct_cache_dir(lima_service_user: str) -> str:
+    """Absolute path of the box dir holding the cached FCT image tar for ``lima_service_user``."""
+    return f"/home/{lima_service_user}/{_SLICE_FCT_CACHE_RELDIR}"
 
 
 def slice_base_image_file_url(lima_service_user: str) -> str:

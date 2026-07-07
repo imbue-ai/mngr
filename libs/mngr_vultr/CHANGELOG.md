@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: Unauthenticated Vultr provider now raises the shared `ProviderNotAuthorizedError` at construction, instead of printing an ad-hoc `WARNING: Vultr API key not configured` and returning an empty listing (exit 0). The bespoke warning print has been removed. Reported consistently with the other cloud providers in `mngr list` rather than vanishing.
+
 ## [v0.1.10] - 2026-06-18
 
 ## [v0.1.9] - 2026-06-16

@@ -4,6 +4,16 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-01
+
+Added a new async/await ratchet (`test_prevent_async_await`) that freezes the current amount of `async def` / `await` usage in this project and fails if new async code is added. We strongly prefer synchronous code: it is far easier to debug, and our software is intentionally low-scale, so async provides no benefit. Existing usage is grandfathered in at its current count; the count can only decrease.
+
+## 2026-06-19
+
+Gave `test_blocked_resource_appended_to_failing_test` a longer (30s) per-test timeout. It spawns a pytest subprocess via `runpytest_subprocess`, whose startup is slow and variable under offload load and intermittently exceeded the default 10s timeout. No change to `resource_guards` runtime behavior.
+
+Trimmed the README to user-relevant content, cutting the internal guard mechanics and tightening prose for concision.
+
 ## 2026-06-04
 
 Adopted the new repo-wide `per-file host uploads inside loops` ratchet check (flags write_file/write_text_file/put_file calls inside loops, which should use a single rsync via host.copy_directory instead). No production code change in this project.

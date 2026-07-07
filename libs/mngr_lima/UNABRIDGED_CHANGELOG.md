@@ -4,6 +4,20 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-01
+
+Added a new async/await ratchet (`test_prevent_async_await`) that freezes the current amount of `async def` / `await` usage in this project and fails if new async code is added. We strongly prefer synchronous code: it is far easier to debug, and our software is intentionally low-scale, so async provides no benefit. Existing usage is grandfathered in at its current count; the count can only decrease.
+
+## 2026-06-22
+
+Add `flock` (the `util-linux` package) to the Lima VM provisioning script's required-package check.
+
+`flock` now backs mngr's unified cross-actor host lock and the in-host idle-shutdown watcher, so it must be present on Lima hosts. It is already present on the standard Debian images Lima uses, so this only installs it on minimal/custom images that lack it.
+
+## 2026-06-19
+
+Trimmed the README to user-relevant content and tightened it for concision.
+
 ## 2026-06-16
 
 Removed a redundant `register_marker("lima: ...")` call from the test conftest: the `lima` pytest marker is already auto-registered for the whole session by the resource_guards infrastructure (mngr_lima's `lima` resource guard), so the manual registration was duplicative. Test selection and the marker's meaning are unchanged.

@@ -112,9 +112,12 @@ def claude_agent(claude_test_env: dict[str, str], temp_git_repo: Path) -> Genera
 @pytest.mark.rsync
 @pytest.mark.timeout(300)
 def test_mngr_create_with_message_succeeds(claude_test_env: dict[str, str], temp_git_repo: Path) -> None:
-    """Test that `mngr create --message` successfully sends a message to Claude.
+    """Verify `mngr create --message` submits the initial message as part of agent creation.
 
-    This tests the integrated flow where the message is sent as part of agent creation.
+    Asserts the command exits 0 and that its output contains "Message submitted successfully",
+    the confirmation emitted only after the message is actually typed into the agent's TUI. This
+    fails if creation succeeds but the message is never delivered, so it covers the integrated
+    create-then-send path rather than creation alone.
     """
     agent_name = f"test-create-msg-{get_short_random_string()}"
     message = f"test message {get_short_random_string()}"
@@ -133,10 +136,12 @@ def test_mngr_create_with_message_succeeds(claude_test_env: dict[str, str], temp
 @pytest.mark.rsync
 @pytest.mark.timeout(300)
 def test_mngr_create_with_message_multiple_times(claude_test_env: dict[str, str], temp_git_repo: Path) -> None:
-    """Test that `mngr create --message` works reliably across multiple trials.
+    """Verify `mngr create --message` delivers the message reliably across repeated trials.
 
-    This is a reliability test that creates multiple agents with messages to verify
-    the message sending mechanism works consistently.
+    Creates three agents in turn, each with an initial message, and requires every trial to
+    both exit 0 and report "Message submitted successfully" (a 100% success rate). This guards
+    against intermittent message-submission failures that a single-shot test could miss; it
+    fails if any trial errors, times out, or omits the submission confirmation.
     """
     trial_count = 3
     successes = 0

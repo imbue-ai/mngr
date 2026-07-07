@@ -225,8 +225,6 @@ def build_pool_create_command(
             "--format",
             "json",
             "--label",
-            f"workspace={BAKED_SERVICES_AGENT_NAME}",
-            "--label",
             "user_created=true",
             "--label",
             "is_primary=true",

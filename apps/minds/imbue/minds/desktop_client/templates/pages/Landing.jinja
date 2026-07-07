@@ -1,7 +1,7 @@
-{#def agent_ids, agent_accents, mngr_forward_origin, telegram_enabled, telegram_status_by_agent_id, is_discovering, agent_names, destroying_status_by_agent_id, shutdown_capable_agent_ids, mind_liveness_by_agent_id, agent_providers={} #}
+{#def agent_ids, agent_accents, mngr_forward_origin, is_discovering, agent_names, destroying_status_by_agent_id, shutdown_capable_agent_ids, mind_liveness_by_agent_id, agent_providers={} #}
 {#
-  Landing page: list of accessible workspaces with per-row health, backup,
-  and telegram status. Subscribes to the chrome SSE so the page reloads
+  Landing page: list of accessible workspaces with per-row health and backup
+  status. Subscribes to the chrome SSE so the page reloads
   when a destroy completes (or any other workspace-list change lands).
 #}
 {% set _scripts %}
@@ -167,7 +167,7 @@
       applyMindLiveness(agentId, 'STARTING');
       // The endpoint is synchronous: it resolves only once the host has actually
       // started (or failed), so a non-ok response is a real failure to revert.
-      fetch('/api/agents/' + encodeURIComponent(agentId) + '/start-host', { method: 'POST' })
+      fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/start', { method: 'POST' })
         .then(function (response) {
           if (response.ok) {
             applyAuthoritativeMindLiveness(agentId, 'RUNNING');
@@ -203,7 +203,7 @@
       if (!ok) return;
       pendingMindActionByAgent[agentId] = 'STOPPED';
       applyMindLiveness(agentId, 'STOPPING');
-      fetch('/api/agents/' + encodeURIComponent(agentId) + '/stop-host', { method: 'POST' })
+      fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/stop', { method: 'POST' })
         .then(function (response) {
           if (response.ok) {
             applyAuthoritativeMindLiveness(agentId, 'STOPPED');
@@ -354,16 +354,25 @@
     function toggleProvider(name, isEnabled) {
       pendingToggleClickedAtByProvider[name] = Date.now();
       renderProviders({ providers: renderedProviders || [] });
-      fetch('/api/providers/' + encodeURIComponent(name) + '/toggle', {
-        method: 'POST',
+      fetch('/api/v1/desktop/providers/' + encodeURIComponent(name), {
+        method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ is_enabled: isEnabled }),
+        body: JSON.stringify({ enabled: isEnabled }),
       }).then(function (response) {
-        if (!response.ok) {
-          console.error('Provider toggle for', name, 'returned HTTP', response.status);
-          delete pendingToggleClickedAtByProvider[name];
-          renderProviders({ providers: renderedProviders || [] });
-        }
+        if (response.ok) return;
+        // The toggle failed (e.g. 409 when disabling a provider that still has
+        // active workspaces): drop the optimistic pending state, re-render, and
+        // surface the server's reason to the user instead of silently reverting.
+        delete pendingToggleClickedAtByProvider[name];
+        renderProviders({ providers: renderedProviders || [] });
+        return response.json().catch(function () { return null; }).then(function (body) {
+          var message = (body && (body.error || body.detail)) || ('HTTP ' + response.status);
+          if (response.status === 409) {
+            window.alert('Cannot disable ' + name + ': ' + message);
+          } else {
+            console.error('Provider toggle for', name, 'returned HTTP', response.status, message);
+          }
+        });
       }).catch(function (err) {
         console.error('Provider toggle for', name, 'failed:', err);
         delete pendingToggleClickedAtByProvider[name];
@@ -444,7 +453,21 @@
         link.style.pointerEvents = '';
         link.removeAttribute('data-exporting');
       }
-      fetch('/api/backup-export/' + encodeURIComponent(agentId)).then(function (resp) {
+      // v1 export is per-snapshot, so first list the workspace's snapshots and
+      // pick the most recent one (matching the old latest-snapshot export),
+      // then POST to export it as a zip.
+      fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backups').then(function (resp) {
+        if (!resp.ok) throw new Error('listing backups failed: ' + resp.status);
+        return resp.json();
+      }).then(function (data) {
+        var snapshots = (data && data.snapshots) || [];
+        if (snapshots.length === 0) throw new Error('no snapshots to export');
+        var latest = snapshots.reduce(function (a, b) {
+          return Date.parse(b.time) >= Date.parse(a.time) ? b : a;
+        });
+        return fetch('/api/v1/workspaces/' + encodeURIComponent(agentId)
+          + '/backups/' + encodeURIComponent(latest.snapshot_id) + '/export', { method: 'POST' });
+      }).then(function (resp) {
         if (!resp.ok) throw new Error('export failed: ' + resp.status);
         var disp = resp.headers.get('Content-Disposition') || '';
         var match = /filename="?([^"]+)"?/.exec(disp);
@@ -488,16 +511,61 @@
       });
     }
 
+    // Derive the badge status from a workspace's snapshots (+ its create time
+    // for the no-backups fallback). The old batch route returned a precomputed
+    // ``state``; the per-workspace backups route returns only snapshots, so we
+    // map "has snapshots" -> BACKED_UP (last_success = newest snapshot's time)
+    // and "no snapshots" -> the create-time fallback ("Created N ago" / "No
+    // backups"). This keeps applyBackupBadge's visual output equivalent.
+    function deriveBackupStatus(snapshots, createTime, isBackingUp) {
+      var latestTime = null;
+      if (snapshots && snapshots.length > 0) {
+        var latest = snapshots.reduce(function (a, b) {
+          return Date.parse(b.time) >= Date.parse(a.time) ? b : a;
+        });
+        latestTime = latest.time;
+      }
+      // A backup running right now takes precedence over the last-success time,
+      // restoring the live "Backing up…" badge (the per-workspace backups route
+      // reports this via is_backing_up; the snapshot list alone can't).
+      if (isBackingUp) {
+        return { state: 'BACKING_UP', last_success_at: latestTime };
+      }
+      if (latestTime) {
+        return { state: 'BACKED_UP', last_success_at: latestTime };
+      }
+      return { created_at: createTime || null };
+    }
+
     function loadBackupStatus() {
+      if (renderedIds.length === 0) return;
       showBackupChecking();
-      fetch('/api/backup-status').then(function (response) {
-        return response.ok ? response.json() : {};
-      }).then(function (data) {
-        Object.keys(data).forEach(function (agentId) { applyBackupBadge(agentId, data[agentId]); });
-        clearBackupChecking();
-      }).catch(function (err) {
-        console.error('Backup status fetch failed:', err);
-        clearBackupChecking();
+      // The workspaces list carries each row's create_time for the no-backups
+      // "Created N ago" fallback; fetch it once, then fan out one backups
+      // request per workspace (replacing the old single batch route).
+      fetch('/api/v1/workspaces').then(function (response) {
+        return response.ok ? response.json() : { workspaces: [] };
+      }).catch(function () { return { workspaces: [] }; }).then(function (wsData) {
+        var createTimeByAgent = {};
+        ((wsData && wsData.workspaces) || []).forEach(function (w) {
+          var id = w && (w.agent_id || w.id);
+          if (id) createTimeByAgent[id] = w.create_time || w.created_at;
+        });
+        var pending = renderedIds.length;
+        function finishOne() {
+          pending -= 1;
+          if (pending <= 0) clearBackupChecking();
+        }
+        renderedIds.forEach(function (agentId) {
+          fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backups').then(function (response) {
+            return response.ok ? response.json() : null;
+          }).catch(function () { return null; }).then(function (data) {
+            var snapshots = (data && data.snapshots) || [];
+            applyBackupBadge(agentId, deriveBackupStatus(snapshots, createTimeByAgent[agentId], data && data.is_backing_up));
+          }).catch(function (err) {
+            console.error('Backup status fetch failed for', agentId, err);
+          }).then(finishOne);
+        });
       });
     }
     loadBackupStatus();
@@ -561,11 +629,11 @@
   })();
 </script>
 {% endset %}
-<Base title="Projects" scripts={{ _scripts }}>
+<Base title="Workspaces" scripts={{ _scripts }}>
   <PageContainer>
     {% if agent_ids %}
       <div class="flex items-center justify-between mb-4" data-landing-agent-ids="{{ agent_ids | map('string') | join(',') }}">
-        <h1 class="type-heading text-primary">Projects</h1>
+        <h1 class="type-heading text-primary">Workspaces</h1>
         <ButtonLink href="/create" variant="primary">Create</ButtonLink>
       </div>
 
@@ -627,35 +695,35 @@
                         extra="landing-start-btn"
                         :style="start_btn_style"
                         onclick="event.stopPropagation(); window.landingStartClick(this)"
-                        title="Start mind"
-                        aria-label="Start mind">
+                        data-tooltip="Start workspace"
+                        aria-label="Start workspace">
                   <Icon16 name="play" />
                 </Button>
                 <Button variant="ghost" size="icon"
                         extra="landing-stop-btn"
                         :style="stop_btn_style"
                         onclick="event.stopPropagation(); window.landingStopClick(this)"
-                        title="Stop mind"
-                        aria-label="Stop mind">
+                        data-tooltip="Stop workspace"
+                        aria-label="Stop workspace">
                   <Icon16 name="pause" />
                 </Button>
               {% else %}
                 <Button variant="ghost" size="icon"
                         onclick="event.stopPropagation(); window.landingRestartClick(this)"
-                        title="Restart workspace"
+                        data-tooltip="Restart workspace"
                         aria-label="Restart workspace">
                   <Icon16 name="restart" />
                 </Button>
               {% endif %}
               <Button variant="ghost" size="icon"
                       onclick="event.stopPropagation(); window.landingOpenInNewWindow(this)"
-                      title="Open in new window"
+                      data-tooltip="Open in new window"
                       aria-label="Open workspace in new window">
                 <Icon16 name="arrow-up-right" />
               </Button>
               <Button variant="ghost" size="icon"
                       onclick={{ "event.stopPropagation(); window.location='/workspace/" ~ agent_id ~ "/settings'" }}
-                      title="Settings"
+                      data-tooltip="Settings"
                       aria-label="Workspace settings">
                 <Icon16 name="settings" />
               </Button>
@@ -671,7 +739,7 @@
         <script>setTimeout(function() { location.reload(); }, 2000);</script>
       {% else %}
         <div class="text-center py-12">
-          <p class="text-tertiary mb-6">No projects yet</p>
+          <p class="text-tertiary mb-6">No workspaces yet</p>
           <ButtonLink href="/create" variant="primary">Create</ButtonLink>
         </div>
       {% endif %}
