@@ -2,12 +2,14 @@ import argparse
 import logging
 import os
 import sys
+from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 
 from imbue.slack_exporter.data_types import ChannelConfig
 from imbue.slack_exporter.data_types import ExporterSettings
+from imbue.slack_exporter.data_types import SlackApiCaller
 from imbue.slack_exporter.errors import ChannelNotFoundError
 from imbue.slack_exporter.errors import LatchkeyInvocationError
 from imbue.slack_exporter.errors import SlackApiError
@@ -34,8 +36,8 @@ def _parse_channel_spec(spec: str) -> ChannelConfig:
     return ChannelConfig(name=SlackChannelName(name), oldest=oldest)
 
 
-def main() -> None:
-    """Entry point for the slack-exporter CLI."""
+def _build_arg_parser() -> argparse.ArgumentParser:
+    """Build the argument parser for the slack-exporter CLI."""
     parser = argparse.ArgumentParser(
         description="Export Slack channel messages, channels, and users to JSONL files using latchkey",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -105,14 +107,14 @@ Examples:
         action="store_true",
         help="Enable verbose logging",
     )
+    return parser
 
-    args = parser.parse_args()
 
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+def build_settings_from_args(args: argparse.Namespace, env: Mapping[str, str]) -> ExporterSettings:
+    """Construct ExporterSettings from parsed CLI args and the process environment.
 
+    Pure (no I/O) so the argument-handling boundaries can be unit-tested directly.
+    """
     if args.channels:
         # Support space-separated channel names within a single argument
         all_specs: list[str] = []
@@ -122,11 +124,12 @@ Examples:
     else:
         channel_configs = None
     default_oldest = _parse_iso_datetime_as_utc(args.since)
-    cache_ttl_seconds = int(os.environ.get("SLACK_EXPORTER_CACHE_TTL_SECONDS", "600"))
+    cache_ttl_seconds = int(env.get("SLACK_EXPORTER_CACHE_TTL_SECONDS", "600"))
 
+    # A non-positive refresh window means "disabled" (None), not a zero-day window.
     refresh_window_days: int | None = args.refresh_window_days if args.refresh_window_days > 0 else None
 
-    settings = ExporterSettings(
+    return ExporterSettings(
         channels=channel_configs,
         recently_active_channels=args.recently_active_channels,
         default_oldest=default_oldest,
@@ -138,8 +141,11 @@ Examples:
         cache_ttl_seconds=cache_ttl_seconds,
     )
 
+
+def run_export_or_exit(settings: ExporterSettings, api_caller: SlackApiCaller) -> None:
+    """Run the export, mapping known exporter errors to a non-zero exit code."""
     try:
-        run_export(settings, api_caller=call_slack_api)
+        run_export(settings, api_caller=api_caller)
     except ChannelNotFoundError as e:
         logging.error("Channel not found: %s", e.channel_name)
         sys.exit(1)
@@ -149,6 +155,19 @@ Examples:
     except SlackApiError as e:
         logging.error("Slack API error: %s", e)
         sys.exit(1)
+
+
+def main() -> None:
+    """Entry point for the slack-exporter CLI."""
+    args = _build_arg_parser().parse_args()
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+    settings = build_settings_from_args(args, os.environ)
+    run_export_or_exit(settings, call_slack_api)
 
 
 if __name__ == "__main__":

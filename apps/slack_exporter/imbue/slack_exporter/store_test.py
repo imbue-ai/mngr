@@ -108,12 +108,13 @@ def test_load_existing_users_returns_from_created_stream(temp_output_dir: Path) 
 
 
 def test_load_existing_users_updated_overrides_created(temp_output_dir: Path) -> None:
-    created = make_user_event("U111")
-    updated = make_user_event("U111")
+    created = make_user_event("U111", name="alice")
+    updated = make_user_event("U111", name="alice-renamed")
     save_user_events(temp_output_dir, StreamType.CREATED, [created])
     save_user_events(temp_output_dir, StreamType.UPDATED, [updated])
     result = load_existing_users(temp_output_dir)
     assert len(result) == 1
+    assert result[SlackUserId("U111")].raw["name"] == "alice-renamed"
 
 
 def test_save_channel_events_creates_directory_structure(temp_output_dir: Path) -> None:
@@ -131,12 +132,19 @@ def test_save_message_events_creates_directory_structure(temp_output_dir: Path) 
     save_message_events(temp_output_dir, StreamType.CREATED, [make_message_event()])
     expected_path = temp_output_dir / "message" / "created" / "events.jsonl"
     assert expected_path.exists()
+    parsed = json.loads(expected_path.read_text().strip())
+    assert parsed["channel_id"] == "C123"
+    assert parsed["message_ts"] == "1700000000.000001"
+    assert parsed["source"] == "slack"
 
 
 def test_save_user_events_creates_directory_structure(temp_output_dir: Path) -> None:
     save_user_events(temp_output_dir, StreamType.CREATED, [make_user_event()])
     expected_path = temp_output_dir / "user" / "created" / "events.jsonl"
     assert expected_path.exists()
+    parsed = json.loads(expected_path.read_text().strip())
+    assert parsed["user_id"] == "U123"
+    assert parsed["source"] == "slack"
 
 
 def test_save_appends_to_existing(temp_output_dir: Path) -> None:

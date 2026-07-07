@@ -19,6 +19,11 @@ from imbue.slack_exporter.primitives import SlackMessageTimestamp
 from imbue.slack_exporter.primitives import SlackUserId
 from imbue.slack_exporter.primitives import SlackUserName
 
+# These fixed values are intentionally deterministic rather than uuid4-based. Each test runs
+# against an isolated temp_output_dir, and store de-duplication keys are domain identifiers
+# (channel_id, message_ts, user_id, etc.), never event_id -- so reused IDs cannot collide across
+# tests or mask a store bug. If a future test depends on event-ID uniqueness, have that caller use
+# make_event_id() instead.
 FIXED_TIMESTAMP = IsoTimestamp("2025-01-15T12:00:00.000000000Z")
 FIXED_EVENT_ID = EventId("evt-test00000000000000000000000000")
 
@@ -59,6 +64,7 @@ def make_message_event(
 
 def make_user_event(
     user_id: str = "U123",
+    name: str = "testuser",
 ) -> UserEvent:
     return UserEvent(
         timestamp=FIXED_TIMESTAMP,
@@ -66,7 +72,7 @@ def make_user_event(
         event_id=FIXED_EVENT_ID,
         source=EventSource("slack"),
         user_id=SlackUserId(user_id),
-        raw={"id": user_id, "name": "testuser"},
+        raw={"id": user_id, "name": name},
     )
 
 

@@ -37,7 +37,9 @@ def test_fetch_channel_list_single_page() -> None:
     assert channels[0].channel_id == SlackChannelId("C123")
     assert channels[1].channel_id == SlackChannelId("C456")
     assert channels[0].source == "slack"
-    assert "event_id" in channels[0].model_dump()
+    # event_id should be a generated, non-empty 'evt-'-prefixed identifier (see make_event_id).
+    assert channels[0].event_id.startswith("evt-")
+    assert len(channels[0].event_id) > len("evt-")
 
 
 def test_fetch_channel_list_filters_non_member_channels_by_default() -> None:
