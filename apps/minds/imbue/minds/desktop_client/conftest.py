@@ -1,6 +1,9 @@
 import json
 import tempfile
 from collections.abc import Iterator
+from collections.abc import Mapping
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 
 import pytest
@@ -18,6 +21,8 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.primitives import ServiceName
+from imbue.mngr.api.discovery_events import DiscoveredProvider
+from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
@@ -119,15 +124,56 @@ def short_tmp_path() -> Iterator[Path]:
         yield Path(d)
 
 
-def make_agents_json(*agent_ids: AgentId, labels: dict[str, str] | None = None) -> str:
-    """Build a JSON string matching `mngr list --format json` output for the given agent IDs."""
-    effective_labels = labels if labels is not None else {"workspace": "true", "is_primary": "true"}
-    return json.dumps({"agents": [{"id": str(agent_id), "labels": effective_labels} for agent_id in agent_ids]})
+_FIXED_TEST_HOST_ID: str = "host-00000000000000000000000000000000"
+
+
+def make_agents_json(*agent_ids: AgentId, labels: dict[str, str] | None = None, host_name: str | None = None) -> str:
+    """Build a JSON string matching `mngr list --format json` output for the given agent IDs.
+
+    When ``host_name`` is given, each agent carries a ``host`` object with that
+    name so the resolver's ``host_name_by_host_id`` (the canonical host-name
+    source) is populated, mirroring real discovery output.
+    """
+    effective_labels = labels if labels is not None else {"is_primary": "true"}
+
+    def _agent(agent_id: AgentId) -> dict[str, object]:
+        entry: dict[str, object] = {"id": str(agent_id), "labels": effective_labels}
+        if host_name is not None:
+            entry["host"] = {"id": _FIXED_TEST_HOST_ID, "name": host_name}
+        return entry
+
+    return json.dumps({"agents": [_agent(agent_id) for agent_id in agent_ids]})
 
 
 def make_service_log(service: str, url: str) -> str:
     """Build a single JSONL line matching the services/events.jsonl format."""
     return json.dumps({"service": service, "url": url}) + "\n"
+
+
+def seed_provider_snapshots(
+    resolver: MngrCliBackendResolver,
+    providers: tuple[DiscoveredProvider, ...] = (),
+    error_by_provider_name: Mapping[ProviderInstanceName, DiscoveryError] | None = None,
+    last_snapshot_at: datetime | None = None,
+) -> None:
+    """Feed per-provider discovery snapshots into ``resolver`` via its per-provider merge API.
+
+    Convenience for tests that previously seeded provider state through the old
+    global ``update_providers`` in a single call: it fans the healthy providers
+    and the errored-provider entries into one ``update_providers`` call each,
+    every entry stamped with ``last_snapshot_at`` (defaulting to now). A real
+    provider snapshot carries either a constructed provider or an error, so the
+    two groups are kept distinct here.
+    """
+    snapshot_at = last_snapshot_at if last_snapshot_at is not None else datetime.now(timezone.utc)
+    for provider in providers:
+        resolver.update_providers(
+            provider_name=provider.provider_name, provider=provider, error=None, last_snapshot_at=snapshot_at
+        )
+    for provider_name, error in (error_by_provider_name or {}).items():
+        resolver.update_providers(
+            provider_name=provider_name, provider=None, error=error, last_snapshot_at=snapshot_at
+        )
 
 
 def make_resolver_with_data(
@@ -162,6 +208,7 @@ def make_resolver_with_data(
                 agent_ids=parsed.agent_ids,
                 discovered_agents=discovered,
                 ssh_info_by_agent_id=parsed.ssh_info_by_agent_id,
+                host_name_by_host_id=parsed.host_name_by_host_id,
             )
         )
 

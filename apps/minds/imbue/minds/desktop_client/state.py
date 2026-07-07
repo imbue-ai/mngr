@@ -30,6 +30,7 @@ from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
+from imbue.minds.desktop_client.help_modal_requests import HelpModalRequestBroker
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.latchkey.permission_requests_consumer import PermissionRequestsConsumer
 from imbue.minds.desktop_client.minds_config import MindsConfig
@@ -42,6 +43,7 @@ from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHe
 from imbue.minds.desktop_client.workspace_operations import InMemoryWorkspaceOperationRegistry
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationRegistryInterface
 from imbue.minds.primitives import OutputFormat
+from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 
@@ -79,6 +81,10 @@ class DesktopClientState(MutableModel):
     geo_location_cache: GeoLocationCache = Field(
         default_factory=GeoLocationCache, description="One-shot IP-geolocation cache for region defaults"
     )
+    help_modal_request_broker: HelpModalRequestBroker = Field(
+        default_factory=HelpModalRequestBroker,
+        description="Fans agent-initiated 'open the pre-filled help modal' requests out to chrome SSE connections",
+    )
     client_env_config: ClientEnvConfig | None = Field(
         default=None, frozen=True, description="Loaded per-env client config (connector URL, etc.)"
     )
@@ -112,6 +118,11 @@ class DesktopClientState(MutableModel):
         default=None, frozen=True, description="App-global discovery-pipeline health watchdog"
     )
     mngr_binary: str = Field(default="mngr", frozen=True, description="Path/name of the mngr binary to shell out to")
+    mngr_caller: MngrCaller | None = Field(
+        default=None,
+        frozen=True,
+        description="Warm-process mngr CLI caller for in-request invocations (get-help /assist); tests inject a fake",
+    )
     mngr_host_dir: Path = Field(
         default_factory=lambda: Path.home() / ".mngr", frozen=True, description="MNGR_HOST_DIR"
     )

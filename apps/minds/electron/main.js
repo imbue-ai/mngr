@@ -1,4 +1,4 @@
-const { BaseWindow, WebContentsView, Menu, Notification, clipboard, dialog, ipcMain, net, shell, app, session, screen } = require('electron');
+const { BaseWindow, WebContentsView, Menu, Notification, clipboard, dialog, ipcMain, net, shell, app, session, screen, nativeImage } = require('electron');
 const todesktop = require('@todesktop/runtime');
 const path = require('path');
 const fs = require('fs');
@@ -7,6 +7,7 @@ const { initSentry, captureManualReport, isLogInclusionEnabled } = require('./se
 const { runEnvSetup } = require('./env-setup');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
 const { decideStartupRoute } = require('./startup-routing');
+const { computeBundleViewBounds } = require('./view-layout');
 
 // Initialize Sentry as early as possible so errors thrown during main-process
 // startup (window creation, env setup, backend spawn) are captured. The SDK is
@@ -360,64 +361,49 @@ function updateBundleBounds(bundle) {
   if (!bundle || bundle.window.isDestroyed()) return;
   const { width, height } = bundle.window.getContentBounds();
 
+  // The per-view bounds math -- the takeover collapse, the error-state modal
+  // overlay (so the "Report a bug" /help modal is visible over the error
+  // screen), and the normal inset/accent layout -- lives in
+  // computeBundleViewBounds so it can be unit-tested under plain node. Apply
+  // each result only to the views that currently exist: in the takeover states
+  // the content/modal views are usually already torn down, and during a quit a
+  // present-but-hidden modal is sized to 0x0 (it stays setVisible(false)
+  // regardless). The chrome view fills the window in every regime; in the
+  // normal layout it paints the workspace accent in the inset frame + rounded
+  // corner cutouts the content view leaves, and the modal overlays the whole
+  // window (its own transparent dim backdrop shows the content behind it).
+  const bounds = computeBundleViewBounds({
+    isErrorState: bundle.isErrorState,
+    isLoadingState: bundle.isLoadingState,
+    isQuittingState: bundle.isQuittingState,
+    modalVisible: bundle.modalVisible,
+    width,
+    height,
+    titlebarHeight: TITLEBAR_HEIGHT,
+    contentInset: CONTENT_INSET,
+  });
+  // A takeover collapses the overlay view out from under any showing tooltip, so
+  // drop the flag that says the tooltip owns the view's bounds. Otherwise the
+  // modal-bounds gate below would keep skipping the full-window restore after
+  // recovery and leave the overlay surface stuck at 0x0.
   if (bundle.isErrorState || bundle.isLoadingState || bundle.isQuittingState) {
-    // The chrome view takes over the whole window; every other view collapses
-    // to zero so the takeover screen (shell.html) is the only thing visible.
-    // For loading/error the auxiliary views are already absent, so the loop is
-    // a no-op there; the quitting flip leaves them present-but-hidden, so this
-    // guarantees none of them peek out from behind the full-window chrome view.
-    if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
-      bundle.chromeView.setBounds({ x: 0, y: 0, width, height });
-    }
-    for (const view of [bundle.contentView, bundle.modalView]) {
-      if (view && !view.webContents.isDestroyed()) {
-        view.setBounds({ x: 0, y: 0, width: 0, height: 0 });
-      }
-    }
-    return;
+    bundle.tooltipVisible = false;
   }
-
   if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
-    // The chromeView covers the entire window. Its body background is
-    // ``var(--titlebar-bg)``, so wherever the contentView doesn't paint
-    // (the ``CONTENT_INSET``-wide frame around three sides and the
-    // rounded-corner cutouts at all four corners of the contentView),
-    // the chromeView fills in with the current workspace's accent
-    // color. This mirrors browser mode where the iframe sits inside a
-    // matching body inset that paints the same accent color.
-    bundle.chromeView.setBounds({ x: 0, y: 0, width, height });
+    bundle.chromeView.setBounds(bounds.chrome);
   }
   if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
-    // Inset the contentView by ``CONTENT_INSET`` on left, right, and
-    // bottom (top is flush with the titlebar's bottom edge). That gap
-    // plus ``setBorderRadius(CONTENT_CORNER_RADIUS)`` (applied in
-    // ``createBundleWebContentsViews``) together create the "tucks
-    // under a rounded inset frame" look without needing per-corner
-    // control: all four corners of the contentView are visibly rounded
-    // and the cutouts reveal accent color (the chromeView below),
-    // independent of whatever background the workspace content paints.
-    bundle.contentView.setBounds({
-      x: CONTENT_INSET,
-      y: TITLEBAR_HEIGHT,
-      width: width - CONTENT_INSET * 2,
-      height: height - TITLEBAR_HEIGHT - CONTENT_INSET,
-    });
+    bundle.contentView.setBounds(bounds.content);
   }
-  // The modal overlays the entire window (including the title bar) so
-  // the inbox drawer reads as a top-level panel rather than something
-  // nested under the chrome. On macOS the OS-level traffic-light
-  // buttons stay visible (they're floating overlays the system draws);
-  // the in-content window controls used on Windows/Linux are hidden
-  // while the modal is open and reappear on close. The view is
-  // transparent, so the dialog's own dim backdrop shows the workspace
-  // behind it.
   if (bundle.modalView && !bundle.modalView.webContents.isDestroyed()) {
-    bundle.modalView.setBounds({
-      x: 0,
-      y: 0,
-      width,
-      height,
-    });
+    // While a tooltip is showing (and no modal is open), the overlay manager
+    // owns the view's bounds (it's shrunk to the tooltip's rect); leave them so
+    // a resize doesn't snap it back to full-window. Tooltips dismiss on resize,
+    // which restores the full-window bounds. Otherwise apply the computed bounds
+    // (full window normally / when a modal is open, collapsed during a takeover).
+    if (!(bundle.tooltipVisible && !bundle.modalVisible)) {
+      bundle.modalView.setBounds(bounds.modal);
+    }
   }
 }
 
@@ -585,9 +571,25 @@ function createBundle() {
     modalView: null,
     modalVisible: false,
     modalUrl: null,
+    // The latest 'show-modal' overlay command, replayed on the overlay host's
+    // did-finish-load if it was issued before the host page finished loading.
+    pendingOverlayCommand: null,
+    // True while a hover tooltip is showing (overlay view shrunk to the tooltip
+    // rect). Gates updateBundleBounds so a resize doesn't clobber that rect with
+    // the full-window modal bounds.
+    tooltipVisible: false,
     inboxListReloadTimer: null,
     currentContentUrl: null,
     currentWorkspaceId: null,
+    // Whether the content view is currently displaying a REACHABLE workspace
+    // rather than the "Loading workspace" proxy loader. The mngr_forward proxy
+    // serves that loader (HTTP 503) at the workspace's own URL while the backend
+    // is still unreachable, so ``currentWorkspaceId`` alone can't tell a loaded
+    // workspace from one that's merely loading (or stopped). Tracked from the
+    // content view's ``did-navigate`` HTTP status and forwarded to the chrome so
+    // the get-help modal only offers "have an agent help" when the workspace can
+    // actually host a chat. False until a non-loader navigation confirms it.
+    contentWorkspaceReady: false,
     // ``currentAccentAgentId`` is the accent source of THIS window's current
     // screen -- the workspace id whose color tints the titlebar -- kept as a
     // tiny piece of per-window state only so the chrome renderer (a separate
@@ -626,6 +628,11 @@ function createBundle() {
   wireContentViewEvents(bundle, contentView);
   registerShortcutsFor(bundle, chromeView.webContents);
   registerShortcutsFor(bundle, contentView.webContents);
+  // The overlay view is created on top of chrome + content and loads the warm
+  // host page (when the backend is up). For the initial window the backend is
+  // not ready yet, so loadOverlayHost is a no-op here and the host is loaded
+  // once the backend comes up (see the startup-ready transition).
+  createBundleOverlayView(bundle);
   wireBundleShowLogic(bundle);
 
   return bundle;
@@ -641,14 +648,26 @@ function wireContentViewEvents(bundle, contentView) {
     }
   });
 
-  const onContentNavigate = (url) => {
+  const onContentNavigate = (url, httpResponseCode) => {
     if (!bundle.isErrorState) {
       bundle.currentContentUrl = url;
       bundle.preErrorUrl = url;
     }
     const newAgentId = parseWorkspaceId(url);
-    if (bundle.currentWorkspaceId !== newAgentId) {
+    // Recompute workspace reachability from the HTTP status. The mngr_forward
+    // proxy serves its "Loading workspace" loader as HTTP 503 at the workspace's
+    // own URL while the backend is unreachable, so a non-success status on a
+    // workspace URL means "still loading / not reachable" (a loaded workspace
+    // answers 200). Only a full navigation carries a status; ``did-navigate-in-page``
+    // (anchors, pushState) passes undefined, and since it doesn't reload the
+    // document we keep the prior readiness in that case.
+    let newContentReady = bundle.contentWorkspaceReady;
+    if (httpResponseCode !== undefined) {
+      newContentReady = !!newAgentId && httpResponseCode < 400;
+    }
+    if (bundle.currentWorkspaceId !== newAgentId || bundle.contentWorkspaceReady !== newContentReady) {
       bundle.currentWorkspaceId = newAgentId;
+      bundle.contentWorkspaceReady = newContentReady;
       sendCurrentWorkspaceToBundleViews(bundle);
     }
     // Tint the titlebar with the workspace's accent on any
@@ -668,17 +687,15 @@ function wireContentViewEvents(bundle, contentView) {
     if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
       bundle.chromeView.webContents.send('content-url-changed', url);
     }
-    // The sidebar (now hosted in the shared modalView) refreshes its
+    // The sidebar (hosted in an overlay iframe) refreshes its
     // "Manage account(s)" / "Log in" label on every content URL change so
     // a sign-in / sign-out performed in the workspace iframe propagates
-    // to the menu the next time the user opens it. Inbox doesn't subscribe
-    // to this channel so the send is a no-op when the modal is showing it.
-    if (bundle.modalView && !bundle.modalView.webContents.isDestroyed()) {
-      bundle.modalView.webContents.send('content-url-changed', url);
-    }
+    // to the menu the next time the user opens it. Sent per-frame so it
+    // reaches the iframe; inbox doesn't subscribe so it's a no-op there.
+    sendToOverlayFrames(bundle, 'content-url-changed', url);
   };
 
-  contentView.webContents.on('did-navigate', (_e, url) => onContentNavigate(url));
+  contentView.webContents.on('did-navigate', (_e, url, httpResponseCode) => onContentNavigate(url, httpResponseCode));
   contentView.webContents.on('did-navigate-in-page', (_e, url) => onContentNavigate(url));
 
   // Enforce workspace uniqueness at the Electron level so it applies to EVERY
@@ -816,10 +833,11 @@ function notifyOpenFailed(url) {
 
 // -- Sidebar helpers (per-bundle) --
 //
-// The sidebar is just the modal overlay loaded with /_chrome/sidebar -- it
-// shares ``modalView``, the same lazy-creation + transparent background +
-// Escape handling + ``modal-state-changed`` titlebar-drag suppression as
-// the inbox. There is no separate sidebar WebContentsView.
+// The sidebar is just the workspace menu hosted on the shared warm overlay
+// surface (``modalView``), loaded with /_chrome/sidebar -- it shares the same
+// transparent background + Escape handling + ``modal-state-changed``
+// titlebar-drag suppression as the inbox. There is no separate sidebar
+// WebContentsView.
 
 function sidebarUrlFor(anchor) {
   if (!backendBaseUrl) return null;
@@ -864,67 +882,185 @@ function toggleSidebar(bundle, anchor) {
   else openSidebar(bundle, anchor);
 }
 
-// -- Modal overlay (per-bundle) --
+// -- Overlay surface (per-bundle) --
 //
-// The modal is a full-content-area overlay that hosts the inbox modal and
-// any one-off dialog pages. It does not replace the user's workspace in
-// the content view -- the workspace stays visible behind the dialog's dim
-// backdrop. Created lazily and reused via setVisible(true/false). It uses
-// the default session (so it carries the auth cookie, like the chrome
-// view) plus the preload bridge, so the page inside can call
-// `window.minds.closeModal()`.
+// The overlay surface is a single always-warm WebContentsView (``modalView``)
+// that main loads ONCE with /_chrome/overlay at window creation and keeps
+// mounted for the window's life. Every overlay -- the workspace menu, inbox,
+// help, and sign-in modals -- is hosted there as a mount-on-demand iframe
+// (created when opened, destroyed when closed) driven over IPC, so the surface
+// stays warm without loading a fresh page into this view on every open. The
+// hosted pages are first-party and same-origin, so ``nodeIntegrationInSubFrames`` runs
+// the preload in each iframe and exposes the same ``window.minds`` bridge their
+// existing code already calls; navigation is locked to the backend origin (see
+// createBundleOverlayView) so no foreign page can ever inherit that bridge.
+//
+// Electron 40 has no per-view click-through, so while a modal is open the view
+// is shown full-window and captures pointer events exactly as the old modal
+// overlay did. The view is hidden (and so captures nothing) whenever no overlay
+// is open. The dynamic-bounds path that tooltips use lands separately.
 
-function openModal(bundle, url) {
-  if (!bundle || bundle.window.isDestroyed() || !url) return;
-  if (!bundle.modalView) {
-    const modal = new WebContentsView({
-      webPreferences: {
-        preload: path.join(__dirname, 'preload.js'),
-        contextIsolation: true,
-        nodeIntegration: false,
-      },
-    });
-    // Transparent background so the dialog's own dim backdrop reveals the
-    // workspace underneath instead of an opaque rectangle.
-    modal.setBackgroundColor('#00000000');
-    bundle.modalView = modal;
-    bundle.window.contentView.addChildView(modal);
-    registerShortcutsFor(bundle, modal.webContents);
-    // Escape closes the modal even if the page's own key handling fails.
-    modal.webContents.on('before-input-event', (event, input) => {
-      if (input.type === 'keyDown' && input.key === 'Escape') {
-        event.preventDefault();
-        closeModal(bundle);
+function overlayIdForUrl(url) {
+  let pathname;
+  try {
+    pathname = new URL(url).pathname;
+  } catch {
+    return null;
+  }
+  if (pathname === '/_chrome/sidebar') return 'sidebar';
+  if (pathname === '/inbox') return 'inbox';
+  if (pathname === '/help') return 'help';
+  if (pathname === '/auth/signin-modal') return 'signin';
+  return null;
+}
+
+// Push an IPC payload to EVERY frame of the overlay view (the host page plus
+// each hosted modal iframe). ``webContents.send`` reaches only the top frame, so
+// per-frame ``frame.send`` is required to deliver chrome-events / current-
+// workspace / priming into the iframes where the sidebar and inbox actually run.
+function sendToOverlayFrames(bundle, channel, payload) {
+  const view = bundle && bundle.modalView;
+  if (!view || view.webContents.isDestroyed()) return;
+  let frames;
+  try {
+    frames = view.webContents.mainFrame.framesInSubtree;
+  } catch {
+    return;
+  }
+  for (const frame of frames) {
+    try {
+      frame.send(channel, payload);
+    } catch { /* noop */ }
+  }
+}
+
+function loadOverlayHost(bundle) {
+  if (!bundle || !bundle.modalView || !backendBaseUrl) return;
+  if (bundle.modalView.webContents.isDestroyed()) return;
+  bundle.modalView.webContents.loadURL(backendBaseUrl + '/_chrome/overlay').catch(() => {});
+}
+
+// Tell the overlay host which overlay to show/hide. The command is sent
+// immediately AND stashed so the host's did-finish-load can replay the latest
+// one: Electron drops IPC with no listener, so a command issued before the host
+// page finished loading would otherwise be lost (the same replay-on-load pattern
+// primeViewWithCachedChromeState uses for the chrome view).
+function sendOverlayCommand(bundle, cmd) {
+  if (!bundle || !bundle.modalView || bundle.modalView.webContents.isDestroyed()) return;
+  bundle.pendingOverlayCommand = cmd.type === 'hide-all' ? null : cmd;
+  try {
+    bundle.modalView.webContents.send('overlay-command', cmd);
+  } catch { /* noop */ }
+}
+
+// Replay the cached chrome state into the overlay's iframes. The hosted sidebar
+// renders its workspace list from the SSE-driven ``workspaces`` event and the
+// inbox keys off ``requests``; an iframe that just (re)loaded must be handed the
+// current state immediately rather than waiting for the next SSE push. Mirrors
+// primeViewWithCachedChromeState, but fans out per-frame (see sendToOverlayFrames).
+function primeOverlayFrames(bundle) {
+  if (latestChromeState.workspaces !== null) {
+    sendToOverlayFrames(bundle, 'chrome-event', { type: 'workspaces', workspaces: latestChromeState.workspaces });
+  }
+  if (latestChromeState.authStatus) {
+    sendToOverlayFrames(bundle, 'chrome-event', latestChromeState.authStatus);
+  }
+  sendToOverlayFrames(bundle, 'chrome-event', {
+    type: 'requests',
+    count: latestChromeState.requestCount,
+    request_ids: latestChromeState.requestIds,
+  });
+  for (const [agentId, status] of systemInterfaceStatusByAgent) {
+    if (!status || status === 'healthy') continue;
+    sendToOverlayFrames(bundle, 'chrome-event', { type: 'system_interface_status', agent_id: agentId, status });
+  }
+  sendToOverlayFrames(bundle, 'current-workspace-changed', bundle.currentWorkspaceId);
+}
+
+// Create the per-bundle overlay view and load the warm host page. Called once
+// from createBundle; the view persists (hidden) until an overlay is opened.
+function createBundleOverlayView(bundle) {
+  const modal = new WebContentsView({
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      // The hosted modals run as same-origin iframes inside the host page; this
+      // runs the preload in each so their existing window.minds.*() calls and
+      // onChromeEvent subscriptions work unchanged. Safe because the only frames
+      // here are first-party pages from our own backend, and the navigation
+      // guards below keep it that way.
+      nodeIntegrationInSubFrames: true,
+    },
+  });
+  // Transparent so each hosted overlay's own dim backdrop reveals the workspace
+  // behind it instead of an opaque rectangle.
+  modal.setBackgroundColor('#00000000');
+  // Hidden until an overlay is opened: a full-window view would otherwise
+  // capture every pointer event over the window (Electron has no per-view
+  // click-through), so it must not be visible while idle.
+  modal.setVisible(false);
+  bundle.modalView = modal;
+  bundle.window.contentView.addChildView(modal);
+  registerShortcutsFor(bundle, modal.webContents);
+  // Escape closes the open overlay even if a hosted page's own key handling
+  // fails -- the same main-process backstop the modal overlay had before.
+  modal.webContents.on('before-input-event', (event, input) => {
+    if (input.type === 'keyDown' && input.key === 'Escape') {
+      event.preventDefault();
+      closeModal(bundle);
+    }
+  });
+  // Lock the overlay view to the backend origin. ``nodeIntegrationInSubFrames``
+  // hands the window.minds bridge to every frame here, so a foreign page must
+  // never be allowed to load in this view or any of its iframes.
+  const isAllowedOverlayUrl = (url) =>
+    url === 'about:blank' || (backendBaseUrl && url.startsWith(backendBaseUrl));
+  modal.webContents.on('will-navigate', (event, url) => {
+    if (!isAllowedOverlayUrl(url)) event.preventDefault();
+  });
+  modal.webContents.on('will-frame-navigate', (event) => {
+    if (!isAllowedOverlayUrl(event.url)) event.preventDefault();
+  });
+  modal.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  // Replay the latest show command once the host page is ready, in case an
+  // overlay was opened before the host finished loading (Electron drops
+  // listener-less IPC). Hosted iframes are primed when they signal
+  // overlay-modal-loaded, not here.
+  modal.webContents.on('did-finish-load', () => {
+    if (modal.webContents.isDestroyed()) return;
+    if (modal.webContents.getURL() === 'about:blank') return;
+    if (bundle.pendingOverlayCommand) {
+      try {
+        modal.webContents.send('overlay-command', bundle.pendingOverlayCommand);
+      } catch { /* noop */ }
+    }
+  });
+  // Auto-open DevTools for dev-time inspection, matching the content view; gated
+  // on the same env var so a single switch covers all surfaces.
+  if (process.env.MINDS_OPEN_DEVTOOLS === '1') {
+    modal.webContents.once('did-finish-load', () => {
+      if (!modal.webContents.isDestroyed()) {
+        modal.webContents.openDevTools({ mode: 'detach' });
       }
     });
-    // Each new URL load (sidebar, inbox, ...) gets the cached chrome state
-    // and the current workspace id pushed before it can fall behind. The
-    // inbox renders its initial list server-side, but the sidebar reuses
-    // the SSE-driven ``workspaces`` event for first paint, so without this
-    // prime an existing workspace list would only appear after the next SSE
-    // push arrives.
-    modal.webContents.on('did-finish-load', () => {
-      if (modal.webContents.isDestroyed()) return;
-      if (modal.webContents.getURL() === 'about:blank') return;
-      sendCurrentWorkspaceToBundleViews(bundle);
-      primeViewWithCachedChromeState(bundle, modal.webContents);
-    });
-    // Auto-open DevTools for dev-time inspection. Matches the
-    // contentView behavior in createBundleWebContentsViews; gated on
-    // the same env var so a single switch covers both surfaces.
-    if (process.env.MINDS_OPEN_DEVTOOLS === '1') {
-      modal.webContents.once('did-finish-load', () => {
-        if (!modal.webContents.isDestroyed()) {
-          modal.webContents.openDevTools({ mode: 'detach' });
-        }
-      });
-    }
-  } else {
-    // Re-add to the parent to raise to the top of z-order, then make visible.
-    bundle.window.contentView.removeChildView(bundle.modalView);
-    bundle.window.contentView.addChildView(bundle.modalView);
-    bundle.modalView.setVisible(true);
   }
+  loadOverlayHost(bundle);
+  // Give the view its full-window bounds now (it stays hidden) so the overlay
+  // host has a real viewport to measure tooltips against before the first show.
+  updateBundleBounds(bundle);
+}
+
+function openModal(bundle, url) {
+  if (!bundle || bundle.window.isDestroyed() || !url || !bundle.modalView) return;
+  const id = overlayIdForUrl(url);
+  if (!id) return;
+  if (bundle.modalView.webContents.isDestroyed()) return;
+  // Raise the warm overlay view to the top of z-order and show it (full-window;
+  // it captures pointer events, as the modal overlay did before the migration).
+  bundle.window.contentView.removeChildView(bundle.modalView);
+  bundle.window.contentView.addChildView(bundle.modalView);
+  bundle.modalView.setVisible(true);
   bundle.modalVisible = true;
   bundle.modalUrl = url;
   // Notify the chrome view that the modal is open so it can drop the
@@ -937,9 +1073,7 @@ function openModal(bundle, url) {
       bundle.chromeView.webContents.send('modal-state-changed', { open: true });
     } catch { /* noop */ }
   }
-  if (!bundle.modalView.webContents.isDestroyed()) {
-    bundle.modalView.webContents.loadURL(url);
-  }
+  sendOverlayCommand(bundle, { type: 'show-modal', id, url });
   updateBundleBounds(bundle);
 }
 
@@ -955,11 +1089,9 @@ function closeModal(bundle) {
       bundle.chromeView.webContents.send('modal-state-changed', { open: false });
     } catch { /* noop */ }
   }
-  // Drop the page so its websockets/timers stop and a stale dialog isn't
-  // briefly visible the next time the modal opens.
-  if (!bundle.modalView.webContents.isDestroyed()) {
-    bundle.modalView.webContents.loadURL('about:blank').catch(() => {});
-  }
+  // Tell the warm overlay host to hide its overlays. The host page itself stays
+  // loaded (warm) so the next open is instant; only the hosted iframes hide.
+  sendOverlayCommand(bundle, { type: 'hide-all' });
   if (bundle.inboxListReloadTimer) {
     clearTimeout(bundle.inboxListReloadTimer);
     bundle.inboxListReloadTimer = null;
@@ -1016,10 +1148,24 @@ function toggleInbox(bundle) {
 // currently-displayed workspace, or falsy on a general screen) is forwarded as a
 // ?workspace= query so the help page can scope its bug report to that workspace.
 
-function helpUrlFor(agentId) {
+function helpUrlFor(agentId, description, assistAvailable) {
   if (!backendBaseUrl) return null;
-  const query = agentId ? '?workspace=' + encodeURIComponent(agentId) : '';
-  return backendBaseUrl + '/help' + query;
+  const params = new URLSearchParams();
+  if (agentId) params.set('workspace', agentId);
+  // ``assist=1`` enables the "have an agent help" option; the titlebar sets it only when the
+  // displayed workspace is healthy (chrome.js), so it stays off for the recovery / agent-escalation
+  // open-help paths that don't pass it. The workspace id is still sent for report scoping.
+  if (assistAvailable) params.set('assist', '1');
+  // A description is only ever passed by the open_help (agent-escalation) flow; the
+  // titlebar button opens /help with none. So a present description marks this as an
+  // agent-submitted report, which the /help page frames differently (agent wording,
+  // no mode choice).
+  if (description) {
+    params.set('description', description);
+    params.set('agent_report', '1');
+  }
+  const query = params.toString();
+  return backendBaseUrl + '/help' + (query ? '?' + query : '');
 }
 
 function isHelpModalOpen(bundle) {
@@ -1032,17 +1178,17 @@ function isHelpModalOpen(bundle) {
   }
 }
 
-function openHelp(bundle, agentId) {
+function openHelp(bundle, agentId, description, assistAvailable) {
   if (!bundle || bundle.window.isDestroyed()) return;
-  const url = helpUrlFor(agentId);
+  const url = helpUrlFor(agentId, description, assistAvailable);
   if (!url) return;
   openModal(bundle, url);
 }
 
-function toggleHelp(bundle, agentId) {
+function toggleHelp(bundle, agentId, assistAvailable) {
   if (!bundle || bundle.window.isDestroyed()) return;
   if (isHelpModalOpen(bundle)) closeModal(bundle);
-  else openHelp(bundle, agentId);
+  else openHelp(bundle, agentId, undefined, assistAvailable);
 }
 
 // Coalesce rapid SSE-triggered chrome-event posts so the inbox shell
@@ -1059,9 +1205,8 @@ function scheduleInboxListRefresh(bundle, evt) {
     if (!bundle || bundle.window.isDestroyed()) return;
     if (!bundle.modalView || !bundle.modalVisible) return;
     if (bundle.modalView.webContents.isDestroyed()) return;
-    try {
-      bundle.modalView.webContents.send('chrome-event', evt);
-    } catch { /* noop */ }
+    // Per-frame so the event reaches the inbox iframe, not just the host frame.
+    sendToOverlayFrames(bundle, 'chrome-event', evt);
   }, INBOX_LIST_REFRESH_DEBOUNCE_MS);
 }
 
@@ -1074,10 +1219,11 @@ function sendCurrentWorkspaceToBundleViews(bundle) {
   // ``accent-changed`` channel (``updateBundleAccentAgentId``), set by the
   // navigation handlers off ``parseAccentSourceAgentId(url)`` and re-primed
   // when the chrome view (re)loads.
-  for (const view of [bundle.chromeView, bundle.modalView]) {
-    if (!view || view.webContents.isDestroyed()) continue;
-    view.webContents.send('current-workspace-changed', bundle.currentWorkspaceId);
+  if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
+    bundle.chromeView.webContents.send('current-workspace-changed', bundle.currentWorkspaceId, bundle.contentWorkspaceReady);
   }
+  // The sidebar/inbox run in overlay iframes, so fan out per-frame.
+  sendToOverlayFrames(bundle, 'current-workspace-changed', bundle.currentWorkspaceId);
 }
 
 // -- Window opening / focusing --
@@ -1094,6 +1240,11 @@ function loadUrlIntoBundleContentView(bundle, url) {
   const intendedAgentId = parseWorkspaceId(url);
   if (intendedAgentId) {
     bundle.currentWorkspaceId = intendedAgentId;
+    // We're only starting the navigation; the workspace isn't confirmed
+    // reachable until ``did-navigate`` lands a non-loader status, so clear
+    // readiness now to avoid a stale "reachable" carrying over from the
+    // previously-displayed workspace during the load.
+    bundle.contentWorkspaceReady = false;
     bundle.currentContentUrl = url;
     bundle.preErrorUrl = url;
     updateOsTitle(bundle);
@@ -1636,6 +1787,19 @@ function handleChromeSSEEvent(evt) {
         }
       }
     }
+  } else if (evt.type === 'open_help') {
+    // An in-workspace ``/assist`` agent asked the app to open the report-a-bug
+    // modal pre-filled with its diagnosis (the /api/v1 report route). Surface it
+    // in the window currently showing that workspace; if no window is showing it,
+    // fall back to the most-recent window so the report isn't silently lost. Leave
+    // an already-open modal alone (matching the requests auto-open), so we never
+    // yank a menu the user has up.
+    const description = typeof evt.description === 'string' ? evt.description : '';
+    const wsId = evt.workspace_agent_id ? String(evt.workspace_agent_id) : '';
+    const target = (wsId && findBundleForWorkspace(wsId)) || getMostRecentWindow();
+    if (target && !target.modalVisible) {
+      openHelp(target, wsId, description);
+    }
   } else if (evt.type === 'discovery_health') {
     // App-global discovery-pipeline health. Only the terminal `blocked` state is
     // ever sent (the reconnecting tier heals silently in the background, retrying
@@ -1663,16 +1827,16 @@ function handleChromeSSEEvent(evt) {
 function broadcastChromeEvent(evt) {
   for (const b of bundles) {
     if (b.window.isDestroyed()) continue;
-    // Push to the chrome titlebar and to any open modal (sidebar, inbox).
+    // Push to the chrome titlebar and to the overlay's iframes (sidebar, inbox).
     // The inbox shell uses these events too (e.g. ``requests`` count); the
-    // sidebar uses ``workspaces`` / ``auth_status`` to render its list.
-    for (const view of [b.chromeView, b.modalView]) {
-      if (!view) continue;
-      if (view.webContents.isDestroyed()) continue;
+    // sidebar uses ``workspaces`` / ``auth_status`` to render its list. The
+    // overlay's hosted pages live in iframes, so fan out per-frame.
+    if (b.chromeView && !b.chromeView.webContents.isDestroyed()) {
       try {
-        view.webContents.send('chrome-event', evt);
+        b.chromeView.webContents.send('chrome-event', evt);
       } catch { /* noop */ }
     }
+    sendToOverlayFrames(b, 'chrome-event', evt);
   }
 }
 
@@ -2364,6 +2528,7 @@ async function onReady() {
   });
   installApplicationMenu();
   installDockMenu();
+  installDevDockIcon();
   setupContentPartitionCookieSync();
   await syncContentCookiesToDefaultSession();
 
@@ -2534,6 +2699,18 @@ function installDockMenu() {
   ]));
 }
 
+// In dev (unpackaged) runs the macOS dock shows the generic Electron icon,
+// which is indistinguishable from any other Electron app and from a packaged
+// Minds. Override it with the "dev"-labeled variant so a running dev build is
+// obvious in the dock. Packaged builds get their icon from the bundled .icns
+// (see todesktop.js) and must not be overridden here. BrowserWindow's `icon`
+// option is ignored for the macOS dock, so app.dock.setIcon is the only path.
+function installDevDockIcon() {
+  if (app.isPackaged || !isMac || !app.dock) return;
+  const devIcon = nativeImage.createFromPath(path.join(__dirname, 'assets', 'icon-dev.png'));
+  if (!devIcon.isEmpty()) app.dock.setIcon(devIcon);
+}
+
 async function runStartupSequence(bundle) {
   console.log('[startup] Loading shell.html in chrome view...');
   bundle.isLoadingState = true;
@@ -2676,6 +2853,9 @@ async function startBackendWithRetry() {
       if (initialBundle.chromeView && !initialBundle.chromeView.webContents.isDestroyed()) {
         initialBundle.chromeView.webContents.loadURL(backendBaseUrl + '/_chrome');
       }
+      // The initial window's overlay view was created before the backend was
+      // up, so load its warm host page now that ``backendBaseUrl`` is known.
+      loadOverlayHost(initialBundle);
 
       // Decide the cold-start landing screen. The precedence (welcome > create
       // > restore) lives in the pure ``decideStartupRoute`` helper so it can be
@@ -2901,8 +3081,8 @@ ipcMain.on('toggle-inbox', (event) => {
   toggleInbox(getBundleFromEvent(event));
 });
 
-ipcMain.on('toggle-help', (event, agentId) => {
-  toggleHelp(getBundleFromEvent(event), agentId);
+ipcMain.on('toggle-help', (event, agentId, assistAvailable) => {
+  toggleHelp(getBundleFromEvent(event), agentId, assistAvailable);
 });
 
 // One-shot bug report from the full-app error takeover (shell.html), used when the
@@ -2990,6 +3170,90 @@ ipcMain.on('open-signin-modal', (event) => {
 
 ipcMain.on('close-modal', (event) => {
   closeModal(getBundleFromEvent(event));
+});
+
+// The overlay host fires this once a hosted modal iframe (workspace menu /
+// inbox / ...) has loaded and registered its window.minds listeners. We replay
+// the cached chrome state into the overlay's frames so the just-loaded iframe
+// paints its workspace list / request count immediately instead of waiting for
+// the next SSE push. (Pre-migration, this priming happened on the modal view's
+// own did-finish-load; now each hosted iframe signals when it's ready.)
+ipcMain.on('overlay-modal-loaded', (event) => {
+  const bundle = getBundleFromEvent(event);
+  if (bundle) primeOverlayFrames(bundle);
+});
+
+// Custom tooltip: a trigger (a titlebar button in the chrome view, or an element
+// in a hosted modal page like the help dialog) sends its rect + label; forward
+// it to the overlay host to render. When NO modal is open the host measures the
+// bubble and reports a small rect so the overlay view shrinks to it (the rest of
+// the window stays interactive). When a modal IS open the overlay view is already
+// full-window and capturing, so ``inModal`` tells the host to render the bubble
+// in-page above the modal iframe (above everything via z-index) without a bounds
+// change. Titlebar tooltips can't fire while a modal is open (the modal covers
+// the titlebar), so this only enables modal-internal tooltips.
+ipcMain.on('show-tooltip', (event, payload) => {
+  const bundle = getBundleFromEvent(event);
+  if (!bundle || !bundle.modalView || bundle.modalView.webContents.isDestroyed()) return;
+  if (!payload || typeof payload !== 'object' || !payload.rect) return;
+  // Pass the real window size: the overlay host can't trust its own
+  // window.innerWidth for measuring/positioning, because between tooltips the
+  // view is hidden and a hidden WebContentsView doesn't update innerWidth when
+  // main resizes it -- so it can be stale (a previous tooltip's small rect).
+  const cb = bundle.window.getContentBounds();
+  try {
+    bundle.modalView.webContents.send('overlay-command', {
+      type: 'show-tooltip',
+      rect: payload.rect,
+      text: typeof payload.text === 'string' ? payload.text : '',
+      shortcut: typeof payload.shortcut === 'string' ? payload.shortcut : '',
+      html: typeof payload.html === 'string' ? payload.html : null,
+      windowWidth: cb.width,
+      windowHeight: cb.height,
+      inModal: !!bundle.modalVisible,
+    });
+  } catch { /* noop */ }
+});
+
+ipcMain.on('hide-tooltip', (event) => {
+  const bundle = getBundleFromEvent(event);
+  if (!bundle || !bundle.modalView || bundle.modalView.webContents.isDestroyed()) return;
+  try {
+    bundle.modalView.webContents.send('overlay-command', { type: 'hide-tooltip' });
+  } catch { /* noop */ }
+});
+
+// The overlay host reports the overlay view's required bounds (it is the only
+// authority on its size, since Electron 40 has no per-view click-through). A
+// tooltip reports a small rect so the rest of the window stays interactive;
+// 'hidden' restores the full-window (hidden) bounds so the next tooltip can be
+// measured. Modals are full-window and own their own visibility, so tooltip
+// bounds are ignored while a modal is open.
+ipcMain.on('overlay-set-bounds', (event, spec) => {
+  const bundle = getBundleFromEvent(event);
+  if (!bundle || !bundle.modalView || bundle.modalView.webContents.isDestroyed()) return;
+  if (!spec || typeof spec !== 'object') return;
+  if (bundle.modalVisible) return;
+  if (spec.mode === 'rect' && spec.rect) {
+    const r = spec.rect;
+    bundle.tooltipVisible = true;
+    // Raise above the content view (it may have been re-added on a crash
+    // rebuild) and size to the tooltip's rect.
+    bundle.window.contentView.removeChildView(bundle.modalView);
+    bundle.window.contentView.addChildView(bundle.modalView);
+    bundle.modalView.setBounds({
+      x: Math.round(r.x),
+      y: Math.round(r.y),
+      width: Math.max(1, Math.round(r.width)),
+      height: Math.max(1, Math.round(r.height)),
+    });
+    bundle.modalView.setVisible(true);
+  } else {
+    bundle.tooltipVisible = false;
+    bundle.modalView.setVisible(false);
+    // Restore the full-window (hidden) bounds for the next measurement.
+    updateBundleBounds(bundle);
+  }
 });
 
 // Settings-page color picker: optimistic chrome-titlebar paint for the

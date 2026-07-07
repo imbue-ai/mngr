@@ -189,12 +189,15 @@ class BaseHost(HostInterface):
         """
         return validate_and_create_discovered_agent(agent_data, self.id, self.provider_instance.name)
 
-    def discover_agents(self) -> list[DiscoveredAgent]:
+    def discover_agents(self, timeout_seconds: float | None = None) -> list[DiscoveredAgent]:
         """Return a list of all agent references for this host.
 
         For offline hosts, get agent information from the provider's persisted data.
         The full agent data.json contents are included as certified_data.
         Malformed agent records are skipped with a log.
+
+        ``timeout_seconds`` is accepted for interface compatibility but ignored:
+        offline discovery reads the provider's persisted records, not the host.
         """
         agent_records = self.provider_instance.list_persisted_agent_data_for_host(self.id)
 

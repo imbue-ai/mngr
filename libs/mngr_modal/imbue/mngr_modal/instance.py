@@ -55,6 +55,7 @@ from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.cleanup_failures import collect_cleanup_failures
 from imbue.mngr.interfaces.cleanup_failures import collecting_cleanup_failures
 from imbue.mngr.interfaces.data_types import AgentDetails
+from imbue.mngr.interfaces.data_types import BoundedProviderDiscoveryResult
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import CleanupFailureCategory
@@ -69,6 +70,9 @@ from imbue.mngr.interfaces.data_types import SnapshotRecord
 from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.provider_instance import HostDiscoveryReadRegistry
+from imbue.mngr.interfaces.provider_instance import bounded_result_from_agents_by_host
+from imbue.mngr.interfaces.provider_instance import collect_cached_host_ssh_infos
 from imbue.mngr.interfaces.volume import HostVolume
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
@@ -2471,6 +2475,28 @@ log "=== Shutdown script completed ==="
 
             logger.debug("Found {} running host ID(s) for app={}", len(running_host_ids), self.app_name)
             return running_host_ids
+
+    @handle_modal_auth_error
+    def discover_hosts_and_agents_within_timeouts(
+        self,
+        cg: ConcurrencyGroup,
+        host_discovery_timeout_seconds: float,
+        agent_discovery_timeout_seconds: float,
+        include_destroyed: bool = False,
+        registry: HostDiscoveryReadRegistry | None = None,
+    ) -> BoundedProviderDiscoveryResult:
+        """Delegate to the batch discovery path; bounded only by the provider-level error timeout.
+
+        Modal reads all host/agent state from the state volume in one batched pass,
+        so individual host reads cannot be bounded; nothing is marked UNKNOWN here.
+        ``registry`` is accepted for interface compatibility but unused: this path
+        spawns no per-host reads to de-duplicate across polls.
+        """
+        agents_by_host = self.discover_hosts_and_agents(cg=cg, include_destroyed=include_destroyed)
+        # Surface each running host's SSH endpoint (read from the host object the batch discovery
+        # just cached) so the streaming poller re-emits it as HOST_SSH_INFO for tunneling consumers.
+        host_ssh_infos = collect_cached_host_ssh_infos(self, agents_by_host.keys())
+        return bounded_result_from_agents_by_host(agents_by_host, host_ssh_infos=host_ssh_infos)
 
     @handle_modal_auth_error
     def discover_hosts_and_agents(

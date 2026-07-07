@@ -258,7 +258,11 @@ minds-test-deployment-only *tests:
 # the gitignored stylesheet. The test lives in the snapshot-resume suite (it
 # runs in CI in the snapshot offload stage, reusing that image's warm Electron
 # toolchain) but creates its own fresh workspace, so it runs fine locally too.
+# The test itself only consumes the FCT worktree (erroring if absent), so this
+# recipe first materializes it (paired FCT branch + vendored mngr) unless an
+# operator worktree is already present, mirroring the CI snapshot bake.
 minds-test-electron *args: minds-css
+  uv run python -c 'from imbue.minds.desktop_client.fct_worktree import materialize_paired_fct_worktree; materialize_paired_fct_worktree()'
   xvfb-run -a uv run pytest apps/minds/test_snapshot_resume.py::test_create_apikey_workspace_and_chat_via_electron -v --no-cov --cov-fail-under=0 {{args}}
 
 # Drive the FULL Electron workspace lifecycle end-to-end (create local Docker
@@ -931,18 +935,16 @@ create-new-mind-repo repo_name parent_dir="$HOME/project":
 # DSN from their per-env secrets.toml. Activate a minds env first:
 #   eval "$(uv run minds env activate <name>)"
 #
-# Pool hosts are baked as bare-metal SLICES (recipes below). Baking new OVH
-# classic VPS pool hosts is DEPRECATED and no longer supported; existing OVH VPS
-# rows can still be listed (`just list-pool-hosts`) and destroyed
-# (`just destroy-pool-host`).
+# Pool hosts are baked as bare-metal SLICES (recipes below). List them with
+# `just list-pool-hosts` and remove them with `just destroy-pool-host`.
 
 # === minds bare-metal SLICES (carved on a pre-registered bare-metal box) ===
 #
 # These bake "slices": lima/QEMU VMs carved on a bare-metal box you already
 # ordered, `mngr imbue_cloud admin server register`ed, and `... prep`ped
-# (status `ready`). They are thin wrappers over `minds pool create --backend
-# slice` (the default), which resolves the tier's pool key (+ host_pool DSN for
-# shared tiers) from Vault automatically.
+# (status `ready`). They are thin wrappers over `minds pool create`, which
+# resolves the tier's pool key (+ host_pool DSN for shared tiers) from Vault
+# automatically.
 #
 # Prereqs: activate a minds env first (`eval "$(uv run minds env activate <name>)"`)
 # AND `vault login -method=oidc` (the wrapper's Vault reads need a live token).
@@ -955,7 +957,6 @@ create-new-mind-repo repo_name parent_dir="$HOME/project":
 # Dev slice bake from a working tree (identity = its origin remote + current branch).
 bake-slice-dev region workspace_dir="$HOME/project/forever-claude-template" count="1" *extra_args:
     uv run minds pool create \
-        --backend slice \
         --count "{{count}}" \
         --region "{{region}}" \
         --workspace-dir "{{workspace_dir}}" \
@@ -967,7 +968,6 @@ bake-slice-dev region workspace_dir="$HOME/project/forever-claude-template" coun
 # per-slice sizing without baking.
 bake-slice-prod region tag count="1" *extra_args:
     uv run minds pool create \
-        --backend slice \
         --count "{{count}}" \
         --region "{{region}}" \
         --from-tag "{{tag}}" \
@@ -998,19 +998,16 @@ list-pool-hosts:
 backfill-pool-host-keys:
     uv run minds pool backfill-host-keys
 
-# Destroy a single pool host: tear down its underlying machine, then drop its
-# pool_hosts row. The teardown mirrors the row's backend -- cancel the OVH VPS for
-# an ovh_vps row, or destroy the lima VM (freeing the box slot) for a slice row.
-# Find the id with `just list-pool-hosts`. Extra flags forward to `minds pool
-# destroy` (e.g. --force to drop a non-released row, --skip-vps-cancel if the
-# underlying machine is already gone).
+# Destroy a single pool host: destroy its slice lima VM (freeing the box slot),
+# then drop its pool_hosts row. Find the id with `just list-pool-hosts`. Extra
+# flags forward to `minds pool destroy` (e.g. --force to drop a non-released row,
+# --skip-vps-cancel if the slice VM is already gone).
 #
 #   just destroy-pool-host <pool-host-id>
 #
-# Note: the steady-state teardown is automatic -- the connector releases a host
-# when its lease ends and an hourly Modal cron (`cleanup_removing_pool_hosts`)
-# sweeps any stragglers; `minds env destroy` removes every VPS for a whole tier.
-# This recipe is the manual single-host escape hatch.
+# Note: the steady-state teardown is automatic -- the connector destroys a host's
+# slice VM when its lease ends. `minds env destroy` tears down a whole env's
+# unleased slices. This recipe is the manual single-host escape hatch.
 destroy-pool-host pool_host_id *extra_args:
     uv run minds pool destroy "{{pool_host_id}}" {{extra_args}}
 

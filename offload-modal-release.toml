@@ -57,7 +57,7 @@ run_args = "--no-cov -p no:xdist --timeout=900 -o addopts="
 [groups.all]
 retry_count = 4
 # Exclude docker/docker_sdk release tests -- those run in the dedicated
-# `test-docker-release` CI job on a GitHub runner with a real Docker daemon,
+# `test-mngr-release-docker` CI job on a GitHub runner with a real Docker daemon,
 # since Docker-in-Docker under gVisor is too flaky (dockerd startup races,
 # intermittent container networking). Non-docker release tests run here.
 filters = "-m 'release and not docker and not docker_sdk and not minds_deployment and not minds_services and not minds_snapshot_resume'"
