@@ -235,6 +235,24 @@ use different backends), so we place checks at these points:
    re-verifies and continues, or raises `LockLostError`. This catches the common
    case at the first post-drop operation, before it runs.
 
+   **Preserve a live transport while locked.** Reconnection today is *not* limited
+   to genuine connection failure. The retry primitives already distinguish
+   channel-level from transport-level errors -- `ChannelException` ("channel open
+   refused", e.g. server `MaxSessions`) and `SSHException` containing "Channel
+   closed" are retried *without* disconnecting, because the transport is still
+   alive. But one case, pyinfra's read `TimeoutError`, currently forces a
+   `disconnect()` even though (per its own comment) "the connection may still
+   appear open." Tearing down a live transport also tears down the live lock
+   channel, needlessly releasing a lock we validly hold and opening an avoidable
+   window for another actor. Therefore, **while `_active_lock` is set, a retry
+   primitive must not `disconnect()` a still-active transport**: check
+   `transport.is_active()` first, and on a channel-level or timeout error with a
+   live transport, retry the operation on the *same* transport (leaving the lock
+   channel intact). Only a confirmed-dead transport (`not transport.is_active()`,
+   or a transport-level `SSHException`/`EOFError`/socket-closed `OSError`) should
+   trigger the reconnect-and-re-acquire path above. The counter still keeps us
+   *safe* if a disconnect does happen; this rule avoids the *unnecessary* loss.
+
    **Re-entrancy:** `_reacquire_and_verify_lock()` itself calls
    `_open_remote_lock_channel`, which calls `_ensure_connected`. That inner call
    must perform a plain reconnect, not re-route back into re-acquire (which would
@@ -258,14 +276,18 @@ use different backends), so we place checks at these points:
    by the next paramiko operation's reconnect check (point 1) or, failing that,
    the release backstop (point 4).
 
-3. **Lock-channel death with a live transport.** The remote lock *shell* can die
-   (OOM/kill) while the transport stays up. No reconnect is triggered, so points
-   1 and 2 would miss it. Guard by checking `_active_lock.channel.closed` (a
-   cheap, non-blocking check) at operation boundaries in the retry primitives; if
-   the lock channel is closed but the transport is alive, trigger
-   `_reacquire_and_verify_lock()`. (A dedicated monitor thread reading the lock
-   channel for EOF is an alternative but is heavier; the boundary check is
-   sufficient given operations are frequent within a critical section.)
+3. **Lock-channel death with a live transport.** SSH multiplexes many channels
+   over one transport, so a single channel can close while the transport stays up
+   -- the retry primitives already rely on this (the "retry without disconnect"
+   cases in point 1). The lock channel is no exception: the remote lock *shell*
+   can die (OOM/kill, or a spurious stdin EOF) while the transport is fine. No
+   reconnect is triggered in that case, so points 1 and 2 would miss it. Guard by
+   checking `_active_lock.channel.closed` (a cheap, non-blocking check) at
+   operation boundaries in the retry primitives; if the lock channel is closed but
+   the transport is alive, trigger `_reacquire_and_verify_lock()`. (A dedicated
+   monitor thread reading the lock channel for EOF is an alternative but is
+   heavier; the boundary check is sufficient given operations are frequent within
+   a critical section.)
 
 4. **Release backstop (completeness guarantee).** `_hold_remote_host_lock` has a
    single `finally`. Before declaring the block successful, verify the counter is
@@ -282,7 +304,9 @@ The full model, keyed on lock state:
 
 - **Acquiring (no lock held):** reconnect/retry freely (PR #2350). Safe -- no
   critical section exists yet.
-- **Holding the lock:** a reconnect (or observed lock-channel death) triggers
+- **Holding the lock:** channel-level or timeout errors on a still-active
+  transport retry on the same transport, leaving the lock intact. Only a
+  confirmed-dead transport (or an observed lock-channel death) triggers
   `_reacquire_and_verify_lock()`. Uncontended -> transparently continue;
   contended or unrecoverable -> `LockLostError`.
 
@@ -290,6 +314,7 @@ The full model, keyed on lock state:
 
 | Scenario | Behavior |
 |---|---|
+| Channel-level error / read timeout, transport still active | Retry on the same transport; lock channel left intact, no re-acquire needed. |
 | Transient blip, no other actor acquired | Reconnect, re-acquire, `V == token+1` -> continue. Recovered transparently. |
 | Blip, another actor acquired and released in the gap | `V > token+1` -> `LockLostError`. |
 | Blip, another actor is *still holding* on reconnect | Fast-fail read sees counter advanced -> `LockLostError` without blocking. |
