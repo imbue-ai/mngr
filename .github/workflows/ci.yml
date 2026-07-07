@@ -64,11 +64,21 @@ jobs:
     permissions:
       contents: write
       checks: write
-    env:
-      MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID }}
-      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
-
+      # Lets the use-vault-secrets step below mint a GitHub OIDC token for Vault.
+      id-token: write
     steps:
+      # The imbue Modal workspace token (id + secret) from Vault, migrated off
+      # the MODAL_TOKEN_ID variable + MODAL_TOKEN_SECRET GitHub Actions secret.
+      # Injected as MODAL_TOKEN_ID / MODAL_TOKEN_SECRET into the job env for the
+      # offload run below.
+      - name: Fetch Modal credentials from Vault
+        uses: imbue-ai/use-vault-secrets@main
+        with:
+          role: mngr_ci_gh
+          secrets: |
+            mngr/ci/MODAL_TOKEN_ID
+            mngr/ci/MODAL_TOKEN_SECRET
+
       # Default shallow single-ref checkout, then deepen only THIS ref's
       # history in the next step. offload needs the full ancestry of HEAD
       # (to find its checkpoint commit and thin-diff against it), but not
@@ -239,11 +249,21 @@ jobs:
   # Clean up old Modal test environments left behind by acceptance tests.
   cleanup-modal-environments:
     runs-on: ubuntu-latest
-    env:
-      MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID }}
-      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
-
+    permissions:
+      contents: read
+      # Lets the use-vault-secrets step below mint a GitHub OIDC token for Vault.
+      id-token: write
     steps:
+      # imbue Modal workspace token (id + secret) from Vault, migrated off the
+      # MODAL_TOKEN_ID variable + MODAL_TOKEN_SECRET GitHub Actions secret.
+      - name: Fetch Modal credentials from Vault
+        uses: imbue-ai/use-vault-secrets@main
+        with:
+          role: mngr_ci_gh
+          secrets: |
+            mngr/ci/MODAL_TOKEN_ID
+            mngr/ci/MODAL_TOKEN_SECRET
+
       - uses: actions/checkout@v6
 
       - name: Set up Python
@@ -281,11 +301,21 @@ jobs:
     permissions:
       contents: write
       checks: write
-    env:
-      MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID }}
-      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
-
+      # Lets the use-vault-secrets step below mint a GitHub OIDC token for Vault.
+      id-token: write
     steps:
+      # The imbue Modal workspace token (id + secret) from Vault, migrated off
+      # the MODAL_TOKEN_ID variable + MODAL_TOKEN_SECRET GitHub Actions secret.
+      # Injected as MODAL_TOKEN_ID / MODAL_TOKEN_SECRET into the job env for the
+      # offload run below.
+      - name: Fetch Modal credentials from Vault
+        uses: imbue-ai/use-vault-secrets@main
+        with:
+          role: mngr_ci_gh
+          secrets: |
+            mngr/ci/MODAL_TOKEN_ID
+            mngr/ci/MODAL_TOKEN_SECRET
+
       # Default shallow single-ref checkout, then deepen only THIS ref's
       # history in the next step. offload needs the full ancestry of HEAD
       # (to find its checkpoint commit and thin-diff against it), but not
@@ -453,14 +483,22 @@ jobs:
        github.event.pull_request.head.repo.full_name == github.repository)
     permissions:
       contents: read
+      # Lets the use-vault-secrets step below mint a GitHub OIDC token for Vault.
+      id-token: write
     # Exposes the freshly-built snapshot image id to the dependent test job.
     outputs:
       image_id: ${{ steps.snapshot.outputs.image_id }}
-    env:
-      MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID }}
-      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
-
     steps:
+      # imbue Modal workspace token (id + secret) from Vault, migrated off the
+      # MODAL_TOKEN_ID variable + MODAL_TOKEN_SECRET GitHub Actions secret.
+      - name: Fetch Modal credentials from Vault
+        uses: imbue-ai/use-vault-secrets@main
+        with:
+          role: mngr_ci_gh
+          secrets: |
+            mngr/ci/MODAL_TOKEN_ID
+            mngr/ci/MODAL_TOKEN_SECRET
+
       # The snapshot script rsyncs the checked-out working tree into the
       # Modal image (it excludes .git), so a default shallow single-ref
       # checkout is all it needs -- no history deepening required.
@@ -526,13 +564,13 @@ jobs:
       contents: read
       id-token: write
     env:
-      # The ci tier deploys to the minds-dev Modal workspace, so use that
-      # workspace's tokens. The default MODAL_TOKEN_ID is the imbue workspace,
-      # and Modal env tokens override the ~/.modal.toml profile -- using imbue
-      # here makes `modal deploy` report imbue-* hostnames that mismatch the
-      # computed minds-dev-* URLs and aborts the deploy.
-      MODAL_TOKEN_ID: ${{ vars.MINDS_DEV_MODAL_TOKEN_ID }}
-      MODAL_TOKEN_SECRET: ${{ secrets.MINDS_DEV_MODAL_TOKEN_SECRET }}
+      # The ci tier deploys to the minds-dev Modal workspace, so the deploy
+      # authenticates with that workspace's token, fetched from Vault in the
+      # "Authenticate to Vault via GitHub OIDC" step below and exported as
+      # MODAL_TOKEN_ID / MODAL_TOKEN_SECRET (migrated off the
+      # MINDS_DEV_MODAL_TOKEN_* GitHub Actions variable/secret). The default
+      # imbue-workspace token would make `modal deploy` report imbue-* hostnames
+      # that mismatch the computed minds-dev-* URLs and abort the deploy.
       VAULT_ADDR: https://vault-cluster-public-vault-df29b16f.9b573ab7.z1.hashicorp.cloud:8200
       VAULT_NAMESPACE: admin
     steps:
@@ -566,16 +604,27 @@ jobs:
           VAULT_TOKEN=$(vault write -field=token auth/jwt_github_actions/login role=minds_ci_env_gh jwt="$OIDC")
           echo "::add-mask::$VAULT_TOKEN"
           printf '%s' "$VAULT_TOKEN" > "$HOME/.vault-token"
+          # Fetch the minds-dev Modal workspace token from Vault (migrated off
+          # the MINDS_DEV_MODAL_TOKEN_* GitHub Actions variable/secret) and
+          # export it for the modal-profile + deploy steps below, reusing the
+          # token just minted (the vault CLI reads VAULT_TOKEN from the env).
+          export VAULT_TOKEN
+          MODAL_TOKEN_ID=$(vault kv get -field=value -mount=secrets minds/ci/MODAL_TOKEN_ID)
+          MODAL_TOKEN_SECRET=$(vault kv get -field=value -mount=secrets minds/ci/MODAL_TOKEN_SECRET)
+          echo "::add-mask::$MODAL_TOKEN_ID"
+          echo "::add-mask::$MODAL_TOKEN_SECRET"
+          printf 'MODAL_TOKEN_ID<<__EOF__\n%s\n__EOF__\n' "$MODAL_TOKEN_ID" >> "$GITHUB_ENV"
+          printf 'MODAL_TOKEN_SECRET<<__EOF__\n%s\n__EOF__\n' "$MODAL_TOKEN_SECRET" >> "$GITHUB_ENV"
       # `minds env deploy` for the ci tier requires deploy-mode activation, which
       # pins MODAL_PROFILE to the tier's modal_workspace (minds-dev) and
       # validates it against ~/.modal.toml. CI has no ~/.modal.toml, so synthesize
       # a throwaway one from the Modal token env.
       - name: Write throwaway Modal profile
         run: |
-          cat > "$HOME/.modal.toml" <<'EOF'
+          cat > "$HOME/.modal.toml" <<EOF
           [minds-dev]
-          token_id = "${{ vars.MINDS_DEV_MODAL_TOKEN_ID }}"
-          token_secret = "${{ secrets.MINDS_DEV_MODAL_TOKEN_SECRET }}"
+          token_id = "${MODAL_TOKEN_ID}"
+          token_secret = "${MODAL_TOKEN_SECRET}"
           active = true
           EOF
       - name: Deploy the per-run ci env
@@ -606,8 +655,8 @@ jobs:
       id-token: write
     env:
       # ci envs live in the minds-dev Modal workspace (see build-minds-ci-env).
-      MODAL_TOKEN_ID: ${{ vars.MINDS_DEV_MODAL_TOKEN_ID }}
-      MODAL_TOKEN_SECRET: ${{ secrets.MINDS_DEV_MODAL_TOKEN_SECRET }}
+      # The minds-dev Modal token is fetched from Vault in the auth step below
+      # and exported as MODAL_TOKEN_ID / MODAL_TOKEN_SECRET.
       VAULT_ADDR: https://vault-cluster-public-vault-df29b16f.9b573ab7.z1.hashicorp.cloud:8200
       VAULT_NAMESPACE: admin
     steps:
@@ -636,12 +685,23 @@ jobs:
           VAULT_TOKEN=$(vault write -field=token auth/jwt_github_actions/login role=minds_ci_env_gh jwt="$OIDC")
           echo "::add-mask::$VAULT_TOKEN"
           printf '%s' "$VAULT_TOKEN" > "$HOME/.vault-token"
+          # Fetch the minds-dev Modal workspace token from Vault (migrated off
+          # the MINDS_DEV_MODAL_TOKEN_* GitHub Actions variable/secret) and
+          # export it for the modal-profile + deploy steps below, reusing the
+          # token just minted (the vault CLI reads VAULT_TOKEN from the env).
+          export VAULT_TOKEN
+          MODAL_TOKEN_ID=$(vault kv get -field=value -mount=secrets minds/ci/MODAL_TOKEN_ID)
+          MODAL_TOKEN_SECRET=$(vault kv get -field=value -mount=secrets minds/ci/MODAL_TOKEN_SECRET)
+          echo "::add-mask::$MODAL_TOKEN_ID"
+          echo "::add-mask::$MODAL_TOKEN_SECRET"
+          printf 'MODAL_TOKEN_ID<<__EOF__\n%s\n__EOF__\n' "$MODAL_TOKEN_ID" >> "$GITHUB_ENV"
+          printf 'MODAL_TOKEN_SECRET<<__EOF__\n%s\n__EOF__\n' "$MODAL_TOKEN_SECRET" >> "$GITHUB_ENV"
       - name: Write throwaway Modal profile
         run: |
-          cat > "$HOME/.modal.toml" <<'EOF'
+          cat > "$HOME/.modal.toml" <<EOF
           [minds-dev]
-          token_id = "${{ vars.MINDS_DEV_MODAL_TOKEN_ID }}"
-          token_secret = "${{ secrets.MINDS_DEV_MODAL_TOKEN_SECRET }}"
+          token_id = "${MODAL_TOKEN_ID}"
+          token_secret = "${MODAL_TOKEN_SECRET}"
           active = true
           EOF
       - name: Sweep leaked ci-* envs older than 1 hour
@@ -678,8 +738,10 @@ jobs:
       checks: write
       id-token: write
     env:
-      MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID }}
-      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      # The imbue Modal workspace token (id + secret) is fetched from Vault in
+      # the "Fetch Anthropic key and Modal credentials from Vault" step below
+      # and exported as MODAL_TOKEN_ID / MODAL_TOKEN_SECRET (migrated off the
+      # MODAL_TOKEN_ID variable + MODAL_TOKEN_SECRET GitHub Actions secret).
       # The minds_services fixtures read the per-env secrets back from Vault
       # (keyed by env name, available in the downloaded deployment_envs.json).
       VAULT_ADDR: https://vault-cluster-public-vault-df29b16f.9b573ab7.z1.hashicorp.cloud:8200
@@ -689,13 +751,27 @@ jobs:
       - uses: actions/checkout@v6
 
       # The Anthropic key (for live checks) is always needed; masked in the logs
-      # and forwarded into the offload sandbox by the just recipe below.
+      # and forwarded into the offload sandbox by the just recipe below. Read via
+      # the minds-scoped minds_ci_test_gh role.
       - name: Fetch Anthropic key from Vault
-        uses: imbue-ai/use-vault-secrets@2375c28b61513dadebebdce845c109a01777a197
+        uses: imbue-ai/use-vault-secrets@main
         with:
           role: minds_ci_test_gh
           secrets: |
             minds/ci/litellm/ANTHROPIC_API_KEY
+
+      # The imbue Modal workspace token (id + secret) is fetched via the
+      # monorepo-wide mngr_ci_gh role, not minds_ci_test_gh: this job's
+      # minds-ci-test environment claim still satisfies mngr_ci_gh's
+      # repository-only binding, so minds_ci_test_gh stays scoped to minds/ci.
+      # Exported as MODAL_TOKEN_ID / MODAL_TOKEN_SECRET.
+      - name: Fetch Modal credentials from Vault
+        uses: imbue-ai/use-vault-secrets@main
+        with:
+          role: mngr_ci_gh
+          secrets: |
+            mngr/ci/MODAL_TOKEN_ID
+            mngr/ci/MODAL_TOKEN_SECRET
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -819,13 +895,13 @@ jobs:
       contents: read
       id-token: write
     env:
-      # The ci tier deploys to the minds-dev Modal workspace, so use that
-      # workspace's tokens. The default MODAL_TOKEN_ID is the imbue workspace,
-      # and Modal env tokens override the ~/.modal.toml profile -- using imbue
-      # here makes `modal deploy` report imbue-* hostnames that mismatch the
-      # computed minds-dev-* URLs and aborts the deploy.
-      MODAL_TOKEN_ID: ${{ vars.MINDS_DEV_MODAL_TOKEN_ID }}
-      MODAL_TOKEN_SECRET: ${{ secrets.MINDS_DEV_MODAL_TOKEN_SECRET }}
+      # The ci tier deploys to the minds-dev Modal workspace, so the deploy
+      # authenticates with that workspace's token, fetched from Vault in the
+      # "Authenticate to Vault via GitHub OIDC" step below and exported as
+      # MODAL_TOKEN_ID / MODAL_TOKEN_SECRET (migrated off the
+      # MINDS_DEV_MODAL_TOKEN_* GitHub Actions variable/secret). The default
+      # imbue-workspace token would make `modal deploy` report imbue-* hostnames
+      # that mismatch the computed minds-dev-* URLs and abort the deploy.
       VAULT_ADDR: https://vault-cluster-public-vault-df29b16f.9b573ab7.z1.hashicorp.cloud:8200
       VAULT_NAMESPACE: admin
     steps:
@@ -854,12 +930,23 @@ jobs:
           VAULT_TOKEN=$(vault write -field=token auth/jwt_github_actions/login role=minds_ci_env_gh jwt="$OIDC")
           echo "::add-mask::$VAULT_TOKEN"
           printf '%s' "$VAULT_TOKEN" > "$HOME/.vault-token"
+          # Fetch the minds-dev Modal workspace token from Vault (migrated off
+          # the MINDS_DEV_MODAL_TOKEN_* GitHub Actions variable/secret) and
+          # export it for the modal-profile + deploy steps below, reusing the
+          # token just minted (the vault CLI reads VAULT_TOKEN from the env).
+          export VAULT_TOKEN
+          MODAL_TOKEN_ID=$(vault kv get -field=value -mount=secrets minds/ci/MODAL_TOKEN_ID)
+          MODAL_TOKEN_SECRET=$(vault kv get -field=value -mount=secrets minds/ci/MODAL_TOKEN_SECRET)
+          echo "::add-mask::$MODAL_TOKEN_ID"
+          echo "::add-mask::$MODAL_TOKEN_SECRET"
+          printf 'MODAL_TOKEN_ID<<__EOF__\n%s\n__EOF__\n' "$MODAL_TOKEN_ID" >> "$GITHUB_ENV"
+          printf 'MODAL_TOKEN_SECRET<<__EOF__\n%s\n__EOF__\n' "$MODAL_TOKEN_SECRET" >> "$GITHUB_ENV"
       - name: Write throwaway Modal profile
         run: |
-          cat > "$HOME/.modal.toml" <<'EOF'
+          cat > "$HOME/.modal.toml" <<EOF
           [minds-dev]
-          token_id = "${{ vars.MINDS_DEV_MODAL_TOKEN_ID }}"
-          token_secret = "${{ secrets.MINDS_DEV_MODAL_TOKEN_SECRET }}"
+          token_id = "${MODAL_TOKEN_ID}"
+          token_secret = "${MODAL_TOKEN_SECRET}"
           active = true
           EOF
       - name: Download deployment env config
@@ -897,8 +984,9 @@ jobs:
       contents: read
       id-token: write
     env:
-      MODAL_TOKEN_ID: ${{ vars.MINDS_DEV_MODAL_TOKEN_ID }}
-      MODAL_TOKEN_SECRET: ${{ secrets.MINDS_DEV_MODAL_TOKEN_SECRET }}
+      # The minds-dev Modal token is fetched from Vault in the auth step below
+      # and exported as MODAL_TOKEN_ID / MODAL_TOKEN_SECRET (migrated off the
+      # MINDS_DEV_MODAL_TOKEN_* GitHub Actions variable/secret).
       VAULT_ADDR: https://vault-cluster-public-vault-df29b16f.9b573ab7.z1.hashicorp.cloud:8200
       VAULT_NAMESPACE: admin
       # Fixed, HOME-independent browser location for test_sse_redirect. The minds
@@ -932,12 +1020,23 @@ jobs:
           VAULT_TOKEN=$(vault write -field=token auth/jwt_github_actions/login role=minds_ci_env_gh jwt="$OIDC")
           echo "::add-mask::$VAULT_TOKEN"
           printf '%s' "$VAULT_TOKEN" > "$HOME/.vault-token"
+          # Fetch the minds-dev Modal workspace token from Vault (migrated off
+          # the MINDS_DEV_MODAL_TOKEN_* GitHub Actions variable/secret) and
+          # export it for the modal-profile + deploy steps below, reusing the
+          # token just minted (the vault CLI reads VAULT_TOKEN from the env).
+          export VAULT_TOKEN
+          MODAL_TOKEN_ID=$(vault kv get -field=value -mount=secrets minds/ci/MODAL_TOKEN_ID)
+          MODAL_TOKEN_SECRET=$(vault kv get -field=value -mount=secrets minds/ci/MODAL_TOKEN_SECRET)
+          echo "::add-mask::$MODAL_TOKEN_ID"
+          echo "::add-mask::$MODAL_TOKEN_SECRET"
+          printf 'MODAL_TOKEN_ID<<__EOF__\n%s\n__EOF__\n' "$MODAL_TOKEN_ID" >> "$GITHUB_ENV"
+          printf 'MODAL_TOKEN_SECRET<<__EOF__\n%s\n__EOF__\n' "$MODAL_TOKEN_SECRET" >> "$GITHUB_ENV"
       - name: Write throwaway Modal profile
         run: |
-          cat > "$HOME/.modal.toml" <<'EOF'
+          cat > "$HOME/.modal.toml" <<EOF
           [minds-dev]
-          token_id = "${{ vars.MINDS_DEV_MODAL_TOKEN_ID }}"
-          token_secret = "${{ secrets.MINDS_DEV_MODAL_TOKEN_SECRET }}"
+          token_id = "${MODAL_TOKEN_ID}"
+          token_secret = "${MODAL_TOKEN_SECRET}"
           active = true
           EOF
       - name: Run minds release-tier tests (minds_deployment)

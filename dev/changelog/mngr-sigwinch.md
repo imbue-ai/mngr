@@ -1,1 +1,0 @@
-Added an implementation plan (`specs/sigwinch-attach-hook/spec.md`) for moving the post-attach SIGWINCH repaint nudge from the `mngr connect` path into a persistent tmux `client-attached` hook, so the agent repaints cleanly on every attach (plain `tmux attach`, ttyd terminal, web-shell, `mngr connect`). See issue #2322.
