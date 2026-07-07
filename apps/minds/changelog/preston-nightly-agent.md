@@ -1,1 +1,3 @@
 Added `GET /api/v1/timezone`: the desktop client reports the IANA timezone of the machine it runs on (empty string when it cannot be determined). Workspace agents can fetch it through the latchkey gateway, so a workspace's recurring jobs (like the nightly Caretaker) can run in your local time and re-check your timezone whenever you schedule something -- instead of the desktop client pushing a timezone into each workspace at create time. The create request no longer carries a timezone field, and the create-time write into the workspace was removed.
+
+Also added a MINDS_WINDOW_TITLE environment override for the desktop window title, so several dev instances (one per minds env) can be told apart in the window switcher.
