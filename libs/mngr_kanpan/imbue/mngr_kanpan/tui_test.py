@@ -1867,9 +1867,9 @@ def test_on_peek_reply_poll_success_renders_sent() -> None:
     future: Future[subprocess.CompletedProcess[str]] = Future()
     future.set_result(subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""))
     state.peek_reply_future = future
-    _on_peek_reply_poll(cast(Any, _make_mock_loop()), (state, "agent-a"))
+    _on_peek_reply_poll(_make_mock_loop(), (state, "agent-a"))
     assert state.peek_reply_future is None
-    assert "sent to agent-a" in state.peek_status_text.text
+    assert "sent to agent-a" in str(state.peek_status_text.text)
 
 
 def test_on_peek_reply_poll_failure_shows_last_error_line() -> None:
@@ -1880,8 +1880,8 @@ def test_on_peek_reply_poll_failure_shows_last_error_line() -> None:
         subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="pane dump\nActual error line")
     )
     state.peek_reply_future = future
-    _on_peek_reply_poll(cast(Any, _make_mock_loop()), (state, "agent-a"))
-    assert "send failed: Actual error line" in state.peek_status_text.text
+    _on_peek_reply_poll(_make_mock_loop(), (state, "agent-a"))
+    assert "send failed: Actual error line" in str(state.peek_status_text.text)
 
 
 def test_close_peek_restores_footer_and_clears_state() -> None:
