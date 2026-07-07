@@ -1,1 +1,3 @@
-`propagate_changes` now tells you to create a missing FCT worktree with `just fct-worktree` rather than a hardcoded `cd ~/project/forever-claude-template && git worktree add ...`. The `bake-slice-dev` default workspace dir (documented in `docs/host-pool-setup.md`) now honors `$FCT_DIR`, falling back to `~/project/forever-claude-template`.
+`propagate_changes` now tells you to create a missing FCT worktree with `just fct-worktree` rather than a hardcoded `cd ~/project/forever-claude-template && git worktree add ...`. The `bake-slice-dev` workspace dir (documented in `docs/host-pool-setup.md`) now resolves from the explicit arg, else `FCT_DIR`, else the `.external_worktrees/forever-claude-template` checkout -- no `~/project/...` path baked in.
+
+`.env.example` documents that `FCT_DIR` is now read by `just fct-worktree` and `just bake-slice-dev` (not only `sync-vendor-mngr`), and that `apps/minds/.env` is copied into each mngr agent worktree.
