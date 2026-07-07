@@ -12,9 +12,12 @@ from datetime import timedelta
 from datetime import timezone
 from pathlib import Path
 
+from pydantic import PrivateAttr
+
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
+from imbue.minds.desktop_client.recovery_probe import DispatchTier
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.workspace_operations import InMemoryWorkspaceOperationRegistry
@@ -25,12 +28,14 @@ from imbue.minds.desktop_client.workspace_recovery import _build_mngr_stop_argv
 from imbue.minds.desktop_client.workspace_recovery import _is_discovery_fresh
 from imbue.minds.desktop_client.workspace_recovery import _provider_error_message_for_workspace
 from imbue.minds.desktop_client.workspace_recovery import is_recovery_classification_trustworthy
+from imbue.minds.desktop_client.workspace_recovery import probe_workspace_health
 from imbue.minds.desktop_client.workspace_recovery import run_restart_sequence
 from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 
 
@@ -463,3 +468,85 @@ def test_classification_trustworthiness_without_onset_falls_back_to_age() -> Non
     assert is_recovery_classification_trustworthy(resolver, tracker, agent_id) is False
     # No tracker at all behaves identically to a missing onset.
     assert is_recovery_classification_trustworthy(resolver, None, agent_id) is False
+
+
+# -- host-health probe: classification-time consistency --
+
+
+class _HostStateFlipResolver(MngrCliBackendResolver):
+    """Resolver whose host state flips RUNNING -> STOPPED across successive reads.
+
+    Emulates a fresh discovery snapshot landing while the slow in-container exec
+    is in flight: the pre-exec host-state read sees the stale RUNNING; every read
+    after that sees the fresh STOPPED.
+    """
+
+    _host_state_reads: int = PrivateAttr(default=0)
+
+    def get_host_state(self, host_id: HostId) -> HostState | None:
+        self._host_state_reads += 1
+        return HostState.RUNNING if self._host_state_reads == 1 else HostState.STOPPED
+
+
+def _register_workspace_with_services(
+    resolver: MngrCliBackendResolver, workspace_agent: AgentId, services_agent: AgentId, provider_name: str
+) -> None:
+    """Register a workspace agent and its system-services agent on one shared host."""
+    host_id = HostId.generate()
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(workspace_agent, services_agent),
+            discovered_agents=(
+                DiscoveredAgent(
+                    host_id=host_id,
+                    agent_id=workspace_agent,
+                    agent_name=AgentName("ws-agent"),
+                    provider_name=ProviderInstanceName(provider_name),
+                    certified_data={"labels": {"workspace": "true", "is_primary": "true"}},
+                ),
+                DiscoveredAgent(
+                    host_id=host_id,
+                    agent_id=services_agent,
+                    agent_name=AgentName("system-services"),
+                    provider_name=ProviderInstanceName(provider_name),
+                ),
+            ),
+        )
+    )
+
+
+def test_probe_pairs_the_classified_host_state_with_the_freshness_gate(tmp_path: Path) -> None:
+    """A snapshot landing mid-exec must not split the verdict from its evidence.
+
+    The in-container exec takes tens of seconds. If a fresh discovery snapshot
+    lands during it, the freshness gate (evaluated after the exec) sees a
+    post-onset snapshot time -- but the host state read *before* the exec still
+    holds the pre-snapshot value. Classifying that pair rendered a trusted
+    HOST_UNRESPONSIVE off a stale RUNNING when the very snapshot that opened the
+    gate already read STOPPED. The probe must classify the host state as re-read
+    at gate time: HOST_OFFLINE.
+    """
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    resolver = _HostStateFlipResolver()
+    _register_workspace_with_services(resolver, workspace_agent, services_agent, "docker")
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    onset = _drive_to_stuck_with_onset(tracker, workspace_agent)
+    # The mid-exec snapshot: post-onset, so the gate opens.
+    _set_provider_snapshot_at(resolver, "docker", onset + timedelta(seconds=1))
+
+    with ConcurrencyGroup(name="test-probe") as cg:
+        response = probe_workspace_health(
+            workspace_agent,
+            backend_resolver=resolver,
+            tracker=tracker,
+            mngr_binary=_write_fake_mngr(tmp_path),
+            mngr_host_dir=tmp_path,
+            concurrency_group=cg,
+            envelope_stream_consumer=None,
+        )
+
+    # Two reads happened: the pre-exec gate read (RUNNING, so the exec ran) and
+    # the classification-time read (STOPPED).
+    assert resolver._host_state_reads >= 2
+    assert response.dispatch_tier == DispatchTier.HOST_OFFLINE

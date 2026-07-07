@@ -394,6 +394,11 @@ def probe_workspace_health(
     nothing), the classifier yields INDETERMINATE rather than a verdict -- unless
     the probe returned direct evidence (a live GET / 200), which is trusted
     regardless of freshness.
+
+    The host state that feeds the classifier is re-read after the exec, at the
+    same instant the trustworthiness check runs, so the freshness gate always
+    certifies the state that is actually classified (a snapshot landing during
+    the slow exec would otherwise open the gate for a pre-snapshot reading).
     """
     env = dict(os.environ)
     env["MNGR_HOST_DIR"] = str(mngr_host_dir)
@@ -446,6 +451,17 @@ def probe_workspace_health(
         exec_command = shlex.join(build_probe_argv(mngr_binary, services_agent_id))
     else:
         exec_command = "(mngr exec <system-services-agent>) -- no services agent id known"
+    # Re-read the host state here, paired with the trustworthiness check below, so
+    # the freshness gate certifies the state that is actually classified. The exec
+    # above can take tens of seconds; a discovery snapshot landing mid-exec bumps
+    # the per-provider snapshot time past the outage onset (making the
+    # classification trustworthy) while the pre-exec read still holds the
+    # pre-snapshot state -- classifying e.g. HOST_UNRESPONSIVE off a stale RUNNING
+    # when the snapshot that opened the gate already reads STOPPED. The pre-exec
+    # read above only decides whether to attempt the exec.
+    if display_info is not None:
+        host_state_enum = backend_resolver.get_host_state(HostId(display_info.host_id))
+        host_state = host_state_enum.value if host_state_enum is not None else ""
     classification_is_trustworthy = is_recovery_classification_trustworthy(backend_resolver, tracker, agent_id)
     return build_host_health_response(
         host_state=host_state,
