@@ -76,9 +76,7 @@ def test_committed_minds_mapper_template_renders() -> None:
     minds_template = repo_root / "apps" / "minds" / "tmr" / "mapper.j2"
     if not minds_template.is_file():
         pytest.skip("apps/minds tree not present (running outside the monorepo checkout)")
-    prompt = build_test_agent_prompt(
-        "apps/minds/test_x.py::test_y", ("-m", "release"), template_path=minds_template
-    )
+    prompt = build_test_agent_prompt("apps/minds/test_x.py::test_y", ("-m", "release"), template_path=minds_template)
     assert prompt.startswith("You are working on the tests for the minds app")
     assert "docstring" in prompt.lower()
     assert TESTING_AGENT_OUTCOME_FILENAME in prompt

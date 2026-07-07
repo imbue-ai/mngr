@@ -17,6 +17,7 @@ from abc import abstractmethod
 from collections.abc import Sequence
 from enum import auto
 from pathlib import Path
+
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
