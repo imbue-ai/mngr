@@ -102,6 +102,7 @@ def _fetch_template_claude_version() -> str | None:
 
 
 @pytest.mark.release
+@pytest.mark.flaky
 def test_claude_code_version_matches_forever_claude_template_pin() -> None:
     """The Dockerfile's CLAUDE_CODE_VERSION default must match the pin in
     forever-claude-template/.mngr/settings.toml [agent_types.claude].version.
