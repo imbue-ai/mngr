@@ -8,6 +8,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Added
 
+- Added: Shared Sentry error-reporting library `imbue.imbue_common.sentry`, packaging the generic pieces previously duplicated in the minds backend: loguru-to-Sentry event/breadcrumb handlers, an unsigned-S3 attachment uploader, a per-exception rate limiter, an oversized-event (HTTP 413) transport, a `before_send` chain (automatic-reporting consent gate and interrupt/clean-shutdown filtering), manual bug-report submission, and a parameterized `setup_sentry`. Callers supply concrete `dsn` / `environment_name` / `s3_attachment_bucket` (plus service name, integrations, and log-attachment groups); no Sentry project/environment/bucket knowledge lives in the library. Adds `sentry-sdk`, `boto3`, and `traceback-with-variables` as `imbue-common` dependencies.
 - Added: Shared `PREVENT_ASYNC_AWAIT` ratchet rule (`common_ratchets.py`) and `check_async_await` wrapper (`standard_ratchet_checks.py`) that power a per-project `test_prevent_async_await` ratchet freezing `async def` / `await` usage across the monorepo.
 
 ### Changed
