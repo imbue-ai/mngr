@@ -274,9 +274,7 @@ def test_build_experimental_options_none_when_vm_runtime_disabled(modal_provider
     disabled_config = modal_provider.config.model_copy_update(
         to_update(modal_provider.config.field_ref().is_vm_runtime_enabled, False)
     )
-    disabled = modal_provider.model_copy_update(
-        to_update(modal_provider.field_ref().config, disabled_config)
-    )
+    disabled = modal_provider.model_copy_update(to_update(modal_provider.field_ref().config, disabled_config))
     assert disabled._build_experimental_options() is None
 
 
