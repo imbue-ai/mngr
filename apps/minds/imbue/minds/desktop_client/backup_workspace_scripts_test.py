@@ -188,10 +188,11 @@ def test_check_script_reports_env_sha_and_content(tmp_path: Path) -> None:
     assert payload is not None, run
     env_info = payload["env"]
     assert isinstance(env_info, dict)
-    assert env_info["present"] is True
-    sha_value = env_info["sha256"]
+    env_map: dict[str, object] = {str(key): value for key, value in env_info.items()}
+    assert env_map["present"] is True
+    sha_value = env_map["sha256"]
     assert isinstance(sha_value, str) and len(sha_value) == 64
-    assert "content_b64" in env_info
+    assert "content_b64" in env_map
 
 
 # --- gate probe script ---
