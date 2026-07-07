@@ -186,9 +186,12 @@ def test_check_script_reports_env_sha_and_content(tmp_path: Path) -> None:
     run = _run_script(repo, BACKUP_CHECK_SCRIPT, ("--minds-version", "1.0.0"), extra_path=stub_bin)
     payload = extract_marker_json(run["stdout"], CHECK_RESULT_MARKER)
     assert payload is not None, run
-    assert payload["env"]["present"] is True
-    assert len(payload["env"]["sha256"]) == 64
-    assert "content_b64" in payload["env"]
+    env_info = payload["env"]
+    assert isinstance(env_info, dict)
+    assert env_info["present"] is True
+    sha_value = env_info["sha256"]
+    assert isinstance(sha_value, str) and len(sha_value) == 64
+    assert "content_b64" in env_info
 
 
 # --- gate probe script ---
