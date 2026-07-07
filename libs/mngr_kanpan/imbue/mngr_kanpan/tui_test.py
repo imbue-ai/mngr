@@ -68,30 +68,38 @@ from imbue.mngr_kanpan.tui import _build_command_map
 from imbue.mngr_kanpan.tui import _build_data_source_column_defs
 from imbue.mngr_kanpan.tui import _build_field_color_palette
 from imbue.mngr_kanpan.tui import _build_mark_palette
+from imbue.mngr_kanpan.tui import _build_peek_panel
+from imbue.mngr_kanpan.tui import _cancel_peek_alarm
 from imbue.mngr_kanpan.tui import _carry_forward_fields
 from imbue.mngr_kanpan.tui import _clear_focus
 from imbue.mngr_kanpan.tui import _close_peek
 from imbue.mngr_kanpan.tui import _compute_board_column_widths
 from imbue.mngr_kanpan.tui import _compute_footer_display
 from imbue.mngr_kanpan.tui import _dispatch_command
+from imbue.mngr_kanpan.tui import _ensure_peek_executor
 from imbue.mngr_kanpan.tui import _execute_marks
 from imbue.mngr_kanpan.tui import _execute_next_in_batch
 from imbue.mngr_kanpan.tui import _field_cell_markup
 from imbue.mngr_kanpan.tui import _field_cell_text
+from imbue.mngr_kanpan.tui import _find_entry_by_name
 from imbue.mngr_kanpan.tui import _finish_batch_execution
 from imbue.mngr_kanpan.tui import _flatten_markup_to_attr
+from imbue.mngr_kanpan.tui import _focus_row_by_name
 from imbue.mngr_kanpan.tui import _format_section_heading
 from imbue.mngr_kanpan.tui import _get_focused_entry
 from imbue.mngr_kanpan.tui import _get_name_cell_markup
 from imbue.mngr_kanpan.tui import _get_state_attr
+from imbue.mngr_kanpan.tui import _handle_peek_key
 from imbue.mngr_kanpan.tui import _is_field_stale
 from imbue.mngr_kanpan.tui import _is_focus_on_first_selectable
 from imbue.mngr_kanpan.tui import _last_nonempty_line
 from imbue.mngr_kanpan.tui import _load_user_commands
 from imbue.mngr_kanpan.tui import _on_batch_item_poll
+from imbue.mngr_kanpan.tui import _on_peek_capture_poll
 from imbue.mngr_kanpan.tui import _on_peek_reply_poll
 from imbue.mngr_kanpan.tui import _on_transient_expire
 from imbue.mngr_kanpan.tui import _peek_body_from_capture
+from imbue.mngr_kanpan.tui import _peek_move
 from imbue.mngr_kanpan.tui import _prune_orphaned_marks
 from imbue.mngr_kanpan.tui import _refresh_display
 from imbue.mngr_kanpan.tui import _render_footer
@@ -99,10 +107,13 @@ from imbue.mngr_kanpan.tui import _resolve_section_order
 from imbue.mngr_kanpan.tui import _run_shell_command
 from imbue.mngr_kanpan.tui import _show_transient_message
 from imbue.mngr_kanpan.tui import _submit_batch_item
+from imbue.mngr_kanpan.tui import _submit_peek_reply
 from imbue.mngr_kanpan.tui import _toggle_mark
+from imbue.mngr_kanpan.tui import _toggle_peek
 from imbue.mngr_kanpan.tui import _unmark_all
 from imbue.mngr_kanpan.tui import _unmark_focused
 from imbue.mngr_kanpan.tui import _update_mark_count_footer
+from imbue.mngr_kanpan.tui import _update_peek_header
 from imbue.mngr_kanpan.tui import _update_row_mark
 from imbue.mngr_kanpan.tui import _update_snapshot_mute
 from imbue.mngr_kanpan.tui import resolve_board_layout
@@ -1906,4 +1917,150 @@ def test_close_peek_restores_footer_and_clears_state() -> None:
 def test_close_peek_when_not_open_is_noop() -> None:
     state = _make_state()
     _close_peek(state)
+    assert state.peek_agent_name is None
+
+
+def test_find_entry_by_name_found_and_missing() -> None:
+    entry = _make_entry(name="agent-a")
+    state = _make_state_with_walker((entry,))
+    assert _find_entry_by_name(state, AgentName("agent-a")) is not None
+    assert _find_entry_by_name(state, AgentName("nope")) is None
+    assert _find_entry_by_name(state, None) is None
+
+
+def test_focus_row_by_name_moves_walker_focus() -> None:
+    entries = (_make_entry(name="agent-a"), _make_entry(name="agent-b"))
+    state = _make_state_with_walker(entries)
+    _focus_row_by_name(state, AgentName("agent-b"))
+    _, focus_idx = state.list_walker.get_focus()
+    assert state.index_to_entry[focus_idx].name == AgentName("agent-b")
+
+
+def test_ensure_peek_executor_is_created_once() -> None:
+    state = _make_state()
+    first = _ensure_peek_executor(state)
+    second = _ensure_peek_executor(state)
+    assert first is second
+    first.shutdown(wait=False)
+
+
+def test_build_peek_panel_populates_parts() -> None:
+    state = _make_state()
+    _build_peek_panel(state)
+    assert state.peek_input is not None
+    assert state.peek_input.get_edit_text() == ""
+    assert state.peek_body_text is not None
+    assert state.peek_header_text is not None
+
+
+def test_update_peek_header_names_agent() -> None:
+    entry = _make_entry(name="agent-a", state=AgentLifecycleState.WAITING)
+    state = _make_state_with_walker((entry,))
+    state.peek_header_text = Text("")
+    state.peek_agent_name = AgentName("agent-a")
+    _update_peek_header(state)
+    assert "agent-a" in str(state.peek_header_text.text)
+
+
+def test_update_peek_header_missing_agent_falls_back() -> None:
+    state = _make_state_with_walker((_make_entry(name="agent-a"),))
+    state.peek_header_text = Text("")
+    state.peek_agent_name = AgentName("gone")
+    _update_peek_header(state)
+    assert str(state.peek_header_text.text).strip() == "Peek"
+
+
+def test_cancel_peek_alarm_removes_pending_alarm() -> None:
+    state = _make_state()
+    loop = _RecordingLoop()
+    state.loop = cast(Any, loop)
+    state.peek_alarm = 7
+    _cancel_peek_alarm(state)
+    assert state.peek_alarm is None
+    assert loop.removed == [7]
+
+
+def test_on_peek_capture_poll_renders_body_when_done() -> None:
+    state = _make_state()
+    state.loop = _make_mock_loop()
+    state.peek_agent_name = AgentName("agent-a")
+    state.peek_body_text = Text("")
+    future: Future[subprocess.CompletedProcess[str]] = Future()
+    future.set_result(subprocess.CompletedProcess(args=[], returncode=0, stdout="alpha\nbeta\n", stderr=""))
+    state.peek_capture_future = future
+    _on_peek_capture_poll(cast(Any, state.loop), state)
+    assert state.peek_capture_future is None
+    assert "beta" in str(state.peek_body_text.text)
+
+
+def test_on_peek_capture_poll_reschedules_while_running() -> None:
+    state = _make_state()
+    state.loop = _make_mock_loop()
+    state.peek_agent_name = AgentName("agent-a")
+    state.peek_body_text = Text("unchanged")
+    # A future that never resolves stays "not done".
+    state.peek_capture_future = Future()
+    _on_peek_capture_poll(cast(Any, state.loop), state)
+    # A running capture is left in place and the body is not overwritten.
+    assert state.peek_capture_future is not None
+    assert str(state.peek_body_text.text) == "unchanged"
+
+
+def test_handle_peek_key_esc_closes_panel() -> None:
+    entry = _make_entry(name="agent-a")
+    state = _make_state_with_walker((entry,))
+    original_footer = Text("bar")
+    state.frame.footer = original_footer
+    state.peek_agent_name = AgentName("agent-a")
+    state.saved_footer = original_footer
+    state.frame.footer = Text("panel")
+    assert _handle_peek_key(state, "esc") is True
+    assert state.peek_agent_name is None
+
+
+def test_handle_peek_key_right_with_text_does_not_attach() -> None:
+    state = _make_state()
+    _build_peek_panel(state)
+    state.peek_agent_name = AgentName("agent-a")
+    state.peek_input.set_edit_text("hello")
+    # -> is swallowed (returns True) without attaching while the input has text.
+    assert _handle_peek_key(state, "right") is True
+    assert state.peek_agent_name == AgentName("agent-a")
+
+
+def test_handle_peek_key_unknown_passes_through() -> None:
+    state = _make_state()
+    state.peek_agent_name = AgentName("agent-a")
+    assert _handle_peek_key(state, "z") is None
+
+
+def test_toggle_peek_closes_when_already_open() -> None:
+    entry = _make_entry(name="agent-a")
+    state = _make_state_with_walker((entry,))
+    original_footer = Text("bar")
+    state.frame.footer = original_footer
+    state.peek_agent_name = AgentName("agent-a")
+    state.saved_footer = original_footer
+    state.frame.footer = Text("panel")
+    _toggle_peek(state)
+    assert state.peek_agent_name is None
+
+
+def test_submit_peek_reply_empty_input_attaches_and_closes() -> None:
+    entry = _make_entry(name="agent-a")
+    state = _make_state_with_walker((entry,))
+    _build_peek_panel(state)
+    original_footer = Text("bar")
+    state.saved_footer = original_footer
+    state.frame.footer = Text("panel")
+    state.peek_agent_name = AgentName("agent-a")
+    # loop is None, so the attach short-circuits after closing the panel.
+    _submit_peek_reply(state)
+    assert state.peek_agent_name is None
+
+
+def test_peek_move_without_target_is_noop() -> None:
+    state = _make_state_with_walker((_make_entry(name="agent-a"),))
+    state.peek_agent_name = None
+    _peek_move(state, 1)
     assert state.peek_agent_name is None
