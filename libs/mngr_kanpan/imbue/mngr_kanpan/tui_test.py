@@ -46,7 +46,7 @@ from imbue.mngr_kanpan.testing import make_board_snapshot
 from imbue.mngr_kanpan.testing import make_mngr_ctx_with_config
 from imbue.mngr_kanpan.testing import make_pr_field
 from imbue.mngr_kanpan.tui import BOARD_SECTION_ORDER
-from imbue.mngr_kanpan.tui import PEEK_TAIL_LINE_COUNT
+from imbue.mngr_kanpan.tui import PEEK_BODY_HEIGHT
 from imbue.mngr_kanpan.tui import _BUILTIN_COLUMN_DEFS
 from imbue.mngr_kanpan.tui import _BUILTIN_COMMAND_KEY_DELETE
 from imbue.mngr_kanpan.tui import _BUILTIN_COMMAND_KEY_EXECUTE
@@ -92,8 +92,10 @@ from imbue.mngr_kanpan.tui import _get_state_attr
 from imbue.mngr_kanpan.tui import _handle_peek_key
 from imbue.mngr_kanpan.tui import _is_field_stale
 from imbue.mngr_kanpan.tui import _is_focus_on_first_selectable
+from imbue.mngr_kanpan.tui import _is_peek_chrome_line
 from imbue.mngr_kanpan.tui import _last_nonempty_line
 from imbue.mngr_kanpan.tui import _load_user_commands
+from imbue.mngr_kanpan.tui import _looks_like_selection
 from imbue.mngr_kanpan.tui import _on_batch_item_poll
 from imbue.mngr_kanpan.tui import _on_peek_capture_poll
 from imbue.mngr_kanpan.tui import _on_peek_reply_poll
@@ -114,6 +116,7 @@ from imbue.mngr_kanpan.tui import _unmark_all
 from imbue.mngr_kanpan.tui import _unmark_focused
 from imbue.mngr_kanpan.tui import _update_mark_count_footer
 from imbue.mngr_kanpan.tui import _update_peek_header
+from imbue.mngr_kanpan.tui import _update_peek_hint
 from imbue.mngr_kanpan.tui import _update_row_mark
 from imbue.mngr_kanpan.tui import _update_snapshot_mute
 from imbue.mngr_kanpan.tui import resolve_board_layout
@@ -1857,9 +1860,47 @@ def test_peek_body_from_capture_keeps_trailing_tail() -> None:
     stdout = "\n".join(f"line{i}" for i in range(30)) + "\n\n\n"
     result = subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
     body_lines = _peek_body_from_capture(result).split("\n")
-    # Trailing blank lines are dropped and only the last PEEK_TAIL_LINE_COUNT remain.
-    assert len(body_lines) == PEEK_TAIL_LINE_COUNT
+    # Trailing blank lines are dropped and only the last PEEK_BODY_HEIGHT remain.
+    assert len(body_lines) == PEEK_BODY_HEIGHT
     assert body_lines[-1] == "line29"
+
+
+def test_peek_body_from_capture_trims_boxed_input_and_status() -> None:
+    stdout = (
+        "assistant said the last useful thing\n"
+        "╭────────────────────────────────╮\n"
+        "│ ❯                              │\n"
+        "╰────────────────────────────────╯\n"
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents\n"
+    )
+    result = subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
+    # The empty input box, its borders, and the status line are all chrome, so the
+    # digest ends on the last real output line rather than the agent's own prompt.
+    assert _peek_body_from_capture(result) == "assistant said the last useful thing"
+
+
+def test_peek_body_from_capture_trims_rule_style_input_box_and_statusline() -> None:
+    stdout = (
+        "the assistant's final line of output\n"
+        "\n"
+        "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n"
+        "❯ a leftover draft message\n"
+        "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n"
+        "  [01:22:38 weishi@host /Users/weishi/x] branch/name\n"
+    )
+    result = subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
+    # A rule-style input box holding a draft plus the shipped statusline are all
+    # trimmed, so the two-input-box confusion does not reach the digest.
+    assert _peek_body_from_capture(result) == "the assistant's final line of output"
+
+
+def test_peek_body_from_capture_keeps_boxed_menu_options() -> None:
+    stdout = "Do you want to proceed?\n│ ❯ 1. Yes │\n│   2. No  │\n╰──────────╯\n"
+    result = subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
+    body = _peek_body_from_capture(result)
+    # Boxed rows carrying real content (menu options) survive the chrome trim.
+    assert "1. Yes" in body
+    assert "2. No" in body
 
 
 def test_peek_body_from_capture_reports_failure() -> None:
@@ -1870,6 +1911,40 @@ def test_peek_body_from_capture_reports_failure() -> None:
 def test_peek_body_from_capture_empty_output() -> None:
     result = subprocess.CompletedProcess(args=[], returncode=0, stdout="\n\n", stderr="")
     assert _peek_body_from_capture(result) == "(no recent output)"
+
+
+def test_is_peek_chrome_line_classifies_chrome_and_content() -> None:
+    assert _is_peek_chrome_line("")
+    assert _is_peek_chrome_line("   ")
+    assert _is_peek_chrome_line("╭────────╮")
+    assert _is_peek_chrome_line("▔▔▔▔▔▔▔▔")
+    assert _is_peek_chrome_line("│ ❯ │")
+    assert _is_peek_chrome_line("❯ a leftover draft message")
+    assert _is_peek_chrome_line("  [01:22:38 weishi@host /Users/weishi/x] branch/name")
+    assert _is_peek_chrome_line("  ⏵⏵ bypass permissions on (shift+tab to cycle)")
+    assert not _is_peek_chrome_line("real output line")
+    assert not _is_peek_chrome_line("❯ 1. Yes")
+    assert not _is_peek_chrome_line("│ ❯ 1. Yes │")
+
+
+def test_looks_like_selection_detects_cursor_marked_menu() -> None:
+    menu = "Choose one:\n❯ 1. First option\n  2. Second option\n"
+    assert _looks_like_selection(menu)
+
+
+def test_looks_like_selection_ignores_plain_numbered_list() -> None:
+    plain = "Plan:\n1. build the thing\n2. test the thing\n"
+    assert not _looks_like_selection(plain)
+
+
+def test_update_peek_hint_switches_between_send_and_attach() -> None:
+    state = _make_state()
+    state.peek_hint_text = Text("")
+    _update_peek_hint(state, has_text=False)
+    assert "attach" in str(state.peek_hint_text.text)
+    _update_peek_hint(state, has_text=True)
+    assert "send" in str(state.peek_hint_text.text)
+    assert "attach" not in str(state.peek_hint_text.text)
 
 
 def test_on_peek_reply_poll_success_renders_sent() -> None:
@@ -2064,3 +2139,15 @@ def test_peek_move_without_target_is_noop() -> None:
     state.peek_agent_name = None
     _peek_move(state, 1)
     assert state.peek_agent_name is None
+
+
+def test_peek_move_clears_typed_reply_for_new_agent() -> None:
+    entries = (_make_entry(name="agent-a"), _make_entry(name="agent-b"))
+    state = _make_state_with_walker(entries)
+    _build_peek_panel(state)
+    state.peek_agent_name = AgentName("agent-a")
+    state.peek_input.set_edit_text("meant for agent-a")
+    _peek_move(state, 1)
+    assert state.peek_agent_name == AgentName("agent-b")
+    # A reply typed for the previous agent is discarded, not carried to the new one.
+    assert state.peek_input.get_edit_text() == ""

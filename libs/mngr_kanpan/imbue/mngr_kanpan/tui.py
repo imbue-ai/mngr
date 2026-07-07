@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 import time
 from collections.abc import Callable
@@ -9,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from datetime import timezone
 from typing import Any
+from typing import Final
 from typing import assert_never
 
 from loguru import logger
@@ -16,6 +18,7 @@ from pydantic import ConfigDict
 from urwid.canvas import TextCanvas
 from urwid.event_loop.abstract_loop import ExitMainLoop
 from urwid.event_loop.main_loop import MainLoop
+from urwid.signals import connect_signal
 from urwid.widget.attr_map import AttrMap
 from urwid.widget.columns import Columns
 from urwid.widget.divider import Divider
@@ -83,9 +86,9 @@ SPINNER_FRAMES: tuple[str, ...] = ("|", "/", "-", "\\")
 SPINNER_INTERVAL_SECONDS: float = 0.15
 TRANSIENT_MESSAGE_SECONDS: float = 3.0
 
-# Peek panel: number of trailing pane lines to show, and how often to re-capture
-# while the panel is open.
-PEEK_TAIL_LINE_COUNT: int = 14
+# Peek panel: visible height of the scrollable output window, and how often to
+# re-capture the agent's pane while the panel is open.
+PEEK_BODY_HEIGHT: int = 14
 PEEK_REFRESH_SECONDS: float = 2.0
 PEEK_REPLY_PROMPT: str = "reply> "
 
@@ -401,6 +404,8 @@ class _KanpanState(MutableModel):
     peek_alarm: Any = None
     # In-flight `mngr message` reply, polled to report success/failure.
     peek_reply_future: Future[subprocess.CompletedProcess[str]] | None = None
+    # Footer hint line inside the panel; its text depends on whether a reply is typed.
+    peek_hint_text: Any = None
     # Dedicated executor for peek captures and replies. Kept separate from the
     # shared `executor` (and sized for two workers) so a slow reply -- `mngr
     # message` waits up to ~90s to confirm submission -- cannot freeze the live
@@ -959,17 +964,73 @@ def _last_nonempty_line(text: str) -> str:
     return lines[-1] if lines else ""
 
 
+# Trailing pane chrome trimmed from the peek digest so the agent's own input box
+# stops reading as a second reply field.
+_PEEK_STATUS_MARKERS: Final = (
+    "bypass permissions",
+    "accept edits",
+    "for agents",
+    "shift+tab",
+    "esc to interrupt",
+)
+# Rule/border glyphs an agent draws around its input box (box-drawing and heavy rules).
+_PEEK_RULE_CHARS: Final = frozenset("─━═▔▁╭╮╰╯┌┐└┘ ")
+_PEEK_PROMPT_CHARS: Final = frozenset("❯›> ")
+# A numbered menu option, optionally boxed (│) and cursor-marked (❯), e.g. "❯ 1. Yes".
+_PEEK_OPTION_RE: Final = re.compile(r"^\s*│?\s*[❯›>]?\s*\d+[.)]\s+\S")
+
+
+@pure
+def _is_peek_chrome_line(line: str) -> bool:
+    """True when `line` is trailing agent-TUI chrome trimmed from the peek digest.
+
+    Covers blank lines, box/rule borders, the agent's own input prompt (empty or
+    holding a draft), and the shipped ``[HH:MM:SS user@host path]`` statusline, so
+    the digest ends on real output rather than the agent's input box. Numbered menu
+    options are preserved so a live selection stays visible.
+    """
+    stripped = line.strip()
+    if not stripped:
+        return True
+    if _PEEK_OPTION_RE.match(stripped):
+        return False
+    if stripped.startswith("│") and stripped.endswith("│"):
+        inner = stripped[1:-1].strip()
+        return all(char in _PEEK_PROMPT_CHARS for char in inner)
+    if all(char in _PEEK_RULE_CHARS for char in stripped):
+        return True
+    if stripped[0] in _PEEK_PROMPT_CHARS:
+        return True
+    if stripped.startswith("[") and "@" in stripped:
+        return True
+    lowered = stripped.lower()
+    return any(marker in lowered for marker in _PEEK_STATUS_MARKERS)
+
+
+@pure
+def _looks_like_selection(text: str) -> bool:
+    """True when the pane shows a cursor-marked numbered selection menu (>= 2 options)."""
+    options = [line for line in text.splitlines() if _PEEK_OPTION_RE.match(line)]
+    if len(options) < 2:
+        return False
+    return any("❯" in option for option in options)
+
+
 @pure
 def _peek_body_from_capture(result: subprocess.CompletedProcess[str]) -> str:
-    """Reduce a captured pane to the trailing lines shown in the peek panel."""
+    """Reduce a captured pane to the trailing content lines shown in the peek panel.
+
+    Trailing chrome (input box, borders, status) is trimmed so the digest ends on
+    real output rather than the agent's own prompt.
+    """
     if result.returncode != 0:
         detail = result.stderr.strip() or f"exited with code {result.returncode}"
         return f"(no output: {detail})"
     lines = result.stdout.rstrip("\n").split("\n")
     end = len(lines)
-    while end > 0 and not lines[end - 1].strip():
+    while end > 0 and _is_peek_chrome_line(lines[end - 1]):
         end -= 1
-    tail = lines[max(0, end - PEEK_TAIL_LINE_COUNT) : end]
+    tail = lines[max(0, end - PEEK_BODY_HEIGHT) : end]
     if not tail:
         return "(no recent output)"
     return "\n".join(tail)
@@ -981,7 +1042,7 @@ def _build_peek_panel(state: _KanpanState) -> Pile:
     state.peek_body_text = Text("", wrap="clip")
     state.peek_input = Edit(caption=("peek_hint", PEEK_REPLY_PROMPT))
     state.peek_status_text = Text("")
-    hint = Text(("peek_hint", "  enter: send / attach   up/down: switch   right: enter   esc: close"))
+    state.peek_hint_text = Text("")
     panel = Pile(
         [
             Divider("─"),
@@ -990,12 +1051,29 @@ def _build_peek_panel(state: _KanpanState) -> Pile:
             Divider("─"),
             state.peek_input,
             state.peek_status_text,
-            hint,
+            state.peek_hint_text,
         ]
     )
     # Focus the reply input so typed keys land in it.
     panel.focus_position = 4
+    connect_signal(state.peek_input, "change", _on_peek_input_change, user_args=[state])
+    _update_peek_hint(state, has_text=False)
     return panel
+
+
+def _update_peek_hint(state: _KanpanState, has_text: bool) -> None:
+    """Set the panel footer hint to state exactly what Enter does right now."""
+    if state.peek_hint_text is None:
+        return
+    if has_text:
+        state.peek_hint_text.set_text(("peek_hint", "  enter send   ·   esc close"))
+    else:
+        state.peek_hint_text.set_text(("peek_hint", "  ↑↓ switch agent   ·   enter/→ attach   ·   esc close"))
+
+
+def _on_peek_input_change(state: _KanpanState, _edit: Edit, new_text: str) -> None:
+    """Keep the footer hint in sync with whether a reply is typed (send vs attach)."""
+    _update_peek_hint(state, bool(new_text.strip()))
 
 
 def _update_peek_header(state: _KanpanState) -> None:
@@ -1042,6 +1120,9 @@ def _on_peek_capture_poll(loop: MainLoop, state: _KanpanState) -> None:
         body = f"(capture failed: {e})"
     if state.peek_body_text is not None:
         state.peek_body_text.set_text(body)
+    # A menu can't be driven from here (reply is text-only), so point the user at attach.
+    if state.peek_status_text is not None and _looks_like_selection(body):
+        state.peek_status_text.set_text(("peek_hint", "  selection detected — press → to attach and choose"))
     if state.peek_agent_name is not None:
         state.peek_alarm = loop.set_alarm_in(PEEK_REFRESH_SECONDS, _on_peek_capture_tick, state)
 
@@ -1088,6 +1169,7 @@ def _close_peek(state: _KanpanState) -> None:
     state.peek_body_text = None
     state.peek_input = None
     state.peek_status_text = None
+    state.peek_hint_text = None
 
 
 def _toggle_peek(state: _KanpanState) -> None:
@@ -1120,6 +1202,10 @@ def _peek_move(state: _KanpanState, delta: int) -> None:
         state.peek_body_text.set_text("(loading...)")
     if state.peek_status_text is not None:
         state.peek_status_text.set_text("")
+    # Discard any half-typed reply so it can't be sent to the newly focused agent.
+    if state.peek_input is not None:
+        state.peek_input.set_edit_text("")
+    _update_peek_hint(state, has_text=False)
     _cancel_peek_alarm(state)
     state.peek_capture_future = None
     _start_peek_capture(state)
@@ -2047,7 +2133,7 @@ def run_kanpan(
         f"{key}: {cmd.name}" for key, cmd in commands.items() if _mark_color(cmd) is None and key not in mark_keys
     ]
     action_parts.append("space: peek")
-    action_parts.append("enter: connect")
+    action_parts.append("enter/→: attach")
     action_parts.append("q: quit")
     keybindings = "  ".join(mark_parts + ["|"] + action_parts) + "  "
 
