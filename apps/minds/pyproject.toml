@@ -23,7 +23,6 @@ dependencies = [
     "imbue-mngr-aws",
     "imbue-mngr-forward",
     "imbue-mngr-latchkey",
-    "imbue-mngr-ovh",
     "imbue-mngr-vps",
     "modal>=1.4.3",
     "paramiko>=3.0",
@@ -58,7 +57,6 @@ imbue-mngr = { workspace = true }
 imbue-mngr-aws = { workspace = true }
 imbue-mngr-forward = { workspace = true }
 imbue-mngr-latchkey = { workspace = true }
-imbue-mngr-ovh = { workspace = true }
 imbue-mngr-vps = { workspace = true }
 imbue-common = { workspace = true }
 

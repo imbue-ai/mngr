@@ -89,6 +89,7 @@ from imbue.minds.desktop_client.api_models import WorkspaceSummary
 from imbue.minds.desktop_client.api_models import WorkspaceVersionResponse
 from imbue.minds.desktop_client.api_spec import API_SPEC
 from imbue.minds.desktop_client.api_spec import json_response_model
+from imbue.minds.desktop_client.backend_resolver import WORKSPACE_DISPLAY_NAME_LABEL
 from imbue.minds.desktop_client.backup_export import BackupExportError
 from imbue.minds.desktop_client.backup_export import export_snapshot_zip
 from imbue.minds.desktop_client.create_helpers import REMOTE_SIGNIN_REDIRECT_URL
@@ -114,6 +115,7 @@ from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.templates import FALLBACK_BRANCH
+from imbue.minds.desktop_client.templates import normalize_host_name_slug
 from imbue.minds.desktop_client.templates import resolve_create_host_name
 from imbue.minds.desktop_client.templates import status_text_for
 from imbue.minds.desktop_client.workspace_create import build_backup_request_or_error
@@ -222,7 +224,10 @@ def _serialize_workspace(agent_id: AgentId) -> WorkspaceSummary:
             host_state = backend_resolver.get_host_state(typed_host_id)
     return WorkspaceSummary(
         agent_id=str(agent_id),
-        name=backend_resolver.get_workspace_name(agent_id) or (info.agent_name if info is not None else None),
+        # The human-readable display name (``workspace_display_name`` label,
+        # falling back to the host name for legacy workspaces). Never the agent
+        # name, which is the constant ``system-services``.
+        name=backend_resolver.get_workspace_name(agent_id),
         host_id=host_id,
         host_state=str(host_state) if host_state is not None else None,
         git_url=backend_resolver.get_agent_label(agent_id, "remote"),
@@ -550,6 +555,10 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
     creation_id = agent_creator.start_creation(
         git_url,
         host_name=resolved_host_name,
+        # The raw, arbitrary name the user typed becomes the display name; the
+        # resolved slug above is the host name. When blank, start_creation falls
+        # the display name back to the slug.
+        display_name=host_name,
         branch=branch,
         launch_mode=launch_mode,
         ai_provider=ai_provider,
@@ -650,6 +659,81 @@ def _handle_workspace_start(agent_id: str) -> WorkspaceLifecycleResponse | Respo
 def _handle_workspace_stop(agent_id: str) -> WorkspaceLifecycleResponse | Response:
     """Stop a workspace's host, blocking until the transition resolves."""
     return _perform_workspace_lifecycle(agent_id, "stop")
+
+
+def _apply_workspace_display_label(
+    agent_id: AgentId, display_name: str, host_name_slug: str | None, parent_cg: ConcurrencyGroup
+) -> Response:
+    """Write the workspace's human-readable display label, returning the API response.
+
+    ``host_name_slug`` is the workspace's new normalized host name when the rename
+    also renamed the host (a slug change), or None for a display-only rename.
+    """
+    returncode, _stdout, stderr = _run_mngr_blocking(
+        [get_state().mngr_binary, "label", str(agent_id), "--label", f"{WORKSPACE_DISPLAY_NAME_LABEL}={display_name}"],
+        parent_cg,
+    )
+    if returncode != 0:
+        return _json_error(f"Failed to update workspace name: {stderr.strip()[:200]}", 502)
+    # Optimistically reflect the just-persisted name in the discovery-fed resolver
+    # cache so an immediate settings reload renders the new name instead of the stale
+    # one; discovery re-reads the label on its next snapshot and reconciles (or
+    # expires) the override.
+    get_state().backend_resolver.set_workspace_name_override(agent_id, display_name, host_name_slug)
+    return _json_response({"agent_id": str(agent_id), "name": display_name})
+
+
+@require_api_or_cookie_auth
+def _handle_workspace_rename(agent_id: str) -> Response:
+    """Rename a workspace (``POST .../workspaces/<agent_id>/rename``).
+
+    Updates the workspace's normalized host name (the slug) and its
+    human-readable display label together so the two never drift. When the new
+    name normalizes to the same slug as the current host name, only the display
+    label is rewritten -- no host rename, so it works on every provider and
+    while offline. ``agent_id`` is the workspace's ``system-services`` agent id.
+    """
+    parsed_id = AgentId(agent_id)
+    state = get_state()
+    backend_resolver = state.backend_resolver
+    if parsed_id not in backend_resolver.list_known_workspace_ids():
+        return _json_error(f"Unknown workspace {agent_id}", 404)
+    parent_cg = state.root_concurrency_group
+    if parent_cg is None:
+        return _json_error("Workspace rename is unavailable in this configuration", 503)
+
+    raw_name = str((request.get_json(silent=True) or {}).get("name", "")).strip()
+    if not raw_name:
+        return _json_field_error("A workspace name is required.", "name")
+    try:
+        new_slug = normalize_host_name_slug(raw_name)
+    except InvalidName as exc:
+        return _json_field_error(str(exc), "name")
+
+    current_host_name = backend_resolver.get_host_name(parsed_id)
+
+    # Display-only rename: the slug is unchanged, so just rewrite the label
+    # (no host rename needed -- works on every provider, online or offline).
+    if current_host_name is not None and new_slug.casefold() == current_host_name.casefold():
+        return _apply_workspace_display_label(parsed_id, raw_name, None, parent_cg)
+
+    # Reject a slug that collides with another active workspace on the same provider.
+    info = backend_resolver.get_agent_display_info(parsed_id)
+    if info is not None and info.provider_name is not None:
+        taken = taken_host_names_on_provider(backend_resolver, info.provider_name)
+        if current_host_name is not None:
+            taken.discard(current_host_name.casefold())
+        if new_slug.casefold() in taken:
+            return _json_error(f"A workspace named '{new_slug}' already exists.", 409)
+
+    # Rename the host first, then update the display label. The operation is
+    # idempotently re-runnable: re-running completes an interrupted rename.
+    returncode, _stdout, stderr = _run_mngr_blocking(
+        [state.mngr_binary, "rename", "--host", str(parsed_id), str(new_slug)], parent_cg
+    )
+    if returncode != 0:
+        return _json_error(f"Failed to rename workspace host: {stderr.strip()[:200]}", 502)
+    return _apply_workspace_display_label(parsed_id, raw_name, str(new_slug), parent_cg)
 
 
 # -- Workspace recovery routes (health probe + restart) --
@@ -1461,6 +1545,7 @@ def create_api_v1_blueprint() -> Blueprint:
     # Cross-workspace mutation (create / destroy / lifecycle) + operation polling.
     blueprint.add_url_rule("/workspaces", view_func=_handle_create_workspace, methods=["POST"])
     blueprint.add_url_rule("/workspaces/<agent_id>/destroy", view_func=_handle_destroy_workspace, methods=["POST"])
+    blueprint.add_url_rule("/workspaces/<agent_id>/rename", view_func=_handle_workspace_rename, methods=["POST"])
     blueprint.add_url_rule(
         "/workspaces/<agent_id>/start",
         view_func=_handle_workspace_start,

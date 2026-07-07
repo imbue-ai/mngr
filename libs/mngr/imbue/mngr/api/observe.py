@@ -29,9 +29,10 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
+from imbue.mngr.api.discovery_aggregator import AggregatorDelta
+from imbue.mngr.api.discovery_aggregator import DiscoveryStateAggregator
 from imbue.mngr.api.discovery_events import DiscoveryErrorEvent
-from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
-from imbue.mngr.api.discovery_events import HostDestroyedEvent
+from imbue.mngr.api.discovery_events import ProviderDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
 from imbue.mngr.api.list import list_agents
 from imbue.mngr.config.data_types import MngrConfig
@@ -344,6 +345,18 @@ def _make_unknown_agent_details(last_known: AgentDetails) -> AgentDetails:
     )
 
 
+@pure
+def _is_provider_error_event(event: object) -> bool:
+    """True if a discovery event indicates a provider failed this poll.
+
+    Used to wake the observer's periodic snapshot loop so UNKNOWN state for the
+    errored provider's agents propagates without waiting for the full interval.
+    """
+    if isinstance(event, ProviderDiscoverySnapshotEvent):
+        return event.error is not None
+    return isinstance(event, DiscoveryErrorEvent)
+
+
 class AgentObserver(MutableModel):
     """Observes agent state changes across all hosts.
 
@@ -360,6 +373,9 @@ class AgentObserver(MutableModel):
     mngr_binary: str = Field(default="mngr", frozen=True)
 
     _concurrency_group: ConcurrencyGroup = PrivateAttr(default_factory=lambda: ConcurrencyGroup(name="agent-observer"))
+    # Folds the per-provider discovery stream into a consistent view (known hosts,
+    # per-provider error state) that drives activity streams and UNKNOWN synthesis.
+    _aggregator: DiscoveryStateAggregator = PrivateAttr(default_factory=DiscoveryStateAggregator)
     _known_hosts: dict[str, _KnownHost] = PrivateAttr(default_factory=dict)
     _discovery_stream_process: RunningProcess = PrivateAttr(default_factory=dict)
     _events_processes: dict[str, RunningProcess] = PrivateAttr(default_factory=dict)
@@ -376,17 +392,13 @@ class AgentObserver(MutableModel):
     # in this set get an UNKNOWN AgentDetails synthesized on the next full state
     # snapshot if they did not reappear in the live listing.
     _currently_errored_providers: set[ProviderInstanceName] = PrivateAttr(default_factory=set)
-    # Union of providers + error_by_provider_name from the most recent snapshot.
+    # Union of providers + errored providers currently known to the aggregator.
     # When a previously-tracked agent's provider is no longer in this set, the
     # observer treats it as implicit destroy (config-removal) and drops the
     # agent from tracking instead of marking it UNKNOWN.
     _known_provider_names: set[ProviderInstanceName] = PrivateAttr(default_factory=set)
-    # Set true on receipt of a DiscoveryErrorEvent with provider_name=None
-    # (polling loop crashed entirely); cleared on the next successful snapshot.
-    # While true, every tracked agent is considered UNKNOWN-eligible.
-    _polling_loop_crashed: bool = PrivateAttr(default=False)
-    # Triggered to wake the periodic-snapshot loop early when a DiscoveryErrorEvent
-    # arrives, so UNKNOWN state propagates without waiting for the full poll interval.
+    # Triggered to wake the periodic-snapshot loop early when a provider error is
+    # observed, so UNKNOWN state propagates without waiting for the full poll interval.
     _snapshot_trigger: threading.Event = PrivateAttr(default_factory=threading.Event)
 
     def run(self) -> None:
@@ -456,7 +468,13 @@ class AgentObserver(MutableModel):
         )
 
     def _on_discovery_stream_output(self, line: str, is_stdout: bool) -> None:
-        """Handle a line of output from 'mngr observe --discovery-only'."""
+        """Handle a line of output from 'mngr observe --discovery-only'.
+
+        Every discovery event is folded into the shared aggregator, which maintains the
+        per-provider-correct view of hosts and provider error state. The returned delta
+        drives starting/stopping per-host activity streams; provider error events wake
+        the periodic snapshot loop so UNKNOWN state propagates quickly.
+        """
         if not is_stdout:
             return
         stripped = line.strip()
@@ -464,82 +482,38 @@ class AgentObserver(MutableModel):
             return
 
         event = parse_discovery_event_line(stripped)
+        if event is None:
+            return
 
-        if isinstance(event, FullDiscoverySnapshotEvent):
-            self._handle_full_snapshot(event)
-        elif isinstance(event, HostDestroyedEvent):
-            self._handle_host_destroyed(event)
-        elif isinstance(event, DiscoveryErrorEvent):
-            self._handle_discovery_error_event(event)
-        else:
-            pass
-
-    def _handle_full_snapshot(self, event: FullDiscoverySnapshotEvent) -> None:
-        """Update known hosts and provider error state from a full discovery snapshot."""
-        # Build the new set of known hosts from the host records (which carry the
-        # authoritative host_name, unlike DiscoveredAgent which only has agent_name)
-        new_hosts: dict[str, _KnownHost] = {}
-        for host in event.hosts:
-            host_id_str = str(host.host_id)
-            new_hosts[host_id_str] = _KnownHost(
-                host_id=host.host_id,
-                host_name=host.host_name,
-            )
-
-        # The snapshot is authoritative state for which providers are currently
-        # loaded and which of those are errored. A successful snapshot (even one
-        # carrying some per-provider errors) also clears the "polling loop
-        # crashed entirely" signal.
-        new_known_providers = {p.provider_name for p in event.providers} | set(event.error_by_provider_name.keys())
-        new_errored_providers = set(event.error_by_provider_name.keys())
-        had_new_provider_errors = bool(event.error_by_provider_name)
-
-        with self._lock:
-            previously_known = set(self._known_hosts.keys())
-            self._known_hosts = new_hosts
-            self._known_provider_names = new_known_providers
-            self._currently_errored_providers = new_errored_providers
-            self._polling_loop_crashed = False
-
-        new_host_ids = set(new_hosts.keys())
-
-        # Stop streams for hosts that are no longer known
-        for host_id_str in previously_known - new_host_ids:
-            self._stop_activity_stream(host_id_str)
-
-        # Start streams for newly discovered hosts
-        for host_id_str in new_host_ids - previously_known:
-            host = new_hosts[host_id_str]
-            self._start_activity_stream(host_id_str, host.host_name)
-
-        # Wake the periodic loop so UNKNOWN state propagates without waiting
-        # for the full poll interval whenever provider errors are observed.
-        if had_new_provider_errors:
+        delta = self._aggregator.apply_event(event)
+        self._sync_known_state_from_aggregator()
+        self._reconcile_activity_streams(delta)
+        if _is_provider_error_event(event):
             self._snapshot_trigger.set()
 
-    def _handle_discovery_error_event(self, event: DiscoveryErrorEvent) -> None:
-        """React to an incremental DiscoveryErrorEvent between snapshots.
-
-        ``provider_name`` set: mark that provider's agents as UNKNOWN-eligible.
-        ``provider_name`` is ``None``: the polling loop itself crashed, so every
-        currently-tracked agent becomes UNKNOWN-eligible until the next
-        successful snapshot.
-        """
-        if event.provider_name is None:
-            with self._lock:
-                self._polling_loop_crashed = True
-        else:
-            with self._lock:
-                self._currently_errored_providers.add(ProviderInstanceName(event.provider_name))
-        # Trigger a state snapshot so UNKNOWN propagates within seconds.
-        self._snapshot_trigger.set()
-
-    def _handle_host_destroyed(self, event: HostDestroyedEvent) -> None:
-        """Remove a destroyed host from known hosts and stop its activity stream."""
-        host_id_str = str(event.host_id)
+    def _sync_known_state_from_aggregator(self) -> None:
+        """Refresh known hosts and provider error/known sets from the aggregator."""
+        host_by_id = self._aggregator.get_host_by_id()
+        new_known_hosts = {
+            host_id_str: _KnownHost(host_id=host.host_id, host_name=host.host_name)
+            for host_id_str, host in host_by_id.items()
+        }
+        errored_providers = set(self._aggregator.get_error_by_provider_name().keys())
+        known_providers = {provider.provider_name for provider in self._aggregator.get_providers()} | errored_providers
         with self._lock:
-            self._known_hosts.pop(host_id_str, None)
-        self._stop_activity_stream(host_id_str)
+            self._known_hosts = new_known_hosts
+            self._currently_errored_providers = errored_providers
+            self._known_provider_names = known_providers
+
+    def _reconcile_activity_streams(self, delta: AggregatorDelta) -> None:
+        """Start activity streams for newly-known hosts and stop them for removed hosts."""
+        for host_id_str in delta.removed_host_ids:
+            self._stop_activity_stream(host_id_str)
+        for host_id_str in delta.added_host_ids:
+            with self._lock:
+                host = self._known_hosts.get(host_id_str)
+            if host is not None:
+                self._start_activity_stream(host_id_str, host.host_name)
 
     # FIXME: we'll need to be smarter about this when we have tons of hosts--add these options to the observe CLI and API:
     #  1. --local-watches-only to only observe the local host. If specified, don't bother starting an activity stream for anything besides the local host
@@ -678,7 +652,6 @@ class AgentObserver(MutableModel):
 
             errored_providers = self._currently_errored_providers
             known_providers = self._known_provider_names
-            polling_crashed = self._polling_loop_crashed
 
             for agent_id_str, last_details in self._last_known_details_by_id.items():
                 if agent_id_str in live_agent_ids:
@@ -689,8 +662,8 @@ class AgentObserver(MutableModel):
                 if known_providers and provider not in known_providers:
                     ids_to_drop.append(agent_id_str)
                     continue
-                # Provider currently errored, or polling crashed -- synthesize UNKNOWN.
-                if polling_crashed or provider in errored_providers:
+                # Provider currently errored -- its agents' state is unknown, synthesize UNKNOWN.
+                if provider in errored_providers:
                     unknown_agents.append(_make_unknown_agent_details(last_details))
                     continue
                 # Provider is healthy and the agent disappeared from the listing without

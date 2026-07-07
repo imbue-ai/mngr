@@ -5,9 +5,9 @@ loader and any downstream consumer's loading/recovery page render the *same*
 HTML in their loading state -- rather than two hand-matched markups that drift
 apart.
 
-The proxy serves it as a static auto-refreshing page; a consumer can reuse it
-and layer its own controls and script on top via the ``card_extra`` /
-``style_extra`` / ``body_extra`` hooks.
+The proxy serves it with a small background poll that re-attempts the workspace
+until it answers; a consumer can reuse it and layer its own controls and script
+on top via the ``card_extra`` / ``style_extra`` / ``body_extra`` hooks.
 """
 
 from typing import Final
@@ -73,7 +73,7 @@ def render_loading_page(
 ) -> str:
     """Render the canonical "Loading workspace" page.
 
-    ``head_extra``   -- extra markup inside ``<head>`` (e.g. a meta refresh).
+    ``head_extra``   -- extra markup inside ``<head>`` (e.g. a ``<meta>`` or ``<link>`` tag).
     ``style_extra``  -- extra CSS appended to ``LOADING_PAGE_CSS``.
     ``card_attrs``   -- extra attributes on the ``.card`` element (e.g. ``data-*``).
     ``card_extra``   -- extra markup appended inside the ``.card`` (e.g. buttons).

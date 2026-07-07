@@ -13,8 +13,8 @@ This provider's responsibilities are then:
   volumes, per-host btrfs subvolume under ``/mngr-btrfs/``, ``docker system
   prune``, ``/root`` and ``/tmp`` content) and release the lease back to the
   pool. The privacy-first ordering means the agent's data is gone before the
-  connector flips the row to ``released``; ``cleanup_released_hosts.py``'s
-  later VPS-destroy becomes belt-and-suspenders.
+  connector flips the row to ``released`` and destroys the leased slice's VM, so
+  the data wipe is belt-and-suspenders.
 - `delete_host` -- called by mngr's GC after the destroyed-host grace
   period. Same flow as ``destroy_host``; treated as a no-op when the lease
   has already been released.
@@ -67,6 +67,7 @@ from imbue.mngr.hosts.outer_host import OuterHost
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.data_types import AgentDetails
+from imbue.mngr.interfaces.data_types import BoundedProviderDiscoveryResult
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import CleanupFailureCategory
@@ -80,6 +81,8 @@ from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.host import OuterHostInterface
+from imbue.mngr.interfaces.provider_instance import HostDiscoveryReadRegistry
+from imbue.mngr.interfaces.provider_instance import bounded_result_from_agents_by_host
 from imbue.mngr.interfaces.provider_instance import build_agent_details_from_offline_ref
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -442,6 +445,36 @@ class ImbueCloudProvider(BaseProviderInstance):
     # outer SSH to be reachable for every leased VPS.
     # ------------------------------------------------------------------
 
+    def discover_hosts_and_agents_within_timeouts(
+        self,
+        cg: ConcurrencyGroup,
+        host_discovery_timeout_seconds: float,
+        agent_discovery_timeout_seconds: float,
+        include_destroyed: bool = False,
+        registry: HostDiscoveryReadRegistry | None = None,
+    ) -> BoundedProviderDiscoveryResult:
+        """Delegate to the batch discovery path; bounded only by the provider-level error timeout.
+
+        Imbue Cloud discovery reads all leased hosts (and their agents) in one batched
+        pass, so individual host reads cannot be bounded; nothing is marked UNKNOWN here.
+        ``registry`` is accepted for interface compatibility but unused: this path spawns
+        no per-host reads to de-duplicate across polls.
+        """
+        agents_by_host = self.discover_hosts_and_agents(cg=cg, include_destroyed=include_destroyed)
+        # Attach each discovered host's SSH endpoint (built from its lease) so the streaming
+        # discovery poller re-emits it as a HOST_SSH_INFO event. The lightweight streaming path
+        # does not otherwise surface SSH info, so without this a consumer that tunnels to the
+        # host (the minds system_interface forward) is starved of the endpoint and can only get
+        # it from an occasional full ``mngr list``. The leases are already cached from the
+        # discovery pass above, so this is a cheap lookup, not a second connector round-trip.
+        discovered_host_ids = {host.host_id for host in agents_by_host}
+        host_ssh_infos = [
+            (HostId(lease.host_id), self._build_lease_ssh_info(HostId(lease.host_id), lease))
+            for lease in self._list_leased_hosts_cached()
+            if HostId(lease.host_id) in discovered_host_ids
+        ]
+        return bounded_result_from_agents_by_host(agents_by_host, host_ssh_infos=host_ssh_infos)
+
     def discover_hosts_and_agents(
         self,
         cg: ConcurrencyGroup,
@@ -501,12 +534,19 @@ class ImbueCloudProvider(BaseProviderInstance):
                 agent_name_str = data.get("name")
                 if not agent_id_str or not agent_name_str:
                     continue
+                # Carry the raw per-agent data (its labels, type, work_dir, etc.) as
+                # certified_data, exactly the same ``agent_raw["data"]`` the rich
+                # ``get_host_and_agent_details`` path reads. Without it these streaming
+                # refs are label-less, so any consumer that filters on labels -- e.g. the
+                # minds system_interface forward's ``--agent-include
+                # has(agent.labels.is_primary)`` -- silently drops every imbue_cloud agent.
                 agent_refs.append(
                     DiscoveredAgent(
                         agent_id=AgentId(agent_id_str),
                         agent_name=AgentName(agent_name_str),
                         host_id=host_id,
                         provider_name=self.name,
+                        certified_data=data,
                     )
                 )
             # If the outer-SSH discovery returned no agents (e.g. container
@@ -1698,14 +1738,14 @@ class ImbueCloudProvider(BaseProviderInstance):
            and wipe ``/root`` and ``/tmp`` (preserving ``authorized_keys``
            so the pool-management ssh path keeps working through cleanup).
         2. Release the lease via the connector's ``/hosts/{id}/release``
-           endpoint -- the row flips to ``released`` and gets picked up by
-           ``cleanup_released_hosts.py`` later for VPS-destroy.
+           endpoint -- the row flips to ``released`` and the connector destroys
+           the leased slice's VM.
         3. Drop local per-host state (ssh keys, known_hosts, cached records).
 
         Best-effort across steps: a failed wipe still proceeds to release
         (because a stuck VPS would otherwise leak a paid lease indefinitely),
-        and the data wipe is non-gating because the VPS is destroyed wholesale
-        by ``cleanup_released_hosts.py`` after release regardless. A failed
+        and the data wipe is non-gating because the slice's VM is destroyed
+        wholesale by the connector's release route regardless. A failed
         release, however, means the paid lease is leaked -- it is recorded as a
         ``HOST_RESOURCE_REMAINS`` failure and local cleanup is intentionally
         skipped (removing local SSH keys for a host that was never released
@@ -1748,8 +1788,8 @@ class ImbueCloudProvider(BaseProviderInstance):
 
         Raises a ``CleanupFailedGroup`` carrying the real cleanup failures
         (resources left behind); returns normally otherwise. The wipe step is
-        non-gating (warn-only): the leased VPS is destroyed wholesale by
-        ``cleanup_released_hosts.py`` after the release, so residual data on it
+        non-gating (warn-only): the leased slice's VM is destroyed wholesale by
+        the connector's release route after the release, so residual data on it
         is not a leaked resource from mngr's accounting. A failed release leaks
         the paid lease and is recorded as ``HOST_RESOURCE_REMAINS``.
         """
@@ -1971,7 +2011,27 @@ class ImbueCloudProvider(BaseProviderInstance):
         host: HostInterface | HostId,
         name: HostName,
     ) -> Host:
-        raise NotImplementedError("imbue_cloud does not support renaming hosts (the host_id is fixed by the lease)")
+        """Rename a leased host by updating its mutable ``host_name`` in the connector.
+
+        The lease's ``host_db_id`` remains the durable identity; only the
+        friendly name changes. The connector owns the name, so this works
+        whether or not the leased container is currently running.
+        """
+        host_id = host.id if isinstance(host, HostInterface) else host
+        lease = self._find_leased(host_id)
+        if lease is None:
+            raise HostNotFoundError(self.name, host_id)
+
+        account = self._require_account()
+        token = self._get_access_token(account)
+        self.client.rename_host(token, str(lease.host_db_id), str(name))
+
+        # The connector DB is authoritative for discovery (host_name comes from
+        # the lease listing), so drop the cache and build the host from the
+        # locally-updated lease to avoid an extra round-trip.
+        updated_lease = lease.model_copy_update(to_update(lease.field_ref().host_name, str(name)))
+        self.reset_caches()
+        return self._build_host_object(updated_lease, adopt_pre_baked_agent=False)
 
     # ------------------------------------------------------------------
     # pyinfra connector lookup

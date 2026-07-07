@@ -121,14 +121,12 @@ _PERM_MINDS_API_PROXY_REPORT: Final[str] = "minds-api-proxy-report-allow"
 # gateway matches on; the proxy strips ``/minds-api-proxy`` before forwarding to
 # the desktop client's ``/api/schema``. It lives as a permission on the
 # ``latchkey-self`` scope (like ``read-self-permissions``). That scope is
-# domain-only, so it matches every gateway-self request; under detent's
-# evaluation the FIRST rule whose scope matches is authoritative -- it allows
-# when one of that rule's permissions matches and otherwise rejects outright,
-# without falling through to later rules. The ``latchkey-self`` rule is therefore
-# kept LAST among the gateway-self rules (see ``_with_gateway_self_catchall_last``)
-# so a narrower same-domain scope placed before it (e.g. the cross-workspace
-# ``minds-workspaces`` scope a grant adds) is evaluated first instead of being
-# shadowed and vetoed by this domain-only catch-all.
+# domain-only, so it matches every gateway-self request; within the single
+# matching rule detent allows a request that matches any one of the rule's
+# listed permission schemas. All gateway-self grants minds produces -- schema
+# read, file-sharing, accounts, and the cross-workspace verbs -- attach as
+# permissions on this one scope, so there is only ever a single gateway-self
+# rule and rule order never affects the verdict.
 _MINDS_API_SCHEMA_INBOUND_PATH: Final[str] = "/minds-api-proxy/api/schema"
 _PERM_MINDS_API_SCHEMA: Final[str] = "minds-api-schema-read"
 
@@ -142,13 +140,13 @@ _MINDS_API_TIMEZONE_INBOUND_PATH: Final[str] = "/minds-api-proxy/api/v1/timezone
 _PERM_MINDS_API_TIMEZONE: Final[str] = "minds-api-timezone-read"
 
 # The minds desktop client's cross-workspace management API
-# (``/api/v1/workspaces/...``) is gated by a separate ``minds-workspaces`` detent
-# scope. Its scope + per-verb permission schemas are NOT part of this agent
-# baseline: they are self-contained in the ``workspace`` permission request's
-# precomputed effect and spliced into the per-host permissions file when the
-# user approves a grant (see ``permission_requests.mjs``'s
-# ``computeWorkspaceEffect`` and the ``workspace_permissions`` module), exactly
-# like the file-sharing flow. Nothing about that scope needs to exist here.
+# (``/api/v1/workspaces/...``) attaches its per-verb permission schemas to the
+# ``latchkey-self`` scope, just like file-sharing and accounts. Those schemas are
+# NOT part of this agent baseline: they are self-contained in the ``workspace``
+# permission request's precomputed effect and unioned onto the ``latchkey-self``
+# rule when the user approves a grant (see ``permission_requests.mjs``'s
+# ``computeWorkspaceEffect`` and the ``workspace_permissions`` module). Nothing
+# about them needs to exist here.
 
 # Exact prefix/suffix wrapping each agent id inside an ``anyOf`` entry's
 # path pattern. Shared by the build + extract helpers so the two cannot
@@ -299,37 +297,6 @@ _AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissi
 )
 
 
-def _rule_scope_key(rule: Mapping[str, JsonValue]) -> str:
-    """Return the single scope key of a ``{scope: [permissions]}`` rule."""
-    keys = tuple(rule.keys())
-    if len(keys) != 1:
-        raise LatchkeyStoreError(
-            f"Expected each permissions rule to have exactly one scope key; got {len(keys)}: {rule!r}"
-        )
-    return keys[0]
-
-
-def _with_gateway_self_catchall_last(
-    rules: tuple[dict[str, list[str]], ...],
-) -> tuple[dict[str, list[str]], ...]:
-    """Return ``rules`` reordered so the domain-only ``latchkey-self`` catch-all is last.
-
-    The ``latchkey-self`` scope schema matches every gateway-self request on
-    ``domain`` alone (it carries no path constraint). detent evaluates a file's
-    rules in order and treats the *first* rule whose scope matches as
-    authoritative: it allows when one of that rule's permissions matches the
-    request and otherwise rejects outright, never consulting later rules. So a
-    narrower same-domain scope (e.g. the cross-workspace ``minds-workspaces``
-    scope a grant adds) must be ordered *before* ``latchkey-self``; otherwise the
-    catch-all matches first, finds none of its own permissions cover the request,
-    and vetoes it even though the later rule would have granted it. The relative
-    order of all other rules is preserved.
-    """
-    others = tuple(rule for rule in rules if _rule_scope_key(rule) != _SCOPE_LATCHKEY_SELF)
-    catchall = tuple(rule for rule in rules if _rule_scope_key(rule) == _SCOPE_LATCHKEY_SELF)
-    return others + catchall
-
-
 def register_agent_for_host(
     plugin_data_dir: Path,
     host_id: HostId,
@@ -341,12 +308,8 @@ def register_agent_for_host(
     baseline if it does not yet exist), extracts the current allowed-agent
     list out of the ``minds-api-proxy-unauthorized`` scope's ``not.anyOf``
     block, appends a per-agent entry if ``agent_id`` is not already there,
-    and writes the updated config back atomically. It also normalizes rule
-    order so the domain-only ``latchkey-self`` catch-all stays last (see
-    ``_with_gateway_self_catchall_last``). Idempotent: re-registering an agent
-    already in the list whose file is already canonically ordered is a no-op
-    write; if only the order is stale, the file is rewritten in place to repair
-    it (and nothing else changes).
+    and writes the updated config back atomically. Idempotent:
+    re-registering an agent already in the list is a no-op write.
 
     This is the *only* public way to grant a minds agent access to the
     Minds API proxy. The matching CLI wrapper is ``mngr latchkey
@@ -361,14 +324,6 @@ def register_agent_for_host(
         # First agent on this host: start from the baseline so the
         # gateway-self rules and the minds-api-proxy gate are present.
         config = _AGENT_BASELINE_PERMISSIONS
-
-    # Keep the domain-only ``latchkey-self`` catch-all last so any narrower
-    # same-domain scope a grant has appended (notably ``minds-workspaces``) is
-    # evaluated first; an older build appended such scopes after the catch-all,
-    # where detent's first-matching-scope-wins evaluation silently vetoes them
-    # (see ``_with_gateway_self_catchall_last``). Recomputed on every call so a
-    # restart repairs a pre-existing file even for an already-registered agent.
-    ordered_rules = _with_gateway_self_catchall_last(config.rules)
 
     schemas: dict[str, JsonValue] = dict(config.schemas)
     scope_schema = schemas.get(_SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED)
@@ -409,12 +364,7 @@ def register_agent_for_host(
 
     existing_ids = [_extract_agent_id_from_anyof_entry(entry) for entry in any_of]
     if str(agent_id) in existing_ids:
-        # Agent already allowed: nothing to add to the allowlist. Still rewrite if
-        # the rule order is non-canonical (a pre-existing file whose grant was
-        # appended after the catch-all by an older build), so a restart repairs it;
-        # otherwise this is a true no-op.
-        if ordered_rules != config.rules:
-            save_permissions(path, LatchkeyPermissionsConfig(rules=ordered_rules, schemas=config.schemas))
+        # No-op: agent already allowed.
         return
     new_any_of: list[JsonValue] = list(any_of) + [_build_allowed_agent_anyof_entry(str(agent_id))]
 
@@ -431,7 +381,7 @@ def register_agent_for_host(
             },
         },
     }
-    new_config = LatchkeyPermissionsConfig(rules=ordered_rules, schemas=schemas)
+    new_config = LatchkeyPermissionsConfig(rules=config.rules, schemas=schemas)
     save_permissions(path, new_config)
 
 

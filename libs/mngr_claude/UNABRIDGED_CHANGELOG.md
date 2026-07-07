@@ -4,6 +4,14 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-06
+
+Give `test_provision_preserves_existing_remote_project_config` the same 30s pytest-timeout that its sibling `test_provision_adds_trust_for_remote_work_dir` already carries. Both drive `provision()`, which runs the real local `claude --version` subprocess check; that check can exceed the default 10s timeout under CI load, so this test was flaking on the shorter limit.
+
+## 2026-07-01
+
+Added a new async/await ratchet (`test_prevent_async_await`) that freezes the current amount of `async def` / `await` usage in this project and fails if new async code is added. We strongly prefer synchronous code: it is far easier to debug, and our software is intentionally low-scale, so async provides no benefit. Existing usage is grandfathered in at its current count; the count can only decrease.
+
 ## 2026-06-26
 
 Added scope docstrings to this package's release tests so the TMR (test

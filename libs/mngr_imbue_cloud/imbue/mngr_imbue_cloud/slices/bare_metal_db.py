@@ -24,16 +24,16 @@ _INSERT_BARE_METAL_SERVER_SQL: Final[str] = (
     "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())"
 )
 
-# A slice is an ordinary pool_hosts row with backend_kind='slice' + the lima
-# fields the connector needs to tear it down. ssh_port / container_ssh_port are
-# the box-forwarded ports (not the OVH default 22 / 2222), so they are params.
+# A slice is an ordinary pool_hosts row plus the lima fields the connector needs
+# to tear it down. ssh_port / container_ssh_port are the box-forwarded ports (not
+# the default 22 / 2222), so they are params.
 _INSERT_SLICE_POOL_HOST_SQL: Final[str] = (
     "INSERT INTO pool_hosts "
     "(id, vps_address, vps_instance_id, agent_id, host_id, host_name, ssh_port, ssh_user, "
-    "container_ssh_port, status, attributes, region, backend_kind, bare_metal_server_id, "
+    "container_ssh_port, status, attributes, region, bare_metal_server_id, "
     "lima_instance_name, lima_disk_name, outer_host_public_key, container_host_public_key, created_at) "
     "VALUES (%s, %s, %s, %s, %s, %s, %s, 'root', %s, 'available', %s::jsonb, %s, "
-    "'slice', %s, %s, %s, %s, %s, NOW())"
+    "%s, %s, %s, %s, %s, NOW())"
 )
 
 _SELECT_SERVERS_SQL: Final[str] = (
@@ -52,15 +52,13 @@ _COUNT_SLICES_SQL: Final[str] = (
 # Every slice's lima instance name on a server (any status). Used to reconcile the
 # box's running VMs against the DB and reap orphans (VMs with no row).
 _SELECT_SLICE_INSTANCE_NAMES_SQL: Final[str] = (
-    "SELECT lima_instance_name FROM pool_hosts "
-    "WHERE bare_metal_server_id = %s AND backend_kind = 'slice' AND lima_instance_name IS NOT NULL"
+    "SELECT lima_instance_name FROM pool_hosts WHERE bare_metal_server_id = %s AND lima_instance_name IS NOT NULL"
 )
 
 # Sibling of the instance-name query, for reconciling the box's lima data disks
 # against the DB and reaping orphan disks (disks with no row).
 _SELECT_SLICE_DISK_NAMES_SQL: Final[str] = (
-    "SELECT lima_disk_name FROM pool_hosts "
-    "WHERE bare_metal_server_id = %s AND backend_kind = 'slice' AND lima_disk_name IS NOT NULL"
+    "SELECT lima_disk_name FROM pool_hosts WHERE bare_metal_server_id = %s AND lima_disk_name IS NOT NULL"
 )
 
 
@@ -244,7 +242,7 @@ _SELECT_UNLEASED_SLICE_TEARDOWN_TARGETS_SQL: Final[str] = (
     "SELECT p.id, p.lima_instance_name, p.lima_disk_name, s.public_address, s.lima_service_user, "
     "s.box_host_public_key "
     "FROM pool_hosts p JOIN bare_metal_servers s ON p.bare_metal_server_id = s.id "
-    "WHERE p.backend_kind = 'slice' AND p.status NOT IN ('leased', 'removing') "
+    "WHERE p.status NOT IN ('leased', 'removing') "
     "AND p.lima_instance_name IS NOT NULL AND s.public_address IS NOT NULL"
 )
 
