@@ -973,7 +973,9 @@ bake-slice-dev region workspace_dir="" count="1" *extra_args:
     wd="{{workspace_dir}}"
     if [ -z "$wd" ]; then
         [ -f apps/minds/.env ] && { set -a; . apps/minds/.env; set +a; }
-        wd="${FCT_DIR:-.external_worktrees/forever-claude-template}"
+        # $PWD is the repo root (just runs recipes from the justfile dir); keeps
+        # the fallback absolute, which minds pool create's --workspace-dir wants.
+        wd="${FCT_DIR:-$PWD/.external_worktrees/forever-claude-template}"
     fi
     uv run minds pool create \
         --count "{{count}}" \

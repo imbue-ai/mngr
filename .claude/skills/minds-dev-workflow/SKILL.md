@@ -155,7 +155,7 @@ Slice bakes (`minds pool create`, `just bake-slice-{dev,prod}`) read secrets fro
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
-| `MINDS_WORKSPACE_GIT_URL` | Template repo path/URL for the create-form | `<repo>/.external_worktrees/forever-claude-template/` if it exists (create it with `just fct-worktree`), else `$FCT_DIR` / `~/project/forever-claude-template` |
+| `MINDS_WORKSPACE_GIT_URL` | Template repo path/URL for the create-form | `<repo>/.external_worktrees/forever-claude-template/` (create it with `just fct-worktree`); `just minds-start` sets this. Absent it, `templates.py` falls back to the forever-claude-template remote URL |
 | `MINDS_WORKSPACE_BRANCH` | Default git branch for the template | The FCT path's current branch (matches your mngr branch when you set up the worktree on a parallel-named branch) |
 
 The desktop client reads these in `apps/minds/imbue/minds/desktop_client/templates.py`.
@@ -213,7 +213,7 @@ Normally `just fct-worktree` does this for you (clones fct into
 by hand from your own fct clone instead:
 
 ```bash
-cd "${FCT_DIR:-~/project/forever-claude-template}"
+cd "${FCT_DIR:-$HOME/project/forever-claude-template}"
 git worktree add /path/to/mngr/worktree/.external_worktrees/forever-claude-template -b <branch-name> origin/main
 ```
 
