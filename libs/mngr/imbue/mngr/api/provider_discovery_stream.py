@@ -13,6 +13,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import DiscoveryError
+from imbue.mngr.api.discovery_events import emit_host_ssh_info
 from imbue.mngr.api.discovery_events import get_discovery_events_path
 from imbue.mngr.api.discovery_events import make_discovered_provider
 from imbue.mngr.api.discovery_events import tail_discovery_events_from_offset
@@ -174,6 +175,13 @@ class _ProviderDiscoveryPoller(MutableModel):
             unknown_host_ids=result.unknown_host_ids,
             unknown_agent_ids=result.unknown_agent_ids,
         )
+        # Re-emit each host's SSH endpoint so consumers that tunnel to the host (the minds
+        # system_interface forward) get it from the streaming path. Only a full ``mngr list``
+        # emits these otherwise, which the running app never does periodically, so without this
+        # a forward that loses a host's SSH info (e.g. after the host briefly left discovery)
+        # never regains it and refuses to dial the host's loopback-registered service URL.
+        for host_id, ssh_info in result.host_ssh_infos:
+            emit_host_ssh_info(self.mngr_ctx.config, host_id, ssh_info)
 
     def _emit_error_snapshot(self, started_at: datetime, exc: BaseException) -> None:
         cause = exc.__cause__ if isinstance(exc, ProviderError) and exc.__cause__ is not None else exc

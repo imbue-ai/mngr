@@ -336,16 +336,20 @@ def _discover_agents_on_host_with_offline_fallback(
 @pure
 def bounded_result_from_agents_by_host(
     agents_by_host: Mapping[DiscoveredHost, Sequence[DiscoveredAgent]],
+    host_ssh_infos: Sequence[tuple[HostId, SSHInfo]] = (),
 ) -> BoundedProviderDiscoveryResult:
     """Flatten a host->agents map into a BoundedProviderDiscoveryResult with no unknown items.
 
     Used by providers that batch host+agent discovery (and therefore cannot bound
     individual host reads): their whole discovery is bounded only by the
     provider-level error timeout, so nothing is marked UNKNOWN here.
+
+    ``host_ssh_infos`` carries any per-host SSH endpoints the provider knows at discovery
+    time, so the streaming poller can re-emit them as ``HOST_SSH_INFO`` events.
     """
     hosts = tuple(agents_by_host.keys())
     agents = tuple(agent for agent_list in agents_by_host.values() for agent in agent_list)
-    return BoundedProviderDiscoveryResult(hosts=hosts, agents=agents)
+    return BoundedProviderDiscoveryResult(hosts=hosts, agents=agents, host_ssh_infos=tuple(host_ssh_infos))
 
 
 def _set_host_agents_future(

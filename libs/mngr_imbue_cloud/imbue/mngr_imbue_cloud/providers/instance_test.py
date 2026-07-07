@@ -13,6 +13,7 @@ import pytest
 from pydantic import Field
 from pydantic import SecretStr
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostNotFoundError
@@ -523,6 +524,59 @@ def test_list_leased_hosts_preserves_auth_error() -> None:
 
     with pytest.raises(ImbueCloudAuthError):
         provider._list_leased_hosts_cached()
+
+
+class _HostSshInfoProvider(ImbueCloudProvider):
+    """Provider stub that returns a fixed discovered host, isolating the ``host_ssh_infos``
+    attachment in ``discover_hosts_and_agents_within_timeouts`` from the outer-SSH machinery."""
+
+    _lease: LeasedHostInfo | None = None
+    _discovered_host: DiscoveredHost | None = None
+
+    def _list_leased_hosts_cached(self) -> list[LeasedHostInfo]:
+        return [self._lease] if self._lease is not None else []
+
+    def _host_keypair_paths(self, host_id: HostId) -> tuple[Path, Path]:
+        return Path("/tmp/imbue-cloud-test-keys/ssh_key"), Path("/tmp/imbue-cloud-test-keys/ssh_key.pub")
+
+    def discover_hosts_and_agents(
+        self, cg: ConcurrencyGroup, include_destroyed: bool = False
+    ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
+        assert self._discovered_host is not None
+        return {self._discovered_host: []}
+
+
+def test_discover_within_timeouts_attaches_lease_ssh_info(temp_mngr_ctx: MngrContext) -> None:
+    """The streaming discovery result carries each discovered host's SSH endpoint (built from
+    its lease, pointing at the container's inner sshd), so the poller can emit HOST_SSH_INFO."""
+    host_id = HostId.generate()
+    lease = _make_lease(host_id)
+    discovered_host = DiscoveredHost(
+        host_id=host_id,
+        host_name=HostName(lease.host_name),
+        provider_name=ProviderInstanceName("imbue-cloud-test"),
+        host_state=HostState.RUNNING,
+    )
+    provider = _HostSshInfoProvider.model_construct(
+        name=ProviderInstanceName("imbue-cloud-test"),
+        mngr_ctx=temp_mngr_ctx,
+        _lease=lease,
+        _discovered_host=discovered_host,
+    )
+
+    result = provider.discover_hosts_and_agents_within_timeouts(
+        cg=temp_mngr_ctx.concurrency_group,
+        host_discovery_timeout_seconds=30.0,
+        agent_discovery_timeout_seconds=30.0,
+    )
+
+    assert len(result.host_ssh_infos) == 1
+    emitted_host_id, ssh_info = result.host_ssh_infos[0]
+    assert emitted_host_id == host_id
+    # The endpoint targets the container's inner sshd (container_ssh_port), not the outer VPS port.
+    assert ssh_info.host == lease.vps_address
+    assert ssh_info.port == lease.container_ssh_port
+    assert ssh_info.user == lease.ssh_user
 
 
 def test_ensure_host_key_pinned_does_not_clobber_a_recorded_key(temp_mngr_ctx: MngrContext) -> None:
