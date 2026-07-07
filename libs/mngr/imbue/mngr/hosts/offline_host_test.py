@@ -394,7 +394,9 @@ def test_validate_and_create_discovered_agent_creates_valid_ref() -> None:
 def test_validate_and_create_discovered_agent_returns_none_for_missing_id() -> None:
     host_id = HostId.generate()
     agent_data = {"name": "my-agent"}
-    ref = validate_and_create_discovered_agent(agent_data, host_id, ProviderInstanceName("p"), AgentLifecycleState.STOPPED)
+    ref = validate_and_create_discovered_agent(
+        agent_data, host_id, ProviderInstanceName("p"), AgentLifecycleState.STOPPED
+    )
     assert ref is None
 
 
@@ -402,7 +404,9 @@ def test_validate_and_create_discovered_agent_returns_none_for_missing_id() -> N
 def test_validate_and_create_discovered_agent_returns_none_for_invalid_id() -> None:
     host_id = HostId.generate()
     agent_data = {"id": "not-a-valid-id", "name": "my-agent"}
-    ref = validate_and_create_discovered_agent(agent_data, host_id, ProviderInstanceName("p"), AgentLifecycleState.STOPPED)
+    ref = validate_and_create_discovered_agent(
+        agent_data, host_id, ProviderInstanceName("p"), AgentLifecycleState.STOPPED
+    )
     assert ref is None
 
 
@@ -411,7 +415,9 @@ def test_validate_and_create_discovered_agent_returns_none_for_missing_name() ->
     host_id = HostId.generate()
     agent_id = AgentId.generate()
     agent_data = {"id": str(agent_id)}
-    ref = validate_and_create_discovered_agent(agent_data, host_id, ProviderInstanceName("p"), AgentLifecycleState.STOPPED)
+    ref = validate_and_create_discovered_agent(
+        agent_data, host_id, ProviderInstanceName("p"), AgentLifecycleState.STOPPED
+    )
     assert ref is None
 
 
