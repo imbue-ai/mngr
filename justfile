@@ -620,64 +620,74 @@ minds-stop:
     #!/bin/bash
     set -ueo pipefail
     pid_file="/tmp/minds-start-$(echo -n "$PWD" | sha1sum | cut -c1-12).pid"
-    if [ ! -f "$pid_file" ]; then
-        echo "no PID file at $pid_file -- nothing to stop"
-        exit 0
-    fi
-    pid=$(cat "$pid_file")
-    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
-        echo "PID $pid in $pid_file is not running -- removing stale file"
-        rm -f "$pid_file"
-        exit 0
-    fi
-    # Snapshot the full descendant tree. pstree -p -T walks PPID links and
-    # gives PIDs in flat form. We'll use this both to identify electron's
-    # main process and to verify the whole tree exits.
-    descendants=$(pstree -p -T "$pid" 2>/dev/null | grep -oE '\([0-9]+\)' | tr -d '()' | sort -u)
-    # Locate Electron's main process: the descendant whose cmd contains the
-    # electron binary path and is NOT a `--type=zygote` / `--type=utility`
-    # / `--type=...` subprocess. There's exactly one such process per
-    # session (the rest are renderer / GPU / network helpers it spawned).
-    electron_main_pid=""
-    for d in $descendants; do
-        cmd=$(ps -o cmd= -p "$d" 2>/dev/null || true)
-        if [[ "$cmd" == *"node_modules/electron/dist/electron "* && "$cmd" != *"--type="* ]]; then
-            electron_main_pid="$d"
-            break
-        fi
-    done
-    if [ -n "$electron_main_pid" ]; then
-        echo "Stopping minds (recipe=$pid, electron=$electron_main_pid) via clean shutdown"
-        kill -TERM "$electron_main_pid"
-    else
-        # Pre-electron startup race: electron hasn't been exec'd yet. Fall
-        # back to the recipe shell, which at least kills the bash sitting
-        # in `pnpm install` / similar.
-        echo "Stopping minds-start (pid=$pid, electron not yet spawned)"
-        kill -TERM "$pid"
-    fi
-    # Wait up to 10s for the whole tree to exit.
-    for i in $(seq 1 10); do
-        still_alive=""
-        for descendant in $descendants; do
-            if kill -0 "$descendant" 2>/dev/null; then
-                still_alive="$still_alive $descendant"
-            fi
+    app_dir="$PWD/apps/minds"
+
+    # Collect every PID that descends from a set of roots by walking PPID links
+    # with `ps` -- portable (no pstree, which stock macOS lacks; the old
+    # grep-based pstree pipeline also aborted this whole recipe under `set -e`).
+    table="$(ps -Ao pid=,ppid=)"
+    collect_tree() {
+        local frontier="$*" all="$*" next parent kids
+        while [ -n "$frontier" ]; do
+            next=""
+            for parent in $frontier; do
+                kids="$(echo "$table" | awk -v pp="$parent" '$2 == pp { print $1 }')"
+                next="$next $kids"
+                all="$all $kids"
+            done
+            frontier="$next"
         done
-        if [ -z "$still_alive" ]; then
-            rm -f "$pid_file"
-            exit 0
+        echo "$all"
+    }
+
+    roots=""
+    # The Electron app is launched through LaunchServices (`open`, see
+    # apps/minds/scripts/launch_electron.js) so it becomes a proper foreground
+    # app -- which also reparents it to launchd, OUTSIDE the recipe's tree. Find
+    # its main process by its unique per-worktree app-dir argument (a specific
+    # match, not a broad pattern); helper subprocesses carry `--type=` and are
+    # skipped so we root the sweep at the main process only.
+    for p in $(pgrep -f "MacOS/Electron ${app_dir}" 2>/dev/null || true); do
+        cmd="$(ps -o command= -p "$p" 2>/dev/null || true)"
+        case "$cmd" in *"--type="*) continue;; esac
+        roots="$roots $p"
+    done
+    # The recipe's own tree (concurrently + CSS watcher + the launcher / blocking
+    # `open -W`) hangs off the PID recorded by `minds-start`.
+    if [ -f "$pid_file" ]; then
+        recipe_pid="$(cat "$pid_file" 2>/dev/null || echo "")"
+        if [ -n "$recipe_pid" ] && kill -0 "$recipe_pid" 2>/dev/null; then
+            roots="$roots $recipe_pid"
         fi
+        rm -f "$pid_file"
+    fi
+
+    if [ -z "$(echo "$roots" | tr -d ' ')" ]; then
+        echo "no running minds found for this worktree -- nothing to stop"
+        exit 0
+    fi
+
+    targets="$(collect_tree $roots)"
+    echo "Stopping minds (roots:$roots)"
+    # Graceful first: SIGTERM the Electron main runs its shutdown chain (SIGTERMs
+    # the python backend + mngr forward and waits for a clean exit).
+    for d in $targets; do kill -TERM "$d" 2>/dev/null || true; done
+    # Grace period, then SIGKILL specific survivors (never a broad match) so a
+    # stalled graceful shutdown cannot leave the app (or its backend) running.
+    alive=""
+    for i in $(seq 1 12); do
+        alive=""
+        for d in $targets; do
+            kill -0 "$d" 2>/dev/null && alive="$alive $d" || true
+        done
+        [ -z "$alive" ] && break
         sleep 1
     done
-    # Force-kill anything that survived the grace period. Each kill targets
-    # a specific PID we observed under the recipe shell -- never a broad
-    # pgrep-style match.
-    echo "Tree did not exit after 10s SIGTERM grace; force-killing leftovers:$still_alive"
-    for descendant in $still_alive; do
-        kill -9 "$descendant" 2>/dev/null || true
-    done
-    rm -f "$pid_file"
+    if [ -n "$alive" ]; then
+        echo "Did not exit after 12s SIGTERM grace; force-killing:$alive"
+        for d in $alive; do kill -9 "$d" 2>/dev/null || true; done
+    fi
+    echo "minds stopped"
 
 # Build the minds desktop client distributable (slow; uses todesktop).
 minds-build:
