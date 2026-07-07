@@ -50,6 +50,7 @@ from imbue.mngr_latchkey._spawn import spawn_detached_latchkey_ensure_browser
 from imbue.mngr_latchkey.encryption_key import LatchkeyEncryptionKeyPermissionError
 from imbue.mngr_latchkey.encryption_key import inject_encryption_key_into_env
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
+from imbue.mngr_latchkey.migrations.runner import run_data_format_migrations
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import default_permissions_path
 from imbue.mngr_latchkey.store import ensure_admin_permissions_file
@@ -541,6 +542,12 @@ class Latchkey(MutableModel):
         immediately, before any agent has had a chance to be told to
         use the gateway.
 
+        Also reconciles the plugin's on-disk data format: any
+        outstanding :class:`DataFormatMigration` steps between the
+        version recorded under :attr:`plugin_data_dir` and the version
+        the installed code targets are applied here (cheap in the
+        steady state -- one small file read when already current).
+
         There is intentionally **no** cross-process gateway-record
         reconciliation: the new ``mngr latchkey forward`` /
         :class:`LatchkeyForwardSupervisor` design guarantees at most
@@ -560,6 +567,7 @@ class Latchkey(MutableModel):
                 (non-zero exit, unparseable output, spawn error).
         """
         self._check_minimum_version()
+        run_data_format_migrations(self.plugin_data_dir)
         with self._lock:
             self._is_initialized = True
 

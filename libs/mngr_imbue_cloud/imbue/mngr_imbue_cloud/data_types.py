@@ -186,9 +186,8 @@ class LeaseResult(FrozenModel):
     host_db_id: LeaseDbId = Field(description="Database id of the leased host (UUID)")
     vps_address: str = Field(
         description=(
-            "SSH-reachable address of the VPS -- either a public IPv4 or a DNS hostname, "
-            "depending on what the host's provider returned at bake time. OVH-backed "
-            "rows are DNS hostnames like ``vps-eec8860b.vps.ovh.us``."
+            "SSH-reachable address of the leased host's bare-metal box (the box's public "
+            "address that the slice VM is reached through)."
         )
     )
     ssh_port: int = Field(description="SSH port for the VPS itself (root)")
@@ -219,10 +218,7 @@ class LeasedHostInfo(FrozenModel):
 
     host_db_id: LeaseDbId
     vps_address: str = Field(
-        description=(
-            "SSH-reachable address of the VPS. Public IPv4 for Vultr-backed rows, "
-            "DNS hostname (e.g. ``vps-eec8860b.vps.ovh.us``) for OVH-backed rows."
-        )
+        description="SSH-reachable address of the leased host's bare-metal box (reaches the slice VM)."
     )
     ssh_port: int
     ssh_user: str

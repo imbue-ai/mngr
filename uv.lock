@@ -2065,12 +2065,15 @@ name = "imbue-common"
 version = "0.1.20"
 source = { editable = "libs/imbue_common" }
 dependencies = [
+    { name = "boto3" },
     { name = "click" },
     { name = "cowsay-python" },
     { name = "httpx" },
     { name = "loguru" },
     { name = "pydantic" },
+    { name = "sentry-sdk" },
     { name = "tenacity" },
+    { name = "traceback-with-variables" },
 ]
 
 [package.optional-dependencies]
@@ -2080,13 +2083,16 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "boto3", specifier = ">=1.34" },
     { name = "click", specifier = ">=8.0" },
     { name = "cowsay-python", specifier = ">=1.0.2" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "inline-snapshot", marker = "extra == 'dev'", specifier = ">=0.13" },
     { name = "loguru", specifier = ">=0.7" },
     { name = "pydantic", specifier = ">=2.0" },
+    { name = "sentry-sdk", specifier = ">=2.59.0" },
     { name = "tenacity", specifier = ">=8.0" },
+    { name = "traceback-with-variables", specifier = ">=2.0" },
 ]
 provides-extras = ["dev"]
 
@@ -3337,7 +3343,6 @@ dependencies = [
     { name = "imbue-mngr-aws" },
     { name = "imbue-mngr-forward" },
     { name = "imbue-mngr-latchkey" },
-    { name = "imbue-mngr-ovh" },
     { name = "imbue-mngr-vps" },
     { name = "itsdangerous" },
     { name = "jinja2" },
@@ -3374,7 +3379,6 @@ requires-dist = [
     { name = "imbue-mngr-aws", editable = "libs/mngr_aws" },
     { name = "imbue-mngr-forward", editable = "libs/mngr_forward" },
     { name = "imbue-mngr-latchkey", editable = "libs/mngr_latchkey" },
-    { name = "imbue-mngr-ovh", editable = "libs/mngr_ovh" },
     { name = "imbue-mngr-vps", editable = "libs/mngr_vps" },
     { name = "itsdangerous", specifier = ">=2.2.0" },
     { name = "jinja2", specifier = ">=3.1.0" },
@@ -4801,7 +4805,6 @@ dependencies = [
     { name = "imbue-common" },
     { name = "loguru" },
     { name = "modal" },
-    { name = "ovh" },
     { name = "paramiko" },
     { name = "psycopg2-binary" },
     { name = "pydantic" },
@@ -4816,7 +4819,6 @@ requires-dist = [
     { name = "imbue-common", editable = "libs/imbue_common" },
     { name = "loguru", specifier = ">=0.7" },
     { name = "modal", specifier = ">=1.4.3" },
-    { name = "ovh", specifier = ">=1.1" },
     { name = "paramiko", specifier = ">=3.0" },
     { name = "psycopg2-binary", specifier = ">=2.9" },
     { name = "pydantic", specifier = ">=2.0" },

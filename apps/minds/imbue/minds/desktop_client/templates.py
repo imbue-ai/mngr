@@ -14,6 +14,7 @@ Jinja2 macros + ``{% extends %}`` to JinjaX components.
 
 import html
 import os
+import re
 from collections.abc import Collection
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -39,6 +40,7 @@ from imbue.minds.primitives import OneTimeCode
 from imbue.minds.utils.sentry.frontend import frontend_sentry_browser_payload
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import InvalidName
 from imbue.mngr_forward.loading_page import render_loading_page
 
 TEMPLATE_DIR: Final[Path] = Path(__file__).resolve().parent / "templates"
@@ -282,7 +284,7 @@ _FALLBACK_GIT_URL: Final[str] = DEFAULT_FOREVER_CLAUDE_GIT_URL
 # Pin to an annotated FCT tag so a shipped binary clones the exact FCT
 # snapshot it was verified against. Bump to a newer tag only after
 # re-verifying launch-to-msg CI against (this binary, the new tag).
-FALLBACK_BRANCH: Final[str] = "minds-v0.3.4"
+FALLBACK_BRANCH: Final[str] = "minds-v0.3.5"
 
 # Env var (set by ``just minds-start`` and the e2e workspace runner) that opts a
 # launch into the operator's local-worktree create-form defaults. Gating on an
@@ -332,6 +334,27 @@ def _operator_workspace_default(env_var: str, fallback: str) -> str:
 # used bare -- it is always numbered (``workspace-1``, ``workspace-2``, ...).
 _DEFAULT_HOST_NAME_BASE: Final[str] = "workspace"
 
+# Minds derives a short, pretty host-name slug from the user's arbitrary
+# display name. The slug target is well under mngr's ``HostName`` hard cap.
+_MINDS_HOST_NAME_SLUG_MAX_LENGTH: Final[int] = 32
+_NON_SLUG_CHARS_RE: Final = re.compile(r"[^a-z0-9]+")
+
+
+def normalize_host_name_slug(text: str) -> HostName:
+    """Convert an arbitrary human-readable name into a normalized host-name slug.
+
+    Lowercases, replaces every run of non-alphanumeric characters with a single
+    dash, trims leading/trailing dashes, and truncates to the slug length cap.
+    Raises ``InvalidName`` if the result is empty (e.g. the input was all
+    emoji/punctuation).
+    """
+    lowered = text.strip().lower()
+    collapsed = _NON_SLUG_CHARS_RE.sub("-", lowered).strip("-")
+    truncated = collapsed[:_MINDS_HOST_NAME_SLUG_MAX_LENGTH].strip("-")
+    if not truncated:
+        raise InvalidName("Workspace name must include at least one letter or number.")
+    return HostName(truncated)
+
 
 @pure
 def make_unique_host_name(base: str, existing_host_names: Collection[str], *, always_number: bool = False) -> HostName:
@@ -365,23 +388,23 @@ def resolve_create_host_name(submitted_host_name: str, existing_host_names: Coll
     """Resolve the host name for a new workspace.
 
     The name defaults to an automatic ``workspace-N`` unless the operator types
-    one into the create form's advanced "Name" field. Resolution order:
+    one into the create form's "Name" field. Resolution order:
 
-    1. the user-submitted name, if any, used verbatim (validated as a
-       ``HostName``);
+    1. the user-submitted name, if any, normalized into a host-name slug
+       (lowercased, non-alphanumeric runs collapsed to dashes, truncated);
     2. the next free ``workspace-N`` name (smallest positive ``N`` whose
        ``workspace-N`` is not already in ``existing_host_names``).
 
-    The submitted name is used verbatim and never uniquified -- an explicit
-    collision is the API's 409 to reject, not ours to silently rename (a
-    duplicate name fails the ``mngr create`` pre-flight). Only the generated
-    ``workspace-N`` fallback consults ``existing_host_names`` to pick a free name.
+    The normalized submitted name is never uniquified -- an explicit collision
+    is the API's 409 to reject, not ours to silently rename (a duplicate name
+    fails the ``mngr create`` pre-flight). Only the generated ``workspace-N``
+    fallback consults ``existing_host_names`` to pick a free name.
 
-    Raises ``InvalidName`` if a non-empty submitted name is not a valid host
-    name; the generated fallback is always valid.
+    Raises ``InvalidName`` if a non-empty submitted name normalizes to an empty
+    slug (e.g. all punctuation/emoji); the generated fallback is always valid.
     """
     if submitted_host_name:
-        return HostName(submitted_host_name)
+        return normalize_host_name_slug(submitted_host_name)
     return make_unique_host_name(_DEFAULT_HOST_NAME_BASE, existing_host_names, always_number=True)
 
 
@@ -623,25 +646,30 @@ def render_consent_page(report_unexpected_errors: bool, include_logs: bool) -> s
 def render_help_page(
     include_logs_setting: bool,
     workspace_agent_id: str,
+    assist_available: bool = False,
     description: str = "",
     is_agent_report: bool = False,
     workspace_name: str = "",
 ) -> str:
-    """Render the get-help modal page (report a bug; agent help disabled for now).
+    """Render the get-help modal page (report a bug + optional agent help).
 
     ``include_logs_setting`` is the persistent include-logs preference: when on, logs are always
     attached and the form hides its one-off "include logs" checkbox. ``workspace_agent_id`` is the
     workspace the help flow was opened from ("" on a general screen), enabling workspace-scoped options.
-    ``description`` pre-fills the report textarea -- non-empty when an in-workspace ``/assist`` agent
-    asked the app to open the modal with its diagnosis already written in. ``is_agent_report`` is set
-    for that agent-escalation flow: the modal then frames the pre-filled report as the agent's
-    submission (titled with ``workspace_name``, when known) and hides the mode choice, since a report
-    is already underway.
+    ``assist_available`` enables the "have an agent help" option; it is set only when the workspace is
+    reachable/healthy enough to host an ``/assist`` chat (an unreachable workspace's chat couldn't be
+    seen or used), so it is distinct from ``workspace_agent_id``, which still scopes a bug report to a
+    stuck workspace. ``description`` pre-fills the report textarea -- non-empty when an in-workspace
+    ``/assist`` agent asked the app to open the modal with its diagnosis already written in.
+    ``is_agent_report`` is set for that agent-escalation flow: the modal then frames the pre-filled
+    report as the agent's submission (titled with ``workspace_name``, when known) and hides the mode
+    choice, since a report is already underway.
     """
     return CATALOG.render(
         "pages.Help",
         include_logs_setting=include_logs_setting,
         workspace_agent_id=workspace_agent_id,
+        assist_available=assist_available,
         description=description,
         is_agent_report=is_agent_report,
         workspace_name=workspace_name,
@@ -937,9 +965,11 @@ _RECOVERY_STYLE: Final[str] = """\
 
 # The recovery page's behavior. It drives the shared loading card (toggling
 # the spinner, heading and message) plus the recovery-only restart button and
-# error <details>. While a restart is in flight it auto-refreshes itself:
-# _handle_recovery_page re-renders from the live tracker state on every GET,
-# so a timed reload is the whole "is it healthy yet?" check.
+# error <details>. While a restart is in flight it polls the recovery route in
+# the background (so it does not steal focus from any overlaid view) and only
+# reloads once the state actually changes: _handle_recovery_page re-renders from
+# the live tracker state on every GET and exposes it via the X-Recovery-Status
+# header, which scheduleRefresh reads to decide "keep waiting" vs. "reload".
 _RECOVERY_SCRIPT: Final[str] = """\
       (function () {
         var root = document.querySelector('[data-agent-id]');
@@ -974,12 +1004,12 @@ _RECOVERY_SCRIPT: Final[str] = """\
 
         var latestHealth = null;
 
-        // A timed reload restarts the spinner's CSS animation from 0deg, so the
-        // interval must be a whole multiple of the spinner's 1s rotation period
-        // (see LOADING_PAGE_CSS' ``spin`` keyframe) -- otherwise the spinner
-        // visibly jumps back mid-rotation on every refresh. 1000ms also matches
-        // the mngr_forward proxy loader's 1s meta refresh, keeping the two
-        // loading pages a user may see during recovery in lockstep.
+        // The background convergence/healthy polls below run on this cadence.
+        // 1000ms matches the mngr_forward proxy loader's poll interval, keeping
+        // the two loading pages a user may see during recovery in lockstep, and
+        // is a whole multiple of the spinner's 1s rotation period (see
+        // LOADING_PAGE_CSS' ``spin`` keyframe) so the one eventual state-change
+        // reload lands at the animation's cycle boundary rather than mid-spin.
         var REFRESH_INTERVAL_MS = 1000;
 
         function show(el, visible) {
@@ -1041,15 +1071,40 @@ _RECOVERY_SCRIPT: Final[str] = """\
           if (returnTo) u += '?return_to=' + encodeURIComponent(returnTo);
           return u;
         }
+        // Convergence poll while a restart is in flight (the RESTARTING state).
+        // A full-page reload here would steal OS focus from any Electron view
+        // layered over this one -- e.g. the bug-report modal opened from
+        // "Report a problem" -- on every tick, making its inputs impossible to
+        // type into (Electron has no per-WebContentsView focus-on-navigation
+        // control; see https://github.com/electron/electron/issues/42578). So
+        // poll in the background instead: a HEALTHY tracker 302s back to the
+        // workspace (an opaque redirect, which we follow), and any non-restarting
+        // status (e.g. restart_failed) means we reload to render that state.
+        // While the status stays 'restarting' we leave the page -- and any
+        // focused overlay -- untouched and just poll again.
         function scheduleRefresh() {
-          setTimeout(function () { window.location.assign(pollUrl()); }, REFRESH_INTERVAL_MS);
+          setTimeout(function () {
+            fetch(pollUrl(), { credentials: 'same-origin', redirect: 'manual', cache: 'no-store' }).then(function (resp) {
+              if (resp.type === 'opaqueredirect' || (resp.status >= 300 && resp.status < 400)) {
+                window.location.assign(pollUrl());
+                return;
+              }
+              if ((resp.headers.get('X-Recovery-Status') || '') === 'restarting') {
+                scheduleRefresh();
+                return;
+              }
+              window.location.assign(pollUrl());
+            }, function () {
+              scheduleRefresh();
+            });
+          }, REFRESH_INTERVAL_MS);
         }
-        // Background convergence poll for the restart_failed state. Unlike
-        // scheduleRefresh (which reloads the whole page), this fetches pollUrl
-        // with manual redirect handling: while the workspace is still down the
-        // server returns the recovery HTML (200), which we discard so the
-        // displayed failure reason + diagnostics stay put and the heavy
-        // host-health probe is not re-run. Once the background probe loop flips
+        // Background convergence poll for the restart_failed state. Like
+        // scheduleRefresh it polls in the background rather than reloading, but
+        // it only ever navigates on a healthy redirect: while the workspace is
+        // still down the server returns the recovery HTML (200), which we
+        // discard so the displayed failure reason + diagnostics stay put and the
+        // heavy host-health probe is not re-run. Once the background probe loop flips
         // the tracker to HEALTHY the server starts 302ing to return_to, which
         // surfaces as an opaque-redirect response; we then follow it to send
         // the user back to the now-recovered workspace.
@@ -1471,6 +1526,20 @@ def render_sidebar_page(
         offset_x=offset_x,
         offset_y=offset_y,
     )
+
+
+@pure
+def render_overlay_host_page() -> str:
+    """Render the always-warm overlay host page loaded into the shared modal WebContentsView.
+
+    The page is a transparent shell hosting the overlay manager (overlay.js).
+    Every overlay -- the migrated workspace menu / inbox / help / sign-in modals
+    (as mount-on-demand iframes, created when opened and destroyed when closed)
+    and hover tooltips -- is in-page DOM driven over IPC, so opening an overlay
+    never costs a per-open page load. main.js loads this once at window creation
+    and keeps it mounted for the window's life.
+    """
+    return CATALOG.render("pages.OverlayHost")
 
 
 # -- Workspace/settings/sharing/accounts --

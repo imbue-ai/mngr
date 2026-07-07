@@ -1,6 +1,4 @@
 {
-  "scope": "minds-workspaces",
-  "gateway_self_host": "latchkey-self.invalid",
   "path_prefix": "/minds-api-proxy/api/v1/workspaces",
   "verbs": [
     {

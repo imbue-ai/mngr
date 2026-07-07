@@ -235,6 +235,17 @@ def test_prevent_code_in_init_files() -> None:
     rc.check_code_in_init_files(_DIR, snapshot(0))
 
 
+# --- Banned libraries and patterns ---
+
+
+def test_prevent_async_await() -> None:
+    # mngr_robinhood is exempt from the async/await ratchet. It is a thin wrapper around the
+    # Claude Agent SDK, which is fundamentally async, so async/await usage here is intrinsic and
+    # cannot be removed. This test is kept (the meta-ratchet requires every project to define the
+    # same set of ratchet tests) but intentionally enforces no cap.
+    pass
+
+
 # --- Process management ---
 
 

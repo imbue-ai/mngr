@@ -37,6 +37,16 @@ on:
         description: "PR number this run superseded (auto-closed as stale), or empty."
         value: ${{ jobs.gate.outputs.supersedes_pr }}
 
+# The `run` job below calls the reusable tmr.yml, whose job needs
+# `id-token: write` to authenticate to Vault (it fetches its credentials from
+# Vault now). A job that calls a reusable workflow passes down the caller's
+# workflow-level permissions, so grant them here. The `gate` job sets its own
+# (narrower) permissions and is unaffected.
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+
 jobs:
   gate:
     runs-on: ubuntu-latest

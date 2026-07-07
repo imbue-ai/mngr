@@ -5,10 +5,27 @@ from pathlib import Path
 
 import pytest
 
-from imbue.mngr.cli.complete_names import _find_last_full_snapshot_line_idx
+from imbue.mngr.cli.complete_names import _find_replay_start_idx
 from imbue.mngr.cli.complete_names import _get_discovery_events_path
 from imbue.mngr.cli.complete_names import resolve_names_from_discovery_stream
 from imbue.mngr.utils.testing import write_discovery_snapshot_to_path
+
+
+def _provider_snapshot_line(provider_name: str, agents: list[dict], hosts: list[dict], event_id: str) -> str:
+    """Build a per-provider DISCOVERY_PROVIDER JSONL line for the given provider."""
+    return json.dumps(
+        {
+            "timestamp": "2025-01-01T00:00:00Z",
+            "type": "DISCOVERY_PROVIDER",
+            "event_id": event_id,
+            "source": "mngr/discovery",
+            "provider_name": provider_name,
+            "agents": agents,
+            "hosts": hosts,
+            "discovery_started_at": "2025-01-01T00:00:00Z",
+            "discovery_finished_at": "2025-01-01T00:00:01Z",
+        }
+    )
 
 
 def test_complete_names_reads_discovery_stream(tmp_path: Path) -> None:
@@ -132,47 +149,132 @@ def test_complete_names_incremental_agent_discovered(tmp_path: Path) -> None:
 
 
 # =============================================================================
-# _find_last_full_snapshot_line_idx tests
+# _find_replay_start_idx tests
 # =============================================================================
 
 
-def test_find_last_full_snapshot_returns_negative_one_for_empty_list() -> None:
-    """Returns -1 when given an empty list of lines."""
-    assert _find_last_full_snapshot_line_idx([]) == -1
+def test_find_replay_start_returns_zero_for_empty_list() -> None:
+    """Returns 0 (replay whole file) when given an empty list of lines."""
+    assert _find_replay_start_idx([]) == 0
 
 
-def test_find_last_full_snapshot_returns_negative_one_when_no_snapshot() -> None:
-    """Returns -1 when no DISCOVERY_FULL event is present."""
+def test_find_replay_start_returns_zero_when_no_snapshot() -> None:
+    """Returns 0 when no snapshot event of any kind is present."""
     lines = [
         json.dumps({"type": "AGENT_DISCOVERED", "agent": {"agent_id": "a1", "agent_name": "x"}}),
         json.dumps({"type": "HOST_DISCOVERED", "host": {"host_id": "h1", "host_name": "y"}}),
     ]
-    assert _find_last_full_snapshot_line_idx(lines) == -1
+    assert _find_replay_start_idx(lines) == 0
 
 
-def test_find_last_full_snapshot_finds_last_snapshot() -> None:
-    """Returns the index of the last DISCOVERY_FULL line when multiple exist."""
+def test_find_replay_start_finds_last_full_snapshot() -> None:
+    """With only legacy full snapshots, returns the index of the last one."""
     snapshot1 = json.dumps({"type": "DISCOVERY_FULL", "agents": [], "hosts": []})
     other = json.dumps({"type": "AGENT_DISCOVERED", "agent": {}})
     snapshot2 = json.dumps({"type": "DISCOVERY_FULL", "agents": [], "hosts": []})
     lines = [snapshot1, other, snapshot2]
-    assert _find_last_full_snapshot_line_idx(lines) == 2
+    assert _find_replay_start_idx(lines) == 2
 
 
-def test_find_last_full_snapshot_skips_blank_lines() -> None:
+def test_find_replay_start_uses_min_of_per_provider_latest() -> None:
+    """Returns the earliest index among each provider's latest per-provider snapshot."""
+    local_snap = _provider_snapshot_line("local", [], [], "evt-local")
+    other = json.dumps({"type": "AGENT_DISCOVERED", "agent": {}})
+    modal_snap = _provider_snapshot_line("modal", [], [], "evt-modal")
+    trailing = json.dumps({"type": "AGENT_DISCOVERED", "agent": {}})
+    lines = [local_snap, other, modal_snap, trailing]
+    # local's latest snapshot is at index 0; replaying from 0 still includes modal's at 2.
+    assert _find_replay_start_idx(lines) == 0
+
+
+def test_find_replay_start_includes_legacy_full_in_min() -> None:
+    """A legacy DISCOVERY_FULL is considered alongside per-provider snapshots in the min."""
+    full_snap = json.dumps({"type": "DISCOVERY_FULL", "agents": [], "hosts": []})
+    modal_snap = _provider_snapshot_line("modal", [], [], "evt-modal")
+    lines = [full_snap, modal_snap]
+    assert _find_replay_start_idx(lines) == 0
+
+
+def test_find_replay_start_skips_blank_lines() -> None:
     """Blank lines should be skipped without error."""
     snapshot = json.dumps({"type": "DISCOVERY_FULL", "agents": [], "hosts": []})
     lines = [snapshot, "", "  ", "\n"]
-    assert _find_last_full_snapshot_line_idx(lines) == 0
+    assert _find_replay_start_idx(lines) == 0
 
 
-def test_find_last_full_snapshot_skips_malformed_json() -> None:
-    """Malformed JSON lines containing the DISCOVERY_FULL string should be skipped."""
+def test_find_replay_start_skips_malformed_json() -> None:
+    """Malformed JSON lines containing a snapshot type string should be skipped."""
     bad_line = '{"type": "DISCOVERY_FULL", broken json'
     good = json.dumps({"type": "DISCOVERY_FULL", "agents": [], "hosts": []})
     lines = [good, bad_line]
-    # The bad line at index 1 is skipped, and the good line at index 0 is found
-    assert _find_last_full_snapshot_line_idx(lines) == 0
+    # The bad line at index 1 is skipped, and the good line at index 0 is found.
+    assert _find_replay_start_idx(lines) == 0
+
+
+# =============================================================================
+# per-provider DISCOVERY_PROVIDER replay tests
+# =============================================================================
+
+
+def test_resolve_names_reads_per_provider_snapshots(tmp_path: Path) -> None:
+    """resolve_names replays per-provider DISCOVERY_PROVIDER snapshots into the current name set."""
+    events_dir = tmp_path / "events" / "mngr" / "discovery"
+    events_dir.mkdir(parents=True, exist_ok=True)
+    events_path = events_dir / "events.jsonl"
+
+    local_snap = _provider_snapshot_line(
+        "local",
+        [{"agent_id": "a-local", "agent_name": "local-agent", "host_id": "h-local", "provider_name": "local"}],
+        [{"host_id": "h-local", "host_name": "localhost", "provider_name": "local"}],
+        "evt-local",
+    )
+    modal_snap = _provider_snapshot_line(
+        "modal",
+        [{"agent_id": "a-modal", "agent_name": "modal-agent", "host_id": "h-modal", "provider_name": "modal"}],
+        [{"host_id": "h-modal", "host_name": "modal-host", "provider_name": "modal"}],
+        "evt-modal",
+    )
+    events_path.write_text(local_snap + "\n" + modal_snap + "\n")
+
+    agent_names, host_names = resolve_names_from_discovery_stream(events_path)
+
+    assert agent_names == ["local-agent", "modal-agent"]
+    assert host_names == ["localhost", "modal-host"]
+
+
+def test_resolve_names_per_provider_snapshot_resets_only_its_own_provider(tmp_path: Path) -> None:
+    """A later DISCOVERY_PROVIDER for one provider drops that provider's stale agents but
+    leaves another provider's agents intact."""
+    events_dir = tmp_path / "events" / "mngr" / "discovery"
+    events_dir.mkdir(parents=True, exist_ok=True)
+    events_path = events_dir / "events.jsonl"
+
+    local_first = _provider_snapshot_line(
+        "local",
+        [{"agent_id": "a-old", "agent_name": "stale-local", "host_id": "h-local", "provider_name": "local"}],
+        [{"host_id": "h-local", "host_name": "localhost", "provider_name": "local"}],
+        "evt-local-1",
+    )
+    modal_snap = _provider_snapshot_line(
+        "modal",
+        [{"agent_id": "a-modal", "agent_name": "modal-agent", "host_id": "h-modal", "provider_name": "modal"}],
+        [{"host_id": "h-modal", "host_name": "modal-host", "provider_name": "modal"}],
+        "evt-modal",
+    )
+    # A newer local snapshot replaces local's agent set (the old one is gone) without
+    # touching modal's agents.
+    local_second = _provider_snapshot_line(
+        "local",
+        [{"agent_id": "a-new", "agent_name": "fresh-local", "host_id": "h-local", "provider_name": "local"}],
+        [{"host_id": "h-local", "host_name": "localhost", "provider_name": "local"}],
+        "evt-local-2",
+    )
+    events_path.write_text(local_first + "\n" + modal_snap + "\n" + local_second + "\n")
+
+    agent_names, _ = resolve_names_from_discovery_stream(events_path)
+
+    assert agent_names == ["fresh-local", "modal-agent"]
+    assert "stale-local" not in agent_names
 
 
 # =============================================================================
