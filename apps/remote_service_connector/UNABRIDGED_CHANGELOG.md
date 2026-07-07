@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-06
+
+Added a `POST /hosts/{host_db_id}/rename` endpoint that updates a leased host's mutable `host_name` column. Ownership is enforced (a host leased by another user returns 403; a missing or not-leased host returns 404) and the new name is validated against mngr's SafeName regex. This backs the new workspace-rename flow; the host's durable identity (its lease id) is unchanged.
+
+Integrates the "simple names" work: adds `POST /hosts/{host_db_id}/rename` to update a leased host's mutable `host_name`. Ownership is enforced (403 for a host leased by another user, 404 for a missing or not-leased host) and the new name is validated against mngr's SafeName regex. This backs the workspace-rename flow; the host's durable identity (its lease id) is unchanged.
+
 ## 2026-07-01
 
 Removed all OVH logic from the remote connector service. Pool hosts are now exclusively bare-metal slices, so releasing a host destroys its slice's lima VM and the connector makes no OVH API calls.

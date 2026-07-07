@@ -1,1 +1,0 @@
-Give `test_provision_preserves_existing_remote_project_config` the same 30s pytest-timeout that its sibling `test_provision_adds_trust_for_remote_work_dir` already carries. Both drive `provision()`, which runs the real local `claude --version` subprocess check; that check can exceed the default 10s timeout under CI load, so this test was flaking on the shorter limit.
