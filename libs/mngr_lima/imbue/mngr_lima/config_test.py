@@ -36,17 +36,24 @@ def test_run_as_root_with_exposed_volume_layout_is_rejected() -> None:
         LimaProviderConfig(is_run_as_root=True, is_host_data_volume_exposed=True)
 
 
-def test_custom_config() -> None:
+def test_custom_config_survives_json_round_trip() -> None:
+    # A custom config must serialize and deserialize without loss. This guards
+    # the non-obvious coercions the bare constructor does not: the tuple fields
+    # (default_start_args, minimum_lima_version) round-trip through JSON as
+    # lists and must come back as tuples, and host_dir as a Path.
     config = LimaProviderConfig(
         host_dir=Path("/custom/mngr"),
         default_idle_timeout=300,
         default_start_args=("--cpus=2",),
         minimum_lima_version=(1, 2, 0),
     )
-    assert config.host_dir == Path("/custom/mngr")
-    assert config.default_idle_timeout == 300
-    assert config.default_start_args == ("--cpus=2",)
-    assert config.minimum_lima_version == (1, 2, 0)
+
+    reloaded = LimaProviderConfig.model_validate_json(config.model_dump_json())
+
+    assert reloaded == config
+    assert reloaded.host_dir == Path("/custom/mngr")
+    assert reloaded.default_start_args == ("--cpus=2",)
+    assert reloaded.minimum_lima_version == (1, 2, 0)
 
 
 def test_config_backend_is_lima() -> None:
