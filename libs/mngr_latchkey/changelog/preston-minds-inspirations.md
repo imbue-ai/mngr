@@ -10,3 +10,8 @@ server-side -- but a push's packfile scales with repo history (a minds
 template push is roughly 30 MiB today), which exceeded the old 10 MiB cap and
 made gateway-authenticated pushes fail. The forever-claude-template's
 publish-inspiration flow now relies on this push path.
+
+Already-running gateways keep the old cap until they restart: the desktop
+gateway picks the flag up on the next minds-app session, and a VPS gateway on
+the next launch after its recorded process exits (the pidfile guard
+deliberately never kills a live gateway).
