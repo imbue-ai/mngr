@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from collections.abc import Mapping
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 from typing import cast
 
 import httpx
@@ -577,6 +578,56 @@ def test_discover_within_timeouts_attaches_lease_ssh_info(temp_mngr_ctx: MngrCon
     assert ssh_info.host == lease.vps_address
     assert ssh_info.port == lease.container_ssh_port
     assert ssh_info.user == lease.ssh_user
+
+
+class _CannedListingProvider(ImbueCloudProvider):
+    """Provider stub that feeds ``discover_hosts_and_agents`` a canned outer-listing ``raw`` dict,
+    isolating the streaming ref-building loop from the real outer-SSH machinery."""
+
+    _lease: LeasedHostInfo | None = None
+    _raw: Mapping[str, Any] | None = None
+
+    def _list_leased_hosts_cached(self) -> list[LeasedHostInfo]:
+        return [self._lease] if self._lease is not None else []
+
+    def _collect_listing_raw_via_outer(self, lease: LeasedHostInfo) -> tuple[dict[str, Any] | None, str | None, bool]:
+        assert self._raw is not None
+        return dict(self._raw), None, False
+
+
+def test_discover_hosts_and_agents_carries_agent_labels_as_certified_data(temp_mngr_ctx: MngrContext) -> None:
+    """Streaming discovery refs must carry each agent's ``data`` as ``certified_data`` so label
+    filters (e.g. the minds forward's ``has(agent.labels.is_primary)``) see the labels. Without it
+    the refs are label-less and every imbue_cloud agent is silently dropped by such a filter."""
+    host_id = HostId.generate()
+    lease = _make_lease(host_id)
+    agent_id = str(AgentId.generate())
+    agent_data = {
+        "id": agent_id,
+        "name": "primary-agent",
+        "labels": {"is_primary": "true", "team": "minds"},
+        "type": "codex",
+    }
+    raw = {
+        "container_state": RUNNING_CONTAINER_STATE,
+        "certified_data": {"image": "some-image"},
+        "agents": [{"data": agent_data}],
+    }
+    provider = _CannedListingProvider.model_construct(
+        name=ProviderInstanceName("imbue-cloud-test"),
+        mngr_ctx=temp_mngr_ctx,
+        _lease=lease,
+        _raw=raw,
+    )
+
+    agents_by_host = provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group)
+
+    all_agents = [agent for agents in agents_by_host.values() for agent in agents]
+    assert len(all_agents) == 1
+    discovered_agent = all_agents[0]
+    assert discovered_agent.certified_data == agent_data
+    # The label filter the minds forward applies reads through the ``labels`` property.
+    assert discovered_agent.labels["is_primary"] == "true"
 
 
 def test_ensure_host_key_pinned_does_not_clobber_a_recorded_key(temp_mngr_ctx: MngrContext) -> None:
