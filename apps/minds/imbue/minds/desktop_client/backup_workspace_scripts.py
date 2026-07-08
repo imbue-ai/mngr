@@ -331,7 +331,11 @@ _main()
 BACKUP_APPLY_UPDATE_SCRIPT: Final[str] = (
     _SCRIPT_PREAMBLE
     + r"""
-_TICK_WAIT_TIMEOUT_SECONDS = 3600.0
+# minds already waited (unboundedly, cancellably) for a quiet workspace before
+# dispatching this script; this bounded wait only covers a tick that started in
+# between, and must stay well inside the caller's outer exec timeout so the
+# structured "timed out waiting" payload beats the exec being killed.
+_TICK_WAIT_TIMEOUT_SECONDS = 900.0
 _TICK_POLL_SECONDS = 5.0
 _SERVICE_VERIFY_TIMEOUT_SECONDS = 60.0
 

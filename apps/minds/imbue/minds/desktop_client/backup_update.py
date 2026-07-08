@@ -62,11 +62,16 @@ from imbue.mngr.primitives import AgentId
 # update; the UI parses the comma-separated chat names after it.
 BLOCKED_BY_RUNNING_CHATS_PREFIX: Final[str] = "BLOCKED_BY_RUNNING_CHATS:"
 
-_GATE_PROBE_TIMEOUT_SECONDS: Final[float] = 120.0
+# Must exceed the gate probe script's own `uv run mngr list` budget (180s)
+# so a slow list surfaces as the script's structured "mngr list failed"
+# payload rather than an opaque exec timeout.
+_GATE_PROBE_TIMEOUT_SECONDS: Final[float] = 240.0
 _GATE_POLL_INTERVAL_SECONDS: Final[float] = 10.0
-# The apply script bounds its own internal waits; this is the outer ceiling
-# for one exec covering stash + checkout + commit + uv sync + restart.
-_APPLY_EXEC_TIMEOUT_SECONDS: Final[float] = 1800.0
+# The apply script bounds its own internal waits; this outer ceiling covers
+# the worst-case rollback path (in-script tick wait of 900s, two `uv sync`
+# runs of up to 900s each, plus restarts/verifies and the revert) so the
+# script's structured failure payload always beats the exec timeout.
+_APPLY_EXEC_TIMEOUT_SECONDS: Final[float] = 3600.0
 
 # Problems that mean the update itself did not converge (operation fails).
 # NOT_CONFIGURED is deliberately absent: enabling backups is the configure

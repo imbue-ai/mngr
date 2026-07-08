@@ -53,8 +53,10 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 
 # One exec runs the whole check; sized to cover a first-encounter `git fetch
-# upstream --tags` on a slow network on top of the (fast, local) git diff.
-_CHECK_EXEC_TIMEOUT_SECONDS: Final[float] = 180.0
+# upstream --tags` on a slow network (the script gives the fetch 300s) on top
+# of the (fast, local) git diff, so the script's structured "fetch failed"
+# detail always beats the exec timeout.
+_CHECK_EXEC_TIMEOUT_SECONDS: Final[float] = 360.0
 # Wall-clock budget for the whole batch; a workspace whose check hasn't
 # finished reports UNKNOWN (no badge) and completes on a later batch.
 _CHECK_BATCH_TIMEOUT_SECONDS: Final[float] = 60.0
