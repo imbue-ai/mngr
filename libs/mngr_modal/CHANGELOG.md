@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `is_vm_runtime_enabled` option under `[providers.modal]` (default false) creates sandboxes on Modal's VM runtime (`experimental_options = {"vm_runtime": True}`) instead of gVisor, giving stronger isolation and broader syscall compatibility (e.g. Docker-in-sandbox state surviving a filesystem snapshot).
+
 ### Changed
 
 - Changed: Modal provider updated for mngr's new per-provider discovery — implements the bounded `discover_hosts_and_agents_within_timeouts` entry point. Because Modal reads all host and agent state from the state volume in one batched pass, individual host reads are not separately bounded (still bounded by the provider-level discovery error timeout; no host is marked UNKNOWN by this path).
