@@ -517,6 +517,7 @@ class DirectModalInterface(ModalInterface):
         region: str | None = None,
         cidr_allowlist: Sequence[str] | None = None,
         volumes: Mapping[str, VolumeInterface] | None = None,
+        experimental_options: Mapping[str, bool] | None = None,
     ) -> SandboxInterface:
         modal_volumes: dict[str | os.PathLike[str], modal.Volume | modal.CloudBucketMount] = {}
         if volumes is not None:
@@ -534,6 +535,7 @@ class DirectModalInterface(ModalInterface):
                 region=region,
                 cidr_allowlist=list(cidr_allowlist) if cidr_allowlist is not None else None,
                 volumes=modal_volumes,
+                experimental_options=dict(experimental_options) if experimental_options is not None else None,
             )
         except modal.exception.Error as e:
             raise _translate_modal_error(e) from e

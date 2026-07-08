@@ -7,21 +7,22 @@ starting/stopping, exporting backups, establishing SSH access, updating settings
 recovering (health check / restart), and managing service sharing. Those calls
 are reached through the gateway's bundled ``minds-api-proxy`` extension (so the
 detent envelope's domain is the synthetic ``latchkey-self.invalid`` gateway-self
-host) and gated by a single ``minds-workspaces`` detent scope with one named
-permission per verb.
+host) and granted by unioning one named permission per verb onto the domain-only
+``latchkey-self`` scope (like file-sharing and accounts), so no dedicated detent
+scope is minted.
 
-The verb catalog -- the scope name, the verb permission-schema names, their
-targeted/non-targeted split, and the dialog labels -- lives in a single shared
-data file, ``extensions/workspace_permissions.json``, read by *both* this module
-(for the dialog-facing metadata) and the gateway's ``permission_requests.mjs``
-extension (for the request-path schema construction). Keeping one source of
-truth means the two sides cannot drift; an integration check in
-``permission_requests_test.py`` confirms the gateway accepts exactly the verbs
-this module exposes.
+The verb catalog -- the verb permission-schema names, their targeted/non-targeted
+split, and the dialog labels -- lives in a single shared data file,
+``extensions/workspace_permissions.json``, read by *both* this module (for the
+dialog-facing metadata) and the gateway's ``permission_requests.mjs`` extension
+(for the request-path schema construction). Keeping one source of truth means the
+two sides cannot drift; an integration check in ``permission_requests_test.py``
+confirms the gateway accepts exactly the verbs this module exposes.
 
-The actual permission *effect* (the scope + per-verb schemas + the grant rule)
-is computed in that gateway extension and applied through the standard
-``POST /permission-requests/approve`` path, so no schema construction lives here.
+The actual permission *effect* (the per-verb schemas + the grant rule attaching
+them to ``latchkey-self``) is computed in that gateway extension and applied
+through the standard ``POST /permission-requests/approve`` path, so no schema
+construction lives here.
 
 The verbs split on a target axis:
 
@@ -77,7 +78,6 @@ class WorkspaceVerb(FrozenModel):
 class _WorkspacePermissionsCatalog(FrozenModel):
     """Parsed view of the shared verb-catalog data file."""
 
-    scope: str = Field(description="Detent scope schema name for the cross-workspace API.")
     verbs: tuple[WorkspaceVerb, ...] = Field(description="The grantable verbs, in dialog order.")
 
 
@@ -95,10 +95,7 @@ def _load_catalog() -> _WorkspacePermissionsCatalog:
         raise WorkspacePermissionsError(f"Bundled {_WORKSPACE_PERMISSIONS_FILENAME} is not valid JSON: {e}") from e
     if not isinstance(parsed, dict):
         raise WorkspacePermissionsError(f"{_WORKSPACE_PERMISSIONS_FILENAME} top-level value must be a JSON object.")
-    scope = parsed.get("scope")
     raw_verbs = parsed.get("verbs")
-    if not isinstance(scope, str) or not scope:
-        raise WorkspacePermissionsError(f"{_WORKSPACE_PERMISSIONS_FILENAME}: 'scope' must be a non-empty string.")
     if not isinstance(raw_verbs, list) or not raw_verbs:
         raise WorkspacePermissionsError(f"{_WORKSPACE_PERMISSIONS_FILENAME}: 'verbs' must be a non-empty array.")
     verbs: list[WorkspaceVerb] = []
@@ -118,7 +115,7 @@ def _load_catalog() -> _WorkspacePermissionsCatalog:
                 is_targeted=path["kind"] == "targeted",
             )
         )
-    return _WorkspacePermissionsCatalog(scope=scope, verbs=tuple(verbs))
+    return _WorkspacePermissionsCatalog(verbs=tuple(verbs))
 
 
 def _require_str(entry: Mapping[str, object], field: str) -> str:
@@ -130,15 +127,10 @@ def _require_str(entry: Mapping[str, object], field: str) -> str:
     return value
 
 
-# Module-level views of the shared catalog, resolved once at import. The data
+# Module-level view of the shared catalog, resolved once at import. The data
 # file is trusted package data that is always present, so a load failure is a
 # packaging bug and surfaces immediately as :class:`WorkspacePermissionsError`.
 _CATALOG: Final[_WorkspacePermissionsCatalog] = _load_catalog()
-
-# Detent scope schema for the cross-workspace API. Appears as the rule key in a
-# per-host ``latchkey_permissions.json`` (``{"minds-workspaces": [...]}``) and as
-# the ``scope`` a workspace permission request is filed under.
-MINDS_WORKSPACES_SCOPE: Final[str] = _CATALOG.scope
 
 # The grantable verbs, in the order the dialog presents them.
 WORKSPACE_VERBS: Final[tuple[WorkspaceVerb, ...]] = _CATALOG.verbs

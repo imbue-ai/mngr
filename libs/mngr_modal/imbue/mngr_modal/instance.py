@@ -55,6 +55,7 @@ from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.cleanup_failures import collect_cleanup_failures
 from imbue.mngr.interfaces.cleanup_failures import collecting_cleanup_failures
 from imbue.mngr.interfaces.data_types import AgentDetails
+from imbue.mngr.interfaces.data_types import BoundedProviderDiscoveryResult
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import CleanupFailureCategory
@@ -69,6 +70,9 @@ from imbue.mngr.interfaces.data_types import SnapshotRecord
 from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.provider_instance import HostDiscoveryReadRegistry
+from imbue.mngr.interfaces.provider_instance import bounded_result_from_agents_by_host
+from imbue.mngr.interfaces.provider_instance import collect_cached_host_ssh_infos
 from imbue.mngr.interfaces.volume import HostVolume
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
@@ -98,6 +102,7 @@ from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_com
 from imbue.mngr.providers.ssh_host_setup import build_start_volume_sync_command
 from imbue.mngr.providers.ssh_host_setup import parse_warnings_from_output
 from imbue.mngr_modal.config import ModalProviderConfig
+from imbue.mngr_modal.errors import ModalMngrError
 from imbue.mngr_modal.errors import ModalSandboxTimeoutMngrError
 from imbue.mngr_modal.errors import NoSnapshotsModalMngrError
 from imbue.mngr_modal.routes.deployment import deploy_function
@@ -506,6 +511,16 @@ class ModalProviderInstance(BaseProviderInstance):
             create_if_missing=True,
             environment_name=self.environment_name,
         )
+
+    def _build_experimental_options(self) -> dict[str, bool] | None:
+        """Build the ``experimental_options`` passed to Modal when creating a sandbox.
+
+        Requests the VM runtime (https://modal.com/docs/guide/vm-sandboxes) when
+        enabled on the provider config; returns None to use Modal's default runtime.
+        """
+        if self.config.is_vm_runtime_enabled:
+            return {"vm_runtime": True}
+        return None
 
     @handle_modal_auth_error
     def get_volume_for_host(self, host: HostInterface | HostId) -> HostVolume | None:
@@ -1794,6 +1809,7 @@ log "=== Shutdown script completed ==="
                     region=config.region,
                     cidr_allowlist=config.effective_cidr_allowlist,
                     volumes=sandbox_volumes,
+                    experimental_options=self._build_experimental_options(),
                 )
                 logger.trace("Created Modal sandbox", sandbox_id=sandbox.get_object_id())
         except (ModalProxyError, MngrError) as e:
@@ -1903,7 +1919,15 @@ log "=== Shutdown script completed ==="
             try:
                 sandbox.terminate()
             except ModalProxyError as e:
+                # Do NOT swallow this: a failed terminate means the Modal sandbox is
+                # still running (a billing orphan). Swallowing it would let destroy_host
+                # report success and the UI spin on "Destroying...". Surface it so the
+                # caller (destroy_host records a CleanupFailure; `mngr stop`/`destroy`
+                # exits non-zero) sees the failure. We deliberately raise *before*
+                # writing stop_reason=STOPPED and clearing caches, since the host is
+                # not actually stopped.
                 logger.warning("Error terminating sandbox: {}", e)
+                raise ModalMngrError(f"Failed to terminate sandbox for host {host_id}: {e}") from e
         else:
             logger.debug("Failed to find sandbox (may already be terminated)", host_id=str(host_id))
 
@@ -1988,7 +2012,10 @@ log "=== Shutdown script completed ==="
                     "Cannot restart. Create a new host instead."
                 )
 
-            # Use the most recent snapshot (sorted by created_at descending)
+            # Use the most recent snapshot (sorted by created_at descending). The
+            # initial snapshot (taken after agent creation, so it carries the agent)
+            # is a valid restore point; a graceful stop/pause leaves a newer one that
+            # is used in preference.
             sorted_snapshots = sorted(
                 host_record.certified_host_data.snapshots, key=lambda s: s.created_at, reverse=True
             )
@@ -2055,6 +2082,7 @@ log "=== Shutdown script completed ==="
                 region=config.region,
                 cidr_allowlist=config.effective_cidr_allowlist,
                 volumes=sandbox_volumes,
+                experimental_options=self._build_experimental_options(),
             )
         logger.info("Created sandbox from snapshot", sandbox_id=new_sandbox.get_object_id())
 
@@ -2063,6 +2091,19 @@ log "=== Shutdown script completed ==="
         # Invalidate any cached OfflineHost so we return the new online Host
         self._uncache_host(host_id)
 
+        # Clear stop_reason on resume. When a sandbox is shut down, the shutdown path
+        # persists stop_reason into the host record -- PAUSED for a graceful idle/timeout
+        # shutdown (activity_watcher.sh -> shutdown.sh), STOPPED for an explicit
+        # ``mngr stop``. We are now booting a fresh sandbox from that record's snapshot,
+        # so the host is running again and that stale reason must be cleared: otherwise
+        # state derivation keeps reporting the host as PAUSED/STOPPED, and if it later
+        # hard-crashes it is mis-derived as PAUSED/STOPPED (never GC'd, wrongly offering a
+        # Resume control) instead of CRASHED. The setup helper below persists this cleared
+        # data to both the host record and the host's data.json, mirroring mngr_lima's restart.
+        restored_host_data = host_record.certified_host_data.model_copy_update(
+            to_update(host_record.certified_host_data.field_ref().stop_reason, None),
+        )
+
         # Set up SSH and create host object using shared helper
         restored_host, ssh_host, ssh_port, host_public_key = self._setup_sandbox_ssh_and_create_host(
             sandbox=new_sandbox,
@@ -2070,7 +2111,7 @@ log "=== Shutdown script completed ==="
             host_name=host_name,
             user_tags=user_tags,
             config=config,
-            host_data=host_record.certified_host_data,
+            host_data=restored_host_data,
         )
 
         # Cache the new online host
@@ -2104,9 +2145,11 @@ log "=== Shutdown script completed ==="
             except ModalProxyNotFoundError:
                 # Sandbox already gone -- benign.
                 pass
-            except ModalProxyError as e:
+            except (ModalProxyError, ModalMngrError) as e:
                 # ModalProxyInvalidError / ModalProxyInternalError and any other Modal
-                # failure mean the resource may still exist.
+                # failure mean the resource may still exist. stop_host now wraps a failed
+                # terminate in a ModalMngrError (rather than swallowing it) so a billing
+                # orphan is recorded here instead of being reported as a successful destroy.
                 logger.warning("Failed to terminate sandbox for host {}: {}", host_id, e)
                 failures.append(
                     CleanupFailure(
@@ -2473,6 +2516,28 @@ log "=== Shutdown script completed ==="
             return running_host_ids
 
     @handle_modal_auth_error
+    def discover_hosts_and_agents_within_timeouts(
+        self,
+        cg: ConcurrencyGroup,
+        host_discovery_timeout_seconds: float,
+        agent_discovery_timeout_seconds: float,
+        include_destroyed: bool = False,
+        registry: HostDiscoveryReadRegistry | None = None,
+    ) -> BoundedProviderDiscoveryResult:
+        """Delegate to the batch discovery path; bounded only by the provider-level error timeout.
+
+        Modal reads all host/agent state from the state volume in one batched pass,
+        so individual host reads cannot be bounded; nothing is marked UNKNOWN here.
+        ``registry`` is accepted for interface compatibility but unused: this path
+        spawns no per-host reads to de-duplicate across polls.
+        """
+        agents_by_host = self.discover_hosts_and_agents(cg=cg, include_destroyed=include_destroyed)
+        # Surface each running host's SSH endpoint (read from the host object the batch discovery
+        # just cached) so the streaming poller re-emits it as HOST_SSH_INFO for tunneling consumers.
+        host_ssh_infos = collect_cached_host_ssh_infos(self, agents_by_host.keys())
+        return bounded_result_from_agents_by_host(agents_by_host, host_ssh_infos=host_ssh_infos)
+
+    @handle_modal_auth_error
     def discover_hosts_and_agents(
         self,
         cg: ConcurrencyGroup,
@@ -2539,15 +2604,54 @@ log "=== Shutdown script completed ==="
                 host_state=host_state,
             )
 
-            agent_refs: list[DiscoveredAgent] = []
-            for agent_data in agent_data_by_host_id.get(host_id, []):
-                ref = validate_and_create_discovered_agent(agent_data, host_id, self.name)
-                if ref is not None:
-                    agent_refs.append(ref)
-
-            result[host_ref] = agent_refs
+            # A RUNNING host's agents are read LIVE off the sandbox; only offline
+            # hosts fall back to the state volume. See _discover_agent_refs_for_host.
+            result[host_ref] = self._discover_agent_refs_for_host(
+                host_id, host_record, is_running, agent_data_by_host_id.get(host_id, [])
+            )
 
         return result
+
+    def _discover_agent_refs_for_host(
+        self,
+        host_id: HostId,
+        host_record: HostRecord,
+        is_running: bool,
+        volume_agent_data: list[dict[str, Any]],
+    ) -> list[DiscoveredAgent]:
+        """Resolve a host's agent refs: LIVE for running hosts, the state volume otherwise.
+
+        A running host's agents must be read live off the sandbox: agents created
+        in-sandbox (e.g. the user's workspace agent) are never written to the state
+        volume -- only host-side agents like ``system-services`` are. Reading the
+        volume only made ``mngr destroy`` / ``mngr start`` unable to resolve a live
+        in-sandbox agent (it was absent from the volume), so teardown spun forever.
+        This mirrors the VPS providers, which read running hosts live and fall back
+        to the persisted store only when the host is offline (or the live read fails).
+        """
+        if is_running:
+            try:
+                host = self._get_host(host_id, host_record)
+                if isinstance(host, Host):
+                    return list(host.discover_agents())
+            except (HostConnectionError, MngrError) as e:
+                logger.debug(
+                    "Live agent read failed for running Modal host {}; falling back to volume records: {}",
+                    host_id,
+                    e,
+                )
+        return self._agent_refs_from_volume_data(host_id, volume_agent_data)
+
+    def _agent_refs_from_volume_data(
+        self, host_id: HostId, volume_agent_data: list[dict[str, Any]]
+    ) -> list[DiscoveredAgent]:
+        """Build agent refs from persisted state-volume records (the offline-host path)."""
+        agent_refs: list[DiscoveredAgent] = []
+        for agent_data in volume_agent_data:
+            ref = validate_and_create_discovered_agent(agent_data, host_id, self.name)
+            if ref is not None:
+                agent_refs.append(ref)
+        return agent_refs
 
     def get_host_resources(self, host: HostInterface) -> HostResources:
         """Get resource information for a Modal sandbox."""

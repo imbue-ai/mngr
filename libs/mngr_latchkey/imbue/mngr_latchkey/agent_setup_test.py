@@ -24,7 +24,6 @@ from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVE
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY_SECONDARY
 from imbue.mngr_latchkey.agent_setup import _build_allowed_agent_anyof_entry
 from imbue.mngr_latchkey.agent_setup import _extract_agent_id_from_anyof_entry
-from imbue.mngr_latchkey.agent_setup import _with_gateway_self_catchall_last
 from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
 from imbue.mngr_latchkey.agent_setup import maybe_recover_host_permissions_for_agent
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
@@ -87,9 +86,13 @@ def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
     assert setup.opaque_permissions_path is not None
     assert setup.opaque_permissions_path.parent == opaque_permissions_dir(fake.plugin_data_dir)
     on_disk = json.loads(setup.opaque_permissions_path.read_text())
-    # Two rules now ship in the baseline:
+    # Three rules now ship in the baseline:
     #
-    # 1. ``minds-api-proxy-unauthorized`` (first): scope matches any
+    # 0. ``minds-api-proxy-report`` (first): a POST to the per-agent
+    #    ``/report`` path is allowed for ANY agent, with no per-agent
+    #    registration. It must come before the unauthorized gate because
+    #    detent stops at the first matching scope.
+    # 1. ``minds-api-proxy-unauthorized``: scope matches any
     #    ``/minds-api-proxy/api/v1/agents/<id>/...`` request whose <id>
     #    is NOT in the allowed list (encoded as ``not + anyOf`` on the
     #    path schema; initially empty -- no agent allowed). Detent
@@ -101,6 +104,7 @@ def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
     #    Authorized agents (those past Rule 1's ``not + anyOf``) hit
     #    this rule and are let through by the generic permission.
     assert on_disk["rules"] == [
+        {"minds-api-proxy-report": ["minds-api-proxy-report-allow"]},
         {"minds-api-proxy-per-agent-unauthorized": []},
         {
             "latchkey-self": [
@@ -113,6 +117,23 @@ def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
         },
     ]
     schemas = on_disk["schemas"]
+    # The report scope + permission both pin to a POST on the per-agent
+    # ``/report`` path, so any agent's bug-report escalation is let through
+    # without registration while every other agent-scoped path still falls
+    # to the unauthorized gate.
+    report_scope = schemas["minds-api-proxy-report"]["properties"]
+    assert report_scope["domain"] == {"const": "latchkey-self.invalid"}
+    assert report_scope["method"] == {"const": "POST"}
+    assert report_scope["path"] == {
+        "type": "string",
+        "pattern": r"^/minds-api-proxy/api/v1/agents/[^/]+/report$",
+    }
+    report_perm = schemas["minds-api-proxy-report-allow"]["properties"]
+    assert report_perm["method"] == {"const": "POST"}
+    assert report_perm["path"] == {
+        "type": "string",
+        "pattern": r"^/minds-api-proxy/api/v1/agents/[^/]+/report$",
+    }
     # The minds-api-proxy-unauthorized scope:
     #   * ``domain`` constrained to the gateway-self host,
     #   * ``path`` must match the proxy-prefix pattern AND not match
@@ -442,11 +463,11 @@ def test_register_agent_for_host_preserves_other_grants(tmp_path: Path) -> None:
     path = permissions_path_for_host(tmp_path, host_id)
     config = json.loads(path.read_text())
     rule_keys = [next(iter(rule.keys())) for rule in config["rules"]]
-    # The minds-api-proxy-unauthorized rule must come first so detent
-    # stops at it for an unauthorized agent_id (rejecting with the
-    # empty permission list) rather than falling through to the
-    # latchkey-self baseline rule.
-    assert rule_keys == ["minds-api-proxy-per-agent-unauthorized", "latchkey-self"]
+    # The always-allowed report rule comes first, then the
+    # minds-api-proxy-unauthorized gate (so detent stops at it for an
+    # unauthorized agent_id, rejecting with the empty permission list
+    # rather than falling through to the latchkey-self baseline rule).
+    assert rule_keys == ["minds-api-proxy-report", "minds-api-proxy-per-agent-unauthorized", "latchkey-self"]
 
 
 def test_register_agent_for_host_raises_when_anyof_was_hand_edited(tmp_path: Path) -> None:
@@ -464,71 +485,6 @@ def test_register_agent_for_host_raises_when_anyof_was_hand_edited(tmp_path: Pat
     path.write_text(json.dumps(config))
     with pytest.raises(LatchkeyStoreError):
         register_agent_for_host(tmp_path, host_id, agent_id)
-
-
-def test_with_gateway_self_catchall_last_moves_catchall_to_end() -> None:
-    """The domain-only ``latchkey-self`` catch-all is moved last; other rules keep order."""
-    rules = (
-        {"minds-api-proxy-per-agent-unauthorized": []},
-        {"latchkey-self": ["latchkey-self-read-self-permissions"]},
-        {"minds-workspaces": ["minds-workspaces-read"]},
-    )
-    assert _with_gateway_self_catchall_last(rules) == (
-        {"minds-api-proxy-per-agent-unauthorized": []},
-        {"minds-workspaces": ["minds-workspaces-read"]},
-        {"latchkey-self": ["latchkey-self-read-self-permissions"]},
-    )
-
-
-def test_with_gateway_self_catchall_last_is_noop_when_already_canonical() -> None:
-    """A file whose catch-all is already last is returned unchanged (so register no-ops)."""
-    rules = (
-        {"minds-api-proxy-per-agent-unauthorized": []},
-        {"minds-workspaces": ["minds-workspaces-read"]},
-        {"latchkey-self": ["latchkey-self-read-self-permissions"]},
-    )
-    assert _with_gateway_self_catchall_last(rules) == rules
-
-
-def test_register_agent_for_host_repairs_grant_appended_after_catchall(tmp_path: Path) -> None:
-    """A workspace grant appended after the ``latchkey-self`` catch-all is reordered before it.
-
-    An older build appended a ``minds-workspaces`` grant at the end of the rules
-    array, after the domain-only ``latchkey-self`` catch-all. Because detent
-    treats the first rule whose scope matches as authoritative, that catch-all
-    then shadowed the grant and vetoed every ``/workspaces`` request. Registering
-    the (already-allowed) agent again -- which happens on every app restart via
-    the auto-register sweep -- must repair the order in place so the grant takes
-    effect, without disturbing the grant or the allowlist.
-    """
-    host_id = HostId.generate()
-    agent_id = AgentId.generate()
-    register_agent_for_host(tmp_path, host_id, agent_id)
-    path = permissions_path_for_host(tmp_path, host_id)
-    config = json.loads(path.read_text())
-    # Simulate the pre-fix on-disk state: the grant appended after the catch-all.
-    config["rules"].append({"minds-workspaces": ["minds-workspaces-read", "minds-workspaces-create"]})
-    assert [next(iter(rule.keys())) for rule in config["rules"]] == [
-        "minds-api-proxy-per-agent-unauthorized",
-        "latchkey-self",
-        "minds-workspaces",
-    ]
-    path.write_text(json.dumps(config))
-
-    # Re-registering the same, already-allowed agent repairs the order.
-    register_agent_for_host(tmp_path, host_id, agent_id)
-    repaired = json.loads(path.read_text())
-    assert [next(iter(rule.keys())) for rule in repaired["rules"]] == [
-        "minds-api-proxy-per-agent-unauthorized",
-        "minds-workspaces",
-        "latchkey-self",
-    ]
-    # The grant itself is preserved -- only its position changed.
-    workspace_rule = next(rule for rule in repaired["rules"] if "minds-workspaces" in rule)
-    assert workspace_rule["minds-workspaces"] == ["minds-workspaces-read", "minds-workspaces-create"]
-    # The repair write must not duplicate the agent in the allowlist.
-    any_of = _allowed_anyof_for_host(tmp_path, host_id)
-    assert len(any_of) == 1
 
 
 # The ``minds-workspaces`` cross-workspace API scope is no longer part of the

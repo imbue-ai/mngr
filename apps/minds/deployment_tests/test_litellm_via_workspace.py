@@ -20,7 +20,7 @@ from imbue.minds.deployment_tests.data_types import SharedEnvHandle
 from imbue.minds.deployment_tests.data_types import VerifiedUserHandle
 from imbue.minds.deployment_tests.helpers import wait_for_env_ready
 
-pytestmark = pytest.mark.minds_services
+pytestmark = [pytest.mark.release, pytest.mark.minds_services]
 
 
 # NOT YET WORKING. This test is wired into the per-run CI env flow (correct

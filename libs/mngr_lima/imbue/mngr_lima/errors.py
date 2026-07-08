@@ -50,10 +50,3 @@ class LimaHostCreationError(HostCreationError):
     def __init__(self, provider_name: ProviderInstanceName, reason: str, build_log: str = "") -> None:
         self.build_log = build_log
         super().__init__(provider_name, f"Failed to create Lima VM: {reason}")
-
-
-class LimaHostRenameError(MngrError):
-    """Raised when attempting to rename a Lima host."""
-
-    def __init__(self) -> None:
-        super().__init__("Lima instances cannot be renamed. Create a new host with the desired name instead.")

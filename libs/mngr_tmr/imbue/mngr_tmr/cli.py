@@ -5,6 +5,8 @@ defines the click command, parses the TMR-specific options on top of the
 framework's common options, and hands off to ``run_mapreduce``.
 """
 
+from pathlib import Path
+
 import click
 
 from imbue.mngr.cli.common_opts import add_common_options
@@ -20,6 +22,9 @@ from imbue.mngr_tmr.recipe import TestMapReduceRecipe
 class TmrCliOptions(MapReduceCliOptions):
     """Options for the ``mngr tmr`` command (TMR specifics on top of the framework's)."""
 
+    name: str
+    mapper_prompt: str | None
+    reducer_prompt: str | None
     pytest_args: tuple[str, ...]
     testing_flags: tuple[str, ...]
 
@@ -48,6 +53,30 @@ class _TmrCommand(click.Command):
 
 @click.command("tmr", cls=_TmrCommand, context_settings={"ignore_unknown_options": True})
 @click.argument("pytest_args", nargs=-1, type=click.UNPROCESSED)
+@click.option(
+    "--name",
+    default="tmr",
+    show_default=True,
+    help="Variant name, used as the prefix for this run's agent/branch/host names "
+    "(e.g. tmr-mngr, tmr-minds) so distinct test suites stay separable and reviewable "
+    "on their own. Distinct from --run-name, which identifies one run within a variant.",
+)
+@click.option(
+    "--mapper-prompt",
+    "mapper_prompt",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Override the packaged mapper prompt with this Jinja template file. It may "
+    "'{% extends %}' or '{% include %}' the packaged mapper.j2 by name.",
+)
+@click.option(
+    "--reducer-prompt",
+    "reducer_prompt",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Override the packaged reducer prompt with this Jinja template file. It may "
+    "'{% extends %}' or '{% include %}' the packaged reducer.j2 by name.",
+)
 @add_mapreduce_options
 @add_common_options
 @click.pass_context
@@ -58,8 +87,11 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
         command_class=TmrCliOptions,
     )
     recipe = TestMapReduceRecipe(
+        name=opts.name,
         pytest_args=opts.pytest_args,
         testing_flags=opts.testing_flags,
+        mapper_prompt_path=Path(opts.mapper_prompt) if opts.mapper_prompt is not None else None,
+        reducer_prompt_path=Path(opts.reducer_prompt) if opts.reducer_prompt is not None else None,
     )
     run_mapreduce(recipe, opts, mngr_ctx, output_opts)
 
@@ -67,7 +99,7 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
 CommandHelpMetadata(
     key="tmr",
     one_line_description="Run and fix tests in parallel using agents (test map-reduce)",
-    synopsis="mngr tmr [TEST_PATHS...] [-- TESTING_FLAGS...] [--provider <PROVIDER>] [--env KEY=VALUE] [--label KEY=VALUE] [--timeout <SECS>] [--agent-type <TYPE>]",
+    synopsis="mngr tmr [TEST_PATHS...] [-- TESTING_FLAGS...] [--name <VARIANT>] [--mapper-prompt <FILE>] [--reducer-prompt <FILE>] [--provider <PROVIDER>] [--env KEY=VALUE] [--label KEY=VALUE] [--timeout <SECS>] [--agent-type <TYPE>]",
     description="""This command implements a map-reduce pattern for tests:
 
 1. Collects tests using pytest --collect-only, passing through all arguments.
@@ -90,6 +122,16 @@ pytest testing flags shared between discovery and individual test runs. For exam
 This discovers tests with `pytest --collect-only tests/e2e -m release` and runs
 each test with `pytest tests/e2e/test_foo.py::test_bar -m release`.
 
+Use --name to give a run its own variant prefix (agent/branch/host names), so
+distinct suites stay separable and reviewable on their own. For example, run the
+mngr suite and the minds suite as separate variants:
+
+  mngr tmr libs/mngr --name tmr-mngr -- -m "release and not docker and not docker_sdk"
+  mngr tmr apps/minds --name tmr-minds -- -m "release and not minds_deployment and not minds_services and not minds_snapshot_resume"
+
+Use --mapper-prompt / --reducer-prompt to point a variant at its own Jinja
+prompt templates (they may extend or include the packaged ones by name).
+
 Use --provider to run agents on a specific provider (e.g. docker, modal).
 On providers that support snapshots (e.g. modal), the orchestrator
 automatically builds and provisions one host, snapshots it, then launches
@@ -105,6 +147,11 @@ tests_passing_before/after booleans, and a markdown summary.""",
         ("Run all tests in current directory", "mngr tmr"),
         ("Run tests in a specific file", "mngr tmr tests/test_foo.py"),
         ("Run tests with a marker", "mngr tmr tests/e2e -- -m release"),
+        ("Run the minds suite as its own variant", "mngr tmr apps/minds --name tmr-minds -- -m release"),
+        (
+            "Use a custom mapper prompt",
+            "mngr tmr apps/minds --name tmr-minds --mapper-prompt apps/minds/tmr/mapper.j2",
+        ),
         ("Use Docker provider", "mngr tmr --provider docker tests/"),
         ("Modal (snapshot is automatic)", "mngr tmr --provider modal tests/"),
         ("Pass env vars and labels", "mngr tmr --env API_KEY=xxx --label batch=run1"),

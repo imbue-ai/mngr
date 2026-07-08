@@ -12,7 +12,7 @@
 
   The color is chosen automatically (the first unused palette entry, carried
   in a hidden input), so it is not asked for here. The workspace name defaults
-  to an auto-generated ``mind-N`` (server-side) but can be set explicitly via
+  to an auto-generated ``workspace-N`` (server-side) but can be set explicitly via
   the advanced view's ``Name`` field.
 
   ``selected_preset`` picks which card starts selected (and which
@@ -52,6 +52,7 @@
     var apiKeyInput = document.getElementById('anthropic_api_key');
     var launchModeError = document.getElementById('launch-mode-account-error');
     var awsCredentialsNote = document.getElementById('aws-credentials-note');
+    var modalDirectNote = document.getElementById('modal-direct-note');
     var aiProviderError = document.getElementById('ai-provider-account-error');
     var backupSelect = document.getElementById('backup_provider');
     var backupApiKeyRow = document.getElementById('backup-api-key-row');
@@ -70,6 +71,7 @@
     var gitUrlInput = document.getElementById('git_url');
     var branchInput = document.getElementById('branch');
     var hostNameInput = document.getElementById('host_name');
+    var hostNameError = document.getElementById('host-name-error');
     var colorInput = document.getElementById('create-color-input');
     var backupApiKeyEnvInput = document.getElementById('backup_api_key_env');
     var backupSavePasswordInput = document.getElementById('backup_save_password');
@@ -148,6 +150,113 @@
       accountSelect.classList.remove('!ring-1', 'ring-important');
     }
 
+    // ---- Live Name (host name) validation -------------------------------
+    // Mirrors mngr's HostName rules (alphanumeric plus '-'/'_' in the middle,
+    // no leading/trailing '-'/'_', no dots) for instant format feedback, then
+    // debounced-asks the server whether the name is free on the *selected*
+    // provider (the scope where a real create would actually collide). State
+    // 'ok' lets submit through; 'invalid'/'taken' block it (the field stays
+    // editable). Empty is always 'ok' -- the server auto-names it.
+    var HOST_NAME_OK = 'ok', HOST_NAME_INVALID = 'invalid', HOST_NAME_TAKEN = 'taken';
+    var hostNameState = HOST_NAME_OK;
+    var hostNameDebounce = null;
+    var hostNameCheckSeq = 0;
+    // The availability key (name + provider scope) a HOST_NAME_TAKEN was computed
+    // for. A 'taken' verdict only blocks submit while the current inputs still
+    // produce this exact key; once the user edits the name or switches
+    // provider/account/region it is stale and must not fail-close a name/scope it
+    // was never checked against.
+    var hostNameTakenKey = null;
+
+    function hostNameFormatError(value) {
+      // Friendly message for the first broken rule, or '' if valid. Empty is
+      // valid (named automatically server-side).
+      if (value === '') return '';
+      var invalidChar = value.match(/[^a-zA-Z0-9_-]/);
+      if (invalidChar) {
+        if (invalidChar[0] === '.') return "Dots aren't allowed in a name.";
+        if (invalidChar[0] === ' ') return "Spaces aren't allowed in a name.";
+        return 'Use only letters, numbers, dashes, and underscores.';
+      }
+      if (/^[-_]/.test(value)) return "Can't start with a dash or underscore.";
+      if (/[-_]$/.test(value)) return "Can't end with a dash or underscore.";
+      return '';
+    }
+
+    function showHostNameError(message) {
+      hostNameError.textContent = message;
+      hostNameError.classList.remove('hidden');
+      // Turn the field's own border red (no extra ring), and recolor the focus
+      // outline red instead of the default accent. ``!border-important`` beats
+      // the base ``border-strong`` / ``hover:border-stronger``;
+      // ``focus:!outline-important`` overrides the base ``focus:outline-accent``.
+      hostNameInput.classList.add('!border-important', 'focus:!outline-important');
+    }
+
+    function clearHostNameError() {
+      hostNameError.textContent = '';
+      hostNameError.classList.add('hidden');
+      hostNameInput.classList.remove('!border-important', 'focus:!outline-important');
+    }
+
+    function hostNameAvailabilityUrl(value) {
+      var params = new URLSearchParams({
+        name: value,
+        launch_mode: launchSelect.value,
+        account_id: accountSelect.value,
+        region: regionSelect.disabled ? '' : regionSelect.value
+      });
+      return '/api/v1/desktop/host-name-available?' + params.toString();
+    }
+
+    function validateHostName() {
+      var value = hostNameInput.value.trim();
+      var formatError = hostNameFormatError(value);
+      if (formatError) {
+        hostNameState = HOST_NAME_INVALID;
+        hostNameTakenKey = null;
+        showHostNameError(formatError);
+        return;
+      }
+      if (value === '') {
+        hostNameState = HOST_NAME_OK;
+        hostNameTakenKey = null;
+        clearHostNameError();
+        return;
+      }
+      // Format is fine; ask the server about availability. Until it answers we
+      // optimistically treat the name as ok so a fast Create isn't blocked (the
+      // rare race falls back to the server's own create-time conflict check).
+      hostNameState = HOST_NAME_OK;
+      hostNameTakenKey = null;
+      clearHostNameError();
+      var url = hostNameAvailabilityUrl(value);
+      var seq = ++hostNameCheckSeq;
+      fetch(url, { headers: { 'Accept': 'application/json' } })
+        .then(function (resp) { return resp.ok ? resp.json() : null; })
+        .then(function (data) {
+          // Ignore a stale response superseded by a newer keystroke/change.
+          if (seq !== hostNameCheckSeq) return;
+          if (data && data.available === false) {
+            hostNameState = HOST_NAME_TAKEN;
+            // Remember exactly which name/scope is taken so a later edit doesn't
+            // leave this verdict blocking a different name (see submit handler).
+            hostNameTakenKey = url;
+            showHostNameError('That name is already taken. Pick a different one.');
+          } else {
+            hostNameState = HOST_NAME_OK;
+            hostNameTakenKey = null;
+            clearHostNameError();
+          }
+        })
+        .catch(function () { /* network error: fail open, leave the name usable */ });
+    }
+
+    function scheduleHostNameValidation() {
+      if (hostNameDebounce) clearTimeout(hostNameDebounce);
+      hostNameDebounce = setTimeout(validateHostName, 300);
+    }
+
     function onPresetClick(name) {
       // Clicking a card only selects it -- it never navigates. Remote (Imbue
       // Cloud) compute needs an account: when the user has signed-in accounts
@@ -160,6 +269,10 @@
       markPresetSelected(name);
       applyPreset(name);
       update();
+      // applyPreset sets launchSelect.value (and may change the account) directly,
+      // which does not fire a 'change' event, so re-run the availability check
+      // explicitly to re-scope "taken" to the preset's provider/account.
+      scheduleHostNameValidation();
     }
 
     for (var i = 0; i < presetCards.length; i++) {
@@ -274,6 +387,35 @@
         else openSigninModal();
         return;
       }
+      // Re-run format validation synchronously so a known-bad / already-taken
+      // name blocks submit (mirroring the account-picker guard). Availability
+      // that hasn't come back yet does not block -- the server's create-time
+      // conflict check backstops that rare race. This synchronous check owns the
+      // *format* dimension: it must also clear a stale 'invalid' from a prior
+      // keystroke (the debounced validateHostName may not have re-run yet), or a
+      // name the user just corrected would be wrongly blocked.
+      var trimmedName = hostNameInput.value.trim();
+      var nameFormatError = hostNameFormatError(trimmedName);
+      if (nameFormatError) {
+        hostNameState = HOST_NAME_INVALID;
+        showHostNameError(nameFormatError);
+      } else if (hostNameState === HOST_NAME_INVALID) {
+        hostNameState = HOST_NAME_OK;
+        clearHostNameError();
+      }
+      // A 'taken' verdict only blocks the exact name/scope it was computed for.
+      // If the user has since edited the name (or switched provider/account/region)
+      // the verdict is stale -- the debounced re-check may not have run yet -- so it
+      // must not fail-close a name that was never checked; we fall through to
+      // optimistic-allow and let the server's create-time conflict check backstop.
+      var nameStillTaken =
+        hostNameState === HOST_NAME_TAKEN && hostNameTakenKey === hostNameAvailabilityUrl(trimmedName);
+      if (hostNameState === HOST_NAME_INVALID || nameStillTaken) {
+        // (default already prevented above) -- just surface the inline error.
+        showAdvanced(true);
+        hostNameInput.focus();
+        return;
+      }
       submitBtn.disabled = true;
       submitBtn.textContent = 'Creating...';
       submitCreate();
@@ -344,6 +486,7 @@
       var backupInvalid = !hasAccount && backupValue === 'IMBUE_CLOUD';
       launchModeError.classList.toggle('hidden', !launchInvalid);
       if (awsCredentialsNote) awsCredentialsNote.classList.toggle('hidden', launchSelect.value !== 'AWS');
+      if (modalDirectNote) modalDirectNote.classList.toggle('hidden', launchSelect.value !== 'MODAL');
       aiProviderError.classList.toggle('hidden', !aiInvalid);
       backupProviderError.classList.toggle('hidden', !backupInvalid);
 
@@ -364,14 +507,23 @@
     backupSelect.addEventListener('change', update);
     backupEncryptionSelect.addEventListener('change', update);
 
+    hostNameInput.addEventListener('input', scheduleHostNameValidation);
+    // Provider / account / region changes move the goalposts for "taken", so
+    // re-check the name against the newly-selected scope.
+    accountSelect.addEventListener('change', scheduleHostNameValidation);
+    launchSelect.addEventListener('change', scheduleHostNameValidation);
+    regionSelect.addEventListener('change', scheduleHostNameValidation);
+
     var initialPreset = selectedPreset();
     if (initialPreset) markPresetSelected(initialPreset);
     showAdvanced({{ 'true' if start_advanced else 'false' }});
     update();
+    // Validate any pre-filled name on load (e.g. a re-rendered submit error).
+    validateHostName();
   })();
 </script>
 {% endset %}
-<PageNarrowContainer title="Create a mind" padding="form" max_width="max-w-[720px]" scripts={{ _scripts }}>
+<PageNarrowContainer title="Create a workspace" padding="form" max_width="max-w-[720px]" scripts={{ _scripts }}>
   {# Submission is a JS fetch to POST /api/v1/workspaces (the same create front
      door agents use); see the submit handler in the scripts block. The form
      element keeps the field layout + native required-field validation. #}
@@ -380,8 +532,8 @@
     <input type="hidden" name="color" id="create-color-input" value="{{ color }}">
 
     <div class="text-center mb-12">
-      <p class="type-label uppercase tracking-wide text-secondary">Create a mind</p>
-      <h1 class="type-heading-lg text-primary mt-1">Where do you want to run your mind?</h1>
+      <p class="type-label uppercase tracking-wide text-secondary">Create a workspace</p>
+      <h1 class="type-heading-lg text-primary mt-1">Where should it run?</h1>
     </div>
 
     {% if error_message %}
@@ -393,7 +545,7 @@
     <p id="create-error" role="alert" class="hidden mb-6 type-helper text-important text-center"></p>
 
     {# ---- Simple view: two compute presets ---- #}
-    <div id="simple-view" role="radiogroup" aria-label="Where to run your mind">
+    <div id="simple-view" role="radiogroup" aria-label="Where to run your workspace">
       <div class="flex gap-6 items-stretch">
         <PresetCard preset="remote" :selected="selected_preset == 'remote'" extra="flex-1">
           <div class="flex items-center gap-2">
@@ -427,7 +579,7 @@
         {% for acct in accounts %}
           <option value="{{ acct.user_id }}"{% if acct.user_id == default_account_id %} selected{% endif %}>{{ acct.email }}</option>
         {% endfor %}
-        <option value=""{% if not default_account_id %} selected{% endif %}>No account (private project)</option>
+        <option value=""{% if not default_account_id %} selected{% endif %}>No account (private workspace)</option>
       </select>
       <span id="advanced-toggle-wrap">
         <Button variant="ghost" id="toggle-advanced"
@@ -459,7 +611,10 @@
       <div>
         <FormLabel target="host_name">Name</FormLabel>
         <p class="mb-1 type-helper text-tertiary">Leave empty to name it automatically</p>
-        <TextInput name="host_name" :value="host_name" placeholder="my-mind" id="host_name" />
+        <TextInput name="host_name" :value="host_name" placeholder="my-workspace" id="host_name" />
+        {# Inline live-validation message for the name field (format + availability),
+           toggled by the script below; mirrors the account-picker error pattern. #}
+        <p id="host-name-error" class="hidden mt-1 type-helper text-important"></p>
       </div>
 
       <div>
@@ -472,11 +627,18 @@
               or <code>AWS_PROFILE</code>, or <code>~/.aws/credentials</code>).
               Pick a region below.
             </p>
+            <p id="modal-direct-note" class="hidden mt-1 type-helper text-tertiary">
+              Modal creates sandboxes from this machine using your own Modal token.
+              If you haven't authenticated yet, install the CLI and log in:
+              <code>uv tool install modal</code>, then <code>modal token new</code>
+              (or set <code>MODAL_TOKEN_ID</code> / <code>MODAL_TOKEN_SECRET</code>).
+              Sandboxes are ephemeral (~1 day) -- testing only.
+            </p>
           </div>
           <Select id="launch_mode" name="launch_mode" width="w-48">
             {% for mode in launch_modes %}
               <option value="{{ mode.value }}"{% if mode.value == selected_launch_mode %} selected{% endif %}
-                      {% if mode.value == 'IMBUE_CLOUD' %}data-requires-account="true"{% endif %}>{{ mode.value | lower }}</option>
+                      {% if mode.value == 'IMBUE_CLOUD' %}data-requires-account="true"{% endif %}>{% if mode.value == 'MODAL' %}Modal (1-day ephemeral){% else %}{{ mode.value | lower }}{% endif %}</option>
             {% endfor %}
           </Select>
         </div>

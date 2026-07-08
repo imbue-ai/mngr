@@ -47,9 +47,12 @@ concurrency:
 # `notify_slack` to fetch the run's `run_started_at` for the duration
 # field in the slack message. actions/cache uses its own injected
 # cache token, not GITHUB_TOKEN, so no write scope is needed.
+# `id-token: write` lets the use-vault-secrets steps (in `build`,
+# `launch_to_msg`, and `notify_slack`) mint a GitHub OIDC token for Vault.
 permissions:
   contents: read
   actions: read
+  id-token: write
 
 jobs:
   # Free Linux job that decides whether the rest of the pipeline runs.
@@ -158,6 +161,12 @@ jobs:
   build:
     needs: [check_should_run]
     if: needs.check_should_run.outputs.should_run == 'true'
+    # Gated behind the `minds-release` GitHub Environment: the minds_release_gh
+    # Vault role that mints the ToDesktop credentials binds on this environment
+    # claim, so only a job that declares it can fetch them. The environment must
+    # exist in the repo settings with NO required reviewers, so the nightly
+    # build still runs unattended.
+    environment: minds-release
     # The job's `check for existing ToDesktop build` step short-circuits
     # `pnpm dist` (the 15-min ToDesktop sign + notarize) when a clean
     # ready build for this SHA already exists; otherwise it packages
@@ -170,19 +179,10 @@ jobs:
     # native binary. Linux runners produce ELF binaries that the shipped
     # .app can't exec on Mac.
     runs-on: [self-hosted, macOS, minds-runner]
-    # 60 min covers cold-cache install + full pnpm dist that waits on
-    # ToDesktop's per-target cloud build (sign + notarize x64 + arm64).
-    # 25 min was too tight (cache-miss installs grazed the deadline).
-    # 40 min was also too tight (run 26935971928 stalled at "Notarizing
-    # Minds for arm64 (this may take up to 30 minutes) 35%" -- Apple's
-    # notarization service is the long pole and the worst case really is
-    # ~30 min per arch). 60 min absorbs that worst-case for both archs
-    # without leaving the post-failure cancel step needlessly tearing
-    # down builds that just needed a few more minutes.
-    timeout-minutes: 60
+    # 85 min = the 70-min `pnpm dist` step budget (below) + ~15 min for the
+    # post-failure cancel step to tear an orphaned ToDesktop build down.
+    timeout-minutes: 85
     env:
-      TODESKTOP_ACCESS_TOKEN: ${{ secrets.TODESKTOP_ACCESS_TOKEN }}
-      TODESKTOP_EMAIL:        ${{ secrets.TODESKTOP_EMAIL }}
       # Resolved relative to pnpm's CWD (apps/minds), not the repo root.
       MINDS_CLIENT_CONFIG_BUNDLE: imbue/minds/config/envs/production/client.toml
       MINDS_ROOT_NAME_BUNDLE: minds
@@ -191,6 +191,19 @@ jobs:
       build_id:    ${{ steps.existing.outputs.build_id || steps.parse.outputs.build_id }}
       reused:      ${{ steps.existing.outputs.url != '' }}
     steps:
+      # ToDesktop signing/publishing credentials from Vault (migrated off the
+      # TODESKTOP_ACCESS_TOKEN / TODESKTOP_EMAIL GitHub Actions secrets). These
+      # publish the minds desktop client, so they live under minds/release/*
+      # behind the minds_release_gh role's environment gate, not the ordinary CI
+      # role. NOTE: this self-hosted macOS runner must have curl + jq on PATH,
+      # which the use-vault-secrets action shells out to.
+      - name: Fetch ToDesktop credentials from Vault
+        uses: imbue-ai/use-vault-secrets@main
+        with:
+          role: minds_release_gh
+          secrets: |
+            minds/release/TODESKTOP_ACCESS_TOKEN
+            minds/release/TODESKTOP_EMAIL
       - name: check ToDesktop secrets
         run: |
           missing=0
@@ -203,7 +216,7 @@ jobs:
             missing=1
           fi
           if (( missing )); then
-            echo "Add both at Settings -> Secrets and variables -> Actions."
+            echo "Add both to Vault under secrets/minds/release/ (see the use-vault-secrets step above)."
             exit 1
           fi
           echo "TODESKTOP_ACCESS_TOKEN length=${#TODESKTOP_ACCESS_TOKEN}, TODESKTOP_EMAIL length=${#TODESKTOP_EMAIL}"
@@ -304,13 +317,10 @@ jobs:
       - name: pnpm dist (build + upload to ToDesktop)
         id: dist
         if: steps.existing.outputs.url == ''
-        # 45 min covers a healthy cold build (~15-25 min observed) plus
-        # tail latency on Apple's notarization service. When ToDesktop's
-        # signing wedges (silent stall mid-notarize, e.g. run
-        # 27310529771), failing here at 45 surfaces the wedge instead of
-        # consuming the job-level 60-min budget and starving the cancel
-        # step of time to tear the build down.
-        timeout-minutes: 45
+        # A fresh dual-arch build historically runs ~43 min, up to ~60+ min
+        # when ToDesktop's "Downloading application source" step stalls
+        # (~16 min); notarization is the long pole.
+        timeout-minutes: 70
         working-directory: apps/minds
         # build.js::bundleLatchkey smoke-tests the bundled CLI via
         # `latchkey --version`. Latchkey tries to read/init an encryption
@@ -423,9 +433,16 @@ jobs:
       launch_to_ready: ${{ steps.timings.outputs.launch_to_ready }}
       w1_create:       ${{ steps.timings.outputs.w1_create }}
       w2_create:       ${{ steps.timings.outputs.w2_create }}
-    env:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
     steps:
+      # Anthropic key from Vault (migrated off the ANTHROPIC_API_KEY GitHub
+      # Actions secret). This self-hosted macOS runner must have curl + jq on
+      # PATH, which the use-vault-secrets action shells out to.
+      - name: Fetch Anthropic key from Vault
+        uses: imbue-ai/use-vault-secrets@main
+        with:
+          role: mngr_ci_gh
+          secrets: |
+            mngr/ci/ANTHROPIC_API_KEY
       - uses: actions/checkout@v6
       - name: verify ANTHROPIC_API_KEY injected
         run: |
@@ -1068,9 +1085,21 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     steps:
+      # Slack webhook from Vault (migrated off the SLACK_LAUNCH_TO_MSG_WEBHOOK
+      # GitHub Actions secret). continue-on-error so a Vault hiccup never kills
+      # this always()-run notification: if the fetch fails, WEBHOOK stays empty
+      # and the step below no-ops with a warning -- exactly as before when the
+      # webhook was unset.
+      - name: Fetch Slack webhook from Vault
+        continue-on-error: true
+        uses: imbue-ai/use-vault-secrets@main
+        with:
+          role: mngr_ci_gh
+          secrets: |
+            mngr/ci/SLACK_LAUNCH_TO_MSG_WEBHOOK
       - name: post status to slack
         env:
-          WEBHOOK: ${{ secrets.SLACK_LAUNCH_TO_MSG_WEBHOOK }}
+          WEBHOOK: ${{ env.SLACK_LAUNCH_TO_MSG_WEBHOOK }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SHOULD_RUN: ${{ needs.check_should_run.outputs.should_run }}
           MNGR_SHA: ${{ needs.check_should_run.outputs.mngr_sha }}
@@ -1175,17 +1204,24 @@ jobs:
           done
           metrics_line=""
           [[ -n "$metrics_inner" ]] && metrics_line="[${metrics_inner}]"
-          # Build links line: `[<binary> | <run logs> | <mngr commit> | <fct commit>]`.
-          # Derive the ToDesktop dashboard URL from the build's app_zip_url:
-          # https://dl.todesktop.com/<APP_ID>/builds/<BID>/mac/zip/arm64
-          dashboard_url=""
+          # Build links line: `[todesktop(mac-arm64) | <run logs> | <mngr commit> | <fct commit>]`.
+          # The ToDesktop dashboard URL and the arm64 .dmg download are both
+          # derived from the build's app_zip_url
+          # (https://dl.todesktop.com/<APP_ID>/builds/<BID>/mac/zip/arm64):
+          #   todesktop -> https://app.todesktop.com/apps/<APP_ID>/builds/<BID>
+          #   mac-arm64 -> https://dl.todesktop.com/<APP_ID>/builds/<BID>/mac/dmg/arm64
+          binary_link=""
           if [[ -n "$APP_ZIP_URL" && "$APP_ZIP_URL" =~ dl\.todesktop\.com/([^/]+)/builds/([^/]+)/ ]]; then
-            dashboard_url="https://app.todesktop.com/apps/${BASH_REMATCH[1]}/builds/${BASH_REMATCH[2]}"
+            td_app_id="${BASH_REMATCH[1]}"
+            td_build_id="${BASH_REMATCH[2]}"
+            dashboard_url="https://app.todesktop.com/apps/${td_app_id}/builds/${td_build_id}"
+            dmg_url="https://dl.todesktop.com/${td_app_id}/builds/${td_build_id}/mac/dmg/arm64"
+            binary_link="<${dashboard_url}|todesktop>(<${dmg_url}|mac-arm64>)"
           fi
           links_inner=""
           sep=""
-          if [[ -n "$dashboard_url" ]]; then
-            links_inner+="<${dashboard_url}|binary>"
+          if [[ -n "$binary_link" ]]; then
+            links_inner+="$binary_link"
             sep=" | "
           fi
           links_inner+="${sep}<${RUN_URL}|run logs>"
@@ -1194,8 +1230,8 @@ jobs:
           links_line="[${links_inner}]"
           # Assemble the final message. Line 1 is always present. Line 2
           # (SHAs) is always present. Line 3 (metrics) is omitted when we
-          # have no values. Line 4 (links) is always present, though
-          # `binary` falls out when build didn't produce one.
+          # have no values. Line 4 (links) is always present, though the
+          # todesktop(mac-arm64) link falls out when build didn't produce one.
           line1=$(printf '%s *launch-to-msg* — %s in %s%s, _trigger=_ `%s`' \
             "$emoji" "$verdict_word" "$duration" "$detail" "$TRIGGER")
           # Show "<ref> (<commit>)" when the ref is a name (tag / branch);
