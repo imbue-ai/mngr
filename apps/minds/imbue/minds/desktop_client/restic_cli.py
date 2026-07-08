@@ -486,37 +486,6 @@ def list_snapshots(
     return parse_restic_snapshots(result.stdout or "[]")
 
 
-def get_latest_snapshot_time(
-    *,
-    repository: str,
-    backend_env: Mapping[str, str],
-    password: str | None,
-    parent_cg: ConcurrencyGroup | None = None,
-    timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
-) -> datetime | None:
-    """Return the time of the most recent snapshot, or None if there are none."""
-    env, flags = _env_and_flags(repository, backend_env, password)
-    result = _run_restic(
-        [*flags, "--no-lock", "snapshots", "--latest", "1", "--json"],
-        env_overrides=env,
-        parent_cg=parent_cg,
-        timeout_seconds=timeout_seconds,
-    )
-    if result.returncode != 0:
-        raise BackupProvisioningError(f"restic snapshots failed (exit {result.returncode}): {result.stderr.strip()}")
-    try:
-        snapshots = json.loads(result.stdout or "[]")
-    except ValueError as e:
-        raise BackupProvisioningError(f"restic snapshots returned non-JSON output: {e}") from e
-    times = [
-        parse_restic_timestamp(str(snapshot["time"]))
-        for snapshot in snapshots
-        if isinstance(snapshot, dict) and snapshot.get("time")
-    ]
-    real_times = [time for time in times if time is not None]
-    return max(real_times) if real_times else None
-
-
 def is_backup_in_progress(
     *,
     repository: str,
