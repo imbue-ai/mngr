@@ -46,6 +46,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.data_types import ErrorInfo
+from imbue.mngr.interfaces.data_types import ProviderErrorInfo
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
@@ -360,6 +361,40 @@ def test_read_records_from_vps_falls_back_on_mngr_error(provider: _DiscoveryTest
     result = provider._read_records_from_vps("10.0.0.4")
 
     assert result.records == (cached,)
+
+
+def test_read_records_from_vps_emits_provider_error_info_on_ssh_failure(
+    provider: _DiscoveryTestProvider,
+) -> None:
+    """A per-VPS SSH failure surfaces a ProviderErrorInfo through on_error.
+
+    Canonical conversion site for the per-resource on_error feature: when
+    outer SSH to a VPS fails, the listing pipeline must record a structured
+    error so ``mngr list`` exits 1 instead of silently returning partial
+    results.
+    """
+    provider.per_vps_outer_errors["10.0.0.5"] = HostConnectionError("connection refused")
+    captured: list[ErrorInfo] = []
+
+    provider._read_records_from_vps("10.0.0.5", captured.append)
+
+    assert len(captured) == 1
+    error = captured[0]
+    assert isinstance(error, ProviderErrorInfo)
+    assert error.provider_name == provider.name
+    assert error.exception_type == "HostConnectionError"
+    assert "connection refused" in error.message
+
+
+def test_read_records_from_vps_with_none_on_error_swallows_failure(
+    provider: _DiscoveryTestProvider,
+) -> None:
+    """``on_error=None`` still returns the fallback tuple without raising."""
+    provider.per_vps_outer_errors["10.0.0.6"] = MngrError("docker inspect failed")
+
+    result = provider._read_records_from_vps("10.0.0.6", None)
+
+    assert result.records == ()
 
 
 def test_read_records_from_vps_returns_empty_when_state_container_not_ready(
