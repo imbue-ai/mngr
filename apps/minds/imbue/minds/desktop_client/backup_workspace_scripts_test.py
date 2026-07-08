@@ -16,6 +16,7 @@ from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_CHECK_SCR
 from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_GATE_PROBE_SCRIPT
 from imbue.minds.desktop_client.backup_workspace_scripts import CHECK_RESULT_MARKER
 from imbue.minds.desktop_client.backup_workspace_scripts import GATE_RESULT_MARKER
+from imbue.minds.desktop_client.backup_workspace_scripts import OFFICIAL_REMOTE_URL
 from imbue.minds.desktop_client.backup_workspace_scripts import UPDATE_RESULT_MARKER
 from imbue.minds.desktop_client.backup_workspace_scripts import build_workspace_script_command
 from imbue.minds.desktop_client.backup_workspace_scripts import extract_marker_json
@@ -82,6 +83,12 @@ def _running_chat_agents_json(repo: Path) -> str:
 # --- marker/command plumbing ---
 
 
+def test_module_official_url_constant_matches_the_script_default() -> None:
+    # The module-level constant (used for display / docs) and the default baked
+    # into the script preamble must never drift apart.
+    assert f'DEFAULT_OFFICIAL_REMOTE_URL = "{OFFICIAL_REMOTE_URL}"' in BACKUP_CHECK_SCRIPT
+
+
 def test_extract_marker_json_finds_last_payload_amid_noise() -> None:
     stdout = 'warning: something\nMARKER:{"a": 1}\nnoise\nMARKER:{"a": 2}\ntrailing\n'
     assert extract_marker_json(stdout, "MARKER:") == {"a": 2}
@@ -111,7 +118,7 @@ def test_check_script_reports_matches_when_tag_equals_worktree(tmp_path: Path) -
     repo = _make_workspace_repo(tmp_path)
     run_git_for_backup_test(repo, "tag", "minds-v1.0.0")
     stub_bin = _make_stub_bin(tmp_path)
-    run = _run_script(repo, BACKUP_CHECK_SCRIPT, ("--minds-version", "1.0.0"), extra_path=stub_bin)
+    run = _run_script(repo, BACKUP_CHECK_SCRIPT, ("--minimum-tag", "minds-v1.0.0"), extra_path=stub_bin)
     payload = extract_marker_json(run["stdout"], CHECK_RESULT_MARKER)
     assert payload is not None, run
     assert payload["target_tag"] == "minds-v1.0.0"
@@ -127,7 +134,7 @@ def test_check_script_reports_newer_when_tag_is_ancestor(tmp_path: Path) -> None
     run_git_for_backup_test(repo, "add", "-A")
     run_git_for_backup_test(repo, "commit", "-q", "-m", "local improvement on top of the tag")
     stub_bin = _make_stub_bin(tmp_path)
-    run = _run_script(repo, BACKUP_CHECK_SCRIPT, ("--minds-version", "1.0.0"), extra_path=stub_bin)
+    run = _run_script(repo, BACKUP_CHECK_SCRIPT, ("--minimum-tag", "minds-v1.0.0"), extra_path=stub_bin)
     payload = extract_marker_json(run["stdout"], CHECK_RESULT_MARKER)
     assert payload is not None, run
     assert payload["code_state"] == "newer"
@@ -139,22 +146,113 @@ def test_check_script_reports_outdated_when_tag_is_not_an_ancestor(tmp_path: Pat
     # does not contain the tag -> outdated.
     tag_newer_release_content(repo)
     stub_bin = _make_stub_bin(tmp_path)
-    run = _run_script(repo, BACKUP_CHECK_SCRIPT, ("--minds-version", "2.0.0"), extra_path=stub_bin)
+    run = _run_script(repo, BACKUP_CHECK_SCRIPT, ("--minimum-tag", "minds-v2.0.0"), extra_path=stub_bin)
     payload = extract_marker_json(run["stdout"], CHECK_RESULT_MARKER)
     assert payload is not None, run
     assert payload["code_state"] == "outdated"
 
 
-def test_check_script_falls_back_to_highest_tag_for_unknown_version(tmp_path: Path) -> None:
+def test_check_script_reports_unverifiable_when_minimum_tag_is_missing(tmp_path: Path) -> None:
+    # The minimum tag has no highest-tag fallback: missing after a (failed)
+    # fetch from the official remote means the check cannot run.
     repo = _make_workspace_repo(tmp_path)
     run_git_for_backup_test(repo, "tag", "minds-v1.0.0")
-    run_git_for_backup_test(repo, "tag", "minds-v1.2.0")
-    (repo / "parent.toml").write_text('url = "file:///nonexistent"\nbranch = "main"\n')
     stub_bin = _make_stub_bin(tmp_path)
-    run = _run_script(repo, BACKUP_CHECK_SCRIPT, ("--minds-version", "9.9.9-dev"), extra_path=stub_bin)
+    run = _run_script(
+        repo,
+        BACKUP_CHECK_SCRIPT,
+        ("--minimum-tag", "minds-v9.9.9", "--official-url", str(tmp_path / "nonexistent-remote")),
+        extra_path=stub_bin,
+    )
     payload = extract_marker_json(run["stdout"], CHECK_RESULT_MARKER)
     assert payload is not None, run
-    assert payload["target_tag"] == "minds-v1.2.0"
+    assert payload["code_state"] == "unverifiable"
+    assert payload["target_tag"] == "minds-v9.9.9"
+
+
+def test_check_script_fetches_missing_minimum_tag_from_the_official_remote(tmp_path: Path) -> None:
+    # The workspace lacks the minimum tag locally; the script must add the
+    # `official` remote pointing at the given URL and fetch the tag from it.
+    template_parent = tmp_path / "template-parent"
+    template_parent.mkdir()
+    template = _make_workspace_repo(template_parent)
+    run_git_for_backup_test(template, "tag", "minds-v1.0.0")
+    repo = tmp_path / "workspace-clone"
+    subprocess.run(
+        ["git", "clone", "-q", "--no-tags", str(template), str(repo)], check=True, capture_output=True, timeout=60
+    )
+    stub_bin = _make_stub_bin(tmp_path)
+    run = _run_script(
+        repo,
+        BACKUP_CHECK_SCRIPT,
+        ("--minimum-tag", "minds-v1.0.0", "--official-url", str(template)),
+        extra_path=stub_bin,
+    )
+    payload = extract_marker_json(run["stdout"], CHECK_RESULT_MARKER)
+    assert payload is not None, run
+    assert payload["code_state"] == "matches"
+    remote_url = subprocess.run(
+        ["git", "remote", "get-url", "official"], cwd=repo, capture_output=True, text=True, check=True, timeout=60
+    ).stdout.strip()
+    assert remote_url == str(template)
+
+
+def test_check_script_repoints_a_wrong_official_remote(tmp_path: Path) -> None:
+    # minds owns the `official` remote name: an existing remote pointing
+    # elsewhere is idempotently repointed at the given URL.
+    template_parent = tmp_path / "template-parent"
+    template_parent.mkdir()
+    template = _make_workspace_repo(template_parent)
+    run_git_for_backup_test(template, "tag", "minds-v1.0.0")
+    repo = tmp_path / "workspace-clone"
+    subprocess.run(
+        ["git", "clone", "-q", "--no-tags", str(template), str(repo)], check=True, capture_output=True, timeout=60
+    )
+    subprocess.run(
+        ["git", "remote", "add", "official", str(tmp_path / "somewhere-else")],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        timeout=60,
+    )
+    stub_bin = _make_stub_bin(tmp_path)
+    run = _run_script(
+        repo,
+        BACKUP_CHECK_SCRIPT,
+        ("--minimum-tag", "minds-v1.0.0", "--official-url", str(template)),
+        extra_path=stub_bin,
+    )
+    payload = extract_marker_json(run["stdout"], CHECK_RESULT_MARKER)
+    assert payload is not None, run
+    assert payload["code_state"] == "matches"
+    remote_url = subprocess.run(
+        ["git", "remote", "get-url", "official"], cwd=repo, capture_output=True, text=True, check=True, timeout=60
+    ).stdout.strip()
+    assert remote_url == str(template)
+
+
+def test_check_script_accepts_installed_identity_at_or_above_the_minimum(tmp_path: Path) -> None:
+    # A workspace updated by content commit (`backup-update: minds-v2.0.0`)
+    # never gains the minimum tag as an ancestor; the installed identity at or
+    # above the minimum must still read as fine.
+    repo = _make_workspace_repo(tmp_path)
+    run_git_for_backup_test(repo, "tag", "minds-v1.0.0")
+    (repo / "libs" / "host_backup" / "service.py").write_text("VERSION = 2\n")
+    run_git_for_backup_test(repo, "add", "-A")
+    run_git_for_backup_test(repo, "commit", "-q", "-m", "backup-update: minds-v2.0.0")
+    # Orphan the minimum tag onto a side commit so it is NOT an ancestor.
+    run_git_for_backup_test(repo, "checkout", "-q", "-b", "side", "HEAD~1")
+    (repo / "side.txt").write_text("side\n")
+    run_git_for_backup_test(repo, "add", "-A")
+    run_git_for_backup_test(repo, "commit", "-q", "-m", "side content")
+    run_git_for_backup_test(repo, "tag", "-f", "minds-v1.0.0")
+    run_git_for_backup_test(repo, "checkout", "-q", "main")
+    stub_bin = _make_stub_bin(tmp_path)
+    run = _run_script(repo, BACKUP_CHECK_SCRIPT, ("--minimum-tag", "minds-v1.0.0"), extra_path=stub_bin)
+    payload = extract_marker_json(run["stdout"], CHECK_RESULT_MARKER)
+    assert payload is not None, run
+    assert payload["installed_version"] == "minds-v2.0.0"
+    assert payload["code_state"] == "newer"
 
 
 def test_check_script_reports_env_sha_and_content(tmp_path: Path) -> None:
@@ -164,7 +262,7 @@ def test_check_script_reports_env_sha_and_content(tmp_path: Path) -> None:
     env_path.parent.mkdir(parents=True)
     env_path.write_text("RESTIC_REPOSITORY=s3:r\nRESTIC_PASSWORD=p\n")
     stub_bin = _make_stub_bin(tmp_path)
-    run = _run_script(repo, BACKUP_CHECK_SCRIPT, ("--minds-version", "1.0.0"), extra_path=stub_bin)
+    run = _run_script(repo, BACKUP_CHECK_SCRIPT, ("--minimum-tag", "minds-v1.0.0"), extra_path=stub_bin)
     payload = extract_marker_json(run["stdout"], CHECK_RESULT_MARKER)
     assert payload is not None, run
     env_info = payload["env"]
@@ -316,7 +414,7 @@ def test_apply_update_rolls_back_when_service_restart_fails(tmp_path: Path) -> N
     # skips the reverted `backup-update:` subject and (here) falls back to an
     # empty identity, since the tag is not an ancestor of HEAD.
     check_run = _run_script(
-        repo, BACKUP_CHECK_SCRIPT, ("--minds-version", "2.0.0", "--agent-id", "agent-x"), extra_path=stub_bin
+        repo, BACKUP_CHECK_SCRIPT, ("--minimum-tag", "minds-v2.0.0", "--agent-id", "agent-x"), extra_path=stub_bin
     )
     check_payload = extract_marker_json(check_run["stdout"], CHECK_RESULT_MARKER)
     assert check_payload is not None, check_run

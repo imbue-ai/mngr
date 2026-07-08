@@ -1,29 +1,29 @@
-"""Verify that a workspace's backup service matches what minds would install today.
+"""Verify that a workspace's backup service is at (or above) the minimum required version.
 
-Runs as an expanded part of the backup status check: for each online,
+Runs as part of the per-workspace backups route: for an online,
 verification-enabled workspace, one ``mngr exec`` runs the stdlib-only check
 script (see ``backup_workspace_scripts``) which compares the installed
-``libs/host_backup`` content against the ``minds-v*`` tag matching this app's
-version (fetching tags from ``upstream`` only when the tag is missing
+``libs/host_backup`` content against the *minimum required* ``minds-v*`` tag
+(fetching tags from the ``official`` remote only when the tag is missing
 locally), reports the supervisord state of the ``host-backup`` program, and
 returns the workspace's ``restic.env`` (sha256 + content).
 
-minds then classifies the result into problems. "Newer is fine": when the
-target tag is an ancestor of the workspace HEAD and the content differs, the
-code is assumed newer (or deliberately edited) and is NOT flagged. A workspace
-with a working, hand-configured ``restic.env`` and no minds-side canonical env
-is *adopted*: the env is pulled into the canonical store during the check so
-status and management just start working.
+minds then classifies the result into problems. At-or-above the minimum is
+fine: content matching the minimum tag, the minimum tag being an ancestor of
+the workspace HEAD (which also silently accepts user edits on top), or an
+installed ``backup-update:`` identity at or above the minimum all produce no
+warning. A workspace with a working, hand-configured ``restic.env`` and no
+minds-side canonical env is *adopted*: the env is pulled into the canonical
+store during the check so status and management just start working.
 
 Offline workspaces report ``OFFLINE`` (no badge); workspaces with verification
-disabled report ``DISABLED`` and are never exec'd into.
+disabled report ``DISABLED`` and are never exec'd into. Cross-workspace
+parallelism is the frontend's job -- there is deliberately no batch entry
+point here.
 """
 
 import base64
-from collections.abc import Sequence
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FuturesTimeoutError
-from concurrent.futures import wait
+import os
 from enum import auto
 from typing import Final
 
@@ -35,7 +35,6 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.build_info import resolve_release_id
 from imbue.minds.config.data_types import WorkspacePaths
-from imbue.minds.desktop_client import backup_status
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backup_env_store import env_content_sha256
 from imbue.minds.desktop_client.backup_env_store import parse_restic_env
@@ -47,20 +46,23 @@ from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_CHECK_SCR
 from imbue.minds.desktop_client.backup_workspace_scripts import CHECK_RESULT_MARKER
 from imbue.minds.desktop_client.backup_workspace_scripts import build_workspace_script_command
 from imbue.minds.desktop_client.backup_workspace_scripts import extract_marker_json
-from imbue.minds.errors import BackupProvisioningError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 
 # One exec runs the whole check; sized to cover a first-encounter `git fetch
-# upstream --tags` on a slow network (the script gives the fetch 300s) on top
+# official --tags` on a slow network (the script gives the fetch 300s) on top
 # of the (fast, local) git diff, so the script's structured "fetch failed"
 # detail always beats the exec timeout.
 _CHECK_EXEC_TIMEOUT_SECONDS: Final[float] = 360.0
-# Wall-clock budget for the whole batch; a workspace whose check hasn't
-# finished reports UNKNOWN (no badge) and completes on a later batch.
-_CHECK_BATCH_TIMEOUT_SECONDS: Final[float] = 60.0
-_MAX_CHECK_WORKERS: Final[int] = 4
+
+# The minimum required backup-service version. Workspaces at or above it are
+# never flagged; the update action still converges to the tag matching the
+# running minds release. Bumped manually only when a newer backup service is
+# actually required -- this deliberately avoids re-flagging every workspace on
+# every release. Overridable via MINDS_MINIMUM_BACKUP_TAG for dev/testing.
+MINIMUM_BACKUP_SERVICE_TAG: Final[str] = "minds-v0.3.4"
+MINIMUM_BACKUP_TAG_ENV_VAR: Final[str] = "MINDS_MINIMUM_BACKUP_TAG"
 
 _REQUIRED_ADOPTION_KEYS: Final[tuple[str, ...]] = ("RESTIC_REPOSITORY", "RESTIC_PASSWORD")
 
@@ -101,12 +103,23 @@ class BackupServiceCheck(FrozenModel):
     installed_version: str | None = Field(
         default=None, description="Installed backup-code version (last backup-update tag, or nearest minds-v* tag)"
     )
-    desired_version: str | None = Field(default=None, description="The minds-v* tag the check compared against")
+    minimum_version: str | None = Field(
+        default=None, description="The minimum required minds-v* tag the check compared against"
+    )
     detail: str = Field(default="", description="Human-readable extra detail (e.g. why unverifiable)")
 
 
-def desired_backup_tag() -> str:
-    """The minds-v* tag this app version expects workspaces to carry."""
+def minimum_backup_tag() -> str:
+    """The minimum required backup-service tag (env-overridable for dev/testing)."""
+    return os.environ.get(MINIMUM_BACKUP_TAG_ENV_VAR) or MINIMUM_BACKUP_SERVICE_TAG
+
+
+def update_target_backup_tag() -> str:
+    """The minds-v* tag the update action converges to (the running release).
+
+    Display-only on the minds side: the update script itself re-resolves the
+    version (falling back to the highest available tag for dev builds).
+    """
     return f"minds-v{resolve_release_id()}"
 
 
@@ -177,7 +190,7 @@ def classify_check_payload(
         state=state,
         problems=tuple(problems),
         installed_version=str(payload.get("installed_version") or "") or None,
-        desired_version=str(payload.get("target_tag") or "") or None,
+        minimum_version=str(payload.get("target_tag") or "") or None,
         detail="; ".join(details),
     )
     return check, env_to_adopt
@@ -212,7 +225,7 @@ def check_backup_service_for_workspace(
         return BackupServiceCheck(state=BackupServiceCheckState.OFFLINE)
 
     command_str = build_workspace_script_command(
-        BACKUP_CHECK_SCRIPT, ("--minds-version", resolve_release_id(), "--agent-id", str(agent_id))
+        BACKUP_CHECK_SCRIPT, ("--minimum-tag", minimum_backup_tag(), "--agent-id", str(agent_id))
     )
     result = run_mngr_exec_on_agent(
         agent_id, command_str, parent_cg=parent_cg, timeout_seconds=_CHECK_EXEC_TIMEOUT_SECONDS
@@ -223,7 +236,7 @@ def check_backup_service_for_workspace(
         return BackupServiceCheck(
             state=BackupServiceCheckState.PROBLEMS,
             problems=(BackupServiceProblem.UNVERIFIABLE,),
-            desired_version=desired_backup_tag(),
+            minimum_version=minimum_backup_tag(),
             detail=f"check could not run: {detail}",
         )
     payload = extract_marker_json(result.stdout, CHECK_RESULT_MARKER)
@@ -231,7 +244,7 @@ def check_backup_service_for_workspace(
         return BackupServiceCheck(
             state=BackupServiceCheckState.PROBLEMS,
             problems=(BackupServiceProblem.UNVERIFIABLE,),
-            desired_version=desired_backup_tag(),
+            minimum_version=minimum_backup_tag(),
             detail="check produced no parseable result",
         )
 
@@ -244,75 +257,3 @@ def check_backup_service_for_workspace(
         logger.info("Adopting externally-configured restic.env for workspace {}", agent_id)
         write_canonical_env(paths, agent_id, env_to_adopt)
     return check
-
-
-def compute_backup_service_checks(
-    paths: WorkspacePaths,
-    agent_ids: Sequence[AgentId],
-    *,
-    resolver: BackendResolverInterface,
-    parent_cg: ConcurrencyGroup | None = None,
-) -> dict[str, BackupServiceCheck]:
-    """Check many workspaces in parallel, bounded in wall-clock.
-
-    Mirrors ``backup_status.compute_backup_status_for_workspaces``: any
-    workspace whose check hasn't finished within the batch budget reports
-    ``UNKNOWN`` (no badge) and simply completes on a later batch; the executor
-    is shut down non-blocking so stragglers never stall the route.
-    """
-    if not agent_ids:
-        return {}
-    result_by_agent_id: dict[str, BackupServiceCheck] = {}
-    worker_count = min(_MAX_CHECK_WORKERS, len(agent_ids))
-    executor = ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="backup-check")
-    try:
-        future_by_agent_id = {
-            agent_id: executor.submit(
-                check_backup_service_for_workspace, paths, agent_id, resolver=resolver, parent_cg=parent_cg
-            )
-            for agent_id in agent_ids
-        }
-        wait(future_by_agent_id.values(), timeout=_CHECK_BATCH_TIMEOUT_SECONDS)
-        for agent_id, future in future_by_agent_id.items():
-            try:
-                result_by_agent_id[str(agent_id)] = future.result(timeout=0)
-            except FuturesTimeoutError:
-                # Expected: the check just hasn't finished within the batch
-                # budget; it completes (or retries) on a later batch.
-                logger.debug("Backup service check for {} did not finish within the batch budget", agent_id)
-                result_by_agent_id[str(agent_id)] = BackupServiceCheck(state=BackupServiceCheckState.UNKNOWN)
-            except BackupProvisioningError as e:
-                # A real error (e.g. the adoption write to the canonical env
-                # store failed); the batch still degrades to UNKNOWN rather
-                # than crashing.
-                logger.warning("Backup service check for {} failed: {}", agent_id, e)
-                result_by_agent_id[str(agent_id)] = BackupServiceCheck(state=BackupServiceCheckState.UNKNOWN)
-    finally:
-        executor.shutdown(wait=False, cancel_futures=True)
-    return result_by_agent_id
-
-
-def compute_backup_health(
-    paths: WorkspacePaths,
-    agent_ids: Sequence[AgentId],
-    *,
-    resolver: BackendResolverInterface,
-    parent_cg: ConcurrencyGroup | None = None,
-) -> tuple[dict[str, "backup_status.BackupStatus"], dict[str, BackupServiceCheck]]:
-    """Run the snapshot-status batch and the verification batch concurrently.
-
-    The service checks fan out on their own single-purpose executor while the
-    restic snapshot statuses run on the calling thread; both halves bound their
-    own wall-clock, so the combined call finishes in roughly
-    max(status budget, check budget).
-    """
-    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="backup-health")
-    try:
-        checks_future = executor.submit(
-            compute_backup_service_checks, paths, agent_ids, resolver=resolver, parent_cg=parent_cg
-        )
-        status_by_agent_id = backup_status.compute_backup_status_for_workspaces(paths, agent_ids, parent_cg=parent_cg)
-        check_by_agent_id = checks_future.result()
-    finally:
-        executor.shutdown(wait=False, cancel_futures=True)
-    return status_by_agent_id, check_by_agent_id

@@ -2,11 +2,15 @@
 
 import base64
 
+import pytest
+
 from imbue.minds.desktop_client.backup_env_store import env_content_sha256
 from imbue.minds.desktop_client.backup_verification import BackupServiceCheckState
 from imbue.minds.desktop_client.backup_verification import BackupServiceProblem
+from imbue.minds.desktop_client.backup_verification import MINIMUM_BACKUP_SERVICE_TAG
+from imbue.minds.desktop_client.backup_verification import MINIMUM_BACKUP_TAG_ENV_VAR
 from imbue.minds.desktop_client.backup_verification import classify_check_payload
-from imbue.minds.desktop_client.backup_verification import desired_backup_tag
+from imbue.minds.desktop_client.backup_verification import minimum_backup_tag
 
 _CANONICAL_ENV = "RESTIC_REPOSITORY=s3:r\nRESTIC_PASSWORD=p\n"
 
@@ -37,7 +41,7 @@ def test_all_green_classifies_ok() -> None:
     assert check.state == BackupServiceCheckState.OK
     assert check.problems == ()
     assert check.installed_version == "minds-v1.2.3"
-    assert check.desired_version == "minds-v1.2.3"
+    assert check.minimum_version == "minds-v1.2.3"
     assert env_to_adopt is None
 
 
@@ -59,7 +63,7 @@ def test_newer_code_is_not_flagged() -> None:
 def test_unverifiable_code_is_flagged_with_detail() -> None:
     payload = _healthy_payload()
     payload["code_state"] = "unverifiable"
-    payload["code_detail"] = "git fetch upstream --tags failed: no network"
+    payload["code_detail"] = "git fetch official --tags failed: no network"
     check, _ = classify_check_payload(payload, canonical_env=_CANONICAL_ENV)
     assert BackupServiceProblem.UNVERIFIABLE in check.problems
     assert "no network" in check.detail
@@ -127,5 +131,11 @@ def test_multiple_problems_accumulate() -> None:
     }
 
 
-def test_desired_backup_tag_has_minds_prefix() -> None:
-    assert desired_backup_tag().startswith("minds-v")
+def test_minimum_backup_tag_defaults_to_the_fixed_constant() -> None:
+    assert minimum_backup_tag() == MINIMUM_BACKUP_SERVICE_TAG
+    assert MINIMUM_BACKUP_SERVICE_TAG.startswith("minds-v")
+
+
+def test_minimum_backup_tag_honors_the_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(MINIMUM_BACKUP_TAG_ENV_VAR, "minds-v9.9.9")
+    assert minimum_backup_tag() == "minds-v9.9.9"

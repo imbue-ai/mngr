@@ -6,11 +6,11 @@ single marker-prefixed JSON line on stdout so the caller can parse a verdict
 out of arbitrarily noisy output:
 
 - the *check* script: verifies the installed backup-service code against the
-  target ``minds-v*`` tag (fetching tags from ``upstream`` only when the tag
-  is missing locally), reports the supervisord state of the ``host-backup``
-  program and the current ``runtime/secrets/restic.env`` (sha256 + content,
-  so minds can compare against its canonical copy and adopt externally
-  configured envs).
+  *minimum required* ``minds-v*`` tag (fetching tags from the ``official``
+  remote only when the tag is missing locally), reports the supervisord state
+  of the ``host-backup`` program and the current ``runtime/secrets/restic.env``
+  (sha256 + content, so minds can compare against its canonical copy and adopt
+  externally configured envs).
 - the *gate probe* script: reports which chat agents are actively RUNNING
   (agents sharing the repo-root work_dir, excluding the ``main``-type
   services agent -- worktree/worker agents live elsewhere and never count)
@@ -34,6 +34,15 @@ CHECK_RESULT_MARKER: Final[str] = "MINDS_BACKUP_CHECK_JSON:"
 GATE_RESULT_MARKER: Final[str] = "MINDS_BACKUP_GATE_JSON:"
 UPDATE_RESULT_MARKER: Final[str] = "MINDS_BACKUP_UPDATE_JSON:"
 
+# The one repository backup-service code is fetched from. minds owns the
+# ``official`` remote on every workspace: the scripts create it (or repoint it)
+# at this URL, deliberately ignoring ``parent.toml`` -- workspaces created from
+# private template clones still receive the official backup code, and the
+# ``upstream`` remote name stays reserved for the update-self machinery. Tests
+# override it via the scripts' ``--official-url`` argument. Must stay equal to
+# the default baked into ``_SCRIPT_PREAMBLE`` (asserted by a unit test).
+OFFICIAL_REMOTE_URL: Final[str] = "https://github.com/imbue-ai/forever-claude-template.git"
+
 # Shared helper functions textually prepended to each script body. Kept as one
 # plain string (not f-string) so braces inside the python source need no
 # escaping; parameters arrive via sys.argv, never via interpolation.
@@ -45,8 +54,9 @@ import os as _os
 import subprocess as _subprocess
 import sys as _sys
 import time as _time
-import tomllib as _tomllib
 
+OFFICIAL_REMOTE_NAME = "official"
+DEFAULT_OFFICIAL_REMOTE_URL = "https://github.com/imbue-ai/forever-claude-template.git"
 BACKUP_CODE_PATH = "libs/host_backup"
 RESTIC_ENV_PATH = "runtime/secrets/restic.env"
 GIT_IDENTITY = ["-c", "user.name=minds-backup-update", "-c", "user.email=backup-update@minds.local"]
@@ -85,30 +95,39 @@ def _tag_exists(tag):
     return _run(["git", "rev-parse", "-q", "--verify", "refs/tags/%s" % tag]).returncode == 0
 
 
-def _ensure_upstream_remote():
-    if _run(["git", "remote", "get-url", "upstream"]).returncode == 0:
+def _official_url():
+    return _arg_value("--official-url", DEFAULT_OFFICIAL_REMOTE_URL)
+
+
+def _ensure_official_remote():
+    """Idempotently point the `official` remote at the official template URL.
+
+    minds owns this remote name: a missing remote is added and a remote
+    pointing anywhere else is repointed, so the fetch below always talks to
+    the official repository regardless of what the workspace was created from.
+    """
+    url = _official_url()
+    current = _run(["git", "remote", "get-url", OFFICIAL_REMOTE_NAME])
+    if current.returncode == 0:
+        if current.stdout.strip() == url:
+            return ""
+        repointed = _run(["git", "remote", "set-url", OFFICIAL_REMOTE_NAME, url])
+        if repointed.returncode != 0:
+            return "cannot repoint official remote: %s" % repointed.stderr.strip()
         return ""
-    try:
-        with open("parent.toml", "rb") as fh:
-            parent = _tomllib.load(fh)
-        url = parent.get("url", "")
-    except (OSError, ValueError) as e:
-        return "cannot read parent.toml: %s" % e
-    if not url:
-        return "parent.toml has no url"
-    added = _run(["git", "remote", "add", "upstream", url])
+    added = _run(["git", "remote", "add", OFFICIAL_REMOTE_NAME, url])
     if added.returncode != 0:
-        return "cannot add upstream remote: %s" % added.stderr.strip()
+        return "cannot add official remote: %s" % added.stderr.strip()
     return ""
 
 
-def _fetch_upstream_tags():
-    remote_error = _ensure_upstream_remote()
+def _fetch_official_tags():
+    remote_error = _ensure_official_remote()
     if remote_error:
         return remote_error
-    fetched = _run(["git", "fetch", "upstream", "--tags", "--quiet"], timeout=300)
+    fetched = _run(["git", "fetch", OFFICIAL_REMOTE_NAME, "--tags", "--quiet"], timeout=300)
     if fetched.returncode != 0:
-        return "git fetch upstream --tags failed: %s" % (fetched.stderr or fetched.stdout).strip()[-500:]
+        return "git fetch official --tags failed: %s" % (fetched.stderr or fetched.stdout).strip()[-500:]
     return ""
 
 
@@ -139,7 +158,7 @@ def _resolve_target_tag(version):
     preferred = "minds-v%s" % version if version else ""
     if preferred and _tag_exists(preferred):
         return preferred, ""
-    fetch_error = _fetch_upstream_tags()
+    fetch_error = _fetch_official_tags()
     if preferred and _tag_exists(preferred):
         return preferred, ""
     best = _highest_minds_tag()
@@ -148,15 +167,39 @@ def _resolve_target_tag(version):
     return "", fetch_error or "no minds-v* tags found"
 
 
-def _compute_code_state(tag):
-    """Return (state, detail): matches | newer | outdated | unverifiable."""
-    diffed = _run(["git", "diff", "--quiet", tag, "--", BACKUP_CODE_PATH])
+def _resolve_minimum_tag(minimum_tag):
+    """Return (tag, error). The minimum tag has no fallback: found or unverifiable."""
+    if not minimum_tag:
+        return "", "no minimum tag provided"
+    if _tag_exists(minimum_tag):
+        return minimum_tag, ""
+    fetch_error = _fetch_official_tags()
+    if _tag_exists(minimum_tag):
+        return minimum_tag, ""
+    return "", fetch_error or ("minimum tag %s not found" % minimum_tag)
+
+
+def _compute_code_state(minimum_tag, installed_version):
+    """Return (state, detail): matches | newer | outdated | unverifiable.
+
+    At-or-above the minimum is fine. Three ways to establish that:
+    1. content matches the minimum tag exactly;
+    2. the minimum tag is an ancestor of HEAD (also silently accepts user
+       edits on top);
+    3. the installed identity (the newest non-reverted `backup-update:` subject,
+       else the nearest ancestor minds-v* tag) sorts at or above the minimum --
+       needed because backup updates land as *content* commits, which never
+       make the minimum tag an ancestor on workspaces created before it.
+    """
+    diffed = _run(["git", "diff", "--quiet", minimum_tag, "--", BACKUP_CODE_PATH])
     if diffed.returncode == 0:
         return "matches", ""
     if diffed.returncode != 1:
         return "unverifiable", ("git diff failed: %s" % (diffed.stderr or diffed.stdout).strip()[-500:])
-    ancestor = _run(["git", "merge-base", "--is-ancestor", tag, "HEAD"])
+    ancestor = _run(["git", "merge-base", "--is-ancestor", minimum_tag, "HEAD"])
     if ancestor.returncode == 0:
+        return "newer", ""
+    if installed_version.startswith("minds-v") and _tag_sort_key(installed_version) >= _tag_sort_key(minimum_tag):
         return "newer", ""
     return "outdated", ""
 
@@ -294,17 +337,18 @@ BACKUP_CHECK_SCRIPT: Final[str] = (
     + r"""
 
 def _main():
-    version = _arg_value("--minds-version")
+    minimum = _arg_value("--minimum-tag")
     result = {"schema": 1}
-    tag, tag_error = _resolve_target_tag(version)
-    result["target_tag"] = tag
+    installed_version = _installed_backup_version()
+    result["installed_version"] = installed_version
+    tag, tag_error = _resolve_minimum_tag(minimum)
+    result["target_tag"] = tag or minimum
     if tag:
-        code_state, code_detail = _compute_code_state(tag)
+        code_state, code_detail = _compute_code_state(tag, installed_version)
     else:
         code_state, code_detail = "unverifiable", tag_error
     result["code_state"] = code_state
     result["code_detail"] = code_detail
-    result["installed_version"] = _installed_backup_version()
     service_state, service_detail = _service_state()
     result["service_state"] = service_state
     result["service_detail"] = service_detail
