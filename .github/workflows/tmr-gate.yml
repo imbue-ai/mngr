@@ -1,40 +1,41 @@
-name: TMR (scheduled)
+name: TMR (periodic gate)
 
-# Daily scheduled wrapper around the main TMR workflow.
+# Reusable gate shared by the per-variant scheduled TMR wrappers
+# (tmr-mngr-scheduled.yml, tmr-minds-scheduled.yml). Each variant passes its
+# own `label`, so their periodic PRs -- and this gate's decisions -- stay
+# independent.
 #
-# At the top of each run, the `gate` job looks for an open PR from a prior
-# scheduled run (label: `tmr-periodic`):
+# At the top of each scheduled run, this looks for an open PR from a prior
+# scheduled run of the SAME variant (identified by `label`):
 #   - none open                 -> proceed.
-#   - one open, > 4 days old    -> close it (deleting its branch), then
+#   - one open, > stale_days old -> close it (deleting its branch), then
 #                                  proceed; the new run's PR is linked back
 #                                  as a follow-up comment on the closed PR.
-#   - one open, <= 4 days old   -> skip this firing and post a comment on
+#   - one open, <= stale_days old -> skip this firing and post a comment on
 #                                  the open PR explaining the policy. The
 #                                  comment is posted fresh each skipped day
 #                                  (intentional: the recurring pings are the
 #                                  nudge to act on the open PR).
-#
-# Manual `workflow_dispatch` runs of TMR are intentionally independent of
-# this logic: they don't touch the label and don't go through this gate.
 
 on:
-  # 08:00 UTC = 00:00 PST (UTC-8). GitHub Actions cron does not support
-  # timezones, so this stays on PST year-round and shifts to 01:00 PDT in
-  # summer.
-  schedule:
-    - cron: "0 8 * * *"
-  # Manual trigger is provided only for testing the gate logic itself
-  # (e.g. on a branch). Real ad-hoc TMR runs should use the main TMR
-  # workflow's workflow_dispatch.
-  workflow_dispatch:
-
-# Don't let two scheduled firings overlap. A long-running TMR (up to 4h)
-# could otherwise be in flight when the next cron fires; that next gate
-# would see no open `tmr-periodic` PR (since the in-flight run hasn't
-# opened it yet) and start a duplicate.
-concurrency:
-  group: tmr-scheduled
-  cancel-in-progress: false
+  workflow_call:
+    inputs:
+      label:
+        description: "The periodic-PR label that scopes this gate to one variant (e.g. tmr-mngr-periodic)."
+        type: string
+        required: true
+      stale_days:
+        description: "Auto-close an open periodic PR once it is older than this many days."
+        type: string
+        required: false
+        default: "4"
+    outputs:
+      proceed:
+        description: "Whether the scheduled run should proceed."
+        value: ${{ jobs.gate.outputs.proceed }}
+      supersedes_pr:
+        description: "PR number this run superseded (auto-closed as stale), or empty."
+        value: ${{ jobs.gate.outputs.supersedes_pr }}
 
 jobs:
   gate:
@@ -46,18 +47,19 @@ jobs:
       issues: write
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      STALE_DAYS: "4"
+      STALE_DAYS: ${{ inputs.stale_days }}
+      LABEL: ${{ inputs.label }}
     outputs:
       proceed: ${{ steps.decide.outputs.proceed }}
       supersedes_pr: ${{ steps.decide.outputs.supersedes_pr }}
     steps:
       - uses: actions/checkout@v6
 
-      - name: Ensure tmr-periodic label exists
+      - name: Ensure periodic label exists
         run: |
-          gh label create tmr-periodic \
+          gh label create "$LABEL" \
             --color 1d76db \
-            --description "Auto-opened by a scheduled TMR run." \
+            --description "Auto-opened by a scheduled TMR run ($LABEL)." \
             --repo "${{ github.repository }}" \
             2>/dev/null || true
 
@@ -65,17 +67,18 @@ jobs:
         id: decide
         run: |
           set -euo pipefail
-          # Take the oldest open `tmr-periodic` PR (there should only ever
-          # be one; oldest is the safest tiebreak if multiple slipped in).
+          # Take the oldest open PR with this variant's label (there should
+          # only ever be one; oldest is the safest tiebreak if multiple
+          # slipped in).
           pr_json=$(gh pr list \
             --repo "${{ github.repository }}" \
-            --label tmr-periodic \
+            --label "$LABEL" \
             --state open \
             --json number,createdAt,url \
             --jq 'sort_by(.createdAt) | .[0] // empty')
 
           if [ -z "$pr_json" ]; then
-            echo "No open tmr-periodic PR; proceeding."
+            echo "No open $LABEL PR; proceeding."
             echo "proceed=true" >> "$GITHUB_OUTPUT"
             echo "supersedes_pr=" >> "$GITHUB_OUTPUT"
             exit 0
@@ -87,7 +90,7 @@ jobs:
           created_epoch=$(date -u -d "$created_at" +%s)
           now_epoch=$(date -u +%s)
           age_days=$(( (now_epoch - created_epoch) / 86400 ))
-          echo "Open tmr-periodic PR: $pr_url (age: ${age_days}d)"
+          echo "Open $LABEL PR: $pr_url (age: ${age_days}d)"
 
           if [ "$age_days" -gt "$STALE_DAYS" ]; then
             gh pr comment "$pr_number" \
@@ -106,12 +109,3 @@ jobs:
             echo "proceed=false" >> "$GITHUB_OUTPUT"
             echo "supersedes_pr=" >> "$GITHUB_OUTPUT"
           fi
-
-  run:
-    needs: gate
-    if: needs.gate.outputs.proceed == 'true'
-    uses: ./.github/workflows/tmr.yml
-    secrets: inherit
-    with:
-      is_scheduled: true
-      supersedes_pr: ${{ needs.gate.outputs.supersedes_pr }}

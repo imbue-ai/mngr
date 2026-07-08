@@ -4,6 +4,26 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-07
+
+Fixed two ways imbue_cloud's streaming (per-provider) discovery underfed consumers, leaving a cloud workspace stuck loading in the minds app.
+
+- `discover_hosts_and_agents` read each agent's raw data but only kept its id and name, so the `DiscoveredAgent` it emitted had no `certified_data` and therefore no labels -- even though the same raw data (and its labels) is what the richer `get_host_and_agent_details` path reads. Any consumer that filters agents by label got nothing back: most visibly, the minds system_interface forward runs with `--agent-include has(agent.labels.is_primary)`, so every streaming snapshot silently filtered out the workspace's primary agent. The streaming refs now carry the raw per-agent data as `certified_data`, matching the rich path, so labels flow through.
+
+- The streaming discovery result now includes each discovered host's SSH endpoint (built from its lease, pointing at the container's inner sshd), so the discovery poller can re-emit `HOST_SSH_INFO` events. Without this the forward could not learn the host's SSH endpoint from the streaming path and refused to dial the host's loopback-registered service URL.
+
+## 2026-07-06
+
+Updated the per-host-bounded discovery override to accept the new cross-poll read registry parameter (unused by this batch provider, which reads all hosts in one bounded pass). No behavioral change for this provider.
+
+Updated the Imbue Cloud provider for mngr's new per-provider discovery: it now implements the bounded `discover_hosts_and_agents_within_timeouts` discovery entry point. Because Imbue Cloud discovery reads all leased hosts and their agents in one batched pass, individual host reads are not separately bounded -- the provider is still bounded by the provider-level discovery error timeout, and no host is marked UNKNOWN by this path.
+
+`ImbueCloudProvider.rename_host` is now implemented: a leased host can be renamed by updating its mutable `host_name` via the connector. The lease's `host_db_id` remains the durable identity, so a rename never touches the VPS or container and works whether or not the container is running.
+
+The pre-baked pool host is no longer stamped with a `workspace=<name>` label at bake time; workspace identity lives on the host name and host id, not on a label.
+
+Integrates the "simple names" work: `ImbueCloudProvider.rename_host` is now implemented (a leased host is renamed by updating its mutable `host_name` via the connector, without touching the VPS or container, whether or not it is running), and pre-baked pool hosts are no longer stamped with a `workspace=<name>` label -- workspace identity lives on the host name and host id.
+
 ## 2026-07-01
 
 Removed the legacy OVH-VPS pool-host backend from `mngr imbue_cloud admin pool`. Pool hosts are now exclusively bare-metal slices (lima VMs carved on our bare-metal boxes).

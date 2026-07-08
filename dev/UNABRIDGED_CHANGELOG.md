@@ -4,6 +4,47 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-07
+
+Migrated the GitHub Actions workflows off GitHub-stored secrets and onto HashiCorp Vault (via the `imbue-ai/use-vault-secrets` OIDC action), so CI credentials are managed centrally in Vault instead of the repo's Actions settings.
+
+- CI test/TMR jobs (`ci.yml`, `vet.yml`, `release-tests.yml`, `tmr.yml`, `tmr-reintegrate.yml`) now fetch the Anthropic key, imbue Modal workspace token (both id and secret), and the TMR S3 credentials from Vault under `mngr/ci/*`, using a new repo-bound `mngr_ci_gh` role. The `MODAL_TOKEN_ID` repo variable and the `ANTHROPIC_API_KEY` / `MODAL_TOKEN_SECRET` / `AWS_*` Actions secrets are no longer used.
+
+- The minds CI-env jobs in `ci.yml` now read the minds-dev Modal token from Vault (`minds/ci/MODAL_TOKEN_ID` + `MODAL_TOKEN_SECRET`) via their existing Vault login, replacing the `MINDS_DEV_MODAL_TOKEN_*` variable/secret.
+
+- The `minds-launch-to-msg.yml` build job fetches its ToDesktop signing credentials from a separate, environment-gated minds release path (`minds/release/*`, role `minds_release_gh`, GitHub Environment `minds-release`); its launch and Slack-notify jobs read the Anthropic key and Slack webhook from the monorepo-wide `mngr/ci/*` CI-tooling bucket.
+
+- The automatic per-run `GITHUB_TOKEN` (used for same-repo `git push` / `gh` calls and check-run reporting) is intentionally left as-is -- it is not a stored secret and cannot meaningfully live in Vault.
+
+- `scripts/changelog_deploy.sh` now reads its bot token from `secrets/mngr/dev/GH_TOKEN` (the developer-direct-access path) and its Anthropic key from the shared `secrets/mngr/ci/ANTHROPIC_API_KEY`, replacing the old `mngr/dev/github` and `mngr/dev/anthropic` paths.
+
+The Vault roles/policies backing these paths are defined in the separate `imbue-ai/vault` Terraform repo. Note: the self-hosted macOS `minds-runner` must have `curl` and `jq` on PATH for the Vault action to run.
+
+## 2026-07-06
+
+Added the design plan for the minds overlay-surface and custom-tooltips work under `blueprint/overlay-surface-tooltips/`.
+
+Exclude `/imbue_common/sentry` from coverage.
+
+Recorded the follow-up spec for bounding per-host discovery reads as implemented (`blueprint/per-provider-discovery/spec-bounded-per-host-discovery.md`).
+
+Raised the repo-wide bash strict-mode ratchet (`test_meta_ratchets.py::test_prevent_bash_without_strict_mode`) from 11 to 12 to account for `libs/mngr/imbue/mngr/resources/sigwinch_panes.sh`, a best-effort tmux repaint sweep that deliberately uses `set -uo pipefail` (omitting `-e`). The script landed after the snapshot was last pinned, so the ratchet was already over its bound on `main`; this unblocks CI. Also refreshed the test's docstring, which had grown stale (it referenced minds verify scripts that no longer exist and a local/CI count divergence that no longer holds).
+
+Added a design/plan document (`blueprint/per-provider-discovery/`) for making mngr's provider discovery per-provider so a single hung or slow provider can no longer block discovery of all providers.
+
+- Added `blueprint/persistent-terminals/plan-persistent-terminals.md`, the
+  design plan for the minds in-memory persistent terminals feature (the
+  implementation itself lives in the forever-claude-template repo; see the
+  `minds` changelog for the linked doc).
+
+Added an implementation plan (`specs/sigwinch-attach-hook/spec.md`) for moving the post-attach SIGWINCH repaint nudge from the `mngr connect` path into a persistent tmux `client-attached` hook, so the agent repaints cleanly on every attach (plain `tmux attach`, ttyd terminal, web-shell, `mngr connect`). See issue #2322.
+
+Added the implementation plan for simplifying workspace names (`blueprint/simplify-workspace-names/`): one canonical home per datum (immutable `host_id`, mutable normalized `host_name`, arbitrary human-readable name as a `workspace_display_name` label), renamable workspaces, host rename for more providers, and removal of the duplicative `workspace` label.
+
+The minds snapshot bake (`scripts/snapshot_minds_e2e_state.py`) now materializes a paired forever-claude-template working tree on the runner (the FCT branch matching the current mngr branch, else `main`, with this mngr checkout vendored into `vendor/mngr`) and bakes it into the snapshot image via a separate upload, so workspace-creation tests run coordinated mngr+FCT changes together instead of the released FCT tag. Added a `blueprint/paired-fct-workspace-tests/` plan for the change and taught `just minds-test-electron` to materialize the worktree before running the local Electron test.
+
+Integrates the "simple names" work at the repo root: the minds snapshot bake (`scripts/snapshot_minds_e2e_state.py`) materializes a paired forever-claude-template working tree (the FCT branch matching the current mngr branch, else `main`, with this mngr checkout vendored into `vendor/mngr`) and bakes it into the snapshot image, and `just minds-test-electron` materializes that worktree before the local Electron test -- so workspace-creation tests exercise coordinated mngr+FCT changes together instead of the released FCT tag.
+
 ## 2026-07-01
 
 Split the mngr and minds release test suites cleanly.
