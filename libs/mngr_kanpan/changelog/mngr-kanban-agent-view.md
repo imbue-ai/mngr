@@ -10,4 +10,4 @@ Added agent-view style interaction to the kanpan board, so you can work with an 
 
 - Optional `peek_left_returns_to_board` setting (under `[plugins.kanpan]`, off by default): when on, pressing `←` on an empty reply closes the peek panel and returns to the board. `←` still moves the cursor when the reply has text.
 
-- Mouse: click a row to focus it, while plain click-and-drag still selects and copies text with no modifier key. kanpan reports the click (to move focus) but turns off drag-motion tracking, so the terminal keeps doing native selection. Selection menus (e.g. `/login`) are not part of the transcript, so attach (`Enter`) to make the choice in the real session.
+- Mouse: the board leaves the mouse to the terminal, so drag-select/copy and wheel scrollback work natively with no modifier key. Rows are navigated with the arrow and page keys (`↑`/`↓`, `Page Up`/`Page Down`, `Home`/`End`), and the board scrolls to keep the selection in view so a list longer than the screen stays reachable. Selection menus (e.g. `/login`) are not part of the transcript, so attach (`Enter`) to make the choice in the real session.

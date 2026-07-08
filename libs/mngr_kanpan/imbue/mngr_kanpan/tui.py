@@ -14,7 +14,6 @@ from typing import assert_never
 from loguru import logger
 from pydantic import ConfigDict
 from urwid.canvas import TextCanvas
-from urwid.display.raw import Screen
 from urwid.event_loop.abstract_loop import ExitMainLoop
 from urwid.event_loop.main_loop import MainLoop
 from urwid.widget.attr_map import AttrMap
@@ -890,21 +889,6 @@ def _on_mute_persist_poll(loop: MainLoop, data: tuple[_KanpanState, Future[bool]
         loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_mute_persist_poll, data)
 
 
-def _restore_drag_selection(loop: MainLoop, _user_data: object = None) -> None:  # pragma: no cover
-    """Turn off drag-motion mouse reporting so the terminal still does native drag-select.
-
-    urwid enables button (1000), drag-motion (1002), and SGR (1006) tracking together;
-    dropping 1002 keeps a click reported (so it still focuses a row) while letting a plain
-    drag select and copy text with no modifier key. Re-applied after each screen start,
-    since ``loop.start()`` re-enables the full set. Doubles as an alarm callback (hence the
-    ignored second argument), so it can run once the screen is up under ``loop.run()``.
-    """
-    screen = loop.screen
-    if isinstance(screen, Screen):
-        screen.write("\x1b[?1002l")
-        screen.flush()
-
-
 def _attach_to_focused_agent(state: _KanpanState) -> None:  # pragma: no cover
     """Suspend the board and attach to the focused agent's session, restoring on return.
 
@@ -937,10 +921,8 @@ def _attach_to_focused_agent(state: _KanpanState) -> None:  # pragma: no cover
     finally:
         loop.start()
         loop.screen.clear()
-        # loop.start() re-enables full mouse tracking; drop drag-motion again, and force
-        # an immediate repaint so the board returns at once instead of waiting for the
-        # next refresh (which left the detach output on screen -- the "stuck" exit).
-        _restore_drag_selection(loop)
+        # Force an immediate repaint so the board returns at once instead of waiting for
+        # the next refresh, which left the detach output on screen -- the "stuck" exit.
         loop.draw_screen()
 
     _start_local_refresh(loop, state)
@@ -2196,15 +2178,11 @@ def run_kanpan(
             palette=PALETTE + mark_palette_entries,
             unhandled_input=input_handler,
             screen=screen,
-            # Enable mouse so a click focuses the row under it (urwid ListBox handles
-            # this natively). Drag-motion tracking is turned off once the screen is up
-            # (see _restore_drag_selection) so plain drag-to-select/copy still works.
-            handle_mouse=True,
+            # Leave the mouse to the terminal so native drag-select and wheel scrollback
+            # keep working; rows are navigated with the arrow and page keys.
+            handle_mouse=False,
         )
         state.loop = loop
-
-        # Drop drag-motion mouse reporting as soon as the screen has started.
-        loop.set_alarm_in(0, _restore_drag_selection)
 
         # Initial data load with spinner
         _start_refresh(loop, state)

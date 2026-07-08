@@ -4,7 +4,7 @@ All-seeing agent tracker. The name combines Sino-Japanese 看 (*kan*, "to look",
 
 Launch with `mngr kanpan`. Requires the `gh` CLI to be installed and authenticated.
 
-Click a row to focus it. Plain click-and-drag still selects and copies text with no modifier key: kanpan reports the click (to move focus) but turns off drag-motion tracking, so the terminal keeps doing native selection.
+The mouse is left to the terminal, so drag-select/copy and wheel scrollback work natively with no modifier key. Move the board selection with the arrow keys (`↑`/`↓`, `Page Up`/`Page Down`, `Home`/`End`); the board scrolls to keep the selection in view, so a list longer than the screen stays reachable.
 
 ## Attach, peek, and reply
 
