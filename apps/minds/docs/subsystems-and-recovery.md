@@ -10,6 +10,18 @@ discovery-consumer/proxy subprocess and a detached `mngr latchkey forward`
 supervisor that survives minds restarts), which front the **agent containers**
 (supervisord-managed services from the external forever-claude-template repo).
 
+One cross-cutting note for the per-subsystem timeout callouts below: on Apple
+Silicon Macs the monotonic clock advances *during* sleep, so every
+duration-based timer (probe caps, readiness windows, retry budgets) sees a
+laptop nap as an outage of the same length, and wall-clock timers elapse
+trivially; only stateless reconnect loops are naturally sleep-proof. The rule
+that separates transient wake-noise from stranding: a timeout misfire is
+harmless wherever a poll keeps running and success always wins, and sticky
+wherever a verdict is terminal or a budget never re-arms. (Local containers
+suspend and resume with the laptop; remote/VPS workspaces keep running
+through a sleep, so their wake recovery is purely client-side
+re-establishment -- tunnels first, then discovery freshness.)
+
 ---
 
 ## 1. Electron shell (backend supervision)
@@ -38,6 +50,13 @@ so the user can never be trapped.
   `render-process-gone` / `unresponsive` / `did-fail-load` handlers -- leaving
   a blank or frozen view with no reload, takeover, or report. Rare event
   class; total silence when it happens.
+
+**Timeouts and sleep.** All the shell's timers are startup- or quit-scoped
+(the ~10s port poll; a 25s initial-state fetch whose expiry lands a signed-in
+user on `/welcome`; the 5s SIGTERM-to-SIGKILL ladder), so there is no
+steady-state timer to misfire across sleep. The SSE loop's 1.5s reconnect
+makes it sleep-proof: at wake it finds a dead socket and reconnects within
+seconds.
 
 ---
 
@@ -90,6 +109,19 @@ recovery redirect (section 3) requires a post-outage discovery snapshot, a
 workspace that breaks *during* a persistent stall sits on the auto-refresh
 loader rather than reaching the recovery page.
 
+**Timeouts and sleep.** The stall detector is wall-clock, so any sleep longer
+than 35s makes the first post-wake watchdog tick read "stalled" and bounce the
+observe child -- every wake pays a producer respawn for a producer that was
+never broken. The escalation math is tighter than it looks: the first full
+`restart()` fires 15s after the bounce if no event has landed, and a bounced
+observe needs a process spawn plus a ~10s provider poll against
+possibly-still-waking networking to produce one -- so a wake can plausibly
+escalate to the heavyweight supervisor restart on a healthy system. The
+backoff cap bounds the damage and one fresh event resets everything. The
+reconnect-loop halves are sleep-robust: the proxy's 1s loader, and the
+reverse-tunnel health thread, whose backoff counter only grows on *awake*
+failed attempts -- at wake both find the breakage and repair within seconds.
+
 ---
 
 ## 3. Per-workspace health and recovery
@@ -120,6 +152,14 @@ probe through, a cleanly-dispatched restart is reported done without
 verification. Container-internal supervision (supervisord inside the FCT
 container) is the invisible first line of defense below all of this; minds
 sees it only through this page's diagnostics.
+
+**Timeouts and sleep.** Every trigger here is a monotonic duration, so sleep
+reads as outage. One failed probe just before sleep plus one just after
+(tunnels still rebuilding) spans the whole nap and yields an instant STUCK
+for a healthy workspace -- the routine wake entry point into this subsystem.
+Sleeping through a restart's 15s/30s readiness window yields a
+spurious-but-visible `RESTART_FAILED` that the probe loop cleans up on its
+next success. The sticky case was the verdict pages, below.
 
 **Known flaw, fixed by PR #2370 (open).** This subsystem was less well-behaved
 than the framing above suggests: its *verdict* states did not keep checking.
@@ -176,6 +216,13 @@ durable response event to disk, then nudges the waiting agent via
   so one transient IO error permanently skips that agent -- its gateway calls
   are rejected until an operator runs `mngr latchkey register-agent`.
 
+**Timeouts and sleep.** Sleep-robust. The follow-stream cycles on a ~2s read
+timeout with reconnect backoff capped at 30s, and because the gateway
+re-emits everything still pending from disk on each reconnect, a wake loses
+nothing -- worst case is prompts arriving ~30s late. The 30s gateway
+port-wait runs only at startup; the nudge's 30s command cap changes nothing
+about its loss mode above.
+
 ---
 
 ## 5. Auth and sessions
@@ -225,6 +272,12 @@ double-destroying.
 
 **No recovery / silent.** Nothing notable.
 
+**Timeouts and sleep.** The 300s lifecycle caps mean sleeping mid-operation
+fires a spurious-but-visible timeout at wake: a create that "times out"
+publishes its redirect anyway (the workspace finishes booting behind the
+auto-refresh loader), and a start/stop timeout clears the optimistic override
+so the UI reverts to discovery's truth. Nothing sticky.
+
 ---
 
 ## 7. Backups
@@ -246,6 +299,12 @@ indistinguishable from "no backups yet". This is the one place a
 data-protection feature can be silently off. (A persistent failure badge
 exists only on the separate `gabriel/backup-failure` branch.)
 
+**Timeouts and sleep.** The 300s retry budget is a monotonic one-shot that
+never re-arms, which makes sleep the most plausible real-world trigger of the
+silent state above: a laptop that sleeps mid-provisioning spends the budget
+asleep and wakes to the single toast. The status-query caps (12s/20s) are
+per-request and harmless across sleep.
+
 ---
 
 ## 8. Error reporting (the backstop)
@@ -257,73 +316,6 @@ from the help button, the `BLOCKED` takeover, and the recovery pages. Gaps:
 the quitting/loading takeovers have no report button, and the renderer-crash
 state (section 1) has no surface at all -- neither auto-reported nor manually
 reportable.
-
----
-
-## Timeouts and sleep/wake
-
-Nearly every recovery mechanism above is armed by a timeout, and a laptop
-sleeping is the one event that fires many of them at once. On Apple Silicon
-Macs the monotonic clock (`time.monotonic`, subprocess timeouts,
-`Event.wait`) advances *during* sleep, so to every duration-based timer a
-30-minute nap is indistinguishable from a 30-minute outage; wall-clock timers
-obviously elapse too. (On Intel Macs some monotonic timers pause instead --
-the incident behind PR #2370 confirms the elapsed behavior in practice.) The
-timers fall into three classes with very different wake behavior:
-
-**Data-age timers (wall clock) -- fire at every wake, by construction.** The
-discovery watchdog's 35s stall threshold compares wall-clock `last_event_at`
-to now, so any sleep longer than 35s makes the first post-wake tick read
-"stalled" and SIGHUP-bounce the observe child -- every wake pays a
-producer respawn for a producer that was never broken. The escalation math is
-tighter than it looks: the first full `restart()` fires 15s after the bounce
-if no event has landed, and a bounced observe needs a process spawn plus a
-~10s provider poll (against possibly still-waking networking) to produce one
--- so a wake can plausibly escalate to the heavyweight supervisor restart
-(gateway + tunnels + VPS re-provision) on a healthy system. The backoff cap
-then bounds the damage, and a single fresh event resets everything.
-
-**Duration timers (monotonic) -- treat the sleep as a real outage.** These
-are the misclassification sources:
-
-- The health tracker's 5s failure-run: one failed probe just before sleep
-  plus one just after wake (while tunnels/proxy are still rebuilding)
-  computes a run that spans the whole sleep -- instant STUCK for a healthy
-  workspace. Common at wake; previously the entry point to the PR #2370
-  incident.
-- The recovery page's 30s in-container probe cap: a probe spanning sleep is
-  declared timed-out at wake. Pre-#2370 that was treated as evidence
-  (`HOST_UNRESPONSIVE` dead-end); post-#2370 it is non-evidence
-  (`INDETERMINATE`, keep checking).
-- Restart readiness windows (15s/30s) and mngr command caps (30-300s):
-  sleeping mid-restart or mid-start/stop yields a spurious `RESTART_FAILED`
-  or timeout error at wake. Visible and retryable, and the probe loop flips
-  the workspace back on its next success, so these are transient noise.
-- One-shot budgets are the sticky case: sleeping through the creation
-  readiness window (300s) is benign (the redirect publishes anyway, landing
-  on the auto-refresh loader), but sleeping through the backup provisioning
-  budget (300s, tenacity `stop_after_delay`) permanently consumes it --
-  the retry budget is spent on a sleeping machine, the one toast fires, and
-  section 7's silent no-backups state follows. Sleep is the most plausible
-  real-world way to hit that failure.
-
-**Reconnect loops -- sleep-robust by design.** The chrome SSE loop (1.5s
-retry), the permission follow-stream (backoff capped at 30s, disk-backed
-re-emit of everything pending on reconnect), and the reverse-tunnel health
-thread (30s checks; the backoff counter only grows on *awake* failed
-attempts) carry no duration state across sleep. At wake they find a dead
-socket, reconnect within seconds, and lose nothing. The proxy's 1s
-auto-refresh loader is the same shape on the HTTP side.
-
-The pattern that separates transient wake-noise from stranding: **misfires
-are harmless wherever a poll keeps running and success always wins**
-(`record_probe_success` overrides every bad state; the loader auto-refreshes;
-tunnels rebuild). The two places sleep produced sticky failures are exactly
-where that principle was violated -- the pre-#2370 verdict pages that never
-re-checked, and the backup budget that never re-arms. Local containers
-suspend and resume with the laptop; remote/VPS workspaces keep running
-through it, so for them wake recovery is purely client-side re-establishment
-(tunnels, then discovery freshness).
 
 ---
 
