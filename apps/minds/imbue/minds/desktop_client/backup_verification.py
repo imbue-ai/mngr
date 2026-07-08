@@ -276,8 +276,16 @@ def compute_backup_service_checks(
         for agent_id, future in future_by_agent_id.items():
             try:
                 result_by_agent_id[str(agent_id)] = future.result(timeout=0)
-            except (FuturesTimeoutError, BackupProvisioningError) as e:
-                logger.debug("Backup service check for {} incomplete: {}", agent_id, e)
+            except FuturesTimeoutError:
+                # Expected: the check just hasn't finished within the batch
+                # budget; it completes (or retries) on a later batch.
+                logger.debug("Backup service check for {} did not finish within the batch budget", agent_id)
+                result_by_agent_id[str(agent_id)] = BackupServiceCheck(state=BackupServiceCheckState.UNKNOWN)
+            except BackupProvisioningError as e:
+                # A real error (e.g. the adoption write to the canonical env
+                # store failed); the batch still degrades to UNKNOWN rather
+                # than crashing.
+                logger.warning("Backup service check for {} failed: {}", agent_id, e)
                 result_by_agent_id[str(agent_id)] = BackupServiceCheck(state=BackupServiceCheckState.UNKNOWN)
     finally:
         executor.shutdown(wait=False, cancel_futures=True)
