@@ -1,0 +1,5 @@
+The app-level Settings page is now organized into a left nav (Permissions, Error reporting) with a right content pane, replacing the single-column layout.
+
+The new Permissions section lets you inspect and revoke the third-party ("predefined") service permissions your agents have been granted, across all active workspaces. Each supported service shows one card per workspace that has access, listing the granted permissions; you can revoke a single workspace's access or remove all authorizations for a service at once.
+
+Revoking removes only the permission rule (through the latchkey gateway's permissions extension); your saved sign-in for the service is left in place, and agents can request access again later through the usual permission-request flow. Changing or broadening an existing grant is still done via that request flow, not from this page. Destroyed workspaces are not shown.

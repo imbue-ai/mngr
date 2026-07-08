@@ -56,6 +56,12 @@ from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.help_modal_requests import OpenHelpRequest
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
+from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
+from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
+from imbue.minds.desktop_client.latchkey.permission_overview import PermissionOverviewError
+from imbue.minds.desktop_client.latchkey.permission_overview import build_permission_overview
+from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_for_all_workspaces
+from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_for_workspace
 from imbue.minds.desktop_client.mind_liveness import compute_mind_liveness_by_agent_id
 from imbue.minds.desktop_client.mind_liveness import get_shutdown_capable_workspace_agent_ids
 from imbue.minds.desktop_client.minds_config import MindsConfig
@@ -1725,22 +1731,134 @@ def _handle_accounts_page() -> Response:
     return make_html_response(content=html)
 
 
+def _find_predefined_permission_handler() -> LatchkeyPermissionGrantHandler | None:
+    """Return the registered predefined-permission handler, or ``None`` if absent.
+
+    The handler owns the latchkey gateway client, the services catalog, and the
+    :class:`Latchkey` wrapper the permissions settings section needs. It is
+    registered in ``request_event_handlers`` at startup; minimal setups (some
+    tests) may omit it, in which case the permissions section renders empty.
+    """
+    for handler in get_state().request_event_handlers:
+        if isinstance(handler, LatchkeyPermissionGrantHandler):
+            return handler
+    return None
+
+
 def _handle_settings_page() -> Response:
     """Render the app-level settings page (GET /settings).
 
-    Hosts the per-machine error-reporting toggles, seeded from ``MindsConfig``. Requires the same
-    local session as the rest of the app; it is not account-scoped.
+    Hosts the Permissions subsection (predefined-service grants across all
+    active workspaces) and the per-machine error-reporting toggles (seeded from
+    ``MindsConfig``). Requires the same local session as the rest of the app; it
+    is not account-scoped.
     """
     if not _is_request_authenticated():
         return make_response(status_code=403, content="Not authenticated")
     minds_config: MindsConfig | None = get_state().minds_config
     report_unexpected_errors = minds_config.get_report_unexpected_errors() if minds_config else False
     include_error_logs = minds_config.get_include_error_logs() if minds_config else False
+
+    services_overview: list[object] = []
+    all_service_display_names: list[str] = []
+    permissions_unavailable = False
+    handler = _find_predefined_permission_handler()
+    if handler is not None:
+        all_service_display_names = sorted(
+            {infos[0].display_name for infos in handler.services_catalog.as_mapping().values() if infos},
+            key=str.lower,
+        )
+        try:
+            services_overview = list(
+                build_permission_overview(
+                    backend_resolver=get_state().backend_resolver,
+                    gateway_client=handler.gateway_client,
+                    services_catalog=handler.services_catalog,
+                    latchkey=handler.latchkey,
+                )
+            )
+        except LatchkeyGatewayClientError as e:
+            logger.warning("Could not build permission overview for settings page: {}", e)
+            permissions_unavailable = True
+
     html = render_settings_page(
         report_unexpected_errors=report_unexpected_errors,
         include_error_logs=include_error_logs,
+        services_overview=services_overview,
+        all_service_display_names=all_service_display_names,
+        permissions_unavailable=permissions_unavailable,
     )
     return make_html_response(content=html)
+
+
+def _handle_revoke_service_for_workspace() -> Response:
+    """Revoke a predefined service's grants for one workspace (POST /settings/permissions/revoke).
+
+    Body: ``{"workspace_agent_id": "...", "service_name": "..."}``. Removes every
+    rule the service owns from that workspace's host permissions file (credentials
+    untouched). Returns 200 on success, 400 for a bad request/unknown service,
+    503 when the handler or gateway is unavailable.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
+    body = request.get_json(silent=True, force=True)
+    if not isinstance(body, dict):
+        return make_response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
+    workspace_agent_id = str(body.get("workspace_agent_id", ""))
+    service_name = str(body.get("service_name", ""))
+    if not workspace_agent_id or not service_name:
+        return _json_error("workspace_agent_id and service_name are required", status_code=400)
+    handler = _find_predefined_permission_handler()
+    if handler is None:
+        return _json_error("Permission management is unavailable", status_code=503)
+    try:
+        revoke_service_for_workspace(
+            backend_resolver=get_state().backend_resolver,
+            gateway_client=handler.gateway_client,
+            services_catalog=handler.services_catalog,
+            latchkey=handler.latchkey,
+            workspace_agent_id=workspace_agent_id,
+            service_name=service_name,
+        )
+    except PermissionOverviewError as e:
+        return _json_error(str(e), status_code=400)
+    except LatchkeyGatewayClientError as e:
+        logger.warning("Could not revoke {} for workspace {}: {}", service_name, workspace_agent_id, e)
+        return _json_error(f"Could not revoke through the latchkey gateway: {e}", status_code=502)
+    return make_response(content='{"status": "ok"}', media_type="application/json")
+
+
+def _handle_revoke_service_for_all_workspaces() -> Response:
+    """Revoke a predefined service's grants across every active workspace (POST /settings/permissions/revoke-all).
+
+    Body: ``{"service_name": "..."}``. Returns 200 on success, 400 for a bad
+    request/unknown service, 503 when the handler is unavailable.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
+    body = request.get_json(silent=True, force=True)
+    if not isinstance(body, dict):
+        return make_response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
+    service_name = str(body.get("service_name", ""))
+    if not service_name:
+        return _json_error("service_name is required", status_code=400)
+    handler = _find_predefined_permission_handler()
+    if handler is None:
+        return _json_error("Permission management is unavailable", status_code=503)
+    try:
+        revoke_service_for_all_workspaces(
+            backend_resolver=get_state().backend_resolver,
+            gateway_client=handler.gateway_client,
+            services_catalog=handler.services_catalog,
+            latchkey=handler.latchkey,
+            service_name=service_name,
+        )
+    except PermissionOverviewError as e:
+        return _json_error(str(e), status_code=400)
+    except LatchkeyGatewayClientError as e:
+        logger.warning("Could not revoke {} across workspaces: {}", service_name, e)
+        return _json_error(f"Could not revoke through the latchkey gateway: {e}", status_code=502)
+    return make_response(content='{"status": "ok"}', media_type="application/json")
 
 
 def _handle_set_default_account() -> Response:
@@ -2370,6 +2488,10 @@ def create_desktop_client(
     # Account management routes
     app.add_url_rule("/accounts", view_func=_handle_accounts_page)
     app.add_url_rule("/settings", view_func=_handle_settings_page)
+    app.add_url_rule("/settings/permissions/revoke", view_func=_handle_revoke_service_for_workspace, methods=["POST"])
+    app.add_url_rule(
+        "/settings/permissions/revoke-all", view_func=_handle_revoke_service_for_all_workspaces, methods=["POST"]
+    )
     app.add_url_rule("/accounts/set-default", view_func=_handle_set_default_account, methods=["POST"])
     app.add_url_rule("/accounts/<user_id>/logout", view_func=_handle_account_logout, methods=["POST"])
 

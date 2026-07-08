@@ -1664,16 +1664,33 @@ def render_accounts_page(
 def render_settings_page(
     report_unexpected_errors: bool = False,
     include_error_logs: bool = False,
+    services_overview: Sequence[object] | None = None,
+    all_service_display_names: Sequence[str] | None = None,
+    permissions_unavailable: bool = False,
 ) -> str:
     """Render the app-level settings page (reachable from the sidebar's "Settings" entry).
+
+    The page has a left nav (Permissions / Error reporting) and a right content
+    pane.
 
     ``report_unexpected_errors`` / ``include_error_logs`` seed the per-machine
     error-reporting toggles hosted on this page (the same settings the
     first-launch consent screen records). They are global to the machine, not
     account-scoped.
+
+    ``services_overview`` is a sequence of
+    :class:`~imbue.minds.desktop_client.latchkey.permission_overview.ServicePermissionOverview`
+    describing the predefined-service grants held across all active workspaces
+    (empty when nothing is granted). ``all_service_display_names`` lists every
+    service the catalog supports, for the "ask your agent" guidance.
+    ``permissions_unavailable`` is True when the latchkey gateway could not be
+    reached to read grants, so the page shows a notice instead of an empty list.
     """
     return CATALOG.render(
         "pages.Settings",
         report_unexpected_errors=report_unexpected_errors,
         include_error_logs=include_error_logs,
+        services_overview=list(services_overview or []),
+        all_service_display_names=list(all_service_display_names or []),
+        permissions_unavailable=permissions_unavailable,
     )

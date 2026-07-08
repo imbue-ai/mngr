@@ -1,20 +1,51 @@
-{#def report_unexpected_errors=false, include_error_logs=false #}
+{#def report_unexpected_errors=false, include_error_logs=false, services_overview=[], all_service_display_names=[], permissions_unavailable=false #}
 {#
   App-level settings page, reachable from the floating sidebar's "Settings" entry.
 
-  Hosts the per-machine error-reporting toggles (the same settings the first-launch
-  consent screen records). These are global to the machine, not account-scoped, which
-  is why they live here rather than on the manage-accounts page.
+  Two columns: a left nav that switches between subsections (Permissions,
+  Error reporting) and a right content pane showing the active subsection.
+
+  The Permissions subsection inspects and revokes the "predefined"
+  (catalog-backed) latchkey grants held across all *active* workspaces. Grants
+  are stored per host and every agent on a host shares them, so each card is one
+  workspace (labelled by its primary agent). Revoking removes the rule only --
+  stored credentials are left in place -- and there is intentionally no "change"
+  affordance here: broadening or narrowing a grant happens through the ordinary
+  agent-driven permission-request flow. These settings live at the app level
+  because the app, not any single workspace, owns permissions.
+
+  The Error reporting subsection hosts the per-machine error-reporting toggles
+  (the same settings the first-launch consent screen records). These are global
+  to the machine, not account-scoped.
 #}
 {% set _scripts %}
 <script>
   (function () {
+    // -- Left-nav subsection switching -----------------------------------
+    var navButtons = document.querySelectorAll('[data-settings-nav]');
+    var panels = document.querySelectorAll('[data-settings-panel]');
+    function selectSection(name) {
+      navButtons.forEach(function (btn) {
+        var isActive = btn.getAttribute('data-settings-nav') === name;
+        btn.classList.toggle('bg-fill-hover', isActive);
+        btn.classList.toggle('text-primary', isActive);
+        btn.classList.toggle('text-secondary', !isActive);
+      });
+      panels.forEach(function (panel) {
+        panel.classList.toggle('hidden', panel.getAttribute('data-settings-panel') !== name);
+      });
+    }
+    navButtons.forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        selectSection(btn.getAttribute('data-settings-nav'));
+      });
+    });
+
+    // -- Error reporting toggles -----------------------------------------
     var reportToggle = document.getElementById('report-errors-toggle');
     var logsRow = document.getElementById('include-logs-row');
     var logsToggle = document.getElementById('include-logs-toggle');
 
-    // "Include logs" is only meaningful when reporting is on; reveal it with the
-    // report toggle and clear it (persisting the cleared state) when reporting goes off.
     function syncLogsVisibility() {
       if (reportToggle.checked) {
         logsRow.classList.remove('hidden');
@@ -36,7 +67,6 @@
       var enabled = reportToggle.checked;
       var payload = { report_unexpected_errors: enabled };
       if (!enabled) {
-        // Turning reporting off also clears log inclusion so the stored pair stays consistent.
         logsToggle.checked = false;
         payload.include_logs = false;
       }
@@ -47,33 +77,220 @@
     logsToggle.addEventListener('change', function () {
       saveErrorReporting({ include_logs: logsToggle.checked });
     });
+
+    // -- Permission revocation -------------------------------------------
+    var revokeDialog = document.getElementById('revoke-dialog');
+    var revokeTitle = document.getElementById('revoke-dialog-title');
+    var revokeBody = document.getElementById('revoke-dialog-body');
+    var revokeCancelBtn = document.getElementById('revoke-cancel-btn');
+    var revokeConfirmBtn = document.getElementById('revoke-confirm-btn');
+    var revokeErrorEl = document.getElementById('revoke-error');
+    var pendingRevoke = null;
+
+    function openRevokeDialog(title, body, request) {
+      pendingRevoke = request;
+      revokeTitle.textContent = title;
+      revokeBody.textContent = body;
+      if (revokeErrorEl) revokeErrorEl.classList.add('hidden');
+      revokeConfirmBtn.disabled = false;
+      revokeDialog.classList.remove('hidden');
+    }
+    function closeRevokeDialog() {
+      pendingRevoke = null;
+      revokeDialog.classList.add('hidden');
+    }
+    if (revokeDialog) {
+      revokeCancelBtn.addEventListener('click', closeRevokeDialog);
+      revokeDialog.addEventListener('click', function (e) {
+        if (e.target === revokeDialog) closeRevokeDialog();
+      });
+      revokeConfirmBtn.addEventListener('click', function () {
+        if (!pendingRevoke) return;
+        revokeConfirmBtn.disabled = true;
+        fetch(pendingRevoke.url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(pendingRevoke.body),
+        })
+          .then(function (resp) {
+            if (resp.ok) {
+              window.location.reload();
+              return;
+            }
+            revokeConfirmBtn.disabled = false;
+            if (revokeErrorEl) {
+              revokeErrorEl.textContent = 'Could not revoke (HTTP ' + resp.status + ')';
+              revokeErrorEl.classList.remove('hidden');
+            }
+          })
+          .catch(function () {
+            revokeConfirmBtn.disabled = false;
+            if (revokeErrorEl) {
+              revokeErrorEl.textContent = 'Could not revoke (network error)';
+              revokeErrorEl.classList.remove('hidden');
+            }
+          });
+      });
+    }
+
+    document.querySelectorAll('.revoke-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var serviceSection = btn.closest('[data-service-name]');
+        var card = btn.closest('[data-workspace-agent-id]');
+        var serviceLabel = serviceSection.getAttribute('data-service-label');
+        var workspaceName = card.getAttribute('data-workspace-name');
+        openRevokeDialog(
+          'Revoke ' + serviceLabel + ' access?',
+          'This removes ' + workspaceName + "'s " + serviceLabel + ' permissions. The agent can request them again later.',
+          {
+            url: '/settings/permissions/revoke',
+            body: {
+              workspace_agent_id: card.getAttribute('data-workspace-agent-id'),
+              service_name: serviceSection.getAttribute('data-service-name'),
+            },
+          }
+        );
+      });
+    });
+
+    document.querySelectorAll('.remove-all-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var serviceSection = btn.closest('[data-service-name]');
+        var serviceLabel = serviceSection.getAttribute('data-service-label');
+        openRevokeDialog(
+          'Remove all ' + serviceLabel + ' authorizations?',
+          'This removes ' + serviceLabel + ' permissions from every workspace. Agents can request them again later.',
+          {
+            url: '/settings/permissions/revoke-all',
+            body: { service_name: serviceSection.getAttribute('data-service-name') },
+          }
+        );
+      });
+    });
   })();
 </script>
 {% endset %}
 <Base title="Settings" scripts={{ _scripts }}>
-  <PageContainer>
-    <h1 class="type-heading text-primary mb-4">Settings</h1>
+  <div class="max-w-[960px] mx-auto px-6 py-12">
+    <h1 class="type-heading text-primary mb-6">Settings</h1>
+    <div class="flex gap-8 items-start">
+      {# Left nav #}
+      <nav class="w-48 shrink-0 flex flex-col gap-0.5" aria-label="Settings sections">
+        <button type="button" data-settings-nav="permissions"
+                class="flex items-center h-8 px-2 rounded-md cursor-pointer type-body text-left bg-fill-hover text-primary border-0">
+          Permissions
+        </button>
+        <button type="button" data-settings-nav="error-reporting"
+                class="flex items-center h-8 px-2 rounded-md cursor-pointer type-body text-left bg-transparent text-secondary hover:text-primary hover:bg-fill-hover border-0">
+          Error reporting
+        </button>
+      </nav>
 
-    <h2 class="type-heading text-primary mb-2">Error reporting</h2>
-    <p class="type-helper text-tertiary mb-3">Applies to this device, regardless of which account is signed in.</p>
-    <label class="flex items-start justify-between gap-3 py-3 border-b border-subtle cursor-pointer">
-      <span>
-        <span class="type-body text-primary font-semibold">Report unexpected errors</span>
-        <span class="block type-helper text-tertiary">Send a report to Imbue when something goes wrong.</span>
-      </span>
-      <input type="checkbox" id="report-errors-toggle" class="mt-1 shrink-0"
-             {% if report_unexpected_errors %}checked{% endif %}>
-    </label>
-    <label id="include-logs-row"
-           class="flex items-start justify-between gap-3 py-3 border-b border-subtle cursor-pointer {% if not report_unexpected_errors %}hidden{% endif %}">
-      <span>
-        <span class="type-body text-primary font-semibold">Include logs</span>
-        <span class="block type-helper text-tertiary">Attach recent log files to help diagnose the problem.</span>
-      </span>
-      <input type="checkbox" id="include-logs-toggle" class="mt-1 shrink-0"
-             {% if include_error_logs %}checked{% endif %}>
-    </label>
+      {# Right content #}
+      <div class="flex-1 min-w-0">
+        {# -- Permissions panel -- #}
+        <section data-settings-panel="permissions">
+          <h2 class="type-heading text-primary mb-2">Permissions</h2>
+          <p class="type-helper text-tertiary mb-6">
+            Third-party service access your agents have been granted, across all workspaces.
+            Revoking removes the permission; your saved sign-in is kept, and agents can ask again later.
+          </p>
+
+          {% if permissions_unavailable %}
+            <Notice variant="warn">
+              Permissions can't be loaded right now because the latchkey gateway is unavailable.
+              Try again in a moment.
+            </Notice>
+          {% elif services_overview %}
+            <div class="flex flex-col gap-8">
+              {% for service in services_overview %}
+                <div data-service-name="{{ service.service_name }}" data-service-label="{{ service.display_name }}">
+                  <div class="flex items-center justify-between gap-3 mb-3">
+                    <h3 class="type-body font-semibold text-primary">{{ service.display_name }}</h3>
+                    <Button variant="danger" size="md" class="remove-all-btn">Remove all authorizations</Button>
+                  </div>
+                  <div class="flex flex-wrap gap-3">
+                    {% for grant in service.workspace_grants %}
+                      <div class="minds-card p-4 w-64 flex flex-col gap-3"
+                           data-workspace-agent-id="{{ grant.workspace_agent_id }}"
+                           data-workspace-name="{{ grant.workspace_name }}">
+                        <div class="flex items-center gap-2">
+                          <span class="w-2.5 h-2.5 rounded-full shrink-0" style="background-color: {{ grant.color }}"></span>
+                          <span class="type-body font-semibold text-primary truncate">{{ grant.workspace_name }}</span>
+                        </div>
+                        <div>
+                          <p class="type-helper text-tertiary mb-1">Allowed</p>
+                          <div class="flex flex-wrap gap-1">
+                            {% for label in grant.permission_labels %}
+                              <code class="code-pill">{{ label }}</code>
+                            {% endfor %}
+                          </div>
+                        </div>
+                        <div class="mt-auto">
+                          <Button variant="secondary" size="md" class="revoke-btn">Revoke</Button>
+                        </div>
+                      </div>
+                    {% endfor %}
+                  </div>
+                </div>
+              {% endfor %}
+            </div>
+          {% else %}
+            <Notice variant="info">
+              No third-party service permissions have been granted yet.
+            </Notice>
+          {% endif %}
+
+          <SectionHeader divider>Requesting access</SectionHeader>
+          <p class="type-body text-secondary mb-2">
+            Agents request access to a service themselves when they need it, and you approve or deny
+            the request. To grant or broaden access, just ask your agent to use the service.
+          </p>
+          {% if all_service_display_names %}
+            <p class="type-helper text-tertiary mb-1">Supported services:</p>
+            <div class="flex flex-wrap gap-1">
+              {% for name in all_service_display_names %}
+                <code class="code-pill">{{ name }}</code>
+              {% endfor %}
+            </div>
+          {% endif %}
+        </section>
+
+        {# -- Error reporting panel -- #}
+        <section data-settings-panel="error-reporting" class="hidden">
+          <h2 class="type-heading text-primary mb-2">Error reporting</h2>
+          <p class="type-helper text-tertiary mb-3">Applies to this device, regardless of which account is signed in.</p>
+          <label class="flex items-start justify-between gap-3 py-3 border-b border-subtle cursor-pointer">
+            <span>
+              <span class="type-body text-primary font-semibold">Report unexpected errors</span>
+              <span class="block type-helper text-tertiary">Send a report to Imbue when something goes wrong.</span>
+            </span>
+            <input type="checkbox" id="report-errors-toggle" class="mt-1 shrink-0"
+                   {% if report_unexpected_errors %}checked{% endif %}>
+          </label>
+          <label id="include-logs-row"
+                 class="flex items-start justify-between gap-3 py-3 border-b border-subtle cursor-pointer {% if not report_unexpected_errors %}hidden{% endif %}">
+            <span>
+              <span class="type-body text-primary font-semibold">Include logs</span>
+              <span class="block type-helper text-tertiary">Attach recent log files to help diagnose the problem.</span>
+            </span>
+            <input type="checkbox" id="include-logs-toggle" class="mt-1 shrink-0"
+                   {% if include_error_logs %}checked{% endif %}>
+          </label>
+        </section>
+      </div>
+    </div>
 
     <div class="mt-8"><Link href="/" extra="type-helper">&larr; Back to workspaces</Link></div>
-  </PageContainer>
+  </div>
+
+  <Modal id="revoke-dialog" card_extra="text-left">
+    <h2 id="revoke-dialog-title" class="type-heading text-primary mb-3">Revoke access?</h2>
+    <p id="revoke-dialog-body" class="type-body text-primary mb-4"></p>
+    <p id="revoke-error" class="hidden type-body text-important mb-3" role="alert"></p>
+    <div class="flex justify-end gap-3">
+      <Button variant="secondary" id="revoke-cancel-btn">Cancel</Button>
+      <Button variant="danger" id="revoke-confirm-btn">Revoke</Button>
+    </div>
+  </Modal>
 </Base>
