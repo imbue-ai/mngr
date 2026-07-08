@@ -1879,8 +1879,9 @@ def create_api_v1_blueprint() -> Blueprint:
     )
 
     # Operation polling is type-segmented: ``/operations/<type>/<id>`` (type in
-    # create | destroy | restart). The caller always knows the type, so each gets
-    # a dedicated handler + precise response model (no id-prefix dispatch).
+    # create | destroy | restart | backup). The caller always knows the type, so
+    # each gets a dedicated handler + precise response model (no id-prefix
+    # dispatch).
     blueprint.add_url_rule(
         "/workspaces/operations/create/<operation_id>",
         view_func=_handle_create_operation_status,
