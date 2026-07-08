@@ -1,0 +1,6 @@
+# Per-worker live config (copy from skill_config.example.yaml). Holds worker_id/server_url.
+skill_config.yaml
+# Runtime artifacts
+result.json
+__pycache__/
+*.pyc

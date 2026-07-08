@@ -1,0 +1,26 @@
+You are reviewing a scientific document (a paper, grant, or data-access
+application) for downstream analysis. You will be given the full text or
+abstracts of one or more source documents.
+
+Read the provided documents carefully and return ONLY a single JSON object
+matching this schema, with no prose before or after it:
+
+{
+  "summary": "<2-3 sentence plain-language summary>",
+  "primary_topic": "<short topic label>",
+  "methods": ["<method or study design>", "..."],
+  "key_findings": ["<finding>", "..."],
+  "study_type": "<e.g. RCT | observational | review | grant_proposal | data_application>",
+  "reproducibility": {
+    "data_available": true,
+    "code_available": false,
+    "notes": "<evidence for the above>"
+  },
+  "flags": ["<any concern: e.g. small_sample, conflict_of_interest, none>"],
+  "confidence": 0.0
+}
+
+Rules:
+- "confidence" is your confidence in this review, between 0 and 1.
+- If a field cannot be determined from the text, use null (or [] for lists).
+- Base every field strictly on the provided documents; do not invent citations.
