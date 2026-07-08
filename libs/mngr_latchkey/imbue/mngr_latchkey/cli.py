@@ -38,6 +38,7 @@ from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.sentry.core import flush_sentry_on_shutdown
+from imbue.mngr.api.providers import list_provider_names_to_load
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
@@ -596,9 +597,15 @@ def _run_forward_supervisor(
     # observer for the host dir; it writes the shared default discovery log that
     # minds' `mngr forward --observe-via-file` tails. There is no second observer
     # to isolate from, so it uses the standard event location.
+    # Providers this forward would actually load; a provider disabled in config
+    # (e.g. via the minds providers panel) is absent, so the consumer can suppress
+    # its expected discovery-error noise (written to the shared discovery log by
+    # other mngr processes such as ``mngr list``) instead of logging it at warning.
+    loadable_provider_names = frozenset(str(name) for name in list_provider_names_to_load(mngr_ctx))
     consumer = DiscoveryStreamConsumer(
         concurrency_group=mngr_ctx.concurrency_group,
         mngr_binary=opts.mngr_binary,
+        loadable_provider_names=loadable_provider_names,
     )
     consumer.add_on_agent_discovered_callback(discovery_handler)
     consumer.add_on_agent_destroyed_callback(destruction_handler)

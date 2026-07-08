@@ -117,6 +117,20 @@ class DiscoveryStreamConsumer(MutableModel):
         frozen=True,
         description="Path to the mngr binary used to spawn the observe subprocess.",
     )
+    loadable_provider_names: frozenset[str] | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "Names of the providers this forward's config would actually load (from "
+            "``list_provider_names_to_load``). A provider disabled in config (e.g. via the "
+            "minds providers panel setting ``is_enabled = false``) is absent from this set. "
+            "Discovery errors attributable to such a provider are expected noise -- other mngr "
+            "processes (e.g. ``mngr list``) still write them to the shared discovery log, which "
+            "this forward's ``mngr observe`` tail echoes -- so they are logged at trace rather "
+            "than warning. ``None`` disables the filter and logs every discovery error at warning "
+            "(the pre-filter behaviour, used by tests that do not exercise the disabled-provider path)."
+        ),
+    )
 
     _on_agent_discovered_callbacks: list[OnAgentDiscoveredCallback] = PrivateAttr(default_factory=list)
     _on_agent_destroyed_callbacks: list[OnAgentDestroyedCallback] = PrivateAttr(default_factory=list)
@@ -261,18 +275,44 @@ class DiscoveryStreamConsumer(MutableModel):
             with self._lock:
                 self._ssh_by_host_id.pop(str(event.host_id), None)
         elif isinstance(event, DiscoveryErrorEvent):
-            logger.warning(
-                "Discovery error from {}: {} ({})",
-                event.source_name,
-                event.error_message,
-                event.error_type,
-            )
+            if self._is_error_from_disabled_provider(event):
+                # A provider the user disabled in this forward's config: its discovery errors
+                # (written to the shared discovery log by other mngr processes such as
+                # ``mngr list``, whose tail this forward echoes) are expected noise about a
+                # provider we intentionally do not manage, so drop them to trace instead of
+                # spamming the forward log at warning.
+                logger.trace(
+                    "Ignoring discovery error from disabled provider {}: {} ({})",
+                    event.provider_name,
+                    event.error_message,
+                    event.error_type,
+                )
+            else:
+                logger.warning(
+                    "Discovery error from {}: {} ({})",
+                    event.source_name,
+                    event.error_message,
+                    event.error_type,
+                )
         else:
             # Remaining event types (AgentDestroyedEvent, HostDiscoveryEvent, and
             # the ignored legacy FullDiscoverySnapshotEvent) need no extra work
             # here: destruction callbacks were already fired from the delta above,
             # and these events carry nothing requiring a discovery callback.
             logger.trace("No discovery callback to fire for event of type {}", type(event).__name__)
+
+    def _is_error_from_disabled_provider(self, event: DiscoveryErrorEvent) -> bool:
+        """Whether this discovery error is attributable to a provider disabled in our config.
+
+        Only provider-attributable errors (``provider_name`` set) can be suppressed; a
+        non-provider error (host/agent, ``provider_name is None``) is always surfaced.
+        With no loadable-provider set configured (``None``) the filter is inert.
+        """
+        if self.loadable_provider_names is None:
+            return False
+        if event.provider_name is None:
+            return False
+        return event.provider_name not in self.loadable_provider_names
 
     def _handle_host_ssh_info(self, event: HostSSHInfoEvent) -> None:
         ssh_info = _convert_ssh_info(event.ssh)

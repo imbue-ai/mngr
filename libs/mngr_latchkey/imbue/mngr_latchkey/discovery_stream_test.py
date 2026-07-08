@@ -27,6 +27,7 @@ from imbue.mngr.api.discovery_events import AgentDestroyedEvent
 from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
 from imbue.mngr.api.discovery_events import DISCOVERY_EVENT_SOURCE
 from imbue.mngr.api.discovery_events import DiscoveryError
+from imbue.mngr.api.discovery_events import DiscoveryErrorEvent
 from imbue.mngr.api.discovery_events import DiscoveryEventType
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
@@ -37,6 +38,7 @@ from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SSHInfo
+from imbue.mngr.utils.testing import capture_log_warnings
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_latchkey.discovery_stream import DiscoveryStreamConsumer
 
@@ -100,9 +102,12 @@ class _RecordingHandlers:
 # -- Helpers ------------------------------------------------------------------
 
 
-def _make_consumer(cg: ConcurrencyGroup) -> tuple[DiscoveryStreamConsumer, _RecordingHandlers]:
+def _make_consumer(
+    cg: ConcurrencyGroup,
+    loadable_provider_names: frozenset[str] | None = None,
+) -> tuple[DiscoveryStreamConsumer, _RecordingHandlers]:
     handlers = _RecordingHandlers()
-    consumer = DiscoveryStreamConsumer(concurrency_group=cg)
+    consumer = DiscoveryStreamConsumer(concurrency_group=cg, loadable_provider_names=loadable_provider_names)
     consumer.add_on_agent_discovered_callback(handlers.on_discovered)
     consumer.add_on_agent_destroyed_callback(handlers.on_destroyed)
     return consumer, handlers
@@ -226,6 +231,20 @@ def _provider_error(provider_name: str) -> DiscoveryError:
         message="discovery failed",
         provider_name=ProviderInstanceName(provider_name),
     )
+
+
+def _discovery_error_line(source_name: str, provider_name: str | None) -> str:
+    """Build a standalone ``DiscoveryErrorEvent`` JSONL line (as ``mngr list`` emits)."""
+    timestamp, event_id = _envelope_fields()
+    return DiscoveryErrorEvent(
+        timestamp=timestamp,
+        event_id=event_id,
+        source=DISCOVERY_EVENT_SOURCE,
+        error_type="ProviderNotAuthorizedError",
+        error_message=f"Provider '{source_name}' is not available: API key not configured.",
+        source_name=source_name,
+        provider_name=provider_name,
+    ).model_dump_json()
 
 
 def _make_ssh_info(host: str, port: int, key_path: Path) -> SSHInfo:
@@ -419,6 +438,46 @@ def test_provider_snapshot_does_not_drop_other_providers_agents(tmp_path: Path) 
         consumer._on_observe_output(_provider_snapshot_line((), provider_name=alpha), is_stdout=True)
 
     assert handlers.destroyed_calls == (agent_alpha.agent_id,)
+
+
+def test_discovery_error_from_disabled_provider_is_not_logged_at_warning(tmp_path: Path) -> None:
+    """A discovery error for a provider absent from the loadable set is suppressed (trace, not warning)."""
+    del tmp_path
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        consumer, _handlers = _make_consumer(cg, loadable_provider_names=frozenset({"local", "docker"}))
+        with capture_log_warnings() as warnings:
+            consumer._on_observe_output(_discovery_error_line("vultr", provider_name="vultr"), is_stdout=True)
+    assert warnings == []
+
+
+def test_discovery_error_from_loadable_provider_is_logged_at_warning(tmp_path: Path) -> None:
+    """A discovery error for a provider that is in the loadable set is still surfaced at warning."""
+    del tmp_path
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        consumer, _handlers = _make_consumer(cg, loadable_provider_names=frozenset({"local", "vultr"}))
+        with capture_log_warnings() as warnings:
+            consumer._on_observe_output(_discovery_error_line("vultr", provider_name="vultr"), is_stdout=True)
+    assert any("Discovery error from vultr" in message for message in warnings)
+
+
+def test_non_provider_discovery_error_is_logged_even_with_loadable_filter(tmp_path: Path) -> None:
+    """A non-provider-attributable error (``provider_name is None``) is never suppressed by the filter."""
+    del tmp_path
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        consumer, _handlers = _make_consumer(cg, loadable_provider_names=frozenset({"local"}))
+        with capture_log_warnings() as warnings:
+            consumer._on_observe_output(_discovery_error_line("some-host", provider_name=None), is_stdout=True)
+    assert any("Discovery error from some-host" in message for message in warnings)
+
+
+def test_discovery_error_logged_at_warning_when_no_loadable_filter(tmp_path: Path) -> None:
+    """With no loadable-provider set (``None``), every discovery error is logged at warning."""
+    del tmp_path
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        consumer, _handlers = _make_consumer(cg)
+        with capture_log_warnings() as warnings:
+            consumer._on_observe_output(_discovery_error_line("vultr", provider_name="vultr"), is_stdout=True)
+    assert any("Discovery error from vultr" in message for message in warnings)
 
 
 def test_malformed_line_is_ignored(tmp_path: Path) -> None:
