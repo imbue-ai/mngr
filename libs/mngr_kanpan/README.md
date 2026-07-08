@@ -15,7 +15,7 @@ Interact with an agent without leaving the board:
   - The input supports readline-style editing: word movement (`Option`/`Ctrl`+`←`/`→`), word delete (`Option`/`Ctrl`+`Delete`, `Ctrl-W`), start/end (`Ctrl-A`/`Ctrl-E`), and kill to start/end (`Ctrl-U`/`Ctrl-K`).
 - **Selections**: a text reply cannot move a selection cursor, so when the peeked agent shows a menu (e.g. `/login`) the panel prompts `selection detected — esc, then enter to attach and choose`; make the choice in the real session.
 
-To make `←` on an empty reply close the panel and return to the board (Agent View's back gesture), set `peek_left_returns_to_board = true` under `[plugins.kanpan]` in your mngr settings. It is off by default so `←` keeps its normal cursor-movement behavior in the reply.
+To make `←` on an empty reply close the panel and return to the board (Agent View's back gesture), set `peek_left_returns_to_board = true` under `[plugins.kanpan]` in your mngr settings (off by default). Even when enabled, `←` still moves the cursor whenever the reply has text — it returns to the board only when the reply is empty.
 
 These are builtins; they do not need any configuration.
 

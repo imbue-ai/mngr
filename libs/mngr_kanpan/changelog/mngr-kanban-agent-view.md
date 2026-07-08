@@ -6,8 +6,8 @@ Added agent-view style interaction to the kanpan board, so you can work with an 
 
 - Reply from the peek panel: type into the `reply>` input and press `Enter` to send a message to that agent (an empty reply does nothing). The send runs in the background so the panel stays live, and failures are shown inline. The sent text is echoed immediately (`sending: ...`) so it is not lost while delivery is in flight.
 
-- The reply input supports readline-style editing: word movement (`Option`/`Ctrl`+`←`/`→`), word delete (`Option`/`Ctrl`+`Delete`, `Ctrl-W`), jump to start/end (`Ctrl-A`/`Ctrl-E`), and kill to start/end (`Ctrl-U`/`Ctrl-K`).
+- The reply input supports readline-style editing (via the `urwid_readline` library, with the Option/Ctrl+arrow chords added): word movement (`Option`/`Ctrl`+`←`/`→`, `Meta-B`/`F`), word delete (`Option`+`Delete`, `Ctrl-W`, `Meta-D`), jump to start/end (`Ctrl-A`/`Ctrl-E`), and kill to start/end (`Ctrl-U`/`Ctrl-K`).
 
-- Optional `peek_left_returns_to_board` setting (under `[plugins.kanpan]`, off by default): when on, pressing `←` on an empty reply closes the peek panel and returns to the board (mirrors Claude Agent View's back gesture).
+- Optional `peek_left_returns_to_board` setting (under `[plugins.kanpan]`, off by default): when on, pressing `←` on an empty reply closes the peek panel and returns to the board (mirrors Claude Agent View's back gesture). `←` still moves the cursor when the reply has text.
 
 - When the peeked agent is showing a selection menu (e.g. `/login`), the panel says `selection detected — esc, then enter to attach and choose`: menus are driven in the real session, since the text reply cannot move a selection cursor.

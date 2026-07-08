@@ -21,13 +21,13 @@ from urwid.event_loop.main_loop import MainLoop
 from urwid.widget.attr_map import AttrMap
 from urwid.widget.columns import Columns
 from urwid.widget.divider import Divider
-from urwid.widget.edit import Edit
 from urwid.widget.filler import Filler
 from urwid.widget.frame import Frame
 from urwid.widget.listbox import ListBox
 from urwid.widget.listbox import SimpleFocusListWalker
 from urwid.widget.pile import Pile
 from urwid.widget.text import Text
+from urwid_readline import ReadlineEdit
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
@@ -1035,83 +1035,28 @@ def _peek_body_from_capture(result: subprocess.CompletedProcess[str]) -> str:
     return "\n".join(tail)
 
 
-@pure
-def _reply_word_start(text: str, pos: int) -> int:
-    """Index of the start of the whitespace-delimited word to the left of `pos`."""
-    index = pos
-    while index > 0 and text[index - 1].isspace():
-        index -= 1
-    while index > 0 and not text[index - 1].isspace():
-        index -= 1
-    return index
+def _make_reply_edit(caption: tuple[str, str]) -> ReadlineEdit:
+    """A single-line reply input with readline editing from ``urwid_readline``.
 
-
-@pure
-def _reply_word_end(text: str, pos: int) -> int:
-    """Index of the end of the whitespace-delimited word to the right of `pos`."""
-    index = pos
-    length = len(text)
-    while index < length and text[index].isspace():
-        index += 1
-    while index < length and not text[index].isspace():
-        index += 1
-    return index
-
-
-class _ReplyEdit(Edit):
-    """Single-line reply input with readline-style word and line editing.
-
-    Adds the word-movement, word-delete and line-kill bindings a terminal user
-    expects (Option/Ctrl+arrow, Option/Ctrl+Delete, Ctrl-A/E/K/U/W) on top of
-    urwid's basic Edit. Keys it does not handle fall through unchanged so the
-    panel can act on them (Enter sends, Esc closes, Left on an empty line returns
-    to the board).
+    ``ReadlineEdit`` ships the readline keymap (Ctrl-A/E/W/K/U, Meta-B/F/D, etc.)
+    but binds word ops only to Meta+letter and Shift+arrow, not the Option/Ctrl +
+    arrow chords many terminals emit; those are added here so word movement and
+    deletion work however the terminal encodes them. ``enter`` and a boundary
+    ``left`` are left unbound so they bubble to the panel (send / return-to-board).
     """
-
-    _WORD_LEFT = ("meta left", "ctrl left", "meta b")
-    _WORD_RIGHT = ("meta right", "ctrl right", "meta f")
-    _DELETE_WORD_LEFT = ("ctrl w", "meta backspace", "meta delete")
-    _DELETE_WORD_RIGHT = ("meta d",)
-
-    def keypress(self, size: tuple[int, ...], key: str) -> str | None:
-        text = self.edit_text
-        pos = self.edit_pos
-        if key == "ctrl a":
-            self.set_edit_pos(0)
-            return None
-        if key == "ctrl e":
-            self.set_edit_pos(len(text))
-            return None
-        if key in self._WORD_LEFT:
-            self.set_edit_pos(_reply_word_start(text, pos))
-            return None
-        if key in self._WORD_RIGHT:
-            self.set_edit_pos(_reply_word_end(text, pos))
-            return None
-        if key in self._DELETE_WORD_LEFT:
-            start = _reply_word_start(text, pos)
-            self.set_edit_text(text[:start] + text[pos:])
-            self.set_edit_pos(start)
-            return None
-        if key in self._DELETE_WORD_RIGHT:
-            end = _reply_word_end(text, pos)
-            self.set_edit_text(text[:pos] + text[end:])
-            return None
-        if key == "ctrl k":
-            self.set_edit_text(text[:pos])
-            return None
-        if key == "ctrl u":
-            self.set_edit_text(text[pos:])
-            self.set_edit_pos(0)
-            return None
-        return super().keypress(size, key)
+    edit = ReadlineEdit(caption=caption, multiline=False)
+    edit.keymap["meta left"] = edit.backward_word
+    edit.keymap["ctrl left"] = edit.backward_word
+    edit.keymap["meta right"] = edit.forward_word
+    edit.keymap["ctrl right"] = edit.forward_word
+    return edit
 
 
 def _build_peek_panel(state: _KanpanState) -> Pile:
     """Build the peek panel widget (shown in place of the footer) and stash its parts."""
     state.peek_header_text = Text("")
     state.peek_body_text = Text("", wrap="clip")
-    state.peek_input = _ReplyEdit(caption=("peek_hint", PEEK_REPLY_PROMPT))
+    state.peek_input = _make_reply_edit(("peek_hint", PEEK_REPLY_PROMPT))
     state.peek_status_text = Text("")
     hint = Text(("peek_hint", "  enter: send reply   ·   esc: close"))
     panel = Pile(

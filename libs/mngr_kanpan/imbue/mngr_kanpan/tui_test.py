@@ -60,7 +60,6 @@ from imbue.mngr_kanpan.tui import _FieldCellMarkupFn
 from imbue.mngr_kanpan.tui import _FieldCellTextFn
 from imbue.mngr_kanpan.tui import _KanpanInputHandler
 from imbue.mngr_kanpan.tui import _KanpanState
-from imbue.mngr_kanpan.tui import _ReplyEdit
 from imbue.mngr_kanpan.tui import _assemble_column_defs
 from imbue.mngr_kanpan.tui import _batch_item_label
 from imbue.mngr_kanpan.tui import _build_agent_row
@@ -97,6 +96,7 @@ from imbue.mngr_kanpan.tui import _is_peek_chrome_line
 from imbue.mngr_kanpan.tui import _last_nonempty_line
 from imbue.mngr_kanpan.tui import _load_user_commands
 from imbue.mngr_kanpan.tui import _looks_like_selection
+from imbue.mngr_kanpan.tui import _make_reply_edit
 from imbue.mngr_kanpan.tui import _on_batch_item_poll
 from imbue.mngr_kanpan.tui import _on_peek_capture_poll
 from imbue.mngr_kanpan.tui import _on_peek_reply_poll
@@ -105,8 +105,6 @@ from imbue.mngr_kanpan.tui import _peek_body_from_capture
 from imbue.mngr_kanpan.tui import _prune_orphaned_marks
 from imbue.mngr_kanpan.tui import _refresh_display
 from imbue.mngr_kanpan.tui import _render_footer
-from imbue.mngr_kanpan.tui import _reply_word_end
-from imbue.mngr_kanpan.tui import _reply_word_start
 from imbue.mngr_kanpan.tui import _resolve_section_order
 from imbue.mngr_kanpan.tui import _run_shell_command
 from imbue.mngr_kanpan.tui import _show_transient_message
@@ -2054,7 +2052,7 @@ def test_on_peek_capture_poll_renders_body_when_done() -> None:
     future: Future[subprocess.CompletedProcess[str]] = Future()
     future.set_result(subprocess.CompletedProcess(args=[], returncode=0, stdout="alpha\nbeta\n", stderr=""))
     state.peek_capture_future = future
-    _on_peek_capture_poll(cast(Any, state.loop), state)
+    _on_peek_capture_poll(state.loop, state)
     assert state.peek_capture_future is None
     assert "beta" in str(state.peek_body_text.text)
 
@@ -2066,7 +2064,7 @@ def test_on_peek_capture_poll_reschedules_while_running() -> None:
     state.peek_body_text = Text("unchanged")
     # A future that never resolves stays "not done".
     state.peek_capture_future = Future()
-    _on_peek_capture_poll(cast(Any, state.loop), state)
+    _on_peek_capture_poll(state.loop, state)
     # A running capture is left in place and the body is not overwritten.
     assert state.peek_capture_future is not None
     assert str(state.peek_body_text.text) == "unchanged"
@@ -2125,16 +2123,17 @@ def test_submit_peek_reply_empty_input_is_noop() -> None:
     assert state.peek_reply_future is None
 
 
-def test_reply_word_boundaries() -> None:
-    text = "hello  world foo"
-    assert _reply_word_start(text, len(text)) == len("hello  world ")
-    assert _reply_word_start(text, 5) == 0
-    assert _reply_word_end(text, 0) == 5
-    assert _reply_word_end(text, 5) == len("hello  world")
+def test_make_reply_edit_binds_arrow_word_chords() -> None:
+    edit = _make_reply_edit(("peek_hint", "reply> "))
+    # The library binds Meta+letter word ops; we add the Option/Ctrl+arrow chords.
+    assert edit.keymap["meta left"] == edit.backward_word
+    assert edit.keymap["ctrl left"] == edit.backward_word
+    assert edit.keymap["meta right"] == edit.forward_word
+    assert edit.keymap["ctrl right"] == edit.forward_word
 
 
-def test_reply_edit_word_move_and_delete() -> None:
-    edit = _ReplyEdit()
+def test_make_reply_edit_word_move_and_delete() -> None:
+    edit = _make_reply_edit(("peek_hint", "reply> "))
     edit.set_edit_text("hello world foo")
     edit.set_edit_pos(len("hello world foo"))
     edit.keypress((40,), "meta left")
@@ -2143,22 +2142,9 @@ def test_reply_edit_word_move_and_delete() -> None:
     assert edit.edit_text == "hello foo"
 
 
-def test_reply_edit_line_kill_and_home_end() -> None:
-    edit = _ReplyEdit()
-    edit.set_edit_text("hello world")
-    edit.set_edit_pos(5)
-    edit.keypress((40,), "ctrl k")
-    assert edit.edit_text == "hello"
-    edit.keypress((40,), "ctrl a")
-    assert edit.edit_pos == 0
-    edit.set_edit_pos(len("hello"))
-    edit.keypress((40,), "ctrl u")
-    assert edit.edit_text == ""
-
-
-def test_reply_edit_defers_unhandled_keys() -> None:
-    edit = _ReplyEdit()
-    edit.set_edit_text("")
+def test_make_reply_edit_defers_enter_and_boundary_left() -> None:
+    edit = _make_reply_edit(("peek_hint", "reply> "))
+    # Enter and Left-at-column-0 are unhandled, so they bubble to the panel.
     assert edit.keypress((40,), "enter") == "enter"
     assert edit.keypress((40,), "left") == "left"
 

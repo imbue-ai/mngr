@@ -225,8 +225,9 @@ class KanpanPluginConfig(PluginConfig):
     peek_left_returns_to_board: bool = Field(
         default=False,
         description="When true, pressing Left on an empty reply in the peek panel closes it and "
-        "returns focus to the board (mirrors Claude Agent View's back gesture). Off by default so "
-        "Left keeps its normal cursor-movement behavior in the reply input.",
+        "returns to the board (mirrors Claude Agent View's back gesture). Left still moves the "
+        "cursor whenever the reply has text; it returns to the board only when the reply is empty. "
+        "Off by default (opt-in).",
     )
     retry_cooldown_seconds: float = Field(
         default=60.0,
