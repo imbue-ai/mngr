@@ -4,6 +4,12 @@ A concise, human-friendly summary of changes for repo-level dev tooling: CI work
 
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
+## 2026-07-07
+
+### Changed
+
+- Changed: Migrated GitHub Actions workflows off GitHub-stored secrets onto HashiCorp Vault via the `imbue-ai/use-vault-secrets` OIDC action. CI test/TMR jobs fetch the Anthropic key, imbue Modal token id/secret, and TMR S3 credentials from `mngr/ci/*` (role `mngr_ci_gh`); the minds CI-env jobs fetch the minds-dev Modal token from `minds/ci/*`; `minds-launch-to-msg.yml`'s build job fetches ToDesktop signing credentials from an environment-gated `minds/release/*` (role `minds_release_gh`, GitHub Environment `minds-release`). `scripts/changelog_deploy.sh` now reads its bot token from `secrets/mngr/dev/GH_TOKEN` and Anthropic key from `secrets/mngr/ci/ANTHROPIC_API_KEY`. The `MODAL_TOKEN_ID` repo variable and the `ANTHROPIC_API_KEY` / `MODAL_TOKEN_SECRET` / `MINDS_DEV_MODAL_TOKEN_*` / `AWS_*` Actions secrets are retired. The self-hosted macOS `minds-runner` needs `curl` and `jq` on PATH for the Vault action.
+
 ## 2026-07-06
 
 ### Added

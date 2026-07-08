@@ -1,7 +1,13 @@
 from pathlib import Path
 
+import pytest
+
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr_modal.backend import ModalProviderBackend
 from imbue.mngr_modal.backend import get_files_for_deploy
+from imbue.mngr_modal.config import ModalMode
+from imbue.mngr_modal.config import ModalProviderConfig
+from imbue.modal_proxy.direct import DirectModalInterface
 
 # =============================================================================
 # get_files_for_deploy Tests
@@ -57,3 +63,21 @@ def test_get_files_for_deploy_includes_non_key_files(temp_mngr_ctx: MngrContext,
     assert len(result) == 1
     matched_values = list(result.values())
     assert matched_values[0] == config_file
+
+
+# =============================================================================
+# ModalMode resolution -- no Modal/network calls
+# =============================================================================
+
+
+def test_resolve_modal_interface_direct_uses_sdk() -> None:
+    """DIRECT mode resolves to the SDK-backed interface."""
+    iface = ModalProviderBackend._resolve_modal_interface(ModalProviderConfig())
+    assert isinstance(iface, DirectModalInterface)
+
+
+def test_resolve_modal_interface_proxied_is_not_implemented() -> None:
+    """PROXIED is intentionally not implemented (Modal is imbue-internal; auth directly via DIRECT)."""
+    config = ModalProviderConfig(mode=ModalMode.PROXIED)
+    with pytest.raises(NotImplementedError):
+        ModalProviderBackend._resolve_modal_interface(config)
