@@ -11,8 +11,11 @@ Interact with an agent without leaving the board:
 - **Attach** (`Enter`): enter the focused agent's full interactive session (equivalent to `mngr connect`). The board suspends while you are attached and restores when you detach (tmux's `Ctrl-b d`), so you return to the board rather than a bare shell.
 - **Peek** (`Space`): open a live panel below the board showing the focused agent's recent pane output, refreshed every couple of seconds, with the board still visible above. The digest trims the agent's own input box and status line so it is not confused with the reply field.
   - `Esc` closes the panel. To peek a different agent, close it, move the board selection, and press `Space` again.
-- **Reply**: type into the panel's `reply>` input and press `Enter` to send the message to that agent (equivalent to `mngr message`); an empty reply does nothing. The send runs in the background, so the panel stays live and you can watch the reply land in the peeked output. Sending to a stopped or non-interactive agent reports the error inline.
+- **Reply**: type into the panel's `reply>` input and press `Enter` to send the message to that agent (equivalent to `mngr message`); an empty reply does nothing. The sent text is echoed immediately (`sending: ...`) so it is not lost while delivery is in flight (`mngr message` can wait up to ~90s for the agent's submission signal). The send runs in the background, so the panel stays live and you can watch the reply land in the peeked output. Sending to a stopped or non-interactive agent reports the error inline.
+  - The input supports readline-style editing: word movement (`Option`/`Ctrl`+`←`/`→`), word delete (`Option`/`Ctrl`+`Delete`, `Ctrl-W`), start/end (`Ctrl-A`/`Ctrl-E`), and kill to start/end (`Ctrl-U`/`Ctrl-K`).
 - **Selections**: a text reply cannot move a selection cursor, so when the peeked agent shows a menu (e.g. `/login`) the panel prompts `selection detected — esc, then enter to attach and choose`; make the choice in the real session.
+
+To make `←` on an empty reply close the panel and return to the board (Agent View's back gesture), set `peek_left_returns_to_board = true` under `[plugins.kanpan]` in your mngr settings. It is off by default so `←` keeps its normal cursor-movement behavior in the reply.
 
 These are builtins; they do not need any configuration.
 

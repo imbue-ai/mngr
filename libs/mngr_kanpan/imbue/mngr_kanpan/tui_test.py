@@ -60,6 +60,7 @@ from imbue.mngr_kanpan.tui import _FieldCellMarkupFn
 from imbue.mngr_kanpan.tui import _FieldCellTextFn
 from imbue.mngr_kanpan.tui import _KanpanInputHandler
 from imbue.mngr_kanpan.tui import _KanpanState
+from imbue.mngr_kanpan.tui import _ReplyEdit
 from imbue.mngr_kanpan.tui import _assemble_column_defs
 from imbue.mngr_kanpan.tui import _batch_item_label
 from imbue.mngr_kanpan.tui import _build_agent_row
@@ -104,6 +105,8 @@ from imbue.mngr_kanpan.tui import _peek_body_from_capture
 from imbue.mngr_kanpan.tui import _prune_orphaned_marks
 from imbue.mngr_kanpan.tui import _refresh_display
 from imbue.mngr_kanpan.tui import _render_footer
+from imbue.mngr_kanpan.tui import _reply_word_end
+from imbue.mngr_kanpan.tui import _reply_word_start
 from imbue.mngr_kanpan.tui import _resolve_section_order
 from imbue.mngr_kanpan.tui import _run_shell_command
 from imbue.mngr_kanpan.tui import _show_transient_message
@@ -2120,3 +2123,68 @@ def test_submit_peek_reply_empty_input_is_noop() -> None:
     _submit_peek_reply(state)
     assert state.peek_agent_name == AgentName("agent-a")
     assert state.peek_reply_future is None
+
+
+def test_reply_word_boundaries() -> None:
+    text = "hello  world foo"
+    assert _reply_word_start(text, len(text)) == len("hello  world ")
+    assert _reply_word_start(text, 5) == 0
+    assert _reply_word_end(text, 0) == 5
+    assert _reply_word_end(text, 5) == len("hello  world")
+
+
+def test_reply_edit_word_move_and_delete() -> None:
+    edit = _ReplyEdit()
+    edit.set_edit_text("hello world foo")
+    edit.set_edit_pos(len("hello world foo"))
+    edit.keypress((40,), "meta left")
+    assert edit.edit_pos == len("hello world ")
+    edit.keypress((40,), "ctrl w")
+    assert edit.edit_text == "hello foo"
+
+
+def test_reply_edit_line_kill_and_home_end() -> None:
+    edit = _ReplyEdit()
+    edit.set_edit_text("hello world")
+    edit.set_edit_pos(5)
+    edit.keypress((40,), "ctrl k")
+    assert edit.edit_text == "hello"
+    edit.keypress((40,), "ctrl a")
+    assert edit.edit_pos == 0
+    edit.set_edit_pos(len("hello"))
+    edit.keypress((40,), "ctrl u")
+    assert edit.edit_text == ""
+
+
+def test_reply_edit_defers_unhandled_keys() -> None:
+    edit = _ReplyEdit()
+    edit.set_edit_text("")
+    assert edit.keypress((40,), "enter") == "enter"
+    assert edit.keypress((40,), "left") == "left"
+
+
+def test_handle_peek_key_left_returns_to_board_when_enabled() -> None:
+    entry = _make_entry(name="agent-a")
+    state = _make_state_with_walker((entry,))
+    _build_peek_panel(state)
+    original_footer = Text("bar")
+    state.saved_footer = original_footer
+    state.frame.footer = Text("panel")
+    state.peek_agent_name = AgentName("agent-a")
+    state.peek_left_returns_to_board = True
+    assert _handle_peek_key(state, "left") is True
+    assert state.peek_agent_name is None
+
+
+def test_handle_peek_key_left_ignored_when_disabled_or_nonempty() -> None:
+    entry = _make_entry(name="agent-a")
+    state = _make_state_with_walker((entry,))
+    _build_peek_panel(state)
+    state.peek_agent_name = AgentName("agent-a")
+    # Disabled by default: Left falls through to the Edit.
+    assert _handle_peek_key(state, "left") is None
+    # Enabled but reply has text: Left stays cursor movement, not a return.
+    state.peek_left_returns_to_board = True
+    state.peek_input.set_edit_text("draft")
+    assert _handle_peek_key(state, "left") is None
+    assert state.peek_agent_name == AgentName("agent-a")

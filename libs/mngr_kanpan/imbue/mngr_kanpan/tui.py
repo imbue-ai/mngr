@@ -374,6 +374,8 @@ class _KanpanState(MutableModel):
     refresh_interval_seconds: float = DEFAULT_REFRESH_INTERVAL_SECONDS
     retry_cooldown_seconds: float = 60.0
     staleness_threshold_seconds: float = DEFAULT_STALENESS_THRESHOLD_SECONDS
+    # When true, Left on an empty reply closes the peek panel (Agent-View back gesture).
+    peek_left_returns_to_board: bool = False
     # Palette attr names for mark indicators (e.g. "mark_d", "mark_p")
     mark_attr_names: tuple[str, ...] = ()
     # Column definitions (from data sources)
@@ -1033,11 +1035,83 @@ def _peek_body_from_capture(result: subprocess.CompletedProcess[str]) -> str:
     return "\n".join(tail)
 
 
+@pure
+def _reply_word_start(text: str, pos: int) -> int:
+    """Index of the start of the whitespace-delimited word to the left of `pos`."""
+    index = pos
+    while index > 0 and text[index - 1].isspace():
+        index -= 1
+    while index > 0 and not text[index - 1].isspace():
+        index -= 1
+    return index
+
+
+@pure
+def _reply_word_end(text: str, pos: int) -> int:
+    """Index of the end of the whitespace-delimited word to the right of `pos`."""
+    index = pos
+    length = len(text)
+    while index < length and text[index].isspace():
+        index += 1
+    while index < length and not text[index].isspace():
+        index += 1
+    return index
+
+
+class _ReplyEdit(Edit):
+    """Single-line reply input with readline-style word and line editing.
+
+    Adds the word-movement, word-delete and line-kill bindings a terminal user
+    expects (Option/Ctrl+arrow, Option/Ctrl+Delete, Ctrl-A/E/K/U/W) on top of
+    urwid's basic Edit. Keys it does not handle fall through unchanged so the
+    panel can act on them (Enter sends, Esc closes, Left on an empty line returns
+    to the board).
+    """
+
+    _WORD_LEFT = ("meta left", "ctrl left", "meta b")
+    _WORD_RIGHT = ("meta right", "ctrl right", "meta f")
+    _DELETE_WORD_LEFT = ("ctrl w", "meta backspace", "meta delete")
+    _DELETE_WORD_RIGHT = ("meta d",)
+
+    def keypress(self, size: tuple[int, ...], key: str) -> str | None:
+        text = self.edit_text
+        pos = self.edit_pos
+        if key == "ctrl a":
+            self.set_edit_pos(0)
+            return None
+        if key == "ctrl e":
+            self.set_edit_pos(len(text))
+            return None
+        if key in self._WORD_LEFT:
+            self.set_edit_pos(_reply_word_start(text, pos))
+            return None
+        if key in self._WORD_RIGHT:
+            self.set_edit_pos(_reply_word_end(text, pos))
+            return None
+        if key in self._DELETE_WORD_LEFT:
+            start = _reply_word_start(text, pos)
+            self.set_edit_text(text[:start] + text[pos:])
+            self.set_edit_pos(start)
+            return None
+        if key in self._DELETE_WORD_RIGHT:
+            end = _reply_word_end(text, pos)
+            self.set_edit_text(text[:pos] + text[end:])
+            return None
+        if key == "ctrl k":
+            self.set_edit_text(text[:pos])
+            return None
+        if key == "ctrl u":
+            self.set_edit_text(text[pos:])
+            self.set_edit_pos(0)
+            return None
+        return super().keypress(size, key)
+
+
 def _build_peek_panel(state: _KanpanState) -> Pile:
     """Build the peek panel widget (shown in place of the footer) and stash its parts."""
     state.peek_header_text = Text("")
     state.peek_body_text = Text("", wrap="clip")
-    state.peek_input = Edit(caption=("peek_hint", PEEK_REPLY_PROMPT))
+    state.peek_input = _ReplyEdit(caption=("peek_hint", PEEK_REPLY_PROMPT))
     state.peek_status_text = Text("")
     hint = Text(("peek_hint", "  enter: send reply   ·   esc: close"))
     panel = Pile(
@@ -1170,8 +1244,10 @@ def _submit_peek_reply(state: _KanpanState) -> None:
     agent_name = str(state.peek_agent_name)
     state.peek_reply_future = executor.submit(_run_message, agent_name, text)
     state.peek_input.set_edit_text("")
+    # Echo the sent text immediately so it is not "eaten" while delivery is in flight
+    # (mngr message can wait up to ~90s for the agent's submission signal).
     if state.peek_status_text is not None:
-        state.peek_status_text.set_text(("peek_hint", "  sending..."))
+        state.peek_status_text.set_text(("peek_hint", f"  sending: {text}"))
     if state.loop is not None:
         state.loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_peek_reply_poll, (state, agent_name))
 
@@ -1208,6 +1284,12 @@ def _handle_peek_key(state: _KanpanState, key: str) -> bool | None:
     if key == "enter":
         _submit_peek_reply(state)
         return True
+    # Optional Agent-View back gesture: Left on an empty reply returns to the board.
+    # (Left only reaches here when the reply Edit is at column 0, i.e. empty.)
+    if key == "left" and state.peek_left_returns_to_board:
+        if state.peek_input is not None and not state.peek_input.get_edit_text():
+            _close_peek(state)
+            return True
     return None
 
 
@@ -2100,6 +2182,7 @@ def run_kanpan(
         refresh_interval_seconds=plugin_config.refresh_interval_seconds,
         retry_cooldown_seconds=plugin_config.retry_cooldown_seconds,
         staleness_threshold_seconds=plugin_config.effective_staleness_threshold_seconds(),
+        peek_left_returns_to_board=plugin_config.peek_left_returns_to_board,
         mark_attr_names=mark_attr_names,
         column_defs=column_defs,
         data_sources=data_sources,
