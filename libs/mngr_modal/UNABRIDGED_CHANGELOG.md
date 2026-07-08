@@ -4,6 +4,24 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-07
+
+Added an `is_vm_runtime_enabled` setting to the Modal provider config that controls whether sandboxes run on Modal's VM runtime (https://modal.com/docs/guide/vm-sandboxes) instead of the default gVisor runtime. It defaults to false (gVisor); set `is_vm_runtime_enabled = true` under `[providers.modal]` to create sandboxes with `experimental_options = {"vm_runtime": True}`, which provides stronger isolation and broader syscall compatibility (e.g. Docker-in-sandbox state surviving a filesystem snapshot).
+
+Modal streaming discovery now reports each running host's SSH endpoint (via the shared `collect_cached_host_ssh_infos` helper) so the discovery poller re-emits it as a `HOST_SSH_INFO` event. Previously only a full `mngr list` surfaced SSH info, so a consumer that tunnels to Modal hosts through the streaming discovery path (e.g. the minds system_interface forward) could be left unable to reach them.
+
+## 2026-07-06
+
+Updated the per-host-bounded discovery override to accept the new cross-poll read registry parameter (unused by this batch provider, which reads all hosts in one bounded pass). No behavioral change for this provider.
+
+Updated the Modal provider for mngr's new per-provider discovery: it now implements the bounded `discover_hosts_and_agents_within_timeouts` discovery entry point. Because Modal reads all host and agent state from the state volume in one batched pass, individual host reads are not separately bounded -- the provider is still bounded by the provider-level discovery error timeout, and no host is marked UNKNOWN by this path.
+
+Fixed a regression where Modal authentication failures during `mngr list` surfaced as a raw proxy auth error instead of the friendly Modal auth error (with the provider name and disable hint): the `discover_hosts_and_agents` batch path is decorated with the auth-error handler again.
+
+## 2026-07-01
+
+Added a new async/await ratchet (`test_prevent_async_await`) that freezes the current amount of `async def` / `await` usage in this project and fails if new async code is added. We strongly prefer synchronous code: it is far easier to debug, and our software is intentionally low-scale, so async provides no benefit. Existing usage is grandfathered in at its current count; the count can only decrease.
+
 ## 2026-06-26
 
 Added scope docstrings to this package's release tests so the TMR (test

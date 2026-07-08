@@ -4,6 +4,39 @@ A concise, human-friendly summary of changes for repo-level dev tooling: CI work
 
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
+## 2026-07-07
+
+### Changed
+
+- Changed: Migrated GitHub Actions workflows off GitHub-stored secrets onto HashiCorp Vault via the `imbue-ai/use-vault-secrets` OIDC action. CI test/TMR jobs fetch the Anthropic key, imbue Modal token id/secret, and TMR S3 credentials from `mngr/ci/*` (role `mngr_ci_gh`); the minds CI-env jobs fetch the minds-dev Modal token from `minds/ci/*`; `minds-launch-to-msg.yml`'s build job fetches ToDesktop signing credentials from an environment-gated `minds/release/*` (role `minds_release_gh`, GitHub Environment `minds-release`). `scripts/changelog_deploy.sh` now reads its bot token from `secrets/mngr/dev/GH_TOKEN` and Anthropic key from `secrets/mngr/ci/ANTHROPIC_API_KEY`. The `MODAL_TOKEN_ID` repo variable and the `ANTHROPIC_API_KEY` / `MODAL_TOKEN_SECRET` / `MINDS_DEV_MODAL_TOKEN_*` / `AWS_*` Actions secrets are retired. The self-hosted macOS `minds-runner` needs `curl` and `jq` on PATH for the Vault action.
+
+## 2026-07-06
+
+### Added
+
+- Added: Design plans for overlay-surface + custom tooltips (`blueprint/overlay-surface-tooltips/`), per-provider discovery (`blueprint/per-provider-discovery/`, plus follow-up spec `spec-bounded-per-host-discovery.md`), persistent terminals (`blueprint/persistent-terminals/`), the SIGWINCH attach-hook implementation (`specs/sigwinch-attach-hook/spec.md`), and simplifying workspace names (`blueprint/simplify-workspace-names/`).
+- Added: Paired forever-claude-template worktree in the minds snapshot bake — `scripts/snapshot_minds_e2e_state.py` now materializes the FCT branch matching the current mngr branch (else `main`) with the current mngr vendored into `vendor/mngr`, baked into the snapshot image via a separate upload. Workspace-creation tests now exercise coordinated mngr+FCT changes together instead of the released FCT tag. `just minds-test-electron` materializes the worktree before the local run.
+
+### Changed
+
+- Changed: Raised the repo-wide bash strict-mode ratchet from 11 to 12 (`test_meta_ratchets.py::test_prevent_bash_without_strict_mode`) to account for `libs/mngr/imbue/mngr/resources/sigwinch_panes.sh`, a best-effort tmux repaint sweep that deliberately uses `set -uo pipefail` (omitting `-e`). Refreshed the test's stale docstring.
+- Changed: Excluded `/imbue_common/sentry` from coverage.
+
+## 2026-07-01
+
+### Added
+
+- Added: `blueprint/ratchet-async-await/` design doc for the new monorepo-wide async/await ratchet that freezes and gradually reduces `async def` / `await` usage.
+
+### Changed
+
+- Changed: Split the mngr and minds release test suites. `.github/workflows/release-tests.yml` jobs renamed (`test-docker-release` -> `test-mngr-release-docker`, `test-release` -> `test-mngr-release`) and now exclude `apps/minds` by path. All minds `@release` tests (`minds_deployment` group plus the plain minds `@release` tests, with Chromium installed in-job) now run from the minds release job (`test-minds-release` in `ci.yml`, manual `run_minds_release_tests` dispatch) instead of the mngr `v*`-tag workflow. Updated the stale `test-docker-release` reference in `offload-modal-release.toml`.
+- Changed: Bumped pinned Claude Code CLI version 2.1.141 -> 2.1.160 in the release-tests workflow, the `tmr-setup` action, and the minds snapshot build script, aligning with the release Dockerfile pin.
+
+### Removed
+
+- Removed: Dev-level OVH-VPS scaffolding. Dropped `--backend slice` from the `bake-slice-{dev,prod}` justfile recipes (the flag no longer exists) and reframed the pool recipe comments to slice-only; deleted the unused `scripts/remove_old_flat_vault_secrets.py`; and removed obsolete `specs/swap-pool-to-ovh/`, `blueprint/deprecate-ovh-vps/`, and `blueprint/disable-ovh-qemu-backups/`.
+
 ## 2026-06-30
 
 ### Added

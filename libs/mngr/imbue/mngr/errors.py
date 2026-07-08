@@ -518,13 +518,20 @@ class LocalHostNotDestroyableError(ProviderError):
         super().__init__(provider_name, "Cannot destroy the local host - it is your local computer")
 
 
+# Marker substring embedded in HostShutdownNotSupportedError's message. Exported as
+# an importable constant so out-of-process callers -- notably minds, which runs mngr
+# as a subprocess and only sees (exit_code, stderr), not the exception object -- can
+# match on this one shared source of truth instead of duplicating the literal.
+HOST_SHUTDOWN_NOT_SUPPORTED_MESSAGE: Final[str] = "does not support stopping hosts"
+
+
 class HostShutdownNotSupportedError(ProviderError):
     """Provider does not support stopping hosts."""
 
     user_help_text = "Stop the agent without --stop-host, or use a provider that supports stopping hosts."
 
     def __init__(self, provider_name: ProviderInstanceName) -> None:
-        super().__init__(provider_name, f"Provider {provider_name} does not support stopping hosts")
+        super().__init__(provider_name, f"Provider {provider_name} {HOST_SHUTDOWN_NOT_SUPPORTED_MESSAGE}")
 
 
 class PluginSpecifierError(MngrError, ValueError):
@@ -600,6 +607,15 @@ class InvalidKeyPathError(ConfigError, ValueError):
 
 class DockerConfigValidationError(ConfigError, ValueError):
     """Raised when Docker provider config fields are mutually inconsistent."""
+
+
+class ProviderTimeoutConfigError(ConfigError, ValueError):
+    """Raised when a provider's discovery timeout fields are mis-ordered.
+
+    The per-host and per-agent discovery timeouts must be below the provider
+    error timeout, otherwise a single slow host could never surface as UNKNOWN
+    before its whole provider is declared errored.
+    """
 
 
 class UnknownAgentTypeError(ConfigError):

@@ -322,6 +322,24 @@ def test_build_mngr_create_command_forwards_region_for_imbue_cloud() -> None:
     assert "region=US-WEST-OR" in command
 
 
+def test_build_mngr_create_command_modal_targets_modal_provider() -> None:
+    """Modal addresses the ``modal`` provider instance (local-token mode)."""
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.MODAL,
+        host_name=HostName("hello"),
+    )
+    # Exact list-element match so it can't be confused with ``modal_proxied``.
+    assert "system-services@hello.modal" in command
+    assert "system-services@hello.modal_proxied" not in command
+    # Same remote shape as vultr/aws: new host + main + modal templates.
+    assert "--new-host" in command
+    assert command.count("--template") == 2
+    assert "modal" in command
+    assert "main" in command
+    # No --reuse (that is only for imbue_cloud pool adoption).
+    assert "--reuse" not in command
+
+
 def test_build_mngr_create_command_forwards_region_for_vultr() -> None:
     command = _build_mngr_create_command(
         launch_mode=LaunchMode.VULTR,
@@ -1200,7 +1218,9 @@ def test_start_creation_imbue_cloud_ai_with_local_compute_mints_litellm_key(tmp_
 
     assert len(cli.create_calls) == 1
     assert cli.create_calls[0]["account"] == "alice@imbue.com"
-    assert cli.create_calls[0]["metadata"] == {"host_name": "my-workspace"}
+    # The LiteLLM key no longer carries host_name metadata (the host name is
+    # mutable and the key is minted before the host exists).
+    assert cli.create_calls[0]["metadata"] is None
 
 
 # Deterministic sync test, but the setup spins up fresh ConcurrencyGroups and a

@@ -6,6 +6,7 @@ Unless otherwise specified, `mngr` assumes:
 - the user is either the current user (local) or `root` (remote, override via config or CLI args for most commands)
 - a host name is a unique identifier for the host (a host can contain multiple agents).
 - tmux sessions are named `mngr-<agent_name>`
+- attaching to an agent's tmux session triggers a repaint (a `SIGWINCH` to the agent process) so its TUI redraws cleanly at the attaching client's size. This fires on *every* attach -- `mngr connect`, a plain `tmux attach`, the ttyd terminal, etc. -- via a per-session tmux `client-attached` hook
 - agent data exists at `$MNGR_AGENT_STATE_DIR` (i.e., `$MNGR_HOST_DIR/agents/$MNGR_AGENT_ID/`)
 - there are `events` subdirectories inside `$MNGR_HOST_DIR` and each `$MNGR_AGENT_STATE_DIR` for storing structured event data (JSONL files under `events/`). Plain-text service logs (sshd, activity watcher, volume sync, shutdown) are stored under `$MNGR_HOST_DIR/logs/`.
 - environment variables for hosts and agents are stored in `$MNGR_HOST_DIR/env` and `$MNGR_AGENT_STATE_DIR/env` respectively

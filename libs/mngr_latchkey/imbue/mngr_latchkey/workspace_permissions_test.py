@@ -7,13 +7,8 @@ of the shared ``workspace_permissions.json`` catalog the desktop dialog renders
 from.
 """
 
-from imbue.mngr_latchkey.workspace_permissions import MINDS_WORKSPACES_SCOPE
 from imbue.mngr_latchkey.workspace_permissions import WORKSPACE_VERBS
 from imbue.mngr_latchkey.workspace_permissions import is_targeted_verb
-
-
-def test_scope_is_minds_workspaces() -> None:
-    assert MINDS_WORKSPACES_SCOPE == "minds-workspaces"
 
 
 def test_is_targeted_verb_classifies_verbs() -> None:

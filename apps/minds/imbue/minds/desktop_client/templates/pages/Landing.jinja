@@ -695,7 +695,7 @@
                         extra="landing-start-btn"
                         :style="start_btn_style"
                         onclick="event.stopPropagation(); window.landingStartClick(this)"
-                        title="Start workspace"
+                        data-tooltip="Start workspace"
                         aria-label="Start workspace">
                   <Icon16 name="play" />
                 </Button>
@@ -703,27 +703,27 @@
                         extra="landing-stop-btn"
                         :style="stop_btn_style"
                         onclick="event.stopPropagation(); window.landingStopClick(this)"
-                        title="Stop workspace"
+                        data-tooltip="Stop workspace"
                         aria-label="Stop workspace">
                   <Icon16 name="pause" />
                 </Button>
               {% else %}
                 <Button variant="ghost" size="icon"
                         onclick="event.stopPropagation(); window.landingRestartClick(this)"
-                        title="Restart workspace"
+                        data-tooltip="Restart workspace"
                         aria-label="Restart workspace">
                   <Icon16 name="restart" />
                 </Button>
               {% endif %}
               <Button variant="ghost" size="icon"
                       onclick="event.stopPropagation(); window.landingOpenInNewWindow(this)"
-                      title="Open in new window"
+                      data-tooltip="Open in new window"
                       aria-label="Open workspace in new window">
                 <Icon16 name="arrow-up-right" />
               </Button>
               <Button variant="ghost" size="icon"
                       onclick={{ "event.stopPropagation(); window.location='/workspace/" ~ agent_id ~ "/settings'" }}
-                      title="Settings"
+                      data-tooltip="Settings"
                       aria-label="Workspace settings">
                 <Icon16 name="settings" />
               </Button>

@@ -5,14 +5,15 @@ from pathlib import Path
 import pytest
 
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr_lima.config import LimaProviderConfig
-from imbue.mngr_lima.errors import LimaHostRenameError
 from imbue.mngr_lima.host_store import HostRecord
 from imbue.mngr_lima.host_store import LimaHostConfig
 from imbue.mngr_lima.instance import LimaProviderInstance
@@ -39,12 +40,41 @@ def test_snapshot_methods_raise(lima_provider: LimaProviderInstance) -> None:
         lima_provider.delete_snapshot(host_id, SnapshotId("snap-1"))
 
 
-def test_rename_host_raises(lima_provider: LimaProviderInstance) -> None:
-    from imbue.mngr.primitives import HostName
-
+def test_rename_host_raises_when_record_missing(lima_provider: LimaProviderInstance) -> None:
     host_id = HostId.generate()
-    with pytest.raises(LimaHostRenameError):
+    with pytest.raises(HostNotFoundError):
         lima_provider.rename_host(host_id, HostName("new-name"))
+
+
+def test_rename_host_updates_persisted_host_name(lima_provider: LimaProviderInstance) -> None:
+    """Renaming a Lima host rewrites the host name on its record (the instance name is untouched)."""
+    host_id = HostId.generate()
+    now = datetime.now(timezone.utc)
+    record = HostRecord(
+        certified_host_data=CertifiedHostData(
+            host_id=str(host_id),
+            host_name="old-name",
+            user_tags={},
+            snapshots=[],
+            created_at=now,
+            updated_at=now,
+        ),
+        config=LimaHostConfig(
+            instance_name=f"mngr-{host_id}",
+            is_host_data_volume_exposed=False,
+            host_data_disk_name="mngr-abc-data",
+        ),
+    )
+    lima_provider._host_store.write_host_record(record)
+
+    lima_provider.rename_host(host_id, HostName("new-name"))
+
+    updated = lima_provider._host_store.read_host_record(host_id, use_cache=False)
+    assert updated is not None
+    assert updated.certified_host_data.host_name == "new-name"
+    # The limactl instance name is unchanged (no VM rename).
+    assert updated.config is not None
+    assert updated.config.instance_name == f"mngr-{host_id}"
 
 
 def test_tags_crud(lima_provider: LimaProviderInstance) -> None:

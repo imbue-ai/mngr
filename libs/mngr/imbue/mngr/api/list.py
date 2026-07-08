@@ -25,7 +25,7 @@ from imbue.mngr.api.discovery_events import emit_discovery_error_event
 from imbue.mngr.api.discovery_events import emit_host_ssh_info
 from imbue.mngr.api.discovery_events import extract_agents_and_hosts_from_full_listing
 from imbue.mngr.api.discovery_events import make_discovered_provider
-from imbue.mngr.api.discovery_events import write_full_discovery_snapshot
+from imbue.mngr.api.discovery_events import write_provider_discovery_snapshot
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.api.providers import list_provider_names_to_load
 from imbue.mngr.config.data_types import MngrContext
@@ -235,6 +235,10 @@ def list_agents(
     reset_caches: bool = False,
 ) -> ListResult:
     """List all agents with optional filtering."""
+    # Stamp the per-provider snapshot span from when listing began (see
+    # _maybe_write_provider_discovery_snapshots), so the shared aggregator can refuse
+    # to let this side-effect snapshot clobber an item changed during the listing.
+    discovery_started_at = datetime.now(timezone.utc)
     result = ListResult()
 
     # Compile CEL filters if provided
@@ -301,62 +305,86 @@ def list_agents(
         if on_error:
             on_error(error_info)
 
-    _maybe_write_full_discovery_snapshot(mngr_ctx, result, provider_names, include_filters, exclude_filters)
+    _maybe_write_provider_discovery_snapshots(
+        mngr_ctx, result, provider_names, include_filters, exclude_filters, discovery_started_at
+    )
     return result
 
 
-def _maybe_write_full_discovery_snapshot(
+def _maybe_write_provider_discovery_snapshots(
     mngr_ctx: MngrContext,
     result: ListResult,
     provider_names: tuple[str, ...] | None,
     include_filters: tuple[str, ...],
     exclude_filters: tuple[str, ...],
+    discovery_started_at: datetime,
 ) -> None:
-    """Write a full discovery snapshot when this listing represents all known agents.
+    """Write one per-provider discovery snapshot per provider when listing all known agents.
 
-    A snapshot is written whenever the listing represents the full state:
+    Snapshots are written whenever the listing represents the full state:
     - All providers were queried (no provider_names filter)
     - No CEL filters were applied (the result contains every agent)
 
-    Per-provider discovery errors are NOT a reason to skip emission: the
-    snapshot is authoritative state, and consumers need to see which
-    providers succeeded vs. failed in order to render reality. The `providers`
-    and `error_by_provider_name` fields carry that information.
+    One ``ProviderDiscoverySnapshotEvent`` is emitted per provider that was attempted --
+    a successful provider carries its agents/hosts, an errored provider carries its
+    ``DiscoveryError`` (and no agents/hosts). This replaces the old single global
+    snapshot so a slow/failed provider only affects its own snapshot, matching the
+    streaming producer's per-provider model.
     """
     is_full_listing = provider_names is None and not include_filters and not exclude_filters
     if not is_full_listing:
         return
-    # Skip if any error is something other than a per-provider error. This
-    # filter currently lumps three classes together: plain `ErrorInfo` from the
-    # top-level `except MngrError` (truly non-attributable), plus `HostErrorInfo`
-    # and `AgentErrorInfo` (attributable to a host/agent but not modeled in the
-    # snapshot today). In all three cases the result may be structurally
-    # incomplete in ways the snapshot's `error_by_provider_name` field cannot
-    # represent, so we skip emission rather than mislead consumers. Only
-    # per-provider failures are handled in-band via `error_by_provider_name`;
-    # surfacing per-host / per-agent errors in the snapshot is out of scope for
-    # this change.
+    # Skip if any error is something other than a per-provider error. This filter lumps
+    # three classes together: plain `ErrorInfo` from the top-level `except MngrError`
+    # (truly non-attributable), plus `HostErrorInfo` and `AgentErrorInfo` (attributable
+    # to a host/agent but not modeled in the snapshot today). In all three cases the
+    # result may be structurally incomplete in ways the per-provider snapshots cannot
+    # represent, so we skip emission rather than mislead consumers. Only per-provider
+    # failures are handled in-band via each snapshot's `error` field.
     non_provider_errors = [e for e in result.errors if not isinstance(e, ProviderErrorInfo)]
     if non_provider_errors:
         logger.trace(
-            "Skipping full discovery snapshot: {} non-provider-attributable error(s) during listing",
+            "Skipping discovery snapshots: {} non-provider-attributable error(s) during listing",
             len(non_provider_errors),
         )
         return
     try:
         discovered_agents, discovered_hosts, host_ssh_infos = extract_agents_and_hosts_from_full_listing(result.agents)
         snapshot_providers, error_by_provider_name = _build_provider_snapshot_state(mngr_ctx, result)
-        write_full_discovery_snapshot(
-            mngr_ctx.config,
-            discovered_agents,
-            discovered_hosts,
-            providers=snapshot_providers,
-            error_by_provider_name=error_by_provider_name,
+        discovery_finished_at = datetime.now(timezone.utc)
+
+        # Group this listing's agents/hosts by their owning provider so each provider's
+        # snapshot is authoritative only for its own items.
+        agents_by_provider: dict[ProviderInstanceName, list[DiscoveredAgent]] = {}
+        for agent in discovered_agents:
+            agents_by_provider.setdefault(agent.provider_name, []).append(agent)
+        hosts_by_provider: dict[ProviderInstanceName, list[DiscoveredHost]] = {}
+        for host in discovered_hosts:
+            hosts_by_provider.setdefault(host.provider_name, []).append(host)
+
+        # Write one snapshot per provider we attempted (succeeded or errored). Also
+        # include any provider that actually contributed agents/hosts to this listing,
+        # so its items are never silently dropped from the side-effect log even if it
+        # is absent from both the loaded-providers list and the error map.
+        provider_by_name = {provider.provider_name: provider for provider in snapshot_providers}
+        attempted_provider_names = (
+            set(provider_by_name) | set(error_by_provider_name) | set(agents_by_provider) | set(hosts_by_provider)
         )
+        for provider_name in attempted_provider_names:
+            write_provider_discovery_snapshot(
+                mngr_ctx.config,
+                provider_name=provider_name,
+                agents=agents_by_provider.get(provider_name, []),
+                hosts=hosts_by_provider.get(provider_name, []),
+                discovery_started_at=discovery_started_at,
+                discovery_finished_at=discovery_finished_at,
+                provider=provider_by_name.get(provider_name),
+                error=error_by_provider_name.get(provider_name),
+            )
         for host_id, ssh_info in host_ssh_infos:
             emit_host_ssh_info(mngr_ctx.config, host_id, ssh_info)
     except (MngrError, OSError) as e:
-        logger.warning("Failed to write full discovery snapshot: {}", e)
+        logger.warning("Failed to write per-provider discovery snapshots: {}", e)
 
 
 def _build_provider_snapshot_state(
@@ -443,8 +471,7 @@ def _construct_and_discover_for_provider(
             # ProviderNotAuthorizedError), so re-raise it as-is -- this keeps the
             # auth/unavailable message consistent and lets the CLI map it to the
             # provider-inaccessible exit code. Only wrap genuinely
-            # non-attributable failures so downstream handlers (e.g.
-            # discovery_events' _write_unfiltered_full_snapshot_logged, minds'
+            # non-attributable failures so downstream handlers (e.g. minds'
             # providers panel) can still recover a provider_name.
             if isinstance(e, ProviderError):
                 raise

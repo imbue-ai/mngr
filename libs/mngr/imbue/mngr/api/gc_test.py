@@ -2343,7 +2343,7 @@ class _RemoteHost(Host):
     def is_local(self) -> bool:
         return False
 
-    def discover_agents(self) -> list[DiscoveredAgent]:
+    def discover_agents(self, timeout_seconds: float | None = None) -> list[DiscoveredAgent]:
         return []
 
     def get_certified_data(self) -> CertifiedHostData:
@@ -2366,14 +2366,14 @@ class _RemoteHost(Host):
 class _RemoteAuthErrorOnDiscoverHost(_RemoteHost):
     """Remote host where discover_agents raises HostAuthenticationError."""
 
-    def discover_agents(self) -> list[DiscoveredAgent]:
+    def discover_agents(self, timeout_seconds: float | None = None) -> list[DiscoveredAgent]:
         raise HostAuthenticationError("simulated auth failure from test")
 
 
 class _RemoteConnectionErrorOnDiscoverHost(_RemoteHost):
     """Remote host where discover_agents raises HostConnectionError."""
 
-    def discover_agents(self) -> list[DiscoveredAgent]:
+    def discover_agents(self, timeout_seconds: float | None = None) -> list[DiscoveredAgent]:
         raise HostConnectionError("simulated connection failure from test")
 
 
