@@ -888,8 +888,15 @@
           <Spinner size="md" tone="accent" />
           <Spinner size="lg" tone="accent" />
         </div>
+        {# Inverse tone derives its colors from currentColor, so it is shown
+           on a solid success fill (matching the Approve button's busy state). #}
+        <div class="flex items-center gap-3 pl-6 border-l border-default bg-success text-white rounded-md px-3 py-2">
+          <Spinner size="sm" tone="inverse" />
+          <Spinner size="md" tone="inverse" />
+          <Spinner size="lg" tone="inverse" />
+        </div>
       </div>
-      <div class="mt-1 type-helper text-secondary font-mono">app.css :: .spinner (+ .spinner-accent) + Spinner.jinja</div>
+      <div class="mt-1 type-helper text-secondary font-mono">app.css :: .spinner (+ .spinner-accent / .spinner-inverse) + Spinner.jinja</div>
     </section>
 
     {# Buttons #}
