@@ -1209,7 +1209,7 @@ def _handle_backup_operation_logs(operation_id: str) -> Response:
     if log_queue is None:
         return _json_error(f"Unknown operation {operation_id}", 404)
     return make_streaming_response(
-        _stream_restart_operation_logs(log_queue), media_type="text/event-stream", headers=_SSE_HEADERS
+        _stream_workspace_operation_logs(log_queue), media_type="text/event-stream", headers=_SSE_HEADERS
     )
 
 
@@ -1238,11 +1238,13 @@ def _stream_create_operation_logs(log_queue: "queue.Queue[str]") -> Iterator[str
         yield _sse({"log": line})
 
 
-def _stream_restart_operation_logs(log_queue: "queue.Queue[str]") -> Iterator[str]:
-    """Yield SSE frames draining a restart operation's in-memory log queue.
+def _stream_workspace_operation_logs(log_queue: "queue.Queue[str]") -> Iterator[str]:
+    """Yield SSE frames draining a workspace operation's in-memory log queue.
 
-    Mirrors :func:`_stream_create_operation_logs` but keys on the restart
-    registry's ``OPERATION_LOG_SENTINEL`` end-of-stream marker.
+    Serves the restart and backup update/configure log routes alike (any
+    operation tracked by the workspace-operation registry). Mirrors
+    :func:`_stream_create_operation_logs` but keys on the registry's
+    ``OPERATION_LOG_SENTINEL`` end-of-stream marker.
     """
     shutdown_event = get_state().shutdown_event
     while not shutdown_event.is_set():
@@ -1328,7 +1330,7 @@ def _handle_restart_operation_logs(operation_id: str) -> Response:
     if log_queue is None:
         return _json_error(f"Unknown operation {operation_id}", 404)
     return make_streaming_response(
-        _stream_restart_operation_logs(log_queue), media_type="text/event-stream", headers=_SSE_HEADERS
+        _stream_workspace_operation_logs(log_queue), media_type="text/event-stream", headers=_SSE_HEADERS
     )
 
 
