@@ -70,6 +70,15 @@ class WorkspaceOperationRegistryInterface(MutableModel, ABC):
         """Register a new RUNNING operation for ``agent_id``, replacing any prior record."""
 
     @abstractmethod
+    def start_if_idle(self, agent_id: AgentId, kind: WorkspaceOperationKind, now: datetime) -> bool:
+        """Atomically register a new RUNNING operation unless one is already RUNNING.
+
+        Returns whether this caller won the claim. Dispatch routes use this
+        (instead of a separate get + ``start``) so two concurrent requests
+        cannot both spawn a worker for the same workspace.
+        """
+
+    @abstractmethod
     def append_log(self, agent_id: AgentId, line: str) -> None:
         """Append a log line to the operation's stream (no-op if the operation is unknown)."""
 
@@ -118,15 +127,27 @@ class InMemoryWorkspaceOperationRegistry(WorkspaceOperationRegistryInterface):
 
     def start(self, agent_id: AgentId, kind: WorkspaceOperationKind, now: datetime) -> None:
         with self.lock:
-            self.record_by_agent_id[agent_id] = WorkspaceOperationRecord(
-                agent_id=agent_id,
-                kind=kind,
-                status=WorkspaceOperationStatus.RUNNING,
-                error=None,
-                started_at=now,
-            )
-            self.log_queue_by_agent_id[agent_id] = queue.Queue()
-            self.cancel_event_by_agent_id[agent_id] = threading.Event()
+            self._register_locked(agent_id, kind, now)
+
+    def start_if_idle(self, agent_id: AgentId, kind: WorkspaceOperationKind, now: datetime) -> bool:
+        with self.lock:
+            existing = self.record_by_agent_id.get(agent_id)
+            if existing is not None and existing.status == WorkspaceOperationStatus.RUNNING:
+                return False
+            self._register_locked(agent_id, kind, now)
+            return True
+
+    def _register_locked(self, agent_id: AgentId, kind: WorkspaceOperationKind, now: datetime) -> None:
+        """Register a fresh RUNNING record; the caller must hold ``self.lock``."""
+        self.record_by_agent_id[agent_id] = WorkspaceOperationRecord(
+            agent_id=agent_id,
+            kind=kind,
+            status=WorkspaceOperationStatus.RUNNING,
+            error=None,
+            started_at=now,
+        )
+        self.log_queue_by_agent_id[agent_id] = queue.Queue()
+        self.cancel_event_by_agent_id[agent_id] = threading.Event()
 
     def append_log(self, agent_id: AgentId, line: str) -> None:
         with self.lock:

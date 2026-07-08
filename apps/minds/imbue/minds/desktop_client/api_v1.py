@@ -1020,13 +1020,15 @@ def _handle_backup_service_update(agent_id: str) -> tuple[OperationHandleRespons
     parsed_id, paths, parent_cg = context
     state = get_state()
     registry = state.workspace_operation_registry
-    existing = registry.get(parsed_id)
-    if existing is not None and existing.status == WorkspaceOperationStatus.RUNNING:
-        return _json_error(f"Another operation ({existing.kind.value}) is already running for {agent_id}", 409)
 
     body = request.get_json(silent=True, force=True) or {}
     is_stop_chats = bool(body.get("stop_chats", False))
-    registry.start(parsed_id, WorkspaceOperationKind.BACKUP_UPDATE, datetime.now(timezone.utc))
+    # Atomic check-and-claim (like restart's mark_restarting): two concurrent
+    # requests must not both spawn workers mutating the same workspace.
+    if not registry.start_if_idle(parsed_id, WorkspaceOperationKind.BACKUP_UPDATE, datetime.now(timezone.utc)):
+        existing = registry.get(parsed_id)
+        kind_note = f" ({existing.kind.value})" if existing is not None else ""
+        return _json_error(f"Another operation{kind_note} is already running for {agent_id}", 409)
     try:
         parent_cg.start_new_thread(
             target=backup_update_module.run_backup_update_sequence,
@@ -1084,6 +1086,8 @@ def _handle_backup_service_configure(agent_id: str) -> tuple[OperationHandleResp
     parsed_id, paths, parent_cg = context
     state = get_state()
     registry = state.workspace_operation_registry
+    # Fast-path rejection before any validation work; the authoritative,
+    # race-free claim is the start_if_idle below.
     existing = registry.get(parsed_id)
     if existing is not None and existing.status == WorkspaceOperationStatus.RUNNING:
         return _json_error(f"Another operation ({existing.kind.value}) is already running for {agent_id}", 409)
@@ -1118,7 +1122,10 @@ def _handle_backup_service_configure(agent_id: str) -> tuple[OperationHandleResp
         return _json_error(error_message or "Invalid backup configuration", 400)
 
     is_destination_change = has_canonical_env(paths, parsed_id)
-    registry.start(parsed_id, WorkspaceOperationKind.BACKUP_CONFIGURE, datetime.now(timezone.utc))
+    if not registry.start_if_idle(parsed_id, WorkspaceOperationKind.BACKUP_CONFIGURE, datetime.now(timezone.utc)):
+        claimed = registry.get(parsed_id)
+        kind_note = f" ({claimed.kind.value})" if claimed is not None else ""
+        return _json_error(f"Another operation{kind_note} is already running for {agent_id}", 409)
     registry.append_log(
         parsed_id, "Changing the backup destination..." if is_destination_change else "Enabling backups..."
     )
