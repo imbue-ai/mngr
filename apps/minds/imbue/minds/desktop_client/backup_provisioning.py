@@ -28,7 +28,6 @@ canonical env already exists for the workspace, minds just re-injects it.
 """
 
 import base64
-import hashlib
 import os
 import secrets
 import shlex
@@ -49,6 +48,7 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client import restic_cli
 from imbue.minds.desktop_client.backup_env_store import ENV_ARCHIVE_TIMESTAMP_FORMAT
 from imbue.minds.desktop_client.backup_env_store import archive_canonical_env
+from imbue.minds.desktop_client.backup_env_store import env_content_sha256
 from imbue.minds.desktop_client.backup_env_store import parse_restic_env
 from imbue.minds.desktop_client.backup_env_store import read_canonical_env
 from imbue.minds.desktop_client.backup_env_store import write_canonical_env
@@ -193,7 +193,7 @@ def _write_remote_file(
     chmod_suffix = f" && chmod {mode} {quoted_path}" if mode is not None else ""
     rotate_prefix = ""
     if rotate_timestamp is not None:
-        new_sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        new_sha = env_content_sha256(content)
         rotated_path = shlex.quote(f"{remote_path}.{rotate_timestamp}")
         rotate_prefix = (
             f'if [ -f {quoted_path} ] && [ "$(sha256sum {quoted_path} | cut -d\' \' -f1)" != "{new_sha}" ]; '
