@@ -4,6 +4,8 @@ All-seeing agent tracker. The name combines Sino-Japanese 看 (*kan*, "to look",
 
 Launch with `mngr kanpan`. Requires the `gh` CLI to be installed and authenticated.
 
+Board text can be selected and copied with your terminal's normal click-and-drag: the board does not capture the mouse.
+
 ## Attach, peek, and reply
 
 Interact with an agent without leaving the board:

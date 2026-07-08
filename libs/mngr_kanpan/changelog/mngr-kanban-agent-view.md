@@ -11,3 +11,5 @@ Added agent-view style interaction to the kanpan board, so you can work with an 
 - Optional `peek_left_returns_to_board` setting (under `[plugins.kanpan]`, off by default): when on, pressing `←` on an empty reply closes the peek panel and returns to the board (mirrors Claude Agent View's back gesture). `←` still moves the cursor when the reply has text.
 
 - Selection menus (e.g. `/login`) are not part of the transcript, so they do not appear in the peek; attach (`Enter`) to make the choice in the real session, since the text reply cannot move a selection cursor.
+
+- The board no longer captures the mouse, so your terminal's own click-drag text selection and copy work normally on the board (previously the board grabbed mouse events, which blocked native selection). The board has no mouse actions of its own.

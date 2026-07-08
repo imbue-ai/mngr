@@ -2098,6 +2098,9 @@ def run_kanpan(
             palette=PALETTE + mark_palette_entries,
             unhandled_input=input_handler,
             screen=screen,
+            # The board has no mouse actions; leaving mouse capture off keeps the
+            # terminal's own click-drag text selection and copy working.
+            handle_mouse=False,
         )
         state.loop = loop
 
