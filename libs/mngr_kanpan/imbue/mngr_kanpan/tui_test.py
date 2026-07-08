@@ -97,7 +97,6 @@ from imbue.mngr_kanpan.tui import _load_user_commands
 from imbue.mngr_kanpan.tui import _make_reply_edit
 from imbue.mngr_kanpan.tui import _on_batch_item_poll
 from imbue.mngr_kanpan.tui import _on_peek_capture_poll
-from imbue.mngr_kanpan.tui import _on_peek_reply_poll
 from imbue.mngr_kanpan.tui import _on_transient_expire
 from imbue.mngr_kanpan.tui import _peek_body_from_transcript
 from imbue.mngr_kanpan.tui import _prune_orphaned_marks
@@ -1902,28 +1901,22 @@ def test_peek_body_from_transcript_all_empty_turns_reports_no_messages() -> None
     assert _peek_body_from_transcript(result) == "(no recent messages)"
 
 
-def test_on_peek_reply_poll_success_clears_status() -> None:
-    state = _make_state()
-    state.peek_status_text = Text("  sending...")
-    future: Future[subprocess.CompletedProcess[str]] = Future()
-    future.set_result(subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""))
-    state.peek_reply_future = future
-    _on_peek_reply_poll(_make_mock_loop(), (state, "agent-a"))
-    assert state.peek_reply_future is None
-    # On success the in-flight marker is cleared; the reply shows up in the peek body.
-    assert str(state.peek_status_text.text) == ""
-
-
-def test_on_peek_reply_poll_failure_shows_last_error_line() -> None:
-    state = _make_state()
-    state.peek_status_text = Text("")
-    future: Future[subprocess.CompletedProcess[str]] = Future()
-    future.set_result(
-        subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="pane dump\nActual error line")
+def test_peek_body_from_transcript_collapses_tool_events() -> None:
+    stdout = (
+        "[2026-07-08T01:57:39Z] assistant:\n(no content)\n\n"
+        "[2026-07-08T01:57:39Z] tool (Bash):\n21:from imbue.mngr.errors import HostNotFoundError\n"
+        "22:from imbue.mngr.errors import MngrError\n\n"
+        "[2026-07-08T01:57:45Z] assistant:\ndone debugging\n"
     )
-    state.peek_reply_future = future
-    _on_peek_reply_poll(_make_mock_loop(), (state, "agent-a"))
-    assert "send failed: Actual error line" in str(state.peek_status_text.text)
+    result = subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
+    body = _peek_body_from_transcript(result)
+    # Empty assistant turn dropped; tool event collapsed to header + one summary line;
+    # the assistant prose kept.
+    assert "tool (Bash):" in body
+    assert "21:from imbue.mngr.errors import HostNotFoundError" in body
+    assert "22:from imbue.mngr.errors import MngrError" not in body
+    assert "done debugging" in body
+    assert "(no content)" not in body
 
 
 def test_close_peek_restores_footer_and_clears_state() -> None:

@@ -127,7 +127,6 @@ PALETTE = [
     # Peek panel
     ("peek_header", "white", "dark blue"),
     ("peek_hint", "dark gray", ""),
-    ("peek_status_error", "light red", ""),
 ]
 
 # Display order: most mature first (like Linear), muted always last
@@ -399,12 +398,11 @@ class _KanpanState(MutableModel):
     peek_header_text: Any = None
     peek_body_text: Any = None
     peek_input: Any = None
-    peek_status_text: Any = None
-    # In-flight `mngr capture` for the peeked agent, polled by the peek alarm.
+    # In-flight transcript read for the peeked agent, polled by the peek alarm.
     peek_capture_future: Future[subprocess.CompletedProcess[str]] | None = None
-    # Handle for the pending live-capture alarm (None if none scheduled).
+    # Handle for the pending live-refresh alarm (None if none scheduled).
     peek_alarm: Any = None
-    # In-flight `mngr message` reply, polled to report success/failure.
+    # Fire-and-forget `mngr message` reply; kept only so the future is not dropped.
     peek_reply_future: Future[subprocess.CompletedProcess[str]] | None = None
     # Dedicated executor for peek captures and replies. Kept separate from the
     # shared `executor` (and sized for two workers) so a slow reply -- `mngr
@@ -941,23 +939,14 @@ def _focus_row_by_name(state: _KanpanState, name: AgentName) -> None:
 
 
 def _run_transcript(agent_name: str) -> subprocess.CompletedProcess[str]:  # pragma: no cover
-    """Read the agent's recent user/assistant messages. Called from a background thread.
+    """Read the agent's recent transcript events. Called from a background thread.
 
-    Tool call/result events are excluded so the peek reads like the conversation,
-    not the agent's tool trace.
+    All roles are fetched; the verbose tool bodies are collapsed to a one-line
+    summary in ``_meaningful_transcript_lines`` so a busy agent still shows what it
+    is doing without dumping full tool output into the peek.
     """
     return subprocess.run(
-        [
-            "mngr",
-            "transcript",
-            agent_name,
-            "--role",
-            "user",
-            "--role",
-            "assistant",
-            "--tail",
-            str(PEEK_TRANSCRIPT_TAIL_EVENTS),
-        ],
+        ["mngr", "transcript", agent_name, "--tail", str(PEEK_TRANSCRIPT_TAIL_EVENTS)],
         capture_output=True,
         text=True,
         timeout=30,
@@ -989,14 +978,20 @@ def _last_nonempty_line(text: str) -> str:
 
 # A ``mngr transcript`` message header, e.g. ``[2026-07-08T01:06:54Z] assistant:``.
 _TRANSCRIPT_HEADER_RE: re.Pattern[str] = re.compile(r"^\[\d{4}-\d{2}-\d{2}T[^\]]*\] ")
+# The same header for a tool call/result, e.g. ``[...] tool (Bash):``.
+_TOOL_HEADER_RE: re.Pattern[str] = re.compile(r"^\[\d{4}-\d{2}-\d{2}T[^\]]*\] tool ")
+# Max width of the one-line summary kept for a collapsed tool event.
+PEEK_TOOL_SUMMARY_CHARS: int = 100
 
 
 @pure
 def _meaningful_transcript_lines(stdout: str) -> list[str]:
-    """Split a transcript dump into message blocks, keeping only those with real text.
+    """Split a transcript dump into message blocks, keeping what a person would read.
 
-    Tool-only turns render as ``(no content)`` under their header; dropping those empty
-    blocks leaves the conversation a person would actually read.
+    User/assistant turns with real text are kept verbatim; tool-only turns render as
+    ``(no content)`` and are dropped. Tool events are collapsed to their header plus a
+    one-line summary so a busy agent still shows what it is doing without the full,
+    verbose tool output.
     """
     blocks: list[list[str]] = []
     for line in stdout.rstrip("\n").split("\n"):
@@ -1006,9 +1001,19 @@ def _meaningful_transcript_lines(stdout: str) -> list[str]:
             blocks[-1].append(line)
     kept: list[str] = []
     for block in blocks:
-        body = block[1:] if _TRANSCRIPT_HEADER_RE.match(block[0]) else block
-        if any(line.strip() and line.strip() != "(no content)" for line in body):
+        header = block[0] if _TRANSCRIPT_HEADER_RE.match(block[0]) else None
+        body = block[1:] if header is not None else block
+        if header is not None and _TOOL_HEADER_RE.match(header):
+            summary = next((line.strip() for line in body if line.strip()), "")
+            kept.append(header)
+            if summary:
+                kept.append(f"  {summary[:PEEK_TOOL_SUMMARY_CHARS]}")
+            kept.append("")
+        elif any(line.strip() and line.strip() != "(no content)" for line in body):
             kept.extend(block)
+        else:
+            # An empty or "(no content)" turn -- dropped so it does not clutter the peek.
+            pass
     return kept
 
 
@@ -1057,7 +1062,6 @@ def _build_peek_panel(state: _KanpanState) -> Pile:
     state.peek_header_text = Text("")
     state.peek_body_text = Text("", wrap="space")
     state.peek_input = _make_reply_edit(("peek_hint", PEEK_REPLY_PROMPT))
-    state.peek_status_text = Text("")
     hint = Text(("peek_hint", "  enter: send reply   ·   esc: close"))
     panel = Pile(
         [
@@ -1066,7 +1070,6 @@ def _build_peek_panel(state: _KanpanState) -> Pile:
             state.peek_body_text,
             Divider("─"),
             state.peek_input,
-            state.peek_status_text,
             hint,
         ]
     )
@@ -1164,7 +1167,6 @@ def _close_peek(state: _KanpanState) -> None:
     state.peek_header_text = None
     state.peek_body_text = None
     state.peek_input = None
-    state.peek_status_text = None
 
 
 def _toggle_peek(state: _KanpanState) -> None:
@@ -1176,46 +1178,21 @@ def _toggle_peek(state: _KanpanState) -> None:
 
 
 def _submit_peek_reply(state: _KanpanState) -> None:
-    """Send the reply-input text to the peeked agent; a no-op when the input is empty."""
+    """Fire-and-forget the reply-input text to the peeked agent; a no-op when empty.
+
+    ``mngr message`` blocks up to ~90s waiting for the agent's submission signal,
+    which a busy agent cannot give until its current turn ends -- so the send runs
+    on the peek executor and its result is not awaited. The paste itself is queued
+    immediately, and the reply shows up in the panel body once the agent submits it.
+    """
     if state.peek_agent_name is None or state.peek_input is None:
         return
     text = state.peek_input.get_edit_text().strip()
     if not text:
         return
     executor = _ensure_peek_executor(state)
-    agent_name = str(state.peek_agent_name)
-    state.peek_reply_future = executor.submit(_run_message, agent_name, text)
+    state.peek_reply_future = executor.submit(_run_message, str(state.peek_agent_name), text)
     state.peek_input.set_edit_text("")
-    # The reply lands in the transcript body within a refresh or two, so the status
-    # only needs a minimal in-flight marker; it is cleared once delivery returns.
-    if state.peek_status_text is not None:
-        state.peek_status_text.set_text(("peek_hint", "  sending..."))
-    if state.loop is not None:
-        state.loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_peek_reply_poll, (state, agent_name))
-
-
-def _on_peek_reply_poll(loop: MainLoop, data: tuple[_KanpanState, str]) -> None:
-    """Poll the in-flight reply and report success/failure in the panel status line."""
-    state, agent_name = data
-    future = state.peek_reply_future
-    if future is None:
-        return
-    if not future.done():
-        loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_peek_reply_poll, data)
-        return
-
-    state.peek_reply_future = None
-    if state.peek_status_text is None:
-        return
-    try:
-        result = future.result()
-        if result.returncode == 0:
-            state.peek_status_text.set_text("")
-        else:
-            detail = _last_nonempty_line(result.stderr) or f"exited with code {result.returncode}"
-            state.peek_status_text.set_text(("peek_status_error", f"  send failed: {detail}"))
-    except (subprocess.SubprocessError, OSError) as e:
-        state.peek_status_text.set_text(("peek_status_error", f"  send failed: {e}"))
 
 
 def _handle_peek_key(state: _KanpanState, key: str) -> bool | None:
