@@ -10,10 +10,13 @@ from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.latchkey.permission_overview import PermissionOverviewError
 from imbue.minds.desktop_client.latchkey.permission_overview import build_file_sharing_overview
 from imbue.minds.desktop_client.latchkey.permission_overview import build_permission_overview
+from imbue.minds.desktop_client.latchkey.permission_overview import build_workspace_overview
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_file_sharing_for_all_workspaces
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_file_sharing_for_workspace
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_for_all_workspaces
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_for_workspace
+from imbue.minds.desktop_client.latchkey.permission_overview import revoke_workspace_ops_for_all_workspaces
+from imbue.minds.desktop_client.latchkey.permission_overview import revoke_workspace_ops_for_workspace
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -281,3 +284,117 @@ def test_revoke_file_sharing_unresolvable_workspace_raises(tmp_path: Path) -> No
 
     with pytest.raises(PermissionOverviewError, match="Could not resolve host"):
         revoke_file_sharing_for_workspace(resolver, build_fake_gateway_client(), latchkey, str(AgentId()))
+
+
+# -- Cross-workspace management ------------------------------------------------
+
+
+def _workspace_rule(names: tuple[str, ...]) -> dict[str, list[str]]:
+    return {"latchkey-self": [_BASELINE_SELF_PERM, *names]}
+
+
+def test_build_workspace_overview_groups_shared_and_per_target(tmp_path: Path) -> None:
+    latchkey = _latchkey(tmp_path)
+    agent, host = str(AgentId()), HostId()
+    target = str(AgentId())
+    _seed_host(
+        latchkey,
+        host,
+        (
+            _workspace_rule(
+                (
+                    "minds-workspaces-read",
+                    "minds-workspaces-create",
+                    f"minds-workspaces-recover-{target}",
+                    f"minds-workspaces-backups-export-{target}",
+                )
+            ),
+        ),
+    )
+    resolver = _resolver({agent: host}, {agent: "Ops Bot"})
+
+    overview = build_workspace_overview(resolver, build_fake_gateway_client(), latchkey)
+
+    # Shared group first, then the per-target group.
+    assert [g.is_shared for g in overview] == [True, False]
+    shared, per_target = overview
+    assert shared.target_workspace_id == ""
+    assert {p.label for p in shared.cards[0].permissions} == {"read", "create"}
+    assert per_target.target_workspace_id == target
+    # ``backups-export`` keeps its internal hyphen in the short label.
+    assert {p.label for p in per_target.cards[0].permissions} == {"recover", "backups-export"}
+
+
+def test_build_workspace_overview_ignores_non_workspace_permissions(tmp_path: Path) -> None:
+    latchkey = _latchkey(tmp_path)
+    agent, host = str(AgentId()), HostId()
+    # Only baseline + file-sharing + accounts, no minds-workspaces verbs.
+    _seed_host(
+        latchkey, host, ({"latchkey-self": [_BASELINE_SELF_PERM, "minds-file-server-read-/x", "minds-accounts-read"]},)
+    )
+    resolver = _resolver({agent: host}, {agent: "Ops Bot"})
+
+    assert build_workspace_overview(resolver, build_fake_gateway_client(), latchkey) == ()
+
+
+def test_revoke_workspace_ops_shared_keeps_per_target_and_baseline(tmp_path: Path) -> None:
+    latchkey = _latchkey(tmp_path)
+    gateway = build_fake_gateway_client()
+    agent, host = str(AgentId()), HostId()
+    target = str(AgentId())
+    _seed_host(
+        latchkey,
+        host,
+        (_workspace_rule(("minds-workspaces-read", f"minds-workspaces-ssh-{target}")),),
+    )
+    resolver = _resolver({agent: host}, {agent: "Ops Bot"})
+
+    # Revoke the shared scope only (target_workspace_id=None).
+    revoke_workspace_ops_for_workspace(resolver, gateway, latchkey, agent, None)
+
+    remaining = gateway.get_permission_rules(permissions_path_for_host(latchkey.plugin_data_dir, host))[
+        "latchkey-self"
+    ]
+    assert "minds-workspaces-read" not in remaining
+    assert f"minds-workspaces-ssh-{target}" in remaining
+    assert _BASELINE_SELF_PERM in remaining
+
+
+def test_revoke_workspace_ops_per_target_keeps_shared(tmp_path: Path) -> None:
+    latchkey = _latchkey(tmp_path)
+    gateway = build_fake_gateway_client()
+    agent, host = str(AgentId()), HostId()
+    target = str(AgentId())
+    _seed_host(
+        latchkey,
+        host,
+        (_workspace_rule(("minds-workspaces-read", f"minds-workspaces-ssh-{target}")),),
+    )
+    resolver = _resolver({agent: host}, {agent: "Ops Bot"})
+
+    revoke_workspace_ops_for_workspace(resolver, gateway, latchkey, agent, target)
+
+    remaining = gateway.get_permission_rules(permissions_path_for_host(latchkey.plugin_data_dir, host))[
+        "latchkey-self"
+    ]
+    assert f"minds-workspaces-ssh-{target}" not in remaining
+    assert "minds-workspaces-read" in remaining
+
+
+def test_revoke_workspace_ops_for_all_workspaces(tmp_path: Path) -> None:
+    latchkey = _latchkey(tmp_path)
+    gateway = build_fake_gateway_client()
+    agent_a, host_a = str(AgentId()), HostId()
+    agent_b, host_b = str(AgentId()), HostId()
+    _seed_host(latchkey, host_a, (_workspace_rule(("minds-workspaces-create",)),))
+    _seed_host(latchkey, host_b, (_workspace_rule(("minds-workspaces-read",)),))
+    resolver = _resolver({agent_a: host_a, agent_b: host_b}, {agent_a: "A", agent_b: "B"})
+
+    processed = revoke_workspace_ops_for_all_workspaces(resolver, gateway, latchkey, None)
+
+    assert processed == 2
+    for host in (host_a, host_b):
+        remaining = gateway.get_permission_rules(permissions_path_for_host(latchkey.plugin_data_dir, host))[
+            "latchkey-self"
+        ]
+        assert remaining == (_BASELINE_SELF_PERM,)

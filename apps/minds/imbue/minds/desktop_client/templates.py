@@ -1666,6 +1666,7 @@ def render_settings_page(
     include_error_logs: bool = False,
     services_overview: Sequence[object] | None = None,
     file_sharing_grants: Sequence[object] | None = None,
+    workspace_op_groups: Sequence[object] | None = None,
     permissions_unavailable: bool = False,
 ) -> str:
     """Render the app-level settings page (reachable from the sidebar's "Settings" entry).
@@ -1684,9 +1685,13 @@ def render_settings_page(
     (empty when nothing is granted). ``file_sharing_grants`` is a sequence of
     :class:`~imbue.minds.desktop_client.latchkey.permission_overview.WorkspaceFileSharingGrant`
     describing the file-sharing access granted per workspace, rendered as a
-    separate section below the services. ``permissions_unavailable`` is True
-    when the latchkey gateway could not be reached to read grants, so the page
-    shows a notice instead of an empty list.
+    separate section below the services. ``workspace_op_groups`` is a sequence of
+    :class:`~imbue.minds.desktop_client.latchkey.permission_overview.WorkspaceOpTargetGroup`
+    describing the cross-workspace-management grants, grouped by target (the
+    shared/all-workspaces group first, then one panel per specific target),
+    rendered below file sharing. ``permissions_unavailable`` is True when the
+    latchkey gateway could not be reached to read grants, so the page shows a
+    notice instead of an empty list.
     """
     return CATALOG.render(
         "pages.Settings",
@@ -1694,5 +1699,6 @@ def render_settings_page(
         include_error_logs=include_error_logs,
         services_overview=list(services_overview or []),
         file_sharing_grants=list(file_sharing_grants or []),
+        workspace_op_groups=list(workspace_op_groups or []),
         permissions_unavailable=permissions_unavailable,
     )

@@ -323,6 +323,91 @@ def test_revoke_file_sharing_requires_authentication(tmp_path: Path) -> None:
     assert response.status_code == 403
 
 
+# -- Cross-workspace management ------------------------------------------------
+
+
+def _seed_workspace_ops(tmp_path: Path, host: HostId, names: tuple[str, ...]) -> Path:
+    path = permissions_path_for_host(_plugin_dir(tmp_path), host)
+    save_permissions(path, LatchkeyPermissionsConfig(rules=({"latchkey-self": [_BASELINE_SELF_PERM, *names]},)))
+    return path
+
+
+def test_settings_page_lists_workspace_ops_grouped_by_target(tmp_path: Path) -> None:
+    agent, host = str(AgentId()), HostId()
+    target = str(AgentId())
+    _seed_workspace_ops(tmp_path, host, ("minds-workspaces-read", f"minds-workspaces-ssh-{target}"))
+    handler = _build_handler(tmp_path)
+    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "Ops Bot"})
+
+    response = client.get("/settings")
+
+    assert response.status_code == 200
+    body = response.text
+    assert "Workspace management" in body
+    assert "all workspaces" in body
+    assert 'data-workspace-target=""' in body
+    assert f'data-workspace-target="{target}"' in body
+    assert ">read</code>" in body and ">ssh</code>" in body
+
+
+def test_revoke_workspace_ops_shared_keeps_per_target(tmp_path: Path) -> None:
+    agent, host = str(AgentId()), HostId()
+    target = str(AgentId())
+    path = _seed_workspace_ops(tmp_path, host, ("minds-workspaces-read", f"minds-workspaces-ssh-{target}"))
+    handler = _build_handler(tmp_path)
+    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "Ops Bot"})
+
+    response = client.post(
+        "/settings/permissions/workspace/revoke",
+        json={"workspace_agent_id": agent, "target_workspace_id": None},
+    )
+
+    assert response.status_code == 200
+    remaining = handler.gateway_client.get_permission_rules(path)["latchkey-self"]
+    assert "minds-workspaces-read" not in remaining
+    assert f"minds-workspaces-ssh-{target}" in remaining
+
+
+def test_revoke_workspace_ops_per_target(tmp_path: Path) -> None:
+    agent, host = str(AgentId()), HostId()
+    target = str(AgentId())
+    path = _seed_workspace_ops(tmp_path, host, ("minds-workspaces-read", f"minds-workspaces-ssh-{target}"))
+    handler = _build_handler(tmp_path)
+    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "Ops Bot"})
+
+    response = client.post(
+        "/settings/permissions/workspace/revoke",
+        json={"workspace_agent_id": agent, "target_workspace_id": target},
+    )
+
+    assert response.status_code == 200
+    remaining = handler.gateway_client.get_permission_rules(path)["latchkey-self"]
+    assert f"minds-workspaces-ssh-{target}" not in remaining
+    assert "minds-workspaces-read" in remaining
+
+
+def test_revoke_workspace_ops_all_shared(tmp_path: Path) -> None:
+    agent, host = str(AgentId()), HostId()
+    path = _seed_workspace_ops(tmp_path, host, ("minds-workspaces-create",))
+    handler = _build_handler(tmp_path)
+    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "Ops Bot"})
+
+    response = client.post("/settings/permissions/workspace/revoke-all", json={"target_workspace_id": None})
+
+    assert response.status_code == 200
+    assert handler.gateway_client.get_permission_rules(path)["latchkey-self"] == (_BASELINE_SELF_PERM,)
+
+
+def test_revoke_workspace_ops_missing_workspace_returns_400(tmp_path: Path) -> None:
+    agent, host = str(AgentId()), HostId()
+    handler = _build_handler(tmp_path)
+    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "Ops Bot"})
+
+    response = client.post("/settings/permissions/workspace/revoke", json={"target_workspace_id": None})
+
+    assert response.status_code == 400
+
+
 def test_revoke_requires_authentication(tmp_path: Path) -> None:
     agent, host = str(AgentId()), HostId()
     handler = _build_handler(tmp_path)

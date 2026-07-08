@@ -36,21 +36,24 @@ from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.services_catalog import WILDCARD_PERMISSION_NAME
 from imbue.mngr_latchkey.store import permissions_path_for_host
+from imbue.mngr_latchkey.workspace_permissions import WORKSPACE_VERBS
 
 # The catch-all detent permission (matches every request under the scope) is
 # shown to users as "all", mirroring the permission-request dialog.
 _WILDCARD_DISPLAY_LABEL = "all"
 _WILDCARD_DESCRIPTION = "Unrestricted access: any request to this service is permitted."
 
-# File-sharing grants are not catalog services: they live under the shared
-# ``latchkey-self`` scope as per-path permission schemas named
+# File-sharing *and* cross-workspace-management grants share the domain-only
+# ``latchkey-self`` scope with baseline / accounts permissions (the gateway
+# unions per-feature permission schemas onto it rather than minting dedicated
+# scopes). So the whole ``latchkey-self`` rule must never be deleted; each
+# feature is read back by its permission-name prefix and revoked by removing
+# only its own permission names from the rule.
+_SELF_SCOPE = "latchkey-self"
+
+# File-sharing grants: per-path permission schemas named
 # ``minds-file-server-<access>-<absolute-path>`` (see the gateway's
-# ``permission_requests.mjs``). We read them back by that prefix and split off
-# the access mode + path, and revoke them by removing just those permission
-# names from the ``latchkey-self`` rule (the rule also carries unrelated
-# baseline / accounts / workspace permissions, so the whole rule must never be
-# deleted).
-FILE_SHARING_SCOPE = "latchkey-self"
+# ``permission_requests.mjs``).
 _FILE_SHARING_PERMISSION_PREFIX = "minds-file-server-"
 _FILE_SHARING_READ = "read"
 _FILE_SHARING_WRITE = "write"
@@ -58,6 +61,14 @@ _FILE_SHARING_WRITE = "write"
 # "read and write"; a read-only grant reads as "read".
 _FILE_SHARING_READ_LABEL = "read"
 _FILE_SHARING_WRITE_LABEL = "read and write"
+
+# Cross-workspace-management grants: verb permission schemas named
+# ``minds-workspaces-<verb>`` (an all-workspaces grant) or
+# ``minds-workspaces-<verb>-<target_agent_id>`` (a grant pinned to one target
+# workspace). ``read`` / ``create`` are all-or-nothing; the rest are targeted.
+_WORKSPACE_PERMISSION_PREFIX = "minds-workspaces-"
+_WORKSPACE_VERB_BY_PERMISSION = {verb.permission: verb for verb in WORKSPACE_VERBS}
+_TARGETED_WORKSPACE_VERB_PERMISSIONS = tuple(verb.permission for verb in WORKSPACE_VERBS if verb.is_targeted)
 
 
 class PermissionOverviewError(Exception):
@@ -285,7 +296,7 @@ def build_file_sharing_overview(
     grants: list[WorkspaceFileSharingGrant] = []
     for host in _list_active_workspace_hosts(backend_resolver):
         path = permissions_path_for_host(plugin_data_dir, host.host_id)
-        permissions = gateway_client.get_permission_rules(path).get(FILE_SHARING_SCOPE, ())
+        permissions = gateway_client.get_permission_rules(path).get(_SELF_SCOPE, ())
         read_paths: list[str] = []
         write_paths: list[str] = []
         for permission_name in permissions:
@@ -329,11 +340,11 @@ def _revoke_file_sharing_at_path(gateway_client: LatchkeyGatewayClient, permissi
     ``schemas`` object; they are unreferenced and harmless, and a re-grant
     overwrites them by name.)
     """
-    permissions = gateway_client.get_permission_rules(permissions_file_path).get(FILE_SHARING_SCOPE, ())
+    permissions = gateway_client.get_permission_rules(permissions_file_path).get(_SELF_SCOPE, ())
     kept = tuple(name for name in permissions if _parse_file_sharing_permission(name) is None)
     if len(kept) == len(permissions):
         return
-    gateway_client.set_permission_rule(permissions_file_path, FILE_SHARING_SCOPE, kept)
+    gateway_client.set_permission_rule(permissions_file_path, _SELF_SCOPE, kept)
 
 
 def revoke_file_sharing_for_workspace(
@@ -364,6 +375,219 @@ def revoke_file_sharing_for_all_workspaces(
     hosts = _list_active_workspace_hosts(backend_resolver)
     for host in hosts:
         _revoke_file_sharing_at_path(gateway_client, permissions_path_for_host(plugin_data_dir, host.host_id))
+    return len(hosts)
+
+
+# -- Cross-workspace management ("workspace") grants ---------------------------
+
+
+class WorkspaceOpGrantCard(FrozenModel):
+    """One granting workspace's cross-workspace verbs within a single target group.
+
+    ``workspace_agent_id`` / ``workspace_name`` identify the *granting* workspace
+    (the agent that holds the permission); the target it acts on is carried by the
+    enclosing :class:`WorkspaceOpTargetGroup`. ``permissions`` are the granted
+    verb chips (short verb label + description tooltip), in catalog order.
+    """
+
+    workspace_agent_id: str = Field(description="Granting workspace agent id (used to resolve the host on revoke).")
+    workspace_name: str = Field(description="Granting workspace display name shown as the card header.")
+    host_id: str = Field(description="Host the grant lives on.")
+    color: str = Field(description="Granting workspace accent color hex (``#rrggbb``).")
+    permissions: tuple[GrantedPermission, ...] = Field(description="Granted verb chips, in catalog order.")
+
+
+class WorkspaceOpTargetGroup(FrozenModel):
+    """All granting workspaces that hold cross-workspace verbs for a single target.
+
+    A group is either the *shared* group (verbs that apply to every workspace --
+    ``read`` / ``create`` and any all-workspaces grant of a targeted verb;
+    ``is_shared`` True, ``target_workspace_id`` empty) or a per-target group
+    (verbs pinned to one target workspace; ``is_shared`` False).
+    """
+
+    target_workspace_id: str = Field(description="Target workspace agent id, or empty string for the shared group.")
+    target_name: str = Field(description="Human-readable target label (``all workspaces`` or the target's name).")
+    is_shared: bool = Field(description="Whether this is the all-workspaces group.")
+    cards: tuple[WorkspaceOpGrantCard, ...] = Field(description="One card per granting workspace in this group.")
+
+
+def _parse_workspace_permission(permission_name: str) -> tuple[str, str | None] | None:
+    """Split a ``minds-workspaces-*`` permission into ``(verb_permission, target)``.
+
+    ``target`` is ``None`` for an all-workspaces grant (a broad verb name) and the
+    target workspace agent id for a per-target grant. Returns ``None`` for any name
+    that is not a well-formed workspace verb, so unrelated ``latchkey-self``
+    permissions (baseline / accounts / file-sharing) are ignored. Matching is by
+    the known verb names (not naive ``-`` splitting) because verb names such as
+    ``minds-workspaces-backups-export`` themselves contain hyphens.
+    """
+    if not permission_name.startswith(_WORKSPACE_PERMISSION_PREFIX):
+        return None
+    if permission_name in _WORKSPACE_VERB_BY_PERMISSION:
+        return permission_name, None
+    for verb_permission in _TARGETED_WORKSPACE_VERB_PERMISSIONS:
+        prefix = f"{verb_permission}-"
+        if permission_name.startswith(prefix):
+            target = permission_name[len(prefix) :]
+            if target:
+                return verb_permission, target
+    return None
+
+
+def _workspace_verb_chips(verb_permissions: set[str]) -> tuple[GrantedPermission, ...]:
+    """Build verb chips (short label + description tooltip) in catalog order."""
+    chips: list[GrantedPermission] = []
+    for verb in WORKSPACE_VERBS:
+        if verb.permission in verb_permissions:
+            chips.append(
+                GrantedPermission(
+                    label=verb.permission.removeprefix(_WORKSPACE_PERMISSION_PREFIX),
+                    description=verb.description,
+                )
+            )
+    return tuple(chips)
+
+
+def _resolve_target_workspace_name(backend_resolver: BackendResolverInterface, target_workspace_id: str) -> str:
+    """Resolve a target workspace agent id to a display name, falling back to the raw id."""
+    try:
+        parsed = AgentId(target_workspace_id)
+    except ValueError:
+        return target_workspace_id
+    name = backend_resolver.get_workspace_name(parsed)
+    if name:
+        return name
+    info = backend_resolver.get_agent_display_info(parsed)
+    return info.agent_name if info is not None else target_workspace_id
+
+
+def build_workspace_overview(
+    backend_resolver: BackendResolverInterface,
+    gateway_client: LatchkeyGatewayClient,
+    latchkey: Latchkey,
+) -> tuple[WorkspaceOpTargetGroup, ...]:
+    """Assemble the cross-workspace-management grant overview, grouped by target.
+
+    Reads each active workspace host's permissions file once, pulls the
+    ``minds-workspaces-*`` verbs out of the shared ``latchkey-self`` rule, and
+    groups them first by *target* (the shared/all-workspaces bucket, then one
+    bucket per specific target workspace) and within each target by *granting*
+    workspace. Only targets with at least one grant are returned; the shared
+    group is listed first, then per-target groups sorted by target name. Raises
+    :class:`LatchkeyGatewayClientError` on a read failure (see
+    :func:`build_permission_overview`).
+    """
+    plugin_data_dir = latchkey.plugin_data_dir
+    hosts = _list_active_workspace_hosts(backend_resolver)
+    # target key (None == shared) -> granting agent id -> set of verb permissions.
+    verbs_by_target: dict[str | None, dict[str, set[str]]] = {}
+    host_by_agent: dict[str, _WorkspaceHost] = {}
+    for host in hosts:
+        host_by_agent[host.agent_id] = host
+        permissions = gateway_client.get_permission_rules(
+            permissions_path_for_host(plugin_data_dir, host.host_id)
+        ).get(_SELF_SCOPE, ())
+        for permission_name in permissions:
+            parsed = _parse_workspace_permission(permission_name)
+            if parsed is None:
+                continue
+            verb_permission, target = parsed
+            verbs_by_target.setdefault(target, {}).setdefault(host.agent_id, set()).add(verb_permission)
+
+    def _build_group(target: str | None, per_agent: dict[str, set[str]]) -> WorkspaceOpTargetGroup:
+        cards = [
+            WorkspaceOpGrantCard(
+                workspace_agent_id=host_by_agent[agent_id].agent_id,
+                workspace_name=host_by_agent[agent_id].workspace_name,
+                host_id=str(host_by_agent[agent_id].host_id),
+                color=host_by_agent[agent_id].color,
+                permissions=_workspace_verb_chips(verb_permissions),
+            )
+            for agent_id, verb_permissions in per_agent.items()
+        ]
+        cards.sort(key=lambda card: card.workspace_name.lower())
+        return WorkspaceOpTargetGroup(
+            target_workspace_id="" if target is None else target,
+            target_name="all workspaces"
+            if target is None
+            else _resolve_target_workspace_name(backend_resolver, target),
+            is_shared=target is None,
+            cards=tuple(cards),
+        )
+
+    groups: list[WorkspaceOpTargetGroup] = []
+    if None in verbs_by_target:
+        groups.append(_build_group(None, verbs_by_target[None]))
+    target_groups = [
+        _build_group(target, per_agent) for target, per_agent in verbs_by_target.items() if target is not None
+    ]
+    target_groups.sort(key=lambda group: group.target_name.lower())
+    groups.extend(target_groups)
+    return tuple(groups)
+
+
+def _revoke_workspace_ops_at_path(
+    gateway_client: LatchkeyGatewayClient,
+    permissions_file_path: Path,
+    target_workspace_id: str | None,
+) -> None:
+    """Remove the ``minds-workspaces-*`` permissions for one target scope from the host file.
+
+    ``target_workspace_id`` is ``None`` for the shared (all-workspaces) grants or a
+    target agent id for a per-target group. Only the matching workspace verbs are
+    stripped from the ``latchkey-self`` rule; unrelated permissions are preserved.
+    """
+    permissions = gateway_client.get_permission_rules(permissions_file_path).get(_SELF_SCOPE, ())
+
+    def _matches(permission_name: str) -> bool:
+        parsed = _parse_workspace_permission(permission_name)
+        return parsed is not None and parsed[1] == target_workspace_id
+
+    kept = tuple(name for name in permissions if not _matches(name))
+    if len(kept) == len(permissions):
+        return
+    gateway_client.set_permission_rule(permissions_file_path, _SELF_SCOPE, kept)
+
+
+def revoke_workspace_ops_for_workspace(
+    backend_resolver: BackendResolverInterface,
+    gateway_client: LatchkeyGatewayClient,
+    latchkey: Latchkey,
+    workspace_agent_id: str,
+    target_workspace_id: str | None,
+) -> None:
+    """Remove one granting workspace's cross-workspace verbs for a single target scope.
+
+    ``target_workspace_id`` is ``None`` for the shared group. Raises
+    :class:`PermissionOverviewError` for an unresolvable granting workspace.
+    """
+    host_id = _resolve_host_id(backend_resolver, workspace_agent_id)
+    if host_id is None:
+        raise PermissionOverviewError(
+            f"Could not resolve host for workspace '{workspace_agent_id}'; cannot revoke.",
+        )
+    _revoke_workspace_ops_at_path(
+        gateway_client, permissions_path_for_host(latchkey.plugin_data_dir, host_id), target_workspace_id
+    )
+
+
+def revoke_workspace_ops_for_all_workspaces(
+    backend_resolver: BackendResolverInterface,
+    gateway_client: LatchkeyGatewayClient,
+    latchkey: Latchkey,
+    target_workspace_id: str | None,
+) -> int:
+    """Remove a target scope's cross-workspace verbs from every active workspace host.
+
+    ``target_workspace_id`` is ``None`` for the shared group. Returns hosts processed.
+    """
+    plugin_data_dir = latchkey.plugin_data_dir
+    hosts = _list_active_workspace_hosts(backend_resolver)
+    for host in hosts:
+        _revoke_workspace_ops_at_path(
+            gateway_client, permissions_path_for_host(plugin_data_dir, host.host_id), target_workspace_id
+        )
     return len(hosts)
 
 

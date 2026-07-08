@@ -61,10 +61,13 @@ from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPerm
 from imbue.minds.desktop_client.latchkey.permission_overview import PermissionOverviewError
 from imbue.minds.desktop_client.latchkey.permission_overview import build_file_sharing_overview
 from imbue.minds.desktop_client.latchkey.permission_overview import build_permission_overview
+from imbue.minds.desktop_client.latchkey.permission_overview import build_workspace_overview
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_file_sharing_for_all_workspaces
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_file_sharing_for_workspace
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_for_all_workspaces
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_for_workspace
+from imbue.minds.desktop_client.latchkey.permission_overview import revoke_workspace_ops_for_all_workspaces
+from imbue.minds.desktop_client.latchkey.permission_overview import revoke_workspace_ops_for_workspace
 from imbue.minds.desktop_client.mind_liveness import compute_mind_liveness_by_agent_id
 from imbue.minds.desktop_client.mind_liveness import get_shutdown_capable_workspace_agent_ids
 from imbue.minds.desktop_client.minds_config import MindsConfig
@@ -1764,6 +1767,7 @@ def _handle_settings_page() -> Response:
 
     services_overview: list[object] = []
     file_sharing_grants: list[object] = []
+    workspace_op_groups: list[object] = []
     permissions_unavailable = False
     handler = _find_predefined_permission_handler()
     if handler is not None:
@@ -1783,6 +1787,13 @@ def _handle_settings_page() -> Response:
                     latchkey=handler.latchkey,
                 )
             )
+            workspace_op_groups = list(
+                build_workspace_overview(
+                    backend_resolver=get_state().backend_resolver,
+                    gateway_client=handler.gateway_client,
+                    latchkey=handler.latchkey,
+                )
+            )
         except LatchkeyGatewayClientError as e:
             logger.warning("Could not build permission overview for settings page: {}", e)
             permissions_unavailable = True
@@ -1792,6 +1803,7 @@ def _handle_settings_page() -> Response:
         include_error_logs=include_error_logs,
         services_overview=services_overview,
         file_sharing_grants=file_sharing_grants,
+        workspace_op_groups=workspace_op_groups,
         permissions_unavailable=permissions_unavailable,
     )
     return make_html_response(content=html)
@@ -1918,6 +1930,72 @@ def _handle_revoke_file_sharing_for_all_workspaces() -> Response:
         )
     except LatchkeyGatewayClientError as e:
         logger.warning("Could not revoke file sharing across workspaces: {}", e)
+        return _json_error(f"Could not revoke through the latchkey gateway: {e}", status_code=502)
+    return make_response(content='{"status": "ok"}', media_type="application/json")
+
+
+def _handle_revoke_workspace_ops_for_workspace() -> Response:
+    """Revoke a workspace's cross-workspace-management verbs for one target scope.
+
+    Route: POST /settings/permissions/workspace/revoke. Body:
+    ``{"workspace_agent_id": "...", "target_workspace_id": "..."|null}`` where a
+    null/absent ``target_workspace_id`` means the shared (all-workspaces) grants.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
+    body = request.get_json(silent=True, force=True)
+    if not isinstance(body, dict):
+        return make_response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
+    workspace_agent_id = str(body.get("workspace_agent_id", ""))
+    if not workspace_agent_id:
+        return _json_error("workspace_agent_id is required", status_code=400)
+    raw_target = body.get("target_workspace_id")
+    target_workspace_id = str(raw_target) if raw_target else None
+    handler = _find_predefined_permission_handler()
+    if handler is None:
+        return _json_error("Permission management is unavailable", status_code=503)
+    try:
+        revoke_workspace_ops_for_workspace(
+            backend_resolver=get_state().backend_resolver,
+            gateway_client=handler.gateway_client,
+            latchkey=handler.latchkey,
+            workspace_agent_id=workspace_agent_id,
+            target_workspace_id=target_workspace_id,
+        )
+    except PermissionOverviewError as e:
+        return _json_error(str(e), status_code=400)
+    except LatchkeyGatewayClientError as e:
+        logger.warning("Could not revoke workspace ops for workspace {}: {}", workspace_agent_id, e)
+        return _json_error(f"Could not revoke through the latchkey gateway: {e}", status_code=502)
+    return make_response(content='{"status": "ok"}', media_type="application/json")
+
+
+def _handle_revoke_workspace_ops_for_all_workspaces() -> Response:
+    """Revoke a target scope's cross-workspace verbs across every active workspace.
+
+    Route: POST /settings/permissions/workspace/revoke-all. Body:
+    ``{"target_workspace_id": "..."|null}`` where a null/absent value means the
+    shared (all-workspaces) grants.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
+    body = request.get_json(silent=True, force=True)
+    if not isinstance(body, dict):
+        return make_response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
+    raw_target = body.get("target_workspace_id")
+    target_workspace_id = str(raw_target) if raw_target else None
+    handler = _find_predefined_permission_handler()
+    if handler is None:
+        return _json_error("Permission management is unavailable", status_code=503)
+    try:
+        revoke_workspace_ops_for_all_workspaces(
+            backend_resolver=get_state().backend_resolver,
+            gateway_client=handler.gateway_client,
+            latchkey=handler.latchkey,
+            target_workspace_id=target_workspace_id,
+        )
+    except LatchkeyGatewayClientError as e:
+        logger.warning("Could not revoke workspace ops across workspaces: {}", e)
         return _json_error(f"Could not revoke through the latchkey gateway: {e}", status_code=502)
     return make_response(content='{"status": "ok"}', media_type="application/json")
 
@@ -2561,6 +2639,16 @@ def create_desktop_client(
     app.add_url_rule(
         "/settings/permissions/file-sharing/revoke-all",
         view_func=_handle_revoke_file_sharing_for_all_workspaces,
+        methods=["POST"],
+    )
+    app.add_url_rule(
+        "/settings/permissions/workspace/revoke",
+        view_func=_handle_revoke_workspace_ops_for_workspace,
+        methods=["POST"],
+    )
+    app.add_url_rule(
+        "/settings/permissions/workspace/revoke-all",
+        view_func=_handle_revoke_workspace_ops_for_all_workspaces,
         methods=["POST"],
     )
     app.add_url_rule("/accounts/set-default", view_func=_handle_set_default_account, methods=["POST"])
