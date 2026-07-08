@@ -116,7 +116,12 @@ above (the minds release procedure is a manual dispatch, not a `v*` tag):
 
 `.github/workflows/minds-launch-to-msg.yml`: builds the `.app` via ToDesktop,
 runs `scripts/launch_to_msg_e2e.py` (Python launch-to-first-message + Slack), and
-a parallel job runs `macos-launch.spec.js`.
+a parallel job runs `macos-launch.spec.js`. Both inputs (`commit_sha` for mngr,
+`template_ref` for forever-claude-template) accept a full 40-char SHA, branch,
+or tag; a ref is frozen to its SHA once at run start, and that frozen SHA is
+what gets built (mngr) and what the agent is created from (FCT) -- the SHAs in
+the slack message and step summaries are exactly what ran, even if the ref
+moved mid-run.
 
 ### 1.6 The modal-snapshot stage (the "new" parallel-in-offload e2e stage)
 
