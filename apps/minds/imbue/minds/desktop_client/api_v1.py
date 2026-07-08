@@ -1066,6 +1066,7 @@ def _handle_backup_service_update(agent_id: str) -> tuple[OperationHandleRespons
             ),
         )
     except (OSError, RuntimeError, ConcurrencyGroupError) as exc:
+        logger.warning("Failed to spawn backup update worker for {}: {}", parsed_id, exc)
         message = f"Could not start the backup update worker: {exc}"
         registry.fail(parsed_id, message)
         return _json_error(message, 503)
@@ -1169,6 +1170,7 @@ def _handle_backup_service_configure(agent_id: str) -> tuple[OperationHandleResp
             ),
         )
     except (OSError, RuntimeError, ConcurrencyGroupError) as exc:
+        logger.warning("Failed to spawn backup configure worker for {}: {}", parsed_id, exc)
         message = f"Could not start the backup configure worker: {exc}"
         registry.fail(parsed_id, message)
         return _json_error(message, 503)
