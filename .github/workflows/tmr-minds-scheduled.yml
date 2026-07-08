@@ -1,0 +1,68 @@
+name: minds TMR (scheduled)
+
+# Daily scheduled wrapper around the main TMR workflow for the *minds* variant
+# (the apps/minds tree, with the minds-tailored mapper prompt). Sibling of
+# tmr-mngr-scheduled.yml; the two are independent (separate gate label,
+# separate concurrency group, separate periodic PR).
+#
+# The `gate` job (shared reusable tmr-gate.yml, scoped by the
+# `tmr-minds-periodic` label) decides whether to proceed based on any open
+# periodic PR from a prior minds run -- see tmr-gate.yml for the policy.
+#
+# Scope note: this targets the plain minds @release tests that need no ci env /
+# snapshot image (matching the `tmr-minds` justfile recipe). The capability
+# suites (minds_deployment / minds_services / minds_snapshot_resume) need extra
+# secrets/infra and are intentionally excluded here.
+#
+# Manual `workflow_dispatch` runs of TMR are intentionally independent of this
+# logic: they don't touch the label and don't go through this gate.
+
+on:
+  # Staggered one hour after the mngr variant (09:00 UTC) so the two daily runs
+  # don't provision their Modal host fleets at the same instant.
+  schedule:
+    - cron: "0 9 * * *"
+  # Manual trigger is provided only for testing the gate logic itself
+  # (e.g. on a branch). Real ad-hoc TMR runs should use the main TMR
+  # workflow's workflow_dispatch.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  # The `run` job calls the reusable tmr.yml, whose job fetches its credentials
+  # from Vault via a GitHub OIDC token. A called reusable workflow's job
+  # permissions are capped by the caller's, so id-token: write must be granted
+  # here for that Vault auth to succeed.
+  id-token: write
+
+# Don't let two scheduled firings of this variant overlap (see the mngr wrapper
+# for the rationale). Independent group from the mngr variant.
+concurrency:
+  group: tmr-minds-scheduled
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    uses: ./.github/workflows/tmr-gate.yml
+    secrets: inherit
+    with:
+      label: tmr-minds-periodic
+
+  run:
+    needs: gate
+    if: needs.gate.outputs.proceed == 'true'
+    uses: ./.github/workflows/tmr.yml
+    secrets: inherit
+    with:
+      # minds variant: the apps/minds tree with the minds-tailored mapper
+      # prompt, scoped to the plain @release tests (no capability marks). Keep
+      # in sync with the `tmr-minds` justfile recipe.
+      name: tmr-minds
+      test_paths: apps/minds
+      mapper_prompt: apps/minds/tmr/mapper.j2
+      pytest_args: -m "release and not minds_deployment and not minds_services and not minds_snapshot_resume"
+      is_scheduled: true
+      periodic_label: tmr-minds-periodic
+      supersedes_pr: ${{ needs.gate.outputs.supersedes_pr }}

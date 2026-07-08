@@ -1,5 +1,14 @@
 name: TMR
 
+# The default inputs below run the *mngr* release suite (variant `tmr`, scoped to
+# libs/mngr). To dispatch the *minds* variant instead, set:
+#   test_paths:   apps/minds
+#   name:         tmr-minds
+#   mapper_prompt: apps/minds/tmr/mapper.j2
+#   pytest_args:  -m "release and not minds_deployment and not minds_services and not minds_snapshot_resume"
+# (the plain minds @release tests, which need no ci env / snapshot image). The
+# capability suites additionally need their secrets passed via env -- see the
+# `tmr-minds` justfile recipe, which is the canonical source for these flag sets.
 on:
   workflow_dispatch:
     inputs:
@@ -27,9 +36,22 @@ on:
         description: "Override the auto-generated run name (default: a UTC YYYYMMDDHHMMSS timestamp). The reintegrate workflow uses this name to rediscover this run's agents."
         required: false
         default: ""
-  # Invoked by the TMR (scheduled) workflow on its daily cron. The shared
-  # inputs below mirror the workflow_dispatch inputs; the two extra inputs
-  # (is_scheduled, supersedes_pr) are scheduled-run plumbing and are not
+      name:
+        description: "Variant name; prefixes this run's agent/branch/host names (e.g. tmr-mngr, tmr-minds) so distinct suites stay separable. Must be a slug (alphanumerics, dashes, underscores)."
+        required: false
+        default: "tmr"
+      mapper_prompt:
+        description: "Optional repo-relative path to a Jinja template overriding the mapper prompt (blank = packaged default). For the minds variant use apps/minds/tmr/mapper.j2."
+        required: false
+        default: ""
+      reducer_prompt:
+        description: "Optional repo-relative path to a Jinja template overriding the reducer prompt (blank = packaged default)."
+        required: false
+        default: ""
+  # Invoked by the per-variant scheduled wrappers (tmr-mngr-scheduled.yml,
+  # tmr-minds-scheduled.yml) on their daily crons. The shared inputs below
+  # mirror the workflow_dispatch inputs; the extra inputs (is_scheduled,
+  # supersedes_pr, periodic_label) are scheduled-run plumbing and are not
   # surfaced in the manual-dispatch UI.
   workflow_call:
     inputs:
@@ -55,11 +77,28 @@ on:
         type: string
         required: false
         default: ""
+      name:
+        type: string
+        required: false
+        default: "tmr"
+      mapper_prompt:
+        type: string
+        required: false
+        default: ""
+      reducer_prompt:
+        type: string
+        required: false
+        default: ""
       is_scheduled:
-        description: "Set by the scheduled wrapper workflow. When true, the auto-opened PR is labeled `tmr-periodic` so the next scheduled run's gate can find it."
+        description: "Set by the scheduled wrapper workflow. When true, the auto-opened PR is labeled with `periodic_label` so the next scheduled run's gate for that variant can find it."
         type: boolean
         required: false
         default: false
+      periodic_label:
+        description: "Label to attach to the auto-opened PR on scheduled runs (each variant uses its own, e.g. tmr-mngr-periodic / tmr-minds-periodic, so their gates stay independent). Only used when is_scheduled is true."
+        type: string
+        required: false
+        default: "tmr-periodic"
       supersedes_pr:
         description: "Set by the scheduled wrapper workflow when this run was triggered after auto-closing a stale prior periodic PR. The newly-opened PR's number is posted as a follow-up comment on this PR."
         type: string
@@ -152,6 +191,16 @@ jobs:
           if [ -n "${{ inputs.run_name }}" ]; then
             run_name_args+=(--run-name "${{ inputs.run_name }}")
           fi
+          # Variant name (branch/agent prefix) plus optional prompt-template
+          # overrides. The prompt paths are repo-relative; blank means the
+          # packaged default template is used.
+          variant_args=(--name "${{ inputs.name }}")
+          if [ -n "${{ inputs.mapper_prompt }}" ]; then
+            variant_args+=(--mapper-prompt "${{ inputs.mapper_prompt }}")
+          fi
+          if [ -n "${{ inputs.reducer_prompt }}" ]; then
+            variant_args+=(--reducer-prompt "${{ inputs.reducer_prompt }}")
+          fi
           uv run --project libs/mngr_tmr mngr tmr -vv \
             -S 'agent_types.yolo.parent_type="claude"' \
             -S 'agent_types.yolo.cli_args=["--dangerously-skip-permissions"]' \
@@ -162,6 +211,7 @@ jobs:
             --env "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" \
             "${authorized_host_args[@]}" \
             "${run_name_args[@]}" \
+            "${variant_args[@]}" \
             --output-dir tmr-report \
             --format jsonl \
             ${{ inputs.test_paths }} \
@@ -185,6 +235,7 @@ jobs:
         env:
           IS_SCHEDULED: ${{ inputs.is_scheduled }}
           SUPERSEDES_PR: ${{ inputs.supersedes_pr }}
+          PERIODIC_LABEL: ${{ inputs.periodic_label }}
         run: |
           set -euo pipefail
           branch=$(jq -r 'select(.event == "integrator_branch") | .branch_name' < tmr-report/events.jsonl | tail -n 1)
@@ -206,7 +257,7 @@ jobs:
           # runs leave it unlabeled and unassigned.
           scheduled_args=()
           if [ "$IS_SCHEDULED" = "true" ]; then
-            scheduled_args+=(--label tmr-periodic)
+            scheduled_args+=(--label "$PERIODIC_LABEL")
             scheduled_args+=(--assignee qi-imbue --assignee joshalbrecht)
           fi
           new_pr_url=$(gh pr create \
