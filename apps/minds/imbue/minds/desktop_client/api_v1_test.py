@@ -47,6 +47,7 @@ from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHe
 from imbue.minds.desktop_client.templates import status_text_for
 from imbue.minds.desktop_client.workspace_operations import OPERATION_LOG_SENTINEL
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
+from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
@@ -1757,6 +1758,36 @@ def test_backup_service_update_conflicts_with_a_running_operation(
     record = registry.get(agent_id)
     assert record is not None
     assert record.kind == WorkspaceOperationKind.RESTART
+
+
+def test_workspace_restart_conflicts_with_a_running_backup_operation(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    # The reverse serialization direction: a restart dispatched while a backup
+    # update is RUNNING must 409 instead of replacing the registry record (and
+    # bouncing the host under the in-flight backup mutation).
+    agent_id = AgentId()
+    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    client = _build_client(
+        tmp_path,
+        resolver,
+        root_concurrency_group=root_concurrency_group,
+        system_interface_health_tracker=SystemInterfaceHealthTracker(),
+    )
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.BACKUP_UPDATE, datetime.now(timezone.utc))
+
+    response = client.post(
+        f"/api/v1/workspaces/{agent_id}/restart", headers=_auth_header(), json={"scope": "services"}
+    )
+
+    assert response.status_code == 409
+    assert "BACKUP_UPDATE" in json.loads(response.data)["error"]
+    # The running backup operation's record was not replaced.
+    record = registry.get(agent_id)
+    assert record is not None
+    assert record.kind == WorkspaceOperationKind.BACKUP_UPDATE
+    assert record.status == WorkspaceOperationStatus.RUNNING
 
 
 def test_backup_service_update_cancel_without_an_update_returns_404(tmp_path: Path) -> None:

@@ -775,7 +775,10 @@ def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, i
     ``202`` with ``{operation_id, kind: "restart"}`` (the op id is the workspace
     agent id), followed via ``/api/v1/workspaces/operations/restart/<id>``
     (+``/logs``) exactly like create / destroy. A restart already in flight is
-    deduped: the same handle is returned without stacking a second worker.
+    deduped: the same handle is returned without stacking a second worker. A
+    RUNNING operation of another kind (a backup update/configure) is a 409:
+    workspace operations are serialized, and a restart must not bounce the
+    host under an in-flight backup mutation.
     """
     parsed_id = AgentId(agent_id)
     # The spectree model enforces ``scope`` is a required string; its value (one
@@ -812,6 +815,22 @@ def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, i
             parsed_id,
         )
         return handle, 202
+    # Serialize with the backup operations: ``registry.start`` below replaces
+    # the workspace's record, so a RUNNING backup update/configure must be
+    # rejected here (its worker's terminal complete/fail would corrupt the
+    # restart's record, and restarting would bounce the host under an
+    # in-flight backup mutation). The backup dispatch routes reject in the
+    # other direction via their atomic ``start_if_idle``.
+    registry = state.workspace_operation_registry
+    existing_operation = registry.get(parsed_id)
+    if (
+        existing_operation is not None
+        and existing_operation.status == WorkspaceOperationStatus.RUNNING
+        and existing_operation.kind != WorkspaceOperationKind.RESTART
+    ):
+        return _json_error(
+            f"Another operation ({existing_operation.kind.value}) is already running for {agent_id}", 409
+        )
     # A restart already in flight for this workspace -- don't stack a second
     # worker racing the first's stop/start commands. mark_restarting decides the
     # RESTARTING transition under its own lock and reports whether this caller won
@@ -819,7 +838,6 @@ def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, i
     if not tracker.mark_restarting(parsed_id):
         return handle, 202
 
-    registry = state.workspace_operation_registry
     registry.start(parsed_id, WorkspaceOperationKind.RESTART, datetime.now(timezone.utc))
 
     # host_already_stopped lets an auto-dispatched host restart skip the redundant
