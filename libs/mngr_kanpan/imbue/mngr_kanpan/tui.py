@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 import time
 from collections.abc import Callable
@@ -31,10 +32,12 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
+from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.cli.urwid_utils import create_urwid_screen_preserving_terminal
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.utils.logging import CLEAR_SCREEN
 from imbue.mngr_kanpan.data_source import BoolField
 from imbue.mngr_kanpan.data_source import FIELD_MUTED
 from imbue.mngr_kanpan.data_source import FieldValue
@@ -86,7 +89,7 @@ TRANSIENT_MESSAGE_SECONDS: float = 3.0
 # Peek panel: how many trailing transcript lines to show, how many recent
 # transcript events to fetch, and how often to refresh while the panel is open.
 PEEK_BODY_HEIGHT: int = 14
-PEEK_TRANSCRIPT_TAIL_EVENTS: int = 3
+PEEK_TRANSCRIPT_TAIL_EVENTS: int = 10
 PEEK_REFRESH_SECONDS: float = 2.0
 PEEK_REPLY_PROMPT: str = "reply> "
 
@@ -124,7 +127,6 @@ PALETTE = [
     # Peek panel
     ("peek_header", "white", "dark blue"),
     ("peek_hint", "dark gray", ""),
-    ("peek_status", "light green", ""),
     ("peek_status_error", "light red", ""),
 ]
 
@@ -906,6 +908,10 @@ def _attach_to_focused_agent(state: _KanpanState) -> None:  # pragma: no cover
 
     loop.stop()
     try:
+        # loop.stop() restores the pre-kanpan primary screen (a stale shell prompt);
+        # clear it and show a connecting line so the handoff is not a flash of that
+        # old command line before the agent's session paints over it.
+        write_human_line(f"{CLEAR_SCREEN}  Connecting to {entry.name}...")
         subprocess.run(["mngr", "connect", str(entry.name)], env=attach_env)
     finally:
         loop.start()
@@ -935,9 +941,23 @@ def _focus_row_by_name(state: _KanpanState, name: AgentName) -> None:
 
 
 def _run_transcript(agent_name: str) -> subprocess.CompletedProcess[str]:  # pragma: no cover
-    """Read the agent's recent transcript messages. Called from a background thread."""
+    """Read the agent's recent user/assistant messages. Called from a background thread.
+
+    Tool call/result events are excluded so the peek reads like the conversation,
+    not the agent's tool trace.
+    """
     return subprocess.run(
-        ["mngr", "transcript", agent_name, "--tail", str(PEEK_TRANSCRIPT_TAIL_EVENTS)],
+        [
+            "mngr",
+            "transcript",
+            agent_name,
+            "--role",
+            "user",
+            "--role",
+            "assistant",
+            "--tail",
+            str(PEEK_TRANSCRIPT_TAIL_EVENTS),
+        ],
         capture_output=True,
         text=True,
         timeout=30,
@@ -967,25 +987,49 @@ def _last_nonempty_line(text: str) -> str:
     return lines[-1] if lines else ""
 
 
+# A ``mngr transcript`` message header, e.g. ``[2026-07-08T01:06:54Z] assistant:``.
+_TRANSCRIPT_HEADER_RE: re.Pattern[str] = re.compile(r"^\[\d{4}-\d{2}-\d{2}T[^\]]*\] ")
+
+
+@pure
+def _meaningful_transcript_lines(stdout: str) -> list[str]:
+    """Split a transcript dump into message blocks, keeping only those with real text.
+
+    Tool-only turns render as ``(no content)`` under their header; dropping those empty
+    blocks leaves the conversation a person would actually read.
+    """
+    blocks: list[list[str]] = []
+    for line in stdout.rstrip("\n").split("\n"):
+        if _TRANSCRIPT_HEADER_RE.match(line) or not blocks:
+            blocks.append([line])
+        else:
+            blocks[-1].append(line)
+    kept: list[str] = []
+    for block in blocks:
+        body = block[1:] if _TRANSCRIPT_HEADER_RE.match(block[0]) else block
+        if any(line.strip() and line.strip() != "(no content)" for line in body):
+            kept.extend(block)
+    return kept
+
+
 @pure
 def _peek_body_from_transcript(result: subprocess.CompletedProcess[str]) -> str:
     """Reduce a transcript dump to the trailing lines shown in the peek panel.
 
-    Shows the tail -- the newest lines -- so a long final message renders its end
-    (the agent's conclusion, or the question it is waiting on) rather than its
-    start. A ``N earlier lines hidden`` marker is prepended when older lines drop.
+    Keeps only turns with real text, then shows the tail -- the newest lines -- so a
+    long final message renders its end (the agent's conclusion, or the question it is
+    waiting on). A ``N earlier lines hidden`` marker is prepended when older lines drop.
     """
     if result.returncode != 0:
         detail = _last_nonempty_line(result.stderr) or f"exited with code {result.returncode}"
         return f"(no transcript: {detail})"
-    lines = result.stdout.rstrip("\n").split("\n")
-    end = len(lines)
-    while end > 0 and not lines[end - 1].strip():
-        end -= 1
-    start = max(0, end - PEEK_BODY_HEIGHT)
-    tail = lines[start:end]
-    if not tail:
-        return "(no messages yet)"
+    lines = _meaningful_transcript_lines(result.stdout)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if not lines:
+        return "(no recent messages)"
+    start = max(0, len(lines) - PEEK_BODY_HEIGHT)
+    tail = lines[start:]
     if start > 0:
         return "\n".join([f"... {start} earlier lines hidden", *tail])
     return "\n".join(tail)
@@ -1142,10 +1186,10 @@ def _submit_peek_reply(state: _KanpanState) -> None:
     agent_name = str(state.peek_agent_name)
     state.peek_reply_future = executor.submit(_run_message, agent_name, text)
     state.peek_input.set_edit_text("")
-    # Echo the sent text immediately so it is not "eaten" while delivery is in flight
-    # (mngr message can wait up to ~90s for the agent's submission signal).
+    # The reply lands in the transcript body within a refresh or two, so the status
+    # only needs a minimal in-flight marker; it is cleared once delivery returns.
     if state.peek_status_text is not None:
-        state.peek_status_text.set_text(("peek_hint", f"  sending: {text}"))
+        state.peek_status_text.set_text(("peek_hint", "  sending..."))
     if state.loop is not None:
         state.loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_peek_reply_poll, (state, agent_name))
 
@@ -1166,7 +1210,7 @@ def _on_peek_reply_poll(loop: MainLoop, data: tuple[_KanpanState, str]) -> None:
     try:
         result = future.result()
         if result.returncode == 0:
-            state.peek_status_text.set_text(("peek_status", f"  sent to {agent_name}"))
+            state.peek_status_text.set_text("")
         else:
             detail = _last_nonempty_line(result.stderr) or f"exited with code {result.returncode}"
             state.peek_status_text.set_text(("peek_status_error", f"  send failed: {detail}"))

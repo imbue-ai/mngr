@@ -1879,18 +1879,39 @@ def test_peek_body_from_transcript_reports_failure() -> None:
 
 def test_peek_body_from_transcript_empty_output() -> None:
     result = subprocess.CompletedProcess(args=[], returncode=0, stdout="\n\n", stderr="")
-    assert _peek_body_from_transcript(result) == "(no messages yet)"
+    assert _peek_body_from_transcript(result) == "(no recent messages)"
 
 
-def test_on_peek_reply_poll_success_renders_sent() -> None:
+def test_peek_body_from_transcript_drops_empty_turns() -> None:
+    stdout = (
+        "[2026-07-08T01:06:54Z] assistant:\n(no content)\n\n"
+        "[2026-07-08T01:07:06Z] assistant:\nhere is the real summary\n\n"
+        "[2026-07-08T01:07:10Z] assistant:\n(no content)\n"
+    )
+    result = subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
+    body = _peek_body_from_transcript(result)
+    # Tool-only turns render as "(no content)"; only the turn with real text survives.
+    assert "(no content)" not in body
+    assert "here is the real summary" in body
+    assert body.count("assistant:") == 1
+
+
+def test_peek_body_from_transcript_all_empty_turns_reports_no_messages() -> None:
+    stdout = "[2026-07-08T01:06:54Z] assistant:\n(no content)\n\n[2026-07-08T01:07:10Z] assistant:\n(no content)\n"
+    result = subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
+    assert _peek_body_from_transcript(result) == "(no recent messages)"
+
+
+def test_on_peek_reply_poll_success_clears_status() -> None:
     state = _make_state()
-    state.peek_status_text = Text("")
+    state.peek_status_text = Text("  sending...")
     future: Future[subprocess.CompletedProcess[str]] = Future()
     future.set_result(subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""))
     state.peek_reply_future = future
     _on_peek_reply_poll(_make_mock_loop(), (state, "agent-a"))
     assert state.peek_reply_future is None
-    assert "sent to agent-a" in str(state.peek_status_text.text)
+    # On success the in-flight marker is cleared; the reply shows up in the peek body.
+    assert str(state.peek_status_text.text) == ""
 
 
 def test_on_peek_reply_poll_failure_shows_last_error_line() -> None:
