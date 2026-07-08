@@ -1665,6 +1665,7 @@ def render_settings_page(
     report_unexpected_errors: bool = False,
     include_error_logs: bool = False,
     services_overview: Sequence[object] | None = None,
+    file_sharing_grants: Sequence[object] | None = None,
     permissions_unavailable: bool = False,
 ) -> str:
     """Render the app-level settings page (reachable from the sidebar's "Settings" entry).
@@ -1680,14 +1681,18 @@ def render_settings_page(
     ``services_overview`` is a sequence of
     :class:`~imbue.minds.desktop_client.latchkey.permission_overview.ServicePermissionOverview`
     describing the predefined-service grants held across all active workspaces
-    (empty when nothing is granted). ``permissions_unavailable`` is True when
-    the latchkey gateway could not be reached to read grants, so the page shows
-    a notice instead of an empty list.
+    (empty when nothing is granted). ``file_sharing_grants`` is a sequence of
+    :class:`~imbue.minds.desktop_client.latchkey.permission_overview.WorkspaceFileSharingGrant`
+    describing the file-sharing access granted per workspace, rendered as a
+    separate section below the services. ``permissions_unavailable`` is True
+    when the latchkey gateway could not be reached to read grants, so the page
+    shows a notice instead of an empty list.
     """
     return CATALOG.render(
         "pages.Settings",
         report_unexpected_errors=report_unexpected_errors,
         include_error_logs=include_error_logs,
         services_overview=list(services_overview or []),
+        file_sharing_grants=list(file_sharing_grants or []),
         permissions_unavailable=permissions_unavailable,
     )

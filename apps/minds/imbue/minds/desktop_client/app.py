@@ -59,7 +59,10 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.permission_overview import PermissionOverviewError
+from imbue.minds.desktop_client.latchkey.permission_overview import build_file_sharing_overview
 from imbue.minds.desktop_client.latchkey.permission_overview import build_permission_overview
+from imbue.minds.desktop_client.latchkey.permission_overview import revoke_file_sharing_for_all_workspaces
+from imbue.minds.desktop_client.latchkey.permission_overview import revoke_file_sharing_for_workspace
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_for_all_workspaces
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_for_workspace
 from imbue.minds.desktop_client.mind_liveness import compute_mind_liveness_by_agent_id
@@ -1760,6 +1763,7 @@ def _handle_settings_page() -> Response:
     include_error_logs = minds_config.get_include_error_logs() if minds_config else False
 
     services_overview: list[object] = []
+    file_sharing_grants: list[object] = []
     permissions_unavailable = False
     handler = _find_predefined_permission_handler()
     if handler is not None:
@@ -1772,6 +1776,13 @@ def _handle_settings_page() -> Response:
                     latchkey=handler.latchkey,
                 )
             )
+            file_sharing_grants = list(
+                build_file_sharing_overview(
+                    backend_resolver=get_state().backend_resolver,
+                    gateway_client=handler.gateway_client,
+                    latchkey=handler.latchkey,
+                )
+            )
         except LatchkeyGatewayClientError as e:
             logger.warning("Could not build permission overview for settings page: {}", e)
             permissions_unavailable = True
@@ -1780,6 +1791,7 @@ def _handle_settings_page() -> Response:
         report_unexpected_errors=report_unexpected_errors,
         include_error_logs=include_error_logs,
         services_overview=services_overview,
+        file_sharing_grants=file_sharing_grants,
         permissions_unavailable=permissions_unavailable,
     )
     return make_html_response(content=html)
@@ -1851,6 +1863,61 @@ def _handle_revoke_service_for_all_workspaces() -> Response:
         return _json_error(str(e), status_code=400)
     except LatchkeyGatewayClientError as e:
         logger.warning("Could not revoke {} across workspaces: {}", service_name, e)
+        return _json_error(f"Could not revoke through the latchkey gateway: {e}", status_code=502)
+    return make_response(content='{"status": "ok"}', media_type="application/json")
+
+
+def _handle_revoke_file_sharing_for_workspace() -> Response:
+    """Revoke all file-sharing grants for one workspace (POST /settings/permissions/file-sharing/revoke).
+
+    Body: ``{"workspace_agent_id": "..."}``. Removes every ``minds-file-server-*``
+    permission from that workspace's host file, leaving unrelated permissions and
+    stored state intact.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
+    body = request.get_json(silent=True, force=True)
+    if not isinstance(body, dict):
+        return make_response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
+    workspace_agent_id = str(body.get("workspace_agent_id", ""))
+    if not workspace_agent_id:
+        return _json_error("workspace_agent_id is required", status_code=400)
+    handler = _find_predefined_permission_handler()
+    if handler is None:
+        return _json_error("Permission management is unavailable", status_code=503)
+    try:
+        revoke_file_sharing_for_workspace(
+            backend_resolver=get_state().backend_resolver,
+            gateway_client=handler.gateway_client,
+            latchkey=handler.latchkey,
+            workspace_agent_id=workspace_agent_id,
+        )
+    except PermissionOverviewError as e:
+        return _json_error(str(e), status_code=400)
+    except LatchkeyGatewayClientError as e:
+        logger.warning("Could not revoke file sharing for workspace {}: {}", workspace_agent_id, e)
+        return _json_error(f"Could not revoke through the latchkey gateway: {e}", status_code=502)
+    return make_response(content='{"status": "ok"}', media_type="application/json")
+
+
+def _handle_revoke_file_sharing_for_all_workspaces() -> Response:
+    """Revoke file-sharing grants across every active workspace (POST /settings/permissions/file-sharing/revoke-all).
+
+    Takes no body parameters. Returns 200 on success, 503 when the handler is unavailable.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
+    handler = _find_predefined_permission_handler()
+    if handler is None:
+        return _json_error("Permission management is unavailable", status_code=503)
+    try:
+        revoke_file_sharing_for_all_workspaces(
+            backend_resolver=get_state().backend_resolver,
+            gateway_client=handler.gateway_client,
+            latchkey=handler.latchkey,
+        )
+    except LatchkeyGatewayClientError as e:
+        logger.warning("Could not revoke file sharing across workspaces: {}", e)
         return _json_error(f"Could not revoke through the latchkey gateway: {e}", status_code=502)
     return make_response(content='{"status": "ok"}', media_type="application/json")
 
@@ -2485,6 +2552,16 @@ def create_desktop_client(
     app.add_url_rule("/settings/permissions/revoke", view_func=_handle_revoke_service_for_workspace, methods=["POST"])
     app.add_url_rule(
         "/settings/permissions/revoke-all", view_func=_handle_revoke_service_for_all_workspaces, methods=["POST"]
+    )
+    app.add_url_rule(
+        "/settings/permissions/file-sharing/revoke",
+        view_func=_handle_revoke_file_sharing_for_workspace,
+        methods=["POST"],
+    )
+    app.add_url_rule(
+        "/settings/permissions/file-sharing/revoke-all",
+        view_func=_handle_revoke_file_sharing_for_all_workspaces,
+        methods=["POST"],
     )
     app.add_url_rule("/accounts/set-default", view_func=_handle_set_default_account, methods=["POST"])
     app.add_url_rule("/accounts/<user_id>/logout", view_func=_handle_account_logout, methods=["POST"])

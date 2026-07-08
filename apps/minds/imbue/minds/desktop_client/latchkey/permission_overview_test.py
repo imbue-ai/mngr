@@ -8,7 +8,10 @@ from pydantic import Field
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.latchkey.permission_overview import PermissionOverviewError
+from imbue.minds.desktop_client.latchkey.permission_overview import build_file_sharing_overview
 from imbue.minds.desktop_client.latchkey.permission_overview import build_permission_overview
+from imbue.minds.desktop_client.latchkey.permission_overview import revoke_file_sharing_for_all_workspaces
+from imbue.minds.desktop_client.latchkey.permission_overview import revoke_file_sharing_for_workspace
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_for_all_workspaces
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_for_workspace
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
@@ -200,3 +203,80 @@ def test_revoke_unresolvable_workspace_raises(tmp_path: Path) -> None:
         revoke_service_for_workspace(
             resolver, build_fake_gateway_client(), _catalog(), latchkey, str(AgentId()), "slack"
         )
+
+
+# -- File sharing --------------------------------------------------------------
+
+# The shared internal scope also carries a baseline permission that must survive
+# any file-sharing revocation.
+_BASELINE_SELF_PERM = "latchkey-self-create-permission-request"
+
+
+def _file_sharing_rule(read_paths: tuple[str, ...] = (), write_paths: tuple[str, ...] = ()) -> dict[str, list[str]]:
+    perms = [_BASELINE_SELF_PERM]
+    perms += [f"minds-file-server-read-{p}" for p in read_paths]
+    perms += [f"minds-file-server-write-{p}" for p in write_paths]
+    return {"latchkey-self": perms}
+
+
+def test_build_file_sharing_overview_groups_by_access(tmp_path: Path) -> None:
+    latchkey = _latchkey(tmp_path)
+    agent, host = str(AgentId()), HostId()
+    _seed_host(latchkey, host, (_file_sharing_rule(read_paths=("/home/docs", "/tmp/x"), write_paths=("/home/out",)),))
+    resolver = _resolver({agent: host}, {agent: "Alpha"})
+
+    overview = build_file_sharing_overview(resolver, build_fake_gateway_client(), latchkey)
+
+    assert len(overview) == 1
+    labels = {p.label: p.description for p in overview[0].permissions}
+    assert labels["read"] == "/home/docs, /tmp/x"
+    assert labels["read and write"] == "/home/out"
+
+
+def test_build_file_sharing_overview_omits_workspaces_without_grants(tmp_path: Path) -> None:
+    latchkey = _latchkey(tmp_path)
+    agent, host = str(AgentId()), HostId()
+    # Only a baseline self permission, no file-sharing schemas.
+    _seed_host(latchkey, host, ({"latchkey-self": [_BASELINE_SELF_PERM]},))
+    resolver = _resolver({agent: host}, {agent: "Alpha"})
+
+    assert build_file_sharing_overview(resolver, build_fake_gateway_client(), latchkey) == ()
+
+
+def test_revoke_file_sharing_for_workspace_keeps_other_permissions(tmp_path: Path) -> None:
+    latchkey = _latchkey(tmp_path)
+    gateway = build_fake_gateway_client()
+    agent, host = str(AgentId()), HostId()
+    _seed_host(latchkey, host, (_file_sharing_rule(read_paths=("/home/docs",), write_paths=("/home/out",)),))
+    resolver = _resolver({agent: host}, {agent: "Alpha"})
+
+    revoke_file_sharing_for_workspace(resolver, gateway, latchkey, agent)
+
+    remaining = gateway.get_permission_rules(permissions_path_for_host(latchkey.plugin_data_dir, host))
+    # The baseline self permission survives; every file-sharing schema is gone.
+    assert remaining["latchkey-self"] == (_BASELINE_SELF_PERM,)
+
+
+def test_revoke_file_sharing_for_all_workspaces(tmp_path: Path) -> None:
+    latchkey = _latchkey(tmp_path)
+    gateway = build_fake_gateway_client()
+    agent_a, host_a = str(AgentId()), HostId()
+    agent_b, host_b = str(AgentId()), HostId()
+    _seed_host(latchkey, host_a, (_file_sharing_rule(read_paths=("/a",)),))
+    _seed_host(latchkey, host_b, (_file_sharing_rule(write_paths=("/b",)),))
+    resolver = _resolver({agent_a: host_a, agent_b: host_b}, {agent_a: "A", agent_b: "B"})
+
+    processed = revoke_file_sharing_for_all_workspaces(resolver, gateway, latchkey)
+
+    assert processed == 2
+    for host in (host_a, host_b):
+        remaining = gateway.get_permission_rules(permissions_path_for_host(latchkey.plugin_data_dir, host))
+        assert remaining["latchkey-self"] == (_BASELINE_SELF_PERM,)
+
+
+def test_revoke_file_sharing_unresolvable_workspace_raises(tmp_path: Path) -> None:
+    latchkey = _latchkey(tmp_path)
+    resolver = _resolver({}, {})
+
+    with pytest.raises(PermissionOverviewError, match="Could not resolve host"):
+        revoke_file_sharing_for_workspace(resolver, build_fake_gateway_client(), latchkey, str(AgentId()))

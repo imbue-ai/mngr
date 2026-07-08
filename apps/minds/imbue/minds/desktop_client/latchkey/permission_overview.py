@@ -20,6 +20,7 @@ permission-request flow, not here.
 """
 
 from collections.abc import Sequence
+from pathlib import Path
 
 from loguru import logger
 from pydantic import Field
@@ -41,6 +42,23 @@ from imbue.mngr_latchkey.store import permissions_path_for_host
 _WILDCARD_DISPLAY_LABEL = "all"
 _WILDCARD_DESCRIPTION = "Unrestricted access: any request to this service is permitted."
 
+# File-sharing grants are not catalog services: they live under the shared
+# ``latchkey-self`` scope as per-path permission schemas named
+# ``minds-file-server-<access>-<absolute-path>`` (see the gateway's
+# ``permission_requests.mjs``). We read them back by that prefix and split off
+# the access mode + path, and revoke them by removing just those permission
+# names from the ``latchkey-self`` rule (the rule also carries unrelated
+# baseline / accounts / workspace permissions, so the whole rule must never be
+# deleted).
+FILE_SHARING_SCOPE = "latchkey-self"
+_FILE_SHARING_PERMISSION_PREFIX = "minds-file-server-"
+_FILE_SHARING_READ = "read"
+_FILE_SHARING_WRITE = "write"
+# User-facing labels: a write grant is a read+write superset, so it reads as
+# "read and write"; a read-only grant reads as "read".
+_FILE_SHARING_READ_LABEL = "read"
+_FILE_SHARING_WRITE_LABEL = "read and write"
+
 
 class PermissionOverviewError(Exception):
     """Raised for caller-facing programming errors (e.g. revoking an unknown service)."""
@@ -53,6 +71,25 @@ class GrantedPermission(FrozenModel):
     description: str = Field(
         default="",
         description="Plain-English summary shown as a tooltip; empty when the catalog has none.",
+    )
+
+
+class WorkspaceFileSharingGrant(FrozenModel):
+    """The file-sharing access a single workspace's host has been granted.
+
+    Mirrors :class:`WorkspaceServiceGrant` so the settings template can render it
+    with the same card markup. ``permissions`` holds at most two entries -- a
+    ``read`` chip and/or a ``read and write`` chip -- whose ``description`` is the
+    comma-separated list of shared paths at that access level (shown as a
+    tooltip).
+    """
+
+    workspace_agent_id: str = Field(description="Primary workspace agent id (used to resolve the host on revoke).")
+    workspace_name: str = Field(description="Human-readable workspace display name shown as the card header.")
+    host_id: str = Field(description="Host the grant lives on (every agent on the host shares it).")
+    color: str = Field(description="Workspace accent color hex (``#rrggbb``) for the card header dot.")
+    permissions: tuple[GrantedPermission, ...] = Field(
+        description="``read`` / ``read and write`` access chips, each tooltip-listing its shared paths.",
     )
 
 
@@ -210,6 +247,122 @@ def build_permission_overview(
                 )
             )
     return tuple(sorted(overviews, key=lambda overview: overview.display_name.lower()))
+
+
+def _parse_file_sharing_permission(permission_name: str) -> tuple[str, str] | None:
+    """Split a ``minds-file-server-<access>-<path>`` name into ``(access, path)``.
+
+    Returns ``None`` for any permission name that is not a well-formed
+    file-sharing schema (so unrelated ``latchkey-self`` permissions -- baseline,
+    accounts, workspace verbs -- are ignored). The access mode is the token
+    before the first ``-`` after the prefix; the remainder (which starts with
+    ``/``) is the absolute path.
+    """
+    if not permission_name.startswith(_FILE_SHARING_PERMISSION_PREFIX):
+        return None
+    remainder = permission_name[len(_FILE_SHARING_PERMISSION_PREFIX) :]
+    access, separator, path = remainder.partition("-")
+    if not separator or access not in (_FILE_SHARING_READ, _FILE_SHARING_WRITE) or not path:
+        return None
+    return access, path
+
+
+def build_file_sharing_overview(
+    backend_resolver: BackendResolverInterface,
+    gateway_client: LatchkeyGatewayClient,
+    latchkey: Latchkey,
+) -> tuple[WorkspaceFileSharingGrant, ...]:
+    """Assemble the per-workspace file-sharing grant overview for the settings page.
+
+    Reads each active workspace host's permissions file once (through the gateway
+    extension), pulls the ``minds-file-server-*`` permissions out of the shared
+    ``latchkey-self`` rule, and groups the shared paths by access level. Only
+    workspaces with at least one file-sharing grant are returned, sorted by
+    workspace name. Raises :class:`LatchkeyGatewayClientError` on a read failure
+    (see :func:`build_permission_overview`).
+    """
+    plugin_data_dir = latchkey.plugin_data_dir
+    grants: list[WorkspaceFileSharingGrant] = []
+    for host in _list_active_workspace_hosts(backend_resolver):
+        path = permissions_path_for_host(plugin_data_dir, host.host_id)
+        permissions = gateway_client.get_permission_rules(path).get(FILE_SHARING_SCOPE, ())
+        read_paths: list[str] = []
+        write_paths: list[str] = []
+        for permission_name in permissions:
+            parsed = _parse_file_sharing_permission(permission_name)
+            if parsed is None:
+                continue
+            access, shared_path = parsed
+            (write_paths if access == _FILE_SHARING_WRITE else read_paths).append(shared_path)
+        chips: list[GrantedPermission] = []
+        if read_paths:
+            chips.append(
+                GrantedPermission(label=_FILE_SHARING_READ_LABEL, description=", ".join(sorted(set(read_paths))))
+            )
+        if write_paths:
+            chips.append(
+                GrantedPermission(label=_FILE_SHARING_WRITE_LABEL, description=", ".join(sorted(set(write_paths))))
+            )
+        if not chips:
+            continue
+        grants.append(
+            WorkspaceFileSharingGrant(
+                workspace_agent_id=host.agent_id,
+                workspace_name=host.workspace_name,
+                host_id=str(host.host_id),
+                color=host.color,
+                permissions=tuple(chips),
+            )
+        )
+    return tuple(sorted(grants, key=lambda grant: grant.workspace_name.lower()))
+
+
+def _revoke_file_sharing_at_path(gateway_client: LatchkeyGatewayClient, permissions_file_path: Path) -> None:
+    """Strip every ``minds-file-server-*`` permission from the host file's ``latchkey-self`` rule.
+
+    The rule also carries unrelated baseline / accounts / workspace permissions,
+    so we rewrite it with just the file-sharing entries filtered out rather than
+    deleting the whole rule. A no-op when the host has no file-sharing grants.
+    (The now-orphaned per-path schema definitions are left in the file's
+    ``schemas`` object; they are unreferenced and harmless, and a re-grant
+    overwrites them by name.)
+    """
+    permissions = gateway_client.get_permission_rules(permissions_file_path).get(FILE_SHARING_SCOPE, ())
+    kept = tuple(name for name in permissions if _parse_file_sharing_permission(name) is None)
+    if len(kept) == len(permissions):
+        return
+    gateway_client.set_permission_rule(permissions_file_path, FILE_SHARING_SCOPE, kept)
+
+
+def revoke_file_sharing_for_workspace(
+    backend_resolver: BackendResolverInterface,
+    gateway_client: LatchkeyGatewayClient,
+    latchkey: Latchkey,
+    workspace_agent_id: str,
+) -> None:
+    """Remove all file-sharing grants from the given workspace's host file.
+
+    Raises :class:`PermissionOverviewError` for an unresolvable workspace.
+    """
+    host_id = _resolve_host_id(backend_resolver, workspace_agent_id)
+    if host_id is None:
+        raise PermissionOverviewError(
+            f"Could not resolve host for workspace '{workspace_agent_id}'; cannot revoke.",
+        )
+    _revoke_file_sharing_at_path(gateway_client, permissions_path_for_host(latchkey.plugin_data_dir, host_id))
+
+
+def revoke_file_sharing_for_all_workspaces(
+    backend_resolver: BackendResolverInterface,
+    gateway_client: LatchkeyGatewayClient,
+    latchkey: Latchkey,
+) -> int:
+    """Remove all file-sharing grants from every active workspace host. Returns hosts processed."""
+    plugin_data_dir = latchkey.plugin_data_dir
+    hosts = _list_active_workspace_hosts(backend_resolver)
+    for host in hosts:
+        _revoke_file_sharing_at_path(gateway_client, permissions_path_for_host(plugin_data_dir, host.host_id))
+    return len(hosts)
 
 
 def _resolve_host_id(

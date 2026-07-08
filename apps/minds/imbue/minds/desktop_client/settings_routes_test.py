@@ -167,7 +167,7 @@ def test_settings_page_empty_state_when_no_grants(tmp_path: Path) -> None:
     response = client.get("/settings")
 
     assert response.status_code == 200
-    assert "No third-party service permissions" in response.text
+    assert "No permissions have been granted yet" in response.text
 
 
 def test_revoke_service_for_workspace_removes_rule(tmp_path: Path) -> None:
@@ -237,7 +237,90 @@ def test_settings_page_shows_unavailable_notice_when_gateway_down(tmp_path: Path
 
     assert response.status_code == 200
     assert "gateway is unavailable" in response.text
-    assert "No third-party service permissions" not in response.text
+    assert "No permissions have been granted yet" not in response.text
+
+
+# -- File sharing --------------------------------------------------------------
+
+_BASELINE_SELF_PERM = "latchkey-self-create-permission-request"
+
+
+def _seed_file_sharing(
+    tmp_path: Path, host: HostId, read_paths: tuple[str, ...], write_paths: tuple[str, ...]
+) -> Path:
+    perms = [_BASELINE_SELF_PERM]
+    perms += [f"minds-file-server-read-{p}" for p in read_paths]
+    perms += [f"minds-file-server-write-{p}" for p in write_paths]
+    path = permissions_path_for_host(_plugin_dir(tmp_path), host)
+    save_permissions(path, LatchkeyPermissionsConfig(rules=({"latchkey-self": perms},)))
+    return path
+
+
+def test_settings_page_lists_file_sharing_section(tmp_path: Path) -> None:
+    agent, host = str(AgentId()), HostId()
+    _seed_file_sharing(tmp_path, host, read_paths=("/home/docs",), write_paths=("/home/out",))
+    handler = _build_handler(tmp_path)
+    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
+
+    response = client.get("/settings")
+
+    assert response.status_code == 200
+    body = response.text
+    assert "File sharing" in body
+    assert "read and write" in body
+    # The shared paths are surfaced as the chip tooltip.
+    assert 'data-tooltip="/home/docs"' in body
+    assert 'data-tooltip="/home/out"' in body
+
+
+def test_revoke_file_sharing_for_workspace_keeps_other_permissions(tmp_path: Path) -> None:
+    agent, host = str(AgentId()), HostId()
+    path = _seed_file_sharing(tmp_path, host, read_paths=("/home/docs",), write_paths=("/home/out",))
+    handler = _build_handler(tmp_path)
+    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
+
+    response = client.post("/settings/permissions/file-sharing/revoke", json={"workspace_agent_id": agent})
+
+    assert response.status_code == 200
+    assert handler.gateway_client.get_permission_rules(path)["latchkey-self"] == (_BASELINE_SELF_PERM,)
+
+
+def test_revoke_file_sharing_all_removes_across_workspaces(tmp_path: Path) -> None:
+    agent_a, host_a = str(AgentId()), HostId()
+    agent_b, host_b = str(AgentId()), HostId()
+    path_a = _seed_file_sharing(tmp_path, host_a, read_paths=("/a",), write_paths=())
+    path_b = _seed_file_sharing(tmp_path, host_b, read_paths=(), write_paths=("/b",))
+    handler = _build_handler(tmp_path)
+    client = _build_client(
+        tmp_path, handler, {agent_a: str(host_a), agent_b: str(host_b)}, {agent_a: "A", agent_b: "B"}
+    )
+
+    response = client.post("/settings/permissions/file-sharing/revoke-all", json={})
+
+    assert response.status_code == 200
+    assert handler.gateway_client.get_permission_rules(path_a)["latchkey-self"] == (_BASELINE_SELF_PERM,)
+    assert handler.gateway_client.get_permission_rules(path_b)["latchkey-self"] == (_BASELINE_SELF_PERM,)
+
+
+def test_revoke_file_sharing_missing_workspace_returns_400(tmp_path: Path) -> None:
+    agent, host = str(AgentId()), HostId()
+    handler = _build_handler(tmp_path)
+    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
+
+    response = client.post("/settings/permissions/file-sharing/revoke", json={})
+
+    assert response.status_code == 400
+
+
+def test_revoke_file_sharing_requires_authentication(tmp_path: Path) -> None:
+    agent, host = str(AgentId()), HostId()
+    handler = _build_handler(tmp_path)
+    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
+    client.delete_cookie(SESSION_COOKIE_NAME)
+
+    response = client.post("/settings/permissions/file-sharing/revoke-all", json={})
+
+    assert response.status_code == 403
 
 
 def test_revoke_requires_authentication(tmp_path: Path) -> None:
