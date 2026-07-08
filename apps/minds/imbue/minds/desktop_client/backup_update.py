@@ -62,6 +62,14 @@ from imbue.mngr.primitives import AgentId
 # update; the UI parses the comma-separated chat names after it.
 BLOCKED_BY_RUNNING_CHATS_PREFIX: Final[str] = "BLOCKED_BY_RUNNING_CHATS:"
 
+# User-facing guidance when the apply script's `git stash pop` conflicted;
+# shown on both the success (warning log) and failure (error message) paths so
+# stashed changes never look lost.
+_STASH_CONFLICT_GUIDANCE: Final[str] = (
+    "Your uncommitted changes could not be restored automatically; "
+    "they are preserved in the git stash (run `git stash pop` in the workspace)."
+)
+
 # Must exceed the gate probe script's own `uv run mngr list` budget (180s)
 # so a slow list surfaces as the script's structured "mngr list failed"
 # payload rather than an opaque exec timeout.
@@ -180,18 +188,15 @@ def _run_update_phases(
     if status != "ok":
         detail = str(payload.get("detail", "unknown failure"))
         rolled_back_note = " (changes were rolled back)" if payload.get("rolled_back") else ""
-        registry.fail(agent_id, f"{detail}{rolled_back_note}")
+        stash_note = f" {_STASH_CONFLICT_GUIDANCE}" if payload.get("stash_conflict") else ""
+        registry.fail(agent_id, f"{detail}{rolled_back_note}{stash_note}")
         return
     if payload.get("committed"):
         registry.append_log(agent_id, f"Updated backup service code to {payload.get('tag', 'the target tag')}.")
     else:
         registry.append_log(agent_id, "Backup service code already matched the target version.")
     if payload.get("stash_conflict"):
-        registry.append_log(
-            agent_id,
-            "Warning: your uncommitted changes could not be restored automatically; "
-            "they are preserved in the git stash (run `git stash pop` in the workspace).",
-        )
+        registry.append_log(agent_id, f"Warning: {_STASH_CONFLICT_GUIDANCE}")
 
     # Phase 3: re-inject the canonical env (rotates a drifted workspace copy).
     if has_canonical_env(paths, agent_id):
