@@ -2,6 +2,7 @@
 
 import shutil
 import subprocess
+from collections.abc import Callable
 from collections.abc import Iterator
 from collections.abc import Mapping
 from contextlib import contextmanager
@@ -23,6 +24,7 @@ from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import CommandResult
+from imbue.mngr.interfaces.data_types import ErrorInfo
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -541,7 +543,10 @@ class _HostSshInfoProvider(ImbueCloudProvider):
         return Path("/tmp/imbue-cloud-test-keys/ssh_key"), Path("/tmp/imbue-cloud-test-keys/ssh_key.pub")
 
     def discover_hosts_and_agents(
-        self, cg: ConcurrencyGroup, include_destroyed: bool = False
+        self,
+        cg: ConcurrencyGroup,
+        include_destroyed: bool = False,
+        on_error: Callable[[ErrorInfo], None] | None = None,
     ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
         assert self._discovered_host is not None
         return {self._discovered_host: []}
@@ -590,7 +595,11 @@ class _CannedListingProvider(ImbueCloudProvider):
     def _list_leased_hosts_cached(self) -> list[LeasedHostInfo]:
         return [self._lease] if self._lease is not None else []
 
-    def _collect_listing_raw_via_outer(self, lease: LeasedHostInfo) -> tuple[dict[str, Any] | None, str | None, bool]:
+    def _collect_listing_raw_via_outer(
+        self,
+        lease: LeasedHostInfo,
+        on_error: Callable[[ErrorInfo], None] | None = None,
+    ) -> tuple[dict[str, Any] | None, str | None, bool]:
         assert self._raw is not None
         return dict(self._raw), None, False
 

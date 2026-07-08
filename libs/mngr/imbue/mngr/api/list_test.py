@@ -1376,6 +1376,7 @@ class _UnavailableDiscoveryProviderInstance(MockProviderInstance):
         self,
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
+        on_error: Callable[[ErrorInfo], None] | None = None,
     ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
         raise ProviderUnavailableError(self.name, "backend offline")
 
@@ -1387,6 +1388,7 @@ class _NotAuthorizedDiscoveryProviderInstance(MockProviderInstance):
         self,
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
+        on_error: Callable[[ErrorInfo], None] | None = None,
     ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
         raise ProviderNotAuthorizedError(
             self.name,

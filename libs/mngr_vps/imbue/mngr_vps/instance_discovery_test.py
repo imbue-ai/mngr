@@ -25,6 +25,7 @@ the actual fan-out / aggregation / caching code under test runs unmodified.
 """
 
 import json
+from collections.abc import Callable
 from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -44,6 +45,7 @@ from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CommandResult
+from imbue.mngr.interfaces.data_types import ErrorInfo
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
@@ -143,6 +145,7 @@ class _DiscoveryTestProvider(VpsProvider):
     def _read_records_from_vps(
         self,
         vps_ip: str,
+        on_error: Callable[[ErrorInfo], None] | None = None,
     ) -> _VpsDiscoveryData:
         # When a test wants to drive the *real* _read_records_from_vps logic
         # (cache-fallback or state-container-not-ready paths), it sets the
@@ -155,7 +158,7 @@ class _DiscoveryTestProvider(VpsProvider):
             or vps_ip in self.state_container_ready
             or vps_ip in self.live_outer_by_ip
         ):
-            return super()._read_records_from_vps(vps_ip)
+            return super()._read_records_from_vps(vps_ip, on_error)
         return self.per_vps_records.get(vps_ip, _VpsDiscoveryData())
 
     @contextmanager
