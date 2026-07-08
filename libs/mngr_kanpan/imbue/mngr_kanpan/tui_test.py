@@ -92,16 +92,14 @@ from imbue.mngr_kanpan.tui import _get_state_attr
 from imbue.mngr_kanpan.tui import _handle_peek_key
 from imbue.mngr_kanpan.tui import _is_field_stale
 from imbue.mngr_kanpan.tui import _is_focus_on_first_selectable
-from imbue.mngr_kanpan.tui import _is_peek_chrome_line
 from imbue.mngr_kanpan.tui import _last_nonempty_line
 from imbue.mngr_kanpan.tui import _load_user_commands
-from imbue.mngr_kanpan.tui import _looks_like_selection
 from imbue.mngr_kanpan.tui import _make_reply_edit
 from imbue.mngr_kanpan.tui import _on_batch_item_poll
 from imbue.mngr_kanpan.tui import _on_peek_capture_poll
 from imbue.mngr_kanpan.tui import _on_peek_reply_poll
 from imbue.mngr_kanpan.tui import _on_transient_expire
-from imbue.mngr_kanpan.tui import _peek_body_from_capture
+from imbue.mngr_kanpan.tui import _peek_body_from_transcript
 from imbue.mngr_kanpan.tui import _prune_orphaned_marks
 from imbue.mngr_kanpan.tui import _refresh_display
 from imbue.mngr_kanpan.tui import _render_footer
@@ -1855,85 +1853,33 @@ def test_last_nonempty_line_all_blank_returns_empty() -> None:
     assert _last_nonempty_line("   \n\n") == ""
 
 
-def test_peek_body_from_capture_keeps_trailing_tail() -> None:
+def test_peek_body_from_transcript_keeps_trailing_tail() -> None:
     stdout = "\n".join(f"line{i}" for i in range(30)) + "\n\n\n"
     result = subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
-    body_lines = _peek_body_from_capture(result).split("\n")
-    # Trailing blank lines are dropped and only the last PEEK_BODY_HEIGHT remain.
-    assert len(body_lines) == PEEK_BODY_HEIGHT
+    body_lines = _peek_body_from_transcript(result).split("\n")
+    # Trailing blanks dropped; only the newest PEEK_BODY_HEIGHT lines show, under a marker.
+    assert body_lines[0] == "... 16 earlier lines hidden"
     assert body_lines[-1] == "line29"
+    assert len(body_lines) == PEEK_BODY_HEIGHT + 1
 
 
-def test_peek_body_from_capture_trims_boxed_input_and_status() -> None:
-    stdout = (
-        "assistant said the last useful thing\n"
-        "╭────────────────────────────────╮\n"
-        "│ ❯                              │\n"
-        "╰────────────────────────────────╯\n"
-        "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents\n"
-    )
+def test_peek_body_from_transcript_short_message_has_no_marker() -> None:
+    stdout = "[2026-07-07T00:14:35Z] assistant:\nall done, tests pass\n"
     result = subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
-    # The empty input box, its borders, and the status line are all chrome, so the
-    # digest ends on the last real output line rather than the agent's own prompt.
-    assert _peek_body_from_capture(result) == "assistant said the last useful thing"
+    body = _peek_body_from_transcript(result)
+    # A message shorter than the window shows verbatim, with no truncation marker.
+    assert body == "[2026-07-07T00:14:35Z] assistant:\nall done, tests pass"
+    assert "earlier lines hidden" not in body
 
 
-def test_peek_body_from_capture_trims_rule_style_input_box_and_statusline() -> None:
-    stdout = (
-        "the assistant's final line of output\n"
-        "\n"
-        "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n"
-        "❯ a leftover draft message\n"
-        "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n"
-        "  [01:22:38 weishi@host /Users/weishi/x] branch/name\n"
-    )
-    result = subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
-    # A rule-style input box holding a draft plus the shipped statusline are all
-    # trimmed, so the two-input-box confusion does not reach the digest.
-    assert _peek_body_from_capture(result) == "the assistant's final line of output"
+def test_peek_body_from_transcript_reports_failure() -> None:
+    result = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="does not support transcripts")
+    assert "does not support transcripts" in _peek_body_from_transcript(result)
 
 
-def test_peek_body_from_capture_keeps_boxed_menu_options() -> None:
-    stdout = "Do you want to proceed?\n│ ❯ 1. Yes │\n│   2. No  │\n╰──────────╯\n"
-    result = subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
-    body = _peek_body_from_capture(result)
-    # Boxed rows carrying real content (menu options) survive the chrome trim.
-    assert "1. Yes" in body
-    assert "2. No" in body
-
-
-def test_peek_body_from_capture_reports_failure() -> None:
-    result = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="host unreachable")
-    assert "host unreachable" in _peek_body_from_capture(result)
-
-
-def test_peek_body_from_capture_empty_output() -> None:
+def test_peek_body_from_transcript_empty_output() -> None:
     result = subprocess.CompletedProcess(args=[], returncode=0, stdout="\n\n", stderr="")
-    assert _peek_body_from_capture(result) == "(no recent output)"
-
-
-def test_is_peek_chrome_line_classifies_chrome_and_content() -> None:
-    assert _is_peek_chrome_line("")
-    assert _is_peek_chrome_line("   ")
-    assert _is_peek_chrome_line("╭────────╮")
-    assert _is_peek_chrome_line("▔▔▔▔▔▔▔▔")
-    assert _is_peek_chrome_line("│ ❯ │")
-    assert _is_peek_chrome_line("❯ a leftover draft message")
-    assert _is_peek_chrome_line("  [01:22:38 weishi@host /Users/weishi/x] branch/name")
-    assert _is_peek_chrome_line("  ⏵⏵ bypass permissions on (shift+tab to cycle)")
-    assert not _is_peek_chrome_line("real output line")
-    assert not _is_peek_chrome_line("❯ 1. Yes")
-    assert not _is_peek_chrome_line("│ ❯ 1. Yes │")
-
-
-def test_looks_like_selection_detects_cursor_marked_menu() -> None:
-    menu = "Choose one:\n❯ 1. First option\n  2. Second option\n"
-    assert _looks_like_selection(menu)
-
-
-def test_looks_like_selection_ignores_plain_numbered_list() -> None:
-    plain = "Plan:\n1. build the thing\n2. test the thing\n"
-    assert not _looks_like_selection(plain)
+    assert _peek_body_from_transcript(result) == "(no messages yet)"
 
 
 def test_on_peek_reply_poll_success_renders_sent() -> None:

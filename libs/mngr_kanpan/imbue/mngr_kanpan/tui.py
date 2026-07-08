@@ -1,5 +1,4 @@
 import os
-import re
 import subprocess
 import time
 from collections.abc import Callable
@@ -10,7 +9,6 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from datetime import timezone
 from typing import Any
-from typing import Final
 from typing import assert_never
 
 from loguru import logger
@@ -85,9 +83,10 @@ SPINNER_FRAMES: tuple[str, ...] = ("|", "/", "-", "\\")
 SPINNER_INTERVAL_SECONDS: float = 0.15
 TRANSIENT_MESSAGE_SECONDS: float = 3.0
 
-# Peek panel: visible height of the scrollable output window, and how often to
-# re-capture the agent's pane while the panel is open.
+# Peek panel: how many trailing transcript lines to show, how many recent
+# transcript events to fetch, and how often to refresh while the panel is open.
 PEEK_BODY_HEIGHT: int = 14
+PEEK_TRANSCRIPT_TAIL_EVENTS: int = 3
 PEEK_REFRESH_SECONDS: float = 2.0
 PEEK_REPLY_PROMPT: str = "reply> "
 
@@ -935,9 +934,14 @@ def _focus_row_by_name(state: _KanpanState, name: AgentName) -> None:
             return
 
 
-def _run_capture(agent_name: str) -> subprocess.CompletedProcess[str]:  # pragma: no cover
-    """Capture the agent's tmux pane content. Called from a background thread."""
-    return subprocess.run(["mngr", "capture", agent_name], capture_output=True, text=True, timeout=30)
+def _run_transcript(agent_name: str) -> subprocess.CompletedProcess[str]:  # pragma: no cover
+    """Read the agent's recent transcript messages. Called from a background thread."""
+    return subprocess.run(
+        ["mngr", "transcript", agent_name, "--tail", str(PEEK_TRANSCRIPT_TAIL_EVENTS)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
 
 
 def _run_message(agent_name: str, message: str) -> subprocess.CompletedProcess[str]:  # pragma: no cover
@@ -963,75 +967,27 @@ def _last_nonempty_line(text: str) -> str:
     return lines[-1] if lines else ""
 
 
-# Trailing pane chrome trimmed from the peek digest so the agent's own input box
-# stops reading as a second reply field.
-_PEEK_STATUS_MARKERS: Final = (
-    "bypass permissions",
-    "accept edits",
-    "for agents",
-    "shift+tab",
-    "esc to interrupt",
-)
-# Rule/border glyphs an agent draws around its input box (box-drawing and heavy rules).
-_PEEK_RULE_CHARS: Final = frozenset("─━═▔▁╭╮╰╯┌┐└┘ ")
-_PEEK_PROMPT_CHARS: Final = frozenset("❯›> ")
-# A numbered menu option, optionally boxed (│) and cursor-marked (❯), e.g. "❯ 1. Yes".
-_PEEK_OPTION_RE: Final = re.compile(r"^\s*│?\s*[❯›>]?\s*\d+[.)]\s+\S")
-
-
 @pure
-def _is_peek_chrome_line(line: str) -> bool:
-    """True when `line` is trailing agent-TUI chrome trimmed from the peek digest.
+def _peek_body_from_transcript(result: subprocess.CompletedProcess[str]) -> str:
+    """Reduce a transcript dump to the trailing lines shown in the peek panel.
 
-    Covers blank lines, box/rule borders, the agent's own input prompt (empty or
-    holding a draft), and the shipped ``[HH:MM:SS user@host path]`` statusline, so
-    the digest ends on real output rather than the agent's input box. Numbered menu
-    options are preserved so a live selection stays visible.
-    """
-    stripped = line.strip()
-    if not stripped:
-        return True
-    if _PEEK_OPTION_RE.match(stripped):
-        return False
-    if stripped.startswith("│") and stripped.endswith("│"):
-        inner = stripped[1:-1].strip()
-        return all(char in _PEEK_PROMPT_CHARS for char in inner)
-    if all(char in _PEEK_RULE_CHARS for char in stripped):
-        return True
-    if stripped[0] in _PEEK_PROMPT_CHARS:
-        return True
-    if stripped.startswith("[") and "@" in stripped:
-        return True
-    lowered = stripped.lower()
-    return any(marker in lowered for marker in _PEEK_STATUS_MARKERS)
-
-
-@pure
-def _looks_like_selection(text: str) -> bool:
-    """True when the pane shows a cursor-marked numbered selection menu (>= 2 options)."""
-    options = [line for line in text.splitlines() if _PEEK_OPTION_RE.match(line)]
-    if len(options) < 2:
-        return False
-    return any("❯" in option for option in options)
-
-
-@pure
-def _peek_body_from_capture(result: subprocess.CompletedProcess[str]) -> str:
-    """Reduce a captured pane to the trailing content lines shown in the peek panel.
-
-    Trailing chrome (input box, borders, status) is trimmed so the digest ends on
-    real output rather than the agent's own prompt.
+    Shows the tail -- the newest lines -- so a long final message renders its end
+    (the agent's conclusion, or the question it is waiting on) rather than its
+    start. A ``N earlier lines hidden`` marker is prepended when older lines drop.
     """
     if result.returncode != 0:
-        detail = result.stderr.strip() or f"exited with code {result.returncode}"
-        return f"(no output: {detail})"
+        detail = _last_nonempty_line(result.stderr) or f"exited with code {result.returncode}"
+        return f"(no transcript: {detail})"
     lines = result.stdout.rstrip("\n").split("\n")
     end = len(lines)
-    while end > 0 and _is_peek_chrome_line(lines[end - 1]):
+    while end > 0 and not lines[end - 1].strip():
         end -= 1
-    tail = lines[max(0, end - PEEK_BODY_HEIGHT) : end]
+    start = max(0, end - PEEK_BODY_HEIGHT)
+    tail = lines[start:end]
     if not tail:
-        return "(no recent output)"
+        return "(no messages yet)"
+    if start > 0:
+        return "\n".join([f"... {start} earlier lines hidden", *tail])
     return "\n".join(tail)
 
 
@@ -1055,7 +1011,7 @@ def _make_reply_edit(caption: tuple[str, str]) -> ReadlineEdit:
 def _build_peek_panel(state: _KanpanState) -> Pile:
     """Build the peek panel widget (shown in place of the footer) and stash its parts."""
     state.peek_header_text = Text("")
-    state.peek_body_text = Text("", wrap="clip")
+    state.peek_body_text = Text("", wrap="space")
     state.peek_input = _make_reply_edit(("peek_hint", PEEK_REPLY_PROMPT))
     state.peek_status_text = Text("")
     hint = Text(("peek_hint", "  enter: send reply   ·   esc: close"))
@@ -1094,16 +1050,16 @@ def _cancel_peek_alarm(state: _KanpanState) -> None:
 
 
 def _start_peek_capture(state: _KanpanState) -> None:
-    """Kick off a background capture for the peeked agent and poll for it."""
+    """Kick off a background transcript read for the peeked agent and poll for it."""
     if state.peek_agent_name is None or state.loop is None:
         return
     executor = _ensure_peek_executor(state)
-    state.peek_capture_future = executor.submit(_run_capture, str(state.peek_agent_name))
+    state.peek_capture_future = executor.submit(_run_transcript, str(state.peek_agent_name))
     state.peek_alarm = state.loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_peek_capture_poll, state)
 
 
 def _on_peek_capture_poll(loop: MainLoop, state: _KanpanState) -> None:
-    """Poll the in-flight capture; render it and schedule the next one while open."""
+    """Poll the in-flight transcript read; render it and schedule the next while open."""
     state.peek_alarm = None
     future = state.peek_capture_future
     if future is None or state.peek_agent_name is None:
@@ -1114,14 +1070,11 @@ def _on_peek_capture_poll(loop: MainLoop, state: _KanpanState) -> None:
 
     state.peek_capture_future = None
     try:
-        body = _peek_body_from_capture(future.result())
+        body = _peek_body_from_transcript(future.result())
     except (subprocess.SubprocessError, OSError) as e:
-        body = f"(capture failed: {e})"
+        body = f"(transcript failed: {e})"
     if state.peek_body_text is not None:
         state.peek_body_text.set_text(body)
-    # A menu can't be driven from here (reply is text-only), so point the user at attach.
-    if state.peek_status_text is not None and _looks_like_selection(body):
-        state.peek_status_text.set_text(("peek_hint", "  selection detected — esc, then enter to attach and choose"))
     if state.peek_agent_name is not None:
         state.peek_alarm = loop.set_alarm_in(PEEK_REFRESH_SECONDS, _on_peek_capture_tick, state)
 

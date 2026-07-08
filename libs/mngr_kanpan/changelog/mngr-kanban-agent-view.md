@@ -2,7 +2,7 @@ Added agent-view style interaction to the kanpan board, so you can work with an 
 
 - Attach to the focused agent's session with `Enter`. The board suspends while attached and restores when you detach (`Ctrl-b d`), returning you to the board instead of a bare shell.
 
-- Peek at an agent with `Space`: a live panel below the board shows the agent's recent output, refreshed every couple of seconds, with the board still visible above. The digest trims the agent's own input box and status line so it does not read as a second reply field. `Esc` closes the panel; to peek a different agent, close it, move on the board, and press `Space` again.
+- Peek at an agent with `Space`: a live panel below the board shows the agent's most recent transcript messages (via `mngr transcript`), refreshed every couple of seconds, with the board still visible above. It shows the newest lines, so a long final message renders its end -- the agent's conclusion, or the question it is waiting on -- under a `N earlier lines hidden` marker, rather than being cut off at the top or mirroring the agent's scrolled-up screen. `Esc` closes the panel; to peek a different agent, close it, move on the board, and press `Space` again.
 
 - Reply from the peek panel: type into the `reply>` input and press `Enter` to send a message to that agent (an empty reply does nothing). The send runs in the background so the panel stays live, and failures are shown inline. The sent text is echoed immediately (`sending: ...`) so it is not lost while delivery is in flight.
 
@@ -10,4 +10,4 @@ Added agent-view style interaction to the kanpan board, so you can work with an 
 
 - Optional `peek_left_returns_to_board` setting (under `[plugins.kanpan]`, off by default): when on, pressing `←` on an empty reply closes the peek panel and returns to the board (mirrors Claude Agent View's back gesture). `←` still moves the cursor when the reply has text.
 
-- When the peeked agent is showing a selection menu (e.g. `/login`), the panel says `selection detected — esc, then enter to attach and choose`: menus are driven in the real session, since the text reply cannot move a selection cursor.
+- Selection menus (e.g. `/login`) are not part of the transcript, so they do not appear in the peek; attach (`Enter`) to make the choice in the real session, since the text reply cannot move a selection cursor.
