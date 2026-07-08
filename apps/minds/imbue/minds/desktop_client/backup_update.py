@@ -229,6 +229,7 @@ def _wait_for_quiet_workspace(
     """
     probe_command = build_workspace_script_command(BACKUP_GATE_PROBE_SCRIPT, ("--agent-id", str(agent_id)))
     is_waiting_logged = False
+    is_gate_error_logged = False
     while not registry.is_cancel_requested(agent_id):
         probe_result = run_mngr_exec_on_agent(
             agent_id, probe_command, parent_cg=parent_cg, timeout_seconds=_GATE_PROBE_TIMEOUT_SECONDS
@@ -238,6 +239,17 @@ def _wait_for_quiet_workspace(
             detail = (probe_result.stderr or probe_result.stdout).strip()[-500:]
             registry.fail(agent_id, f"Could not probe the workspace: {detail}")
             return False
+        # A gate_error means the probe could not list chats (its mngr list
+        # failed) and running_chats is empty by construction. Keep going --
+        # the apply script re-runs the gate authoritatively before mutating
+        # anything -- but leave a trace so a later failure is explicable.
+        gate_error = str(payload.get("gate_error") or "")
+        if gate_error and not is_gate_error_logged:
+            logger.warning("Backup update gate probe for {} could not list chats: {}", agent_id, gate_error)
+            registry.append_log(
+                agent_id, "Warning: could not check for running chats; they are re-checked before applying."
+            )
+            is_gate_error_logged = True
         running_chats = payload.get("running_chats")
         chat_names = [str(name) for name in running_chats] if isinstance(running_chats, list) else []
         if chat_names and not is_stop_chats:
