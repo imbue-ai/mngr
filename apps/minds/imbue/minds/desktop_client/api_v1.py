@@ -759,6 +759,7 @@ def _handle_workspace_health(agent_id: str) -> Response:
     response = probe_workspace_health(
         parsed_id,
         backend_resolver=backend_resolver,
+        tracker=state.system_interface_health_tracker,
         mngr_binary=state.mngr_binary,
         mngr_host_dir=state.mngr_host_dir,
         concurrency_group=parent_cg,

@@ -6,8 +6,6 @@ import time
 from collections.abc import Collection
 from collections.abc import Iterator
 from collections.abc import Mapping
-from datetime import datetime
-from datetime import timezone
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -123,9 +121,7 @@ from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.minds.utils.sentry.core import latchkey_forward_sentry_consent_path
 from imbue.minds.utils.sentry.core import write_latchkey_forward_sentry_consent
-from imbue.mngr.api.discovery_events import DISCOVERY_STREAM_POLL_INTERVAL_SECONDS
 from imbue.mngr.primitives import AgentId
-from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 
 _PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
@@ -163,78 +159,6 @@ def _system_interface_status_payload(
         if error is not None:
             payload["error"] = error
     return payload
-
-
-def _should_emit_system_interface_status(
-    backend_resolver: BackendResolverInterface,
-    tracker: SystemInterfaceHealthTracker | None,
-    agent_id: AgentId,
-    status: AgentHealth,
-) -> bool:
-    """Whether to push a ``system_interface_status`` event for an agent in ``status``.
-
-    A STUCK status is what drives the chrome to redirect the content view to the
-    recovery page. Gate that redirect on a discovery snapshot taken *after* the
-    outage began: a snapshot that predates the outage still carries the pre-outage
-    host state (a just-stopped container still reads RUNNING), which would
-    misclassify the recovery tier and ask the user to confirm a restart instead of
-    auto-dispatching one. So suppress STUCK -- keeping the user on the
-    auto-refreshing "Loading workspace" loader -- until a full snapshot whose
-    producer timestamp is at or after the agent's outage onset
-    (``get_failure_run_started_wall_at``) has landed; by then discovery has
-    re-observed the host and the classification is trustworthy. The next emission
-    (the per-wake flip check or the periodic re-assert in the chrome-events loop)
-    then pushes STUCK and the redirect fires.
-
-    When no onset is recorded (only the force-``mark_stuck`` path, used in tests,
-    lacks one) fall back to the absolute-age freshness gate so that path is not
-    stranded. Non-STUCK statuses (RESTARTING, RESTART_FAILED, HEALTHY) are emitted
-    unconditionally -- they do not trigger the redirect, and the user is already on
-    the recovery page when they apply. Only the passive-discovery resolver tracks
-    snapshot freshness; for any other resolver the redirect is not gated.
-
-    Freshness is scoped to the *workspace's own provider*: each provider is
-    discovered on its own decoupled loop, so this gate compares against the last
-    snapshot of the agent's provider (falling back to the aggregate when that
-    provider is not yet known), not a single global snapshot.
-    """
-    if status != AgentHealth.STUCK:
-        return True
-    if not isinstance(backend_resolver, MngrCliBackendResolver):
-        return True
-    last_snapshot_at = _workspace_provider_snapshot_at(backend_resolver, agent_id)
-    onset = tracker.get_failure_run_started_wall_at(agent_id) if tracker is not None else None
-    # When discovery is *persistently* stale -- the producer/consumer pipeline has
-    # stalled, not merely a provider being down -- no post-onset snapshot ever
-    # arrives, so this gate keeps suppressing the STUCK redirect indefinitely. That
-    # is intentional and safe: the DiscoveryHealthWatchdog independently detects the
-    # stall (snapshot age), tries to self-heal the producer, and on failure (or a
-    # dead consumer) escalates to a terminal BLOCKED app-takeover -- so the user is
-    # never left stranded on the "Loading workspace" loader here with no recourse.
-    if onset is None:
-        return _is_discovery_fresh(last_snapshot_at)
-    return last_snapshot_at is not None and last_snapshot_at >= onset
-
-
-def _workspace_provider_snapshot_at(backend_resolver: MngrCliBackendResolver, agent_id: AgentId) -> datetime | None:
-    """Last per-provider snapshot time for ``agent_id``'s provider, or the aggregate fallback.
-
-    The recovery redirect gates on whether discovery has re-observed *this
-    workspace's* host since the outage began. Because each provider is discovered
-    on its own decoupled loop, a healthy provider keeps emitting fresh snapshots
-    even while an unrelated provider is down -- so the gate must use the
-    workspace's own provider's snapshot time, not a single global one. When the
-    agent's provider is known, its snapshot time is returned even if ``None`` (no
-    snapshot of that provider has completed yet, so freshness cannot be
-    established and the caller treats it as stale). Only when the agent's provider
-    is *unknown* (it has not appeared in discovery at all) do we fall back to the
-    aggregate snapshot time across all providers.
-    """
-    info = backend_resolver.get_agent_display_info(agent_id)
-    if info is not None and info.provider_name is not None:
-        return backend_resolver.get_last_snapshot_at_for_provider(ProviderInstanceName(info.provider_name))
-    _, aggregate_snapshot_at = backend_resolver.get_freshness_timestamps()
-    return aggregate_snapshot_at
 
 
 def _discovery_health_payload(health: DiscoveryHealth) -> dict[str, str]:
@@ -1152,15 +1076,13 @@ def _handle_chrome_events() -> Response:
             )
 
             # Agents for which a STUCK redirect has already been emitted on this
-            # connection, so the per-wake flip check below emits each stuck episode
-            # exactly once (the 15s re-assert still re-delivers for a chrome that
-            # lost the one-shot). An agent is dropped from the set when it leaves
-            # STUCK so a later re-STUCK re-promotes.
+            # connection, so a steadily-STUCK workspace is redirected exactly once
+            # (the 15s re-assert still re-delivers for a chrome that lost the
+            # one-shot). An agent is dropped from the set when it leaves STUCK so a
+            # later re-STUCK re-promotes.
             redirected_agent_ids: set[str] = set()
             if tracker is not None:
                 for aid, status in tracker.snapshot_all().items():
-                    if not _should_emit_system_interface_status(backend_resolver, tracker, aid, status):
-                        continue
                     if status == AgentHealth.STUCK:
                         redirected_agent_ids.add(str(aid))
                     yield "data: {}\n\n".format(
@@ -1237,31 +1159,12 @@ def _handle_chrome_events() -> Response:
                 while not health_queue.empty():
                     aid_str, status = health_queue.get_nowait()
                     # Leaving STUCK clears the redirect latch so a later re-STUCK
-                    # is promoted again by the flip check below.
+                    # is redirected again.
                     if status != AgentHealth.STUCK:
                         redirected_agent_ids.discard(aid_str)
-                    if not _should_emit_system_interface_status(backend_resolver, tracker, AgentId(aid_str), status):
-                        continue
                     if status == AgentHealth.STUCK:
                         redirected_agent_ids.add(aid_str)
                     yield "data: {}\n\n".format(json.dumps(_system_interface_status_payload(tracker, aid_str, status)))
-
-                # Promote any STUCK agent whose suppression has just lifted: the
-                # STUCK edge fired earlier (and was suppressed because no post-onset
-                # snapshot had landed yet), and this wake is the snapshot arriving.
-                # Emit immediately rather than waiting for the 15s re-assert below,
-                # bounding redirect latency to one discovery poll. The latch keeps
-                # this to one emit per stuck episode.
-                if tracker is not None:
-                    for aid, status in tracker.snapshot_all().items():
-                        if status != AgentHealth.STUCK or str(aid) in redirected_agent_ids:
-                            continue
-                        if not _should_emit_system_interface_status(backend_resolver, tracker, aid, status):
-                            continue
-                        redirected_agent_ids.add(str(aid))
-                        yield "data: {}\n\n".format(
-                            json.dumps(_system_interface_status_payload(tracker, str(aid), status))
-                        )
 
                 if (
                     discovery_watchdog is not None
@@ -1279,9 +1182,6 @@ def _handle_chrome_events() -> Response:
                 # reloaded chrome webview) would otherwise never re-learn it and
                 # never redirect to the recovery page. Re-asserting is idempotent
                 # client-side (the recovery-redirect lock prevents re-navigation).
-                # Prompt promotion of a suppressed STUCK once a post-onset snapshot
-                # lands is handled by the flip check above; this is the slower
-                # lost-event backstop.
                 now = time.monotonic()
                 if (
                     tracker is not None
@@ -1289,8 +1189,6 @@ def _handle_chrome_events() -> Response:
                 ):
                     last_status_reassert = now
                     for aid, status in tracker.snapshot_all().items():
-                        if not _should_emit_system_interface_status(backend_resolver, tracker, aid, status):
-                            continue
                         if status == AgentHealth.STUCK:
                             redirected_agent_ids.add(str(aid))
                         yield "data: {}\n\n".format(
@@ -1578,14 +1476,6 @@ def _build_requests_payload(
 # Used by the background system-interface-health probe loop -- we want a short,
 # snappy timeout so a wedged workspace doesn't gate the recovery UI.
 _WORKSPACE_PROBE_TIMEOUT_SECONDS: Final[float] = 2.0
-# How recent the last full discovery snapshot must be to treat discovery as
-# trustworthy. A healthy discovery poll emits a snapshot every
-# ``DISCOVERY_STREAM_POLL_INTERVAL_SECONDS``; three missed snapshots means the
-# pipeline has stalled, so the host/provider state it last reported can no longer
-# be trusted to drive the recovery redirect. The 3x multiple stays comfortably
-# above the normal inter-snapshot interval to avoid a false "stale" during a
-# single slow-but-healthy poll.
-_DISCOVERY_FRESHNESS_THRESHOLD_SECONDS: Final[float] = 3 * DISCOVERY_STREAM_POLL_INTERVAL_SECONDS
 
 
 def _sanitize_recovery_return_to(raw: str) -> str:
@@ -1688,19 +1578,6 @@ def _handle_recovery_page(
     # (reload to render the new state) without a focus-stealing full reload on
     # every tick. See the recovery script's ``scheduleRefresh``.
     return make_html_response(content=html_body, headers={"X-Recovery-Status": render_status})
-
-
-def _is_discovery_fresh(last_full_snapshot_at: datetime | None) -> bool:
-    """Whether the most recent full discovery snapshot is recent enough to trust.
-
-    A snapshot older than ``_DISCOVERY_FRESHNESS_THRESHOLD_SECONDS`` (or no
-    snapshot at all) means discovery has stalled -- the resolver's host state may
-    pre-date an outage -- so reachability cannot be positively established.
-    """
-    if last_full_snapshot_at is None:
-        return False
-    age_seconds = (datetime.now(timezone.utc) - last_full_snapshot_at).total_seconds()
-    return age_seconds <= _DISCOVERY_FRESHNESS_THRESHOLD_SECONDS
 
 
 # -- Account management routes --

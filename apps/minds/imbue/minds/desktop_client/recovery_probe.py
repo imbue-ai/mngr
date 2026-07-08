@@ -135,6 +135,22 @@ class DispatchTier(str, Enum):
     the recovery page, so this tier is what prevents an unnecessary restart of a
     workspace that has already come back."""
 
+    INDETERMINATE = "indeterminate"
+    """We lack trustworthy evidence to classify, so no verdict or restart is safe.
+
+    Either the in-container probe timed out (it observed nothing -- absence of
+    evidence, not evidence the workspace is down), or the discovery snapshot
+    backing the host state predates the outage onset (a pre-outage snapshot still
+    reads the stale host state, e.g. a just-stopped container still shows RUNNING).
+    A negative verdict or an auto-dispatched restart off such non-evidence is
+    exactly the misclassification this tier avoids. The recovery page renders a
+    live "reconnecting" state and keeps checking: the cheap liveness poll returns
+    the user home the instant the workspace answers, and a later probe that
+    *completes* against a *fresh* snapshot resolves to a real tier if the
+    workspace is genuinely down. Direct in-container evidence (a live GET / 200)
+    still short-circuits to HEALTHY even here -- positive evidence is trusted
+    regardless of snapshot freshness."""
+
     INTERFACE_UNRESPONSIVE = "interface_unresponsive"
     """Container running and exec works, but the inner web server does not answer
     GET / with 200 -- restart the system-services agent in place."""
@@ -552,52 +568,67 @@ def _build_plugin_resolver_probe(plugin_resolver_services: dict[str, str]) -> Pr
 def _classify_dispatch_tier(
     probes: tuple[Probe, ...],
     provider_error_message: str | None,
+    probe_timed_out: bool,
+    classification_is_trustworthy: bool,
 ) -> DispatchTier:
-    """Derive the dispatch tier from probe answers and the provider error.
+    """Derive the dispatch tier from probe answers, the provider error, and evidence quality.
 
     Ordered by precedence:
 
-    * BACKEND_UNREACHABLE beats every host/interface tier: if the provider that
-      produces the host-state observations is itself unreachable (or rejecting
-      us), no restart routed through it can help and the host-state probes cannot
-      be trusted, so the provider-error signal wins outright. We do not
-      sub-classify by error kind (a stopped daemon, a paused daemon, an expired
-      login all land here): the user-facing impact is identical -- show the
-      provider's own message, offer Retry, and wait for it to recover.
-    * HOST_OFFLINE when the container is offline: nothing live to interrupt, so
-      a host restart can run unattended.
-    * HEALTHY when both container and exec are healthy AND the inner web server
-      answers GET / with 200: the interface is demonstrably responding, so there
-      is nothing to recover. A live 200 is direct proof and is trusted over the
-      slower background health tracker that triggered the page, so a workspace
-      that has already come back is sent home instead of needlessly restarted.
-    * INTERFACE_UNRESPONSIVE when container and exec are healthy but the inner
-      server does NOT confirm a 200: the system-services agent can be restarted
-      in place without touching the user's agents. A listening-but-not-answering
-      (or unprobeable) interface is exactly the wedge that restart fixes, so we
-      classify it here rather than as HEALTHY.
-    * HOST_UNRESPONSIVE when the container claims running but we can't exec into
-      it (or on any other ambiguous host state): a host restart bounces a live
-      container, so it requires explicit user consent. The recovery page is only
-      reached once discovery is fresh (the redirect is gated on freshness), so
-      the RUNNING claim is trustworthy here.
+    * BACKEND_UNREACHABLE beats every other tier: if the provider that produces
+      the host-state observations is itself unreachable (or rejecting us), no
+      restart routed through it can help and the host-state probes cannot be
+      trusted, so the provider-error signal wins outright. We do not sub-classify
+      by error kind (a stopped daemon, a paused daemon, an expired login all land
+      here): the user-facing impact is identical -- show the provider's own
+      message, offer Retry, and wait for it to recover.
+    * HEALTHY / INTERFACE_UNRESPONSIVE next, whenever the batched exec reached the
+      container (``can_run`` is YES). Direct in-container evidence is authoritative
+      regardless of snapshot freshness or how we got here: the container is
+      demonstrably up, so a live GET / 200 is proof the interface is answering
+      (HEALTHY, sent home) and a non-200 is the wedge a surgical in-place restart
+      fixes (INTERFACE_UNRESPONSIVE). Positive evidence short-circuits every
+      host-state-derived tier below.
+    * INDETERMINATE when we have no direct in-container evidence AND cannot trust a
+      negative verdict: the probe timed out (it observed *nothing* -- a timeout is
+      absence of evidence, not evidence of a down workspace), or no discovery
+      snapshot taken at/after the outage onset backs the host state (a pre-outage
+      snapshot still reads the stale host state). A verdict or auto-restart off
+      such non-evidence is the misclassification we avoid; the recovery page keeps
+      checking instead.
+    * HOST_OFFLINE when the container is offline (and we trust that observation):
+      nothing live to interrupt, so a host restart can run unattended.
+    * HOST_UNRESPONSIVE when the container claims running but the exec cleanly
+      failed to reach it (ssh dead), or on any other ambiguous but trusted host
+      state: a host restart bounces a live container, so it requires explicit user
+      consent.
     """
     if provider_error_message is not None:
         return DispatchTier.BACKEND_UNREACHABLE
     answers = {probe.question: probe.answer for probe in probes}
-    container_running = answers.get(_QUESTION_CONTAINER_RUNNING)
-    if container_running == ProbeAnswer.NO:
-        return DispatchTier.HOST_OFFLINE
+    # Direct in-container evidence is authoritative regardless of snapshot
+    # freshness: if the batched exec reached the container, the container is
+    # demonstrably up. A confirmed GET / 200 means the interface is actually
+    # responding (HEALTHY); any other result is the wedge a surgical in-place
+    # restart fixes (INTERFACE_UNRESPONSIVE). This positive evidence is trusted
+    # over both the discovery snapshot and the slower background health tracker.
     can_run = answers.get(_QUESTION_CAN_RUN_COMMANDS_INSIDE)
-    if container_running == ProbeAnswer.YES and can_run == ProbeAnswer.YES:
-        # Container up and exec works. Consult the most direct evidence we have --
-        # the live in-container HTTP GET / -- before assuming the interface is at
-        # fault. A confirmed 200 means it is actually responding (HEALTHY); only a
-        # non-200, errored, or unprobeable result falls through to the
-        # by-elimination INTERFACE_UNRESPONSIVE surgical restart.
+    if can_run == ProbeAnswer.YES:
         if answers.get(_QUESTION_CURL_OK) == ProbeAnswer.YES:
             return DispatchTier.HEALTHY
         return DispatchTier.INTERFACE_UNRESPONSIVE
+    # No direct in-container evidence: every remaining tier is a *negative*
+    # verdict that leans on the discovery snapshot's host state. We can only trust
+    # such a verdict when the probe actually completed (a timeout observed nothing)
+    # and a snapshot taken at/after the outage onset backs it. Absent either, we
+    # have no trustworthy negative evidence -- surface INDETERMINATE so the
+    # recovery page keeps checking (and the cheap liveness poll can still send the
+    # user home) rather than rendering a verdict or auto-dispatching a restart.
+    if probe_timed_out or not classification_is_trustworthy:
+        return DispatchTier.INDETERMINATE
+    container_running = answers.get(_QUESTION_CONTAINER_RUNNING)
+    if container_running == ProbeAnswer.NO:
+        return DispatchTier.HOST_OFFLINE
     return DispatchTier.HOST_UNRESPONSIVE
 
 
@@ -610,6 +641,8 @@ def build_host_health_response(
     mngr_binary: str = "mngr",
     provider_error_message: str | None = None,
     provider_label: str = "",
+    probe_timed_out: bool = False,
+    classification_is_trustworthy: bool = True,
 ) -> HostHealthResponse:
     """Assemble the host-health response (probes + dispatch tier) from raw inputs.
 
@@ -628,6 +661,13 @@ def build_host_health_response(
     drives the BACKEND_UNREACHABLE tier and is carried on the response as
     ``unreachable_reason``. ``provider_label`` is the friendly provider name for
     that page's title.
+
+    ``probe_timed_out`` is True when the in-container ``mngr exec`` was killed by
+    its own timeout rather than exiting cleanly -- it observed nothing, so a
+    negative verdict off it would be unfounded. ``classification_is_trustworthy``
+    is False when the host state read here comes from a discovery snapshot that
+    predates the outage onset (so it may be stale). Either one, absent direct
+    in-container evidence, yields the INDETERMINATE tier.
     """
     in_container = _parse_in_container_probe(in_container_stdout)
     exec_cmd = mngr_exec_command or "(mngr exec <system-services-agent>)"
@@ -640,7 +680,9 @@ def build_host_health_response(
         _build_curl_probe(in_container, mngr_binary, services_agent_id),
         _build_plugin_resolver_probe(plugin_resolver_services),
     )
-    dispatch_tier = _classify_dispatch_tier(probes, provider_error_message)
+    dispatch_tier = _classify_dispatch_tier(
+        probes, provider_error_message, probe_timed_out, classification_is_trustworthy
+    )
     is_backend_unreachable = dispatch_tier == DispatchTier.BACKEND_UNREACHABLE
     return HostHealthResponse(
         probes=probes,
