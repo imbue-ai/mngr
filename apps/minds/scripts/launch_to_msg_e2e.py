@@ -634,51 +634,37 @@ async def find_chat_window(ctx: BrowserContext) -> Page | None:
 
 
 async def pick_backend_page(ctx: BrowserContext, origin: str, timeout: float = 30.0) -> Page:
-    """Return the chrome-shell page (``<origin>/_chrome``), the view this harness drives.
+    """Return the content page (the backend page NOT under ``/_chrome``).
 
-    An Electron window is several WebContentsViews (chrome shell, content,
-    modal overlay), and CDP's page ordering follows attach timing, so
-    ``ctx.pages[0]`` is a coin flip. Driving the wrong view breaks the run in
-    obscure ways: main.js collapses the content/modal views to 0x0 or reloads
-    them behind the harness, so ``page.screenshot`` hangs and navigations get
-    swallowed. The chrome shell keeps full-window bounds in every regime
-    (main.js ``computeBundleViewBounds``), so it is the only view that is safe
-    to drive; main.js points it at ``<origin>/_chrome`` once the backend is
-    ready, which is what this selector keys on. Prefers the exact ``/_chrome``
-    page for the first two thirds of ``timeout``; only then falls back to any
-    page on the backend port, so a slow ``/_chrome`` load can't flip the pick
-    onto a managed view that happened to reach the backend first. Pages load
-    the backend as ``localhost`` while ``wait_backend_url`` reports
-    ``127.0.0.1``, so matching is by loopback host + port, not URL prefix; the
-    overlay lives at ``/_chrome/overlay``, so the preferred match is the exact
-    ``/_chrome`` path.
+    An Electron window is several WebContentsViews -- chrome shell
+    (``/_chrome``), modal overlay (``/_chrome/overlay``), and the content view
+    (the landing page, e.g. ``/welcome``) -- and CDP's page ordering follows
+    attach timing, so ``ctx.pages[0]`` is a coin flip. Only the content view
+    is safe to drive end to end: driving the overlay breaks screenshots and
+    navigation (main.js keeps it collapsed and reloads it), and driving the
+    chrome shell navigates it off ``/_chrome``, killing the requests SSE
+    consumer that powers the inbox badge / auto-open, so the slack permission
+    flow never surfaces a Deny button. main.js points the content view at the
+    backend landing page once the backend is ready, which is what this
+    selector keys on: the loopback page on the backend port (pages use
+    ``localhost`` while ``wait_backend_url`` reports ``127.0.0.1``) whose path
+    is not under ``/_chrome``.
     """
     backend_port = urllib.parse.urlsplit(origin).port
-
-    def _split_if_backend(url: str) -> urllib.parse.SplitResult | None:
-        parts = urllib.parse.urlsplit(url)
-        if parts.hostname in ("localhost", "127.0.0.1") and parts.port == backend_port:
-            return parts
-        return None
-
     deadline = time.time() + timeout
-    fallback_after = time.time() + timeout * 2 / 3
     while time.time() < deadline:
-        backend_pages: list[Page] = []
         for p in all_pages(ctx):
             with contextlib.suppress(Exception):
-                parts = _split_if_backend(p.url)
-                if parts is None:
-                    continue
-                if parts.path == "/_chrome":
+                parts = urllib.parse.urlsplit(p.url)
+                if (
+                    parts.hostname in ("localhost", "127.0.0.1")
+                    and parts.port == backend_port
+                    and not parts.path.startswith("/_chrome")
+                ):
                     return p
-                backend_pages.append(p)
-        if backend_pages and time.time() >= fallback_after:
-            logger.warning("no /_chrome page after {:.0f}s; falling back to {}", timeout * 2 / 3, backend_pages[0].url)
-            return backend_pages[0]
         await asyncio.sleep(0.5)
     urls = [p.url for p in all_pages(ctx)]
-    raise E2EFailure(f"no page on backend origin {origin} after {timeout}s; page URLs: {urls}")
+    raise E2EFailure(f"no content page on backend origin {origin} after {timeout}s; page URLs: {urls}")
 
 
 # --- per-workspace helpers ---
