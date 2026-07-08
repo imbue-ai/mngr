@@ -228,6 +228,26 @@ def run_git_for_backup_test(repo: Path, *args: str) -> str:
     return result.stdout
 
 
+def write_stub_supervisorctl(stub_bin: Path, *, is_restart_ok: bool = True) -> Path:
+    """Write a stub ``supervisorctl`` into ``stub_bin`` and return its path.
+
+    The healthy variant always reports ``host-backup`` RUNNING; the
+    ``is_restart_ok=False`` variant fails ``restart`` and reports the program
+    STOPPED, for exercising the update script's rollback path. Shared by the
+    ``backup_release_workspace`` fixture and the script-level unit tests.
+    """
+    stub = stub_bin / "supervisorctl"
+    if is_restart_ok:
+        stub.write_text('#!/bin/bash\necho "host-backup RUNNING pid 123, uptime 0:00:01"\nexit 0\n')
+    else:
+        stub.write_text(
+            '#!/bin/bash\nif [ "$1" = "restart" ]; then echo "failed" >&2; exit 1; fi\n'
+            'echo "host-backup STOPPED"\nexit 0\n'
+        )
+    stub.chmod(0o755)
+    return stub
+
+
 def make_fct_shaped_repo(tmp_path: Path) -> Path:
     """A committed git repo shaped like a workspace checkout.
 

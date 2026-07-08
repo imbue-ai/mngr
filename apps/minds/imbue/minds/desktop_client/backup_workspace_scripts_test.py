@@ -19,15 +19,8 @@ from imbue.minds.desktop_client.backup_workspace_scripts import GATE_RESULT_MARK
 from imbue.minds.desktop_client.backup_workspace_scripts import UPDATE_RESULT_MARKER
 from imbue.minds.desktop_client.backup_workspace_scripts import build_workspace_script_command
 from imbue.minds.desktop_client.backup_workspace_scripts import extract_marker_json
-
-_GIT_IDENTITY = ("-c", "user.name=test", "-c", "user.email=test@example.com")
-
-
-def _git(repo: Path, *args: str) -> str:
-    result = subprocess.run(
-        ["git", *_GIT_IDENTITY, *args], cwd=repo, capture_output=True, text=True, check=True, timeout=60
-    )
-    return result.stdout
+from imbue.minds.testing import run_git_for_backup_test
+from imbue.minds.testing import write_stub_supervisorctl
 
 
 def _make_workspace_repo(tmp_path: Path) -> Path:
@@ -39,8 +32,8 @@ def _make_workspace_repo(tmp_path: Path) -> Path:
     backup_dir.mkdir(parents=True)
     (backup_dir / "service.py").write_text("VERSION = 1\n")
     (repo / "other.txt").write_text("unrelated\n")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-q", "-m", "initial")
+    run_git_for_backup_test(repo, "add", "-A")
+    run_git_for_backup_test(repo, "commit", "-q", "-m", "initial")
     return repo
 
 
@@ -72,15 +65,7 @@ def _make_stub_bin(
         "exit 0\n"
     )
     uv_stub.chmod(0o755)
-    supervisorctl_stub = stub_bin / "supervisorctl"
-    if restart_ok:
-        supervisorctl_stub.write_text('#!/bin/bash\necho "host-backup RUNNING pid 123, uptime 0:00:01"\nexit 0\n')
-    else:
-        supervisorctl_stub.write_text(
-            '#!/bin/bash\nif [ "$1" = "restart" ]; then echo "failed" >&2; exit 1; fi\n'
-            'echo "host-backup STOPPED"\nexit 0\n'
-        )
-    supervisorctl_stub.chmod(0o755)
+    write_stub_supervisorctl(stub_bin, is_restart_ok=restart_ok)
     return stub_bin
 
 
@@ -123,7 +108,7 @@ def test_build_workspace_script_command_round_trips_through_bash(tmp_path: Path)
 
 def test_check_script_reports_matches_when_tag_equals_worktree(tmp_path: Path) -> None:
     repo = _make_workspace_repo(tmp_path)
-    _git(repo, "tag", "minds-v1.0.0")
+    run_git_for_backup_test(repo, "tag", "minds-v1.0.0")
     stub_bin = _make_stub_bin(tmp_path)
     run = _run_script(repo, BACKUP_CHECK_SCRIPT, ("--minds-version", "1.0.0"), extra_path=stub_bin)
     payload = extract_marker_json(run["stdout"], CHECK_RESULT_MARKER)
@@ -136,10 +121,10 @@ def test_check_script_reports_matches_when_tag_equals_worktree(tmp_path: Path) -
 
 def test_check_script_reports_newer_when_tag_is_ancestor(tmp_path: Path) -> None:
     repo = _make_workspace_repo(tmp_path)
-    _git(repo, "tag", "minds-v1.0.0")
+    run_git_for_backup_test(repo, "tag", "minds-v1.0.0")
     (repo / "libs" / "host_backup" / "service.py").write_text("VERSION = 2\n")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-q", "-m", "local improvement on top of the tag")
+    run_git_for_backup_test(repo, "add", "-A")
+    run_git_for_backup_test(repo, "commit", "-q", "-m", "local improvement on top of the tag")
     stub_bin = _make_stub_bin(tmp_path)
     run = _run_script(repo, BACKUP_CHECK_SCRIPT, ("--minds-version", "1.0.0"), extra_path=stub_bin)
     payload = extract_marker_json(run["stdout"], CHECK_RESULT_MARKER)
@@ -151,12 +136,12 @@ def test_check_script_reports_outdated_when_tag_is_not_an_ancestor(tmp_path: Pat
     repo = _make_workspace_repo(tmp_path)
     # The tag lives on a side branch ahead of main: main's content differs and
     # does not contain the tag -> outdated.
-    _git(repo, "checkout", "-q", "-b", "release")
+    run_git_for_backup_test(repo, "checkout", "-q", "-b", "release")
     (repo / "libs" / "host_backup" / "service.py").write_text("VERSION = 99\n")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-q", "-m", "newer release content")
-    _git(repo, "tag", "minds-v2.0.0")
-    _git(repo, "checkout", "-q", "main")
+    run_git_for_backup_test(repo, "add", "-A")
+    run_git_for_backup_test(repo, "commit", "-q", "-m", "newer release content")
+    run_git_for_backup_test(repo, "tag", "minds-v2.0.0")
+    run_git_for_backup_test(repo, "checkout", "-q", "main")
     stub_bin = _make_stub_bin(tmp_path)
     run = _run_script(repo, BACKUP_CHECK_SCRIPT, ("--minds-version", "2.0.0"), extra_path=stub_bin)
     payload = extract_marker_json(run["stdout"], CHECK_RESULT_MARKER)
@@ -166,8 +151,8 @@ def test_check_script_reports_outdated_when_tag_is_not_an_ancestor(tmp_path: Pat
 
 def test_check_script_falls_back_to_highest_tag_for_unknown_version(tmp_path: Path) -> None:
     repo = _make_workspace_repo(tmp_path)
-    _git(repo, "tag", "minds-v1.0.0")
-    _git(repo, "tag", "minds-v1.2.0")
+    run_git_for_backup_test(repo, "tag", "minds-v1.0.0")
+    run_git_for_backup_test(repo, "tag", "minds-v1.2.0")
     (repo / "parent.toml").write_text('url = "file:///nonexistent"\nbranch = "main"\n')
     stub_bin = _make_stub_bin(tmp_path)
     run = _run_script(repo, BACKUP_CHECK_SCRIPT, ("--minds-version", "9.9.9-dev"), extra_path=stub_bin)
@@ -178,7 +163,7 @@ def test_check_script_falls_back_to_highest_tag_for_unknown_version(tmp_path: Pa
 
 def test_check_script_reports_env_sha_and_content(tmp_path: Path) -> None:
     repo = _make_workspace_repo(tmp_path)
-    _git(repo, "tag", "minds-v1.0.0")
+    run_git_for_backup_test(repo, "tag", "minds-v1.0.0")
     env_path = repo / "runtime" / "secrets" / "restic.env"
     env_path.parent.mkdir(parents=True)
     env_path.write_text("RESTIC_REPOSITORY=s3:r\nRESTIC_PASSWORD=p\n")
@@ -241,12 +226,12 @@ def test_gate_probe_detects_in_flight_backup_tick(tmp_path: Path) -> None:
 def test_apply_update_commits_tag_content_and_restores_stash(tmp_path: Path) -> None:
     repo = _make_workspace_repo(tmp_path)
     # The target tag carries newer backup code on a side branch (outdated state).
-    _git(repo, "checkout", "-q", "-b", "release")
+    run_git_for_backup_test(repo, "checkout", "-q", "-b", "release")
     (repo / "libs" / "host_backup" / "service.py").write_text("VERSION = 2\n")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-q", "-m", "release content")
-    _git(repo, "tag", "minds-v2.0.0")
-    _git(repo, "checkout", "-q", "main")
+    run_git_for_backup_test(repo, "add", "-A")
+    run_git_for_backup_test(repo, "commit", "-q", "-m", "release content")
+    run_git_for_backup_test(repo, "tag", "minds-v2.0.0")
+    run_git_for_backup_test(repo, "checkout", "-q", "main")
     # Uncommitted user work that must survive the update via the stash.
     (repo / "other.txt").write_text("user edit in progress\n")
     (repo / "untracked.txt").write_text("scratch\n")
@@ -263,7 +248,7 @@ def test_apply_update_commits_tag_content_and_restores_stash(tmp_path: Path) -> 
     assert payload["stash_conflict"] is False
     # The backup code now matches the tag and is committed with the convention subject.
     assert (repo / "libs" / "host_backup" / "service.py").read_text() == "VERSION = 2\n"
-    subject = _git(repo, "log", "-1", "--format=%s").strip()
+    subject = run_git_for_backup_test(repo, "log", "-1", "--format=%s").strip()
     assert subject == "backup-update: minds-v2.0.0"
     # The user's uncommitted work came back.
     assert (repo / "other.txt").read_text() == "user edit in progress\n"
@@ -272,7 +257,7 @@ def test_apply_update_commits_tag_content_and_restores_stash(tmp_path: Path) -> 
 
 def test_apply_update_is_blocked_by_running_chats_without_stop_flag(tmp_path: Path) -> None:
     repo = _make_workspace_repo(tmp_path)
-    _git(repo, "tag", "minds-v1.0.0")
+    run_git_for_backup_test(repo, "tag", "minds-v1.0.0")
     stub_bin = _make_stub_bin(tmp_path, agents_json=_running_chat_agents_json(repo))
     run = _run_script(
         repo, BACKUP_APPLY_UPDATE_SCRIPT, ("--minds-version", "1.0.0", "--agent-id", "agent-x"), extra_path=stub_bin
@@ -285,12 +270,12 @@ def test_apply_update_is_blocked_by_running_chats_without_stop_flag(tmp_path: Pa
 
 def test_apply_update_rolls_back_when_service_restart_fails(tmp_path: Path) -> None:
     repo = _make_workspace_repo(tmp_path)
-    _git(repo, "checkout", "-q", "-b", "release")
+    run_git_for_backup_test(repo, "checkout", "-q", "-b", "release")
     (repo / "libs" / "host_backup" / "service.py").write_text("VERSION = 2\n")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-q", "-m", "release content")
-    _git(repo, "tag", "minds-v2.0.0")
-    _git(repo, "checkout", "-q", "main")
+    run_git_for_backup_test(repo, "add", "-A")
+    run_git_for_backup_test(repo, "commit", "-q", "-m", "release content")
+    run_git_for_backup_test(repo, "tag", "minds-v2.0.0")
+    run_git_for_backup_test(repo, "checkout", "-q", "main")
     pre_content = (repo / "libs" / "host_backup" / "service.py").read_text()
 
     stub_bin = _make_stub_bin(tmp_path, restart_ok=False)
@@ -303,14 +288,14 @@ def test_apply_update_rolls_back_when_service_restart_fails(tmp_path: Path) -> N
     assert payload["rolled_back"] is True
     # The revert restored the pre-update content, keeping both commits in history.
     assert (repo / "libs" / "host_backup" / "service.py").read_text() == pre_content
-    subjects = _git(repo, "log", "--format=%s").splitlines()
+    subjects = run_git_for_backup_test(repo, "log", "--format=%s").splitlines()
     assert subjects[0].startswith('Revert "backup-update: minds-v2.0.0"')
     assert subjects[1] == "backup-update: minds-v2.0.0"
 
 
 def test_apply_update_skips_commit_when_content_already_matches(tmp_path: Path) -> None:
     repo = _make_workspace_repo(tmp_path)
-    _git(repo, "tag", "minds-v1.0.0")
+    run_git_for_backup_test(repo, "tag", "minds-v1.0.0")
     stub_bin = _make_stub_bin(tmp_path)
     run = _run_script(
         repo, BACKUP_APPLY_UPDATE_SCRIPT, ("--minds-version", "1.0.0", "--agent-id", "agent-x"), extra_path=stub_bin
@@ -319,4 +304,4 @@ def test_apply_update_skips_commit_when_content_already_matches(tmp_path: Path) 
     assert payload is not None, run
     assert payload["status"] == "ok"
     assert payload["committed"] is False
-    assert _git(repo, "log", "-1", "--format=%s").strip() == "initial"
+    assert run_git_for_backup_test(repo, "log", "-1", "--format=%s").strip() == "initial"

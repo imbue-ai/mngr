@@ -32,6 +32,7 @@ from imbue.minds.testing import BackupReleaseWorkspace
 from imbue.minds.testing import find_agent
 from imbue.minds.testing import make_fct_shaped_repo
 from imbue.minds.testing import run_mngr
+from imbue.minds.testing import write_stub_supervisorctl
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.utils.logging import suppress_warnings
 from imbue.mngr.utils.plugin_testing import register_plugin_test_fixtures
@@ -169,9 +170,7 @@ def xvfb_display() -> Iterator[str]:
 def backup_release_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[BackupReleaseWorkspace]:
     stub_bin = tmp_path / "stub-bin"
     stub_bin.mkdir()
-    supervisorctl_stub = stub_bin / "supervisorctl"
-    supervisorctl_stub.write_text('#!/bin/bash\necho "host-backup RUNNING pid 123, uptime 0:00:01"\nexit 0\n')
-    supervisorctl_stub.chmod(0o755)
+    write_stub_supervisorctl(stub_bin)
     monkeypatch.setenv("PATH", f"{stub_bin}:{os.environ['PATH']}")
     # Only the local provider matters here; an unreachable cloud provider
     # (e.g. missing AWS credentials) must not fail `mngr list`.
