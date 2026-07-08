@@ -27,6 +27,8 @@ from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
+from imbue.minds.desktop_client.backup_update import BLOCKED_BY_RUNNING_CHATS_PREFIX
+from imbue.minds.desktop_client.backup_verification_store import is_backup_verification_enabled
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import make_agents_json
@@ -1684,3 +1686,220 @@ def test_operation_logs_streams_restart_log_lines(tmp_path: Path) -> None:
     text = response.get_data(as_text=True)
     assert "restarting now" in text
     assert '"done": true' in text
+
+
+# -- Backup service routes --
+
+
+def test_backup_health_unavailable_without_concurrency_group_returns_503(tmp_path: Path) -> None:
+    client = _client_with_workspace(tmp_path, AgentId())
+
+    response = client.get("/api/v1/workspaces/backup-health", headers=_auth_header())
+
+    assert response.status_code == 503
+
+
+def test_backup_health_reports_offline_workspace_with_verification_enabled(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    # With no discovery host-state data the workspace reads OFFLINE, so the
+    # route answers from local data alone (no exec into the workspace).
+    agent_id = AgentId()
+    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
+
+    response = client.get("/api/v1/workspaces/backup-health", headers=_auth_header())
+
+    assert response.status_code == 200
+    entries = json.loads(response.data)["workspaces"]
+    entry = next(candidate for candidate in entries if candidate["agent_id"] == str(agent_id))
+    assert entry["check_state"] == "OFFLINE"
+    assert entry["problems"] == []
+    assert entry["is_verification_enabled"] is True
+
+
+def test_backup_service_update_unknown_workspace_returns_404(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    resolver = make_resolver_with_data(make_agents_json(AgentId()))
+    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
+
+    response = client.post(f"/api/v1/workspaces/{AgentId()}/backup-service/update", headers=_auth_header(), json={})
+
+    assert response.status_code == 404
+
+
+def test_backup_service_update_unavailable_without_concurrency_group_returns_503(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+
+    response = client.post(f"/api/v1/workspaces/{agent_id}/backup-service/update", headers=_auth_header(), json={})
+
+    assert response.status_code == 503
+
+
+def test_backup_service_update_conflicts_with_a_running_operation(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    # Any RUNNING operation for the workspace (here a restart) makes a second
+    # dispatch a 409 instead of stacking a second worker.
+    agent_id = AgentId()
+    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.RESTART, datetime.now(timezone.utc))
+
+    response = client.post(f"/api/v1/workspaces/{agent_id}/backup-service/update", headers=_auth_header(), json={})
+
+    assert response.status_code == 409
+    assert "RESTART" in json.loads(response.data)["error"]
+    # The dispatch did not replace the running record.
+    record = registry.get(agent_id)
+    assert record is not None
+    assert record.kind == WorkspaceOperationKind.RESTART
+
+
+def test_backup_service_update_cancel_without_an_update_returns_404(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    cancel_url = f"/api/v1/workspaces/{agent_id}/backup-service/update/cancel"
+
+    # No operation at all.
+    assert client.post(cancel_url, headers=_auth_header()).status_code == 404
+
+    # A non-backup-update record (a restart) must not be cancellable through
+    # the backup route either.
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.RESTART, datetime.now(timezone.utc))
+    assert client.post(cancel_url, headers=_auth_header()).status_code == 404
+
+
+def test_backup_service_update_cancel_flags_a_running_update(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.BACKUP_UPDATE, datetime.now(timezone.utc))
+
+    response = client.post(f"/api/v1/workspaces/{agent_id}/backup-service/update/cancel", headers=_auth_header())
+
+    assert response.status_code == 200
+    assert registry.is_cancel_requested(agent_id) is True
+
+
+def test_backup_service_configure_rejects_configure_later_and_invalid_providers(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    agent_id = AgentId()
+    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
+    configure_url = f"/api/v1/workspaces/{agent_id}/backup-service/configure"
+
+    later = client.post(configure_url, headers=_auth_header(), json={"backup_provider": "CONFIGURE_LATER"})
+    assert later.status_code == 400
+
+    invalid = client.post(configure_url, headers=_auth_header(), json={"backup_provider": "NOT_A_PROVIDER"})
+    assert invalid.status_code == 400
+
+
+def test_backup_operation_status_unknown_or_wrong_kind_returns_404(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    status_url = f"/api/v1/workspaces/operations/backup/{agent_id}"
+
+    # No operation at all.
+    assert client.get(status_url, headers=_auth_header()).status_code == 404
+
+    # Kind segregation: a restart record is not visible through the backup
+    # operations endpoint.
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.RESTART, datetime.now(timezone.utc))
+    assert client.get(status_url, headers=_auth_header()).status_code == 404
+
+
+def test_backup_operation_status_reports_running_then_done(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.BACKUP_CONFIGURE, datetime.now(timezone.utc))
+    status_url = f"/api/v1/workspaces/operations/backup/{agent_id}"
+
+    running = json.loads(client.get(status_url, headers=_auth_header()).data)
+    assert running["kind"] == "backup_configure"
+    assert running["status"] == "RUNNING"
+    assert running["is_done"] is False
+    assert running["blocked_chats"] == []
+
+    registry.complete(agent_id)
+    done = json.loads(client.get(status_url, headers=_auth_header()).data)
+    assert done["is_done"] is True
+    assert done["status"] == "DONE"
+
+
+def test_backup_operation_status_surfaces_blocked_chats(tmp_path: Path) -> None:
+    # A failure with the structured blocked-by-running-chats error exposes the
+    # chat names so the UI can offer "Stop all chats and retry".
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.BACKUP_UPDATE, datetime.now(timezone.utc))
+    registry.fail(agent_id, f"{BLOCKED_BY_RUNNING_CHATS_PREFIX}chat-1,chat-2")
+
+    body = json.loads(client.get(f"/api/v1/workspaces/operations/backup/{agent_id}", headers=_auth_header()).data)
+
+    assert body["kind"] == "backup_update"
+    assert body["is_done"] is False
+    assert body["blocked_chats"] == ["chat-1", "chat-2"]
+
+
+def test_backup_verification_toggle_round_trips(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    paths = WorkspacePaths(data_dir=tmp_path / "minds")
+    toggle_url = f"/api/v1/workspaces/{agent_id}/backup-service/verification"
+
+    disabled = client.post(toggle_url, headers=_auth_header(), json={"enabled": False})
+    assert disabled.status_code == 200
+    assert is_backup_verification_enabled(paths, agent_id) is False
+
+    enabled = client.post(toggle_url, headers=_auth_header(), json={"enabled": True})
+    assert enabled.status_code == 200
+    assert is_backup_verification_enabled(paths, agent_id) is True
+
+
+def test_backup_verification_toggle_requires_the_enabled_field(tmp_path: Path) -> None:
+    # A missing ``enabled`` is a structural failure, so spectree rejects it up
+    # front with the uniform 422 contract.
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+
+    response = client.post(
+        f"/api/v1/workspaces/{agent_id}/backup-service/verification", headers=_auth_header(), json={}
+    )
+
+    assert response.status_code == 422
+    errors = json.loads(response.data)["errors"]
+    assert any(error["field"] == "enabled" for error in errors)
+
+
+def test_backup_verification_toggle_unknown_workspace_returns_404(tmp_path: Path) -> None:
+    client = _client_with_workspace(tmp_path, AgentId())
+
+    response = client.post(
+        f"/api/v1/workspaces/{AgentId()}/backup-service/verification",
+        headers=_auth_header(),
+        json={"enabled": False},
+    )
+
+    assert response.status_code == 404
+
+
+def test_backup_routes_require_bearer(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+
+    assert client.get("/api/v1/workspaces/backup-health").status_code == 401
+    assert client.post(f"/api/v1/workspaces/{agent_id}/backup-service/update", json={}).status_code == 401
+    assert (
+        client.post(f"/api/v1/workspaces/{agent_id}/backup-service/verification", json={"enabled": False}).status_code
+        == 401
+    )
