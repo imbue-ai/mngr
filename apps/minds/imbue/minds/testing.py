@@ -5,10 +5,13 @@ from typing import Final
 
 import pytest
 from loguru import logger
+from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.bootstrap import mngr_host_dir_for
 from imbue.minds.config.data_types import parse_agents_from_mngr_output
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.utils.env_utils import TEST_ENV_PREFIX
 
 _GIT_TEST_ENV_KEYS: Final[dict[str, str]] = {
@@ -197,3 +200,95 @@ def extract_response(exec_result: subprocess.CompletedProcess[str]) -> str:
     if not response_lines:
         raise AssertionError(f"No response from model: {exec_result.stdout!r}")
     return response_lines[0]
+
+
+# -- Backup-service release-test helpers (see apps/minds/conftest.py's
+# ``backup_release_workspace`` fixture and test_backup_service_release.py) --
+
+_BACKUP_TEST_GIT_IDENTITY: Final[tuple[str, ...]] = (
+    "-c",
+    "user.name=test",
+    "-c",
+    "user.email=test@example.com",
+)
+
+
+class BackupReleaseWorkspace(FrozenModel):
+    """Handle for the backup release tests' real local workspace agent."""
+
+    agent_id: AgentId = Field(description="The created agent's id")
+    work_dir: Path = Field(description="The agent's work_dir (an FCT-shaped git repo)")
+    agent_name: str = Field(description="The created agent's name")
+
+
+def run_git_for_backup_test(repo: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *_BACKUP_TEST_GIT_IDENTITY, *args], cwd=repo, capture_output=True, text=True, check=True, timeout=60
+    )
+    return result.stdout
+
+
+def write_stub_supervisorctl(stub_bin: Path, *, is_restart_ok: bool = True) -> Path:
+    """Write a stub ``supervisorctl`` into ``stub_bin`` and return its path.
+
+    The healthy variant always reports ``host-backup`` RUNNING; the
+    ``is_restart_ok=False`` variant fails ``restart`` and reports the program
+    STOPPED, for exercising the update script's rollback path. Shared by the
+    ``backup_release_workspace`` fixture and the script-level unit tests.
+    """
+    stub = stub_bin / "supervisorctl"
+    if is_restart_ok:
+        stub.write_text('#!/bin/bash\necho "host-backup RUNNING pid 123, uptime 0:00:01"\nexit 0\n')
+    else:
+        stub.write_text(
+            '#!/bin/bash\nif [ "$1" = "restart" ]; then echo "failed" >&2; exit 1; fi\n'
+            'echo "host-backup STOPPED"\nexit 0\n'
+        )
+    stub.chmod(0o755)
+    return stub
+
+
+def tag_newer_release_content(repo: Path, *, removed_file: str | None = None) -> None:
+    """Commit newer backup code on a side branch and tag it ``minds-v2.0.0``.
+
+    HEAD (main) then reads as *outdated* relative to the tag. ``removed_file``
+    additionally deletes that path inside the release commit, for exercising
+    convergence onto a tag that removed a file. Shared by
+    ``make_fct_shaped_repo`` and the script-level unit tests.
+    """
+    run_git_for_backup_test(repo, "checkout", "-q", "-b", "release")
+    if removed_file is not None:
+        run_git_for_backup_test(repo, "rm", "-q", removed_file)
+    (repo / "libs" / "host_backup" / "service.py").write_text("VERSION = 2\n")
+    run_git_for_backup_test(repo, "add", "-A")
+    run_git_for_backup_test(repo, "commit", "-q", "-m", "release content")
+    run_git_for_backup_test(repo, "tag", "minds-v2.0.0")
+    run_git_for_backup_test(repo, "checkout", "-q", "main")
+
+
+def make_fct_shaped_repo(tmp_path: Path) -> Path:
+    """A committed git repo shaped like a workspace checkout.
+
+    Includes a minimal pyproject so ``uv run mngr ...`` inside the work_dir
+    resolves (uv falls back to PATH for commands that are not project
+    scripts), plus libs/host_backup content and a newer tagged version on a
+    side branch (so HEAD reads as *outdated* relative to the tag).
+    """
+    repo = tmp_path / "fake-workspace"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True, capture_output=True, timeout=60)
+    (repo / "pyproject.toml").write_text(
+        '[project]\nname = "fake-workspace"\nversion = "0.0.1"\nrequires-python = ">=3.11"\n'
+    )
+    # A committed lockfile so `uv run` / `uv sync` inside the work_dir succeed
+    # even under a UV_FROZEN=1 environment (as the test harness sets).
+    lock_env = {key: value for key, value in os.environ.items() if key != "UV_FROZEN"}
+    subprocess.run(["uv", "lock"], cwd=repo, check=True, capture_output=True, timeout=120, env=lock_env)
+    backup_dir = repo / "libs" / "host_backup"
+    backup_dir.mkdir(parents=True)
+    (backup_dir / "service.py").write_text("VERSION = 1\n")
+    run_git_for_backup_test(repo, "add", "-A")
+    run_git_for_backup_test(repo, "commit", "-q", "-m", "initial")
+    # Tagged newer backup code on a side branch: HEAD (main) is outdated.
+    tag_newer_release_content(repo)
+    return repo

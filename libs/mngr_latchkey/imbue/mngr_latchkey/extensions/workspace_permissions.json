@@ -44,6 +44,13 @@
       "description": "Establish SSH access into the selected workspace."
     },
     {
+      "permission": "minds-workspaces-backups-manage",
+      "method": "POST",
+      "path": { "kind": "targeted", "suffix": "/backup-service/(update(/cancel)?|configure|verification)$" },
+      "display_name": "Manage a workspace's backups",
+      "description": "Update the selected workspace's backup service, enable or repoint its backups, and toggle backup verification."
+    },
+    {
       "permission": "minds-workspaces-update",
       "method": "PATCH",
       "path": { "kind": "targeted", "suffix": "$" },

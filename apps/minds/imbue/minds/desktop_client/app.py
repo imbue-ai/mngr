@@ -1823,6 +1823,12 @@ def _handle_workspace_settings(
     errored_provider_names = {str(name) for name in backend_resolver.get_provider_errors()}
     is_stale = _is_workspace_provider_errored(info, errored_provider_names)
 
+    # The backup section's configure form needs to know whether a shared
+    # master password is already saved (it then never re-prompts) and whether
+    # an account is associated (imbue_cloud backups require one).
+    paths = get_state().api_v1_paths
+    is_backup_password_saved = has_saved_backup_password(paths) if paths is not None else False
+
     html = render_workspace_settings(
         agent_id=agent_id,
         ws_name=ws_name,
@@ -1832,6 +1838,8 @@ def _handle_workspace_settings(
         is_leased_imbue_cloud=is_leased_imbue_cloud,
         current_color=current_color,
         is_stale=is_stale,
+        has_saved_backup_password=is_backup_password_saved,
+        has_account=current_account is not None,
     )
     return make_html_response(content=html)
 

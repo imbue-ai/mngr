@@ -1588,6 +1588,8 @@ def render_workspace_settings(
     is_leased_imbue_cloud: bool = False,
     current_color: str = DEFAULT_WORKSPACE_COLOR,
     is_stale: bool = False,
+    has_saved_backup_password: bool = False,
+    has_account: bool = False,
 ) -> str:
     """Render the workspace settings page.
 
@@ -1617,6 +1619,8 @@ def render_workspace_settings(
         is_leased_imbue_cloud=is_leased_imbue_cloud,
         current_color=current_color,
         is_stale=is_stale,
+        has_saved_backup_password=has_saved_backup_password,
+        has_account=has_account,
         palette=WORKSPACE_PALETTE,
     )
 

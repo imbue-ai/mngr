@@ -100,6 +100,67 @@ class RestartOperationStatusResponse(FrozenModel):
     error: str | None = Field(default=None, description="Failure message, when the restart failed")
 
 
+class BackupOperationStatusResponse(FrozenModel):
+    """Status of a backup update/configure operation (polled at /operations/backup/<id>)."""
+
+    operation_id: str = Field(description="The workspace agent id the operation acts on")
+    kind: str = Field(description="'backup_update' or 'backup_configure'")
+    status: str = Field(description="Raw operation status (RUNNING/DONE/FAILED)")
+    is_done: bool = Field(description="Whether the operation has finished successfully")
+    error: str | None = Field(default=None, description="Failure message, when the operation failed")
+    blocked_chats: tuple[str, ...] = Field(
+        default=(),
+        description="Chat agents whose RUNNING state blocked the update (offer 'Stop all chats and retry')",
+    )
+
+
+class WorkspaceBackupHealthEntry(FrozenModel):
+    """One workspace's combined snapshot status + backup-service verification result."""
+
+    agent_id: str = Field(description="Workspace agent id")
+    snapshot_state: str = Field(description="Snapshot status: NOT_CONFIGURED/NEVER/BACKED_UP/BACKING_UP/UNKNOWN")
+    last_success_at: str | None = Field(default=None, description="ISO time of the latest successful snapshot")
+    check_state: str = Field(description="Verification verdict: OK/PROBLEMS/OFFLINE/DISABLED/UNKNOWN")
+    problems: tuple[str, ...] = Field(default=(), description="Detected backup-service problems (badge causes)")
+    installed_version: str | None = Field(default=None, description="Installed backup-code version, when known")
+    desired_version: str | None = Field(default=None, description="The minds-v* tag the check compared against")
+    detail: str = Field(default="", description="Extra human-readable detail (e.g. why unverifiable)")
+    is_verification_enabled: bool = Field(description="Whether backup verification is enabled for this workspace")
+
+
+class WorkspaceBackupHealthResponse(FrozenModel):
+    """Batch backup health for all known workspaces (landing/sidebar badge feed)."""
+
+    workspaces: tuple[WorkspaceBackupHealthEntry, ...] = Field(description="One entry per known workspace")
+
+
+class BackupServiceUpdateRequest(ApiRequestModel):
+    """Body for the one idempotent 'Update backup service' action."""
+
+    stop_chats: bool = Field(
+        default=False,
+        description="Stop actively-RUNNING chat agents first (the 'Stop all chats and retry' flow)",
+    )
+
+
+class BackupServiceConfigureRequest(ApiRequestModel):
+    """Body for enabling backups or changing a workspace's backup destination."""
+
+    backup_provider: str = Field(description="'IMBUE_CLOUD' or 'API_KEY'")
+    backup_encryption_method: str = Field(
+        default="NO_PASSWORD", description="'MASTER_PASSWORD' or 'NO_PASSWORD' (recovery key for restic init)"
+    )
+    master_password: str = Field(default="", description="Typed master password (when none is saved yet)")
+    save_password: bool = Field(default=False, description="Persist the typed master password for later workspaces")
+    api_key_env: str = Field(default="", description="For API_KEY: KEY=VALUE block (RESTIC_REPOSITORY + creds)")
+
+
+class BackupVerificationToggleRequest(ApiRequestModel):
+    """Body for enabling/disabling backup verification on a workspace."""
+
+    enabled: bool = Field(description="Whether verification (and the warning badge) is enabled")
+
+
 class EmptyResponse(FrozenModel):
     """An empty ``{}`` success body (e.g. an idempotent dismissal)."""
 
