@@ -13,8 +13,10 @@ from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
+from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
+from imbue.minds.desktop_client.latchkey.testing import FakeLatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.utils.testing import RecordingMngrCaller
@@ -59,7 +61,17 @@ class _WorkspaceResolver(StaticBackendResolver):
         return self.name_by_agent.get(str(agent_id))
 
 
-def _build_handler(tmp_path: Path) -> LatchkeyPermissionGrantHandler:
+class _UnavailableGatewayClient(FakeLatchkeyGatewayClient):
+    """Fake whose reads fail, standing in for a down latchkey gateway."""
+
+    def get_permission_rules(self, permissions_file_path: Path) -> dict[str, tuple[str, ...]]:
+        raise LatchkeyGatewayClientError("gateway down")
+
+
+def _build_handler(
+    tmp_path: Path,
+    gateway_client: FakeLatchkeyGatewayClient | None = None,
+) -> LatchkeyPermissionGrantHandler:
     return LatchkeyPermissionGrantHandler(
         data_dir=tmp_path,
         latchkey=Latchkey(latchkey_directory=tmp_path, latchkey_binary="/nonexistent"),
@@ -68,7 +80,7 @@ def _build_handler(tmp_path: Path) -> LatchkeyPermissionGrantHandler:
             mngr_caller=RecordingMngrCaller(),
             concurrency_group=ConcurrencyGroup(name="settings-routes-test-unused"),
         ),
-        gateway_client=build_fake_gateway_client(),
+        gateway_client=gateway_client or build_fake_gateway_client(),
     )
 
 
@@ -187,6 +199,18 @@ def test_revoke_missing_fields_returns_400(tmp_path: Path) -> None:
     response = client.post("/settings/permissions/revoke", json={"service_name": "slack"})
 
     assert response.status_code == 400
+
+
+def test_settings_page_shows_unavailable_notice_when_gateway_down(tmp_path: Path) -> None:
+    agent, host = str(AgentId()), HostId()
+    handler = _build_handler(tmp_path, gateway_client=_UnavailableGatewayClient())
+    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
+
+    response = client.get("/settings")
+
+    assert response.status_code == 200
+    assert "gateway is unavailable" in response.text
+    assert "No third-party service permissions" not in response.text
 
 
 def test_revoke_requires_authentication(tmp_path: Path) -> None:

@@ -27,7 +27,6 @@ from pydantic import Field
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
-from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -146,25 +145,23 @@ def build_permission_overview(
     """Assemble the per-service, per-workspace grant overview for the settings page.
 
     Reads each active workspace host's permissions file once (through the
-    gateway extension) and groups the grants by catalog service. A host whose
-    file cannot be read is logged and treated as having no grants rather than
-    failing the whole page. Only services with at least one active-workspace
-    grant are returned; the result is sorted by display name for a stable UI.
+    gateway extension) and groups the grants by catalog service. Only services
+    with at least one active-workspace grant are returned; the result is sorted
+    by display name for a stable UI.
+
+    Raises :class:`LatchkeyGatewayClientError` if a host file cannot be read.
+    Because every host shares one gateway, a read error almost always means the
+    gateway itself is unavailable, so the caller surfaces an explicit
+    "unavailable" state rather than silently rendering the page as if nothing
+    were granted (a missing file is not an error -- the client maps it to an
+    empty rule set).
     """
     hosts = _list_active_workspace_hosts(backend_resolver)
     plugin_data_dir = latchkey.plugin_data_dir
     rules_by_agent: dict[str, dict[str, tuple[str, ...]]] = {}
     for host in hosts:
         path = permissions_path_for_host(plugin_data_dir, host.host_id)
-        try:
-            rules_by_agent[host.agent_id] = gateway_client.get_permission_rules(path)
-        except LatchkeyGatewayClientError as e:
-            logger.warning(
-                "Could not read permissions for host {} via the gateway extension; treating as no grants: {}",
-                host.host_id,
-                e,
-            )
-            rules_by_agent[host.agent_id] = {}
+        rules_by_agent[host.agent_id] = gateway_client.get_permission_rules(path)
 
     overviews: list[ServicePermissionOverview] = []
     for service_name, service_infos in services_catalog.as_mapping().items():
