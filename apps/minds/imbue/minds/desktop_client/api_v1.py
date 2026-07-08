@@ -1884,7 +1884,8 @@ def create_api_v1_blueprint() -> Blueprint:
     blueprint.add_url_rule("/workspaces/<agent_id>/health", view_func=_handle_workspace_health, methods=["GET"])
     blueprint.add_url_rule("/workspaces/<agent_id>/restart", view_func=_handle_workspace_restart, methods=["POST"])
 
-    # Backup service verification + management. The batch health read rides the
+    # Backup service verification + management. The per-workspace health read
+    # (folded into ``/workspaces/<agent_id>/backups`` above) rides the
     # ``minds-workspaces-read`` grant; the mutating backup-service routes are
     # gated by ``minds-workspaces-backups-manage`` at the gateway.
     blueprint.add_url_rule(
