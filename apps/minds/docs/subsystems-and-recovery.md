@@ -1,12 +1,7 @@
 # Minds subsystems: recovery mechanisms and gaps
 
 A map of the minds app's subsystems, focused on how each one recovers from
-failure -- or doesn't. Re-synthesized from `error-recovery-audit.md`,
-`subsystem-resilience-report.md`, and the repo-root
-`minds_background_process_audit.md`, re-grounded against the code on
-`gabriel/recovery-audit`. Descriptive only: it records what exists, with
-severity calibrated by how often a failure occurs and what a user actually
-loses.
+failure -- or doesn't.
 
 The system is four layers, each supervising the one below: the **Electron
 shell** supervises the one **Python desktop client** (`minds run`), which
@@ -14,10 +9,6 @@ supervises the host-side **mngr processes** (a `mngr forward`
 discovery-consumer/proxy subprocess and a detached `mngr latchkey forward`
 supervisor that survives minds restarts), which front the **agent containers**
 (supervisord-managed services from the external forever-claude-template repo).
-
-Recurring pattern: detection is probe-confirmed rather than timer-only, retry
-loops back off and retry forever rather than giving up, and shutdown/sign-out
-paths resolve in favor of the user's intent.
 
 ---
 
@@ -91,8 +82,7 @@ traffic stops entirely.
   online overnight recovers unattended. Forward tunnels fail per-connection
   into the 503 path.
 - *Duplicate supervisors* (the PR #2285 stuck-new-mind incident) are reaped at
-  `ensure_running` by a process-table scan scoped to the latchkey directory.
-  (PR #2328's leash-to-embedder replacement has not landed on this branch.)
+  `ensure_running` during startup by a process-table scan scoped to the latchkey directory.
 
 **If recovery fails.** A producer stall that remediation never fixes stays
 `RECONNECTING` forever with only the passive counter -- and because the
@@ -104,13 +94,13 @@ loader rather than reaching the recovery page.
 
 ## 3. Per-workspace health and recovery
 
-The best-behaved subsystem. Proxy failure envelopes only *enroll suspects*
-(connection-level failures and infra 5xx; app errors and routeless
-`UNRESOLVED` are ignored); a 2s background probe loop is the sole authority,
-and an unbroken 5s run of failed probes flips the agent to STUCK, navigating
-that workspace's view to a recovery page. A freshness gate holds the redirect
-until a discovery snapshot from after the outage onset lands, so the
-classification never runs on pre-outage host state.
+Proxy failure envelopes only *enroll suspects* (connection-level failures and
+infra 5xx; app errors and routeless `UNRESOLVED` are ignored); a 2s background
+probe loop is the sole authority, and an unbroken 5s run of failed probes
+flips the agent to STUCK, navigating that workspace's view to a recovery page.
+A freshness gate requires a discovery snapshot from after the outage onset
+before the classification is trusted, so it never runs on pre-outage host
+state.
 
 **Recovery that exists.** The recovery page runs an in-container diagnostic
 probe (the literal commands and outputs are shown) and classifies the failure:
@@ -121,8 +111,8 @@ host restart), or already-healthy (sends the user straight back, preventing a
 needless restart). The restart worker (`mngr stop`/`start` + a 15s/30s
 readiness poll) is deduped by an atomic compare-and-set.
 
-**If recovery fails.** Every failure path -- command error, readiness timeout,
-even a crash of the worker thread itself -- converges on a visible
+**If recovery fails.** Every restart failure path -- command error, readiness
+timeout, even a crash of the worker thread itself -- converges on a visible
 `RESTART_FAILED` with a reason string and a try-again affordance. The probe
 loop keeps polling regardless, so a spontaneous recovery flips the workspace
 back to HEALTHY on its own. The one unconfirmed edge: with no plugin route to
@@ -130,6 +120,25 @@ probe through, a cleanly-dispatched restart is reported done without
 verification. Container-internal supervision (supervisord inside the FCT
 container) is the invisible first line of defense below all of this; minds
 sees it only through this page's diagnostics.
+
+**Known flaw, fixed by PR #2370 (open).** This subsystem was less well-behaved
+than the framing above suggests: its *verdict* states did not keep checking.
+Diagnosed from a real incident (Sentry `fc54dc12`): the in-container probe was
+launched just before a laptop suspended, spanned the sleep, and was declared
+timed-out at wake; combined with a pre-sleep `RUNNING` snapshot it
+misclassified as `HOST_UNRESPONSIVE` -- and that consent-gated verdict page
+never re-polled, stranding the user on a dead-end screen for a workspace that
+answered ~3s later. Separately, the freshness gate held the STUCK *redirect*
+(not just the verdict), so a stalled discovery pipeline stranded users on the
+"Loading workspace" loader instead. PR #2370 makes three changes: the recovery
+page arms a cheap idempotent liveness poll under *every* waiting and terminal
+state (the moment the workspace answers, the user goes home); a timed-out
+probe becomes non-evidence -- a new `INDETERMINATE` "keep checking" tier
+instead of `HOST_UNRESPONSIVE` (only a clean-exit-with-no-sentinel, i.e. ssh
+provably dead, keeps that verdict); and the freshness gate moves from the
+redirect to the verdict path, so the page appears promptly and shows a live
+"Reconnecting..." state rather than an indefinite loader when the snapshot
+isn't trustworthy yet.
 
 ---
 
@@ -251,6 +260,73 @@ reportable.
 
 ---
 
+## Timeouts and sleep/wake
+
+Nearly every recovery mechanism above is armed by a timeout, and a laptop
+sleeping is the one event that fires many of them at once. On Apple Silicon
+Macs the monotonic clock (`time.monotonic`, subprocess timeouts,
+`Event.wait`) advances *during* sleep, so to every duration-based timer a
+30-minute nap is indistinguishable from a 30-minute outage; wall-clock timers
+obviously elapse too. (On Intel Macs some monotonic timers pause instead --
+the incident behind PR #2370 confirms the elapsed behavior in practice.) The
+timers fall into three classes with very different wake behavior:
+
+**Data-age timers (wall clock) -- fire at every wake, by construction.** The
+discovery watchdog's 35s stall threshold compares wall-clock `last_event_at`
+to now, so any sleep longer than 35s makes the first post-wake tick read
+"stalled" and SIGHUP-bounce the observe child -- every wake pays a
+producer respawn for a producer that was never broken. The escalation math is
+tighter than it looks: the first full `restart()` fires 15s after the bounce
+if no event has landed, and a bounced observe needs a process spawn plus a
+~10s provider poll (against possibly still-waking networking) to produce one
+-- so a wake can plausibly escalate to the heavyweight supervisor restart
+(gateway + tunnels + VPS re-provision) on a healthy system. The backoff cap
+then bounds the damage, and a single fresh event resets everything.
+
+**Duration timers (monotonic) -- treat the sleep as a real outage.** These
+are the misclassification sources:
+
+- The health tracker's 5s failure-run: one failed probe just before sleep
+  plus one just after wake (while tunnels/proxy are still rebuilding)
+  computes a run that spans the whole sleep -- instant STUCK for a healthy
+  workspace. Common at wake; previously the entry point to the PR #2370
+  incident.
+- The recovery page's 30s in-container probe cap: a probe spanning sleep is
+  declared timed-out at wake. Pre-#2370 that was treated as evidence
+  (`HOST_UNRESPONSIVE` dead-end); post-#2370 it is non-evidence
+  (`INDETERMINATE`, keep checking).
+- Restart readiness windows (15s/30s) and mngr command caps (30-300s):
+  sleeping mid-restart or mid-start/stop yields a spurious `RESTART_FAILED`
+  or timeout error at wake. Visible and retryable, and the probe loop flips
+  the workspace back on its next success, so these are transient noise.
+- One-shot budgets are the sticky case: sleeping through the creation
+  readiness window (300s) is benign (the redirect publishes anyway, landing
+  on the auto-refresh loader), but sleeping through the backup provisioning
+  budget (300s, tenacity `stop_after_delay`) permanently consumes it --
+  the retry budget is spent on a sleeping machine, the one toast fires, and
+  section 7's silent no-backups state follows. Sleep is the most plausible
+  real-world way to hit that failure.
+
+**Reconnect loops -- sleep-robust by design.** The chrome SSE loop (1.5s
+retry), the permission follow-stream (backoff capped at 30s, disk-backed
+re-emit of everything pending on reconnect), and the reverse-tunnel health
+thread (30s checks; the backoff counter only grows on *awake* failed
+attempts) carry no duration state across sleep. At wake they find a dead
+socket, reconnect within seconds, and lose nothing. The proxy's 1s
+auto-refresh loader is the same shape on the HTTP side.
+
+The pattern that separates transient wake-noise from stranding: **misfires
+are harmless wherever a poll keeps running and success always wins**
+(`record_probe_success` overrides every bad state; the loader auto-refreshes;
+tunnels rebuild). The two places sleep produced sticky failures are exactly
+where that principle was violated -- the pre-#2370 verdict pages that never
+re-checked, and the backup budget that never re-arms. Local containers
+suspend and resume with the laptop; remote/VPS workspaces keep running
+through it, so for them wake recovery is purely client-side re-establishment
+(tunnels, then discovery freshness).
+
+---
+
 ## Calibration notes
 
 Where this report's severity judgment deliberately differs from the earlier
@@ -269,6 +345,12 @@ audits:
 - **The renderer-crash gap is the largest by blast radius when it happens,
   not by expected frequency.** "Largest silent-failure surface in the
   product" overstated it.
+- **Conversely, "model citizen" flattered the workspace-recovery flow.** Its
+  restart paths really do all converge on visible states, but its verdict
+  pages didn't keep checking -- a real user was stranded 38 minutes on a
+  dead-end `HOST_UNRESPONSIVE` page after a sleep/wake (the PR #2370
+  incident). The earlier audits graded surfaces by whether failure paths
+  were *visible*; this one failed by being visible but *stale*.
 - **The supervisor `restart()` "hammer" is half-justified**: its launch-time
   use is required (per-launch gateway key/port), and only its use as a
   stall remedy is debatable -- with the capped backoff already bounding the
