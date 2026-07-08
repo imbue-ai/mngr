@@ -630,7 +630,7 @@ def test_backup_update_gate_blocks_on_live_chat_and_stop_chats_clears_it(
     story_marker = get_short_random_string()
     messaged = _exec_in_container(
         container_name,
-        f'cd /code && mngr message {chat_id} "Please tell me a really long story about {story_marker}. '
+        f'cd /code && mngr message {chat_id} -m "Please tell me a really long story about {story_marker}. '
         'Make it as long and detailed as you possibly can."',
         timeout=120,
     )
