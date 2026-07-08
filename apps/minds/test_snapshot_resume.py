@@ -30,6 +30,12 @@ import tomlkit
 from loguru import logger
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_APPLY_UPDATE_SCRIPT
+from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_GATE_PROBE_SCRIPT
+from imbue.minds.desktop_client.backup_workspace_scripts import GATE_RESULT_MARKER
+from imbue.minds.desktop_client.backup_workspace_scripts import UPDATE_RESULT_MARKER
+from imbue.minds.desktop_client.backup_workspace_scripts import build_workspace_script_command
+from imbue.minds.desktop_client.backup_workspace_scripts import extract_marker_json
 from imbue.minds.desktop_client.e2e_workspace_runner import _REPO_ROOT
 from imbue.minds.desktop_client.e2e_workspace_runner import _send_message_and_await_reply
 from imbue.minds.desktop_client.e2e_workspace_runner import configure_logging
@@ -558,3 +564,117 @@ def test_create_apikey_workspace_and_chat_via_electron(
         )
     finally:
         destroy_agent_best_effort(workspace_name, config_project_dir=host_config_root / ".mngr")
+
+
+# -- Backup-update chat gate against a live, LLM-authenticated chat agent -----
+#
+# The backup update's chat gate must (a) classify a claude agent that is
+# actively generating as a running chat, (b) block the mutating update on it,
+# and (c) stop it for real when the "Stop all chats and retry" flow passes
+# --stop-chats. The unit tests in backup_workspace_scripts_test.py drive these
+# paths with a stubbed `mngr list`; this test drives them against the resumed
+# snapshot workspace's real chat agent, which has working LLM credentials
+# baked in -- asking it for a long story keeps it RUNNING long enough for the
+# gate to observe it.
+
+
+def _find_chat_agent(container_name: str) -> dict[str, Any]:
+    """Return the workspace's (claude-type) chat agent record from mngr list."""
+    agents = _list_agents_in_container(container_name)
+    chats = [agent for agent in agents if agent.get("type") == "claude"]
+    assert chats, f"No claude chat agent among {[a.get('name') for a in agents]!r}"
+    return chats[0]
+
+
+def _wait_for_agent_state(container_name: str, agent_id: str, expected_state: str, *, attempts: int = 40) -> bool:
+    """Poll (shell-side, no python sleeps) until the agent reports the state, or time out."""
+    read_state = (
+        "cd /code && mngr list --format json --on-error continue | "
+        f'python3 -c \'import json,sys; print(next((a["state"] for a in json.load(sys.stdin)["agents"] '
+        f'if a["id"] == "{agent_id}"), ""))\''
+    )
+    poll = (
+        f"for i in $(seq 1 {attempts}); do "
+        f'state=$({read_state}); [ "$state" = "{expected_state}" ] && exit 0; '
+        "sleep 3; done; exit 1"
+    )
+    return _exec_in_container(container_name, poll, timeout=attempts * 3 + 120).returncode == 0
+
+
+def _run_backup_script_in_container(
+    container_name: str, script: str, args: tuple[str, ...], *, timeout: int
+) -> subprocess.CompletedProcess[str]:
+    """Run one of the minds backup workspace scripts inside the container at /code."""
+    command = build_workspace_script_command(script, args)
+    return _exec_in_container(container_name, f"cd /code && {command}", timeout=timeout)
+
+
+@pytest.mark.minds_snapshot_resume
+@pytest.mark.docker
+@pytest.mark.timeout(900)
+def test_backup_update_gate_blocks_on_live_chat_and_stop_chats_clears_it(
+    running_workspace: _ResumedWorkspace,
+) -> None:
+    """The chat gate blocks on a genuinely generating claude agent and --stop-chats stops it."""
+    container_name = running_workspace.container_name
+    chat = _find_chat_agent(container_name)
+    chat_id = str(chat["id"])
+    chat_name = str(chat["name"])
+
+    # Wake the chat and give it work that takes a while: a real LLM generation
+    # (the baked workspace carries working credentials). `mngr message`
+    # delivers the keystrokes and returns; claude then reads as RUNNING while
+    # it generates.
+    started = _exec_in_container(container_name, f"cd /code && mngr start {chat_id} --quiet", timeout=180)
+    assert started.returncode == 0, f"`mngr start` failed for the chat agent: {started.stderr}"
+    story_marker = get_short_random_string()
+    messaged = _exec_in_container(
+        container_name,
+        f'cd /code && mngr message {chat_id} "Please tell me a really long story about {story_marker}. '
+        'Make it as long and detailed as you possibly can."',
+        timeout=120,
+    )
+    assert messaged.returncode == 0, f"`mngr message` failed for the chat agent: {messaged.stderr}"
+    assert _wait_for_agent_state(container_name, chat_id, "RUNNING"), (
+        "The chat agent never reached RUNNING after being asked for a long story."
+    )
+
+    # The gate probe classifies the generating chat as a running chat.
+    probe = _run_backup_script_in_container(
+        container_name,
+        BACKUP_GATE_PROBE_SCRIPT,
+        ("--agent-id", running_workspace.services_agent_id),
+        timeout=300,
+    )
+    probe_payload = extract_marker_json(probe.stdout, GATE_RESULT_MARKER)
+    assert probe_payload is not None, (probe.stdout, probe.stderr)
+    assert chat_name in probe_payload["running_chats"], probe_payload
+
+    # The mutating update refuses to run while the chat is generating.
+    blocked = _run_backup_script_in_container(
+        container_name,
+        BACKUP_APPLY_UPDATE_SCRIPT,
+        ("--minds-version", "0.0.0-snapshot-test", "--agent-id", running_workspace.services_agent_id),
+        timeout=600,
+    )
+    blocked_payload = extract_marker_json(blocked.stdout, UPDATE_RESULT_MARKER)
+    assert blocked_payload is not None, (blocked.stdout, blocked.stderr)
+    assert blocked_payload["status"] == "blocked", blocked_payload
+    assert chat_name in blocked_payload["running_chats"], blocked_payload
+
+    # "Stop all chats and retry": the script stops the live chat itself and
+    # proceeds past the gate. Whether the rest of the update succeeds depends
+    # on the baked repo's tags; the contract under test is that the outcome is
+    # anything but blocked and the chat agent is genuinely stopped.
+    retried = _run_backup_script_in_container(
+        container_name,
+        BACKUP_APPLY_UPDATE_SCRIPT,
+        ("--minds-version", "0.0.0-snapshot-test", "--agent-id", running_workspace.services_agent_id, "--stop-chats"),
+        timeout=600,
+    )
+    retried_payload = extract_marker_json(retried.stdout, UPDATE_RESULT_MARKER)
+    assert retried_payload is not None, (retried.stdout, retried.stderr)
+    assert retried_payload["status"] != "blocked", retried_payload
+    assert _wait_for_agent_state(container_name, chat_id, "STOPPED"), (
+        "The chat agent was not stopped by the --stop-chats gate."
+    )
