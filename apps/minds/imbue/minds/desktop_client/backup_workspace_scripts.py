@@ -163,9 +163,20 @@ def _compute_code_state(tag):
 
 def _installed_backup_version():
     logged = _run(["git", "log", "-n", "200", "--format=%s"])
+    # The apply script's rollback reverts the update commit, so a
+    # `backup-update:` subject with a newer matching revert subject must not
+    # count as the installed version.
+    pending_reverts = []
     for line in logged.stdout.splitlines():
-        if line.startswith("backup-update: "):
-            return line[len("backup-update: "):].strip()
+        stripped = line.strip()
+        if stripped.startswith('Revert "backup-update: ') and stripped.endswith('"'):
+            pending_reverts.append(stripped[len('Revert "'):-1])
+            continue
+        if stripped.startswith("backup-update: "):
+            if stripped in pending_reverts:
+                pending_reverts.remove(stripped)
+                continue
+            return stripped[len("backup-update: "):].strip()
     described = _run(["git", "describe", "--tags", "--match", "minds-v*", "--abbrev=0"])
     if described.returncode == 0:
         return described.stdout.strip()

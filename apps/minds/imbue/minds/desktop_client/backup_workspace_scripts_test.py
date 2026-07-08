@@ -332,6 +332,15 @@ def test_apply_update_rolls_back_when_service_restart_fails(tmp_path: Path) -> N
     subjects = run_git_for_backup_test(repo, "log", "--format=%s").splitlines()
     assert subjects[0].startswith('Revert "backup-update: minds-v2.0.0"')
     assert subjects[1] == "backup-update: minds-v2.0.0"
+    # The reverted update must not read as the installed version: the check
+    # skips the reverted `backup-update:` subject and (here) falls back to an
+    # empty identity, since the tag is not an ancestor of HEAD.
+    check_run = _run_script(
+        repo, BACKUP_CHECK_SCRIPT, ("--minds-version", "2.0.0", "--agent-id", "agent-x"), extra_path=stub_bin
+    )
+    check_payload = extract_marker_json(check_run["stdout"], CHECK_RESULT_MARKER)
+    assert check_payload is not None, check_run
+    assert check_payload["installed_version"] == ""
 
 
 def test_apply_update_skips_commit_when_content_already_matches(tmp_path: Path) -> None:
