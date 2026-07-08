@@ -4,4 +4,4 @@ The `mngr create` subprocess is now given a log-safe process `name` (via the new
 
 The `modal secret create` subprocess (used by `minds env` deploy tooling) is likewise named with its `KEY=VALUE` secret values masked, so raw Vault secrets no longer reach the thread name or error messages.
 
-The Electron backend log (`minds.log`, uploaded with bug reports) now masks the `mngr forward` preauth cookie and the one-time login code before writing backend stdout events to disk.
+The Electron backend log (`minds.log`, uploaded with bug reports) now masks the `mngr forward` preauth cookie -- a reusable, session-lifetime bearer token -- before writing backend stdout events to disk. (The single-use one-time login code is intentionally left as-is: it is spent immediately at session start.)

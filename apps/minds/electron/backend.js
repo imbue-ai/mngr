@@ -25,10 +25,19 @@ let backendProcess = null;
 // Backend stdout JSONL event fields that carry secrets and must be masked
 // before the raw line is written to minds.log (which is uploaded with bug
 // reports). Keyed by event type; each value lists the fields to redact.
-//   * login_url: the URL embeds a single-use one-time login code.
-//   * mngr_forward_started: the freshly-minted mngr-forward preauth cookie.
+//
+//   * mngr_forward_started: the freshly-minted mngr-forward preauth cookie --
+//     a reusable, session-lifetime bearer token for the local forward. The
+//     backend never logs it through any other path, so masking it here removes
+//     it from the logs entirely.
+//
+// The ``login_url`` event's one-time login code is deliberately NOT masked: it
+// is single-use and consumed immediately at session start, so it is spent by
+// the time any log is read (it is also common to print single-use login URLs).
+// Masking it here would be a false comfort anyway -- the backend prints the
+// same URL via a stderr log line and the JSONL sink, neither of which this
+// stdout-only redaction touches.
 const SECRET_STDOUT_EVENT_FIELDS = {
-  login_url: ['login_url', 'message'],
   mngr_forward_started: ['preauth_cookie'],
 };
 
@@ -335,10 +344,10 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
 
         for (const line of lines) {
           // Log every complete line, but mask secret-bearing event fields
-          // (the mngr-forward preauth cookie, the one-time login code) first:
-          // minds.log is uploaded with bug reports, so credentials must never
-          // land in it. The in-process handlers below still parse the original
-          // line, so they receive the real values.
+          // (the mngr-forward preauth cookie) first: minds.log is uploaded with
+          // bug reports, so that reusable session token must never land in it.
+          // The in-process handlers below still parse the original line, so they
+          // receive the real values.
           logStream.write(redactStdoutLineForLog(line) + '\n');
           if (!line.trim()) continue;
           try {
