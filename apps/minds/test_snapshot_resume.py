@@ -648,7 +648,8 @@ def test_backup_update_gate_blocks_on_live_chat_and_stop_chats_clears_it(
     )
     probe_payload = extract_marker_json(probe.stdout, GATE_RESULT_MARKER)
     assert probe_payload is not None, (probe.stdout, probe.stderr)
-    assert chat_name in probe_payload["running_chats"], probe_payload
+    probe_chats = probe_payload["running_chats"]
+    assert isinstance(probe_chats, list) and chat_name in probe_chats, probe_payload
 
     # The mutating update refuses to run while the chat is generating.
     blocked = _run_backup_script_in_container(
@@ -660,7 +661,8 @@ def test_backup_update_gate_blocks_on_live_chat_and_stop_chats_clears_it(
     blocked_payload = extract_marker_json(blocked.stdout, UPDATE_RESULT_MARKER)
     assert blocked_payload is not None, (blocked.stdout, blocked.stderr)
     assert blocked_payload["status"] == "blocked", blocked_payload
-    assert chat_name in blocked_payload["running_chats"], blocked_payload
+    blocked_chats = blocked_payload["running_chats"]
+    assert isinstance(blocked_chats, list) and chat_name in blocked_chats, blocked_payload
 
     # "Stop all chats and retry": the script stops the live chat itself and
     # proceeds past the gate. Whether the rest of the update succeeds depends
