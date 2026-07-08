@@ -646,22 +646,36 @@ async def pick_backend_page(ctx: BrowserContext, origin: str, timeout: float = 3
     to drive; main.js points it at ``<origin>/_chrome`` once the backend is
     ready, which is what this selector keys on. Prefers the exact ``/_chrome``
     page for the first two thirds of ``timeout``; only then falls back to any
-    page on the backend origin, so a slow ``/_chrome`` load can't flip the
-    pick onto a managed view that happened to reach the origin first.
+    page on the backend port, so a slow ``/_chrome`` load can't flip the pick
+    onto a managed view that happened to reach the backend first. Pages load
+    the backend as ``localhost`` while ``wait_backend_url`` reports
+    ``127.0.0.1``, so matching is by loopback host + port, not URL prefix; the
+    overlay lives at ``/_chrome/overlay``, so the preferred match is the exact
+    ``/_chrome`` path.
     """
+    backend_port = urllib.parse.urlsplit(origin).port
+
+    def _split_if_backend(url: str) -> urllib.parse.SplitResult | None:
+        parts = urllib.parse.urlsplit(url)
+        if parts.hostname in ("localhost", "127.0.0.1") and parts.port == backend_port:
+            return parts
+        return None
+
     deadline = time.time() + timeout
     fallback_after = time.time() + timeout * 2 / 3
     while time.time() < deadline:
-        origin_pages: list[Page] = []
+        backend_pages: list[Page] = []
         for p in all_pages(ctx):
             with contextlib.suppress(Exception):
-                if p.url.startswith(origin + "/_chrome"):
+                parts = _split_if_backend(p.url)
+                if parts is None:
+                    continue
+                if parts.path == "/_chrome":
                     return p
-                if p.url.startswith(origin):
-                    origin_pages.append(p)
-        if origin_pages and time.time() >= fallback_after:
-            logger.warning("no /_chrome page after {:.0f}s; falling back to {}", timeout * 2 / 3, origin_pages[0].url)
-            return origin_pages[0]
+                backend_pages.append(p)
+        if backend_pages and time.time() >= fallback_after:
+            logger.warning("no /_chrome page after {:.0f}s; falling back to {}", timeout * 2 / 3, backend_pages[0].url)
+            return backend_pages[0]
         await asyncio.sleep(0.5)
     urls = [p.url for p in all_pages(ctx)]
     raise E2EFailure(f"no page on backend origin {origin} after {timeout}s; page URLs: {urls}")
