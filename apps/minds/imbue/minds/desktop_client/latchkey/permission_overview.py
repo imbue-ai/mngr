@@ -39,10 +39,21 @@ from imbue.mngr_latchkey.store import permissions_path_for_host
 # The catch-all detent permission (matches every request under the scope) is
 # shown to users as "all", mirroring the permission-request dialog.
 _WILDCARD_DISPLAY_LABEL = "all"
+_WILDCARD_DESCRIPTION = "Unrestricted access: any request to this service is permitted."
 
 
 class PermissionOverviewError(Exception):
     """Raised for caller-facing programming errors (e.g. revoking an unknown service)."""
+
+
+class GrantedPermission(FrozenModel):
+    """A single granted permission plus its plain-English description for a tooltip."""
+
+    label: str = Field(description="User-facing label (the detent catch-all ``any`` is rendered as ``all``).")
+    description: str = Field(
+        default="",
+        description="Plain-English summary shown as a tooltip; empty when the catalog has none.",
+    )
 
 
 class WorkspaceServiceGrant(FrozenModel):
@@ -52,11 +63,8 @@ class WorkspaceServiceGrant(FrozenModel):
     workspace_name: str = Field(description="Human-readable workspace display name shown as the column header.")
     host_id: str = Field(description="Host the grant lives on (every agent on the host shares it).")
     color: str = Field(description="Workspace accent color hex (``#rrggbb``) for the column header dot.")
-    permission_labels: tuple[str, ...] = Field(
-        description=(
-            "User-facing permission labels granted under this service, in catalog order. The "
-            "detent catch-all ``any`` is rendered as ``all``."
-        ),
+    permissions: tuple[GrantedPermission, ...] = Field(
+        description="Permissions granted under this service, in catalog order, each with its tooltip description.",
     )
 
 
@@ -114,26 +122,33 @@ def _list_active_workspace_hosts(backend_resolver: BackendResolverInterface) -> 
     return tuple(hosts)
 
 
-def _permission_labels(
+def _granted_permissions(
     service_infos: Sequence[ServicePermissionInfo],
     granted: frozenset[str],
-) -> tuple[str, ...]:
-    """Map the granted permission schemas to user-facing labels in catalog order.
+) -> tuple[GrantedPermission, ...]:
+    """Map the granted permission schemas to labelled, described permissions in catalog order.
 
     Iterates the catalog's declared permission schemas across every scope the
     service owns (``any`` is index 0 of each), keeping only those actually
     granted and de-duplicating across scopes. Grants that are not in the
     catalog for the service are dropped (defence-in-depth against a hand-edited
-    file), and the catch-all ``any`` is relabeled ``all``.
+    file), and the catch-all ``any`` is relabeled ``all`` with a generic
+    description.
     """
-    labels: list[str] = []
+    permissions: list[GrantedPermission] = []
     seen: set[str] = set()
     for info in service_infos:
         for schema in info.permission_schemas:
-            if schema in granted and schema not in seen:
-                seen.add(schema)
-                labels.append(_WILDCARD_DISPLAY_LABEL if schema == WILDCARD_PERMISSION_NAME else schema)
-    return tuple(labels)
+            if schema not in granted or schema in seen:
+                continue
+            seen.add(schema)
+            if schema == WILDCARD_PERMISSION_NAME:
+                permissions.append(GrantedPermission(label=_WILDCARD_DISPLAY_LABEL, description=_WILDCARD_DESCRIPTION))
+            else:
+                permissions.append(
+                    GrantedPermission(label=schema, description=info.description_by_permission_name.get(schema, ""))
+                )
+    return tuple(permissions)
 
 
 def build_permission_overview(
@@ -174,8 +189,8 @@ def build_permission_overview(
             granted: set[str] = set()
             for scope in scopes:
                 granted.update(rules.get(scope, ()))
-            labels = _permission_labels(service_infos, frozenset(granted))
-            if not labels:
+            permissions = _granted_permissions(service_infos, frozenset(granted))
+            if not permissions:
                 continue
             grants.append(
                 WorkspaceServiceGrant(
@@ -183,7 +198,7 @@ def build_permission_overview(
                     workspace_name=host.workspace_name,
                     host_id=str(host.host_id),
                     color=host.color,
-                    permission_labels=labels,
+                    permissions=permissions,
                 )
             )
         if grants:

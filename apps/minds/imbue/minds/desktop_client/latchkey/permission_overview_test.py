@@ -107,9 +107,11 @@ def test_build_overview_groups_grants_per_service_and_workspace(tmp_path: Path) 
     assert set(by_service) == {"slack", "github"}
     # Sorted by display name: GitHub before Slack.
     assert [o.display_name for o in overview] == ["GitHub", "Slack"]
-    slack_ws = {g.workspace_name: g.permission_labels for g in by_service["slack"].workspace_grants}
+    slack_ws = {g.workspace_name: tuple(p.label for p in g.permissions) for g in by_service["slack"].workspace_grants}
     assert slack_ws == {"Alpha": ("slack-read-all",), "Beta": ("slack-read-all", "slack-write-all")}
-    github_ws = {g.workspace_name: g.permission_labels for g in by_service["github"].workspace_grants}
+    github_ws = {
+        g.workspace_name: tuple(p.label for p in g.permissions) for g in by_service["github"].workspace_grants
+    }
     assert github_ws == {"Alpha": ("github-read-all",)}
 
 
@@ -122,7 +124,9 @@ def test_build_overview_relabels_wildcard_as_all(tmp_path: Path) -> None:
     overview = build_permission_overview(resolver, build_fake_gateway_client(), _catalog(), latchkey)
 
     assert len(overview) == 1
-    assert overview[0].workspace_grants[0].permission_labels == ("all",)
+    wildcard = overview[0].workspace_grants[0].permissions
+    assert tuple(p.label for p in wildcard) == ("all",)
+    assert wildcard[0].description  # the catch-all carries a non-empty tooltip description
 
 
 def test_build_overview_omits_services_with_no_grants(tmp_path: Path) -> None:

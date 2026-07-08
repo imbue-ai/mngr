@@ -33,7 +33,10 @@ _CATALOG_PAYLOAD: dict[str, object] = {
         {
             "scope": "slack-api",
             "display_name": "Slack",
-            "permissions": [{"name": "slack-read-all"}, {"name": "slack-write-all"}],
+            "permissions": [
+                {"name": "slack-read-all", "description": "All read operations across the Slack API."},
+                {"name": "slack-write-all"},
+            ],
         },
     ],
 }
@@ -130,6 +133,10 @@ def test_settings_page_lists_granted_service_per_workspace(tmp_path: Path) -> No
     assert "My Workspace" in body
     assert "slack-read-all" in body
     assert 'data-service-name="slack"' in body
+    # The per-permission description is surfaced as a tooltip on the pill.
+    assert 'data-tooltip="All read operations across the Slack API."' in body
+    # The per-service revoke-all button names the service so its scope is unambiguous.
+    assert "Remove all authorizations for Slack" in body
 
 
 def test_settings_page_empty_state_when_no_grants(tmp_path: Path) -> None:

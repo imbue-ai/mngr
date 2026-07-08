@@ -1760,14 +1760,9 @@ def _handle_settings_page() -> Response:
     include_error_logs = minds_config.get_include_error_logs() if minds_config else False
 
     services_overview: list[object] = []
-    all_service_display_names: list[str] = []
     permissions_unavailable = False
     handler = _find_predefined_permission_handler()
     if handler is not None:
-        all_service_display_names = sorted(
-            {infos[0].display_name for infos in handler.services_catalog.as_mapping().values() if infos},
-            key=str.lower,
-        )
         try:
             services_overview = list(
                 build_permission_overview(
@@ -1785,7 +1780,6 @@ def _handle_settings_page() -> Response:
         report_unexpected_errors=report_unexpected_errors,
         include_error_logs=include_error_logs,
         services_overview=services_overview,
-        all_service_display_names=all_service_display_names,
         permissions_unavailable=permissions_unavailable,
     )
     return make_html_response(content=html)
