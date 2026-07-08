@@ -851,7 +851,10 @@ create-new-mind-repo repo_name parent_dir="$HOME/project":
         echo "error: could not determine GitHub username from 'gh api user'" >&2; exit 2
     fi
     if [ ! -d "$fct/.git" ]; then
-        echo "error: $fct is not a git repo (skill expects forever-claude-template here)" >&2; exit 2
+        echo "error: no forever-claude-template checkout at $fct" >&2
+        echo "       set FCT_DIR (in a gitignored apps/minds/.env, or your shell) to your fct clone," >&2
+        echo "       or clone fct to that path." >&2
+        exit 2
     fi
     if [ ! -d "$parent" ]; then
         echo "error: parent directory '$parent' does not exist" >&2; exit 2
@@ -977,6 +980,12 @@ bake-slice-dev region workspace_dir="" count="1" *extra_args:
         # $PWD is the repo root (just runs recipes from the justfile dir); keeps
         # the fallback absolute, which minds pool create's --workspace-dir wants.
         wd="${FCT_DIR:-$PWD/.external_worktrees/forever-claude-template}"
+    fi
+    if [ ! -d "$wd/.git" ]; then
+        echo "error: no fct checkout at $wd" >&2
+        echo "       run 'just fct-worktree' to create it, or set FCT_DIR (apps/minds/.env or shell)" >&2
+        echo "       to your fct clone." >&2
+        exit 2
     fi
     uv run minds pool create \
         --count "{{count}}" \
