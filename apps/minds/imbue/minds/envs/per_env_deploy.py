@@ -45,6 +45,7 @@ from imbue.minds.envs.providers.supertokens_app import SuperTokensAppRecord
 from imbue.minds.envs.vault_reader import VaultPath
 from imbue.minds.envs.vault_reader import read_vault_kv
 from imbue.minds.errors import MindError
+from imbue.minds.utils.secret_redaction import redact_secret_env_assignments
 
 # Modal's `modal deploy` prints lines like:
 #     Created web function api => https://<host>.modal.run
@@ -260,20 +261,10 @@ def push_per_env_modal_secret(
         secret_name,
         *(f"{k}={v}" for k, v in values.items()),
     ]
-    # The command carries the raw secret values as ``KEY=VALUE`` args; give the
-    # process a name with the values masked so they never reach the reader
-    # thread's name (recorded in JSONL logs) or a ProcessError message. The
-    # real command is still what executes.
-    loggable_command = [
-        "modal",
-        "secret",
-        "create",
-        "--force",
-        "--env",
-        modal_env,
-        secret_name,
-        *(f"{k}=***" for k in values),
-    ]
+    # Every ``KEY=VALUE`` arg here is a raw secret value, so give the process a
+    # name with all assignment values masked -- that name (not the real command)
+    # becomes the reader thread's name (recorded in JSONL logs) and any
+    # ProcessError message. The real command above is still what executes.
     cg = parent_cg.make_concurrency_group(name=f"modal-secret-{secret_name}")
     with cg:
         result = cg.run_process_to_completion(
@@ -281,7 +272,7 @@ def push_per_env_modal_secret(
             timeout=_MODAL_SECRET_TIMEOUT_SECONDS,
             is_checked_after=False,
             env=_modal_subprocess_env(),
-            name=" ".join(loggable_command),
+            name=" ".join(redact_secret_env_assignments(command, redact_all=True)),
         )
     if result.returncode != 0:
         stderr = result.stderr.strip() or result.stdout.strip()

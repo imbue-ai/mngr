@@ -139,3 +139,42 @@ def test_redact_secret_env_assignments_does_not_mutate_input() -> None:
     redact_secret_env_assignments(command, secret_env_var_names=("LATCHKEY_GATEWAY_PASSWORD",))
 
     assert command == ["--host-env", "LATCHKEY_GATEWAY_PASSWORD=pw"]
+
+
+def test_redact_secret_env_assignments_redact_all_masks_every_assignment() -> None:
+    # ``redact_all`` masks every ``NAME=VALUE`` value regardless of name, while
+    # leaving the verb, flags, and non-assignment positional args untouched.
+    command = [
+        "modal",
+        "secret",
+        "create",
+        "--force",
+        "--env",
+        "minds-staging",
+        "minds-litellm-staging-42",
+        "DATABASE_URL=postgres://u:p@host/db",
+        "API_KEY=abc123",
+    ]
+
+    redacted = redact_secret_env_assignments(command, redact_all=True)
+
+    assert "postgres://u:p@host/db" not in " ".join(redacted)
+    assert "abc123" not in " ".join(redacted)
+    assert redacted == [
+        "modal",
+        "secret",
+        "create",
+        "--force",
+        "--env",
+        "minds-staging",
+        "minds-litellm-staging-42",
+        f"DATABASE_URL={REDACTED_PLACEHOLDER}",
+        f"API_KEY={REDACTED_PLACEHOLDER}",
+    ]
+
+
+def test_redact_secret_env_assignments_defaults_to_noop() -> None:
+    # With neither a name set nor ``redact_all``, nothing is masked.
+    command = ["cmd", "KEY=value"]
+
+    assert redact_secret_env_assignments(command) == command

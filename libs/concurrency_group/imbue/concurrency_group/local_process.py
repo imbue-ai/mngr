@@ -94,7 +94,7 @@ class RunningProcess:
         if thread.is_alive():
             stdout = self.read_stdout()
             stderr = self.read_stderr()
-            raise TimeoutExpired(self._error_command, timeout if timeout is not None else 0.0, stdout, stderr)
+            raise TimeoutExpired(self._error_display, timeout if timeout is not None else 0.0, stdout, stderr)
         result = self.poll()
         if result is None:
             raise ProcessSetupError(
@@ -143,7 +143,7 @@ class RunningProcess:
         if thread.is_alive():
             stdout = self.read_stdout()
             stderr = self.read_stderr()
-            raise TimeoutExpired(self._error_command, force_kill_seconds, stdout, stderr)
+            raise TimeoutExpired(self._error_display, force_kill_seconds, stdout, stderr)
 
     def start(self, kwargs: dict) -> None:
         context = contextvars.copy_context()
@@ -168,13 +168,14 @@ class RunningProcess:
         return f"RunningProcess: {' '.join(self._command)}"
 
     @property
-    def _error_command(self) -> Sequence[str] | str:
-        """Command rendering safe for stdlib ``TimeoutExpired`` (the ``name`` when supplied).
+    def _error_display(self) -> Sequence[str] | str:
+        """The label to show for this process in a raised error (the ``name`` when supplied).
 
         ``subprocess.TimeoutExpired`` renders its ``cmd`` into ``str(exc)``, so a
         command carrying secrets would leak there. When a ``name`` was supplied we
-        hand that in as ``cmd`` instead; otherwise we fall back to the real command
-        (prior behavior).
+        hand that label in instead; otherwise we fall back to the real command
+        (prior behavior). The value is a plain display label, not necessarily a
+        command -- hence the name.
         """
         return self._name if self._name is not None else self._command
 
