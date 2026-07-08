@@ -9,7 +9,11 @@
   spinner used everywhere. ``tone="accent"`` swaps to a blue ring +
   blue top, used inside the backup-export "downloading..." indicator
   where the surrounding text and affordance are already blue.
+  ``tone="inverse"`` derives its ring + top from ``currentColor``, so a
+  spinner placed inside a solid-filled button (e.g. the success-variant
+  Approve button, whose text is white) inherits that button's text
+  color and stays legible against the fill.
 #}
 {%- set _dim = {"sm": "w-3.5 h-3.5 border", "md": "w-[18px] h-[18px] border-2", "lg": "w-8 h-8 border-[3px]"} -%}
-{%- set _tone = " spinner-accent" if tone == "accent" else "" -%}
+{%- set _tone = " spinner-accent" if tone == "accent" else (" spinner-inverse" if tone == "inverse" else "") -%}
 <span class="spinner{{ _tone }} inline-block align-middle {{ _dim[size] }} {{ extra }}" aria-hidden="true"></span>

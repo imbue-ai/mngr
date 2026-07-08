@@ -1,1 +1,0 @@
-Integrates the "simple names" work: `ImbueCloudProvider.rename_host` is now implemented (a leased host is renamed by updating its mutable `host_name` via the connector, without touching the VPS or container, whether or not it is running), and pre-baked pool hosts are no longer stamped with a `workspace=<name>` label -- workspace identity lives on the host name and host id.

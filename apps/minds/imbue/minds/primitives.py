@@ -68,6 +68,11 @@ class LaunchMode(UpperCaseStrEnum):
     LIMA = auto()
     IMBUE_CLOUD = auto()
     AWS = auto()
+    # Runs the agent in a Modal sandbox using the local machine's own Modal token
+    # (``modal token new``) -- resolves the ``modal`` provider instance. Modal
+    # sandboxes are ephemeral (~1 day max), so it is surfaced as "Modal (1-day
+    # ephemeral)" and is testing-only.
+    MODAL = auto()
 
 
 class AIProvider(UpperCaseStrEnum):
