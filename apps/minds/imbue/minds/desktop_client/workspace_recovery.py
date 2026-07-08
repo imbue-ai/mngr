@@ -46,6 +46,7 @@ from imbue.minds.errors import MngrCommandError
 from imbue.minds.errors import MngrCommandTimeoutError
 from imbue.mngr.api.discovery_events import DISCOVERY_STREAM_POLL_INTERVAL_SECONDS
 from imbue.mngr.api.discovery_events import DiscoveryError
+from imbue.mngr.errors import HOST_SHUTDOWN_NOT_SUPPORTED_MESSAGE
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
@@ -309,11 +310,30 @@ def run_restart_sequence(
         try:
             _run_mngr(concurrency_group, _build_mngr_stop_argv(mngr_binary, services_agent_id, is_host_restart), env)
         except MngrCommandError as exc:
-            logger.warning("Stop step of {} for {} failed: {}", tier_label, workspace_agent_id, exc)
-            message = f"Stop step of {tier_label} failed: {exc}"
-            tracker.mark_restart_failed(workspace_agent_id, message)
-            registry.fail(workspace_agent_id, message)
-            return
+            # ``mngr stop --stop-host`` raises HostShutdownNotSupportedError when a provider's
+            # ``supports_shutdown_hosts`` is False (e.g. Modal). minds runs mngr as a subprocess,
+            # so it can only match the error's message text in stderr -- keyed off mngr's exported
+            # HOST_SHUTDOWN_NOT_SUPPORTED_MESSAGE constant (one shared source of truth) rather than
+            # a duplicated literal.
+            if HOST_SHUTDOWN_NOT_SUPPORTED_MESSAGE in str(exc):
+                # Provider can't stop a host in place (e.g. Modal). Expected, not a
+                # failure: the start step below restarts it on its own (reconnect-if-alive,
+                # else recreate-from-snapshot), so skip the stop and proceed.
+                logger.info(
+                    "Stop step of {} for {} skipped: provider does not support host shutdown; "
+                    "restart proceeds via start alone",
+                    tier_label,
+                    workspace_agent_id,
+                )
+                registry.append_log(
+                    workspace_agent_id, "Provider does not support stopping the host; skipping stop step."
+                )
+            else:
+                logger.warning("Stop step of {} for {} failed: {}", tier_label, workspace_agent_id, exc)
+                message = f"Stop step of {tier_label} failed: {exc}"
+                tracker.mark_restart_failed(workspace_agent_id, message)
+                registry.fail(workspace_agent_id, message)
+                return
 
     registry.append_log(workspace_agent_id, "Starting the system-services agent.")
     try:
