@@ -10,7 +10,7 @@
 - Scope decisions (2026-07-06):
   - Ship and test darwin-arm64 and linux-x64. The manifest additionally carries darwin-x64, linux-arm64, and windows-x64 entries so those targets are one flag away, but they are not shipped or CI-gated.
   - Provenance is pinned SHA256 hashes against dugite-native's GitHub release assets (no artifact mirroring for now).
-  - A weekly CI workflow nags (via a GitHub issue) when the pinned release falls behind dugite-native's latest, which tracks upstream git security releases.
+  - A weekly CI workflow nags (via a GitHub issue) when the pin falls behind on the upstream *git version* (the security axis), but only for releases that have cleared the repo's 14-day dependency cooldown. Same-git-version dugite rebuilds are not chased. (Refined 2026-07-08 after PR review flagged that the first cut nagged on any newer release, contradicting the repo's minimum-release-age posture.)
   - Credential helpers stay out of scope (Tier 0 below); the payload retains git-credential-manager so enabling them later is configuration, not bundling.
 - Invariants:
   - Zero prerequisites for end users; no Xcode CLT dependency at build or run time.
@@ -32,8 +32,8 @@
 - Dev mode (`pnpm start`) uses the identical payload: the `prestart` `ensure-binaries.js` hook already requires `resources/git/bin/git` and triggers the same downloader.
 - `git --version` inside the app reports exactly the manifest's `gitVersion` (2.53.0 at pin time), on every platform, on every build, regardless of which machine built it. The backend logs the bundled git version once at startup for supportability.
 - Linux is continuously proven in CI: an acceptance test (running on Linux via offload) downloads, verifies, extracts, and exercises the linux-x64 payload -- including an HTTPS clone through `git-remote-https` -- even though a packaged Linux app is not shipping yet. When the ToDesktop `linux` target is eventually enabled, git is a solved problem, not a stub.
-- Once a week, CI compares the pinned tag against dugite-native's latest release. If behind, it opens (or updates) a single tracking issue; when the pin catches up, the workflow closes it.
-- When git publishes a security release: dugite-native cuts a release within days; the nag issue appears within a week; a maintainer follows the update runbook (bump manifest + hashes, let CI verify); the fix ships with the next app release via ToDesktop auto-update.
+- Once a week, CI finds the newest dugite-native release that has cleared the 14-day cooldown and compares its upstream git version against the pin. If that git version is newer, it opens (or updates) a single tracking issue; if the pin is current or ahead on git version (including when only a newer dugite `-<build>` of the same git exists), the workflow closes any open issue. A release still inside the cooldown window is ignored until it ages out.
+- When git publishes a security release: dugite-native cuts a release within days; once it clears the 14-day cooldown the nag issue appears on the next weekly run; a maintainer follows the update runbook (bump manifest + hashes, let CI verify); the fix ships with the next app release via ToDesktop auto-update. For a genuinely urgent CVE a maintainer may bump before the cooldown at their discretion -- the automated nag deliberately waits the window out to avoid recommending an unvetted release.
 
 ## Changes
 
@@ -84,10 +84,13 @@ These are set only in the backend subprocess environment, never globally. Implem
 
 ### New file: `.github/workflows/minds-git-freshness.yml`
 
-- Weekly cron plus `workflow_dispatch`, on ubuntu. Reads `dugiteNativeTag` from the manifest, fetches `repos/desktop/dugite-native/releases/latest` via `gh api`, and:
-  - If behind: create-or-update a single issue (matched by stable title; deliberately no label dependency, so the workflow never needs label provisioning) containing the latest tag and release notes excerpt.
-  - If current: close any open nag issue.
-- Rationale: dugite-native's releases track upstream git security releases within days, and nagging on what is actually pinnable is the actionable signal. Watching git CVE feeds directly is deliberately omitted (it would nag about versions we cannot pin yet).
+- Weekly cron plus `workflow_dispatch`, on ubuntu. Reads `dugiteNativeTag` + `gitVersion` from the manifest, lists `repos/desktop/dugite-native/releases` via `gh api`, filters out drafts/prereleases and any release younger than the 14-day cooldown, and takes the newest survivor as the candidate. It derives the candidate's upstream git version from its tag (`v<gitversion>-<build>`) and:
+  - If the candidate's git version is newer than the pin: create-or-update a single issue (matched by stable title; deliberately no label dependency, so the workflow never needs label provisioning) framed on the git-version delta, with the candidate's release-notes excerpt and a pointer to review upstream git's notes for security relevance.
+  - If the pin is current or ahead on git version (identical git, a newer same-git dugite `-<build>`, or the pin is ahead via an emergency override): close any open nag issue.
+- Two constraints, both mirroring the repo-wide dependency posture (pnpm `minimumReleaseAge` 20160 min; packaged pyproject `exclude-newer = "14 days"`):
+  - **Cooldown (14 days):** a freshly-published, possibly-compromised release is never recommended before it has had time to be vetted and, if needed, yanked. The constant is duplicated in the workflow with a comment tying it to those two settings (a GH Actions YAML cannot import them).
+  - **Security axis, not features:** only a newer upstream *git version* nags (git security fixes ship as new git patch versions); dugite rebuilds that keep the same git version are packaging/feature updates and are deliberately not chased -- a nag that fires on non-actionable churn trains people to ignore it.
+- Rationale: dugite-native's releases track upstream git security releases within days, and nagging on the pinnable, cooldown-cleared, security-relevant delta is the actionable signal. Watching git CVE feeds directly is deliberately omitted (it would nag about versions we cannot pin yet).
 
 ### Update runbook (also lands in `apps/minds/docs/desktop-app.md`)
 
