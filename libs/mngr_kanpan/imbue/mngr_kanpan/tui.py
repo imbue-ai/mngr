@@ -1,5 +1,4 @@
 import os
-import re
 import subprocess
 import time
 from collections.abc import Callable
@@ -15,6 +14,7 @@ from typing import assert_never
 from loguru import logger
 from pydantic import ConfigDict
 from urwid.canvas import TextCanvas
+from urwid.display.raw import Screen
 from urwid.event_loop.abstract_loop import ExitMainLoop
 from urwid.event_loop.main_loop import MainLoop
 from urwid.widget.attr_map import AttrMap
@@ -22,6 +22,7 @@ from urwid.widget.columns import Columns
 from urwid.widget.divider import Divider
 from urwid.widget.filler import Filler
 from urwid.widget.frame import Frame
+from urwid.widget.line_box import LineBox
 from urwid.widget.listbox import ListBox
 from urwid.widget.listbox import SimpleFocusListWalker
 from urwid.widget.pile import Pile
@@ -90,7 +91,7 @@ TRANSIENT_MESSAGE_SECONDS: float = 3.0
 # while the panel is open.
 PEEK_BODY_HEIGHT: int = 14
 PEEK_REFRESH_SECONDS: float = 2.0
-PEEK_REPLY_PROMPT: str = "reply> "
+PEEK_REPLY_PROMPT: str = "› "
 
 PALETTE = [
     ("header", "white", "dark blue"),
@@ -126,6 +127,8 @@ PALETTE = [
     # Peek panel
     ("peek_header", "white", "dark blue"),
     ("peek_hint", "dark gray", ""),
+    # Your own messages/replies, marked with `›`.
+    ("peek_user", "dark blue", ""),
 ]
 
 # Display order: most mature first (like Linear), muted always last
@@ -394,9 +397,13 @@ class _KanpanState(MutableModel):
     # Original frame footer (keybinding bar), restored when the panel closes.
     saved_footer: Any = None
     # Widgets owned by the open panel (set while peek_agent_name is not None).
-    peek_header_text: Any = None
+    peek_box: Any = None
     peek_body_text: Any = None
     peek_input: Any = None
+    # Last clean `mngr transcript --conversation` stdout shown in the panel.
+    peek_transcript: str = ""
+    # Replies sent but not yet echoed back by the transcript, shown optimistically.
+    peek_pending_replies: list[str] = []
     # In-flight transcript read for the peeked agent, polled by the peek alarm.
     peek_capture_future: Future[subprocess.CompletedProcess[str]] | None = None
     # Handle for the pending live-refresh alarm (None if none scheduled).
@@ -883,6 +890,21 @@ def _on_mute_persist_poll(loop: MainLoop, data: tuple[_KanpanState, Future[bool]
         loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_mute_persist_poll, data)
 
 
+def _restore_drag_selection(loop: MainLoop, _user_data: object = None) -> None:  # pragma: no cover
+    """Turn off drag-motion mouse reporting so the terminal still does native drag-select.
+
+    urwid enables button (1000), drag-motion (1002), and SGR (1006) tracking together;
+    dropping 1002 keeps a click reported (so it still focuses a row) while letting a plain
+    drag select and copy text with no modifier key. Re-applied after each screen start,
+    since ``loop.start()`` re-enables the full set. Doubles as an alarm callback (hence the
+    ignored second argument), so it can run once the screen is up under ``loop.run()``.
+    """
+    screen = loop.screen
+    if isinstance(screen, Screen):
+        screen.write("\x1b[?1002l")
+        screen.flush()
+
+
 def _attach_to_focused_agent(state: _KanpanState) -> None:  # pragma: no cover
     """Suspend the board and attach to the focused agent's session, restoring on return.
 
@@ -915,6 +937,11 @@ def _attach_to_focused_agent(state: _KanpanState) -> None:  # pragma: no cover
     finally:
         loop.start()
         loop.screen.clear()
+        # loop.start() re-enables full mouse tracking; drop drag-motion again, and force
+        # an immediate repaint so the board returns at once instead of waiting for the
+        # next refresh (which left the detach output on screen -- the "stuck" exit).
+        _restore_drag_selection(loop)
+        loop.draw_screen()
 
     _start_local_refresh(loop, state)
 
@@ -942,11 +969,10 @@ def _focus_row_by_name(state: _KanpanState, name: AgentName) -> None:
 def _run_transcript(agent_name: str) -> subprocess.CompletedProcess[str]:  # pragma: no cover
     """Read the agent's user/assistant messages. Called from a background thread.
 
-    Tool events are not fetched, and there is no ``--tail`` window: the last readable
-    message can sit arbitrarily far back behind a run of tool-only turns (which have no
-    text), and the cost of ``mngr transcript`` is dominated by process startup rather
-    than transcript length, so fetching the whole thing and keeping the tail is simpler
-    than guessing a window size.
+    Slash-command scaffolding and other framework-injected turns are already dropped
+    upstream (claude's converter reclassifies them to the tool role), so the plain
+    ``--role user --role assistant`` filter yields the readable conversation. No
+    ``--tail`` window -- the whole thing is fetched and the panel keeps the tail.
     """
     return subprocess.run(
         ["mngr", "transcript", agent_name, "--role", "user", "--role", "assistant"],
@@ -990,54 +1016,74 @@ def _last_nonempty_line(text: str) -> str:
     return lines[-1] if lines else ""
 
 
-# A ``mngr transcript`` message header, e.g. ``[2026-07-08T01:06:54Z] assistant:``.
-_TRANSCRIPT_HEADER_RE: re.Pattern[str] = re.compile(r"^\[\d{4}-\d{2}-\d{2}T[^\]]*\] ")
-
-
 @pure
-def _meaningful_transcript_lines(stdout: str) -> list[str]:
-    """Split a transcript dump into message blocks, keeping only those with real text.
+def _peek_body_lines(transcript: str, pending: list[str]) -> list[str]:
+    """Assemble the panel's body lines: the clean conversation plus pending replies.
 
-    Tool-only turns render as ``(no content)`` under their header; dropping those empty
-    blocks leaves the last user/assistant message a person would actually read.
+    Pending replies -- sent but not yet echoed back by the transcript -- are appended as
+    ``› `` lines so a reply shows the instant it is sent. Only the trailing
+    ``PEEK_BODY_HEIGHT`` lines are kept (a leading ``⋯`` marks older lines were trimmed)
+    so a long final message shows its end rather than the agent's scrolled-up screen.
     """
-    blocks: list[list[str]] = []
-    for line in stdout.rstrip("\n").split("\n"):
-        if _TRANSCRIPT_HEADER_RE.match(line) or not blocks:
-            blocks.append([line])
-        else:
-            blocks[-1].append(line)
-    kept: list[str] = []
-    for block in blocks:
-        body = block[1:] if _TRANSCRIPT_HEADER_RE.match(block[0]) else block
-        if any(line.strip() and line.strip() != "(no content)" for line in body):
-            kept.extend(block)
-    return kept
-
-
-@pure
-def _peek_body_from_transcript(result: subprocess.CompletedProcess[str]) -> str:
-    """Reduce a transcript dump to the trailing lines shown in the peek panel.
-
-    Keeps only turns with real text, then shows the tail -- the newest lines -- so a
-    long final message renders its end (the agent's conclusion, or the question it is
-    waiting on). A ``N earlier lines hidden`` marker is prepended when older lines drop.
-    """
-    if result.returncode != 0:
-        detail = _last_nonempty_line(result.stderr) or f"exited with code {result.returncode}"
-        return f"(no transcript: {detail})"
-    lines = _meaningful_transcript_lines(result.stdout)
+    body = transcript.strip("\n")
+    lines = body.split("\n") if body else []
+    for reply in pending:
+        if lines:
+            lines.append("")
+        lines.append(f"› {reply}")
+    while lines and not lines[0].strip():
+        lines.pop(0)
     while lines and not lines[-1].strip():
         lines.pop()
+    if len(lines) > PEEK_BODY_HEIGHT:
+        lines = lines[-PEEK_BODY_HEIGHT:]
+        while lines and not lines[0].strip():
+            lines.pop(0)
+        lines = ["⋯", *lines]
+    return lines
+
+
+@pure
+def _is_transcript_header(line: str) -> bool:
+    """True for a ``mngr transcript`` header line, e.g. ``[2026-07-08T02:56:03Z] user:``."""
+    stripped = line.rstrip()
+    return line.startswith("[") and "] " in line and stripped.endswith(":")
+
+
+@pure
+def _short_header(line: str) -> str:
+    """Drop the ISO timestamp from a transcript header, leaving just the role cue.
+
+    ``[2026-07-08T02:56:03Z] assistant:`` -> ``assistant:``. The timestamp is chrome for
+    a live peek; the full value is still available via ``mngr transcript`` itself.
+    """
+    return line.split("] ", 1)[1] if "] " in line else line
+
+
+@pure
+def _peek_body_markup(transcript: str, pending: list[str]) -> list[Any]:
+    """Render the panel body as urwid markup: message text prominent, chrome de-emphasized.
+
+    The transcript's own ``[time] role:`` headers are shortened to a dimmed role cue and
+    the trim ``⋯`` marker is dimmed too, so the conversation reads first; your
+    sent-but-not-yet-echoed replies are accented with the same ``›`` as the reply prompt.
+    """
+    lines = _peek_body_lines(transcript, pending)
     if not lines:
-        # The whole transcript has no readable user/assistant text (e.g. a brand-new
-        # agent, or one that has only ever emitted tool calls).
-        return "(no messages yet)"
-    start = max(0, len(lines) - PEEK_BODY_HEIGHT)
-    tail = lines[start:]
-    if start > 0:
-        return "\n".join([f"... {start} earlier lines hidden", *tail])
-    return "\n".join(tail)
+        return [("peek_hint", "(no messages yet)")]
+    markup: list[Any] = []
+    for index, line in enumerate(lines):
+        if index > 0:
+            markup.append("\n")
+        if line == "⋯":
+            markup.append(("peek_hint", line))
+        elif _is_transcript_header(line):
+            markup.append(("peek_hint", _short_header(line)))
+        elif line.startswith("› "):
+            markup.append(("peek_user", line))
+        else:
+            markup.append(line)
+    return markup
 
 
 def _make_reply_edit(caption: tuple[str, str]) -> ReadlineEdit:
@@ -1057,36 +1103,49 @@ def _make_reply_edit(caption: tuple[str, str]) -> ReadlineEdit:
     return edit
 
 
-def _build_peek_panel(state: _KanpanState) -> Pile:
-    """Build the peek panel widget (shown in place of the footer) and stash its parts."""
-    state.peek_header_text = Text("")
+def _build_peek_panel(state: _KanpanState) -> LineBox:
+    """Build the peek panel (a bordered box shown in place of the footer) and stash its parts."""
     state.peek_body_text = Text("", wrap="space")
-    state.peek_input = _make_reply_edit(("peek_hint", PEEK_REPLY_PROMPT))
-    hint = Text(("peek_hint", "  enter: send reply   ·   esc: close"))
-    panel = Pile(
+    state.peek_input = _make_reply_edit(("peek_user", PEEK_REPLY_PROMPT))
+    hint = Text(("peek_hint", "enter: send   ·   esc: close"))
+    inner = Pile(
         [
-            Divider("─"),
-            AttrMap(state.peek_header_text, "peek_header"),
             state.peek_body_text,
-            Divider("─"),
+            Divider(" "),
             state.peek_input,
             hint,
         ]
     )
     # Focus the reply input so typed keys land in it.
-    panel.focus_position = 4
-    return panel
+    inner.focus_position = 2
+    box = LineBox(
+        inner,
+        title="Peek",
+        title_align="left",
+        tlcorner="╭",
+        trcorner="╮",
+        blcorner="╰",
+        brcorner="╯",
+    )
+    state.peek_box = box
+    return box
 
 
 def _update_peek_header(state: _KanpanState) -> None:
-    """Refresh the peek header line from the currently peeked agent."""
-    if state.peek_header_text is None:
+    """Refresh the peek box's border title from the currently peeked agent."""
+    if state.peek_box is None:
         return
     entry = _find_entry_by_name(state, state.peek_agent_name)
     if entry is None:
-        state.peek_header_text.set_text("  Peek")
+        state.peek_box.set_title("Peek")
         return
-    state.peek_header_text.set_text(f"  Peek: {entry.name}  ·  {entry.state}  ·  {entry.provider_name}")
+    state.peek_box.set_title(f" {entry.name} · {entry.state} · {entry.provider_name} ")
+
+
+def _set_peek_body(state: _KanpanState) -> None:
+    """Render the peek body from the cached transcript and any pending replies."""
+    if state.peek_body_text is not None:
+        state.peek_body_text.set_text(_peek_body_markup(state.peek_transcript, state.peek_pending_replies))
 
 
 def _cancel_peek_alarm(state: _KanpanState) -> None:
@@ -1117,11 +1176,22 @@ def _on_peek_capture_poll(loop: MainLoop, state: _KanpanState) -> None:
 
     state.peek_capture_future = None
     try:
-        body = _peek_body_from_transcript(future.result())
+        result = future.result()
     except (subprocess.SubprocessError, OSError) as e:
-        body = f"(transcript failed: {e})"
-    if state.peek_body_text is not None:
-        state.peek_body_text.set_text(body)
+        if state.peek_body_text is not None:
+            state.peek_body_text.set_text(("peek_hint", f"(transcript failed: {e})"))
+    else:
+        if result.returncode != 0:
+            detail = _last_nonempty_line(result.stderr) or f"exited with code {result.returncode}"
+            if state.peek_body_text is not None:
+                state.peek_body_text.set_text(("peek_hint", f"(no transcript: {detail})"))
+        else:
+            state.peek_transcript = result.stdout
+            # A reply the agent has since accepted now appears in the transcript, so drop
+            # its optimistic echo to avoid showing it twice.
+            delivered = set(result.stdout.splitlines())
+            state.peek_pending_replies = [r for r in state.peek_pending_replies if r not in delivered]
+            _set_peek_body(state)
     if state.peek_agent_name is not None:
         state.peek_alarm = loop.set_alarm_in(PEEK_REFRESH_SECONDS, _on_peek_capture_tick, state)
 
@@ -1140,13 +1210,15 @@ def _open_peek(state: _KanpanState) -> None:
         return
     state.peek_agent_name = entry.name
     state.focused_agent_name = entry.name
+    state.peek_transcript = ""
+    state.peek_pending_replies = []
     panel = _build_peek_panel(state)
     state.saved_footer = state.frame.footer
     state.frame.footer = panel
     state.frame.focus_position = "footer"
     _update_peek_header(state)
     if state.peek_body_text is not None:
-        state.peek_body_text.set_text("(loading...)")
+        state.peek_body_text.set_text(("peek_hint", "(loading...)"))
     _start_peek_capture(state)
 
 
@@ -1164,9 +1236,11 @@ def _close_peek(state: _KanpanState) -> None:
     state.frame.focus_position = "body"
     state.focused_agent_name = closed_name
     _focus_row_by_name(state, closed_name)
-    state.peek_header_text = None
+    state.peek_box = None
     state.peek_body_text = None
     state.peek_input = None
+    state.peek_transcript = ""
+    state.peek_pending_replies = []
 
 
 def _toggle_peek(state: _KanpanState) -> None:
@@ -1178,21 +1252,24 @@ def _toggle_peek(state: _KanpanState) -> None:
 
 
 def _submit_peek_reply(state: _KanpanState) -> None:
-    """Fire-and-forget the reply-input text to the peeked agent; a no-op when empty.
+    """Send the reply-input text to the peeked agent and echo it immediately; no-op when empty.
 
-    ``mngr message`` blocks up to ~90s waiting for the agent's submission signal,
-    which a busy agent cannot give until its current turn ends -- so the send runs
-    on the peek executor and its result is not awaited. The paste itself is queued
-    immediately, and the reply shows up in the panel body once the agent submits it.
+    ``mngr message`` blocks up to ~90s on the agent's submission signal, which a busy
+    agent cannot give until its current turn ends -- so the send runs on the reply
+    executor and is not awaited. The typed text is echoed into the body right away (as a
+    ``›`` line) and, once the agent accepts it and it shows up in the transcript, the
+    echo is dropped in favour of the real message.
     """
     if state.peek_agent_name is None or state.peek_input is None:
         return
     text = state.peek_input.get_edit_text().strip()
     if not text:
         return
+    state.peek_pending_replies = [*state.peek_pending_replies, text]
     executor = _ensure_peek_reply_executor(state)
     state.peek_reply_future = executor.submit(_run_message, str(state.peek_agent_name), text)
     state.peek_input.set_edit_text("")
+    _set_peek_body(state)
 
 
 def _handle_peek_key(state: _KanpanState, key: str) -> bool | None:
@@ -2119,11 +2196,15 @@ def run_kanpan(
             palette=PALETTE + mark_palette_entries,
             unhandled_input=input_handler,
             screen=screen,
-            # The board has no mouse actions; leaving mouse capture off keeps the
-            # terminal's own click-drag text selection and copy working.
-            handle_mouse=False,
+            # Enable mouse so a click focuses the row under it (urwid ListBox handles
+            # this natively). Drag-motion tracking is turned off once the screen is up
+            # (see _restore_drag_selection) so plain drag-to-select/copy still works.
+            handle_mouse=True,
         )
         state.loop = loop
+
+        # Drop drag-motion mouse reporting as soon as the screen has started.
+        loop.set_alarm_in(0, _restore_drag_selection)
 
         # Initial data load with spinner
         _start_refresh(loop, state)

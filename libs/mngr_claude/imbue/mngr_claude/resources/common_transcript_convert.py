@@ -106,6 +106,25 @@ def _load_existing_ids(output_file: str) -> set[str]:
     return ids
 
 
+# Claude records slash-command expansions and their local output as user turns whose
+# content is only an XML-ish envelope (e.g. `<command-name>/login</command-name>` or
+# `<local-command-stdout>...`). No human typed them, so -- like isMeta messages -- they
+# are reclassified as tool results rather than left masquerading as user input.
+_COMMAND_SCAFFOLDING_PREFIXES = (
+    "<command-name>",
+    "<command-message>",
+    "<command-args>",
+    "<local-command-stdout>",
+    "<local-command-stderr>",
+    "<command-stdout>",
+)
+
+
+def _is_command_scaffolding(text: str) -> bool:
+    """True when a user turn's text is only claude slash-command scaffolding."""
+    return text.lstrip().startswith(_COMMAND_SCAFFOLDING_PREFIXES)
+
+
 def convert(input_file: str, output_file: str) -> int:
     """Append new common-transcript events from ``input_file`` to ``output_file``; return the count."""
     existing_ids = _load_existing_ids(output_file)
@@ -252,9 +271,24 @@ def convert(input_file: str, output_file: str) -> int:
                             }
                             new_events.append((timestamp, event))
                     else:
+                        # Keep the "user" event_id even for scaffolding reclassified below,
+                        # so re-converting a session written before this change (which
+                        # emitted it as a user_message under this id) does not double-emit.
                         event_id = _make_event_id(uuid, "user")
-                        if event_id not in existing_ids:
-                            if text:
+                        if event_id not in existing_ids and text:
+                            if _is_command_scaffolding(text):
+                                event = {
+                                    "timestamp": timestamp,
+                                    "type": "tool_result",
+                                    "event_id": event_id,
+                                    "source": "claude/common_transcript",
+                                    "tool_call_id": f"meta-{uuid}",
+                                    "tool_name": "meta",
+                                    "output": _truncate(text, _MAX_OUTPUT_LENGTH),
+                                    "is_error": False,
+                                    "message_uuid": uuid,
+                                }
+                            else:
                                 event = {
                                     "timestamp": timestamp,
                                     "type": "user_message",
@@ -264,7 +298,7 @@ def convert(input_file: str, output_file: str) -> int:
                                     "content": text,
                                     "message_uuid": uuid,
                                 }
-                                new_events.append((timestamp, event))
+                            new_events.append((timestamp, event))
 
                 # Emit tool result events for any tool_result blocks
                 if isinstance(content, list):

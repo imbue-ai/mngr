@@ -93,18 +93,21 @@ from imbue.mngr_kanpan.tui import _get_state_attr
 from imbue.mngr_kanpan.tui import _handle_peek_key
 from imbue.mngr_kanpan.tui import _is_field_stale
 from imbue.mngr_kanpan.tui import _is_focus_on_first_selectable
+from imbue.mngr_kanpan.tui import _is_transcript_header
 from imbue.mngr_kanpan.tui import _last_nonempty_line
 from imbue.mngr_kanpan.tui import _load_user_commands
 from imbue.mngr_kanpan.tui import _make_reply_edit
 from imbue.mngr_kanpan.tui import _on_batch_item_poll
 from imbue.mngr_kanpan.tui import _on_peek_capture_poll
 from imbue.mngr_kanpan.tui import _on_transient_expire
-from imbue.mngr_kanpan.tui import _peek_body_from_transcript
+from imbue.mngr_kanpan.tui import _peek_body_lines
+from imbue.mngr_kanpan.tui import _peek_body_markup
 from imbue.mngr_kanpan.tui import _prune_orphaned_marks
 from imbue.mngr_kanpan.tui import _refresh_display
 from imbue.mngr_kanpan.tui import _render_footer
 from imbue.mngr_kanpan.tui import _resolve_section_order
 from imbue.mngr_kanpan.tui import _run_shell_command
+from imbue.mngr_kanpan.tui import _short_header
 from imbue.mngr_kanpan.tui import _show_transient_message
 from imbue.mngr_kanpan.tui import _submit_batch_item
 from imbue.mngr_kanpan.tui import _submit_peek_reply
@@ -1853,53 +1856,53 @@ def test_last_nonempty_line_all_blank_returns_empty() -> None:
     assert _last_nonempty_line("   \n\n") == ""
 
 
-def test_peek_body_from_transcript_keeps_trailing_tail() -> None:
-    stdout = "\n".join(f"line{i}" for i in range(30)) + "\n\n\n"
-    result = subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
-    body_lines = _peek_body_from_transcript(result).split("\n")
-    # Trailing blanks dropped; only the newest PEEK_BODY_HEIGHT lines show, under a marker.
-    assert body_lines[0] == "... 16 earlier lines hidden"
-    assert body_lines[-1] == "line29"
-    assert len(body_lines) == PEEK_BODY_HEIGHT + 1
+def test_peek_body_lines_tails_to_window_with_marker() -> None:
+    transcript = "\n".join(f"line{i}" for i in range(30)) + "\n\n\n"
+    lines = _peek_body_lines(transcript, [])
+    # Trailing blanks dropped; only the newest PEEK_BODY_HEIGHT lines show, under a ⋯ marker.
+    assert lines[0] == "⋯"
+    assert lines[-1] == "line29"
+    assert len(lines) == PEEK_BODY_HEIGHT + 1
 
 
-def test_peek_body_from_transcript_short_message_has_no_marker() -> None:
-    stdout = "[2026-07-07T00:14:35Z] assistant:\nall done, tests pass\n"
-    result = subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
-    body = _peek_body_from_transcript(result)
-    # A message shorter than the window shows verbatim, with no truncation marker.
-    assert body == "[2026-07-07T00:14:35Z] assistant:\nall done, tests pass"
-    assert "earlier lines hidden" not in body
+def test_peek_body_lines_short_message_has_no_marker() -> None:
+    transcript = "[2026-07-07T00:14:35Z] assistant:\nall done, tests pass\n"
+    lines = _peek_body_lines(transcript, [])
+    assert "⋯" not in lines
+    assert lines[-1] == "all done, tests pass"
 
 
-def test_peek_body_from_transcript_reports_failure() -> None:
-    result = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="does not support transcripts")
-    assert "does not support transcripts" in _peek_body_from_transcript(result)
+def test_peek_body_lines_empty_transcript_is_empty() -> None:
+    assert _peek_body_lines("\n\n", []) == []
 
 
-def test_peek_body_from_transcript_empty_output() -> None:
-    result = subprocess.CompletedProcess(args=[], returncode=0, stdout="\n\n", stderr="")
-    assert _peek_body_from_transcript(result) == "(no messages yet)"
+def test_peek_body_lines_appends_pending_reply() -> None:
+    lines = _peek_body_lines("[..] assistant:\nhi", ["my reply"])
+    # A sent-but-not-yet-echoed reply is appended as a `›` line so it shows immediately.
+    assert lines[-1] == "› my reply"
 
 
-def test_peek_body_from_transcript_drops_empty_turns() -> None:
-    stdout = (
-        "[2026-07-08T01:06:54Z] assistant:\n(no content)\n\n"
-        "[2026-07-08T01:07:06Z] assistant:\nhere is the real summary\n\n"
-        "[2026-07-08T01:07:10Z] assistant:\n(no content)\n"
-    )
-    result = subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
-    body = _peek_body_from_transcript(result)
-    # Tool-only turns render as "(no content)"; only the turn with real text survives.
-    assert "(no content)" not in body
-    assert "here is the real summary" in body
-    assert body.count("assistant:") == 1
+def test_peek_body_markup_empty_says_no_messages() -> None:
+    assert _peek_body_markup("", []) == [("peek_hint", "(no messages yet)")]
 
 
-def test_peek_body_from_transcript_all_empty_turns_reports_no_messages() -> None:
-    stdout = "[2026-07-08T01:06:54Z] assistant:\n(no content)\n\n[2026-07-08T01:07:10Z] assistant:\n(no content)\n"
-    result = subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
-    assert _peek_body_from_transcript(result) == "(no messages yet)"
+def test_peek_body_markup_dims_headers_and_accents_replies() -> None:
+    markup = _peek_body_markup("[2026-07-07T00:14:35Z] user:\nhello", ["a reply"])
+    # Header shortened + dimmed, content plain, pending reply accented.
+    assert ("peek_hint", "user:") in markup
+    assert "hello" in markup
+    assert ("peek_user", "› a reply") in markup
+
+
+def test_short_header_drops_timestamp() -> None:
+    assert _short_header("[2026-07-07T00:14:35Z] assistant:") == "assistant:"
+    assert _short_header("no-bracket line") == "no-bracket line"
+
+
+def test_is_transcript_header_matches_only_headers() -> None:
+    assert _is_transcript_header("[2026-07-07T00:14:35Z] user:")
+    assert not _is_transcript_header("just some text")
+    assert not _is_transcript_header("  -> Bash(ls)")
 
 
 def test_peek_reply_executor_serializes_in_order() -> None:
@@ -1972,24 +1975,24 @@ def test_build_peek_panel_populates_parts() -> None:
     assert state.peek_input is not None
     assert state.peek_input.get_edit_text() == ""
     assert state.peek_body_text is not None
-    assert state.peek_header_text is not None
+    assert state.peek_box is not None
 
 
 def test_update_peek_header_names_agent() -> None:
     entry = _make_entry(name="agent-a", state=AgentLifecycleState.WAITING)
     state = _make_state_with_walker((entry,))
-    state.peek_header_text = Text("")
+    _build_peek_panel(state)
     state.peek_agent_name = AgentName("agent-a")
     _update_peek_header(state)
-    assert "agent-a" in str(state.peek_header_text.text)
+    assert "agent-a" in state.peek_box.title_widget.text
 
 
 def test_update_peek_header_missing_agent_falls_back() -> None:
     state = _make_state_with_walker((_make_entry(name="agent-a"),))
-    state.peek_header_text = Text("")
+    _build_peek_panel(state)
     state.peek_agent_name = AgentName("gone")
     _update_peek_header(state)
-    assert str(state.peek_header_text.text).strip() == "Peek"
+    assert state.peek_box.title_widget.text.strip() == "Peek"
 
 
 def test_cancel_peek_alarm_removes_pending_alarm() -> None:
