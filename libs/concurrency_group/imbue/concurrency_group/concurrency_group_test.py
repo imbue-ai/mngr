@@ -95,6 +95,24 @@ def test_concurrency_group_supports_running_process_to_completion() -> None:
     assert process.returncode == 0
 
 
+def test_run_process_to_completion_name_keeps_secret_out_of_failure() -> None:
+    """End-to-end: a ``name`` passed to ``run_process_to_completion`` masks a
+    secret-bearing command in the raised ProcessError message, so it never reaches
+    logs, while the real command still executes (non-zero exit is detected)."""
+    with ConcurrencyGroup(name="outer") as cg:
+        # ``run_process_to_completion`` checks the exit code itself and raises the
+        # ProcessError inline (the process is not group-checked), so we catch it
+        # here and the group still exits cleanly.
+        with pytest.raises(ProcessError) as exc_info:
+            cg.run_process_to_completion(
+                ["bash", "-c", "exit 3", "--token=s3cr3t-value"],
+                name="bash -c <redacted> --token=***",
+            )
+
+    assert "s3cr3t-value" not in str(exc_info.value)
+    assert "--token=***" in str(exc_info.value)
+
+
 def test_concurrency_group_supports_running_processes_with_on_output_callbacks() -> None:
     calls: list[tuple[str, bool]] = []
 
