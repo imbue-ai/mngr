@@ -314,7 +314,7 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
             message = f"{len(exceptions)} strands failed in concurrency group `{self.name}`."
             if len(exceptions) == 1 and isinstance(exceptions[0], ProcessError):
                 output = exceptions[0].stdout[:128] + " (...) " + exceptions[0].stderr[:128]
-                message += f"\nFailed command: {exceptions[0].command}\nOutput: {output}"
+                message += f"\nFailed command: {exceptions[0].display_command}\nOutput: {output}"
             raise ConcurrencyExceptionGroup(
                 message,
                 exceptions,
@@ -437,6 +437,10 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
         shutdown_event: ReadOnlyEvent | None = None,
         # Open file descriptors to keep open in (and inherit into) the spawned child, by their fd numbers.
         pass_fds: Sequence[int] = (),
+        # Optional log-safe label for the process. When the command carries secret
+        # argument values, pass a masked/friendly ``name`` so they never reach the
+        # reader thread's name (recorded in JSONL logs) or any raised error message.
+        name: str | None = None,
     ) -> RunningProcess:
         """
         Run a process in the background, returning immediately.
@@ -459,6 +463,7 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
                 pass_fds=pass_fds,
                 process_class=RunningProcessWithOnLineCallback,
                 process_class_kwargs={"on_line_callback": on_output},
+                name=name,
             )
 
         return self.start_background_process_from_factory(process_factory)
@@ -472,6 +477,8 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
         cwd: Path | None = None,
         env: Mapping[str, str] | None = None,
         shutdown_event: ReadOnlyEvent | None = None,
+        # Optional log-safe label for the process (see ``run_process_in_background``).
+        name: str | None = None,
     ) -> FinishedProcess:
         """
         Run a process to completion, blocking until it finishes.
@@ -487,6 +494,7 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
             shutdown_event=shutdown_event,
             on_output=on_output,
             is_checked_by_group=False,
+            name=name,
         )
         process.wait()
         if is_checked_after:
@@ -499,6 +507,7 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
             stderr=process.read_stderr(),
             is_timed_out=process.get_timed_out(),
             is_output_already_logged=False,
+            display_name=name,
         )
 
     def _cleanup(self) -> None:
