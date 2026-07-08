@@ -20,6 +20,7 @@ from flask import abort
 from flask import request
 from loguru import logger
 from pydantic import Field
+from pydantic import SecretStr
 from werkzeug.exceptions import HTTPException
 from werkzeug.middleware.dispatcher import DispatcherMiddleware
 
@@ -42,6 +43,7 @@ from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.backup_password_rotation import rotate_backup_master_password
 from imbue.minds.desktop_client.backup_password_store import ensure_backup_password_hash
 from imbue.minds.desktop_client.backup_password_store import has_saved_backup_password
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
@@ -492,6 +494,61 @@ def _handle_error_reporting_settings() -> Response:
             minds_config.set_include_error_logs(bool(body["include_logs"]))
         _sync_latchkey_forward_sentry_consent(minds_config)
     return make_response(status_code=200, content='{"ok": true}', media_type="application/json")
+
+
+def _handle_backup_password_change() -> Response:
+    """Rotate the shared backup master password (POST /_chrome/backup-password).
+
+    Deliberately a desktop-only cookie-auth route (not part of /api/v1): agents
+    must never be able to rotate the master password. The rotation is
+    synchronous -- it rekeys every existing backed-up workspace's repository --
+    and the response carries per-workspace results for the Settings page to
+    render inline.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
+    body = request.get_json(silent=True, force=True)
+    if not isinstance(body, dict):
+        return make_response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
+    paths: WorkspacePaths | None = get_state().api_v1_paths
+    if paths is None:
+        return make_response(
+            status_code=503,
+            content='{"error": "Backup management is unavailable in this configuration"}',
+            media_type="application/json",
+        )
+    # Wrapped in SecretStr immediately; the plaintext must never reach a log.
+    new_password = SecretStr(str(body.get("new_password") or ""))
+    confirmation = SecretStr(str(body.get("new_password_confirm") or ""))
+    if new_password.get_secret_value() != confirmation.get_secret_value():
+        return make_response(
+            status_code=400, content='{"error": "The two passwords do not match."}', media_type="application/json"
+        )
+    result = rotate_backup_master_password(
+        paths=paths,
+        resolver=get_state().backend_resolver,
+        new_password=new_password,
+        is_save_password=bool(body.get("save_password", False)),
+        parent_cg=get_state().root_concurrency_group,
+    )
+    return make_response(
+        status_code=200,
+        content=json.dumps(
+            {
+                "ok": result.is_all_ok,
+                "results": [
+                    {
+                        "agent_id": entry.agent_id,
+                        "workspace_name": entry.workspace_name,
+                        "is_ok": entry.is_ok,
+                        "error": entry.error,
+                    }
+                    for entry in result.results
+                ],
+            }
+        ),
+        media_type="application/json",
+    )
 
 
 def _sync_latchkey_forward_sentry_consent(minds_config: MindsConfig) -> None:
@@ -1737,9 +1794,11 @@ def _handle_settings_page() -> Response:
     minds_config: MindsConfig | None = get_state().minds_config
     report_unexpected_errors = minds_config.get_report_unexpected_errors() if minds_config else False
     include_error_logs = minds_config.get_include_error_logs() if minds_config else False
+    paths: WorkspacePaths | None = get_state().api_v1_paths
     html = render_settings_page(
         report_unexpected_errors=report_unexpected_errors,
         include_error_logs=include_error_logs,
+        has_saved_backup_password=has_saved_backup_password(paths) if paths is not None else False,
     )
     return make_html_response(content=html)
 
@@ -2373,6 +2432,7 @@ def create_desktop_client(
     app.add_url_rule("/consent", view_func=_handle_consent_page)
     app.add_url_rule("/consent", view_func=_handle_consent_submit, methods=["POST"])
     app.add_url_rule("/_chrome/error-reporting", view_func=_handle_error_reporting_settings, methods=["POST"])
+    app.add_url_rule("/_chrome/backup-password", view_func=_handle_backup_password_change, methods=["POST"])
     app.add_url_rule("/help", view_func=_handle_help_page)
     app.add_url_rule("/help/report", view_func=_handle_help_report, methods=["POST"])
     app.add_url_rule("/help/assist", view_func=_handle_help_assist, methods=["POST"])

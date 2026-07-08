@@ -231,8 +231,22 @@ def _add_password_key_once(
     new_password: str,
     parent_cg: ConcurrencyGroup | None,
 ) -> None:
-    """Run a single ``restic key add`` attempt, authenticating with ``existing_password``."""
+    """Run a single ``restic key add`` attempt, authenticating with ``existing_password``.
+
+    An empty ``new_password`` adds the empty-password key via
+    ``--new-insecure-no-password`` (restic rejects an empty password file).
+    """
     env, flags = _env_and_flags(repository, backend_env, existing_password)
+    if not new_password:
+        result = _run_restic(
+            [*flags, "key", "add", "--new-insecure-no-password"],
+            env_overrides=env,
+            parent_cg=parent_cg,
+            timeout_seconds=_DEFAULT_TIMEOUT_SECONDS,
+        )
+        if result.returncode != 0:
+            _raise_restic_failure("restic key add", result.returncode, result.stderr)
+        return
     with TemporaryDirectory() as temp_dir:
         new_password_file = Path(temp_dir) / "new_password"
         # 0600 temp file so the random key isn't briefly world-readable on disk.
@@ -272,6 +286,67 @@ def add_password_key(
             parent_cg=parent_cg,
         )
     )
+
+
+class ResticKey(FrozenModel):
+    """One repository key as reported by ``restic key list --json``."""
+
+    key_id: str = Field(description="The key's id (hex prefix restic accepts for key remove)")
+    is_current: bool = Field(description="Whether this is the key the listing authenticated with")
+
+
+def list_keys(
+    *,
+    repository: str,
+    backend_env: Mapping[str, str],
+    password: str | None,
+    parent_cg: ConcurrencyGroup | None = None,
+    timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
+) -> tuple[ResticKey, ...]:
+    """List the repository's keys, marking the one used to authenticate."""
+    env, flags = _env_and_flags(repository, backend_env, password)
+    result = _run_restic(
+        [*flags, "--no-lock", "key", "list", "--json"],
+        env_overrides=env,
+        parent_cg=parent_cg,
+        timeout_seconds=timeout_seconds,
+    )
+    if result.returncode != 0:
+        raise BackupProvisioningError(f"restic key list failed (exit {result.returncode}): {result.stderr.strip()}")
+    try:
+        raw = json.loads(result.stdout or "[]")
+    except ValueError as e:
+        raise BackupProvisioningError(f"restic key list returned non-JSON output: {e}") from e
+    if not isinstance(raw, list):
+        raise BackupProvisioningError(f"restic key list returned a non-list JSON payload: {type(raw).__name__}")
+    keys: list[ResticKey] = []
+    for entry in raw:
+        if not isinstance(entry, dict) or not entry.get("id"):
+            logger.warning("Skipping malformed restic key entry: {!r}", entry)
+            continue
+        keys.append(ResticKey(key_id=str(entry["id"]), is_current=bool(entry.get("current"))))
+    return tuple(keys)
+
+
+def remove_key(
+    *,
+    repository: str,
+    backend_env: Mapping[str, str],
+    password: str | None,
+    key_id: str,
+    parent_cg: ConcurrencyGroup | None = None,
+    timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
+) -> None:
+    """Remove one key from the repository (restic refuses to remove the current key)."""
+    env, flags = _env_and_flags(repository, backend_env, password)
+    result = _run_restic(
+        [*flags, "key", "remove", key_id],
+        env_overrides=env,
+        parent_cg=parent_cg,
+        timeout_seconds=timeout_seconds,
+    )
+    if result.returncode != 0:
+        raise BackupProvisioningError(f"restic key remove failed (exit {result.returncode}): {result.stderr.strip()}")
 
 
 def restore_snapshot(

@@ -1659,16 +1659,19 @@ def render_accounts_page(
 def render_settings_page(
     report_unexpected_errors: bool = False,
     include_error_logs: bool = False,
+    has_saved_backup_password: bool = False,
 ) -> str:
     """Render the app-level settings page (reachable from the sidebar's "Settings" entry).
 
     ``report_unexpected_errors`` / ``include_error_logs`` seed the per-machine
     error-reporting toggles hosted on this page (the same settings the
-    first-launch consent screen records). They are global to the machine, not
-    account-scoped.
+    first-launch consent screen records); ``has_saved_backup_password`` feeds
+    the backup master-password section's helper text. All are global to the
+    machine, not account-scoped.
     """
     return CATALOG.render(
         "pages.Settings",
         report_unexpected_errors=report_unexpected_errors,
         include_error_logs=include_error_logs,
+        has_saved_backup_password=has_saved_backup_password,
     )
