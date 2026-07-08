@@ -36,9 +36,11 @@ from flask import Blueprint
 from flask import Response
 from flask import request
 from loguru import logger
+from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroupError
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client import backup_status
@@ -87,8 +89,6 @@ from imbue.minds.desktop_client.api_models import SharingToggleResponse
 from imbue.minds.desktop_client.api_models import SshConnectionResponse
 from imbue.minds.desktop_client.api_models import StopStateContainerResponse
 from imbue.minds.desktop_client.api_models import UpgradeMergeSummary
-from imbue.minds.desktop_client.api_models import WorkspaceBackupHealthEntry
-from imbue.minds.desktop_client.api_models import WorkspaceBackupHealthResponse
 from imbue.minds.desktop_client.api_models import WorkspaceBackupsResponse
 from imbue.minds.desktop_client.api_models import WorkspaceLifecycleResponse
 from imbue.minds.desktop_client.api_models import WorkspaceListResponse
@@ -96,6 +96,7 @@ from imbue.minds.desktop_client.api_models import WorkspaceSummary
 from imbue.minds.desktop_client.api_models import WorkspaceVersionResponse
 from imbue.minds.desktop_client.api_spec import API_SPEC
 from imbue.minds.desktop_client.api_spec import json_response_model
+from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import WORKSPACE_DISPLAY_NAME_LABEL
 from imbue.minds.desktop_client.backup_env_store import has_canonical_env
 from imbue.minds.desktop_client.backup_export import BackupExportError
@@ -333,30 +334,36 @@ def _handle_workspace_version(agent_id: str) -> WorkspaceVersionResponse | Respo
     )
 
 
-@require_api_or_cookie_auth
-@API_SPEC.validate(resp=json_response_model(WorkspaceBackupsResponse))
-def _handle_workspace_backups(agent_id: str) -> WorkspaceBackupsResponse | Response:
-    """List a workspace's restic backup snapshots (works even when it is offline/destroyed)."""
-    parsed_id = AgentId(agent_id)
-    paths: WorkspacePaths | None = get_state().api_v1_paths
-    if paths is None:
-        return _json_error("Backups are not configured", 501)
+class _WorkspaceSnapshotListing(FrozenModel):
+    """The snapshot half of the per-workspace backups response."""
+
+    snapshots: tuple[BackupSnapshotSummary, ...] = Field(description="All snapshots, newest-first")
+    is_backing_up: bool = Field(description="Whether a (non-stale) restic backup is currently running")
+    error: str | None = Field(default=None, description="Why the listing failed, when it did")
+
+
+def _list_workspace_snapshots_safely(paths: WorkspacePaths, parsed_id: AgentId) -> _WorkspaceSnapshotListing:
+    """List a workspace's snapshots + in-progress flag, degrading errors into the payload.
+
+    An unconfigured workspace (no canonical env) is an ordinary empty listing,
+    not an error -- NOT_CONFIGURED surfaces through the verification half.
+    """
+    if not has_canonical_env(paths, parsed_id):
+        return _WorkspaceSnapshotListing(snapshots=(), is_backing_up=False)
     try:
         snapshots = backup_status.list_workspace_snapshots(
             paths, parsed_id, parent_cg=get_state().root_concurrency_group
         )
     except BackupProvisioningError as e:
-        return _json_error(str(e), 404)
+        logger.warning("Backup snapshot listing failed for {}: {}", parsed_id, e)
+        return _WorkspaceSnapshotListing(snapshots=(), is_backing_up=False, error=str(e))
     # Whether a backup is running *right now* (non-stale restic lock). The
     # snapshot list alone can't express this, so the landing page reads this
-    # flag to show the live "Backing up..." badge it lost when the batch
-    # /api/backup-status route was removed.
+    # flag to show the live "Backing up..." badge.
     is_backing_up = backup_status.is_workspace_backing_up(
         paths, parsed_id, now=datetime.now(timezone.utc), parent_cg=get_state().root_concurrency_group
     )
-    return WorkspaceBackupsResponse(
-        agent_id=str(parsed_id),
-        is_backing_up=is_backing_up,
+    return _WorkspaceSnapshotListing(
         snapshots=tuple(
             BackupSnapshotSummary(
                 snapshot_id=snapshot.snapshot_id,
@@ -369,12 +376,90 @@ def _handle_workspace_backups(agent_id: str) -> WorkspaceBackupsResponse | Respo
             )
             for snapshot in snapshots
         ),
+        is_backing_up=is_backing_up,
+    )
+
+
+def _check_backup_service_safely(
+    paths: WorkspacePaths,
+    parsed_id: AgentId,
+    # Resolved on the request thread and passed explicitly: this runs on a
+    # concurrency-group thread, where the Flask app-context state proxy
+    # (get_state) is unavailable.
+    resolver: BackendResolverInterface,
+    parent_cg: ConcurrencyGroup | None,
+) -> "backup_verification.BackupServiceCheck":
+    """Run the backup-service check, degrading a crash to UNKNOWN (no badge)."""
+    try:
+        return backup_verification.check_backup_service_for_workspace(
+            paths, parsed_id, resolver=resolver, parent_cg=parent_cg
+        )
+    except BackupProvisioningError as e:
+        # A real error (e.g. the adoption write to the canonical env store
+        # failed); the response still degrades to UNKNOWN rather than failing.
+        logger.warning("Backup service check for {} failed: {}", parsed_id, e)
+        return backup_verification.BackupServiceCheck(state=backup_verification.BackupServiceCheckState.UNKNOWN)
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(resp=json_response_model(WorkspaceBackupsResponse))
+def _handle_workspace_backups(agent_id: str) -> WorkspaceBackupsResponse | Response:
+    """One workspace's full backup picture: snapshots + service verification.
+
+    The restic snapshot listing (run from this machine; works even when the
+    workspace is offline or destroyed) and the backup-service check (an exec
+    into the workspace) run concurrently -- the check on a concurrency-group
+    thread, the listing on the request thread. Cross-workspace parallelism is
+    the frontend's job: it fans out one request per workspace.
+    """
+    parsed_id = AgentId(agent_id)
+    state = get_state()
+    paths: WorkspacePaths | None = state.api_v1_paths
+    if paths is None:
+        return _json_error("Backups are not configured", 501)
+
+    check_results: list[backup_verification.BackupServiceCheck] = []
+    resolver = state.backend_resolver
+    parent_cg = state.root_concurrency_group
+
+    def _run_check_into_results() -> None:
+        check_results.append(_check_backup_service_safely(paths, parsed_id, resolver, parent_cg))
+
+    cg_name = f"backup-detail-{parsed_id}"
+    cg = parent_cg.make_concurrency_group(name=cg_name) if parent_cg is not None else ConcurrencyGroup(name=cg_name)
+    with cg:
+        cg.start_new_thread(target=_run_check_into_results, name=f"backup-check-{parsed_id}")
+        listing = _list_workspace_snapshots_safely(paths, parsed_id)
+    check = (
+        check_results[0]
+        if check_results
+        else backup_verification.BackupServiceCheck(state=backup_verification.BackupServiceCheckState.UNKNOWN)
+    )
+
+    return WorkspaceBackupsResponse(
+        agent_id=str(parsed_id),
+        is_configured=has_canonical_env(paths, parsed_id),
+        is_backing_up=listing.is_backing_up,
+        snapshots=listing.snapshots,
+        snapshots_error=listing.error,
+        check_state=check.state.value,
+        problems=tuple(problem.value for problem in check.problems),
+        installed_version=check.installed_version,
+        minimum_version=check.minimum_version,
+        update_target_version=backup_verification.update_target_backup_tag(),
+        check_detail=check.detail,
+        is_verification_enabled=is_backup_verification_enabled(paths, parsed_id),
     )
 
 
 @require_api_or_cookie_auth
 def _handle_workspace_backup_export(agent_id: str, snapshot_id: str) -> Response:
-    """Restore the named snapshot and stream it back as a zip."""
+    """Restore the named snapshot (or ``latest``) and stream it back as a zip.
+
+    ``snapshot_id`` is passed to restic verbatim, so restic's own snapshot
+    addressing applies -- in particular ``latest`` exports the newest snapshot
+    without the caller having to list them first.
+    """
     parsed_id = AgentId(agent_id)
     paths: WorkspacePaths | None = get_state().api_v1_paths
     if paths is None:
@@ -963,52 +1048,6 @@ def _handle_restart_operation_status(operation_id: str) -> RestartOperationStatu
 
 
 # -- Backup service verification + management routes --
-
-
-@require_api_or_cookie_auth
-@API_SPEC.validate(resp=json_response_model(WorkspaceBackupHealthResponse))
-def _handle_workspaces_backup_health() -> WorkspaceBackupHealthResponse | Response:
-    """Batch backup health: snapshot status + backup-service verification per workspace.
-
-    The verification half execs into every online, verification-enabled
-    workspace (adopting externally-configured envs as a side effect); the
-    snapshot half runs restic from this machine against each canonical env.
-    Both run concurrently; either half's stragglers degrade to UNKNOWN rather
-    than stalling the response.
-    """
-    state = get_state()
-    paths: WorkspacePaths | None = state.api_v1_paths
-    parent_cg = state.root_concurrency_group
-    if paths is None or parent_cg is None:
-        return _json_error("Backup health is unavailable in this configuration", 503)
-    agent_ids = state.backend_resolver.list_known_workspace_ids()
-    status_by_agent_id, check_by_agent_id = backup_verification.compute_backup_health(
-        paths, agent_ids, resolver=state.backend_resolver, parent_cg=parent_cg
-    )
-
-    entries: list[WorkspaceBackupHealthEntry] = []
-    for agent_id in agent_ids:
-        agent_id_str = str(agent_id)
-        snapshot_status = status_by_agent_id.get(agent_id_str)
-        check = check_by_agent_id.get(agent_id_str)
-        entries.append(
-            WorkspaceBackupHealthEntry(
-                agent_id=agent_id_str,
-                snapshot_state=snapshot_status.state.value if snapshot_status is not None else "UNKNOWN",
-                last_success_at=(
-                    snapshot_status.last_success_at.isoformat()
-                    if snapshot_status is not None and snapshot_status.last_success_at is not None
-                    else None
-                ),
-                check_state=check.state.value if check is not None else "UNKNOWN",
-                problems=tuple(problem.value for problem in check.problems) if check is not None else (),
-                installed_version=check.installed_version if check is not None else None,
-                desired_version=check.desired_version if check is not None else None,
-                detail=check.detail if check is not None else "",
-                is_verification_enabled=is_backup_verification_enabled(paths, agent_id),
-            )
-        )
-    return WorkspaceBackupHealthResponse(workspaces=tuple(entries))
 
 
 def _resolve_backup_route_context(agent_id: str) -> "tuple[AgentId, WorkspacePaths, ConcurrencyGroup] | Response":
@@ -1856,7 +1895,6 @@ def create_api_v1_blueprint() -> Blueprint:
     # Backup service verification + management. The batch health read rides the
     # ``minds-workspaces-read`` grant; the mutating backup-service routes are
     # gated by ``minds-workspaces-backups-manage`` at the gateway.
-    blueprint.add_url_rule("/workspaces/backup-health", view_func=_handle_workspaces_backup_health, methods=["GET"])
     blueprint.add_url_rule(
         "/workspaces/<agent_id>/backup-service/update",
         view_func=_handle_backup_service_update,

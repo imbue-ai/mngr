@@ -1,8 +1,10 @@
 // Shared backup-health cache for the workspace-list surfaces (sidebar +
-// chrome). Fetches /api/v1/workspaces/backup-health once on load (and then on
-// a slow refresh cadence -- each fetch runs the full verification batch
-// against online workspaces), keeps the latest per-workspace verdict, and
-// notifies subscribers so rows can add/remove the backup warning badge.
+// chrome). On load (and then on a slow refresh cadence) it fetches the
+// workspace list once and fans out one per-workspace
+// /api/v1/workspaces/<id>/backups request -- cross-workspace parallelism
+// lives here in the frontend; the backend route is strictly per-workspace.
+// It keeps the latest per-workspace verdict and notifies subscribers so rows
+// can add/remove the backup warning badge.
 //
 // The badge appears only when a problem is detected (check_state PROBLEMS);
 // OFFLINE / DISABLED / UNKNOWN / OK all render nothing.
@@ -30,21 +32,36 @@
     return 'Backup warning: ' + text.charAt(0).toUpperCase() + text.slice(1) + '.';
   }
 
-  function ingest(data) {
-    warningByAgentId = {};
-    (data.workspaces || []).forEach(function (entry) {
-      var text = warningText(entry);
-      if (text) warningByAgentId[entry.agent_id] = text;
-    });
+  function notifyListeners() {
     listeners.forEach(function (listener) {
       try { listener(); } catch (e) { /* one bad listener must not break the rest */ }
     });
   }
 
+  // Ingest one workspace's /backups response (also called by the settings
+  // page so its fresher result updates the badge immediately).
+  function ingestEntry(entry) {
+    if (!entry || !entry.agent_id) return;
+    var text = warningText(entry);
+    if (text) warningByAgentId[entry.agent_id] = text;
+    else delete warningByAgentId[entry.agent_id];
+    notifyListeners();
+  }
+
   function refresh() {
-    fetch('/api/v1/workspaces/backup-health')
+    fetch('/api/v1/workspaces')
       .then(function (resp) { return resp.ok ? resp.json() : null; })
-      .then(function (data) { if (data) ingest(data); })
+      .then(function (data) {
+        if (!data) return;
+        (data.workspaces || []).forEach(function (workspace) {
+          var agentId = workspace.agent_id || workspace.id;
+          if (!agentId) return;
+          fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backups')
+            .then(function (resp) { return resp.ok ? resp.json() : null; })
+            .then(function (entry) { if (entry) ingestEntry(entry); })
+            .catch(function () {});
+        });
+      })
       .catch(function () {});
   }
 
@@ -52,7 +69,7 @@
     // Returns the warning tooltip for a workspace, or null when no badge is due.
     get: function (agentId) { return warningByAgentId[agentId] || null; },
     onUpdate: function (listener) { listeners.push(listener); },
-    ingest: ingest,
+    ingestEntry: ingestEntry,
     refresh: refresh,
   };
 

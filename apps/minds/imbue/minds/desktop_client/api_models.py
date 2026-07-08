@@ -114,26 +114,6 @@ class BackupOperationStatusResponse(FrozenModel):
     )
 
 
-class WorkspaceBackupHealthEntry(FrozenModel):
-    """One workspace's combined snapshot status + backup-service verification result."""
-
-    agent_id: str = Field(description="Workspace agent id")
-    snapshot_state: str = Field(description="Snapshot status: NOT_CONFIGURED/NEVER/BACKED_UP/BACKING_UP/UNKNOWN")
-    last_success_at: str | None = Field(default=None, description="ISO time of the latest successful snapshot")
-    check_state: str = Field(description="Verification verdict: OK/PROBLEMS/OFFLINE/DISABLED/UNKNOWN")
-    problems: tuple[str, ...] = Field(default=(), description="Detected backup-service problems (badge causes)")
-    installed_version: str | None = Field(default=None, description="Installed backup-code version, when known")
-    desired_version: str | None = Field(default=None, description="The minds-v* tag the check compared against")
-    detail: str = Field(default="", description="Extra human-readable detail (e.g. why unverifiable)")
-    is_verification_enabled: bool = Field(description="Whether backup verification is enabled for this workspace")
-
-
-class WorkspaceBackupHealthResponse(FrozenModel):
-    """Batch backup health for all known workspaces (landing/sidebar badge feed)."""
-
-    workspaces: tuple[WorkspaceBackupHealthEntry, ...] = Field(description="One entry per known workspace")
-
-
 class BackupServiceUpdateRequest(ApiRequestModel):
     """Body for the one idempotent 'Update backup service' action."""
 
@@ -372,11 +352,33 @@ class BackupSnapshotSummary(FrozenModel):
 
 
 class WorkspaceBackupsResponse(FrozenModel):
-    """A workspace's restic backup snapshots plus whether a backup is running now."""
+    """A workspace's full backup picture: snapshots plus the backup-service verification result.
+
+    The snapshot half (restic, run from the minds machine) works even when
+    the workspace is offline or destroyed; the verification half execs into
+    the workspace and reports OFFLINE/DISABLED instead when it cannot or
+    must not run. Cross-workspace parallelism is the caller's job -- this is
+    deliberately the only backup-health surface, one workspace per request.
+    """
 
     agent_id: str = Field(description="The workspace agent id")
+    is_configured: bool = Field(description="Whether minds holds a canonical restic.env for this workspace")
     is_backing_up: bool = Field(description="Whether a (non-stale) restic backup is currently running")
     snapshots: tuple[BackupSnapshotSummary, ...] = Field(default=(), description="All snapshots, newest-first")
+    snapshots_error: str | None = Field(
+        default=None, description="Why the snapshot listing failed (e.g. restic error), when it did"
+    )
+    check_state: str = Field(description="Verification verdict: OK/PROBLEMS/OFFLINE/DISABLED/UNKNOWN")
+    problems: tuple[str, ...] = Field(default=(), description="Detected backup-service problems (badge causes)")
+    installed_version: str | None = Field(default=None, description="Installed backup-code version, when known")
+    minimum_version: str | None = Field(
+        default=None, description="The minimum required minds-v* tag the check compared against"
+    )
+    update_target_version: str | None = Field(
+        default=None, description="The minds-v* tag the 'Update backup service' action would install"
+    )
+    check_detail: str = Field(default="", description="Extra human-readable check detail (e.g. why unverifiable)")
+    is_verification_enabled: bool = Field(description="Whether backup verification is enabled for this workspace")
 
 
 class SharingReadinessResponse(FrozenModel):

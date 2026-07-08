@@ -33,6 +33,7 @@ from pydantic import Field
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.minds.build_info import resolve_release_id
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
@@ -128,7 +129,13 @@ def is_workspace_online(resolver: BackendResolverInterface, agent_id: AgentId) -
     display_info = resolver.get_agent_display_info(agent_id)
     if display_info is None:
         return False
-    host_state = resolver.get_host_state(HostId(display_info.host_id))
+    try:
+        host_id = HostId(display_info.host_id)
+    except InvalidRandomIdError:
+        # A non-canonical host id (e.g. "localhost") has no discovery host
+        # state to consult; treat it as not verifiably online.
+        return False
+    host_state = resolver.get_host_state(host_id)
     return host_state == HostState.RUNNING
 
 

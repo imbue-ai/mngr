@@ -66,7 +66,6 @@ from imbue.minds.desktop_client.api_models import RestartWorkspaceRequest
 from imbue.minds.desktop_client.api_models import SharingReadinessResponse
 from imbue.minds.desktop_client.api_models import SharingToggleResponse
 from imbue.minds.desktop_client.api_models import SshConnectionResponse
-from imbue.minds.desktop_client.api_models import WorkspaceBackupHealthResponse
 from imbue.minds.desktop_client.api_models import WorkspaceBackupsResponse
 from imbue.minds.desktop_client.api_models import WorkspaceLifecycleResponse
 from imbue.minds.desktop_client.api_models import WorkspaceListResponse
@@ -157,7 +156,6 @@ _ROUTE_MODELS: Final[Mapping[tuple[str, str], _RouteModels]] = {
     ("GET", "/api/v1/workspaces/{agent_id}/sharing/{service_name}/readiness"): _RouteModels(
         response_model=SharingReadinessResponse
     ),
-    ("GET", "/api/v1/workspaces/backup-health"): _RouteModels(response_model=WorkspaceBackupHealthResponse),
     ("POST", "/api/v1/workspaces/{agent_id}/backup-service/update"): _RouteModels(
         request_model=BackupServiceUpdateRequest, response_model=OperationHandleResponse, success_status=202
     ),

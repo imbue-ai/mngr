@@ -29,6 +29,7 @@ from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.backup_update import BLOCKED_BY_RUNNING_CHATS_PREFIX
 from imbue.minds.desktop_client.backup_verification_store import is_backup_verification_enabled
+from imbue.minds.desktop_client.backup_verification_store import set_backup_verification_enabled
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import make_agents_json
@@ -345,15 +346,23 @@ def test_workspace_version_returns_original_version_label(tmp_path: Path) -> Non
     assert body["upgrade_merges"] == []
 
 
-def test_workspace_backups_reports_not_found_without_canonical_env(tmp_path: Path) -> None:
-    # No restic.env was written for this workspace, so the backups route reports
-    # 404 (backups never configured) rather than 500.
+def test_workspace_backups_reports_unconfigured_as_an_ordinary_empty_listing(tmp_path: Path) -> None:
+    # No restic.env was written for this workspace: not an error -- the route
+    # returns an empty snapshot list, is_configured false, and the check half
+    # still reports its verdict (OFFLINE here: no discovery host-state data).
     agent_id = AgentId()
     client = _client_with_workspace(tmp_path, agent_id)
 
     response = client.get(f"/api/v1/workspaces/{agent_id}/backups", headers=_auth_header())
 
-    assert response.status_code == 404
+    assert response.status_code == 200
+    body = json.loads(response.data)
+    assert body["is_configured"] is False
+    assert body["snapshots"] == []
+    assert body["is_backing_up"] is False
+    assert body["check_state"] == "OFFLINE"
+    assert body["is_verification_enabled"] is True
+    assert body["update_target_version"].startswith("minds-v")
 
 
 def test_create_workspace_without_agent_creator_returns_501(tmp_path: Path) -> None:
@@ -1706,15 +1715,7 @@ def test_operation_logs_streams_restart_log_lines(tmp_path: Path) -> None:
 # -- Backup service routes --
 
 
-def test_backup_health_unavailable_without_concurrency_group_returns_503(tmp_path: Path) -> None:
-    client = _client_with_workspace(tmp_path, AgentId())
-
-    response = client.get("/api/v1/workspaces/backup-health", headers=_auth_header())
-
-    assert response.status_code == 503
-
-
-def test_backup_health_reports_offline_workspace_with_verification_enabled(
+def test_workspace_backups_reports_offline_workspace_with_verification_enabled(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:
     # With no discovery host-state data the workspace reads OFFLINE, so the
@@ -1723,14 +1724,31 @@ def test_backup_health_reports_offline_workspace_with_verification_enabled(
     resolver = make_resolver_with_data(make_agents_json(agent_id))
     client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
 
-    response = client.get("/api/v1/workspaces/backup-health", headers=_auth_header())
+    response = client.get(f"/api/v1/workspaces/{agent_id}/backups", headers=_auth_header())
 
     assert response.status_code == 200
-    entries = json.loads(response.data)["workspaces"]
-    entry = next(candidate for candidate in entries if candidate["agent_id"] == str(agent_id))
+    entry = json.loads(response.data)
+    assert entry["agent_id"] == str(agent_id)
     assert entry["check_state"] == "OFFLINE"
     assert entry["problems"] == []
     assert entry["is_verification_enabled"] is True
+
+
+def test_workspace_backups_reports_disabled_verification_without_exec(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    # Verification disabled: no exec runs and the check half reports DISABLED.
+    agent_id = AgentId()
+    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
+    set_backup_verification_enabled(WorkspacePaths(data_dir=tmp_path / "minds"), agent_id, False)
+
+    response = client.get(f"/api/v1/workspaces/{agent_id}/backups", headers=_auth_header())
+
+    assert response.status_code == 200
+    entry = json.loads(response.data)
+    assert entry["check_state"] == "DISABLED"
+    assert entry["is_verification_enabled"] is False
 
 
 def test_backup_service_update_unknown_workspace_returns_404(
@@ -1942,7 +1960,7 @@ def test_backup_routes_require_bearer(tmp_path: Path) -> None:
     agent_id = AgentId()
     client = _client_with_workspace(tmp_path, agent_id)
 
-    assert client.get("/api/v1/workspaces/backup-health").status_code == 401
+    assert client.get(f"/api/v1/workspaces/{agent_id}/backups").status_code == 401
     assert client.post(f"/api/v1/workspaces/{agent_id}/backup-service/update", json={}).status_code == 401
     assert (
         client.post(f"/api/v1/workspaces/{agent_id}/backup-service/verification", json={"enabled": False}).status_code

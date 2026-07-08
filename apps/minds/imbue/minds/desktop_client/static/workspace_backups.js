@@ -1,6 +1,6 @@
 // Backup section of the workspace settings page: shows the combined
-// snapshot status + backup-service verification breakdown from
-// /api/v1/workspaces/backup-health, and drives the three actions:
+// snapshot status + backup-service verification breakdown from this
+// workspace's /api/v1/workspaces/<id>/backups, and drives the three actions:
 //   - "Update backup service" (one idempotent converge; tracked operation
 //     polled at /api/v1/workspaces/operations/backup/<id>, with a
 //     "Stop all chats and retry" follow-up when running chats block it and
@@ -53,14 +53,21 @@
     errorEl.classList.add('hidden');
   }
 
+  function latestSnapshotTime(snapshots) {
+    var latest = null;
+    (snapshots || []).forEach(function (snapshot) {
+      if (!latest || Date.parse(snapshot.time) > Date.parse(latest)) latest = snapshot.time;
+    });
+    return latest;
+  }
+
   function snapshotText(entry) {
-    if (entry.snapshot_state === 'BACKING_UP') return 'Backing up now...';
-    if (entry.snapshot_state === 'BACKED_UP' && entry.last_success_at) {
-      return 'Last backup: ' + new Date(entry.last_success_at).toLocaleString();
-    }
-    if (entry.snapshot_state === 'NEVER') return 'No successful backup yet.';
-    if (entry.snapshot_state === 'NOT_CONFIGURED') return 'Backups are not configured.';
-    return 'Backup status unknown.';
+    if (entry.is_backing_up) return 'Backing up now...';
+    var latest = latestSnapshotTime(entry.snapshots);
+    if (latest) return 'Last backup: ' + new Date(latest).toLocaleString();
+    if (!entry.is_configured) return 'Backups are not configured.';
+    if (entry.snapshots_error) return 'Backup status unknown.';
+    return 'No successful backup yet.';
   }
 
   function renderEntry(entry) {
@@ -74,45 +81,54 @@
 
     if (entry.check_state === 'DISABLED') {
       statusLine.textContent += ' Backup verification is disabled for this workspace.';
+      updateBtn.classList.remove('hidden');
       return;
     }
     if (entry.check_state === 'OFFLINE') {
       statusLine.textContent += ' The workspace is offline; its backup service will be verified when it is back.';
       return;
     }
-    if (entry.installed_version || entry.desired_version) {
-      versionsEl.textContent =
-        'Installed backup service: ' + (entry.installed_version || 'unknown') +
-        ' / expected: ' + (entry.desired_version || 'unknown');
+    var versionParts = [];
+    if (entry.installed_version) versionParts.push('Installed backup service: ' + entry.installed_version);
+    if (entry.minimum_version) versionParts.push('minimum required: ' + entry.minimum_version);
+    if (entry.update_target_version && entry.update_target_version !== entry.minimum_version) {
+      versionParts.push('update installs: ' + entry.update_target_version);
+    }
+    if (versionParts.length > 0) {
+      versionsEl.textContent = versionParts.join(' / ');
       versionsEl.classList.remove('hidden');
     }
+    // The update is an idempotent converge, so the button is always offered
+    // for a reachable workspace -- even at the target version it usefully
+    // resets a wedged backup service.
+    updateBtn.classList.remove('hidden');
     if (entry.check_state === 'PROBLEMS') {
       (entry.problems || []).forEach(function (problem) {
         var li = document.createElement('li');
         li.textContent = PROBLEM_LABELS[problem] || problem;
         problemsEl.appendChild(li);
       });
-      if (entry.detail) {
+      if (entry.check_detail) {
         var detailLi = document.createElement('li');
-        detailLi.textContent = entry.detail;
+        detailLi.textContent = entry.check_detail;
         problemsEl.appendChild(detailLi);
       }
       problemsEl.classList.remove('hidden');
-      updateBtn.classList.remove('hidden');
     } else if (entry.check_state === 'OK') {
       statusLine.textContent += ' The backup service is up to date.';
     }
   }
 
   function refreshHealth() {
-    fetch('/api/v1/workspaces/backup-health')
+    fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backups')
       .then(function (resp) { return resp.ok ? resp.json() : null; })
-      .then(function (data) {
-        if (!data) return;
-        var entry = (data.workspaces || []).find(function (w) { return w.agent_id === agentId; });
-        if (entry) renderEntry(entry);
-        else statusLine.textContent = 'Backup status unavailable for this workspace.';
-        if (window.mindsBackupHealth) window.mindsBackupHealth.ingest(data);
+      .then(function (entry) {
+        if (!entry) {
+          statusLine.textContent = 'Backup status unavailable for this workspace.';
+          return;
+        }
+        renderEntry(entry);
+        if (window.mindsBackupHealth) window.mindsBackupHealth.ingestEntry(entry);
       })
       .catch(function () {
         statusLine.textContent = 'Could not load backup status.';
