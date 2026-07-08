@@ -121,12 +121,15 @@
 
   // -- Tracked operation driving (update + configure share the poller) ------
 
-  function setOperationRunning(isRunning) {
+  // Cancel only affects a still-waiting backup *update* (the cancel route
+  // 404s for configure operations, which have no waiting phase), so the
+  // Cancel button is shown only for cancellable operations.
+  function setOperationRunning(isRunning, isCancellable) {
     spinner.classList.toggle('hidden', !isRunning);
     updateBtn.disabled = isRunning;
     configureSubmitBtn.disabled = isRunning;
     stopChatsBtn.disabled = isRunning;
-    cancelBtn.classList.toggle('hidden', !isRunning);
+    cancelBtn.classList.toggle('hidden', !(isRunning && isCancellable));
     if (!isRunning) progressEl.classList.add('hidden');
   }
 
@@ -174,9 +177,9 @@
       .catch(function () { setOperationRunning(false); });
   }
 
-  function startOperation(url, body) {
+  function startOperation(url, body, isCancellable) {
     clearError();
-    setOperationRunning(true);
+    setOperationRunning(true, isCancellable);
     fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -200,11 +203,11 @@
   }
 
   updateBtn.addEventListener('click', function () {
-    startOperation('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backup-service/update', { stop_chats: false });
+    startOperation('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backup-service/update', { stop_chats: false }, true);
   });
   stopChatsBtn.addEventListener('click', function () {
     stopChatsBtn.classList.add('hidden');
-    startOperation('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backup-service/update', { stop_chats: true });
+    startOperation('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backup-service/update', { stop_chats: true }, true);
   });
   cancelBtn.addEventListener('click', function () {
     fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backup-service/update/cancel', { method: 'POST' })
@@ -236,7 +239,7 @@
       master_password: masterPasswordInput ? masterPasswordInput.value : '',
       save_password: savePasswordInput ? savePasswordInput.checked : false,
     };
-    startOperation('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backup-service/configure', body);
+    startOperation('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backup-service/configure', body, false);
   });
 
   // -- Verification toggle --------------------------------------------------
