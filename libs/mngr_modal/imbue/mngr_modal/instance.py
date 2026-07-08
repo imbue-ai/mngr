@@ -72,6 +72,7 @@ from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_instance import HostDiscoveryReadRegistry
 from imbue.mngr.interfaces.provider_instance import bounded_result_from_agents_by_host
+from imbue.mngr.interfaces.provider_instance import collect_cached_host_ssh_infos
 from imbue.mngr.interfaces.volume import HostVolume
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
@@ -509,6 +510,16 @@ class ModalProviderInstance(BaseProviderInstance):
             create_if_missing=True,
             environment_name=self.environment_name,
         )
+
+    def _build_experimental_options(self) -> dict[str, bool] | None:
+        """Build the ``experimental_options`` passed to Modal when creating a sandbox.
+
+        Requests the VM runtime (https://modal.com/docs/guide/vm-sandboxes) when
+        enabled on the provider config; returns None to use Modal's default runtime.
+        """
+        if self.config.is_vm_runtime_enabled:
+            return {"vm_runtime": True}
+        return None
 
     @handle_modal_auth_error
     def get_volume_for_host(self, host: HostInterface | HostId) -> HostVolume | None:
@@ -1797,6 +1808,7 @@ log "=== Shutdown script completed ==="
                     region=config.region,
                     cidr_allowlist=config.effective_cidr_allowlist,
                     volumes=sandbox_volumes,
+                    experimental_options=self._build_experimental_options(),
                 )
                 logger.trace("Created Modal sandbox", sandbox_id=sandbox.get_object_id())
         except (ModalProxyError, MngrError) as e:
@@ -2058,6 +2070,7 @@ log "=== Shutdown script completed ==="
                 region=config.region,
                 cidr_allowlist=config.effective_cidr_allowlist,
                 volumes=sandbox_volumes,
+                experimental_options=self._build_experimental_options(),
             )
         logger.info("Created sandbox from snapshot", sandbox_id=new_sandbox.get_object_id())
 
@@ -2492,7 +2505,10 @@ log "=== Shutdown script completed ==="
         spawns no per-host reads to de-duplicate across polls.
         """
         agents_by_host = self.discover_hosts_and_agents(cg=cg, include_destroyed=include_destroyed)
-        return bounded_result_from_agents_by_host(agents_by_host)
+        # Surface each running host's SSH endpoint (read from the host object the batch discovery
+        # just cached) so the streaming poller re-emits it as HOST_SSH_INFO for tunneling consumers.
+        host_ssh_infos = collect_cached_host_ssh_infos(self, agents_by_host.keys())
+        return bounded_result_from_agents_by_host(agents_by_host, host_ssh_infos=host_ssh_infos)
 
     @handle_modal_auth_error
     def discover_hosts_and_agents(
