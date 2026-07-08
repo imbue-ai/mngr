@@ -645,9 +645,12 @@ async def pick_backend_page(ctx: BrowserContext, origin: str, timeout: float = 3
     (main.js ``computeBundleViewBounds``), so it is the only view that is safe
     to drive; main.js points it at ``<origin>/_chrome`` once the backend is
     ready, which is what this selector keys on. Prefers the exact ``/_chrome``
-    page, falls back to any page already on the backend origin.
+    page for the first two thirds of ``timeout``; only then falls back to any
+    page on the backend origin, so a slow ``/_chrome`` load can't flip the
+    pick onto a managed view that happened to reach the origin first.
     """
     deadline = time.time() + timeout
+    fallback_after = time.time() + timeout * 2 / 3
     while time.time() < deadline:
         origin_pages: list[Page] = []
         for p in all_pages(ctx):
@@ -656,7 +659,8 @@ async def pick_backend_page(ctx: BrowserContext, origin: str, timeout: float = 3
                     return p
                 if p.url.startswith(origin):
                     origin_pages.append(p)
-        if origin_pages:
+        if origin_pages and time.time() >= fallback_after:
+            logger.warning("no /_chrome page after {:.0f}s; falling back to {}", timeout * 2 / 3, origin_pages[0].url)
             return origin_pages[0]
         await asyncio.sleep(0.5)
     urls = [p.url for p in all_pages(ctx)]
