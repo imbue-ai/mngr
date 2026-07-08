@@ -174,7 +174,9 @@
         }
         showError(op.error || 'The backup operation failed.');
       })
-      .catch(function () { setOperationRunning(false); });
+      // A transient fetch failure must not end the Working state while the
+      // backend operation is still running -- keep polling (like creating.js).
+      .catch(function () { setTimeout(pollOperation, 2000); });
   }
 
   function startOperation(url, body, isCancellable) {
