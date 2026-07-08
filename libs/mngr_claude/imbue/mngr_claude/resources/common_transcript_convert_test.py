@@ -123,6 +123,39 @@ def test_meta_user_message_reclassified_as_tool_result(tmp_path: Path) -> None:
     assert event["tool_name"] == "meta"
 
 
+def test_slash_command_scaffolding_reclassified_as_tool_result(tmp_path: Path) -> None:
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    _write(input_file, [_user_text("u1", "<command-name>/login</command-name>\n<command-args></command-args>")])
+    event = _events(output_file)[0] if common_transcript_convert.convert(str(input_file), str(output_file)) else {}
+    assert event["type"] == "tool_result"
+    assert event["tool_name"] == "meta"
+    assert validate_common_transcript_record(event) is None
+
+
+def test_local_command_output_reclassified_as_tool_result(tmp_path: Path) -> None:
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    _write(input_file, [_user_text("u1", "<local-command-stdout>Login interrupted</local-command-stdout>")])
+    event = _events(output_file)[0] if common_transcript_convert.convert(str(input_file), str(output_file)) else {}
+    assert event["type"] == "tool_result"
+
+
+def test_real_user_message_with_angle_bracket_stays_user(tmp_path: Path) -> None:
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    _write(input_file, [_user_text("u1", "is a < b in this expression?")])
+    event = _events(output_file)[0] if common_transcript_convert.convert(str(input_file), str(output_file)) else {}
+    assert event["type"] == "user_message"
+
+
+def test_scaffolding_not_double_emitted_over_pre_change_user_message(tmp_path: Path) -> None:
+    # A session converted before this change wrote the scaffolding as a user_message under
+    # the "user" event_id; re-converting must not add a second (tool_result) copy of it.
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    _write(input_file, [_user_text("u1", "<command-name>/login</command-name>")])
+    prior_id = common_transcript_convert._make_event_id("u1", "user")
+    output_file.write_text(json.dumps({"type": "user_message", "event_id": prior_id, "content": "x"}) + "\n")
+    assert common_transcript_convert.convert(str(input_file), str(output_file)) == 0
+
+
 def test_tool_result_labeled_from_preceding_tool_use(tmp_path: Path) -> None:
     input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
     _write(

@@ -153,11 +153,12 @@ def _format_event_human(event: dict[str, Any]) -> str:
             return f"[{timestamp}] user:\n{content}"
 
         case "assistant_message":
-            # Every emitter fills the ordered parts[]; render it directly (the flat
-            # text + tool_calls are kept on the record as a convenience baseline, but
-            # parts[] is the authoritative ordered view).
+            # parts[] is the authoritative ordered view when present; the flat text +
+            # tool_calls are a baseline some emitters (e.g. claude's common_transcript)
+            # fill instead of parts[]. Render parts[] if it has content, else fall back
+            # to the flat fields -- otherwise a message with real text shows as empty.
             lines: list[str] = []
-            for part in event.get("parts", []):
+            for part in event.get("parts") or []:
                 if not isinstance(part, dict):
                     continue
                 if part.get("type") == "text":
@@ -171,6 +172,16 @@ def _format_event_human(event: dict[str, Any]) -> str:
                 else:
                     # Unknown part type (e.g. a future reasoning part): nothing to render here.
                     continue
+            if not lines:
+                text = event.get("text", "")
+                if text:
+                    lines.append(text)
+                for tool_call in event.get("tool_calls") or []:
+                    if not isinstance(tool_call, dict):
+                        continue
+                    tool_name = tool_call.get("tool_name", "unknown")
+                    preview = tool_call.get("input_preview", "")
+                    lines.append(f"  -> {tool_name}({preview})")
             body = "\n".join(lines) if lines else "(no content)"
             return f"[{timestamp}] assistant:\n{body}"
 
