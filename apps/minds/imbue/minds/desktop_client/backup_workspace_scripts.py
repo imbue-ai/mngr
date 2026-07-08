@@ -435,8 +435,12 @@ def _main():
     committed_sha = ""
     if changed:
         added = _git(["add", BACKUP_CODE_PATH])
+        if added.returncode != 0:
+            _git(["checkout", "HEAD", "--", BACKUP_CODE_PATH])
+            _pop_stash_into(result)
+            _finish(result, "failed", "git add failed: %s" % (added.stderr or added.stdout).strip()[-500:])
         committed = _git(["commit", "-m", "backup-update: %s" % tag])
-        if added.returncode != 0 or committed.returncode != 0:
+        if committed.returncode != 0:
             _git(["checkout", "HEAD", "--", BACKUP_CODE_PATH])
             _pop_stash_into(result)
             _finish(result, "failed", "git commit failed: %s" % (committed.stderr or committed.stdout).strip()[-500:])
