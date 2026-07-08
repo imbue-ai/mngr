@@ -1,3 +1,4 @@
+import os
 import platform
 from enum import auto
 from typing import Final
@@ -94,12 +95,33 @@ class DockerRuntime(UpperCaseStrEnum):
     RUNSC = auto()
 
 
-def default_docker_runtime() -> DockerRuntime:
-    """Return the platform-appropriate default Docker container runtime.
+# Env override for the create-form / create-API default runtime, consulted by
+# ``default_docker_runtime``. Set it to a ``DockerRuntime`` value
+# (case-insensitive) to force the default. CI and the e2e snapshot build set it
+# to ``RUNC`` because their Docker daemon has no gVisor (runsc) registered; a
+# real deployment leaves it unset, so Linux still defaults to the hardened
+# runsc. This is the layer that decides whether the create stacks the
+# ``docker_runsc`` template at all -- distinct from
+# ``MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME``, which only overrides the mngr
+# provider config and cannot override a template that was explicitly stacked.
+_DEFAULT_DOCKER_RUNTIME_ENV_VAR: Final[str] = "MINDS_DOCKER_RUNTIME_DEFAULT"
 
-    macOS has no gVisor, so it must use runc; Linux defaults to the
+
+def default_docker_runtime() -> DockerRuntime:
+    """Return the default Docker container runtime for the create form / API.
+
+    An explicit ``MINDS_DOCKER_RUNTIME_DEFAULT`` env override wins when set
+    (CI uses it to pin runc, having no gVisor). Otherwise the platform default:
+    macOS has no gVisor so it must use runc; Linux defaults to the
     gVisor-hardened runsc (which the minds app assumes is installed there).
+
+    Raises ``ValueError`` if the override is set to a value that is not a
+    ``DockerRuntime`` -- a misconfigured knob should fail loud, not silently
+    fall back.
     """
+    override = os.environ.get(_DEFAULT_DOCKER_RUNTIME_ENV_VAR)
+    if override:
+        return DockerRuntime(override.strip().upper())
     return DockerRuntime.RUNC if platform.system() == "Darwin" else DockerRuntime.RUNSC
 
 

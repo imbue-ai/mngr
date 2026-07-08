@@ -140,14 +140,21 @@ _IN_SANDBOX_RUNNER_PROGRAM: Final[str] = textwrap.dedent(
     # Snapshot builds are test infrastructure, not a real install, so they
     # must not count toward Latchkey's usage.
     _write_to_os_environ("LATCHKEY_DISABLE_COUNTING", "1")
-    # FCT's [providers.docker] block sets docker_runtime = "runsc" to harden
-    # the agent container with gVisor, but the dockerd inside this Modal
-    # vm_runtime sandbox only has the default runc registered, so
-    # `docker run --runtime runsc` fails with "unknown or invalid runtime
-    # name: runsc". Force runc here -- the Modal VM is already the isolation
-    # boundary for this throwaway snapshot. Mirrors the same override the
-    # pytest path applies in
-    # apps/minds/test_snapshot_resume.py::test_create_apikey_workspace_and_chat_via_electron.
+    # Force the local-docker workspace to runc: the dockerd inside this Modal
+    # vm_runtime sandbox only has the default runc registered (no gVisor), so a
+    # runsc container fails with "unknown or invalid runtime name: runsc". The
+    # Modal VM is already the isolation boundary for this throwaway snapshot, so
+    # gVisor buys nothing here. Two layers, because runsc can be selected two ways:
+    #   1. MINDS_DOCKER_RUNTIME_DEFAULT pins the create form / API default to
+    #      runc so minds never stacks the `docker_runsc` create-template. This is
+    #      the one that matters now -- an explicitly stacked template's
+    #      docker_runtime cannot be overridden by the mngr env var below.
+    #   2. MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME=runc still overrides the FCT
+    #      `docker` template's own default, covering an older resolved FCT whose
+    #      [providers.docker] block hardcodes runsc without a separate overlay.
+    # Mirrors the same overrides the pytest path applies in
+    # apps/minds/test_snapshot_resume.py.
+    _write_to_os_environ("MINDS_DOCKER_RUNTIME_DEFAULT", "RUNC")
     _write_to_os_environ("MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME", "runc")
     # The paired FCT worktree was materialized on the runner and baked into the
     # image at ``.external_worktrees/forever-claude-template``; resolve it
