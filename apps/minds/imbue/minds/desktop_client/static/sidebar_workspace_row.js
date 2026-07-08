@@ -19,11 +19,12 @@
 //   var btn = window.mindsSidebarRow.buildIconButton(title, pathSvg,
 //                                                    dataAttr, agentId, sizeClass);
 //
-// ``workspace`` is { id, name, accent?, is_stale? }. ``withOpenNew``
-// adds the "open in new window" arrow (Electron only -- browser mode has no
+// ``workspace`` is { id, name, accent?, is_stale? }. ``withOpenNew`` adds
+// the "open in new window" arrow (Electron only -- browser mode has no
 // multi-window concept and passes false). Both action icons are always
 // visible. ``isCurrent`` marks the row selected (highlighted background).
-// Event wiring (click / context-menu) is the caller's job -- this builds DOM only.
+// Event wiring (click / context-menu) is the caller's job -- this builds
+// DOM only.
 (function () {
   function buildIconButton(title, pathSvg, dataAttr, agentId, sizeClass) {
     var btn = document.createElement('button');

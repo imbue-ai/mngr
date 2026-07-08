@@ -294,19 +294,14 @@ function focusBundle(bundle) {
 
 // -- Title handling --
 
-// Base window title. MINDS_WINDOW_TITLE lets a dev instance label its windows
-// (e.g. several `minds env` instances running side by side) so they can be told
-// apart in the window switcher; unset, the product name is used.
-const BASE_WINDOW_TITLE = process.env.MINDS_WINDOW_TITLE || 'Minds';
-
 function computeTitleFor(bundle) {
   const agentId = bundle.currentWorkspaceId;
   if (agentId) {
     const ws = workspaceList.find((w) => w.id === agentId);
     const name = ws ? (ws.name || ws.id) : null;
-    return name ? `${name} \u2014 ${BASE_WINDOW_TITLE}` : BASE_WINDOW_TITLE;
+    return name ? `${name} \u2014 Minds` : 'Minds';
   }
-  return BASE_WINDOW_TITLE;
+  return 'Minds';
 }
 
 function updateOsTitle(bundle) {
@@ -420,7 +415,7 @@ function buildBundleWindowOptions() {
     height: 800,
     minWidth: 800,
     minHeight: 600,
-    title: BASE_WINDOW_TITLE,
+    title: 'Minds',
     show: false,
     autoHideMenuBar: true,
   };
