@@ -229,7 +229,8 @@ def test_build_file_sharing_overview_groups_by_access(tmp_path: Path) -> None:
 
     assert len(overview) == 1
     labels = {p.label: p.description for p in overview[0].permissions}
-    assert labels["read"] == "/home/docs, /tmp/x"
+    # Paths are newline-separated so the tooltip renders as a list.
+    assert labels["read"] == "/home/docs\n/tmp/x"
     assert labels["read and write"] == "/home/out"
 
 

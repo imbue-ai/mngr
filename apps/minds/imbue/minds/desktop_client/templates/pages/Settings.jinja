@@ -212,13 +212,18 @@
     <h1 class="type-heading text-primary mb-6">Settings</h1>
     <div class="flex gap-8 items-start">
       {# Left nav #}
+      {# Both entries share identical base classes (notably no ``bg-transparent``,
+         which would beat the toggled-on ``bg-fill-hover`` and leave the active
+         entry un-highlighted); ``selectSection`` in the page script drives the
+         active state on both by toggling ``bg-fill-hover`` / ``text-primary`` /
+         ``text-secondary``. Permissions starts active. #}
       <nav class="w-48 shrink-0 flex flex-col gap-0.5" aria-label="Settings sections">
         <button type="button" data-settings-nav="permissions"
-                class="flex items-center h-8 px-2 rounded-md cursor-pointer type-body text-left bg-fill-hover text-primary border-0">
+                class="flex items-center h-8 px-2 rounded-md cursor-pointer type-body text-left border-0 hover:text-primary hover:bg-fill-hover bg-fill-hover text-primary">
           Permissions
         </button>
         <button type="button" data-settings-nav="error-reporting"
-                class="flex items-center h-8 px-2 rounded-md cursor-pointer type-body text-left bg-transparent text-secondary hover:text-primary hover:bg-fill-hover border-0">
+                class="flex items-center h-8 px-2 rounded-md cursor-pointer type-body text-left border-0 hover:text-primary hover:bg-fill-hover text-secondary">
           Error reporting
         </button>
       </nav>

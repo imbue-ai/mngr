@@ -294,14 +294,16 @@ def build_file_sharing_overview(
                 continue
             access, shared_path = parsed
             (write_paths if access == _FILE_SHARING_WRITE else read_paths).append(shared_path)
+        # One path per line so the chip's tooltip reads as a list (the tooltip
+        # bubble renders newlines via ``white-space: pre-line``).
         chips: list[GrantedPermission] = []
         if read_paths:
             chips.append(
-                GrantedPermission(label=_FILE_SHARING_READ_LABEL, description=", ".join(sorted(set(read_paths))))
+                GrantedPermission(label=_FILE_SHARING_READ_LABEL, description="\n".join(sorted(set(read_paths))))
             )
         if write_paths:
             chips.append(
-                GrantedPermission(label=_FILE_SHARING_WRITE_LABEL, description=", ".join(sorted(set(write_paths))))
+                GrantedPermission(label=_FILE_SHARING_WRITE_LABEL, description="\n".join(sorted(set(write_paths))))
             )
         if not chips:
             continue
