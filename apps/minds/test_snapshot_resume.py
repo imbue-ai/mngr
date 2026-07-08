@@ -841,7 +841,6 @@ def test_backup_enable_repair_and_destination_change_on_resumed_workspace(
     # isolated pytest-opted-in project config (the repo's own .mngr would fail
     # the config guard), and a neutral cwd; silence providers that would need
     # cloud credentials during discovery.
-    ensure_minds_env_defaults(setenv=monkeypatch.setenv)
     monkeypatch.setenv("MNGR_PREFIX", mngr_prefix_for(os.environ.get("MINDS_ROOT_NAME", "minds-staging")))
     monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(_isolated_host_config_root(tmp_path) / ".mngr"))
     monkeypatch.setenv("MNGR__PROVIDERS__MODAL__IS_ENABLED", "false")

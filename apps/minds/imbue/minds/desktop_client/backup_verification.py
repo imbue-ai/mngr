@@ -90,7 +90,8 @@ class BackupServiceCheckState(UpperCaseStrEnum):
     OFFLINE = auto()
     # Verification is disabled for this workspace; no checks run, no badge.
     DISABLED = auto()
-    # The check did not complete in time (it retries on a later batch); no badge.
+    # The check could not produce a verdict (e.g. it crashed); a later
+    # per-workspace request simply retries. No badge.
     UNKNOWN = auto()
 
 
