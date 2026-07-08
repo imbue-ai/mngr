@@ -766,15 +766,8 @@ def _build_latchkey(data_directory: Path) -> Latchkey:
     latchkey_binary = binary_override if binary_override else LATCHKEY_BINARY
     # Single rooted directory for both upstream latchkey's credential
     # store (passed as ``LATCHKEY_DIRECTORY``) and the plugin's own
-    # ``mngr_latchkey/`` metadata subdir. ``MINDS_LATCHKEY_DIRECTORY``
-    # is honored as an override for users who want to share credentials
-    # across multiple ``MINDS_ROOT_NAME``s.
-    directory_override = os.environ.get("MINDS_LATCHKEY_DIRECTORY")
-    latchkey_directory: Path
-    if directory_override:
-        latchkey_directory = Path(directory_override).expanduser()
-    else:
-        latchkey_directory = data_directory / "latchkey"
+    # ``mngr_latchkey/`` metadata subdir.
+    latchkey_directory = WorkspacePaths(data_dir=data_directory).latchkey_dir
     # The per-env encryption key is loaded lazily on every subprocess
     # spawn inside ``Latchkey`` itself (via ``_load_encryption_key``)
     # so the secret only lives in parent-process memory for the

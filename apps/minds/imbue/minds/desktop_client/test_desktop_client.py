@@ -983,8 +983,8 @@ class _AllAgentsKnownStaticResolver(StaticBackendResolver):
 def test_build_requests_payload_empty_inbox() -> None:
     """An empty inbox yields a zero count and no pending ids."""
     resolver = _AllAgentsKnownStaticResolver(url_by_agent_and_service={})
-    assert _build_requests_payload(None, resolver) == {"count": 0, "request_ids": []}
-    assert _build_requests_payload(RequestInbox(), resolver) == {"count": 0, "request_ids": []}
+    assert _build_requests_payload(None, resolver, None) == {"count": 0, "request_ids": []}
+    assert _build_requests_payload(RequestInbox(), resolver, None) == {"count": 0, "request_ids": []}
 
 
 def test_build_requests_payload_carries_pending_ids() -> None:
@@ -994,7 +994,7 @@ def test_build_requests_payload_carries_pending_ids() -> None:
         agent_id=agent_id, scope="slack-api", rationale="post updates"
     )
     resolver = _AllAgentsKnownStaticResolver(url_by_agent_and_service={})
-    payload = _build_requests_payload(RequestInbox().add_request(event), resolver)
+    payload = _build_requests_payload(RequestInbox().add_request(event), resolver, None)
     assert payload == {"count": 1, "request_ids": [str(event.event_id)]}
 
 
@@ -1025,8 +1025,8 @@ def test_build_requests_payload_distinguishes_equal_count_different_contents() -
     ).add_request(request_b)
 
     resolver = _AllAgentsKnownStaticResolver(url_by_agent_and_service={})
-    payload_a = _build_requests_payload(inbox_with_a, resolver)
-    payload_b = _build_requests_payload(inbox_with_b, resolver)
+    payload_a = _build_requests_payload(inbox_with_a, resolver, None)
+    payload_b = _build_requests_payload(inbox_with_b, resolver, None)
     assert payload_a["count"] == payload_b["count"] == 1
     assert payload_a != payload_b
     assert payload_b["request_ids"] == [str(request_b.event_id)]

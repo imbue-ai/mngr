@@ -1,4 +1,5 @@
 import json
+import os
 from enum import auto
 from pathlib import Path
 from typing import Final
@@ -49,6 +50,16 @@ class WorkspacePaths(FrozenModel):
         main-process log (``minds.log``) both live here.
         """
         return self.data_dir / "logs"
+
+    @property
+    def latchkey_dir(self) -> Path:
+        """Latchkey root directory (e.g. ~/.minds/latchkey).
+
+        ``MINDS_LATCHKEY_DIRECTORY`` overrides the default so users can share
+        credentials across multiple ``MINDS_ROOT_NAME``s.
+        """
+        override = os.environ.get("MINDS_LATCHKEY_DIRECTORY")
+        return Path(override).expanduser() if override else self.data_dir / "latchkey"
 
     def workspace_dir(self, agent_id: AgentId) -> Path:
         """Directory for a specific workspace's repo (e.g. ~/.minds/<agent-id>/)."""
