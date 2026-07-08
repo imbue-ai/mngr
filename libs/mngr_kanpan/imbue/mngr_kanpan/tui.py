@@ -86,10 +86,9 @@ SPINNER_FRAMES: tuple[str, ...] = ("|", "/", "-", "\\")
 SPINNER_INTERVAL_SECONDS: float = 0.15
 TRANSIENT_MESSAGE_SECONDS: float = 3.0
 
-# Peek panel: how many trailing transcript lines to show, how many recent
-# transcript events to fetch, and how often to refresh while the panel is open.
+# Peek panel: how many trailing transcript lines to show, and how often to refresh
+# while the panel is open.
 PEEK_BODY_HEIGHT: int = 14
-PEEK_TRANSCRIPT_TAIL_EVENTS: int = 20
 PEEK_REFRESH_SECONDS: float = 2.0
 PEEK_REPLY_PROMPT: str = "reply> "
 
@@ -941,24 +940,16 @@ def _focus_row_by_name(state: _KanpanState, name: AgentName) -> None:
 
 
 def _run_transcript(agent_name: str) -> subprocess.CompletedProcess[str]:  # pragma: no cover
-    """Read the agent's recent user/assistant messages. Called from a background thread.
+    """Read the agent's user/assistant messages. Called from a background thread.
 
-    Tool events are not fetched; the peek shows the conversation, not a tool trace.
-    The window is wide enough to reach past tool-only turns (which have no text) to
-    the last message a person would actually read.
+    Tool events are not fetched, and there is no ``--tail`` window: the last readable
+    message can sit arbitrarily far back behind a run of tool-only turns (which have no
+    text), and the cost of ``mngr transcript`` is dominated by process startup rather
+    than transcript length, so fetching the whole thing and keeping the tail is simpler
+    than guessing a window size.
     """
     return subprocess.run(
-        [
-            "mngr",
-            "transcript",
-            agent_name,
-            "--role",
-            "user",
-            "--role",
-            "assistant",
-            "--tail",
-            str(PEEK_TRANSCRIPT_TAIL_EVENTS),
-        ],
+        ["mngr", "transcript", agent_name, "--role", "user", "--role", "assistant"],
         capture_output=True,
         text=True,
         timeout=30,
@@ -1039,9 +1030,9 @@ def _peek_body_from_transcript(result: subprocess.CompletedProcess[str]) -> str:
     while lines and not lines[-1].strip():
         lines.pop()
     if not lines:
-        # No readable user/assistant message in the window -- e.g. an agent running a
-        # long stretch of tool calls with no prose. Point at attach to watch it live.
-        return "(no recent messages -- attach to watch)"
+        # The whole transcript has no readable user/assistant text (e.g. a brand-new
+        # agent, or one that has only ever emitted tool calls).
+        return "(no messages yet)"
     start = max(0, len(lines) - PEEK_BODY_HEIGHT)
     tail = lines[start:]
     if start > 0:

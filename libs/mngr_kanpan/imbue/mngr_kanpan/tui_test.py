@@ -1879,7 +1879,7 @@ def test_peek_body_from_transcript_reports_failure() -> None:
 
 def test_peek_body_from_transcript_empty_output() -> None:
     result = subprocess.CompletedProcess(args=[], returncode=0, stdout="\n\n", stderr="")
-    assert _peek_body_from_transcript(result) == "(no recent messages -- attach to watch)"
+    assert _peek_body_from_transcript(result) == "(no messages yet)"
 
 
 def test_peek_body_from_transcript_drops_empty_turns() -> None:
@@ -1899,7 +1899,7 @@ def test_peek_body_from_transcript_drops_empty_turns() -> None:
 def test_peek_body_from_transcript_all_empty_turns_reports_no_messages() -> None:
     stdout = "[2026-07-08T01:06:54Z] assistant:\n(no content)\n\n[2026-07-08T01:07:10Z] assistant:\n(no content)\n"
     result = subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
-    assert _peek_body_from_transcript(result) == "(no recent messages -- attach to watch)"
+    assert _peek_body_from_transcript(result) == "(no messages yet)"
 
 
 def test_peek_reply_executor_serializes_in_order() -> None:
