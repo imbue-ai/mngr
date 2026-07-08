@@ -948,7 +948,10 @@ def _handle_restart_operation_status(operation_id: str) -> RestartOperationStatu
     """Report the status of a restart operation (the id is the workspace agent id)."""
     parsed_id = AgentId(operation_id)
     restart_record = get_state().workspace_operation_registry.get(parsed_id)
-    if restart_record is None:
+    # Operation polling is type-segmented: a backup update/configure record for
+    # the same workspace must not read as a restart through this endpoint (the
+    # backup status handler filters in the same way for the other direction).
+    if restart_record is None or restart_record.kind != WorkspaceOperationKind.RESTART:
         return _json_error(f"Unknown operation {operation_id}", 404)
     return RestartOperationStatusResponse(
         operation_id=operation_id,

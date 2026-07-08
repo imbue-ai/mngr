@@ -1643,6 +1643,20 @@ def test_restart_operation_status_reports_registry_record(tmp_path: Path) -> Non
     assert done["status"] == "DONE"
 
 
+def test_restart_operation_status_hides_backup_operation_records(tmp_path: Path) -> None:
+    # Kind segregation in the restart direction: a backup update record for the
+    # same workspace agent id must not read as a restart through the typed
+    # restart endpoint (mirrors the backup endpoint hiding restart records).
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.BACKUP_UPDATE, datetime.now(timezone.utc))
+
+    response = client.get(f"/api/v1/workspaces/operations/restart/{agent_id}", headers=_auth_header())
+
+    assert response.status_code == 404
+
+
 def test_typed_operation_routes_report_independently_for_one_agent_id(tmp_path: Path) -> None:
     # The whole point of type-segmenting the operations resource: a destroy and a
     # (stale, never-pruned) restart record for the *same* workspace agent id no
