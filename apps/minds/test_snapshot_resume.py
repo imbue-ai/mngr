@@ -21,6 +21,7 @@ import bz2
 import hashlib
 import json
 import os
+import pwd
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
@@ -63,6 +64,7 @@ from imbue.minds.desktop_client.recovery_probe import PROBE_SENTINEL
 from imbue.minds.desktop_client.recovery_probe import build_probe_shell_command
 from imbue.minds.desktop_client.restic_cli import ResticNotInstalledError
 from imbue.minds.primitives import BackupProvider
+from imbue.mngr.config.pre_readers import find_profile_dir_lightweight
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.utils.testing import get_short_random_string
 
@@ -837,11 +839,28 @@ def test_backup_enable_repair_and_destination_change_on_resumed_workspace(
     """
     _ensure_restic_on_sandbox_host(tmp_path, monkeypatch)
     # The provisioning path shells out to `mngr exec <agent>` from this
-    # process. Give that mngr the snapshot's real container prefix, an
-    # isolated pytest-opted-in project config (the repo's own .mngr would fail
-    # the config guard), and a neutral cwd; silence providers that would need
-    # cloud credentials during discovery.
-    monkeypatch.setenv("MNGR_PREFIX", mngr_prefix_for(os.environ.get("MINDS_ROOT_NAME", "minds-staging")))
+    # process. Give that mngr the snapshot's real container prefix AND the
+    # snapshot's real desktop-side host dir: the docker provider reaches its
+    # host records through a state container named after the profile's user id
+    # under MNGR_HOST_DIR, so the autouse fixture's throwaway host dir (fresh
+    # profile, different user id) would make the baked workspace invisible
+    # ("Agent not found"). The baked host dir lives under the *real* home --
+    # the autouse fixture monkeypatches HOME to a temp dir, so resolve it via
+    # /etc/passwd (same trick as deployment_tests/conftest.py) using the
+    # mngr_host_dir_for layout. Its baked profile settings get the pytest
+    # config-guard opt-in (throwaway sandbox state, per the helper's contract),
+    # and the project config is an isolated pytest-opted-in copy (the repo's
+    # own .mngr would fail the config guard). Use a neutral cwd and silence
+    # providers that would need cloud credentials during discovery.
+    root_name = os.environ.get("MINDS_ROOT_NAME", "minds-staging")
+    real_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    baked_mngr_host_dir = real_home / f".{root_name}" / "mngr"
+    assert baked_mngr_host_dir.is_dir(), f"No baked desktop-side mngr host dir at {baked_mngr_host_dir}"
+    baked_profile_dir = find_profile_dir_lightweight(baked_mngr_host_dir)
+    assert baked_profile_dir is not None, f"No mngr profile under {baked_mngr_host_dir} in the snapshot"
+    _opt_into_pytest_config_guard(baked_profile_dir / "settings.toml")
+    monkeypatch.setenv("MNGR_HOST_DIR", str(baked_mngr_host_dir))
+    monkeypatch.setenv("MNGR_PREFIX", mngr_prefix_for(root_name))
     monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(_isolated_host_config_root(tmp_path) / ".mngr"))
     monkeypatch.setenv("MNGR__PROVIDERS__MODAL__IS_ENABLED", "false")
     monkeypatch.setenv("MNGR__PROVIDERS__AWS__IS_ENABLED", "false")
