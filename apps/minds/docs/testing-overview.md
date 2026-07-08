@@ -39,7 +39,7 @@ run. By area:
 | File / test | Marks | What it exercises |
 |---|---|---|
 | `test_aws_workspace_release.py::test_aws_workspace_runs_in_runsc_container_on_ec2` | `release`, `timeout(900)`, skip unless AWS creds + `MNGR_AWS_RELEASE_TESTS=1` | Provisions a real EC2 instance, asserts the agent runs in a runsc/gVisor container. Costs money. |
-| `test_snapshot_resume.py` (6 tests) | each `minds_snapshot_resume` + `docker` (+ `rsync` on the electron test) + per-test `timeout` | Five assert against a Modal-snapshot sandbox (pre-baked, stopped FCT workspace container). The sixth, `test_create_apikey_workspace_and_chat_via_electron`, reuses the snapshot image's warm Electron/Playwright/Xvfb toolchain to drive the real Electron app: it creates a fresh local Docker FCT workspace via the manual `api_key` AI provider (needs `ANTHROPIC_API_KEY`), sends a chat message, and asserts the agent replies, then `mngr destroy`s in `finally`. Shares its driver with `desktop_client/e2e_workspace_runner.py`. Only via `just test-offload-minds-snapshot` (or `just minds-test-electron` locally). See 1.5. |
+| `test_snapshot_resume.py` (9 tests) | each `minds_snapshot_resume` + `docker` (+ `rsync` on the electron test) + per-test `timeout` | Most assert against a Modal-snapshot sandbox (pre-baked, stopped FCT workspace container): resume sanity checks, the backup-update chat gate against a live LLM-backed chat, the backup-service check/update/force-update converge loop (real supervisord + `official`-remote tag fetch from GitHub), and the backup enable / env-repair / destination-change flow (real minds-side restic provisioning + `mngr exec` injection; installs a pinned restic on the sandbox host when the image lacks the bundled one). `test_create_apikey_workspace_and_chat_via_electron` reuses the snapshot image's warm Electron/Playwright/Xvfb toolchain to drive the real Electron app: it creates a fresh local Docker FCT workspace via the manual `api_key` AI provider (needs `ANTHROPIC_API_KEY`), sends a chat message, and asserts the agent replies, then `mngr destroy`s in `finally`. Shares its driver with `desktop_client/e2e_workspace_runner.py`. Only via `just test-offload-minds-snapshot` (or `just minds-test-electron` locally). See 1.5. |
 | `test_sse_redirect.py::test_sse_redirect_on_done` | `release` | Werkzeug server + Playwright; verifies the creating-page SSE stream delivers `done` and the JS redirects. No Docker/agent. |
 | `imbue/minds/test_claude_version_alignment.py::test_claude_code_version_matches_forever_claude_template_pin` | `release` | Checks the Claude Code CLI pin matches the FCT pin. |
 
@@ -139,10 +139,13 @@ then cheap test sandboxes fan out from the baked image.
   one `[groups.all]` with `filters="-m 'minds_snapshot_resume'"`,
   `max_parallel=10`. The image is deleted on success. Both jobs are gated by the
   `DISABLE_MINDS_SNAPSHOT_CI` repo variable and skipped on fork PRs.
-- **Currently runs:** the 5 `minds_snapshot_resume` tests in
-  `test_snapshot_resume.py` (container present + stopped; resumed workspace
-  serves `system_interface`; services-agent alive; expected services
-  registered; minds recovery restores a dead `system_interface`).
+- **Currently runs:** every `minds_snapshot_resume` test in
+  `test_snapshot_resume.py` (resume sanity checks, the Electron create+chat
+  round-trip, the backup-update chat gate, and the backup-service
+  check/update and enable/repair/destination-change flows). Run a single one
+  with `just test-offload-minds-snapshot <image-id> '--filter <test_name>'`;
+  mint an image id manually via `uv run python
+  scripts/snapshot_minds_e2e_state.py`.
 
 The `ANTHROPIC_API_KEY` is pulled from Vault for the test job (so the agent can
 actually run), but these tests do **not** require an imbue_cloud login.

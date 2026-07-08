@@ -22,18 +22,11 @@ import os
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
-from uuid import uuid4
 
 import pytest
 
 from imbue.imbue_common.conftest_hooks import register_conftest_hooks
 from imbue.imbue_common.conftest_hooks import register_marker
-from imbue.minds.testing import BackupReleaseWorkspace
-from imbue.minds.testing import find_agent
-from imbue.minds.testing import make_fct_shaped_repo
-from imbue.minds.testing import run_mngr
-from imbue.minds.testing import write_stub_supervisorctl
-from imbue.mngr.primitives import AgentId
 from imbue.mngr.utils.logging import suppress_warnings
 from imbue.mngr.utils.plugin_testing import register_plugin_test_fixtures
 from imbue.mngr.utils.testing import generate_test_environment_name
@@ -155,49 +148,3 @@ def xvfb_display() -> Iterator[str]:
             process.wait(timeout=10)
         except subprocess.TimeoutExpired:
             process.kill()
-
-
-# -- Backup-service release-test fixture (test_backup_service_release.py) --
-#
-# A real local mngr agent (benign `--type command -- sleep N` body) whose
-# work_dir is an FCT-shaped git repo, plus a stub `supervisorctl` on PATH so
-# the workspace check/update scripts see a healthy service. The shared
-# autouse plugin fixtures above already isolate MNGR_HOST_DIR / MNGR_PREFIX /
-# the tmux server per test, so the created agent lives in a throwaway host.
-
-
-@pytest.fixture
-def backup_release_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[BackupReleaseWorkspace]:
-    stub_bin = tmp_path / "stub-bin"
-    stub_bin.mkdir()
-    write_stub_supervisorctl(stub_bin)
-    monkeypatch.setenv("PATH", f"{stub_bin}:{os.environ['PATH']}")
-    # Only the local provider matters here; an unreachable cloud provider
-    # (e.g. missing AWS credentials) must not fail `mngr list`.
-    for provider_name in ("AWS", "MODAL", "DOCKER", "LIMA", "VULTR", "OVH"):
-        monkeypatch.setenv(f"MNGR__PROVIDERS__{provider_name}__IS_ENABLED", "false")
-
-    repo = make_fct_shaped_repo(tmp_path)
-    agent_name = f"backup-release-{uuid4().hex}"
-    created = run_mngr(
-        "create",
-        agent_name,
-        "--type",
-        "command",
-        "--no-ensure-clean",
-        "--no-connect",
-        "--",
-        "sleep",
-        "104729",
-        cwd=repo,
-        timeout=300.0,
-    )
-    assert created.returncode == 0, created.stderr
-    try:
-        entry = find_agent(agent_name)
-        assert entry is not None, f"agent {agent_name} not found after create"
-        work_dir = Path(str(entry["work_dir"]))
-        assert work_dir.is_dir()
-        yield BackupReleaseWorkspace(agent_id=AgentId(str(entry["id"])), work_dir=work_dir, agent_name=agent_name)
-    finally:
-        run_mngr("destroy", agent_name, "--force", timeout=300.0)
