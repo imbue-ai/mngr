@@ -286,6 +286,11 @@ def test_apply_update_rolls_back_when_service_restart_fails(tmp_path: Path) -> N
     assert payload is not None, run
     assert payload["status"] == "failed"
     assert payload["rolled_back"] is True
+    # The restore restart also fails here (the stub always fails restarts), and
+    # that must be visible in the detail rather than silently swallowed.
+    detail = payload["detail"]
+    assert isinstance(detail, str)
+    assert "restoring the service failed" in detail
     # The revert restored the pre-update content, keeping both commits in history.
     assert (repo / "libs" / "host_backup" / "service.py").read_text() == pre_content
     subjects = run_git_for_backup_test(repo, "log", "--format=%s").splitlines()

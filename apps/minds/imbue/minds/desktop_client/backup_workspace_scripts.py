@@ -460,7 +460,9 @@ def _main():
             if reverted.returncode == 0:
                 result["rolled_back"] = True
                 _run(["uv", "sync"], timeout=900)
-                _restart_and_verify_service()
+                restore_detail = _restart_and_verify_service()
+                if restore_detail:
+                    failure_detail += "; the rollback commit landed but restoring the service failed: %s" % restore_detail
             else:
                 failure_detail += "; rollback also failed: %s" % (reverted.stderr or reverted.stdout).strip()[-300:]
         _pop_stash_into(result)
