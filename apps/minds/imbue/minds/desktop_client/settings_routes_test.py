@@ -135,8 +135,28 @@ def test_settings_page_lists_granted_service_per_workspace(tmp_path: Path) -> No
     assert 'data-service-name="slack"' in body
     # The per-permission description is surfaced as a tooltip on the pill.
     assert 'data-tooltip="All read operations across the Slack API."' in body
-    # The per-service revoke-all button names the service so its scope is unambiguous.
-    assert "Remove all authorizations for Slack" in body
+    # The service panel carries a per-service revoke-all action and a workspace count.
+    assert "Remove all authorizations" in body
+    assert "1 workspace" in body
+
+
+def test_settings_page_shows_plural_workspace_count(tmp_path: Path) -> None:
+    agent_a, host_a = str(AgentId()), HostId()
+    agent_b, host_b = str(AgentId()), HostId()
+    for host in (host_a, host_b):
+        save_permissions(
+            permissions_path_for_host(_plugin_dir(tmp_path), host),
+            LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-read-all"]},)),
+        )
+    handler = _build_handler(tmp_path)
+    client = _build_client(
+        tmp_path, handler, {agent_a: str(host_a), agent_b: str(host_b)}, {agent_a: "A", agent_b: "B"}
+    )
+
+    response = client.get("/settings")
+
+    assert response.status_code == 200
+    assert "2 workspaces" in response.text
 
 
 def test_settings_page_empty_state_when_no_grants(tmp_path: Path) -> None:

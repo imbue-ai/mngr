@@ -11,8 +11,9 @@
   workspace (labelled by its primary agent). Revoking removes the rule only --
   stored credentials are left in place -- and there is intentionally no "change"
   affordance here: broadening or narrowing a grant happens through the ordinary
-  agent-driven permission-request flow. "Remove all authorizations for X"
-  revokes service X from every workspace at once (it is per-service, not global).
+  agent-driven permission-request flow. Each service is shown as its own panel;
+  the panel header's "Remove all authorizations" action revokes that one service
+  from every workspace at once (it is per-service, not global).
   These settings live at the app level because the app, not any single
   workspace, owns permissions.
 
@@ -204,35 +205,43 @@
               Try again in a moment.
             </Notice>
           {% elif services_overview %}
-            <div class="flex flex-col gap-8">
+            <div class="flex flex-col gap-6">
               {% for service in services_overview %}
-                <div data-service-name="{{ service.service_name }}" data-service-label="{{ service.display_name }}">
-                  <h3 class="type-body font-semibold text-primary mb-3">{{ service.display_name }}</h3>
-                  <div class="flex flex-wrap gap-3">
-                    {% for grant in service.workspace_grants %}
-                      <div class="minds-card p-4 w-64 flex flex-col gap-3"
-                           data-workspace-agent-id="{{ grant.workspace_agent_id }}"
-                           data-workspace-name="{{ grant.workspace_name }}">
-                        <div class="flex items-center gap-2">
-                          <span class="w-2.5 h-2.5 rounded-full shrink-0" style="background-color: {{ grant.color }}"></span>
-                          <span class="type-body font-semibold text-primary truncate">{{ grant.workspace_name }}</span>
-                        </div>
-                        <div>
-                          <p class="type-helper text-tertiary mb-1">Allowed</p>
-                          <div class="flex flex-wrap gap-1">
-                            {% for perm in grant.permissions %}
-                              <code class="code-pill"{% if perm.description %} data-tooltip="{{ perm.description }}"{% endif %}>{{ perm.label }}</code>
-                            {% endfor %}
+                {% set ws_count = service.workspace_grants | length %}
+                <div class="border border-subtle rounded-lg overflow-hidden"
+                     data-service-name="{{ service.service_name }}" data-service-label="{{ service.display_name }}">
+                  <div class="flex items-center justify-between gap-3 px-4 py-3 bg-fill-subtle border-b border-subtle">
+                    <h3 class="type-body font-semibold text-primary">
+                      {{ service.display_name }}
+                      <span class="type-helper text-tertiary font-normal">&middot; {{ ws_count }} workspace{{ '' if ws_count == 1 else 's' }}</span>
+                    </h3>
+                    <Button variant="ghost" size="md"
+                            class="remove-all-btn !text-important !border-important/40 hover:!bg-[var(--c-important-surface)]">Remove all authorizations</Button>
+                  </div>
+                  <div class="p-4">
+                    <div class="grid grid-cols-2 gap-3">
+                      {% for grant in service.workspace_grants %}
+                        <div class="minds-card p-4 flex flex-col gap-3"
+                             data-workspace-agent-id="{{ grant.workspace_agent_id }}"
+                             data-workspace-name="{{ grant.workspace_name }}">
+                          <div class="flex items-center gap-2">
+                            <span class="w-2.5 h-2.5 rounded-full shrink-0" style="background-color: {{ grant.color }}"></span>
+                            <span class="type-body font-semibold text-primary truncate">{{ grant.workspace_name }}</span>
+                          </div>
+                          <div>
+                            <p class="type-helper text-tertiary mb-1">Allowed</p>
+                            <div class="flex flex-wrap gap-1">
+                              {% for perm in grant.permissions %}
+                                <code class="code-pill"{% if perm.description %} data-tooltip="{{ perm.description }}"{% endif %}>{{ perm.label }}</code>
+                              {% endfor %}
+                            </div>
+                          </div>
+                          <div class="mt-auto">
+                            <Button variant="secondary" size="md" class="revoke-btn">Revoke</Button>
                           </div>
                         </div>
-                        <div class="mt-auto">
-                          <Button variant="secondary" size="md" class="revoke-btn">Revoke</Button>
-                        </div>
-                      </div>
-                    {% endfor %}
-                  </div>
-                  <div class="mt-3">
-                    <Button variant="ghost" size="md" class="remove-all-btn !text-important hover:!bg-fill-hover">Remove all authorizations for {{ service.display_name }}</Button>
+                      {% endfor %}
+                    </div>
                   </div>
                 </div>
               {% endfor %}
