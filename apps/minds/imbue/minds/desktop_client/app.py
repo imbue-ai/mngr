@@ -42,6 +42,7 @@ from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.backup_password_store import ensure_backup_password_hash
 from imbue.minds.desktop_client.backup_password_store import has_saved_backup_password
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
@@ -2288,6 +2289,12 @@ def create_desktop_client(
     if not (_static_dir / "app.min.css").exists():
         logger.warning("Missing static/app.min.css. Run `just minds-css` from the repo root to build it.")
     app = Flask(__name__, static_folder=str(_static_dir), static_url_path="/_static")
+
+    # The backup master-password hash must always exist (initially the hash of
+    # the empty password, or of a pre-hash install's saved plaintext) so every
+    # backup flow can validate against it.
+    if paths is not None:
+        ensure_backup_password_hash(paths)
 
     @app.errorhandler(Exception)
     def _unhandled_exception_handler(exc: Exception) -> Response | HTTPException:

@@ -12,7 +12,6 @@
   var section = document.getElementById('backup-section');
   if (!section) return;
   var agentId = document.getElementById('workspace-settings').dataset.agentId;
-  var hasSavedPassword = section.dataset.hasSavedPassword === 'true';
 
   var statusLine = document.getElementById('backup-status-line');
   var versionsEl = document.getElementById('backup-versions');
@@ -28,8 +27,6 @@
   var configureToggleBtn = document.getElementById('backup-configure-toggle-btn');
   var configureForm = document.getElementById('backup-configure-form');
   var providerSelect = document.getElementById('backup-provider-select');
-  var encryptionSelect = document.getElementById('backup-encryption-select');
-  var masterPasswordRow = document.getElementById('backup-master-password-row');
   var masterPasswordInput = document.getElementById('backup-master-password-input');
   var savePasswordInput = document.getElementById('backup-save-password-input');
   var apiKeyRow = document.getElementById('backup-api-key-row');
@@ -237,22 +234,19 @@
   function syncConfigureFormVisibility() {
     var isApiKey = providerSelect.value === 'API_KEY';
     apiKeyRow.classList.toggle('hidden', !isApiKey);
-    if (masterPasswordRow) {
-      var needsPassword = encryptionSelect.value === 'MASTER_PASSWORD' && !hasSavedPassword;
-      masterPasswordRow.classList.toggle('hidden', !needsPassword);
-    }
   }
   configureToggleBtn.addEventListener('click', function () {
     configureForm.classList.toggle('hidden');
     syncConfigureFormVisibility();
   });
   providerSelect.addEventListener('change', syncConfigureFormVisibility);
-  encryptionSelect.addEventListener('change', syncConfigureFormVisibility);
 
+  // The master password (blank = use the saved copy, else the empty password)
+  // is validated server-side against the stored hash; save_password persists
+  // the just-validated typed value as the plaintext convenience copy.
   configureSubmitBtn.addEventListener('click', function () {
     var body = {
       backup_provider: providerSelect.value,
-      backup_encryption_method: encryptionSelect.value,
       api_key_env: apiKeyEnvInput ? apiKeyEnvInput.value : '',
       master_password: masterPasswordInput ? masterPasswordInput.value : '',
       save_password: savePasswordInput ? savePasswordInput.checked : false,

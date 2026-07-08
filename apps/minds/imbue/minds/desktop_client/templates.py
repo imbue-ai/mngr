@@ -32,7 +32,6 @@ from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
 from imbue.minds.primitives import AIProvider
-from imbue.minds.primitives import BackupEncryptionMethod
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
@@ -416,7 +415,6 @@ def render_create_form(
     launch_mode: LaunchMode | None = None,
     ai_provider: AIProvider | None = None,
     backup_provider: BackupProvider | None = None,
-    backup_encryption_method: BackupEncryptionMethod | None = None,
     backup_api_key_env: str = "",
     has_saved_backup_password: bool = False,
     accounts: Sequence[object] | None = None,
@@ -442,8 +440,7 @@ def render_create_form(
     follow the selected preset so the highlighted card matches what a plain
     submit would create: the ``remote`` preset maps to ``IMBUE_CLOUD`` for all
     three, the ``local`` preset to ``LIMA`` / ``SUBSCRIPTION`` /
-    ``CONFIGURE_LATER``. The backup encryption method defaults to
-    ``NO_PASSWORD``.
+    ``CONFIGURE_LATER``.
 
     ``selected_preset`` picks which preset card starts selected. When ``None``
     it defaults to ``remote`` on a fresh form (regardless of whether an account
@@ -454,9 +451,8 @@ def render_create_form(
     ``start_advanced`` opens the advanced view on first paint -- used when
     re-rendering a submit error, whose fields live there.
 
-    ``has_saved_backup_password`` toggles the master-password input between a
-    "enter a passphrase" field (no saved password yet) and a read-only
-    "a saved password will be used" indicator.
+    ``has_saved_backup_password`` adds the "leave blank to use your saved
+    password" helper under the (always-rendered) master-password input.
 
     ``host_name`` is an optional explicit workspace name, exposed as a "Name"
     field in the advanced view. When empty the name is chosen automatically
@@ -495,9 +491,6 @@ def render_create_form(
         if backup_provider is not None
         else (BackupProvider.IMBUE_CLOUD if is_remote_preset else BackupProvider.CONFIGURE_LATER)
     )
-    effective_backup_encryption = (
-        backup_encryption_method if backup_encryption_method is not None else BackupEncryptionMethod.NO_PASSWORD
-    )
     return CATALOG.render(
         "pages.Create",
         git_url=effective_url,
@@ -509,8 +502,6 @@ def render_create_form(
         selected_ai_provider=effective_ai_provider.value,
         backup_providers=list(BackupProvider),
         selected_backup_provider=effective_backup_provider.value,
-        backup_encryption_methods=list(BackupEncryptionMethod),
-        selected_backup_encryption_method=effective_backup_encryption.value,
         backup_api_key_env=backup_api_key_env,
         has_saved_backup_password=has_saved_backup_password,
         accounts=accounts or [],

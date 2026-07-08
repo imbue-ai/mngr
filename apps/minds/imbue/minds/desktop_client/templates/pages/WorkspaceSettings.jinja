@@ -243,24 +243,16 @@
                 <option value="API_KEY">Bring my own (restic env)</option>
               </select>
             </div>
-            <div class="flex items-center gap-2">
-              <FormLabel target="backup-encryption-select">Recovery key</FormLabel>
-              <select id="backup-encryption-select" class="h-[34px] px-3 rounded-full type-body bg-surface-secondary text-primary">
-                <option value="NO_PASSWORD" selected>No password</option>
-                <option value="MASTER_PASSWORD">Master password</option>
-              </select>
-            </div>
-            {% if not has_saved_backup_password %}
-            <div id="backup-master-password-row" class="hidden flex items-center gap-2">
+            <div id="backup-master-password-row" class="flex items-center gap-2">
               <FormLabel target="backup-master-password-input">Master password</FormLabel>
               <input id="backup-master-password-input" type="password"
                      class="h-[34px] px-3 rounded-full type-body bg-surface-secondary text-primary"
-                     autocomplete="new-password">
+                     autocomplete="current-password"
+                     {% if has_saved_backup_password %}placeholder="leave blank to use your saved password"{% endif %}>
               <label class="type-helper text-tertiary flex items-center gap-1">
                 <input id="backup-save-password-input" type="checkbox"> Save this password
               </label>
             </div>
-            {% endif %}
             <div id="backup-api-key-row" class="hidden">
               <FormLabel target="backup-api-key-env-input">Restic env (KEY=VALUE per line; no RESTIC_PASSWORD)</FormLabel>
               <textarea id="backup-api-key-env-input" rows="4" spellcheck="false"

@@ -37,6 +37,7 @@ from flask import Response
 from flask import request
 from loguru import logger
 from pydantic import Field
+from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroupError
@@ -143,7 +144,6 @@ from imbue.minds.envs.docker_cleanup import DockerCleanupError
 from imbue.minds.errors import BackupProvisioningError
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.primitives import AIProvider
-from imbue.minds.primitives import BackupEncryptionMethod
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
@@ -513,8 +513,8 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
 
     Backup provisioning and Cloudflare tunnel injection match the desktop UI's
     create flow: the optional ``backup_*`` fields (``backup_provider``,
-    ``backup_encryption_method``, ``backup_master_password``,
-    ``backup_save_password``, ``backup_api_key_env``) build the same restic
+    ``backup_master_password``, ``backup_save_password``,
+    ``backup_api_key_env``) build the same restic
     setup request, and -- when an ``account_id`` is given -- the same
     post-creation callback associates the peer with the account and injects a
     Cloudflare tunnel token. Both reuse the shared helpers in
@@ -545,13 +545,9 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
         backup_provider = BackupProvider(str(body.get("backup_provider", BackupProvider.CONFIGURE_LATER.value)))
     except ValueError:
         return _json_error(f"Invalid backup_provider: {body.get('backup_provider')!r}", 400)
-    try:
-        backup_encryption_method = BackupEncryptionMethod(
-            str(body.get("backup_encryption_method", BackupEncryptionMethod.NO_PASSWORD.value))
-        )
-    except ValueError:
-        return _json_error(f"Invalid backup_encryption_method: {body.get('backup_encryption_method')!r}", 400)
-    backup_master_password = str(body.get("backup_master_password", ""))
+    # Wrapped in SecretStr immediately so the plaintext never rides a local
+    # that could end up in a log or an error message.
+    backup_master_password = SecretStr(str(body.get("backup_master_password") or ""))
     is_save_backup_password = bool(body.get("backup_save_password", False))
     backup_api_key_env = str(body.get("backup_api_key_env", ""))
     account_id = str(body.get("account_id", "")).strip()
@@ -604,11 +600,11 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
     if account_id and session_store is not None:
         account_email = session_store.get_account_email(account_id) or ""
 
-    # Build the same restic setup request the create form builds (reads / saves
-    # the shared master password as a side effect). Fail fast on a bad config.
+    # Build the same restic setup request the create form builds (validates the
+    # master password against the stored hash; optionally saves the plaintext
+    # convenience copy). Fail fast on a bad config.
     backup_request, backup_error = build_backup_request_or_error(
         backup_provider=backup_provider,
-        encryption_method=backup_encryption_method,
         typed_master_password=backup_master_password,
         is_save_password=is_save_backup_password,
         api_key_env=backup_api_key_env,
@@ -1156,11 +1152,8 @@ def _handle_backup_service_configure(agent_id: str) -> tuple[OperationHandleResp
     body = request.get_json(silent=True, force=True) or {}
     try:
         backup_provider = BackupProvider(str(body.get("backup_provider", "")))
-        backup_encryption_method = BackupEncryptionMethod(
-            str(body.get("backup_encryption_method", BackupEncryptionMethod.NO_PASSWORD.value))
-        )
     except ValueError:
-        return _json_error("Invalid backup_provider or backup_encryption_method", 400)
+        return _json_error("Invalid backup_provider", 400)
     if backup_provider is BackupProvider.CONFIGURE_LATER:
         return _json_error("Pick a real backup provider (imbue_cloud or api_key)", 400)
 
@@ -1172,8 +1165,7 @@ def _handle_backup_service_configure(agent_id: str) -> tuple[OperationHandleResp
 
     backup_request, error_message = build_backup_request_or_error(
         backup_provider=backup_provider,
-        encryption_method=backup_encryption_method,
-        typed_master_password=str(body.get("master_password", "")),
+        typed_master_password=SecretStr(str(body.get("master_password") or "")),
         is_save_password=bool(body.get("save_password", False)),
         api_key_env=str(body.get("api_key_env", "")),
         account_email=account_email,
