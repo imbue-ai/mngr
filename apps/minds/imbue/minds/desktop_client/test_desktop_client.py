@@ -1513,6 +1513,31 @@ def test_inbox_shell_reapplies_selection_after_list_refresh(tmp_path: Path) -> N
     assert "setSelectedCard(currentId)" in body
 
 
+def test_inbox_shell_disables_both_buttons_and_spins_during_approval(tmp_path: Path) -> None:
+    """While an approval runs in the background the shell must give a clear
+    signal: a busy helper that disables BOTH buttons and reveals the Approve
+    spinner, invoked when the grant is submitted.
+
+    Regression guard for the "scary" no-feedback approval: the user needs to
+    see that work is happening (browser sign-in, follow-up grant, etc.) and
+    must not be able to double-submit or deny mid-flight.
+    """
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    response = client.get("/inbox")
+    assert response.status_code == 200
+    body = response.text
+    # The busy helper disables both buttons and toggles the spinner/label.
+    assert "function setApproveBusy(isBusy)" in body
+    assert 'document.getElementById("permissions-deny-btn")' in body
+    assert 'document.getElementById("permissions-approve-spinner")' in body
+    # Submitting the grant enters the busy state.
+    assert "setApproveBusy(true)" in body
+    # Non-resolving outcomes (failure, manual credentials, errors) clear it
+    # so the user can retry.
+    assert "setApproveBusy(false)" in body
+
+
 def test_old_requests_panel_route_removed(tmp_path: Path) -> None:
     """The legacy panel route no longer exists."""
     client, auth_store = _create_test_client_with_stores(tmp_path)
