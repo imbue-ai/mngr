@@ -108,9 +108,9 @@ All three are placed in the `resources/` directory (outside the asar archive) an
 
 ### Updating the bundled git
 
-git tracks upstream security releases, so the pinned dugite-native payload needs periodic bumping. A weekly CI workflow opens (or updates) a tracking issue when the pin falls behind dugite-native's latest release. To update:
+git tracks upstream security releases, so the pinned dugite-native payload needs periodic bumping. A weekly CI workflow (`.github/workflows/minds-git-freshness.yml`) opens (or updates) a tracking issue when a dugite-native release carrying a **newer upstream git version** has cleared the repo's 14-day dependency cooldown (the same minimum-release-age posture as `pnpm-workspace.yaml` and the packaged pyproject). It deliberately does not nag on same-git-version dugite rebuilds, and ignores releases still inside the cooldown window. To update:
 
-1. Pick the new dugite-native tag from the freshness tracking issue.
+1. Pick the new dugite-native tag from the freshness tracking issue (or, for an urgent CVE, directly -- you may bump before the cooldown window at your discretion; the automated nag waits it out).
 2. Update `apps/minds/scripts/git-manifest.json`: the `dugiteNativeTag`, the `gitVersion`, all five asset names (each embeds a dugite-native commit short-SHA, so record them verbatim), and each target's hash taken from the release's `.sha256` companion asset.
 3. Independently download each tarball and recompute its SHA256, then compare against the values you just recorded (pinning defends against future substitution, not against copying a wrong value in).
 4. Run the bundled-git acceptance test locally on a mac; CI covers linux-x64.
