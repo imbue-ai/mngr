@@ -9,5 +9,3 @@ Added agent-view style interaction to the kanpan board, so you can work with an 
 - The reply input supports readline-style editing (via the `urwid_readline` library, with the Option/Ctrl+arrow chords added): word movement (`Option`/`Ctrl`+`←`/`→`, `Meta-B`/`F`), word delete (`Option`+`Delete`, `Ctrl-W`, `Meta-D`), jump to start/end (`Ctrl-A`/`Ctrl-E`), and kill to start/end (`Ctrl-U`/`Ctrl-K`).
 
 - Optional `peek_left_returns_to_board` setting (under `[plugins.kanpan]`, off by default): when on, pressing `←` on an empty reply closes the peek panel and returns to the board. `←` still moves the cursor when the reply has text.
-
-- Mouse: the board leaves the mouse to the terminal, so drag-select/copy and wheel scrollback work natively with no modifier key. Rows are navigated with the arrow and page keys (`↑`/`↓`, `Page Up`/`Page Down`, `Home`/`End`), and the board scrolls to keep the selection in view so a list longer than the screen stays reachable. Selection menus (e.g. `/login`) are not part of the transcript, so attach (`Enter`) to make the choice in the real session.

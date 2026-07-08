@@ -2178,9 +2178,6 @@ def run_kanpan(
             palette=PALETTE + mark_palette_entries,
             unhandled_input=input_handler,
             screen=screen,
-            # Leave the mouse to the terminal so native drag-select and wheel scrollback
-            # keep working; rows are navigated with the arrow and page keys.
-            handle_mouse=False,
         )
         state.loop = loop
 

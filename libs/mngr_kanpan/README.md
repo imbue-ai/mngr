@@ -4,8 +4,6 @@ All-seeing agent tracker. The name combines Sino-Japanese 看 (*kan*, "to look",
 
 Launch with `mngr kanpan`. Requires the `gh` CLI to be installed and authenticated.
 
-The mouse is left to the terminal, so drag-select/copy and wheel scrollback work natively with no modifier key. Move the board selection with the arrow keys (`↑`/`↓`, `Page Up`/`Page Down`, `Home`/`End`); the board scrolls to keep the selection in view, so a list longer than the screen stays reachable.
-
 ## Attach, peek, and reply
 
 Interact with an agent without leaving the board:
