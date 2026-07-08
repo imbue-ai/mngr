@@ -1,8 +1,10 @@
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import Callable
+from collections.abc import Iterable
 from collections.abc import Iterator
 from concurrent.futures import Future
+from concurrent.futures import wait
 from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
@@ -10,13 +12,17 @@ from pathlib import Path
 from typing import Any
 from typing import Mapping
 from typing import Sequence
+from typing import TypeVar
 
 from loguru import logger
+from pydantic import ConfigDict
 from pydantic import Field
 from pyinfra.api.host import Host as PyinfraHost
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.imbue_common.pure import pure
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import HostAuthenticationError
@@ -24,10 +30,12 @@ from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
+from imbue.mngr.interfaces.data_types import BoundedProviderDiscoveryResult
 from imbue.mngr.interfaces.data_types import ErrorInfo
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
+from imbue.mngr.interfaces.data_types import ProviderResourceInfo
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.interfaces.host import HostInterface
@@ -51,6 +59,7 @@ from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
 from imbue.mngr.utils.name_generator import generate_host_name
+from imbue.mngr.utils.thread_cleanup import cleanup_thread_local_resources
 from imbue.mngr.utils.thread_cleanup import mngr_executor
 
 
@@ -74,6 +83,27 @@ def _compute_idle_seconds(
     return (datetime.now(timezone.utc) - latest_activity).total_seconds()
 
 
+def _ssh_info_from_host(host: HostInterface) -> SSHInfo | None:
+    """Build SSHInfo from a host's SSH endpoint, or None for a local host / an offline host.
+
+    Only online hosts expose a connection endpoint; the returned endpoint (user/host/port/key)
+    is static config, so this does not open a new SSH session.
+    """
+    if not isinstance(host, OnlineHostInterface):
+        return None
+    ssh_connection = host.get_ssh_connection_info()
+    if ssh_connection is None:
+        return None
+    user, hostname, port, key_path = ssh_connection
+    return SSHInfo(
+        user=user,
+        host=hostname,
+        port=port,
+        key_path=key_path,
+        command=f"ssh -i {key_path} -p {port} {user}@{hostname}",
+    )
+
+
 def _build_host_details_from_host(
     host: HostInterface,
     host_ref: DiscoveredHost,
@@ -84,21 +114,11 @@ def _build_host_details_from_host(
     Returns the HostDetails and the SSH activity time (needed for agent idle calculation).
     """
     # Build SSH info if this is a remote host (only available for online hosts)
-    ssh_info: SSHInfo | None = None
+    ssh_info: SSHInfo | None = _ssh_info_from_host(host)
 
     is_locked: bool | None = None
     locked_time: datetime | None = None
     if isinstance(host, OnlineHostInterface):
-        ssh_connection = host.get_ssh_connection_info()
-        if ssh_connection is not None:
-            user, hostname, port, key_path = ssh_connection
-            ssh_info = SSHInfo(
-                user=user,
-                host=hostname,
-                port=port,
-                key_path=key_path,
-                command=f"ssh -i {key_path} -p {port} {user}@{hostname}",
-            )
         boot_time = host.get_boot_time()
         uptime_seconds = host.get_uptime_seconds()
         resource = host.get_provider_resources()
@@ -142,6 +162,33 @@ def _build_host_details_from_host(
     return host_details, ssh_activity
 
 
+_FieldGeneratorAgent = TypeVar("_FieldGeneratorAgent")
+_FieldGeneratorHost = TypeVar("_FieldGeneratorHost")
+
+
+def _compute_plugin_fields(
+    field_generators: Mapping[str, Mapping[str, Callable[[_FieldGeneratorAgent, _FieldGeneratorHost], Any]]],
+    agent: _FieldGeneratorAgent,
+    host: _FieldGeneratorHost,
+) -> dict[str, Any]:
+    """Run plugin field generators, building plugin.<plugin_name>.<field> data.
+
+    Shared by the online path (live agent/host) and the offline path
+    (DiscoveredAgent/HostDetails). Fields that evaluate to None are omitted, and
+    plugins that contribute no fields are dropped.
+    """
+    plugin_data: dict[str, Any] = {}
+    for plugin_name, generators in field_generators.items():
+        plugin_fields: dict[str, Any] = {}
+        for field_name, field_generator in generators.items():
+            value = field_generator(agent, host)
+            if value is not None:
+                plugin_fields[field_name] = value
+        if plugin_fields:
+            plugin_data[plugin_name] = plugin_fields
+    return plugin_data
+
+
 def _build_agent_details_from_online_agent(
     agent: AgentInterface,
     host_details: HostDetails,
@@ -169,15 +216,7 @@ def _build_agent_details_from_online_agent(
     idle_seconds = _compute_idle_seconds(user_activity, agent_activity, ssh_activity)
 
     # Compute plugin-specific fields from field generators
-    plugin_data: dict[str, Any] = {}
-    for plugin_name, generators in field_generators.items():
-        plugin_fields: dict[str, Any] = {}
-        for field_name, generator in generators.items():
-            value = generator(agent, host)
-            if value is not None:
-                plugin_fields[field_name] = value
-        if plugin_fields:
-            plugin_data[plugin_name] = plugin_fields
+    plugin_data = _compute_plugin_fields(field_generators, agent, host)
 
     return AgentDetails(
         id=agent.id,
@@ -207,9 +246,11 @@ def _build_agent_details_from_online_agent(
 def build_agent_details_from_offline_ref(
     agent_ref: DiscoveredAgent,
     host_details: HostDetails,
+    offline_field_generators: Mapping[str, Mapping[str, Callable[[DiscoveredAgent, HostDetails], Any]]] | None = None,
 ) -> AgentDetails:
     """Build AgentDetails from a discovered agent reference when the host is offline."""
     create_time = agent_ref.create_time or datetime(1970, 1, 1, tzinfo=timezone.utc)
+    plugin_data = _compute_plugin_fields(offline_field_generators or {}, agent_ref, host_details)
     return AgentDetails(
         id=agent_ref.agent_id,
         name=agent_ref.agent_name,
@@ -232,7 +273,7 @@ def build_agent_details_from_offline_ref(
         idle_mode=None,
         labels=agent_ref.labels,
         host=host_details,
-        plugin={},
+        plugin=plugin_data,
     )
 
 
@@ -252,10 +293,155 @@ def connected_host(
 def _discover_agents_on_host(
     provider: "ProviderInstanceInterface",
     host_id: HostId,
-) -> list[DiscoveredAgent]:
-    """Discover agents on a host, disconnecting afterward."""
+    timeout_seconds: float | None = None,
+) -> tuple[list[DiscoveredAgent], SSHInfo | None]:
+    """Discover agents on a host (and capture its SSH endpoint), disconnecting afterward.
+
+    When ``timeout_seconds`` is set (the per-host-bounded discovery path), the
+    host's reads are bounded by that wall-clock so a wedged host self-terminates
+    its reads rather than hanging the (potentially abandoned) discovery thread.
+
+    The SSH endpoint is read from the already-connected host (no extra connection) so the
+    streaming discovery poller can re-emit it as a ``HOST_SSH_INFO`` event; it is ``None``
+    for local hosts.
+    """
+    # FIXME: wrap this in a bounded retry (e.g. tenacity) so a *transient*
+    # connection failure (timeout, connection refused, banner reset) is retried
+    # here rather than immediately surfacing to the caller. The retry predicate
+    # must NOT retry permanent failures (HostAuthenticationError / bad key) --
+    # those should fail fast. This is the right layer for it: retrying here means
+    # a brief network blip never reaches discover_hosts_and_agents' offline
+    # fallback at all, which matters most for providers without an offline view
+    # (e.g. SSH), where a transient blip would otherwise propagate as a
+    # ProviderDiscoveryError.
     with connected_host(provider, host_id) as host:
-        return host.discover_agents()
+        agents = host.discover_agents(timeout_seconds=timeout_seconds)
+        return agents, _ssh_info_from_host(host)
+
+
+def _discover_agents_on_host_with_offline_fallback(
+    provider: "ProviderInstanceInterface",
+    host_ref: DiscoveredHost,
+    timeout_seconds: float | None = None,
+) -> tuple[list[DiscoveredAgent], SSHInfo | None]:
+    """Discover a host's agents (and its SSH endpoint), falling back to the provider's offline view on connection error.
+
+    The host was reachable enough to be discovered, but enumerating its agents
+    over SSH failed (sshd crashed, banner reset, auth failure, ...). Rather than
+    fail the whole provider, recover the host's agents from the provider's
+    persisted/offline records so its workspaces stay visible. Mirrors the
+    inline recovery in ``discover_hosts_and_agents``.
+
+    ``timeout_seconds``, when set, bounds the online read (a per-host-timeout hit
+    surfaces as ``HostConnectionError`` and lands in the offline fallback, which
+    is itself bounded because it reads persisted records rather than the host).
+    """
+    try:
+        return _discover_agents_on_host(provider, host_ref.host_id, timeout_seconds)
+    except HostConnectionError as e:
+        # Drop any cached per-host handle so the next cycle does not re-hit the
+        # wedged connection, then recover the host's agents from the offline view.
+        provider.on_connection_error(host_ref.host_id)
+        logger.debug(
+            "Falling back to offline agent enumeration for host {} ({}) after connection error: {}",
+            host_ref.host_id,
+            host_ref.host_name,
+            e,
+        )
+        # A host that just failed to connect has no reachable SSH endpoint to emit (a
+        # tunnel to it would fail anyway); recover its agents but report no SSH info.
+        return provider.to_offline_host(host_ref.host_id).discover_agents(), None
+
+
+@pure
+def bounded_result_from_agents_by_host(
+    agents_by_host: Mapping[DiscoveredHost, Sequence[DiscoveredAgent]],
+    host_ssh_infos: Sequence[tuple[HostId, SSHInfo]] = (),
+) -> BoundedProviderDiscoveryResult:
+    """Flatten a host->agents map into a BoundedProviderDiscoveryResult with no unknown items.
+
+    Used by providers that batch host+agent discovery (and therefore cannot bound
+    individual host reads): their whole discovery is bounded only by the
+    provider-level error timeout, so nothing is marked UNKNOWN here.
+
+    ``host_ssh_infos`` carries any per-host SSH endpoints the provider knows at discovery
+    time, so the streaming poller can re-emit them as ``HOST_SSH_INFO`` events.
+    """
+    hosts = tuple(agents_by_host.keys())
+    agents = tuple(agent for agent_list in agents_by_host.values() for agent in agent_list)
+    return BoundedProviderDiscoveryResult(hosts=hosts, agents=agents, host_ssh_infos=tuple(host_ssh_infos))
+
+
+def collect_cached_host_ssh_infos(
+    provider: "ProviderInstanceInterface",
+    hosts: Iterable[DiscoveredHost],
+) -> list[tuple[HostId, SSHInfo]]:
+    """Best-effort per-host SSH endpoints for a batch provider's streaming discovery.
+
+    Batch providers (vps, modal) read hosts in bulk without the per-host connection the base
+    bounded path makes, so they can't capture SSH inline. This reads the (cheap, local) SSH
+    endpoint off each RUNNING host's already-cached host object, so the streaming poller can
+    re-emit it as a ``HOST_SSH_INFO`` event. A host whose object can't be read (not running,
+    offline, or uncached) contributes nothing -- a tunnel to it would fail anyway. Providers
+    that already have a cheaper source (imbue_cloud builds it straight from the lease) do not
+    need this.
+    """
+    host_ssh_infos: list[tuple[HostId, SSHInfo]] = []
+    for host in hosts:
+        if host.host_state != HostState.RUNNING:
+            continue
+        try:
+            host_obj = provider.get_host(host.host_id)
+        except (MngrError, OSError) as e:
+            logger.debug("Skipping SSH info for host {}: {}", host.host_id, e)
+            continue
+        ssh_info = _ssh_info_from_host(host_obj)
+        if ssh_info is not None:
+            host_ssh_infos.append((host.host_id, ssh_info))
+    return host_ssh_infos
+
+
+def _set_host_agents_future(
+    provider: "ProviderInstanceInterface",
+    host_ref: DiscoveredHost,
+    future: "Future[tuple[list[DiscoveredAgent], SSHInfo | None]]",
+    timeout_seconds: float,
+) -> None:
+    """Read one host's agents and SSH endpoint on a daemon thread, recording the outcome on ``future``.
+
+    Captures the expected discovery failure modes onto the future so a failed
+    host can be treated as UNKNOWN rather than crashing the poll. ``timeout_seconds``
+    bounds each of the host's reads so an abandoned thread (left running past the
+    per-host timeout) still self-terminates rather than running forever. Always
+    releases thread-local gevent resources, since this thread may be abandoned and
+    only resolves its future late.
+    """
+    try:
+        agents_and_ssh = provider.read_host_agents_for_bounded_discovery(host_ref, timeout_seconds)
+    except (MngrError, OSError) as e:
+        future.set_exception(e)
+    else:
+        future.set_result(agents_and_ssh)
+    finally:
+        cleanup_thread_local_resources()
+
+
+class HostDiscoveryReadRegistry(MutableModel):
+    """Holds in-flight per-host discovery reads so a wedged host is not re-read every poll.
+
+    A long-lived registry (owned by a provider's discovery poller) that maps a
+    host to the ``Future`` of its currently-running bounded read. When a poll finds
+    a host whose prior read is still in flight, it reuses that future instead of
+    spawning a second read, bounding accumulation to at most one abandoned read per
+    host. A per-call (fresh) registry is used for one-shot discovery, where there is
+    nothing to carry across polls.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    future_by_host_id: dict[HostId, "Future[tuple[list[DiscoveredAgent], SSHInfo | None]]"] = Field(
+        default_factory=dict, description="In-flight per-host (agents, ssh_info) read futures, keyed by host id"
+    )
 
 
 class ProviderInstanceInterface(MutableModel, ABC):
@@ -367,6 +553,12 @@ class ProviderInstanceInterface(MutableModel, ABC):
         Providers that support snapshots should preserve snapshot records and
         mark the host as DESTROYED so that gc_snapshots can age-gate their
         deletion.
+
+        Best-effort and aggregate-and-continue: attempts every teardown step and collects
+        every real failure. Returns normally on full success or benign "already gone"
+        outcomes (a resource that was already absent is not a failure); raises
+        ``CleanupFailedGroup`` if any real infrastructure resource was left behind. See
+        specs/cleanup-error-aggregation.md.
         """
         ...
 
@@ -379,6 +571,45 @@ class ProviderInstanceInterface(MutableModel, ABC):
     def on_connection_error(self, host_id: HostId) -> None:
         """Handle actions to take when a connection error occurs with a host."""
         ...
+
+    def get_outer_ssh_port(self, host_id: HostId) -> int | None:
+        """Port of the host's outer/management sshd, when distinct from the agent connection.
+
+        Returns ``None`` by default (the agent connection from
+        ``get_ssh_connection_info`` is the only SSH endpoint, or the host is
+        local). Providers whose host has a separate outer/management sshd on a
+        non-obvious port (e.g. a slice's VM-root sshd reached via a box-forwarded
+        port) override this so ``mngr create --format json`` can report it.
+        """
+        return None
+
+    def get_connection_error_fallback_state(self, host_id: HostId) -> HostState | None:
+        """State to report for a host whose inner-SSH agent enumeration just failed.
+
+        Consulted from the ``HostConnectionError`` fallback in
+        ``get_host_and_agent_details``. Returns ``None`` to keep the default
+        offline-state derivation (``OfflineHost.get_state()``, which yields
+        ``CRASHED`` for a shutdown-capable provider with no recorded stop
+        reason). A provider that can confirm out-of-band -- without inner SSH --
+        that the host is actually still up returns a non-offline state (e.g.
+        ``HostState.UNAUTHENTICATED``) so a live host with a dead inner sshd is
+        not misreported as offline. Only consulted for non-authentication
+        connection failures, since an authentication failure already maps to
+        ``UNAUTHENTICATED``.
+        """
+        return None
+
+    # returns (outer_host_public_key, container_host_public_key)
+    def get_ssh_host_public_keys(self, host_id: HostId) -> tuple[str | None, str | None]:
+        """The host's outer (VPS/VM-root) and container sshd host public keys, when known.
+
+        Returns ``(None, None)`` by default. Providers that generate the host's
+        sshd host keys at bake time (so the public keys are deterministically
+        known, not scanned) override this so ``mngr create --format json`` can
+        report them and downstream tooling can pin them for strict host-key
+        checking.
+        """
+        return (None, None)
 
     @abstractmethod
     def get_max_destroyed_host_persisted_seconds(self) -> float:
@@ -446,7 +677,7 @@ class ProviderInstanceInterface(MutableModel, ABC):
         host_refs = self.discover_hosts(cg=cg, include_destroyed=include_destroyed)
         logger.trace("Loaded {} host(s) from provider {}", len(host_refs), self.name)
 
-        future_by_host_ref: dict[DiscoveredHost, Future[list[DiscoveredAgent]]] = {}
+        future_by_host_ref: dict[DiscoveredHost, Future[tuple[list[DiscoveredAgent], SSHInfo | None]]] = {}
         with mngr_executor(parent_cg=cg, name=f"load_agents_{self.name}", max_workers=32) as executor:
             for host_ref in host_refs:
                 future_by_host_ref[host_ref] = executor.submit(
@@ -455,7 +686,176 @@ class ProviderInstanceInterface(MutableModel, ABC):
                     host_ref.host_id,
                 )
 
-        return {host_ref: future.result() for host_ref, future in future_by_host_ref.items()}
+        results: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
+        for host_ref, future in future_by_host_ref.items():
+            try:
+                # This batch path is used by ``mngr list``, which sources SSH info separately
+                # (via ``get_host_and_agent_details``), so the captured endpoint is unused here.
+                agents, _ssh_info = future.result()
+                results[host_ref] = agents
+            except HostConnectionError as e:
+                # The host was reachable enough to be discovered, but enumerating
+                # its agents failed (sshd crashed, banner reset, auth failure,
+                # ...). Rather than let that bubble up to
+                # _construct_and_discover_for_provider -- which records a
+                # per-provider error and reports agents=[] / hosts=[] for the
+                # WHOLE provider, making every workspace on it unreachable via
+                # mngr_forward -- recover the host's agents from the provider's
+                # offline view.
+                #
+                # First mirror get_host_and_agent_details' on_connection_error
+                # call so providers that cache per-host state (docker's container
+                # cache, modal/lima/vps_docker host caches) drop the wedged entry;
+                # otherwise the next discovery cycle keeps re-hitting the stale
+                # handle.
+                self.on_connection_error(host_ref.host_id)
+                # The offline view recovers the host's persisted records: a docker
+                # container that is RUNNING but whose sshd has died still exposes
+                # its agent records via the docker daemon (labels + on-host-volume
+                # data), so its workspaces stay visible -- matching the behavior of
+                # a fully-stopped container.
+                #
+                # Any provider whose hosts can raise HostConnectionError is assumed
+                # to implement to_offline_host: the local provider never opens a
+                # connection (so it never reaches here), and every remote provider
+                # persists host/agent state. If to_offline_host nonetheless fails
+                # (no offline view, or no persisted record for a host we just
+                # discovered), that signals a broken invariant / corrupt state, so
+                # we let it propagate rather than masking it as an empty agent list.
+                offline_agents = self.to_offline_host(host_ref.host_id).discover_agents()
+                logger.debug(
+                    "Falling back to offline agent enumeration for host {} ({}) after connection error: {}",
+                    host_ref.host_id,
+                    host_ref.host_name,
+                    e,
+                )
+                results[host_ref] = offline_agents
+        return results
+
+    def read_host_agents_for_bounded_discovery(
+        self,
+        host_ref: DiscoveredHost,
+        timeout_seconds: float,
+    ) -> tuple[list[DiscoveredAgent], SSHInfo | None]:
+        """Read one host's agents and SSH endpoint (with offline fallback) for the per-host-bounded discovery path.
+
+        A seam used by ``discover_hosts_and_agents_within_timeouts``: each host's read
+        runs through this method on its own daemon thread so a slow host can be
+        abandoned. ``timeout_seconds`` bounds each of the host's reads so an abandoned
+        thread self-terminates rather than running forever. The SSH endpoint (``None`` for
+        local hosts) lets the poller re-emit ``HOST_SSH_INFO``. Tests override it to inject
+        a controllable per-host delay without a live host connection.
+        """
+        return _discover_agents_on_host_with_offline_fallback(self, host_ref, timeout_seconds)
+
+    def discover_hosts_and_agents_within_timeouts(
+        self,
+        cg: ConcurrencyGroup,
+        host_discovery_timeout_seconds: float,
+        agent_discovery_timeout_seconds: float,
+        include_destroyed: bool = False,
+        registry: "HostDiscoveryReadRegistry | None" = None,
+    ) -> BoundedProviderDiscoveryResult:
+        """Discover this provider's hosts/agents, bounding each host's agent read by a timeout.
+
+        A host whose agent read does not finish within ``host_discovery_timeout_seconds``
+        (or fails) is omitted from the result and reported in ``unknown_host_ids`` -- so one
+        slow or wedged host cannot stall the whole provider's snapshot. The abandoned read
+        keeps running on a daemon thread (threads cannot be killed) but ``host_discovery_timeout_seconds``
+        is threaded down as a per-command bound so it self-terminates instead of hanging forever.
+
+        ``registry`` carries in-flight per-host reads across polls: a host whose prior read is
+        still running is *not* re-spawned (a warning is logged instead), so at most one abandoned
+        read exists per host at a time. When ``None`` (one-shot discovery), a fresh per-call
+        registry is used, so there is no cross-poll state and every host is read.
+
+        The default per-host implementation bounds at host granularity, which already
+        encompasses that host's agent enumeration, so ``agent_discovery_timeout_seconds`` is
+        unused here (it exists for providers that read agents individually). Providers that
+        batch host+agent discovery override this to delegate to their batch
+        ``discover_hosts_and_agents`` (bounded only by the provider-level error timeout).
+        """
+        host_refs = self.discover_hosts(cg=cg, include_destroyed=include_destroyed)
+        active_registry = registry if registry is not None else HostDiscoveryReadRegistry()
+        host_ref_by_id = {host_ref.host_id: host_ref for host_ref in host_refs}
+
+        # Decide, per host, whether to spawn a fresh read or reuse an in-flight one from a
+        # prior poll. Each fresh read runs on its own daemon thread via _set_host_agents_future,
+        # which calls read_host_agents_for_bounded_discovery (overridable for testing).
+        future_by_host_ref: dict[DiscoveredHost, Future[tuple[list[DiscoveredAgent], SSHInfo | None]]] = {}
+        skipped_unknown_host_ids: list[HostId] = []
+        for host_ref in host_refs:
+            in_flight = active_registry.future_by_host_id.get(host_ref.host_id)
+            if in_flight is not None and not in_flight.done():
+                # A prior poll's read for this host is still running. Do not spawn a second
+                # read; with the per-command timeout in place this should essentially never
+                # happen, so warn loudly -- it is a precise "host wedged past its timeout" alarm.
+                # The host is still UNKNOWN this poll (its state is retained by the consumer).
+                logger.warning(
+                    "Skipped discovery for host {} on provider {}: prior read still in flight "
+                    "(host wedged past its {:.0f}s timeout)",
+                    host_ref.host_id,
+                    self.name,
+                    host_discovery_timeout_seconds,
+                )
+                skipped_unknown_host_ids.append(host_ref.host_id)
+                continue
+            if in_flight is not None:
+                # A prior poll's read finished (possibly late). Harvest it this poll; the
+                # harvest loop below clears it so the next poll starts a fresh read.
+                future_by_host_ref[host_ref] = in_flight
+                continue
+            host_future: Future[tuple[list[DiscoveredAgent], SSHInfo | None]] = Future()
+            active_registry.future_by_host_id[host_ref.host_id] = host_future
+            future_by_host_ref[host_ref] = host_future
+            cg.start_new_thread(
+                target=_set_host_agents_future,
+                args=(self, host_ref, host_future, host_discovery_timeout_seconds),
+                daemon=True,
+                is_checked=False,
+                name=f"discover_host_{host_ref.host_id}",
+                on_failure=lambda exc, ref=host_ref: logger.opt(exception=exc).debug(
+                    "Host {} discovery thread crashed; treating as unknown", ref.host_id
+                ),
+            )
+
+        # Wait once, up to the per-host budget, for every host's read to finish.
+        wait(list(future_by_host_ref.values()), timeout=host_discovery_timeout_seconds)
+
+        discovered_hosts: list[DiscoveredHost] = []
+        discovered_agents: list[DiscoveredAgent] = []
+        host_ssh_infos: list[tuple[HostId, SSHInfo]] = []
+        unknown_host_ids: list[HostId] = []
+        for host_ref, host_future in future_by_host_ref.items():
+            # A host that did not finish in time, or whose read failed, is unknown
+            # (not gone): the consumer retains its previously-known state.
+            if not host_future.done() or host_future.exception() is not None:
+                unknown_host_ids.append(host_ref.host_id)
+                # A read that finished (with an exception) is cleared so the next poll retries
+                # it fresh; a still-running read is kept so the next poll does not re-spawn it.
+                if host_future.done():
+                    active_registry.future_by_host_id.pop(host_ref.host_id, None)
+                continue
+            agents, ssh_info = host_future.result()
+            discovered_hosts.append(host_ref)
+            discovered_agents.extend(agents)
+            # Carry the host's SSH endpoint so the streaming poller re-emits it as HOST_SSH_INFO.
+            if ssh_info is not None:
+                host_ssh_infos.append((host_ref.host_id, ssh_info))
+            active_registry.future_by_host_id.pop(host_ref.host_id, None)
+
+        # Drop registry entries for hosts no longer discovered (e.g. destroyed while wedged)
+        # so the registry stays bounded to currently-known hosts.
+        stale_host_ids = [host_id for host_id in active_registry.future_by_host_id if host_id not in host_ref_by_id]
+        for host_id in stale_host_ids:
+            active_registry.future_by_host_id.pop(host_id, None)
+
+        return BoundedProviderDiscoveryResult(
+            hosts=tuple(discovered_hosts),
+            agents=tuple(discovered_agents),
+            host_ssh_infos=tuple(host_ssh_infos),
+            unknown_host_ids=tuple(skipped_unknown_host_ids) + tuple(unknown_host_ids),
+        )
 
     @abstractmethod
     def get_host_resources(self, host: HostInterface) -> HostResources:
@@ -467,6 +867,9 @@ class ProviderInstanceInterface(MutableModel, ABC):
         host_ref: DiscoveredHost,
         agent_refs: Sequence[DiscoveredAgent],
         field_generators: Mapping[str, Mapping[str, Callable[[AgentInterface, OnlineHostInterface], Any]]]
+        | None = None,
+        # Field generators for offline agents, computing plugin fields from (DiscoveredAgent, HostDetails).
+        offline_field_generators: Mapping[str, Mapping[str, Callable[[DiscoveredAgent, HostDetails], Any]]]
         | None = None,
         # Called when an error occurs for a specific agent or the host itself.
         # If the callback raises, the error propagates (ABORT semantics).
@@ -482,6 +885,8 @@ class ProviderInstanceInterface(MutableModel, ABC):
         """
         is_authentication_failure = False
         initial_host: HostInterface | None = None
+        # Resolved before the try so the offline fallback (HostConnectionError) can use it too.
+        resolved_offline_field_generators = offline_field_generators or {}
         try:
             host = self.get_host(host_ref.host_id)
             initial_host = host
@@ -521,9 +926,19 @@ class ProviderInstanceInterface(MutableModel, ABC):
 
                     # If this host is offline, or if we failed to find the agent on the online host
                     if agent_details is None:
-                        agent_details = build_agent_details_from_offline_ref(agent_ref, host_details)
+                        agent_details = build_agent_details_from_offline_ref(
+                            agent_ref, host_details, resolved_offline_field_generators
+                        )
 
                     agent_details_list.append(agent_details)
+                except HostConnectionError:
+                    # A connection failure means the whole host is unreachable,
+                    # not just this one agent. Let it propagate to the outer
+                    # ``except HostConnectionError`` handler, which clears the
+                    # per-host connection cache and falls back to the offline
+                    # view for every agent. (HostConnectionError is a MngrError
+                    # subclass, so without this it would be swallowed per-agent.)
+                    raise
                 except MngrError as e:
                     if on_error is not None:
                         on_error(agent_ref, e)
@@ -535,7 +950,11 @@ class ProviderInstanceInterface(MutableModel, ABC):
                             host_ref.host_id,
                             e,
                         )
-                        agent_details_list.append(build_agent_details_from_offline_ref(agent_ref, host_details))
+                        agent_details_list.append(
+                            build_agent_details_from_offline_ref(
+                                agent_ref, host_details, resolved_offline_field_generators
+                            )
+                        )
 
         except HostConnectionError as e:
             self.on_connection_error(host_ref.host_id)
@@ -543,8 +962,22 @@ class ProviderInstanceInterface(MutableModel, ABC):
             host = self.to_offline_host(host_ref.host_id)
             is_authentication_failure = isinstance(e, HostAuthenticationError)
             host_details, _ssh_activity = _build_host_details_from_host(host, host_ref, is_authentication_failure)
+            # The offline derivation can only reason from persisted records, so a
+            # shutdown-capable provider reports CRASHED for a host that never
+            # recorded a clean stop. When the connection failure is not an auth
+            # failure, give the provider a chance to correct that from an
+            # out-of-band signal it has (e.g. docker's daemon reports the
+            # container is still running -> UNAUTHENTICATED), so a live host with
+            # a dead inner sshd is not misreported as offline.
+            if not is_authentication_failure:
+                fallback_state = self.get_connection_error_fallback_state(host_ref.host_id)
+                if fallback_state is not None:
+                    host_details = host_details.model_copy_update(
+                        to_update(host_details.field_ref().state, fallback_state)
+                    )
             agent_details_list = [
-                build_agent_details_from_offline_ref(agent_ref, host_details) for agent_ref in agent_refs
+                build_agent_details_from_offline_ref(agent_ref, host_details, resolved_offline_field_generators)
+                for agent_ref in agent_refs
             ]
 
         finally:
@@ -615,9 +1048,44 @@ class ProviderInstanceInterface(MutableModel, ABC):
         only accessed by mngr and contains trusted metadata.
 
         Returns None if the provider does not support host volumes or if
-        no volume exists for the given host.
+        no volume exists for the given host. Providers whose volume lookup is a
+        lazy reference (e.g. Modal) confirm existence with a network probe here;
+        callers that only need a reference and want to skip that probe should use
+        :meth:`get_volume_reference_for_host`.
         """
         return None
+
+    def get_volume_reference_for_host(self, host: HostInterface | HostId) -> HostVolume | None:
+        """Return a host-volume *reference* without verifying it exists.
+
+        Like :meth:`get_volume_for_host`, but skips any network existence probe:
+        it returns a possibly-unverified reference (operations on a since-deleted
+        volume fail at access time). Used by ``make_readable_offline_host`` to
+        construct a readable offline host cheaply, with no per-host probe during
+        host discovery.
+
+        The default delegates to :meth:`get_volume_for_host` -- correct for
+        providers that have no existence probe (their lookup is already cheap).
+        Providers that *do* probe (Modal) override this to skip it.
+        """
+        return self.get_volume_for_host(host)
+
+    # =========================================================================
+    # Garbage Collection Hooks
+    # =========================================================================
+
+    def gc_provider_resources(self, dry_run: bool) -> list[ProviderResourceInfo]:
+        """Reclaim orphaned provider-level cloud resources not attached to any live host.
+
+        Default no-op. Providers whose create path can leave stray cloud resources
+        behind override this to reclaim them at GC time -- e.g. Azure provisions a
+        per-VM NIC + public IP before the VM and reserves them for 180s after a
+        failed create, so they cannot be cleaned up synchronously and are instead
+        reaped here. Called once per provider by ``mngr gc``; when ``dry_run`` is
+        True, report what would be reclaimed without deleting anything. Returns the
+        resources reclaimed (or, under dry-run, that would be).
+        """
+        return []
 
     # =========================================================================
     # Host Mutation Methods

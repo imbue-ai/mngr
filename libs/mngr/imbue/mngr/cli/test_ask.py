@@ -23,7 +23,12 @@ pytestmark = pytest.mark.skipif(not is_claude_installed(), reason="Claude Code C
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_ask_simple_query(temp_git_repo: Path) -> None:
-    """mngr ask should return a non-empty response from Claude."""
+    """Verify `mngr ask --format json` drives a real Claude agent end-to-end and returns its answer.
+
+    Asserts the command exits 0 and that the parsed JSON payload's `response` field is non-empty.
+    This fails if the agent never runs, the query is not delivered, or the response is empty/missing,
+    so it confirms a genuine round-trip rather than just successful argument parsing.
+    """
     env = setup_claude_trust_config_for_subprocess([temp_git_repo])
     result = run_mngr_subprocess(
         "ask",

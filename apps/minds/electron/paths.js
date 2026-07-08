@@ -35,6 +35,38 @@ function getGitBinDir() {
   return path.dirname(getGitPath());
 }
 
+function getLimaPath() {
+  return path.join(getResourcesDir(), 'lima', 'bin', 'limactl');
+}
+
+function getLimaBinDir() {
+  return path.dirname(getLimaPath());
+}
+
+function getDesyncPath() {
+  return path.join(getResourcesDir(), 'desync', 'desync');
+}
+
+function getDesyncBinDir() {
+  return path.dirname(getDesyncPath());
+}
+
+/**
+ * Path to the bundled restic binary used by the desktop client to
+ * provision and query per-workspace backup repositories.
+ *
+ * Both dev and packaged mode resolve to ``resources/restic/restic``:
+ * build.js downloads restic per target platform into that location via
+ * scripts/download-binaries.js. In dev, ``pnpm start`` runs the
+ * ``prestart`` hook (``node scripts/download-binaries.js``) so the
+ * binary is present before Electron boots, mirroring the bundled-app
+ * UX -- a Minds end user (or dev) should never have to install restic
+ * separately.
+ */
+function getResticPath() {
+  return path.join(getResourcesDir(), 'restic', 'restic');
+}
+
 /**
  * Path to the Latchkey CLI shipped as an npm dependency of this app.
  *
@@ -202,8 +234,13 @@ module.exports = {
   getUvBinDir,
   getGitPath,
   getGitBinDir,
+  getLimaPath,
+  getLimaBinDir,
+  getDesyncPath,
+  getDesyncBinDir,
   getLatchkeyPath,
   getLatchkeyDirectory,
+  getResticPath,
   getMindsRootName,
   getDataDir,
   getMngrHostDir,

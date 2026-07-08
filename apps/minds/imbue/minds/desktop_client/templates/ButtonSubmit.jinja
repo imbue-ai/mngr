@@ -1,0 +1,21 @@
+{#def variant="primary", size="md", extra="", form="", block=false, disabled=false #}
+{#
+  <button type="submit">. Use inside a <form> (or pass ``form="..."``) for
+  form submission. Usage:
+    <ButtonSubmit variant="primary" form="create-form">Save</ButtonSubmit>
+    <ButtonSubmit variant="primary" size="lg" block id="signup-btn">Create account</ButtonSubmit>
+
+  Pulls its base class string, sizes map, and variants map from the
+  Catalog globals ``BTN_BASE`` / ``BTN_SIZES`` / ``BTN_VARIANTS`` (defined
+  in templates.py).
+
+  ``disabled`` toggles the initial ``disabled`` attribute (JS can flip it
+  back on/off after first paint). The disabled-state utility classes are
+  already part of ``BTN_BASE`` so no extra styling is needed.
+
+  Any HTML attribute on the tag that is not declared above (id=, title=,
+  aria-*, data-*) flows through via JinjaX's ``attrs`` passthrough.
+#}
+{%- set _cls = BTN_BASE ~ " " ~ BTN_SIZES[size] ~ " " ~ BTN_VARIANTS[variant] ~ (" w-full" if block else "") ~ " " ~ extra -%}
+{%- set _form_arg = {"form": form} if form else {} -%}
+<button {{ attrs.render(type="submit", classes=_cls, disabled=disabled, **_form_arg) }}>{{ content }}</button>

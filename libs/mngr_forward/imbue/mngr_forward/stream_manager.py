@@ -3,13 +3,16 @@
 Adapted from ``minds.desktop_client.backend_resolver.MngrStreamManager``,
 slimmed to the parts the plugin needs:
 
-- One ``mngr observe --discovery-only --quiet`` subprocess produces discovery
-  events. Lines pass through to the envelope writer's ``observe`` stream and
-  drive the ``ForwardResolver``'s known-agent set + per-host SSH info.
-- One ``mngr event <id> services requests refresh --follow --quiet`` per
-  filter-matching agent produces service-registration / request / refresh
-  events. Lines pass through to the envelope writer's ``event`` stream and
-  drive the resolver's per-agent service map.
+- Discovery events come from one of two sources: a ``mngr observe
+  --discovery-only --quiet`` subprocess (default), or, when
+  ``discovery_events_path`` is set (``mngr forward --observe-via-file``), an
+  in-process tail of a shared discovery events file written by another
+  observer. Either way lines drive the envelope writer's ``observe`` stream and
+  the ``ForwardResolver``'s known-agent set + per-host SSH info.
+- One ``mngr event <id> services requests --follow --quiet`` per
+  filter-matching agent produces service-registration / request events.
+  Lines pass through to the envelope writer's ``event`` stream and drive
+  the resolver's per-agent service map.
 - ``bounce_observe()`` terminates only the observe subprocess and respawns it
   with the same args; per-agent event subprocesses, registered callbacks, and
   resolver state survive.
@@ -33,14 +36,20 @@ from pydantic import PrivateAttr
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.concurrency_group import InvalidConcurrencyGroupStateError
 from imbue.concurrency_group.local_process import RunningProcess
+from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.mngr.api.discovery_aggregator import AggregatorDelta
+from imbue.mngr.api.discovery_aggregator import DiscoveryStateAggregator
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
 from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
 from imbue.mngr.api.discovery_events import DiscoveryErrorEvent
-from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
+from imbue.mngr.api.discovery_events import DiscoveryEvent
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
+from imbue.mngr.api.discovery_events import HostDiscoveryEvent
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
+from imbue.mngr.api.discovery_events import ProviderDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
+from imbue.mngr.api.discovery_events import tail_discovery_events_file
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.utils.cel_utils import apply_cel_filters_to_context
@@ -52,7 +61,6 @@ from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 _SERVICES_SOURCE = "services"
 _REQUESTS_SOURCE = "requests"
-_REFRESH_SOURCE = "refresh"
 
 
 OnAgentDiscoveredCallback = Callable[[AgentId, RemoteSSHInfo | None, str], None]
@@ -65,6 +73,15 @@ class ForwardStreamManager(MutableModel):
     resolver: ForwardResolver = Field(frozen=True, description="Resolver to update")
     envelope_writer: EnvelopeWriter = Field(frozen=True, description="Where parsed lines fan out to")
     mngr_binary: str = Field(default=MNGR_BINARY, frozen=True, description="Path to the mngr binary")
+    discovery_events_path: Path | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "If set (``--observe-via-file``), discovery is driven by tailing this discovery events file "
+            "in-process instead of spawning a ``mngr observe`` subprocess. Used when another process "
+            "(e.g. ``mngr latchkey forward``) is the sole discovery observer writing this shared log."
+        ),
+    )
     agent_include: tuple[str, ...] = Field(
         default=(),
         frozen=True,
@@ -76,7 +93,7 @@ class ForwardStreamManager(MutableModel):
         description="CEL exclude filters for which agents the plugin tracks",
     )
     event_sources: tuple[str, ...] = Field(
-        default=(_SERVICES_SOURCE, _REQUESTS_SOURCE, _REFRESH_SOURCE),
+        default=(_SERVICES_SOURCE, _REQUESTS_SOURCE),
         frozen=True,
         description="Source streams to follow per-agent (passed to ``mngr event``)",
     )
@@ -97,10 +114,10 @@ class ForwardStreamManager(MutableModel):
 
     _cg: ConcurrencyGroup = PrivateAttr(default_factory=lambda: ConcurrencyGroup(name="mngr-forward-stream"))
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
-    _agent_host_map: dict[str, str] = PrivateAttr(default_factory=dict)
+    _aggregator: DiscoveryStateAggregator = PrivateAttr(default_factory=DiscoveryStateAggregator)
     _ssh_by_host_id: dict[str, RemoteSSHInfo] = PrivateAttr(default_factory=dict)
-    _discovered_agents: dict[str, DiscoveredAgent] = PrivateAttr(default_factory=dict)
     _observe_process: RunningProcess | None = PrivateAttr(default=None)
+    _tail_stop_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     _events_processes: dict[str, RunningProcess] = PrivateAttr(default_factory=dict)
     _events_services: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
     _on_agent_discovered_callbacks: list[OnAgentDiscoveredCallback] = PrivateAttr(default_factory=list)
@@ -163,12 +180,16 @@ class ForwardStreamManager(MutableModel):
     # -- lifecycle ---------------------------------------------------------
 
     def start(self) -> None:
-        """Start the observe subprocess. Per-agent event subprocesses are started lazily."""
+        """Start discovery (observe subprocess, or file tail). Per-agent event subprocesses start lazily."""
         self._cg.__enter__()
-        self._observe_process = self._spawn_observe()
+        if self.discovery_events_path is not None:
+            self._start_tail_discovery()
+        else:
+            self._observe_process = self._spawn_observe()
 
     def stop(self) -> None:
-        """Terminate every managed subprocess and exit the ConcurrencyGroup."""
+        """Terminate every managed subprocess (and stop the file tail) and exit the ConcurrencyGroup."""
+        self._tail_stop_event.set()
         for process in self._all_managed_processes():
             try:
                 process.terminate()
@@ -184,6 +205,12 @@ class ForwardStreamManager(MutableModel):
         ``settings.toml`` provider changes take effect without restarting
         the whole plugin.
         """
+        if self.discovery_events_path is not None:
+            # --observe-via-file mode owns no observe child: the shared discovery
+            # log's writer (another `mngr observe`) re-emits a fresh snapshot that
+            # the tailer picks up on its own, so a bounce here is a no-op.
+            logger.debug("bounce_observe: --observe-via-file mode, nothing to bounce")
+            return
         if self._observe_process is None:
             logger.debug("bounce_observe: no observe process running; skipping")
             return
@@ -208,6 +235,23 @@ class ForwardStreamManager(MutableModel):
             is_checked_by_group=False,
         )
 
+    def _start_tail_discovery(self) -> None:
+        """Tail the shared discovery events file in-process instead of spawning observe."""
+        self._cg.start_new_thread(
+            target=self._run_tail_discovery,
+            name="mngr-forward-discovery-tail",
+            daemon=True,
+            is_checked=False,
+        )
+
+    def _run_tail_discovery(self) -> None:
+        assert self.discovery_events_path is not None
+        tail_discovery_events_file(
+            events_path=self.discovery_events_path,
+            stop_event=self._tail_stop_event,
+            on_line=self._process_observe_line,
+        )
+
     def _all_managed_processes(self) -> list[RunningProcess]:
         result: list[RunningProcess] = []
         if self._observe_process is not None:
@@ -221,6 +265,14 @@ class ForwardStreamManager(MutableModel):
             if stripped:
                 logger.debug("mngr observe stderr: {}", stripped)
             return
+        self._process_observe_line(line)
+
+    def _process_observe_line(self, line: str) -> None:
+        """Parse one discovery JSONL line into the envelope + resolver state.
+
+        Shared by the subprocess observe reader (``_on_observe_output``) and the
+        ``--observe-via-file`` tailer (``_run_tail_discovery``).
+        """
         stripped = line.strip()
         if not stripped:
             return
@@ -237,18 +289,19 @@ class ForwardStreamManager(MutableModel):
             return
         self._handle_discovery_event(event)
 
-    def _handle_discovery_event(self, event: Any) -> None:
-        if isinstance(event, FullDiscoverySnapshotEvent):
-            self._handle_full_snapshot(event)
+    def _handle_discovery_event(self, event: DiscoveryEvent) -> None:
+        if isinstance(event, ProviderDiscoverySnapshotEvent):
+            self._handle_provider_snapshot(event)
         elif isinstance(event, HostSSHInfoEvent):
             self._handle_host_ssh_info(event)
         elif isinstance(event, AgentDiscoveryEvent):
             self._handle_agent_discovered(event)
-        elif isinstance(event, AgentDestroyedEvent):
-            self._handle_agent_destroyed(event)
-        elif isinstance(event, HostDestroyedEvent):
-            self._handle_host_destroyed(event)
+        elif isinstance(event, (HostDiscoveryEvent, AgentDestroyedEvent, HostDestroyedEvent)):
+            self._apply_event_and_reconcile(event)
         elif isinstance(event, DiscoveryErrorEvent):
+            # Fold into the aggregator so its per-provider error map stays current,
+            # then surface the error to the operator.
+            self._aggregator.apply_event(event)
             logger.warning(
                 "Discovery error from {}: {} ({})",
                 event.source_name,
@@ -277,44 +330,58 @@ class ForwardStreamManager(MutableModel):
             error_context_description=f"agent {agent.agent_id}",
         )
 
-    def _handle_full_snapshot(self, event: FullDiscoverySnapshotEvent) -> None:
-        kept_ids: list[AgentId] = []
-        kept_agents: dict[str, DiscoveredAgent] = {}
-        agent_host_map: dict[str, str] = {}
-        for agent in event.agents:
-            if not self._agent_passes_filter(agent):
-                continue
-            kept_ids.append(agent.agent_id)
-            kept_agents[str(agent.agent_id)] = agent
-            agent_host_map[str(agent.agent_id)] = str(agent.host_id)
+    def _handle_provider_snapshot(self, event: ProviderDiscoverySnapshotEvent) -> None:
+        # Drop agents that the plugin's CEL filters exclude before folding the
+        # snapshot in, so the aggregator only ever tracks agents we manage.
+        filtered_agents = tuple(agent for agent in event.agents if self._agent_passes_filter(agent))
+        filtered_event = event.model_copy_update(to_update(event.field_ref().agents, filtered_agents))
+        self._apply_event_and_reconcile(filtered_event)
+        # A per-agent events stream can die (e.g. its host rebooted and broke the
+        # long-lived --follow connection). Nothing respawns it on its own, so the
+        # periodic snapshot drives the retry: re-start it for every agent the
+        # aggregator still tracks (the call is a no-op for live ones). Restrict this
+        # to agents the aggregator kept -- it is span-aware and deliberately does not
+        # re-add an agent whose own destroy event landed during this snapshot's span,
+        # so restarting a stream from the raw event.agents would resurrect (and never
+        # tear down) a stream for an agent already considered gone.
+        present_agent_ids = self._aggregator.get_agent_by_id()
+        for agent in filtered_agents:
+            if str(agent.agent_id) in present_agent_ids:
+                self._start_events_stream(agent.agent_id)
 
+    def _apply_event_and_reconcile(self, event: DiscoveryEvent) -> None:
+        """Fold one discovery event into the aggregator and apply the resulting membership delta."""
+        delta = self._aggregator.apply_event(event)
+        # The aggregator is now the source of truth for the known-agent set; sync
+        # the resolver to its full (all-provider) view so a per-provider snapshot
+        # never clobbers agents owned by other providers.
+        self.resolver.update_known_agents(tuple(AgentId(aid) for aid in self._aggregator.get_agent_by_id()))
+        self._apply_membership_delta(delta)
+
+    def _apply_membership_delta(self, delta: AggregatorDelta) -> None:
+        for host_id_str in delta.removed_host_ids:
+            with self._lock:
+                self._ssh_by_host_id.pop(host_id_str, None)
+        for agent_id_str in delta.removed_agent_ids:
+            self._teardown_agent(AgentId(agent_id_str))
+        for agent_id_str in delta.added_agent_ids:
+            self._setup_agent(AgentId(agent_id_str))
+
+    def _setup_agent(self, agent_id: AgentId) -> None:
+        ssh_info = self._ssh_for_agent(agent_id)
+        if ssh_info is not None:
+            self.resolver.update_ssh_info(agent_id, ssh_info)
+        self._start_events_stream(agent_id)
+        provider_name = self._provider_name_for_agent(agent_id)
+        for callback in self._on_agent_discovered_callbacks:
+            self._safely_call(callback, agent_id, ssh_info, provider_name, name="on_agent_discovered")
+
+    def _teardown_agent(self, agent_id: AgentId) -> None:
         with self._lock:
-            previously_known = set(self._discovered_agents.keys())
-            self._discovered_agents = kept_agents
-            self._agent_host_map = agent_host_map
-            new_known = set(agent_host_map.keys())
-            removed = previously_known - new_known
-
-        self.resolver.update_known_agents(tuple(kept_ids))
-
-        for aid_str in removed:
-            self._stop_events_stream(AgentId(aid_str))
-            for callback in self._on_agent_destroyed_callbacks:
-                self._safely_call(callback, AgentId(aid_str), name="on_agent_destroyed")
-
-        for agent in kept_agents.values():
-            ssh_info = self._ssh_for_agent(agent.agent_id)
-            if ssh_info is not None:
-                self.resolver.update_ssh_info(agent.agent_id, ssh_info)
-            self._start_events_stream(agent.agent_id)
-            for callback in self._on_agent_discovered_callbacks:
-                self._safely_call(
-                    callback,
-                    agent.agent_id,
-                    ssh_info,
-                    str(agent.provider_name),
-                    name="on_agent_discovered",
-                )
+            self._events_services.pop(str(agent_id), None)
+        self._stop_events_stream(agent_id)
+        for callback in self._on_agent_destroyed_callbacks:
+            self._safely_call(callback, agent_id, name="on_agent_destroyed")
 
     def _handle_host_ssh_info(self, event: HostSSHInfoEvent) -> None:
         ssh_info = RemoteSSHInfo(
@@ -326,7 +393,10 @@ class ForwardStreamManager(MutableModel):
         host_id_str = str(event.host_id)
         with self._lock:
             self._ssh_by_host_id[host_id_str] = ssh_info
-            agents_on_host = [AgentId(aid) for aid, hid in self._agent_host_map.items() if hid == host_id_str]
+        self._aggregator.apply_event(event)
+        agents_on_host = [
+            agent.agent_id for agent in self._aggregator.get_agents() if str(agent.host_id) == host_id_str
+        ]
 
         for agent_id in agents_on_host:
             self.resolver.update_ssh_info(agent_id, ssh_info)
@@ -340,57 +410,19 @@ class ForwardStreamManager(MutableModel):
                 )
 
     def _handle_agent_discovered(self, event: AgentDiscoveryEvent) -> None:
-        agent = event.agent
-        if not self._agent_passes_filter(agent):
+        if not self._agent_passes_filter(event.agent):
             return
-        aid_str = str(agent.agent_id)
-        with self._lock:
-            self._discovered_agents[aid_str] = agent
-            self._agent_host_map[aid_str] = str(agent.host_id)
-        self.resolver.add_known_agent(agent.agent_id)
-        ssh_info = self._ssh_for_agent(agent.agent_id)
-        if ssh_info is not None:
-            self.resolver.update_ssh_info(agent.agent_id, ssh_info)
-        self._start_events_stream(agent.agent_id)
-        for callback in self._on_agent_discovered_callbacks:
-            self._safely_call(
-                callback,
-                agent.agent_id,
-                ssh_info,
-                str(agent.provider_name),
-                name="on_agent_discovered",
-            )
-
-    def _handle_agent_destroyed(self, event: AgentDestroyedEvent) -> None:
-        self._destroy_agent(event.agent_id)
-
-    def _handle_host_destroyed(self, event: HostDestroyedEvent) -> None:
-        for agent_id in event.agent_ids:
-            self._destroy_agent(agent_id)
-        with self._lock:
-            self._ssh_by_host_id.pop(str(event.host_id), None)
-
-    def _destroy_agent(self, agent_id: AgentId) -> None:
-        aid_str = str(agent_id)
-        with self._lock:
-            self._discovered_agents.pop(aid_str, None)
-            self._agent_host_map.pop(aid_str, None)
-            self._events_services.pop(aid_str, None)
-        self.resolver.remove_known_agent(agent_id)
-        self._stop_events_stream(agent_id)
-        for callback in self._on_agent_destroyed_callbacks:
-            self._safely_call(callback, agent_id, name="on_agent_destroyed")
+        self._apply_event_and_reconcile(event)
 
     def _ssh_for_agent(self, agent_id: AgentId) -> RemoteSSHInfo | None:
+        agent = self._aggregator.get_agent_by_id().get(str(agent_id))
+        if agent is None:
+            return None
         with self._lock:
-            host_id = self._agent_host_map.get(str(agent_id))
-            if host_id is None:
-                return None
-            return self._ssh_by_host_id.get(host_id)
+            return self._ssh_by_host_id.get(str(agent.host_id))
 
     def _provider_name_for_agent(self, agent_id: AgentId) -> str:
-        with self._lock:
-            agent = self._discovered_agents.get(str(agent_id))
+        agent = self._aggregator.get_agent_by_id().get(str(agent_id))
         if agent is None:
             return "unknown"
         return str(agent.provider_name)
@@ -406,9 +438,30 @@ class ForwardStreamManager(MutableModel):
             return
         aid_str = str(agent_id)
         with self._lock:
-            if aid_str in self._events_processes:
+            existing = self._events_processes.get(aid_str)
+            if existing is not None and existing.poll() is None:
+                # A live events stream is already running for this agent.
                 return
-            self._events_services[aid_str] = {}
+            if existing is not None:
+                # The previous stream exited -- most often because the agent's
+                # host restarted (e.g. after a reboot) and broke the long-lived
+                # ``mngr event ... --follow`` connection, which then exits
+                # non-zero. Nothing respawns it on its own, so the resolver's
+                # per-agent service map would stay empty forever and
+                # ``resolve`` would keep returning None (a permanent 503).
+                # Drop the dead entry and respawn below; the periodic discovery
+                # snapshot drives this retry, rate-limiting respawns to the
+                # snapshot cadence.
+                logger.info(
+                    "Per-agent events stream for {} exited (returncode={}); respawning",
+                    agent_id,
+                    existing.returncode,
+                )
+                self._events_processes.pop(aid_str, None)
+            # Preserve any already-known services across a respawn (the new
+            # stream re-emits current registrations on connect); only seed an
+            # empty map on the first spawn.
+            self._events_services.setdefault(aid_str, {})
         sources: Sequence[str] = self._filtered_event_sources
         try:
             process = self._cg.run_process_in_background(
@@ -460,8 +513,8 @@ class ForwardStreamManager(MutableModel):
             return
         source = raw.get("source")
         if source != _SERVICES_SOURCE:
-            # Requests / refresh events are passed through to consumers via
-            # the envelope; the plugin doesn't consume them itself.
+            # Request events are passed through to consumers via the
+            # envelope; the plugin doesn't consume them itself.
             return
 
         event_type = raw.get("type", "service_registered")

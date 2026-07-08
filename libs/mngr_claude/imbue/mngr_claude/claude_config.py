@@ -1,5 +1,6 @@
 import copy
 import fcntl
+import functools
 import json
 import os
 import re
@@ -15,7 +16,6 @@ from loguru import logger
 
 from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import ConfigError
-from imbue.mngr.errors import UserInputError
 from imbue.mngr.utils.file_utils import atomic_write
 
 
@@ -114,24 +114,48 @@ def get_user_claude_config_dir() -> Path:
 
 
 def resolve_shared_claude_config_dir() -> Path:
-    """Return the value of $CLAUDE_CONFIG_DIR. Raises UserInputError if unset or empty.
+    """Return $CLAUDE_CONFIG_DIR, falling back to ``~/.claude/`` when unset.
 
-    Used by the ``use_env_config_dir`` mode of ``ClaudeAgentConfig`` where mngr
-    delegates the claude config dir to whatever the user has in their shell env
-    rather than provisioning a per-agent dir. The flag is meaningless unless
-    the env var is set, so this helper makes the failure mode explicit.
+    Used by the shared (``isolate_local_config_dir=False``) mode of
+    ``ClaudeAgentConfig`` where mngr delegates the claude config dir to whatever
+    the user has in their shell env rather than provisioning a per-agent dir. The
+    fallback to ``~/.claude/`` matches the directory claude itself picks when
+    ``CLAUDE_CONFIG_DIR`` is unset. This resolves a *directory path* for mngr-side
+    bookkeeping (e.g. locating shared session files); it is NOT what mngr exports
+    into the agent's environment. Exporting ``CLAUDE_CONFIG_DIR=~/.claude`` is not
+    equivalent to leaving it unset -- claude reads its global ``.claude.json`` from
+    ``$CLAUDE_CONFIG_DIR/.claude.json`` when the var is set but from
+    ``~/.claude.json`` when it is unset -- so ``modify_env_vars`` only propagates
+    the var when the user's shell already had it set. The fallback path is shared
+    (not per-agent), which is the whole point of the flag.
+    """
+    return get_claude_config_dir()
+
+
+def find_user_config_in_unisolated_mode() -> Path:
+    """Find the global ``.claude.json`` that claude reads in shared (non-isolated) mode.
+
+    In shared mode (``isolate_local_config_dir=False``) mngr does not provision a
+    per-agent config dir; the agent's claude reads the user's own global config.
+    That file is ``$CLAUDE_CONFIG_DIR/.claude.json`` when the user's shell exports
+    ``CLAUDE_CONFIG_DIR`` (the custom-dir convention) and ``~/.claude.json``
+    otherwise (claude's default, beside ``~/.claude/``). This mirrors the directory
+    resolution in ``resolve_shared_claude_config_dir`` and the ``CLAUDE_CONFIG_DIR``
+    propagation in ``ClaudeAgent.modify_env_vars`` so that dialog-dismissal writes
+    land in the same file the agent's claude will actually read.
+
+    This differs from ``find_user_config_in_isolated_mode``, which keys off
+    ``$ORIGINAL_CLAUDE_CONFIG_DIR`` (set only *inside* an agent) and is the right
+    resolver for the isolated path; it would ignore a shared user's
+    ``$CLAUDE_CONFIG_DIR`` and point at the wrong file.
     """
     env_dir = os.environ.get("CLAUDE_CONFIG_DIR")
-    if not env_dir:
-        raise UserInputError(
-            "use_env_config_dir=True requires $CLAUDE_CONFIG_DIR to be set in the parent "
-            "process environment, but it is unset (or empty). Either set CLAUDE_CONFIG_DIR "
-            "to the directory you want claude agents to share, or set use_env_config_dir=False."
-        )
-    return Path(env_dir)
+    if env_dir:
+        return Path(env_dir) / ".claude.json"
+    return Path.home() / ".claude.json"
 
 
-def find_user_claude_config() -> Path:
+def find_user_config_in_isolated_mode() -> Path:
     """Find the user-scope Claude config file (.claude.json).
 
     Returns the first candidate path that exists on disk. If none exist,
@@ -324,19 +348,34 @@ def remove_claude_trust_for_path(config_path: Path, path: Path) -> bool:
     return True
 
 
-def is_effort_callout_dismissed(config_path: Path) -> bool:
-    """Check whether the effort callout has been dismissed in the given config file.
-
-    Returns True if effortCalloutDismissed is true in the config file.
-    """
+def _get_boolean_flag(config_path: Path, key: str) -> bool:
+    """Return whether the given boolean flag is set to true in the config file."""
     config = read_claude_config(config_path)
-    return bool(config.get("effortCalloutDismissed", False))
+    return bool(config.get(key, False))
+
+
+def _set_boolean_flag(config_path: Path, key: str) -> bool:
+    """Set the given boolean flag to true in the config file. No-op if already set.
+
+    Acquires the config lock, reads, and atomically writes the updated config.
+    Returns True if it wrote (the flag was newly set), False if it was already set.
+    """
+    with _claude_config_lock(config_path):
+        config = read_claude_config(config_path)
+        if config.get(key, False):
+            return False
+        config[key] = True
+        _write_claude_config_atomic(config_path, config)
+    return True
+
+
+def is_effort_callout_dismissed(config_path: Path) -> bool:
+    """Check whether the effort callout has been dismissed in the given config file."""
+    return _get_boolean_flag(config_path, "effortCalloutDismissed")
 
 
 def check_effort_callout_dismissed(config_path: Path) -> None:
     """Check that the effort callout has been dismissed in the given config file.
-
-    Reads the config file and verifies that effortCalloutDismissed is true.
 
     Raises ClaudeEffortCalloutNotDismissedError if the effort callout has not
     been dismissed.
@@ -346,24 +385,14 @@ def check_effort_callout_dismissed(config_path: Path) -> None:
 
 
 def dismiss_effort_callout(config_path: Path) -> None:
-    """Set effortCalloutDismissed=true in the given config file.
-
-    Acquires the config lock and sets the field. No-op if already set.
-    """
-    with _claude_config_lock(config_path):
-        config = read_claude_config(config_path)
-        if config.get("effortCalloutDismissed", False):
-            return
-        config["effortCalloutDismissed"] = True
-        _write_claude_config_atomic(config_path, config)
-
-    logger.trace("Dismissed effort callout in Claude config")
+    """Set effortCalloutDismissed=true in the given config file. No-op if already set."""
+    if _set_boolean_flag(config_path, "effortCalloutDismissed"):
+        logger.trace("Dismissed effort callout in Claude config")
 
 
 def is_onboarding_completed(config_path: Path) -> bool:
     """Check whether onboarding has been completed in the given config file."""
-    config = read_claude_config(config_path)
-    return bool(config.get("hasCompletedOnboarding", False))
+    return _get_boolean_flag(config_path, "hasCompletedOnboarding")
 
 
 def check_onboarding_completed(config_path: Path) -> None:
@@ -374,20 +403,13 @@ def check_onboarding_completed(config_path: Path) -> None:
 
 def complete_onboarding(config_path: Path) -> None:
     """Set hasCompletedOnboarding=true in the given config file. No-op if already set."""
-    with _claude_config_lock(config_path):
-        config = read_claude_config(config_path)
-        if config.get("hasCompletedOnboarding", False):
-            return
-        config["hasCompletedOnboarding"] = True
-        _write_claude_config_atomic(config_path, config)
-
-    logger.trace("Marked onboarding as completed in Claude config")
+    if _set_boolean_flag(config_path, "hasCompletedOnboarding"):
+        logger.trace("Marked onboarding as completed in Claude config")
 
 
 def is_bypass_permissions_accepted(config_path: Path) -> bool:
     """Check whether the bypass permissions prompt has been accepted in the given config file."""
-    config = read_claude_config(config_path)
-    return bool(config.get("bypassPermissionsModeAccepted", False))
+    return _get_boolean_flag(config_path, "bypassPermissionsModeAccepted")
 
 
 def check_bypass_permissions_accepted(config_path: Path) -> None:
@@ -398,26 +420,14 @@ def check_bypass_permissions_accepted(config_path: Path) -> None:
 
 def accept_bypass_permissions(config_path: Path) -> None:
     """Set bypassPermissionsModeAccepted=true in the given config file. No-op if already set."""
-    with _claude_config_lock(config_path):
-        config = read_claude_config(config_path)
-        if config.get("bypassPermissionsModeAccepted", False):
-            return
-        config["bypassPermissionsModeAccepted"] = True
-        _write_claude_config_atomic(config_path, config)
-
-    logger.trace("Accepted bypass permissions in Claude config")
+    if _set_boolean_flag(config_path, "bypassPermissionsModeAccepted"):
+        logger.trace("Accepted bypass permissions in Claude config")
 
 
 def acknowledge_cost_threshold(config_path: Path) -> None:
     """Set hasAcknowledgedCostThreshold=true in the given config file. No-op if already set."""
-    with _claude_config_lock(config_path):
-        config = read_claude_config(config_path)
-        if config.get("hasAcknowledgedCostThreshold", False):
-            return
-        config["hasAcknowledgedCostThreshold"] = True
-        _write_claude_config_atomic(config_path, config)
-
-    logger.trace("Acknowledged cost threshold in Claude config")
+    if _set_boolean_flag(config_path, "hasAcknowledgedCostThreshold"):
+        logger.trace("Acknowledged cost threshold in Claude config")
 
 
 def check_claude_dialogs_dismissed(config_path: Path, source_path: Path) -> None:
@@ -498,10 +508,81 @@ def encode_claude_project_dir_name(path: Path) -> str:
     anthropics/claude-code#19972. If this encoder diverges from Claude
     Code's, ``on_after_provisioning`` writes the adopted JSONL to a
     project subdir Claude Code never reads on resume, the find guard in
-    ``assemble_command`` returns no match, and ``--adopt-session``
+    ``assemble_command`` returns no match, and ``--adopt``
     silently spawns a fresh session via the ``||`` fallback.
     """
     return _NON_DASH_ALNUM_ASCII.sub("-", str(path))
+
+
+# =============================================================================
+# Per-agent Claude artifact directory ($MNGR_AGENT_STATE_DIR/plugin/claude/)
+# =============================================================================
+
+# Single source of truth for the per-agent ``plugin/claude/`` layout (relative to
+# $MNGR_AGENT_STATE_DIR). It holds the isolated config dir (``anthropic/``), the
+# response-stream buffers, and the managed settings file, and is preserved as part
+# of the agent's ``plugin/`` subtree on clone. Routing every accessor through
+# ``get_agent_claude_plugin_dir`` keeps those call sites from drifting.
+_AGENT_CLAUDE_PLUGIN_SUBPATH: Final[tuple[str, ...]] = ("plugin", "claude")
+
+# Filename of the file holding all of mngr's Claude hooks, loaded via
+# ``claude --settings``. Now used only in ``use_env_config_dir`` mode: there is no
+# per-agent config dir to bake hooks into, so mngr loads them from this file
+# instead. (In normal mode the hooks live in the per-agent config-dir
+# ``settings.json`` -- the "user" layer Claude reads -- and this file is unused.)
+# It lives in the agent's private state dir rather than the project's
+# ``.claude/settings.local.json``, which every claude session in that directory
+# reads (including plain non-mngr ones) -- so mngr's hooks take effect only inside
+# the agent and never run in a plain ``claude`` session. mngr owns the file
+# outright and rewrites it fresh each provision.
+MANAGED_SETTINGS_FILENAME: Final[str] = "mngr_managed_settings.json"
+MANAGED_SETTINGS_RELATIVE_PATH: Final[tuple[str, ...]] = (*_AGENT_CLAUDE_PLUGIN_SUBPATH, MANAGED_SETTINGS_FILENAME)
+
+
+def get_agent_claude_plugin_dir(agent_state_dir: Path) -> Path:
+    """Return the per-agent directory holding mngr's Claude artifacts.
+
+    ``agent_state_dir`` is the agent's state directory (on-disk $MNGR_AGENT_STATE_DIR).
+    The directory holds the per-agent config dir (``anthropic/``), the response-stream
+    buffers, and the managed settings file. See ``_AGENT_CLAUDE_PLUGIN_SUBPATH``.
+    """
+    return agent_state_dir.joinpath(*_AGENT_CLAUDE_PLUGIN_SUBPATH)
+
+
+# Subdirectory of the per-agent ``plugin/claude/`` dir that is the agent's isolated
+# Claude config dir (the per-agent replacement for ``~/.claude/``). It holds the
+# config-dir ``settings.json`` (the "user" layer Claude reads from
+# $CLAUDE_CONFIG_DIR) and the session ``projects/`` subtree.
+_AGENT_CLAUDE_CONFIG_SUBDIR: Final[str] = "anthropic"
+
+
+def get_agent_claude_config_dir(agent_state_dir: Path) -> Path:
+    """Return the agent's isolated Claude config dir (per-agent replacement for ~/.claude/).
+
+    This is the directory Claude reads as ``$CLAUDE_CONFIG_DIR`` in normal mode;
+    its ``settings.json`` is the "user" settings layer mngr builds. Single source
+    of truth shared by ``ClaudeAgent.get_claude_config_dir`` and the
+    subagent-proxy plugin so the path never drifts between them.
+    """
+    return get_agent_claude_plugin_dir(agent_state_dir) / _AGENT_CLAUDE_CONFIG_SUBDIR
+
+
+def get_managed_settings_path(agent_state_dir: Path) -> Path:
+    """Return the agent's mngr-managed Claude settings file. See ``MANAGED_SETTINGS_FILENAME``."""
+    return get_agent_claude_plugin_dir(agent_state_dir) / MANAGED_SETTINGS_FILENAME
+
+
+def get_agent_hook_settings_path(agent_state_dir: Path, *, use_env_config_dir: bool) -> Path:
+    """Return the settings file mngr's Claude hooks live in for this agent.
+
+    In ``use_env_config_dir`` mode the managed ``--settings`` file (no per-agent config dir
+    exists); otherwise the per-agent config-dir ``settings.json`` (the "user" layer Claude
+    reads, built by ``_build_settings_json``). Single source of truth shared by mngr_claude
+    and the subagent-proxy plugin so the branch never drifts between them.
+    """
+    if use_env_config_dir:
+        return get_managed_settings_path(agent_state_dir)
+    return get_agent_claude_config_dir(agent_state_dir) / "settings.json"
 
 
 # =============================================================================
@@ -511,6 +592,15 @@ def encode_claude_project_dir_name(path: Path) -> str:
 # Guard prefix for readiness hook commands: exit gracefully if this is not the
 # main Claude session (e.g. a reviewer sub-agent that resumed a session).
 SESSION_GUARD: Final[str] = '[ -z "$MAIN_CLAUDE_SESSION_ID" ] && exit 0; '
+
+# Shell snippet that marks the agent idle: removes the 'active' and
+# 'permissions_waiting' marker files (so get_lifecycle_state reports WAITING
+# rather than RUNNING) and emits an activity event so `mngr observe` promptly
+# re-fetches the agent's state. Shared by the Notification idle_prompt hook and
+# the SessionStart startup/resume hook so the two stay byte-identical.
+_CLEAR_ACTIVE_MARKERS_AND_EMIT_ACTIVITY_EVENT: Final[str] = (
+    """rm -f "$MNGR_AGENT_STATE_DIR/active" "$MNGR_AGENT_STATE_DIR/permissions_waiting" && mkdir -p $MNGR_HOST_DIR/events/mngr/activity && echo '{"source": "mngr/activity", "type": "activity", "event_id": "'"evt-$(head -c 16 /dev/urandom | xxd -p)"'", "timestamp": "'"$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z")"'"}' >> $MNGR_HOST_DIR/events/mngr/activity/events.jsonl"""
+)
 
 
 @pure
@@ -528,6 +618,13 @@ def build_readiness_hooks_config() -> dict[str, Any]:
       without this signal ``mngr message agent -m /clear`` would time out at
       ``enter_submission_timeout_seconds`` even though /clear actually executed.
       Filtering on source ensures normal startup/resume don't fire stale signals.
+      Finally, on ``startup``/``resume`` it clears the 'active' and
+      'permissions_waiting' markers (see below): a fresh Claude process is not
+      mid-turn, so any marker left over from a turn that was abandoned by an
+      abnormal exit (container restart, OOM, crash -- where the Stop hook never
+      ran) is stale and must be reset, otherwise the agent reports RUNNING
+      forever. ``compact`` is excluded because auto-compaction fires mid-turn
+      while Claude is genuinely active.
     - UserPromptSubmit: creates 'active' file, removes 'permissions_waiting', signals tmux wait-for
     - PermissionRequest: creates 'permissions_waiting' file (Claude is waiting for permission approval)
     - PostToolUse: removes 'permissions_waiting' file (tool completed, permission resolved)
@@ -547,6 +644,11 @@ def build_readiness_hooks_config() -> dict[str, Any]:
       format: "session_id source" where source comes from the hook payload)
     - active: Claude is processing user input (RUNNING lifecycle state, WAITING otherwise)
     - permissions_waiting: Claude is blocked on a permission dialog (always WAITING when present)
+    - claude_process_started: touched on every startup/resume SessionStart (a
+      fresh, not-mid-turn Claude process). Its mtime is the restart boundary:
+      a transcript event older than it belongs to a turn the current process
+      did not run, so consumers can treat such a tail as idle rather than
+      "still working". Deliberately NOT touched on compact (mid-turn).
 
     The tmux wait-for signal on UserPromptSubmit allows instant detection of
     message submission without polling.
@@ -595,6 +697,32 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                                 ' case "$_MNGR_SOURCE" in clear|compact)'
                                 " tmux wait-for -S \"mngr-submit-$(tmux display-message -p '#S')\" 2>/dev/null || true ;;"
                                 " esac"
+                            ),
+                        },
+                        {
+                            # A fresh Claude process (startup/resume) is never
+                            # mid-turn, so record the process-start time and reset
+                            # the activity markers. This heals the case where a
+                            # turn was abandoned by an abnormal exit (container
+                            # restart, OOM, crash): the Stop hook never ran to
+                            # clear 'active', so without this the agent would
+                            # report RUNNING forever after restart. The
+                            # 'claude_process_started' marker's mtime gives
+                            # consumers (e.g. the system interface activity
+                            # indicator) a restart boundary to compare transcript
+                            # timestamps against -- any transcript event older
+                            # than it belongs to a turn this process did not run.
+                            # Gated to startup|resume; compact is excluded because
+                            # auto-compaction fires mid-turn while Claude is active
+                            # (so it must NOT move the process-start boundary).
+                            "type": "command",
+                            "command": (
+                                SESSION_GUARD + "_MNGR_HOOK_INPUT=$(cat);"
+                                ' _MNGR_SOURCE=$(echo "$_MNGR_HOOK_INPUT" | jq -r ".source // empty");'
+                                ' case "$_MNGR_SOURCE" in startup|resume)'
+                                ' touch "$MNGR_AGENT_STATE_DIR/claude_process_started" && '
+                                + _CLEAR_ACTIVE_MARKERS_AND_EMIT_ACTIVITY_EVENT
+                                + " ;; esac"
                             ),
                         },
                     ]
@@ -652,8 +780,7 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": SESSION_GUARD
-                            + """rm -f "$MNGR_AGENT_STATE_DIR/active" "$MNGR_AGENT_STATE_DIR/permissions_waiting" && mkdir -p $MNGR_HOST_DIR/events/mngr/activity && echo '{"source": "mngr/activity", "type": "activity", "event_id": "'"evt-$(head -c 16 /dev/urandom | xxd -p)"'", "timestamp": "'"$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z")"'"}' >> $MNGR_HOST_DIR/events/mngr/activity/events.jsonl""",
+                            "command": SESSION_GUARD + _CLEAR_ACTIVE_MARKERS_AND_EMIT_ACTIVITY_EVENT,
                         },
                     ],
                 }
@@ -740,17 +867,17 @@ def hook_already_exists(existing_hooks: list[dict[str, Any]], new_hook: dict[str
     return False
 
 
-def merge_hooks_config(existing_settings: dict[str, Any], hooks_config: dict[str, Any]) -> dict[str, Any] | None:
+def merge_hooks_config(existing_settings: dict[str, Any], hooks_config: dict[str, Any]) -> dict[str, Any]:
     """Merge new hooks into existing settings, skipping duplicates.
 
-    Returns the merged settings dict if any hooks were added, or None if all
-    hooks already existed. Does not mutate the input dict.
+    Returns a new settings dict with any not-yet-present hooks appended -- equal by value
+    to ``existing_settings`` when every hook already existed. Does not mutate the input; a
+    caller that must avoid a redundant write compares the result against its input.
     """
     merged = copy.deepcopy(existing_settings)
     if "hooks" not in merged:
         merged["hooks"] = {}
 
-    any_added = False
     for event_name, event_hooks in hooks_config["hooks"].items():
         if event_name not in merged["hooks"]:
             merged["hooks"][event_name] = []
@@ -758,6 +885,14 @@ def merge_hooks_config(existing_settings: dict[str, Any], hooks_config: dict[str
         for new_hook in event_hooks:
             if not hook_already_exists(merged["hooks"][event_name], new_hook):
                 merged["hooks"][event_name].append(new_hook)
-                any_added = True
 
-    return merged if any_added else None
+    return merged
+
+
+def fold_hook_configs(base: dict[str, Any], hook_configs: list[dict[str, Any]]) -> dict[str, Any]:
+    """Fold a sequence of hook configs onto a base settings dict via ``merge_hooks_config``.
+
+    Each config is merged in order, skipping duplicate hooks. Returns the resulting
+    settings dict (equal by value to ``base`` if every hook already existed).
+    """
+    return functools.reduce(merge_hooks_config, hook_configs, base)

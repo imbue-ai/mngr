@@ -37,9 +37,11 @@ Plugins implement these to register new capabilities with mngr. They are called 
 | Hook                         | Description                                                                                                    |
 |------------------------------|----------------------------------------------------------------------------------------------------------------|
 | `register_agent_type`        | Register a new agent type (e.g., `claude`, `codex`, `opencode`)                                                |
+| `register_agent_aliases`     | Register short alternate names for agent types the plugin registers (e.g., `agy` for `antigravity`)            |
 | `register_provider_backend`  | Register a new provider backend (e.g., cloud platforms)                                                        |
 | `register_cli_commands`      | Define an entirely new CLI command                                                                             |
 | `register_cli_options`       | Add custom CLI options to any existing command's schema so that they appear in `--help`                        |
+| `register_help_topics`       | Add standalone help topic pages that appear in `mngr help` and `mngr help <topic>` when the plugin is installed |
 
 ### Deployment hooks
 
@@ -73,7 +75,7 @@ Called during `mngr create` and `mngr destroy` operations:
 
 | Hook                          | Description                                                                                       |
 |-------------------------------|---------------------------------------------------------------------------------------------------|
-| `on_before_host_create`       | Before creating a new host (receives host name and provider name). [experimental]                 |
+| `on_before_host_create`       | Before creating a new host (receives host name, provider name, and mngr_ctx). [experimental]       |
 | `on_host_created`             | After a new host has been created via provider.create_host().                                     |
 | `on_before_host_destroy`      | Before destroying a host via provider.destroy_host(). [experimental]                              |
 | `on_host_destroyed`           | After a host has been destroyed. The Python object is still available for metadata. [experimental] |
@@ -86,7 +88,6 @@ The following host lifecycle hooks are planned but not yet implemented:
 | `on_before_machine_create`    | Before creating the underlying environment (machine, container, sandbox) for a host [future] |
 | `on_after_machine_create`     | After creating the underlying environment (machine, container, sandbox) for a host [future]  |
 | `on_host_state_dir_created`   | When creating the host's state directory [future]                                   |
-| `get_offline_agent_state`     | Use this to provide state for an offline agent [future]                              |
 
 Note that we cannot have callbacks for most host lifecycle events because they can happen outside the control of `mngr`. To implement such functionality, you should provision shell scripts into the appropriate location:
 
@@ -139,7 +140,8 @@ Called when collecting data for hosts and agents. These allow plugins to compute
 | Hook                       | Description                                                                                                                                     |
 |----------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------|
 | `host_field_generators` | Return functions for computing additional fields for hosts (and their dependencies). Fields are namespaced under `host.plugin.<plugin_name>`. [future]  |
-| `agent_field_generators`   | Return functions for computing additional fields for agents (and their dependencies [future]). Fields are namespaced under `plugin.<plugin_name>`. [experimental]                 |
+| `agent_field_generators`   | Return functions for computing additional fields for agents (and their dependencies [future]). Each generator receives the live `(agent, host)`. Fields are namespaced under `plugin.<plugin_name>`. [experimental]                 |
+| `offline_agent_field_generators` | The offline counterpart to `agent_field_generators`, used when an agent's host is offline or unreachable. Each generator receives the offline `(discovered_agent, host_details)` instead of live objects, computing fields from `discovered_agent.certified_data` (the cached `data.json`). Fields are namespaced under `plugin.<plugin_name>`, exactly like the online path. [experimental] |
 
 **Dependency ordering [future]:** The return types for the above hooks are complex: they should return structured types that express both the way of calculating the fields, and the dependencies for those calculations. This allows plugin A's fields to depend on values computed by plugin B. Currently, field generators receive the agent and host objects directly without dependency support.
 
@@ -243,7 +245,7 @@ def override_command_options(command_name, command_class, params):
 
 ```python
 @hookimpl
-def on_before_create(args):
+def on_before_create(args, mngr_ctx):
     # Return modified args, or None to pass through unchanged
     return args.model_copy(update={"create_work_dir": False})
 ```
@@ -314,6 +316,40 @@ def override_command_options(command_name, command_class, params):
 ```
 
 To add visible CLI options to existing commands (so they appear in `--help`), implement `register_cli_options`.
+
+### Help topics
+
+`mngr help` lists standalone topic pages (concepts that span multiple commands, like `mngr help address`) alongside per-command help. Implement `register_help_topics` to contribute your own pages; they appear in `mngr help` and are viewable via `mngr help <topic>` whenever your plugin is installed.
+
+Each topic is a `TopicHelpPage` whose metadata (key, description, aliases, see-also) is declared explicitly. Its body (rendered as markdown, rich-rendered in an interactive terminal) is one of:
+
+- `DocFile(path=...)`: a markdown file, read lazily. Use this to keep long-form prose in a `.md` file. The file must ship inside your package -- e.g. keep it under your `imbue/...` tree, or `force-include` it in the wheel; a path outside the installed package works in an editable checkout but is absent from a PyPI wheel.
+- `InlineContent(markdown=...)`: an inline markdown string (handy for short bodies).
+
+```python
+from pathlib import Path
+
+from imbue.mngr import hookimpl
+from imbue.mngr.interfaces.help_topic import DocFile
+from imbue.mngr.interfaces.help_topic import TopicHelpPage
+
+# docs/ is shipped inside the package (e.g. via wheel force-include)
+_DOCS = Path(__file__).parent / "docs"
+
+@hookimpl
+def register_help_topics():
+    return [
+        TopicHelpPage(
+            key="my_topic",
+            aliases=("mt",),
+            one_line_description="What my plugin adds",
+            body=DocFile(path=_DOCS / "my_topic.md"),
+            see_also=(("create", "Create and run an agent"),),
+        ),
+    ]
+```
+
+A plugin topic whose key (or alias) collides with a built-in topic is skipped (built-in topics always win), so pick distinctive keys.
 
 ### Error handling
 

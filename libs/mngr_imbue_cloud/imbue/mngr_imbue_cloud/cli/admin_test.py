@@ -1,66 +1,17 @@
 """Tests for ``mngr imbue_cloud admin pool ...`` provider-generic helpers.
 
-We don't exercise the full subprocess pipeline (that needs a real OVH
-provider + a real Neon DB); instead we cover the small pure helpers
-that encode the contract this command commits to: tag-value validation,
-ufw command ordering, and the CLI signature.
+We don't exercise the full subprocess pipeline (that needs a real bare-metal box
++ a real Neon DB); instead we cover the small pure helpers that encode the
+contract this command commits to: region validation, the list-column coverage,
+and the CLI signature.
 """
 
 from typing import Any
 
-import click
-import pytest
 from click.testing import CliRunner
 
-from imbue.mngr_imbue_cloud.cli.admin import _CONTAINER_SSH_PORT
-from imbue.mngr_imbue_cloud.cli.admin import _INSERT_POOL_HOST_SQL
-from imbue.mngr_imbue_cloud.cli.admin import _ufw_provision_commands
-from imbue.mngr_imbue_cloud.cli.admin import build_extra_tags_env_value
+from imbue.mngr_imbue_cloud.cli.admin import _POOL_HOST_LIST_COLUMNS
 from imbue.mngr_imbue_cloud.cli.admin import pool
-
-
-def test_build_extra_tags_env_value_empty() -> None:
-    assert build_extra_tags_env_value(()) == ""
-
-
-def test_build_extra_tags_env_value_single_entry() -> None:
-    assert build_extra_tags_env_value(("minds_env=alice",)) == "minds_env=alice"
-
-
-def test_build_extra_tags_env_value_multiple_entries_join_with_comma() -> None:
-    assert build_extra_tags_env_value(("minds_env=alice", "pool-owner=bob")) == "minds_env=alice,pool-owner=bob"
-
-
-def test_build_extra_tags_env_value_rejects_entry_without_equals() -> None:
-    with pytest.raises(click.UsageError, match="KEY=VALUE"):
-        build_extra_tags_env_value(("minds_env=alice", "no-equals"))
-
-
-def test_ufw_provision_commands_allows_port_22_before_enable() -> None:
-    """ufw enable must come *after* allow 22, otherwise the in-progress SSH session is killed."""
-    commands = _ufw_provision_commands(_CONTAINER_SSH_PORT)
-    allow_22_index = next(i for i, c in enumerate(commands) if c == "ufw allow 22/tcp")
-    enable_index = next(i for i, c in enumerate(commands) if c == "ufw --force enable")
-    assert allow_22_index < enable_index
-
-
-def test_ufw_provision_commands_allows_container_ssh_port() -> None:
-    commands = _ufw_provision_commands(_CONTAINER_SSH_PORT)
-    assert f"ufw allow {_CONTAINER_SSH_PORT}/tcp" in commands
-
-
-def test_ufw_provision_commands_installs_ufw_first() -> None:
-    """ufw must be installed before any ufw allow / enable can run."""
-    commands = _ufw_provision_commands(_CONTAINER_SSH_PORT)
-    install_index = next(i for i, c in enumerate(commands) if "install -y ufw" in c)
-    first_ufw_use = next(i for i, c in enumerate(commands) if c.startswith("ufw "))
-    assert install_index < first_ufw_use
-
-
-def test_ufw_provision_commands_sets_default_deny_incoming() -> None:
-    commands = _ufw_provision_commands(_CONTAINER_SSH_PORT)
-    assert "ufw default deny incoming" in commands
-    assert "ufw default allow outgoing" in commands
 
 
 def test_pool_create_requires_region() -> None:
@@ -75,8 +26,8 @@ def test_pool_create_requires_region() -> None:
             "{}",
             "--workspace-dir",
             ".",
-            "--management-public-key-file",
-            "/dev/null",
+            "--server-id",
+            "11111111-1111-1111-1111-111111111111",
             "--database-url",
             "postgres://example",
         ],
@@ -85,18 +36,44 @@ def test_pool_create_requires_region() -> None:
     assert "Missing option" in result.output and "--region" in result.output
 
 
-def test_pool_hosts_insert_has_required_columns() -> None:
-    """The INSERT must include every pool_hosts NOT-NULL column the schema requires.
+def test_pool_create_rejects_ovh_datacenter_code_as_region() -> None:
+    """A raw OVH datacenter code (e.g. 'vin') must be rejected -- only lease labels are valid.
 
-    Regression test for the 2026-05 ``host_name`` drift: schema migration
-    added ``host_name NOT NULL`` but the bake's INSERT never picked it up,
-    so every successful VPS provision ended in a stranded VPS + a 500 on
-    the final DB write.
-
-    Asserting the literal column list keeps this test cheap (no fake DB)
-    while still catching any future drop of a required column.
+    Regression test: feeding the datacenter code that `admin server list` prints
+    (``vin``) instead of the lease-region label (``US-EAST-VA``) stamps an
+    unleasable region onto every baked pool_hosts row, since the connector's
+    region filter is an exact, never-relaxed string match.
     """
-    required_columns = (
+    runner = CliRunner()
+    result = runner.invoke(
+        pool,
+        [
+            "create",
+            "--count",
+            "1",
+            "--region",
+            "vin",
+            "--server-id",
+            "00000000-0000-0000-0000-000000000000",
+            "--database-url",
+            "postgres://example",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "not a known lease region" in result.output
+    assert "US-EAST-VA" in result.output
+
+
+def test_pool_list_covers_every_pool_host_column() -> None:
+    """`pool list` must surface every pool_hosts column, not a hand-maintained subset.
+
+    Regression test for the drift where region and the slice identifiers
+    (bare_metal_server_id / lima_instance_name / lima_disk_name) were absent from the
+    list output. Because `_POOL_HOST_LIST_COLUMNS` now drives both the SELECT and the
+    emitted JSON keys, asserting it equals the full schema keeps the two in lockstep
+    and forces any new pool_hosts migration column to be added here too.
+    """
+    expected_columns = {
         "id",
         "vps_address",
         "vps_instance_id",
@@ -108,39 +85,73 @@ def test_pool_hosts_insert_has_required_columns() -> None:
         "container_ssh_port",
         "status",
         "attributes",
+        "leased_to_user",
+        "leased_at",
+        "released_at",
         "created_at",
+        "region",
+        "bare_metal_server_id",
+        "lima_instance_name",
+        "lima_disk_name",
+    }
+    assert set(_POOL_HOST_LIST_COLUMNS) == expected_columns, (
+        "`pool list` columns drifted from the pool_hosts schema; add (or remove) the column in "
+        f"_POOL_HOST_LIST_COLUMNS so the SELECT and JSON keys stay complete. "
+        f"missing={expected_columns - set(_POOL_HOST_LIST_COLUMNS)} "
+        f"unexpected={set(_POOL_HOST_LIST_COLUMNS) - expected_columns}"
     )
-    for column in required_columns:
-        assert column in _INSERT_POOL_HOST_SQL, (
-            f"Pool host INSERT is missing required column {column!r}; this is the same drift "
-            f"class as the host_name regression. SQL: {_INSERT_POOL_HOST_SQL!r}"
-        )
+    assert len(_POOL_HOST_LIST_COLUMNS) == len(set(_POOL_HOST_LIST_COLUMNS)), (
+        f"_POOL_HOST_LIST_COLUMNS has duplicate entries: {_POOL_HOST_LIST_COLUMNS}"
+    )
 
 
-def test_pool_create_rejects_malformed_tag(tmp_path: Any) -> None:
-    """A ``--tag`` value without ``=`` aborts the bake before any subprocess work."""
-    runner = CliRunner()
-    key_file = tmp_path / "mgmt.pub"
-    key_file.write_text("ssh-ed25519 AAAA... operator@host\n")
-    result = runner.invoke(
-        pool,
-        [
-            "create",
-            "--count",
-            "1",
-            "--region",
-            "US-EAST-VA",
-            "--tag",
-            "no-equals",
-            "--attributes",
-            "{}",
-            "--workspace-dir",
-            str(tmp_path),
-            "--management-public-key-file",
-            str(key_file),
-            "--database-url",
-            "postgres://example",
-        ],
-    )
+def _slice_create_args(extra: list[str]) -> list[str]:
+    """Base ``pool create`` argv (with a DSN + server-id so resolution succeeds).
+
+    Carries no identity attributes: repo_url / repo_branch_or_tag are derived from
+    the bake source (--from-tag / --workspace-dir), never passed in --attributes.
+    """
+    return [
+        "create",
+        "--count",
+        "1",
+        "--region",
+        "US-EAST-VA",
+        "--server-id",
+        "11111111-1111-1111-1111-111111111111",
+        "--database-url",
+        "postgres://example",
+        *extra,
+    ]
+
+
+def test_pool_create_requires_server_id() -> None:
+    """``--server-id`` is required (we never auto-select a box)."""
+    args = [
+        "create",
+        "--count",
+        "1",
+        "--region",
+        "US-EAST-VA",
+        "--database-url",
+        "postgres://example",
+        "--from-tag",
+        "v0.3.0",
+    ]
+    result = CliRunner().invoke(pool, args)
     assert result.exit_code != 0
-    assert "KEY=VALUE" in result.output or "KEY=VALUE" in str(result.exception)
+    assert "--server-id is required" in result.output
+
+
+def test_pool_create_requires_a_bake_source_selector() -> None:
+    """Neither --from-tag nor --workspace-dir is a usage error (exactly one is required)."""
+    result = CliRunner().invoke(pool, _slice_create_args([]))
+    assert result.exit_code != 0
+    assert "--from-tag" in result.output and "--workspace-dir" in result.output
+
+
+def test_pool_create_rejects_both_bake_source_selectors(tmp_path: Any) -> None:
+    """Passing both --from-tag and --workspace-dir is a usage error."""
+    result = CliRunner().invoke(pool, _slice_create_args(["--from-tag", "v0.3.0", "--workspace-dir", str(tmp_path)]))
+    assert result.exit_code != 0
+    assert "exactly one" in result.output

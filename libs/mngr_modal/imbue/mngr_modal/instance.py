@@ -48,10 +48,17 @@ from imbue.mngr.hosts.common import timestamp_to_datetime
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import derive_offline_host_state
+from imbue.mngr.hosts.offline_host import make_readable_offline_host
 from imbue.mngr.hosts.offline_host import validate_and_create_discovered_agent
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
+from imbue.mngr.interfaces.cleanup_failures import collect_cleanup_failures
+from imbue.mngr.interfaces.cleanup_failures import collecting_cleanup_failures
 from imbue.mngr.interfaces.data_types import AgentDetails
+from imbue.mngr.interfaces.data_types import BoundedProviderDiscoveryResult
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import CleanupFailure
+from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import ErrorInfo
 from imbue.mngr.interfaces.data_types import HostConfig
@@ -65,6 +72,9 @@ from imbue.mngr.interfaces.data_types import SnapshotRecord
 from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.provider_instance import HostDiscoveryReadRegistry
+from imbue.mngr.interfaces.provider_instance import bounded_result_from_agents_by_host
+from imbue.mngr.interfaces.provider_instance import collect_cached_host_ssh_infos
 from imbue.mngr.interfaces.volume import HostVolume
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
@@ -243,6 +253,12 @@ def handle_modal_auth_error(func: Callable[P, T]) -> Callable[P, T]:
         try:
             return func(*args, **kwargs)
         except ModalProxyAuthError as e:
+            # The wrapped callables are all ModalProviderInstance methods, so the first
+            # positional arg is the instance; surface its name so the error (and its
+            # disable hint) reference the actual provider instance rather than the default.
+            instance = args[0] if args else None
+            if isinstance(instance, ModalProviderInstance):
+                raise ModalAuthError(instance.name) from e
             raise ModalAuthError() from e
 
     return wrapper
@@ -497,6 +513,16 @@ class ModalProviderInstance(BaseProviderInstance):
             environment_name=self.environment_name,
         )
 
+    def _build_experimental_options(self) -> dict[str, bool] | None:
+        """Build the ``experimental_options`` passed to Modal when creating a sandbox.
+
+        Requests the VM runtime (https://modal.com/docs/guide/vm-sandboxes) when
+        enabled on the provider config; returns None to use Modal's default runtime.
+        """
+        if self.config.is_vm_runtime_enabled:
+            return {"vm_runtime": True}
+        return None
+
     @handle_modal_auth_error
     def get_volume_for_host(self, host: HostInterface | HostId) -> HostVolume | None:
         """Get the host volume for reading data written by the sandbox.
@@ -505,9 +531,31 @@ class ModalProviderInstance(BaseProviderInstance):
         the sandbox. Returns None if the volume does not exist or if
         host volume creation is disabled.
 
-        Probes the volume with a listdir to verify it actually exists, since
-        volume_from_name returns a lazy reference that doesn't fail
-        for deleted volumes.
+        Probes the volume with a ``listdir`` to verify it actually exists, since
+        ``volume_from_name`` returns a lazy reference that doesn't fail for a
+        deleted volume. Callers that only need a reference and want to skip that
+        network probe should use :meth:`get_volume_reference_for_host`.
+        """
+        host_volume = self.get_volume_reference_for_host(host)
+        if host_volume is None:
+            return None
+        try:
+            # Probe the volume to verify it exists (from_name returns lazy references).
+            host_volume.volume.listdir("/")
+        except (ModalProxyNotFoundError, ModalProxyInvalidError):
+            return None
+        return host_volume
+
+    @handle_modal_auth_error
+    def get_volume_reference_for_host(self, host: HostInterface | HostId) -> HostVolume | None:
+        """Return a host-volume *reference* without verifying it exists.
+
+        Cheap: constructs the lazy ``volume_from_name`` reference and skips the
+        ``listdir`` existence probe that :meth:`get_volume_for_host` performs, so
+        this does no network round-trip beyond resolving the reference. Returns
+        None only when host volumes are disabled for this provider. A reference
+        to a since-deleted volume is still returned; operations on it fail at
+        access time.
         """
         if not self.config.is_host_volume_created:
             return None
@@ -517,12 +565,9 @@ class ModalProviderInstance(BaseProviderInstance):
             vol_iface = self._modal_interface.volume_from_name(
                 volume_name, create_if_missing=False, environment_name=self.environment_name
             )
-            # Probe the volume to verify it exists (from_name returns lazy references)
-            vol_iface.listdir("/")
-            modal_volume = ModalVolume.model_construct(modal_volume=vol_iface)
-            return HostVolume.model_construct(volume=modal_volume)
         except (ModalProxyNotFoundError, ModalProxyInvalidError):
             return None
+        return HostVolume.model_construct(volume=ModalVolume.model_construct(modal_volume=vol_iface))
 
     # =========================================================================
     # Volume-based Host Record Methods
@@ -1630,14 +1675,16 @@ log "=== Shutdown script completed ==="
         the host record.
         """
         host_id = HostId(host_record.certified_host_data.host_id)
-        return OfflineHost(
-            id=host_id,
-            certified_host_data=host_record.certified_host_data,
-            provider_instance=self,
-            mngr_ctx=self.mngr_ctx,
-            on_updated_host_data=lambda callback_host_id, certified_data: self._on_certified_host_data_updated(
-                callback_host_id, certified_data
-            ),
+        return make_readable_offline_host(
+            OfflineHost(
+                id=host_id,
+                certified_host_data=host_record.certified_host_data,
+                provider_instance=self,
+                mngr_ctx=self.mngr_ctx,
+                on_updated_host_data=lambda callback_host_id, certified_data: self._on_certified_host_data_updated(
+                    callback_host_id, certified_data
+                ),
+            )
         )
 
     # =========================================================================
@@ -1763,6 +1810,7 @@ log "=== Shutdown script completed ==="
                     region=config.region,
                     cidr_allowlist=config.effective_cidr_allowlist,
                     volumes=sandbox_volumes,
+                    experimental_options=self._build_experimental_options(),
                 )
                 logger.trace("Created Modal sandbox", sandbox_id=sandbox.get_object_id())
         except (ModalProxyError, MngrError) as e:
@@ -1779,6 +1827,12 @@ log "=== Shutdown script completed ==="
             )
             if isinstance(e, ModalProxyRemoteError):
                 raise MngrError(f"Failed to create Modal sandbox: {e}\n{build_log}") from None
+            elif isinstance(e, ModalProxyInvalidError):
+                # An invalid argument (e.g. a non-existent --snapshot image id) is a
+                # user/config error, not an internal bug. Surface it as a clean
+                # MngrError so the CLI prints a single-line message instead of
+                # dumping a raw Python traceback.
+                raise MngrError(f"Failed to create Modal host: {e}") from None
             else:
                 raise
 
@@ -2018,6 +2072,7 @@ log "=== Shutdown script completed ==="
                 region=config.region,
                 cidr_allowlist=config.effective_cidr_allowlist,
                 volumes=sandbox_volumes,
+                experimental_options=self._build_experimental_options(),
             )
         logger.info("Created sandbox from snapshot", sandbox_id=new_sandbox.get_object_id())
 
@@ -2050,32 +2105,107 @@ log "=== Shutdown script completed ==="
         ``mngr create --snapshot``).  The host is marked DESTROYED via
         stop_reason so the state derivation returns DESTROYED even when
         snapshot records still exist.
+
+        Best-effort: each teardown step is attempted, and a real failure (a
+        resource that exists but could not be removed) is recorded and raised as a
+        ``CleanupFailedGroup`` rather than aborting or being silently swallowed. A
+        resource that was already gone (``ModalProxyNotFoundError``) is benign. See
+        specs/cleanup-error-aggregation.md.
         """
-        self.stop_host(host, create_snapshot=False)
         host_id = host.id if isinstance(host, HostInterface) else host
-        self._destroy_agents_on_host(host_id)
-        self._mark_host_destroyed(host_id)
-        # FOLLOWUP: once Modal enables deleting Images, this will be the place to do it
-        if self.config.is_host_volume_created:
-            self._delete_host_volume(host_id)
+
+        with collecting_cleanup_failures() as failures:
+            # Terminate the sandbox (without creating a snapshot since we're destroying).
+            # An already-gone sandbox is benign; any other Modal error leaves it behind.
+            try:
+                self.stop_host(host, create_snapshot=False)
+            except ModalProxyNotFoundError:
+                # Sandbox already gone -- benign.
+                pass
+            except ModalProxyError as e:
+                # ModalProxyInvalidError / ModalProxyInternalError and any other Modal
+                # failure mean the resource may still exist.
+                logger.warning("Failed to terminate sandbox for host {}: {}", host_id, e)
+                failures.append(
+                    CleanupFailure(
+                        category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                        message=f"failed to terminate sandbox for host {host_id}: {e}",
+                        host_id=host_id,
+                    )
+                )
+
+            # Remove the agent records from the state volume. A missing record is
+            # benign; any other Modal error leaves the records behind.
+            try:
+                self._destroy_agents_on_host(host_id)
+            except ModalProxyNotFoundError:
+                pass
+            except ModalProxyError as e:
+                logger.warning("Failed to remove agent records for host {}: {}", host_id, e)
+                failures.append(
+                    CleanupFailure(
+                        category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                        message=f"failed to remove agent records for host {host_id}: {e}",
+                        host_id=host_id,
+                    )
+                )
+
+            # Mark the host record DESTROYED. A failure here leaves the record inconsistent.
+            try:
+                self._mark_host_destroyed(host_id)
+            except (ModalProxyError, MngrError) as e:
+                logger.warning("Failed to mark host {} destroyed: {}", host_id, e)
+                failures.append(
+                    CleanupFailure(
+                        category=CleanupFailureCategory.OTHER,
+                        message=f"failed to mark host {host_id} destroyed: {e}",
+                        host_id=host_id,
+                    )
+                )
+
+            # FOLLOWUP: once Modal enables deleting Images, this will be the place to do it
+            if self.config.is_host_volume_created:
+                try:
+                    self._delete_host_volume(host_id)
+                except CleanupFailedGroup as group:
+                    collect_cleanup_failures(failures, group)
 
     @handle_modal_auth_error
     def delete_host(self, host: HostInterface) -> None:
         self._destroy_agents_on_host(host.id)
         self._delete_host_record(host.id)
         if self.config.is_host_volume_created:
-            self._delete_host_volume(host.id)
+            # delete_host returns None per the interface; a volume that could not be removed
+            # is surfaced through destroy_host, not here (GC calls delete_host after the grace
+            # period and must not abort the sweep). Log and swallow the CleanupFailedGroup.
+            try:
+                self._delete_host_volume(host.id)
+            except CleanupFailedGroup as group:
+                logger.warning("Cleanup left resources behind while deleting host {}: {}", host.id, group)
 
     def _delete_host_volume(self, host_id: HostId) -> None:
-        """Delete the persistent host volume, logging but not raising on failure."""
+        """Delete the persistent host volume.
+
+        A real cleanup failure (a volume that exists but could not be deleted) is
+        raised as a ``CleanupFailedGroup``. An already-deleted volume is benign and
+        produces no failure. See specs/cleanup-error-aggregation.md.
+        """
         host_volume_name = self._get_host_volume_name(host_id)
-        try:
-            self._modal_interface.volume_delete(host_volume_name, environment_name=self.environment_name)
-            logger.debug("Deleted host volume: {}", host_volume_name)
-        except ModalProxyNotFoundError:
-            logger.trace("Host volume {} already deleted", host_volume_name)
-        except (ModalProxyInvalidError, ModalProxyInternalError) as e:
-            logger.warning("Failed to delete host volume {}: {}", host_volume_name, e)
+        with collecting_cleanup_failures() as failures:
+            try:
+                self._modal_interface.volume_delete(host_volume_name, environment_name=self.environment_name)
+                logger.debug("Deleted host volume: {}", host_volume_name)
+            except ModalProxyNotFoundError:
+                logger.trace("Host volume {} already deleted", host_volume_name)
+            except (ModalProxyInvalidError, ModalProxyInternalError) as e:
+                logger.warning("Failed to delete host volume {}: {}", host_volume_name, e)
+                failures.append(
+                    CleanupFailure(
+                        category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                        message=f"failed to delete host volume {host_volume_name}: {e}",
+                        host_id=host_id,
+                    )
+                )
 
     def on_connection_error(self, host_id: HostId) -> None:
         """Remove all caches if we notice a connection to the host fail"""
@@ -2192,7 +2322,7 @@ log "=== Shutdown script completed ==="
             sandboxes = sandboxes_future.result()
             all_host_records = host_records_future.result()
         except ModalProxyAuthError as e:
-            raise ModalAuthError() from e
+            raise ModalAuthError(self.name) from e
 
         # Map running sandboxes by host_id
         running_sandbox_by_host_id: dict[HostId, SandboxInterface] = {}
@@ -2371,6 +2501,28 @@ log "=== Shutdown script completed ==="
             return running_host_ids
 
     @handle_modal_auth_error
+    def discover_hosts_and_agents_within_timeouts(
+        self,
+        cg: ConcurrencyGroup,
+        host_discovery_timeout_seconds: float,
+        agent_discovery_timeout_seconds: float,
+        include_destroyed: bool = False,
+        registry: HostDiscoveryReadRegistry | None = None,
+    ) -> BoundedProviderDiscoveryResult:
+        """Delegate to the batch discovery path; bounded only by the provider-level error timeout.
+
+        Modal reads all host/agent state from the state volume in one batched pass,
+        so individual host reads cannot be bounded; nothing is marked UNKNOWN here.
+        ``registry`` is accepted for interface compatibility but unused: this path
+        spawns no per-host reads to de-duplicate across polls.
+        """
+        agents_by_host = self.discover_hosts_and_agents(cg=cg, include_destroyed=include_destroyed)
+        # Surface each running host's SSH endpoint (read from the host object the batch discovery
+        # just cached) so the streaming poller re-emits it as HOST_SSH_INFO for tunneling consumers.
+        host_ssh_infos = collect_cached_host_ssh_infos(self, agents_by_host.keys())
+        return bounded_result_from_agents_by_host(agents_by_host, host_ssh_infos=host_ssh_infos)
+
+    @handle_modal_auth_error
     def discover_hosts_and_agents(
         self,
         cg: ConcurrencyGroup,
@@ -2399,7 +2551,7 @@ log "=== Shutdown script completed ==="
                     running_host_ids = running_ids_future.result()
                     all_host_records, agent_data_by_host_id = host_and_agent_future.result()
             except ModalProxyAuthError as e:
-                raise ModalAuthError() from e
+                raise ModalAuthError(self.name) from e
             logger.debug(
                 "Modal discovery: {} running host(s), {} host record(s), {} host(s) with agent data",
                 len(running_host_ids),
@@ -2483,6 +2635,8 @@ log "=== Shutdown script completed ==="
         agent_refs: Sequence[DiscoveredAgent],
         field_generators: Mapping[str, Mapping[str, Callable[[AgentInterface, OnlineHostInterface], Any]]]
         | None = None,
+        offline_field_generators: Mapping[str, Mapping[str, Callable[[DiscoveredAgent, HostDetails], Any]]]
+        | None = None,
         on_error: Callable[[DiscoveredAgent | DiscoveredHost, BaseException], None] | None = None,
     ) -> tuple[HostDetails, list[AgentDetails]]:
         """Build HostDetails and AgentDetails via a single SSH command."""
@@ -2497,12 +2651,25 @@ log "=== Shutdown script completed ==="
 
                 # For offline hosts, fall back to the default per-field collection
                 if not isinstance(host, Host):
-                    return super().get_host_and_agent_details(host_ref, agent_refs, field_generators, on_error)
+                    return super().get_host_and_agent_details(
+                        host_ref,
+                        agent_refs,
+                        field_generators=field_generators,
+                        offline_field_generators=offline_field_generators,
+                        on_error=on_error,
+                    )
 
                 # Collect all data in one SSH command
                 with trace_span("Collecting listing data for {}", host_ref.host_id, _is_trace_span_enabled=False):
                     try:
                         raw = self._collect_all_listing_data_via_ssh(host)
+                    except HostConnectionError:
+                        # Connection failures must reach the outer
+                        # ``except HostConnectionError`` handler so the per-host
+                        # connection cache is cleared and we fall back to the
+                        # default listing. (HostConnectionError is a MngrError
+                        # subclass, so without this it would be swallowed here.)
+                        raise
                     except MngrError as e:
                         if on_error:
                             on_error(host_ref, e)
@@ -2516,7 +2683,13 @@ log "=== Shutdown script completed ==="
                     host_ref.host_id,
                     e,
                 )
-                return super().get_host_and_agent_details(host_ref, agent_refs, field_generators, on_error)
+                return super().get_host_and_agent_details(
+                    host_ref,
+                    agent_refs,
+                    field_generators=field_generators,
+                    offline_field_generators=offline_field_generators,
+                    on_error=on_error,
+                )
             finally:
                 if host is not None:
                     host.disconnect()
@@ -2538,7 +2711,7 @@ log "=== Shutdown script completed ==="
         prefix = self.mngr_ctx.config.prefix
 
         # Build a shell script that collects everything we need
-        script = build_listing_collection_script(host_dir, prefix)
+        script = build_listing_collection_script(host_dir, prefix, self.mngr_ctx.config.tmux.primary_window_name)
 
         with log_span("Collecting listing data via single SSH command", host_id=str(host.id)):
             result = host.execute_idempotent_command(script, timeout_seconds=30.0)
@@ -2598,10 +2771,14 @@ log "=== Shutdown script completed ==="
         # Resources from cached host record (no remote call)
         resource = self.get_host_resources(host)
 
-        # Lock status from SSH-collected data
+        # Lock status from SSH-collected data. The lock file persists after release
+        # (its inode must stay stable across local and remote holders), so its mtime
+        # alone does not indicate "held"; use the real flock held-probe.
         lock_mtime = raw.get("lock_mtime")
-        is_locked = lock_mtime is not None
-        locked_time = datetime.fromtimestamp(lock_mtime, tz=timezone.utc) if lock_mtime is not None else None
+        is_locked = bool(raw.get("is_lock_held"))
+        locked_time = (
+            datetime.fromtimestamp(lock_mtime, tz=timezone.utc) if is_locked and lock_mtime is not None else None
+        )
 
         # Certified data from SSH-collected data (parsed from data.json)
         certified_data: CertifiedHostData | None = None

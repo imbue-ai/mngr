@@ -8,7 +8,12 @@
 # Fill in values in a per-env copy, not here. Empty values are skipped on push
 # (an empty `export KEY=` line declares the key but leaves it unset on Modal).
 
-# Cloudflare API token with Tunnel Write and DNS Write permissions.
+# Cloudflare API token. Must be an account-owned token (cfat_), NOT a
+# user-owned token (cfut_), because the connector mints account-owned per-bucket
+# R2 tokens on the user's behalf. Required permissions: Cloudflare Tunnel: Edit,
+# DNS: Edit, Access: Apps and Policies: Edit, Access: Service Tokens: Edit,
+# Workers KV Storage: Edit, Workers R2 Storage: Edit, Account API Tokens: Edit.
+# R2 must also be enabled on the Cloudflare account for the bucket routes to work.
 export CLOUDFLARE_API_TOKEN=
 
 # Cloudflare account ID.

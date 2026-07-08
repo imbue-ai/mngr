@@ -10,6 +10,7 @@ from imbue.mngr.cli.complete import _read_cache
 from imbue.mngr.cli.complete import _read_discovery_names
 from imbue.mngr.cli.complete import _read_git_branches
 from imbue.mngr.cli.complete import _read_host_names
+from imbue.mngr.cli.complete import _segment_keys
 from imbue.mngr.config.completion_cache import COMPLETION_CACHE_FILENAME
 from imbue.mngr.config.completion_cache import CompletionCacheData
 from imbue.mngr.utils.testing import run_git_command
@@ -393,6 +394,125 @@ def test_get_completions_subcommand_agent_names(
     result = _get_completions()
 
     assert result == ["my-agent", "other-agent"]
+
+
+def test_get_completions_plugin_add_catalog_packages(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """Completing catalog package names for `mngr plugin add <TAB>`."""
+    data = CompletionCacheData(
+        commands=["plugin"],
+        subcommand_by_command={"plugin": ["add", "enable", "disable"]},
+        positional_completions={"plugin.add": [["catalog_packages"]]},
+        catalog_package_names=["imbue-mngr-claude", "imbue-mngr-modal"],
+    )
+    _write_command_cache(completion_cache_dir, data)
+    set_comp_env("mngr plugin add ", "3")
+
+    result = _get_completions()
+
+    assert result == ["imbue-mngr-claude", "imbue-mngr-modal"]
+
+
+def test_get_completions_plugin_add_catalog_packages_with_prefix(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """Completing catalog package names for `mngr plugin add` with a prefix filter."""
+    data = CompletionCacheData(
+        commands=["plugin"],
+        subcommand_by_command={"plugin": ["add", "enable", "disable"]},
+        positional_completions={"plugin.add": [["catalog_packages"]]},
+        catalog_package_names=["imbue-mngr-claude", "imbue-mngr-modal"],
+    )
+    _write_command_cache(completion_cache_dir, data)
+    set_comp_env("mngr plugin add imbue-mngr-m", "3")
+
+    result = _get_completions()
+
+    assert result == ["imbue-mngr-modal"]
+
+
+def test_get_completions_plugin_add_is_variadic(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """`plugin add` takes multiple packages, so completion repeats for later positions."""
+    data = CompletionCacheData(
+        commands=["plugin"],
+        subcommand_by_command={"plugin": ["add", "enable", "disable"]},
+        positional_completions={"plugin.add": [["catalog_packages"]]},
+        catalog_package_names=["imbue-mngr-claude", "imbue-mngr-modal"],
+    )
+    _write_command_cache(completion_cache_dir, data)
+    set_comp_env("mngr plugin add imbue-mngr-claude ", "4")
+
+    result = _get_completions()
+
+    assert result == ["imbue-mngr-claude", "imbue-mngr-modal"]
+
+
+def test_get_completions_plugin_remove_installed_packages(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """Completing installed plugin packages for `mngr plugin remove <TAB>`."""
+    data = CompletionCacheData(
+        commands=["plugin"],
+        subcommand_by_command={"plugin": ["add", "remove", "enable"]},
+        positional_completions={"plugin.remove": [["installed_packages"]]},
+        installed_plugin_package_names=["imbue-mngr-claude", "imbue-mngr-modal"],
+    )
+    _write_command_cache(completion_cache_dir, data)
+    set_comp_env("mngr plugin remove ", "3")
+
+    result = _get_completions()
+
+    assert result == ["imbue-mngr-claude", "imbue-mngr-modal"]
+
+
+def test_get_completions_plugin_remove_installed_packages_with_prefix(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """`plugin remove` completion respects a prefix filter."""
+    data = CompletionCacheData(
+        commands=["plugin"],
+        subcommand_by_command={"plugin": ["add", "remove", "enable"]},
+        positional_completions={"plugin.remove": [["installed_packages"]]},
+        installed_plugin_package_names=["imbue-mngr-claude", "imbue-mngr-modal"],
+    )
+    _write_command_cache(completion_cache_dir, data)
+    set_comp_env("mngr plugin remove imbue-mngr-c", "3")
+
+    result = _get_completions()
+
+    assert result == ["imbue-mngr-claude"]
+
+
+def test_get_completions_plugin_remove_distinct_from_add(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """`remove` completes installed packages while `add` completes the full catalog."""
+    data = CompletionCacheData(
+        commands=["plugin"],
+        subcommand_by_command={"plugin": ["add", "remove"]},
+        positional_completions={
+            "plugin.add": [["catalog_packages"]],
+            "plugin.remove": [["installed_packages"]],
+        },
+        catalog_package_names=["imbue-mngr-claude", "imbue-mngr-modal", "imbue-mngr-vultr"],
+        installed_plugin_package_names=["imbue-mngr-claude"],
+    )
+    _write_command_cache(completion_cache_dir, data)
+
+    set_comp_env("mngr plugin add ", "3")
+    assert _get_completions() == ["imbue-mngr-claude", "imbue-mngr-modal", "imbue-mngr-vultr"]
+
+    set_comp_env("mngr plugin remove ", "3")
+    assert _get_completions() == ["imbue-mngr-claude"]
 
 
 def test_get_completions_subcommand_agent_names_with_prefix(
@@ -859,7 +979,7 @@ def test_get_completions_config_key_positional(
     completion_cache_dir: Path,
     set_comp_env: Callable[[str, str], None],
 ) -> None:
-    """Config get/set/unset should complete config keys positionally."""
+    """Config get/set/unset complete config keys positionally, collapsed to the next segment."""
     data = CompletionCacheData(
         commands=["config"],
         subcommand_by_command={"config": ["get", "set", "unset", "list"]},
@@ -875,16 +995,18 @@ def test_get_completions_config_key_positional(
 
     result = _get_completions()
 
+    # Top-level keys are shown collapsed to the next ``.`` segment: a leaf key
+    # (prefix) verbatim, and the ``logging.*`` keys as the single ``logging.`` branch.
     assert "prefix" in result
-    assert "logging.console_level" in result
-    assert "logging.file_level" in result
+    assert "logging." in result
+    assert "logging.console_level" not in result
 
 
 def test_get_completions_config_key_positional_with_prefix(
     completion_cache_dir: Path,
     set_comp_env: Callable[[str, str], None],
 ) -> None:
-    """Config key completion should filter by prefix."""
+    """A prefix before the first ``.`` collapses to the matching branch segment."""
     data = CompletionCacheData(
         commands=["config"],
         subcommand_by_command={"config": ["get", "set", "unset"]},
@@ -893,6 +1015,25 @@ def test_get_completions_config_key_positional_with_prefix(
     )
     _write_command_cache(completion_cache_dir, data)
     set_comp_env("mngr config get log", "3")
+
+    result = _get_completions()
+
+    assert result == ["logging."]
+
+
+def test_get_completions_config_key_positional_drills_into_segment(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """Once a segment is settled (``logging.``), its sub-keys are offered as leaves."""
+    data = CompletionCacheData(
+        commands=["config"],
+        subcommand_by_command={"config": ["get", "set", "unset"]},
+        config_keys=["prefix", "logging.console_level", "logging.file_level"],
+        positional_completions={"config.get": [["config_keys"]]},
+    )
+    _write_command_cache(completion_cache_dir, data)
+    set_comp_env("mngr config get logging.", "3")
 
     result = _get_completions()
 
@@ -1002,8 +1143,9 @@ def test_get_completions_nargs_limit_not_reached(
 
     result = _get_completions()
 
+    # Keys are shown collapsed to the next segment (prefix verbatim, logging.* as a branch).
     assert "prefix" in result
-    assert "logging.console_level" in result
+    assert "logging." in result
 
 
 def test_get_completions_nargs_interleaved_options(
@@ -1107,7 +1249,7 @@ def test_get_completions_config_set_pos0_offers_keys(
     completion_cache_dir: Path,
     set_comp_env: Callable[[str, str], None],
 ) -> None:
-    """config set <TAB> at position 0 should offer config keys."""
+    """config set <TAB> at position 0 should offer config keys, collapsed to the next segment."""
     data = CompletionCacheData(
         commands=["config"],
         subcommand_by_command={"config": ["set"]},
@@ -1121,7 +1263,7 @@ def test_get_completions_config_set_pos0_offers_keys(
     result = _get_completions()
 
     assert "prefix" in result
-    assert "logging.console_level" in result
+    assert "logging." in result
 
 
 def test_get_completions_config_set_pos1_string_field_no_completions(
@@ -1381,3 +1523,359 @@ def test_get_completions_config_set_provider_backend(
     assert "local" in result
     assert "modal" in result
     assert "ssh" in result
+
+
+# =============================================================================
+# -S / --setting (KEY=VALUE config override) completion tests
+# =============================================================================
+
+
+def _setting_cache() -> CompletionCacheData:
+    """A cache wired for ``-S``/``--setting`` completion across commands."""
+    return CompletionCacheData(
+        commands=["create", "destroy"],
+        setting_option_names=["--setting", "-S"],
+        config_keys=["headless", "prefix", "logging.console_level"],
+        config_value_choices={
+            "headless": ["true", "false"],
+            "logging.console_level": ["TRACE", "DEBUG", "BUILD", "INFO", "WARN", "ERROR", "NONE"],
+        },
+    )
+
+
+def test_get_completions_setting_key_phase_valued(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """`mngr create -S head<TAB>` completes a valued key to ``KEY=`` and defers the values.
+
+    The values are not listed until the key is fully completed (the next TAB, once
+    the word contains ``=``), mirroring the ``.`` segment drill-down.
+    """
+    _write_command_cache(completion_cache_dir, _setting_cache())
+    set_comp_env("mngr create -S head", "3")
+
+    result = _get_completions()
+
+    assert result == ["headless="]
+
+
+def test_get_completions_setting_key_phase_valueless(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """`mngr create -S pre<TAB>` offers a bare key for a free-form (valueless) field."""
+    _write_command_cache(completion_cache_dir, _setting_cache())
+    set_comp_env("mngr create -S pre", "3")
+
+    result = _get_completions()
+
+    assert result == ["prefix"]
+
+
+def test_get_completions_setting_key_phase_mixed(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """`mngr create -S <TAB>` offers top-level segments: ``KEY=`` for valued leaves, bare leaves, and branches.
+
+    Dotted keys are collapsed to the next segment (``logging.console_level`` ->
+    the ``logging.`` branch), and a valued leaf is offered as ``KEY=`` with its
+    values deferred to the next TAB -- not expanded up front.
+    """
+    _write_command_cache(completion_cache_dir, _setting_cache())
+    set_comp_env("mngr create -S ", "3")
+
+    result = _get_completions()
+
+    assert "headless=" in result
+    assert "headless=true" not in result
+    assert "prefix" in result
+    assert "logging." in result
+    assert "logging.console_level=TRACE" not in result
+
+
+def test_get_completions_setting_key_phase_drills_into_branch(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """`mngr create -S logging.<TAB>` drills into the branch, offering its leaves."""
+    data = _setting_cache()._replace(
+        config_keys=["headless", "prefix", "logging.console_level", "logging.file_level"],
+        config_value_choices={
+            "headless": ["true", "false"],
+            "logging.console_level": ["TRACE", "DEBUG"],
+        },
+    )
+    _write_command_cache(completion_cache_dir, data)
+    set_comp_env("mngr create -S logging.", "3")
+
+    result = _get_completions()
+
+    # console_level is valued (offered as KEY=, values deferred); file_level is free-form (bare).
+    assert result == ["logging.console_level=", "logging.file_level"]
+
+
+def test_segment_keys_collapses_to_next_dot_segment() -> None:
+    """_segment_keys returns distinct next-level branches plus terminal leaves."""
+    keys = ["headless", "prefix", "logging.console_level", "logging.file_level", "agent_types.claude.command"]
+
+    # Top level: leaves verbatim, dotted keys collapsed to their first segment.
+    branches, leaves = _segment_keys(keys, "")
+    assert branches == ["logging.", "agent_types."]
+    assert leaves == ["headless", "prefix"]
+
+    # A partial first segment still collapses to the branch (not yet past the dot).
+    assert _segment_keys(keys, "log") == (["logging."], [])
+
+    # Once the segment is settled, its children are leaves / deeper branches.
+    assert _segment_keys(keys, "logging.") == ([], ["logging.console_level", "logging.file_level"])
+    assert _segment_keys(keys, "agent_types.") == (["agent_types.claude."], [])
+
+
+def test_get_completions_setting_works_on_any_command(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """`-S` is a global common option, so it completes on commands other than create too."""
+    _write_command_cache(completion_cache_dir, _setting_cache())
+    set_comp_env("mngr destroy -S head", "3")
+
+    result = _get_completions()
+
+    assert result == ["headless="]
+
+
+def test_get_completions_setting_long_form(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """The long ``--setting`` form completes the same as ``-S``."""
+    _write_command_cache(completion_cache_dir, _setting_cache())
+    set_comp_env("mngr create --setting head", "3")
+
+    result = _get_completions()
+
+    assert result == ["headless="]
+
+
+def test_get_completions_setting_value_phase_zsh(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """zsh keeps KEY=VALUE as one word, so the value phase returns KEY=VALUE candidates."""
+    _write_command_cache(completion_cache_dir, _setting_cache())
+    set_comp_env("mngr create -S logging.console_level=", "3")
+
+    result = _get_completions()
+
+    assert result == [
+        "logging.console_level=TRACE",
+        "logging.console_level=DEBUG",
+        "logging.console_level=BUILD",
+        "logging.console_level=INFO",
+        "logging.console_level=WARN",
+        "logging.console_level=ERROR",
+        "logging.console_level=NONE",
+    ]
+
+
+def test_get_completions_setting_value_phase_zsh_with_prefix(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """zsh value phase filters by the typed value prefix."""
+    _write_command_cache(completion_cache_dir, _setting_cache())
+    set_comp_env("mngr create -S logging.console_level=D", "3")
+
+    result = _get_completions()
+
+    assert result == ["logging.console_level=DEBUG"]
+
+
+def test_get_completions_setting_value_phase_bash_prefix(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """bash splits on ``=``, so ``-S KEY = VALPREFIX`` returns bare values (only the value word is replaced)."""
+    _write_command_cache(completion_cache_dir, _setting_cache())
+    set_comp_env("mngr create -S logging.console_level = D", "5")
+
+    result = _get_completions()
+
+    assert result == ["DEBUG"]
+
+
+def test_get_completions_setting_value_phase_bash_empty(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """bash with the cursor right after ``=`` (``-S KEY =``) returns all bare values."""
+    _write_command_cache(completion_cache_dir, _setting_cache())
+    set_comp_env("mngr create -S headless =", "4")
+
+    result = _get_completions()
+
+    assert result == ["true", "false"]
+
+
+def test_get_completions_setting_no_options_falls_back(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """An old cache without setting_option_names does not crash and offers nothing for -S."""
+    data = CompletionCacheData(
+        commands=["create"],
+        config_keys=["headless"],
+        config_value_choices={"headless": ["true", "false"]},
+    )
+    _write_command_cache(completion_cache_dir, data)
+    set_comp_env("mngr create -S head", "3")
+
+    result = _get_completions()
+
+    assert result == []
+
+
+def test_get_completions_setting_does_not_misfire_on_other_option_equals(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """A standalone ``=`` after a non-setting option must not trigger value completion."""
+    data = _setting_cache()._replace(
+        options_by_command={"list": ["--format"]},
+        commands=["list"],
+    )
+    _write_command_cache(completion_cache_dir, data)
+    set_comp_env("mngr list --format = jso", "5")
+
+    result = _get_completions()
+
+    assert result == []
+
+
+def test_get_completions_short_value_option_does_not_consume_positional(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """A short value option (-S KEY=VALUE) must not be miscounted as a positional argument.
+
+    With -S recorded in options_by_command the counter treats it as value-taking
+    (consuming its KEY=VALUE word), so a later positional (here, the single agent
+    name destroy accepts) is still offered rather than suppressed by the nargs limit.
+    """
+    data = CompletionCacheData(
+        commands=["destroy"],
+        options_by_command={"destroy": ["--force", "--setting", "-S"]},
+        flag_options_by_command={"destroy": ["--force", "-f"]},
+        positional_nargs_by_command={"destroy": 1},
+        positional_completions={"destroy": [["agent_names"]]},
+    )
+    _write_command_cache(completion_cache_dir, data)
+    _write_discovery_events(completion_cache_dir, ["my-agent", "other-agent"])
+    set_comp_env("mngr destroy -S commands.create.connect=false ", "4")
+
+    result = _get_completions()
+
+    assert result == ["my-agent", "other-agent"]
+
+
+def test_get_completions_value_option_bash_equals_residue_does_not_consume_positional(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """In bash, -S KEY=VALUE splits on '=' into three words; the whole value must be consumed.
+
+    Otherwise the trailing ``= VALUE`` words are miscounted as positionals and a
+    later positional (the agent name) gets suppressed by the nargs limit.
+    """
+    data = CompletionCacheData(
+        commands=["destroy"],
+        options_by_command={"destroy": ["--force", "--setting", "-S"]},
+        flag_options_by_command={"destroy": ["--force", "-f"]},
+        positional_nargs_by_command={"destroy": 1},
+        positional_completions={"destroy": [["agent_names"]]},
+    )
+    _write_command_cache(completion_cache_dir, data)
+    _write_discovery_events(completion_cache_dir, ["my-agent", "other-agent"])
+    # bash tokenizes `-S commands.create.connect=false` as 3 words (KEY, =, VALUE).
+    set_comp_env("mngr destroy -S commands.create.connect = false ", "6")
+
+    result = _get_completions()
+
+    assert result == ["my-agent", "other-agent"]
+
+
+def test_get_completions_value_option_without_equals_consumes_only_its_value(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """A value option whose value has no '=' consumes exactly the option + its value, not more.
+
+    The bash '=' coalescing must not over-consume a following real positional when
+    the value contains no '='.
+    """
+    data = CompletionCacheData(
+        commands=["foo"],
+        options_by_command={"foo": ["--message", "-m"]},
+        flag_options_by_command={"foo": []},
+        positional_nargs_by_command={"foo": 1},
+        positional_completions={"foo": [["agent_names"]]},
+    )
+    _write_command_cache(completion_cache_dir, data)
+    _write_discovery_events(completion_cache_dir, ["my-agent", "other-agent"])
+    set_comp_env("mngr foo -m hello ", "4")
+
+    result = _get_completions()
+
+    assert result == ["my-agent", "other-agent"]
+
+
+def test_get_completions_value_option_equals_still_counts_following_positional(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """The '=' coalescing stops at the value; a genuine positional after it is still counted."""
+    data = CompletionCacheData(
+        commands=["foo"],
+        subcommand_by_command={},
+        options_by_command={"foo": ["--setting", "-S"]},
+        flag_options_by_command={"foo": []},
+        config_keys=["prefix"],
+        positional_nargs_by_command={"foo": 1},
+        positional_completions={"foo": [["agent_names"]]},
+    )
+    _write_command_cache(completion_cache_dir, data)
+    _write_discovery_events(completion_cache_dir, ["my-agent"])
+    # bash: `-S a=b` (3 words) + one real positional already typed -> nargs=1 reached.
+    set_comp_env("mngr foo -S a = b pos1 ", "7")
+
+    result = _get_completions()
+
+    assert result == []
+
+
+def test_get_completions_short_value_option_absent_still_consumes_positional(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """Without -S in options_by_command (the old behavior) its value is miscounted, suppressing the positional.
+
+    This pins the contract that recording the short form is what fixes the miscount:
+    when -S is absent, the counter falls back to skipping it alone and counts
+    ``KEY=VALUE`` as the (only) positional, hitting the nargs=1 limit.
+    """
+    data = CompletionCacheData(
+        commands=["destroy"],
+        options_by_command={"destroy": ["--force", "--setting"]},
+        flag_options_by_command={"destroy": ["--force", "-f"]},
+        positional_nargs_by_command={"destroy": 1},
+        positional_completions={"destroy": [["agent_names"]]},
+    )
+    _write_command_cache(completion_cache_dir, data)
+    _write_discovery_events(completion_cache_dir, ["my-agent", "other-agent"])
+    set_comp_env("mngr destroy -S commands.create.connect=false ", "4")
+
+    result = _get_completions()
+
+    assert result == []

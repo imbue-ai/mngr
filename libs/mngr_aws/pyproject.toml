@@ -1,0 +1,77 @@
+[project]
+name = "imbue-mngr-aws"
+version = "0.1.4"
+description = "AWS provider backend plugin for mngr"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "imbue-mngr==0.2.17",
+    "imbue-mngr-vps==0.1.10",
+    "boto3>=1.34",
+    "botocore>=1.34",
+    # boto3-stubs[ec2] gives every botocore call a TypedDict request/response
+    # type. Without it boto3 calls are typed `Any` and the type checker can't
+    # catch wrong-shaped dicts or missing keys.
+    "boto3-stubs[ec2]>=1.34",
+]
+
+[project.entry-points.mngr]
+aws = "imbue.mngr_aws.backend"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["imbue"]
+exclude = ["*_test.py", "test_*.py", "**/conftest.py", "**/testing.py"]
+
+[tool.uv.sources]
+imbue-mngr = { workspace = true }
+imbue-mngr-vps = { workspace = true }
+
+[tool.pytest.ini_options]
+timeout_func_only = true
+junit_family = "xunit1"
+testpaths = ["."]
+addopts = [
+  "--cov=imbue.mngr_aws",
+  "--cov-report=term-missing",
+  "--cov-report=xml",
+  "--durations=20",
+  "--timeout=10",
+  "--timeout-method=signal",
+  "--slow-tests-to-file",
+  "--coverage-to-file",
+]
+
+[tool.coverage.run]
+parallel = true
+concurrency = ["multiprocessing"]
+omit = [
+  "*_test.py",
+  "test_*.py",
+  "*/tests/*",
+  "*/conftest.py",
+]
+
+[tool.coverage.report]
+fail_under = 60
+omit = [
+  "*_test.py",
+  "test_*.py",
+  "*/tests/*",
+  "*/conftest.py",
+]
+
+[tool.inline-snapshot]
+default-flags=["report"]
+default-flags-tui=["report"]
+default-flags-ide=["report"]
+format-command="uv run ruff format --force-exclude --config pyproject.toml --stdin-filename {filename}"
+
+[tool.pyright]
+venvPath = "../.."
+venv = ".venv"
+pythonVersion = "3.11"
+strict = ["**/*.py"]

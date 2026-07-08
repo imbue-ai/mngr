@@ -1,0 +1,13 @@
+{#def divider=false, extra="" #}
+{#
+  Small section header used inside settings-style pages. Uses the
+  ``type-label`` role in the secondary color. When ``divider=true``
+  the header sits above a horizontal rule with top spacing -- used to
+  break a card-shaped page into top-level sections.
+
+  Use ``extra=""`` for one-off margin overrides; the existing call sites
+  are stable enough that the default + divider variants cover them.
+#}
+{% set _base = "type-label text-secondary mb-3" %}
+{% set _divider = "mt-8 pt-4 border-t border-default" if divider else "" %}
+<h2 class="{{ _base }} {{ _divider }} {{ extra }}">{{ content }}</h2>

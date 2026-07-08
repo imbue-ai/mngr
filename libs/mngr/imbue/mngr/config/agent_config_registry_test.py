@@ -1,5 +1,8 @@
 """Tests for agent_config_registry and agent_class_registry modules."""
 
+from typing import Annotated
+from typing import Any
+
 import pytest
 from pydantic import Field
 
@@ -17,6 +20,7 @@ from imbue.mngr.config.agent_config_registry import reset_agent_config_registry
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
+from imbue.mngr.config.field_markers import SettingsPatchField
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UnknownAgentTypeError
 from imbue.mngr.primitives import AgentTypeName
@@ -28,16 +32,39 @@ class _SubclassAgentConfig(AgentTypeConfig):
 
     extra_bool: bool = Field(default=False)
     extra_str: str | None = Field(default=None)
+    settings_overrides: Annotated[dict[str, Any], SettingsPatchField()] = Field(default_factory=dict)
+
+
+def test_apply_custom_overrides_combines_settings_patch_field() -> None:
+    """A ``SettingsPatchField`` accumulates across parent_type inheritance: the
+    parent's non-overlapping keys survive into the child, and a shared ``__extend``
+    key combines rather than being replaced."""
+    parent = _SubclassAgentConfig(
+        settings_overrides={"model": "opus", "permissions__extend": {"allow__extend": ["P"]}},
+    )
+    child = _SubclassAgentConfig.model_construct(
+        settings_overrides={"permissions__extend": {"allow__extend": ["C"]}},
+    )
+    result = _apply_custom_overrides_to_parent_config(parent, child)
+    assert isinstance(result, _SubclassAgentConfig)
+    assert result.settings_overrides == {
+        "model": "opus",
+        "permissions__extend": {"allow__extend": ["P", "C"]},
+    }
 
 
 def test_apply_custom_overrides_returns_parent_when_no_overrides() -> None:
-    """_apply_custom_overrides_to_parent_config should return parent unchanged when custom has no overrides."""
+    """_apply_custom_overrides_to_parent_config returns a config equal to the parent when
+    custom has no overrides. (The overlay pipeline re-validates into a fresh, ``==``-equal
+    instance rather than returning the same object -- identity is irrelevant for an immutable
+    frozen model, and this matches the AgentTypeConfig/MngrConfig merges, which also return
+    fresh instances.)"""
     parent = AgentTypeConfig(cli_args=("--model", "opus"))
     custom = AgentTypeConfig()
 
     result = _apply_custom_overrides_to_parent_config(parent, custom)
 
-    assert result is parent
+    assert result == parent
     assert result.cli_args == ("--model", "opus")
 
 
@@ -53,18 +80,18 @@ def test_apply_custom_overrides_applies_command_override() -> None:
 
 
 def test_apply_custom_overrides_applies_cli_args_override() -> None:
-    """Custom config with cli_args should merge with parent's cli_args."""
+    """Custom config with cli_args assigns over the parent's cli_args (no concat)."""
     parent = AgentTypeConfig(cli_args=("--base",))
     custom = AgentTypeConfig(cli_args=("--extra",))
 
     result = _apply_custom_overrides_to_parent_config(parent, custom)
 
     assert result is not parent
-    assert result.cli_args == ("--base", "--extra")
+    assert result.cli_args == ("--extra",)
 
 
 def test_apply_custom_overrides_applies_all_overrides_at_once() -> None:
-    """All fields overridden at once should produce a merged config."""
+    """All fields are assigned from the custom config; no concat across parent inheritance."""
     parent = AgentTypeConfig(cli_args=("--parent-arg",))
     custom = AgentTypeConfig(
         command=CommandString("my-cmd"),
@@ -74,7 +101,7 @@ def test_apply_custom_overrides_applies_all_overrides_at_once() -> None:
     result = _apply_custom_overrides_to_parent_config(parent, custom)
 
     assert result.command == CommandString("my-cmd")
-    assert result.cli_args == ("--parent-arg", "--custom-arg")
+    assert result.cli_args == ("--custom-arg",)
 
 
 def test_apply_custom_overrides_applies_subclass_fields() -> None:
@@ -110,8 +137,8 @@ def test_apply_custom_overrides_preserves_unset_subclass_fields() -> None:
     assert result.extra_str == "original"
 
 
-def test_apply_custom_overrides_concatenates_provisioning_fields() -> None:
-    """Provisioning tuple fields should be concatenated onto parent, not replaced."""
+def test_apply_custom_overrides_replaces_provisioning_fields() -> None:
+    """Provisioning tuple fields are assigned from custom, not concatenated."""
     parent = AgentTypeConfig(
         extra_provision_command=("echo parent",),
         env=("PARENT=1",),
@@ -123,8 +150,8 @@ def test_apply_custom_overrides_concatenates_provisioning_fields() -> None:
 
     result = _apply_custom_overrides_to_parent_config(parent, custom)
 
-    assert result.extra_provision_command == ("echo parent", "echo child")
-    assert result.env == ("PARENT=1", "CHILD=2")
+    assert result.extra_provision_command == ("echo child",)
+    assert result.env == ("CHILD=2",)
 
 
 def test_apply_custom_overrides_preserves_parent_provisioning_when_unset() -> None:
@@ -394,6 +421,98 @@ def test_resolve_agent_type_preserves_subclass_fields() -> None:
         assert isinstance(resolved_config, _SubclassAgentConfig)
         assert resolved_config.extra_bool is True
         assert resolved_config.extra_str == "custom-value"
+    finally:
+        reset_agent_class_registry()
+        reset_agent_config_registry()
+
+
+def test_resolve_agent_type_inherits_parent_user_config_through_multilayer_merge() -> None:
+    """A parent_type child still inherits the parent's non-default settings after the config
+    has gone through a multi-layer ``MngrConfig.merge_with``.
+
+    Regression for the overlay reparse losing each registry entry's ``model_fields_set``:
+    after a whole-config merge carried a child entry through, ``model_validate`` re-marked
+    all of its defaulted fields as explicitly set, so they clobbered the parent's non-default
+    values during the later ``parent_type`` inheritance merge. The earlier inheritance tests
+    build a config and resolve directly, never merging layers first, so they never exercised
+    this path.
+    """
+    reset_agent_class_registry()
+    reset_agent_config_registry()
+    try:
+        register_agent_class("parent-type", _FakeAgentClass)
+        register_agent_config("parent-type", _SubclassAgentConfig)
+
+        # Layer 1: parent sets a bool that defaults False; child declares only parent_type.
+        layer_one = MngrConfig(
+            agent_types={
+                AgentTypeName("parent-type"): _SubclassAgentConfig.model_construct(extra_bool=True),
+                AgentTypeName("child-type"): _SubclassAgentConfig.model_construct(
+                    parent_type=AgentTypeName("parent-type"),
+                ),
+            },
+        )
+        # Layer 2: touches only the parent (never mentions the child). The second merge is what
+        # previously re-marked the carried-through child entry as fully set.
+        layer_two = MngrConfig(
+            agent_types={
+                AgentTypeName("parent-type"): _SubclassAgentConfig.model_construct(extra_str="parent-value"),
+            },
+        )
+
+        merged_once, _ = MngrConfig().merge_with(layer_one)
+        merged_twice, _ = merged_once.merge_with(layer_two)
+
+        # The child entry must stay sparse: only the field it actually set survives the merges.
+        child_entry = merged_twice.agent_types[AgentTypeName("child-type")]
+        assert child_entry.model_fields_set == {"parent_type"}
+
+        resolved = resolve_agent_type(AgentTypeName("child-type"), merged_twice).agent_config
+        assert isinstance(resolved, _SubclassAgentConfig)
+        # Both parent settings (one per layer) are inherited rather than reset to their defaults.
+        assert resolved.extra_bool is True
+        assert resolved.extra_str == "parent-value"
+    finally:
+        reset_agent_class_registry()
+        reset_agent_config_registry()
+
+
+def test_resolve_agent_type_child_override_wins_through_multilayer_merge() -> None:
+    """A child's explicit override still wins over the inherited parent value after a
+    multi-layer merge, while an unset child field still inherits the parent's value."""
+    reset_agent_class_registry()
+    reset_agent_config_registry()
+    try:
+        register_agent_class("parent-type", _FakeAgentClass)
+        register_agent_config("parent-type", _SubclassAgentConfig)
+
+        layer_one = MngrConfig(
+            agent_types={
+                AgentTypeName("parent-type"): _SubclassAgentConfig.model_construct(extra_bool=True),
+                AgentTypeName("child-type"): _SubclassAgentConfig.model_construct(
+                    parent_type=AgentTypeName("parent-type"),
+                    extra_bool=False,
+                ),
+            },
+        )
+        layer_two = MngrConfig(
+            agent_types={
+                AgentTypeName("parent-type"): _SubclassAgentConfig.model_construct(extra_str="parent-value"),
+            },
+        )
+
+        merged_once, _ = MngrConfig().merge_with(layer_one)
+        merged_twice, _ = merged_once.merge_with(layer_two)
+
+        child_entry = merged_twice.agent_types[AgentTypeName("child-type")]
+        assert child_entry.model_fields_set == {"parent_type", "extra_bool"}
+
+        resolved = resolve_agent_type(AgentTypeName("child-type"), merged_twice).agent_config
+        assert isinstance(resolved, _SubclassAgentConfig)
+        # The child explicitly set extra_bool=False, which must beat the parent's True.
+        assert resolved.extra_bool is False
+        # extra_str is unset on the child, so it inherits the parent's value.
+        assert resolved.extra_str == "parent-value"
     finally:
         reset_agent_class_registry()
         reset_agent_config_registry()

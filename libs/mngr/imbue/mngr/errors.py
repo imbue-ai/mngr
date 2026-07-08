@@ -1,7 +1,14 @@
 from pathlib import Path
+from typing import Any
+from typing import Final
+from typing import IO
 
 from click import ClickException
+from click import get_text_stream
 
+from imbue.mngr.colors import ERROR_COLOR
+from imbue.mngr.colors import RESET_COLOR
+from imbue.mngr.colors import should_use_color
 from imbue.mngr.plugin_catalog import get_plugin_install_hint
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -14,11 +21,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
 
 
-class BaseMngrError(Exception):
-    """Base exception for all mngr errors."""
-
-
-class MngrError(ClickException, BaseMngrError):
+class MngrError(ClickException):
     """Base exception for all user-facing mngr errors.
 
     All MngrError subclasses can provide a user_help_text attribute that contains
@@ -33,6 +36,22 @@ class MngrError(ClickException, BaseMngrError):
             return str(self) + "  [" + self.user_help_text + "]"
         return str(self)
 
+    def show(self, file: IO[Any] | None = None) -> None:
+        """Render the error with a bold-red ``Error:`` prefix on a color-capable terminal.
+
+        Gated on ``should_use_color`` so piped or ``NO_COLOR`` output stays plain,
+        mirroring the colored ``ERROR:`` prefix that ``logger.error`` already uses.
+        """
+        if file is None:
+            file = get_text_stream("stderr")
+        message = f"Error: {self.format_message()}"
+        if should_use_color(file):
+            message = f"{ERROR_COLOR}{message}{RESET_COLOR}"
+        # Write straight to the stream (the PREVENT_CLICK_ECHO ratchet forbids the
+        # click helper here); this matches how the loguru stderr sink writes.
+        file.write(message + "\n")
+        file.flush()
+
 
 class UserInputError(MngrError):
     """Raised when user input is invalid."""
@@ -44,6 +63,10 @@ class ParseSpecError(MngrError, ValueError):
     """Raised when parsing a specification string fails."""
 
 
+class MismatchedPreselectionError(MngrError, ValueError):
+    """Raised when a picker's preselected mask length does not match its options."""
+
+
 class InvalidRelativePathError(MngrError, ValueError):
     """Raised when a path that should be relative is actually absolute."""
 
@@ -52,8 +75,14 @@ class InvalidRelativePathError(MngrError, ValueError):
         super().__init__(f"Path must be relative, got absolute path: {path}")
 
 
-class HostError(BaseMngrError):
-    """Base class for host-related errors."""
+class HostError(MngrError):
+    """Base class for host-related errors.
+
+    As a MngrError subclass, host errors are ClickException instances: when they
+    reach the CLI they render as a clean ``Error: ...`` message (plus any
+    user_help_text) instead of a traceback, and ``except MngrError`` handlers
+    treat them as the user-facing errors they are.
+    """
 
 
 class InvalidActivityTypeError(HostError, ValueError):
@@ -113,15 +142,25 @@ class LockNotHeldError(HostError):
     """Raised when attempting to use a lock that is not held."""
 
 
-class AgentError(BaseMngrError):
-    """Base class for agent-related errors."""
+class AgentError(MngrError):
+    """Base class for agent-related errors.
+
+    As a MngrError subclass, agent errors are ClickException instances: when they
+    reach the CLI they render as a clean ``Error: ...`` message (plus any
+    user_help_text) instead of a traceback, and ``except MngrError`` handlers
+    treat them as the user-facing errors they are.
+    """
+
+
+class AgentInstallationError(AgentError):
+    """Raised when an agent's CLI binary is missing and cannot be installed."""
 
 
 class NoCommandDefinedError(AgentError, ValueError):
     """Raised when no command is defined for an agent type."""
 
 
-class AgentNotFoundError(AgentError, MngrError):
+class AgentNotFoundError(AgentError):
     """No agent with this ID exists."""
 
     user_help_text = "Use 'mngr list' to see available agents."
@@ -151,7 +190,7 @@ class SendMessageError(AgentError):
         super().__init__(f"Failed to send message to agent {agent_name}: {reason}")
 
 
-class DuplicateAgentNameError(AgentError, MngrError):
+class DuplicateAgentNameError(AgentError):
     """An agent with this name already exists on the host."""
 
     user_help_text = (
@@ -162,6 +201,10 @@ class DuplicateAgentNameError(AgentError, MngrError):
         self.agent_name = agent_name
         self.existing_agent_id = existing_agent_id
         super().__init__(f"An agent named '{agent_name}' already exists on this host (ID: {existing_agent_id})")
+
+
+class AgentStateInconsistencyError(AgentError, RuntimeError):
+    """Raised when an agent found during discovery is no longer present on the live host."""
 
 
 class AgentStartError(AgentError):
@@ -189,15 +232,40 @@ class ProviderUnavailableError(ProviderError):
     Commands that query multiple providers catch this and continue with
     the providers that *are* available, so a single offline backend does
     not block the entire operation.
+
+    Carries structured fields so callers can render a consistent one-line
+    summary (``short_reason`` + ``short_remediation``) without re-parsing the
+    full message, while ``user_help_text`` keeps the verbose guidance.
     """
 
-    def __init__(self, provider_name: ProviderInstanceName, reason: str) -> None:
+    # A concise phrase describing why the provider is unavailable (e.g. "AWS
+    # credentials not configured"). Distinct from the verbose ``user_help_text``.
+    short_reason: str
+    # A concise next step the user can take (e.g. "run `aws configure`"), or None.
+    short_remediation: str | None
+
+    def __init__(
+        self,
+        provider_name: ProviderInstanceName,
+        reason: str,
+        user_help_text: str | None = None,
+        short_remediation: str | None = None,
+        # An explicit concise, single-line reason for the rendered summary. Defaults to
+        # ``reason``; pass it when ``reason`` is long or multi-line (e.g. a cloud SDK
+        # message) so the one-line-per-provider listing stays glanceable.
+        short_reason: str | None = None,
+    ) -> None:
+        self.short_reason = short_reason or reason
+        self.short_remediation = short_remediation
         super().__init__(
             provider_name,
             f"Provider '{provider_name}' is not available: {reason}. "
             f"Any agents managed by this provider could not be reached.",
         )
-        self.user_help_text = (
+        # Providers whose "unavailable" cause is not a local daemon (e.g. a cloud
+        # provider failing on credentials/subscription) pass curated guidance so
+        # the user is not told to "start Docker" for an auth problem.
+        self.user_help_text = user_help_text or (
             f"Ensure the provider backend is running (e.g. start Docker), or disable the provider:\n"
             f"  mngr config set --scope user providers.{provider_name}.is_enabled false"
         )
@@ -225,8 +293,8 @@ class ProviderDiscoveryError(ProviderError):
 
     The wrapped exception is preserved in ``__cause__``; ``provider_name``
     carries the ``ProviderInstanceName`` of the failing instance so error
-    handlers (e.g. minds' auto-disable on auth failure) don't have to
-    pattern-match the message string.
+    handlers (e.g. minds' providers panel surfacing per-provider error
+    badges) don't have to pattern-match the message string.
     """
 
     def __init__(self, provider_name: ProviderInstanceName, cause: BaseException) -> None:
@@ -245,18 +313,35 @@ class ProviderInstanceNotFoundError(ProviderError):
         super().__init__(provider_name, f"Provider {provider_name} not found")
 
 
-class ProviderNotAuthorizedError(ProviderError):
-    """Provider instance is not authorized/authenticated."""
+class ProviderNotAuthorizedError(ProviderUnavailableError):
+    """Provider instance is not authenticated/authorized (missing or invalid credentials).
 
-    def __init__(self, provider_name: ProviderInstanceName, auth_help: str | None = None) -> None:
-        message = f"Provider '{provider_name}' is not authorized."
-        if auth_help:
-            message = f"{message} {auth_help}"
-        super().__init__(provider_name, message)
-        self.user_help_text = (
+    A specialization of ``ProviderUnavailableError``: the backend may be reachable
+    in principle, but without valid credentials its state is unknown, so read paths
+    (``mngr list`` / ``mngr gc`` / discovery) treat it identically to any other
+    unavailable provider. The dedicated type lets callers and tests recognize the
+    "not authenticated" case specifically.
+    """
+
+    def __init__(
+        self,
+        provider_name: ProviderInstanceName,
+        reason: str = "not authenticated",
+        short_remediation: str | None = None,
+        user_help_text: str | None = None,
+        short_reason: str | None = None,
+    ) -> None:
+        default_help = (
             f"To disable this provider, run:\n"
             f"  mngr config set --scope user providers.{provider_name}.is_enabled false\n"
             f"Or disable the provider backend entirely by removing it from enabled_backends in your config."
+        )
+        super().__init__(
+            provider_name,
+            reason,
+            user_help_text=user_help_text or default_help,
+            short_remediation=short_remediation,
+            short_reason=short_reason,
         )
 
 
@@ -298,6 +383,67 @@ class DockerBuildTimeoutError(HostCreationError):
         self.user_help_text = (
             f"Increase build_timeout_seconds for this provider, e.g.:\n"
             f"  mngr config set --scope user providers.{provider_name}.build_timeout_seconds 1800"
+        )
+
+
+class DockerRuntimeNotRegisteredError(HostCreationError):
+    """Raised when the configured `docker_runtime` is not registered with the Docker daemon.
+
+    Surfaces Docker's native "unknown or invalid runtime name" failure as a
+    clean, actionable message instead of a raw `ProcessError` traceback that
+    buries the cause inside the full `docker run` command line.
+    """
+
+    def __init__(self, provider_name: ProviderInstanceName, runtime_name: str) -> None:
+        self.runtime_name = runtime_name
+        super().__init__(
+            provider_name,
+            f"Docker runtime '{runtime_name}' is not registered with the Docker daemon "
+            f"for provider '{provider_name}'.",
+        )
+        self.user_help_text = (
+            f"Install and register the '{runtime_name}' runtime with Docker (e.g. gVisor's "
+            f"runsc), or select the default runtime by setting docker_runtime to 'runc':\n"
+            f"  mngr config set --scope user providers.{provider_name}.docker_runtime runc\n"
+            f"or per-invocation:\n"
+            f"  MNGR__PROVIDERS__{provider_name.upper()}__DOCKER_RUNTIME=runc"
+        )
+
+
+class DockerGvisorEphemeralRootfsError(HostCreationError):
+    """Raised when a configured gVisor (`runsc`) Docker runtime lacks `--overlay2=none`.
+
+    gVisor's default root overlay (`--overlay2=root:self`) keeps each container's root
+    filesystem in a per-sandbox overlay that is discarded whenever the container stops,
+    so mngr's SSH provisioning (the injected host key, `authorized_keys`, and the
+    self-healing-entrypoint marker) is lost the first time the container restarts --
+    leaving the host running but unreachable. Registering the runtime with
+    `--overlay2=none` writes the root layer through to the persistent Docker layer.
+    """
+
+    def __init__(self, provider_name: ProviderInstanceName, runtime_name: str) -> None:
+        self.runtime_name = runtime_name
+        super().__init__(
+            provider_name,
+            f"Docker runtime '{runtime_name}' (gVisor) for provider '{provider_name}' is registered "
+            f"without '--overlay2=none', so each container's root filesystem is ephemeral: gVisor's "
+            f"default overlay ('--overlay2=root:self') discards all root-filesystem writes when the "
+            f"container stops, so mngr's SSH provisioning is lost on the first restart and the host "
+            f"becomes unreachable.",
+        )
+        self.user_help_text = (
+            f"Fix this in one of two ways:\n"
+            f"  1. Run containers under the standard runtime instead of gVisor -- set docker_runtime to 'runc':\n"
+            f"       mngr config set --scope user providers.{provider_name}.docker_runtime runc\n"
+            f"     (or per-invocation: MNGR__PROVIDERS__{provider_name.upper()}__DOCKER_RUNTIME=runc)\n"
+            f"  2. Re-register the gVisor runtime so writes persist, then restart Docker:\n"
+            f"       sudo runsc install -- --overlay2=none\n"
+            f"       sudo systemctl restart docker\n"
+            f"     With option 2, if the container runs supervisord (or anything that installs a unix\n"
+            f"     socket via a hard link under /run), ALSO mount /run as a tmpfs -- e.g. set\n"
+            f'     default_start_args=["--tmpfs", "/run"] on this provider. --overlay2=none puts /run\n'
+            f"     on gVisor's gofer filesystem, where os.link() of a socket fails (EOPNOTSUPP), so\n"
+            f"     supervisord wedges and never starts its services without a tmpfs /run."
         )
 
 
@@ -358,15 +504,6 @@ class SnapshotsNotSupportedError(SnapshotError):
         super().__init__(provider_name, f"Provider {provider_name} does not support snapshots")
 
 
-class TagLimitExceededError(ProviderError):
-    """Tags exceed provider's storage limit."""
-
-    def __init__(self, provider_name: ProviderInstanceName, limit: int, actual: int) -> None:
-        self.limit = limit
-        self.actual = actual
-        super().__init__(provider_name, f"Tag limit exceeded: {actual} tags (limit: {limit})")
-
-
 class LocalHostNotStoppableError(ProviderError):
     """Raised when attempting to stop the local host."""
 
@@ -381,7 +518,16 @@ class LocalHostNotDestroyableError(ProviderError):
         super().__init__(provider_name, "Cannot destroy the local host - it is your local computer")
 
 
-class PluginSpecifierError(BaseMngrError, ValueError):
+class HostShutdownNotSupportedError(ProviderError):
+    """Provider does not support stopping hosts."""
+
+    user_help_text = "Stop the agent without --stop-host, or use a provider that supports stopping hosts."
+
+    def __init__(self, provider_name: ProviderInstanceName) -> None:
+        super().__init__(provider_name, f"Provider {provider_name} does not support stopping hosts")
+
+
+class PluginSpecifierError(MngrError, ValueError):
     """Raised when a plugin specifier is invalid or cannot be resolved."""
 
 
@@ -394,17 +540,34 @@ class PluginMngrError(MngrError):
     """
 
 
-class ModalAuthError(PluginMngrError):
-    """Modal authentication failed due to missing or invalid token."""
+_DEFAULT_MODAL_PROVIDER_NAME: Final[ProviderInstanceName] = ProviderInstanceName("modal")
 
-    def __init__(self) -> None:
-        super().__init__(
+
+class ModalAuthError(ProviderNotAuthorizedError):
+    """Modal authentication failed due to missing or invalid token.
+
+    A ``ProviderNotAuthorizedError`` (hence ``ProviderUnavailableError``) so read
+    paths (``mngr list`` / ``gc`` / discovery) categorize it as a provider-
+    inaccessible / unauthenticated failure consistently with the other cloud
+    providers, while preserving the Modal-specific message and remediation.
+    """
+
+    def __init__(self, provider_name: ProviderInstanceName = _DEFAULT_MODAL_PROVIDER_NAME) -> None:
+        message = (
             "Modal authentication failed. Token missing or invalid. "
             "You can disable the modal plugin by running "
             "'mngr config set --scope user plugins.modal.enabled false', "
             "or by passing --disable-plugin modal to individual commands. "
             "To configure modal credentials, see https://modal.com/docs/reference/modal.config"
         )
+        # Initialize the ProviderError base directly so the Modal-specific message and
+        # guidance are preserved verbatim (the ProviderUnavailableError base would
+        # otherwise rewrite the message into the generic "is not available" shape).
+        ProviderError.__init__(self, provider_name, message)
+        self.short_reason = "Modal token missing or invalid"
+        self.short_remediation = "run `uvx modal token set`"
+        # The message already carries full remediation, so no separate help text.
+        self.user_help_text = None
 
 
 class ConfigError(MngrError):
@@ -429,6 +592,23 @@ class ConfigKeyNotFoundError(ConfigError, KeyError):
 
 class ConfigStructureError(ConfigError, TypeError):
     """Invalid configuration structure."""
+
+
+class InvalidKeyPathError(ConfigError, ValueError):
+    """Raised when a config key path is empty or otherwise malformed."""
+
+
+class DockerConfigValidationError(ConfigError, ValueError):
+    """Raised when Docker provider config fields are mutually inconsistent."""
+
+
+class ProviderTimeoutConfigError(ConfigError, ValueError):
+    """Raised when a provider's discovery timeout fields are mis-ordered.
+
+    The per-host and per-agent discovery timeouts must be below the provider
+    error timeout, otherwise a single slow host could never surface as UNKNOWN
+    before its whole provider is declared errored.
+    """
 
 
 class UnknownAgentTypeError(ConfigError):
@@ -474,7 +654,7 @@ class BinaryNotInstalledError(MngrError):
         super().__init__(f"{binary} is required for {purpose} but was not found on PATH")
 
 
-class DiscoverySchemaChangedError(BaseMngrError, ValueError):
+class DiscoverySchemaChangedError(MngrError, ValueError):
     """Raised when a discovery event line cannot be validated against the current schema.
 
     This typically means a field was added, removed, or renamed in a discovery event
@@ -490,7 +670,7 @@ class DiscoverySchemaChangedError(BaseMngrError, ValueError):
         super().__init__(f"Discovery event of type {event_type!r} does not match current schema: {validation_error}")
 
 
-class MalformedJsonlLineError(BaseMngrError, ValueError):
+class MalformedJsonlLineError(MngrError, ValueError):
     """Raised when a JSONL line is structurally invalid (e.g. not a JSON object, missing required envelope fields).
 
     The right fix is to track down whichever process is producing the bad line and stop it

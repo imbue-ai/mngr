@@ -1,0 +1,102 @@
+{#def agent_id, request_id, ws_name, rationale, file_path, access, access_human_label, display_name, allowed_roots_json="[]", home_dir="", mngr_forward_origin #}
+{#
+  Latchkey file-sharing permission request fragment. Rendered inside the
+  inbox modal's right pane. Provides a single hidden checked
+  ``name="permissions"`` input so the Approve button enables on first
+  paint (file sharing has no per-permission choice). Chrome and form
+  submission JS live in the inbox shell.
+#}
+<div class="permissions-detail">
+  <PermissionsHeader :display_name="display_name" :ws_name="ws_name" :agent_id="agent_id" :rationale="rationale" />
+
+  <PermissionsForm :request_id="request_id">
+    {# Single summary sentence (mirroring the predefined dialog's simple view)
+       naming the requesting workspace and the access level, followed by an
+       editable path field (with an access badge beside its label) and a
+       Browse button that opens the OS file picker. #}
+    <p class="type-body text-primary mb-3">
+      {% if access == 'WRITE' %}
+        Approving will grant {{ ws_name or agent_id }} and its sibling agents
+        <strong>read and write</strong> access (including delete) to the file/directory below.
+      {% else %}
+        Approving will grant {{ ws_name or agent_id }} and its sibling agents
+        <strong>read-only</strong> access to the file/directory below.
+      {% endif %}
+      You can edit the path before approving -- paste a different one or pick it with Browse.
+    </p>
+    {# Editable share path. The input is pre-filled with the path the
+       agent requested; the user may change it (paste or native file
+       picker) before approving. The inbox shell's ``browseForSharePath``
+       opens the OS file dialog and writes the chosen path back here, and
+       its ``updateApproveState`` keeps Approve disabled while the field
+       is empty. #}
+    {# Field label + access badge on one line, left-aligned, so the badge
+       reads as labelling the field rather than floating above the Browse
+       control on the right edge. Emerald tint for read-only, amber for
+       read+write so the broader grant stands out visually. #}
+    <div class="flex items-center gap-2 mb-1.5">
+      <FormLabel inline target="file-sharing-path-input">Path to share</FormLabel>
+      {% if access == 'WRITE' %}
+        <span class="shrink-0 type-section px-2 py-0.5 rounded-full bg-warning/12 text-warning border border-warning/30">
+          {{ access_human_label }}
+        </span>
+      {% else %}
+        <span class="shrink-0 type-section px-2 py-0.5 rounded-full bg-success/12 text-success border border-success/30">
+          {{ access_human_label }}
+        </span>
+      {% endif %}
+    </div>
+    {# ``data-allowed-roots`` carries the WebDAV mount roots so the inbox
+       shell can flag (and block Approve on) a path outside them as the
+       user types or picks one -- the same roots the server validates
+       against. #}
+    <TextInput id="file-sharing-path-input"
+               name="file_path"
+               :value="file_path"
+               :data-allowed-roots="allowed_roots_json"
+               :data-home-dir="home_dir"
+               extra="font-mono type-body"
+               oninput="window.updateApproveState && window.updateApproveState()" />
+    {# Shown by the inbox shell only when the field holds a non-empty path
+       that is outside the shared roots. #}
+    <p id="file-sharing-path-hint" class="hidden mt-1.5 type-helper text-warning">
+      This path isn't inside a folder Minds can share (your home folder or the system
+      temporary folder), so it can't be shared. Pick a path under one of those instead.
+    </p>
+    {# Two single-purpose pickers (file vs. folder) rather than one
+       combined "Browse" button: a dialog can't be both a file and a
+       directory selector on Linux/Windows, so a combined picker there
+       falls back to a directory selector and picking a file returns its
+       parent directory. Each button opens the OS picker for its mode and
+       writes the chosen absolute path back into the field above. Placed
+       below the input and left-aligned (rather than to its right) so they
+       do not stack in the same column as the right-aligned Deny / Approve
+       buttons. Hidden unless the Electron native-picker bridge is present;
+       in a plain browser the user pastes a path into the field above. #}
+    <div class="mt-2 flex gap-2">
+      <Button id="file-sharing-browse-file-btn"
+              variant="secondary"
+              extra="hidden"
+              onclick="window.browseForSharePath && window.browseForSharePath('file')">Choose file…</Button>
+      <Button id="file-sharing-browse-folder-btn"
+              variant="secondary"
+              extra="hidden"
+              onclick="window.browseForSharePath && window.browseForSharePath('directory')">Choose folder…</Button>
+    </div>
+    {# Hidden checked input named ``permissions`` so the base dialog's
+       updateApproveState treats this fragment as "has a selection":
+       there is no per-permission choice in this flow, the request itself
+       already names the single (path, access) pair. Approve is gated
+       additionally on the path field being non-empty (see the shell). #}
+    <input type="checkbox" name="permissions" value="file-sharing" checked hidden>
+  </PermissionsForm>
+
+  <div id="permissions-progress" class="hidden mt-4">
+    <Notice variant="info">
+      <span class="font-semibold">Granting permission...</span>
+    </Notice>
+  </div>
+
+  <PermissionsManualCredentials />
+  <PermissionsError />
+</div>

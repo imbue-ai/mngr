@@ -19,6 +19,19 @@ TEST_ENV_PREFIX: Final[str] = "mngr_test-"
 # Matches test environment names: mngr_test-YYYY-MM-DD-HH-MM-SS[-user_id].
 TEST_ENV_PATTERN: Final[re.Pattern[str]] = re.compile(r"^mngr_test-(\d{4})-(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{2})")
 
+# Matches the per-test prefix produced by the autouse ``mngr_test_prefix``
+# fixture: ``mngr_<32 hex chars>-`` (from ``uuid4().hex``). For example:
+# ``mngr_22921e597952421296c8973d922f2eb3-docker-state-...``. Used by the test
+# session cleanup to recognise leaked test resources (e.g. docker containers)
+# whose names carry this prefix.
+TEST_PREFIX_PATTERN: Final[re.Pattern[str]] = re.compile(r"^mngr_[0-9a-f]{32}-")
+
+
+@pure
+def looks_like_mngr_test_container_name(container_name: str) -> bool:
+    """Whether a container name starts with the autouse per-test prefix (mngr_<hex32>-)."""
+    return TEST_PREFIX_PATTERN.match(container_name) is not None
+
 
 @pure
 def parse_bool_env(value: str) -> bool:

@@ -313,6 +313,62 @@ def find_underscore_imports(
     return tuple(sorted_chunks)
 
 
+_HOST_UPLOAD_METHOD_NAMES: Final[frozenset[str]] = frozenset({"write_file", "write_text_file", "put_file"})
+
+
+def find_per_file_host_uploads_in_loops(
+    source_dir: Path,
+    excluded_path_patterns: tuple[str, ...] = (),
+) -> tuple[RatchetMatchChunk, ...]:
+    """Find host file-write calls nested inside a loop using AST analysis.
+
+    Flags ``.write_file(...)`` / ``.write_text_file(...)`` / ``.put_file(...)`` calls
+    that appear inside a ``for`` or ``while`` loop. Writing files to a (possibly
+    remote) host one at a time is slow and fragile: each call is a separate
+    round-trip (an SFTP channel open per file), which over an SSH tunnel scales
+    linearly and has repeatedly caused upload timeouts and "connection reset / SSH
+    protocol banner" failures. Transfer many files with a single bulk copy
+    (``host.copy_directory``, i.e. rsync) instead.
+    """
+    file_paths = _get_non_ignored_files_with_extension(
+        source_dir, FileExtension(".py"), TEST_FILE_PATTERNS + excluded_path_patterns
+    )
+    chunks: list[RatchetMatchChunk] = []
+
+    for file_path in file_paths:
+        seen_positions: set[tuple[int, int]] = set()
+        loop_nodes: list[ast.AST] = [
+            *get_ast_nodes_of_type(file_path, ast.For),
+            *get_ast_nodes_of_type(file_path, ast.While),
+        ]
+        for loop_node in loop_nodes:
+            for inner_node in ast.walk(loop_node):
+                if (
+                    isinstance(inner_node, ast.Call)
+                    and isinstance(inner_node.func, ast.Attribute)
+                    and inner_node.func.attr in _HOST_UPLOAD_METHOD_NAMES
+                ):
+                    # A call inside nested loops is reached via each enclosing loop;
+                    # dedupe by source position so it is counted once.
+                    position = (inner_node.lineno, inner_node.col_offset)
+                    if position in seen_positions:
+                        continue
+                    seen_positions.add(position)
+                    start_line = LineNumber(inner_node.lineno)
+                    end_line = LineNumber(inner_node.end_lineno if inner_node.end_lineno else inner_node.lineno)
+                    chunks.append(
+                        RatchetMatchChunk(
+                            file_path=file_path,
+                            matched_content=f".{inner_node.func.attr}() called inside a loop at line {start_line}",
+                            start_line=start_line,
+                            end_line=end_line,
+                        )
+                    )
+
+    sorted_chunks = sorted(chunks, key=lambda c: (str(c.file_path), c.start_line))
+    return tuple(sorted_chunks)
+
+
 def find_cast_usages(
     source_dir: Path,
     excluded_path_patterns: tuple[str, ...] = (),
@@ -435,33 +491,6 @@ def check_no_type_errors(project_root: Path) -> None:
         raise AssertionError("\n".join(failure_message))
 
 
-def check_no_ruff_errors(project_root: Path) -> None:
-    """Run the ruff linter and raise AssertionError if any linting errors are found."""
-    result = subprocess.run(
-        ["uv", "run", "ruff", "check"],
-        cwd=project_root,
-        capture_output=True,
-        text=True,
-    )
-
-    if result.returncode != 0:
-        failure_message = [
-            f"Ruff linter found errors (returncode {result.returncode}):",
-            "",
-            "Full ruff stdout:",
-            "=" * 80,
-            result.stdout,
-            "=" * 80,
-            "",
-            "Full ruff stderr:",
-            "=" * 80,
-            result.stderr,
-            "=" * 80,
-        ]
-
-        raise AssertionError("\n".join(failure_message))
-
-
 def assert_posix_compatible(command: str) -> None:
     """Assert that a shell command string is POSIX-compatible using shellcheck.
 
@@ -542,6 +571,16 @@ def check_no_import_lint_errors(project_root: Path, contract_name: str = "mngr l
         raise AssertionError("\n".join(failure_message))
 
 
+# Directory prefixes (repo-relative, posix) whose ``*.sh`` files are exempt
+# from the strict-mode ratchet because they are not runnable scripts.
+# ``.minds/template/`` holds declarative secret-schema templates -- commented
+# ``export KEY=`` files sourced by the deploy tooling
+# (``scripts/push_vault_from_file.py``, ``minds env deploy``) and copied
+# per-tier, never executed standalone -- so ``set -euo pipefail`` is meaningless
+# for them and they are not the class of script this ratchet guards.
+_STRICT_MODE_EXEMPT_DIR_PREFIXES: Final[tuple[str, ...]] = (".minds/template/",)
+
+
 def find_bash_scripts_without_strict_mode(cwd: Path) -> list[str]:
     """Find bash scripts missing 'set -euo pipefail' in the git repo containing cwd."""
     result = subprocess.run(
@@ -567,12 +606,15 @@ def find_bash_scripts_without_strict_mode(cwd: Path) -> list[str]:
 
     violations: list[str] = []
     for sh_file in sh_files:
-        # Skip files that git tracks but aren't present on disk. This happens
-        # in offload release sandboxes where .dockerignore omits some tracked
-        # paths (e.g. .minds/template/*) from the COPY context but those paths
-        # remain in the in-image .git index after the `git init + git add -A`
-        # normalization. The ratchet is about actual scripts that could run,
-        # not index entries.
+        # Skip declarative, non-runnable schema templates (see the prefix list above).
+        relative_path = sh_file.relative_to(repo_root).as_posix()
+        if any(relative_path.startswith(prefix) for prefix in _STRICT_MODE_EXEMPT_DIR_PREFIXES):
+            continue
+        # Skip files that git tracks but aren't present on disk. This happens in
+        # offload release sandboxes where the build COPY context omits some
+        # tracked paths, yet they remain in the in-image .git index after the
+        # `git init + git add -A` normalization. The ratchet is about actual
+        # scripts that could run, not index entries.
         if not sh_file.is_file():
             continue
         content = sh_file.read_text()

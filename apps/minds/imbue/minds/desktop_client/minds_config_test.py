@@ -32,6 +32,28 @@ def test_clear_default_account_id(tmp_path: Path) -> None:
     assert config.get_default_account_id() is None
 
 
+def test_default_region_is_none(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    assert config.get_region("imbue_cloud") is None
+
+
+def test_set_and_get_region_per_provider(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    config.set_region("imbue_cloud", "US-WEST-OR")
+    config.set_region("vultr", "lhr")
+    assert config.get_region("imbue_cloud") == "US-WEST-OR"
+    assert config.get_region("vultr") == "lhr"
+    # A provider with no stored region still reads as None.
+    assert config.get_region("docker") is None
+
+
+def test_set_region_overwrites_previous_value(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    config.set_region("imbue_cloud", "US-EAST-VA")
+    config.set_region("imbue_cloud", "US-WEST-OR")
+    assert config.get_region("imbue_cloud") == "US-WEST-OR"
+
+
 def test_set_and_get_auto_open_requests_panel(tmp_path: Path) -> None:
     """Setting auto_open_requests_panel persists correctly."""
     config = _make_config(tmp_path)
@@ -40,6 +62,29 @@ def test_set_and_get_auto_open_requests_panel(tmp_path: Path) -> None:
 
     config.set_auto_open_requests_panel(True)
     assert config.get_auto_open_requests_panel() is True
+
+
+def test_error_reporting_settings_default_off(tmp_path: Path) -> None:
+    """Consent and both error-reporting toggles default to off on a fresh install."""
+    config = _make_config(tmp_path)
+    assert config.get_error_reporting_consent_given() is False
+    assert config.get_report_unexpected_errors() is False
+    assert config.get_include_error_logs() is False
+
+
+def test_error_reporting_settings_round_trip(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    config.set_error_reporting_consent_given(True)
+    config.set_report_unexpected_errors(True)
+    config.set_include_error_logs(True)
+    assert config.get_error_reporting_consent_given() is True
+    assert config.get_report_unexpected_errors() is True
+    assert config.get_include_error_logs() is True
+    # A new instance reads the same persisted values.
+    reloaded = _make_config(tmp_path)
+    assert reloaded.get_error_reporting_consent_given() is True
+    assert reloaded.get_report_unexpected_errors() is True
+    assert reloaded.get_include_error_logs() is True
 
 
 def test_persistence_across_instances(tmp_path: Path) -> None:

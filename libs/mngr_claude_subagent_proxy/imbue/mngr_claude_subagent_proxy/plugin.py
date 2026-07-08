@@ -11,17 +11,24 @@ from typing import Final
 from loguru import logger
 from pydantic import Field
 
+from imbue.mngr.api.git import GitignoreStatus
+from imbue.mngr.api.git import check_path_gitignore_status
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.host_dir import read_default_host_dir
 from imbue.mngr.config.plugin_registry import register_plugin_config
 from imbue.mngr.errors import MngrError
-from imbue.mngr.hosts.host import get_agent_state_dir_path
+from imbue.mngr.errors import PluginMngrError
+from imbue.mngr.hosts.common import get_agent_state_dir_path
+from imbue.mngr.hosts.common import get_agents_root_dir
+from imbue.mngr.hosts.host import read_json_dict_via_host
+from imbue.mngr.hosts.host import write_json_dict_via_host
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentName
 from imbue.mngr_claude.claude_config import SESSION_GUARD
 from imbue.mngr_claude.claude_config import build_permission_auto_allow_hooks_config
+from imbue.mngr_claude.claude_config import get_agent_hook_settings_path
 from imbue.mngr_claude.claude_config import get_user_claude_config_dir
 from imbue.mngr_claude.claude_config import merge_hooks_config
 from imbue.mngr_claude.plugin import ClaudeAgent
@@ -31,6 +38,8 @@ from imbue.mngr_claude_subagent_proxy import resources as _subagent_proxy_resour
 from imbue.mngr_claude_subagent_proxy._stop_hook_guard import MNGR_MANAGED_HOOK_MARKERS
 from imbue.mngr_claude_subagent_proxy._stop_hook_guard import PROXY_CHILD_GUARD_PREFIX
 from imbue.mngr_claude_subagent_proxy._stop_hook_guard import guard_user_stop_hooks_against_proxy_children
+from imbue.mngr_claude_subagent_proxy._stop_hook_guard import guarded_settings_text
+from imbue.mngr_claude_subagent_proxy._stop_hook_guard import is_well_formed_command_entry
 from imbue.mngr_claude_subagent_proxy._stop_hook_guard import iter_user_stop_hook_commands
 from imbue.mngr_claude_subagent_proxy.data_types import SubagentProxyMode
 from imbue.mngr_claude_subagent_proxy.data_types import SubagentProxyPluginConfig
@@ -83,6 +92,18 @@ class UnguardedProjectStopHookError(MngrError):
     """
 
 
+class UnignoredProxyArtifactError(MngrError):
+    """A subagent-proxy provisioning artifact path is not gitignored.
+
+    Raised at provisioning time when the plugin would write its agent
+    definition (PROXY mode) or DENY-mode skill into a git-tracked worktree
+    where the target path is not gitignored -- the file would surface as an
+    unstaged change and trip clean-tree stop hooks. Like mngr_claude's
+    settings.local.json guard, we refuse rather than dirty the worktree; the
+    user must either gitignore the path or disable the plugin.
+    """
+
+
 @hookimpl
 def register_agent_type() -> tuple[str, type[AgentInterface], type[AgentTypeConfig]]:
     """Register the mngr-proxy-child agent type.
@@ -94,7 +115,19 @@ def register_agent_type() -> tuple[str, type[AgentInterface], type[AgentTypeConf
 
 
 _AGENT_DEFINITION: Final[str] = "mngr-proxy.agent.md"
-_MNGR_SUBAGENTS_SKILL: Final[str] = "mngr-subagents.skill.md"
+_PROXY_SKILL_RESOURCE: Final[str] = "mngr-proxy.skill.md"
+
+# Where the plugin writes its provisioning artifacts, relative to the agent
+# worktree's ``.claude/`` directory. Both live under a ``mngr-proxy/``
+# subdirectory (rather than flat in ``agents/`` / ``skills/``) so a single
+# ``.claude/agents/mngr-proxy/`` or ``.claude/skills/mngr-proxy/`` line in
+# ``.gitignore`` covers them. Claude Code scans ``.claude/agents/``
+# recursively and identifies a subagent by its frontmatter ``name:`` field
+# (``mngr-proxy``), not its filename or directory, so the agent definition is
+# still discovered from the subdirectory. A skill, by contrast, is named by
+# its directory and its entry file must be exactly ``SKILL.md``.
+_PROXY_AGENT_SUBPATH: Final[Path] = Path("agents") / "mngr-proxy" / "proxy.md"
+_PROXY_SKILL_SUBPATH: Final[Path] = Path("skills") / "mngr-proxy" / "SKILL.md"
 
 _SPAWN_MODULE: Final[str] = "imbue.mngr_claude_subagent_proxy.hooks.spawn"
 _CLEANUP_MODULE: Final[str] = "imbue.mngr_claude_subagent_proxy.hooks.cleanup"
@@ -169,8 +202,8 @@ def build_subagent_proxy_deny_hooks_config() -> dict[str, Any]:
     """Build the deny-mode hooks config: PreToolUse:Agent deny + SessionStart reap.
 
     - PreToolUse (Agent): emit a short skill-pointer ``permissionDecisionReason``
-      that directs Claude at the ``mngr-subagents`` skill (installed under
-      ``.claude/skills/`` by ``_write_mngr_subagents_skill``); the
+      that directs Claude at the ``mngr-proxy`` skill (installed under
+      ``.claude/skills/`` by ``_write_proxy_skill``); the
       ``mngr create`` / ``subagent_wait`` protocol lives in that skill,
       not in the deny reason itself.
     - SessionStart: same shared label-driven reaper that PROXY mode uses
@@ -214,35 +247,164 @@ def build_subagent_proxy_deny_hooks_config() -> dict[str, Any]:
     }
 
 
+def _unignored_relative_or_none(host: OnlineHostInterface, repo_path: Path, claude_subpath: Path) -> Path | None:
+    """Return the relative path if ``.claude/<claude_subpath>`` is NOT gitignored, else None.
+
+    Computes the gitignore status of the path once via the any-rule
+    ``check_path_gitignore_status`` and applies the single canonical accept
+    rule ``status in (GitignoreStatus.SKIP, GitignoreStatus.IGNORED)`` -- i.e.
+    the path is ignored, or the location is not a git repo (SKIP). When the path
+    is accepted, returns None; otherwise returns the computed relative path
+    (which reflects any ``.claude`` symlink resolution) so the caller can build
+    its own error message. ``check_path_gitignore_status`` never returns
+    ``ONLY_GLOBAL``, so this accept rule matches the prior ``is not NOT_IGNORED``.
+    """
+    status, relative = check_path_gitignore_status(host, repo_path, Path(".claude") / claude_subpath)
+    if status in (GitignoreStatus.SKIP, GitignoreStatus.IGNORED):
+        return None
+    return relative
+
+
+def _check_proxy_artifact_gitignored(host: OnlineHostInterface, work_dir: Path, claude_subpath: Path) -> None:
+    """Refuse to write a provisioning artifact into a git-tracked worktree.
+
+    Mirrors mngr_claude's settings.local.json guard: writing the file into a
+    repo where its path is not gitignored would surface it as an unstaged
+    change. Uses the any-rule ``check_path_gitignore_status`` (not the
+    repo-rule-only variant), so a path ignored only via the user's global
+    excludes is accepted -- this is a local provisioning step, not a preflight
+    whose result has to hold on a remote host. Raises
+    ``UnignoredProxyArtifactError`` otherwise, pointing the user at both the
+    gitignore fix and the option to disable the plugin.
+
+    We check the exact file the plugin is about to write, not its directory:
+    the guard runs before the directory is created, and a directory-only
+    gitignore rule (``mngr-proxy/``) does not match a not-yet-existing
+    *directory* path -- but it does match a *file* under it, which is what we
+    check. So checking the file accepts both ``.claude/agents/mngr-proxy/`` and
+    broader rules like ``.claude/``. The remediation still points at the file's
+    parent directory, since the plugin owns that whole ``mngr-proxy/`` subdir
+    and one directory rule is the clean way to ignore it. ``relative.parent``
+    (not the input subpath's parent) is used so the suggestion reflects any
+    symlink resolution -- e.g. ``.agents/...`` when ``.claude -> .agents``.
+    """
+    relative = _unignored_relative_or_none(host, work_dir, claude_subpath)
+    if relative is None:
+        return
+    raise UnignoredProxyArtifactError(
+        f"'{relative}' is not gitignored in {work_dir}.\n"
+        "The mngr subagent-proxy plugin writes this file when provisioning a Claude agent, "
+        "but it would appear as an unstaged change in your repository.\n"
+        f"Add '{relative.parent}/' to your .gitignore and try again, or disable the plugin for this repository:\n"
+        f"  mngr config set --scope project plugins.{CLAUDE_SUBAGENT_PROXY_PLUGIN_NAME}.enabled false"
+    )
+
+
+def _check_settings_local_gitignored(host: OnlineHostInterface, repo_path: Path) -> None:
+    """Verify .claude/settings.local.json is gitignored in the given repo path.
+
+    The proxy wraps user-defined Stop hooks by writing into this file; if it is
+    not gitignored the write would surface as an unstaged change. When .claude is
+    a symlink, resolves it and checks the resolved path against .gitignore instead
+    (e.g. .agents/settings.local.json if .claude -> .agents).
+
+    Raises PluginMngrError if the file is not gitignored. Silently returns if the
+    path is not a git repository or if the .claude symlink target is outside the
+    repo (since git won't track it).
+    """
+    settings_relative = _unignored_relative_or_none(host, repo_path, Path("settings.local.json"))
+    if settings_relative is None:
+        return
+    raise PluginMngrError(
+        f"'{settings_relative}' is not gitignored in {repo_path}.\n"
+        "mngr writes to this file (to guard user-defined Stop hooks against proxy children), "
+        "but it would appear as an unstaged change.\n"
+        f"Add '{settings_relative}' to your .gitignore and try again."
+    )
+
+
 def _write_proxy_agent_definition(host: OnlineHostInterface, work_dir: Path) -> None:
-    """Write the mngr-proxy subagent definition under the agent's .claude/agents/."""
-    agents_dir = work_dir / ".claude" / "agents"
-    host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(agents_dir))}", timeout_seconds=5.0)
+    """Write the mngr-proxy subagent definition under the agent's .claude/agents/.
+
+    Written to ``.claude/agents/mngr-proxy/proxy.md``; Claude Code resolves the
+    ``mngr-proxy`` subagent_type from the file's frontmatter ``name:`` field
+    regardless of the subdirectory. Refuses to write if the path is not
+    gitignored (see ``_check_proxy_artifact_gitignored``).
+    """
+    _check_proxy_artifact_gitignored(host, work_dir, _PROXY_AGENT_SUBPATH)
+    agent_path = work_dir / ".claude" / _PROXY_AGENT_SUBPATH
+    host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(agent_path.parent))}", timeout_seconds=5.0)
     content = _load_resource(_AGENT_DEFINITION)
-    host.write_text_file(agents_dir / "mngr-proxy.md", content)
+    host.write_text_file(agent_path, content)
 
 
-def _write_mngr_subagents_skill(host: OnlineHostInterface, work_dir: Path) -> None:
-    """Write the ``mngr-subagents`` Claude skill under the agent's .claude/skills/.
+def _write_proxy_skill(host: OnlineHostInterface, work_dir: Path) -> None:
+    """Write the ``mngr-proxy`` Claude skill under the agent's .claude/skills/.
 
     Used in DENY mode to give Claude the full context for delegating to
     mngr-managed subagents. The deny hook's ``permissionDecisionReason``
     is intentionally short -- a one-liner pointing at this skill -- so
     the verbose two-command spawn-and-wait protocol is loaded on demand
-    by Claude rather than crowding every Task transcript.
+    by Claude rather than crowding every Task transcript. Written to
+    ``.claude/skills/mngr-proxy/SKILL.md`` (the skill is named by its
+    directory; Claude Code requires the entry file to be exactly
+    ``SKILL.md``). Refuses to write if the path is not gitignored.
     """
-    skill_dir = work_dir / ".claude" / "skills" / "mngr-subagents"
-    host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(skill_dir))}", timeout_seconds=5.0)
-    content = _load_resource(_MNGR_SUBAGENTS_SKILL)
-    host.write_text_file(skill_dir / "SKILL.md", content)
+    _check_proxy_artifact_gitignored(host, work_dir, _PROXY_SKILL_SUBPATH)
+    skill_path = work_dir / ".claude" / _PROXY_SKILL_SUBPATH
+    host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(skill_path.parent))}", timeout_seconds=5.0)
+    content = _load_resource(_PROXY_SKILL_RESOURCE)
+    host.write_text_file(skill_path, content)
 
 
-def _merge_subagent_proxy_deny_hooks(host: OnlineHostInterface, work_dir: Path) -> None:
-    """Merge the deny-mode hooks into the agent's .claude/settings.local.json.
+def _merge_hooks_into_settings(host: OnlineHostInterface, settings_path: Path, hooks_config: dict[str, Any]) -> None:
+    """Layer ``hooks_config`` onto the agent's Claude settings file.
+
+    In normal mode this is the per-agent config-dir ``settings.json`` (the "user"
+    layer Claude reads from ``$CLAUDE_CONFIG_DIR``); in ``use_env_config_dir`` mode
+    it is the mngr-managed ``--settings`` file (see ``get_managed_settings_path``).
+    Either way mngr_claude provisioning writes the base file before this plugin's
+    ``on_after_provisioning`` runs, so it normally already exists; this read-merge-
+    write tolerates a missing file regardless. ``merge_hooks_config`` preserves
+    sibling (non-hook) keys.
+    """
+    existing_settings = read_json_dict_via_host(host, settings_path)
+    merged = merge_hooks_config(existing_settings, hooks_config)
+    if merged == existing_settings:
+        logger.debug("Subagent-proxy hooks already configured in {}", settings_path)
+        return
+    # Ensure the parent exists so this doesn't depend on mngr_claude creating it first.
+    write_json_dict_via_host(host, settings_path, merged, make_parent=True)
+
+
+def _guard_user_stop_hooks_in_project_settings(host: OnlineHostInterface, work_dir: Path) -> None:
+    """Wrap user Stop/SubagentStop hooks in ``.claude/settings.local.json`` with the
+    MNGR_CLAUDE_SUBAGENT_PROXY_CHILD guard so they no-op inside proxy children.
+
+    Without this, user-installed Stop hooks (imbue-code-guardian's
+    stop_hook_orchestrator.sh, project cleanup hooks, etc.) would re-prompt
+    spawned subagents into autofix/verify cycles. The wrap is env-conditional,
+    so the parent agent (env unset) still runs the original command. Targets
+    the *user's* hooks only; mngr's own hooks live in the managed settings file.
+
+    Writing settings.local.json must not dirty the worktree, so this requires
+    the file to be gitignored -- the one place that requirement still applies.
+    """
+    settings_path = work_dir / ".claude" / "settings.local.json"
+    settings = read_json_dict_via_host(host, settings_path)
+    if not settings:
+        return
+    if guard_user_stop_hooks_against_proxy_children(settings):
+        _check_settings_local_gitignored(host, work_dir)
+        write_json_dict_via_host(host, settings_path, settings)
+
+
+def _merge_subagent_proxy_deny_hooks(host: OnlineHostInterface, hook_settings_path: Path) -> None:
+    """Merge the deny-mode hooks into the agent's Claude settings file.
 
     Deny mode installs two hooks: a PreToolUse:Agent hook that denies
     Task calls with a short skill-pointer reason pointing at the
-    ``mngr-subagents`` skill (installed alongside, under
+    ``mngr-proxy`` skill (installed alongside, under
     ``.claude/skills/``), plus the shared label-driven SessionStart
     reaper (same ``hooks/reap.py`` PROXY uses; both spawn paths attach
     the ``mngr_claude_subagent_proxy_parent_id`` label so the same
@@ -255,56 +417,22 @@ def _merge_subagent_proxy_deny_hooks(host: OnlineHostInterface, work_dir: Path) 
     project ``settings.json`` for un-guarded Stop hooks (same reason).
     The surface is deliberately much smaller than PROXY mode.
     """
-    settings_path = work_dir / ".claude" / "settings.local.json"
-    existing_settings: dict[str, Any] = {}
-    try:
-        content = host.read_text_file(settings_path)
-        existing_settings = json.loads(content)
-    except FileNotFoundError:
-        pass
-
-    hooks_config = build_subagent_proxy_deny_hooks_config()
-    merged = merge_hooks_config(existing_settings, hooks_config)
-    if merged is None:
-        logger.debug("Subagent-proxy deny hook already configured in {}", settings_path)
-        return
-    host.write_text_file(settings_path, json.dumps(merged, indent=2) + "\n")
+    _merge_hooks_into_settings(host, hook_settings_path, build_subagent_proxy_deny_hooks_config())
 
 
-def _merge_subagent_proxy_hooks(host: OnlineHostInterface, work_dir: Path) -> None:
-    """Merge the subagent-proxy hooks into the agent's .claude/settings.local.json.
+def _merge_subagent_proxy_hooks(host: OnlineHostInterface, hook_settings_path: Path, work_dir: Path) -> None:
+    """Install the subagent-proxy hooks and guard user-installed Stop hooks.
 
-    Also rewrites every existing user-defined Stop/SubagentStop command
-    in that file to no-op when MNGR_CLAUDE_SUBAGENT_PROXY_CHILD=1 is set in the
-    env. This is what stops user-installed Stop hooks (imbue-code-guardian's
-    stop_hook_orchestrator.sh, project-specific cleanup hooks, etc.) from
-    re-prompting spawned subagents into autofix/verify cycles.
-
-    The wrap is env-conditional so it is safe for the parent agent too:
-    the parent's MNGR_CLAUDE_SUBAGENT_PROXY_CHILD is unset, the guard falls
-    through, and the original command runs normally. Only the spawned
-    proxy children, which we explicitly set the env var on at create
-    time, see the no-op.
+    The proxy's own hooks go into the agent's Claude settings file
+    (``hook_settings_path``). Separately, every user-defined
+    Stop/SubagentStop command in the project's settings.local.json and in
+    the plugin caches is wrapped with the MNGR_CLAUDE_SUBAGENT_PROXY_CHILD
+    guard so it no-ops inside spawned proxy children -- see
+    ``_guard_user_stop_hooks_in_project_settings``.
     """
-    settings_path = work_dir / ".claude" / "settings.local.json"
-    existing_settings: dict[str, Any] = {}
-    try:
-        content = host.read_text_file(settings_path)
-        existing_settings = json.loads(content)
-    except FileNotFoundError:
-        pass
+    _merge_hooks_into_settings(host, hook_settings_path, build_subagent_proxy_hooks_config())
 
-    hooks_config = build_subagent_proxy_hooks_config()
-    merged = merge_hooks_config(existing_settings, hooks_config)
-    if merged is None:
-        merged = existing_settings
-
-    guard_changed = guard_user_stop_hooks_against_proxy_children(merged)
-
-    if merged is not existing_settings or guard_changed:
-        host.write_text_file(settings_path, json.dumps(merged, indent=2) + "\n")
-    else:
-        logger.debug("Subagent-proxy hooks already configured in {}", settings_path)
+    _guard_user_stop_hooks_in_project_settings(host, work_dir)
 
     # NOTE: project ``.claude/settings.json`` is git-tracked, so we
     # deliberately do NOT mutate it -- a wrap there would dirty the
@@ -329,21 +457,13 @@ def _guard_stop_hooks_in_file(host: OnlineHostInterface, path: Path) -> None:
     file back. No-op if the file is missing, malformed, or already fully
     guarded.
     """
-    try:
-        content = host.read_text_file(path)
-    except FileNotFoundError:
+    data = read_json_dict_via_host(host, path)
+    if not data:
         return
-    try:
-        data = json.loads(content)
-    except json.JSONDecodeError:
-        logger.warning("Could not parse {}; skipping Stop-hook guard pass", path)
+    text = guarded_settings_text(data, path)
+    if text is None:
         return
-    if not isinstance(data, dict):
-        return
-    if not guard_user_stop_hooks_against_proxy_children(data):
-        return
-    logger.info("Wrapped Stop hooks in {} with MNGR_CLAUDE_SUBAGENT_PROXY_CHILD guard", path)
-    host.write_text_file(path, json.dumps(data, indent=2) + "\n")
+    host.write_text_file(path, text)
 
 
 def _discover_plugin_hooks_files() -> list[Path]:
@@ -365,7 +485,7 @@ def _discover_plugin_hooks_files() -> list[Path]:
     # Per-agent plugin caches live under <host_dir>/agents/<id>/plugin/claude/anthropic/plugins/.
     # `read_default_host_dir` resolves MNGR_HOST_DIR (explicit override) or
     # falls back to ~/.mngr -- so we honor user-customized host dirs.
-    host_agents_root = read_default_host_dir() / "agents"
+    host_agents_root = get_agents_root_dir(read_default_host_dir())
     if host_agents_root.is_dir():
         try:
             candidates.extend(host_agents_root.glob("*/plugin/claude/anthropic/plugins/**/hooks/hooks.json"))
@@ -407,12 +527,9 @@ def _is_known_safe_hook(hook_entry: dict[str, Any]) -> bool:
     if not isinstance(inner, list) or not inner:
         return False
     for cmd_entry in inner:
-        if not isinstance(cmd_entry, dict):
+        if not is_well_formed_command_entry(cmd_entry):
             return False
-        command = cmd_entry.get("command")
-        if not isinstance(command, str):
-            return False
-        if not any(marker in command for marker in MNGR_MANAGED_HOOK_MARKERS):
+        if not any(marker in cmd_entry["command"] for marker in MNGR_MANAGED_HOOK_MARKERS):
             return False
     return True
 
@@ -421,20 +538,15 @@ def _check_subagent_hooks_compat(host: OnlineHostInterface, agent: AgentInterfac
     """Refuse to provision a subagent-proxy child whose inherited Stop/SubagentStop hooks
     need custom translation between top-level and subagent semantics.
 
-    We recognize the baseline mngr_claude readiness hook and let it through;
-    anything else is a user-configured hook whose intended scope we don't
-    know (should it run once per subagent turn? once per outer turn? not at
-    all?). Fail loudly rather than silently strip or silently duplicate.
+    mngr's own hooks load via ``claude --settings`` and are not in this file,
+    so any Stop/SubagentStop hook here is user-configured (legacy mngr-marked
+    leftovers are still recognized and allowed). A user hook's intended scope
+    is ambiguous -- should it run once per subagent turn? once per outer turn?
+    not at all? -- so we fail loudly rather than silently strip or duplicate.
     """
     settings_path = agent.work_dir / ".claude" / "settings.local.json"
-    try:
-        content = host.read_text_file(settings_path)
-    except FileNotFoundError:
-        return
-    try:
-        settings: dict[str, Any] = json.loads(content)
-    except json.JSONDecodeError:
-        logger.warning("Could not parse settings.local.json at {}; assuming no stop hooks", settings_path)
+    settings = read_json_dict_via_host(host, settings_path)
+    if not settings:
         return
     hooks = settings.get("hooks")
     if not isinstance(hooks, dict):
@@ -476,14 +588,8 @@ def _check_project_settings_stop_hooks_guarded(host: OnlineHostInterface, work_d
     if os.environ.get(_OPT_OUT_PROJECT_STOP_CHECK_ENV, "") == "1":
         return
     settings_path = work_dir / ".claude" / "settings.json"
-    try:
-        content = host.read_text_file(settings_path)
-    except FileNotFoundError:
-        return
-    try:
-        settings: dict[str, Any] = json.loads(content)
-    except json.JSONDecodeError:
-        logger.warning("Could not parse {}; skipping project stop-hook check", settings_path)
+    settings = read_json_dict_via_host(host, settings_path)
+    if not settings:
         return
     hooks = settings.get("hooks")
     if not isinstance(hooks, dict):
@@ -531,7 +637,7 @@ def on_after_provisioning(agent: AgentInterface, host: OnlineHostInterface, mngr
     """Install subagent-proxy hooks on Claude agents.
 
     Runs trylast so mngr_claude's provisioning (which writes the base
-    settings.local.json) has already completed. For agents we recognize
+    mngr-managed settings file) has already completed. For agents we recognize
     as our own spawned proxy-children, refuse to proceed if they inherit
     any Stop / SubagentStop hooks whose semantics differ between top-level
     and subagent contexts -- the user has to decide how those should apply.
@@ -541,7 +647,7 @@ def on_after_provisioning(agent: AgentInterface, host: OnlineHostInterface, mngr
       write the mngr-proxy agent definition, guard project Stop hooks.
     - ``DENY``: install the PreToolUse:Agent deny hook plus the shared
       label-driven SessionStart reaper (same ``hooks/reap.py`` PROXY
-      uses), and write the ``mngr-subagents`` skill under
+      uses), and write the ``mngr-proxy`` skill under
       ``.claude/skills/``. The other PROXY-only plumbing does NOT run
       (no PostToolUse cleanup, no Stop-hook guard, no project
       settings.json check). The deny hook never invokes ``mngr create``
@@ -550,59 +656,53 @@ def on_after_provisioning(agent: AgentInterface, host: OnlineHostInterface, mngr
       via Bash. The reaper still picks up terminal children spawned
       that way via the shared parent-id label.
     """
-    if not isinstance(agent.agent_config, ClaudeAgentConfig):
+    config = agent.agent_config
+    if not isinstance(config, ClaudeAgentConfig):
         return
 
     mode = _resolve_plugin_mode(mngr_ctx)
+    # Where mngr's hooks live, matching mngr_claude: in normal mode the per-agent
+    # config-dir settings.json (the "user" layer Claude reads, built by
+    # _build_settings_json); in use_env_config_dir mode the managed --settings file
+    # (no per-agent config dir exists). Both paths are derived from the same shared
+    # claude_config helpers mngr_claude uses, so they never drift.
+    agent_state_dir = get_agent_state_dir_path(host.host_dir, agent.id)
+    hook_settings_path = get_agent_hook_settings_path(agent_state_dir, use_env_config_dir=config.use_env_config_dir)
     if mode == SubagentProxyMode.DENY:
-        _merge_subagent_proxy_deny_hooks(host, agent.work_dir)
-        _write_mngr_subagents_skill(host, agent.work_dir)
+        _merge_subagent_proxy_deny_hooks(host, hook_settings_path)
+        _write_proxy_skill(host, agent.work_dir)
         return
 
     _check_project_settings_stop_hooks_guarded(host, agent.work_dir)
     _write_proxy_agent_definition(host, agent.work_dir)
-    _merge_subagent_proxy_hooks(host, agent.work_dir)
+    _merge_subagent_proxy_hooks(host, hook_settings_path, agent.work_dir)
 
     if _is_subagent_proxy_child(agent):
         _check_subagent_hooks_compat(host, agent)
         _strip_user_hooks_from_subagent(host, agent.work_dir)
-        _install_proxy_child_auto_allow(host, agent.work_dir)
+        _install_proxy_child_auto_allow(host, hook_settings_path)
 
 
-def _install_proxy_child_auto_allow(host: OnlineHostInterface, work_dir: Path) -> None:
+def _install_proxy_child_auto_allow(host: OnlineHostInterface, hook_settings_path: Path) -> None:
     """Auto-allow all permission dialogs in spawned mngr-proxy-child agents.
 
     Why: a proxy child is a Haiku dispatcher constrained to running our
     wait-script and fake_tool. When that child itself spawns a nested
     Agent call (depth 2+), our PreToolUse hook proxies it as another
-    Bash invocation -- but the child's settings.local.json has no
-    auto-allow for Bash, so the nested Bash call triggers a permission
-    dialog INSIDE the child's Claude session. The parent's
-    subagent_wait then surfaces NEED_PERMISSION, but the only way to
-    resolve it is `mngr connect <child-name>` in another terminal,
-    which makes nested subagents effectively unusable.
+    Bash invocation -- but the child has no auto-allow for Bash, so the
+    nested Bash call triggers a permission dialog INSIDE the child's
+    Claude session. The parent's subagent_wait then surfaces
+    NEED_PERMISSION, but the only way to resolve it is
+    `mngr connect <child-name>` in another terminal, which makes nested
+    subagents effectively unusable.
 
     Auto-allowing permissions in proxy children is safe: the child is
     structurally restricted (single Bash tool, agent definition limits
     commands) and is never user-driven. Top-level (non-child) agents
     are unaffected -- they keep whatever permissions config the user
-    set.
+    set. The hook goes into the child's Claude settings file.
     """
-    settings_path = work_dir / ".claude" / "settings.local.json"
-    existing_settings: dict[str, Any] = {}
-    try:
-        content = host.read_text_file(settings_path)
-        existing_settings = json.loads(content)
-    except FileNotFoundError:
-        pass
-    except json.JSONDecodeError:
-        logger.warning("Could not parse settings.local.json at {}; skipping auto-allow merge", settings_path)
-        return
-    auto_allow_config = build_permission_auto_allow_hooks_config()
-    merged = merge_hooks_config(existing_settings, auto_allow_config)
-    if merged is None:
-        return
-    host.write_text_file(settings_path, json.dumps(merged, indent=2) + "\n")
+    _merge_hooks_into_settings(host, hook_settings_path, build_permission_auto_allow_hooks_config())
 
 
 def _strip_user_hooks_from_subagent(host: OnlineHostInterface, work_dir: Path) -> None:
@@ -613,20 +713,13 @@ def _strip_user_hooks_from_subagent(host: OnlineHostInterface, work_dir: Path) -
     hooks the user has configured on the parent (PreToolUse filters,
     PostToolUse notifications, etc.). Their top-level-vs-subagent
     semantics are ambiguous, so drop everything that isn't recognized
-    as mngr-managed. The Stop/SubagentStop compat check already
-    rejected unsafe ones before we got here, so anything still present
-    in those events must be mngr baseline; the loop below simply
-    filters again for uniformity.
+    as mngr-managed. mngr's own hooks load via ``claude --settings``,
+    not from here, so in practice this removes the inherited user hooks
+    (the compat check has already rejected ambiguous user Stop/SubagentStop hooks).
     """
     settings_path = work_dir / ".claude" / "settings.local.json"
-    try:
-        content = host.read_text_file(settings_path)
-    except FileNotFoundError:
-        return
-    try:
-        settings: dict[str, Any] = json.loads(content)
-    except json.JSONDecodeError:
-        logger.warning("Could not parse settings.local.json at {}; not stripping user hooks", settings_path)
+    settings = read_json_dict_via_host(host, settings_path)
+    if not settings:
         return
     hooks = settings.get("hooks")
     if not isinstance(hooks, dict):
@@ -647,8 +740,9 @@ def _strip_user_hooks_from_subagent(host: OnlineHostInterface, work_dir: Path) -
 
     if not stripped_any:
         return
+    _check_settings_local_gitignored(host, work_dir)
     logger.info("Stripped user-configured hooks from spawned subagent settings at {}", settings_path)
-    host.write_text_file(settings_path, json.dumps(settings, indent=2) + "\n")
+    write_json_dict_via_host(host, settings_path, settings)
 
 
 _SUBAGENT_MAP_DIRNAME: Final[str] = "subagent_map"

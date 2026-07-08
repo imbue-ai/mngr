@@ -20,7 +20,7 @@ class SubagentProxyMode(UpperCaseStrEnum):
     end-turn body.
 
     DENY: deny every Task call with a short permissionDecisionReason
-    that points Claude at the ``mngr-subagents`` skill. The skill
+    that points Claude at the ``mngr-proxy`` skill. The skill
     teaches an explicit two-command spawn-and-wait protocol Claude
     runs itself via the Bash tool (``mngr create`` then
     ``python -m imbue.mngr_claude_subagent_proxy.subagent_wait``) and
@@ -55,36 +55,18 @@ class SubagentProxyMode(UpperCaseStrEnum):
 
 
 class SubagentProxyPluginConfig(PluginConfig):
-    """Configuration for the mngr_claude_subagent_proxy plugin."""
+    """Configuration for the mngr_claude_subagent_proxy plugin.
+
+    This plugin is opt-in: it is DISABLED by default and only loads when a
+    config layer explicitly sets ``[plugins.claude_subagent_proxy] enabled =
+    true`` (enforced by ``OPT_IN_PLUGINS`` in mngr's config pre-reader). It is
+    very experimental and breaks a lot of other tooling, so it must be turned
+    on deliberately rather than relied upon by default.
+    """
 
     mode: SubagentProxyMode = Field(
         default=SubagentProxyMode.PROXY,
         description="Whether to proxy Task calls through a mngr subagent (PROXY) "
         "or deny them with a short skill-pointer reason that directs Claude at "
-        "the mngr-subagents skill (DENY).",
+        "the mngr-proxy skill (DENY).",
     )
-
-    def merge_with(self, override: "PluginConfig") -> "SubagentProxyPluginConfig":
-        """Merge this config with an override config.
-
-        Scalar fields: override wins if not None. Matches the convention
-        established by other plugin configs (see ``RecursivePluginConfig``).
-
-        Accepts the base ``PluginConfig`` type to keep the signature
-        compatible with the parent class. The two branches:
-
-        - If ``override`` is not a ``SubagentProxyPluginConfig``, it can
-          only carry ``enabled``; preserve ``self.mode`` and merge only
-          ``enabled`` from the override.
-        - If ``override`` IS a ``SubagentProxyPluginConfig``, both
-          ``enabled`` and ``mode`` are merged scalar-style (override
-          wins when not None).
-        """
-        if not isinstance(override, SubagentProxyPluginConfig):
-            return SubagentProxyPluginConfig(
-                enabled=override.enabled if override.enabled is not None else self.enabled,
-                mode=self.mode,
-            )
-        merged_enabled = override.enabled if override.enabled is not None else self.enabled
-        merged_mode = override.mode if override.mode is not None else self.mode
-        return SubagentProxyPluginConfig(enabled=merged_enabled, mode=merged_mode)

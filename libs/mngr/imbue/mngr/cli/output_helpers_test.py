@@ -1,28 +1,25 @@
 """Tests for CLI output helpers."""
 
 import json
-from pathlib import Path
 
 import pytest
 
-from imbue.mngr.api.sync import SyncFilesResult
-from imbue.mngr.api.sync import SyncGitResult
 from imbue.mngr.cli.output_helpers import AbortError
-from imbue.mngr.cli.output_helpers import _write_json_line
+from imbue.mngr.cli.output_helpers import OperatorResultPart
+from imbue.mngr.cli.output_helpers import emit_error_event
 from imbue.mngr.cli.output_helpers import emit_event
-from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import emit_format_template_lines
 from imbue.mngr.cli.output_helpers import emit_info
+from imbue.mngr.cli.output_helpers import emit_operator_result
 from imbue.mngr.cli.output_helpers import format_size
 from imbue.mngr.cli.output_helpers import on_error
-from imbue.mngr.cli.output_helpers import output_sync_files_result
-from imbue.mngr.cli.output_helpers import output_sync_git_result
 from imbue.mngr.cli.output_helpers import render_format_template
+from imbue.mngr.cli.output_helpers import write_event_line
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import OutputFormat
-from imbue.mngr.primitives import SyncMode
 
 # =============================================================================
 # Tests for AbortError
@@ -113,6 +110,67 @@ def test_emit_event_json_format(capsys: pytest.CaptureFixture[str]) -> None:
 
 
 # =============================================================================
+# Tests for write_event_line
+# =============================================================================
+
+
+def test_write_event_line_prepends_event_field(capsys: pytest.CaptureFixture[str]) -> None:
+    """write_event_line should emit the payload with a leading ``event`` field."""
+    write_event_line("destroyed", {"agent_id": "agent-123"})
+    output = json.loads(capsys.readouterr().out.strip())
+    assert output == {"event": "destroyed", "agent_id": "agent-123"}
+
+
+# =============================================================================
+# Tests for emit_operator_result
+# =============================================================================
+
+
+def test_emit_operator_result_json_merges_part_data(capsys: pytest.CaptureFixture[str]) -> None:
+    """JSON mode writes the parts' merged data as a bare object, without an ``event`` field."""
+    parts = [
+        OperatorResultPart(data={"created": True}, human="Made it"),
+        OperatorResultPart(data={"bucket": None}, human=None),
+    ]
+    emit_operator_result("prepared", parts, OutputFormat.JSON)
+    assert json.loads(capsys.readouterr().out.strip()) == {"created": True, "bucket": None}
+
+
+def test_emit_operator_result_jsonl_tags_merged_data_with_event(capsys: pytest.CaptureFixture[str]) -> None:
+    """JSONL mode tags the merged data with the event name."""
+    parts = [OperatorResultPart(data={"created": True}, human="Made it")]
+    emit_operator_result("prepared", parts, OutputFormat.JSONL)
+    assert json.loads(capsys.readouterr().out.strip()) == {"event": "prepared", "created": True}
+
+
+def test_operator_result_part_shown_always_has_human_line() -> None:
+    """``shown`` keeps the human line and collects the keyword fields as data."""
+    part = OperatorResultPart.shown("a line", foo=1, bar=None)
+    assert part.human == "a line"
+    assert part.data == {"foo": 1, "bar": None}
+
+
+def test_operator_result_part_shown_if_drops_human_line_when_absent() -> None:
+    """``shown_if`` keeps the data either way but drops the human line when the gate is None."""
+    present = OperatorResultPart.shown_if("bucket-1", "made bucket-1", bucket="bucket-1")
+    absent = OperatorResultPart.shown_if(None, "made nothing", bucket=None)
+    assert present.human == "made bucket-1"
+    assert absent.human is None
+    assert absent.data == {"bucket": None}
+
+
+def test_emit_operator_result_human_writes_lines_skipping_none(capsys: pytest.CaptureFixture[str]) -> None:
+    """HUMAN mode writes each part's human line in order, skipping parts whose line is None."""
+    parts = [
+        OperatorResultPart(data={"a": 1}, human="line one"),
+        OperatorResultPart(data={"b": None}, human=None),
+        OperatorResultPart(data={"c": 3}, human="line three"),
+    ]
+    emit_operator_result("prepared", parts, OutputFormat.HUMAN)
+    assert capsys.readouterr().out == "line one\nline three\n"
+
+
+# =============================================================================
 # Tests for on_error
 # =============================================================================
 
@@ -155,20 +213,6 @@ def test_on_error_stores_original_exception() -> None:
     with pytest.raises(AbortError) as exc_info:
         on_error("test error", ErrorBehavior.ABORT, OutputFormat.HUMAN, exc=original)
     assert exc_info.value.original_exception is original
-
-
-# =============================================================================
-# Tests for emit_final_json
-# =============================================================================
-
-
-def test_emit_final_json_outputs_json(capsys: pytest.CaptureFixture[str]) -> None:
-    """emit_final_json should output JSON data."""
-    emit_final_json({"status": "success", "count": 5})
-    captured = capsys.readouterr()
-    output = json.loads(captured.out.strip())
-    assert output["status"] == "success"
-    assert output["count"] == 5
 
 
 # =============================================================================
@@ -339,167 +383,6 @@ def test_emit_format_template_lines_empty_list(capsys: pytest.CaptureFixture[str
 
 
 # =============================================================================
-# Tests for output_sync_files_result
-# =============================================================================
-
-
-def test_output_sync_files_result_json(capsys: pytest.CaptureFixture[str]) -> None:
-    """output_sync_files_result with JSON should output structured data."""
-    result = SyncFilesResult(
-        files_transferred=5,
-        bytes_transferred=1024,
-        source_path=Path("/src"),
-        destination_path=Path("/dst"),
-        is_dry_run=False,
-        mode=SyncMode.PUSH,
-    )
-    output_sync_files_result(result, OutputFormat.JSON)
-    captured = capsys.readouterr()
-    output = json.loads(captured.out.strip())
-    assert output["files_transferred"] == 5
-    assert output["bytes_transferred"] == 1024
-
-
-def test_output_sync_files_result_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
-    """output_sync_files_result with JSONL should emit event."""
-    result = SyncFilesResult(
-        files_transferred=3,
-        bytes_transferred=512,
-        source_path=Path("/src"),
-        destination_path=Path("/dst"),
-        is_dry_run=False,
-        mode=SyncMode.PULL,
-    )
-    output_sync_files_result(result, OutputFormat.JSONL)
-    captured = capsys.readouterr()
-    output = json.loads(captured.out.strip())
-    assert output["event"] == "pull_complete"
-
-
-def test_output_sync_files_result_human(capsys: pytest.CaptureFixture[str]) -> None:
-    """output_sync_files_result with HUMAN should output human-readable line."""
-    result = SyncFilesResult(
-        files_transferred=5,
-        bytes_transferred=1024,
-        source_path=Path("/src"),
-        destination_path=Path("/dst"),
-        is_dry_run=False,
-        mode=SyncMode.PUSH,
-    )
-    output_sync_files_result(result, OutputFormat.HUMAN)
-    captured = capsys.readouterr()
-    assert "Push complete" in captured.out
-    assert "5 files" in captured.out
-
-
-def test_output_sync_files_result_human_dry_run(capsys: pytest.CaptureFixture[str]) -> None:
-    """output_sync_files_result dry run should say would be transferred."""
-    result = SyncFilesResult(
-        files_transferred=2,
-        bytes_transferred=256,
-        source_path=Path("/src"),
-        destination_path=Path("/dst"),
-        is_dry_run=True,
-        mode=SyncMode.PUSH,
-    )
-    output_sync_files_result(result, OutputFormat.HUMAN)
-    captured = capsys.readouterr()
-    assert "Dry run complete" in captured.out
-    assert "would be transferred" in captured.out
-
-
-# =============================================================================
-# Tests for output_sync_git_result
-# =============================================================================
-
-
-def test_output_sync_git_result_json(capsys: pytest.CaptureFixture[str]) -> None:
-    """output_sync_git_result with JSON should output structured data."""
-    result = SyncGitResult(
-        source_branch="main",
-        target_branch="main",
-        source_path=Path("/src"),
-        destination_path=Path("/dst"),
-        is_dry_run=False,
-        commits_transferred=3,
-        mode=SyncMode.PUSH,
-    )
-    output_sync_git_result(result, OutputFormat.JSON)
-    captured = capsys.readouterr()
-    output = json.loads(captured.out.strip())
-    assert output["commits_transferred"] == 3
-    assert output["source_branch"] == "main"
-
-
-def test_output_sync_git_result_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
-    """output_sync_git_result with JSONL should emit event."""
-    result = SyncGitResult(
-        source_branch="main",
-        target_branch="main",
-        source_path=Path("/src"),
-        destination_path=Path("/dst"),
-        is_dry_run=False,
-        commits_transferred=3,
-        mode=SyncMode.PULL,
-    )
-    output_sync_git_result(result, OutputFormat.JSONL)
-    captured = capsys.readouterr()
-    output = json.loads(captured.out.strip())
-    assert output["event"] == "pull_git_complete"
-
-
-def test_output_sync_git_result_human_push(capsys: pytest.CaptureFixture[str]) -> None:
-    """output_sync_git_result with HUMAN should output push message."""
-    result = SyncGitResult(
-        source_branch="main",
-        target_branch="main",
-        source_path=Path("/src"),
-        destination_path=Path("/dst"),
-        is_dry_run=False,
-        commits_transferred=3,
-        mode=SyncMode.PUSH,
-    )
-    output_sync_git_result(result, OutputFormat.HUMAN)
-    captured = capsys.readouterr()
-    assert "Git push complete" in captured.out
-    assert "pushed" in captured.out
-
-
-def test_output_sync_git_result_human_pull(capsys: pytest.CaptureFixture[str]) -> None:
-    """output_sync_git_result with HUMAN should output merge message."""
-    result = SyncGitResult(
-        source_branch="feature",
-        target_branch="main",
-        source_path=Path("/src"),
-        destination_path=Path("/dst"),
-        is_dry_run=False,
-        commits_transferred=5,
-        mode=SyncMode.PULL,
-    )
-    output_sync_git_result(result, OutputFormat.HUMAN)
-    captured = capsys.readouterr()
-    assert "Git merge complete" in captured.out
-    assert "merged" in captured.out
-
-
-def test_output_sync_git_result_human_dry_run(capsys: pytest.CaptureFixture[str]) -> None:
-    """output_sync_git_result dry run should say would push/merge."""
-    result = SyncGitResult(
-        source_branch="main",
-        target_branch="main",
-        source_path=Path("/src"),
-        destination_path=Path("/dst"),
-        is_dry_run=True,
-        commits_transferred=3,
-        mode=SyncMode.PUSH,
-    )
-    output_sync_git_result(result, OutputFormat.HUMAN)
-    captured = capsys.readouterr()
-    assert "Dry run complete" in captured.out
-    assert "would push" in captured.out
-
-
-# =============================================================================
 # Tests for write_human_line
 # =============================================================================
 
@@ -519,13 +402,13 @@ def test_write_human_line_with_args(capsys: pytest.CaptureFixture[str]) -> None:
 
 
 # =============================================================================
-# Tests for _write_json_line
+# Tests for write_json_line
 # =============================================================================
 
 
 def test_write_json_line_outputs_json(capsys: pytest.CaptureFixture[str]) -> None:
-    """_write_json_line should output valid JSON followed by newline."""
-    _write_json_line({"key": "value", "number": 42})
+    """write_json_line should output valid JSON followed by newline."""
+    write_json_line({"key": "value", "number": 42})
     captured = capsys.readouterr()
     output = json.loads(captured.out.strip())
     assert output["key"] == "value"
@@ -533,69 +416,10 @@ def test_write_json_line_outputs_json(capsys: pytest.CaptureFixture[str]) -> Non
 
 
 def test_write_json_line_terminates_with_newline(capsys: pytest.CaptureFixture[str]) -> None:
-    """_write_json_line should terminate output with newline."""
-    _write_json_line({"a": 1})
+    """write_json_line should terminate output with newline."""
+    write_json_line({"a": 1})
     captured = capsys.readouterr()
     assert captured.out.endswith("\n")
-
-
-# =============================================================================
-# Tests for output_sync_files_result (JSONL push event name)
-# =============================================================================
-
-
-def test_output_sync_files_result_jsonl_push(capsys: pytest.CaptureFixture[str]) -> None:
-    """output_sync_files_result with JSONL for PUSH should emit push_complete event."""
-    result = SyncFilesResult(
-        files_transferred=3,
-        bytes_transferred=512,
-        source_path=Path("/src"),
-        destination_path=Path("/dst"),
-        is_dry_run=False,
-        mode=SyncMode.PUSH,
-    )
-    output_sync_files_result(result, OutputFormat.JSONL)
-    captured = capsys.readouterr()
-    output = json.loads(captured.out.strip())
-    assert output["event"] == "push_complete"
-
-
-# =============================================================================
-# Tests for output_sync_git_result (JSONL push event name)
-# =============================================================================
-
-
-def test_output_sync_git_result_jsonl_push(capsys: pytest.CaptureFixture[str]) -> None:
-    """output_sync_git_result with JSONL for PUSH should emit push_git_complete event."""
-    result = SyncGitResult(
-        source_branch="main",
-        target_branch="main",
-        source_path=Path("/src"),
-        destination_path=Path("/dst"),
-        is_dry_run=False,
-        commits_transferred=3,
-        mode=SyncMode.PUSH,
-    )
-    output_sync_git_result(result, OutputFormat.JSONL)
-    captured = capsys.readouterr()
-    output = json.loads(captured.out.strip())
-    assert output["event"] == "push_git_complete"
-
-
-def test_output_sync_git_result_human_pull_dry_run(capsys: pytest.CaptureFixture[str]) -> None:
-    """output_sync_git_result dry run with PULL should say would merge."""
-    result = SyncGitResult(
-        source_branch="feature",
-        target_branch="main",
-        source_path=Path("/src"),
-        destination_path=Path("/dst"),
-        is_dry_run=True,
-        commits_transferred=2,
-        mode=SyncMode.PULL,
-    )
-    output_sync_git_result(result, OutputFormat.HUMAN)
-    captured = capsys.readouterr()
-    assert "would merge" in captured.out
 
 
 # =============================================================================
@@ -618,3 +442,35 @@ def test_on_error_jsonl_format_abort(capsys: pytest.CaptureFixture[str]) -> None
     output = json.loads(captured.out.strip())
     assert output["event"] == "error"
     assert output["message"] == "jsonl error"
+
+
+def test_on_error_jsonl_includes_error_class_when_exc_given(capsys: pytest.CaptureFixture[str]) -> None:
+    """on_error attaches the exception's class name to the JSONL error event."""
+    on_error("boom", ErrorBehavior.CONTINUE, OutputFormat.JSONL, exc=MngrError("boom"))
+    output = json.loads(capsys.readouterr().out.strip())
+    assert output["event"] == "error"
+    assert output["error_class"] == "MngrError"
+
+
+# =============================================================================
+# Tests for emit_error_event
+# =============================================================================
+
+
+def test_emit_error_event_jsonl_emits_event_with_error_class(capsys: pytest.CaptureFixture[str]) -> None:
+    """In JSONL mode, emit a structured error record carrying the exception class name."""
+    emit_error_event(MngrError("no exact match"), OutputFormat.JSONL)
+    output = json.loads(capsys.readouterr().out.strip())
+    assert output == {"event": "error", "error_class": "MngrError", "message": "no exact match"}
+
+
+def test_emit_error_event_human_format_is_noop(capsys: pytest.CaptureFixture[str]) -> None:
+    """HUMAN mode must not emit a JSONL error record."""
+    emit_error_event(MngrError("boom"), OutputFormat.HUMAN)
+    assert capsys.readouterr().out == ""
+
+
+def test_emit_error_event_none_format_is_noop(capsys: pytest.CaptureFixture[str]) -> None:
+    """A missing (None) output format -- e.g. failure before option parsing -- is a no-op."""
+    emit_error_event(MngrError("boom"), None)
+    assert capsys.readouterr().out == ""

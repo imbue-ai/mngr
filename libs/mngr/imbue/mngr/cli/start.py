@@ -24,15 +24,18 @@ from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import emit_event
-from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import emit_format_template_lines
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.cli.stdin_utils import STDIN_PLACEHOLDER
 from imbue.mngr.cli.stdin_utils import expand_stdin_placeholder
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.errors import AgentNotFoundOnHostError
+from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.agent import require_interactive_agent
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentLifecycleState
@@ -51,6 +54,7 @@ class StartCliOptions(CommonCliOptions):
     connect_command: str | None
     restart: bool
     no_resume: bool
+    dry_run: bool
     # Planned features (not yet implemented)
     host: tuple[HostAddress, ...]
 
@@ -70,7 +74,7 @@ def _output_result(started_agents: Sequence[str], output_opts: OutputOptions, *,
     result_data = {"started_agents": started_agents, "count": len(started_agents)}
     match output_opts.output_format:
         case OutputFormat.JSON:
-            emit_final_json(result_data)
+            write_json_line(result_data)
         case OutputFormat.JSONL:
             emit_event("start_result", result_data, OutputFormat.JSONL)
         case OutputFormat.HUMAN:
@@ -105,7 +109,7 @@ def _send_resume_message_if_configured(agent: AgentInterface, output_opts: Outpu
             "Failed to reach WAITING state within {}s, proceeding anyway",
             timeout,
         )
-    agent.send_message(resume_message)
+    require_interactive_agent(agent).send_message(resume_message)
     logger.debug("Sent resume message to agent {}", agent.name)
 
 
@@ -135,6 +139,11 @@ def _send_resume_message_if_configured(agent: AgentInterface, output_opts: Outpu
     "--no-resume",
     is_flag=True,
     help="Skip sending the resume message after starting.",
+)
+@optgroup.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show what would be started without actually starting anything",
 )
 @optgroup.option(
     "--connect/--no-connect",
@@ -200,6 +209,14 @@ def _start_agents(
             _output("No stopped agents found to start", output_opts)
         return
 
+    # Handle dry-run mode: report what would be started without touching any hosts.
+    if opts.dry_run:
+        verb = "restarted" if is_restart else "started"
+        _output(f"Would be {verb}:", output_opts)
+        for match in matched_agents:
+            _output(f"  - {match.agent_name} (on host {match.host_id})", output_opts)
+        return
+
     started_agents: list[str] = []
     last_started_agent = None
     last_started_host = None
@@ -215,19 +232,37 @@ def _start_agents(
         provider = get_provider_instance(provider_name, mngr_ctx)
         host = provider.get_host(HostId(host_id_str))
 
-        # Ensure host is started (always start since this is the start command)
+        # Ensure host is started (always start since this is the start command).
+        # start_host is idempotent (returns early if the host is already running),
+        # so concurrent starts do not need to coordinate around this step.
         online_host, _ = ensure_host_started(host, is_start_desired=True, provider=provider)
 
         agent_ids = [match.agent_id for match in agent_list]
 
-        # Stop agents first when restarting
-        if is_restart:
-            with log_span("Stopping {} agent(s) for restart", len(agent_ids)):
-                online_host.stop_agents(agent_ids)
+        # Serialize agent (re)launch against any other operation on this host via
+        # the shared host lock -- e.g. the minds desktop client (remote, over SSH)
+        # racing a VM/container boot hook (local), or a concurrent `mngr gc`. The
+        # lock blocks indefinitely; once it is held, an already-running agent's
+        # launch is a no-op (the start command exits early when its tmux session
+        # exists), so the loser cleanly does nothing.
+        with online_host.lock_cooperatively(timeout_seconds=None):
+            # gc shares this lock, so a gc that tore down the host/agent is now
+            # serialized before us. Lightweight check (just the agent state dir,
+            # not a full host revalidation) so a doomed start fails with a clear
+            # error instead of trying to boot an agent gc already removed.
+            for match in agent_list:
+                agent_state_dir = get_agent_state_dir_path(online_host.host_dir, match.agent_id)
+                if not online_host.path_exists(agent_state_dir):
+                    raise AgentNotFoundOnHostError(match.agent_id, online_host.id)
 
-        # Start agents on this host
-        with log_span("Starting {} agent(s)", len(agent_ids)):
-            online_host.start_agents(agent_ids)
+            # Stop agents first when restarting
+            if is_restart:
+                with log_span("Stopping {} agent(s) for restart", len(agent_ids)):
+                    online_host.stop_agents(agent_ids)
+
+            # Start agents on this host
+            with log_span("Starting {} agent(s)", len(agent_ids)):
+                online_host.start_agents(agent_ids)
 
         # Emit discovery events for agents and host
         emit_discovery_events_for_host(mngr_ctx.config, online_host)
@@ -267,7 +302,7 @@ def _maybe_connect(
 
     resolved_command = resolve_connect_command(opts.connect_command, mngr_ctx)
     if resolved_command is not None:
-        session_name = f"{mngr_ctx.config.prefix}{last_started_agent.name}"
+        session_name = last_started_agent.session_name
         run_connect_command(
             resolved_command,
             str(last_started_agent.name),
@@ -290,7 +325,7 @@ def _maybe_connect(
 CommandHelpMetadata(
     key="start",
     one_line_description="Start stopped agent(s)",
-    synopsis="mngr start [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--restart] [--no-resume] [--connect]",
+    synopsis="mngr start [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--restart] [--no-resume] [--connect] [--dry-run]",
     description="""For remote hosts, this restores from the most recent snapshot and starts
 the container/instance. For local agents, this starts the agent's tmux
 session.
@@ -311,6 +346,7 @@ Supports custom format templates via --format. Available fields: name.""",
         ("Restart a running agent cleanly", "mngr start my-agent --restart"),
         ("Start and connect", "mngr start my-agent --connect"),
         ("Start all stopped agents", "mngr list --ids | mngr start -"),
+        ("Preview what would be started", "mngr list --ids | mngr start - --dry-run"),
         ("Custom format template output", "mngr start agent1 agent2 --format '{name}'"),
     ),
     see_also=(

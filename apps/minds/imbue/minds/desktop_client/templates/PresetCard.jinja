@@ -1,0 +1,45 @@
+{#def preset, selected=False, extra="" #}
+{#
+  Selectable "where to run" card for the create page -- the two compute
+  presets (Imbue Cloud / local) compose from this. Renders a
+  ``<button type="button">`` with ``role="radio"``; selection is driven by
+  ``aria-checked`` (the create page's inline JS flips it), exactly like the
+  ColorSwatch picker. The visual state is pure Tailwind:
+
+    - default: a 1px dashed neutral outline (``outline-1 outline-dashed
+      outline-strong``);
+    - selected: a 2px solid accent (blue) outline (no fill tint), via the
+      ``aria-checked:`` variants (so the JS only toggles the attribute, no
+      class bookkeeping);
+    - hover: lifts up 1px (``-translate-y-px``) with ``shadow-raised``;
+      pressing settles it back down (``active:translate-y-0``) and scales to
+      0.99 for a tactile click.
+
+  The edge is an ``outline`` (not a ``border``): outlines paint outside the box
+  and never take up layout space, so growing 1px -> 2px between states never
+  shifts the card or its contents. ``transition-all`` eases every change -- the
+  outline width/color, the hover lift, and the press scale all animate (the
+  dashed -> solid style flip snaps, as outline-style isn't animatable). Tailwind
+  v4 maps ``translate``/``scale`` to the standalone CSS properties, so the hover
+  lift and press scale compose without fighting over ``transform``; ``active:``
+  ordering wins over ``hover:``, so a press settles the lift back to 0 while
+  shrinking. The caller supplies the title / badge / feature list as the
+  component body.
+
+  Props:
+    preset    the ``data-preset`` value (``"remote"`` / ``"local"``); the
+              page JS reads it to apply that preset's provider defaults.
+    selected  initial ``aria-checked`` state (one card per radiogroup).
+    extra     parent-owned sizing (e.g. ``flex-1``); the component root
+              carries no outer positioning of its own.
+
+  Any other HTML attribute (id=, data-*, aria-label=) flows through via
+  JinjaX's ``attrs`` passthrough.
+#}
+{%- set _base = "flex flex-col gap-2 p-4 text-left cursor-pointer rounded-lg bg-surface-primary outline-1 outline-dashed outline-strong transition-all duration-150 ease-out hover:-translate-y-px hover:shadow-raised active:translate-y-0 active:scale-[0.99] aria-checked:outline-2 aria-checked:outline-solid aria-checked:outline-accent" -%}
+<button {{ attrs.render(
+  type="button",
+  role="radio",
+  classes=_base ~ " " ~ extra,
+  **{"data-preset": preset, "aria-checked": "true" if selected else "false"},
+) }}>{{ content }}</button>

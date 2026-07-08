@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import shlex
 from abc import ABC
 from abc import abstractmethod
@@ -9,7 +8,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 from typing import Callable
-from typing import Final
 from typing import Iterator
 from typing import Mapping
 from typing import Sequence
@@ -21,7 +19,6 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import ParseSpecError
-from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import ActivityConfig
 from imbue.mngr.interfaces.data_types import CertifiedHostData
@@ -30,6 +27,7 @@ from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.data_types import SnapshotInfo
+from imbue.mngr.interfaces.data_types import VolumeFile
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -42,27 +40,10 @@ from imbue.mngr.primitives import HostNameStyle
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotName
+from imbue.mngr.primitives import TmuxHeight
+from imbue.mngr.primitives import TmuxWidth
+from imbue.mngr.primitives import TmuxWindowSize
 from imbue.mngr.primitives import TransferMode
-
-# Default timeout for waiting for agent readiness before sending messages.
-# With hook-based polling, we return early when the agent signals readiness,
-# so this is a max wait time, not an unconditional delay.
-# Can be overridden via the MNGR_AGENT_READY_TIMEOUT environment variable.
-DEFAULT_AGENT_READY_TIMEOUT_SECONDS: Final[float] = 10.0
-
-
-def get_agent_ready_timeout() -> float:
-    """Return the agent ready timeout, respecting MNGR_AGENT_READY_TIMEOUT env var.
-
-    Falls back to DEFAULT_AGENT_READY_TIMEOUT_SECONDS if the env var is not set.
-    """
-    env_val = os.environ.get("MNGR_AGENT_READY_TIMEOUT")
-    if env_val is not None:
-        try:
-            return float(env_val)
-        except ValueError as e:
-            raise UserInputError(f"MNGR_AGENT_READY_TIMEOUT must be a number, got: {env_val!r}") from e
-    return DEFAULT_AGENT_READY_TIMEOUT_SECONDS
 
 
 class HostInterface(MutableModel, ABC):
@@ -167,8 +148,14 @@ class HostInterface(MutableModel, ABC):
     # =========================================================================
 
     @abstractmethod
-    def discover_agents(self) -> list[DiscoveredAgent]:
-        """Return lightweight data for all agents on this host."""
+    def discover_agents(self, timeout_seconds: float | None = None) -> list[DiscoveredAgent]:
+        """Return lightweight data for all agents on this host.
+
+        When ``timeout_seconds`` is set, online implementations bound each remote
+        read by that wall-clock so a wedged host self-terminates its discovery
+        reads instead of hanging. Offline implementations read local/persisted
+        data and ignore it.
+        """
         ...
 
     @abstractmethod
@@ -221,7 +208,90 @@ class HostInterface(MutableModel, ABC):
         """
 
 
-class OuterHostInterface(MutableModel, ABC):
+class HostFileReadInterface(MutableModel, ABC):
+    """Read-only access to a host's persistent files.
+
+    The subset of file operations that work even when a host is not online for
+    command execution, as long as its persistent storage (volume) is reachable.
+    All paths are absolute paths as seen under the host's ``host_dir``.
+
+    Implemented by:
+    - :class:`OuterHostInterface` (and thus every online host), reading the
+      live filesystem over SSH / locally.
+    - :class:`~imbue.mngr.hosts.offline_host.OfflineHostWithVolume`, reading the
+      host's persisted volume when the host itself is stopped.
+
+    Splitting these reads out of :class:`OuterHostInterface` lets callers that
+    only need to *read* files (log / transcript / session readers, session
+    preservation, ``mngr file get``/``list``) accept a stopped-but-volume-backed
+    host without it having to pretend it can execute commands or write files.
+    """
+
+    @abstractmethod
+    def read_file(self, path: Path) -> bytes:
+        """Read a file and return its contents as bytes."""
+        ...
+
+    @abstractmethod
+    def read_text_file(self, path: Path, encoding: str = "utf-8") -> str:
+        """Read a file and return its contents as a string."""
+        ...
+
+    @abstractmethod
+    def path_exists(self, path: Path) -> bool:
+        """Whether ``path`` exists on this host."""
+        ...
+
+    @abstractmethod
+    def get_file_mtime(self, path: Path) -> datetime | None:
+        """Return the modification time of a file, or None if the file doesn't exist."""
+        ...
+
+    @abstractmethod
+    def list_directory(self, path: Path, *, recursive: bool = False) -> list[VolumeFile]:
+        """List the entries under directory ``path``.
+
+        Returns one :class:`~imbue.mngr.interfaces.data_types.VolumeFile` per
+        entry, each with an absolute ``path`` under the host's ``host_dir``.
+        When ``recursive`` is True, descends into subdirectories and returns
+        every nested entry. Returns an empty list if ``path`` does not exist or
+        is not a directory.
+        """
+        ...
+
+
+class HostFileWriteInterface(MutableModel, ABC):
+    """Write access to a host's files.
+
+    The companion to :class:`HostFileReadInterface`. Implemented by:
+    - :class:`OuterHostInterface` (and thus every online host), writing the live
+      filesystem over SSH / locally.
+    - :class:`~imbue.mngr.hosts.offline_host.OfflineHostWithVolume`, writing the
+      host's persisted volume when the host itself is stopped (so files can be
+      staged for the next time it starts). File modes are not settable on a
+      volume write, so ``mode`` is ignored there.
+
+    All paths are absolute paths as seen under the host's ``host_dir``.
+    """
+
+    @abstractmethod
+    def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = False) -> None:
+        """Write bytes content to a file."""
+        ...
+
+    @abstractmethod
+    def write_text_file(
+        self,
+        path: Path,
+        content: str,
+        encoding: str = "utf-8",
+        mode: str | None = None,
+    ) -> None:
+        """Write string content to a file."""
+        ...
+
+
+class OuterHostInterface(HostFileReadInterface, HostFileWriteInterface, ABC):
     """Minimal interface for the "outer" machine that hosts a container/sandbox.
 
     Outer hosts have a strictly smaller surface than mngr-managed hosts: just the
@@ -311,50 +381,33 @@ class OuterHostInterface(MutableModel, ABC):
         ...
 
     @abstractmethod
-    def read_file(
-        self,
-        path: Path,
-    ) -> bytes:
-        """Read a file and return its contents as bytes."""
-        ...
-
-    @abstractmethod
-    def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = False) -> None:
-        """Write bytes content to a file."""
-        ...
-
-    @abstractmethod
-    def read_text_file(
-        self,
-        path: Path,
-        encoding: str = "utf-8",
-    ) -> str:
-        """Read a file and return its contents as a string."""
-        ...
-
-    @abstractmethod
-    def write_text_file(
-        self,
-        path: Path,
-        content: str,
-        encoding: str = "utf-8",
-        mode: str | None = None,
-    ) -> None:
-        """Write string content to a file."""
-        ...
-
-    @abstractmethod
-    def get_file_mtime(self, path: Path) -> datetime | None:
-        """Return the modification time of a file, or None if the file doesn't exist."""
-        ...
-
-    @abstractmethod
     def get_ssh_connection_info(self) -> tuple[str, str, int, Path] | None:
         """Get SSH connection info for this host if it's remote.
 
         Returns (user, hostname, port, private_key_path) if remote, None if local.
         """
         ...
+
+    def get_outer_ssh_port(self) -> int | None:
+        """Port of the host's outer/management sshd, when distinct from the agent connection.
+
+        Returns ``None`` by default. A provider whose host reaches a separate
+        outer sshd on a non-obvious port (e.g. a slice's VM-root sshd via a
+        box-forwarded port) surfaces it here so ``mngr create --format json``
+        can report it. The default is sufficient for hosts whose only SSH
+        endpoint is the one ``get_ssh_connection_info`` returns.
+        """
+        return None
+
+    # returns (outer_host_public_key, container_host_public_key)
+    def get_ssh_host_public_keys(self) -> tuple[str | None, str | None]:
+        """The host's outer (VPS/VM-root) and container sshd host public keys, when known.
+
+        Returns ``(None, None)`` by default. A provider that generates the host's
+        sshd host keys at bake time surfaces them here so ``mngr create --format
+        json`` can report them for strict host-key pinning.
+        """
+        return (None, None)
 
     def disconnect(self) -> None:
         """Disconnect from this host, releasing any held connections.
@@ -414,18 +467,25 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
 
     @abstractmethod
     @contextmanager
-    def lock_cooperatively(self, timeout_seconds: float = 30.0) -> Iterator[None]:
-        """Context manager for acquiring and releasing the host lock."""
+    def lock_cooperatively(self, timeout_seconds: float | None = 300.0) -> Iterator[None]:
+        """Hold the host's exclusive, cross-actor lock for the duration of the block.
+
+        Holds a real flock(2) (directly on local hosts, over SSH on remote hosts)
+        that coordinates local (in-host) and remote (over-SSH) holders and
+        suppresses idle shutdown while held. ``timeout_seconds=None`` blocks
+        indefinitely; a finite value raises LockNotHeldError if it cannot be
+        acquired in time.
+        """
         ...
 
     @abstractmethod
     def get_reported_lock_time(self) -> datetime | None:
-        """Return the last modification time of the host lock file, or None if not locked."""
+        """Return the last modification time of the host lock file, or None if absent."""
         ...
 
     @abstractmethod
     def is_lock_held(self) -> bool:
-        """Check whether the host lock is currently held."""
+        """Check whether the host lock is currently held (via a non-blocking flock probe)."""
         ...
 
     # =========================================================================
@@ -593,7 +653,13 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
 
     @abstractmethod
     def destroy_agent(self, agent: AgentInterface) -> None:
-        """Remove an agent and all its associated state from this host."""
+        """Remove an agent and all its associated state from this host.
+
+        Best-effort and aggregate-and-continue: attempts every teardown step and collects
+        every real failure. Returns normally on full success or benign "already gone"
+        outcomes; raises ``CleanupFailedGroup`` if any real resources were left behind.
+        See specs/cleanup-error-aggregation.md.
+        """
         ...
 
     @abstractmethod
@@ -603,7 +669,13 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
 
     @abstractmethod
     def stop_agents(self, agent_ids: Sequence[AgentId], timeout_seconds: float = 5.0) -> None:
-        """Stop the specified agents gracefully within the given timeout."""
+        """Stop the specified agents gracefully within the given timeout.
+
+        Best-effort and aggregate-and-continue: attempts every step for every agent and
+        collects every real failure. Returns normally on full success or benign "already
+        gone" outcomes; raises ``CleanupFailedGroup`` if any real resources were left
+        behind. See specs/cleanup-error-aggregation.md.
+        """
         ...
 
     @abstractmethod
@@ -622,6 +694,18 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
         - Local to remote (push via SSH)
         - Remote to local (pull via SSH)
         - Remote to remote (via local temp directory as intermediary)
+        """
+        ...
+
+    @abstractmethod
+    def copy_local_directory(self, source_path: Path, target_path: Path, extra_args: str | None) -> None:
+        """Copy a directory from the local machine (where mngr runs) to self:target_path.
+
+        Like ``copy_directory`` with a local source, but takes no source-host object --
+        the source is always the local filesystem. This lets the host layer push staged
+        files without resolving a local host (which would require ``mngr.api.providers``
+        and hit an import cycle). Uses rsync (additive, no ``--delete``); ``extra_args``
+        is appended to the rsync invocation (e.g. ``--include``/``--exclude`` filters).
         """
         ...
 
@@ -848,6 +932,49 @@ class AgentDataOptions(FrozenModel):
     )
 
 
+class AgentTmuxOptions(FrozenModel):
+    """Per-agent tmux window sizing and resize behavior.
+
+    A ``None`` field means "use the host default" (the session builder falls back
+    to its built-in defaults and leaves tmux's resize policy untouched).
+    """
+
+    width: TmuxWidth | None = Field(
+        default=None,
+        description="tmux window width in columns (None = host default)",
+    )
+    height: TmuxHeight | None = Field(
+        default=None,
+        description="tmux window height in rows (None = host default)",
+    )
+    window_size: TmuxWindowSize | None = Field(
+        default=None,
+        description="tmux window-size resize mode (None = host default / today's behavior)",
+    )
+
+    def to_data_dict(self) -> dict[str, Any]:
+        """Serialize to the JSON-friendly shape persisted in the agent's data.json."""
+        return {
+            "width": int(self.width) if self.width is not None else None,
+            "height": int(self.height) if self.height is not None else None,
+            "window_size": self.window_size.value if self.window_size is not None else None,
+        }
+
+    @classmethod
+    def from_data_dict(cls, data: Mapping[str, Any] | None) -> "AgentTmuxOptions":
+        """Reconstruct from the data.json ``tmux`` block, tolerating a missing/empty block."""
+        if not data:
+            return cls()
+        raw_width = data.get("width")
+        raw_height = data.get("height")
+        raw_window_size = data.get("window_size")
+        return cls(
+            width=TmuxWidth(raw_width) if raw_width is not None else None,
+            height=TmuxHeight(raw_height) if raw_height is not None else None,
+            window_size=TmuxWindowSize(raw_window_size) if raw_window_size is not None else None,
+        )
+
+
 class CreateAgentOptions(FrozenModel):
     """Complete options for creating a new agent.
 
@@ -858,8 +985,7 @@ class CreateAgentOptions(FrozenModel):
         default=None,
         description="Explicit agent ID (auto-generated if not specified)",
     )
-    agent_type: AgentTypeName | None = Field(
-        default=None,
+    agent_type: AgentTypeName = Field(
         description="Type of agent to run (claude, codex, etc.)",
     )
     name: AgentName | None = Field(
@@ -902,9 +1028,10 @@ class CreateAgentOptions(FrozenModel):
         default=None,
         description="Message to send when the agent is started (resumed) after being stopped",
     )
-    ready_timeout_seconds: float = Field(
-        default_factory=get_agent_ready_timeout,
-        description="Timeout in seconds to wait for agent readiness before sending initial message",
+    ready_timeout_seconds: float | None = Field(
+        default=None,
+        description="Timeout in seconds to wait for agent readiness before sending initial message. "
+        "When None, falls back to MngrConfig.agent_ready_timeout at consumption time.",
     )
     git: AgentGitOptions | None = Field(
         default=None,
@@ -930,10 +1057,21 @@ class CreateAgentOptions(FrozenModel):
         default_factory=AgentProvisioningOptions,
         description="Simple provisioning options",
     )
+    tmux: AgentTmuxOptions = Field(
+        default_factory=AgentTmuxOptions,
+        description="tmux window sizing and resize behavior for the agent's session",
+    )
     plugin_data: dict[str, Any] = Field(
         default_factory=dict,
         description="Opaque dict for plugins to pass data through the creation pipeline. "
-        "Keys are namespaced by plugin (e.g. 'adopt_session' for ClaudeAgent).",
+        "Keys are namespaced by plugin.",
+    )
+    adopt_session: tuple[str, ...] = Field(
+        default=(),
+        description="Session id(s) or path(s) to adopt into the new agent so it resumes that "
+        "conversation (the --adopt option). Repeatable; the last named session is the one resumed "
+        "on startup. Only valid for agent types that support session adoption "
+        "(HasSessionAdoptionMixin); mutually exclusive with cloning via --from.",
     )
     source_agent_state_location: HostLocation | None = Field(
         default=None,
@@ -990,6 +1128,34 @@ class HostEnvironmentOptions(FrozenModel):
     )
 
 
+class HostProvisioningOptions(FrozenModel):
+    """Simple provisioning options for a new host (post-creation hooks)."""
+
+    post_host_create_commands: tuple[CommandString, ...] = Field(
+        default=(),
+        description="Shell commands to run inside the newly-created host, "
+        "synchronously, after the host is ready but before any agent work_dir "
+        "is touched. Each command runs in order; a non-zero exit aborts the create.",
+    )
+    post_host_create_outer_commands: tuple[CommandString, ...] = Field(
+        default=(),
+        description="Shell commands to run once on the host's outer machine (the "
+        "underlying VM/daemon host), synchronously, after the host is ready. Run "
+        "in order; a non-zero exit aborts the create. Skipped (with a warning) "
+        "when the provider exposes no outer host.",
+    )
+
+
+# Mapping from raw-string config/CLI field names to HostProvisioningOptions
+# target fields and their parsers. Parallels PROVISIONING_FIELD_MAP for the
+# agent side; used so the CLI flag and template-stacking machinery stay in
+# sync.
+HOST_PROVISIONING_FIELD_MAP: tuple[tuple[str, str, Any], ...] = (
+    ("post_host_create_command", "post_host_create_commands", CommandString),
+    ("post_host_create_outer_command", "post_host_create_outer_commands", CommandString),
+)
+
+
 class NewHostOptions(FrozenModel):
     """Options for creating a new host."""
 
@@ -1019,4 +1185,8 @@ class NewHostOptions(FrozenModel):
     lifecycle: HostLifecycleOptions = Field(
         default_factory=HostLifecycleOptions,
         description="Lifecycle and idle detection options",
+    )
+    provisioning: HostProvisioningOptions = Field(
+        default_factory=HostProvisioningOptions,
+        description="Post-create provisioning hooks",
     )

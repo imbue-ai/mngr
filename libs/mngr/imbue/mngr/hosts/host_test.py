@@ -2,6 +2,8 @@
 
 import io
 import json
+import subprocess
+import threading
 from collections.abc import Callable
 from datetime import datetime
 from datetime import timezone
@@ -10,20 +12,26 @@ from typing import Any
 from typing import IO
 from typing import cast
 
+import pluggy
 import pytest
+from paramiko import Channel
 from paramiko import ChannelException
 from paramiko import SSHException
 from pyinfra.api.command import StringCommand
 from pyinfra.api.host import Host as PyinfraHost
 from pyinfra.connectors.util import CommandOutput
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import EnvVar
+from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.data_types import TmuxConfig
 from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.errors import AgentError
 from imbue.mngr.errors import AgentStartError
+from imbue.mngr.errors import CommandTimeoutError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostDataSchemaError
 from imbue.mngr.errors import InvalidActivityTypeError
@@ -32,16 +40,25 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.host import ONBOARDING_TEXT
 from imbue.mngr.hosts.host import ONBOARDING_TEXT_TMUX_USER
+from imbue.mngr.hosts.host import _LOCK_ACQUIRED_MARKER
+from imbue.mngr.hosts.host import _LOCK_TIMED_OUT_MARKER
+from imbue.mngr.hosts.host import _TMUX_SET_TITLES_STRING
+from imbue.mngr.hosts.host import _TMUX_STATUS_LEFT_LENGTH
+from imbue.mngr.hosts.host import _build_remote_lock_command
 from imbue.mngr.hosts.host import _build_start_agent_shell_command
 from imbue.mngr.hosts.host import _format_env_file
 from imbue.mngr.hosts.host import _is_transient_ssh_error
 from imbue.mngr.hosts.host import _merge_agent_type_provisioning
 from imbue.mngr.hosts.host import _parse_boot_time_output
 from imbue.mngr.hosts.host import _parse_uptime_output
+from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.data_types import CleanupFailureCategory
+from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import AgentLabelOptions
 from imbue.mngr.interfaces.host import AgentProvisioningOptions
+from imbue.mngr.interfaces.host import AgentTmuxOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import NamedCommand
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -53,9 +70,16 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import TmuxHeight
+from imbue.mngr.primitives import TmuxWidth
+from imbue.mngr.primitives import TmuxWindowSize
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.utils.testing import get_cleanup_failures
 from imbue.mngr.utils.testing import get_short_random_string
+from imbue.mngr.utils.testing import make_mngr_ctx
+from imbue.mngr.utils.testing import make_test_agent_details
 
 
 class _TestableAgent(BaseAgent):
@@ -358,17 +382,31 @@ def test_destroy_agent_continues_cleanup_when_on_destroy_raises(
     temp_host_dir: Path,
     temp_work_dir: Path,
 ) -> None:
-    """Test that destroy_agent still cleans up if agent.on_destroy() raises."""
+    """destroy_agent records an on_destroy failure but still completes the teardown.
+
+    A MngrError raised by the on_destroy hook is captured as an OTHER cleanup failure
+    (aggregated into the CleanupFailedGroup, not propagated immediately) so the remaining
+    teardown steps still run.
+    """
     agent, host = _create_testable_agent(local_provider, temp_host_dir, temp_work_dir, on_destroy_should_raise=True)
 
     agent_dir = local_provider.host_dir / "agents" / str(agent.id)
     assert agent_dir.exists()
 
-    # Exception propagates, but cleanup still runs
-    with pytest.raises(AgentError, match="cleanup failed"):
-        host.destroy_agent(agent)
+    # The hook failure is recorded and surfaced via CleanupFailedGroup rather than aborting.
+    failures = get_cleanup_failures(lambda: host.destroy_agent(agent))
 
-    # State directory should still be cleaned up
+    assert agent.on_destroy_called
+    # Exactly one failure: the on_destroy hook error, classified as OTHER and tagged
+    # with the agent. The stop of a freshly-created agent with no live session is benign
+    # and contributes no failures.
+    assert len(failures) == 1
+    on_destroy_failure = failures[0]
+    assert on_destroy_failure.category == CleanupFailureCategory.OTHER
+    assert on_destroy_failure.agent_name == agent.name
+    assert "cleanup failed" in on_destroy_failure.message
+
+    # State directory should still be cleaned up despite the hook failure.
     assert not agent_dir.exists()
 
 
@@ -655,6 +693,8 @@ def _build_command_with_defaults(
     additional_commands: list[NamedCommand] | None = None,
     unset_vars: list[str] | None = None,
     onboarding_text: str | None = None,
+    primary_window_name: str = "agent",
+    tmux_options: AgentTmuxOptions | None = None,
 ) -> str:
     """Call _build_start_agent_shell_command with standard test defaults."""
     return _build_start_agent_shell_command(
@@ -666,6 +706,8 @@ def _build_command_with_defaults(
         tmux_config_path=Path("/tmp/tmux.conf"),
         unset_vars=unset_vars if unset_vars is not None else [],
         host_dir=host_dir,
+        primary_window_name=primary_window_name,
+        tmux_options=tmux_options if tmux_options is not None else AgentTmuxOptions(),
         onboarding_text=onboarding_text,
     )
 
@@ -697,6 +739,79 @@ def test_build_start_agent_shell_command_produces_single_command(
     assert "pane_pid" in result
 
 
+def test_build_start_agent_shell_command_names_primary_window_and_targets_it_by_name(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """new-session must name the primary window (-n) and all targets must use that name,
+    not the literal :0, so mngr works regardless of the user's tmux base-index.
+    """
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    result = _build_command_with_defaults(agent, temp_host_dir, primary_window_name="agent")
+
+    session = f"mngr-{agent.name}"
+    assert "new-session -d" in result
+    assert " -n agent" in result
+    # Targets address the window by name, never the literal :0 index.
+    assert f"={session}:agent" in result
+    assert f"={session}:0" not in result
+
+
+def test_build_start_agent_shell_command_uses_custom_primary_window_name(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """A custom tmux.primary_window_name flows into both -n and the window targets."""
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    result = _build_command_with_defaults(agent, temp_host_dir, primary_window_name="primary")
+
+    session = f"mngr-{agent.name}"
+    assert " -n primary" in result
+    assert f"={session}:primary" in result
+    assert f"={session}:agent" not in result
+
+
+def test_build_start_agent_shell_command_uses_default_dimensions_when_unset(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """With default (all-None) tmux options, the historical 200x50 size is used and no resize policy is set."""
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    result = _build_command_with_defaults(agent, temp_host_dir, tmux_options=AgentTmuxOptions())
+
+    assert "-x 200 -y 50" in result
+    assert "window-size" not in result
+
+
+def test_build_start_agent_shell_command_uses_custom_dimensions(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """Custom width/height are passed to new-session's -x/-y."""
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    options = AgentTmuxOptions(width=TmuxWidth(2048), height=TmuxHeight(256))
+    result = _build_command_with_defaults(agent, temp_host_dir, tmux_options=options)
+
+    assert "-x 2048 -y 256" in result
+
+
+def test_build_start_agent_shell_command_sets_manual_window_size_on_agent_window(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """A manual window-size emits a set-option targeting the agent's named primary window."""
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    options = AgentTmuxOptions(window_size=TmuxWindowSize.MANUAL)
+    result = _build_command_with_defaults(agent, temp_host_dir, tmux_options=options)
+
+    assert f"set-option -t =mngr-{agent.name}:agent window-size manual" in result
+
+
 def test_build_start_agent_shell_command_includes_unset_vars(
     local_provider: LocalProviderInstance,
     temp_host_dir: Path,
@@ -713,6 +828,27 @@ def test_build_start_agent_shell_command_includes_unset_vars(
     unset_pos = result.index("unset")
     new_session_pos = result.index("new-session")
     assert unset_pos < new_session_pos
+
+
+def test_build_start_agent_shell_command_sources_config_after_new_session(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """mngr's config is sourced at agent creation, after new-session.
+
+    The user's own config is pulled in at tmux server start; mngr's is not, so it
+    is sourced explicitly. The step is non-fatal: it is wrapped in a subshell that
+    scopes '|| true' to this step alone, so a cosmetic-config error does not abort
+    the agent-start chain (and a failure of an earlier step is not masked).
+    """
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    result = _build_command_with_defaults(agent, temp_host_dir)
+
+    assert result.index("new-session") < result.index("source-file")
+    # Wrapped in a subshell so '|| true' scopes to this step alone.
+    assert "(tmux source-file" in result
+    assert "|| true)" in result
 
 
 def test_build_start_agent_shell_command_includes_additional_windows(
@@ -765,6 +901,8 @@ def test_build_start_agent_shell_command_send_keys_uses_end_of_options_separator
         tmux_config_path=Path("/tmp/tmux.conf"),
         unset_vars=[],
         host_dir=temp_host_dir,
+        primary_window_name="agent",
+        tmux_options=AgentTmuxOptions(),
     )
 
     send_keys_l_lines = [line for line in result.split(" && ") if "send-keys" in line and " -l " in line]
@@ -867,7 +1005,7 @@ def test_build_start_agent_shell_command_includes_onboarding_hook(
 
     assert "set-hook" in result
     assert "display-popup" in result
-    assert "client-attached" in result
+    assert "client-attached[99]" in result
 
 
 def test_build_start_agent_shell_command_no_onboarding_hook_by_default(
@@ -875,13 +1013,50 @@ def test_build_start_agent_shell_command_no_onboarding_hook_by_default(
     temp_host_dir: Path,
     temp_work_dir: Path,
 ) -> None:
-    """When onboarding_text is None (default), no hook or popup should appear."""
+    """When onboarding_text is None (default), the onboarding popup hook should not appear.
+
+    The persistent SIGWINCH repaint hook (client-attached[98]) is always set, so only
+    the onboarding popup and its [99] slot should be absent here.
+    """
     agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
     result = _build_command_with_defaults(agent, temp_host_dir)
 
-    assert "set-hook" not in result
     assert "display-popup" not in result
-    assert "client-attached" not in result
+    assert "client-attached[99]" not in result
+
+
+def test_build_start_agent_shell_command_includes_sigwinch_hook(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """A persistent client-attached SIGWINCH repaint hook is always set, even with no
+    onboarding text, so every attach (not just `mngr connect`) repaints the agent."""
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    result = _build_command_with_defaults(agent, temp_host_dir)
+
+    # Persistent hook in slot [98] (distinct from the one-shot onboarding [99]),
+    # running the shipped script via run-shell -b against this session's window.
+    assert "set-hook" in result
+    assert "client-attached[98]" in result
+    assert "run-shell -b" in result
+    assert "commands/sigwinch_panes.sh" in result
+    # It must be persistent: no self-removal (set-hook -u) like the onboarding hook has.
+    assert "set-hook -u -t" not in result
+
+
+def test_build_start_agent_shell_command_sigwinch_hook_targets_named_window(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """The SIGWINCH hook passes the primary window name to the script (not the literal
+    :0 index), so the manual-pin guard holds regardless of the user's tmux base-index."""
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    result = _build_command_with_defaults(agent, temp_host_dir, primary_window_name="primary")
+
+    assert "sigwinch_panes.sh" in result
+    assert f"mngr-{agent.name} primary" in result
 
 
 # =========================================================================
@@ -916,7 +1091,7 @@ def test_build_start_agent_shell_command_includes_onboarding_hook_tmux_user(
 
     assert "set-hook" in result
     assert "display-popup" in result
-    assert "client-attached" in result
+    assert "client-attached[99]" in result
 
 
 # =========================================================================
@@ -1078,6 +1253,237 @@ def _create_host_with_fake_connector(
     )
 
 
+def _make_stop_agents_test_host(
+    local_provider: LocalProviderInstance,
+    agent: AgentInterface,
+    command_handler: Callable[[str], CommandResult],
+) -> tuple[Host, list[tuple[str, float | None]]]:
+    """Build a Host whose stop-path shell commands are served by ``command_handler``.
+
+    The returned Host's ``execute_idempotent_command`` records every
+    ``(command, timeout_seconds)`` pair into the returned list (so callers can
+    assert on the bounds passed) and delegates the actual result to
+    ``command_handler``, which is free to return canned output or raise to
+    simulate a wedged command. ``_get_agent_by_id`` is stubbed to return
+    ``agent`` so ``stop_agents`` walks its full collect-then-kill sequence
+    without touching real tmux or processes.
+    """
+    recorded_timeouts: list[tuple[str, float | None]] = []
+
+    class _StopAgentsTestHost(Host):
+        def execute_idempotent_command(
+            self,
+            command: str,
+            user: str | None = None,
+            cwd: Path | None = None,
+            env: Any = None,
+            timeout_seconds: float | None = None,
+            raise_on_timeout: bool = False,
+        ) -> CommandResult:
+            recorded_timeouts.append((command, timeout_seconds))
+            return command_handler(command)
+
+        def _get_agent_by_id(self, agent_id: AgentId) -> AgentInterface | None:
+            return agent
+
+    host = _StopAgentsTestHost(
+        id=HostId.generate(),
+        host_name=HostName("test"),
+        connector=PyinfraConnector(cast(PyinfraHost, _FakePyinfraHost())),
+        provider_instance=local_provider,
+        mngr_ctx=local_provider.mngr_ctx,
+    )
+    return host, recorded_timeouts
+
+
+def test_stop_agents_bounds_every_command_with_a_timeout(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """stop_agents must pass a timeout to every shell command it runs.
+
+    Regression for an offload hang: a wedged ``tmux list-panes`` client (tmux
+    occasionally fails to return under CI load) blocked the unbounded command in
+    the stop path forever, stalling the whole test batch. Every step in the
+    stop/cleanup path must carry a timeout so a wedged command can't hang
+    cleanup. This records the timeout passed to each command and asserts none is
+    unbounded.
+    """
+    agent = make_test_agent_details("cleanup-timeout-agent")
+    fake_pid = "12345"
+
+    def handle(command: str) -> CommandResult:
+        # Canned output (a window index for list-windows and a pane PID for
+        # list-panes) so stop_agents walks its full collect-then-kill sequence.
+        if "list-windows" in command:
+            stdout = "0"
+        elif "list-panes" in command:
+            stdout = fake_pid
+        else:
+            stdout = ""
+        return CommandResult(stdout=stdout, stderr="", success=True)
+
+    host, recorded = _make_stop_agents_test_host(local_provider, cast(AgentInterface, agent), handle)
+
+    host.stop_agents([agent.id])
+
+    # Sanity: we actually exercised the tmux pid-collection path and the kill step.
+    assert any("list-panes" in command for command, _ in recorded)
+    assert any("kill-session" in command for command, _ in recorded)
+    # The regression guard: no command in the stop path may be unbounded.
+    unbounded = [command for command, timeout in recorded if timeout is None]
+    assert unbounded == [], f"stop_agents ran command(s) without a timeout: {unbounded}"
+
+
+@pytest.mark.allow_warnings(match=r"^Cleanup step timed out on host")
+def test_stop_agents_records_timeout_failure_and_continues(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """A timed-out stop-path command is recorded as a TIMEOUT failure and returned,
+    not silently swallowed -- and cleanup continues (aggregate, not fail-fast).
+
+    Simulates execute_idempotent_command raising CommandTimeoutError (which
+    _run_classified_cleanup_command catches and converts to a TIMEOUT failure).
+    The wedged list-panes does not abort: the session teardown is still attempted.
+    """
+    agent = make_test_agent_details("cleanup-timeout-agent")
+
+    def handle(command: str) -> CommandResult:
+        if "list-panes" in command:
+            raise CommandTimeoutError(f"Command timed out after 10.0s: {command}")
+        stdout = "0" if "list-windows" in command else ""
+        return CommandResult(stdout=stdout, stderr="", success=True)
+
+    host, recorded = _make_stop_agents_test_host(local_provider, cast(AgentInterface, agent), handle)
+
+    failures = get_cleanup_failures(lambda: host.stop_agents([agent.id]))
+
+    assert [f.category for f in failures] == [CleanupFailureCategory.TIMEOUT]
+    commands = [command for command, _ in recorded]
+    assert any("list-panes" in command for command in commands)
+    # Aggregate-and-continue: the timeout does not abort; kill-session is still attempted.
+    assert any("kill-session" in command for command in commands)
+
+
+@pytest.mark.allow_warnings(match=r"^Cleanup step left a resource behind on host")
+def test_stop_agents_classifies_real_vs_benign_stderr(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """Stderr signalling 'already gone' (tmux can't-find-session, kill ESRCH) is benign
+    (no failure); any other stderr line is a real failure.
+    """
+    agent = make_test_agent_details("cleanup-classify-agent")
+
+    def handle_benign(command: str) -> CommandResult:
+        # Session already gone (list-windows) and the server going away during teardown
+        # (kill-session racing with the local tmux server exiting) are both benign.
+        if "list-windows" in command:
+            return CommandResult(stdout="", stderr="can't find session: mngr_x", success=False)
+        if "kill-session" in command:
+            return CommandResult(stdout="", stderr="lost server", success=False)
+        return CommandResult(stdout="", stderr="", success=True)
+
+    benign_host, _ = _make_stop_agents_test_host(local_provider, cast(AgentInterface, agent), handle_benign)
+    assert get_cleanup_failures(lambda: benign_host.stop_agents([agent.id])) == []
+
+    def handle_real(command: str) -> CommandResult:
+        if "list-windows" in command:
+            return CommandResult(stdout="0", stderr="", success=True)
+        if "list-panes" in command:
+            return CommandResult(stdout="999", stderr="", success=True)
+        if "kill -TERM" in command or "kill -KILL" in command:
+            # A process that cannot be killed -> a real PROCESSES_REMAIN failure.
+            return CommandResult(stdout="", stderr="kill: (999): Operation not permitted", success=False)
+        return CommandResult(stdout="", stderr="", success=True)
+
+    real_host, _ = _make_stop_agents_test_host(local_provider, cast(AgentInterface, agent), handle_real)
+    failures = get_cleanup_failures(lambda: real_host.stop_agents([agent.id]))
+    assert [f.category for f in failures] == [CleanupFailureCategory.PROCESSES_REMAIN]
+
+
+def test_stop_agents_treats_tmux_no_current_target_as_benign(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """tmux 'no current target' on kill-session is benign, not a LOCAL_STATE_REMAINS failure.
+
+    When several agents are destroyed at once, killing the last session makes the tmux server
+    exit; a concurrent kill-session against the already-gone session then reports "no current
+    target". The session is gone either way, so this must not surface as a spurious cleanup
+    failure (it did, flakily, before "no current target" was whitelisted).
+    """
+    agent = make_test_agent_details("cleanup-no-current-target-agent")
+
+    def handle(command: str) -> CommandResult:
+        if "kill-session" in command:
+            return CommandResult(stdout="", stderr="no current target", success=False)
+        return CommandResult(stdout="", stderr="", success=True)
+
+    host, _ = _make_stop_agents_test_host(local_provider, cast(AgentInterface, agent), handle)
+    assert get_cleanup_failures(lambda: host.stop_agents([agent.id])) == []
+
+
+def test_reap_agent_process_tree_kills_pane_and_env_marked_orphans_but_not_the_session(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """reap_agent_process_tree kills the pane descendants AND the MNGR_AGENT_ID-tagged
+    orphans (reparented to PID 1), with SIGTERM then SIGKILL, but does NOT kill the
+    tmux session itself.
+
+    Regression: a long-lived daemon launched under an agent (the FCT bootstrap's
+    supervisord and its ttyd) could be orphaned to PID 1 on an abrupt teardown and
+    outlive the agent, holding a fixed port (EADDRINUSE on the next relaunch). The
+    shared reap must catch such orphans via the env marker, which a pane/tree walk
+    misses. It must NOT kill the session, so callers can reap-then-relaunch in place.
+    """
+    agent = make_test_agent_details("reap-tree-agent")
+    pane_pid = "55502"
+    orphan_pid = "55501"
+
+    def handle(command: str) -> CommandResult:
+        if "list-windows" in command:
+            return CommandResult(stdout="0", stderr="", success=True)
+        if "list-panes" in command:
+            return CommandResult(stdout=pane_pid, stderr="", success=True)
+        # The env-marker /proc scan that finds orphans reparented to PID 1.
+        if "MNGR_AGENT_ID" in command:
+            return CommandResult(stdout=orphan_pid, stderr="", success=True)
+        return CommandResult(stdout="", stderr="", success=True)
+
+    host, recorded = _make_stop_agents_test_host(local_provider, cast(AgentInterface, agent), handle)
+
+    failures = host.reap_agent_process_tree(cast(AgentInterface, agent))
+
+    assert failures == []
+    commands = [command for command, _ in recorded]
+    # It ran the env-marker orphan scan.
+    assert any("MNGR_AGENT_ID" in command for command in commands)
+    # It killed BOTH the pane pid and the env-marked orphan, via SIGTERM and SIGKILL.
+    kill_commands = " ".join(c for c in commands if "kill -TERM" in c or "kill -KILL" in c)
+    assert "kill -TERM" in kill_commands and "kill -KILL" in kill_commands
+    assert pane_pid in kill_commands and orphan_pid in kill_commands
+    # It must NOT kill the tmux session -- that's stop_agents' job, not the reap's.
+    assert not any("kill-session" in command for command in commands)
+
+
+def test_execute_idempotent_command_raises_command_timeout_error_on_local_timeout(
+    local_host: Host,
+) -> None:
+    """raise_on_timeout normalizes a local timeout into a loud CommandTimeoutError.
+
+    Exercises the real local backend: a command that outlives its timeout is
+    killed and, with raise_on_timeout=True, surfaces as CommandTimeoutError
+    (a MngrError) rather than the default failed CommandResult. The default
+    (raise_on_timeout=False) path is asserted too, to confirm existing callers
+    still see success=False on a timeout.
+    """
+    # Default: a local timeout is reported as a failed result, not raised.
+    result = local_host.execute_idempotent_command("sleep 10", timeout_seconds=1)
+    assert result.success is False
+
+    # Opt-in: the same timeout is raised loudly as CommandTimeoutError.
+    with pytest.raises(CommandTimeoutError):
+        local_host.execute_idempotent_command("sleep 10", timeout_seconds=1, raise_on_timeout=True)
+
+
 @pytest.mark.parametrize(
     ("exception", "expected"),
     [
@@ -1087,21 +1493,74 @@ def _create_host_with_fake_connector(
         (SSHException("SSH session not active"), True),
         (ChannelException(2, "open failed"), True),
         (EOFError(), True),
+        (TimeoutError("Timed out reading output"), True),
     ],
-    ids=["socket-closed", "other-os-error", "non-os-error", "ssh-exception", "channel-exception", "eof-error"],
+    ids=[
+        "socket-closed",
+        "other-os-error",
+        "non-os-error",
+        "ssh-exception",
+        "channel-exception",
+        "eof-error",
+        "timeout-error",
+    ],
 )
 def test_is_transient_ssh_error(exception: BaseException, expected: bool) -> None:
     assert _is_transient_ssh_error(exception) is expected
 
 
+class _FakeLockChannel:
+    """Fake paramiko Channel for the SSH host-lock exec path.
+
+    ``recv`` yields the acquired marker so ``_wait_for_remote_lock_acquired``
+    returns immediately; ``shutdown_write``/``close`` are counted so tests can
+    assert the lock is released on exit.
+    """
+
+    def __init__(self) -> None:
+        self.exec_command_call_count = 0
+        self.shutdown_write_call_count = 0
+        self.close_call_count = 0
+        self._recv_chunks = [_LOCK_ACQUIRED_MARKER.encode() + b"\n"]
+        self._recv_call_count = 0
+
+    def exec_command(self, command: str) -> None:
+        self.exec_command_call_count += 1
+
+    def recv(self, size: int) -> bytes:
+        idx = self._recv_call_count
+        self._recv_call_count += 1
+        if idx < len(self._recv_chunks):
+            return self._recv_chunks[idx]
+        return b""
+
+    def shutdown_write(self) -> None:
+        self.shutdown_write_call_count += 1
+
+    def close(self) -> None:
+        self.close_call_count += 1
+
+
 class _FakeTransport:
     """Fake paramiko transport for testing."""
 
-    def __init__(self, *, is_active: bool = True) -> None:
+    def __init__(self, *, is_active: bool = True, open_session_results: list[object] | None = None) -> None:
         self._is_active = is_active
+        self._open_session_results: list[object] = open_session_results if open_session_results is not None else []
+        self.open_session_call_count = 0
 
     def is_active(self) -> bool:
         return self._is_active
+
+    def open_session(self) -> object:
+        idx = self.open_session_call_count
+        self.open_session_call_count += 1
+        if idx < len(self._open_session_results):
+            result = self._open_session_results[idx]
+            if isinstance(result, Exception):
+                raise result
+            return result
+        raise AssertionError("open_session called more times than configured")
 
 
 class _BaseFakeSFTP:
@@ -1421,6 +1880,207 @@ def test_put_file_propagates_non_socket_closed_os_error(
         host._put_file(io.BytesIO(b"content"), "/remote/file.txt")
 
 
+def test_get_file_timeout_error_disconnects_before_retry(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """TimeoutError (pyinfra/paramiko read timeout) should disconnect before retrying.
+
+    ``TimeoutError`` is an ``OSError`` subclass on Python 3, so the inner
+    retry handler must branch on it BEFORE the generic OSError branch --
+    otherwise the file-not-found / socket-closed string-matches would run
+    against the timeout exception, miss, and re-raise without disconnect,
+    leaving the retry to reuse the same dead SSH channel.
+    """
+    call_count = 0
+
+    class _FailOnceThenSucceedSFTP(_BaseFakeSFTP):
+        def getfo(self, remote_path: str, fl: IO[bytes]) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise TimeoutError("Timed out reading output")
+
+    host, fake = _create_host_with_custom_sftp_and_fake(local_provider, _FailOnceThenSucceedSFTP)
+    result = host._get_file("/remote/file.txt", io.BytesIO())
+
+    assert result is True
+    assert call_count == 2
+    assert fake.disconnect_call_count == 1
+
+
+def test_put_file_timeout_error_disconnects_before_retry(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """TimeoutError (pyinfra/paramiko write timeout) should disconnect before retrying.
+
+    Parallel to ``test_get_file_timeout_error_disconnects_before_retry``;
+    see that docstring for the ordering rationale.
+    """
+    call_count = 0
+
+    class _FailOnceThenSucceedSFTP(_BaseFakeSFTP):
+        def putfo(self, fl: IO[bytes], remote_path: str) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise TimeoutError("Timed out writing output")
+
+    host, fake = _create_host_with_custom_sftp_and_fake(local_provider, _FailOnceThenSucceedSFTP)
+    result = host._put_file(io.BytesIO(b"content"), "/remote/file.txt")
+
+    assert result is True
+    assert call_count == 2
+    assert fake.disconnect_call_count == 1
+
+
+def test_get_file_wraps_timeout_error_in_host_connection_error(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """After retries are exhausted, TimeoutError must be wrapped in HostConnectionError.
+
+    Without an explicit TimeoutError branch in ``_get_file``'s outer
+    handler, the post-retry timeout would fall into the generic OSError
+    branch and re-raise as raw ``OSError`` (since "Socket is closed"
+    won't match a timeout message), leaking the underlying class to
+    callers.
+    """
+
+    class _HostWithImmediateTimeout(Host):
+        def _get_file_with_transient_retry(
+            self,
+            remote_filename: str,
+            filename_or_io: str | IO[bytes],
+            remote_temp_filename: str | None = None,
+            timeout_seconds: float | None = None,
+        ) -> bool:
+            raise TimeoutError("Timed out reading output")
+
+    fake = _FakeHostWithSSH(ssh_client=_FakeSSHClient(transport_return=_FakeTransport()))
+    connector = PyinfraConnector(cast(PyinfraHost, fake))
+    host = _HostWithImmediateTimeout(
+        id=HostId.generate(),
+        host_name=HostName("test"),
+        connector=connector,
+        provider_instance=local_provider,
+        mngr_ctx=local_provider.mngr_ctx,
+    )
+
+    with pytest.raises(HostConnectionError, match="timed out while reading file"):
+        host._get_file("/remote/file.txt", io.BytesIO())
+
+
+def test_discover_agents_threads_timeout_into_directory_and_file_reads(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """When a per-host timeout is given, discover_agents bounds *both* reads it makes.
+
+    Change 1: an unbounded discovery read can leave an abandoned thread running forever.
+    Here we assert discover_agents(timeout_seconds=T) threads T into the directory listing
+    and into the per-agent data.json read (using the timeout-carrying read helper), rather
+    than falling back to the unbounded ``read_text_file`` path.
+    """
+    agent_id = AgentId.generate()
+    agent_data = {
+        "id": str(agent_id),
+        "name": "recorded-agent",
+        "type": "claude",
+        "work_dir": "/tmp/work",
+    }
+    recorded_list_timeouts: list[float | None] = []
+    recorded_read_timeouts: list[float] = []
+
+    class _RecordingReadHost(Host):
+        def _list_directory(self, path: Path, timeout_seconds: float | None = None) -> list[str]:
+            recorded_list_timeouts.append(timeout_seconds)
+            return [str(agent_id)]
+
+        def read_text_file_within_timeout(self, path: Path, timeout_seconds: float, encoding: str = "utf-8") -> str:
+            recorded_read_timeouts.append(timeout_seconds)
+            return json.dumps(agent_data)
+
+        def read_text_file(self, path: Path, encoding: str = "utf-8") -> str:
+            raise AssertionError("bounded discovery must not use the unbounded read_text_file path")
+
+    fake = _FakeHostWithSSH(ssh_client=_FakeSSHClient(transport_return=_FakeTransport()))
+    connector = PyinfraConnector(cast(PyinfraHost, fake))
+    host = _RecordingReadHost(
+        id=HostId.generate(),
+        host_name=HostName("test"),
+        connector=connector,
+        provider_instance=local_provider,
+        mngr_ctx=local_provider.mngr_ctx,
+    )
+
+    refs = host.discover_agents(timeout_seconds=7.0)
+
+    assert [ref.agent_id for ref in refs] == [agent_id]
+    assert recorded_list_timeouts == [7.0]
+    assert recorded_read_timeouts == [7.0]
+
+
+def test_read_file_within_timeout_applies_timeout_to_sftp_channel(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """read_file_within_timeout must set the SFTP channel's socket timeout.
+
+    Change 1: bounding the per-agent ``data.json`` read is what stops an abandoned
+    discovery thread from hanging forever on a stalled SFTP transfer. This exercises
+    the real ``read_text_file_within_timeout`` -> ``_get_file`` -> ``_get_file_via_paramiko``
+    path (not a stubbed read) and asserts the timeout actually reaches the channel.
+    """
+    recorded_settimeouts: list[float] = []
+    file_contents = b'{"hello": "world"}'
+
+    class _RecordingChannel:
+        def settimeout(self, timeout_seconds: float) -> None:
+            recorded_settimeouts.append(timeout_seconds)
+
+    class _TimeoutRecordingSFTP(_BaseFakeSFTP):
+        def get_channel(self) -> _RecordingChannel:
+            return _RecordingChannel()
+
+        def getfo(self, remote_path: str, fl: IO[bytes]) -> None:
+            fl.write(file_contents)
+
+    host = _create_host_with_custom_sftp(local_provider, _TimeoutRecordingSFTP)
+
+    result = host.read_text_file_within_timeout(Path("/remote/data.json"), 7.0)
+
+    assert result == file_contents.decode()
+    assert recorded_settimeouts == [7.0]
+
+
+def test_put_file_wraps_timeout_error_in_host_connection_error(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """After retries are exhausted, TimeoutError must be wrapped in HostConnectionError.
+
+    Parallel to ``test_get_file_wraps_timeout_error_in_host_connection_error``.
+    """
+
+    class _HostWithImmediateTimeout(Host):
+        def _put_file_with_transient_retry(
+            self,
+            filename_or_io: str | IO[str] | IO[bytes],
+            remote_filename: str,
+            remote_temp_filename: str | None = None,
+        ) -> bool:
+            raise TimeoutError("Timed out writing output")
+
+    fake = _FakeHostWithSSH(ssh_client=_FakeSSHClient(transport_return=_FakeTransport()))
+    connector = PyinfraConnector(cast(PyinfraHost, fake))
+    host = _HostWithImmediateTimeout(
+        id=HostId.generate(),
+        host_name=HostName("test"),
+        connector=connector,
+        provider_instance=local_provider,
+        mngr_ctx=local_provider.mngr_ctx,
+    )
+
+    with pytest.raises(HostConnectionError, match="timed out while writing file"):
+        host._put_file(io.BytesIO(b"content"), "/remote/file.txt")
+
+
 def test_get_paramiko_transport_raises_for_host_without_connector(
     local_provider: LocalProviderInstance,
 ) -> None:
@@ -1566,6 +2226,7 @@ def test_get_file_wraps_ssh_exception_in_host_connection_error(
             remote_filename: str,
             filename_or_io: str | IO[bytes],
             remote_temp_filename: str | None = None,
+            timeout_seconds: float | None = None,
         ) -> bool:
             raise SSHException("connection lost")
 
@@ -1775,6 +2436,40 @@ def test_run_shell_command_wraps_ssh_exception_in_host_connection_error(
     )
 
     with pytest.raises(HostConnectionError, match="Could not execute command"):
+        host._run_shell_command(StringCommand("echo hello"))
+
+
+def test_run_shell_command_wraps_timeout_error_in_host_connection_error(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """After all retries are exhausted, TimeoutError must be wrapped in HostConnectionError.
+
+    ``TimeoutError`` is an ``OSError`` subclass on Python 3, so the outer
+    handler's ordering matters: the TimeoutError branch must precede the
+    narrow "Socket is closed" OSError check, otherwise post-retry timeouts
+    leak to callers as raw ``OSError`` rather than the structured
+    ``HostConnectionError`` wrapper.
+    """
+
+    class _HostWithImmediateTimeout(Host):
+        def _run_shell_command_with_transient_retry(
+            self,
+            command: StringCommand,
+            pyinfra_kwargs: dict[str, Any],
+        ) -> tuple[bool, CommandOutput]:
+            raise TimeoutError("Timed out reading output")
+
+    fake = _FakePyinfraHost()
+    connector = PyinfraConnector(cast(PyinfraHost, fake))
+    host = _HostWithImmediateTimeout(
+        id=HostId.generate(),
+        host_name=HostName("test"),
+        connector=connector,
+        provider_instance=local_provider,
+        mngr_ctx=local_provider.mngr_ctx,
+    )
+
+    with pytest.raises(HostConnectionError, match="timed out reading output"):
         host._run_shell_command(StringCommand("echo hello"))
 
 
@@ -2125,6 +2820,131 @@ def test_host_lock_cooperatively_acquires_and_releases(
 
     # After exiting the context, the lock should be released
     assert host.is_lock_held() is False
+
+
+def test_build_remote_lock_command_blocking_holds_flock_until_stdin_closes() -> None:
+    """The blocking remote lock command must be valid shell, flock the path, and signal acquisition."""
+    cmd = _build_remote_lock_command(Path("/mngr/host_lock"), timeout_seconds=None)
+    assert subprocess.run(["sh", "-n", "-c", cmd], capture_output=True).returncode == 0
+    assert "flock 9" in cmd
+    assert "/mngr/host_lock" in cmd
+    assert _LOCK_ACQUIRED_MARKER in cmd
+    # It must wait on stdin (so closing the channel releases the lock).
+    assert "read" in cmd
+
+
+def test_build_remote_lock_command_with_timeout_uses_flock_wait() -> None:
+    """A bounded remote lock command must use ``flock -w`` and emit the timeout marker."""
+    cmd = _build_remote_lock_command(Path("/mngr/host_lock"), timeout_seconds=12.0)
+    assert subprocess.run(["sh", "-n", "-c", cmd], capture_output=True).returncode == 0
+    assert "flock -w 12 9" in cmd
+    assert _LOCK_ACQUIRED_MARKER in cmd
+    assert _LOCK_TIMED_OUT_MARKER in cmd
+
+
+def test_host_lock_cooperatively_acquires_and_releases_blocking(
+    local_host: Host,
+) -> None:
+    """lock_cooperatively with an indefinite timeout should acquire and release the lock."""
+    host = local_host
+    with host.lock_cooperatively(timeout_seconds=None):
+        assert host.is_lock_held() is True
+    # The lock file persists (stable inode) but is no longer held.
+    assert (host.host_dir / "host_lock").exists()
+    assert host.is_lock_held() is False
+
+
+def test_hold_remote_host_lock_retries_transient_ssh_error_and_reconnects(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """A dropped connection during lock acquisition should disconnect, reconnect, and retry.
+
+    Reproduces the CI failure where a mapper host's SSH transport died
+    ("Connection reset by peer" -> "SSH session not active"): the first
+    ``open_session`` raises, we disconnect so the retry rebuilds the connection,
+    and the second attempt acquires the lock.
+    """
+    channel = _FakeLockChannel()
+    transport = _FakeTransport(open_session_results=[SSHException("SSH session not active"), channel])
+    fake = _FakeHostWithSSH(ssh_client=_FakeSSHClient(transport_return=transport))
+    host = _create_host_with_fake_connector(local_provider, fake)
+
+    with host.lock_cooperatively(timeout_seconds=None):
+        pass
+
+    assert transport.open_session_call_count == 2
+    assert fake.disconnect_call_count == 1
+    # The acquired channel is released (EOF + close) when the block exits.
+    assert channel.shutdown_write_call_count == 1
+    assert channel.close_call_count == 1
+
+
+def test_hold_remote_host_lock_wraps_persistent_ssh_error_in_host_connection_error(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """A lock-acquisition SSH error that survives the retries must surface as HostConnectionError.
+
+    Wrapping the raw paramiko ``SSHException`` in an ``MngrError`` subclass is what
+    lets a many-host caller (the mapreduce orchestrator) isolate one unreachable
+    host instead of crashing the whole run. ``_open_remote_lock_channel`` is
+    overridden to raise immediately so the test does not pay the real retry backoff.
+    """
+
+    class _HostWithImmediateLockSSHFailure(Host):
+        def _open_remote_lock_channel(self, lock_file_path: Path, timeout_seconds: float | None) -> Channel:
+            raise SSHException("SSH session not active")
+
+    fake = _FakePyinfraHost()
+    connector = PyinfraConnector(cast(PyinfraHost, fake))
+    host = _HostWithImmediateLockSSHFailure(
+        id=HostId.generate(),
+        host_name=HostName("test"),
+        connector=connector,
+        provider_instance=local_provider,
+        mngr_ctx=local_provider.mngr_ctx,
+    )
+
+    with pytest.raises(HostConnectionError, match="Could not acquire host lock"):
+        with host.lock_cooperatively(timeout_seconds=None):
+            pass
+
+
+def test_host_lock_cooperatively_is_mutually_exclusive(
+    local_host: Host,
+) -> None:
+    """A second lock_cooperatively must block until the first releases (real flock)."""
+    host = local_host
+    first_acquired = threading.Event()
+    allow_first_release = threading.Event()
+    second_acquired = threading.Event()
+
+    def hold_first() -> None:
+        with host.lock_cooperatively(timeout_seconds=None):
+            first_acquired.set()
+            # Hold the lock until the test signals release.
+            allow_first_release.wait(timeout=30.0)
+
+    def acquire_second() -> None:
+        # Only attempt once the first holder is established.
+        first_acquired.wait(timeout=30.0)
+        with host.lock_cooperatively(timeout_seconds=None):
+            second_acquired.set()
+
+    first_thread = threading.Thread(target=hold_first)
+    second_thread = threading.Thread(target=acquire_second)
+    first_thread.start()
+    second_thread.start()
+    try:
+        assert first_acquired.wait(timeout=30.0)
+        # The second acquisition must not succeed while the first holds the lock.
+        assert not second_acquired.wait(timeout=1.0)
+        # Releasing the first lets the second proceed.
+        allow_first_release.set()
+        assert second_acquired.wait(timeout=30.0)
+    finally:
+        allow_first_release.set()
+        first_thread.join(timeout=30.0)
+        second_thread.join(timeout=30.0)
 
 
 def test_host_get_reported_lock_time_returns_none_when_no_lock(
@@ -2625,9 +3445,86 @@ def test_host_create_host_tmux_config_creates_file(
     assert config_path.exists()
 
     content = config_path.read_text()
-    assert "source-file" in content
     assert "C-q" in content
     assert "C-t" in content
+
+
+def test_host_create_host_tmux_config_contains_mngr_settings(
+    local_host: Host,
+    temp_host_dir: Path,
+) -> None:
+    """The config sets mngr's status-left-length and set-titles options."""
+    host = local_host
+    content = host._create_host_tmux_config().read_text()
+
+    assert f"set -g status-left-length {_TMUX_STATUS_LEFT_LENGTH}" in content
+    assert "set -g set-titles on" in content
+    assert f'set -g set-titles-string "{_TMUX_SET_TITLES_STRING}"' in content
+
+
+def test_host_create_host_tmux_config_does_not_source_user_config(
+    local_host: Host,
+    temp_host_dir: Path,
+) -> None:
+    """The generated config must not source the user's ~/.tmux.conf.
+
+    tmux loads ~/.tmux.conf itself when the server starts; re-sourcing it from
+    mngr's config on every agent creation would re-run non-idempotent user
+    config (e.g. 'set -ag', plugin 'run-shell') and corrupt their setup.
+    """
+    host = local_host
+    content = host._create_host_tmux_config().read_text()
+
+    assert "~/.tmux.conf" not in content
+    assert "source-file" not in content
+
+
+def _make_local_host_with_tmux_config(
+    tmux_config: TmuxConfig,
+    temp_host_dir: Path,
+    temp_profile_dir: Path,
+    plugin_manager: pluggy.PluginManager,
+    active_concurrency_group: ConcurrencyGroup,
+    mngr_test_prefix: str,
+) -> Host:
+    """Build a local Host whose MngrConfig carries the given tmux config."""
+    config = MngrConfig(
+        default_host_dir=temp_host_dir,
+        prefix=mngr_test_prefix,
+        is_error_reporting_enabled=False,
+        tmux=tmux_config,
+    )
+    ctx = make_mngr_ctx(config, plugin_manager, temp_profile_dir, concurrency_group=active_concurrency_group)
+    provider = LocalProviderInstance(name=ProviderInstanceName("local"), host_dir=temp_host_dir, mngr_ctx=ctx)
+    return provider.create_host(HostName(LOCAL_HOST_NAME))
+
+
+def test_host_create_host_tmux_config_sources_additional_config_when_configured(
+    temp_host_dir: Path,
+    temp_profile_dir: Path,
+    plugin_manager: pluggy.PluginManager,
+    active_concurrency_group: ConcurrencyGroup,
+    mngr_test_prefix: str,
+) -> None:
+    """A configured tmux.additional_config_path is sourced (guarded by test -f) into the session config."""
+    additional_config_path = "~/.mngr/tmux.user.conf"
+    host = _make_local_host_with_tmux_config(
+        TmuxConfig(additional_config_path=Path(additional_config_path)),
+        temp_host_dir,
+        temp_profile_dir,
+        plugin_manager,
+        active_concurrency_group,
+        mngr_test_prefix,
+    )
+    content = host._create_host_tmux_config().read_text()
+
+    assert f"if-shell 'test -f {additional_config_path}' 'source-file {additional_config_path}'" in content
+    # Only the configured additional_config_path is sourced; mngr never sources ~/.tmux.conf
+    # (tmux loads that itself at server start).
+    assert content.count("source-file") == 1
+    assert "~/.tmux.conf" not in content
+    # The path is interpolated unquoted so a leading ~ is expanded by the host shell/tmux.
+    assert f"'{additional_config_path}'" not in content
 
 
 # =========================================================================
@@ -2686,6 +3583,37 @@ def test_host_collect_agent_env_vars_includes_mngr_variables(
     # alongside MNGR_GIT_BASE_BRANCH and must hold the same value.
     assert "CODE_GUARDIAN_STOP_HOOK__BASE_BRANCH" in env
     assert env["CODE_GUARDIAN_STOP_HOOK__BASE_BRANCH"] == env["MNGR_GIT_BASE_BRANCH"]
+    # The primary tmux window name is exported (default "agent") so in-session
+    # helpers like the ttyd attach script can target the window by name, not :0.
+    assert env["MNGR_PRIMARY_WINDOW_NAME"] == "agent"
+
+
+def test_host_collect_agent_env_vars_uses_configured_primary_window_name(
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+    temp_profile_dir: Path,
+    plugin_manager: pluggy.PluginManager,
+    active_concurrency_group: ConcurrencyGroup,
+    mngr_test_prefix: str,
+) -> None:
+    """A custom tmux.primary_window_name flows into MNGR_PRIMARY_WINDOW_NAME."""
+    host = _make_local_host_with_tmux_config(
+        TmuxConfig(primary_window_name="primary"),
+        temp_host_dir,
+        temp_profile_dir,
+        plugin_manager,
+        active_concurrency_group,
+        mngr_test_prefix,
+    )
+    options = CreateAgentOptions(
+        name=AgentName("env-window-agent"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+    )
+    agent = host.create_agent_state(temp_work_dir, options)
+
+    env = host._collect_agent_env_vars(agent, options)
+    assert env["MNGR_PRIMARY_WINDOW_NAME"] == "primary"
 
 
 def test_host_collect_agent_env_vars_with_env_file(
@@ -2988,7 +3916,7 @@ def test_remove_tags_syncs_to_certified_data(
 def test_merge_agent_type_provisioning_returns_unchanged_when_no_fields() -> None:
     """_merge_agent_type_provisioning should return the original options when agent config has no provisioning."""
     agent_config = AgentTypeConfig()
-    options = CreateAgentOptions()
+    options = CreateAgentOptions(agent_type=AgentTypeName("generic"))
     result = _merge_agent_type_provisioning(agent_config, options)
     assert result is options
 
@@ -2997,6 +3925,7 @@ def test_merge_agent_type_provisioning_prepends_extra_provision_commands() -> No
     """Agent type extra_provision_command should be prepended before CLI commands."""
     agent_config = AgentTypeConfig(extra_provision_command=("echo agent_type",))
     options = CreateAgentOptions(
+        agent_type=AgentTypeName("generic"),
         provisioning=AgentProvisioningOptions(extra_provision_commands=("echo cli",)),
     )
     result = _merge_agent_type_provisioning(agent_config, options)
@@ -3007,6 +3936,7 @@ def test_merge_agent_type_provisioning_prepends_upload_files() -> None:
     """Agent type upload_file specs should be parsed and prepended."""
     agent_config = AgentTypeConfig(upload_file=("local.txt:/remote.txt",))
     options = CreateAgentOptions(
+        agent_type=AgentTypeName("generic"),
         provisioning=AgentProvisioningOptions(
             upload_files=(UploadFileSpec(local_path=Path("cli.txt"), remote_path=Path("/cli.txt")),),
         ),
@@ -3022,6 +3952,7 @@ def test_merge_agent_type_provisioning_prepends_env_vars() -> None:
     """Agent type env should be parsed and prepended to environment.env_vars."""
     agent_config = AgentTypeConfig(env=("AGENT_TYPE_VAR=1",))
     options = CreateAgentOptions(
+        agent_type=AgentTypeName("generic"),
         environment=AgentEnvironmentOptions(
             env_vars=(EnvVar(key="CLI_VAR", value="2"),),
         ),
@@ -3037,6 +3968,7 @@ def test_merge_agent_type_provisioning_prepends_env_files() -> None:
     """Agent type env_file should be parsed and prepended to environment.env_files."""
     agent_config = AgentTypeConfig(env_file=("/etc/agent.env",))
     options = CreateAgentOptions(
+        agent_type=AgentTypeName("generic"),
         environment=AgentEnvironmentOptions(
             env_files=(Path("/etc/cli.env"),),
         ),
@@ -3049,6 +3981,7 @@ def test_merge_agent_type_provisioning_prepends_create_directories() -> None:
     """Agent type create_directory should be parsed and prepended."""
     agent_config = AgentTypeConfig(create_directory=("/tmp/mydir",))
     options = CreateAgentOptions(
+        agent_type=AgentTypeName("generic"),
         provisioning=AgentProvisioningOptions(create_directories=(Path("/tmp/existing"),)),
     )
     result = _merge_agent_type_provisioning(agent_config, options)
@@ -3061,7 +3994,7 @@ def test_merge_agent_type_provisioning_combines_provisioning_and_env() -> None:
         extra_provision_command=("echo setup",),
         env=("KEY=val",),
     )
-    options = CreateAgentOptions()
+    options = CreateAgentOptions(agent_type=AgentTypeName("generic"))
     result = _merge_agent_type_provisioning(agent_config, options)
     assert result.provisioning.extra_provision_commands == ("echo setup",)
     assert result.environment.env_vars == (EnvVar(key="KEY", value="val"),)

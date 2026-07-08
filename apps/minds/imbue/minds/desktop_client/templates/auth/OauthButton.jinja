@@ -1,0 +1,22 @@
+{#def provider, extra="" #}
+{#
+  OAuth provider button. Used on the auth signup/signin tabs to render
+  the white-card "Continue with X" buttons next to the email/password
+  form.
+
+  ``provider`` is "google" or "github". The label text and the embedded
+  ``auth.OauthIcon`` brand glyph are picked from that.
+
+  The ``oauth-btn`` class hook on the rendered button is load-bearing:
+  ``static/auth.js`` finds every OAuth button across the page via
+  ``document.querySelectorAll('.oauth-btn')`` to enable/disable them as
+  a group during an OAuth flow.
+
+  ``extra`` is for one-off layout shims (``mb-2`` to space buttons in a
+  vertical stack).
+#}
+{%- set _label = {"google": "Continue with Google", "github": "Continue with GitHub"}[provider] -%}
+<button data-oauth="{{ provider }}"
+        class="oauth-btn w-full py-2 px-3 bg-surface-primary border border-default rounded-lg type-body cursor-pointer flex items-center justify-center gap-2 text-primary hover:bg-fill-hover {{ extra }}">
+  <auth.OauthIcon :provider="provider" /> {{ _label }}
+</button>

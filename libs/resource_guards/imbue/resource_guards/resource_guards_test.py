@@ -218,8 +218,13 @@ def test_marked_test_that_never_calls_resource_fails(pytester: pytest.Pytester, 
     result.stdout.fnmatch_lines(["*never invoked cat*"])
 
 
+@pytest.mark.timeout(30)
 def test_blocked_resource_appended_to_failing_test(pytester: pytest.Pytester, clean_guard_env: None) -> None:
-    """When a test fails AND a blocked resource was invoked, both should be visible."""
+    """When a test fails AND a blocked resource was invoked, both should be visible.
+
+    Spawns a pytest subprocess via ``runpytest_subprocess``, whose startup is slow and
+    variable under offload load and intermittently exceeds the default 10s timeout.
+    """
     pytester.makeconftest(_PYTESTER_CONFTEST)
     pytester.makepyfile("""
         import subprocess

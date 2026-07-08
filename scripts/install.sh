@@ -8,11 +8,14 @@
 # What this script does:
 #   1. Installs uv (https://docs.astral.sh/uv/) if not already present
 #   2. Installs mngr via: uv tool install imbue-mngr
-#   3. Runs: mngr dependencies -i  (interactively install system deps)
+#   3. Runs: mngr dependencies --install interactive --scope core
+#           (interactively install system deps; only warns if a *core* dep is missing)
 #   4. Runs: mngr extras -i        (optional: plugins, shell completion,
 #                                   Claude Code plugin, default agent type)
+#   5. Runs: mngr config wizard    (optional: common user-scope config, e.g.
+#                                   Claude config dir isolation)
 #
-# Steps 1-2 run automatically. Steps 3-4 prompt before installing anything.
+# Steps 1-2 run automatically. Steps 3-5 prompt before changing anything.
 # Safe to re-run: skips anything already installed or configured.
 # Source: https://github.com/imbue-ai/mngr
 #
@@ -71,11 +74,20 @@ fi
 
 # No stdin redirect needed: mngr commands read from /dev/tty directly
 # when they need interactive input, so they work even when stdin is piped.
-mngr dependencies -i || warn "Some dependencies could not be installed. Run 'mngr dependencies' to see what's missing."
+# --scope core: only treat a *core* dependency (git/tmux/jq) as a hard failure, so a
+# missing optional dep (ssh/rsync/unison/claude) does not trigger the warning below.
+mngr dependencies --install interactive --scope core || warn "Some dependencies could not be installed. Run 'mngr dependencies' to see what's missing."
 
 # ── Step 4: Optional extras (plugins, shell completion, Claude Code plugin, default agent type) ──
 
 mngr extras -i || warn "Some extras could not be installed. Run 'mngr extras' to see status."
+
+# ── Step 5: Common user-scope configuration ──────────────────────────────────
+
+# Walks through common config (e.g. whether to isolate the Claude config dir for
+# local agents). Each step is skipped if already configured, so this is safe to
+# re-run. Reads interactive input from /dev/tty, so it works even when stdin is piped.
+mngr config wizard || warn "Configuration wizard did not complete. Run 'mngr config wizard' to finish."
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 

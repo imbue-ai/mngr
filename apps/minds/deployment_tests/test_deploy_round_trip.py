@@ -1,4 +1,4 @@
-"""``minds_deployment`` test: full create / destroy round-trip of a dev env.
+"""``minds_deployment`` test: full create / destroy round-trip of a CI ephemeral env.
 
 Asserts that ``minds env deploy`` from clean creates every expected
 cloud-side resource and that ``minds env destroy`` removes every one of
@@ -22,7 +22,7 @@ from pydantic import SecretStr
 
 from imbue.minds.deployment_tests.data_types import EphemeralEnvHandle
 from imbue.minds.deployment_tests.helpers import build_minds_env_subprocess_env
-from imbue.minds.deployment_tests.helpers import load_dev_credentials_from_vault
+from imbue.minds.deployment_tests.helpers import load_ci_credentials_from_vault
 from imbue.minds.deployment_tests.helpers import modal_env_exists
 from imbue.minds.deployment_tests.helpers import neon_project_exists
 from imbue.minds.deployment_tests.helpers import supertokens_app_exists
@@ -32,7 +32,7 @@ from imbue.minds.envs.paths import secrets_file
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
-pytestmark = pytest.mark.minds_deployment
+pytestmark = [pytest.mark.release, pytest.mark.minds_deployment]
 
 # The fixture's deploy (~3 min) + this test's destroy (~2 min) + the
 # four cloud probes (a few seconds each) fit well under this.
@@ -47,20 +47,20 @@ def test_deploy_then_destroy_round_trip(ephemeral_env: EphemeralEnvHandle) -> No
     """Deploy creates every resource; destroy removes them all.
 
     Post-deploy assertions:
-    - Modal env named ``<ephemeral_env.name>`` exists in the dev-tier workspace.
+    - Modal env named ``<ephemeral_env.name>`` exists in the ci-tier workspace.
     - Connector + litellm-proxy /health/liveness both 200 (proxied via
       the just-deployed Modal apps).
-    - Neon project ``minds-<name>`` exists under the dev-tier Neon org.
-    - SuperTokens app ``<name>`` exists in the dev-tier core.
+    - Neon project ``minds-<name>`` exists under the ci-tier Neon org.
+    - SuperTokens app ``<name>`` exists in the ci-tier core.
     - ``~/.minds-<name>/client.toml`` + ``secrets.toml`` exist on disk.
 
     Post-destroy assertions: each of the above is gone.
 
-    Dev tier doesn't currently use OVH or Cloudflare resources for an
-    ephemeral env (those come in once workspaces / tunnels exist), so
-    those provider enumerations aren't asserted here.
+    The ci tier doesn't currently use OVH or Cloudflare resources for
+    an ephemeral env (those come in once workspaces / tunnels exist),
+    so those provider enumerations aren't asserted here.
     """
-    creds = load_dev_credentials_from_vault()
+    creds = load_ci_credentials_from_vault()
     neon_org_id = creds["NEON_ORG_ID"]
     neon_api_token = SecretStr(creds["NEON_API_TOKEN"])
     supertokens_core_url = creds["SUPERTOKENS_CONNECTION_URI"]

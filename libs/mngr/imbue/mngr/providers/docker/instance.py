@@ -19,34 +19,45 @@ import docker.context
 import docker.errors
 import docker.models.containers
 import docker.models.images
+import requests.exceptions
 from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
 from pyinfra.api import Host as PyinfraHost
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.errors import ProcessTimeoutError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
+from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import DockerBuildTimeoutError
+from imbue.mngr.errors import DockerGvisorEphemeralRootfsError
+from imbue.mngr.errors import DockerRuntimeNotRegisteredError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.errors import SnapshotNotFoundError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
+from imbue.mngr.hosts.offline_host import make_readable_offline_host
 from imbue.mngr.hosts.outer_host import OuterHost
 from imbue.mngr.hosts.outer_host import create_local_pyinfra_host
 from imbue.mngr.hosts.outer_host import create_ssh_pyinfra_host_using_user_config
+from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
+from imbue.mngr.interfaces.cleanup_failures import collect_cleanup_failures
+from imbue.mngr.interfaces.cleanup_failures import collecting_cleanup_failures
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import CleanupFailure
+from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.data_types import CpuResources
+from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import SnapshotRecord
-from imbue.mngr.interfaces.data_types import VolumeFileType
 from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OuterHostInterface
@@ -68,19 +79,23 @@ from imbue.mngr.providers.docker.config import DockerProviderConfig
 from imbue.mngr.providers.docker.host_store import ContainerConfig
 from imbue.mngr.providers.docker.host_store import DockerHostStore
 from imbue.mngr.providers.docker.host_store import HostRecord
-from imbue.mngr.providers.docker.volume import CONTAINER_ENTRYPOINT_CMD
 from imbue.mngr.providers.docker.volume import DockerVolume
 from imbue.mngr.providers.docker.volume import LABEL_PREFIX
 from imbue.mngr.providers.docker.volume import LABEL_PROVIDER
+from imbue.mngr.providers.docker.volume import STATE_CONTAINER_TYPE_LABEL
+from imbue.mngr.providers.docker.volume import STATE_CONTAINER_TYPE_VALUE
 from imbue.mngr.providers.docker.volume import STATE_VOLUME_MOUNT_PATH
 from imbue.mngr.providers.docker.volume import ensure_state_container
+from imbue.mngr.providers.docker.volume import state_container_name
 from imbue.mngr.providers.docker.volume import state_volume_name
 from imbue.mngr.providers.ssh_host_setup import REQUIRED_HOST_PACKAGES
 from imbue.mngr.providers.ssh_host_setup import build_add_authorized_keys_command
 from imbue.mngr.providers.ssh_host_setup import build_add_known_hosts_command
 from imbue.mngr.providers.ssh_host_setup import build_check_and_install_packages_command
 from imbue.mngr.providers.ssh_host_setup import build_configure_ssh_command
+from imbue.mngr.providers.ssh_host_setup import build_self_healing_host_entrypoint_command
 from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_command
+from imbue.mngr.providers.ssh_host_setup import build_start_sshd_command
 from imbue.mngr.providers.ssh_host_setup import parse_warnings_from_output
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
@@ -88,8 +103,15 @@ from imbue.mngr.providers.ssh_utils import load_or_create_host_keypair
 from imbue.mngr.providers.ssh_utils import load_or_create_ssh_keypair
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
 
+# PID-1 entrypoint for host containers. Unlike the idle state-container
+# entrypoint, this self-heals sshd on every (re)start once mngr has provisioned
+# this host (tracked by a marker, so a host key pre-baked into the base image is
+# never used by mistake), so the container is reachable again after an
+# out-of-band restart without waiting for `mngr start`.
+HOST_CONTAINER_ENTRYPOINT_CMD: Final[str] = build_self_healing_host_entrypoint_command()
+
 # Container entrypoint as SDK-style command tuple (used by tests)
-CONTAINER_ENTRYPOINT: Final[tuple[str, ...]] = ("sh", "-c", CONTAINER_ENTRYPOINT_CMD)
+CONTAINER_ENTRYPOINT: Final[tuple[str, ...]] = ("sh", "-c", HOST_CONTAINER_ENTRYPOINT_CMD)
 
 # Fallback base image when no image is specified by the user or provider config.
 DEFAULT_IMAGE: Final[str] = "debian:bookworm-slim"
@@ -117,13 +139,65 @@ LABEL_HOST_ID: Final[str] = f"{LABEL_PREFIX}host-id"
 LABEL_HOST_NAME: Final[str] = f"{LABEL_PREFIX}host-name"
 LABEL_TAGS: Final[str] = f"{LABEL_PREFIX}tags"
 
-# Path where the state volume is mounted inside host containers (when host volume is enabled).
-# The host_dir (e.g. /mngr) is symlinked to <this>/<host_id> so all data persists on the volume.
+# Path where the full state volume is mounted inside host containers in legacy
+# (shared) mode -- i.e. when `isolate_host_volumes` is False or None. In that
+# mode host_dir (e.g. /mngr) is symlinked to <this>/volumes/<host_id> so all
+# data persists on the volume. In isolated mode (`isolate_host_volumes=True`)
+# the per-host sub-folder is bound directly at host_dir via
+# `--mount ... volume-subpath=...` and this path is not used inside the host
+# container. The state container always mounts the full volume here.
 HOST_VOLUME_MOUNT_PATH: Final[str] = STATE_VOLUME_MOUNT_PATH
 
 # SSH constants
 CONTAINER_SSH_PORT: Final[int] = 22
 SSH_CONNECT_TIMEOUT: Final[float] = 60
+
+# Substring of Docker's native error when `docker run --runtime <name>` names a
+# runtime the daemon has not registered (e.g. `runsc`/gVisor not installed).
+# Stable across Docker versions: "unknown or invalid runtime name: <name>".
+_UNKNOWN_RUNTIME_ERROR_MARKER: Final[str] = "unknown or invalid runtime name"
+
+# gVisor (`runsc`) keeps each container's root filesystem in a per-sandbox overlay that
+# is discarded on every (re)start unless the runtime is registered with this flag, which
+# writes the root layer through to the persistent Docker layer. Without it, mngr's SSH
+# provisioning (written to the rootfs at create time) is silently lost on the first
+# restart, leaving the host running but unreachable. See DockerGvisorEphemeralRootfsError.
+_GVISOR_RUNSC_BINARY_NAME: Final[str] = "runsc"
+_GVISOR_PERSISTENT_OVERLAY_RUNTIME_ARG: Final[str] = "--overlay2=none"
+# The local Docker daemon config file, whose `runtimes` block records each runtime's
+# registration (path + runtimeArgs). This is the only readable source of the effective
+# `--overlay2` setting: `docker info` does not expose runtimeArgs, and `runsc features`
+# reports the compiled default regardless of the registered flag.
+_DOCKER_DAEMON_CONFIG_PATH: Final[Path] = Path("/etc/docker/daemon.json")
+
+
+# Minimum Docker Engine version that supports `--mount ... volume-subpath=...`.
+# `volume-subpath` was added in Docker Engine 25.0 (released January 2024).
+_MIN_ENGINE_VERSION_FOR_VOLUME_SUBPATH: Final[tuple[int, int]] = (25, 0)
+
+
+def verify_engine_version_supports_volume_subpath(engine_version: str) -> None:
+    """Raise MngrError if `engine_version` is older than Docker Engine 25.0.
+
+    Engine version strings look like ``"25.0.3"`` or ``"24.0.7-rc.1"``; we
+    parse the leading major and minor numbers and reject anything below 25.0.
+    """
+    version_parts = engine_version.split(".")
+    try:
+        major = int(version_parts[0])
+        minor = int(version_parts[1].split("-")[0]) if len(version_parts) > 1 else 0
+    except (ValueError, IndexError) as e:
+        raise MngrError(f"Cannot parse Docker daemon version {engine_version!r}: {e}") from e
+
+    if (major, minor) < _MIN_ENGINE_VERSION_FOR_VOLUME_SUBPATH:
+        required_major, required_minor = _MIN_ENGINE_VERSION_FOR_VOLUME_SUBPATH
+        raise MngrError(
+            f"isolate_host_volumes=True requires Docker Engine "
+            f"{required_major}.{required_minor}+ for the `--mount ... volume-subpath=...` option "
+            f"(your daemon reports version {engine_version}). "
+            f"Upgrade your Docker daemon, or set isolate_host_volumes=false "
+            f"to use the legacy shared-volume mode."
+        )
 
 
 def build_container_labels(
@@ -222,6 +296,50 @@ def create_docker_client() -> docker.DockerClient:
     return docker.from_env()
 
 
+@pure
+def _is_gvisor_runtime_rootfs_ephemeral(
+    runtime_name: str,
+    runtime_spec_by_name: Mapping[str, Mapping[str, object]],
+) -> bool:
+    """Whether the named Docker runtime is gVisor (`runsc`) registered WITHOUT `--overlay2=none`.
+
+    Returns False for a runtime that is not registered here (a truly-missing runtime surfaces
+    via Docker's own "unknown runtime" error at `docker run`) and for a non-gVisor runtime
+    (whose overlay semantics we cannot reason about).
+    """
+    runtime_spec = runtime_spec_by_name.get(runtime_name)
+    if runtime_spec is None:
+        return False
+    if Path(str(runtime_spec.get("path", ""))).name != _GVISOR_RUNSC_BINARY_NAME:
+        return False
+    runtime_args = runtime_spec.get("runtimeArgs")
+    # A gVisor runtime with missing or malformed runtimeArgs cannot carry the persistence
+    # flag, so it is ephemeral.
+    if not isinstance(runtime_args, (list, tuple)):
+        return True
+    return _GVISOR_PERSISTENT_OVERLAY_RUNTIME_ARG not in runtime_args
+
+
+def _read_local_docker_runtime_spec_by_name() -> dict[str, Mapping[str, object]]:
+    """Read the local Docker daemon's runtime registrations from its config file.
+
+    Returns an empty mapping when the config is absent or cannot be read/parsed -- in those
+    cases the runtime cannot be verified from here and host creation proceeds (a genuinely
+    unregistered runtime still surfaces Docker's own error at `docker run`).
+    """
+    if not _DOCKER_DAEMON_CONFIG_PATH.exists():
+        return {}
+    try:
+        raw_config = json.loads(_DOCKER_DAEMON_CONFIG_PATH.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning("Could not read Docker daemon config at {}: {}", _DOCKER_DAEMON_CONFIG_PATH, e)
+        return {}
+    runtimes = raw_config.get("runtimes") if isinstance(raw_config, dict) else None
+    if not isinstance(runtimes, dict):
+        return {}
+    return {name: spec for name, spec in runtimes.items() if isinstance(spec, dict)}
+
+
 class DockerProviderInstance(BaseProviderInstance):
     """Provider instance for managing Docker containers as hosts.
 
@@ -238,6 +356,10 @@ class DockerProviderInstance(BaseProviderInstance):
 
     # Instance-level caches
     _container_cache_by_id: dict[HostId, docker.models.containers.Container] = PrivateAttr(default_factory=dict)
+    # Cached result of the Docker-daemon version preflight for isolated mounts.
+    # Set to True after a successful check so subsequent host creations on the
+    # same provider instance skip the version query.
+    _is_isolation_check_passed: bool = PrivateAttr(default=False)
 
     @property
     def supports_snapshots(self) -> bool:
@@ -290,6 +412,37 @@ class DockerProviderInstance(BaseProviderInstance):
         prefix = self.mngr_ctx.config.prefix
         return state_volume_name(prefix, user_id)
 
+    def ensure_state_container_exists(self) -> None:
+        """Create the singleton state container if it does not already exist.
+
+        Used by the backend's ``bootstrap_for_host_creation`` on the
+        ``mngr create`` path so the subsequent read-only ``build_provider_instance``
+        passes its emptiness guard. Idempotent: backed by the cached
+        ``_state_volume`` property, which calls ``ensure_state_container``.
+        """
+        # Accessing the cached property forces ensure_state_container() to run.
+        _ = self._state_volume
+
+    def has_state_container(self) -> bool:
+        """Whether the singleton state container already exists, without creating it.
+
+        Used by the backend to decide whether read-only construction should
+        treat this provider as empty (mirrors the Modal backend's environment
+        existence check). Raises ProviderUnavailableError if the Docker daemon is
+        unreachable -- both when the client cannot be created (via _docker_client)
+        and when the existence lookup itself fails -- so the provider loader skips
+        the provider instead of crashing the command with a raw DockerException.
+        """
+        user_id = str(self.mngr_ctx.get_profile_user_id())
+        prefix = self.mngr_ctx.config.prefix
+        try:
+            self._docker_client.containers.get(state_container_name(prefix, user_id))
+        except docker.errors.NotFound:
+            return False
+        except docker.errors.DockerException as e:
+            raise ProviderUnavailableError(self.name, str(e)) from e
+        return True
+
     @cached_property
     def _host_store(self) -> DockerHostStore:
         """Get the host record store backed by the state volume."""
@@ -305,27 +458,71 @@ class DockerProviderInstance(BaseProviderInstance):
         """Get the path to the known_hosts file for this provider instance."""
         return self._keys_dir / "known_hosts"
 
-    def _get_host_volume_mount(self) -> str | None:
-        """Build a -v flag value to mount the state volume into host containers.
+    def _build_volume_mount_args(self, host_id: HostId, is_isolated: bool) -> list[str]:
+        """Build the docker CLI args for the host's volume mount.
 
-        Returns None when host volumes are disabled. When enabled, returns
-        '<volume_name>:<mount_path>:rw' so the container can read/write the
-        shared state volume (where per-host data lives under volumes/vol-<host_hex>/).
+        Returns an empty list when host volumes are disabled. In isolated mode
+        the per-host sub-folder of the shared state volume is bound directly at
+        host_dir via `--mount ... volume-subpath=...` (Docker Engine >= 25.0),
+        so the container cannot see sibling hosts' sub-folders. In shared mode
+        the entire state volume is mounted at HOST_VOLUME_MOUNT_PATH and the
+        caller is expected to symlink host_dir into it.
         """
         if not self.config.is_host_volume_created:
-            return None
-        return f"{self._state_volume_name}:{HOST_VOLUME_MOUNT_PATH}:rw"
+            return []
+        if is_isolated:
+            volume_id = self._volume_id_for_host(host_id)
+            spec = (
+                f"type=volume,source={self._state_volume_name},"
+                f"target={self.host_dir},volume-subpath=volumes/{volume_id}"
+            )
+            return ["--mount", spec]
+        return ["-v", f"{self._state_volume_name}:{HOST_VOLUME_MOUNT_PATH}:rw"]
 
-    def _get_host_volume_symlink_target(self, host_id: HostId) -> str | None:
+    def _get_host_volume_symlink_target(self, host_id: HostId, is_isolated: bool) -> str | None:
         """Get the path inside a container that host_dir should symlink to.
 
-        Returns the per-host sub-folder of the volume mount, e.g.
-        /mngr-state/volumes/vol-<host_hex>. Returns None when host volumes are disabled.
+        Returns None when host volumes are disabled or when the host uses the
+        isolated mount (since the volume is bound at host_dir directly and no
+        symlink is needed). Otherwise returns the per-host sub-folder of the
+        shared volume mount, e.g. /mngr-state/volumes/vol-<host_hex>.
         """
-        if not self.config.is_host_volume_created:
+        if not self.config.is_host_volume_created or is_isolated:
             return None
         volume_id = self._volume_id_for_host(host_id)
         return f"{HOST_VOLUME_MOUNT_PATH}/volumes/{volume_id}"
+
+    def _resolve_isolation_for_new_host(self) -> bool:
+        """Resolve the effective isolation flag for a newly-created host.
+
+        The provider config field is a tri-state: True means "use the new
+        isolated volume-subpath mount"; False or None means "use the legacy
+        shared-volume mount". The None case has already produced its
+        one-shot deprecation warning at config load time.
+        """
+        return self.config.isolate_host_volumes is True
+
+    def _check_isolation_supported(self) -> None:
+        """Verify the Docker daemon supports `--mount ... volume-subpath=...`.
+
+        The `volume-subpath` option was added in Docker Engine 25.0 (January 2024).
+        Hosts with `is_isolated_host_volume=True` cannot be created or started
+        against an older daemon. Result is cached on the provider instance so
+        repeated host creations don't re-query the daemon.
+        """
+        if self._is_isolation_check_passed:
+            return
+        try:
+            version_info = self._docker_client.version()
+        except docker.errors.DockerException as e:
+            raise MngrError(f"Cannot determine Docker daemon version: {e}") from e
+
+        engine_version = version_info.get("Version")
+        if not engine_version:
+            raise MngrError("Docker daemon did not report a `Version` field; cannot verify volume-subpath support")
+
+        verify_engine_version_supports_volume_subpath(engine_version)
+        self._is_isolation_check_passed = True
 
     def _get_ssh_keypair(self) -> tuple[Path, str]:
         """Get or create the SSH keypair for this provider instance."""
@@ -351,13 +548,22 @@ class DockerProviderInstance(BaseProviderInstance):
     ) -> tuple[int, str]:
         """Execute a command in a Docker container via docker exec.
 
+        Forces ``workdir="/"`` so the exec succeeds regardless of whether
+        the image's declared ``WORKDIR`` exists at exec time. Mngr's
+        first container exec is its own sshd setup -- which runs *before*
+        any ``post_host_create_command`` hook -- so a ``WORKDIR`` like
+        ``/mngr/code/`` that the image expects to be populated by a
+        first-boot seed step won't be on disk yet. None of mngr's
+        automated setup commands depend on the image's WORKDIR; they
+        all use absolute paths.
+
         Returns (exit_code, output). For detached commands, returns (0, "").
         """
         if detach:
-            container.exec_run(["sh", "-c", command], detach=True)
+            container.exec_run(["sh", "-c", command], detach=True, workdir="/")
             return 0, ""
 
-        exit_code, output = container.exec_run(["sh", "-c", command])
+        exit_code, output = container.exec_run(["sh", "-c", command], workdir="/")
         output_str = output.decode("utf-8") if isinstance(output, bytes) else str(output)
         return exit_code, output_str
 
@@ -420,7 +626,7 @@ class DockerProviderInstance(BaseProviderInstance):
                     self._exec_in_container(container, add_authorized_keys_cmd)
 
         with log_span("Starting sshd in container"):
-            self._exec_in_container(container, "/usr/sbin/sshd -D -o MaxSessions=100", detach=True)
+            self._exec_in_container(container, build_start_sshd_command(), detach=True)
 
     def _get_container_ssh_port(self, container: docker.models.containers.Container) -> int:
         """Get the host-mapped SSH port for a container."""
@@ -462,7 +668,9 @@ class DockerProviderInstance(BaseProviderInstance):
         host_key_path, host_public_key = self._get_host_keypair()
         host_private_key = host_key_path.read_text()
 
-        host_volume_symlink_target = self._get_host_volume_symlink_target(host_id)
+        host_volume_symlink_target = self._get_host_volume_symlink_target(
+            host_id, is_isolated=config.is_isolated_host_volume
+        )
         self._start_sshd_in_container(
             container,
             client_public_key,
@@ -650,6 +858,27 @@ kill -TERM 1
         if line:
             logger.log(LogLevel.BUILD.value, "{}", line.rstrip(), source="docker")
 
+    @staticmethod
+    def _build_image_tag(host_id: HostId) -> str:
+        """The deterministic tag for the image built for a host in create_host."""
+        return f"mngr-build-{host_id}"
+
+    def _remove_build_image(self, host_id: HostId) -> None:
+        """Drop mngr's per-host build image tag (`mngr-build-<host_id>`).
+
+        No-op when the tag is absent. Callers remove the host's container
+        first, so `force=True` deletes the now-unreferenced image; if anything
+        else still references it -- another container, or a snapshot committed
+        from this host's container (which shares the build image's layers) --
+        `force` drops only mngr's tag and Docker keeps the underlying layers, so
+        snapshot restore is unaffected.
+        """
+        tag = self._build_image_tag(host_id)
+        if not self._docker_client.images.list(name=tag):
+            logger.trace("No build image to remove for host {}", host_id)
+            return
+        self._docker_client.images.remove(tag, force=True)
+
     def _build_image(self, build_args: Sequence[str], tag: str) -> str:
         """Build a Docker image using the configured builder (docker or depot)."""
         builder = self.config.builder
@@ -691,23 +920,30 @@ kill -TERM 1
         container_name: str,
         labels: dict[str, str],
         start_args: Sequence[str],
-        volume_mount: str | None = None,
+        volume_mount_args: Sequence[str] = (),
     ) -> list[str]:
         """Build a docker run command with mandatory flags + user passthrough args.
 
-        When volume_mount is provided, adds -v <volume_mount> to mount the
-        state volume into the container for persistent host data.
+        `volume_mount_args` is a list of literal docker CLI tokens (typically
+        either `["-v", "<spec>"]` for the legacy shared mount or
+        `["--mount", "<spec>"]` for the isolated subpath mount). Empty when
+        the host has no persistent volume.
         """
         cmd = ["run", "-d", "--name", container_name, "-p", f":{CONTAINER_SSH_PORT}"]
+
+        # Select a non-default container runtime (e.g. 'runsc' for gVisor) when configured.
+        # The named runtime must be registered with the Docker daemon, otherwise this run
+        # fails with Docker's native "unknown runtime" error (no silent fallback).
+        if self.config.docker_runtime is not None:
+            cmd.extend(["--runtime", self.config.docker_runtime])
 
         for key, value in labels.items():
             cmd.extend(["--label", f"{key}={value}"])
 
-        if volume_mount is not None:
-            cmd.extend(["-v", volume_mount])
+        cmd.extend(volume_mount_args)
 
         cmd.extend(list(start_args))
-        cmd.extend(["--entrypoint", "sh", image, "-c", CONTAINER_ENTRYPOINT_CMD])
+        cmd.extend(["--entrypoint", "sh", image, "-c", HOST_CONTAINER_ENTRYPOINT_CMD])
         return cmd
 
     def _run_container(
@@ -717,7 +953,7 @@ kill -TERM 1
         container_name: str,
         labels: dict[str, str],
         start_args: Sequence[str],
-        volume_mount: str | None = None,
+        volume_mount_args: Sequence[str] = (),
     ) -> docker.models.containers.Container:
         """Create and start a container via docker run subprocess.
 
@@ -728,12 +964,63 @@ kill -TERM 1
             container_name=container_name,
             labels=labels,
             start_args=start_args,
-            volume_mount=volume_mount,
+            volume_mount_args=volume_mount_args,
         )
-        result = self._run_docker_creation_command(cmd)
+        try:
+            result = self._run_docker_creation_command(cmd)
+        except ProcessError as e:
+            # When a non-default runtime is configured but not registered with the
+            # daemon, `docker run --runtime <name>` fails with Docker's native
+            # "unknown or invalid runtime name" error. Re-raise it as a typed,
+            # actionable error so callers (e.g. minds' create UI) surface a clean
+            # message instead of the raw `docker run` command dump.
+            runtime_error = self._runtime_not_registered_error_or_none(e)
+            if runtime_error is not None:
+                raise runtime_error from e
+            raise
 
         container_id = result.stdout.strip()
         return self._docker_client.containers.get(container_id)
+
+    def _runtime_not_registered_error_or_none(self, error: ProcessError) -> DockerRuntimeNotRegisteredError | None:
+        """Map a `docker run` `ProcessError` to a typed runtime error, when applicable.
+
+        Returns a :class:`DockerRuntimeNotRegisteredError` when a non-default
+        `docker_runtime` is configured and the failure output carries Docker's
+        "unknown or invalid runtime name" marker; otherwise ``None`` so the
+        caller re-raises the original `ProcessError` unchanged.
+        """
+        runtime = self.config.docker_runtime
+        if runtime is not None and _UNKNOWN_RUNTIME_ERROR_MARKER in (error.stdout + error.stderr):
+            return DockerRuntimeNotRegisteredError(self.name, runtime)
+        return None
+
+    def _verify_gvisor_overlay_persistent_or_raise(self) -> None:
+        """Raise when the configured gVisor runtime would give containers an ephemeral root fs.
+
+        gVisor's default root overlay discards all root-filesystem writes on restart, so a
+        runsc runtime registered without `--overlay2=none` would silently lose mngr's SSH
+        provisioning the first time a host restarts. mngr cannot register the runtime itself
+        (that needs root on the Docker host), so refuse to create such a host with an
+        actionable :class:`DockerGvisorEphemeralRootfsError` instead.
+
+        Only the local daemon's runtime registration is readable here; for a remote daemon the
+        registration cannot be introspected, so a warning is emitted rather than a hard failure.
+        """
+        runtime = self.config.docker_runtime
+        if runtime is None:
+            return
+        if self.config.host:
+            logger.warning(
+                "Cannot verify that remote Docker runtime '{}' persists container root filesystems; "
+                "if it is gVisor (runsc) registered without {}, hosts will become unreachable after a "
+                "restart.",
+                runtime,
+                _GVISOR_PERSISTENT_OVERLAY_RUNTIME_ARG,
+            )
+            return
+        if _is_gvisor_runtime_rootfs_ephemeral(runtime, _read_local_docker_runtime_spec_by_name()):
+            raise DockerGvisorEphemeralRootfsError(self.name, runtime)
 
     # =========================================================================
     # Container Discovery Helpers
@@ -787,8 +1074,11 @@ kill -TERM 1
                 all=True,
                 filters={"label": [f"{LABEL_PROVIDER}={self.name}"]},
             )
-        except docker.errors.DockerException as e:
-            raise MngrError(f"Cannot connect to Docker daemon: {e}") from e
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            # Only a transport failure means the daemon is unreachable. A
+            # docker.errors.APIError (the daemon answered with an error) is a
+            # real fault and must propagate, not be mislabeled as unavailable.
+            raise ProviderUnavailableError(self.name, f"Cannot connect to Docker daemon: {e}") from e
 
         prefix = self.mngr_ctx.config.prefix
         filtered: list[docker.models.containers.Container] = []
@@ -804,6 +1094,30 @@ kill -TERM 1
         """Check if a container is running."""
         container.reload()
         return container.status == "running"
+
+    def _raise_if_state_container_stopped(self, containers: list[docker.models.containers.Container]) -> None:
+        """Raise ProviderUnavailableError if the singleton state container is present but stopped.
+
+        ``containers`` comes from :meth:`_list_containers` (``all=True``), so the
+        state container (which carries ``LABEL_PROVIDER`` + the type label) is
+        included with a freshly-listed status -- reliable even for a long-lived
+        cached provider instance whose ``_state_volume`` handle predates an
+        external stop. A stopped state container makes every host-record read
+        fail, which ``list_all_host_records`` masks as an empty list; treating it
+        as unavailable keeps discovery from misreporting "zero hosts". An absent
+        state container is left alone (the read-only emptiness guard / lazy
+        create handles that); only the present-but-stopped case raises here.
+        """
+        for container in containers:
+            labels = container.labels or {}
+            if labels.get(STATE_CONTAINER_TYPE_LABEL) != STATE_CONTAINER_TYPE_VALUE:
+                continue
+            if container.status != "running":
+                raise ProviderUnavailableError(
+                    self.name,
+                    "Docker state container is stopped; host records are unreachable",
+                )
+            return
 
     def _create_host_from_container(
         self,
@@ -871,16 +1185,23 @@ kill -TERM 1
         self,
         host_record: HostRecord,
     ) -> OfflineHost:
-        """Create an OfflineHost from a host record (for stopped/destroyed hosts)."""
+        """Create an OfflineHost from a host record (for stopped/destroyed hosts).
+
+        Wrapped so the offline host is readable (file reads served from its
+        persisted volume) whether it is reached via ``get_host`` or
+        ``to_offline_host``; the volume is resolved lazily, so this is free.
+        """
         host_id = HostId(host_record.certified_host_data.host_id)
-        return OfflineHost(
-            id=host_id,
-            certified_host_data=host_record.certified_host_data,
-            provider_instance=self,
-            mngr_ctx=self.mngr_ctx,
-            on_updated_host_data=lambda callback_host_id, certified_data: self._on_certified_host_data_updated(
-                callback_host_id, certified_data
-            ),
+        return make_readable_offline_host(
+            OfflineHost(
+                id=host_id,
+                certified_host_data=host_record.certified_host_data,
+                provider_instance=self,
+                mngr_ctx=self.mngr_ctx,
+                on_updated_host_data=lambda callback_host_id, certified_data: self._on_certified_host_data_updated(
+                    callback_host_id, certified_data
+                ),
+            )
         )
 
     # =========================================================================
@@ -908,6 +1229,11 @@ kill -TERM 1
         host_id = HostId.generate()
         logger.info("Creating host {} in {} ...", name, self.name)
 
+        # Refuse up front (before the expensive image build) to create a host whose
+        # configured gVisor runtime would give it an ephemeral root filesystem, which
+        # would lose SSH provisioning on the first restart.
+        self._verify_gvisor_overlay_persistent_or_raise()
+
         # Fail fast if a container with this name already exists, before the
         # expensive image build step.
         container_name = f"{self.mngr_ctx.config.prefix}{name}"
@@ -933,11 +1259,11 @@ kill -TERM 1
         try:
             if build_args:
                 # Build image from user-provided build args / Dockerfile
-                build_tag = f"mngr-build-{host_id}"
+                build_tag = self._build_image_tag(host_id)
                 image_name = self._build_image(build_args, build_tag)
             elif is_using_default:
                 # Build from the mngr default Dockerfile so packages are pre-installed
-                build_tag = f"mngr-build-{host_id}"
+                build_tag = self._build_image_tag(host_id)
                 image_name = self._build_default_image(build_tag)
             else:
                 # User specified an image (via --image or config default_image); pull it
@@ -945,8 +1271,16 @@ kill -TERM 1
 
             labels = build_container_labels(host_id, name, str(self.name), tags)
 
-            # Create the per-host volume directory before starting the container
-            # so the symlink target exists when the setup script runs.
+            is_isolated = self._resolve_isolation_for_new_host()
+            # Fail fast (before doing any container work) if the user opted into
+            # isolation but the daemon is too old to honor it.
+            if is_isolated:
+                self._check_isolation_supported()
+
+            # Create the per-host volume directory before starting the container.
+            # Required in both modes: the legacy mount needs it as the symlink
+            # target, and the isolated mount needs it because `volume-subpath`
+            # fails to bind if the path doesn't already exist inside the volume.
             if self.config.is_host_volume_created:
                 self._ensure_host_volume_dir(host_id)
 
@@ -956,7 +1290,7 @@ kill -TERM 1
                     container_name=container_name,
                     labels=labels,
                     start_args=effective_start_args,
-                    volume_mount=self._get_host_volume_mount(),
+                    volume_mount_args=self._build_volume_mount_args(host_id, is_isolated=is_isolated),
                 )
 
         except docker.errors.APIError as e:
@@ -981,7 +1315,11 @@ kill -TERM 1
             raise
 
         self._container_cache_by_id[host_id] = container
-        config = ContainerConfig(start_args=effective_start_args, image=base_image)
+        config = ContainerConfig(
+            start_args=effective_start_args,
+            image=base_image,
+            is_isolated_host_volume=is_isolated,
+        )
 
         lifecycle_options = lifecycle if lifecycle is not None else HostLifecycleOptions()
         activity_config = lifecycle_options.to_activity_config(
@@ -1094,6 +1432,11 @@ kill -TERM 1
         If snapshot_id is provided, creates a new container from the snapshot image.
         Otherwise, restarts the stopped container (preserving filesystem state).
         """
+        # A (re)started gVisor container comes up with a fresh root filesystem and
+        # re-runs provisioning, so refuse to start one whose runtime would discard
+        # those writes again on the next restart.
+        self._verify_gvisor_overlay_persistent_or_raise()
+
         host_id = host.id if isinstance(host, HostInterface) else host
 
         container = self._find_container_by_host_id(host_id)
@@ -1211,13 +1554,19 @@ kill -TERM 1
 
         effective_start_args = config.start_args
 
+        # Replay the same isolation choice the host was created with.
+        # Re-verify daemon support up front so a later daemon downgrade does
+        # not surface as a confusing docker run failure.
+        if config.is_isolated_host_volume:
+            self._check_isolation_supported()
+
         try:
             new_container = self._run_container(
                 image=image_id,
                 container_name=container_name,
                 labels=labels,
                 start_args=effective_start_args,
-                volume_mount=self._get_host_volume_mount(),
+                volume_mount_args=self._build_volume_mount_args(host_id, is_isolated=config.is_isolated_host_volume),
             )
         except (MngrError, docker.errors.DockerException) as e:
             raise MngrError(f"Failed to create container from snapshot: {e}") from e
@@ -1246,49 +1595,155 @@ kill -TERM 1
         age-gate their deletion (and so users can recover via
         ``mngr create --snapshot``). Use ``delete_host`` to permanently
         purge all records.
+
+        Best-effort: each step is attempted, and a real failure (a resource that
+        exists but could not be removed) is recorded and raised as a
+        ``CleanupFailedGroup`` rather than aborting early or being silently swallowed.
+        A resource that was already gone (``docker.errors.NotFound``) is benign. See
+        specs/cleanup-error-aggregation.md.
         """
         host_id = host.id if isinstance(host, HostInterface) else host
 
-        # Stop the host first (without creating a snapshot since we're destroying)
-        self.stop_host(host, create_snapshot=False)
-
-        # Remove the container
-        container = self._find_container_by_host_id(host_id)
-        if container is not None:
+        with collecting_cleanup_failures() as failures:
+            # Stop the host first (without creating a snapshot since we're destroying).
             try:
-                container.remove(force=True)
+                self.stop_host(host, create_snapshot=False)
+            except docker.errors.NotFound:
+                # Container already gone -- benign (defensive: stop_host happens to
+                # swallow this today, but that is not part of its contract).
+                pass
             except docker.errors.DockerException as e:
-                logger.warning("Error removing container: {}", e)
+                logger.warning("Failed to stop container for host {}: {}", host_id, e)
+                failures.append(
+                    CleanupFailure(
+                        category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                        message=f"failed to stop container for host {host_id}: {e}",
+                        host_id=host_id,
+                    )
+                )
 
-        self._mark_host_destroyed(host_id)
+            # Remove the container. A missing container is benign; any other Docker error
+            # leaves the container behind.
+            container = self._find_container_by_host_id(host_id)
+            if container is not None:
+                try:
+                    container.remove(force=True)
+                except docker.errors.NotFound:
+                    pass
+                except docker.errors.DockerException as e:
+                    logger.warning("Failed to remove container for host {}: {}", host_id, e)
+                    failures.append(
+                        CleanupFailure(
+                            category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                            message=f"failed to remove container for host {host_id}: {e}",
+                            host_id=host_id,
+                        )
+                    )
 
-        self._container_cache_by_id.pop(host_id, None)
-        self._evict_cached_host(host_id)
+            # Remove the per-host build image so built images don't pile up. The
+            # container is gone, so force-removing drops mngr's tag.
+            # Docker will handle the gc of image if no other references to it.
+            try:
+                self._remove_build_image(host_id)
+            except docker.errors.NotFound:
+                # Raced away by a concurrent gc deleting the same host -- benign.
+                pass
+            except docker.errors.DockerException as e:
+                logger.warning("Failed to remove build image for host {}: {}", host_id, e)
+                failures.append(
+                    CleanupFailure(
+                        category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                        message=f"failed to remove build image for host {host_id}: {e}",
+                        host_id=host_id,
+                    )
+                )
+
+            # Mark the host record DESTROYED. A failure here leaves the record inconsistent.
+            try:
+                self._mark_host_destroyed(host_id)
+            except MngrError as e:
+                logger.warning("Failed to mark host {} destroyed: {}", host_id, e)
+                failures.append(
+                    CleanupFailure(
+                        category=CleanupFailureCategory.OTHER,
+                        message=f"failed to mark host {host_id} destroyed: {e}",
+                        host_id=host_id,
+                    )
+                )
+
+            # Cache eviction always runs (inside the `with` so it precedes any raise).
+            self._container_cache_by_id.pop(host_id, None)
+            self._evict_cached_host(host_id)
 
     def delete_host(self, host: HostInterface) -> None:
         """Permanently delete all records associated with a (destroyed) host.
 
-        Removes snapshot images, the host volume directory, and the host
-        record. Called by gc_machines once a destroyed host has aged past
-        ``destroyed_host_persisted_seconds``.
+        Re-runs ``destroy_host`` to clear any leftover container and build
+        image, then removes the host's snapshot images, host volume directory,
+        and host record. Called by gc_machines once a destroyed host has aged
+        past ``destroyed_host_persisted_seconds``.
+
+        Best-effort: every step is attempted, and a real failure (a resource
+        that exists but could not be removed) is recorded and raised as a
+        ``CleanupFailedGroup`` rather than aborting the GC sweep with a raw
+        provider exception. The host record is deleted (the host forgotten)
+        only when cleanup fully succeeds; if anything was left behind the
+        record is kept so the next sweep can retry. See
+        specs/cleanup-error-aggregation.md.
         """
         host_id = host.id
 
-        host_record = self._host_store.read_host_record(host_id, use_cache=False)
-        if host_record is not None:
-            for snap in host_record.certified_host_data.snapshots:
-                try:
-                    self._docker_client.images.remove(snap.id)
-                except docker.errors.DockerException as e:
-                    logger.warning("Error removing snapshot image {}: {}", snap.id, e)
-
-        if self.config.is_host_volume_created:
-            volume_id = self._volume_id_for_host(host_id)
+        with collecting_cleanup_failures() as failures:
+            # Re-run destroy_host to clear any runtime resource an earlier
+            # destroy left behind (a container it failed to remove, or a
+            # FAILED/CRASHED host that was never destroyed). It converges to the
+            # same end state on every call (already-gone resources are benign)
+            # and removes the container before the build image, so the removal
+            # never hits the 409 conflict a leftover container would otherwise
+            # cause. Its cleanup failures fold into this sweep.
             try:
-                self._state_volume.remove_directory(f"volumes/{volume_id}")
-            except (FileNotFoundError, OSError, MngrError) as e:
-                logger.trace("No host volume to clean up for {}: {}", host_id, e)
+                self.destroy_host(host)
+            except CleanupFailedGroup as group:
+                collect_cleanup_failures(failures, group)
 
+            host_record = self._host_store.read_host_record(host_id, use_cache=False)
+            if host_record is not None:
+                for snap in host_record.certified_host_data.snapshots:
+                    try:
+                        self._docker_client.images.remove(snap.id)
+                    except docker.errors.NotFound:
+                        pass
+                    except docker.errors.DockerException as e:
+                        logger.warning("Failed to remove snapshot image {} for host {}: {}", snap.id, host_id, e)
+                        failures.append(
+                            CleanupFailure(
+                                category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                                message=f"failed to remove snapshot image {snap.id} for host {host_id}: {e}",
+                                host_id=host_id,
+                            )
+                        )
+
+            if self.config.is_host_volume_created:
+                volume_id = self._volume_id_for_host(host_id)
+                # remove_directory is idempotent on a missing path (DockerVolume's
+                # `rm -rf` and LocalVolume's is_dir() guard both no-op), so an
+                # exception here never means "there was no volume" -- it means the
+                # volume data still exists and could not be removed. Record it as a
+                # leak rather than dismissing it.
+                try:
+                    self._state_volume.remove_directory(f"volumes/{volume_id}")
+                except (OSError, MngrError, docker.errors.DockerException) as e:
+                    logger.warning("Failed to remove host volume for host {}: {}", host_id, e)
+                    failures.append(
+                        CleanupFailure(
+                            category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                            message=f"failed to remove host volume for host {host_id}: {e}",
+                            host_id=host_id,
+                        )
+                    )
+
+        # Reached only if the cleanup above had no failures (the `with` raises
+        # otherwise), so a failed cleanup keeps the host record for retry.
         self._host_store.delete_host_record(host_id)
         self._container_cache_by_id.pop(host_id, None)
         self._evict_cached_host(host_id)
@@ -1310,6 +1765,46 @@ kill -TERM 1
             raise HostNotFoundError(self.name, host_id)
 
         return self._create_host_from_host_record(host_record)
+
+    def get_connection_error_fallback_state(self, host_id: HostId) -> HostState | None:
+        """Report a still-running container as UNAUTHENTICATED rather than CRASHED.
+
+        The docker daemon is ground truth for container lifecycle and is
+        reachable without inner SSH. When agent enumeration fails with a
+        connection error (e.g. the inner sshd died -- "Error reading SSH
+        protocol banner") but the daemon still reports the container as running,
+        the host is up; we just cannot get inside it. Reporting
+        ``HostState.UNAUTHENTICATED`` keeps consumers such as minds' recovery
+        flow from misclassifying a live container as offline and skipping the
+        stop step of a host restart. This deliberately follows the convention
+        ``mngr_imbue_cloud`` established for the identical condition (a running
+        container whose inner SSH is unreachable; see
+        ``map_docker_status_to_host_state``), reached here by a different route:
+        imbue_cloud reads container state out-of-band on its own listing path,
+        whereas docker stays on the generic offline fallback and corrects the
+        state through this hook. Returns ``None`` (default offline derivation)
+        when no running container backs this host, or when the daemon cannot be
+        reached to confirm one -- this hook runs inside the offline fallback,
+        which must degrade gracefully rather than propagate.
+        """
+        try:
+            container = self._find_container_by_host_id(host_id)
+            if container is not None and self._is_container_running(container):
+                return HostState.UNAUTHENTICATED
+        except (
+            docker.errors.DockerException,
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+            MngrError,
+        ) as e:
+            # The daemon was reachable during enumeration but dropped before this
+            # out-of-band check (e.g. a daemon restart). A transport-level drop
+            # surfaces as a requests ConnectionError/Timeout rather than a
+            # DockerException (see _list_containers), so both are caught here.
+            # Keep the default offline derivation instead of breaking the offline
+            # fallback for this host.
+            logger.warning("Could not read docker container state for host {} during fallback: {}", host_id, e)
+        return None
 
     def get_host(
         self,
@@ -1363,12 +1858,31 @@ kill -TERM 1
         """Discover all Docker container hosts."""
         processed_host_ids: set[HostId] = set()
 
+        # Never swallow a failure into an empty list: GC treats an empty host
+        # list as "every volume is orphaned" and would delete every live host's
+        # data. Raise ProviderUnavailableError on a transport failure so an empty
+        # list always means "genuinely zero hosts". A docker.errors.APIError (the
+        # daemon answered with an error) is a real fault and propagates instead.
         try:
             containers = self._list_containers()
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            raise ProviderUnavailableError(self.name, f"Cannot list Docker hosts: {e}") from e
+
+        # A present-but-stopped state container means host records are
+        # unreachable: every read exec's into a stopped container, and
+        # ``list_all_host_records`` swallows that into an empty list -- which
+        # discovery would publish as "zero hosts", dropping every host (and, for
+        # a long-lived cached provider instance, the read never restarts it).
+        # Surface it as ProviderUnavailableError so an empty list still means
+        # "genuinely zero hosts" and the retain-on-error path keeps last-known
+        # hosts instead. Read-only discovery must not start it; the owning app
+        # restarts it on launch.
+        self._raise_if_state_container_stopped(containers)
+
+        try:
             all_host_records = self._host_store.list_all_host_records()
-        except (MngrError, docker.errors.DockerException) as e:
-            logger.warning("Cannot list Docker hosts (Docker daemon unavailable?): {}", e)
-            return []
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            raise ProviderUnavailableError(self.name, f"Cannot list Docker hosts: {e}") from e
 
         # Map running containers by host_id, and harvest host names from labels.
         # We use this map below instead of h.get_name() so building DiscoveredHosts
@@ -1614,7 +2128,7 @@ kill -TERM 1
 
         volumes: list[VolumeInfo] = []
         for entry in entries:
-            if entry.file_type == VolumeFileType.DIRECTORY:
+            if entry.file_type == FileType.DIRECTORY:
                 vol_name = entry.path.rsplit("/", 1)[-1]
                 volume_id = VolumeId(vol_name)
                 host_id = HostId(f"host-{volume_id.get_uuid().hex}")

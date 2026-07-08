@@ -51,6 +51,38 @@ There are several approaches:
 
 You can find other approaches by searching for "nested tmux" or "tmux in tmux".
 
+## Customizing mngr's tmux sessions
+
+A `[tmux]` section in your settings (`~/.mngr/settings.toml`, or a project's `.mngr/settings.toml`) controls how `mngr` creates and attaches to agent sessions:
+
+```toml
+[tmux]
+# Extra tmux client flags inserted before `attach` when you connect to an agent,
+# i.e. `tmux <attach_args> attach ...`. The motivating case is iTerm2 control mode:
+attach_args = ["-CC"]
+
+# An extra tmux config file sourced into every mngr session. Unlike the
+# auto-generated ~/.mngr/tmux.conf (which mngr overwrites), this file is yours
+# to edit and is never regenerated -- the stable place for session-specific config.
+additional_config_path = "~/.mngr/tmux.user.conf"
+
+# Name of the window the agent runs in (default "agent"). mngr targets this
+# window by name, so it works no matter what `base-index` you set.
+primary_window_name = "agent"
+```
+
+### iTerm2 control mode (`-CC`)
+
+Setting `attach_args = ["-CC"]` makes `mngr connect` (and `mngr create`/`start` when they attach) run `tmux -CC attach`, so iTerm2 renders your agent's tmux windows as native iTerm2 tabs/windows. This applies to both local and remote (SSH) agents. `-CC` is a tmux *client* flag, which is why it goes before the `attach` subcommand; other client flags such as `-u` (force UTF-8) or `-2` (force 256-color) work here too.
+
+### Extra session config (`additional_config_path`)
+
+tmux loads your `~/.tmux.conf` itself when its server starts, so `mngr` does not re-source it (re-sourcing non-idempotent config on every agent start could corrupt your setup). The generated `~/.mngr/tmux.conf` holds only `mngr`'s own settings and is marked "do not edit" (it is rewritten each time an agent starts). To add tmux config that applies only to `mngr` sessions (custom status styling, keybindings, etc.), point `additional_config_path` at a file and put your config there -- `mngr` sources it (if it exists) into every session and never touches it. For remote agents the path is resolved on the agent's host, so the file must exist there.
+
+### tmux `base-index`
+
+If your `~/.tmux.conf` sets `set -g base-index 1` (or any non-default value), `mngr` still works: it names the agent's window and targets it by name rather than by the `:0` index, so there is nothing extra to configure.
+
 ## Isolating mngr's tmux sessions
 
 By default, `mngr` creates tmux sessions on your default tmux server. This means `mngr`'s sessions will show up alongside your personal sessions in `tmux ls`, and could interfere with your own tmux workflow.

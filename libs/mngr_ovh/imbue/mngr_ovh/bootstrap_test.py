@@ -14,11 +14,10 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 
 from imbue.mngr_ovh.bootstrap import _load_private_key
 from imbue.mngr_ovh.bootstrap import bootstrap_root_authorized_keys_via_user
-from imbue.mngr_ovh.bootstrap import install_required_outer_packages
 from imbue.mngr_ovh.bootstrap import pin_host_key_via_tofu
 from imbue.mngr_ovh.bootstrap import verify_root_ssh
 from imbue.mngr_ovh.bootstrap import wait_for_ssh_after_rebuild
-from imbue.mngr_vps_docker.errors import VpsProvisioningError
+from imbue.mngr_vps.errors import VpsProvisioningError
 
 
 def _make_private_key(tmp_path: Path) -> Path:
@@ -109,7 +108,7 @@ def _write_rsa_private_key(tmp_path: Path, key_name: str = "id_rsa") -> Path:
     """Write an RSA private key in the TraditionalOpenSSL PEM format.
 
     Matches what ``ssh_utils.generate_ssh_keypair`` produces for the base
-    ``VpsDockerProvider``, so the regression test for Bug 4 reflects the
+    ``VpsProvider``, so the regression test for Bug 4 reflects the
     real on-disk format the OVH provider receives.
     """
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -136,7 +135,7 @@ def test_load_private_key_accepts_rsa(tmp_path: Path) -> None:
     Pre-fix, ``pin_host_key_via_tofu`` hardcoded
     ``paramiko.Ed25519Key.from_private_key_file``, which raised
     ``SSHException("encountered RSA key, expected OPENSSH key")`` against
-    the RSA keys the base ``VpsDockerProvider`` actually produces.
+    the RSA keys the base ``VpsProvider`` actually produces.
     """
     key_path = _write_rsa_private_key(tmp_path)
     loaded = _load_private_key(key_path)
@@ -330,136 +329,4 @@ def test_verify_root_ssh_raises_when_root_login_fails(tmp_path: Path) -> None:
                 private_key_path=private_key_path,
                 known_hosts_path=known_hosts_path,
                 timeout_seconds=0.05,
-            )
-
-
-def test_install_required_outer_packages_runs_apt_install(tmp_path: Path) -> None:
-    """Successful path runs ``apt-get update && apt-get install -y <pkgs>`` as root."""
-    private_key_path = _make_private_key(tmp_path)
-    known_hosts_path = tmp_path / "known_hosts"
-    known_hosts_path.write_text("vps-x ssh-ed25519 AAAA\n")
-    exec_commands: list[str] = []
-    seen_users: list[str | None] = []
-
-    def fake_connect(self: paramiko.SSHClient, **kwargs: Any) -> None:
-        seen_users.append(kwargs.get("username"))
-
-    def fake_exec(self: paramiko.SSHClient, command: str, **_kwargs: Any) -> Any:
-        exec_commands.append(command)
-        return _stub_paramiko_exec(stdout="", stderr="", exit_status=0)
-
-    with (
-        patch.object(paramiko.SSHClient, "connect", autospec=True, side_effect=fake_connect),
-        patch.object(paramiko.SSHClient, "load_host_keys", autospec=True, return_value=None),
-        patch.object(paramiko.SSHClient, "exec_command", autospec=True, side_effect=fake_exec),
-        patch.object(paramiko.SSHClient, "close", autospec=True, return_value=None),
-    ):
-        install_required_outer_packages(
-            hostname="vps-x",
-            port=22,
-            private_key_path=private_key_path,
-            known_hosts_path=known_hosts_path,
-            timeout_seconds=5.0,
-            packages=("rsync",),
-        )
-
-    # Must connect as root (not the bootstrap user) because the previous
-    # step already moved authorized_keys into /root/.
-    assert seen_users == ["root"]
-    # One exec covers update + install in a single set -e pipeline so a
-    # failed update aborts before install rather than masking the cause.
-    assert len(exec_commands) == 1
-    cmd = exec_commands[0]
-    assert "apt-get update" in cmd
-    assert "apt-get install -y rsync" in cmd
-    assert "DEBIAN_FRONTEND=noninteractive" in cmd
-    assert "set -e" in cmd
-
-
-def test_install_required_outer_packages_with_multiple_packages(tmp_path: Path) -> None:
-    """Multiple packages land in a single apt-get install command."""
-    private_key_path = _make_private_key(tmp_path)
-    known_hosts_path = tmp_path / "known_hosts"
-    known_hosts_path.write_text("vps-x ssh-ed25519 AAAA\n")
-    exec_commands: list[str] = []
-
-    def fake_exec(self: paramiko.SSHClient, command: str, **_kwargs: Any) -> Any:
-        exec_commands.append(command)
-        return _stub_paramiko_exec(stdout="", stderr="", exit_status=0)
-
-    with (
-        patch.object(paramiko.SSHClient, "connect", autospec=True, return_value=None),
-        patch.object(paramiko.SSHClient, "load_host_keys", autospec=True, return_value=None),
-        patch.object(paramiko.SSHClient, "exec_command", autospec=True, side_effect=fake_exec),
-        patch.object(paramiko.SSHClient, "close", autospec=True, return_value=None),
-    ):
-        install_required_outer_packages(
-            hostname="vps-x",
-            port=22,
-            private_key_path=private_key_path,
-            known_hosts_path=known_hosts_path,
-            timeout_seconds=5.0,
-            packages=("rsync", "build-essential"),
-        )
-
-    assert exec_commands[0].endswith("apt-get install -y rsync build-essential")
-
-
-def test_install_required_outer_packages_with_empty_packages_is_noop(tmp_path: Path) -> None:
-    """Empty package tuple skips SSH entirely -- nothing to install."""
-    private_key_path = _make_private_key(tmp_path)
-    known_hosts_path = tmp_path / "known_hosts"
-    known_hosts_path.write_text("vps-x ssh-ed25519 AAAA\n")
-    exec_commands: list[str] = []
-    connect_calls: list[Any] = []
-
-    def fake_connect(self: paramiko.SSHClient, **kwargs: Any) -> None:
-        connect_calls.append(kwargs)
-
-    def fake_exec(self: paramiko.SSHClient, command: str, **_kwargs: Any) -> Any:
-        exec_commands.append(command)
-        return _stub_paramiko_exec(stdout="", stderr="", exit_status=0)
-
-    with (
-        patch.object(paramiko.SSHClient, "connect", autospec=True, side_effect=fake_connect),
-        patch.object(paramiko.SSHClient, "load_host_keys", autospec=True, return_value=None),
-        patch.object(paramiko.SSHClient, "exec_command", autospec=True, side_effect=fake_exec),
-        patch.object(paramiko.SSHClient, "close", autospec=True, return_value=None),
-    ):
-        install_required_outer_packages(
-            hostname="vps-x",
-            port=22,
-            private_key_path=private_key_path,
-            known_hosts_path=known_hosts_path,
-            timeout_seconds=5.0,
-            packages=(),
-        )
-
-    assert connect_calls == []
-    assert exec_commands == []
-
-
-def test_install_required_outer_packages_raises_when_apt_fails(tmp_path: Path) -> None:
-    """A non-zero apt exit surfaces as VpsProvisioningError with the package list in the failure label."""
-    private_key_path = _make_private_key(tmp_path)
-    known_hosts_path = tmp_path / "known_hosts"
-    known_hosts_path.write_text("vps-x ssh-ed25519 AAAA\n")
-
-    def fake_exec(self: paramiko.SSHClient, command: str, **_kwargs: Any) -> Any:
-        return _stub_paramiko_exec(stdout="", stderr="E: Unable to locate package rsync", exit_status=100)
-
-    with (
-        patch.object(paramiko.SSHClient, "connect", autospec=True, return_value=None),
-        patch.object(paramiko.SSHClient, "load_host_keys", autospec=True, return_value=None),
-        patch.object(paramiko.SSHClient, "exec_command", autospec=True, side_effect=fake_exec),
-        patch.object(paramiko.SSHClient, "close", autospec=True, return_value=None),
-    ):
-        with pytest.raises(VpsProvisioningError, match="apt-get install rsync"):
-            install_required_outer_packages(
-                hostname="vps-x",
-                port=22,
-                private_key_path=private_key_path,
-                known_hosts_path=known_hosts_path,
-                timeout_seconds=5.0,
-                packages=("rsync",),
             )

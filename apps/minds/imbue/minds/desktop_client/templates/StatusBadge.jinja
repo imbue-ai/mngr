@@ -1,0 +1,27 @@
+{#def variant="neutral", size="sm", extra="", title="" #}
+{#
+  Compact pill-shaped status indicator. Five variants cover the colors
+  that recur across the landing-page row badges, the destroying detail
+  page, and the accounts page. ``size="xs"`` is for inline-with-text
+  callouts (the accounts "Signed out" tag); ``size="sm"`` is for badges
+  that sit in their own slot.
+
+  ``extra`` is for one-off layout shims (``ml-2`` on inline tags,
+  ``gap-2`` when the badge contains its own spinner). ``title`` adds a
+  native browser tooltip on hover.
+#}
+{# Done / Failed / Info read as solid status fills with white text; neutral is
+   a muted fill with secondary text; warn is the yellow caution surface with
+   the (brown-orange) warning foreground, since white on yellow is unreadable. #}
+{% set _variants = {
+  "neutral": "bg-fill-subtle text-secondary",
+  "success": "bg-success text-white",
+  "error":   "bg-important text-white",
+  "warn":    "bg-[var(--c-warning-surface)] text-warning",
+  "info":    "bg-info text-white",
+} %}
+{# Badge type role from size: sm slot badges read as labels (14/semibold),
+   xs inline tags as helper (12/regular). #}
+{% set _type = "type-label" if size == "sm" else "type-helper" %}
+<span class="inline-flex items-center px-2 py-0.5 rounded-md {{ _type }} {{ _variants[variant] }} {{ extra }}"
+      {% if title %}title="{{ title }}"{% endif %}>{{ content }}</span>

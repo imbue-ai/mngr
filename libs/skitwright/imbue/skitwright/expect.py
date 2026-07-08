@@ -2,6 +2,7 @@ import re
 from typing import overload
 
 from imbue.skitwright.data_types import CommandResult
+from imbue.skitwright.errors import UnsupportedExpectTypeError
 
 
 class ResultExpectation:
@@ -101,4 +102,4 @@ def expect(value: CommandResult | str) -> ResultExpectation | StringExpectation:
         return ResultExpectation(value)
     if isinstance(value, str):
         return StringExpectation(value)
-    raise TypeError(f"expect() does not support {type(value).__name__}")
+    raise UnsupportedExpectTypeError(f"expect() does not support {type(value).__name__}")

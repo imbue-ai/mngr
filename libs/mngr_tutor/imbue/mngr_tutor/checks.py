@@ -5,7 +5,7 @@ from loguru import logger
 
 from imbue.mngr.api.list import list_agents
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.errors import BaseMngrError
+from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
@@ -59,7 +59,7 @@ def _check_file_exists_in_work_dir(
 
 def _check_tmux_session_has_clients(agent_name: AgentName, mngr_ctx: MngrContext) -> bool:
     """Check if the agent's tmux session has at least one attached client."""
-    session_name = f"{mngr_ctx.config.prefix}{agent_name}"
+    session_name = mngr_ctx.config.agent_session_name(agent_name)
     result = subprocess.run(
         ["tmux", "list-clients", "-t", session_name],
         capture_output=True,
@@ -90,6 +90,6 @@ def run_check(check: StepCheck, mngr_ctx: MngrContext) -> bool:
     """Execute a step check and return whether it passes."""
     try:
         return _execute_check(check, mngr_ctx)
-    except (BaseMngrError, OSError):
+    except (MngrError, OSError):
         logger.debug("Check failed with exception for check type: {}", type(check).__name__)
         return False

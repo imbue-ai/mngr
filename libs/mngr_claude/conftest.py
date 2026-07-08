@@ -10,10 +10,18 @@ and this file's register_conftest_hooks() call is a no-op (guarded by a module-l
 
 from imbue.imbue_common.conftest_hooks import register_conftest_hooks
 from imbue.mngr.utils.logging import suppress_warnings
+from imbue.mngr.utils.plugin_testing import register_plugin_test_fixtures
 
 suppress_warnings()
 register_conftest_hooks(globals())
 
-# Inherit fixtures from mngr's conftest (base test infrastructure) and
-# mngr_modal's conftest (modal token loading, modal_subprocess_env, etc.)
-pytest_plugins = ["imbue.mngr.conftest", "imbue.mngr_modal.conftest"]
+# Isolate HOME and pull in the shared temp-dir fixtures the same way every other
+# mngr plugin does. This is what protects the real ~/.mngr / ~/.claude.json.
+register_plugin_test_fixtures(globals())
+
+# mngr_claude's tests also exercise mngr_modal's test fixtures (modal_subprocess_env,
+# temp_source_dir, real_modal_provider, ...), shared via pytest_plugins. mngr_modal's
+# autouse _load_modal_test_credentials fixture layers Modal tokens on top of the
+# base HOME isolation above (the two set independent env vars and no longer
+# collide), so real-Modal acceptance/release tests can authenticate.
+pytest_plugins = ["imbue.mngr_modal.conftest"]

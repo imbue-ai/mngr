@@ -2,8 +2,8 @@
 
 Emits a PreToolUse decision JSON on stdout that DENIES the Task tool
 with a short ``permissionDecisionReason`` pointing Claude at the
-``mngr-subagents`` Claude skill (provisioned at
-``.claude/skills/mngr-subagents/SKILL.md`` by ``plugin.py``). The
+``mngr-proxy`` Claude skill (provisioned at
+``.claude/skills/mngr-proxy/SKILL.md`` by ``plugin.py``). The
 skill explains the explicit two-command spawn-and-wait protocol
 Claude should use instead of Task.
 
@@ -44,7 +44,7 @@ from imbue.mngr_claude_subagent_proxy.hooks.agent_definitions import resolve_age
 
 DENY_REASON: Final[str] = (
     "mngr_claude_subagent_proxy is in deny mode: the Task tool is disabled for this agent. "
-    "Use a mngr-managed subagent instead -- see the `mngr-subagents` skill for the "
+    "Use a mngr-managed subagent instead -- see the `mngr-proxy` skill for the "
     "two-command spawn-and-wait protocol."
 )
 

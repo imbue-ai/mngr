@@ -6,19 +6,26 @@
 **Synopsis:**
 
 ```text
-mngr kanpan [OPTIONS]
+mngr kanpan [--include CEL] [--exclude CEL] [--running] [--stopped] [--archived] [--active] [--local] [--remote] [--project PROJECT]
 ```
 
 TUI board showing agents grouped by lifecycle state with PR status.
 
 Launches a terminal UI that displays all mngr agents organized by their
-lifecycle state (RUNNING, WAITING, STOPPED, DONE, REPLACED, RUNNING_UNKNOWN_AGENT_TYPE).
+lifecycle state (RUNNING, WAITING, STOPPED, DONE, REPLACED, RUNNING_UNKNOWN_AGENT_TYPE, UNKNOWN).
 
 Each agent shows its name, current state, and associated GitHub PR information
 including PR number, state (open/closed/merged), and CI check status.
 
 The display auto-refreshes every 10 minutes. Press 'r' to refresh manually,
 or 'q' to quit.
+
+Pass `--format json` (or `jsonl`) to skip the TUI and print a single board
+snapshot for programmatic use instead. JSON emits one object with the ordered
+columns, agents grouped into sections, and any fetch errors; JSONL emits one
+agent record per line (in board order) followed by any error lines. Each agent
+carries both the pre-rendered cells and the structured field values (PR number,
+CI status, etc.).
 
 Supports CEL filtering via --include/--exclude plus alias flags (--running,
 --stopped, --archived, --active, --local, --remote, --project, --label,
@@ -63,7 +70,7 @@ mngr kanpan [OPTIONS]
 | `--safe` | boolean | Always query all providers during discovery (disable event-stream optimization). Use this when interfacing with mngr from multiple machines. | `False` |
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
-| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths; append __extend to the leaf key to extend list/dict/set fields) [repeatable] | None |
 | `-h`, `--help` | boolean | Show this message and exit. | `False` |
 
 ## See Also
@@ -94,4 +101,10 @@ $ mngr kanpan --running
 
 ```bash
 $ mngr kanpan --stopped --label env=prod
+```
+
+**Print the board as JSON for scripting**
+
+```bash
+$ mngr kanpan --format json
 ```

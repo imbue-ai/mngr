@@ -1,0 +1,64 @@
+{#def agent_id, status_text, expected_duration_seconds #}
+{#
+  Progress page shown while an agent is being created. The page is keyed
+  by creation_id (passed as agent_id here -- a minds-internal in-flight
+  handle) rather than the canonical agent_id, because the canonical id
+  only comes into existence once the inner mngr create returns.
+  expected_duration_seconds drives the client-side time-based progress
+  bar (eases toward ~80% over this duration).
+#}
+{% set _scripts %}
+<script src="/_static/creating.js" defer></script>
+{% endset %}
+<Base title="Creating your workspace..."
+      body_class="bg-surface-primary text-primary font-sans antialiased flex items-center justify-center min-h-screen p-6"
+      scripts={{ _scripts }}>
+  <main id="creating"
+        class="w-full"
+        data-agent-id="{{ agent_id }}"
+        data-expected-duration-seconds="{{ expected_duration_seconds }}">
+
+    {# Loading screen: full-width. Holds two mutually exclusive sub-views #}
+    {# (progress vs. failure) plus a shared logs/details footer, so the #}
+    {# streamed logs stay in one place regardless of which sub-view is showing. #}
+    <section class="screen w-full" data-screen="loading">
+      {# Progress sub-view: shown while creation is in flight. #}
+      <div id="progress-view">
+        <div class="text-center pt-2 pb-1">
+          <div class="type-heading mb-1.5">Setting up your workspace</div>
+          <p id="tip" class="type-body text-secondary min-h-[34px] transition-opacity"></p>
+        </div>
+        <div class="h-1.5 bg-fill-subtle rounded-full overflow-hidden">
+          <div id="bar-fill" class="h-full w-0 rounded-full bg-accent transition-[width] duration-300 ease-out"></div>
+        </div>
+      </div>
+
+      {# Failure sub-view: revealed by creating.js the moment creation fails. #}
+      <div id="failure-view" class="hidden">
+        <div class="text-center pt-2 pb-1">
+          <div class="type-heading mb-1.5 text-important">We couldn't set up your workspace</div>
+          <p class="type-body text-secondary">Setup stopped before your workspace was ready.</p>
+        </div>
+        <Notice variant="error">
+          <span id="error-message" class="font-mono type-helper break-words whitespace-pre-wrap"></span>
+        </Notice>
+        <div class="flex items-center justify-center gap-2 mt-4">
+          <ButtonLink href="/create" variant="primary">Back to setup</ButtonLink>
+          <ButtonLink href="/" variant="ghost">Home</ButtonLink>
+        </div>
+      </div>
+
+      {# Shared footer: live stage caption + collapsible logs. #}
+      <div class="flex items-center justify-between mt-2 type-helper text-tertiary">
+        <span id="stage">{{ status_text }}</span>
+        <button type="button" id="details-toggle"
+                class="js-details inline-flex items-center gap-1 text-tertiary hover:text-primary cursor-pointer">
+          Show details
+        </button>
+      </div>
+      <div id="logs"
+           class="dark hidden mt-3 p-3 bg-surface-primary text-secondary font-mono type-helper rounded-lg max-h-[260px] overflow-y-auto whitespace-pre-wrap border border-subtle"></div>
+    </section>
+
+  </main>
+</Base>

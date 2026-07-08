@@ -1,4 +1,4 @@
-"""Tests for mngr_modal using TestingModalInterface.
+"""Tests for mngr_modal using FakeModalInterface.
 
 These tests exercise ModalProviderInstance business logic (host records,
 volumes, tags, snapshots, discovery, lifecycle) without requiring real
@@ -28,7 +28,7 @@ from imbue.mngr.errors import ProviderEmptyError
 from imbue.mngr.errors import SnapshotNotFoundError
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import CertifiedHostData
-from imbue.mngr.interfaces.data_types import VolumeFileType
+from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
@@ -82,11 +82,13 @@ from imbue.mngr_modal.volume import _proxy_file_entry_type_to_volume_file_type
 from imbue.modal_proxy.data_types import FileEntry
 from imbue.modal_proxy.data_types import FileEntryType as ProxyFileEntryType
 from imbue.modal_proxy.errors import ModalProxyError
+from imbue.modal_proxy.errors import ModalProxyInvalidError
 from imbue.modal_proxy.errors import ModalProxyNotFoundError
 from imbue.modal_proxy.errors import ModalProxyRateLimitError
 from imbue.modal_proxy.interface import AppInterface
+from imbue.modal_proxy.interface import SandboxInterface
 from imbue.modal_proxy.interface import VolumeInterface
-from imbue.modal_proxy.testing import TestingModalInterface
+from imbue.modal_proxy.testing import FakeModalInterface
 
 
 class _RateLimitingVolumeStub(VolumeInterface):
@@ -346,7 +348,7 @@ def test_get_volume_for_host_returns_none_when_not_found(
 
 def test_delete_host_volume(
     testing_provider: ModalProviderInstance,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> None:
     host_id = HostId.generate()
     testing_provider._build_host_volume(host_id)
@@ -390,7 +392,7 @@ def test_check_host_name_unique_destroyed_host_ok(testing_provider: ModalProvide
 
 def test_sandbox_cache_by_id(
     testing_provider: ModalProviderInstance,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> None:
     host_id = HostId.generate()
     name = HostName("cached")
@@ -405,7 +407,7 @@ def test_sandbox_cache_by_id(
 
 def test_sandbox_cache_by_name(
     testing_provider: ModalProviderInstance,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> None:
     host_id = HostId.generate()
     name = HostName("by-name")
@@ -420,7 +422,7 @@ def test_sandbox_cache_by_name(
 
 def test_uncache_sandbox(
     testing_provider: ModalProviderInstance,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> None:
     host_id = HostId.generate()
     name = HostName("to-uncache")
@@ -437,7 +439,7 @@ def test_uncache_sandbox(
 
 def test_reset_caches(
     testing_provider: ModalProviderInstance,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> None:
     host_id = HostId.generate()
     sandbox = make_sandbox_with_tags(testing_modal, host_id, "reset-me")
@@ -455,7 +457,7 @@ def test_reset_caches(
 
 def test_list_sandboxes(
     testing_provider: ModalProviderInstance,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> None:
     host_id1 = HostId.generate()
     host_id2 = HostId.generate()
@@ -473,7 +475,7 @@ def test_list_sandboxes(
 
 def test_find_sandbox_by_host_id_api_fallback(
     testing_provider: ModalProviderInstance,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> None:
     host_id = HostId.generate()
     make_sandbox_with_tags(testing_modal, host_id, "api-lookup")
@@ -485,7 +487,7 @@ def test_find_sandbox_by_host_id_api_fallback(
 
 def test_find_sandbox_by_name_api_fallback(
     testing_provider: ModalProviderInstance,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> None:
     host_id = HostId.generate()
     make_sandbox_with_tags(testing_modal, host_id, "api-name-lookup")
@@ -542,7 +544,7 @@ def test_get_modal_image_definition_with_secrets(
 
 def test_discover_hosts_with_running_sandbox(
     testing_provider: ModalProviderInstance,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> None:
     host_id = HostId.generate()
     snapshots = [make_snapshot("snap-run", "s1")]
@@ -786,7 +788,7 @@ def test_list_snapshots_no_record(testing_provider: ModalProviderInstance) -> No
 
 def test_record_snapshot(
     testing_provider: ModalProviderInstance,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> None:
     """Test the low-level _record_snapshot method which creates a filesystem snapshot
     and records it in the host record. This avoids the SSH requirement of create_snapshot
@@ -824,7 +826,7 @@ def test_create_snapshot_no_sandbox_raises(testing_provider: ModalProviderInstan
 
 def test_stop_host_with_sandbox(
     testing_provider: ModalProviderInstance,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> None:
     host_id = HostId.generate()
     record = make_host_record(host_id=host_id, host_name="to-stop")
@@ -862,7 +864,7 @@ def test_stop_host_no_sandbox(testing_provider: ModalProviderInstance) -> None:
 
 def test_destroy_host(
     testing_provider: ModalProviderInstance,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> None:
     host_id = HostId.generate()
     snapshots = [
@@ -918,7 +920,7 @@ def test_delete_host(testing_provider: ModalProviderInstance) -> None:
 
 def test_on_connection_error_clears_caches(
     testing_provider: ModalProviderInstance,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> None:
     host_id = HostId.generate()
     record = make_host_record(host_id=host_id, host_name="conn-err")
@@ -1071,10 +1073,10 @@ def test_derive_modal_names_reproduces_shared_env_via_prefix_and_user_id(
 
 def test_construct_modal_provider_accepts_injected_modal_interface(
     temp_mngr_ctx: MngrContext,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> None:
     """``ModalProviderBackend._construct_modal_provider`` builds a working
-    ``ModalProviderInstance`` against an injected ``TestingModalInterface``.
+    ``ModalProviderInstance`` against an injected ``FakeModalInterface``.
     Locks in that the factory has no implementation-specific branches: any
     code path that bypasses ``modal_interface.enable_output_capture(...)``
     (e.g. by calling a Modal-SDK-specific function directly) would crash
@@ -1108,8 +1110,8 @@ def test_construct_modal_provider_accepts_injected_modal_interface(
     )
 
 
-class _NoAutoCreateModalInterface(TestingModalInterface):
-    """``TestingModalInterface`` variant that does not auto-create the Modal env
+class _NoAutoCreateModalInterface(FakeModalInterface):
+    """``FakeModalInterface`` variant that does not auto-create the Modal env
     on either ``app_lookup`` or ``app.run`` (the testing default is to silently
     create the env for convenience, which would mask the
     "env doesn't exist yet" code path we want to exercise here).
@@ -1176,7 +1178,7 @@ def test_construct_modal_provider_disables_itself_when_env_missing_and_not_creat
             config,
             modal_mngr_ctx,
             modal,
-            is_for_host_creation=False,
+            is_environment_creation_allowed=False,
         )
 
     # Verify the read-flow path did NOT create the Modal env behind our back.
@@ -1187,8 +1189,8 @@ def test_construct_modal_provider_bootstraps_env_when_for_host_creation(
     modal_mngr_ctx: MngrContext, tmp_path: Path, cg: ConcurrencyGroup
 ) -> None:
     """The create-host path is the one place that *is* allowed to bootstrap a
-    missing Modal environment. ``is_for_host_creation=True`` opts in: the
-    backend calls ``_create_environment`` and construction succeeds.
+    missing Modal environment. ``is_environment_creation_allowed=True`` opts
+    in: the backend calls ``_create_environment`` and construction succeeds.
     """
     modal = _NoAutoCreateModalInterface(root_dir=tmp_path / "modal_testing", concurrency_group=cg)
     config = ModalProviderConfig(
@@ -1204,7 +1206,7 @@ def test_construct_modal_provider_bootstraps_env_when_for_host_creation(
         config,
         modal_mngr_ctx,
         modal,
-        is_for_host_creation=True,
+        is_environment_creation_allowed=True,
     )
 
     assert isinstance(instance, ModalProviderInstance)
@@ -1363,12 +1365,50 @@ def test_create_host_raises_on_ssh_setup_failure(
 ) -> None:
     """create_host raises when SSH setup fails in the testing environment.
 
-    The sandbox is created successfully (TestingModalInterface doesn't need real
+    The sandbox is created successfully (FakeModalInterface doesn't need real
     Modal), but SSH setup fails because the testing sandbox can't start sshd
     as a non-root user. This verifies the error propagation path.
     """
     with pytest.raises((MngrError, OSError, ExceptionGroup)):
         testing_provider.create_host(HostName("will-fail"))
+
+
+class _ImageRejectingFakeModalInterface(FakeModalInterface):
+    """A FakeModalInterface that rejects sandbox creation the way real Modal does
+    for a non-existent ``--snapshot`` image id.
+
+    Modal validates the snapshot/image lazily -- ``image_from_id`` succeeds and
+    the bad id is only rejected when the sandbox is actually created -- so this
+    override raises ``ModalProxyInvalidError`` from ``sandbox_create``.
+    """
+
+    def sandbox_create(self, *args: object, **kwargs: object) -> SandboxInterface:
+        raise ModalProxyInvalidError("'snap-123abc' is not a valid Image ID.")
+
+
+def test_create_host_wraps_invalid_argument_error_as_clean_mngr_error(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+    cg: ConcurrencyGroup,
+) -> None:
+    """An invalid Modal argument (e.g. a non-existent --snapshot image id) is
+    surfaced as a clean MngrError, not a raw ModalProxyInvalidError.
+
+    ``create_host`` must translate the ModalProxyInvalidError into a user-facing
+    MngrError (which the CLI renders as a single-line message) rather than
+    letting it escape as a raw Python traceback.
+    """
+    root = tmp_path / "modal_testing"
+    root.mkdir(parents=True, exist_ok=True)
+    rejecting_modal = _ImageRejectingFakeModalInterface(root_dir=root, concurrency_group=cg)
+    provider = make_testing_provider(temp_mngr_ctx, rejecting_modal)
+    try:
+        with pytest.raises(MngrError) as exc_info:
+            provider.create_host(HostName("bad-snapshot"), snapshot=SnapshotName("snap-123abc"))
+        # The original modal error message is preserved for the user.
+        assert "snap-123abc" in str(exc_info.value)
+    finally:
+        rejecting_modal.cleanup()
 
 
 # ---------------------------------------------------------------------------
@@ -1385,7 +1425,7 @@ def test_provider_properties(testing_provider: ModalProviderInstance) -> None:
 
 def test_list_running_host_ids(
     testing_provider: ModalProviderInstance,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> None:
     cg = testing_provider.mngr_ctx.concurrency_group
     host_id1 = HostId.generate()
@@ -1510,7 +1550,7 @@ def test_modal_volume_translates_rate_limit_error_to_mngr_error() -> None:
 
 def test_get_host_tags_from_sandbox(
     testing_provider: ModalProviderInstance,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> None:
     host_id = HostId.generate()
     record = make_host_record(
@@ -1576,7 +1616,7 @@ def test_set_host_tags_offline(
 
 def test_set_host_tags_sandbox_tags_updated(
     testing_provider: ModalProviderInstance,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> None:
     """set_host_tags updates both sandbox tags and the volume record."""
     host_id, _, sandbox = setup_host_with_sandbox(
@@ -1620,7 +1660,7 @@ def test_add_tags_to_host_offline(
 
 def test_add_tags_to_host_sandbox_tags_updated(
     testing_provider: ModalProviderInstance,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> None:
     """add_tags_to_host updates sandbox tags and volume record when sandbox is running."""
     host_id, _, sandbox = setup_host_with_sandbox(
@@ -1659,7 +1699,7 @@ def test_remove_tags_from_host_offline(
 
 def test_remove_tags_from_host_sandbox_tags_updated(
     testing_provider: ModalProviderInstance,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> None:
     """remove_tags_from_host updates sandbox tags and volume record."""
     host_id, _, sandbox = setup_host_with_sandbox(
@@ -1679,7 +1719,7 @@ def test_remove_tags_from_host_sandbox_tags_updated(
 
 def test_rename_host_with_sandbox(
     testing_provider: ModalProviderInstance,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> None:
     """rename_host updates sandbox tags and volume record."""
     host_id, _, sandbox = setup_host_with_sandbox(testing_provider, testing_modal, "old-name")
@@ -1807,7 +1847,7 @@ def test_get_host_by_name_not_in_records_raises(
 
 def test_discover_hosts_mixed_states(
     testing_provider: ModalProviderInstance,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> None:
     """Discover hosts with a mix of stopped, failed, and destroyed hosts."""
     cg = testing_provider.mngr_ctx.concurrency_group
@@ -1916,7 +1956,7 @@ def test_discover_hosts_and_agents_mixed_states(
 
 
 def test_modal_provider_app_get_captured_output(
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> None:
     app = testing_modal.app_lookup("output-test", create_if_missing=True, environment_name="test")
     volume = testing_modal.volume_from_name("output-vol", create_if_missing=True, environment_name="test")
@@ -1936,7 +1976,7 @@ def test_modal_provider_app_get_captured_output(
 
 
 def test_modal_provider_app_close(
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> None:
     app = testing_modal.app_lookup("close-test", create_if_missing=True, environment_name="test")
     volume = testing_modal.volume_from_name("close-vol", create_if_missing=True, environment_name="test")
@@ -1982,12 +2022,12 @@ def test_provider_instance_close(
 
 def test_proxy_file_entry_type_file_maps_to_volume_file() -> None:
     result = _proxy_file_entry_type_to_volume_file_type(ProxyFileEntryType.FILE)
-    assert result == VolumeFileType.FILE
+    assert result == FileType.FILE
 
 
 def test_proxy_file_entry_type_directory_maps_to_volume_directory() -> None:
     result = _proxy_file_entry_type_to_volume_file_type(ProxyFileEntryType.DIRECTORY)
-    assert result == VolumeFileType.DIRECTORY
+    assert result == FileType.DIRECTORY
 
 
 # ---------------------------------------------------------------------------
@@ -2329,12 +2369,12 @@ def test_build_modal_volumes(
 # ---------------------------------------------------------------------------
 
 
-def test_build_modal_secrets_from_env_empty(testing_modal: TestingModalInterface) -> None:
+def test_build_modal_secrets_from_env_empty(testing_modal: FakeModalInterface) -> None:
     result = _build_modal_secrets_from_env([], testing_modal)
     assert result == []
 
 
-def test_build_modal_secrets_from_env_missing_var(testing_modal: TestingModalInterface) -> None:
+def test_build_modal_secrets_from_env_missing_var(testing_modal: FakeModalInterface) -> None:
     with pytest.raises(MngrError, match="not set"):
         _build_modal_secrets_from_env(["DEFINITELY_NOT_SET_VAR_12345"], testing_modal)
 
@@ -2459,7 +2499,7 @@ def test_list_persisted_agent_data_skips_invalid_json(
 
 def test_discover_hosts_running_sandbox_without_host_record(
     testing_provider: ModalProviderInstance,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> None:
     """A running sandbox without a host record (eventual consistency) shows up in discovery.
     The sandbox has tags, but no host record on the volume yet. It should NOT appear
@@ -2616,7 +2656,7 @@ def test_modal_provider_app_full_lifecycle(
 
 def test_create_snapshot_with_cached_offline_host(
     testing_provider: ModalProviderInstance,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> None:
     """Test create_snapshot by pre-populating the host cache with an OfflineHost.
     This avoids the SSH connection attempt in _record_snapshot -> get_host.
@@ -2644,7 +2684,7 @@ def test_create_snapshot_with_cached_offline_host(
 
 def test_create_snapshot_auto_name_with_cached_host(
     testing_provider: ModalProviderInstance,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> None:
     """create_snapshot without a name generates a timestamp-based name."""
     host_id = HostId.generate()
@@ -2668,7 +2708,7 @@ def test_create_snapshot_auto_name_with_cached_host(
 
 def test_stop_host_with_snapshot_using_cached_host(
     testing_provider: ModalProviderInstance,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> None:
     """stop_host with create_snapshot=True should create a snapshot before terminating."""
     host_id = HostId.generate()
@@ -2701,7 +2741,7 @@ def test_stop_host_with_snapshot_using_cached_host(
 
 def test_discover_hosts_handles_sandbox_without_valid_tags(
     testing_provider: ModalProviderInstance,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> None:
     """Sandboxes without valid mngr tags should be skipped during discovery."""
     image = testing_modal.image_debian_slim()

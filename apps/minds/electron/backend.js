@@ -3,6 +3,7 @@ const net = require('net');
 const fs = require('fs');
 const path = require('path');
 const paths = require('./paths');
+const { getBuildMetadata } = require('./build-metadata');
 
 // Swallow EPIPE on the Electron main process's own stdout/stderr. When dev
 // launches go through a pipe (e.g. `just minds-start | head -30`), the
@@ -160,6 +161,9 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
       const mindsRootName = paths.getMindsRootName();
       const mngrHostDir = paths.getMngrHostDir();
       const mngrPrefix = paths.getMngrPrefix();
+      // Forwarded to the Python backend so Sentry tags reports with the desktop
+      // app version (release) and the git SHA the build was cut from.
+      const { releaseId, gitSha } = getBuildMetadata();
       // When build.js embedded a client.toml + root_name pair (production
       // / staging / beta packaged builds), pass --config-file explicitly
       // so the backend doesn't have to fall back to MINDS_CLIENT_CONFIG_PATH.
@@ -191,12 +195,16 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           MNGR_PREFIX: mngrPrefix,
           MINDS_LATCHKEY_BINARY: paths.getLatchkeyPath(),
           MINDS_LATCHKEY_DIRECTORY: paths.getLatchkeyDirectory(),
+          MINDS_RELEASE_ID: releaseId,
+          MINDS_GIT_SHA: gitSha,
         };
       } else {
         // Packaged mode: use bundled uv with standalone pyproject
         const uvPath = paths.getUvPath();
         const uvBinDir = paths.getUvBinDir();
         const gitBinDir = paths.getGitBinDir();
+        const limaBinDir = paths.getLimaBinDir();
+        const desyncBinDir = paths.getDesyncBinDir();
         const uvCacheDir = paths.getUvCacheDir();
         const uvPythonDir = paths.getUvPythonDir();
         const pyprojectDir = paths.getPyprojectDir();
@@ -204,7 +212,16 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
         uvBin = uvPath;
         args = [
           'run', '--project', pyprojectDir,
-          'minds', '--format', 'jsonl',
+          // --active makes uv use VIRTUAL_ENV (~/.minds/.venv) instead of
+          // <project>/.venv, which is inside the signed .app bundle and
+          // read-only on macOS. Without this, `uv run` tries to create
+          // .venv inside the bundle and fails with "Operation not permitted".
+          '--active',
+          // -v sets the stderr threshold to DEBUG so
+          // the subprocess's mngr forward / agent-creation / restic
+          // lifecycle traces land in minds.log for bug reports.
+          'minds', '-v', '--format', 'jsonl',
+          // The --log-file JSONL sink is already DEBUG regardless of -v.
           '--log-file', path.join(logDir, 'minds-events.jsonl'),
           'run',
           '--host', '127.0.0.1',
@@ -213,9 +230,22 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           ...configFileArgs,
         ];
         cwd = pyprojectDir;
+        // LaunchServices-started apps on macOS inherit a minimal PATH
+        // without /opt/homebrew/bin or /usr/local/bin. Append both so
+        // user-installed tools (`docker` from Docker Desktop, etc.) are
+        // reachable. Bundled uv/git/lima are prepended via their own
+        // absolute paths above. On Linux these dirs are also conventional
+        // (`/usr/local/bin` is std) and the append is harmless either way.
+        const systemPath = process.env.PATH || '';
+        const homebrewPaths = ['/opt/homebrew/bin', '/usr/local/bin'].filter(
+          (p) => !systemPath.split(':').includes(p)
+        ).join(':');
+        const augmentedSystemPath = homebrewPaths
+          ? `${systemPath}:${homebrewPaths}`
+          : systemPath;
         env = {
           ...process.env,
-          PATH: `${uvBinDir}:${gitBinDir}:${process.env.PATH}`,
+          PATH: `${uvBinDir}:${gitBinDir}:${limaBinDir}:${desyncBinDir}:${augmentedSystemPath}`,
           UV_CACHE_DIR: uvCacheDir,
           UV_PYTHON_INSTALL_DIR: uvPythonDir,
           MINDS_ELECTRON: '1',
@@ -224,11 +254,16 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           MNGR_PREFIX: mngrPrefix,
           MINDS_LATCHKEY_BINARY: paths.getLatchkeyPath(),
           MINDS_LATCHKEY_DIRECTORY: paths.getLatchkeyDirectory(),
+          MINDS_RESTIC_BINARY: paths.getResticPath(),
           // Tell the packaged latchkey shim which Electron binary to use as Node.
           MINDS_ELECTRON_EXEC_PATH: process.execPath,
+          // Set VIRTUAL_ENV to the per-user venv so `uv run --active` uses
+          // it. Without this, uv falls back to <project>/.venv which is
+          // inside the signed .app bundle (read-only on macOS).
+          VIRTUAL_ENV: paths.getVenvDir(),
+          MINDS_RELEASE_ID: releaseId,
+          MINDS_GIT_SHA: gitSha,
         };
-        // Remove VIRTUAL_ENV to avoid uv warnings about path mismatches
-        delete env.VIRTUAL_ENV;
       }
 
       const child = spawn(uvBin, args, {
@@ -287,6 +322,11 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
       child.stderr.on('data', (data) => {
         const text = data.toString();
         logStream.write(text);
+        if (!isResolved) {
+          // Surface uv's freshest progress line on the splash so cold launch doesn't look frozen.
+          const latest = text.split('\n').map(l => l.trim()).filter(Boolean).pop();
+          if (latest) onProgress(latest);
+        }
         if (paths.isDev()) {
           try {
             process.stderr.write(text);

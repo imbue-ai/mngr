@@ -1,0 +1,114 @@
+{#def agent_id, request_id, ws_name, rationale, display_name, scope, permission_schemas, description_by_permission_name, checked_permissions, wildcard_permission, wildcard_label, will_open_browser, mngr_forward_origin #}
+{#
+  Latchkey predefined permission request fragment. Rendered inside the
+  inbox modal's right pane. Provides the per-permission simple/editor
+  views and the auth-browser progress notice. Chrome (backdrop, close
+  button, escape/backdrop dismiss, form submission JS, Adjust toggle)
+  lives in the inbox shell and operates on these elements via the ids
+  below (#permissions-form, #permissions-simple-view, etc.).
+#}
+<div class="permissions-detail">
+  <PermissionsHeader :display_name="display_name" :ws_name="ws_name" :agent_id="agent_id" :rationale="rationale" />
+
+  <PermissionsForm :request_id="request_id">
+    {# Simple (default) view: a read-only summary of the permissions that
+       will be granted on Approve, with no checkboxes. The full checkbox
+       editor is hidden behind the "Adjust" link below. #}
+    <div id="permissions-simple-view">
+      {% if checked_permissions %}
+        <p class="type-body text-primary mb-3">
+          Approving will grant {{ ws_name or agent_id }} and its sibling agents the following permissions:
+        </p>
+        <Card extra="space-y-3">
+          {% for permission in permission_schemas %}
+            {% if permission in checked_permissions %}
+              <div>
+                {# Checkmark and the permission name share one items-center
+                   row so the icon is vertically centered on the name. Any
+                   description sits below, indented to line up under the
+                   name (icon width + gap = 26px). #}
+                <div class="flex items-center gap-2">
+                  <Icon16 name="check" extra="shrink-0 text-success" />
+                  <code class="type-body font-mono text-primary">{{ wildcard_label if permission == wildcard_permission else permission }}</code>
+                </div>
+                {% set permission_description = description_by_permission_name.get(permission) %}
+                {% if permission_description %}
+                  <span class="block type-body text-primary mt-0.5 ml-[26px]">{{ permission_description }}</span>
+                {% endif %}
+              </div>
+            {% endif %}
+          {% endfor %}
+          {# Right-aligned within the list card so it reads as a secondary
+             affordance rather than another permission row. A faint top
+             border separates it from the permission list above. #}
+          <div class="flex justify-end border-t border-subtle pt-2">
+            <Button variant="ghost" id="permissions-adjust-link"
+                    onclick="showPermissionEditor()"
+                    extra="!p-0 !bg-transparent !type-helper !text-accent hover:!bg-transparent hover:underline">
+              Adjust
+            </Button>
+          </div>
+        </Card>
+      {% else %}
+        <Notice variant="warn">
+          The agent did not request any specific permissions. Click
+          <span class="font-semibold">Adjust</span> below to choose what to grant.
+        </Notice>
+        <div class="flex justify-end mt-3">
+          <Button variant="ghost" id="permissions-adjust-link"
+                  onclick="showPermissionEditor()"
+                  extra="!p-0 !bg-transparent !type-helper !text-accent hover:!bg-transparent hover:underline">
+            Adjust
+          </Button>
+        </div>
+      {% endif %}
+    </div>
+
+    {# Editor view: the full checkbox list, hidden until the user opts in
+       via "Adjust". The inputs are present in the DOM either way so the
+       generic submit handler can read the checked set. #}
+    <div id="permissions-editor-view" class="hidden">
+      <h2 class="type-label text-primary mb-2">Permissions to grant:</h2>
+      <Card extra="space-y-3">
+        {% for permission in permission_schemas %}
+          <label class="flex items-start gap-2 cursor-pointer">
+            <input type="checkbox" name="permissions" value="{{ permission }}"
+                   class="mt-1 shrink-0"
+                   {% if permission == wildcard_permission %}data-wildcard="true"{% endif %}
+                   {% if permission in checked_permissions %}checked{% endif %}>
+            <span class="min-w-0">
+              <code class="type-body font-mono text-primary">{{ wildcard_label if permission == wildcard_permission else permission }}</code>
+              {% set permission_description = description_by_permission_name.get(permission) %}
+              {% if permission_description %}
+                <span class="block type-body text-primary mt-0.5">{{ permission_description }}</span>
+              {% endif %}
+            </span>
+          </label>
+        {% endfor %}
+      </Card>
+    </div>
+  </PermissionsForm>
+
+  {#
+    The progress notice copy depends on whether ``latchkey auth browser``
+    will actually run when the user clicks Approve. ``will_open_browser``
+    is computed server-side from a fresh ``latchkey services info`` call,
+    so when credentials are already valid (or the service requires manual
+    credentials) we show a generic "Granting permission..." notice instead
+    of falsely promising a browser pop-up.
+  #}
+  <div id="permissions-progress" class="hidden mt-4">
+    <Notice variant="info">
+      {% if will_open_browser %}
+        <span class="font-semibold">Authenticating...</span>
+        Opening a browser window for you to sign in to {{ display_name }}.
+        The request will resolve automatically when the flow completes.
+      {% else %}
+        <span class="font-semibold">Granting permission...</span>
+      {% endif %}
+    </Notice>
+  </div>
+
+  <PermissionsManualCredentials />
+  <PermissionsError />
+</div>

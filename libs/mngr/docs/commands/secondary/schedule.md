@@ -45,6 +45,7 @@ mngr schedule add [OPTIONS] [POSITIONAL_NAME]
 | `--command` | choice (`create` &#x7C; `start` &#x7C; `message` &#x7C; `exec`) | Which mngr command to run when triggered. | None |
 | `--args` | text | Arguments to pass to the mngr command (as a string). | None |
 | `--schedule` | text | Cron schedule expression defining when the command runs (e.g. '0 2 * * *'). | None |
+| `--timezone` | text | IANA timezone name (e.g. 'America/Los_Angeles') in which to interpret the --schedule cron expression. Defaults to the deploy machine's local timezone, so pin this explicitly to keep the fire time independent of where the deploy ran. Only supported for the modal provider. | None |
 
 ## Code Packaging
 
@@ -101,7 +102,7 @@ mngr schedule add [OPTIONS] [POSITIONAL_NAME]
 | `--safe` | boolean | Always query all providers during discovery (disable event-stream optimization). Use this when interfacing with mngr from multiple machines. | `False` |
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
-| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths; append __extend to the leaf key to extend list/dict/set fields) [repeatable] | None |
 
 ## mngr schedule list
 
@@ -132,7 +133,7 @@ mngr schedule list [OPTIONS]
 | `--safe` | boolean | Always query all providers during discovery (disable event-stream optimization). Use this when interfacing with mngr from multiple machines. | `False` |
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
-| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths; append __extend to the leaf key to extend list/dict/set fields) [repeatable] | None |
 
 ## mngr schedule remove
 
@@ -168,7 +169,7 @@ mngr schedule remove [OPTIONS] NAMES...
 | `--safe` | boolean | Always query all providers during discovery (disable event-stream optimization). Use this when interfacing with mngr from multiple machines. | `False` |
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
-| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths; append __extend to the leaf key to extend list/dict/set fields) [repeatable] | None |
 
 ## mngr schedule run
 
@@ -198,7 +199,7 @@ mngr schedule run [OPTIONS] NAME
 | `--safe` | boolean | Always query all providers during discovery (disable event-stream optimization). Use this when interfacing with mngr from multiple machines. | `False` |
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
-| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths; append __extend to the leaf key to extend list/dict/set fields) [repeatable] | None |
 
 ## mngr schedule update
 
@@ -217,6 +218,7 @@ mngr schedule update [OPTIONS] [POSITIONAL_NAME]
 | `--command` | choice (`create` &#x7C; `start` &#x7C; `message` &#x7C; `exec`) | Which mngr command to run when triggered. | None |
 | `--args` | text | Arguments to pass to the mngr command (as a string). | None |
 | `--schedule` | text | Cron schedule expression defining when the command runs (e.g. '0 2 * * *'). | None |
+| `--timezone` | text | IANA timezone name (e.g. 'America/Los_Angeles') in which to interpret the --schedule cron expression. Defaults to the deploy machine's local timezone, so pin this explicitly to keep the fire time independent of where the deploy ran. Only supported for the modal provider. | None |
 
 ## Code Packaging
 
@@ -265,7 +267,7 @@ mngr schedule update [OPTIONS] [POSITIONAL_NAME]
 | `--safe` | boolean | Always query all providers during discovery (disable event-stream optimization). Use this when interfacing with mngr from multiple machines. | `False` |
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
-| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths; append __extend to the leaf key to extend list/dict/set fields) [repeatable] | None |
 
 ## See Also
 

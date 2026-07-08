@@ -9,8 +9,8 @@ from pydantic import PrivateAttr
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import HostResources
-from imbue.mngr.interfaces.data_types import VolumeFileType
 from imbue.mngr.interfaces.volume import Volume
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -26,6 +26,33 @@ class LimaHostConfig(FrozenModel):
     instance_name: str = Field(description="Lima instance name (e.g. mngr-my-host)")
     start_args: tuple[str, ...] = Field(default=(), description="limactl start arguments for replay")
     image_url: str | None = Field(default=None, description="Image URL used to create the VM")
+    # Locks in the host_dir layout chosen at create_host time so subsequent
+    # start_host/stop_host/get_host always replay the same setup regardless
+    # of later provider config edits. Default True ensures pre-change on-disk
+    # records (which lack this field) deserialize into today's bind-mount mode.
+    is_host_data_volume_exposed: bool = Field(
+        default=True,
+        description=(
+            "Whether host_dir is backed by a 9p bind mount to the host machine "
+            "(True, today's default) or by an in-VM btrfs additionalDisk (False)."
+        ),
+    )
+    host_data_disk_name: str | None = Field(
+        default=None,
+        description=(
+            "Name of the Lima-managed additional disk used to back host_dir "
+            "when is_host_data_volume_exposed=False. None when the host uses "
+            "the bind-mount layout."
+        ),
+    )
+    is_run_as_root: bool = Field(
+        default=False,
+        description=(
+            "Whether the agent runs in the VM as root (True) or as the Lima "
+            "default user (False, today's default). Locked in at create_host "
+            "time so lifecycle operations replay the right SSH user."
+        ),
+    )
 
 
 class HostRecord(FrozenModel):
@@ -106,7 +133,7 @@ class LimaHostStore(MutableModel):
         try:
             agent_entries = self.volume.listdir(agent_dir)
             for entry in agent_entries:
-                if entry.file_type != VolumeFileType.DIRECTORY:
+                if entry.file_type != FileType.DIRECTORY:
                     self.volume.remove_file(entry.path)
         except (FileNotFoundError, OSError) as e:
             logger.trace("No agent data to clean up for {}: {}", host_id, e)
@@ -132,7 +159,7 @@ class LimaHostStore(MutableModel):
             return []
 
         for entry in entries:
-            if entry.file_type != VolumeFileType.FILE or not entry.path.endswith(".json"):
+            if entry.file_type != FileType.FILE or not entry.path.endswith(".json"):
                 continue
             filename = entry.path.rsplit("/", 1)[-1]
             host_id_str = filename.removesuffix(".json")
@@ -166,7 +193,7 @@ class LimaHostStore(MutableModel):
 
         agent_records: list[dict[str, Any]] = []
         for entry in entries:
-            if entry.file_type != VolumeFileType.FILE or not entry.path.endswith(".json"):
+            if entry.file_type != FileType.FILE or not entry.path.endswith(".json"):
                 continue
             try:
                 content = self.volume.read_file(entry.path)

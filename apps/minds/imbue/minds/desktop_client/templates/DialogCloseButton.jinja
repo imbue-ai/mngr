@@ -1,0 +1,19 @@
+{#def onclick, id="" #}
+{#
+  Absolute-positioned X button at the top right of a modal dialog. The
+  glyph is the shared Icon16 ``close`` (16px -- matching the inbox modal's
+  close button). Caller supplies the ``onclick`` handler.
+
+  Used by the sign-in modal and the DevStyleguide showcase page; the
+  inbox modal inlines its own button so it can sit inside a grid header
+  and carry the per-element ``-webkit-app-region: no-drag`` opt-out
+  needed by the drawer's drag-region handling. Carries ``data-tooltip``
+  so it shows a "Close" tooltip on the overlay surface (via
+  /_static/tooltip_triggers.js) like the other overlay controls.
+#}
+<button type="button" aria-label="Close" data-tooltip="Close"
+        {% if id %}id="{{ id }}"{% endif %}
+        onclick="{{ onclick }}"
+        class="absolute top-3 right-3 z-10 inline-flex items-center justify-center w-8 h-8 rounded-md text-tertiary hover:text-primary hover:bg-fill-hover cursor-pointer">
+  <Icon16 name="close" />
+</button>

@@ -2,17 +2,59 @@ name: CI
 
 on:
   push:
-    branches: [release, main]
+    branches: [main]
   pull_request:
     branches: ['**']
+  # Manual trigger for every minds test path that needs a remote ci env. Off by
+  # default so normal pushes/PRs never stand up a per-run `ci-*` env (real Modal
+  # env + Neon project + SuperTokens app) -- only an explicit dispatch does. When
+  # set it enables BOTH the per-run shared env (build-minds-ci-env + the
+  # `minds_services` step in test-minds-snapshot) and the heavy release-tier
+  # `minds_deployment` tests (test-minds-release, each minting + destroying its
+  # own ephemeral env).
+  workflow_dispatch:
+    inputs:
+      run_minds_release_tests:
+        description: "Run all remote-ci-env minds tests (minds_services + minds_deployment: deploy/rollback/round-trip)"
+        type: boolean
+        default: false
 
 jobs:
-  # Unit + integration tests via offload on Modal - runs on non-release branches
+  # Changelog gate. Runs on the orchestrator (not in an offload
+  # sandbox) because it diffs the PR branch against its real base branch, and
+  # the sandbox has no base ref -- doing the diff there passes vacuously. Pure
+  # stdlib, so no `uv sync`; just enough git history to compute the diff.
+  check-changelog:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      # Shallow checkout, then deepen ONLY HEAD's ancestry (same rationale as
+      # the offload jobs below: a bare `--unshallow` pulls every branch). The
+      # merge-base with the base branch is an ancestor of HEAD, so deepening
+      # HEAD plus fetching the base tip is enough for a three-dot diff.
+      - uses: actions/checkout@v6
+
+      - name: Fetch base branch and deepen HEAD for the changelog diff
+        run: |
+          if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
+            git fetch --no-tags --unshallow origin "$(git rev-parse HEAD)"
+          fi
+          git fetch --no-tags origin \
+            "+refs/heads/${GITHUB_BASE_REF}:refs/remotes/origin/${GITHUB_BASE_REF}"
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Check changelog entries
+        run: python -m scripts.check_changelog_entries
+
+  # Unit + integration tests via offload on Modal
   test-offload:
-    if: github.ref != 'refs/heads/release'
     runs-on: ubuntu-latest
     # `checks: write` is required by the report-flaky-aware-tests composite
-    # action: both its `mikepenz/action-junit-report@v5` invocations and its
+    # action: both its `mikepenz/action-junit-report@v6` invocations and its
     # `gh api POST /repos/.../check-runs` call need it. `contents: write` is
     # required so offload can `git push` its image-cache git notes back to
     # `refs/notes/offload-images`; without it, every run is a cache miss and
@@ -22,16 +64,40 @@ jobs:
     permissions:
       contents: write
       checks: write
-    env:
-      MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID }}
-      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
-
+      # Lets the use-vault-secrets step below mint a GitHub OIDC token for Vault.
+      id-token: write
     steps:
-      - uses: actions/checkout@v6
+      # The imbue Modal workspace token (id + secret) from Vault, migrated off
+      # the MODAL_TOKEN_ID variable + MODAL_TOKEN_SECRET GitHub Actions secret.
+      # Injected as MODAL_TOKEN_ID / MODAL_TOKEN_SECRET into the job env for the
+      # offload run below.
+      - name: Fetch Modal credentials from Vault
+        uses: imbue-ai/use-vault-secrets@main
         with:
-          # Full history needed for offload's git-notes-backed image-cache
-          # lookup and thin-diff against the checkpoint commit.
-          fetch-depth: 0
+          role: mngr_ci_gh
+          secrets: |
+            mngr/ci/MODAL_TOKEN_ID
+            mngr/ci/MODAL_TOKEN_SECRET
+
+      # Default shallow single-ref checkout, then deepen only THIS ref's
+      # history in the next step. offload needs the full ancestry of HEAD
+      # (to find its checkpoint commit and thin-diff against it), but not
+      # every other branch -- which `fetch-depth: 0` would also fetch, and on
+      # a repo with many branches that full-history-of-all-branches fetch can
+      # take minutes. The image-cache git notes are fetched separately below.
+      - uses: actions/checkout@v6
+
+      - name: Deepen current-branch history for offload
+        # Deepen ONLY the checked-out commit's ancestry -- all offload needs to
+        # find and thin-diff its checkpoint. Naming the SHA matters: a bare
+        # `git fetch --unshallow origin` uses the broad refspec and pulls every
+        # branch's full history (including a heavy orphan branch), which is most
+        # of the fetch cost. GitHub allows fetching reachable SHAs, and the
+        # image-cache git notes are fetched separately below.
+        run: |
+          if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
+            git fetch --no-tags --unshallow origin "$(git rev-parse HEAD)"
+          fi
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -47,28 +113,28 @@ jobs:
         run: uv sync --all-packages
 
       - name: Install just
-        uses: extractions/setup-just@v2
+        uses: extractions/setup-just@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache offload binary
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             ~/.cargo/bin/offload
-          key: cargo-offload-0.9.5-${{ runner.os }}
+          key: cargo-offload-0.9.10-${{ runner.os }}
 
       - name: Install offload
         run: |
-          if ! command -v offload &> /dev/null || ! offload --version | grep -q '0.9.5'; then
-            cargo install offload@0.9.5 --force
+          if ! command -v offload &> /dev/null || ! offload --version | grep -q '0.9.10'; then
+            cargo install offload@0.9.10 --force
           fi
 
       - name: Restore offload test durations from previous run
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: test-results/junit.xml
           key: offload-durations-${{ github.ref }}-${{ github.run_id }}
@@ -88,7 +154,7 @@ jobs:
 
       - name: Save offload test durations for next run
         if: always()
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: test-results/junit.xml
           key: offload-durations-${{ github.ref }}-${{ github.run_id }}
@@ -169,7 +235,7 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-results-offload
           path: test-results/
@@ -180,15 +246,24 @@ jobs:
           include-hidden-files: true
           retention-days: 30
 
-  # Clean up old Modal test environments - runs on all branches including release,
-  # since both acceptance tests (non-release) and release tests (release) create environments.
+  # Clean up old Modal test environments left behind by acceptance tests.
   cleanup-modal-environments:
     runs-on: ubuntu-latest
-    env:
-      MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID }}
-      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
-
+    permissions:
+      contents: read
+      # Lets the use-vault-secrets step below mint a GitHub OIDC token for Vault.
+      id-token: write
     steps:
+      # imbue Modal workspace token (id + secret) from Vault, migrated off the
+      # MODAL_TOKEN_ID variable + MODAL_TOKEN_SECRET GitHub Actions secret.
+      - name: Fetch Modal credentials from Vault
+        uses: imbue-ai/use-vault-secrets@main
+        with:
+          role: mngr_ci_gh
+          secrets: |
+            mngr/ci/MODAL_TOKEN_ID
+            mngr/ci/MODAL_TOKEN_SECRET
+
       - uses: actions/checkout@v6
 
       - name: Set up Python
@@ -207,10 +282,17 @@ jobs:
       - name: Clean up old Modal test environments
         run: uv run python scripts/cleanup_old_modal_test_environments.py --max-age-hours 1.0
 
+      # Safety net for leaked minds-snapshot images: the build job records
+      # each built image in a Modal-Dict ledger and the test job deletes it
+      # on success, but a cancelled/failed run can leave one behind. This
+      # sweeps any ledger image older than the threshold (mirrors the env
+      # sweep above).
+      - name: Clean up old minds snapshot images
+        run: uv run python scripts/cleanup_modal_snapshot_images.py sweep --max-age-hours 1.0
 
-  # Acceptance tests via offload on Modal - runs on all branches (except release, since release tests are a superset)
+
+  # Acceptance tests via offload on Modal
   test-offload-acceptance:
-    if: github.ref != 'refs/heads/release'
     runs-on: ubuntu-latest
     # See note on `test-offload` above: `checks: write` is required by the
     # report-flaky-aware-tests composite action, and `contents: write` is
@@ -219,16 +301,40 @@ jobs:
     permissions:
       contents: write
       checks: write
-    env:
-      MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID }}
-      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
-
+      # Lets the use-vault-secrets step below mint a GitHub OIDC token for Vault.
+      id-token: write
     steps:
-      - uses: actions/checkout@v6
+      # The imbue Modal workspace token (id + secret) from Vault, migrated off
+      # the MODAL_TOKEN_ID variable + MODAL_TOKEN_SECRET GitHub Actions secret.
+      # Injected as MODAL_TOKEN_ID / MODAL_TOKEN_SECRET into the job env for the
+      # offload run below.
+      - name: Fetch Modal credentials from Vault
+        uses: imbue-ai/use-vault-secrets@main
         with:
-          # Full history needed for offload's git-notes-backed image-cache
-          # lookup and thin-diff against the checkpoint commit.
-          fetch-depth: 0
+          role: mngr_ci_gh
+          secrets: |
+            mngr/ci/MODAL_TOKEN_ID
+            mngr/ci/MODAL_TOKEN_SECRET
+
+      # Default shallow single-ref checkout, then deepen only THIS ref's
+      # history in the next step. offload needs the full ancestry of HEAD
+      # (to find its checkpoint commit and thin-diff against it), but not
+      # every other branch -- which `fetch-depth: 0` would also fetch, and on
+      # a repo with many branches that full-history-of-all-branches fetch can
+      # take minutes. The image-cache git notes are fetched separately below.
+      - uses: actions/checkout@v6
+
+      - name: Deepen current-branch history for offload
+        # Deepen ONLY the checked-out commit's ancestry -- all offload needs to
+        # find and thin-diff its checkpoint. Naming the SHA matters: a bare
+        # `git fetch --unshallow origin` uses the broad refspec and pulls every
+        # branch's full history (including a heavy orphan branch), which is most
+        # of the fetch cost. GitHub allows fetching reachable SHAs, and the
+        # image-cache git notes are fetched separately below.
+        run: |
+          if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
+            git fetch --no-tags --unshallow origin "$(git rev-parse HEAD)"
+          fi
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -244,28 +350,28 @@ jobs:
         run: uv sync --all-packages
 
       - name: Install just
-        uses: extractions/setup-just@v2
+        uses: extractions/setup-just@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache offload binary
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             ~/.cargo/bin/offload
-          key: cargo-offload-0.9.5-${{ runner.os }}
+          key: cargo-offload-0.9.10-${{ runner.os }}
 
       - name: Install offload
         run: |
-          if ! command -v offload &> /dev/null || ! offload --version | grep -q '0.9.5'; then
-            cargo install offload@0.9.5 --force
+          if ! command -v offload &> /dev/null || ! offload --version | grep -q '0.9.10'; then
+            cargo install offload@0.9.10 --force
           fi
 
       - name: Restore offload test durations from previous run
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: test-results/junit.xml
           key: offload-acceptance-durations-${{ github.ref }}-${{ github.run_id }}
@@ -285,7 +391,7 @@ jobs:
 
       - name: Save offload test durations for next run
         if: always()
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: test-results/junit.xml
           key: offload-acceptance-durations-${{ github.ref }}-${{ github.run_id }}
@@ -301,7 +407,7 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-results-offload-acceptance
           path: test-results/
@@ -314,7 +420,6 @@ jobs:
   # Docker acceptance tests - runs on a GitHub runner with a real Docker daemon.
   # Temporary: these will move to offload once Docker-in-Docker support lands.
   test-docker:
-    if: github.ref != 'refs/heads/release'
     runs-on: ubuntu-latest
 
     steps:
@@ -344,37 +449,65 @@ jobs:
         run: uv sync --all-packages
 
       - name: Run Docker acceptance tests
-        run: PYTEST_MAX_DURATION_SECONDS=600 uv run pytest -n 0 --timeout 300 --no-cov --cov-fail-under=0 -v --tb=short -m '(docker or docker_sdk) and not release'
+        # Excludes `minds_snapshot_resume` because those tests only make
+        # sense inside a Modal sandbox booted from a pre-built snapshot
+        # (see scripts/snapshot_minds_e2e_state.py); they assume a
+        # workspace Docker container is already in /var/lib/docker, which
+        # is not the case on a fresh GitHub runner. Runs via
+        # `just test-offload-minds-snapshot <image-id>` instead. The
+        # Electron e2e coverage also lives in that snapshot stage now (it
+        # carries `minds_snapshot_resume`), reusing the snapshot image's warm
+        # Electron/Playwright/Xvfb toolchain instead of a dedicated cold job.
+        run: PYTEST_MAX_DURATION_SECONDS=600 uv run pytest -n 0 --timeout 300 --no-cov --cov-fail-under=0 -v --tb=short -m '(docker or docker_sdk) and not release and not minds_snapshot_resume'
 
-  # Docker release tests - runs on a GitHub runner with a real Docker daemon,
-  # since Docker-in-Docker under gVisor (offload-modal-release) is too flaky.
-  # Mirrors the `test-docker` job above but filters for release-marked tests.
-  # Gated to release-branch push only, matching test-release below -- these
-  # tests are slow (real docker + release path) and should only run when
-  # cutting a release, not on every PR.
-  test-docker-release:
-    if: github.ref == 'refs/heads/release' && github.event_name == 'push'
+  # Build a fresh minds-workspace Modal snapshot image, then run the
+  # `minds_snapshot_resume` suite against it. Two jobs so the expensive
+  # vm_runtime image build (Docker-in-Docker + Electron workspace
+  # creation, multi-minute) happens once per run and the test job fans
+  # out from the baked image via offload's `--override-image-id` -- no
+  # per-test Docker/image setup. See scripts/snapshot_minds_e2e_state.py
+  # and offload-modal-minds-snapshot.toml.
+  #
+  # Both jobs are gated on the `DISABLE_MINDS_SNAPSHOT_CI` repo variable:
+  # they run by default (blocking on every PR), but setting that variable
+  # to "true" turns them off in one click without a code change -- a kill
+  # switch in case Modal vm_runtime capacity ever wedges the merge queue.
+  build-minds-snapshot:
     runs-on: ubuntu-latest
-    env:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-
+    # Skip on fork PRs to mirror the test job (which authenticates to Vault and
+    # so cannot run on fork PRs). Same-repo branches and pushes to main run
+    # normally.
+    if: >-
+      vars.DISABLE_MINDS_SNAPSHOT_CI != 'true' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    permissions:
+      contents: read
+      # Lets the use-vault-secrets step below mint a GitHub OIDC token for Vault.
+      id-token: write
+    # Exposes the freshly-built snapshot image id to the dependent test job.
+    outputs:
+      image_id: ${{ steps.snapshot.outputs.image_id }}
     steps:
+      # imbue Modal workspace token (id + secret) from Vault, migrated off the
+      # MODAL_TOKEN_ID variable + MODAL_TOKEN_SECRET GitHub Actions secret.
+      - name: Fetch Modal credentials from Vault
+        uses: imbue-ai/use-vault-secrets@main
+        with:
+          role: mngr_ci_gh
+          secrets: |
+            mngr/ci/MODAL_TOKEN_ID
+            mngr/ci/MODAL_TOKEN_SECRET
+
+      # The snapshot script rsyncs the checked-out working tree into the
+      # Modal image (it excludes .git), so a default shallow single-ref
+      # checkout is all it needs -- no history deepening required.
       - uses: actions/checkout@v6
 
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: '3.12'
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y tmux git openssh-server unison
-
-      - name: Configure Docker Hub mirror
-        run: |
-          echo '{"registry-mirrors": ["https://mirror.gcr.io"]}' | sudo tee /etc/docker/daemon.json
-          sudo systemctl restart docker
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
@@ -384,52 +517,266 @@ jobs:
       - name: Install Python dependencies
         run: uv sync --all-packages
 
-      - name: Install Claude Code CLI
-        run: npm install -g @anthropic-ai/claude-code@2.1.141
+      - name: Build and snapshot the minds e2e Modal image
+        id: snapshot
+        # The script builds the vm_runtime image, drives the real Electron
+        # workspace-creation flow inside it (building the FCT agent container
+        # with the local docker builder), docker-stops the container for a clean
+        # state, snapshots the filesystem, and writes the bare image id to the
+        # --image-id-output file for this job's output. It prints a per-phase
+        # timing summary (grep PHASE_TIMING) so the build's wall-clock is visible.
+        # No Job-A retry by design: a build failure should surface.
+        run: |
+          set -euo pipefail
+          uv run python scripts/snapshot_minds_e2e_state.py --image-id-output snapshot-image-id.txt 2>&1 | tee snapshot-build.log
+          IMAGE_ID="$(cat snapshot-image-id.txt)"
+          if [ -z "$IMAGE_ID" ]; then
+            echo "Snapshot script did not produce an image id" >&2
+            exit 1
+          fi
+          echo "image_id=$IMAGE_ID" >> "$GITHUB_OUTPUT"
+          echo "Built snapshot image: $IMAGE_ID"
 
-      - name: Run Docker release tests
-        run: PYTEST_MAX_DURATION_SECONDS=900 uv run pytest -n 0 --timeout 600 --no-cov --cov-fail-under=0 -v --tb=short -m '(docker or docker_sdk) and release'
+      # Record the built image in the Modal-Dict cleanup ledger immediately,
+      # so even if the run is cancelled before the test job's delete step the
+      # periodic sweep can still reclaim it.
+      - name: Record snapshot image in cleanup ledger
+        run: uv run python scripts/cleanup_modal_snapshot_images.py record "${{ steps.snapshot.outputs.image_id }}"
 
-  # Release tests - runs only on release branch pushes
-  test-release:
-    if: github.ref == 'refs/heads/release' && github.event_name == 'push'
-    runs-on: ${{ matrix.os }}
+  # Stands up one ephemeral per-run minds `ci-*` environment (real Modal env +
+  # Neon project + SuperTokens app), creates the fixed CI test user, and
+  # publishes the env's freshly-minted per-env secrets to a per-env Vault path
+  # (keyed by the env name) so the test job can read them back. Runs in
+  # parallel with build-minds-snapshot; test-minds-snapshot needs both.
+  build-minds-ci-env:
+    runs-on: ubuntu-latest
+    # Opt-in only: standing up a per-run ci env (Modal env + Neon + SuperTokens)
+    # on every push has real infra cost, so this runs ONLY on an explicit
+    # `workflow_dispatch` with `run_minds_release_tests=true`. Normal pushes/PRs
+    # skip it (and the `minds_services` step in test-minds-snapshot is gated the
+    # same way), so they never create a ci env.
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.run_minds_release_tests &&
+      vars.DISABLE_MINDS_SNAPSHOT_CI != 'true'
+    environment: minds-ci-env
+    permissions:
+      contents: read
+      id-token: write
     env:
-      MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID }}
-      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-        group: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+      # The ci tier deploys to the minds-dev Modal workspace, so the deploy
+      # authenticates with that workspace's token, fetched from Vault in the
+      # "Authenticate to Vault via GitHub OIDC" step below and exported as
+      # MODAL_TOKEN_ID / MODAL_TOKEN_SECRET (migrated off the
+      # MINDS_DEV_MODAL_TOKEN_* GitHub Actions variable/secret). The default
+      # imbue-workspace token would make `modal deploy` report imbue-* hostnames
+      # that mismatch the computed minds-dev-* URLs and abort the deploy.
+      VAULT_ADDR: https://vault-cluster-public-vault-df29b16f.9b573ab7.z1.hashicorp.cloud:8200
+      VAULT_NAMESPACE: admin
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+      - name: Install Python dependencies
+        run: uv sync --all-packages
+      - name: Install Vault CLI
+        run: |
+          set -euo pipefail
+          VAULT_VERSION=1.18.3
+          curl -sSLo /tmp/vault.zip "https://releases.hashicorp.com/vault/${VAULT_VERSION}/vault_${VAULT_VERSION}_linux_amd64.zip"
+          unzip -o /tmp/vault.zip -d /tmp/vault-bin
+          sudo mv /tmp/vault-bin/vault /usr/local/bin/vault
+          vault --version
+      # Exchange the GitHub OIDC token for a Vault token (role minds_ci_env_gh,
+      # gated on the minds-ci-env environment). `minds env deploy` and the
+      # per-run secret publish both shell out to the `vault` CLI, which reads
+      # ~/.vault-token, so we need a real token here -- not just exported values.
+      - name: Authenticate to Vault via GitHub OIDC
+        run: |
+          set -euo pipefail
+          OIDC=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=imbue-vault" | jq -r '.value')
+          VAULT_TOKEN=$(vault write -field=token auth/jwt_github_actions/login role=minds_ci_env_gh jwt="$OIDC")
+          echo "::add-mask::$VAULT_TOKEN"
+          printf '%s' "$VAULT_TOKEN" > "$HOME/.vault-token"
+          # Fetch the minds-dev Modal workspace token from Vault (migrated off
+          # the MINDS_DEV_MODAL_TOKEN_* GitHub Actions variable/secret) and
+          # export it for the modal-profile + deploy steps below, reusing the
+          # token just minted (the vault CLI reads VAULT_TOKEN from the env).
+          export VAULT_TOKEN
+          MODAL_TOKEN_ID=$(vault kv get -field=value -mount=secrets minds/ci/MODAL_TOKEN_ID)
+          MODAL_TOKEN_SECRET=$(vault kv get -field=value -mount=secrets minds/ci/MODAL_TOKEN_SECRET)
+          echo "::add-mask::$MODAL_TOKEN_ID"
+          echo "::add-mask::$MODAL_TOKEN_SECRET"
+          printf 'MODAL_TOKEN_ID<<__EOF__\n%s\n__EOF__\n' "$MODAL_TOKEN_ID" >> "$GITHUB_ENV"
+          printf 'MODAL_TOKEN_SECRET<<__EOF__\n%s\n__EOF__\n' "$MODAL_TOKEN_SECRET" >> "$GITHUB_ENV"
+      # `minds env deploy` for the ci tier requires deploy-mode activation, which
+      # pins MODAL_PROFILE to the tier's modal_workspace (minds-dev) and
+      # validates it against ~/.modal.toml. CI has no ~/.modal.toml, so synthesize
+      # a throwaway one from the Modal token env.
+      - name: Write throwaway Modal profile
+        run: |
+          cat > "$HOME/.modal.toml" <<EOF
+          [minds-dev]
+          token_id = "${MODAL_TOKEN_ID}"
+          token_secret = "${MODAL_TOKEN_SECRET}"
+          active = true
+          EOF
+      - name: Deploy the per-run ci env
+        run: uv run python apps/minds/scripts/test_deployments.py up
+      - name: Upload deployment env config
+        uses: actions/upload-artifact@v7
+        with:
+          name: minds-ci-env-config
+          path: .minds/iterate-default.json
+          include-hidden-files: true
+          retention-days: 7
+
+  # Backstop sweep for leaked ci-* envs (a per-run destroy that never fired
+  # because its job hard-crashed / was cancelled). Runs in parallel with the
+  # builds; enumerates Modal ci-* envs and destroys any older than 1 hour.
+  cleanup-minds-ci-envs:
+    runs-on: ubuntu-latest
+    # Backstop sweep of leaked ci-* envs. Only meaningful when we actually create
+    # envs, so gate it to the same opt-in as build-minds-ci-env -- normal pushes
+    # create nothing to sweep.
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.run_minds_release_tests &&
+      vars.DISABLE_MINDS_SNAPSHOT_CI != 'true'
+    environment: minds-ci-env
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      # ci envs live in the minds-dev Modal workspace (see build-minds-ci-env).
+      # The minds-dev Modal token is fetched from Vault in the auth step below
+      # and exported as MODAL_TOKEN_ID / MODAL_TOKEN_SECRET.
+      VAULT_ADDR: https://vault-cluster-public-vault-df29b16f.9b573ab7.z1.hashicorp.cloud:8200
+      VAULT_NAMESPACE: admin
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+      - name: Install Python dependencies
+        run: uv sync --all-packages
+      - name: Install Vault CLI
+        run: |
+          set -euo pipefail
+          VAULT_VERSION=1.18.3
+          curl -sSLo /tmp/vault.zip "https://releases.hashicorp.com/vault/${VAULT_VERSION}/vault_${VAULT_VERSION}_linux_amd64.zip"
+          unzip -o /tmp/vault.zip -d /tmp/vault-bin
+          sudo mv /tmp/vault-bin/vault /usr/local/bin/vault
+      - name: Authenticate to Vault via GitHub OIDC
+        run: |
+          set -euo pipefail
+          OIDC=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=imbue-vault" | jq -r '.value')
+          VAULT_TOKEN=$(vault write -field=token auth/jwt_github_actions/login role=minds_ci_env_gh jwt="$OIDC")
+          echo "::add-mask::$VAULT_TOKEN"
+          printf '%s' "$VAULT_TOKEN" > "$HOME/.vault-token"
+          # Fetch the minds-dev Modal workspace token from Vault (migrated off
+          # the MINDS_DEV_MODAL_TOKEN_* GitHub Actions variable/secret) and
+          # export it for the modal-profile + deploy steps below, reusing the
+          # token just minted (the vault CLI reads VAULT_TOKEN from the env).
+          export VAULT_TOKEN
+          MODAL_TOKEN_ID=$(vault kv get -field=value -mount=secrets minds/ci/MODAL_TOKEN_ID)
+          MODAL_TOKEN_SECRET=$(vault kv get -field=value -mount=secrets minds/ci/MODAL_TOKEN_SECRET)
+          echo "::add-mask::$MODAL_TOKEN_ID"
+          echo "::add-mask::$MODAL_TOKEN_SECRET"
+          printf 'MODAL_TOKEN_ID<<__EOF__\n%s\n__EOF__\n' "$MODAL_TOKEN_ID" >> "$GITHUB_ENV"
+          printf 'MODAL_TOKEN_SECRET<<__EOF__\n%s\n__EOF__\n' "$MODAL_TOKEN_SECRET" >> "$GITHUB_ENV"
+      - name: Write throwaway Modal profile
+        run: |
+          cat > "$HOME/.modal.toml" <<EOF
+          [minds-dev]
+          token_id = "${MODAL_TOKEN_ID}"
+          token_secret = "${MODAL_TOKEN_SECRET}"
+          active = true
+          EOF
+      - name: Sweep leaked ci-* envs older than 1 hour
+        run: uv run python apps/minds/scripts/test_deployments.py sweep --max-age-hours 1
+
+  test-minds-snapshot:
+    runs-on: ubuntu-latest
+    needs: [build-minds-snapshot, build-minds-ci-env]
+    # Runs on every push/PR for the snapshot-resume tests (which need only the
+    # built image, not a ci env). `build-minds-ci-env` is opt-in, so it is
+    # normally skipped -- hence `!cancelled()` (which drops the implicit
+    # "a skipped dependency skips me" rule) plus an explicit
+    # `build-minds-snapshot` success gate, so a skipped ci-env build does not
+    # skip this whole job. The `minds_services` steps below are themselves gated
+    # on the same opt-in and only run when the ci env was actually built.
+    # Mirror the build job's fork-PR skip (the job authenticates to Vault, so it
+    # cannot run on fork PRs either).
+    if: >-
+      !cancelled() &&
+      vars.DISABLE_MINDS_SNAPSHOT_CI != 'true' &&
+      needs.build-minds-snapshot.result == 'success' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    # The GitHub Environment whose claim the minds_ci_test_gh Vault role is
+    # bound to; gates which workflows can mint the test secrets.
+    environment: minds-ci-test
+    # `checks: write` is required by the report-flaky-aware-tests composite
+    # action. `id-token: write` lets the use-vault-secrets action mint an OIDC
+    # token for Vault. No `contents: write` here: this job boots from the
+    # prebuilt snapshot image via --override-image-id and never builds or
+    # caches an offload checkpoint, so it has no image-cache git notes to push.
+    permissions:
+      contents: read
+      checks: write
+      id-token: write
+    env:
+      # The imbue Modal workspace token (id + secret) is fetched from Vault in
+      # the "Fetch Anthropic key and Modal credentials from Vault" step below
+      # and exported as MODAL_TOKEN_ID / MODAL_TOKEN_SECRET (migrated off the
+      # MODAL_TOKEN_ID variable + MODAL_TOKEN_SECRET GitHub Actions secret).
+      # The minds_services fixtures read the per-env secrets back from Vault
+      # (keyed by env name, available in the downloaded deployment_envs.json).
+      VAULT_ADDR: https://vault-cluster-public-vault-df29b16f.9b573ab7.z1.hashicorp.cloud:8200
+      VAULT_NAMESPACE: admin
 
     steps:
       - uses: actions/checkout@v6
+
+      # The Anthropic key (for live checks) is always needed; masked in the logs
+      # and forwarded into the offload sandbox by the just recipe below. Read via
+      # the minds-scoped minds_ci_test_gh role.
+      - name: Fetch Anthropic key from Vault
+        uses: imbue-ai/use-vault-secrets@main
+        with:
+          role: minds_ci_test_gh
+          secrets: |
+            minds/ci/litellm/ANTHROPIC_API_KEY
+
+      # The imbue Modal workspace token (id + secret) is fetched via the
+      # monorepo-wide mngr_ci_gh role, not minds_ci_test_gh: this job's
+      # minds-ci-test environment claim still satisfies mngr_ci_gh's
+      # repository-only binding, so minds_ci_test_gh stays scoped to minds/ci.
+      # Exported as MODAL_TOKEN_ID / MODAL_TOKEN_SECRET.
+      - name: Fetch Modal credentials from Vault
+        uses: imbue-ai/use-vault-secrets@main
+        with:
+          role: mngr_ci_gh
+          secrets: |
+            mngr/ci/MODAL_TOKEN_ID
+            mngr/ci/MODAL_TOKEN_SECRET
 
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: '3.12'
-
-      - name: Install system dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y tmux git openssh-server unison
-
-      - name: Install system dependencies (macOS)
-        if: runner.os == 'macOS'
-        run: brew install tmux unison
-
-      - name: Install Claude Code CLI
-        run: npm install -g @anthropic-ai/claude-code@2.1.141
-
-      - name: Configure Docker Hub mirror
-        if: runner.os == 'Linux'
-        run: |
-          echo '{"registry-mirrors": ["https://mirror.gcr.io"]}' | sudo tee /etc/docker/daemon.json
-          sudo systemctl restart docker
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
@@ -439,23 +786,275 @@ jobs:
       - name: Install Python dependencies
         run: uv sync --all-packages
 
-      - name: Run release tests
+      - name: Install just
+        uses: extractions/setup-just@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache offload binary
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/offload
+          key: cargo-offload-0.9.10-${{ runner.os }}
+
+      - name: Install offload
         run: |
-          export IS_RELEASE=1
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            # macOS runners don't have Docker; skip Docker-marked tests
-            uv run pytest -n 0 --timeout 90 --override-ini='addopts=-n 0' --no-cov -v --tb=short --splits 12 --group ${{ matrix.group }} --splitting-algorithm=least_duration -m 'release and not docker and not docker_sdk'
-          else
-            uv run pytest -n 0 --timeout 90 --override-ini='addopts=-n 0' --no-cov -v --tb=short --splits 12 --group ${{ matrix.group }} --splitting-algorithm=least_duration
+          if ! command -v offload &> /dev/null || ! offload --version | grep -q '0.9.10'; then
+            cargo install offload@0.9.10 --force
           fi
 
-      - name: Upload test timing data
-        if: always()
-        uses: actions/upload-artifact@v4
+      - name: Run minds snapshot-resume tests via offload
+        id: tests
+        run: just test-offload-minds-snapshot "${{ needs.build-minds-snapshot.outputs.image_id }}"
+
+      # The minds_services tests run directly on the runner (not in the offload
+      # sandbox): they only need network access to the per-run env's connector +
+      # litellm and a Vault token to read the per-run secrets + CI test-user
+      # credentials. Opt-in only: these steps run ONLY when the ci env was built
+      # (the same `workflow_dispatch` + `run_minds_release_tests` gate as
+      # build-minds-ci-env); on a normal push they are skipped and this job runs
+      # just the snapshot-resume tests above. `!cancelled()` lets them run even
+      # if the offload step failed, so both report.
+      - name: Install Vault CLI
+        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.run_minds_release_tests }}
+        run: |
+          set -euo pipefail
+          VAULT_VERSION=1.18.3
+          curl -sSLo /tmp/vault.zip "https://releases.hashicorp.com/vault/${VAULT_VERSION}/vault_${VAULT_VERSION}_linux_amd64.zip"
+          unzip -o /tmp/vault.zip -d /tmp/vault-bin
+          sudo mv /tmp/vault-bin/vault /usr/local/bin/vault
+      - name: Authenticate to Vault via GitHub OIDC
+        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.run_minds_release_tests }}
+        run: |
+          set -euo pipefail
+          OIDC=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=imbue-vault" | jq -r '.value')
+          VAULT_TOKEN=$(vault write -field=token auth/jwt_github_actions/login role=minds_ci_test_gh jwt="$OIDC")
+          echo "::add-mask::$VAULT_TOKEN"
+          printf '%s' "$VAULT_TOKEN" > "$HOME/.vault-token"
+      - name: Download deployment env config
+        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.run_minds_release_tests }}
+        uses: actions/download-artifact@v7
         with:
-          name: test-durations-release-${{ matrix.os }}-${{ matrix.group }}
-          path: .test_output/test_durations_*.json
-          # The .test_output/ parent is hidden, so upload-artifact's default
-          # of stripping hidden paths would drop the entire glob match.
+          name: minds-ci-env-config
+          path: .minds
+      - name: Run minds_services tests against the per-run ci env
+        id: services_tests
+        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.run_minds_release_tests }}
+        run: |
+          MINDS_DEPLOYMENT_TEST_ENVS_JSON="$PWD/.minds/iterate-default.json" \
+            uv run pytest -m minds_services apps/minds/deployment_tests/ --no-cov -p no:xdist -v
+
+      - name: Report test results
+        if: always()
+        uses: ./.github/actions/report-flaky-aware-tests
+        with:
+          check-name: Minds Snapshot Resume Tests
+          junit-path: test-results/junit.xml
+          tests-outcome: ${{ steps.tests.outcome }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-results-minds-snapshot
+          path: test-results/
           include-hidden-files: true
           retention-days: 30
+
+      # Delete the snapshot image only on a fully successful run (this step
+      # is skipped if any prior step -- including the test-result report --
+      # failed, so a failing run keeps the image around for debugging; the
+      # periodic sweep reclaims it later either way).
+      - name: Delete snapshot image after a successful run
+        if: success()
+        run: uv run python scripts/cleanup_modal_snapshot_images.py delete "${{ needs.build-minds-snapshot.outputs.image_id }}"
+
+  # Destroys the per-run ci env after the test stage, always (even on failure or
+  # cancellation). Separate job because destroy needs the broad minds_ci_env_gh
+  # Vault role / minds-ci-env environment, which the test job (minds-ci-test)
+  # does not have. The parallel cleanup-minds-ci-envs sweep is the backstop if
+  # this job itself never runs.
+  destroy-minds-ci-env:
+    runs-on: ubuntu-latest
+    needs: [build-minds-ci-env, test-minds-snapshot]
+    # Teardown for the opt-in per-run env: `always()` so it tears down even on
+    # test failure/cancellation, but gated to the same opt-in as
+    # build-minds-ci-env so it is skipped on normal pushes (nothing to destroy).
+    if: >-
+      always() &&
+      github.event_name == 'workflow_dispatch' &&
+      inputs.run_minds_release_tests &&
+      vars.DISABLE_MINDS_SNAPSHOT_CI != 'true'
+    environment: minds-ci-env
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      # The ci tier deploys to the minds-dev Modal workspace, so the deploy
+      # authenticates with that workspace's token, fetched from Vault in the
+      # "Authenticate to Vault via GitHub OIDC" step below and exported as
+      # MODAL_TOKEN_ID / MODAL_TOKEN_SECRET (migrated off the
+      # MINDS_DEV_MODAL_TOKEN_* GitHub Actions variable/secret). The default
+      # imbue-workspace token would make `modal deploy` report imbue-* hostnames
+      # that mismatch the computed minds-dev-* URLs and abort the deploy.
+      VAULT_ADDR: https://vault-cluster-public-vault-df29b16f.9b573ab7.z1.hashicorp.cloud:8200
+      VAULT_NAMESPACE: admin
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+      - name: Install Python dependencies
+        run: uv sync --all-packages
+      - name: Install Vault CLI
+        run: |
+          set -euo pipefail
+          VAULT_VERSION=1.18.3
+          curl -sSLo /tmp/vault.zip "https://releases.hashicorp.com/vault/${VAULT_VERSION}/vault_${VAULT_VERSION}_linux_amd64.zip"
+          unzip -o /tmp/vault.zip -d /tmp/vault-bin
+          sudo mv /tmp/vault-bin/vault /usr/local/bin/vault
+      - name: Authenticate to Vault via GitHub OIDC
+        run: |
+          set -euo pipefail
+          OIDC=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=imbue-vault" | jq -r '.value')
+          VAULT_TOKEN=$(vault write -field=token auth/jwt_github_actions/login role=minds_ci_env_gh jwt="$OIDC")
+          echo "::add-mask::$VAULT_TOKEN"
+          printf '%s' "$VAULT_TOKEN" > "$HOME/.vault-token"
+          # Fetch the minds-dev Modal workspace token from Vault (migrated off
+          # the MINDS_DEV_MODAL_TOKEN_* GitHub Actions variable/secret) and
+          # export it for the modal-profile + deploy steps below, reusing the
+          # token just minted (the vault CLI reads VAULT_TOKEN from the env).
+          export VAULT_TOKEN
+          MODAL_TOKEN_ID=$(vault kv get -field=value -mount=secrets minds/ci/MODAL_TOKEN_ID)
+          MODAL_TOKEN_SECRET=$(vault kv get -field=value -mount=secrets minds/ci/MODAL_TOKEN_SECRET)
+          echo "::add-mask::$MODAL_TOKEN_ID"
+          echo "::add-mask::$MODAL_TOKEN_SECRET"
+          printf 'MODAL_TOKEN_ID<<__EOF__\n%s\n__EOF__\n' "$MODAL_TOKEN_ID" >> "$GITHUB_ENV"
+          printf 'MODAL_TOKEN_SECRET<<__EOF__\n%s\n__EOF__\n' "$MODAL_TOKEN_SECRET" >> "$GITHUB_ENV"
+      - name: Write throwaway Modal profile
+        run: |
+          cat > "$HOME/.modal.toml" <<EOF
+          [minds-dev]
+          token_id = "${MODAL_TOKEN_ID}"
+          token_secret = "${MODAL_TOKEN_SECRET}"
+          active = true
+          EOF
+      - name: Download deployment env config
+        continue-on-error: true
+        uses: actions/download-artifact@v7
+        with:
+          name: minds-ci-env-config
+          path: .minds
+      - name: Destroy the per-run ci env
+        run: uv run python apps/minds/scripts/test_deployments.py down
+
+  # Release tier (manual). The home for *all* minds release tests, gated to a
+  # manual run rather than every push (the minds release procedure is a manual
+  # dispatch, not a `v*` tag -- so these do not run in release-tests.yml, which
+  # excludes the whole minds tree by path). Dispatch via the Actions UI (or
+  # `gh workflow run ci.yml -f run_minds_release_tests=true`). Runs two groups:
+  #   1. The heavy minds_deployment tests -- each mints + destroys its own
+  #      ephemeral ci env (deploy / rollback / destroy round-trip). Uses the
+  #      minds-dev Modal workspace + the broad minds_ci_env_gh Vault role (the
+  #      tests deploy envs and read neon-admin/supertokens), like
+  #      build-minds-ci-env. Self-contained (no shared env needed): the
+  #      `deployment-only` orchestrator writes a shared-env-free
+  #      deployment_envs.json and runs `pytest -m minds_deployment`; the
+  #      ephemeral_env fixture deploys + tears down per test.
+  #   2. The plain minds @release tests that need no ci env (version-alignment,
+  #      SSE redirect, the opt-in AWS EC2 test). Selected by tag, not path.
+  test-minds-release:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.run_minds_release_tests &&
+      vars.DISABLE_MINDS_SNAPSHOT_CI != 'true'
+    environment: minds-ci-env
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      # The minds-dev Modal token is fetched from Vault in the auth step below
+      # and exported as MODAL_TOKEN_ID / MODAL_TOKEN_SECRET (migrated off the
+      # MINDS_DEV_MODAL_TOKEN_* GitHub Actions variable/secret).
+      VAULT_ADDR: https://vault-cluster-public-vault-df29b16f.9b573ab7.z1.hashicorp.cloud:8200
+      VAULT_NAMESPACE: admin
+      # Fixed, HOME-independent browser location for test_sse_redirect. The minds
+      # conftest autouse fixture re-points $HOME at a per-test tmpdir, so the
+      # default `$HOME/.cache/ms-playwright` install location would be invisible
+      # to the test process. Both the install step and the test read this var.
+      PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.ms-playwright
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+      - name: Install Python dependencies
+        run: uv sync --all-packages
+      - name: Install Vault CLI
+        run: |
+          set -euo pipefail
+          VAULT_VERSION=1.18.3
+          curl -sSLo /tmp/vault.zip "https://releases.hashicorp.com/vault/${VAULT_VERSION}/vault_${VAULT_VERSION}_linux_amd64.zip"
+          unzip -o /tmp/vault.zip -d /tmp/vault-bin
+          sudo mv /tmp/vault-bin/vault /usr/local/bin/vault
+      - name: Authenticate to Vault via GitHub OIDC
+        run: |
+          set -euo pipefail
+          OIDC=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=imbue-vault" | jq -r '.value')
+          VAULT_TOKEN=$(vault write -field=token auth/jwt_github_actions/login role=minds_ci_env_gh jwt="$OIDC")
+          echo "::add-mask::$VAULT_TOKEN"
+          printf '%s' "$VAULT_TOKEN" > "$HOME/.vault-token"
+          # Fetch the minds-dev Modal workspace token from Vault (migrated off
+          # the MINDS_DEV_MODAL_TOKEN_* GitHub Actions variable/secret) and
+          # export it for the modal-profile + deploy steps below, reusing the
+          # token just minted (the vault CLI reads VAULT_TOKEN from the env).
+          export VAULT_TOKEN
+          MODAL_TOKEN_ID=$(vault kv get -field=value -mount=secrets minds/ci/MODAL_TOKEN_ID)
+          MODAL_TOKEN_SECRET=$(vault kv get -field=value -mount=secrets minds/ci/MODAL_TOKEN_SECRET)
+          echo "::add-mask::$MODAL_TOKEN_ID"
+          echo "::add-mask::$MODAL_TOKEN_SECRET"
+          printf 'MODAL_TOKEN_ID<<__EOF__\n%s\n__EOF__\n' "$MODAL_TOKEN_ID" >> "$GITHUB_ENV"
+          printf 'MODAL_TOKEN_SECRET<<__EOF__\n%s\n__EOF__\n' "$MODAL_TOKEN_SECRET" >> "$GITHUB_ENV"
+      - name: Write throwaway Modal profile
+        run: |
+          cat > "$HOME/.modal.toml" <<EOF
+          [minds-dev]
+          token_id = "${MODAL_TOKEN_ID}"
+          token_secret = "${MODAL_TOKEN_SECRET}"
+          active = true
+          EOF
+      - name: Run minds release-tier tests (minds_deployment)
+        run: uv run python apps/minds/scripts/test_deployments.py deployment-only
+      # The plain minds @release tests need no ci env, so run them here too
+      # (folded into the minds release job rather than the mngr release
+      # workflow). `!cancelled()` so they still run if the deployment group
+      # above failed. `test_sse_redirect` drives a real browser, so install the
+      # Chromium the project's playwright dep expects; `test_aws_workspace_release`
+      # skips unless AWS creds + MNGR_AWS_RELEASE_TESTS are set (they are not here).
+      - name: Install Playwright Chromium (for the SSE-redirect release test)
+        if: ${{ !cancelled() }}
+        run: uv run playwright install --with-deps chromium
+      - name: Run plain minds release tests (no ci env needed)
+        if: ${{ !cancelled() }}
+        # Clear apps/minds's addopts (pytest picks up apps/minds/pyproject.toml
+        # as the config when the target is apps/minds): its `--timeout=10` is far
+        # too tight for these release tests (test_sse_redirect launches a browser
+        # and waits on an SSE redirect; the version-alignment test does a network
+        # fetch). Set an explicit, generous per-test timeout instead.
+        run: uv run pytest apps/minds --override-ini='addopts=' --no-cov -p no:xdist --timeout=300 -v -m 'release and not minds_deployment and not minds_services and not minds_snapshot_resume'

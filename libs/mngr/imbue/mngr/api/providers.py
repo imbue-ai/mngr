@@ -6,12 +6,16 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderEmptyError
 from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.base_provider import BaseProviderInstance
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.registry import build_provider_instance
-from imbue.mngr.providers.registry import get_config_class
 from imbue.mngr.providers.registry import list_backends
+from imbue.mngr.providers.registry import resolve_backend_and_config
 
 # Cache provider instances by (name, mngr_ctx identity) so the same instance
 # is reused across calls within the same context. This prevents accumulating
@@ -53,7 +57,6 @@ def reset_provider_instances() -> None:
 def get_provider_instance(
     name: ProviderInstanceName,
     mngr_ctx: MngrContext,
-    is_for_host_creation: bool = False,
 ) -> BaseProviderInstance:
     """Get or create a provider instance by name.
 
@@ -62,11 +65,10 @@ def get_provider_instance(
     back to treating the name as a backend name with defaults.
     The returned instance is tracked for cleanup at process exit via atexit.
 
-    ``is_for_host_creation`` is forwarded to the backend's
-    ``build_provider_instance`` so backends with one-time bootstrap resources
-    (currently: the Modal backend's per-user environment) can distinguish
-    create-host construction from construction for read-only or existing-host
-    operations. Only the ``mngr create`` path sets this to ``True``.
+    Always treated as read-only-or-existing-host construction: backends must
+    not bootstrap one-time resources here. Callers about to create a host
+    should first call ``backend.bootstrap_for_host_creation(...)`` directly
+    (see ``api/create.py``).
     """
     _ensure_atexit_registered()
 
@@ -76,34 +78,31 @@ def get_provider_instance(
         logger.trace("Returning cached provider instance {}", name)
         return _instance_cache[cache_key]
 
-    # Check if there's a configured provider instance with this name
-    if name in mngr_ctx.config.providers:
-        provider_config = mngr_ctx.config.providers[name]
-        instance = build_provider_instance(
-            instance_name=name,
-            backend_name=provider_config.backend,
-            config=provider_config,
-            mngr_ctx=mngr_ctx,
-            is_for_host_creation=is_for_host_creation,
-        )
-        logger.trace("Built provider instance {} from config with backend {}", name, provider_config.backend)
-    else:
-        # Otherwise, treat the name as a backend name and use defaults
-        # This supports the common case of just specifying "--provider local" or "--provider docker"
-        backend_name = ProviderBackendName(str(name))
-        config_class = get_config_class(backend_name)
-        default_config = config_class(backend=backend_name)
-        instance = build_provider_instance(
-            instance_name=name,
-            backend_name=backend_name,
-            config=default_config,
-            mngr_ctx=mngr_ctx,
-            is_for_host_creation=is_for_host_creation,
-        )
-        logger.trace("Built provider instance {} using backend name as default", name)
+    _, provider_config = resolve_backend_and_config(name, mngr_ctx)
+    instance = build_provider_instance(
+        instance_name=name,
+        backend_name=provider_config.backend,
+        config=provider_config,
+        mngr_ctx=mngr_ctx,
+    )
+    logger.trace("Built provider instance {} with backend {}", name, provider_config.backend)
 
     _instance_cache[cache_key] = instance
     return instance
+
+
+def get_local_host(mngr_ctx: MngrContext) -> OnlineHostInterface:
+    """Resolve the local host as an OnlineHostInterface.
+
+    This is the canonical way to obtain a local host to use as an rsync/copy
+    source (e.g. for ``remote_host.copy_directory(local_host, ...)``) or to run
+    local commands through the host interface.
+    """
+    provider = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx)
+    host_interface = provider.get_host(HostName(LOCAL_HOST_NAME))
+    if not isinstance(host_interface, OnlineHostInterface):
+        raise MngrError("Local host is not online")
+    return host_interface
 
 
 def _is_backend_enabled(backend_name: str, mngr_ctx: MngrContext) -> bool:

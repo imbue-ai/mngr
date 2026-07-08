@@ -47,18 +47,20 @@ cd apps/minds && pnpm install && cd ../..
 git -C ~/project/forever-claude-template worktree add \
     -b "$(git rev-parse --abbrev-ref HEAD)" \
     "$PWD/.external_worktrees/forever-claude-template" \
-    josh/start-minds   # or another base branch / tag
+    origin/main   # base branch/tag; origin/main is the safe default
 
 # 3. (Once) Bootstrap your personal dev env. Pick a name like
-#    "<your-user>-dev" (convention; any DevEnvName works). --create
-#    idempotently mkdirs ~/.minds-<your-user>-dev/ if it doesn't exist.
-eval "$(uv run minds env activate --create <your-user>-dev)"
+#    "dev-<your-user>" (convention; the DevEnvName validator requires the
+#    tier prefix FIRST -- "dev-" or "ci-" -- so "dev-josh" is valid but
+#    "josh-dev" is not). --create idempotently mkdirs the env root
+#    ~/.minds-dev-<your-user>/ if it doesn't exist.
+eval "$(uv run minds env activate --create dev-<your-user>)"
 uv run minds env deploy
 
 # 4. (Every time you start the app, in a fresh shell) Activate the env
 #    and run `just minds-start`. The recipe re-syncs live mngr ->
 #    vendor/mngr/ and launches Electron.
-eval "$(uv run minds env activate <your-user>-dev)"
+eval "$(uv run minds env activate dev-<your-user>)"
 just minds-start
 ```
 
@@ -71,14 +73,14 @@ If you want to run against prod / staging instead of a personal dev env, use `ev
 1. Verifies a minds env is activated in the shell (refuses with a helpful error if not).
 2. Verifies the FCT worktree exists at `.external_worktrees/forever-claude-template/` and bails with a helpful error if not.
 3. Rsyncs the live mngr working tree into the FCT worktree's `vendor/mngr/` using the same exclusions as the pool-bake's `--mngr-source` path (`.git`, `__pycache__`, `.venv`, `node_modules`, etc.). Uncommitted changes are included; nothing is committed in the FCT worktree.
-4. Launches Electron with the right `MINDS_WORKSPACE_*` env vars so the create-form auto-fills "repository", "name", and "branch".
+4. Launches Electron with the right `MINDS_WORKSPACE_*` env vars so the create-form auto-fills "repository" and "branch". The workspace name is not prefilled -- the form generates a `mind-N` name unless you type one into its advanced "Name" field.
 
 ## Iterating on a running agent
 
 After making changes to any component (mngr, the template's system_interface, the template, etc.), sync them into a running agent's container:
 
 ```bash
-eval "$(uv run minds env activate <your-user>-dev)"
+eval "$(uv run minds env activate dev-<your-user>)"
 apps/minds/scripts/propagate_changes \
   --user root --host 127.0.0.1 --port <SSH_PORT> \
   --key <SSH_KEY_PATH>
@@ -99,7 +101,7 @@ The whole cycle takes about 5-10 seconds.
 For local (non-container) agents:
 
 ```bash
-eval "$(uv run minds env activate <your-user>-dev)"
+eval "$(uv run minds env activate dev-<your-user>)"
 apps/minds/scripts/propagate_changes --target /path/to/agent/workdir
 ```
 
@@ -108,15 +110,15 @@ apps/minds/scripts/propagate_changes --target /path/to/agent/workdir
 The port is randomly assigned by Docker per agent. The container name is `<MNGR_PREFIX><agent-name>-host` (set by your activated env's `MNGR_PREFIX`):
 
 ```bash
-eval "$(uv run minds env activate <your-user>-dev)"   # so we know MNGR_PREFIX
-docker ps --format '{{.Names}} {{.Ports}}' | grep "${MNGR_PREFIX}mindtest"
-# e.g.  minds-<your-user>-dev-mindtest-host 0.0.0.0:32772->22/tcp
+eval "$(uv run minds env activate dev-<your-user>)"   # so we know MNGR_PREFIX
+docker ps --format '{{.Names}} {{.Ports}}' | grep "${MNGR_PREFIX}mind-"
+# e.g.  minds-dev-<your-user>-mind-1-host 0.0.0.0:32772->22/tcp
 ```
 
 The SSH key for a minds Docker agent lives under the activated env's `MNGR_HOST_DIR`:
 
 ```bash
-eval "$(uv run minds env activate <your-user>-dev)"   # exports MNGR_HOST_DIR
+eval "$(uv run minds env activate dev-<your-user>)"   # exports MNGR_HOST_DIR
 find "${MNGR_HOST_DIR}/profiles" -path "*/docker/*/keys/docker_ssh_key"
 ```
 
@@ -132,9 +134,23 @@ Do NOT use a key from `~/.mngr/profiles/...` -- that belongs to non-minds mngr a
 | `just minds-stop` | Kill the desktop client started in this worktree by `just minds-start`. |
 | `just minds-build` | Build the desktop client distributable via `todesktop` (slow, only for releases). |
 | `apps/minds/scripts/propagate_changes ...` | Sync changes into a running container without restarting the Electron app from scratch. See "Iterating on a running agent". Requires an activated env. |
-| `mngr imbue_cloud admin pool create --mngr-source <monorepo-root> ...` | Bake a Vultr pool host. `--mngr-source` rsyncs the monorepo into the FCT vendor/mngr/ for the duration of the bake. (For pool hosts only -- has no effect on Docker mode.) Requires an activated env. |
+| `mngr imbue_cloud admin pool create --mngr-source <monorepo-root> ...` | Bake an OVH pool host (the imbue_cloud pool's VPS provider). `--mngr-source` rsyncs the monorepo into the FCT vendor/mngr/ for the duration of the bake. (For pool hosts only -- has no effect on Docker mode.) Requires an activated env. Typically driven via the `minds pool create` wrapper, which injects OVH + pool-ssh credentials from Vault. |
 | `just deploy [--yes-i-mean-<tier>]` | Run `minds env deploy` on the activated env. For dev envs: provisions Modal env / Neon / SuperTokens + deploys both Modal apps + writes `~/.minds-<env>/{client.toml,secrets.toml}`. For tier deploys: pushes Vault secrets to Modal + deploys both Modal apps, no local state written. |
 | `just sync-vendor-mngr <fct-path>` | One-shot: snapshot mngr HEAD into FCT's vendor/mngr/ via `git archive` and commit in FCT. Use for "release" syncs, not dev iteration (it commits and only carries committed mngr content). |
+
+### Vault (for pool / slice bakes)
+
+Slice bakes (`minds pool create`, `just bake-slice-{dev,prod}`) read secrets from Vault (the tier's `POOL_SSH_PRIVATE_KEY`, the host-pool DSN, etc.). (Baking new OVH classic VPS pool hosts is deprecated and no longer supported.) Two things to know:
+
+- **Login is interactive.** Run `vault login -method=oidc` once per session (browser OIDC); the token lands at `~/.vault-token`.
+- **`VAULT_ADDR` / `VAULT_NAMESPACE` are usually NOT set in a non-interactive shell.** The minds wrappers (`minds pool ...` and the `bake-*` recipes) apply the imbue HCP defaults automatically via `apps/minds/imbue/minds/envs/vault_reader.py`, so they "just work" with only the token -- **prefer them**. If you run a **raw** `vault` or `mngr imbue_cloud admin ...` command, a bare `vault` defaults to `https://127.0.0.1:8200` and fails with "connection refused" -- that is a missing address, **NOT** "logged out" (don't ask the operator to re-login, and don't ask them for `VAULT_ADDR`). Export the defaults first:
+
+  ```bash
+  export VAULT_ADDR=https://vault-cluster-public-vault-df29b16f.9b573ab7.z1.hashicorp.cloud:8200
+  export VAULT_NAMESPACE=admin
+  ```
+
+  Single source of truth: `_DEFAULT_VAULT_ADDR` / `_DEFAULT_VAULT_NAMESPACE` in `vault_reader.py` -- read them from there in case they drift.
 
 ### Env vars `just minds-start` sets
 
@@ -143,7 +159,6 @@ Do NOT use a key from `~/.mngr/profiles/...` -- that belongs to non-minds mngr a
 | Variable | Purpose | Default |
 |----------|---------|---------|
 | `MINDS_WORKSPACE_GIT_URL` | Template repo path/URL for the create-form | `<repo>/.external_worktrees/forever-claude-template/` if it exists, else `~/project/forever-claude-template` |
-| `MINDS_WORKSPACE_NAME` | Default agent name in the create-form | `mindtest` (override with `agent_name=...`) |
 | `MINDS_WORKSPACE_BRANCH` | Default git branch for the template | The FCT path's current branch (matches your mngr branch when you set up the worktree on a parallel-named branch) |
 
 The desktop client reads these in `apps/minds/imbue/minds/desktop_client/templates.py`.
@@ -162,24 +177,13 @@ If this chain breaks (orphaned `mngr observe`/`mngr event` processes appear), so
 
 ### Rsync exclusions
 
-`just minds-start`, `mngr imbue_cloud admin pool create --mngr-source ...`, and `propagate_changes` all share one form when rsyncing into `vendor/mngr/`:
-
-```
-rsync -a --delete --filter=':- .gitignore' --exclude=.git --exclude=uv.lock ...
-```
-
-`--filter=':- .gitignore'` is rsync's dir-merge filter: it reads `.gitignore` at each directory level under the source and applies its `-` (exclude) rules. That covers `__pycache__`, `.venv`, `node_modules`, `.test_output`, `.mypy_cache`, `.ruff_cache`, `.pytest_cache`, `.external_worktrees`, and anything else listed in the source repo's gitignore.
-
-The two manual excludes are for things gitignore deliberately doesn't list:
-
-- `.git` -- gitignore never lists it (git's internal dir).
-- `uv.lock` -- intentionally committed at the mngr root, but each install context should regenerate its own.
+`just minds-start`, `mngr imbue_cloud admin pool create --mngr-source ...`, and `propagate_changes` all rsync into `vendor/mngr/` using one shared form (`rsync -a --delete --filter=':- .gitignore' --exclude=.git --exclude=uv.lock`). The form, the rationale for each exclude, and the source-of-truth constants live in `apps/minds/docs/vendor-mngr-sync.md`.
 
 `propagate_changes` additionally protects `runtime/`, `.mngr/`, and `.claude/settings.local.json` from deletion when rsyncing into `/code/`.
 
 ### Editable installs
 
-The Dockerfile uses `uv tool install -e` for mngr (vendored under `vendor/mngr/`) and for the system_interface (at `apps/system_interface/`), so Python code changes in either location are picked up immediately after rsync. Frontend changes require the `npm run build` step (done automatically by `propagate_changes`).
+The FCT Docker build installs mngr (`vendor/mngr/libs/mngr`) and the system_interface (`apps/system_interface/`) editable via `uv tool install -e`, run by `scripts/build_workspace.sh` (which the Dockerfile invokes with `RUN bash`), so Python code changes in either location are picked up immediately after rsync. Frontend changes require the `npm run build` step (done automatically by `propagate_changes`).
 
 ### Template settings
 
@@ -226,14 +230,13 @@ This is what `just minds-start` does internally, what `mngr imbue_cloud admin po
 ### Start electron by hand without the just recipe
 
 ```bash
-eval "$(uv run minds env activate <your-user>-dev)"
+eval "$(uv run minds env activate dev-<your-user>)"
 TEMPLATE_BRANCH=$(cd .external_worktrees/forever-claude-template && git branch --show-current)
 (
   set -a
   source .env
   set +a
   export MINDS_WORKSPACE_GIT_URL="$(pwd)/.external_worktrees/forever-claude-template"
-  export MINDS_WORKSPACE_NAME="mindtest"
   export MINDS_WORKSPACE_BRANCH="$TEMPLATE_BRANCH"
   cd apps/minds && pnpm start
 )

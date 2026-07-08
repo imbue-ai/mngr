@@ -26,22 +26,27 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import format_nanosecond_iso_timestamp
 from imbue.imbue_common.logging import generate_log_event_id
 from imbue.imbue_common.logging import log_span
+from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
-from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
-from imbue.mngr.api.discovery_events import HostDestroyedEvent
+from imbue.mngr.api.discovery_aggregator import AggregatorDelta
+from imbue.mngr.api.discovery_aggregator import DiscoveryStateAggregator
+from imbue.mngr.api.discovery_events import DiscoveryErrorEvent
+from imbue.mngr.api.discovery_events import ProviderDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
 from imbue.mngr.api.list import list_agents
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import HostState
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
 
 # === Constants ===
@@ -321,6 +326,37 @@ class _KnownHost(FrozenModel):
     host_name: HostName = Field(description="Human-readable name of the host")
 
 
+def _make_unknown_agent_details(last_known: AgentDetails) -> AgentDetails:
+    """Build a synthetic AgentDetails representing an UNKNOWN agent.
+
+    Copies all fields from the last successfully-observed AgentDetails and
+    overrides only the lifecycle states: ``state`` and ``host.state`` are both
+    set to UNKNOWN, signalling "the provider that owns this agent could not be
+    accessed during the most recent discovery attempt." Other fields (name,
+    type, work_dir, etc.) retain their last-known values so the desktop client
+    and ``mngr_notifications`` continue to identify the agent.
+    """
+    unknown_host = last_known.host.model_copy_update(
+        to_update(last_known.host.field_ref().state, HostState.UNKNOWN),
+    )
+    return last_known.model_copy_update(
+        to_update(last_known.field_ref().state, AgentLifecycleState.UNKNOWN),
+        to_update(last_known.field_ref().host, unknown_host),
+    )
+
+
+@pure
+def _is_provider_error_event(event: object) -> bool:
+    """True if a discovery event indicates a provider failed this poll.
+
+    Used to wake the observer's periodic snapshot loop so UNKNOWN state for the
+    errored provider's agents propagates without waiting for the full interval.
+    """
+    if isinstance(event, ProviderDiscoverySnapshotEvent):
+        return event.error is not None
+    return isinstance(event, DiscoveryErrorEvent)
+
+
 class AgentObserver(MutableModel):
     """Observes agent state changes across all hosts.
 
@@ -337,6 +373,9 @@ class AgentObserver(MutableModel):
     mngr_binary: str = Field(default="mngr", frozen=True)
 
     _concurrency_group: ConcurrencyGroup = PrivateAttr(default_factory=lambda: ConcurrencyGroup(name="agent-observer"))
+    # Folds the per-provider discovery stream into a consistent view (known hosts,
+    # per-provider error state) that drives activity streams and UNKNOWN synthesis.
+    _aggregator: DiscoveryStateAggregator = PrivateAttr(default_factory=DiscoveryStateAggregator)
     _known_hosts: dict[str, _KnownHost] = PrivateAttr(default_factory=dict)
     _discovery_stream_process: RunningProcess = PrivateAttr(default_factory=dict)
     _events_processes: dict[str, RunningProcess] = PrivateAttr(default_factory=dict)
@@ -344,6 +383,23 @@ class AgentObserver(MutableModel):
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _stop_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     _activity_queue: queue.Queue[str] = PrivateAttr(default_factory=queue.Queue)
+    # UNKNOWN-state tracking. Populated only during this process's lifetime
+    # (not from history) so that restart cannot synthesize UNKNOWN for agents
+    # that may have been deliberately destroyed while the observer was down.
+    _last_known_details_by_id: dict[str, AgentDetails] = PrivateAttr(default_factory=dict)
+    # Most recently observed set of currently-errored providers (from discovery
+    # snapshots and incremental DiscoveryErrorEvents). Agents whose provider is
+    # in this set get an UNKNOWN AgentDetails synthesized on the next full state
+    # snapshot if they did not reappear in the live listing.
+    _currently_errored_providers: set[ProviderInstanceName] = PrivateAttr(default_factory=set)
+    # Union of providers + errored providers currently known to the aggregator.
+    # When a previously-tracked agent's provider is no longer in this set, the
+    # observer treats it as implicit destroy (config-removal) and drops the
+    # agent from tracking instead of marking it UNKNOWN.
+    _known_provider_names: set[ProviderInstanceName] = PrivateAttr(default_factory=set)
+    # Triggered to wake the periodic-snapshot loop early when a provider error is
+    # observed, so UNKNOWN state propagates without waiting for the full poll interval.
+    _snapshot_trigger: threading.Event = PrivateAttr(default_factory=threading.Event)
 
     def run(self) -> None:
         """Run the observer. Blocks until stopped or interrupted."""
@@ -375,13 +431,16 @@ class AgentObserver(MutableModel):
             # Phase 4: periodic full state snapshots + wait for stop
             try:
                 while not self._stop_event.is_set():
-                    self._stop_event.wait(timeout=FULL_STATE_INTERVAL_SECONDS)
+                    # Wake early if a DiscoveryErrorEvent triggered a snapshot.
+                    triggered = self._snapshot_trigger.wait(timeout=FULL_STATE_INTERVAL_SECONDS)
+                    if triggered:
+                        self._snapshot_trigger.clear()
                     if self._stop_event.is_set():
                         break
                     try:
                         with log_span("Performing periodic full state snapshot"):
                             self._do_full_state_snapshot()
-                    except (BaseMngrError, OSError) as e:
+                    except (MngrError, OSError) as e:
                         logger.warning("Periodic full state snapshot failed (continuing): {}", e)
             except KeyboardInterrupt:
                 pass
@@ -392,21 +451,30 @@ class AgentObserver(MutableModel):
     def _on_activity_failure(self, e: BaseException):
         logger.opt(exception=e).error("Activity worker thread failed")
         self._stop_event.set()
+        self._snapshot_trigger.set()
 
     def stop(self) -> None:
         """Signal the observer to stop."""
         self._stop_event.set()
+        # Unblock the periodic snapshot loop's wait on _snapshot_trigger.
+        self._snapshot_trigger.set()
 
     def _start_discovery_stream(self) -> None:
         """Start the 'mngr observe --discovery-only' subprocess for host discovery."""
         self._discovery_stream_process = self._concurrency_group.run_process_in_background(
-            command=[self.mngr_binary, "observe", "--discovery-only", "--quiet", "--on-error", "continue"],
+            command=[self.mngr_binary, "observe", "--discovery-only", "--quiet"],
             on_output=self._on_discovery_stream_output,
             is_checked_by_group=False,
         )
 
     def _on_discovery_stream_output(self, line: str, is_stdout: bool) -> None:
-        """Handle a line of output from 'mngr observe --discovery-only'."""
+        """Handle a line of output from 'mngr observe --discovery-only'.
+
+        Every discovery event is folded into the shared aggregator, which maintains the
+        per-provider-correct view of hosts and provider error state. The returned delta
+        drives starting/stopping per-host activity streams; provider error events wake
+        the periodic snapshot loop so UNKNOWN state propagates quickly.
+        """
         if not is_stdout:
             return
         stripped = line.strip()
@@ -414,47 +482,38 @@ class AgentObserver(MutableModel):
             return
 
         event = parse_discovery_event_line(stripped)
+        if event is None:
+            return
 
-        if isinstance(event, FullDiscoverySnapshotEvent):
-            self._handle_full_snapshot(event)
-        elif isinstance(event, HostDestroyedEvent):
-            self._handle_host_destroyed(event)
-        else:
-            pass
+        delta = self._aggregator.apply_event(event)
+        self._sync_known_state_from_aggregator()
+        self._reconcile_activity_streams(delta)
+        if _is_provider_error_event(event):
+            self._snapshot_trigger.set()
 
-    def _handle_full_snapshot(self, event: FullDiscoverySnapshotEvent) -> None:
-        """Update known hosts from a full discovery snapshot and sync activity streams."""
-        # Build the new set of known hosts from the host records (which carry the
-        # authoritative host_name, unlike DiscoveredAgent which only has agent_name)
-        new_hosts: dict[str, _KnownHost] = {}
-        for host in event.hosts:
-            host_id_str = str(host.host_id)
-            new_hosts[host_id_str] = _KnownHost(
-                host_id=host.host_id,
-                host_name=host.host_name,
-            )
-
+    def _sync_known_state_from_aggregator(self) -> None:
+        """Refresh known hosts and provider error/known sets from the aggregator."""
+        host_by_id = self._aggregator.get_host_by_id()
+        new_known_hosts = {
+            host_id_str: _KnownHost(host_id=host.host_id, host_name=host.host_name)
+            for host_id_str, host in host_by_id.items()
+        }
+        errored_providers = set(self._aggregator.get_error_by_provider_name().keys())
+        known_providers = {provider.provider_name for provider in self._aggregator.get_providers()} | errored_providers
         with self._lock:
-            previously_known = set(self._known_hosts.keys())
-            self._known_hosts = new_hosts
+            self._known_hosts = new_known_hosts
+            self._currently_errored_providers = errored_providers
+            self._known_provider_names = known_providers
 
-        new_host_ids = set(new_hosts.keys())
-
-        # Stop streams for hosts that are no longer known
-        for host_id_str in previously_known - new_host_ids:
+    def _reconcile_activity_streams(self, delta: AggregatorDelta) -> None:
+        """Start activity streams for newly-known hosts and stop them for removed hosts."""
+        for host_id_str in delta.removed_host_ids:
             self._stop_activity_stream(host_id_str)
-
-        # Start streams for newly discovered hosts
-        for host_id_str in new_host_ids - previously_known:
-            host = new_hosts[host_id_str]
-            self._start_activity_stream(host_id_str, host.host_name)
-
-    def _handle_host_destroyed(self, event: HostDestroyedEvent) -> None:
-        """Remove a destroyed host from known hosts and stop its activity stream."""
-        host_id_str = str(event.host_id)
-        with self._lock:
-            self._known_hosts.pop(host_id_str, None)
-        self._stop_activity_stream(host_id_str)
+        for host_id_str in delta.added_host_ids:
+            with self._lock:
+                host = self._known_hosts.get(host_id_str)
+            if host is not None:
+                self._start_activity_stream(host_id_str, host.host_name)
 
     # FIXME: we'll need to be smarter about this when we have tons of hosts--add these options to the observe CLI and API:
     #  1. --local-watches-only to only observe the local host. If specified, don't bother starting an activity stream for anything besides the local host
@@ -481,7 +540,7 @@ class AgentObserver(MutableModel):
             )
             with self._lock:
                 self._events_processes[host_id_str] = process
-        except (BaseMngrError, OSError) as e:
+        except (MngrError, OSError) as e:
             logger.debug("Failed to start activity stream for host {}: {}", host_name, e)
 
     def _stop_activity_stream(self, host_id_str: str) -> None:
@@ -529,7 +588,7 @@ class AgentObserver(MutableModel):
                     break
                 try:
                     self._fetch_and_emit_agent_state_for_host(hid)
-                except (BaseMngrError, OSError) as e:
+                except (MngrError, OSError) as e:
                     logger.warning("Failed to fetch agent state for host {}: {}", hid, e)
 
     def _fetch_and_emit_agent_state_for_host(self, host_id_str: str) -> None:
@@ -551,7 +610,14 @@ class AgentObserver(MutableModel):
             self._emit_agent_state(agent)
 
     def _do_full_state_snapshot(self) -> None:
-        """Perform a full listing, emit a full state event, and check for state changes."""
+        """Perform a full listing, emit a full state event, and check for state changes.
+
+        Agents that were previously observed within this process's lifetime but
+        did not appear in the live listing are synthesized as UNKNOWN entries
+        if their provider is currently errored (sticky until they reappear or
+        the user explicitly destroys them). Agents whose provider has been
+        removed from the configured set entirely are dropped from tracking.
+        """
         result = list_agents(
             mngr_ctx=self.mngr_ctx,
             is_streaming=False,
@@ -565,10 +631,63 @@ class AgentObserver(MutableModel):
         self._process_snapshot_agents(result.agents)
 
     def _process_snapshot_agents(self, agents: Sequence[AgentDetails]) -> None:
-        """Process agents from a full snapshot: detect state changes, emit events, update tracking."""
+        """Process agents from a full snapshot: detect state changes, emit events, update tracking.
+
+        Synthesizes UNKNOWN entries for previously-observed agents that did not
+        appear in `agents` if their provider is currently in the errored set
+        (or the polling loop has crashed). Drops previously-observed agents
+        whose provider is no longer configured at all.
+        """
+        live_agent_ids = {str(agent.id) for agent in agents}
+
+        # Build UNKNOWN synthetic entries and per-id drops in a single locked
+        # region so the provider-error state we use to classify each missing
+        # agent stays consistent with the dict mutations we do below.
+        unknown_agents: list[AgentDetails] = []
+        ids_to_drop: list[str] = []
+        with self._lock:
+            # First, record everything we just observed.
+            for agent in agents:
+                self._last_known_details_by_id[str(agent.id)] = agent
+
+            errored_providers = self._currently_errored_providers
+            known_providers = self._known_provider_names
+
+            for agent_id_str, last_details in self._last_known_details_by_id.items():
+                if agent_id_str in live_agent_ids:
+                    continue
+                provider = last_details.host.provider_name
+                # Config removal trumps everything: provider no longer in any current set.
+                # Skip this rule if we don't yet have a known-provider list (first snapshot).
+                if known_providers and provider not in known_providers:
+                    ids_to_drop.append(agent_id_str)
+                    continue
+                # Provider currently errored -- its agents' state is unknown, synthesize UNKNOWN.
+                if provider in errored_providers:
+                    unknown_agents.append(_make_unknown_agent_details(last_details))
+                    continue
+                # Provider is healthy and the agent disappeared from the listing without
+                # an explicit destroy. Treat as implicit destroy (drop).
+                ids_to_drop.append(agent_id_str)
+
+            for agent_id_str in ids_to_drop:
+                self._last_known_details_by_id.pop(agent_id_str, None)
+                # Stop tracking state-change history for dropped agents too; otherwise
+                # an agent re-created with the same id later would appear to "change
+                # state" relative to the stale tracked record.
+                self._last_tracked_state_by_id.pop(agent_id_str, None)
+
+            # Update last-known details with the synthesized UNKNOWN versions so
+            # subsequent polls don't re-synthesize from the pre-UNKNOWN details.
+            for unknown_agent in unknown_agents:
+                self._last_known_details_by_id[str(unknown_agent.id)] = unknown_agent
+
+        emitted_agents = tuple(agents) + tuple(unknown_agents)
+
+        # Detect state changes against `_last_tracked_state_by_id`
         state_changes: list[tuple[AgentDetails, str | None, str | None]] = []
         with self._lock:
-            for agent in agents:
+            for agent in emitted_agents:
                 agent_id_str = str(agent.id)
                 new_agent_state = agent.state.value
                 new_host_state = agent.host.state.value if agent.host.state is not None else None
@@ -583,11 +702,13 @@ class AgentObserver(MutableModel):
                     )
 
         # Emit the full state event (includes all agents regardless of change)
-        event = make_full_agent_state_event(agents)
+        event = make_full_agent_state_event(emitted_agents)
         append_observe_event(self.events_base_dir, event)
         logger.debug(
-            "Emitted full agent state event with {} agent(s)",
+            "Emitted full agent state event with {} agent(s) ({} live, {} unknown)",
+            len(emitted_agents),
             len(agents),
+            len(unknown_agents),
         )
 
         # Emit state change events to the agent_states stream

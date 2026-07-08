@@ -4,11 +4,11 @@ from typing import Any
 
 import celpy
 from celpy.celparser import CELParseError
+from celpy.celtypes import MapType
 from celpy.evaluation import CELEvalError
 from loguru import logger
 
 from imbue.imbue_common.pure import pure
-from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import MngrError
 
 # Marker substring embedded in the CELEvalError message produced by
@@ -18,21 +18,21 @@ from imbue.mngr.errors import MngrError
 _TOLERANT_MISS_MARKER = "__tolerant_key_miss__"
 
 
-class TolerantPathError(BaseMngrError, TypeError):
+class TolerantPathError(MngrError, TypeError):
     """Raised by `with_tolerant_paths` when a path is misconfigured.
 
     Indicates a programming error in the caller's `paths` argument: a path
     segment is missing from its parent dict, or an ancestor/target is not a
-    dict-like (e.g. a MapType). Subclasses both `BaseMngrError` (the
-    library's package-base, per the project's exception-hierarchy style)
-    and `TypeError` (so existing callers that catch TypeError still see
-    it); the named subclass exists so call sites can distinguish a
-    tolerant-paths setup error from any other TypeError flowing through
-    the same code path.
+    dict-like (e.g. a MapType). Subclasses both `MngrError` (the single
+    user-facing parent for all mngr errors, so an uncaught instance renders
+    as a clean ``Error: ...`` at the CLI) and `TypeError` (so existing
+    callers that catch TypeError still see it); the named subclass exists so
+    call sites can distinguish a tolerant-paths setup error from any other
+    TypeError flowing through the same code path.
     """
 
 
-class TolerantMapType(celpy.celtypes.MapType):
+class TolerantMapType(MapType):
     """A CEL MapType whose missing-key access yields a marked CELEvalError
     value, so that `apply_compiled_cel_filters` can suppress the per-agent
     warning that would otherwise fire on missing schemaless-field keys.

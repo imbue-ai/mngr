@@ -1,24 +1,35 @@
 import json
 import threading
+from collections.abc import Sequence
+from datetime import datetime
+from datetime import timedelta
+from datetime import timezone
 from pathlib import Path
 from threading import Lock
 from typing import cast
 
 import pytest
 
+from imbue.imbue_common.event_envelope import EventId
+from imbue.imbue_common.event_envelope import IsoTimestamp
+from imbue.imbue_common.logging import format_nanosecond_iso_timestamp
+from imbue.imbue_common.logging import generate_log_event_id
+from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
 from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
 from imbue.mngr.api.discovery_events import DISCOVERY_EVENT_SOURCE
+from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.api.discovery_events import DiscoveryErrorEvent
 from imbue.mngr.api.discovery_events import DiscoveryEventType
 from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
 from imbue.mngr.api.discovery_events import HostDiscoveryEvent
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
+from imbue.mngr.api.discovery_events import ProviderDiscoverySnapshotEvent
+from imbue.mngr.api.discovery_events import ResolvedAgentHost
 from imbue.mngr.api.discovery_events import _DISCOVERY_MAX_FILE_SIZE_BYTES
 from imbue.mngr.api.discovery_events import _build_ssh_info_from_host
 from imbue.mngr.api.discovery_events import _discovery_stream_emit_line
-from imbue.mngr.api.discovery_events import _discovery_stream_tail_events_file
 from imbue.mngr.api.discovery_events import _emit_lines_from_offset
 from imbue.mngr.api.discovery_events import _make_envelope_fields
 from imbue.mngr.api.discovery_events import _rotate_discovery_events_if_needed
@@ -32,17 +43,24 @@ from imbue.mngr.api.discovery_events import emit_host_destroyed
 from imbue.mngr.api.discovery_events import emit_host_discovered
 from imbue.mngr.api.discovery_events import emit_host_ssh_info
 from imbue.mngr.api.discovery_events import extract_agents_and_hosts_from_full_listing
-from imbue.mngr.api.discovery_events import find_latest_full_snapshot_offset
+from imbue.mngr.api.discovery_events import find_discovery_snapshot_replay_offset
 from imbue.mngr.api.discovery_events import get_discovery_events_dir
 from imbue.mngr.api.discovery_events import get_discovery_events_path
 from imbue.mngr.api.discovery_events import make_agent_discovery_event
-from imbue.mngr.api.discovery_events import make_full_discovery_snapshot_event
+from imbue.mngr.api.discovery_events import make_discovered_provider
 from imbue.mngr.api.discovery_events import make_host_discovery_event
+from imbue.mngr.api.discovery_events import make_provider_discovery_snapshot_event
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
+from imbue.mngr.api.discovery_events import resolve_hosts_for_identifiers
 from imbue.mngr.api.discovery_events import resolve_provider_names_for_identifiers
-from imbue.mngr.api.discovery_events import write_full_discovery_snapshot
+from imbue.mngr.api.discovery_events import tail_discovery_events_file
+from imbue.mngr.api.discovery_events import tail_discovery_events_from_offset
+from imbue.mngr.api.discovery_events import write_provider_discovery_snapshot
+from imbue.mngr.cli.testing import create_test_agent_state
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import DiscoverySchemaChangedError
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentId
@@ -51,14 +69,46 @@ from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SSHInfo
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
+from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr.utils.testing import make_test_agent_details
 from imbue.mngr.utils.testing import make_test_discovered_agent
 from imbue.mngr.utils.testing import make_test_discovered_host
+
+
+def _write_provider_snapshots(
+    config: MngrConfig,
+    agents: list[DiscoveredAgent],
+    hosts: list[DiscoveredHost],
+) -> None:
+    """Write one per-provider DISCOVERY_PROVIDER snapshot per provider in agents/hosts.
+
+    Mirrors what ``mngr list`` now writes as a side-effect, so resolution tests seed
+    state the same way production does.
+    """
+    now = datetime.now(timezone.utc)
+    agents_by_provider: dict[ProviderInstanceName, list[DiscoveredAgent]] = {}
+    for agent in agents:
+        agents_by_provider.setdefault(agent.provider_name, []).append(agent)
+    hosts_by_provider: dict[ProviderInstanceName, list[DiscoveredHost]] = {}
+    for host in hosts:
+        hosts_by_provider.setdefault(host.provider_name, []).append(host)
+    for provider_name in set(agents_by_provider) | set(hosts_by_provider):
+        write_provider_discovery_snapshot(
+            config,
+            provider_name=provider_name,
+            agents=agents_by_provider.get(provider_name, []),
+            hosts=hosts_by_provider.get(provider_name, []),
+            discovery_started_at=now,
+            discovery_finished_at=now,
+        )
+
 
 # === Path Helper Tests ===
 
@@ -95,14 +145,92 @@ def test_make_host_discovery_event_has_correct_fields() -> None:
     assert event.host == host
 
 
-def test_make_full_discovery_snapshot_event_has_correct_fields() -> None:
+def test_make_provider_discovery_snapshot_event_has_correct_fields() -> None:
     agents = (make_test_discovered_agent(), make_test_discovered_agent())
     hosts = (make_test_discovered_host(),)
-    event = make_full_discovery_snapshot_event(agents, hosts)
-    assert event.type == DiscoveryEventType.DISCOVERY_FULL
+    now = datetime.now(timezone.utc)
+    event = make_provider_discovery_snapshot_event(
+        provider_name=ProviderInstanceName("docker"),
+        agents=agents,
+        hosts=hosts,
+        discovery_started_at=now,
+        discovery_finished_at=now,
+    )
+    assert event.type == DiscoveryEventType.DISCOVERY_PROVIDER
     assert event.source == "mngr/discovery"
+    assert event.provider_name == ProviderInstanceName("docker")
     assert len(event.agents) == 2
     assert len(event.hosts) == 1
+    assert event.error is None
+
+
+def test_make_provider_discovery_snapshot_event_carries_provider_and_error() -> None:
+    provider_name = ProviderInstanceName("modal")
+    provider = make_discovered_provider(
+        provider_name=provider_name,
+        config=ProviderInstanceConfig(backend=ProviderBackendName("modal"), is_enabled=True),
+    )
+    error = DiscoveryError(
+        type_name="ImbueCloudAuthError",
+        message="token missing",
+        provider_name=provider_name,
+    )
+    now = datetime.now(timezone.utc)
+    event = make_provider_discovery_snapshot_event(
+        provider_name=provider_name,
+        agents=(),
+        hosts=(),
+        discovery_started_at=now,
+        discovery_finished_at=now,
+        provider=provider,
+        error=error,
+    )
+    assert event.provider == provider
+    assert event.error == error
+
+
+def test_make_discovered_provider_drops_subclass_fields() -> None:
+    """A provider config subclass with extra fields should serialize as the base only."""
+
+    class _ProviderConfigWithExtras(ProviderInstanceConfig):
+        # Plugin-defined field that must NOT leak into the snapshot
+        api_secret: str = "shhh"
+
+    extras = _ProviderConfigWithExtras(backend=ProviderBackendName("modal"), is_enabled=True, api_secret="leaked")
+    discovered = make_discovered_provider(ProviderInstanceName("modal-prod"), extras)
+    assert discovered.config.backend == "modal"
+    assert discovered.config.is_enabled is True
+    # Serialize and check the wire format has no plugin-defined field
+    dumped = discovered.model_dump()
+    assert "api_secret" not in dumped["config"]
+    assert dumped["config"] == {
+        "backend": "modal",
+        "plugin": None,
+        "is_enabled": True,
+        "destroyed_host_persisted_seconds": None,
+        "min_online_host_age_seconds": None,
+        "discovery_poll_interval_seconds": 30.0,
+        "discovery_warn_seconds": 20.0,
+        "discovery_error_timeout_seconds": 120.0,
+        "host_discovery_timeout_seconds": 30.0,
+        "agent_discovery_timeout_seconds": 30.0,
+    }
+
+
+def test_full_discovery_snapshot_event_parses_legacy_lines_without_new_fields() -> None:
+    """Old snapshots written before the providers/error_by_provider_name fields existed must still parse."""
+    legacy = {
+        "type": DiscoveryEventType.DISCOVERY_FULL.value,
+        "timestamp": "2026-05-21T00:00:00.000000000Z",
+        "event_id": "evt-legacy",
+        "source": "mngr/discovery",
+        "agents": [],
+        "hosts": [],
+    }
+    parsed = parse_discovery_event_line(json.dumps(legacy))
+    assert isinstance(parsed, FullDiscoverySnapshotEvent)
+    assert parsed.providers == ()
+    assert parsed.error_by_provider_name == {}
 
 
 # === Conversion Helper Tests ===
@@ -117,6 +245,20 @@ def test_discovered_agent_from_agent_details_preserves_key_fields() -> None:
     assert discovered.agent_name == details.name
     assert discovered.provider_name == provider_name
     assert discovered.certified_data["type"] == "generic"
+
+
+def test_discovered_agent_from_agent_details_preserves_plugin_fields() -> None:
+    """Plugin fields must survive into the snapshot's certified_data so that
+    offline_agent_field_generators can read them for fully-unreachable hosts."""
+    host_id = HostId.generate()
+    provider_name = ProviderInstanceName("docker")
+    details = make_test_agent_details(
+        host_id=host_id,
+        provider_name=provider_name,
+        plugin={"demo_plugin": {"flag": True}},
+    )
+    discovered = discovered_agent_from_agent_details(details)
+    assert discovered.certified_data["plugin"] == {"demo_plugin": {"flag": True}}
 
 
 def test_discovered_host_from_agent_details_preserves_key_fields() -> None:
@@ -209,9 +351,9 @@ def test_append_discovery_event_creates_dirs_and_writes(temp_config: MngrConfig)
 def test_emit_discovery_error_event_round_trips_provider_name(temp_config: MngrConfig) -> None:
     """Provider-attributable errors must carry the offending provider name through.
 
-    Minds' auto-disable wiring keys off this field; without it the
-    consumer would have to pattern-match the error message to figure out
-    which ``[providers.imbue_cloud_<slug>]`` block to disable.
+    Minds' providers panel keys off this field to surface per-provider
+    error badges; without it the consumer would have to pattern-match the
+    error message to figure out which ``[providers.<name>]`` block failed.
     """
     emit_discovery_error_event(
         temp_config,
@@ -277,16 +419,25 @@ def test_emit_host_discovered_writes_to_file(temp_config: MngrConfig) -> None:
     assert data["host"]["host_name"] == str(host.host_name)
 
 
-def test_write_full_discovery_snapshot_writes_to_file(temp_config: MngrConfig) -> None:
+def test_write_provider_discovery_snapshot_writes_to_file(temp_config: MngrConfig) -> None:
     agents = (make_test_discovered_agent(), make_test_discovered_agent())
     hosts = (make_test_discovered_host(),)
-    returned_event = write_full_discovery_snapshot(temp_config, agents, hosts)
+    now = datetime.now(timezone.utc)
+    returned_event = write_provider_discovery_snapshot(
+        temp_config,
+        provider_name=ProviderInstanceName("docker"),
+        agents=agents,
+        hosts=hosts,
+        discovery_started_at=now,
+        discovery_finished_at=now,
+    )
 
     events_path = get_discovery_events_path(temp_config)
     lines = events_path.read_text().splitlines()
     assert len(lines) == 1
     data = json.loads(lines[0])
-    assert data["type"] == DiscoveryEventType.DISCOVERY_FULL
+    assert data["type"] == DiscoveryEventType.DISCOVERY_PROVIDER
+    assert data["provider_name"] == "docker"
     assert len(data["agents"]) == 2
     assert len(data["hosts"]) == 1
     assert returned_event.event_id == data["event_id"]
@@ -313,13 +464,40 @@ def test_parse_host_discovery_event_round_trips() -> None:
     assert parsed.host.host_id == host.host_id
 
 
-def test_parse_full_snapshot_event_round_trips() -> None:
+def test_parse_legacy_full_snapshot_event_round_trips() -> None:
+    """Back-compat: a directly-constructed legacy DISCOVERY_FULL event still round-trips through parse."""
     agents = (make_test_discovered_agent(),)
     hosts = (make_test_discovered_host(),)
-    event = make_full_discovery_snapshot_event(agents, hosts)
+    timestamp, event_id = _make_envelope_fields()
+    event = FullDiscoverySnapshotEvent(
+        timestamp=timestamp,
+        event_id=event_id,
+        source=DISCOVERY_EVENT_SOURCE,
+        agents=agents,
+        hosts=hosts,
+    )
     line = json.dumps(event.model_dump(mode="json"), separators=(",", ":"))
     parsed = parse_discovery_event_line(line)
     assert isinstance(parsed, FullDiscoverySnapshotEvent)
+    assert len(parsed.agents) == 1
+    assert len(parsed.hosts) == 1
+
+
+def test_parse_provider_snapshot_event_round_trips() -> None:
+    agents = (make_test_discovered_agent(),)
+    hosts = (make_test_discovered_host(),)
+    now = datetime.now(timezone.utc)
+    event = make_provider_discovery_snapshot_event(
+        provider_name=ProviderInstanceName("docker"),
+        agents=agents,
+        hosts=hosts,
+        discovery_started_at=now,
+        discovery_finished_at=now,
+    )
+    line = json.dumps(event.model_dump(mode="json"), separators=(",", ":"))
+    parsed = parse_discovery_event_line(line)
+    assert isinstance(parsed, ProviderDiscoverySnapshotEvent)
+    assert parsed.provider_name == ProviderInstanceName("docker")
     assert len(parsed.agents) == 1
     assert len(parsed.hosts) == 1
 
@@ -371,13 +549,13 @@ def test_parse_recognized_event_with_extra_field_raises_schema_changed() -> None
 def test_resolve_provider_names_recovers_after_schema_mismatch(temp_mngr_ctx: MngrContext) -> None:
     """A stale-schema event must trigger a regenerate (full scan) and a parse retry.
 
-    After the regenerate, the on-disk file has a fresh DISCOVERY_FULL snapshot in the
-    current schema; replaying from the new offset succeeds. The stub local-only
-    provider has no agents, so resolution returns None, but the key assertion is that
-    no exception escapes -- the recovery path ran and parsing succeeded on retry.
+    After the regenerate, the on-disk file has fresh per-provider DISCOVERY_PROVIDER
+    snapshots in the current schema; replaying from the new offset succeeds. The stub
+    local-only provider has no agents, so resolution returns None, but the key assertion
+    is that no exception escapes -- the recovery path ran and parsing succeeded on retry.
     """
     config = temp_mngr_ctx.config
-    # Seed with a valid full snapshot, then append a stale-schema agent-discovery event.
+    # Seed with a valid per-provider snapshot, then append a stale-schema agent-discovery event.
     agent = DiscoveredAgent(
         host_id=HostId.generate(),
         agent_id=AgentId.generate(),
@@ -385,7 +563,7 @@ def test_resolve_provider_names_recovers_after_schema_mismatch(temp_mngr_ctx: Mn
         provider_name=ProviderInstanceName("local"),
         certified_data={},
     )
-    write_full_discovery_snapshot(config, [agent], [])
+    _write_provider_snapshots(config, [agent], [])
 
     events_path = get_discovery_events_path(config)
     pre_recovery_size = events_path.stat().st_size
@@ -403,10 +581,10 @@ def test_resolve_provider_names_recovers_after_schema_mismatch(temp_mngr_ctx: Mn
 
     result = resolve_provider_names_for_identifiers(temp_mngr_ctx, ["known-agent"])
 
-    # The regenerate path appended a fresh DISCOVERY_FULL snapshot past the stale line.
+    # The regenerate path appended fresh per-provider snapshots past the stale line.
     final_lines = events_path.read_text().splitlines()
-    last_event = json.loads(final_lines[-1])
-    assert last_event["type"] == DiscoveryEventType.DISCOVERY_FULL
+    final_types = [json.loads(line)["type"] for line in final_lines if line.strip()]
+    assert DiscoveryEventType.DISCOVERY_PROVIDER in final_types
     assert events_path.stat().st_size > pre_recovery_size
     # The retry parsed against the fresh snapshot, which has no agents from the
     # stub provider setup, so the seeded "known-agent" is not in the post-recovery
@@ -414,29 +592,25 @@ def test_resolve_provider_names_recovers_after_schema_mismatch(temp_mngr_ctx: Mn
     assert result is None
 
 
-# === find_latest_full_snapshot_offset Tests ===
+# === find_discovery_snapshot_replay_offset Tests ===
 
 
-def test_find_latest_full_snapshot_offset_returns_zero_when_no_file(tmp_path: Path) -> None:
-    assert find_latest_full_snapshot_offset(tmp_path / "nonexistent.jsonl") == 0
+def test_find_replay_offset_returns_zero_when_no_file(tmp_path: Path) -> None:
+    assert find_discovery_snapshot_replay_offset(tmp_path / "nonexistent.jsonl") == 0
 
 
-def test_find_latest_full_snapshot_offset_returns_zero_when_no_full_events(temp_config: MngrConfig) -> None:
-    # Write only agent events
+def test_find_replay_offset_returns_zero_when_no_snapshot_events(temp_config: MngrConfig) -> None:
+    # Write only agent events (no snapshot of any kind).
     emit_agent_discovered(temp_config, make_test_discovered_agent())
     emit_agent_discovered(temp_config, make_test_discovered_agent())
 
     events_path = get_discovery_events_path(temp_config)
-    assert find_latest_full_snapshot_offset(events_path) == 0
+    assert find_discovery_snapshot_replay_offset(events_path) == 0
 
 
-def test_find_latest_full_snapshot_offset_warns_on_mid_file_corruption(tmp_path: Path) -> None:
+def test_find_replay_offset_finds_legacy_full_snapshot(tmp_path: Path) -> None:
+    """Back-compat: a legacy DISCOVERY_FULL snapshot is located by its byte offset."""
     events_path = tmp_path / "events.jsonl"
-    # A leading agent event, then a valid full snapshot, then a corrupt line,
-    # then a trailing agent event. The corrupt line is followed by more data,
-    # so a warning should be emitted. The leading event ensures the snapshot
-    # offset is non-zero, so the assertion distinguishes "snapshot located"
-    # from "no snapshot found, fallback to 0".
     leading_agent = (
         '{"timestamp":"2026-01-01T00:00:00Z","type":"AGENT_DISCOVERED","event_id":"evt-w",'
         '"source":"mngr/discovery","agent":{}}'
@@ -445,40 +619,68 @@ def test_find_latest_full_snapshot_offset_warns_on_mid_file_corruption(tmp_path:
         '{"timestamp":"2026-01-02T00:00:00Z","type":"DISCOVERY_FULL","event_id":"evt-x",'
         '"source":"mngr/discovery","agents":[],"hosts":[]}'
     )
+    leading_line = f"{leading_agent}\n"
+    events_path.write_text(f"{leading_line}{valid_full}\n")
+
+    offset = find_discovery_snapshot_replay_offset(events_path)
+
+    # The snapshot starts immediately after the leading line.
+    assert offset == len(leading_line.encode("utf-8"))
+
+
+def test_find_replay_offset_returns_min_of_per_provider_latest(temp_config: MngrConfig) -> None:
+    """The offset is the earliest among each provider's latest per-provider snapshot."""
+    now = datetime.now(timezone.utc)
+    # local's snapshot is written first, then modal's; replaying from local's offset
+    # still includes modal's snapshot, so the returned offset is local's.
+    write_provider_discovery_snapshot(
+        temp_config,
+        provider_name=ProviderInstanceName("local"),
+        agents=(),
+        hosts=(),
+        discovery_started_at=now,
+        discovery_finished_at=now,
+    )
+    events_path = get_discovery_events_path(temp_config)
+    # local's snapshot is the very first line.
+    local_offset = 0
+    write_provider_discovery_snapshot(
+        temp_config,
+        provider_name=ProviderInstanceName("modal"),
+        agents=(),
+        hosts=(),
+        discovery_started_at=now,
+        discovery_finished_at=now,
+    )
+
+    assert find_discovery_snapshot_replay_offset(events_path) == local_offset
+
+
+def test_find_replay_offset_warns_on_mid_file_corruption(tmp_path: Path) -> None:
+    events_path = tmp_path / "events.jsonl"
+    # A leading agent event, then a valid per-provider snapshot, then a corrupt line.
+    # The corrupt line is followed by more data, so a warning should be emitted.
+    leading_agent = (
+        '{"timestamp":"2026-01-01T00:00:00Z","type":"AGENT_DISCOVERED","event_id":"evt-w",'
+        '"source":"mngr/discovery","agent":{}}'
+    )
+    valid_provider = (
+        '{"timestamp":"2026-01-02T00:00:00Z","type":"DISCOVERY_PROVIDER","event_id":"evt-x",'
+        '"source":"mngr/discovery","provider_name":"local","agents":[],"hosts":[],'
+        '"discovery_started_at":"2026-01-02T00:00:00Z","discovery_finished_at":"2026-01-02T00:00:01Z"}'
+    )
     valid_agent = (
         '{"timestamp":"2026-01-03T00:00:00Z","type":"AGENT_DISCOVERED","event_id":"evt-y",'
         '"source":"mngr/discovery","agent":{}}'
     )
     leading_line = f"{leading_agent}\n"
-    events_path.write_text(f"{leading_line}{valid_full}\nthis is not json {{{{\n{valid_agent}\n")
+    events_path.write_text(f"{leading_line}{valid_provider}\nthis is not json {{{{\n{valid_agent}\n")
 
     with capture_loguru(level="WARNING") as log_output:
-        offset = find_latest_full_snapshot_offset(events_path)
+        offset = find_discovery_snapshot_replay_offset(events_path)
 
-    # The snapshot starts immediately after the leading line, so its byte offset
-    # equals the byte length of the leading line.
     assert offset == len(leading_line.encode("utf-8"))
     assert "Skipped corrupt JSONL line" in log_output.getvalue()
-
-
-def test_find_latest_full_snapshot_offset_finds_last_full_event(temp_config: MngrConfig) -> None:
-    # Write: agent, full, agent, full, agent
-    emit_agent_discovered(temp_config, make_test_discovered_agent())
-    write_full_discovery_snapshot(temp_config, (make_test_discovered_agent(),), (make_test_discovered_host(),))
-    emit_agent_discovered(temp_config, make_test_discovered_agent())
-    write_full_discovery_snapshot(temp_config, (make_test_discovered_agent(),), (make_test_discovered_host(),))
-    emit_agent_discovered(temp_config, make_test_discovered_agent())
-
-    events_path = get_discovery_events_path(temp_config)
-    offset = find_latest_full_snapshot_offset(events_path)
-
-    # Read from the offset -- should get the second full event and the last agent event
-    with open(events_path) as f:
-        f.seek(offset)
-        remaining_lines = [line.strip() for line in f if line.strip()]
-    assert len(remaining_lines) == 2
-    first_data = json.loads(remaining_lines[0])
-    assert first_data["type"] == DiscoveryEventType.DISCOVERY_FULL
 
 
 # === Destroy Event Tests ===
@@ -620,7 +822,7 @@ def test_resolve_provider_names_resolves_by_agent_name(temp_mngr_ctx: MngrContex
         host_name=HostName("docker-host"),
         provider_name=ProviderInstanceName("docker"),
     )
-    write_full_discovery_snapshot(temp_mngr_ctx.config, [agent], [host])
+    _write_provider_snapshots(temp_mngr_ctx.config, [agent], [host])
 
     result = resolve_provider_names_for_identifiers(temp_mngr_ctx, ["my-agent"])
     assert result == ("docker",)
@@ -636,7 +838,7 @@ def test_resolve_provider_names_resolves_by_agent_id(temp_mngr_ctx: MngrContext)
         provider_name=ProviderInstanceName("modal"),
         certified_data={},
     )
-    write_full_discovery_snapshot(temp_mngr_ctx.config, [agent], [])
+    _write_provider_snapshots(temp_mngr_ctx.config, [agent], [])
 
     result = resolve_provider_names_for_identifiers(temp_mngr_ctx, [str(agent_id)])
     assert result == ("modal",)
@@ -651,7 +853,7 @@ def test_resolve_provider_names_returns_none_for_unknown_identifier(temp_mngr_ct
         provider_name=ProviderInstanceName("local"),
         certified_data={},
     )
-    write_full_discovery_snapshot(temp_mngr_ctx.config, [agent], [])
+    _write_provider_snapshots(temp_mngr_ctx.config, [agent], [])
 
     result = resolve_provider_names_for_identifiers(temp_mngr_ctx, ["unknown-agent"])
     assert result is None
@@ -666,7 +868,7 @@ def test_resolve_provider_names_returns_none_when_any_identifier_missing(temp_mn
         provider_name=ProviderInstanceName("local"),
         certified_data={},
     )
-    write_full_discovery_snapshot(temp_mngr_ctx.config, [agent], [])
+    _write_provider_snapshots(temp_mngr_ctx.config, [agent], [])
 
     result = resolve_provider_names_for_identifiers(temp_mngr_ctx, ["known-agent", "unknown-agent"])
     assert result is None
@@ -688,7 +890,7 @@ def test_resolve_provider_names_deduplicates_providers(temp_mngr_ctx: MngrContex
         provider_name=ProviderInstanceName("docker"),
         certified_data={},
     )
-    write_full_discovery_snapshot(temp_mngr_ctx.config, [agent1, agent2], [])
+    _write_provider_snapshots(temp_mngr_ctx.config, [agent1, agent2], [])
 
     result = resolve_provider_names_for_identifiers(temp_mngr_ctx, ["agent-a", "agent-b"])
     assert result == ("docker",)
@@ -710,7 +912,7 @@ def test_resolve_provider_names_unions_providers_for_multiple_agents(temp_mngr_c
         provider_name=ProviderInstanceName("docker"),
         certified_data={},
     )
-    write_full_discovery_snapshot(temp_mngr_ctx.config, [agent1, agent2], [])
+    _write_provider_snapshots(temp_mngr_ctx.config, [agent1, agent2], [])
 
     result = resolve_provider_names_for_identifiers(temp_mngr_ctx, ["local-agent", "docker-agent"])
     assert result is not None
@@ -733,7 +935,7 @@ def test_resolve_provider_names_handles_same_name_on_multiple_providers(temp_mng
         provider_name=ProviderInstanceName("docker"),
         certified_data={},
     )
-    write_full_discovery_snapshot(temp_mngr_ctx.config, [agent1, agent2], [])
+    _write_provider_snapshots(temp_mngr_ctx.config, [agent1, agent2], [])
 
     result = resolve_provider_names_for_identifiers(temp_mngr_ctx, ["shared-name"])
     assert result is not None
@@ -750,7 +952,7 @@ def test_resolve_provider_names_replays_incremental_events(temp_mngr_ctx: MngrCo
         provider_name=ProviderInstanceName("local"),
         certified_data={},
     )
-    write_full_discovery_snapshot(temp_mngr_ctx.config, [agent1], [])
+    _write_provider_snapshots(temp_mngr_ctx.config, [agent1], [])
 
     # Add a new agent via an incremental event
     new_agent = DiscoveredAgent(
@@ -777,7 +979,7 @@ def test_resolve_provider_names_respects_destroy_events_by_id(temp_mngr_ctx: Mng
         provider_name=ProviderInstanceName("local"),
         certified_data={},
     )
-    write_full_discovery_snapshot(temp_mngr_ctx.config, [agent], [])
+    _write_provider_snapshots(temp_mngr_ctx.config, [agent], [])
     emit_agent_destroyed(temp_mngr_ctx.config, agent_id, host_id)
 
     # By ID should fail (destroyed)
@@ -796,7 +998,7 @@ def test_resolve_provider_names_respects_destroy_events_by_name(temp_mngr_ctx: M
         provider_name=ProviderInstanceName("local"),
         certified_data={},
     )
-    write_full_discovery_snapshot(temp_mngr_ctx.config, [agent], [])
+    _write_provider_snapshots(temp_mngr_ctx.config, [agent], [])
     emit_agent_destroyed(temp_mngr_ctx.config, agent_id, host_id)
 
     # By name should also fail (destroyed)
@@ -817,6 +1019,311 @@ def test_resolve_provider_names_with_no_snapshot_only_incremental(temp_mngr_ctx:
 
     result = resolve_provider_names_for_identifiers(temp_mngr_ctx, ["incremental-agent"])
     assert result == ("modal",)
+
+
+def test_resolve_provider_names_from_legacy_full_snapshot(temp_mngr_ctx: MngrContext) -> None:
+    """Back-compat: resolution still works from a historical DISCOVERY_FULL snapshot on disk.
+
+    Old discovery logs predating per-provider snapshots contain DISCOVERY_FULL lines;
+    ``_replay_discovery_events_into_maps`` must keep tolerating them.
+    """
+    agent = DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("legacy-agent"),
+        provider_name=ProviderInstanceName("docker"),
+        certified_data={},
+    )
+    timestamp, event_id = _make_envelope_fields()
+    legacy_event = FullDiscoverySnapshotEvent(
+        timestamp=timestamp,
+        event_id=event_id,
+        source=DISCOVERY_EVENT_SOURCE,
+        agents=(agent,),
+        hosts=(),
+    )
+    append_discovery_event(temp_mngr_ctx.config, legacy_event)
+
+    result = resolve_provider_names_for_identifiers(temp_mngr_ctx, ["legacy-agent"])
+    assert result == ("docker",)
+
+
+# === resolve_hosts_for_identifiers Tests ===
+
+
+def _seed_local_host_snapshot(
+    mngr_ctx: MngrContext,
+    local_provider: LocalProviderInstance,
+    agent_name: str,
+) -> tuple[AgentId, HostId]:
+    """Write a per-provider snapshot with one agent on the real local host.
+
+    Returns the agent ID and host ID so tests can resolve by either.
+    """
+    host_id = local_provider.host_id
+    agent_id = AgentId.generate()
+    agent = DiscoveredAgent(
+        host_id=host_id,
+        agent_id=agent_id,
+        agent_name=AgentName(agent_name),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={},
+    )
+    host = DiscoveredHost(
+        host_id=host_id,
+        host_name=HostName(LOCAL_HOST_NAME),
+        provider_name=ProviderInstanceName("local"),
+    )
+    _write_provider_snapshots(mngr_ctx.config, [agent], [host])
+    return agent_id, host_id
+
+
+def test_resolve_hosts_resolves_agent_name_to_host(
+    temp_mngr_ctx: MngrContext, local_provider: LocalProviderInstance
+) -> None:
+    """An agent name in the event stream resolves to its host without SSH."""
+    _agent_id, host_id = _seed_local_host_snapshot(temp_mngr_ctx, local_provider, "stoppable-agent")
+
+    resolved = resolve_hosts_for_identifiers(temp_mngr_ctx, ["stoppable-agent"])
+
+    assert set(resolved.keys()) == {"stoppable-agent"}
+    result = resolved["stoppable-agent"]
+    assert isinstance(result, ResolvedAgentHost)
+    assert result.host_id == host_id
+    assert result.provider_name == ProviderInstanceName("local")
+
+
+def test_resolve_hosts_resolves_agent_id_to_host(
+    temp_mngr_ctx: MngrContext, local_provider: LocalProviderInstance
+) -> None:
+    """An agent ID in the event stream resolves to its host."""
+    agent_id, host_id = _seed_local_host_snapshot(temp_mngr_ctx, local_provider, "by-id-agent")
+
+    resolved = resolve_hosts_for_identifiers(temp_mngr_ctx, [str(agent_id)])
+
+    assert resolved[str(agent_id)].host_id == host_id
+
+
+def test_resolve_hosts_raises_when_no_event_stream(temp_mngr_ctx: MngrContext) -> None:
+    """With no discovery event stream, resolution cannot proceed and raises."""
+    with pytest.raises(AgentNotFoundError):
+        resolve_hosts_for_identifiers(temp_mngr_ctx, ["any-agent"])
+
+
+def test_resolve_hosts_raises_for_unknown_identifier(
+    temp_mngr_ctx: MngrContext, local_provider: LocalProviderInstance
+) -> None:
+    """An identifier absent from the event stream raises AgentNotFoundError."""
+    _seed_local_host_snapshot(temp_mngr_ctx, local_provider, "known-agent")
+
+    with pytest.raises(AgentNotFoundError):
+        resolve_hosts_for_identifiers(temp_mngr_ctx, ["unknown-agent"])
+
+
+def test_resolve_hosts_returns_recorded_host_without_validating_existence(
+    temp_mngr_ctx: MngrContext, local_provider: LocalProviderInstance
+) -> None:
+    """Resolution maps to the recorded host_id without scanning live hosts.
+
+    Existence of the host is deliberately not checked here -- the caller
+    validates it when it fetches the host via the provider's SSH-free
+    ``get_host`` (see the stop-command tests). So even a host_id that no
+    longer exists resolves at this layer, which keeps resolution a pure,
+    SSH-free read of the event stream.
+    """
+    stale_host_id = HostId.generate()
+    agent = DiscoveredAgent(
+        host_id=stale_host_id,
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("orphan-agent"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={},
+    )
+    host = DiscoveredHost(
+        host_id=stale_host_id,
+        host_name=HostName(LOCAL_HOST_NAME),
+        provider_name=ProviderInstanceName("local"),
+    )
+    _write_provider_snapshots(temp_mngr_ctx.config, [agent], [host])
+
+    resolved = resolve_hosts_for_identifiers(temp_mngr_ctx, ["orphan-agent"])
+    assert resolved["orphan-agent"].host_id == stale_host_id
+
+
+def test_resolve_hosts_respects_destroy_events(
+    temp_mngr_ctx: MngrContext, local_provider: LocalProviderInstance
+) -> None:
+    """An agent destroyed after the snapshot must not resolve."""
+    agent_id, host_id = _seed_local_host_snapshot(temp_mngr_ctx, local_provider, "doomed-agent")
+    emit_agent_destroyed(temp_mngr_ctx.config, agent_id, host_id)
+
+    with pytest.raises(AgentNotFoundError):
+        resolve_hosts_for_identifiers(temp_mngr_ctx, ["doomed-agent"])
+
+
+def test_resolve_hosts_picks_up_incremental_agent_event(
+    temp_mngr_ctx: MngrContext, local_provider: LocalProviderInstance
+) -> None:
+    """An agent added via an incremental event after the snapshot resolves."""
+    host_id = local_provider.host_id
+    emit_host_discovered(
+        temp_mngr_ctx.config,
+        DiscoveredHost(
+            host_id=host_id,
+            host_name=HostName(LOCAL_HOST_NAME),
+            provider_name=ProviderInstanceName("local"),
+        ),
+    )
+    new_agent = DiscoveredAgent(
+        host_id=host_id,
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("incremental-host-agent"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={},
+    )
+    emit_agent_discovered(temp_mngr_ctx.config, new_agent)
+
+    resolved = resolve_hosts_for_identifiers(temp_mngr_ctx, ["incremental-host-agent"])
+    assert resolved["incremental-host-agent"].host_id == host_id
+
+
+def _iso_at(at: datetime) -> IsoTimestamp:
+    return IsoTimestamp(format_nanosecond_iso_timestamp(at))
+
+
+def _agent_discovered_event_at(agent: DiscoveredAgent, at: datetime) -> AgentDiscoveryEvent:
+    return AgentDiscoveryEvent(
+        timestamp=_iso_at(at),
+        event_id=EventId(generate_log_event_id()),
+        source=DISCOVERY_EVENT_SOURCE,
+        agent=agent,
+    )
+
+
+def _agent_destroyed_event_at(agent: DiscoveredAgent, at: datetime) -> AgentDestroyedEvent:
+    return AgentDestroyedEvent(
+        timestamp=_iso_at(at),
+        event_id=EventId(generate_log_event_id()),
+        source=DISCOVERY_EVENT_SOURCE,
+        agent_id=agent.agent_id,
+        host_id=agent.host_id,
+    )
+
+
+def test_replay_retains_agent_created_during_snapshot_span(temp_mngr_ctx: MngrContext) -> None:
+    """An agent created mid-discovery is not dropped by a stale snapshot.
+
+    The create event precedes a per-provider snapshot whose read began before the create
+    (so the snapshot omits the agent). The span-aware replay must keep the agent --
+    otherwise a freshly-created agent would vanish from resolution until the next poll.
+    resolve_provider_names has no live fallback, so a non-None result proves the *replay*
+    retained the agent rather than a live rescan masking the bug.
+    """
+    config = temp_mngr_ctx.config
+    span_start = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    created_at = span_start + timedelta(seconds=1)
+    span_end = span_start + timedelta(seconds=2)
+    agent = DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("raced-in-agent"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={},
+    )
+    append_discovery_event(config, _agent_discovered_event_at(agent, created_at))
+    append_discovery_event(
+        config,
+        make_provider_discovery_snapshot_event(
+            provider_name=ProviderInstanceName("local"),
+            agents=(),
+            hosts=(),
+            discovery_started_at=span_start,
+            discovery_finished_at=span_end,
+        ),
+    )
+
+    resolved = resolve_provider_names_for_identifiers(temp_mngr_ctx, ["raced-in-agent"])
+    assert resolved == ("local",)
+
+
+def test_replay_does_not_resurrect_agent_destroyed_during_snapshot_span(temp_mngr_ctx: MngrContext) -> None:
+    """An agent destroyed mid-discovery is not resurrected by a stale snapshot that still lists it.
+
+    The destroy event lands during a snapshot's discovery span, so the snapshot (whose
+    read began before the destroy) still reports the agent alive. The span-aware replay
+    must honor the newer destroy, leaving the agent unresolved.
+    """
+    config = temp_mngr_ctx.config
+    span_start = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    discovered_at = span_start + timedelta(seconds=1)
+    destroyed_at = span_start + timedelta(seconds=2)
+    span_end = span_start + timedelta(seconds=3)
+    agent = DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("doomed-raced-agent"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={},
+    )
+    append_discovery_event(config, _agent_discovered_event_at(agent, discovered_at))
+    append_discovery_event(config, _agent_destroyed_event_at(agent, destroyed_at))
+    append_discovery_event(
+        config,
+        make_provider_discovery_snapshot_event(
+            provider_name=ProviderInstanceName("local"),
+            agents=(agent,),
+            hosts=(),
+            discovery_started_at=span_start,
+            discovery_finished_at=span_end,
+        ),
+    )
+
+    resolved = resolve_provider_names_for_identifiers(temp_mngr_ctx, ["doomed-raced-agent"])
+    assert resolved is None
+
+
+def _live_discovery_fallback(mngr_ctx: MngrContext, identifiers: Sequence[str]) -> list[DiscoveredAgent]:
+    """Test stand-in for the live-discovery fallback the stop CLI injects into resolution."""
+    agents_by_host, _providers = discover_hosts_and_agents(
+        mngr_ctx,
+        provider_names=None,
+        agent_identifiers=tuple(identifiers),
+        include_destroyed=False,
+        reset_caches=False,
+    )
+    return [agent for agent_refs in agents_by_host.values() for agent in agent_refs]
+
+
+def test_resolve_hosts_falls_back_to_live_discovery_for_agent_absent_from_stream(
+    temp_mngr_ctx: MngrContext, local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """An agent present live but absent from the event stream still resolves via live fallback.
+
+    Models an agent created during an in-flight discovery span: it exists on its host but
+    the latest on-disk snapshot omits it. ``resolve_hosts_for_identifiers`` must consult the
+    injected live-discovery fallback rather than raising, so ``mngr stop`` can act on a
+    just-created agent (read-after-write).
+    """
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    create_test_agent_state(host, tmp_path, "fresh-unstreamed-agent")
+    # Seed an unrelated per-provider snapshot so the stream exists but lacks this agent.
+    _seed_local_host_snapshot(temp_mngr_ctx, local_provider, "unrelated-agent")
+
+    resolved = resolve_hosts_for_identifiers(
+        temp_mngr_ctx,
+        ["fresh-unstreamed-agent"],
+        live_discovery_fallback=lambda identifiers: _live_discovery_fallback(temp_mngr_ctx, identifiers),
+    )
+    assert resolved["fresh-unstreamed-agent"].host_id == host.id
+
+
+def test_resolve_hosts_without_fallback_still_raises_for_absent_agent(
+    temp_mngr_ctx: MngrContext, local_provider: LocalProviderInstance
+) -> None:
+    """Without an injected fallback, an identifier absent from the stream still raises."""
+    _seed_local_host_snapshot(temp_mngr_ctx, local_provider, "present-agent")
+    with pytest.raises(AgentNotFoundError):
+        resolve_hosts_for_identifiers(temp_mngr_ctx, ["never-existed-agent"])
 
 
 # === Discovery Stream Tests ===
@@ -922,7 +1429,7 @@ def test_discovery_stream_tail_detects_new_content(temp_config: MngrConfig) -> N
 
     # Start tail thread with on_line callback instead of manipulating sys.stdout
     tail = threading.Thread(
-        target=_discovery_stream_tail_events_file,
+        target=tail_discovery_events_from_offset,
         args=(events_path, initial_offset, stop_event, emitted_ids, lock, warner, captured_lines.append),
         daemon=True,
     )
@@ -958,7 +1465,7 @@ def test_discovery_stream_tail_preserves_partial_writes(tmp_path: Path) -> None:
     warner = MalformedJsonLineWarner(source_description="test partial")
 
     tail = threading.Thread(
-        target=_discovery_stream_tail_events_file,
+        target=tail_discovery_events_from_offset,
         args=(events_path, 0, stop_event, emitted_ids, lock, warner, captured_lines.append),
         daemon=True,
     )
@@ -991,6 +1498,67 @@ def test_discovery_stream_tail_preserves_partial_writes(tmp_path: Path) -> None:
     assert len(captured_lines) == 2
     parsed_ids = {json.loads(line)["event_id"] for line in captured_lines}
     assert parsed_ids == {str(event_1.event_id), str(event_2.event_id)}
+
+
+def test_tail_discovery_events_file_emits_cached_snapshot_then_tails(temp_config: MngrConfig) -> None:
+    """tail_discovery_events_file emits the latest cached snapshot on attach, then
+    picks up events appended by another writer -- a pure consumer that never polls."""
+    events_path = get_discovery_events_path(temp_config)
+    cached_agent = make_test_discovered_agent()
+    _write_provider_snapshots(temp_config, [cached_agent], [])
+
+    captured_lines: list[str] = []
+    stop_event = threading.Event()
+    tail = threading.Thread(
+        target=tail_discovery_events_file,
+        args=(events_path, stop_event, captured_lines.append),
+        daemon=True,
+    )
+    tail.start()
+    try:
+        # The cached per-provider snapshot is emitted immediately on attach.
+        poll_until(lambda: len(captured_lines) >= 1, timeout=5.0)
+        snapshot = parse_discovery_event_line(captured_lines[0])
+        assert isinstance(snapshot, ProviderDiscoverySnapshotEvent)
+        assert any(agent.agent_id == cached_agent.agent_id for agent in snapshot.agents)
+
+        # An event appended by another writer afterwards is tailed.
+        appended_agent = make_test_discovered_agent()
+        emit_agent_discovered(temp_config, appended_agent)
+        poll_until(lambda: len(captured_lines) >= 2, timeout=5.0)
+    finally:
+        stop_event.set()
+        tail.join(timeout=5.0)
+
+    appended = parse_discovery_event_line(captured_lines[-1])
+    assert isinstance(appended, AgentDiscoveryEvent)
+    assert appended.agent.agent_id == appended_agent.agent_id
+
+
+def test_tail_discovery_events_file_waits_for_absent_file(temp_config: MngrConfig) -> None:
+    """If the events file does not exist yet, the tailer waits for it rather than
+    failing, then emits events once a writer creates it (the minds startup race)."""
+    events_path = get_discovery_events_path(temp_config)
+    assert not events_path.exists()
+
+    captured_lines: list[str] = []
+    stop_event = threading.Event()
+    tail = threading.Thread(
+        target=tail_discovery_events_file,
+        args=(events_path, stop_event, captured_lines.append),
+        daemon=True,
+    )
+    tail.start()
+    try:
+        # Create the file (with a snapshot) only after the tailer is already running.
+        _write_provider_snapshots(temp_config, [make_test_discovered_agent()], [])
+        poll_until(lambda: len(captured_lines) >= 1, timeout=5.0)
+    finally:
+        stop_event.set()
+        tail.join(timeout=5.0)
+
+    assert len(captured_lines) >= 1
+    assert isinstance(parse_discovery_event_line(captured_lines[0]), ProviderDiscoverySnapshotEvent)
 
 
 def test_emit_lines_from_offset_warns_on_corruption_across_calls(tmp_path: Path) -> None:

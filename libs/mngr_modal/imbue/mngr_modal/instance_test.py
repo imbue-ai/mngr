@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 import pytest
 
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import MngrError
@@ -264,6 +265,21 @@ def test_modal_provider_supports_mutable_tags(modal_provider: ModalProviderInsta
     assert modal_provider.supports_mutable_tags is True
 
 
+def test_vm_runtime_disabled_by_default(modal_provider: ModalProviderInstance) -> None:
+    """The provider config defaults to Modal's gVisor runtime, so no experimental_options are sent."""
+    assert modal_provider.config.is_vm_runtime_enabled is False
+    assert modal_provider._build_experimental_options() is None
+
+
+def test_build_experimental_options_requests_vm_runtime_when_enabled(modal_provider: ModalProviderInstance) -> None:
+    """When the VM runtime is enabled, sandboxes are created with experimental_options={'vm_runtime': True}."""
+    enabled_config = modal_provider.config.model_copy_update(
+        to_update(modal_provider.config.field_ref().is_vm_runtime_enabled, True)
+    )
+    enabled = modal_provider.model_copy_update(to_update(modal_provider.field_ref().config, enabled_config))
+    assert enabled._build_experimental_options() == {"vm_runtime": True}
+
+
 def test_get_host_volume_name_uses_config_prefix(modal_provider: ModalProviderInstance) -> None:
     """Host volume name should use the mngr config prefix and host_id hex."""
     host_id = HostId.generate()
@@ -328,6 +344,9 @@ def test_handle_modal_auth_error_decorator_converts_auth_error_to_modal_auth_err
     assert "Modal authentication failed" in error_message
     assert "--disable-plugin modal" in error_message
     assert "https://modal.com/docs/reference/modal.config" in error_message
+    # The error must carry the actual provider instance name (not the default "modal"),
+    # so a custom-named Modal instance is attributed correctly in `mngr list`.
+    assert exc_info.value.provider_name == ProviderInstanceName("modal-test-expired")
 
 
 # =============================================================================
@@ -1397,6 +1416,53 @@ def test_get_volume_for_host_returns_none_when_host_volume_disabled(
     host_id = HostId.generate()
     result = modal_provider_no_host_volume.get_volume_for_host(host_id)
     assert result is None
+
+
+def test_get_volume_reference_for_host_converts_auth_error(
+    modal_provider: ModalProviderInstance,
+) -> None:
+    """get_volume_reference_for_host should convert ModalProxyAuthError to ModalAuthError.
+
+    It is reached directly (without an outer decorated method) via
+    make_readable_offline_host -> to_offline_host, so it must surface the
+    user-friendly ModalAuthError rather than the raw proxy error.
+    """
+    mock_interface = cast(Any, modal_provider.modal_app.modal_interface)
+    mock_interface.volume_from_name.side_effect = ModalProxyAuthError("Token missing or expired")
+    with pytest.raises(ModalAuthError):
+        modal_provider.get_volume_reference_for_host(HostId.generate())
+
+
+def test_get_volume_reference_for_host_does_not_probe(
+    modal_provider: ModalProviderInstance,
+) -> None:
+    """The reference method must NOT call listdir -- skipping that existence probe
+    is its entire reason to exist (it keeps make_readable_offline_host cheap during
+    host discovery)."""
+    mock_interface = cast(Any, modal_provider.modal_app.modal_interface)
+    vol_iface = mock_interface.volume_from_name.return_value
+    vol_iface.listdir.reset_mock()
+
+    ref = modal_provider.get_volume_reference_for_host(HostId.generate())
+
+    assert ref is not None
+    vol_iface.listdir.assert_not_called()
+
+
+def test_get_volume_for_host_probes_with_listdir(
+    modal_provider: ModalProviderInstance,
+) -> None:
+    """By contrast, get_volume_for_host confirms the volume exists with a listdir('/')
+    probe (volume_from_name returns a lazy reference that does not fail for a deleted
+    volume)."""
+    mock_interface = cast(Any, modal_provider.modal_app.modal_interface)
+    vol_iface = mock_interface.volume_from_name.return_value
+    vol_iface.listdir.reset_mock()
+
+    result = modal_provider.get_volume_for_host(HostId.generate())
+
+    assert result is not None
+    vol_iface.listdir.assert_called_once_with("/")
 
 
 def test_shutdown_script_omits_volume_sync_when_host_volume_disabled(

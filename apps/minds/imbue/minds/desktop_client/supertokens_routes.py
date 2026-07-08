@@ -12,12 +12,12 @@ import json
 import secrets
 import threading
 import time
+from typing import Final
 from urllib.parse import urlencode
 
-from fastapi import APIRouter
-from fastapi import Request
-from fastapi.responses import HTMLResponse
-from fastapi.responses import Response
+from flask import Blueprint
+from flask import Response
+from flask import request
 from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
@@ -27,18 +27,25 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.bootstrap import set_imbue_cloud_provider_for_account
 from imbue.minds.bootstrap import unset_imbue_cloud_provider_for_account
-from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.minds_config import MindsConfig
+from imbue.minds.desktop_client.responses import make_html_response
+from imbue.minds.desktop_client.responses import make_redirect_response
+from imbue.minds.desktop_client.responses import make_response
+from imbue.minds.desktop_client.responses import safe_local_redirect_path
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.session_store import UserInfo
+from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.templates_auth import render_auth_page
 from imbue.minds.desktop_client.templates_auth import render_check_email_page
 from imbue.minds.desktop_client.templates_auth import render_forgot_password_page
 from imbue.minds.desktop_client.templates_auth import render_settings_page
+from imbue.minds.desktop_client.templates_auth import render_signin_modal_page
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.utils.output import emit_event
+from imbue.mngr_latchkey.core import LatchkeyError
+from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 
 
 class AuthBackendError(RuntimeError):
@@ -155,20 +162,22 @@ class _AuthBackendShim(MutableModel):
 
 
 def _json_response(data: dict[str, object], status_code: int = 200) -> Response:
-    return Response(
+    return make_response(
         content=json.dumps(data),
         media_type="application/json",
         status_code=status_code,
     )
 
 
-def _get_session_store(request: Request) -> MultiAccountSessionStore:
-    return request.app.state.session_store
+def _get_session_store() -> MultiAccountSessionStore:
+    session_store = get_state().session_store
+    assert session_store is not None, "create_desktop_client() was constructed without a session_store"
+    return session_store
 
 
-def _get_auth_backend(request: Request) -> _AuthBackendShim:
+def _get_auth_backend() -> _AuthBackendShim:
     """Return the request-scoped auth-backend shim wrapping the plugin CLI."""
-    cli: ImbueCloudCli | None = request.app.state.imbue_cloud_cli
+    cli: ImbueCloudCli | None = get_state().imbue_cloud_cli
     if cli is None:
         raise AuthBackendError("imbue_cloud_cli is not configured on this app")
     return _AuthBackendShim(cli=cli)
@@ -181,22 +190,18 @@ def _get_latest_user_info(session_store: MultiAccountSessionStore) -> UserInfo |
     return session_store.get_user_info(str(accounts[-1].user_id))
 
 
-def _get_server_port(request: Request) -> int:
-    return request.app.state.auth_server_port
+def _get_output_format() -> OutputFormat:
+    return get_state().auth_output_format
 
 
-def _get_output_format(request: Request) -> OutputFormat:
-    return request.app.state.auth_output_format
+def _get_connector_url() -> str:
+    """Read the connector URL out of the loaded client env config.
 
-
-def _get_connector_url(request: Request) -> str:
-    """Read the connector URL out of the request's loaded client env config.
-
-    The desktop client always populates ``app.state.client_env_config``
-    from a ``--config-file`` (or the build-time default), so this assert
-    fires only in tests that forgot to wire one up.
+    The desktop client always populates ``client_env_config`` from a
+    ``--config-file`` (or the build-time default), so this assert fires only
+    in tests that forgot to wire one up.
     """
-    client_env_config = request.app.state.client_env_config
+    client_env_config = get_state().client_env_config
     assert client_env_config is not None, "create_desktop_client() was constructed without a client_env_config"
     return str(client_env_config.connector_url).rstrip("/")
 
@@ -204,7 +209,6 @@ def _get_connector_url(request: Request) -> str:
 def _store_session_from_auth_result(
     session_store: MultiAccountSessionStore,
     result: AuthResult,
-    request: Request,
 ) -> None:
     """Drop cached identity so the new account shows up, and configure defaults.
 
@@ -221,38 +225,46 @@ def _store_session_from_auth_result(
     """
     assert result.user is not None, "AuthResult missing user"
     session_store.invalidate_identity_cache()
-    minds_config: MindsConfig | None = request.app.state.minds_config
+    minds_config: MindsConfig | None = get_state().minds_config
     if minds_config is not None and minds_config.get_default_account_id() is None:
         minds_config.set_default_account_id(result.user.user_id)
 
-    # Explicit signin -- always re-enable the provider entry, even if a
-    # previous run auto-disabled it after an auth error.
-    connector_url = _get_connector_url(request)
+    # Explicit signin -- always re-enable the provider entry, even if the
+    # user previously clicked Disable on it in the providers panel.
+    connector_url = _get_connector_url()
     if set_imbue_cloud_provider_for_account(
         result.user.email,
         connector_url=connector_url,
         force_enable=True,
     ):
-        _bounce_forward_observe(request)
+        _bounce_forward_observe()
 
 
-def _bounce_forward_observe(request: Request) -> None:
-    """Bounce the ``mngr forward`` plugin's observe child so a freshly-written
-    provider entry takes effect within the same minds session.
+def _bounce_forward_observe() -> None:
+    """Bounce the single discovery observer so a freshly-written provider entry
+    takes effect within the same minds session.
 
-    Sends ``SIGHUP`` to the plugin via ``EnvelopeStreamConsumer.bounce_observe()``;
-    per-agent event subprocesses, SSH tunnels, and the FastAPI app on the
-    plugin side stay alive (the plugin's SIGHUP handler only restarts
-    ``mngr observe``). No-op if the consumer hasn't been attached yet.
-
-    ``app.state.envelope_stream_consumer`` is always set (to either the
-    consumer or ``None``) by ``create_desktop_client``, so direct attribute
-    access is safe — no defensive ``getattr`` required.
+    Sends ``SIGHUP`` to the detached ``mngr latchkey forward`` supervisor via
+    ``LatchkeyForwardSupervisor.bounce()``, restarting only its ``mngr observe``
+    child (the shared gateway, reverse tunnels, and per-agent state stay up). Its
+    next snapshot is written to the shared discovery log that minds' ``mngr forward
+    --observe-via-file`` tails, so no separate ``mngr forward`` bounce is needed.
     """
-    envelope_stream_consumer = request.app.state.envelope_stream_consumer
-    if envelope_stream_consumer is None:
+    bounce_latchkey_forward_supervisor(get_state().latchkey_forward_supervisor)
+
+
+def bounce_latchkey_forward_supervisor(supervisor: LatchkeyForwardSupervisor | None) -> None:
+    """Bounce the detached ``mngr latchkey forward`` supervisor's observe child.
+
+    No-op when no supervisor handle is available (e.g. tests). ``bounce()``
+    starts the supervisor if none is currently running.
+    """
+    if supervisor is None:
         return
-    envelope_stream_consumer.bounce_observe()
+    try:
+        supervisor.bounce()
+    except (OSError, RuntimeError, LatchkeyError) as e:
+        logger.warning("Failed to bounce mngr latchkey forward: {}", e)
 
 
 def _auth_error_response(exc: AuthBackendError | ImbueCloudCliError) -> Response:
@@ -263,27 +275,51 @@ def _auth_error_response(exc: AuthBackendError | ImbueCloudCliError) -> Response
     )
 
 
-def _handle_auth_page(request: Request, message: str | None = None) -> HTMLResponse:
+# Default banner shown when the create page sends a signed-out user here to
+# enable the remote (Imbue Cloud) compute preset. Used when no explicit
+# ``?message=`` is supplied alongside a ``return_to``.
+_REMOTE_SIGNIN_EXPLAINER: Final[str] = (
+    "Sign in or create an Imbue account to run your workspace on Imbue Cloud. "
+    "You can also go back and run it directly on your computer."
+)
+
+
+def _handle_auth_page() -> Response:
     """Render the sign-up or sign-in page.
 
     /auth/signup always defaults to sign-up mode. /auth/login defaults
     to sign-in mode (unless the user has never signed in before, in
     which case it shows sign-up as a convenience).
+
+    An optional ``?message=`` query parameter is rendered as a banner on
+    the page (e.g. the Electron shell appends one explaining why the user
+    was redirected here to sign in).
+
+    An optional ``?return_to=`` query parameter (a same-origin path, e.g.
+    ``/create``) adds a back link to the page and is forwarded to
+    ``/post-login`` so a successful sign-in returns there. When it is
+    present without an explicit message, a default explainer banner about
+    the remote compute path is shown.
     """
-    default_to_signup = request.url.path.rstrip("/").endswith("/signup")
-    return HTMLResponse(
+    default_to_signup = request.path.rstrip("/").endswith("/signup")
+    return_to = safe_local_redirect_path(request.args.get("return_to"))
+    message = request.args.get("message")
+    if message is None and return_to is not None:
+        message = _REMOTE_SIGNIN_EXPLAINER
+    return make_html_response(
         render_auth_page(
             default_to_signup=default_to_signup,
             message=message,
+            return_to=return_to,
         )
     )
 
 
-async def _handle_signup_api(request: Request) -> Response:
+def _handle_signup_api() -> Response:
     """Handle email/password sign-up (JSON API)."""
-    session_store = _get_session_store(request)
-    backend = _get_auth_backend(request)
-    body = await request.json()
+    session_store = _get_session_store()
+    backend = _get_auth_backend()
+    body = request.get_json(silent=True, force=True) or {}
     email = body.get("email", "").strip()
     password = body.get("password", "")
 
@@ -298,18 +334,18 @@ async def _handle_signup_api(request: Request) -> Response:
     if result.status != "OK":
         return _json_response({"status": result.status, "message": result.message or ""})
 
-    _store_session_from_auth_result(session_store, result, request)
+    _store_session_from_auth_result(session_store, result)
     assert result.user is not None
     return _json_response(
         {"status": "OK", "userId": result.user.user_id, "needsEmailVerification": result.needs_email_verification}
     )
 
 
-async def _handle_signin_api(request: Request) -> Response:
+def _handle_signin_api() -> Response:
     """Handle email/password sign-in (JSON API)."""
-    session_store = _get_session_store(request)
-    backend = _get_auth_backend(request)
-    body = await request.json()
+    session_store = _get_session_store()
+    backend = _get_auth_backend()
+    body = request.get_json(silent=True, force=True) or {}
     email = body.get("email", "").strip()
     password = body.get("password", "")
 
@@ -324,7 +360,7 @@ async def _handle_signin_api(request: Request) -> Response:
     if result.status != "OK":
         return _json_response({"status": result.status, "message": result.message or ""})
 
-    _store_session_from_auth_result(session_store, result, request)
+    _store_session_from_auth_result(session_store, result)
     assert result.user is not None
     return _json_response(
         {
@@ -335,7 +371,7 @@ async def _handle_signin_api(request: Request) -> Response:
     )
 
 
-def signout_user_via_plugin(request: Request, user_id: str) -> None:
+def signout_user_via_plugin(user_id: str) -> None:
     """Sign ``user_id`` out via the mngr_imbue_cloud plugin and clear local state.
 
     Resolves the email for ``user_id`` against the cached ``auth list``,
@@ -349,8 +385,8 @@ def signout_user_via_plugin(request: Request, user_id: str) -> None:
     plugin -- the cache is still invalidated so a stale entry can't
     survive.
     """
-    session_store = _get_session_store(request)
-    backend = _get_auth_backend(request)
+    session_store = _get_session_store()
+    backend = _get_auth_backend()
     session = session_store.get_session(user_id)
     signed_out_email: str | None = None
     if session is not None:
@@ -360,10 +396,10 @@ def signout_user_via_plugin(request: Request, user_id: str) -> None:
         logger.warning("No mirrored account for user {}; skipping plugin signout", user_id[:8])
     session_store.invalidate_identity_cache()
     if signed_out_email and unset_imbue_cloud_provider_for_account(signed_out_email):
-        _bounce_forward_observe(request)
+        _bounce_forward_observe()
 
 
-async def _handle_signout_api(request: Request) -> Response:
+def _handle_signout_api() -> Response:
     """Handle sign-out for a specific account.
 
     Expects a JSON body with a ``user_id`` field identifying which account to
@@ -375,22 +411,19 @@ async def _handle_signout_api(request: Request) -> Response:
     logged; we still drop the local mirror so the user's intent is honored
     even when the connector is unreachable.
     """
-    try:
-        body = await request.json()
-        user_id = body.get("user_id")
-    except (json.JSONDecodeError, ValueError):
-        user_id = None
+    body = request.get_json(silent=True, force=True)
+    user_id = body.get("user_id") if isinstance(body, dict) else None
 
     if not user_id:
         return _json_response({"status": "ERROR", "message": "user_id is required"}, 400)
 
-    signout_user_via_plugin(request, str(user_id))
+    signout_user_via_plugin(str(user_id))
     return _json_response({"status": "OK"})
 
 
-def _handle_status_api(request: Request) -> Response:
+def _handle_status_api() -> Response:
     """Return current auth status and user info."""
-    session_store = _get_session_store(request)
+    session_store = _get_session_store()
     user_info = _get_latest_user_info(session_store)
     if user_info is None:
         return _json_response({"signedIn": False})
@@ -405,10 +438,10 @@ def _handle_status_api(request: Request) -> Response:
     )
 
 
-def _handle_email_verified_api(request: Request) -> Response:
+def _handle_email_verified_api() -> Response:
     """Check if the current user's email is verified."""
-    session_store = _get_session_store(request)
-    backend = _get_auth_backend(request)
+    session_store = _get_session_store()
+    backend = _get_auth_backend()
     user_info = _get_latest_user_info(session_store)
     if user_info is None:
         return _json_response({"verified": False, "signedIn": False})
@@ -420,10 +453,10 @@ def _handle_email_verified_api(request: Request) -> Response:
     return _json_response({"verified": verified, "signedIn": True})
 
 
-def _handle_resend_verification_api(request: Request) -> Response:
+def _handle_resend_verification_api() -> Response:
     """Resend the email verification email."""
-    session_store = _get_session_store(request)
-    backend = _get_auth_backend(request)
+    session_store = _get_session_store()
+    backend = _get_auth_backend()
     user_info = _get_latest_user_info(session_store)
     if user_info is None:
         return _json_response({"status": "ERROR", "message": "Not signed in"}, 401)
@@ -437,12 +470,22 @@ def _handle_resend_verification_api(request: Request) -> Response:
     return _json_response({"status": "OK"})
 
 
-def _handle_check_email_page(request: Request) -> HTMLResponse:
+def _handle_signin_modal_page() -> Response:
+    """Render the sign-in modal page (``GET /auth/signin-modal``).
+
+    Served into the desktop client's shared modal WebContentsView (the overlay
+    layer that also hosts the inbox) so the create screen's sign-in prompt
+    covers the whole window, including the title bar.
+    """
+    return make_html_response(render_signin_modal_page())
+
+
+def _handle_check_email_page() -> Response:
     """Render the 'check your email' page."""
-    session_store = _get_session_store(request)
+    session_store = _get_session_store()
     user_info = _get_latest_user_info(session_store)
     email = user_info.email if user_info else "your email"
-    return HTMLResponse(render_check_email_page(email=email))
+    return make_html_response(render_check_email_page(email=email))
 
 
 # OAuth tracking. The plugin's ``mngr imbue_cloud auth oauth ...`` subprocess
@@ -498,7 +541,7 @@ def _run_oauth_subprocess(
     session_store: MultiAccountSessionStore,
     minds_config: MindsConfig | None,
     output_format: OutputFormat,
-    envelope_stream_consumer: EnvelopeStreamConsumer | None,
+    latchkey_forward_supervisor: LatchkeyForwardSupervisor | None,
     connector_url: str,
 ) -> None:
     """Run ``mngr imbue_cloud auth oauth <provider>`` in a background thread.
@@ -507,11 +550,12 @@ def _run_oauth_subprocess(
     the OAuth callback, exchanges the code, and writes the session to its own
     state directory. We then mirror the resulting account identity into
     ``MultiAccountSessionStore`` so the desktop UI can render it, register
-    a ``[providers.imbue_cloud_<slug>]`` entry (force-enabled, even if a
-    previous run auto-disabled it after an auth error), and bounce the
-    ``mngr forward`` plugin's observe child so the new provider config is
-    picked up immediately -- mirroring what the email/password
-    ``_store_session_from_auth_result`` path does for non-OAuth signins.
+    a ``[providers.imbue_cloud_<slug>]`` entry (force-enabled, even if the
+    user previously clicked Disable on it in the providers panel), and bounce
+    the detached ``mngr latchkey forward`` supervisor (the single discovery
+    observer) so the new provider config is picked up immediately -- mirroring
+    what the email/password ``_store_session_from_auth_result`` path does for
+    non-OAuth signins.
     """
     try:
         result = imbue_cloud_cli.auth_oauth(account="", provider_id=provider_id)
@@ -536,8 +580,7 @@ def _run_oauth_subprocess(
         connector_url=connector_url,
         force_enable=True,
     ):
-        if envelope_stream_consumer is not None:
-            envelope_stream_consumer.bounce_observe()
+        bounce_latchkey_forward_supervisor(latchkey_forward_supervisor)
 
     emit_event(
         "auth_success",
@@ -560,7 +603,7 @@ def _run_oauth_subprocess(
     )
 
 
-def _handle_oauth_redirect(provider_id: str, request: Request) -> Response:
+def _handle_oauth_redirect(provider_id: str) -> Response:
     """Kick off the plugin's OAuth flow in a background thread.
 
     Returns immediately with a flow id the frontend can poll. The plugin
@@ -575,12 +618,13 @@ def _handle_oauth_redirect(provider_id: str, request: Request) -> Response:
     ``ObservableThread`` instead of disappearing silently and stalling
     the user on a "Waiting..." page.
     """
-    imbue_cloud_cli: ImbueCloudCli | None = request.app.state.imbue_cloud_cli
-    session_store = _get_session_store(request)
-    output_format = _get_output_format(request)
-    minds_config: MindsConfig | None = request.app.state.minds_config
-    envelope_stream_consumer: EnvelopeStreamConsumer | None = request.app.state.envelope_stream_consumer
-    root_cg: ConcurrencyGroup | None = request.app.state.root_concurrency_group
+    state = get_state()
+    imbue_cloud_cli: ImbueCloudCli | None = state.imbue_cloud_cli
+    session_store = _get_session_store()
+    output_format = _get_output_format()
+    minds_config: MindsConfig | None = state.minds_config
+    latchkey_forward_supervisor: LatchkeyForwardSupervisor | None = state.latchkey_forward_supervisor
+    root_cg: ConcurrencyGroup | None = state.root_concurrency_group
     if imbue_cloud_cli is None:
         return _json_response({"status": "ERROR", "error": "imbue_cloud_cli is not configured"}, 503)
     if root_cg is None:
@@ -602,8 +646,8 @@ def _handle_oauth_redirect(provider_id: str, request: Request) -> Response:
             "session_store": session_store,
             "minds_config": minds_config,
             "output_format": output_format,
-            "envelope_stream_consumer": envelope_stream_consumer,
-            "connector_url": _get_connector_url(request),
+            "latchkey_forward_supervisor": latchkey_forward_supervisor,
+            "connector_url": _get_connector_url(),
         },
         name=f"imbue-cloud-oauth-{provider_id}",
         is_checked=False,
@@ -617,12 +661,11 @@ def _handle_oauth_redirect(provider_id: str, request: Request) -> Response:
     )
 
 
-def _handle_oauth_status(flow_id: str, request: Request) -> Response:
+def _handle_oauth_status(flow_id: str) -> Response:
     """Poll-friendly status for an in-flight OAuth flow.
 
     The frontend long-polls this until ``state`` is ``"done"`` or ``"error"``.
     """
-    _ = request
     status = _read_oauth_status(flow_id)
     if status is None:
         return _json_response({"status": "ERROR", "error": "Unknown flow id"}, 404)
@@ -638,20 +681,20 @@ def _handle_oauth_status(flow_id: str, request: Request) -> Response:
     )
 
 
-def _handle_forgot_password_page(request: Request) -> HTMLResponse:
+def _handle_forgot_password_page() -> Response:
     """Render the forgot password page."""
-    return HTMLResponse(render_forgot_password_page())
+    return make_html_response(render_forgot_password_page())
 
 
-async def _handle_forgot_password_api(request: Request) -> Response:
+def _handle_forgot_password_api() -> Response:
     """Send a password reset email.
 
     This endpoint always returns a generic success response regardless of
     whether the email exists or whether the backend call succeeds. Leaking
     backend errors would enable email enumeration.
     """
-    backend = _get_auth_backend(request)
-    body = await request.json()
+    backend = _get_auth_backend()
+    body = request.get_json(silent=True, force=True) or {}
     email = body.get("email", "").strip()
     if not email:
         return _json_response({"status": "FIELD_ERROR", "message": "Email is required"}, 400)
@@ -662,30 +705,27 @@ async def _handle_forgot_password_api(request: Request) -> Response:
     return _json_response({"status": "OK", "message": "If an account exists, a reset email has been sent"})
 
 
-def _handle_reset_password_redirect(request: Request) -> Response:
+def _handle_reset_password_redirect() -> Response:
     """Redirect legacy in-app reset links to the auth backend's reset page.
 
     The reset link embedded in the reset email now points at the backend
     directly; this redirect keeps any older links working.
     """
-    backend = _get_auth_backend(request)
-    token = request.query_params.get("token", "")
+    backend = _get_auth_backend()
+    token = request.args.get("token", "")
     target = str(backend.base_url).rstrip("/") + "/auth/reset-password"
     if token:
         target = f"{target}?{urlencode({'token': token})}"
-    return Response(status_code=302, headers={"Location": target})
+    return make_redirect_response(target, status_code=302)
 
 
-def _handle_settings_page(request: Request) -> HTMLResponse:
+def _handle_settings_page() -> Response:
     """Render the account settings page."""
-    session_store = _get_session_store(request)
-    backend = _get_auth_backend(request)
+    session_store = _get_session_store()
+    backend = _get_auth_backend()
     user_info = _get_latest_user_info(session_store)
     if user_info is None:
-        return HTMLResponse(
-            status_code=302,
-            headers={"Location": "/auth/login"},
-        )
+        return make_redirect_response("/auth/login", status_code=302)
 
     try:
         provider = backend.get_user_provider(str(user_info.user_id))
@@ -693,7 +733,7 @@ def _handle_settings_page(request: Request) -> HTMLResponse:
         logger.warning("Auth backend unreachable during settings page load: {}", exc)
         provider = "email"
 
-    return HTMLResponse(
+    return make_html_response(
         render_settings_page(
             email=user_info.email,
             display_name=user_info.display_name,
@@ -704,37 +744,25 @@ def _handle_settings_page(request: Request) -> HTMLResponse:
     )
 
 
-def create_supertokens_router(
-    session_store: MultiAccountSessionStore,
-    imbue_cloud_cli: ImbueCloudCli,
-    server_port: int,
-    output_format: OutputFormat,
-) -> APIRouter:
-    """Create a FastAPI router with the auth routes.
+def create_supertokens_blueprint() -> Blueprint:
+    """Create a Flask blueprint with the auth routes (mounted under /auth)."""
+    blueprint = Blueprint("supertokens", __name__, url_prefix="/auth")
 
-    Stores dependencies in ``app.state`` so module-level handlers can access
-    them. The caller is expected to register this router on an app whose
-    ``app.state`` already has ``session_store``, ``imbue_cloud_cli``,
-    ``auth_server_port``, and ``auth_output_format`` populated by
-    ``create_desktop_client``.
-    """
-    _ = session_store, imbue_cloud_cli, server_port, output_format
-    router = APIRouter(prefix="/auth", tags=["auth"])
+    blueprint.add_url_rule("/login", view_func=_handle_auth_page, methods=["GET"], endpoint="login_page")
+    blueprint.add_url_rule("/signup", view_func=_handle_auth_page, methods=["GET"], endpoint="signup_page")
+    blueprint.add_url_rule("/api/signup", view_func=_handle_signup_api, methods=["POST"])
+    blueprint.add_url_rule("/api/signin", view_func=_handle_signin_api, methods=["POST"])
+    blueprint.add_url_rule("/api/signout", view_func=_handle_signout_api, methods=["POST"])
+    blueprint.add_url_rule("/api/status", view_func=_handle_status_api, methods=["GET"])
+    blueprint.add_url_rule("/api/email-verified", view_func=_handle_email_verified_api, methods=["GET"])
+    blueprint.add_url_rule("/api/resend-verification", view_func=_handle_resend_verification_api, methods=["POST"])
+    blueprint.add_url_rule("/signin-modal", view_func=_handle_signin_modal_page, methods=["GET"])
+    blueprint.add_url_rule("/check-email", view_func=_handle_check_email_page, methods=["GET"])
+    blueprint.add_url_rule("/oauth/<provider_id>", view_func=_handle_oauth_redirect, methods=["GET"])
+    blueprint.add_url_rule("/oauth/status/<flow_id>", view_func=_handle_oauth_status, methods=["GET"])
+    blueprint.add_url_rule("/forgot-password", view_func=_handle_forgot_password_page, methods=["GET"])
+    blueprint.add_url_rule("/api/forgot-password", view_func=_handle_forgot_password_api, methods=["POST"])
+    blueprint.add_url_rule("/reset-password", view_func=_handle_reset_password_redirect, methods=["GET"])
+    blueprint.add_url_rule("/settings", view_func=_handle_settings_page, methods=["GET"])
 
-    router.get("/login")(_handle_auth_page)
-    router.get("/signup")(_handle_auth_page)
-    router.post("/api/signup")(_handle_signup_api)
-    router.post("/api/signin")(_handle_signin_api)
-    router.post("/api/signout")(_handle_signout_api)
-    router.get("/api/status")(_handle_status_api)
-    router.get("/api/email-verified")(_handle_email_verified_api)
-    router.post("/api/resend-verification")(_handle_resend_verification_api)
-    router.get("/check-email")(_handle_check_email_page)
-    router.get("/oauth/{provider_id}")(_handle_oauth_redirect)
-    router.get("/oauth/status/{flow_id}")(_handle_oauth_status)
-    router.get("/forgot-password")(_handle_forgot_password_page)
-    router.post("/api/forgot-password")(_handle_forgot_password_api)
-    router.get("/reset-password")(_handle_reset_password_redirect)
-    router.get("/settings")(_handle_settings_page)
-
-    return router
+    return blueprint

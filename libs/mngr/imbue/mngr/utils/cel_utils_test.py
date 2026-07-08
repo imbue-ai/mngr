@@ -193,18 +193,32 @@ def test_cel_nested_dict_dot_notation() -> None:
 
 
 def test_build_cel_context_converts_string_values() -> None:
-    """build_cel_context should convert raw string values to CEL-compatible values."""
+    """build_cel_context should convert raw string values into CEL StringType values.
+
+    The rest of the module relies on the values being real celpy.celtypes, so a
+    regression that left them as plain Python str (or returned the raw dict) must fail.
+    """
     raw = {"name": "test-agent", "state": "running"}
     cel_ctx = build_cel_context(raw)
-    assert "name" in cel_ctx
-    assert "state" in cel_ctx
+    assert isinstance(cel_ctx["name"], celpy.celtypes.StringType)
+    assert isinstance(cel_ctx["state"], celpy.celtypes.StringType)
+    assert cel_ctx["name"] == celpy.celtypes.StringType("test-agent")
+    assert cel_ctx["state"] == celpy.celtypes.StringType("running")
 
 
 def test_build_cel_context_converts_nested_dicts() -> None:
-    """build_cel_context should convert nested dicts for dot notation support."""
+    """build_cel_context should convert nested dicts to MapType so dot notation works.
+
+    A nested dict must become a celpy MapType whose values are themselves CEL types,
+    otherwise dot-notation filtering against the nested fields would break.
+    """
     raw = {"host": {"provider": "local", "name": "my-host"}}
     cel_ctx = build_cel_context(raw)
-    assert "host" in cel_ctx
+    host = cel_ctx["host"]
+    assert isinstance(host, celpy.celtypes.MapType)
+    assert isinstance(host[celpy.json_to_cel("provider")], celpy.celtypes.StringType)
+    assert host[celpy.json_to_cel("provider")] == celpy.celtypes.StringType("local")
+    assert host[celpy.json_to_cel("name")] == celpy.celtypes.StringType("my-host")
 
 
 # =============================================================================

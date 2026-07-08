@@ -1,0 +1,174 @@
+{#-
+  Top-level template for the TMR HTML report.
+
+  Context variables (built in `report.generate_html_report`):
+
+    rows              -- list[RowView]                       all renderable rows
+    sections          -- list[SectionView]                   grouped rows + their kind/label/color/anchor
+    toc_links         -- list[TocLinkView]                   sidebar entries (subset of sections with >0 rows)
+    has_artifacts     -- bool                                whether to inject the asciinema head + JS + panels
+    artifact_panels   -- list[PanelView]                     slide-in panels (one per agent that has artifacts)
+    integrator        -- IntegratorResult | None             reduced-branch summary (drives merged-status cells)
+    escalation_views  -- list[{title, detail_html}]          integrator blockers surfaced to the user (detail pre-rendered)
+    normalization_views -- list[{summary_html}]              suite-wide cleanups the integrator applied (summary pre-rendered)
+    run_commands      -- list[(label, cmd)]                  top-of-report command hints (and reintegrate is used in BLOCKED hint)
+    reintegrate_cmd   -- str                                 pre-extracted "Reintegrate" command (HTML-escaped)
+    asciinema_css_url -- str                                 only meaningful when has_artifacts
+    asciinema_js_url  -- str                                 only meaningful when has_artifacts
+    detail_css        -- str                                 inlined verbatim under the report stylesheet
+    css               -- str                                 inlined verbatim ahead of detail_css
+    js                -- str                                 inlined verbatim near the bottom (artifacts.js)
+-#}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Test Map-Reduce Report</title>
+{%- if has_artifacts %}
+  <link rel="stylesheet" type="text/css" href="{{ asciinema_css_url }}">
+  <script src="{{ asciinema_js_url }}"></script>
+{%- endif %}
+  <style>
+{{ css|safe }}
+{%- if has_artifacts %}
+{{ detail_css|safe }}
+{%- endif %}
+  </style>
+</head>
+<body>
+{%- if toc_links %}
+  <div class="toc-sidebar">
+{%- for link in toc_links %}
+    <a href="#{{ link.anchor }}" class="toc-link" style="color: {{ link.color }};">{{ link.label }} ({{ link.count }})</a>
+{%- endfor %}
+  </div>
+{%- endif %}
+  <div class="main-content">
+    <h1>Test Map-Reduce Report</h1>
+    <p class="summary">{{ rows|length }} test(s)</p>
+{%- if run_commands %}
+    <div class="run-commands">
+{%- for label, cmd in run_commands %}
+      <div class="run-cmd"><span class="run-cmd-label">{{ label }}:</span> <code>{{ cmd }}</code></div>
+{%- endfor %}
+    </div>
+{%- endif %}
+{%- if escalation_views %}
+    <div class="escalations">
+      <h2 style="color: rgb(244, 67, 54);">Escalations ({{ escalation_views|length }})</h2>
+      <p>These cross-cutting blockers could not be resolved automatically and need your attention:</p>
+      <ul>
+{%- for esc in escalation_views %}
+        <li><strong>{{ esc.title }}</strong><div class="md">{{ esc.detail_html|safe }}</div></li>
+{%- endfor %}
+      </ul>
+    </div>
+{%- endif %}
+{%- if normalization_views %}
+    <div class="normalizations">
+      <h2>Suite normalizations ({{ normalization_views|length }})</h2>
+      <ul>
+{%- for norm in normalization_views %}
+        <li class="md">{{ norm.summary_html|safe }}</li>
+{%- endfor %}
+      </ul>
+    </div>
+{%- endif %}
+{%- for section in sections %}
+    <h2 id="{{ section.anchor }}" style="color: {{ section.color }};">{{ section.label }} ({{ section.rows|length }})</h2>
+{%- if section.kind == "BLOCKED" %}
+    <div class="blocked-hint">
+      <p>To resolve issues with a blocked agent:</p>
+      <ol>
+        <li><code>mngr connect $agent_name</code></li>
+        <li>When done, tell it to "regenerate the outcome file"</li>
+{%- if reintegrate_cmd %}
+        <li>Run: <code>{{ reintegrate_cmd|safe }}</code></li>
+{%- endif %}
+      </ol>
+    </div>
+{%- endif %}
+{%- if section.kind == "NON_IMPL_FIXES" and integrator and integrator.squashed_commit_hash %}
+    <p class="squashed-hash">Squashed commit: <code>{{ integrator.squashed_commit_hash[:10] }}</code></p>
+{%- endif %}
+    <table>
+      <thead>
+        <tr>
+{%- if section.kind == "RUNNING" %}
+          <th>Test</th><th>Agent</th>
+{%- elif section.kind == "CLEAN_PASS" %}
+          <th>Test</th><th>Agent</th><th>Branch</th>{% if has_artifacts %}<th>Artifacts</th>{% endif %}
+{%- else %}
+          <th>Test</th><th>Changes</th><th>Agent</th><th>Branch</th><th>Merged?</th>{% if has_artifacts %}<th>Artifacts</th>{% endif %}
+{%- endif %}
+        </tr>
+      </thead>
+      <tbody>
+{%- for row in section.rows %}
+        <tr>
+{%- if section.kind == "RUNNING" %}
+          <td>{{ row.test_id_html|safe }}</td>
+          <td><code>{{ row.agent_name }}</code></td>
+{%- elif section.kind == "CLEAN_PASS" %}
+          <td>{{ row.test_id_html|safe }}</td>
+          <td><code>{{ row.agent_name }}</code></td>
+          <td><code>{{ row.branch_name or "-" }}</code></td>
+{%- if has_artifacts %}
+{%- if row.has_artifacts %}
+          <td><button class="artifacts-btn" data-agent="{{ row.agent_name }}">View</button></td>
+{%- else %}
+          <td>-</td>
+{%- endif %}
+{%- endif %}
+{%- else %}
+          <td>{{ row.test_id_html|safe }}</td>
+          <td>{{ row.changes_html|safe }}</td>
+          <td><code>{{ row.agent_name }}</code></td>
+          <td><code>{{ row.branch_name or "-" }}</code></td>
+          <td>{{ row.merged_html|safe }}</td>
+{%- if has_artifacts %}
+{%- if row.has_artifacts %}
+          <td><button class="artifacts-btn" data-agent="{{ row.agent_name }}">View</button></td>
+{%- else %}
+          <td>-</td>
+{%- endif %}
+{%- endif %}
+{%- endif %}
+        </tr>
+{%- if row.summary_html and section.kind != "RUNNING" %}
+        <tr class="summary-row"><td colspan="{{ section.col_count }}" class="md summary-cell">{{ row.summary_html|safe }}</td></tr>
+{%- endif %}
+{%- endfor %}
+      </tbody>
+    </table>
+{%- endfor %}
+  </div>
+{%- if has_artifacts %}
+  <div id="artifacts-overlay" class="artifacts-overlay"></div>
+{%- for panel in artifact_panels %}
+  <div class="artifacts-panel" id="panel-{{ panel.agent_name }}">
+    <button class="artifacts-close">&times;</button>
+    <h2>{{ panel.agent_name }}</h2>
+{%- if panel.tab_count > 1 %}
+    <div class="run-tabs">
+{%- for i in range(panel.tab_count) %}
+      <button class="run-tab{% if i == 0 %} active{% endif %}" data-agent="{{ panel.agent_name }}" data-run="{{ i }}">{{ i + 1 }}</button>
+{%- endfor %}
+    </div>
+{%- endif %}
+{%- for run in panel.runs %}
+    <div class="run-content" data-agent="{{ panel.agent_name }}" data-run="{{ run.index }}"{% if run.index > 0 %} style="display:none"{% endif %}>
+{%- if run.description_html %}
+      <p><em>{{ run.description_html|safe }}</em></p>
+{%- endif %}
+      {{ run.detail_html|safe }}
+    </div>
+{%- endfor %}
+  </div>
+{%- endfor %}
+  <script>
+{{ js|safe }}
+  </script>
+{%- endif %}
+</body>
+</html>

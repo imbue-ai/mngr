@@ -1,0 +1,114 @@
+import configparser
+import json
+import re
+import socket
+import subprocess
+
+result = {
+    "system_interface_status": None,
+    "supervisorctl_error": None,
+    "inner_port": None,
+    "port_listener": None,
+    "port_listener_error": None,
+    "curl_status": None,
+    "curl_error": None,
+}
+
+# Authoritative liveness check: ask supervisord -- which owns every background
+# service since the services.toml/bootstrap-service-manager migration -- whether
+# the system_interface program is RUNNING. supervisorctl must be pointed at the
+# repo-root config (-c /code/supervisord.conf) so it finds the unix socket
+# declared there; the default config search path does not include
+# /code/supervisord.conf. The exec runs as root, so the 0700 socket is
+# reachable. The raw status line is captured here; recovery_probe parses the
+# state word (RUNNING/STOPPED/...) into the yes/no/unknown answer.
+try:
+    proc = subprocess.run(
+        ["supervisorctl", "-c", "/code/supervisord.conf", "status", "system_interface"],
+        capture_output=True, text=True, timeout=1,
+    )
+    result["system_interface_status"] = (proc.stdout + proc.stderr).strip()
+except Exception as e:
+    result["supervisorctl_error"] = repr(e)
+
+# Source the system-interface inner port from the [program:system_interface]
+# command in supervisord.conf, extracting it from that command's
+# `--url <scheme>://<host>:<port>` flag. Mirrors
+# recovery_probe.parse_inner_port_from_command (kept in sync by hand because
+# this script can't import that module). interpolation=None keeps configparser
+# from choking on any `%` in a command value; a missing section/file leaves
+# inner_port None, which the port + curl probes surface as a parse failure.
+try:
+    parser = configparser.ConfigParser(interpolation=None, strict=False)
+    parser.read("/code/supervisord.conf")
+    command = parser.get("program:system_interface", "command", fallback="") or ""
+    m = re.search(r"--url\s+\S+://[^:]+:(\d+)", command)
+    if m:
+        try:
+            result["inner_port"] = int(m.group(1))
+        except ValueError:
+            pass
+except Exception:
+    pass
+
+# The agent container image ships no iproute2, so "ss" is absent and a
+# subprocess.run(["ss", ...]) raises FileNotFoundError. Scan /proc/net/tcp{,6}
+# directly instead -- always present on Linux, no external binary. Mirrors
+# recovery_probe.parse_listening_sockets / _decode_proc_local_address (kept in
+# sync by hand because this script can't import that module). TCP state "0A"
+# is TCP_LISTEN; the IP is little-endian 32-bit words in hex (8 chars IPv4, 32
+# IPv6), so each 4-byte group is byte-reversed before formatting.
+if result["inner_port"] is not None:
+    try:
+        target = result["inner_port"]
+        listeners = []
+        for proc_path in ("/proc/net/tcp", "/proc/net/tcp6"):
+            try:
+                with open(proc_path) as fh:
+                    content = fh.read()
+            except FileNotFoundError:
+                continue
+            for line in content.splitlines():
+                fields = line.split()
+                if len(fields) < 4 or fields[3] != "0A":
+                    continue
+                local_address = fields[1]
+                ip_hex, _, port_hex = local_address.rpartition(":")
+                try:
+                    if int(port_hex, 16) != target:
+                        continue
+                except ValueError:
+                    continue
+                if len(ip_hex) == 8:
+                    ip = ".".join(str(octet) for octet in bytes.fromhex(ip_hex)[::-1])
+                elif len(ip_hex) == 32:
+                    packed = b"".join(
+                        bytes.fromhex(ip_hex[i:i + 8])[::-1] for i in range(0, 32, 8)
+                    )
+                    ip = socket.inet_ntop(socket.AF_INET6, packed)
+                else:
+                    ip = ip_hex
+                listeners.append("LISTEN {}:{}".format(ip, target))
+        result["port_listener"] = "\n".join(listeners)
+    except Exception as e:
+        result["port_listener_error"] = repr(e)
+
+# Curl / and treat a 200 as "answering" -- deliberately not coupled to any
+# particular application running inside the workspace. This only confirms that
+# some web server is up on the inner port, making no assumption about which app
+# it is or which routes it implements.
+if result["inner_port"] is not None:
+    try:
+        proc = subprocess.run(
+            [
+                "curl", "-m1", "-s", "-o", "/dev/null",
+                "-w", "%{http_code}",
+                "http://localhost:{}/".format(result["inner_port"]),
+            ],
+            capture_output=True, text=True, timeout=2,
+        )
+        result["curl_status"] = proc.stdout.strip()
+    except Exception as e:
+        result["curl_error"] = repr(e)
+
+print(json.dumps(result))

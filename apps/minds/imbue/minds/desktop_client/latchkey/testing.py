@@ -7,31 +7,12 @@ are exercised through the tests that import them.
 import json
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Final
 
 from pydantic import Field
 from pydantic import PrivateAttr
-from pydantic import ValidationError
 
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.minds.desktop_client.latchkey.gateway_client import AvailableServiceEntry
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
-from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
-
-# Default catalog returned by :meth:`FakeLatchkeyGatewayClient.get_available_services`.
-# Mirrors a single Slack-shaped entry from the gateway's real services.json so tests
-# that don't care about the catalog don't have to construct one.
-_DEFAULT_AVAILABLE_SERVICES_PAYLOAD: Final[dict[str, object]] = {
-    "slack": {
-        "scope": "slack-api",
-        "display_name": "Slack",
-        "permissions": [
-            "slack-read-all",
-            "slack-write-all",
-            "slack-chat-read",
-        ],
-    },
-}
 
 
 class RecordedSetPermissionCall(FrozenModel):
@@ -57,14 +38,6 @@ class FakeLatchkeyGatewayClient(LatchkeyGatewayClient):
       subclass or talk to a real gateway.
     """
 
-    available_services_payload: dict[str, object] = Field(
-        default_factory=lambda: dict(_DEFAULT_AVAILABLE_SERVICES_PAYLOAD),
-        description=(
-            "Payload that :meth:`get_available_services` returns. Defaults to a minimal Slack-only "
-            "catalog so tests that just need *any* catalog work without setup."
-        ),
-    )
-
     _set_calls: list[RecordedSetPermissionCall] = PrivateAttr(default_factory=list)
     _deleted_request_ids: list[str] = PrivateAttr(default_factory=list)
 
@@ -77,24 +50,6 @@ class FakeLatchkeyGatewayClient(LatchkeyGatewayClient):
     def deleted_request_ids(self) -> tuple[str, ...]:
         """Request ids the test code asked to delete, in arrival order."""
         return tuple(self._deleted_request_ids)
-
-    def get_available_services(self) -> dict[str, AvailableServiceEntry]:
-        """Validate and return the configured payload.
-
-        Mirrors the real client: structural failures (missing fields,
-        wrong types) raise :class:`LatchkeyGatewayClientError`, so tests
-        that point :attr:`available_services_payload` at malformed data
-        exercise the same code path as production.
-        """
-        validated: dict[str, AvailableServiceEntry] = {}
-        for service_name, raw_entry in self.available_services_payload.items():
-            try:
-                validated[service_name] = AvailableServiceEntry.model_validate(raw_entry)
-            except ValidationError as e:
-                raise LatchkeyGatewayClientError(
-                    f"Configured fake payload entry for {service_name!r} is invalid: {e}",
-                ) from e
-        return validated
 
     def get_granted_permissions_for_scopes(
         self,

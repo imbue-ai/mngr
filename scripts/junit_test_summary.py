@@ -136,6 +136,9 @@ class AttemptsRecord:
             return RunStatus.ERROR
         if self.skipped > 0:
             return RunStatus.SKIPPED
+        # UNKNOWN only arises for a record with zero recorded attempts. The parser
+        # (_parse_junit) always record()s an outcome before reading final_status,
+        # so this is a defensive last resort that is unreachable in the real flow.
         return RunStatus.UNKNOWN
 
 
@@ -266,6 +269,8 @@ def _testcase_outcome(testcase: ET.Element) -> RunStatus:
         return RunStatus.ERROR
     if has_skipped:
         return RunStatus.SKIPPED
+    # A <testcase> with no failure/error/skipped child is by definition a pass in
+    # the junit XML schema, so the fall-through to PASSED is correct.
     return RunStatus.PASSED
 
 

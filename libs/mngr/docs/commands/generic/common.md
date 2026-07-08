@@ -22,4 +22,4 @@ Logs are automatically saved to `~/.mngr/events/logs/<timestamp>-<pid>.json` wit
 
 - `--headless`: Disable all interactive behavior (prompts, TUI, editor). Also settable via `MNGR_HEADLESS` env var or `headless` config key. When not set, interactive mode is auto-detected from the TTY.
 - `--plugin TEXT / --enable-plugin TEXT / --disable-plugin TEXT`: Enable / disable selected plugins
-- `-S KEY=VALUE / --setting KEY=VALUE`: Override a config setting for this invocation. Uses dot-separated paths for nested keys (e.g., `--setting commands.create.connect=false`). Values are parsed as JSON when possible (booleans, numbers, arrays), otherwise as plain strings. Repeatable.
+- `-S KEY=VALUE / --setting KEY=VALUE`: Override a config setting for this invocation. Uses dot-separated paths for nested keys (e.g., `--setting commands.create.connect=false`). Values are parsed as JSON when possible (booleans, numbers, arrays), otherwise as plain strings. Repeatable. Tab completion completes both the `KEY` and (for keys with a constrained value set, like booleans and enums) the `VALUE`.

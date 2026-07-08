@@ -21,14 +21,20 @@ from imbue.minds.deployment_tests.data_types import FctTemplateRef
 from imbue.minds.deployment_tests.data_types import SharedEnvHandle
 from imbue.minds.deployment_tests.helpers import wait_for_env_ready
 
-pytestmark = pytest.mark.minds_services
+pytestmark = [pytest.mark.release, pytest.mark.minds_services]
 
 
+# NOT YET WORKING. Wired into the per-run CI env flow (fixtures + minds_services
+# marker) but the body is still a stub: it must be debugged and implemented
+# before it can pass. Remaining work: a mail.tm-backed signup driver, a
+# one-time-code sign-in driver, an in-process desktop-client workspace +
+# system-interface forwarding driver, and a Cloudflare-tunnel-list assertion
+# helper. Tracked as a Phase 2 follow-up; see specs/minds-deployment-tests.md.
 @pytest.mark.skip(
     reason=(
-        "Pending: mail.tm-backed signup driver, one-time-code sign-in driver, in-process "
-        "desktop client workspace + system-interface forwarding driver, Cloudflare-list "
-        "assertion helper. See specs/minds-deployment-tests.md > Initial test inventory."
+        "NOT YET WORKING -- wired into the per-run CI env flow but the body is a stub; needs "
+        "signup + one-time-code + workspace/tunnel drivers before it will pass. Phase 2 "
+        "follow-up; see specs/minds-deployment-tests.md."
     )
 )
 def test_realistic_signup_verify_signin_create_tunnel_signout(

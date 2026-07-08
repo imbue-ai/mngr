@@ -1,0 +1,24 @@
+{#def target, inline=False, extra="" #}
+{#
+  Field label for form inputs. ``target`` is the id of the input
+  this label is for (renders as the HTML ``for`` attribute -- the
+  prop can't be called ``for`` because JinjaX parses the prop
+  declaration block as a Python function signature, and ``for`` is
+  a reserved keyword).
+
+  Two layouts:
+
+  ``inline=False`` (default) -- a block label that sits above the
+  input, with ``mb-1.5`` bottom spacing. Used by the auth flow stack
+  (email / password) and the Create form's vertical form sections.
+
+  ``inline=True`` -- an inline label that sits in a horizontal flex
+  row beside its input (typically next to a Select). No display /
+  margin classes are added; the parent flex row handles layout.
+
+  Usage: a FormLabel with target="email" renders as a block label
+  above an input; adding ``inline`` flips it to a horizontal-row
+  treatment for cases like a label sitting beside a Select.
+#}
+{%- set _layout = "" if inline else "block mb-1.5" -%}
+<label for="{{ target }}" class="type-label text-primary {{ _layout }} {{ extra }}">{{ content }}</label>

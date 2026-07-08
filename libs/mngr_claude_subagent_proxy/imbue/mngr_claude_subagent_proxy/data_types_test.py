@@ -24,20 +24,3 @@ def test_mode_is_uppercase_string_serializable() -> None:
     """
     assert str(SubagentProxyMode.PROXY) == "PROXY"
     assert str(SubagentProxyMode.DENY) == "DENY"
-
-
-def test_merge_with_override_mode_wins() -> None:
-    """An override config's mode replaces the base's mode on merge."""
-    base = SubagentProxyPluginConfig(mode=SubagentProxyMode.PROXY)
-    override = SubagentProxyPluginConfig(mode=SubagentProxyMode.DENY)
-    merged = base.merge_with(override)
-    assert merged.mode == SubagentProxyMode.DENY
-
-
-def test_merge_with_preserves_enabled_field() -> None:
-    """The ``enabled`` field from PluginConfig still merges correctly."""
-    base = SubagentProxyPluginConfig(enabled=True, mode=SubagentProxyMode.PROXY)
-    override = SubagentProxyPluginConfig(enabled=False, mode=SubagentProxyMode.PROXY)
-    merged = base.merge_with(override)
-    assert merged.enabled is False
-    assert merged.mode == SubagentProxyMode.PROXY

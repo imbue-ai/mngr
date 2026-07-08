@@ -356,10 +356,10 @@ def test_option_stack_item_to_click_option() -> None:
 def test_option_stack_item_flag_value() -> None:
     """Test that OptionStackItem with flag_value creates a dual flag/value click option."""
     item = OptionStackItem(
-        param_decls=("--adopt-session",),
+        param_decls=("--example-opt",),
         type=str,
         flag_value="",
-        help="Adopt a session, optionally specifying an ID",
+        help="An example dual flag/value option",
     )
 
     option = item.to_click_option()
@@ -379,23 +379,23 @@ def test_option_stack_item_flag_value() -> None:
     runner = CliRunner()
 
     # Flag form (no argument) -> flag_value
-    result = runner.invoke(test_cmd, ["--adopt-session"])
+    result = runner.invoke(test_cmd, ["--example-opt"])
     assert result.exit_code == 0
-    assert captured["adopt_session"] == ""
+    assert captured["example_opt"] == ""
 
     captured.clear()
 
     # Value form (with argument) -> provided value
-    result = runner.invoke(test_cmd, ["--adopt-session", "abc123"])
+    result = runner.invoke(test_cmd, ["--example-opt", "abc123"])
     assert result.exit_code == 0
-    assert captured["adopt_session"] == "abc123"
+    assert captured["example_opt"] == "abc123"
 
     captured.clear()
 
     # Not specified -> None
     result = runner.invoke(test_cmd, [])
     assert result.exit_code == 0
-    assert captured["adopt_session"] is None
+    assert captured["example_opt"] is None
 
 
 def test_option_stack_item_with_defaults() -> None:

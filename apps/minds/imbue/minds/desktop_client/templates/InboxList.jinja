@@ -1,0 +1,24 @@
+{#def cards, selected_id="" #}
+{#
+  Left-column list of pending permission-request cards. Rendered both as
+  the initial content of #inbox-list and as a standalone fragment served
+  by GET /inbox/list. When ``cards`` is empty, emits a
+  ``.inbox-empty-placeholder`` instead so the inbox shell JS can detect
+  the empty state and apply the single-centered-message layout.
+
+  ``cards`` is a sequence of dicts with keys: ``id``, ``kind_label``,
+  ``ws_name``, ``display_name``, ``accent``. ``selected_id`` is the id
+  of the currently-selected card (or empty string for no selection).
+#}
+{% if cards %}
+  {% for card in cards %}
+    <div class="inbox-card {% if card.id == selected_id %}is-selected{% endif %}"
+         data-request-id="{{ card.id }}"
+         style="--workspace-accent: {{ card.accent }};">
+      <div class="inbox-card-kind">{{ card.kind_label }}: {{ card.ws_name }}</div>
+      <div class="inbox-card-display">{{ card.display_name }}</div>
+    </div>
+  {% endfor %}
+{% else %}
+  <div class="inbox-empty-placeholder">No pending requests.</div>
+{% endif %}

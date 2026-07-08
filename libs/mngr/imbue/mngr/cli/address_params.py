@@ -98,8 +98,9 @@ class HostLocationAddressParamType(click.ParamType):
     """Click param type for ``[NAME[@HOST[.PROVIDER]]][:PATH]`` source/target arguments.
 
     Used by commands that designate "a location on any host" -- e.g. the
-    ``--from`` argument of ``mngr create``, the ``TARGET``/``SOURCE`` argument
-    of ``mngr push``/``mngr pull``, and the source argument of ``mngr pair``.
+    ``--from`` argument of ``mngr create``, the ``SOURCE``/``DESTINATION``
+    arguments of ``mngr rsync``, the ``TARGET``/``SOURCE`` argument of
+    ``mngr git push``/``mngr git pull``, and the source argument of ``mngr pair``.
     """
 
     name = "host_location_address"
@@ -164,5 +165,18 @@ def parse_agent_addresses_or_raise(raw: list[str]) -> list[AgentAddress]:
     """
     try:
         return [parse_agent_address(s) for s in raw]
+    except UserInputError as e:
+        raise click.BadParameter(str(e)) from e
+
+
+def parse_agent_or_host_addresses_or_raise(raw: list[str]) -> list[AgentOrHostAddress]:
+    """Parse a sequence of raw strings into :class:`AgentOrHostAddress` values.
+
+    Sibling of :func:`parse_agent_addresses_or_raise` for commands whose
+    positional argument accepts both agent and host targets (``mngr snapshot
+    create/list/destroy``).
+    """
+    try:
+        return [parse_agent_or_host_address(s) for s in raw]
     except UserInputError as e:
         raise click.BadParameter(str(e)) from e

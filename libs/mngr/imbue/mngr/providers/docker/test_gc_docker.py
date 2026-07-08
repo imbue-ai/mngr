@@ -2,10 +2,12 @@
 
 Verifies that:
 - GC completes cleanly when the Docker daemon is unavailable
-- _discover_hosts_for_gc includes offline Docker providers with empty host lists
+- _discover_hosts_for_gc skips an offline Docker provider entirely (its
+  discover_hosts raises ProviderUnavailableError rather than returning []),
+  which is what prevents gc_volumes from treating its volumes as orphaned
 - GC correctly destroys running Docker hosts with no agents
-- _discover_hosts_for_gc surfaces both providers (offline Docker + online local)
-  so downstream GC resource functions can still process the available provider
+- _discover_hosts_for_gc still surfaces the available provider (online local)
+  when another provider (offline Docker) is skipped
 """
 
 import pytest
@@ -38,11 +40,13 @@ pytestmark = [pytest.mark.timeout(120)]
 
 @pytest.mark.acceptance
 @pytest.mark.docker_sdk
+@pytest.mark.allow_warnings(match=r"Failed to discover hosts for provider")
 def test_gc_completes_when_docker_daemon_offline(temp_mngr_ctx: MngrContext) -> None:
     """GC should complete without error when the Docker daemon is unreachable.
 
-    Docker's discover_hosts() catches ProviderUnavailableError internally and
-    returns an empty list, so gc() processes the provider without errors.
+    Docker's discover_hosts() raises ProviderUnavailableError when the daemon is
+    unreachable, so _discover_hosts_for_gc skips the provider entirely and gc()
+    completes with nothing to do (and no errors).
     """
     offline_provider = make_offline_docker_provider(temp_mngr_ctx)
 
@@ -68,55 +72,51 @@ def test_gc_completes_when_docker_daemon_offline(temp_mngr_ctx: MngrContext) -> 
 
 @pytest.mark.acceptance
 @pytest.mark.docker_sdk
-def test_gc_discover_hosts_returns_empty_hosts_for_offline_provider(temp_mngr_ctx: MngrContext) -> None:
-    """_discover_hosts_for_gc includes an offline Docker provider with empty hosts.
+@pytest.mark.allow_warnings(match=r"Failed to discover hosts for provider")
+def test_gc_discover_hosts_skips_offline_provider(temp_mngr_ctx: MngrContext) -> None:
+    """_discover_hosts_for_gc skips a Docker provider whose daemon is unreachable.
 
-    Docker's discover_hosts() catches ProviderUnavailableError internally and
-    returns []. The safety for gc_volumes comes from its own catch of
-    ProviderUnavailableError when calling list_volumes() -- it skips the
-    provider rather than treating all volumes as orphaned.
+    Docker's discover_hosts() raises ProviderUnavailableError when the daemon is
+    unreachable (rather than returning []), so _discover_hosts_for_gc drops the
+    provider entirely. This is what prevents gc_volumes from seeing an empty host
+    list and deleting every volume as "orphaned".
     """
     offline_provider = make_offline_docker_provider(temp_mngr_ctx)
 
     result = _discover_hosts_for_gc([offline_provider], temp_mngr_ctx)
 
-    assert len(result) == 1
-    provider, hosts = result[0]
-    assert provider is offline_provider
-    assert hosts == []
+    assert result == []
 
 
 @pytest.mark.acceptance
 @pytest.mark.docker_sdk
-def test_discover_hosts_for_gc_includes_both_providers_when_one_offline(
+@pytest.mark.allow_warnings(match=r"Failed to discover hosts for provider")
+def test_discover_hosts_for_gc_skips_offline_docker_keeps_online(
     temp_mngr_ctx: MngrContext,
     local_provider: LocalProviderInstance,
 ) -> None:
-    """_discover_hosts_for_gc should include both providers when one is offline.
+    """_discover_hosts_for_gc drops an offline Docker provider but keeps available ones.
 
-    Docker's discover_hosts() catches ProviderUnavailableError internally and
-    returns [], so both providers appear in the result. The offline Docker
-    provider has empty hosts, and the local provider has its hosts. This lets
-    downstream GC resource functions still process the available provider.
+    Docker's discover_hosts() raises ProviderUnavailableError when the daemon is
+    unreachable, so _discover_hosts_for_gc skips it while still processing the
+    online local provider. Skipping the offline provider -- rather than including
+    it with an empty host list -- is what keeps gc_volumes from treating its
+    volumes as orphaned.
     """
     offline_docker = make_offline_docker_provider(temp_mngr_ctx)
 
     hosts_by_provider = _discover_hosts_for_gc([offline_docker, local_provider], temp_mngr_ctx)
 
-    # Both providers should be present -- Docker with empty hosts, local with its hosts
+    # Only the available local provider should remain; the offline Docker provider
+    # is skipped entirely.
     provider_names = [p.name for p, _ in hosts_by_provider]
     assert ProviderInstanceName("local") in provider_names
-    assert offline_docker.name in provider_names
+    assert offline_docker.name not in provider_names
 
-    # Verify each provider's hosts
     for provider, hosts in hosts_by_provider:
-        if provider.name == offline_docker.name:
-            assert hosts == []
-        elif provider.name == ProviderInstanceName("local"):
-            # Local provider should have at least one host (localhost)
-            assert len(hosts) >= 1
-        else:
-            raise AssertionError(f"Unexpected provider in results: {provider.name}")
+        assert provider.name == ProviderInstanceName("local")
+        # Local provider should have at least one host (localhost).
+        assert len(hosts) >= 1
 
 
 # =========================================================================

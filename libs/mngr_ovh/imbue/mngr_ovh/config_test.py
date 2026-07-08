@@ -36,7 +36,7 @@ def test_default_config_values(clean_env: None) -> None:
     assert config.pricing_mode == OvhPricingMode.DEFAULT
     assert config.pricing_mode.to_wire_value() == "default"
     assert config.duration == "P1M"
-    assert config.vps_boot_timeout == 600.0
+    assert config.instance_boot_timeout == 600.0
     assert config.ovh_subsidiary == "US"
     assert config.application_key is None
     # Pool-workload-tuned: tight enough that destroy + create in the same

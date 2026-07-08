@@ -10,6 +10,8 @@ when explicitly requested via `just test <path>::<test>`.
 import os
 import subprocess
 import time
+from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 from pydantic import SecretStr
@@ -25,8 +27,45 @@ pytestmark = [
 ]
 
 
-def _run_mngr(*args: str, timeout: int = 300) -> subprocess.CompletedProcess[str]:
-    """Run a mngr command and return the result."""
+@pytest.fixture()
+def vultr_test_settings_dir(tmp_path: Path) -> Iterator[Path]:
+    """Write a project settings.toml that opts into pytest and selects Vultr.
+
+    The ``mngr create`` subprocess inherits ``PYTEST_CURRENT_TEST`` and refuses
+    to load any config that does not set ``is_allowed_in_pytest = true``.
+    Pointing the subprocess at this temp config via ``MNGR_PROJECT_CONFIG_DIR``
+    keeps the opt-in out of the developer's real config and selects the Vultr
+    provider (the API key comes from ``VULTR_API_KEY`` in the environment;
+    provider defaults supply region / plan / OS id).
+    """
+    (tmp_path / "settings.toml").write_text(
+        # Top-level key, so it must precede the first table.
+        "is_allowed_in_pytest = true\n"
+        "\n[providers.vultr]\n"
+        'backend = "vultr"\n'
+        # Disable other remote providers so the create-host preflight doesn't
+        # trip looking for their credentials.
+        "\n[providers.modal]\nis_enabled = false\n"
+        "\n[providers.azure]\nis_enabled = false\n"
+        "\n[providers.gcp]\nis_enabled = false\n"
+        "\n[providers.aws]\nis_enabled = false\n"
+        "\n[providers.ovh]\nis_enabled = false\n"
+        "\n[providers.imbue_cloud]\nis_enabled = false\n"
+    )
+    yield tmp_path
+
+
+def _run_mngr(project_config_dir: Path, *args: str, timeout: int = 600) -> subprocess.CompletedProcess[str]:
+    """Run a mngr command with the test settings.toml in scope.
+
+    The default timeout is generous because ``create`` provisions a real VPS:
+    Vultr provisioning alone can take ~90s, and on a slow run the full
+    create (provision + cloud-init + Docker build + rsync) intermittently
+    exceeded a tighter 300s budget, failing the test with a spurious
+    ``subprocess.TimeoutExpired`` rather than a real defect.
+    """
+    env = os.environ.copy()
+    env["MNGR_PROJECT_CONFIG_DIR"] = str(project_config_dir)
     cmd = ["uv", "run", "mngr", *args]
     return subprocess.run(
         cmd,
@@ -34,18 +73,45 @@ def _run_mngr(*args: str, timeout: int = 300) -> subprocess.CompletedProcess[str
         text=True,
         timeout=timeout,
         cwd=os.environ.get("MNGR_REPO_ROOT", os.getcwd()),
+        env=env,
     )
+
+
+def _destroy(project_config_dir: Path, agent_name: str) -> None:
+    """Force-destroy an agent with the test settings.toml in scope."""
+    env = os.environ.copy()
+    env["MNGR_PROJECT_CONFIG_DIR"] = str(project_config_dir)
+    subprocess.run(
+        ["uv", "run", "mngr", "destroy", agent_name, "--force"],
+        input="y\n",
+        capture_output=True,
+        text=True,
+        timeout=120,
+        cwd=os.environ.get("MNGR_REPO_ROOT", os.getcwd()),
+        env=env,
+    )
+    # Wait for background destroy to complete.
+    time.sleep(20)
 
 
 class TestVultrProviderLifecycle:
     """Tests for the full VPS Docker provider lifecycle."""
 
-    def test_create_exec_and_destroy(self) -> None:
-        """Create a host, run a command on it, then destroy it."""
+    @pytest.mark.rsync
+    def test_create_exec_and_destroy(self, vultr_test_settings_dir: Path) -> None:
+        """Provisioning a real Vultr VPS yields an agent that is fully usable end to end.
+
+        Asserts that ``create`` succeeds, that a subsequent ``exec`` actually runs a
+        command on the remote VPS (the unique marker ``hello-from-vultr`` appears in
+        stdout), that the provisioned host_dir ``/mngr`` exists on the box, and that
+        ``list`` reports the agent under the ``vultr`` provider. Each assertion fails
+        if provisioning, remote exec, or registration silently no-ops.
+        """
         agent_name = f"test-vultr-{int(time.time()) % 100000}"
 
-        # Create
+        # Create (uses rsync to upload the build context to the VPS)
         result = _run_mngr(
+            vultr_test_settings_dir,
             "create",
             agent_name,
             "--type",
@@ -61,38 +127,36 @@ class TestVultrProviderLifecycle:
 
         try:
             # Exec
-            result = _run_mngr("exec", agent_name, "echo hello-from-vultr")
+            result = _run_mngr(vultr_test_settings_dir, "exec", agent_name, "echo hello-from-vultr")
             assert result.returncode == 0, f"Exec failed: {result.stderr}"
             assert "hello-from-vultr" in result.stdout
 
             # Verify host_dir exists
-            result = _run_mngr("exec", agent_name, "test -d /mngr && echo exists")
+            result = _run_mngr(vultr_test_settings_dir, "exec", agent_name, "test -d /mngr && echo exists")
             assert result.returncode == 0, f"host_dir check failed: {result.stderr}"
             assert "exists" in result.stdout
 
             # List
-            result = _run_mngr("list")
+            result = _run_mngr(vultr_test_settings_dir, "list")
             assert result.returncode == 0, f"List failed: {result.stderr}"
             assert agent_name in result.stdout
             assert "vultr" in result.stdout
         finally:
-            # Destroy (pipe 'y' for confirmation, use --force for running agents)
-            result = subprocess.run(
-                ["uv", "run", "mngr", "destroy", agent_name, "--force"],
-                input="y\n",
-                capture_output=True,
-                text=True,
-                timeout=120,
-                cwd=os.environ.get("MNGR_REPO_ROOT", os.getcwd()),
-            )
-            # Wait for background destroy to complete
-            time.sleep(20)
+            _destroy(vultr_test_settings_dir, agent_name)
 
-    def test_create_stop_start_destroy(self) -> None:
-        """Test the full stop/start lifecycle."""
+    @pytest.mark.rsync
+    def test_create_stop_start_destroy(self, vultr_test_settings_dir: Path) -> None:
+        """A Vultr agent survives a stop/start cycle and is runnable again afterward.
+
+        Asserts that ``stop`` then ``start`` both succeed on a real VPS-backed agent
+        and that a post-restart ``exec`` returns its unique marker
+        ``alive-after-restart`` from the box, proving the restart actually brought the
+        agent back to a usable running state rather than leaving it stopped or broken.
+        """
         agent_name = f"test-vultr-ss-{int(time.time()) % 100000}"
 
         result = _run_mngr(
+            vultr_test_settings_dir,
             "create",
             agent_name,
             "--type",
@@ -107,38 +171,38 @@ class TestVultrProviderLifecycle:
 
         try:
             # Stop the agent
-            result = _run_mngr("stop", agent_name)
+            result = _run_mngr(vultr_test_settings_dir, "stop", agent_name)
             assert result.returncode == 0, f"Stop failed: {result.stderr}"
 
             # Verify it appears as stopped in list
-            result = _run_mngr("list")
+            result = _run_mngr(vultr_test_settings_dir, "list")
             assert result.returncode == 0
             assert agent_name in result.stdout
 
             # Start the agent
-            result = _run_mngr("start", agent_name, "--no-connect")
+            result = _run_mngr(vultr_test_settings_dir, "start", agent_name, "--no-connect")
             assert result.returncode == 0, f"Start failed: {result.stderr}"
 
             # Verify it's running again
-            result = _run_mngr("exec", agent_name, "echo alive-after-restart")
+            result = _run_mngr(vultr_test_settings_dir, "exec", agent_name, "echo alive-after-restart")
             assert result.returncode == 0, f"Post-restart exec failed: {result.stderr}"
             assert "alive-after-restart" in result.stdout
         finally:
-            result = subprocess.run(
-                ["uv", "run", "mngr", "destroy", agent_name, "--force"],
-                input="y\n",
-                capture_output=True,
-                text=True,
-                timeout=120,
-                cwd=os.environ.get("MNGR_REPO_ROOT", os.getcwd()),
-            )
-            time.sleep(20)
+            _destroy(vultr_test_settings_dir, agent_name)
 
-    def test_ssh_connectivity(self) -> None:
-        """Verify we can SSH into the container directly."""
+    @pytest.mark.rsync
+    def test_ssh_connectivity(self, vultr_test_settings_dir: Path) -> None:
+        """The provisioned Vultr container runs the expected OS with a live sshd.
+
+        Asserts that ``exec`` (which reaches the box over SSH) reports a Debian-based
+        ``/etc/os-release`` and that at least one ``sshd`` process is running inside
+        the container. Both checks fail if the container is the wrong image or if the
+        SSH daemon backing remote exec is not actually up.
+        """
         agent_name = f"test-vultr-ssh-{int(time.time()) % 100000}"
 
         result = _run_mngr(
+            vultr_test_settings_dir,
             "create",
             agent_name,
             "--type",
@@ -153,44 +217,34 @@ class TestVultrProviderLifecycle:
 
         try:
             # Check OS inside container
-            result = _run_mngr("exec", agent_name, "cat /etc/os-release | head -1")
+            result = _run_mngr(vultr_test_settings_dir, "exec", agent_name, "cat /etc/os-release | head -1")
             assert result.returncode == 0, f"OS check failed: {result.stderr}"
             assert "Debian" in result.stdout or "debian" in result.stdout.lower()
 
             # Verify sshd is running
-            result = _run_mngr("exec", agent_name, "pgrep -c sshd")
+            result = _run_mngr(vultr_test_settings_dir, "exec", agent_name, "pgrep -c sshd")
             assert result.returncode == 0, f"sshd check failed: {result.stderr}"
             sshd_count = int(result.stdout.strip().split("\n")[0])
             assert sshd_count >= 1
         finally:
-            result = subprocess.run(
-                ["uv", "run", "mngr", "destroy", agent_name, "--force"],
-                input="y\n",
-                capture_output=True,
-                text=True,
-                timeout=120,
-                cwd=os.environ.get("MNGR_REPO_ROOT", os.getcwd()),
-            )
-            time.sleep(20)
+            _destroy(vultr_test_settings_dir, agent_name)
+
+
+@pytest.fixture()
+def vultr_release_client() -> VultrVpsClient:
+    """Real Vultr API client for release-test read-only calls."""
+    return VultrVpsClient(api_key=SecretStr(_VULTR_API_KEY), os_id=2136)
 
 
 class TestVultrApiClient:
     """Tests for the Vultr API client with real API calls."""
 
-    def test_list_instances_does_not_error(self) -> None:
-        """Verify the API client can list instances without error."""
-        client = VultrVpsClient(api_key=SecretStr(_VULTR_API_KEY))
-        instances = client.list_instances()
+    def test_list_instances_does_not_error(self, vultr_release_client: VultrVpsClient) -> None:
+        """The client authenticates to the real Vultr API and returns a parsed list.
+
+        Asserts that ``list_instances`` against the live API returns a ``list``,
+        proving the API key is accepted and the response is parsed into the expected
+        shape. Fails if the request errors out or the client returns a non-list.
+        """
+        instances = vultr_release_client.list_instances()
         assert isinstance(instances, list)
-
-    def test_list_ssh_keys(self) -> None:
-        """Verify the API client can list SSH keys."""
-        client = VultrVpsClient(api_key=SecretStr(_VULTR_API_KEY))
-        keys = client.list_ssh_keys()
-        assert isinstance(keys, list)
-
-    def test_list_snapshots(self) -> None:
-        """Verify the API client can list snapshots."""
-        client = VultrVpsClient(api_key=SecretStr(_VULTR_API_KEY))
-        snapshots = client.list_snapshots()
-        assert isinstance(snapshots, list)

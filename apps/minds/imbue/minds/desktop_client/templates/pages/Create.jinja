@@ -1,0 +1,737 @@
+{#def git_url, branch, host_name, launch_modes, selected_launch_mode, ai_providers, selected_ai_provider, backup_providers, selected_backup_provider, backup_encryption_methods, selected_backup_encryption_method, backup_api_key_env, has_saved_backup_password, accounts, default_account_id, anthropic_api_key, error_message, region_options_by_launch_mode, region_selected_by_launch_mode, selected_preset="remote", start_advanced=False, color="#0b292b" #}
+{#
+  Workspace creation form.
+
+  Two views share one form. The simple view offers two compute presets
+  -- "remote" (Imbue Cloud) and "local" (directly on this computer) --
+  as large selectable cards; picking one fills the (hidden) advanced
+  selects with that preset's compute / AI / backup defaults. The advanced
+  view exposes those selects plus the repository / branch / region inputs
+  directly. The advanced selects are always the source of truth on
+  submit, so toggling between views never changes what gets POSTed.
+
+  The color is chosen automatically (the first unused palette entry, carried
+  in a hidden input), so it is not asked for here. The workspace name defaults
+  to an auto-generated ``workspace-N`` (server-side) but can be set explicitly via
+  the advanced view's ``Name`` field.
+
+  ``selected_preset`` picks which card starts selected (and which
+  preset's values the selects start on). ``start_advanced`` opens the
+  advanced view on first paint (used when re-rendering a submit error,
+  whose fields live there).
+#}
+{% set _default_restic_env = "# see docs linked above for available options\n# for example:\nRESTIC_REPOSITORY=s3:s3.amazonaws.com/<bucket_name>\nAWS_ACCESS_KEY_ID=\nAWS_SECRET_ACCESS_KEY=\n" %}
+{% set _scripts %}
+<script src="/_static/api_errors.js"></script>
+<script>
+  (function() {
+    // The remote (Imbue Cloud) preset needs an Imbue account. When a signed-out
+    // user presses "Create" with it selected, open the shared sign-in modal in
+    // the desktop client's overlay layer (covering the whole window, title bar
+    // included) via an allowlisted postMessage relayed to the Electron main
+    // process. In the browser (no shell) navigate to the standalone sign-in
+    // page instead.
+    var isElectronShell = navigator.userAgent.indexOf('Electron') !== -1;
+
+    var form = document.getElementById('create-form');
+    var simpleView = document.getElementById('simple-view');
+    var advancedView = document.getElementById('advanced-view');
+    var toggleAdvanced = document.getElementById('toggle-advanced');
+    var backToSimple = document.getElementById('back-to-simple');
+    // Toggle visibility on the (display-utility-free) wrapper spans rather than
+    // the inline-flex buttons themselves: a `hidden` class loses to `inline-flex`
+    // (see templates/README.md), but display:none on a plain-inline parent hides
+    // the whole subtree regardless.
+    var advancedToggleWrap = document.getElementById('advanced-toggle-wrap');
+    var simpleToggleWrap = document.getElementById('simple-toggle-wrap');
+
+    var accountSelect = document.getElementById('account_id');
+    var launchSelect = document.getElementById('launch_mode');
+    var aiProviderSelect = document.getElementById('ai_provider');
+    var apiKeyRow = document.getElementById('api-key-row');
+    var apiKeyInput = document.getElementById('anthropic_api_key');
+    var launchModeError = document.getElementById('launch-mode-account-error');
+    var awsCredentialsNote = document.getElementById('aws-credentials-note');
+    var aiProviderError = document.getElementById('ai-provider-account-error');
+    var backupSelect = document.getElementById('backup_provider');
+    var backupApiKeyRow = document.getElementById('backup-api-key-row');
+    var backupEncryptionRow = document.getElementById('backup-encryption-row');
+    var backupEncryptionSelect = document.getElementById('backup_encryption_method');
+    var backupMasterPasswordRow = document.getElementById('backup-master-password-row');
+    var backupMasterPasswordInput = document.getElementById('backup_master_password');
+    var backupProviderError = document.getElementById('backup-provider-account-error');
+    var submitBtn = document.getElementById('create-submit');
+    var regionRow = document.getElementById('region-row');
+    var regionSelect = document.getElementById('region');
+    var presetCards = document.querySelectorAll('[data-preset]');
+    var accountError = document.getElementById('account-error');
+    // Inputs read when building the create request body (some -- master password,
+    // save-password -- only exist when no shared backup password is saved yet).
+    var gitUrlInput = document.getElementById('git_url');
+    var branchInput = document.getElementById('branch');
+    var hostNameInput = document.getElementById('host_name');
+    var hostNameError = document.getElementById('host-name-error');
+    var colorInput = document.getElementById('create-color-input');
+    var backupApiKeyEnvInput = document.getElementById('backup_api_key_env');
+    var backupSavePasswordInput = document.getElementById('backup_save_password');
+    var createError = document.getElementById('create-error');
+    // The field highlighted by the last create error, cleared before the next try.
+    var lastErrorField = null;
+    var REGION_OPTIONS = {{ region_options_by_launch_mode | tojson }};
+    var REGION_SELECTED = {{ region_selected_by_launch_mode | tojson }};
+
+    // Whether the user has any signed-in Imbue account to pick. When false,
+    // the remote (Imbue Cloud) preset is still selectable; pressing "Create"
+    // opens the in-page sign-in modal instead of submitting.
+    var HAS_ANY_ACCOUNT = {{ 'true' if accounts else 'false' }};
+
+    // Each preset fills the advanced selects with its compute / AI / backup
+    // defaults. These mirror the per-account defaults the server applies.
+    var PRESETS = {
+      remote: {launch_mode: 'IMBUE_CLOUD', ai_provider: 'IMBUE_CLOUD', backup_provider: 'IMBUE_CLOUD', backup_encryption_method: 'NO_PASSWORD'},
+      local:  {launch_mode: 'LIMA', ai_provider: 'SUBSCRIPTION', backup_provider: 'CONFIGURE_LATER', backup_encryption_method: 'NO_PASSWORD'}
+    };
+
+    function applyPreset(name) {
+      var preset = PRESETS[name];
+      if (!preset) return;
+      launchSelect.value = preset.launch_mode;
+      aiProviderSelect.value = preset.ai_provider;
+      backupSelect.value = preset.backup_provider;
+      backupEncryptionSelect.value = preset.backup_encryption_method;
+    }
+
+    function selectedPreset() {
+      var card = document.querySelector('[data-preset][aria-checked="true"]');
+      return card ? card.getAttribute('data-preset') : null;
+    }
+
+    function markPresetSelected(name) {
+      // Selection is driven purely by aria-checked; the PresetCard's
+      // aria-checked: Tailwind variants paint the selected accent outline + tint.
+      for (var i = 0; i < presetCards.length; i++) {
+        var isOn = presetCards[i].getAttribute('data-preset') === name;
+        presetCards[i].setAttribute('aria-checked', isOn ? 'true' : 'false');
+      }
+    }
+
+    function imbueCloudNeedsAccount() {
+      // Imbue Cloud compute / AI / backup requires an account. True when one of
+      // those is selected but no account is picked.
+      return accountSelect.value === '' && (
+        launchSelect.value === 'IMBUE_CLOUD' ||
+        aiProviderSelect.value === 'IMBUE_CLOUD' ||
+        backupSelect.value === 'IMBUE_CLOUD'
+      );
+    }
+
+    function openSigninModal() {
+      if (isElectronShell) {
+        // Relayed to the main process (content-relay-preload.js), which opens
+        // the shared modal WebContentsView loaded with /auth/signin-modal.
+        window.postMessage({ type: 'minds:open-signin-modal' }, '*');
+      } else {
+        window.location.href = '/auth/signin-modal';
+      }
+    }
+
+    function showAccountError() {
+      // Red outline + message at the account picker. Shown only on a Create
+      // attempt (never proactively), cleared by update() once a valid account
+      // is chosen. ``!ring-1`` (important width) survives the picker's own
+      // ``focus:ring-0`` while it is focused; the color is plain.
+      accountError.classList.remove('hidden');
+      accountSelect.classList.add('!ring-1', 'ring-important');
+    }
+
+    function hideAccountError() {
+      accountError.classList.add('hidden');
+      accountSelect.classList.remove('!ring-1', 'ring-important');
+    }
+
+    // ---- Live Name (host name) validation -------------------------------
+    // Mirrors mngr's HostName rules (alphanumeric plus '-'/'_' in the middle,
+    // no leading/trailing '-'/'_', no dots) for instant format feedback, then
+    // debounced-asks the server whether the name is free on the *selected*
+    // provider (the scope where a real create would actually collide). State
+    // 'ok' lets submit through; 'invalid'/'taken' block it (the field stays
+    // editable). Empty is always 'ok' -- the server auto-names it.
+    var HOST_NAME_OK = 'ok', HOST_NAME_INVALID = 'invalid', HOST_NAME_TAKEN = 'taken';
+    var hostNameState = HOST_NAME_OK;
+    var hostNameDebounce = null;
+    var hostNameCheckSeq = 0;
+    // The availability key (name + provider scope) a HOST_NAME_TAKEN was computed
+    // for. A 'taken' verdict only blocks submit while the current inputs still
+    // produce this exact key; once the user edits the name or switches
+    // provider/account/region it is stale and must not fail-close a name/scope it
+    // was never checked against.
+    var hostNameTakenKey = null;
+
+    function hostNameFormatError(value) {
+      // Friendly message for the first broken rule, or '' if valid. Empty is
+      // valid (named automatically server-side).
+      if (value === '') return '';
+      var invalidChar = value.match(/[^a-zA-Z0-9_-]/);
+      if (invalidChar) {
+        if (invalidChar[0] === '.') return "Dots aren't allowed in a name.";
+        if (invalidChar[0] === ' ') return "Spaces aren't allowed in a name.";
+        return 'Use only letters, numbers, dashes, and underscores.';
+      }
+      if (/^[-_]/.test(value)) return "Can't start with a dash or underscore.";
+      if (/[-_]$/.test(value)) return "Can't end with a dash or underscore.";
+      return '';
+    }
+
+    function showHostNameError(message) {
+      hostNameError.textContent = message;
+      hostNameError.classList.remove('hidden');
+      // Turn the field's own border red (no extra ring), and recolor the focus
+      // outline red instead of the default accent. ``!border-important`` beats
+      // the base ``border-strong`` / ``hover:border-stronger``;
+      // ``focus:!outline-important`` overrides the base ``focus:outline-accent``.
+      hostNameInput.classList.add('!border-important', 'focus:!outline-important');
+    }
+
+    function clearHostNameError() {
+      hostNameError.textContent = '';
+      hostNameError.classList.add('hidden');
+      hostNameInput.classList.remove('!border-important', 'focus:!outline-important');
+    }
+
+    function hostNameAvailabilityUrl(value) {
+      var params = new URLSearchParams({
+        name: value,
+        launch_mode: launchSelect.value,
+        account_id: accountSelect.value,
+        region: regionSelect.disabled ? '' : regionSelect.value
+      });
+      return '/api/v1/desktop/host-name-available?' + params.toString();
+    }
+
+    function validateHostName() {
+      var value = hostNameInput.value.trim();
+      var formatError = hostNameFormatError(value);
+      if (formatError) {
+        hostNameState = HOST_NAME_INVALID;
+        hostNameTakenKey = null;
+        showHostNameError(formatError);
+        return;
+      }
+      if (value === '') {
+        hostNameState = HOST_NAME_OK;
+        hostNameTakenKey = null;
+        clearHostNameError();
+        return;
+      }
+      // Format is fine; ask the server about availability. Until it answers we
+      // optimistically treat the name as ok so a fast Create isn't blocked (the
+      // rare race falls back to the server's own create-time conflict check).
+      hostNameState = HOST_NAME_OK;
+      hostNameTakenKey = null;
+      clearHostNameError();
+      var url = hostNameAvailabilityUrl(value);
+      var seq = ++hostNameCheckSeq;
+      fetch(url, { headers: { 'Accept': 'application/json' } })
+        .then(function (resp) { return resp.ok ? resp.json() : null; })
+        .then(function (data) {
+          // Ignore a stale response superseded by a newer keystroke/change.
+          if (seq !== hostNameCheckSeq) return;
+          if (data && data.available === false) {
+            hostNameState = HOST_NAME_TAKEN;
+            // Remember exactly which name/scope is taken so a later edit doesn't
+            // leave this verdict blocking a different name (see submit handler).
+            hostNameTakenKey = url;
+            showHostNameError('That name is already taken. Pick a different one.');
+          } else {
+            hostNameState = HOST_NAME_OK;
+            hostNameTakenKey = null;
+            clearHostNameError();
+          }
+        })
+        .catch(function () { /* network error: fail open, leave the name usable */ });
+    }
+
+    function scheduleHostNameValidation() {
+      if (hostNameDebounce) clearTimeout(hostNameDebounce);
+      hostNameDebounce = setTimeout(validateHostName, 300);
+    }
+
+    function onPresetClick(name) {
+      // Clicking a card only selects it -- it never navigates. Remote (Imbue
+      // Cloud) compute needs an account: when the user has signed-in accounts
+      // but none is picked, auto-pick the first so it is immediately usable.
+      // When there is no account at all, just select it; pressing "Create"
+      // opens the sign-in modal (see the submit handler).
+      if (name === 'remote' && accountSelect.value === '' && HAS_ANY_ACCOUNT) {
+        accountSelect.selectedIndex = 0;
+      }
+      markPresetSelected(name);
+      applyPreset(name);
+      update();
+      // applyPreset sets launchSelect.value (and may change the account) directly,
+      // which does not fire a 'change' event, so re-run the availability check
+      // explicitly to re-scope "taken" to the preset's provider/account.
+      scheduleHostNameValidation();
+    }
+
+    for (var i = 0; i < presetCards.length; i++) {
+      (function (card) {
+        card.addEventListener('click', function () {
+          onPresetClick(card.getAttribute('data-preset'));
+        });
+      })(presetCards[i]);
+    }
+
+    function showAdvanced(isAdvanced) {
+      simpleView.classList.toggle('hidden', isAdvanced);
+      advancedView.classList.toggle('hidden', !isAdvanced);
+      advancedToggleWrap.classList.toggle('hidden', isAdvanced);
+      simpleToggleWrap.classList.toggle('hidden', !isAdvanced);
+    }
+    toggleAdvanced.addEventListener('click', function () { showAdvanced(true); });
+    backToSimple.addEventListener('click', function () { showAdvanced(false); });
+
+    function fieldValue(el) {
+      // Skip disabled / absent inputs (e.g. the region select while hidden) so
+      // their stale values are not sent.
+      if (!el || el.disabled) return '';
+      return el.value;
+    }
+
+    function clearCreateError() {
+      if (createError) createError.classList.add('hidden');
+      if (lastErrorField) {
+        lastErrorField.classList.remove('!ring-1', 'ring-important');
+        lastErrorField = null;
+      }
+    }
+
+    function showCreateError(message, field) {
+      if (createError) {
+        createError.textContent = message || 'Could not create the workspace.';
+        createError.classList.remove('hidden');
+      }
+      // When the API names the offending field, reveal the advanced view it
+      // lives in, ring it, and bring it into focus so the message has context.
+      if (field) {
+        var fieldEl = document.getElementById(field);
+        if (fieldEl) {
+          showAdvanced(true);
+          fieldEl.classList.add('!ring-1', 'ring-important');
+          fieldEl.focus();
+          fieldEl.scrollIntoView({ block: 'center' });
+          lastErrorField = fieldEl;
+        }
+      }
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Create';
+    }
+
+    function submitCreate() {
+      clearCreateError();
+      // The advanced selects are always the source of truth on submit (the
+      // preset cards just pre-fill them); send the full create field surface.
+      var body = {
+        git_url: fieldValue(gitUrlInput).trim(),
+        host_name: fieldValue(hostNameInput).trim(),
+        branch: fieldValue(branchInput).trim(),
+        color: fieldValue(colorInput),
+        launch_mode: launchSelect.value,
+        ai_provider: aiProviderSelect.value,
+        account_id: accountSelect.value,
+        anthropic_api_key: fieldValue(apiKeyInput).trim(),
+        backup_provider: backupSelect.value,
+        backup_encryption_method: backupEncryptionSelect.value,
+        backup_api_key_env: fieldValue(backupApiKeyEnvInput),
+        backup_master_password: fieldValue(backupMasterPasswordInput),
+        backup_save_password: backupSavePasswordInput ? backupSavePasswordInput.checked : false,
+        region: fieldValue(regionSelect)
+      };
+      fetch('/api/v1/workspaces', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      }).then(function (r) {
+        return r.json().then(function (data) { return { status: r.status, data: data || {} }; });
+      }).then(function (res) {
+        if (res.status === 202 && res.data.operation_id) {
+          window.location = '/creating/' + res.data.operation_id;
+          return;
+        }
+        // Normalize both the structural 422 contract and the handler's semantic
+        // {error, field, redirect_url} into one shape. The no-account imbue_cloud
+        // backstop carries a sign-up redirect target; a field error rings the
+        // matching input (the 422 field names line up with the form input ids).
+        var err = normalizeApiError(res.data);
+        if (err.redirect_url) {
+          window.location = err.redirect_url;
+          return;
+        }
+        showCreateError(err.message, err.field);
+      }).catch(function () {
+        showCreateError('Could not reach the server. Please try again.');
+      });
+    }
+
+    form.addEventListener('submit', function (e) {
+      // Always handle submission via fetch (never a native POST navigation).
+      e.preventDefault();
+      // Imbue Cloud needs an account. If none is selected, don't submit:
+      //  - signed out -> open the sign-in modal (overlay layer).
+      //  - signed in  -> surface the account-picker error, but only now (on a
+      //    Create attempt) -- not proactively as the user clicks between
+      //    presets, which is too distracting.
+      if (imbueCloudNeedsAccount()) {
+        if (HAS_ANY_ACCOUNT) showAccountError();
+        else openSigninModal();
+        return;
+      }
+      // Re-run format validation synchronously so a known-bad / already-taken
+      // name blocks submit (mirroring the account-picker guard). Availability
+      // that hasn't come back yet does not block -- the server's create-time
+      // conflict check backstops that rare race. This synchronous check owns the
+      // *format* dimension: it must also clear a stale 'invalid' from a prior
+      // keystroke (the debounced validateHostName may not have re-run yet), or a
+      // name the user just corrected would be wrongly blocked.
+      var trimmedName = hostNameInput.value.trim();
+      var nameFormatError = hostNameFormatError(trimmedName);
+      if (nameFormatError) {
+        hostNameState = HOST_NAME_INVALID;
+        showHostNameError(nameFormatError);
+      } else if (hostNameState === HOST_NAME_INVALID) {
+        hostNameState = HOST_NAME_OK;
+        clearHostNameError();
+      }
+      // A 'taken' verdict only blocks the exact name/scope it was computed for.
+      // If the user has since edited the name (or switched provider/account/region)
+      // the verdict is stale -- the debounced re-check may not have run yet -- so it
+      // must not fail-close a name that was never checked; we fall through to
+      // optimistic-allow and let the server's create-time conflict check backstop.
+      var nameStillTaken =
+        hostNameState === HOST_NAME_TAKEN && hostNameTakenKey === hostNameAvailabilityUrl(trimmedName);
+      if (hostNameState === HOST_NAME_INVALID || nameStillTaken) {
+        // (default already prevented above) -- just surface the inline error.
+        showAdvanced(true);
+        hostNameInput.focus();
+        return;
+      }
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Creating...';
+      submitCreate();
+    });
+
+    function onAccountChange() {
+      // Selecting "No account" while Imbue Cloud is chosen is no longer auto-
+      // switched to local; update() surfaces the account-picker error instead,
+      // so the user can pick an account (or change provider) deliberately.
+      update();
+    }
+
+    function updateRegion() {
+      // The region dropdown is only shown for providers that place a machine in
+      // a chosen region (imbue_cloud, vultr, aws). For others it is hidden and
+      // disabled so no region value is submitted.
+      var mode = launchSelect.value;
+      var options = REGION_OPTIONS[mode];
+      if (!options || options.length === 0) {
+        regionRow.classList.add('hidden');
+        regionSelect.disabled = true;
+        return;
+      }
+      // Rebuild options only when the provider changed, so a user's explicit
+      // pick survives unrelated form changes.
+      if (regionSelect.getAttribute('data-mode') !== mode) {
+        var preselected = REGION_SELECTED[mode] || options[0];
+        regionSelect.innerHTML = '';
+        for (var i = 0; i < options.length; i++) {
+          var opt = document.createElement('option');
+          opt.value = options[i];
+          opt.textContent = options[i];
+          if (options[i] === preselected) opt.selected = true;
+          regionSelect.appendChild(opt);
+        }
+        regionSelect.setAttribute('data-mode', mode);
+      }
+      regionSelect.disabled = false;
+      regionRow.classList.remove('hidden');
+    }
+
+    function update() {
+      var hasAccount = accountSelect.value !== '';
+
+      var launchImbueOption = launchSelect.querySelector('option[data-requires-account]');
+      if (launchImbueOption) launchImbueOption.disabled = !hasAccount;
+      var aiImbueOption = aiProviderSelect.querySelector('option[data-requires-account]');
+      if (aiImbueOption) aiImbueOption.disabled = !hasAccount;
+      var backupImbueOption = backupSelect.querySelector('option[data-requires-account]');
+      if (backupImbueOption) backupImbueOption.disabled = !hasAccount;
+
+      var isApiKey = aiProviderSelect.value === 'API_KEY';
+      apiKeyRow.classList.toggle('hidden', !isApiKey);
+      apiKeyInput.required = isApiKey;
+
+      var backupValue = backupSelect.value;
+      var isBackupConfigured = backupValue === 'IMBUE_CLOUD' || backupValue === 'API_KEY';
+      var isBackupApiKey = backupValue === 'API_KEY';
+      backupApiKeyRow.classList.toggle('hidden', !isBackupApiKey);
+      backupEncryptionRow.classList.toggle('hidden', !isBackupConfigured);
+
+      var isMasterPassword = isBackupConfigured && backupEncryptionSelect.value === 'MASTER_PASSWORD';
+      if (backupMasterPasswordRow) backupMasterPasswordRow.classList.toggle('hidden', !isMasterPassword);
+      if (backupMasterPasswordInput) backupMasterPasswordInput.required = isMasterPassword;
+
+      var launchInvalid = !hasAccount && launchSelect.value === 'IMBUE_CLOUD';
+      var aiInvalid = !hasAccount && aiProviderSelect.value === 'IMBUE_CLOUD';
+      var backupInvalid = !hasAccount && backupValue === 'IMBUE_CLOUD';
+      launchModeError.classList.toggle('hidden', !launchInvalid);
+      if (awsCredentialsNote) awsCredentialsNote.classList.toggle('hidden', launchSelect.value !== 'AWS');
+      aiProviderError.classList.toggle('hidden', !aiInvalid);
+      backupProviderError.classList.toggle('hidden', !backupInvalid);
+
+      // "Create" stays enabled; the account requirement is enforced on submit
+      // (open the modal when signed out, or show the picker error when signed
+      // in), not by disabling the button or flashing an error proactively. Here
+      // we only *clear* a previously-shown picker error once the selection is
+      // valid again, so picking an account (or switching to local) removes it.
+      if (!imbueCloudNeedsAccount()) hideAccountError();
+      submitBtn.disabled = false;
+
+      updateRegion();
+    }
+
+    accountSelect.addEventListener('change', onAccountChange);
+    launchSelect.addEventListener('change', update);
+    aiProviderSelect.addEventListener('change', update);
+    backupSelect.addEventListener('change', update);
+    backupEncryptionSelect.addEventListener('change', update);
+
+    hostNameInput.addEventListener('input', scheduleHostNameValidation);
+    // Provider / account / region changes move the goalposts for "taken", so
+    // re-check the name against the newly-selected scope.
+    accountSelect.addEventListener('change', scheduleHostNameValidation);
+    launchSelect.addEventListener('change', scheduleHostNameValidation);
+    regionSelect.addEventListener('change', scheduleHostNameValidation);
+
+    var initialPreset = selectedPreset();
+    if (initialPreset) markPresetSelected(initialPreset);
+    showAdvanced({{ 'true' if start_advanced else 'false' }});
+    update();
+    // Validate any pre-filled name on load (e.g. a re-rendered submit error).
+    validateHostName();
+  })();
+</script>
+{% endset %}
+<PageNarrowContainer title="Create a workspace" padding="form" max_width="max-w-[720px]" scripts={{ _scripts }}>
+  {# Submission is a JS fetch to POST /api/v1/workspaces (the same create front
+     door agents use); see the submit handler in the scripts block. The form
+     element keeps the field layout + native required-field validation. #}
+  <form id="create-form">
+    {# Auto-chosen color carried in the create request; no visible picker. #}
+    <input type="hidden" name="color" id="create-color-input" value="{{ color }}">
+
+    <div class="text-center mb-12">
+      <p class="type-label uppercase tracking-wide text-secondary">Create a workspace</p>
+      <h1 class="type-heading-lg text-primary mt-1">Where should it run?</h1>
+    </div>
+
+    {% if error_message %}
+      <Notice variant="error">{{ error_message }}</Notice>
+    {% endif %}
+
+    {# Filled in + revealed by the submit handler from the create API's
+       structured 400 ({error, field}); hidden on a fresh form. #}
+    <p id="create-error" role="alert" class="hidden mb-6 type-helper text-important text-center"></p>
+
+    {# ---- Simple view: two compute presets ---- #}
+    <div id="simple-view" role="radiogroup" aria-label="Where to run your workspace">
+      <div class="flex gap-6 items-stretch">
+        <PresetCard preset="remote" :selected="selected_preset == 'remote'" extra="flex-1">
+          <div class="flex items-center gap-2">
+            <span class="type-heading text-primary">Imbue Cloud</span>
+            <span class="inline-flex items-center px-2 py-0.5 rounded-md type-helper uppercase font-bold bg-accent/15 text-accent">Recommended</span>
+          </div>
+          <ul class="flex flex-col gap-1.5 mt-1">
+            <li class="flex items-start gap-2 type-body text-primary"><span class="text-accent shrink-0 mt-0.5"><Icon16 name="badge-check-filled" /></span>30 second setup</li>
+            <li class="flex items-start gap-2 type-body text-primary"><span class="text-accent shrink-0 mt-0.5"><Icon16 name="badge-check-filled" /></span>Runs even if your computer is off</li>
+            <li class="flex items-start gap-2 type-body text-primary"><span class="text-accent shrink-0 mt-0.5"><Icon16 name="badge-check-filled" /></span>Accessible from mobile</li>
+            <li class="flex items-start gap-2 type-body text-primary"><span class="text-accent shrink-0 mt-0.5"><Icon16 name="badge-check-filled" /></span>Shareable with other people</li>
+          </ul>
+        </PresetCard>
+
+        <PresetCard preset="local" :selected="selected_preset == 'local'" extra="flex-1">
+          <span class="type-heading text-primary">Directly on your computer</span>
+          <ul class="flex flex-col gap-1.5 mt-1">
+            <li class="flex items-start gap-2 type-body text-primary"><span class="shrink-0 mt-0.5"><Icon16 name="badge-check" /></span>5-10 minute setup</li>
+            <li class="flex items-start gap-2 type-body text-primary"><span class="shrink-0 mt-0.5"><Icon16 name="badge-check" /></span>Runs only when your computer is on</li>
+            <li class="flex items-start gap-2 type-body text-primary"><span class="shrink-0 mt-0.5"><Icon16 name="badge-check" /></span>Uses your computer's memory (may slow your device)</li>
+          </ul>
+        </PresetCard>
+      </div>
+    </div>
+
+    {# Account picker + advanced-config toggle. Sits below the presets; visible
+       in both views. The account drives whether the remote preset is available. #}
+    <div class="flex items-center justify-between mt-8 type-helper">
+      <select id="account_id" name="account_id"
+              class="max-w-[220px] type-helper text-tertiary bg-transparent border-0 rounded-md px-1 py-1 -ml-1 outline-none cursor-pointer hover:text-primary focus:outline-none focus:ring-0">
+        {% for acct in accounts %}
+          <option value="{{ acct.user_id }}"{% if acct.user_id == default_account_id %} selected{% endif %}>{{ acct.email }}</option>
+        {% endfor %}
+        <option value=""{% if not default_account_id %} selected{% endif %}>No account (private workspace)</option>
+      </select>
+      <span id="advanced-toggle-wrap">
+        <Button variant="ghost" id="toggle-advanced"
+                extra="!p-0 !bg-transparent !type-helper !text-tertiary hover:!bg-transparent hover:!text-primary hover:underline whitespace-nowrap">
+          Advanced Configuration
+        </Button>
+      </span>
+      <span id="simple-toggle-wrap" class="hidden">
+        <Button variant="ghost" id="back-to-simple"
+                extra="!p-0 !bg-transparent !type-helper !text-tertiary hover:!bg-transparent hover:!text-primary hover:underline whitespace-nowrap">
+          &uarr; Back to simple configuration
+        </Button>
+      </span>
+    </div>
+
+    {# Shown (in red, with a ring on the picker above) when a signed-in user has
+       Imbue Cloud selected but the account picker on "No account": they must
+       pick an account. Toggled by update(); cleared when they pick one. #}
+    <p id="account-error" class="hidden mt-2 type-helper text-important text-center">
+      Pick an account to run on Imbue Cloud, or choose a different option for the providers.
+    </p>
+
+    {# ---- Advanced view: the raw provider / repository controls ---- #}
+    {# `hidden` lives on this plain block wrapper, not the flex column inside
+       it, so toggling visibility isn't fought by a `flex` display utility. #}
+    <div id="advanced-view" class="hidden mt-8">
+     <div class="mx-auto max-w-[560px] flex flex-col gap-4">
+
+      <div>
+        <FormLabel target="host_name">Name</FormLabel>
+        <p class="mb-1 type-helper text-tertiary">Leave empty to name it automatically</p>
+        <TextInput name="host_name" :value="host_name" placeholder="my-workspace" id="host_name" />
+        {# Inline live-validation message for the name field (format + availability),
+           toggled by the script below; mirrors the account-picker error pattern. #}
+        <p id="host-name-error" class="hidden mt-1 type-helper text-important"></p>
+      </div>
+
+      <div>
+        <div class="flex items-start justify-between gap-3">
+          <div>
+            <FormLabel target="launch_mode" inline>Compute provider</FormLabel>
+            <p id="aws-credentials-note" class="hidden mt-1 type-helper text-tertiary">
+              AWS credentials are read from this machine's environment
+              (<code>AWS_ACCESS_KEY_ID</code> / <code>AWS_SECRET_ACCESS_KEY</code>,
+              or <code>AWS_PROFILE</code>, or <code>~/.aws/credentials</code>).
+              Pick a region below.
+            </p>
+          </div>
+          <Select id="launch_mode" name="launch_mode" width="w-48">
+            {% for mode in launch_modes %}
+              <option value="{{ mode.value }}"{% if mode.value == selected_launch_mode %} selected{% endif %}
+                      {% if mode.value == 'IMBUE_CLOUD' %}data-requires-account="true"{% endif %}>{{ mode.value | lower }}</option>
+            {% endfor %}
+          </Select>
+        </div>
+        <p id="launch-mode-account-error" class="hidden mt-1 type-helper text-warning text-right">imbue_cloud requires a selected account.</p>
+      </div>
+
+      <div>
+        <div class="flex items-center justify-between gap-3">
+          <FormLabel target="ai_provider" inline>AI provider</FormLabel>
+          <Select id="ai_provider" name="ai_provider" width="w-48">
+            {% for provider in ai_providers %}
+              <option value="{{ provider.value }}"{% if provider.value == selected_ai_provider %} selected{% endif %}
+                      {% if provider.value == 'IMBUE_CLOUD' %}data-requires-account="true"{% endif %}>{{ provider.value | lower }}</option>
+            {% endfor %}
+          </Select>
+        </div>
+        <p id="ai-provider-account-error" class="hidden mt-1 type-helper text-warning text-right">imbue_cloud requires a selected account.</p>
+        <div id="api-key-row" class="mt-2 hidden">
+          <FormLabel target="anthropic_api_key">Anthropic API key</FormLabel>
+          <TextInput name="anthropic_api_key" :value="anthropic_api_key" placeholder="sk-ant-..." id="anthropic_api_key" type="password" />
+        </div>
+      </div>
+
+      <div>
+        <div class="flex items-center justify-between gap-3">
+          <FormLabel target="backup_provider" inline>Backup provider</FormLabel>
+          <Select id="backup_provider" name="backup_provider" width="w-48">
+            {% for provider in backup_providers %}
+              <option value="{{ provider.value }}"{% if provider.value == selected_backup_provider %} selected{% endif %}
+                      {% if provider.value == 'IMBUE_CLOUD' %}data-requires-account="true"{% endif %}>{% if provider.value == 'API_KEY' %}manual{% else %}{{ provider.value | lower }}{% endif %}</option>
+            {% endfor %}
+          </Select>
+        </div>
+        <p id="backup-provider-account-error" class="hidden mt-1 type-helper text-warning text-right">imbue_cloud requires a selected account.</p>
+
+        <div id="backup-api-key-row" class="mt-2 hidden">
+          <FormLabel target="backup_api_key_env">restic environment</FormLabel>
+          <p class="mb-1 type-helper text-tertiary">
+            Written verbatim to <code>restic.env</code>. Don't set <code>RESTIC_PASSWORD</code> -- minds assigns each
+            workspace its own. See the
+            <Link href="https://restic.readthedocs.io/en/stable/040_backup.html#environment-variables"
+                  target="_blank" rel="noopener">restic docs</Link>.
+          </p>
+          <Textarea id="backup_api_key_env" name="backup_api_key_env" rows="6" extra="font-mono"
+                    :value="backup_api_key_env if backup_api_key_env else _default_restic_env" />
+        </div>
+
+        <div id="backup-encryption-row" class="mt-2 hidden">
+          <div class="flex items-center justify-between gap-3">
+            <FormLabel target="backup_encryption_method" inline>Backup encryption method</FormLabel>
+            <Select id="backup_encryption_method" name="backup_encryption_method" width="w-48">
+              {% for method in backup_encryption_methods %}
+                <option value="{{ method.value }}"{% if method.value == selected_backup_encryption_method %} selected{% endif %}>{{ method.value | lower }}</option>
+              {% endfor %}
+            </Select>
+          </div>
+        </div>
+
+        <div id="backup-master-password-row" class="mt-2 hidden">
+          <FormLabel target="backup_master_password">Backup master password</FormLabel>
+          {% if has_saved_backup_password %}
+            <p class="type-helper text-secondary">A saved backup password will be used for this workspace.</p>
+          {% else %}
+            <TextInput type="password" name="backup_master_password" id="backup_master_password"
+                       placeholder="remember this -- backups are unrecoverable without it" />
+            <label class="mt-2 flex items-center gap-2 type-helper text-secondary">
+              <input type="checkbox" id="backup_save_password" name="backup_save_password" value="1" />
+              Save this password for all my workspaces
+            </label>
+          {% endif %}
+        </div>
+      </div>
+
+      <div id="region-row" class="hidden">
+        <div class="flex items-start justify-between gap-3">
+          <div>
+            <FormLabel target="region" inline>Region</FormLabel>
+            <p class="mt-1 type-helper text-tertiary">Where the machine is created. If a region is out of capacity, try another.</p>
+          </div>
+          <Select id="region" name="region" width="w-48"></Select>
+        </div>
+      </div>
+
+      {# Dashed divider separating the provider / region selects above from the
+         repository / branch text inputs below. #}
+      <hr class="border-t border-dashed border-default my-2">
+
+      <div>
+        <FormLabel target="git_url">Repository</FormLabel>
+        <p class="mb-1 type-helper text-tertiary">Git URL or local path</p>
+        <TextInput name="git_url" :value="git_url" placeholder="https://github.com/user/repo.git" id="git_url" required />
+      </div>
+      <div>
+        <FormLabel target="branch">Branch</FormLabel>
+        <p class="mb-1 type-helper text-tertiary">Leave empty for latest version</p>
+        <TextInput name="branch" :value="branch" placeholder="latest tag" id="branch" />
+      </div>
+     </div>
+    </div>
+
+    <div class="flex justify-center mt-16">
+      <ButtonSubmit form="create-form" id="create-submit" extra="w-80">Create</ButtonSubmit>
+    </div>
+  </form>
+</PageNarrowContainer>

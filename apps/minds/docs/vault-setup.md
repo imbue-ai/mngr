@@ -26,7 +26,22 @@ vault login -method=oidc   # or whatever your team is set up for
 
 ## Path layout
 
-Each tier has two families of Vault entries:
+Secrets use a **split** layout: each `<service>` is a Vault *directory*, and
+every logical key inside it is its own single-field leaf secret holding a
+`value`. For example, the `litellm` service for the `ci` tier is laid out as:
+
+```
+secrets/minds/ci/litellm/ANTHROPIC_API_KEY   -> { "value": "sk-ant-..." }
+secrets/minds/ci/litellm/DATABASE_URL        -> { "value": "postgres://..." }
+```
+
+Read a single key with `vault kv get -mount=secrets minds/<tier>/<service>/<KEY>`
+(the value is at `.data.data.value`), and list a service's keys with
+`vault kv list -mount=secrets minds/<tier>/<service>`. The deploy code and
+`push_vault_from_file.py` handle this fan-out for you.
+
+Each tier has two families of Vault entries (each a service directory as
+described above):
 
 **Pushed to Modal at deploy time** (the connector + litellm-proxy read
 these from their runtime env via `modal.Secret.from_name(...)`):
@@ -36,22 +51,28 @@ secrets/minds/<tier>/cloudflare
 secrets/minds/<tier>/litellm
 secrets/minds/<tier>/litellm-connector
 secrets/minds/<tier>/neon
-secrets/minds/<tier>/paid-accounts
 secrets/minds/<tier>/pool-ssh
 secrets/minds/<tier>/supertokens
 ```
 
 **Read only by `minds env deploy` on a developer's laptop** (never
 pushed to Modal -- the connector's runtime doesn't need
-create-project / VPS-management permissions):
+create-project permissions):
 
 ```
 secrets/minds/<tier>/neon-admin   # NEON_API_TOKEN (every tier);
                                   #   NEON_ORG_ID (dev only);
                                   #   NEON_PROJECT_ID (staging / production only)
-secrets/minds/<tier>/vultr        # VULTR_API_KEY (legacy; OVH-backed pools today)
+```
+
+**Sourced manually by the operator** (never pushed to Modal, never read
+by `minds env deploy` -- no deployed service or deploy step makes
+supplier API calls):
+
+```
 secrets/minds/<tier>/ovh          # OVH_APPLICATION_KEY, OVH_APPLICATION_SECRET,
-                                  #   OVH_CONSUMER_KEY (shared per-tier OVH AK/AS/CK)
+                                  #   OVH_CONSUMER_KEY (shared per-tier bare-metal box
+                                  #   supplier credentials, for `mngr imbue_cloud admin server`)
 ```
 
 The dev-tier `neon-admin` token must have *project-create* scope on
@@ -72,18 +93,15 @@ rolled back. The actual runtime DSNs for these tiers live in
 `secrets/minds/<tier>/neon` and `.../litellm` (the source of truth
 for the connector + proxy at runtime).
 
-The `ovh` entry is read by `minds env destroy` (to enumerate +
-delete OVH VPSes tagged with the env's `minds_env=<name>` IAM tag) and
-by `mngr imbue_cloud admin pool create` (to provision new OVH-backed
-pool hosts). Generate the AK/AS/CK trio at
-<https://api.us.ovhcloud.com/createApp> for the endpoint the pool uses
-(`ovh-us` by default). The shared per-tier credential is intentionally
-account-wide so a single dev's destroy can clean up any OVH instance
-the connector or pool flows landed in the account on behalf of any
-dev. A missing or empty `ovh` Vault entry surfaces as a `WARNING`
-during deploy (no failure); per-env OVH-touching operations then fail
-later if/when invoked, with a message pointing the operator back at
-the Vault path.
+The `ovh` entry holds the bare-metal box supplier credentials
+(currently OVH). These order + manage the bare-metal boxes that Imbue
+Cloud slices are carved on. The operator sources them into their shell
+when running `mngr imbue_cloud admin server ...`; no deployed service or
+`minds env deploy` / `destroy` step reads them. Generate the AK/AS/CK
+trio at <https://api.us.ovhcloud.com/createApp> for the supplier
+endpoint the pool uses (`ovh-us` by default). The shared per-tier
+credential is intentionally account-wide so any operator can order +
+manage boxes for the tier.
 
 The schema for each `<service>` is the corresponding file under
 `.minds/template/<service>.sh` at the repo root. `minds env deploy`
@@ -119,18 +137,21 @@ All deploys (dev / staging / production) flow through the unified
 
 ```bash
 # Tier deploys (staging / production):
-eval "$(uv run minds env activate staging)"
+eval "$(uv run minds env activate --deploy staging)"
 uv run minds env deploy --yes-i-mean-staging
 
 # Dev env deploys (per-developer):
-eval "$(uv run minds env activate dev-<your-user>)"
+eval "$(uv run minds env activate --deploy dev-<your-user>)"
 uv run minds env deploy
 ```
 
+(`--deploy` is required: `minds env deploy` refuses without it. See
+`docs/environments.md` for the use-vs-deploy split.)
+
 `minds env deploy` reads `apps/minds/imbue/minds/config/envs/<tier>/deploy.toml`
 for the Modal workspace name + the list of services to push from
-Vault, then runs `modal deploy` for both `litellm-proxy-<tier>` and
-`remote-service-connector-<tier>`. Tier deploys write nothing to disk
+Vault, then runs `modal deploy` for both `llm-<tier>` and
+`rsc-<tier>`. Tier deploys write nothing to disk
 (the committed in-repo `client.toml` stays the source of truth); dev
 env deploys write the resulting URLs to `~/.minds-<name>/client.toml`
 and per-env secrets (Neon DSN, SuperTokens connection URI + API key)
@@ -144,8 +165,8 @@ this CLI.
 ## Dynamic dev envs and Vault
 
 `minds env deploy` (when run with a dev env activated) reads a small
-set of dev-tier secrets from Vault (the dev-tier Neon API token, the
-dev-tier SuperTokens admin key, the dev-tier Vultr API key) to
+set of dev-tier secrets from Vault (the dev-tier Neon API token and the
+dev-tier SuperTokens admin key) to
 provision per-dev-env resources. The resulting per-dev-env state
 (Neon DSN, SuperTokens app id, etc.) is written **only** to
 `~/.minds-<name>/secrets.toml` on the developer's machine -- never

@@ -16,6 +16,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr import hookimpl
 from imbue.mngr.api.discover import _all_identifiers_found
+from imbue.mngr.api.discover import _discover_provider_hosts_and_agents
 from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.discover import warn_on_duplicate_host_names
 from imbue.mngr.api.discovery_events import get_discovery_events_path
@@ -31,7 +32,7 @@ from imbue.mngr.api.list import _apply_cel_filters
 from imbue.mngr.api.list import _collect_and_emit_details_for_host
 from imbue.mngr.api.list import _construct_discover_and_emit_for_provider
 from imbue.mngr.api.list import _handle_listing_error
-from imbue.mngr.api.list import _maybe_write_full_discovery_snapshot
+from imbue.mngr.api.list import _maybe_write_provider_discovery_snapshots
 from imbue.mngr.api.list import _process_host_with_error_handling
 from imbue.mngr.api.list import agent_details_to_cel_context
 from imbue.mngr.api.list import build_agent_cel_context
@@ -40,6 +41,10 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.provider_config_registry import _provider_config_registry
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderDiscoveryError
+from imbue.mngr.errors import ProviderEmptyError
+from imbue.mngr.errors import ProviderNotAuthorizedError
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import CertifiedHostData
@@ -235,6 +240,31 @@ def test_provider_error_info_build_for_provider() -> None:
     assert error.provider_name == provider_name
 
 
+def test_provider_error_info_from_not_authorized_carries_structured_fields() -> None:
+    """A ProviderNotAuthorizedError yields a provider-inaccessible ErrorInfo with concise fields and help text."""
+    provider_name = ProviderInstanceName("my-cloud")
+    exception = ProviderNotAuthorizedError(
+        provider_name,
+        reason="credentials not configured",
+        short_remediation="run `cloud login`",
+    )
+    error = ProviderErrorInfo.build_for_provider(exception, provider_name)
+    assert error.is_provider_inaccessible is True
+    assert error.short_reason == "credentials not configured"
+    assert error.short_remediation == "run `cloud login`"
+    assert error.help_text is not None
+    assert "is_enabled false" in error.help_text
+
+
+def test_provider_error_info_from_generic_exception_is_not_inaccessible() -> None:
+    """A non-provider-unavailable failure is not flagged inaccessible and carries no concise reason."""
+    error = ProviderErrorInfo.build_for_provider(RuntimeError("boom"), ProviderInstanceName("my-cloud"))
+    assert error.is_provider_inaccessible is False
+    assert error.short_reason is None
+    assert error.short_remediation is None
+    assert error.help_text is None
+
+
 # =============================================================================
 # HostErrorInfo Tests
 # =============================================================================
@@ -376,6 +406,33 @@ def test_agent_details_to_cel_context_computes_idle() -> None:
     # Idle should be approximately 300 seconds (5 minutes)
     assert context["idle"] > 280
     assert context["idle"] < 320
+
+
+def test_agent_details_to_cel_context_exposes_project_alias() -> None:
+    """agent_details_to_cel_context should expose labels.project as the bare `project` alias.
+
+    Mirrors the host.provider alias and the --project filter flag, so CEL filters
+    and sorts can reference `project` directly. The key is always present (None
+    when the label is unset), matching how optional scalar fields appear.
+    """
+    host_details = _make_host_details()
+    with_project = AgentDetails(
+        id=AgentId.generate(),
+        name=AgentName("proj-agent"),
+        type="claude",
+        command=CommandString("sleep 100"),
+        work_dir=Path("/work"),
+        initial_branch=None,
+        create_time=datetime.now(timezone.utc),
+        start_on_boot=False,
+        state=AgentLifecycleState.RUNNING,
+        labels={"project": "mngr"},
+        host=host_details,
+    )
+    assert agent_details_to_cel_context(with_project)["project"] == "mngr"
+
+    without_project = with_project.model_copy_update(to_update(with_project.field_ref().labels, {}))
+    assert agent_details_to_cel_context(without_project)["project"] is None
 
 
 def test_agent_details_to_cel_context_preserves_full_model_structure() -> None:
@@ -686,92 +743,133 @@ def test_apply_cel_filters_no_filters_includes_all() -> None:
 
 
 # =============================================================================
-# _maybe_write_full_discovery_snapshot Tests
+# _maybe_write_provider_discovery_snapshots Tests
 # =============================================================================
 
 
-def test_maybe_write_full_discovery_snapshot_writes_when_unfiltered_and_error_free(
+def test_maybe_write_provider_discovery_snapshots_writes_when_unfiltered_and_error_free(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """_maybe_write_full_discovery_snapshot writes a snapshot when the listing is complete and error-free."""
+    """_maybe_write_provider_discovery_snapshots writes a snapshot when the listing is complete and error-free."""
     host_details = _make_host_details()
     agent = _make_agent_details("snapshot-agent", host_details)
     result = ListResult()
     result.agents.append(agent)
 
-    _maybe_write_full_discovery_snapshot(
+    _maybe_write_provider_discovery_snapshots(
         mngr_ctx=temp_mngr_ctx,
         result=result,
         provider_names=None,
         include_filters=(),
         exclude_filters=(),
+        discovery_started_at=datetime.now(timezone.utc),
     )
 
     events_path = get_discovery_events_path(temp_mngr_ctx.config)
     assert events_path.exists()
     content = events_path.read_text()
-    assert "DISCOVERY_FULL" in content
+    assert "DISCOVERY_PROVIDER" in content
+    assert "DISCOVERY_FULL" not in content
     assert "snapshot-agent" in content
 
 
-def test_maybe_write_full_discovery_snapshot_skips_when_errors_present(
+def test_maybe_write_provider_discovery_snapshots_skips_when_non_provider_error_present(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """_maybe_write_full_discovery_snapshot does not write when errors are present."""
+    """Non-provider-attributable errors (plain ErrorInfo) skip the snapshot.
+
+    These come from the top-level `except MngrError` in list_agents and indicate
+    the result may be structurally incomplete in ways the snapshot cannot model.
+    """
     host_details = _make_host_details()
     agent = _make_agent_details("error-agent", host_details)
     result = ListResult()
     result.agents.append(agent)
-    result.errors.append(ErrorInfo.build(RuntimeError("provider failed")))
+    result.errors.append(ErrorInfo.build(RuntimeError("non-provider failure")))
 
-    _maybe_write_full_discovery_snapshot(
+    _maybe_write_provider_discovery_snapshots(
         mngr_ctx=temp_mngr_ctx,
         result=result,
         provider_names=None,
         include_filters=(),
         exclude_filters=(),
+        discovery_started_at=datetime.now(timezone.utc),
     )
 
     events_path = get_discovery_events_path(temp_mngr_ctx.config)
     assert not events_path.exists()
 
 
-def test_maybe_write_full_discovery_snapshot_skips_when_provider_filter_set(
+def test_maybe_write_provider_discovery_snapshots_emits_with_error_by_provider_name_for_provider_errors(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """_maybe_write_full_discovery_snapshot does not write when provider_names is set."""
+    """Per-provider errors emit a snapshot with error_by_provider_name populated."""
+    host_details = _make_host_details()
+    agent = _make_agent_details("ok-agent", host_details)
+    result = ListResult()
+    result.agents.append(agent)
+    failing_provider = ProviderInstanceName("modal")
+    result.errors.append(
+        ProviderErrorInfo.build_for_provider(RuntimeError("modal token missing"), failing_provider),
+    )
+
+    _maybe_write_provider_discovery_snapshots(
+        mngr_ctx=temp_mngr_ctx,
+        result=result,
+        provider_names=None,
+        include_filters=(),
+        exclude_filters=(),
+        discovery_started_at=datetime.now(timezone.utc),
+    )
+
+    events_path = get_discovery_events_path(temp_mngr_ctx.config)
+    assert events_path.exists()
+    content = events_path.read_text()
+    assert "DISCOVERY_PROVIDER" in content
+    assert "DISCOVERY_FULL" not in content
+    assert "modal token missing" in content
+    assert "RuntimeError" in content
+    assert "modal" in content
+
+
+def test_maybe_write_provider_discovery_snapshots_skips_when_provider_filter_set(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """_maybe_write_provider_discovery_snapshots does not write when provider_names is set."""
     host_details = _make_host_details()
     agent = _make_agent_details("filtered-agent", host_details)
     result = ListResult()
     result.agents.append(agent)
 
-    _maybe_write_full_discovery_snapshot(
+    _maybe_write_provider_discovery_snapshots(
         mngr_ctx=temp_mngr_ctx,
         result=result,
         provider_names=("local",),
         include_filters=(),
         exclude_filters=(),
+        discovery_started_at=datetime.now(timezone.utc),
     )
 
     events_path = get_discovery_events_path(temp_mngr_ctx.config)
     assert not events_path.exists()
 
 
-def test_maybe_write_full_discovery_snapshot_skips_when_include_filters_set(
+def test_maybe_write_provider_discovery_snapshots_skips_when_include_filters_set(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """_maybe_write_full_discovery_snapshot does not write when include_filters are set."""
+    """_maybe_write_provider_discovery_snapshots does not write when include_filters are set."""
     host_details = _make_host_details()
     agent = _make_agent_details("include-filtered-agent", host_details)
     result = ListResult()
     result.agents.append(agent)
 
-    _maybe_write_full_discovery_snapshot(
+    _maybe_write_provider_discovery_snapshots(
         mngr_ctx=temp_mngr_ctx,
         result=result,
         provider_names=None,
         include_filters=('name == "include-filtered-agent"',),
         exclude_filters=(),
+        discovery_started_at=datetime.now(timezone.utc),
     )
 
     events_path = get_discovery_events_path(temp_mngr_ctx.config)
@@ -874,6 +972,8 @@ def test_list_agents_streaming_mode_on_agent_callback_is_called(
 
 
 @pytest.mark.tmux
+# real agent setup/teardown occasionally exceeds the 10s default.
+@pytest.mark.timeout(30)
 def test_list_agents_with_include_filter_excludes_non_matching(
     temp_work_dir: Path,
     temp_mngr_ctx: MngrContext,
@@ -1024,6 +1124,37 @@ class _NoneFieldGeneratorPlugin:
     @hookimpl
     def agent_field_generators(self) -> None:
         return None
+
+
+class _OfflineFieldGeneratorPlugin:
+    """Test plugin that registers offline field generators for agent listing."""
+
+    def __init__(self, plugin_name: str, generators: dict[str, Any]) -> None:
+        self._plugin_name = plugin_name
+        self._generators = generators
+
+    @hookimpl
+    def offline_agent_field_generators(self) -> tuple[str, dict[str, Any]] | None:
+        return (self._plugin_name, self._generators)
+
+
+def test_offline_agent_field_generators_hookspec_is_registered_and_collected(
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """The offline_agent_field_generators hookspec is registered and collects plugin results.
+
+    This mirrors the collection loop in list_agents, guarding against the hookspec
+    being missing (which would make the hook call silently return nothing)."""
+    # The plugin_manager fixture loads real setuptools entrypoints, so other installed
+    # plugins (e.g. kanpan) may also register this hook. Use a unique test-plugin name
+    # and assert membership rather than exact equality so the test stays correct
+    # regardless of which real plugins are present.
+    generators = {"flag": lambda ref, host: True}
+    plugin_manager.register(_OfflineFieldGeneratorPlugin("test_offline_fields", generators))
+
+    collected = [result for result in plugin_manager.hook.offline_agent_field_generators() if result is not None]
+
+    assert ("test_offline_fields", generators) in collected
 
 
 def _find_agent_by_name(result: ListResult, name: str) -> AgentDetails:
@@ -1238,6 +1369,126 @@ class _RaisingDiscoveryProviderInstance(MockProviderInstance):
         raise MngrError("simulated discovery failure from test")
 
 
+class _UnavailableDiscoveryProviderInstance(MockProviderInstance):
+    """Provider whose backend is unreachable -- raises ProviderUnavailableError."""
+
+    def discover_hosts_and_agents(
+        self,
+        cg: ConcurrencyGroup,
+        include_destroyed: bool = False,
+    ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
+        raise ProviderUnavailableError(self.name, "backend offline")
+
+
+class _NotAuthorizedDiscoveryProviderInstance(MockProviderInstance):
+    """Provider that is enabled but unauthenticated -- raises ProviderNotAuthorizedError."""
+
+    def discover_hosts_and_agents(
+        self,
+        cg: ConcurrencyGroup,
+        include_destroyed: bool = False,
+    ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
+        raise ProviderNotAuthorizedError(
+            self.name,
+            reason="credentials not configured",
+            short_remediation="run `cloud login`",
+        )
+
+
+def test_discover_provider_hosts_and_agents_propagates_unavailable_error(
+    temp_host_dir: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """The per-provider worker propagates ProviderUnavailableError unwrapped.
+
+    Discovery does not swallow an unreachable provider, and the worker does NOT
+    wrap the error in ProviderDiscoveryError -- so it reaches the caller as a
+    clear "provider is not available" failure. The end-to-end propagation out of
+    discover_hosts_and_agents is covered by
+    test_discover_hosts_and_agents_propagates_unavailable_provider.
+    """
+    provider = _UnavailableDiscoveryProviderInstance(
+        name=ProviderInstanceName("offline-provider"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+    )
+
+    with pytest.raises(ProviderUnavailableError):
+        _discover_provider_hosts_and_agents(
+            provider,
+            {},
+            include_destroyed=True,
+            results_lock=Lock(),
+            cg=temp_mngr_ctx.concurrency_group,
+        )
+
+
+def test_discover_provider_hosts_and_agents_wraps_non_availability_errors(
+    temp_host_dir: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A non-availability discovery failure is wrapped in ProviderDiscoveryError.
+
+    ProviderUnavailableError propagates unwrapped (clear "unavailable" message);
+    any other failure is wrapped for per-provider attribution. Both propagate.
+    """
+    provider = _RaisingDiscoveryProviderInstance(
+        name=ProviderInstanceName("raising-provider"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+    )
+
+    with pytest.raises(ProviderDiscoveryError):
+        _discover_provider_hosts_and_agents(
+            provider,
+            {},
+            include_destroyed=True,
+            results_lock=Lock(),
+            cg=temp_mngr_ctx.concurrency_group,
+        )
+
+
+def _make_unavailable_alongside_local_ctx(temp_mngr_ctx: MngrContext) -> MngrContext:
+    """Build a MngrContext with the default local provider plus one offline provider."""
+    provider_config = ProviderInstanceConfig(backend=_UNAVAILABLE_DISCOVERY_BACKEND_NAME)
+    merged_providers = {
+        **temp_mngr_ctx.config.providers,
+        ProviderInstanceName("offline-provider"): provider_config,
+    }
+    updated_config = temp_mngr_ctx.config.model_copy_update(
+        to_update(temp_mngr_ctx.config.field_ref().providers, merged_providers),
+    )
+    return temp_mngr_ctx.model_copy_update(
+        to_update(temp_mngr_ctx.field_ref().config, updated_config),
+    )
+
+
+def test_discover_hosts_and_agents_propagates_unavailable_provider(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """An unreachable provider fails a full (enumerate-all) discovery loudly.
+
+    For an enumerate-all call (provider_names=None), a down provider could hold a
+    target, so the error propagates and the command fails rather than silently
+    omitting that provider's agents. Targeted commands avoid this by scoping
+    discovery to the relevant provider(s).
+    """
+    _backend_registry[_UNAVAILABLE_DISCOVERY_BACKEND_NAME] = _UnavailableDiscoveryProviderBackend
+    _provider_config_registry[_UNAVAILABLE_DISCOVERY_BACKEND_NAME] = ProviderInstanceConfig
+    try:
+        mngr_ctx = _make_unavailable_alongside_local_ctx(temp_mngr_ctx)
+
+        with pytest.raises(ProviderUnavailableError):
+            discover_hosts_and_agents(
+                mngr_ctx,
+                provider_names=None,
+                agent_identifiers=None,
+                include_destroyed=True,
+                reset_caches=False,
+            )
+    finally:
+        del _backend_registry[_UNAVAILABLE_DISCOVERY_BACKEND_NAME]
+        del _provider_config_registry[_UNAVAILABLE_DISCOVERY_BACKEND_NAME]
+
+
 class _RaisingDetailProviderInstance(MockProviderInstance):
     """Provider that raises MngrError from get_host_and_agent_details.
 
@@ -1250,6 +1501,7 @@ class _RaisingDetailProviderInstance(MockProviderInstance):
         host_ref: DiscoveredHost,
         agent_refs: Sequence[DiscoveredAgent],
         field_generators: Mapping[str, Any] | None = None,
+        offline_field_generators: Mapping[str, Any] | None = None,
         on_error: Any = None,
     ) -> tuple[HostDetails, list[AgentDetails]]:
         raise MngrError("simulated detail retrieval failure from test")
@@ -1313,9 +1565,7 @@ class _MismatchedProviderBackend(ProviderBackendInterface):
         name: ProviderInstanceName,
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
-        is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
-        del is_for_host_creation
         return _MismatchedProviderInstance(
             name=name,
             host_dir=mngr_ctx.config.default_host_dir,
@@ -1354,14 +1604,133 @@ class _RaisingDiscoveryProviderBackend(ProviderBackendInterface):
         name: ProviderInstanceName,
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
-        is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
-        del is_for_host_creation
         return _RaisingDiscoveryProviderInstance(
             name=name,
             host_dir=mngr_ctx.config.default_host_dir,
             mngr_ctx=mngr_ctx,
         )
+
+
+_UNAVAILABLE_DISCOVERY_BACKEND_NAME = ProviderBackendName("test-unavailable-discovery-backend")
+
+
+class _UnavailableDiscoveryProviderBackend(ProviderBackendInterface):
+    """Backend that creates a _UnavailableDiscoveryProviderInstance."""
+
+    @staticmethod
+    def get_name() -> ProviderBackendName:
+        return _UNAVAILABLE_DISCOVERY_BACKEND_NAME
+
+    @staticmethod
+    def get_description() -> str:
+        return "Test backend whose provider is unreachable during discovery"
+
+    @staticmethod
+    def get_config_class() -> type[ProviderInstanceConfig]:
+        return ProviderInstanceConfig
+
+    @staticmethod
+    def get_build_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def get_start_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def build_provider_instance(
+        name: ProviderInstanceName,
+        config: ProviderInstanceConfig,
+        mngr_ctx: MngrContext,
+        is_for_host_creation: bool = False,
+    ) -> ProviderInstanceInterface:
+        del is_for_host_creation
+        return _UnavailableDiscoveryProviderInstance(
+            name=name,
+            host_dir=mngr_ctx.config.default_host_dir,
+            mngr_ctx=mngr_ctx,
+        )
+
+
+_NOT_AUTHORIZED_DISCOVERY_BACKEND_NAME = ProviderBackendName("test-not-authorized-discovery-backend")
+
+
+class _NotAuthorizedDiscoveryProviderBackend(ProviderBackendInterface):
+    """Backend that creates a _NotAuthorizedDiscoveryProviderInstance."""
+
+    @staticmethod
+    def get_name() -> ProviderBackendName:
+        return _NOT_AUTHORIZED_DISCOVERY_BACKEND_NAME
+
+    @staticmethod
+    def get_description() -> str:
+        return "Test backend whose provider is enabled but unauthenticated"
+
+    @staticmethod
+    def get_config_class() -> type[ProviderInstanceConfig]:
+        return ProviderInstanceConfig
+
+    @staticmethod
+    def get_build_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def get_start_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def build_provider_instance(
+        name: ProviderInstanceName,
+        config: ProviderInstanceConfig,
+        mngr_ctx: MngrContext,
+    ) -> ProviderInstanceInterface:
+        return _NotAuthorizedDiscoveryProviderInstance(
+            name=name,
+            host_dir=mngr_ctx.config.default_host_dir,
+            mngr_ctx=mngr_ctx,
+        )
+
+
+_EMPTY_BACKEND_NAME = ProviderBackendName("test-empty-backend")
+
+
+class _EmptyProviderBackend(ProviderBackendInterface):
+    """Backend whose construction always raises ``ProviderEmptyError``.
+
+    Mirrors the Modal-env-missing situation: the backend is reachable and
+    answers definitively that nothing has been created yet.
+    """
+
+    @staticmethod
+    def get_name() -> ProviderBackendName:
+        return _EMPTY_BACKEND_NAME
+
+    @staticmethod
+    def get_description() -> str:
+        return "Test backend that reports itself empty at construction time"
+
+    @staticmethod
+    def get_config_class() -> type[ProviderInstanceConfig]:
+        return ProviderInstanceConfig
+
+    @staticmethod
+    def get_build_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def get_start_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def build_provider_instance(
+        name: ProviderInstanceName,
+        config: ProviderInstanceConfig,
+        mngr_ctx: MngrContext,
+        is_for_host_creation: bool = False,
+    ) -> ProviderInstanceInterface:
+        del config, mngr_ctx, is_for_host_creation
+        raise ProviderEmptyError(provider_name=name, reason="simulated empty backend from test")
 
 
 def _make_list_params(
@@ -1372,6 +1741,7 @@ def _make_list_params(
     exclude_filters: tuple[str, ...] = (),
     result: ListResult | None = None,
     results_lock: Any = None,
+    offline_field_generators: dict[str, dict[str, Any]] | None = None,
 ) -> _ListAgentsParams:
     """Build a _ListAgentsParams for testing, with optional CEL filters.
 
@@ -1391,6 +1761,7 @@ def _make_list_params(
         error_behavior=error_behavior,
         on_agent=on_agent,
         error_emitter=_ErrorEmitter(result=bound_result, results_lock=bound_lock, on_error=on_error),
+        offline_field_generators=offline_field_generators or {},
     )
 
 
@@ -1458,6 +1829,57 @@ def test_list_agents_batch_continue_mode_records_failing_provider_error(
     assert "nonexistent-backend-xyz" in result.errors[0].message
 
 
+def _make_not_authorized_alongside_local_ctx(temp_mngr_ctx: MngrContext) -> MngrContext:
+    """Build a MngrContext with the default local provider plus one unauthenticated provider."""
+    provider_config = ProviderInstanceConfig(backend=_NOT_AUTHORIZED_DISCOVERY_BACKEND_NAME)
+    merged_providers = {
+        **temp_mngr_ctx.config.providers,
+        ProviderInstanceName("unauth-provider"): provider_config,
+    }
+    updated_config = temp_mngr_ctx.config.model_copy_update(
+        to_update(temp_mngr_ctx.config.field_ref().providers, merged_providers),
+    )
+    return temp_mngr_ctx.model_copy_update(
+        to_update(temp_mngr_ctx.field_ref().config, updated_config),
+    )
+
+
+def test_list_agents_continue_mode_records_unauthenticated_provider_with_structured_fields(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """An enabled-but-unauthenticated provider is recorded as a provider-inaccessible error with concise fields.
+
+    The rest of the listing still runs (the local provider's results are unaffected), and the
+    error carries the structured short_reason/short_remediation/help_text the CLI renders.
+    """
+    _backend_registry[_NOT_AUTHORIZED_DISCOVERY_BACKEND_NAME] = _NotAuthorizedDiscoveryProviderBackend
+    _provider_config_registry[_NOT_AUTHORIZED_DISCOVERY_BACKEND_NAME] = ProviderInstanceConfig
+    try:
+        mngr_ctx = _make_not_authorized_alongside_local_ctx(temp_mngr_ctx)
+
+        result = list_agents(
+            mngr_ctx=mngr_ctx,
+            is_streaming=False,
+            error_behavior=ErrorBehavior.CONTINUE,
+        )
+
+        provider_errors = [e for e in result.errors if isinstance(e, ProviderErrorInfo)]
+        # Every recorded provider error is the unauthenticated backend (registering it
+        # also exposes a default instance named after the backend); all are inaccessible.
+        assert provider_errors
+        assert all(e.is_provider_inaccessible for e in provider_errors)
+        matching = [e for e in provider_errors if e.provider_name == ProviderInstanceName("unauth-provider")]
+        assert len(matching) == 1
+        error = matching[0]
+        assert error.exception_type == "ProviderNotAuthorizedError"
+        assert error.short_reason == "credentials not configured"
+        assert error.short_remediation == "run `cloud login`"
+        assert error.help_text is not None
+    finally:
+        del _backend_registry[_NOT_AUTHORIZED_DISCOVERY_BACKEND_NAME]
+        del _provider_config_registry[_NOT_AUTHORIZED_DISCOVERY_BACKEND_NAME]
+
+
 def test_list_agents_abort_mode_propagates_top_level_mngr_error(
     temp_mngr_ctx: MngrContext,
 ) -> None:
@@ -1481,10 +1903,10 @@ def test_list_agents_abort_mode_propagates_top_level_mngr_error(
 # =============================================================================
 
 
-def test_maybe_write_full_discovery_snapshot_logs_warning_on_oserror(
+def test_maybe_write_provider_discovery_snapshots_logs_warning_on_oserror(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """_maybe_write_full_discovery_snapshot logs a warning when OSError occurs.
+    """_maybe_write_provider_discovery_snapshots logs a warning when OSError occurs.
 
     Makes the discovery events path a directory so that the write attempt
     fails with IsADirectoryError (a subclass of OSError). This works
@@ -1503,22 +1925,23 @@ def test_maybe_write_full_discovery_snapshot_logs_warning_on_oserror(
     result.agents.append(agent)
 
     with capture_loguru(level="WARNING") as log_output:
-        _maybe_write_full_discovery_snapshot(
+        _maybe_write_provider_discovery_snapshots(
             mngr_ctx=temp_mngr_ctx,
             result=result,
             provider_names=None,
             include_filters=(),
             exclude_filters=(),
+            discovery_started_at=datetime.now(timezone.utc),
         )
 
     output = log_output.getvalue()
-    assert "Failed to write full discovery snapshot" in output
+    assert "Failed to write per-provider discovery snapshots" in output
 
 
-def test_maybe_write_full_discovery_snapshot_emits_ssh_host_info(
+def test_maybe_write_provider_discovery_snapshots_emits_ssh_host_info(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """_maybe_write_full_discovery_snapshot emits SSH info for hosts that have it.
+    """_maybe_write_provider_discovery_snapshots emits SSH info for hosts that have it.
 
     When an agent's host has SSH connection info, the snapshot write should
     also call emit_host_ssh_info (line 235). The events file must contain
@@ -1541,18 +1964,20 @@ def test_maybe_write_full_discovery_snapshot_emits_ssh_host_info(
     result = ListResult()
     result.agents.append(agent)
 
-    _maybe_write_full_discovery_snapshot(
+    _maybe_write_provider_discovery_snapshots(
         mngr_ctx=temp_mngr_ctx,
         result=result,
         provider_names=None,
         include_filters=(),
         exclude_filters=(),
+        discovery_started_at=datetime.now(timezone.utc),
     )
 
     events_path = get_discovery_events_path(temp_mngr_ctx.config)
     assert events_path.exists()
     content = events_path.read_text()
-    assert "DISCOVERY_FULL" in content
+    assert "DISCOVERY_PROVIDER" in content
+    assert "DISCOVERY_FULL" not in content
     assert "ssh-agent" in content
 
 
@@ -1909,6 +2334,58 @@ def test_collect_and_emit_details_for_host_include_filter_keeps_matching_agent(
     assert len(result.agents) == 1
     assert str(result.agents[0].name) == "target-agent"
     assert len(collected_agents) == 1
+
+
+def test_collect_and_emit_details_for_host_populates_offline_plugin_data(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """The offline field generators threaded through params populate plugin data for offline agents."""
+    host_id = HostId.generate()
+    provider_name = "test-local"
+    provider = _make_offline_test_provider(host_id, provider_name, temp_mngr_ctx)
+
+    host_ref = DiscoveredHost(
+        host_id=host_id,
+        host_name=HostName("test-host"),
+        provider_name=ProviderInstanceName(provider_name),
+    )
+    agent_ref = DiscoveredAgent(
+        host_id=host_id,
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("offline-agent"),
+        provider_name=ProviderInstanceName(provider_name),
+        certified_data={
+            "type": "generic",
+            "command": "sleep 1",
+            "work_dir": "/tmp",
+            "plugin": {"demo_plugin": {"flag": True}},
+        },
+    )
+
+    result = ListResult()
+    lock = Lock()
+    params = _make_list_params(
+        error_behavior=ErrorBehavior.CONTINUE,
+        offline_field_generators={
+            "demo_plugin": {
+                "flag": lambda ref, host: ref.certified_data.get("plugin", {})
+                .get("demo_plugin", {})
+                .get("flag", False),
+            }
+        },
+    )
+
+    _collect_and_emit_details_for_host(
+        host_ref=host_ref,
+        agent_refs=[agent_ref],
+        provider=provider,
+        params=params,
+        result=result,
+        results_lock=lock,
+    )
+
+    assert len(result.agents) == 1
+    assert result.agents[0].plugin == {"demo_plugin": {"flag": True}}
 
 
 def test_collect_and_emit_details_for_host_include_filter_drops_non_matching_agent(

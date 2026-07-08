@@ -10,16 +10,27 @@ import pytest
 
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import PluginMngrError
+from imbue.mngr.hosts.host import get_agent_state_dir_path
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import PluginName
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
+from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.utils.testing import init_git_repo
+from imbue.mngr_claude.claude_config import get_managed_settings_path
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
+from imbue.mngr_claude_subagent_proxy._stop_hook_guard import PROXY_CHILD_GUARD_PREFIX
 from imbue.mngr_claude_subagent_proxy.data_types import SubagentProxyMode
 from imbue.mngr_claude_subagent_proxy.data_types import SubagentProxyPluginConfig
 from imbue.mngr_claude_subagent_proxy.plugin import CLAUDE_SUBAGENT_PROXY_PLUGIN_NAME
 from imbue.mngr_claude_subagent_proxy.plugin import SubagentProxyChildConfig
 from imbue.mngr_claude_subagent_proxy.plugin import UnguardedProjectStopHookError
+from imbue.mngr_claude_subagent_proxy.plugin import UnignoredProxyArtifactError
 from imbue.mngr_claude_subagent_proxy.plugin import UnsupportedSubagentHookError
+from imbue.mngr_claude_subagent_proxy.plugin import _check_settings_local_gitignored
+from imbue.mngr_claude_subagent_proxy.plugin import _guard_user_stop_hooks_in_project_settings
 from imbue.mngr_claude_subagent_proxy.plugin import cascade_destroy_recorded_children
 from imbue.mngr_claude_subagent_proxy.plugin import on_after_provisioning
 from imbue.mngr_claude_subagent_proxy.plugin import on_before_agent_destroy
@@ -58,19 +69,29 @@ def fake_host(host_dir: Path) -> FakeHost:
     return FakeHost(host_dir)
 
 
+def _settings_json_path(host_dir: Path, agent_id: AgentId) -> Path:
+    """Path of the agent's per-agent config-dir settings.json (where proxy hooks go in normal mode)."""
+    return get_agent_state_dir_path(host_dir, agent_id) / "plugin" / "claude" / "anthropic" / "settings.json"
+
+
+def _managed_settings_path(host_dir: Path, agent_id: AgentId) -> Path:
+    """Path of the agent's mngr-managed Claude --settings file (env-config-dir mode only)."""
+    return get_managed_settings_path(get_agent_state_dir_path(host_dir, agent_id))
+
+
 def test_plugin_hooks_register_on_claude_agent(work_dir: Path, fake_host: FakeHost) -> None:
     """The plugin's provisioning hook wires up hooks and the proxy agent.
 
     This is the golden-path CI check: verify that invoking on_after_provisioning
     for a Claude agent writes the mngr-proxy agent definition and merges the
-    python-module hooks into .claude/settings.local.json.
+    python-module hooks into the agent's mngr-managed settings file.
     """
     agent_id = AgentId.generate()
     agent = FakeAgent(agent_id, work_dir, ClaudeAgentConfig())
 
     _provision(agent, fake_host, None)
 
-    settings_path = work_dir / ".claude" / "settings.local.json"
+    settings_path = _settings_json_path(fake_host.host_dir, agent_id)
     assert settings_path.exists()
     settings = json.loads(settings_path.read_text())
     hooks = settings["hooks"]
@@ -78,10 +99,12 @@ def test_plugin_hooks_register_on_claude_agent(work_dir: Path, fake_host: FakeHo
     assert any(entry.get("matcher") == "Agent" for entry in hooks["PostToolUse"])
     assert "SessionStart" in hooks
 
-    proxy_md = work_dir / ".claude" / "agents" / "mngr-proxy.md"
+    proxy_md = work_dir / ".claude" / "agents" / "mngr-proxy" / "proxy.md"
     assert proxy_md.exists()
     proxy_content = proxy_md.read_text()
     assert "model: haiku" in proxy_content
+    # Discovery hinges on the frontmatter name, not the path; pin it.
+    assert "name: mngr-proxy" in proxy_content
 
     python_prefix = "uv run python -m imbue.mngr_claude_subagent_proxy.hooks."
     pre_cmd = hooks["PreToolUse"][0]["hooks"][0]["command"]
@@ -172,10 +195,13 @@ def test_plugin_allows_mngr_baseline_stop_hook_for_subagent_proxy_child(work_dir
 
     _provision(agent, fake_host, None)
 
+    # The inherited mngr baseline Stop hook is recognized as safe and left in
+    # settings.local.json; the proxy's own hooks go to the config-dir settings.json.
     settings = json.loads(settings_path.read_text())
-    hooks = settings["hooks"]
-    assert "Stop" in hooks
-    assert "PreToolUse" in hooks
+    assert "Stop" in settings["hooks"]
+
+    managed = json.loads(_settings_json_path(fake_host.host_dir, agent.id).read_text())
+    assert "PreToolUse" in managed["hooks"]
 
 
 def test_plugin_preserves_stop_hooks_for_top_level_agent(work_dir: Path, fake_host: FakeHost) -> None:
@@ -407,14 +433,14 @@ def test_deny_mode_installs_pretooluse_deny_and_sessionstart_reaper(
     children don't have the ``MNGR_CLAUDE_SUBAGENT_PROXY_CHILD`` env var.
 
     No PostToolUse hook (the deny hook never runs mngr create itself),
-    no mngr-proxy.md agent definition.
+    no mngr-proxy/proxy.md agent definition.
     """
     ctx = _ctx_with_plugin_config(temp_mngr_ctx, SubagentProxyPluginConfig(mode=SubagentProxyMode.DENY))
     agent = FakeAgent(AgentId.generate(), work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
 
     _provision(agent, fake_host, ctx)
 
-    settings_path = work_dir / ".claude" / "settings.local.json"
+    settings_path = _settings_json_path(fake_host.host_dir, agent.id)
     assert settings_path.exists()
     settings = json.loads(settings_path.read_text())
     hooks = settings["hooks"]
@@ -438,7 +464,7 @@ def test_deny_mode_installs_pretooluse_deny_and_sessionstart_reaper(
 def test_deny_mode_does_not_write_proxy_agent_definition(
     work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext
 ) -> None:
-    """In DENY mode, the mngr-proxy.md agent definition is NOT written.
+    """In DENY mode, the mngr-proxy/proxy.md agent definition is NOT written.
 
     The Haiku dispatcher is part of PROXY mode only. Writing it in deny
     mode would dirty the worktree with a file the user never invokes.
@@ -448,14 +474,12 @@ def test_deny_mode_does_not_write_proxy_agent_definition(
 
     _provision(agent, fake_host, ctx)
 
-    proxy_md = work_dir / ".claude" / "agents" / "mngr-proxy.md"
+    proxy_md = work_dir / ".claude" / "agents" / "mngr-proxy" / "proxy.md"
     assert not proxy_md.exists()
 
 
-def test_deny_mode_writes_mngr_subagents_skill(
-    work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext
-) -> None:
-    """DENY mode provisions the ``mngr-subagents`` Claude skill at .claude/skills/.
+def test_deny_mode_writes_mngr_proxy_skill(work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext) -> None:
+    """DENY mode provisions the ``mngr-proxy`` Claude skill at .claude/skills/.
 
     The skill carries the verbose context (when to use, how to parse
     subagent_wait output, how to inspect a running subagent, etc.) so
@@ -466,12 +490,12 @@ def test_deny_mode_writes_mngr_subagents_skill(
 
     _provision(agent, fake_host, ctx)
 
-    skill_path = work_dir / ".claude" / "skills" / "mngr-subagents" / "SKILL.md"
+    skill_path = work_dir / ".claude" / "skills" / "mngr-proxy" / "SKILL.md"
     assert skill_path.is_file()
     body = skill_path.read_text()
     # Frontmatter wires the skill into Claude Code's skill-discovery mechanism.
     assert body.startswith("---\n")
-    assert "name: mngr-subagents" in body
+    assert "name: mngr-proxy" in body
     assert "description:" in body
     # Body must teach the explicit two-command spawn-and-wait protocol --
     # this is the single source of truth for how Claude delegates work
@@ -492,7 +516,7 @@ def test_deny_mode_writes_mngr_subagents_skill(
     assert "run_in_background" in body
 
 
-def test_proxy_mode_does_not_write_mngr_subagents_skill(
+def test_proxy_mode_does_not_write_mngr_proxy_skill(
     work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext
 ) -> None:
     """PROXY mode does NOT write the deny-mode skill.
@@ -506,8 +530,70 @@ def test_proxy_mode_does_not_write_mngr_subagents_skill(
 
     _provision(agent, fake_host, ctx)
 
-    skill_path = work_dir / ".claude" / "skills" / "mngr-subagents" / "SKILL.md"
+    skill_path = work_dir / ".claude" / "skills" / "mngr-proxy" / "SKILL.md"
     assert not skill_path.exists()
+
+
+def test_proxy_agent_definition_refuses_unignored_git_worktree(temp_git_repo: Path, fake_host: FakeHost) -> None:
+    """PROXY provisioning aborts if the agent-definition path is not gitignored.
+
+    Writing it would surface as an unstaged change in the tracked worktree.
+    The error must point at the subdirectory to gitignore and the repo-scope
+    disable command, and the artifact must not be written.
+    """
+    agent = FakeAgent(AgentId.generate(), temp_git_repo, ClaudeAgentConfig())
+
+    with pytest.raises(UnignoredProxyArtifactError) as exc_info:
+        _provision(agent, fake_host, None)
+
+    message = str(exc_info.value)
+    assert str(Path(".claude") / "agents" / "mngr-proxy" / "proxy.md") in message
+    # The remediation points at the whole mngr-proxy/ subdir, not just the file.
+    assert f"{Path('.claude') / 'agents' / 'mngr-proxy'}/" in message
+    assert "mngr config set --scope project" in message
+    assert f"plugins.{CLAUDE_SUBAGENT_PROXY_PLUGIN_NAME}.enabled false" in message
+    assert not (temp_git_repo / ".claude" / "agents" / "mngr-proxy" / "proxy.md").exists()
+
+
+def test_proxy_agent_definition_written_when_claude_dir_gitignored(temp_git_repo: Path, fake_host: FakeHost) -> None:
+    """A broad .claude/ ignore covers the artifact, so provisioning writes it."""
+    (temp_git_repo / ".gitignore").write_text(".claude/\n")
+    agent = FakeAgent(AgentId.generate(), temp_git_repo, ClaudeAgentConfig())
+
+    _provision(agent, fake_host, None)
+
+    assert (temp_git_repo / ".claude" / "agents" / "mngr-proxy" / "proxy.md").is_file()
+
+
+def test_proxy_agent_definition_written_when_subdir_gitignored(temp_git_repo: Path, fake_host: FakeHost) -> None:
+    """Ignoring exactly the mngr-proxy/ subdir (what the error suggests) is accepted.
+
+    Pins the file-vs-directory subtlety: the guard runs before the directory
+    exists, and the suggested trailing-slash directory rule does not match the
+    not-yet-existing directory path -- but it does match the file under it,
+    which is what the guard checks. If this regression test ever fails, the
+    error message would be telling users to add a rule that the guard rejects.
+    """
+    (temp_git_repo / ".gitignore").write_text(".claude/agents/mngr-proxy/\n")
+    agent = FakeAgent(AgentId.generate(), temp_git_repo, ClaudeAgentConfig())
+
+    _provision(agent, fake_host, None)
+
+    assert (temp_git_repo / ".claude" / "agents" / "mngr-proxy" / "proxy.md").is_file()
+
+
+def test_deny_skill_refuses_unignored_git_worktree(
+    temp_git_repo: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext
+) -> None:
+    """DENY provisioning aborts if the skill path is not gitignored."""
+    ctx = _ctx_with_plugin_config(temp_mngr_ctx, SubagentProxyPluginConfig(mode=SubagentProxyMode.DENY))
+    agent = FakeAgent(AgentId.generate(), temp_git_repo, ClaudeAgentConfig(), name=AgentName("reviewer"))
+
+    with pytest.raises(UnignoredProxyArtifactError) as exc_info:
+        _provision(agent, fake_host, ctx)
+
+    assert str(Path(".claude") / "skills" / "mngr-proxy" / "SKILL.md") in str(exc_info.value)
+    assert not (temp_git_repo / ".claude" / "skills" / "mngr-proxy" / "SKILL.md").exists()
 
 
 def test_deny_mode_skips_project_stop_hook_check(
@@ -583,7 +669,7 @@ def test_proxy_mode_default_when_config_absent(
     # temp_mngr_ctx has no subagent_proxy plugin config -- defaults apply.
     _provision(agent, fake_host, temp_mngr_ctx)
 
-    settings = json.loads((work_dir / ".claude" / "settings.local.json").read_text())
+    settings = json.loads(_settings_json_path(fake_host.host_dir, agent.id).read_text())
     hooks = settings["hooks"]
     # PROXY mode installs all three hook events.
     assert "PreToolUse" in hooks
@@ -600,7 +686,7 @@ def test_explicit_proxy_mode_installs_full_proxy_hooks(
 
     _provision(agent, fake_host, ctx)
 
-    settings = json.loads((work_dir / ".claude" / "settings.local.json").read_text())
+    settings = json.loads(_settings_json_path(fake_host.host_dir, agent.id).read_text())
     hooks = settings["hooks"]
     pre_cmd = hooks["PreToolUse"][0]["hooks"][0]["command"]
     assert "imbue.mngr_claude_subagent_proxy.hooks.spawn" in pre_cmd
@@ -608,18 +694,47 @@ def test_explicit_proxy_mode_installs_full_proxy_hooks(
     assert "SessionStart" in hooks
 
 
-def test_deny_mode_merges_into_existing_settings_local_json(
+def test_proxy_hooks_land_in_managed_file_in_env_config_dir_mode(
+    work_dir: Path, fake_host: FakeHost, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """In use_env_config_dir mode the proxy hooks land in the managed --settings file.
+
+    There is no per-agent config dir, so the managed file is the only channel
+    (mirroring mngr_claude's own _configure_agent_hooks in that mode). The
+    config-dir settings.json is NOT written.
+    """
+    shared_dir = tmp_path / "shared"
+    shared_dir.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(shared_dir))
+    agent = FakeAgent(
+        AgentId.generate(),
+        work_dir,
+        ClaudeAgentConfig(use_env_config_dir=True),
+        name=AgentName("reviewer"),
+    )
+
+    _provision(agent, fake_host, None)
+
+    settings = json.loads(_managed_settings_path(fake_host.host_dir, agent.id).read_text())
+    hooks = settings["hooks"]
+    assert "PreToolUse" in hooks
+    assert "SessionStart" in hooks
+    # The per-agent config-dir settings.json is not used in this mode.
+    assert not _settings_json_path(fake_host.host_dir, agent.id).exists()
+
+
+def test_deny_mode_merges_into_existing_settings_json(
     work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext
 ) -> None:
-    """Deny mode preserves pre-existing entries in settings.local.json.
+    """Deny mode preserves pre-existing entries in the config-dir settings.json.
 
-    mngr_claude provisioning writes its readiness / user-prompt hooks
-    before this plugin runs (we are ``trylast``). Deny mode must merge
-    its single PreToolUse:Agent entry without clobbering those.
+    mngr_claude provisioning writes its readiness / user-prompt hooks into the
+    settings.json before this plugin runs (we are ``trylast``). Deny mode must
+    merge its single PreToolUse:Agent entry without clobbering those.
     """
-    claude_dir = work_dir / ".claude"
-    claude_dir.mkdir()
-    (claude_dir / "settings.local.json").write_text(
+    managed_path = _settings_json_path(fake_host.host_dir, agent_id := AgentId.generate())
+    managed_path.parent.mkdir(parents=True, exist_ok=True)
+    managed_path.write_text(
         json.dumps(
             {
                 "hooks": {
@@ -641,11 +756,11 @@ def test_deny_mode_merges_into_existing_settings_local_json(
         + "\n"
     )
     ctx = _ctx_with_plugin_config(temp_mngr_ctx, SubagentProxyPluginConfig(mode=SubagentProxyMode.DENY))
-    agent = FakeAgent(AgentId.generate(), work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
+    agent = FakeAgent(agent_id, work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
 
     _provision(agent, fake_host, ctx)
 
-    settings = json.loads((claude_dir / "settings.local.json").read_text())
+    settings = json.loads(managed_path.read_text())
     hooks = settings["hooks"]
     assert "UserPromptSubmit" in hooks
     assert "PreToolUse" in hooks
@@ -663,12 +778,146 @@ def test_plugin_strip_hooks_is_safe_when_settings_missing(work_dir: Path, fake_h
 
     _provision(agent, fake_host, None)
 
-    # Provisioning still wrote the merged settings (PreToolUse/PostToolUse/SessionStart),
-    # and the to-be-stripped keys were never present to begin with.
-    settings_path = work_dir / ".claude" / "settings.local.json"
+    # Provisioning still wrote the merged config-dir settings
+    # (PreToolUse/PostToolUse/SessionStart), and the to-be-stripped keys were
+    # never present to begin with.
+    settings_path = _settings_json_path(fake_host.host_dir, agent_id)
     assert settings_path.exists()
     settings = json.loads(settings_path.read_text())
     hooks = settings["hooks"]
     assert "Stop" not in hooks
     assert "SubagentStop" not in hooks
     assert "PreToolUse" in hooks
+
+
+def _write_user_stop_hook(work_dir: Path) -> Path:
+    """Seed work_dir/.claude/settings.local.json with one user-defined Stop hook."""
+    claude_dir = work_dir / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    settings_path = claude_dir / "settings.local.json"
+    settings_path.write_text(
+        json.dumps({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo user-stop"}]}]}}) + "\n"
+    )
+    return settings_path
+
+
+def test_guard_user_stop_hooks_raises_when_settings_local_not_gitignored(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """Guarding user Stop hooks refuses to dirty a non-gitignored settings.local.json.
+
+    This is the one place mngr still requires settings.local.json be gitignored:
+    wrapping the user's own Stop hooks would otherwise show as an unstaged change.
+    """
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    # No .gitignore entry: settings.local.json is not ignored.
+    init_git_repo(work_dir, initial_commit=False)
+    _write_user_stop_hook(work_dir)
+
+    with pytest.raises(PluginMngrError, match="not gitignored"):
+        _guard_user_stop_hooks_in_project_settings(host, work_dir)
+
+
+def test_guard_user_stop_hooks_wraps_when_gitignored(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """When settings.local.json is gitignored, user Stop hooks get the proxy-child guard."""
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    init_git_repo(work_dir, initial_commit=False)
+    (work_dir / ".gitignore").write_text(".claude/settings.local.json\n")
+    settings_path = _write_user_stop_hook(work_dir)
+
+    _guard_user_stop_hooks_in_project_settings(host, work_dir)
+
+    command = json.loads(settings_path.read_text())["hooks"]["Stop"][0]["hooks"][0]["command"]
+    assert PROXY_CHILD_GUARD_PREFIX in command
+
+
+def test_guard_user_stop_hooks_skips_gitignore_check_when_nothing_to_guard(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """The gitignore requirement applies only when there is a Stop hook to wrap.
+
+    A settings.local.json with no Stop/SubagentStop hooks is never written, so a
+    missing gitignore entry does not block provisioning.
+    """
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    # No .gitignore entry: settings.local.json is not ignored.
+    init_git_repo(work_dir, initial_commit=False)
+    claude_dir = work_dir / ".claude"
+    claude_dir.mkdir()
+    # Only a non-Stop user hook -- nothing for the proxy-child guard to wrap.
+    (claude_dir / "settings.local.json").write_text(
+        json.dumps(
+            {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "echo pre"}]}]}}
+        )
+        + "\n"
+    )
+
+    # Should not raise: no write happens, so the gitignore requirement never applies.
+    _guard_user_stop_hooks_in_project_settings(host, work_dir)
+
+
+def test_gitignore_check_passes_when_claude_is_symlink_and_resolved_path_gitignored(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """gitignore check should pass when .claude is a symlink and the resolved path is gitignored."""
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    init_git_repo(repo_dir, initial_commit=False)
+
+    # Create .agents directory and symlink .claude -> .agents
+    (repo_dir / ".agents").mkdir()
+    (repo_dir / ".claude").symlink_to(".agents")
+
+    # Gitignore the resolved path (what git actually sees)
+    (repo_dir / ".gitignore").write_text(".agents/settings.local.json\n")
+
+    # Should not raise
+    _check_settings_local_gitignored(host, repo_dir)
+
+
+def test_gitignore_check_raises_when_claude_is_symlink_and_resolved_path_not_gitignored(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """gitignore check should raise when .claude is a symlink and the resolved path is not gitignored."""
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    init_git_repo(repo_dir, initial_commit=False)
+
+    # Create .agents directory and symlink .claude -> .agents
+    (repo_dir / ".agents").mkdir()
+    (repo_dir / ".claude").symlink_to(".agents")
+
+    # Gitignore the symlink path (wrong -- git won't match this)
+    (repo_dir / ".gitignore").write_text(".claude/settings.local.json\n")
+
+    with pytest.raises(PluginMngrError, match="not gitignored") as exc_info:
+        _check_settings_local_gitignored(host, repo_dir)
+
+    # Error message should tell the user to add the resolved path, not the symlink path
+    assert ".agents/settings.local.json" in str(exc_info.value)
+
+
+def test_gitignore_check_skips_when_claude_symlink_points_outside_repo(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """gitignore check should silently return when .claude symlink target is outside the repo."""
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    init_git_repo(repo_dir, initial_commit=False)
+
+    # Create a directory outside the repo and symlink .claude to it
+    outside_dir = tmp_path / "outside_agents"
+    outside_dir.mkdir()
+    (repo_dir / ".claude").symlink_to(outside_dir)
+
+    # Should not raise -- target is outside the repo, git won't track it
+    _check_settings_local_gitignored(host, repo_dir)

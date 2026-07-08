@@ -3,26 +3,19 @@
 Responsibility split:
 
 * ``mngr imbue_cloud admin pool create`` (in ``libs/mngr_imbue_cloud``) is the
-  provider-generic host-creation step. It accepts a required ``--region`` and
-  repeatable ``--tag KEY=VALUE`` and knows nothing about minds environments.
+  provider-generic host-creation step. It accepts a required ``--region`` and a
+  ``--server-id`` (the bare-metal box to carve the slice on) and knows nothing
+  about minds environments.
 * This module is the env-aware layer. From the activated minds env
   (``MINDS_ROOT_NAME``) it:
-    1. injects ``--tag minds_env=<env-name>`` so ``minds env destroy`` can
-       later enumerate + delete every VPS the env owns (via the OVH IAM v2
-       tag walker in :mod:`imbue.minds.envs.providers.ovh_tags`);
-    2. reads the activated tier's OVH AK/AS/CK from Vault
-       (``<vault_path_prefix>/ovh``) and injects them into the admin
-       subprocess env so the inner ``mngr create ... --template ovh`` has
-       credentials;
-    3. derives the management public key from the activated tier's
-       ``<vault_path_prefix>/pool-ssh.POOL_SSH_PRIVATE_KEY`` Vault entry
-       (the connector runs with the SAME private key as a Modal Secret) and
-       passes it to the admin's ``--management-public-key-file`` -- so the
-       key injected on the VPS at bake time always matches the connector's
-       at lease time. This closes the keypair-mismatch class of bake
-       failures that hand-rolled ``--management-public-key-file`` paths used
-       to leak. Operators can still pass ``--management-public-key-file``
-       to force a specific key (escape hatch for one-off / non-vault setups).
+    1. forwards ``--slice-env-name <env-name>`` (stamped into each slice's lima
+       names, so a shared box can attribute the slice to this env and the
+       post-bake reap only touches this env's own slices);
+    2. derives the host_pool DSN and the pool SSH private key from the activated
+       tier's Vault entries and injects ``POOL_SSH_PRIVATE_KEY`` into the admin
+       subprocess env -- the same key the connector loads from its
+       ``pool-ssh-<tier>`` Modal Secret, so the key the slice bake authorizes on
+       the VM matches the one the connector SSHes with at lease/release time.
   All other admin flags (``--count`` / ``--attributes`` / ``--workspace-dir``
   / ``--database-url`` / ``--mngr-source``) forward 1:1.
 
@@ -35,14 +28,10 @@ click commands so unit tests can verify the env-name injection + flag
 forwarding behaviour without standing up a fake subprocess runner.
 """
 
-import contextlib
 import os
 import shlex
 import sys
-import tempfile
-from collections.abc import Iterator
 from collections.abc import Mapping
-from pathlib import Path
 from typing import Final
 
 import click
@@ -50,33 +39,46 @@ from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
+from imbue.minds.cli._activated_env import PRODUCTION_ENV_NAME
+from imbue.minds.cli._activated_env import STAGING_ENV_NAME
 from imbue.minds.cli._activated_env import require_activated_env_name
 from imbue.minds.cli._activated_env import tier_for_env_name
 from imbue.minds.config.loader import load_deploy_config
 from imbue.minds.envs.primitives import VaultReadError
 from imbue.minds.envs.vault_reader import VaultPath
 from imbue.minds.envs.vault_reader import read_vault_kv
+from imbue.minds.utils.secret_redaction import redact_secret_flag_values
 
-_POOL_COMMAND_TIMEOUT_SECONDS: Final[int] = 7200
+# Hard cap on the admin pool-create subprocess. Generous (12h) so a large bulk bake
+# (e.g. `--count 20` in waves of `--max-concurrency`, slow on a loaded box) is never
+# killed mid-run. If it ever does fire, the slice backend reaps its orphans on
+# SIGTERM, but the point of 12h is to not hit it in normal operation.
+_POOL_COMMAND_TIMEOUT_SECONDS: Final[int] = 43200
 
-# OVH provider-config env vars consumed by ``OvhProviderConfig`` (in
-# ``libs/mngr_ovh``). The three AK/AS/CK keys are required; the
-# endpoint is optional (defaults to ``ovh-us`` in the provider config).
-_OVH_REQUIRED_ENV_VARS: Final[tuple[str, ...]] = (
-    "OVH_APPLICATION_KEY",
-    "OVH_APPLICATION_SECRET",
-    "OVH_CONSUMER_KEY",
-)
-_OVH_OPTIONAL_ENV_VARS: Final[tuple[str, ...]] = ("OVH_ENDPOINT",)
+# Flags whose values are secrets and must be masked when the admin command is
+# rendered into the "Running: ..." log line. ``--database-url`` carries the
+# Neon pool DSN (username + password); leaking it into logs/terminals is the
+# exact issue this redaction closes.
+_SECRET_BEARING_FLAGS: Final[tuple[str, ...]] = ("--database-url",)
 
-# Vault key the management SSH private key lives under (per host-pool-setup.md
-# step 2). The connector deploys with this private key pushed to a Modal
-# Secret; the pool VPS's authorized_keys must hold the matching public key.
+# Vault key the pool management SSH private key lives under (per
+# host-pool-setup.md step 2). The connector deploys with this private key pushed
+# to a Modal Secret; the slice bake authorizes the matching public key on the VM.
 _POOL_MGMT_PRIVATE_KEY_VAULT_FIELD: Final[str] = "POOL_SSH_PRIVATE_KEY"
-# How long ``ssh-keygen -y`` should take to derive a public key from a
-# small ed25519/RSA private key. Generous so a contended box doesn't
-# spuriously fail the bake at the very first step.
-_SSH_KEYGEN_DERIVE_TIMEOUT_SECONDS: Final[float] = 10.0
+# Vault field (under ``<vault_prefix>/neon``) holding the pooled host_pool DSN.
+_POOL_DSN_VAULT_FIELD: Final[str] = "DATABASE_URL"
+# Shared ``--database-url`` help text for the create / list / destroy commands.
+# Hoisted to one constant so the three subcommands' ``--help`` output can't drift.
+_DATABASE_URL_HELP: Final[str] = (
+    "Neon PostgreSQL connection string for the pool DB. Optional: for "
+    "staging/production it is read from Vault (secrets/minds/<tier>/neon); "
+    "for dev/ci it auto-resolves from the activated env's secrets.toml. "
+    "Pass explicitly only when overriding."
+)
+# Env var the admin slice path reads the pool management private key from (see
+# ``mngr_imbue_cloud.cli.server._pool_private_key_path``). The slice backend needs
+# the private key itself to SSH the box and carve the lima VM.
+_POOL_PRIVATE_KEY_ENV_VAR: Final[str] = "POOL_SSH_PRIVATE_KEY"
 
 
 def build_create_admin_args(
@@ -84,21 +86,39 @@ def build_create_admin_args(
     env_name: str,
     count: int,
     region: str,
-    attributes_json: str,
-    workspace_dir: str,
-    management_public_key_file: str,
+    from_tag: str | None,
+    repo_url: str | None,
+    workspace_dir: str | None,
+    repo_branch_or_tag_override: str | None,
+    attributes_json: str | None,
     database_url: str | None,
     mngr_source: str | None,
+    is_dry_run: bool,
+    is_deferred_install_wait_skipped: bool,
+    server_id: str | None = None,
+    max_concurrency: int | None = None,
 ) -> list[str]:
     """Compose the ``mngr imbue_cloud admin pool create`` argv from minds-side inputs.
 
-    Auto-injects ``--tag minds_env=<env_name>``; forwards every other
-    user-supplied flag verbatim. Split out from the click command so
-    tests can exercise the wiring without faking a subprocess.
+    Forwards ``--slice-env-name <env_name>`` (stamped into each slice's lima names,
+    so a shared box can attribute the slice to this env). Every other user-supplied
+    flag forwards verbatim. Split out from the click command so tests can exercise
+    the wiring without faking a subprocess.
 
-    ``--database-url`` is forwarded only when explicitly supplied. When
-    omitted, the admin CLI auto-resolves the DSN from the activated
-    minds env's ``secrets.toml`` (which the deploy wrote).
+    The bake source is exactly one of ``--from-tag`` (production, clones a tag)
+    or ``--workspace-dir`` (dev, a working tree); the admin CLI derives the
+    canonical ``repo_url`` / ``repo_branch_or_tag`` from it, so ``--attributes``
+    carries only non-identity attributes (and may be omitted).
+
+    ``--database-url`` is forwarded only when ``database_url`` is non-None.
+    The caller (``pool_create`` via :func:`resolve_host_pool_dsn`) supplies a
+    Vault-resolved DSN for staging / production and None for dev / ci; when
+    None is passed through here the admin CLI auto-resolves the DSN from the
+    activated minds env's ``secrets.toml`` (which the deploy wrote).
+
+    ``--server-id`` (the explicitly-chosen bare-metal box), ``--dry-run`` (when
+    ``is_dry_run`` is True), and ``--max-concurrency`` (when non-None) are
+    forwarded only when set.
     """
     args = [
         "create",
@@ -106,20 +126,68 @@ def build_create_admin_args(
         str(count),
         "--region",
         region,
-        "--tag",
-        f"minds_env={env_name}",
-        "--attributes",
-        attributes_json,
-        "--workspace-dir",
-        workspace_dir,
-        "--management-public-key-file",
-        management_public_key_file,
     ]
+    if from_tag is not None:
+        args.extend(["--from-tag", from_tag])
+    if repo_url is not None:
+        args.extend(["--repo-url", repo_url])
+    if workspace_dir is not None:
+        args.extend(["--workspace-dir", workspace_dir])
+    if repo_branch_or_tag_override is not None:
+        args.extend(["--repo-branch-or-tag", repo_branch_or_tag_override])
+    if attributes_json is not None:
+        args.extend(["--attributes", attributes_json])
     if database_url is not None:
         args.extend(["--database-url", database_url])
     if mngr_source is not None:
         args.extend(["--mngr-source", mngr_source])
+    # Stamp the owning env into each slice's lima names so multiple dev envs can
+    # share one bare-metal box (occupancy read from the box; reap scoped to this env).
+    args.extend(["--slice-env-name", env_name])
+    if server_id is not None:
+        args.extend(["--server-id", server_id])
+    if is_dry_run:
+        args.append("--dry-run")
+    if max_concurrency is not None:
+        args.extend(["--max-concurrency", str(max_concurrency)])
+    if is_deferred_install_wait_skipped:
+        args.append("--skip-deferred-install-wait")
     return args
+
+
+def build_teardown_slices_admin_args(*, database_url: str | None) -> list[str]:
+    """Compose the ``mngr imbue_cloud admin pool teardown-slices`` argv.
+
+    Forwards ``--database-url`` only when non-None (dev auto-resolves it from the
+    activated env's secrets.toml; staging/production pass the Vault-resolved DSN).
+    """
+    args = ["teardown-slices"]
+    if database_url is not None:
+        args.extend(["--database-url", database_url])
+    return args
+
+
+def tear_down_env_pool_slices(env_name: str) -> None:
+    """Tear down the env's unleased pool slices on their boxes before the env's DB is deleted.
+
+    Resolves the pool SSH key (Vault) + host_pool DSN exactly like ``pool create``,
+    then shells to ``mngr imbue_cloud admin pool teardown-slices``. Leased slices are
+    left to their agent's release path. A missing pool SSH key is a bad state, not a
+    "nothing to clean up" signal -- it raises (failing the destroy) so we never
+    silently leak the env's slice VMs; a genuine teardown failure (an unreachable
+    box) likewise raises rather than leaking.
+    """
+    try:
+        pool_private_key = read_pool_private_key_from_vault(env_name)
+    except VaultReadError as exc:
+        raise click.ClickException(
+            f"Could not read the pool SSH private key from Vault for env '{env_name}': {exc}"
+        ) from exc
+    database_url = resolve_host_pool_dsn(env_name, None)
+    args = build_teardown_slices_admin_args(database_url=database_url)
+    _raise_on_failure(
+        "teardown-slices", _run_admin_command(args, extra_env={_POOL_PRIVATE_KEY_ENV_VAR: pool_private_key})
+    )
 
 
 def build_list_admin_args(*, database_url: str | None) -> list[str]:
@@ -134,13 +202,29 @@ def build_list_admin_args(*, database_url: str | None) -> list[str]:
     return args
 
 
-def build_destroy_admin_args(*, pool_host_id: str, database_url: str | None, force: bool) -> list[str]:
+def build_backfill_host_keys_admin_args(*, database_url: str | None) -> list[str]:
+    """Compose the ``mngr imbue_cloud admin pool backfill-host-keys`` argv.
+
+    ``--database-url`` forwarded only when explicitly supplied; see
+    :func:`build_create_admin_args`.
+    """
+    args = ["backfill-host-keys"]
+    if database_url is not None:
+        args.extend(["--database-url", database_url])
+    return args
+
+
+def build_destroy_admin_args(
+    *, pool_host_id: str, database_url: str | None, force: bool, skip_vps_cancel: bool
+) -> list[str]:
     """Compose the ``mngr imbue_cloud admin pool destroy`` argv."""
     args = ["destroy", pool_host_id]
     if database_url is not None:
         args.extend(["--database-url", database_url])
     if force:
         args.append("--force")
+    if skip_vps_cancel:
+        args.append("--skip-vps-cancel")
     return args
 
 
@@ -159,96 +243,41 @@ def _stream_subprocess_line(line: str, is_stdout: bool) -> None:
     sys.stderr.flush()
 
 
-def merge_ovh_env_into_subprocess_env(*, shell_env: Mapping[str, str], ovh_env: Mapping[str, str]) -> dict[str, str]:
-    """Build the subprocess env: start from ``shell_env``, then layer ``ovh_env`` on top.
+def merge_extra_env_into_subprocess_env(
+    *, shell_env: Mapping[str, str], extra_env: Mapping[str, str]
+) -> dict[str, str]:
+    """Build the subprocess env: start from ``shell_env``, then layer ``extra_env`` on top.
 
-    OVH values from the activated tier's Vault entry win over whatever the
-    operator may have lying around in their shell. The operator's mental
-    model when running ``minds pool create`` (with an activated env) is
-    "this provisions hosts for the active tier" -- so the active tier's
-    creds are the source of truth, not a stale ``OVH_APPLICATION_KEY``
-    that might still be exported from a different tier's bake last week.
+    Injects the activated tier's ``POOL_SSH_PRIVATE_KEY`` (resolved from Vault) into
+    the admin subprocess without mutating the parent process's environment. The
+    Vault value from the activated tier wins over whatever the operator may have
+    lying around in their shell. The operator's mental model when running
+    ``minds pool create`` (with an activated env) is "this provisions hosts for the
+    active tier" -- so the active tier's secrets are the source of truth, not a stale
+    value that might still be exported from a different tier's session last week.
 
     Pure function so the precedence rule is testable without a fake
     subprocess runner or a fake Vault.
     """
     merged = dict(shell_env)
-    merged.update(ovh_env)
+    merged.update(extra_env)
     return merged
 
 
-def derive_public_key_from_private(
-    private_key_pem: str,
-    *,
-    parent_cg: ConcurrencyGroup | None = None,
-) -> str:
-    """Run ``ssh-keygen -y`` to derive the public key from a private key PEM.
-
-    ``ssh-keygen`` only reads from a file (not stdin), so the private key
-    is written to a 0600 temp file for the call and unlinked immediately
-    after. The returned string is the standard ``"<type> <base64>"`` form
-    (without a comment), suitable for an ``authorized_keys`` line.
-
-    Raises ``click.ClickException`` if ``ssh-keygen`` is missing or fails.
-    """
-    cg = (
-        parent_cg.make_concurrency_group(name="ssh-keygen-derive-pub")
-        if parent_cg is not None
-        else ConcurrencyGroup(name="ssh-keygen-derive-pub")
-    )
-    with tempfile.NamedTemporaryFile(mode="w", suffix="_priv", delete=False) as tmp:
-        tmp.write(private_key_pem)
-        if not private_key_pem.endswith("\n"):
-            tmp.write("\n")
-        tmp_path = tmp.name
-    try:
-        os.chmod(tmp_path, 0o600)
-        with cg:
-            result = cg.run_process_to_completion(
-                command=["ssh-keygen", "-y", "-f", tmp_path],
-                timeout=_SSH_KEYGEN_DERIVE_TIMEOUT_SECONDS,
-                is_checked_after=False,
-            )
-    finally:
-        os.unlink(tmp_path)
-    if result.returncode != 0:
-        raise click.ClickException(
-            f"`ssh-keygen -y` failed (exit {result.returncode}) while deriving the management "
-            f"public key from the Vault-stored private key: {result.stderr.strip()}"
-        )
-    derived = result.stdout.strip()
-    if not derived:
-        raise click.ClickException(
-            "`ssh-keygen -y` produced empty output while deriving the management public key; "
-            "the Vault-stored private key may be malformed."
-        )
-    return derived
-
-
-def resolve_management_public_key_from_vault(
+def read_pool_private_key_from_vault(
     env_name: str,
     *,
     parent_cg: ConcurrencyGroup | None = None,
 ) -> str:
-    """Read the activated tier's management private key from Vault, return its public form.
+    """Read the activated tier's pool management private key PEM from Vault.
 
-    Looks up the tier for ``env_name``, loads the corresponding deploy
-    config to discover ``vault_path_prefix``, then reads
-    ``<prefix>/pool-ssh.POOL_SSH_PRIVATE_KEY`` via the standard
-    ``read_vault_kv`` shellout. The returned public key is the openssh
-    ``authorized_keys`` line form (no comment), ready to write to the
-    file the inner admin CLI's ``--management-public-key-file`` reads.
+    Reads ``<vault_path_prefix>/pool-ssh/POOL_SSH_PRIVATE_KEY`` -- the same entry
+    ``minds env deploy`` pushes into the ``pool-ssh-<tier>`` Modal Secret the
+    connector loads, so the key the slice bake authorizes on the VM matches the one
+    the connector SSHes with at lease/release time. The slice backend needs the
+    private key itself to SSH the box and carve the lima VM.
 
-    Same Vault entry as the one ``minds env deploy`` pushes into the
-    ``pool-ssh-<tier>`` Modal Secret -- so the bake-time injection and
-    the connector's lease-time SSH auth always come from the same
-    keypair. The original "operator picks a public key by hand" path led
-    to silent mismatches (the operator generated a fresh key, baked a
-    VPS the connector then couldn't talk to); deriving here makes that
-    failure mode unreachable for the minds-side caller.
-
-    Raises ``click.ClickException`` if the Vault entry is missing the
-    required private-key field or if ``ssh-keygen -y`` cannot parse it.
+    Raises ``click.ClickException`` if the entry lacks the private-key field.
     Raises ``VaultReadError`` for any underlying Vault read failure.
     """
     tier = tier_for_env_name(env_name)
@@ -261,76 +290,52 @@ def resolve_management_public_key_from_vault(
             f"Vault entry {vault_prefix}/pool-ssh is missing {_POOL_MGMT_PRIVATE_KEY_VAULT_FIELD!r}; "
             "see apps/minds/docs/host-pool-setup.md step 2 for the schema."
         )
-    return derive_public_key_from_private(private_key, parent_cg=parent_cg)
+    return private_key
 
 
-@contextlib.contextmanager
-def resolved_management_public_key_path(
+def resolve_host_pool_dsn(
     env_name: str,
-    *,
-    explicit_path: str | None,
-    parent_cg: ConcurrencyGroup | None = None,
-) -> Iterator[str]:
-    """Yield a filesystem path the inner admin CLI can hand to ``--management-public-key-file``.
-
-    Two source-of-truth modes, in precedence order:
-
-    1. ``explicit_path`` (from ``--management-public-key-file``): operator
-       override. Yielded unchanged. Escape hatch for one-off bakes where
-       the operator deliberately wants a non-canonical key.
-    2. Vault (default): :func:`resolve_management_public_key_from_vault`
-       derives the public form from the activated tier's
-       ``<vault_path_prefix>/pool-ssh.POOL_SSH_PRIVATE_KEY`` entry. The
-       derived key is written to a private temp file that's cleaned up
-       when the context exits (so the inner CLI sees ``exists=True`` and
-       no stale public-key files litter the operator's machine).
-    """
-    if explicit_path is not None:
-        yield explicit_path
-        return
-    pub_text = resolve_management_public_key_from_vault(env_name, parent_cg=parent_cg)
-    with tempfile.TemporaryDirectory(prefix="minds-pool-mgmt-pub-") as tmpdir:
-        pub_path = Path(tmpdir) / "id_ed25519.pub"
-        pub_path.write_text(pub_text + "\n")
-        yield str(pub_path)
-
-
-def resolve_ovh_env_from_vault(
-    env_name: str,
+    explicit_database_url: str | None,
     *,
     parent_cg: ConcurrencyGroup | None = None,
-) -> dict[str, str]:
-    """Read the activated tier's OVH AK/AS/CK from Vault, return as env-var dict.
+) -> str | None:
+    """Return the host_pool DSN to forward to the admin command, or None.
 
-    Looks up the tier for ``env_name`` (``production`` / ``staging`` /
-    ``dev``), loads the corresponding deploy config to discover
-    ``vault_path_prefix``, then reads ``<prefix>/ovh`` from Vault via the
-    standard ``read_vault_kv`` shellout (so the operator's existing
-    ``vault login`` + ``VAULT_ADDR`` / ``VAULT_NAMESPACE`` are honored).
+    Precedence: an explicit ``--database-url`` always wins. Otherwise the shared
+    tiers (``staging`` / ``production``) keep no local ``secrets.toml``, so their
+    DSN is read from the tier's ``<vault_prefix>/neon/DATABASE_URL`` Vault entry
+    -- the same entry the connector and ``minds env deploy`` use. Per-env tiers
+    (``dev`` / ``ci``) return None so the admin CLI auto-resolves the DSN from
+    the per-env ``secrets.toml`` that ``minds env deploy`` wrote (this path never
+    touches Vault).
 
-    The required keys ``OVH_APPLICATION_KEY`` / ``OVH_APPLICATION_SECRET``
-    / ``OVH_CONSUMER_KEY`` must all be present and non-empty; the
-    optional ``OVH_ENDPOINT`` is included if set. Missing required keys
-    raise ``click.ClickException`` with a pointer at the setup doc.
+    The wrapper resolves every per-tier secret the bake needs from the same Vault
+    prefix, so the operator never hand-passes ``--database-url`` for staging /
+    production.
 
-    Raises ``VaultReadError`` if the Vault read itself fails (binary
-    missing, not logged in, entry absent, malformed payload).
+    Raises ``click.ClickException`` if the Vault read fails or the entry lacks
+    a non-empty ``DATABASE_URL``.
     """
+    if explicit_database_url is not None:
+        return explicit_database_url
     tier = tier_for_env_name(env_name)
+    if tier not in (PRODUCTION_ENV_NAME, STAGING_ENV_NAME):
+        return None
     deploy_config = load_deploy_config(tier)
     vault_prefix = str(deploy_config.vault_path_prefix).rstrip("/")
-    secret = read_vault_kv(VaultPath(f"{vault_prefix}/ovh"), parent_concurrency_group=parent_cg)
-    missing = [key for key in _OVH_REQUIRED_ENV_VARS if not secret.get(key)]
-    if missing:
+    try:
+        secret = read_vault_kv(VaultPath(f"{vault_prefix}/neon"), parent_concurrency_group=parent_cg)
+    except VaultReadError as exc:
         raise click.ClickException(
-            f"Vault entry {vault_prefix}/ovh is missing required key(s) {missing}; "
+            f"Could not read the host_pool DSN from Vault ({vault_prefix}/neon) for env '{env_name}': {exc}"
+        ) from exc
+    dsn = secret.get(_POOL_DSN_VAULT_FIELD, "")
+    if not dsn:
+        raise click.ClickException(
+            f"Vault entry {vault_prefix}/neon is missing {_POOL_DSN_VAULT_FIELD!r}; "
             "see apps/minds/docs/host-pool-setup.md step 3 for the schema."
         )
-    env_vars: dict[str, str] = {key: secret[key] for key in _OVH_REQUIRED_ENV_VARS}
-    for key in _OVH_OPTIONAL_ENV_VARS:
-        if value := secret.get(key):
-            env_vars[key] = value
-    return env_vars
+    return dsn
 
 
 def _run_admin_command(args: list[str], *, extra_env: Mapping[str, str] | None = None) -> FinishedProcess:
@@ -338,15 +343,15 @@ def _run_admin_command(args: list[str], *, extra_env: Mapping[str, str] | None =
 
     Streams the child's output line-by-line so a multi-host bake isn't a
     silent black box. Forwards the current process env, with ``extra_env``
-    layered on top so callers can inject the activated tier's OVH AK/AS/CK
-    (read from Vault by :func:`resolve_ovh_env_from_vault`) without having
-    to mutate the parent process's environment.
+    layered on top so callers can inject the activated tier's POOL_SSH_PRIVATE_KEY
+    (read from Vault) without mutating the parent process's environment.
     """
     full_command = ["mngr", "imbue_cloud", "admin", "pool"] + args
-    logger.info("Running: {}", " ".join(shlex.quote(part) for part in full_command))
+    loggable_command = redact_secret_flag_values(full_command, secret_bearing_flags=_SECRET_BEARING_FLAGS)
+    logger.info("Running: {}", " ".join(shlex.quote(part) for part in loggable_command))
     subprocess_env: dict[str, str] | None = None
     if extra_env:
-        subprocess_env = merge_ovh_env_into_subprocess_env(shell_env=os.environ, ovh_env=extra_env)
+        subprocess_env = merge_extra_env_into_subprocess_env(shell_env=os.environ, extra_env=extra_env)
     cg = ConcurrencyGroup(name="minds-pool")
     with cg:
         return cg.run_process_to_completion(
@@ -363,6 +368,58 @@ def _raise_on_failure(label: str, result: FinishedProcess) -> None:
         raise click.ClickException(f"mngr imbue_cloud admin pool {label} failed (exit {result.returncode}).")
 
 
+def _run_slice_pool_create(
+    *,
+    env_name: str,
+    count: int,
+    region: str,
+    from_tag: str | None,
+    repo_url: str | None,
+    workspace_dir: str | None,
+    repo_branch_or_tag_override: str | None,
+    attributes_json: str | None,
+    database_url: str | None,
+    mngr_source: str | None,
+    server_id: str | None,
+    is_dry_run: bool,
+    is_deferred_install_wait_skipped: bool,
+    max_concurrency: int | None,
+) -> None:
+    """Resolve the pool private key from Vault, then bake bare-metal slice pool hosts.
+
+    Slice baking targets the explicitly-chosen ``--server-id`` bare-metal box (see
+    ``mngr imbue_cloud admin server list``) and authorizes the pool key from the
+    tier's Vault entry at carve time.
+    """
+    if not server_id:
+        raise click.UsageError(
+            "--server-id is required (the bare-metal box to bake onto; see `mngr imbue_cloud admin server list`)"
+        )
+    try:
+        pool_private_key = read_pool_private_key_from_vault(env_name)
+    except VaultReadError as exc:
+        raise click.ClickException(
+            f"Could not read the pool SSH private key from Vault for env '{env_name}': {exc}"
+        ) from exc
+    args = build_create_admin_args(
+        env_name=env_name,
+        count=count,
+        region=region,
+        from_tag=from_tag,
+        repo_url=repo_url,
+        workspace_dir=workspace_dir,
+        repo_branch_or_tag_override=repo_branch_or_tag_override,
+        attributes_json=attributes_json,
+        database_url=database_url,
+        mngr_source=mngr_source,
+        server_id=server_id,
+        is_dry_run=is_dry_run,
+        is_deferred_install_wait_skipped=is_deferred_install_wait_skipped,
+        max_concurrency=max_concurrency,
+    )
+    _raise_on_failure("create", _run_admin_command(args, extra_env={_POOL_PRIVATE_KEY_ENV_VAR: pool_private_key}))
+
+
 @click.group()
 def pool() -> None:
     """Pool-host orchestration for the currently activated minds env."""
@@ -375,33 +432,44 @@ def pool() -> None:
     required=True,
     type=str,
     help=(
-        "OVH datacenter code for the new pool VPSes (e.g. ``US-EAST-VA``, ``US-WEST-OR``). "
-        "Validated by OVH at order time."
+        "Lease-region label stamped on every new row (e.g. ``US-EAST-VA``, ``US-WEST-OR``) -- what "
+        "the connector region-matches at lease time. It is the lease-region label only (NOT the "
+        "box's raw datacenter code)."
     ),
+)
+@click.option(
+    "--from-tag",
+    "from_tag",
+    default=None,
+    help="[production] Clone --repo-url at this tag and bake from it. Mutually exclusive with --workspace-dir.",
+)
+@click.option(
+    "--repo-url",
+    "repo_url",
+    default=None,
+    help="[--from-tag only] Canonical repo to clone the tag from (default: the FCT remote).",
+)
+@click.option(
+    "--workspace-dir",
+    required=False,
+    default=None,
+    type=click.Path(exists=True),
+    help="[dev] Bake from this template repo working tree. Mutually exclusive with --from-tag.",
+)
+@click.option(
+    "--repo-branch-or-tag",
+    "repo_branch_or_tag_override",
+    default=None,
+    help="[--workspace-dir only] Override the stamped branch label (default: the folder's current branch).",
 )
 @click.option(
     "--attributes",
     "attributes_json",
-    required=True,
-    help='Lease-attributes JSON for the new pool rows (e.g. \'{"version":"v1.2.3","cpus":2,"memory_gb":4}\')',
-)
-@click.option(
-    "--workspace-dir",
-    required=True,
-    type=click.Path(exists=True),
-    help="Path to the template repo checkout",
-)
-@click.option(
-    "--management-public-key-file",
     required=False,
     default=None,
-    type=click.Path(exists=True),
     help=(
-        "Override path for the management SSH public key injected on the pool VPS+container. "
-        "Default (omitted): derive from the activated tier's Vault entry "
-        "`<vault_path_prefix>/pool-ssh.POOL_SSH_PRIVATE_KEY` -- the same private key the connector "
-        "loads from its `pool-ssh-<tier>` Modal Secret, which guarantees the lease-time SSH-key "
-        "injection authenticates. Pass this only when bypassing the tier's canonical keypair."
+        'Optional non-identity lease-attributes JSON (e.g. \'{"cpus":2,"memory_gb":4}\'). repo_url and '
+        "repo_branch_or_tag are derived from the bake source, not passed here."
     ),
 )
 @click.option(
@@ -409,11 +477,7 @@ def pool() -> None:
     required=False,
     default=None,
     type=str,
-    help=(
-        "Neon PostgreSQL direct connection string for the pool DB. Optional: "
-        "defaults to the activated minds env's NEON_HOST_POOL_DSN (written by "
-        "`minds env deploy`). Pass explicitly only when overriding."
-    ),
+    help=_DATABASE_URL_HELP,
 )
 @click.option(
     "--mngr-source",
@@ -421,51 +485,84 @@ def pool() -> None:
     default=None,
     help="Path to the mngr monorepo root. If provided, rsyncs into the template's vendor/mngr/ before creating hosts.",
 )
+@click.option(
+    "--server-id",
+    "server_id",
+    default=None,
+    help=(
+        "[required] The bare_metal_servers row id to bake the slices onto (from "
+        "`mngr imbue_cloud admin server list`). Slice baking targets an explicitly-chosen, ready box."
+    ),
+)
+@click.option(
+    "--dry-run",
+    "is_dry_run",
+    is_flag=True,
+    default=False,
+    help="Report the chosen server + per-slice sizing; do not bake.",
+)
+@click.option(
+    "--max-concurrency",
+    "max_concurrency",
+    type=int,
+    default=None,
+    help=(
+        "Max slices baked at once; the rest queue. Bounds box contention so each "
+        "`mngr create` stays under its timeout. Omitted: the admin CLI's default applies."
+    ),
+)
+@click.option(
+    "--skip-deferred-install-wait",
+    "is_deferred_install_wait_skipped",
+    is_flag=True,
+    default=False,
+    help=(
+        "[dev only] Don't wait for the FCT deferred-install (heavy apt + Playwright/Chromium) before "
+        "stopping the baked services agent. Faster, but the baked container's deferred-install may be "
+        "incomplete. Never use for production hosts."
+    ),
+)
 def pool_create(
     count: int,
     region: str,
-    attributes_json: str,
-    workspace_dir: str,
-    management_public_key_file: str | None,
+    from_tag: str | None,
+    repo_url: str | None,
+    workspace_dir: str | None,
+    repo_branch_or_tag_override: str | None,
+    attributes_json: str | None,
     database_url: str | None,
     mngr_source: str | None,
+    server_id: str | None,
+    is_dry_run: bool,
+    max_concurrency: int | None,
+    is_deferred_install_wait_skipped: bool,
 ) -> None:
-    """Create pool hosts for the activated minds env (OVH-backed via admin).
+    """Create bare-metal slice pool hosts for the activated minds env.
 
-    Reads the activated tier's OVH AK/AS/CK from Vault before invoking the
-    admin subcommand and injects them into the subprocess env, so the
-    operator never has to manually export them. Likewise derives the
-    management public key from the tier's ``<vault_path_prefix>/pool-ssh``
-    entry (unless ``--management-public-key-file`` overrides) -- the
-    activated env dictates which tier, which keeps "I'm on dev, I bake
-    against the dev OVH account using the dev management keypair" the
-    unambiguous default and makes the keypair-mismatch class of bake
-    failures unreachable for the standard path.
+    Resolves the activated tier's POOL_SSH_PRIVATE_KEY from Vault (used to SSH the
+    bare-metal box and carve the lima VM) so the operator never exports it by hand.
+    The activated env dictates the tier, keeping "I'm on dev, I bake against the dev
+    account using the dev keypair" the unambiguous default and making the
+    keypair-mismatch class of bake failures unreachable for the standard path.
     """
     env_name = require_activated_env_name()
-    try:
-        ovh_env = resolve_ovh_env_from_vault(env_name)
-    except VaultReadError as exc:
-        raise click.ClickException(f"Could not read OVH credentials from Vault for env '{env_name}': {exc}") from exc
-    try:
-        with resolved_management_public_key_path(
-            env_name, explicit_path=management_public_key_file
-        ) as effective_mgmt_pub_path:
-            args = build_create_admin_args(
-                env_name=env_name,
-                count=count,
-                region=region,
-                attributes_json=attributes_json,
-                workspace_dir=workspace_dir,
-                management_public_key_file=effective_mgmt_pub_path,
-                database_url=database_url,
-                mngr_source=mngr_source,
-            )
-            _raise_on_failure("create", _run_admin_command(args, extra_env=ovh_env))
-    except VaultReadError as exc:
-        raise click.ClickException(
-            f"Could not read management SSH key from Vault for env '{env_name}': {exc}"
-        ) from exc
+    effective_database_url = resolve_host_pool_dsn(env_name, database_url)
+    _run_slice_pool_create(
+        env_name=env_name,
+        count=count,
+        region=region,
+        from_tag=from_tag,
+        repo_url=repo_url,
+        workspace_dir=workspace_dir,
+        repo_branch_or_tag_override=repo_branch_or_tag_override,
+        attributes_json=attributes_json,
+        database_url=effective_database_url,
+        mngr_source=mngr_source,
+        server_id=server_id,
+        is_dry_run=is_dry_run,
+        is_deferred_install_wait_skipped=is_deferred_install_wait_skipped,
+        max_concurrency=max_concurrency,
+    )
 
 
 @pool.command(name="list")
@@ -474,23 +571,42 @@ def pool_create(
     required=False,
     default=None,
     type=str,
-    help=(
-        "Neon PostgreSQL direct connection string for the pool DB. Optional: "
-        "defaults to the activated minds env's NEON_HOST_POOL_DSN (written by "
-        "`minds env deploy`). Pass explicitly only when overriding."
-    ),
+    help=_DATABASE_URL_HELP,
 )
 def pool_list(database_url: str | None) -> None:
     """List pool_hosts rows (forwards to ``mngr imbue_cloud admin pool list``)."""
-    # No env-name filter: the admin command does not know about minds_env
-    # today and we don't want to start parsing its JSON output here just to
-    # filter. Operators who only want rows for the active env can pipe the
-    # JSON through ``jq``. ``require_activated_env_name`` is still called
-    # for consistency -- a pool list run outside an activated env is almost
-    # always an operator mistake.
-    require_activated_env_name()
-    args = build_list_admin_args(database_url=database_url)
+    # No env-name filter on the rows: the admin command does not know about
+    # minds_env today and we don't want to start parsing its JSON output here
+    # just to filter. Operators who only want rows for the active env can pipe
+    # the JSON through ``jq``. The activated env name is still needed to resolve
+    # the staging/production host_pool DSN from Vault.
+    env_name = require_activated_env_name()
+    args = build_list_admin_args(database_url=resolve_host_pool_dsn(env_name, database_url))
     _raise_on_failure("list", _run_admin_command(args))
+
+
+@pool.command(name="backfill-host-keys")
+@click.option(
+    "--database-url",
+    required=False,
+    default=None,
+    type=str,
+    help=_DATABASE_URL_HELP,
+)
+def pool_backfill_host_keys(database_url: str | None) -> None:
+    """One-time: keyscan + record SSH host public keys for pre-existing pool rows and boxes.
+
+    Forwards to ``mngr imbue_cloud admin pool backfill-host-keys`` -- the single
+    sanctioned trust-on-first-use, used once after deploying the host-key-pinning
+    connector so rows baked before the host-key columns existed become leasable
+    again. Resolves the staging / production host_pool DSN from the tier's
+    ``<vault_prefix>/neon/DATABASE_URL`` Vault entry exactly like ``pool list`` /
+    ``pool destroy``, so the operator never hand-passes ``--database-url``.
+    Idempotent: rows that already have keys are skipped.
+    """
+    env_name = require_activated_env_name()
+    args = build_backfill_host_keys_admin_args(database_url=resolve_host_pool_dsn(env_name, database_url))
+    _raise_on_failure("backfill-host-keys", _run_admin_command(args))
 
 
 @pool.command(name="destroy")
@@ -500,15 +616,38 @@ def pool_list(database_url: str | None) -> None:
     required=False,
     default=None,
     type=str,
-    help=(
-        "Neon PostgreSQL direct connection string for the pool DB. Optional: "
-        "defaults to the activated minds env's NEON_HOST_POOL_DSN (written by "
-        "`minds env deploy`). Pass explicitly only when overriding."
-    ),
+    help=_DATABASE_URL_HELP,
 )
 @click.option("--force", is_flag=True, help="Drop the row even if status != 'released'")
-def pool_destroy(pool_host_id: str, database_url: str | None, force: bool) -> None:
-    """Remove a pool_hosts row by id (forwards to ``mngr imbue_cloud admin pool destroy``)."""
-    require_activated_env_name()
-    args = build_destroy_admin_args(pool_host_id=pool_host_id, database_url=database_url, force=force)
-    _raise_on_failure("destroy", _run_admin_command(args))
+@click.option(
+    "--skip-vps-cancel",
+    is_flag=True,
+    default=False,
+    help=("Only drop the DB row; do NOT destroy the underlying slice lima VM. Use only when the VM is already gone."),
+)
+def pool_destroy(pool_host_id: str, database_url: str | None, force: bool, skip_vps_cancel: bool) -> None:
+    """Full teardown of a pool host: destroy its slice lima VM, then drop the row.
+
+    Forwards to ``mngr imbue_cloud admin pool destroy``, which by default destroys the
+    row's slice lima VM (freeing the box slot) before deleting the row. The
+    POOL_SSH_PRIVATE_KEY teardown secret is read from the activated tier's Vault entry
+    and injected into the subprocess, mirroring ``pool create``. Pass
+    ``--skip-vps-cancel`` to only drop the row when the VM is already gone.
+    """
+    env_name = require_activated_env_name()
+    extra_env: dict[str, str] | None = None
+    if not skip_vps_cancel:
+        try:
+            pool_private_key = read_pool_private_key_from_vault(env_name)
+        except VaultReadError as exc:
+            raise click.ClickException(
+                f"Could not read the pool SSH private key from Vault for env '{env_name}': {exc}"
+            ) from exc
+        extra_env = {_POOL_PRIVATE_KEY_ENV_VAR: pool_private_key}
+    args = build_destroy_admin_args(
+        pool_host_id=pool_host_id,
+        database_url=resolve_host_pool_dsn(env_name, database_url),
+        force=force,
+        skip_vps_cancel=skip_vps_cancel,
+    )
+    _raise_on_failure("destroy", _run_admin_command(args, extra_env=extra_env))

@@ -26,6 +26,8 @@ import tomllib
 from pathlib import Path
 from typing import Final
 
+from pydantic import ValidationError
+
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.config.data_types import DeployEnvConfig
 from imbue.minds.errors import MindError
@@ -74,11 +76,11 @@ def load_client_config(path: Path) -> ClientEnvConfig:
         raise EnvConfigError(f"Cannot read client config {path}: {exc}") from exc
     try:
         raw = tomllib.loads(text)
-    except ValueError as exc:
+    except tomllib.TOMLDecodeError as exc:
         raise EnvConfigError(f"Failed to parse client config {path}: {exc}") from exc
     try:
         return ClientEnvConfig.model_validate(raw)
-    except ValueError as exc:
+    except ValidationError as exc:
         raise EnvConfigError(f"Invalid client config at {path}: {exc}") from exc
 
 
@@ -93,9 +95,9 @@ def load_deploy_config(tier: str) -> DeployEnvConfig:
         raise EnvConfigError(f"Cannot read deploy config {path}: {exc}") from exc
     try:
         raw = tomllib.loads(text)
-    except ValueError as exc:
+    except tomllib.TOMLDecodeError as exc:
         raise EnvConfigError(f"Failed to parse deploy config {path}: {exc}") from exc
     try:
         return DeployEnvConfig.model_validate(raw)
-    except ValueError as exc:
+    except ValidationError as exc:
         raise EnvConfigError(f"Invalid deploy config at {path}: {exc}") from exc

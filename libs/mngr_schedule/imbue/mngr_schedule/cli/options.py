@@ -9,6 +9,7 @@ class ScheduleUpdateCliOptions(CommonCliOptions):
     command: str | None
     args: str | None
     schedule_cron: str | None
+    timezone: str | None
     provider: str | None
     enabled: bool | None
     auto_merge: bool

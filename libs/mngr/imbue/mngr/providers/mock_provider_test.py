@@ -11,12 +11,14 @@ from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import HostResources
+from imbue.mngr.interfaces.data_types import ProviderResourceInfo
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
@@ -35,13 +37,19 @@ class MockProviderInstance(BaseProviderInstance):
     mock_supports_volumes: bool = Field(default=False)
     mock_snapshots: list[SnapshotInfo] = Field(default_factory=list)
     mock_volumes: list[VolumeInfo] = Field(default_factory=list)
+    mock_provider_resources: list[ProviderResourceInfo] = Field(default_factory=list)
     mock_tags: dict[str, str] = Field(default_factory=dict)
     mock_agent_data: list[dict[str, Any]] = Field(default_factory=list)
     mock_hosts: list[HostInterface] = Field(default_factory=list)
     mock_offline_hosts: dict[str, HostInterface] = Field(default_factory=dict)
+    mock_discovered_hosts: list[DiscoveredHost] = Field(default_factory=list)
+    stopped_hosts: list[HostId] = Field(default_factory=list)
     deleted_hosts: list[HostId] = Field(default_factory=list)
     deleted_snapshots: list[tuple[HostId, SnapshotId]] = Field(default_factory=list)
     deleted_volumes: list[VolumeId] = Field(default_factory=list)
+    connection_errors_cleared: list[HostId] = Field(default_factory=list)
+    gc_provider_resources_dry_runs: list[bool] = Field(default_factory=list)
+    mock_connection_error_fallback_state: HostState | None = Field(default=None)
 
     @property
     def supports_snapshots(self) -> bool:
@@ -62,6 +70,10 @@ class MockProviderInstance(BaseProviderInstance):
     def list_snapshots(self, host: HostInterface | HostId) -> list[SnapshotInfo]:
         return self.mock_snapshots
 
+    def gc_provider_resources(self, dry_run: bool) -> list[ProviderResourceInfo]:
+        self.gc_provider_resources_dry_runs.append(dry_run)
+        return self.mock_provider_resources
+
     def get_host_tags(self, host: HostInterface | HostId) -> dict[str, str]:
         return self.mock_tags
 
@@ -77,13 +89,16 @@ class MockProviderInstance(BaseProviderInstance):
     def stop_host(
         self, host: HostInterface | HostId, create_snapshot: bool = True, timeout_seconds: float = 60.0
     ) -> None:
-        raise NotImplementedError()
+        host_id = host.id if isinstance(host, HostInterface) else host
+        self.stopped_hosts.append(host_id)
 
     def discover_hosts(
         self,
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
     ) -> list[DiscoveredHost]:
+        if self.mock_discovered_hosts:
+            return list(self.mock_discovered_hosts)
         return [
             DiscoveredHost(
                 host_id=h.id,
@@ -101,7 +116,10 @@ class MockProviderInstance(BaseProviderInstance):
         self.deleted_hosts.append(host.id)
 
     def on_connection_error(self, host_id: HostId) -> None:
-        pass
+        self.connection_errors_cleared.append(host_id)
+
+    def get_connection_error_fallback_state(self, host_id: HostId) -> HostState | None:
+        return self.mock_connection_error_fallback_state
 
     def to_offline_host(self, host_id: HostId) -> OfflineHost:
         offline = self.mock_offline_hosts.get(str(host_id))

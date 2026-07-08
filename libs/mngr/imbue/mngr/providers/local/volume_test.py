@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from imbue.mngr.errors import MngrError
-from imbue.mngr.interfaces.data_types import VolumeFileType
+from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.providers.local.volume import LocalVolume
 
 
@@ -35,8 +35,8 @@ def test_listdir_returns_files_and_directories(volume: LocalVolume) -> None:
     paths = [e.path for e in entries]
     assert "a.txt" in paths
     file_types = {e.path: e.file_type for e in entries}
-    assert file_types["a.txt"] == VolumeFileType.FILE
-    assert file_types["sub"] == VolumeFileType.DIRECTORY
+    assert file_types["a.txt"] == FileType.FILE
+    assert file_types["sub"] == FileType.DIRECTORY
 
 
 def test_listdir_empty_dir(volume: LocalVolume) -> None:
@@ -93,7 +93,7 @@ def test_write_multiple_files(volume: LocalVolume) -> None:
 
 def test_listdir_includes_size(volume: LocalVolume) -> None:
     volume.write_files({"sized.txt": b"hello"})
-    entries = [e for e in volume.listdir("") if e.file_type == VolumeFileType.FILE]
+    entries = [e for e in volume.listdir("") if e.file_type == FileType.FILE]
     assert len(entries) == 1
     assert entries[0].size == 5
 
@@ -115,12 +115,12 @@ def test_listdir_works_when_root_path_is_symlink(symlink_volume: LocalVolume) ->
     entries = symlink_volume.listdir("")
     assert len(entries) == 1
     assert entries[0].path == "sub"
-    assert entries[0].file_type == VolumeFileType.DIRECTORY
+    assert entries[0].file_type == FileType.DIRECTORY
 
     sub_entries = symlink_volume.listdir("sub")
     assert len(sub_entries) == 1
     assert sub_entries[0].path == "sub/file.txt"
-    assert sub_entries[0].file_type == VolumeFileType.FILE
+    assert sub_entries[0].file_type == FileType.FILE
 
 
 def test_scoped_listdir_works_when_root_path_is_symlink(symlink_volume: LocalVolume) -> None:
@@ -131,7 +131,7 @@ def test_scoped_listdir_works_when_root_path_is_symlink(symlink_volume: LocalVol
     entries = scoped.listdir("events")
     assert len(entries) == 1
     assert entries[0].path == "events/claude"
-    assert entries[0].file_type == VolumeFileType.DIRECTORY
+    assert entries[0].file_type == FileType.DIRECTORY
 
 
 def test_path_exists_returns_true_for_file(volume: LocalVolume) -> None:

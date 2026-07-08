@@ -1,0 +1,28 @@
+{#def #}
+{#
+  Welcome/splash page for first-time users. Offers Sign Up / Log In and a
+  "continue without an account" link.
+
+  That link goes to "/" rather than straight to "/create": the landing handler
+  shows the "Help improve Minds" error-reporting consent screen first (when still
+  unanswered), so reporting is offered to account-less users too, then lands on
+  the create form. Reporting is therefore not gated behind having an account.
+#}
+<Base title="Welcome to Minds">
+  <div class="min-h-screen flex items-center justify-center">
+    <div class="max-w-sm w-full px-6 text-center">
+      <h1 class="type-heading-lg text-primary mb-2">Welcome to Minds</h1>
+      <p class="text-secondary type-body mb-8">Run persistent, autonomous AI agents</p>
+
+      <div class="flex flex-col gap-3 mb-6">
+        <ButtonLink href="/auth/signup" variant="primary" block>Sign Up</ButtonLink>
+        <ButtonLink href="/auth/login" variant="secondary" block>Log In</ButtonLink>
+      </div>
+
+      <ButtonLink href="/" variant="ghost" id="skip-account-btn"
+              extra="!p-0 !bg-transparent !type-helper !text-tertiary hover:!bg-transparent hover:!text-primary hover:underline">
+        Continue without an account
+      </ButtonLink>
+    </div>
+  </div>
+</Base>

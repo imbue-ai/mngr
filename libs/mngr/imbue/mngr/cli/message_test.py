@@ -27,7 +27,6 @@ _DEFAULT_OPTS = MessageCliOptions(
     message_file=None,
     on_error="continue",
     start=False,
-    provider=(),
     output_format="human",
     quiet=False,
     verbose=0,
@@ -47,7 +46,6 @@ def test_message_cli_options_has_expected_fields() -> None:
         message_file=None,
         on_error="continue",
         start=False,
-        provider=(),
         output_format="human",
         quiet=False,
         verbose=0,
@@ -143,6 +141,22 @@ def test_message_nonexistent_agent(
     # The message command reports "no agents found" rather than failing
     assert result.exit_code == 0
     assert "No agents found" in result.output
+
+
+def test_message_no_all_flag(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """`--all` and `-a` are no longer accepted; users pipe ids from `mngr list` instead."""
+    for argv in (["--all", "-m", "hello"], ["-a", "-m", "hello"]):
+        result = cli_runner.invoke(
+            message,
+            argv,
+            obj=plugin_manager,
+            catch_exceptions=True,
+        )
+        assert result.exit_code != 0
+        assert "No such option" in result.output
 
 
 # =============================================================================

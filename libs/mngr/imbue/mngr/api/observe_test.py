@@ -1,12 +1,19 @@
 import json
+from collections.abc import Sequence
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 
 import pytest
 
 from imbue.mngr.api.discovery_events import DISCOVERY_EVENT_SOURCE
+from imbue.mngr.api.discovery_events import DiscoveredProvider
+from imbue.mngr.api.discovery_events import DiscoveryError
+from imbue.mngr.api.discovery_events import DiscoveryErrorEvent
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
 from imbue.mngr.api.discovery_events import _make_envelope_fields
-from imbue.mngr.api.discovery_events import make_full_discovery_snapshot_event
+from imbue.mngr.api.discovery_events import make_discovered_provider
+from imbue.mngr.api.discovery_events import make_provider_discovery_snapshot_event
 from imbue.mngr.api.observe import AGENT_STATES_EVENT_SOURCE
 from imbue.mngr.api.observe import AgentObserver
 from imbue.mngr.api.observe import AgentStateChangeEvent
@@ -16,6 +23,7 @@ from imbue.mngr.api.observe import OBSERVE_EVENT_SOURCE
 from imbue.mngr.api.observe import ObserveEventType
 from imbue.mngr.api.observe import ObserveLockError
 from imbue.mngr.api.observe import _TrackedState
+from imbue.mngr.api.observe import _make_unknown_agent_details
 from imbue.mngr.api.observe import acquire_observe_lock
 from imbue.mngr.api.observe import append_agent_state_change_event
 from imbue.mngr.api.observe import append_observe_event
@@ -32,8 +40,14 @@ from imbue.mngr.api.observe import make_full_agent_state_event
 from imbue.mngr.api.observe import release_observe_lock
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.primitives import AgentLifecycleState
+from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import DiscoveredHost
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
+from imbue.mngr.primitives import ProviderBackendName
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr.utils.testing import make_test_agent_details
 from imbue.mngr.utils.testing import make_test_discovered_agent
@@ -385,38 +399,104 @@ def _make_observer(temp_mngr_ctx: MngrContext, noop_binary: str) -> AgentObserve
     )
 
 
-def test_agent_observer_handle_full_snapshot_tracks_hosts(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
-    """Verify that _handle_full_snapshot correctly populates known hosts from host records."""
+def _make_provider_snapshot_line(
+    provider_name: ProviderInstanceName,
+    agents: Sequence[DiscoveredAgent] = (),
+    hosts: Sequence[DiscoveredHost] = (),
+    provider: DiscoveredProvider | None = None,
+    error: DiscoveryError | None = None,
+    unknown_host_ids: Sequence[HostId] = (),
+) -> str:
+    """Serialize a per-provider discovery snapshot event to a JSONL line for the discovery stream."""
+    now = datetime.now(timezone.utc)
+    event = make_provider_discovery_snapshot_event(
+        provider_name,
+        agents,
+        hosts,
+        discovery_started_at=now,
+        discovery_finished_at=now,
+        provider=provider,
+        error=error,
+        unknown_host_ids=unknown_host_ids,
+    )
+    return json.dumps(event.model_dump(mode="json"))
+
+
+def _feed_provider_snapshot(
+    observer: AgentObserver,
+    provider_name: ProviderInstanceName,
+    agents: Sequence[DiscoveredAgent] = (),
+    hosts: Sequence[DiscoveredHost] = (),
+    provider: DiscoveredProvider | None = None,
+    error: DiscoveryError | None = None,
+    unknown_host_ids: Sequence[HostId] = (),
+) -> None:
+    """Feed a per-provider discovery snapshot through the observer's discovery stream handler."""
+    line = _make_provider_snapshot_line(
+        provider_name,
+        agents=agents,
+        hosts=hosts,
+        provider=provider,
+        error=error,
+        unknown_host_ids=unknown_host_ids,
+    )
+    observer._on_discovery_stream_output(line, is_stdout=True)
+
+
+def test_agent_observer_provider_snapshot_tracks_hosts(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
+    """A per-provider snapshot populates known hosts from its host records and starts activity streams."""
     observer = _make_observer(temp_mngr_ctx, noop_binary)
     host1 = make_test_discovered_host()
     host2 = make_test_discovered_host()
     agent1 = make_test_discovered_agent()
 
-    snapshot = make_full_discovery_snapshot_event([agent1], [host1, host2])
-
     with observer._concurrency_group:
-        observer._handle_full_snapshot(snapshot)
+        _feed_provider_snapshot(observer, ProviderInstanceName("local"), agents=[agent1], hosts=[host1, host2])
         assert len(observer._known_hosts) == 2
         assert str(host1.host_id) in observer._known_hosts
         assert str(host2.host_id) in observer._known_hosts
         assert observer._known_hosts[str(host1.host_id)].host_name == host1.host_name
+        # Newly-known hosts get activity streams started.
+        assert str(host1.host_id) in observer._events_processes
+        assert str(host2.host_id) in observer._events_processes
 
 
-def test_agent_observer_handle_full_snapshot_removes_stale_hosts(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
-    """Verify that hosts from a prior snapshot are removed when not in a new snapshot."""
+def test_agent_observer_provider_snapshot_removes_stale_hosts(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
+    """A host present in a prior snapshot for the same provider is removed when absent from a new one."""
     observer = _make_observer(temp_mngr_ctx, noop_binary)
     host_a = make_test_discovered_host()
     host_b = make_test_discovered_host()
 
     with observer._concurrency_group:
-        snapshot1 = make_full_discovery_snapshot_event([], [host_a])
-        observer._handle_full_snapshot(snapshot1)
+        _feed_provider_snapshot(observer, ProviderInstanceName("local"), hosts=[host_a])
         assert str(host_a.host_id) in observer._known_hosts
 
-        snapshot2 = make_full_discovery_snapshot_event([], [host_b])
-        observer._handle_full_snapshot(snapshot2)
+        _feed_provider_snapshot(observer, ProviderInstanceName("local"), hosts=[host_b])
         assert str(host_a.host_id) not in observer._known_hosts
         assert str(host_b.host_id) in observer._known_hosts
+        # The dropped host's activity stream is stopped; the new host's is started.
+        assert str(host_a.host_id) not in observer._events_processes
+        assert str(host_b.host_id) in observer._events_processes
+
+
+def test_agent_observer_provider_snapshot_scopes_removal_per_provider(
+    temp_mngr_ctx: MngrContext, noop_binary: str
+) -> None:
+    """A snapshot for one provider does not remove hosts attributed to a different provider."""
+    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    local_host = make_test_discovered_host()
+    modal_host = make_test_discovered_host()
+
+    with observer._concurrency_group:
+        _feed_provider_snapshot(observer, ProviderInstanceName("local"), hosts=[local_host])
+        _feed_provider_snapshot(observer, ProviderInstanceName("modal"), hosts=[modal_host])
+        assert str(local_host.host_id) in observer._known_hosts
+        assert str(modal_host.host_id) in observer._known_hosts
+
+        # A fresh empty snapshot for "modal" only drops modal's host; local's is untouched.
+        _feed_provider_snapshot(observer, ProviderInstanceName("modal"), hosts=[])
+        assert str(local_host.host_id) in observer._known_hosts
+        assert str(modal_host.host_id) not in observer._known_hosts
 
 
 def test_agent_observer_on_activity_event_queues_host(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
@@ -706,44 +786,20 @@ def test_agent_observer_process_snapshot_agents_detects_host_state_change(
     assert data["new_state"] == "RUNNING"
 
 
-def test_agent_observer_handle_host_destroyed_removes_host(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
-    """Verify that _handle_host_destroyed removes the host from known_hosts."""
-    observer = _make_observer(temp_mngr_ctx, noop_binary)
-    host = make_test_discovered_host()
-
-    with observer._concurrency_group:
-        # Populate known_hosts via a full snapshot
-        snapshot = make_full_discovery_snapshot_event([], [host])
-        observer._handle_full_snapshot(snapshot)
-        assert str(host.host_id) in observer._known_hosts
-
-        # Destroy the host
-        timestamp, event_id = _make_envelope_fields()
-        destroyed_event = HostDestroyedEvent(
-            timestamp=timestamp,
-            event_id=event_id,
-            source=DISCOVERY_EVENT_SOURCE,
-            host_id=host.host_id,
-            agent_ids=(),
-        )
-        observer._handle_host_destroyed(destroyed_event)
-        assert str(host.host_id) not in observer._known_hosts
-
-
 def test_agent_observer_on_discovery_stream_output_handles_host_destroyed(
     temp_mngr_ctx: MngrContext, noop_binary: str
 ) -> None:
-    """Verify that _on_discovery_stream_output dispatches HostDestroyedEvent correctly."""
+    """A HostDestroyedEvent on the discovery stream removes the host and stops its activity stream."""
     observer = _make_observer(temp_mngr_ctx, noop_binary)
     host = make_test_discovered_host()
 
     with observer._concurrency_group:
-        # Populate known_hosts
-        snapshot = make_full_discovery_snapshot_event([], [host])
-        observer._handle_full_snapshot(snapshot)
+        # Populate known_hosts (and start the activity stream) via a per-provider snapshot.
+        _feed_provider_snapshot(observer, ProviderInstanceName("local"), hosts=[host])
         assert str(host.host_id) in observer._known_hosts
+        assert str(host.host_id) in observer._events_processes
 
-        # Feed a serialized HostDestroyedEvent through _on_discovery_stream_output
+        # Feed a serialized HostDestroyedEvent through _on_discovery_stream_output.
         timestamp, event_id = _make_envelope_fields()
         destroyed_event = HostDestroyedEvent(
             timestamp=timestamp,
@@ -755,3 +811,223 @@ def test_agent_observer_on_discovery_stream_output_handles_host_destroyed(
         line = json.dumps(destroyed_event.model_dump(mode="json"), separators=(",", ":"))
         observer._on_discovery_stream_output(line, is_stdout=True)
         assert str(host.host_id) not in observer._known_hosts
+        assert str(host.host_id) not in observer._events_processes
+
+
+# === UNKNOWN State Tests ===
+
+
+def _make_provider(name: str) -> DiscoveredProvider:
+    return make_discovered_provider(
+        ProviderInstanceName(name),
+        ProviderInstanceConfig(backend=ProviderBackendName("docker"), is_enabled=True),
+    )
+
+
+def test_make_unknown_agent_details_sets_state_unknown_and_preserves_identity() -> None:
+    """Synthetic UNKNOWN AgentDetails keeps name/type/id but flips state + host.state to UNKNOWN."""
+    original = make_test_agent_details(name="ghost-agent", state=AgentLifecycleState.RUNNING)
+    unknown = _make_unknown_agent_details(original)
+
+    assert unknown.id == original.id
+    assert unknown.name == original.name
+    assert unknown.type == original.type
+    assert unknown.work_dir == original.work_dir
+    assert unknown.host.id == original.host.id
+    assert unknown.host.name == original.host.name
+    assert unknown.host.provider_name == original.host.provider_name
+    # Both states flip to UNKNOWN
+    assert unknown.state == AgentLifecycleState.UNKNOWN
+    assert unknown.host.state == HostState.UNKNOWN
+
+
+def test_agent_observer_errored_provider_snapshot_records_errored_providers(
+    temp_mngr_ctx: MngrContext, noop_binary: str
+) -> None:
+    """A per-provider snapshot carrying an error populates _currently_errored_providers and wakes the loop."""
+    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    errored = ProviderInstanceName("modal")
+
+    with observer._concurrency_group:
+        # A healthy provider snapshot establishes "local" as a known provider.
+        _feed_provider_snapshot(observer, ProviderInstanceName("local"), provider=_make_provider("local"))
+        assert not observer._snapshot_trigger.is_set()
+
+        # An errored provider snapshot records the error and wakes the periodic loop.
+        _feed_provider_snapshot(
+            observer,
+            errored,
+            error=DiscoveryError(
+                type_name="ImbueCloudAuthError",
+                message="token missing",
+                provider_name=errored,
+            ),
+        )
+        assert observer._currently_errored_providers == {errored}
+        assert observer._known_provider_names == {ProviderInstanceName("local"), errored}
+        # Trigger should fire so the periodic loop wakes early.
+        assert observer._snapshot_trigger.is_set()
+
+
+def test_agent_observer_discovery_error_event_with_provider_name_adds_to_errored_set(
+    temp_mngr_ctx: MngrContext, noop_binary: str
+) -> None:
+    """A DiscoveryErrorEvent with provider_name adds it to the errored set and triggers a snapshot."""
+    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    timestamp, event_id = _make_envelope_fields()
+    event = DiscoveryErrorEvent(
+        timestamp=timestamp,
+        event_id=event_id,
+        source=DISCOVERY_EVENT_SOURCE,
+        error_type="ImbueCloudAuthError",
+        error_message="auth failed",
+        source_name="modal-prod",
+        provider_name="modal-prod",
+    )
+
+    with observer._concurrency_group:
+        line = json.dumps(event.model_dump(mode="json"), separators=(",", ":"))
+        observer._on_discovery_stream_output(line, is_stdout=True)
+        assert ProviderInstanceName("modal-prod") in observer._currently_errored_providers
+        assert observer._snapshot_trigger.is_set()
+
+
+def test_process_snapshot_agents_emits_unknown_when_provider_errored(
+    temp_mngr_ctx: MngrContext, noop_binary: str
+) -> None:
+    """A previously-observed agent on an errored provider becomes UNKNOWN, not dropped."""
+    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    provider = ProviderInstanceName("modal")
+    agent = make_test_agent_details(
+        name="ghost",
+        state=AgentLifecycleState.RUNNING,
+        provider_name=provider,
+    )
+
+    with observer._concurrency_group:
+        # First snapshot: agent observed
+        observer._process_snapshot_agents([agent])
+        # Mark provider as errored, then run snapshot with empty agent list
+        observer._currently_errored_providers = {provider}
+        observer._known_provider_names = {provider}
+        observer._process_snapshot_agents([])
+
+    # The full state event written for the second poll should contain a synthetic UNKNOWN
+    events_path = get_observe_events_path(observer.events_base_dir)
+    lines = events_path.read_text().strip().splitlines()
+    # There should be exactly two FULL state events (one per call)
+    assert len(lines) == 2
+    second_event = json.loads(lines[1])
+    assert second_event["type"] == "AGENTS_FULL_STATE"
+    assert len(second_event["agents"]) == 1
+    assert second_event["agents"][0]["state"] == "UNKNOWN"
+    assert second_event["agents"][0]["host"]["state"] == "UNKNOWN"
+    assert second_event["agents"][0]["id"] == str(agent.id)
+
+    # A state change event should also have been emitted: RUNNING -> UNKNOWN
+    states_path = get_agent_states_events_path(observer.events_base_dir)
+    state_lines = states_path.read_text().strip().splitlines()
+    transitions = [json.loads(line) for line in state_lines]
+    assert any(
+        t["old_state"] == "RUNNING" and t["new_state"] == "UNKNOWN" and t["agent_id"] == str(agent.id)
+        for t in transitions
+    )
+
+
+def test_process_snapshot_agents_drops_agent_when_provider_removed_from_config(
+    temp_mngr_ctx: MngrContext, noop_binary: str
+) -> None:
+    """If a previously-observed agent's provider is no longer in _known_provider_names, drop it."""
+    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    provider = ProviderInstanceName("modal")
+    agent = make_test_agent_details(
+        name="config-removed",
+        state=AgentLifecycleState.RUNNING,
+        provider_name=provider,
+    )
+
+    with observer._concurrency_group:
+        observer._process_snapshot_agents([agent])
+        assert str(agent.id) in observer._last_known_details_by_id
+        # Provider no longer in known set; not in errored set either
+        observer._known_provider_names = {ProviderInstanceName("local")}
+        observer._currently_errored_providers = set()
+        observer._process_snapshot_agents([])
+
+    assert str(agent.id) not in observer._last_known_details_by_id
+    assert str(agent.id) not in observer._last_tracked_state_by_id
+
+
+def test_process_snapshot_agents_drops_agent_when_provider_healthy_and_agent_absent(
+    temp_mngr_ctx: MngrContext, noop_binary: str
+) -> None:
+    """A previously-observed agent whose provider is healthy but who's missing from the listing is dropped (implicit destroy)."""
+    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    provider = ProviderInstanceName("local")
+    agent = make_test_agent_details(
+        name="implicit-destroyed",
+        state=AgentLifecycleState.RUNNING,
+        provider_name=provider,
+    )
+
+    with observer._concurrency_group:
+        observer._process_snapshot_agents([agent])
+        # Healthy provider, agent not in listing
+        observer._known_provider_names = {provider}
+        observer._currently_errored_providers = set()
+        observer._process_snapshot_agents([])
+
+    assert str(agent.id) not in observer._last_known_details_by_id
+
+
+def test_process_snapshot_agents_unknown_is_sticky_until_reappearance(
+    temp_mngr_ctx: MngrContext, noop_binary: str
+) -> None:
+    """An UNKNOWN agent leaves UNKNOWN only when it reappears in a snapshot."""
+    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    provider = ProviderInstanceName("modal")
+    running_agent = make_test_agent_details(
+        name="resurrecting",
+        state=AgentLifecycleState.RUNNING,
+        provider_name=provider,
+    )
+
+    with observer._concurrency_group:
+        # Observe agent
+        observer._process_snapshot_agents([running_agent])
+        # Provider errors -- agent goes UNKNOWN
+        observer._currently_errored_providers = {provider}
+        observer._known_provider_names = {provider}
+        observer._process_snapshot_agents([])
+        assert observer._last_known_details_by_id[str(running_agent.id)].state == AgentLifecycleState.UNKNOWN
+        # Provider stays errored; agent stays UNKNOWN (sticky)
+        observer._process_snapshot_agents([])
+        assert observer._last_known_details_by_id[str(running_agent.id)].state == AgentLifecycleState.UNKNOWN
+
+        # Provider recovers and agent reappears
+        observer._currently_errored_providers = set()
+        observer._process_snapshot_agents([running_agent])
+        assert observer._last_known_details_by_id[str(running_agent.id)].state == AgentLifecycleState.RUNNING
+
+
+def test_process_snapshot_agents_unknown_scoped_to_errored_provider(
+    temp_mngr_ctx: MngrContext, noop_binary: str
+) -> None:
+    """Only agents on a currently-errored provider go UNKNOWN; a healthy provider's absent agent is dropped."""
+    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    errored_provider = ProviderInstanceName("modal")
+    healthy_provider = ProviderInstanceName("local")
+    errored_agent = make_test_agent_details(name="errored", provider_name=errored_provider)
+    healthy_agent = make_test_agent_details(name="healthy", provider_name=healthy_provider)
+
+    with observer._concurrency_group:
+        observer._process_snapshot_agents([errored_agent, healthy_agent])
+        # Only "modal" is errored this poll; both providers remain configured.
+        observer._currently_errored_providers = {errored_provider}
+        observer._known_provider_names = {errored_provider, healthy_provider}
+        observer._process_snapshot_agents([])
+
+    # The errored provider's agent is retained as UNKNOWN.
+    assert observer._last_known_details_by_id[str(errored_agent.id)].state == AgentLifecycleState.UNKNOWN
+    # The healthy provider's absent agent is dropped (implicit destroy).
+    assert str(healthy_agent.id) not in observer._last_known_details_by_id

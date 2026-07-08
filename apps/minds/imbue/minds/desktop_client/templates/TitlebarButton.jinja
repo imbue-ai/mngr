@@ -1,0 +1,45 @@
+{#def variant="nav", tone="default", extra="" #}
+{#
+  Title-bar window-control button. Distinct from the general-purpose
+  Button primitive only in geometry (window-control sizing); its colors
+  are plain design tokens (always ``text-primary`` + ``hover:bg-fill-hover``
+  + ``active:bg-fill-active``). Keyboard focus shows an accent outline (no
+  offset, so no white gap appears over the colored / neutral titlebar).
+
+  Those tokens are re-based per-workspace by the ``.titlebar-surface`` scope
+  in app.css, which derives a black/white contrast from ``--titlebar-bg`` in
+  pure CSS -- so the same button reads correctly on any workspace color and on
+  the neutral chrome, with no per-element foreground variable.
+
+  Props:
+    variant
+      "nav"     -- left-side icon hits (sidebar / home / back / forward /
+                   requests). A square icon button -- ``p-1.5`` around the icon
+                   (not fixed w/h) with a slight rounded corner. Its flex
+                   wrappers use ``items-center`` so it never stretches to the
+                   titlebar height.
+      "control" -- right-side native window controls (min / max / close)
+                   on platforms where minds draws its own frame.
+                   ``w-9 h-[38px]``, square corners (matches the OS).
+    tone
+      "default" -- no extra class; the foreground + hover come from the
+                   shared ``_btn_base`` tokens above (re-based per-workspace
+                   by the ``.titlebar-surface`` scope in app.css).
+      "danger"  -- close-button-only red hover regardless of accent
+                   (``.titlebar-btn-danger``); use on the close control
+                   to mirror native Windows / Linux behavior.
+
+  Any HTML attribute on the tag that is not declared above (id=, title=,
+  aria-*, data-*) flows through via JinjaX's ``attrs`` passthrough.
+#}
+{%- set _variants = {
+  "nav": "p-1.5 rounded-md",
+  "control": "w-9 h-[38px] rounded-none",
+} -%}
+{%- set _tones = {
+  "default": "",
+  "danger": "titlebar-btn-danger",
+} -%}
+{%- set _btn_base = "inline-flex items-center justify-center cursor-pointer text-primary hover:bg-fill-hover active:bg-fill-active focus-visible:outline-2 focus-visible:outline-accent" -%}
+{%- set _cls = _btn_base ~ " " ~ _variants[variant] ~ " " ~ _tones[tone] ~ " " ~ extra -%}
+<button {{ attrs.render(type="button", classes=_cls) }}>{{ content }}</button>

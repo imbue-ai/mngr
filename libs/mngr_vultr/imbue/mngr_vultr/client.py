@@ -1,8 +1,6 @@
 import base64
-import time
+from collections.abc import Mapping
 from collections.abc import Sequence
-from datetime import datetime
-from datetime import timezone
 from typing import Any
 from typing import Final
 
@@ -11,14 +9,11 @@ from loguru import logger
 from pydantic import Field
 from pydantic import SecretStr
 
-from imbue.mngr_vps_docker.errors import VpsApiError
-from imbue.mngr_vps_docker.errors import VpsProvisioningError
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
-from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
-from imbue.mngr_vps_docker.primitives import VpsSnapshotId
-from imbue.mngr_vps_docker.vps_client import VpsClientInterface
-from imbue.mngr_vps_docker.vps_client import VpsSnapshotInfo
-from imbue.mngr_vps_docker.vps_client import VpsSshKeyInfo
+from imbue.mngr_vps.errors import VpsApiError
+from imbue.mngr_vps.errors import VpsProvisioningError
+from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.primitives import VpsInstanceStatus
+from imbue.mngr_vps.vps_client import VpsClientInterface
 
 _VULTR_API_BASE: Final[str] = "https://api.vultr.com/v2"
 
@@ -35,6 +30,10 @@ class VultrVpsClient(VpsClientInterface):
     """Vultr API v2 client using raw HTTP calls."""
 
     api_key: SecretStr = Field(frozen=True, description="Vultr API key")
+    os_id: int = Field(
+        frozen=True,
+        description="Vultr OS image ID used by create_instance (e.g., 2136 = Debian 12 x64)",
+    )
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -98,26 +97,21 @@ class VultrVpsClient(VpsClientInterface):
         label: str,
         region: str,
         plan: str,
-        os_id: int | str,
         user_data: str,
         ssh_key_ids: Sequence[str],
-        tags: Sequence[str],
+        tags: Mapping[str, str],
     ) -> VpsInstanceId:
-        # Vultr expects an integer os_id; reject anything else explicitly so the
-        # mistake surfaces at the boundary instead of as a confusing API error.
-        if not isinstance(os_id, int):
-            raise VpsProvisioningError(f"Vultr os_id must be an int, got {type(os_id).__name__}: {os_id!r}")
         # Vultr requires user_data to be base64-encoded
         user_data_b64 = base64.b64encode(user_data.encode()).decode()
 
         data: dict[str, Any] = {
             "region": region,
             "plan": plan,
-            "os_id": os_id,
+            "os_id": self.os_id,
             "label": label,
             "user_data": user_data_b64,
             "sshkey_id": list(ssh_key_ids),
-            "tags": list(tags),
+            "tags": [f"{k}={v}" for k, v in tags.items()],
             "backups": "disabled",
             "hostname": label,
         }
@@ -159,27 +153,6 @@ class VultrVpsClient(VpsClientInterface):
             raise VpsProvisioningError(f"Instance {instance_id} does not have an IP yet")
         return main_ip
 
-    def wait_for_instance_active(
-        self,
-        instance_id: VpsInstanceId,
-        timeout_seconds: float = 300.0,
-    ) -> str:
-        start = time.monotonic()
-        while time.monotonic() - start < timeout_seconds:
-            status = self.get_instance_status(instance_id)
-            if status == VpsInstanceStatus.ACTIVE:
-                try:
-                    ip = self.get_instance_ip(instance_id)
-                    elapsed = time.monotonic() - start
-                    if elapsed > 60.0:
-                        logger.warning("VPS provisioning took {:.1f}s (threshold: 60s)", elapsed)
-                    return ip
-                except VpsProvisioningError:
-                    pass
-            time.sleep(5.0)
-
-        raise VpsProvisioningError(f"Vultr instance {instance_id} did not become active within {timeout_seconds}s")
-
     def get_instance_info(self, instance_id: VpsInstanceId) -> dict[str, Any]:
         """Get full instance info from the API."""
         result = self._get(f"/instances/{instance_id}")
@@ -196,44 +169,6 @@ class VultrVpsClient(VpsClientInterface):
         return result["instances"]
 
     # =========================================================================
-    # Snapshot Operations
-    # =========================================================================
-
-    def create_snapshot(self, instance_id: VpsInstanceId, description: str) -> VpsSnapshotId:
-        result = self._post("/snapshots", {"instance_id": str(instance_id), "description": description})
-        if result is None or "snapshot" not in result:
-            raise VpsApiError(500, "Failed to create snapshot")
-        snapshot_id = result["snapshot"]["id"]
-        logger.info("Created Vultr snapshot {}", snapshot_id)
-        return VpsSnapshotId(snapshot_id)
-
-    def delete_snapshot(self, snapshot_id: VpsSnapshotId) -> None:
-        self._delete(f"/snapshots/{snapshot_id}")
-        logger.info("Deleted Vultr snapshot {}", snapshot_id)
-
-    def list_snapshots(self) -> list[VpsSnapshotInfo]:
-        result = self._get("/snapshots")
-        if result is None or "snapshots" not in result:
-            return []
-
-        snapshots: list[VpsSnapshotInfo] = []
-        for snap in result["snapshots"]:
-            created_str = snap.get("date_created", "")
-            try:
-                created_at = datetime.fromisoformat(created_str)
-            except ValueError:
-                created_at = datetime.now(timezone.utc)
-
-            snapshots.append(
-                VpsSnapshotInfo(
-                    id=VpsSnapshotId(snap["id"]),
-                    description=snap.get("description", ""),
-                    created_at=created_at,
-                )
-            )
-        return snapshots
-
-    # =========================================================================
     # SSH Key Operations
     # =========================================================================
 
@@ -248,9 +183,3 @@ class VultrVpsClient(VpsClientInterface):
     def delete_ssh_key(self, key_id: str) -> None:
         self._delete(f"/ssh-keys/{key_id}")
         logger.debug("Deleted SSH key {}", key_id)
-
-    def list_ssh_keys(self) -> list[VpsSshKeyInfo]:
-        result = self._get("/ssh-keys")
-        if result is None or "ssh_keys" not in result:
-            return []
-        return [VpsSshKeyInfo(id=k["id"], name=k["name"]) for k in result["ssh_keys"]]

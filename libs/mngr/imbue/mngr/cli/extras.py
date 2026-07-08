@@ -1,27 +1,33 @@
 """Install optional extras for mngr: plugins, shell completion, Claude Code plugin."""
 
+import json
 import os
 import platform
-import shutil
 import tomllib
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from typing import Final
 
 import click
 from loguru import logger
+from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.errors import ProcessError
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.cli.common_opts import add_common_options
-from imbue.mngr.cli.complete import generate_bash_script
-from imbue.mngr.cli.complete import generate_zsh_script
+from imbue.mngr.cli.completion_install import COMPLETION_SHIM_MARKER
+from imbue.mngr.cli.completion_install import generate_completion_shim
+from imbue.mngr.cli.completion_install import get_managed_completion_script_path
+from imbue.mngr.cli.completion_install import strip_legacy_completion_block
+from imbue.mngr.cli.completion_install import write_managed_completion_scripts
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import AbortError
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.cli.plugin_install_wizard import install_wizard_impl
+from imbue.mngr.cli.urwid_picker import run_multi_select_picker
 from imbue.mngr.cli.urwid_picker import run_single_select_picker
 from imbue.mngr.cli.urwid_utils import has_interactive_terminal
 from imbue.mngr.config.host_dir import read_default_host_dir
@@ -29,6 +35,9 @@ from imbue.mngr.config.loader import get_or_create_profile_dir
 from imbue.mngr.config.pre_readers import find_profile_dir_lightweight
 from imbue.mngr.config.pre_readers import get_user_config_path
 from imbue.mngr.plugin_catalog import PLUGIN_CATALOG
+from imbue.mngr.utils.deps import CLAUDE
+from imbue.mngr.utils.deps import SUBPROCESS_ERRORS
+from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr.utils.toml_config import load_config_file_tomlkit
 from imbue.mngr.utils.toml_config import save_config_file
 from imbue.mngr.utils.toml_config import set_nested_value
@@ -58,17 +67,21 @@ def _get_shell_rc(shell_type: str) -> Path:
 
 
 def _is_completion_configured(rc_path: Path) -> bool:
-    """Check if mngr shell completion is already configured."""
+    """Check if the (current, managed) mngr shell completion shim is installed.
+
+    Looks for the managed-shim marker rather than just ``_mngr_complete``: an rc
+    that still holds the old self-contained completion function (no marker) is
+    treated as *not* configured, so installing adds the up-to-date shim (which,
+    sourced last, supersedes the old function).
+    """
     if not rc_path.exists():
         return False
-    return "_mngr_complete" in rc_path.read_text()
+    return COMPLETION_SHIM_MARKER in rc_path.read_text()
 
 
 def _generate_completion_script(shell_type: str) -> str:
-    """Generate the completion script using the existing complete module."""
-    if shell_type == "zsh":
-        return generate_zsh_script()
-    return generate_bash_script()
+    """Generate the rc shim that sources the managed completion file."""
+    return generate_completion_shim(shell_type)
 
 
 # -- Shared picker helper --
@@ -99,6 +112,20 @@ def _completion_status() -> tuple[bool, str, Path]:
     return configured, shell_type, rc_path
 
 
+def _default_completion_confirm(rc_path: Path, will_replace: bool) -> bool:
+    """Prompt to install/replace shell completion, surfacing whether an old block was detected."""
+    if will_replace:
+        question = (
+            f"Found an existing mngr completion in {rc_path} from an older version. "
+            "Replace it with the auto-updating managed shim?"
+        )
+        install_label = "Replace shell completion"
+    else:
+        question = f"Enable shell completion? This sets up an auto-updating mngr completion in {rc_path}."
+        install_label = "Enable shell completion"
+    return _confirm_install(question, install_label)
+
+
 def _install_completion(
     auto: bool,
     *,
@@ -106,52 +133,183 @@ def _install_completion(
     # in-memory fakes without monkeypatching module-level callables.
     status_fn: Callable[[], tuple[bool, str, Path]] = _completion_status,
     is_interactive_fn: Callable[[], bool] = has_interactive_terminal,
-    confirm_fn: Callable[[Path], bool] = lambda rc_path: _confirm_install(
-        f"Enable shell completion? This will add a line to {rc_path}.",
-        "Enable shell completion",
-    ),
+    confirm_fn: Callable[[Path, bool], bool] = _default_completion_confirm,
 ) -> bool:
-    """Install shell completion. Returns True if installed (or already configured)."""
+    """Install shell completion. Returns True if installed (or already configured).
+
+    The rc gets a small shim that sources a managed completion file mngr keeps up
+    to date; the managed files are (re)written here so completion-logic changes
+    reach the user without further rc edits. An old self-contained completion
+    block left by a previous version is detected and replaced (the confirm prompt
+    says so).
+    """
     configured, shell_type, rc_path = status_fn()
 
+    # Always refresh the managed files so they reflect the current logic, even
+    # when the shim is already installed.
+    write_managed_completion_scripts()
+
+    rc_text = rc_path.read_text() if rc_path.exists() else ""
+    cleaned_text, removed_legacy = strip_legacy_completion_block(rc_text)
+
     if configured:
-        write_human_line("Shell completion already configured in {}", rc_path)
+        # The managed shim is already installed; just tidy up an old self-contained
+        # block if one is left over (and byte-matches a form we generated).
+        if removed_legacy:
+            atomic_write(rc_path, cleaned_text)
+            write_human_line("Removed the old completion block from {} (managed shim already present)", rc_path)
+        else:
+            write_human_line("Shell completion already configured in {} (refreshed completion files)", rc_path)
         return True
+
+    if removed_legacy:
+        write_human_line(
+            "Found an existing mngr completion in {} from an older version; it will be replaced.", rc_path
+        )
 
     if not auto:
         if not is_interactive_fn():
             write_human_line("No interactive terminal available. Skipping shell completion.")
             return False
-        if not confirm_fn(rc_path):
+        if not confirm_fn(rc_path, removed_legacy):
             write_human_line("Skipping shell completion.")
             return False
 
-    script = _generate_completion_script(shell_type)
+    shim = _generate_completion_script(shell_type)
+    if cleaned_text and not cleaned_text.endswith("\n"):
+        cleaned_text += "\n"
+    atomic_write(rc_path, f"{cleaned_text}\n{shim}\n")
 
-    with rc_path.open("a") as f:
-        f.write(f"\n{script}\n")
-
-    write_human_line("Shell completion enabled in {}", rc_path)
+    if removed_legacy:
+        write_human_line("Replaced the old completion block with the managed shim in {}", rc_path)
+    else:
+        write_human_line("Shell completion enabled in {}", rc_path)
+    # A child process can't load completion into the parent shell, so tell the user
+    # how to activate it. The source command is on its own line for easy copying.
+    write_human_line("To use it, start a new shell, or run:")
+    write_human_line("source {}", get_managed_completion_script_path(shell_type))
     return True
 
 
 # -- Claude Code plugin extra --
 
 
-def _claude_plugin_status() -> tuple[bool, bool]:
-    """Return (claude_available, plugin_installed)."""
-    claude_available = shutil.which("claude") is not None
-    if not claude_available:
-        return False, False
+class ClaudeCodePlugin(FrozenModel):
+    """An installable Claude Code plugin offered by `mngr extras claude-plugin`."""
 
-    # Check if the plugin is installed
+    name: str = Field(description="Plugin name, e.g. 'imbue-code-guardian'")
+    description: str = Field(description="One-line description shown next to the name in the picker")
+    marketplace_repo: str = Field(
+        description="GitHub repo hosting the plugin marketplace, e.g. 'imbue-ai/code-guardian'"
+    )
+    install_ref: str = Field(
+        description=(
+            "Plugin id passed to `claude plugin install` and matched against the `id` field of"
+            " `claude plugin list --json`, e.g. 'imbue-code-guardian@imbue-code-guardian'"
+        )
+    )
+
+
+# The Claude Code plugins mngr knows how to install. Each lives in its own
+# GitHub repo, published as a Claude Code plugin marketplace.
+_CLAUDE_CODE_PLUGINS: Final[tuple[ClaudeCodePlugin, ...]] = (
+    ClaudeCodePlugin(
+        name="imbue-code-guardian",
+        description="Automated code review enforcement for Claude Code",
+        marketplace_repo="imbue-ai/code-guardian",
+        install_ref="imbue-code-guardian@imbue-code-guardian",
+    ),
+    ClaudeCodePlugin(
+        name="imbue-mngr-skills",
+        description="Skills that teach Claude how to use mngr, e.g. to coordinate with other agents",
+        marketplace_repo="imbue-ai/mngr-claude-skills",
+        install_ref="imbue-mngr-skills@imbue-mngr",
+    ),
+)
+
+
+def _claude_native_plugin_status() -> tuple[bool, dict[str, bool]]:
+    """Return (claude_available, {plugin_name: is_installed}).
+
+    When Claude Code is not on PATH, the per-plugin map reports every plugin
+    as not installed.
+    """
+    not_installed = {plugin.name: False for plugin in _CLAUDE_CODE_PLUGINS}
+    claude_available = CLAUDE.is_available()
+    if not claude_available:
+        return False, not_installed
+
     try:
         with ConcurrencyGroup(name="extras-claude-check") as cg:
-            result = cg.run_process_to_completion(["claude", "plugin", "list"])
-        plugin_installed = "imbue-code-guardian" in result.stdout
-        return True, plugin_installed
-    except (OSError, ProcessError):
-        return True, False
+            result = cg.run_process_to_completion(["claude", "plugin", "list", "--json"], is_checked_after=False)
+    except SUBPROCESS_ERRORS:
+        return True, not_installed
+
+    if result.returncode != 0:
+        return True, not_installed
+
+    try:
+        entries = json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        logger.warning(
+            "Could not parse `claude plugin list --json` output ({}); unable to detect installed plugins.", e
+        )
+        return True, not_installed
+
+    # `claude plugin list --json` returns objects whose `id` is "<name>@<marketplace>",
+    # which is exactly our install_ref. Match on that rather than substring-scanning
+    # human output.
+    installed_ids = {entry["id"] for entry in entries if isinstance(entry, dict) and "id" in entry}
+    installed = {plugin.name: plugin.install_ref in installed_ids for plugin in _CLAUDE_CODE_PLUGINS}
+    return True, installed
+
+
+def _install_one_claude_plugin(plugin: ClaudeCodePlugin) -> bool:
+    """Add the marketplace for and install a single Claude Code plugin.
+
+    Returns True on success, False (with a warning) on failure.
+    """
+    write_human_line("Installing {}...", plugin.name)
+    commands = (
+        ["claude", "plugin", "marketplace", "add", plugin.marketplace_repo],
+        ["claude", "plugin", "install", plugin.install_ref],
+    )
+    try:
+        with ConcurrencyGroup(name="extras-claude-install") as cg:
+            for command in commands:
+                result = cg.run_process_to_completion(command, is_checked_after=False)
+                if result.returncode != 0:
+                    detail = result.stderr.strip() or result.stdout.strip()
+                    logger.warning("Failed to install {}. {}", plugin.name, detail)
+                    return False
+    except SUBPROCESS_ERRORS as e:
+        logger.warning("Failed to install {}. {}", plugin.name, str(e))
+        return False
+
+    write_human_line("Installed {}.", plugin.name)
+    return True
+
+
+def _prompt_claude_plugins_choice(candidates: tuple[ClaudeCodePlugin, ...]) -> tuple[ClaudeCodePlugin, ...]:
+    """Ask the user which of the not-yet-installed plugins to install.
+
+    Presents a checkbox per candidate (all preselected), toggled with
+    Space and confirmed with Enter. Each row shows the plugin name padded
+    to a common width followed by its description, matching the
+    `mngr extras plugins` wizard. Returns the checked plugins (empty when
+    the user unchecks everything or cancels). Caller must check
+    ``has_interactive_terminal()`` first.
+    """
+    name_width = max(len(plugin.name) for plugin in candidates)
+    selected_indices = run_multi_select_picker(
+        options=[f"{plugin.name.ljust(name_width)}  {plugin.description}" for plugin in candidates],
+        title="mngr extras",
+        header_text="Select Claude Code plugins to install:",
+        preselected=[True] * len(candidates),
+    )
+    if selected_indices is None:
+        return ()
+    return tuple(candidates[index] for index in selected_indices)
 
 
 def _install_claude_plugin(
@@ -159,45 +317,42 @@ def _install_claude_plugin(
     *,
     # Dependencies are exposed as keyword arguments so tests can substitute
     # in-memory fakes without monkeypatching module-level callables.
-    status_fn: Callable[[], tuple[bool, bool]] = _claude_plugin_status,
+    status_fn: Callable[[], tuple[bool, dict[str, bool]]] = _claude_native_plugin_status,
     is_interactive_fn: Callable[[], bool] = has_interactive_terminal,
-    confirm_fn: Callable[[], bool] = lambda: _confirm_install(
-        "Install the Claude Code review plugin (imbue-code-guardian)?",
-        "Install the Claude Code review plugin",
-    ),
+    select_fn: Callable[[tuple[ClaudeCodePlugin, ...]], tuple[ClaudeCodePlugin, ...]] = _prompt_claude_plugins_choice,
+    install_fn: Callable[[ClaudeCodePlugin], bool] = _install_one_claude_plugin,
 ) -> bool:
-    """Install the Claude Code review plugin. Returns True if installed (or already present)."""
-    claude_available, plugin_installed = status_fn()
+    """Install Claude Code plugins (code review and/or agent skills).
+
+    Returns True when every selected plugin was installed successfully (or
+    when all known plugins were already installed). Returns False when Claude
+    Code is unavailable, the user skipped, or any selected install failed.
+    """
+    claude_available, installed_by_name = status_fn()
 
     if not claude_available:
-        write_human_line("Claude Code is not installed -- skipping Claude Code plugin.")
+        write_human_line("Claude Code is not installed -- skipping Claude Code plugins.")
         return False
 
-    if plugin_installed:
-        write_human_line("Claude Code review plugin is already installed.")
+    candidates = tuple(plugin for plugin in _CLAUDE_CODE_PLUGINS if not installed_by_name.get(plugin.name, False))
+
+    if not candidates:
+        write_human_line("All Claude Code plugins are already installed.")
         return True
 
-    if not auto:
-        if not is_interactive_fn():
-            write_human_line("No interactive terminal available. Skipping Claude Code plugin.")
-            return False
-        if not confirm_fn():
-            write_human_line("Skipping Claude Code plugin.")
-            return False
-
-    write_human_line("Installing Claude Code review plugin...")
-    try:
-        with ConcurrencyGroup(name="extras-claude-install") as cg:
-            cg.run_process_to_completion(["claude", "plugin", "marketplace", "add", "imbue-ai/code-guardian"])
-            cg.run_process_to_completion(["claude", "plugin", "install", "imbue-code-guardian@imbue-code-guardian"])
-        write_human_line("Claude Code review plugin installed.")
-        return True
-    except (OSError, ProcessError) as e:
-        detail = ""
-        if isinstance(e, ProcessError):
-            detail = e.stderr.strip() or e.stdout.strip()
-        write_human_line("WARNING: Failed to install Claude Code plugin. {}", detail)
+    if auto:
+        selected = candidates
+    elif not is_interactive_fn():
+        write_human_line("No interactive terminal available. Skipping Claude Code plugins.")
         return False
+    else:
+        selected = select_fn(candidates)
+
+    if not selected:
+        write_human_line("Skipping Claude Code plugins.")
+        return False
+
+    return all([install_fn(plugin) for plugin in selected])
 
 
 # -- Plugins extra (delegates to existing wizard) --
@@ -362,8 +517,18 @@ def _install_default_agent_type(
 # -- Status display --
 
 
-def _print_extras_status() -> None:
-    """Print the status of all extras."""
+def _print_extras_status(
+    *,
+    claude_native_plugin_status_fn: Callable[[], tuple[bool, dict[str, bool]]] = _claude_native_plugin_status,
+) -> None:
+    """Print the status of all extras.
+
+    ``claude_native_plugin_status_fn`` reports whether claude is available and which
+    known Claude Code plugins are installed. It is injectable (mirroring the
+    ``status_fn`` seam on the ``_install_*`` helpers) so tests can avoid shelling
+    out to ``claude plugin list`` -- a Node process whose startup is the slow,
+    variable part of this call.
+    """
     write_human_line("Extras")
     write_human_line("")
 
@@ -378,14 +543,16 @@ def _print_extras_status() -> None:
     else:
         write_human_line("  completion       not configured")
 
-    # Claude Code plugin
-    claude_available, plugin_installed = _claude_plugin_status()
+    # Claude Code plugins
+    claude_available, installed_by_name = claude_native_plugin_status_fn()
     if not claude_available:
         write_human_line("  claude-plugin    claude not installed")
-    elif plugin_installed:
-        write_human_line("  claude-plugin    installed")
     else:
-        write_human_line("  claude-plugin    not installed")
+        statuses = ", ".join(
+            f"{plugin.name}: {'installed' if installed_by_name.get(plugin.name, False) else 'not installed'}"
+            for plugin in _CLAUDE_CODE_PLUGINS
+        )
+        write_human_line("  claude-plugin    {}", statuses)
 
     # Default agent type (the only setting `extras config` walks through today)
     current_default, _ = _default_agent_type_status()
@@ -435,7 +602,7 @@ def extras(ctx: click.Context, **kwargs: Any) -> None:
     _install_completion(auto=False)
 
     write_human_line("")
-    write_human_line("--- Claude Code Plugin ---")
+    write_human_line("--- Claude Code Plugins ---")
     write_human_line("")
     _install_claude_plugin(auto=False)
 
@@ -499,7 +666,7 @@ def extras_config(ctx: click.Context, **kwargs: Any) -> None:
 
 CommandHelpMetadata(
     key="extras",
-    one_line_description="Install optional extras (plugins, completion, Claude Code plugin, user config)",
+    one_line_description="Install optional extras (plugins, completion, Claude Code plugins, user config)",
     synopsis="mngr extras [OPTIONS] [COMMAND]",
     description="""Manage optional extras that enhance mngr. With no subcommand, shows
 the status of all extras. Use -i to walk through each extra interactively.
@@ -507,14 +674,14 @@ the status of all extras. Use -i to walk through each extra interactively.
 Extras:
   plugins        Run the plugin install wizard
   completion     Set up shell tab completion
-  claude-plugin  Install the Claude Code review plugin
+  claude-plugin  Install Claude Code plugins (code review and/or agent skills)
   config         Walk through user-scope config settings (e.g. default agent type)""",
     examples=(
         ("Show status of all extras", "mngr extras"),
         ("Interactively set up all extras", "mngr extras -i"),
         ("Set up shell completion", "mngr extras completion"),
         ("Auto-install shell completion", "mngr extras completion -y"),
-        ("Install Claude Code plugin", "mngr extras claude-plugin"),
+        ("Install Claude Code plugins", "mngr extras claude-plugin"),
         ("Walk through user-scope config settings", "mngr extras config"),
     ),
     see_also=(
@@ -550,15 +717,14 @@ Use -y to skip the confirmation prompt.""",
 
 CommandHelpMetadata(
     key="extras.claude-plugin",
-    one_line_description="Install the Claude Code review plugin",
+    one_line_description="Install Claude Code plugins (code review and/or agent skills)",
     synopsis="mngr extras claude-plugin [-y]",
-    description="""Install the imbue-code-guardian plugin for Claude Code, which provides
-automated code review enforcement.
-
-Requires Claude Code to be installed. Use -y to skip the confirmation prompt.""",
+    description="""Install mngr's Claude Code plugins (imbue-code-guardian and
+imbue-mngr-skills). With an interactive terminal you pick which to install;
+-y auto-installs any that are missing. Requires Claude Code.""",
     examples=(
-        ("Install the plugin interactively", "mngr extras claude-plugin"),
-        ("Auto-install the plugin", "mngr extras claude-plugin -y"),
+        ("Choose which plugins to install", "mngr extras claude-plugin"),
+        ("Auto-install all Claude Code plugins", "mngr extras claude-plugin -y"),
     ),
 ).register()
 

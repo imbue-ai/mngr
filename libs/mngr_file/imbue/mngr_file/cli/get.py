@@ -12,13 +12,12 @@ from imbue.mngr.cli.address_params import AGENT_OR_HOST_ADDRESS
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.output_helpers import emit_event
-from imbue.mngr.cli.output_helpers import emit_final_json
+from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.primitives import AgentOrHostAddress
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr_file.cli.group import file_group
-from imbue.mngr_file.cli.target import compute_volume_path
 from imbue.mngr_file.cli.target import resolve_file_target
 from imbue.mngr_file.cli.target import resolve_full_path
 from imbue.mngr_file.data_types import PathRelativeTo
@@ -45,7 +44,7 @@ def _emit_get_result(
     }
     match output_opts.output_format:
         case OutputFormat.JSON:
-            emit_final_json({"event": "file_read", **data})
+            write_json_line({"event": "file_read", **data})
         case OutputFormat.JSONL:
             emit_event("file_read", data, OutputFormat.JSONL)
         case OutputFormat.HUMAN:
@@ -99,17 +98,11 @@ def file_get(ctx: click.Context, **kwargs: Any) -> None:
             relative_to=relative_to,
         )
 
-    # Read file -- prefer online host, fall back to volume
+    # Read file through the unified readable-host interface (online or volume-backed).
     with log_span("Reading file"):
-        if resolved.is_online:
-            full_path = resolve_full_path(resolved.base_path, opts.path)
-            content = resolved.host.read_file(full_path)
-            display_path = full_path
-        else:
-            assert resolved.volume is not None
-            vol_path = compute_volume_path(resolved.relative_to, resolved.agent_id, opts.path)
-            content = resolved.volume.read_file(vol_path)
-            display_path = Path(vol_path)
+        full_path = resolve_full_path(resolved.base_path, opts.path)
+        content = resolved.host.read_file(full_path)
+        display_path = full_path
 
     # Output
     if opts.output is not None:

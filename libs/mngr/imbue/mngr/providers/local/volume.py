@@ -5,8 +5,8 @@ from typing import Mapping
 from pydantic import Field
 
 from imbue.mngr.errors import MngrError
+from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import VolumeFile
-from imbue.mngr.interfaces.data_types import VolumeFileType
 from imbue.mngr.interfaces.volume import BaseVolume
 
 
@@ -40,7 +40,7 @@ class LocalVolume(BaseVolume):
         entries: list[VolumeFile] = []
         for child in sorted(resolved.iterdir()):
             stat = child.stat()
-            file_type = VolumeFileType.DIRECTORY if child.is_dir() else VolumeFileType.FILE
+            file_type = FileType.DIRECTORY if child.is_dir() else FileType.FILE
             entries.append(
                 VolumeFile(
                     path=str(child.resolve().relative_to(root_resolved)),

@@ -1,0 +1,13 @@
+{#def message #}
+{#
+  Authentication-failure page. Shown when a one-time login code has been
+  used or is malformed.
+#}
+<PageNarrowContainer title="Authentication Error" max_width="max-w-[460px]">
+  <h1 class="type-heading text-primary">Authentication Failed</h1>
+  <p class="mt-2 text-primary">{{ message }}</p>
+  <p class="mt-2 text-primary">
+    Each login URL can only be used once. Please use the login URL printed in the terminal where
+    the server is running, or restart the server to generate a new one.
+  </p>
+</PageNarrowContainer>

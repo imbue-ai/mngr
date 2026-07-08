@@ -1,0 +1,22 @@
+{#def href, weight="regular", extra="" #}
+{#
+  Inline text link. Renders ``<a class="text-accent hover:underline">``
+  with an optional ``font-semibold`` weight for the auth-flow "Sign in" /
+  "Create account" / "Back to home" affordances.
+
+  Usage:
+    <Link href="/auth/login">sign in</Link>
+    <Link href="/auth/signup" weight="medium">Create account</Link>
+
+  Any HTML attribute on the tag (target=, rel=, data-*) flows through
+  via JinjaX's ``attrs`` passthrough.
+
+  For click-toggles that look like links but aren't real navigations
+  (Latchkey's "Adjust", Create's "Configure..." / "Show advanced
+  settings"), prefer the Button-ghost-as-link recipe in the styleguide
+  -- those are buttons by semantics and the keyboard focus / accessibility
+  story is cleaner.
+#}
+{%- set _weight = "font-semibold " if weight == "medium" else "" -%}
+{%- set _cls = "text-accent hover:underline " ~ _weight ~ extra -%}
+<a {{ attrs.render(href=href, classes=_cls) }}>{{ content }}</a>

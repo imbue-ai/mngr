@@ -11,7 +11,6 @@ from typing import Any
 
 import click
 
-from imbue.mngr_imbue_cloud.auth_helper import force_refresh
 from imbue.mngr_imbue_cloud.cli._common import emit_json
 from imbue.mngr_imbue_cloud.cli._common import fail_with_json
 from imbue.mngr_imbue_cloud.cli._common import handle_imbue_cloud_errors
@@ -19,14 +18,16 @@ from imbue.mngr_imbue_cloud.cli._common import make_connector_client
 from imbue.mngr_imbue_cloud.cli._common import make_session_store
 from imbue.mngr_imbue_cloud.cli._common import parse_account
 from imbue.mngr_imbue_cloud.cli._common import resolve_account_or_active
-from imbue.mngr_imbue_cloud.client import AuthRawResponse
+from imbue.mngr_imbue_cloud.connector.auth_helper import force_refresh
+from imbue.mngr_imbue_cloud.connector.client import AuthRawResponse
+from imbue.mngr_imbue_cloud.connector.session_store import ImbueCloudSessionStore
+from imbue.mngr_imbue_cloud.connector.session_store import make_session_from_tokens
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.primitives import SuperTokensUserId
-from imbue.mngr_imbue_cloud.session_store import ImbueCloudSessionStore
-from imbue.mngr_imbue_cloud.session_store import make_session_from_tokens
 
 _OAUTH_LISTEN_TIMEOUT_SECONDS = 300.0
+_OAUTH_CALLBACK_PATH = "/oauth/callback"
 
 
 @click.group(name="auth")
@@ -351,7 +352,11 @@ def _make_callback_handler_class(box: _OAuthCaptureBox) -> type[http.server.Base
         def do_GET(self) -> None:
             parsed = urllib.parse.urlparse(self.path)
             params = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
-            box.set(params)
+            # Only the real /oauth/callback hit with query params is the callback. Browsers
+            # routinely fire secondary GETs (favicon.ico, prefetches, service-worker pings)
+            # at the same listener; those must not overwrite the captured params.
+            if parsed.path == _OAUTH_CALLBACK_PATH and params:
+                box.set(params)
             body = (
                 b"<html><head><title>Imbue Cloud sign-in</title></head>"
                 b"<body><h1>You are signed in</h1>"
@@ -416,7 +421,7 @@ def oauth(
     """
     parsed_account = parse_account(account) if account else None
     port = callback_port if callback_port is not None else _free_localhost_port()
-    callback_url = f"http://127.0.0.1:{port}/oauth/callback"
+    callback_url = f"http://127.0.0.1:{port}{_OAUTH_CALLBACK_PATH}"
 
     client = make_connector_client(connector_url)
     store = make_session_store()

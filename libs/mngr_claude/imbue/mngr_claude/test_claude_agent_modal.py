@@ -17,15 +17,11 @@ from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr.utils.testing import ModalSubprocessTestEnv
 from imbue.mngr.utils.testing import get_short_random_string
 
-
-@pytest.fixture
-def temp_source_dir(tmp_path: Path) -> Path:
-    """Create a temporary source directory for tests."""
-    source_dir = tmp_path / "source"
-    source_dir.mkdir()
-    # Create a simple file so the directory isn't empty
-    (source_dir / "test.txt").write_text("test content")
-    return source_dir
+# The ``temp_source_dir`` fixture is inherited from
+# ``imbue.mngr_modal.conftest`` (registered via ``pytest_plugins``); it
+# creates ``tmp_path/source`` with a ``test.txt`` containing "test content".
+# Do not redefine it here -- a local copy would only duplicate maintenance
+# surface and risk silent drift from the shared definition.
 
 
 def _setup_claude_gitignore(source_dir: Path) -> None:
@@ -209,18 +205,18 @@ def _stop_modal_agent(agent_name: str, env: ModalSubprocessTestEnv) -> subproces
 
 
 def _get_preserved_agent_dir(host_dir: Path, agent_name: str) -> Path:
-    """Return the unique preserved-sessions dir for ``agent_name``.
+    """Return the unique preserved dir for ``agent_name``.
 
-    Layout: ``host_dir/plugin/mngr_claude/preserved_sessions/<agent-name>--<agent-id>/``.
-    Asserts the parent dir exists and exactly one child matches the prefix
-    so callers can assume a single unambiguous result.
+    Layout: ``host_dir/preserved/<agent-name>--<agent-id>/``, mirroring the
+    agent state directory verbatim underneath. Asserts the parent dir exists
+    and exactly one child matches the prefix so callers can assume a single
+    unambiguous result.
     """
-    preserved_sessions_dir = host_dir / "plugin" / "mngr_claude" / "preserved_sessions"
-    assert preserved_sessions_dir.exists(), f"Expected preserved_sessions dir at {preserved_sessions_dir}"
-    agent_dirs = [d for d in preserved_sessions_dir.iterdir() if d.is_dir() and d.name.startswith(agent_name)]
+    preserved_dir = host_dir / "preserved"
+    assert preserved_dir.exists(), f"Expected preserved dir at {preserved_dir}"
+    agent_dirs = [d for d in preserved_dir.iterdir() if d.is_dir() and d.name.startswith(agent_name)]
     assert len(agent_dirs) == 1, (
-        f"Expected exactly one preserved dir for {agent_name}, "
-        f"found: {[d.name for d in preserved_sessions_dir.iterdir()]}"
+        f"Expected exactly one preserved dir for {agent_name}, found: {[d.name for d in preserved_dir.iterdir()]}"
     )
     return agent_dirs[0]
 
@@ -228,14 +224,15 @@ def _get_preserved_agent_dir(host_dir: Path, agent_name: str) -> Path:
 def _assert_sessions_preserved(host_dir: Path, agent_name: str) -> None:
     """Assert that session files were preserved for the given agent under host_dir.
 
-    Checks that the preserved_sessions directory exists, contains exactly one
-    directory for the agent, and that directory has at least one non-empty
-    session JSONL file.
+    Checks that the preserved directory exists, contains exactly one directory
+    for the agent, and that directory has at least one non-empty session JSONL
+    file at the mirrored config-dir path (plugin/claude/anthropic/projects).
     """
     agent_preserved_dir = _get_preserved_agent_dir(host_dir, agent_name)
 
-    # At minimum, session JSONL files should be preserved (the projects/ directory)
-    preserved_projects = agent_preserved_dir / "projects"
+    # At minimum, session JSONL files should be preserved (the projects/ directory,
+    # mirrored at the per-agent Claude config-dir path).
+    preserved_projects = agent_preserved_dir / "plugin" / "claude" / "anthropic" / "projects"
     assert preserved_projects.exists(), (
         f"Expected preserved projects/ dir. Contents: {list(agent_preserved_dir.iterdir())}"
     )
@@ -262,20 +259,32 @@ def test_claude_agent_provisioning_on_modal(
     4. The agent is created and started successfully
 
     The test uses --dangerously-skip-permissions -p "just say 'hello'" to run
-    a quick, non-interactive claude session. The actual output goes to tmux,
-    so we only verify that the agent was created successfully.
+    a quick, non-interactive claude session, then destroys the agent and
+    asserts a non-empty session JSONL was preserved -- proving claude actually
+    ran on Modal, not merely that provisioning logged the expected strings.
     """
     agent_name = f"test-claude-modal-{get_short_random_string()}"
     _setup_claude_gitignore(temp_source_dir)
 
     result = _create_modal_agent(agent_name, temp_source_dir, modal_subprocess_env)
 
-    # Check that the command succeeded
+    # Check that the command succeeded.
     assert result.returncode == 0, f"CLI failed with stderr: {result.stderr}\nstdout: {result.stdout}"
-    assert "Done." in result.stdout, f"Expected 'Done.' in output: {result.stdout}"
 
-    # Verify that Claude was installed (this message appears in the provisioning output)
-    # This confirms that the claude plugin provisioning hook ran correctly
+    # Destroy the agent so its session files are preserved to the local
+    # host_dir, then assert a non-empty session JSONL exists. This is the
+    # load-bearing check: it can only pass if claude actually started a
+    # session and wrote to it on the Modal host. The provisioning-log
+    # substring below is a secondary, best-effort sanity check.
+    destroy_result = _destroy_modal_agent(agent_name, modal_subprocess_env)
+    assert destroy_result.returncode == 0, (
+        f"Destroy failed with stderr: {destroy_result.stderr}\nstdout: {destroy_result.stdout}"
+    )
+    _assert_sessions_preserved(modal_subprocess_env.host_dir, agent_name)
+
+    # Secondary sanity check: provisioning installed claude. This is an
+    # implementation-detail log string (a reword would break it), so it is
+    # deliberately not the primary assertion.
     combined_output = result.stdout + result.stderr
     assert "Claude installed successfully" in combined_output or "Claude is already installed" in combined_output, (
         f"Expected Claude installation message in output.\nstdout: {result.stdout}\nstderr: {result.stderr}"
@@ -294,7 +303,7 @@ def test_destroy_modal_agent_preserves_sessions_locally(
     This verifies the preserve_sessions_on_destroy feature end-to-end:
     1. Create a Claude agent on Modal with a prompt (session data is generated during create)
     2. Destroy the agent (triggers session file preservation)
-    3. Verify that session files were pulled to the local preserved_sessions dir
+    3. Verify that session files were pulled to the local preserved/<name>--<id> dir
     """
     agent_name = f"test-claude-preserve-{get_short_random_string()}"
     _setup_claude_gitignore(temp_source_dir)
@@ -360,8 +369,9 @@ def test_destroy_stopped_modal_agent_preserves_sessions_from_volume(
 def _read_preserved_session_text(host_dir: Path, agent_name: str) -> str:
     """Return the concatenated text of all preserved session JSONLs for an agent."""
     agent_preserved_dir = _get_preserved_agent_dir(host_dir, agent_name)
-    session_files = list((agent_preserved_dir / "projects").rglob("*.jsonl"))
-    assert len(session_files) >= 1, f"No session .jsonl files under {agent_preserved_dir / 'projects'}"
+    projects_dir = agent_preserved_dir / "plugin" / "claude" / "anthropic" / "projects"
+    session_files = list(projects_dir.rglob("*.jsonl"))
+    assert len(session_files) >= 1, f"No session .jsonl files under {projects_dir}"
     return "\n".join(f.read_text() for f in session_files)
 
 

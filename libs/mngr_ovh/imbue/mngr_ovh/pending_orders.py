@@ -3,7 +3,7 @@
 OVH's order pipeline is asynchronous: ``POST /order/cart/.../checkout`` returns
 immediately with an ``orderId``, but the actual VPS ``serviceName`` is only
 assigned during a separate delivery phase. ``mngr create`` waits up to
-``vps_boot_timeout`` for that. When OVH is slow (busy region, new-account
+``instance_boot_timeout`` for that. When OVH is slow (busy region, new-account
 fraud-review hold, etc.), the order's VPS arrives *after* the timeout and
 mngr never gets a chance to tag it. Without intervention, the VPS leaks --
 no ``mngr-provider`` IAM tag, invisible to ``list_vps_resources_for_provider``,

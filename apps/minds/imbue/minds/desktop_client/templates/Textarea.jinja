@@ -1,0 +1,17 @@
+{#def name, value="", rows=4, width="w-full", extra="" #}
+{#
+  Styled <textarea>. Matches the accent focus ring used across the app.
+  Usage:
+    <Textarea name="comments" rows="6" :value="value" />
+    <Textarea name="env" rows="6" extra="font-mono" :value="env_text" />
+
+  ``rows`` controls the visible row count (HTML attribute). ``width``
+  is a Tailwind width utility (default ``w-full``).
+
+  Any HTML attribute (id=, placeholder=, readonly, data-*) flows
+  through via JinjaX's attrs passthrough. The visual shell (border,
+  padding, text size, focus ring) comes from the shared ``INPUT_BASE``
+  catalog global.
+#}
+{%- set _cls = width ~ " " ~ INPUT_BASE ~ " rounded-md " ~ extra -%}
+<textarea {{ attrs.render(name=name, rows=rows, classes=_cls) }}>{{ value }}</textarea>

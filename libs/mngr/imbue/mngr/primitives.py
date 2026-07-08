@@ -16,6 +16,7 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import RandomId
 from imbue.imbue_common.primitives import NonEmptyStr
+from imbue.imbue_common.primitives import PositiveInt
 
 # === Enums ===
 
@@ -89,6 +90,33 @@ class IdleMode(UpperCaseStrEnum):
     RUN = auto()
     CUSTOM = auto()
     DISABLED = auto()
+
+
+class TmuxWindowSize(UpperCaseStrEnum):
+    """Resize policy for an agent's tmux window (tmux ``window-size`` option).
+
+    The lowercase of each value is exactly the token tmux accepts. ``MANUAL``
+    pins the window to its configured size and never auto-resizes to attached
+    clients; ``LATEST`` (tmux's own default) sizes to the most recent client;
+    ``LARGEST`` / ``SMALLEST`` size to the largest / smallest attached client.
+    """
+
+    MANUAL = auto()
+    LATEST = auto()
+    LARGEST = auto()
+    SMALLEST = auto()
+
+
+class TmuxWidth(PositiveInt):
+    """Width, in columns, of an agent's tmux window. Must be > 0."""
+
+    ...
+
+
+class TmuxHeight(PositiveInt):
+    """Height, in rows, of an agent's tmux window. Must be > 0."""
+
+    ...
 
 
 class ActivitySource(UpperCaseStrEnum):
@@ -168,17 +196,6 @@ class UncommittedChangesMode(UpperCaseStrEnum):
     FAIL = auto()
 
 
-class SyncMode(UpperCaseStrEnum):
-    """Direction of sync operation.
-
-    PUSH: local -> agent
-    PULL: agent -> local
-    """
-
-    PUSH = auto()
-    PULL = auto()
-
-
 class SyncDirection(UpperCaseStrEnum):
     """Direction for file synchronization in pair mode."""
 
@@ -237,6 +254,10 @@ class HostState(UpperCaseStrEnum):
     FAILED = auto()
     DESTROYED = auto()
     UNAUTHENTICATED = auto()
+    # The provider that owns this host could not be accessed during the most recent discovery attempt,
+    # so the host's actual state is unknown. Distinct from None on HostDetails.state (which means
+    # "not observed / not applicable"). Emitted by AgentObserver when its provider errored.
+    UNKNOWN = auto()
 
 
 class AgentLifecycleState(UpperCaseStrEnum):
@@ -250,6 +271,26 @@ class AgentLifecycleState(UpperCaseStrEnum):
     # without the config, it can be hard to tell whether the agent is still running or not, because we don't know the process name to expect
     RUNNING_UNKNOWN_AGENT_TYPE = auto()
     DONE = auto()
+    # The provider that owns this agent could not be accessed during the most recent discovery attempt,
+    # so the agent's actual state is unknown. Emitted by AgentObserver for previously-tracked agents
+    # whose provider just failed discovery. Sticky: an agent leaves UNKNOWN only by reappearing in a
+    # snapshot or being explicitly destroyed.
+    UNKNOWN = auto()
+
+
+class WaitingReason(UpperCaseStrEnum):
+    """Why an agent in the WAITING lifecycle state is waiting.
+
+    Reported as the ``waiting_reason`` field by agent plugins (see the
+    ``agent_field_generators`` hook). Shared across plugins so the codex and claude
+    implementations agree on the vocabulary; see ``classify_waiting_reason`` in
+    ``imbue.mngr.hosts.common`` for the shared rule that produces it.
+    """
+
+    # Blocked on a tool-approval dialog, waiting for the user to respond.
+    PERMISSIONS = auto()
+    # Idle with its turn complete, waiting for the user's next message.
+    END_OF_TURN = auto()
 
 
 class AgentId(RandomId):
@@ -321,12 +362,31 @@ class AgentName(SafeName):
     """Human-readable name for an agent."""
 
 
+# The hard upper bound on a host name. Chosen as the DNS-label / typical
+# hostname-component limit so a host name is always safe to embed in
+# provider-side identifiers (Lima instance names, Docker resource names, cloud
+# tags). This is deliberately generous: callers that derive a *pretty* short
+# slug from arbitrary user text (e.g. minds) apply their own, smaller target on
+# top of this. Kept on ``HostName`` rather than the shared ``SafeName`` base so
+# longer ``AgentName`` / ``ProviderInstanceName`` values are not invalidated.
+MAX_HOST_NAME_LENGTH: Final[int] = 63
+
+
 class HostName(SafeName):
     """Human-readable name for a host.
 
     Host names never contain dots: the dot is reserved as the deterministic
     separator in ``HOST.PROVIDER`` host addresses (see ``api/addresses.py``).
+
+    Host names are capped at ``MAX_HOST_NAME_LENGTH`` characters because they
+    end up in provider-side identifiers with their own limits.
     """
+
+    def __new__(cls, value: str) -> Self:
+        stripped = value.strip()
+        if len(stripped) > MAX_HOST_NAME_LENGTH:
+            raise InvalidName(f"{cls.__name__} must be at most {MAX_HOST_NAME_LENGTH} characters: '{stripped}'")
+        return super().__new__(cls, stripped)
 
 
 # A "name or id" reference where the parser couldn't disambiguate at parse time;
@@ -439,9 +499,9 @@ class HostLocationAddress(FrozenModel):
     """A location that lives on some host: ``[NAME[@HOST[.PROVIDER]]][:PATH]`` or a bare path.
 
     Used wherever a CLI command needs to designate "a place on any host" -- the
-    source for ``mngr create --from``/``mngr pair``, or the target for
-    ``mngr push``/``mngr pull``. The host may be local or remote; "hosted"
-    captures both.
+    source for ``mngr create --from``/``mngr pair``, the source/destination for
+    ``mngr rsync``, and the target for ``mngr git push``/``mngr git pull``. The
+    host may be local or remote; "hosted" captures both.
 
     Every component is optional. The four meaningful shapes (in addition to a
     bare path string) are:
@@ -458,6 +518,13 @@ class HostLocationAddress(FrozenModel):
     agent: AgentNameOrId | None = Field(default=None, description="Optional agent name or ID")
     host: HostAddress | None = Field(default=None, description="Optional host")
     path: Path | None = Field(default=None, description="Optional path")
+    has_trailing_path_slash: bool = Field(
+        default=False,
+        description=(
+            "True if the user-typed PATH ended with ``/``. ``Path`` strips trailing slashes, "
+            "so this flag is the only way to preserve rsync's contents-vs-child semantics."
+        ),
+    )
 
 
 class AgentTypeName(SafeName):

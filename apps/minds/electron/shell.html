@@ -5,10 +5,13 @@
   <title>Minds</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
+    /* Loading / quitting / error takeover screen. Deep-maroon brand
+       surface (#492222) with cream (#E9ECD9) text, matching the Minds
+       app icon branding. */
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      background: #0f172a;
-      color: #e2e8f0;
+      background: #492222;
+      color: #E9ECD9;
       display: flex;
       flex-direction: column;
       align-items: center;
@@ -17,34 +20,127 @@
       -webkit-app-region: drag;
       user-select: none;
     }
-    .logo {
-      width: 80px;
-      height: 80px;
-      margin-bottom: 32px;
+    /* When a main-process modal (the /help report dialog opened from the error
+       takeover's "Report a bug" button) overlays this screen, drop the
+       window-drag region. macOS unions -webkit-app-region: drag across all
+       visible views, so this full-window drag would otherwise intercept every
+       click meant for the modal's interior -- the modal looks visible but
+       nothing inside it is clickable. Mirrors the chrome titlebar's modal-open
+       drag suppression. */
+    body.modal-open {
+      -webkit-app-region: no-drag;
     }
-    .logo svg { width: 100%; height: 100%; }
+    /* Brand block: head illustration stacked above the wordmark, centered,
+       18px apart. */
+    .brand {
+      /* Intro timing. --intro-delay is the opening beat of empty maroon before
+         anything appears. The head takes the "first letter" slot; the wordmark
+         letters then follow one --letter-step later, so the reveal cascades
+         head -> M -> i -> n -> d -> s. --letter-step matches the letters' own
+         internal per-letter stagger (~0.1s), so the head leads the M by the
+         same beat that separates the letters. After the intro the wordmark
+         loops; the head stays. */
+      --intro-delay: 1s;
+      --letter-step: 0.1s;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 18px;
+      margin-top: -36px;
+      margin-bottom: 36px;
+    }
+    /* The head illustration is the first element to appear: it fades in one
+       --letter-step BEFORE the M (the letters carry the extra offset), using
+       the same 0.5s linear fade-in as a letter, then holds at full opacity
+       instead of cycling (the wordmark loops without it). Shown immediately in
+       the error state. */
+    .illustration {
+      opacity: 0;
+      animation: head-fade-in 5.4s var(--intro-delay) forwards;
+    }
+    body.error .illustration {
+      animation: none;
+      opacity: 1;
+    }
+    /* Mirrors the fade-in portion of fade-letter-0 (the M), then stays. */
+    @keyframes head-fade-in {
+      0%    { opacity: 0; animation-timing-function: linear; }
+      9.26% { opacity: 1; }
+      100%  { opacity: 1; }
+    }
+    /* Wordmark letter animation. Offset one --letter-step after the head (see
+       .illustration above) so the head leads the M rather than sharing its beat.
+       Cycle = 5.4s: fade in 0.5s linear (0.1s stagger), hold visible 1s,
+       fade out 1.8s cubic-bezier(.05,.25,.08,.99) (0.3s stagger), hold invisible 0.5s.
+       Paths in markup are s, d, n, i, M (right-to-left), so :nth-child(5)
+       targets M (first), :nth-child(1) targets s (last). */
+    .wordmark path { opacity: 0; }
+    /* Error state: freeze the animation and show every letter. */
+    body.error .wordmark path {
+      animation: none;
+      opacity: 1;
+    }
+    .wordmark path:nth-child(5) { animation: fade-letter-0 5.4s calc(var(--intro-delay) + var(--letter-step)) infinite; }
+    .wordmark path:nth-child(4) { animation: fade-letter-1 5.4s calc(var(--intro-delay) + var(--letter-step)) infinite; }
+    .wordmark path:nth-child(3) { animation: fade-letter-2 5.4s calc(var(--intro-delay) + var(--letter-step)) infinite; }
+    .wordmark path:nth-child(2) { animation: fade-letter-3 5.4s calc(var(--intro-delay) + var(--letter-step)) infinite; }
+    .wordmark path:nth-child(1) { animation: fade-letter-4 5.4s calc(var(--intro-delay) + var(--letter-step)) infinite; }
+    @keyframes fade-letter-0 {
+      0%     { opacity: 0; animation-timing-function: linear; }
+      9.26%  { opacity: 1; }
+      35.19% { opacity: 1; animation-timing-function: cubic-bezier(.05, .25, .08, .99); }
+      68.52% { opacity: 0; }
+      100%   { opacity: 0; }
+    }
+    @keyframes fade-letter-1 {
+      0%     { opacity: 0; }
+      1.85%  { opacity: 0; animation-timing-function: linear; }
+      11.11% { opacity: 1; }
+      40.74% { opacity: 1; animation-timing-function: cubic-bezier(.05, .25, .08, .99); }
+      74.07% { opacity: 0; }
+      100%   { opacity: 0; }
+    }
+    @keyframes fade-letter-2 {
+      0%     { opacity: 0; }
+      3.70%  { opacity: 0; animation-timing-function: linear; }
+      12.96% { opacity: 1; }
+      46.30% { opacity: 1; animation-timing-function: cubic-bezier(.05, .25, .08, .99); }
+      79.63% { opacity: 0; }
+      100%   { opacity: 0; }
+    }
+    @keyframes fade-letter-3 {
+      0%     { opacity: 0; }
+      5.56%  { opacity: 0; animation-timing-function: linear; }
+      14.81% { opacity: 1; }
+      51.85% { opacity: 1; animation-timing-function: cubic-bezier(.05, .25, .08, .99); }
+      85.19% { opacity: 0; }
+      100%   { opacity: 0; }
+    }
+    @keyframes fade-letter-4 {
+      0%     { opacity: 0; }
+      7.41%  { opacity: 0; animation-timing-function: linear; }
+      16.67% { opacity: 1; }
+      57.41% { opacity: 1; animation-timing-function: cubic-bezier(.05, .25, .08, .99); }
+      90.74% { opacity: 0; }
+      100%   { opacity: 0; }
+    }
     h1 {
       font-size: 24px;
       font-weight: 600;
       margin-bottom: 16px;
-      color: #f8fafc;
+      color: #E9ECD9;
     }
+    /* Quitting state: a status line under the wordmark, shown only while the
+       app is shutting down. Hidden during normal startup loading so that
+       screen is visually unchanged. */
     .status {
+      display: none;
       font-size: 14px;
-      color: #94a3b8;
-      margin-bottom: 24px;
-      min-height: 20px;
+      color: #E9ECD9;
+      min-height: 18px;
+      text-align: center;
     }
-    .spinner {
-      width: 32px;
-      height: 32px;
-      border: 3px solid #334155;
-      border-top-color: #3b82f6;
-      border-radius: 50%;
-      animation: spin 0.8s linear infinite;
-    }
-    @keyframes spin { to { transform: rotate(360deg); } }
-
+    body.quitting .status { display: block; }
     /* Error state */
     #error-view {
       display: none;
@@ -56,7 +152,7 @@
     #error-view h1 { margin-bottom: 12px; }
     .message {
       font-size: 14px;
-      color: #94a3b8;
+      color: #E9ECD9;
       margin-bottom: 24px;
       max-width: 400px;
     }
@@ -74,78 +170,276 @@
       cursor: pointer;
       font-weight: 500;
     }
-    .btn-primary { background: #3b82f6; color: #fff; }
-    .btn-primary:hover { background: #2563eb; }
-    .btn-secondary { background: #334155; color: #e2e8f0; }
-    .btn-secondary:hover { background: #475569; }
+    .btn-primary { background: #8EAFCB; color: #000000; }
+    .btn-primary:hover { background: #7E9DB8; }
+    .btn-secondary { background: #E9ECD9; color: #492222; }
+    .btn-secondary:hover { background: #D8DBC2; }
     .toggle-details {
       background: none;
       border: none;
-      color: #64748b;
+      color: #E9ECD9;
       font-size: 13px;
       cursor: pointer;
       text-decoration: underline;
       margin-bottom: 12px;
       -webkit-app-region: no-drag;
     }
-    .toggle-details:hover { color: #94a3b8; }
+    .toggle-details:hover { color: #E9ECD9; }
     .details {
       display: none;
       width: 100%;
       max-width: 600px;
       max-height: 200px;
       overflow: auto;
-      background: #1e293b;
+      background: #f4f4f5;
       border-radius: 8px;
       padding: 16px;
       font-family: "SF Mono", "Fira Code", Menlo, monospace;
       font-size: 12px;
-      color: #94a3b8;
+      color: #492222;
       white-space: pre-wrap;
       word-break: break-all;
       -webkit-app-region: no-drag;
       user-select: text;
     }
     .details.visible { display: block; }
+    /* One-shot report outcome (shown when the backend is down and we report the
+       on-screen error directly via the main-process Sentry). */
+    #report-result {
+      display: none;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 16px;
+      font-size: 13px;
+      color: #E9ECD9;
+      -webkit-app-region: no-drag;
+    }
+    #report-result.visible { display: flex; }
+    #report-result code {
+      font-family: "SF Mono", "Fira Code", Menlo, monospace;
+      background: #f4f4f5;
+      color: #492222;
+      border-radius: 4px;
+      padding: 2px 6px;
+      user-select: text;
+    }
+    #report-copy-btn {
+      background: #E9ECD9;
+      color: #492222;
+      border: none;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 500;
+      padding: 4px 10px;
+      cursor: pointer;
+    }
+    #report-copy-btn:hover { background: #D8DBC2; }
+    /* Per-report "include logs" opt-in for the one-shot backend-down report. Shown
+       only when the persistent include-logs setting is off (see the report flow). */
+    #report-options {
+      display: none;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      margin-bottom: 16px;
+      font-size: 13px;
+      color: #E9ECD9;
+      -webkit-app-region: no-drag;
+    }
+    #report-options.visible { display: flex; }
+    #report-options label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+      user-select: none;
+    }
   </style>
 </head>
 <body>
-  <div id="loading-view">
-    <div class="logo">
-      <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-        <circle cx="50" cy="50" r="45" fill="none" stroke="#3b82f6" stroke-width="3"/>
-        <path d="M30 55 C30 35, 50 25, 50 25 C50 25, 70 35, 70 55 C70 70, 55 75, 50 75 C45 75, 30 70, 30 55Z"
-              fill="none" stroke="#3b82f6" stroke-width="2.5"/>
-        <path d="M40 50 C40 42, 50 35, 50 35 C50 35, 60 42, 60 50 C60 58, 55 62, 50 62 C45 62, 40 58, 40 50Z"
-              fill="#3b82f6" opacity="0.3"/>
-        <circle cx="50" cy="48" r="4" fill="#3b82f6"/>
-      </svg>
-    </div>
-    <h1>Minds</h1>
-    <p class="status" id="status-text">Starting...</p>
-    <div class="spinner"></div>
+  <div class="brand">
+    <svg class="illustration" aria-hidden="true" width="132" height="132" viewBox="0 0 132 132" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M30.8593 44.6318C27.5 50.1062 23.4555 74.6146 21.9412 89.3277C21.7499 91.1869 23.1536 92.8071 25.0186 92.9296L31.3888 93.3478C32.8495 93.4436 34.0778 94.479 34.4194 95.9025L37.0109 106.701C37.3156 107.97 38.3272 108.951 39.6146 109.166C50.013 110.903 68.7473 111.932 80.042 105.728C127.884 79.4505 111.589 32.7973 82.7913 25.0809C53.9934 17.3645 39.1073 31.1906 30.8593 44.6318Z" fill="#E9ECD9"/>
+      <g filter="url(#filter0_g_20_1573)">
+        <path d="M92.811 53.1059C95.9755 53.1059 98.2774 54.1948 99.8042 55.9722C101.351 57.773 102.209 60.4063 102.209 63.6636C102.209 69.9314 97.1287 75.0131 90.8608 75.0132C84.593 75.0132 79.5122 69.9314 79.5122 63.6636C79.5123 60.663 81.1487 58.0461 83.6919 56.1382C86.2409 54.226 89.6094 53.106 92.811 53.1059Z" stroke="#492222" stroke-width="2.22785"/>
+      </g>
+      <g filter="url(#filter1_g_20_1573)">
+        <path d="M92.811 53.1059C95.9755 53.1059 98.2774 54.1948 99.8042 55.9722C101.351 57.773 102.209 60.4063 102.209 63.6636C102.209 69.9314 97.1287 75.0131 90.8608 75.0132C84.593 75.0132 79.5122 69.9314 79.5122 63.6636C79.5123 60.663 81.1487 58.0461 83.6919 56.1382C86.2409 54.226 89.6094 53.106 92.811 53.1059Z" stroke="#492222" stroke-width="2.22785"/>
+      </g>
+      <g filter="url(#filter2_g_20_1573)">
+        <path d="M75.1902 36.3615C80.0694 36.3615 83.6679 37.9331 86.0544 40.5187C88.4534 43.1181 89.7468 46.8717 89.7468 51.4435C89.7466 60.3049 82.0045 67.6222 72.283 67.6223C62.5614 67.6223 54.8193 60.3049 54.8191 51.4435C54.8191 47.1445 57.3418 43.3976 61.238 40.6769C65.1339 37.9566 70.281 36.3616 75.1902 36.3615Z" stroke="#492222" stroke-width="2.22785"/>
+      </g>
+      <g filter="url(#filter3_g_20_1573)">
+        <path d="M93.7683 16.1356C98.6475 16.1356 102.246 17.7072 104.633 20.2928C107.031 22.8921 108.325 26.6458 108.325 31.2176C108.325 40.079 100.583 47.3963 90.8611 47.3963C81.1395 47.3963 73.3974 40.079 73.3972 31.2176C73.3972 26.9185 75.9199 23.1716 79.8162 20.451C83.712 17.7307 88.8592 16.1357 93.7683 16.1356Z" stroke="#E9ECD9" stroke-width="2.22785"/>
+      </g>
+      <mask id="mask0_20_1573" style="mask-type:alpha" maskUnits="userSpaceOnUse" x="20" y="21" width="92" height="91">
+        <path d="M30.8593 44.6318C27.5 50.1062 23.4555 74.6146 21.9412 89.3277C21.7499 91.1869 23.1536 92.8071 25.0186 92.9296L31.3888 93.3478C32.8495 93.4436 34.0778 94.479 34.4194 95.9025L37.0109 106.701C37.3156 107.97 38.3272 108.951 39.6146 109.166C50.013 110.903 68.7473 111.932 80.042 105.728C127.884 79.4505 111.589 32.7973 82.7913 25.0809C53.9934 17.3645 39.1073 31.1906 30.8593 44.6318Z" fill="#97630C" stroke="#E9ECD9" stroke-width="2.22785"/>
+      </mask>
+      <g mask="url(#mask0_20_1573)">
+        <g filter="url(#filter4_g_20_1573)">
+          <path d="M93.7683 16.1356C98.6475 16.1356 102.246 17.7072 104.633 20.2928C107.031 22.8921 108.325 26.6458 108.325 31.2176C108.325 40.079 100.583 47.3963 90.8611 47.3963C81.1395 47.3963 73.3974 40.079 73.3972 31.2176C73.3972 26.9185 75.9199 23.1716 79.8162 20.451C83.712 17.7307 88.8592 16.1357 93.7683 16.1356Z" stroke="#492222" stroke-width="2.22785"/>
+        </g>
+      </g>
+      <defs>
+        <filter id="filter0_g_20_1573" x="77.5028" y="51.0966" width="26.716" height="25.9254" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+          <feFlood flood-opacity="0" result="BackgroundImageFix"/>
+          <feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix" result="shape"/>
+          <feTurbulence type="fractalNoise" baseFrequency="0.30468317866325378 0.30468317866325378" numOctaves="3" seed="1005" />
+          <feDisplacementMap in="shape" scale="1.7902352809906006" xChannelSelector="R" yChannelSelector="G" result="displacedImage" width="100%" height="100%" />
+          <feMerge result="effect1_texture_20_1573">
+            <feMergeNode in="displacedImage"/>
+          </feMerge>
+        </filter>
+        <filter id="filter1_g_20_1573" x="77.5028" y="51.0966" width="26.716" height="25.9254" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+          <feFlood flood-opacity="0" result="BackgroundImageFix"/>
+          <feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix" result="shape"/>
+          <feTurbulence type="fractalNoise" baseFrequency="0.30468317866325378 0.30468317866325378" numOctaves="3" seed="1005" />
+          <feDisplacementMap in="shape" scale="1.7902352809906006" xChannelSelector="R" yChannelSelector="G" result="displacedImage" width="100%" height="100%" />
+          <feMerge result="effect1_texture_20_1573">
+            <feMergeNode in="displacedImage"/>
+          </feMerge>
+        </filter>
+        <filter id="filter2_g_20_1573" x="52.8097" y="34.3521" width="38.9462" height="35.2791" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+          <feFlood flood-opacity="0" result="BackgroundImageFix"/>
+          <feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix" result="shape"/>
+          <feTurbulence type="fractalNoise" baseFrequency="0.30468317866325378 0.30468317866325378" numOctaves="3" seed="1005" />
+          <feDisplacementMap in="shape" scale="1.7902352809906006" xChannelSelector="R" yChannelSelector="G" result="displacedImage" width="100%" height="100%" />
+          <feMerge result="effect1_texture_20_1573">
+            <feMergeNode in="displacedImage"/>
+          </feMerge>
+        </filter>
+        <filter id="filter3_g_20_1573" x="71.3878" y="14.1262" width="38.9462" height="35.2791" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+          <feFlood flood-opacity="0" result="BackgroundImageFix"/>
+          <feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix" result="shape"/>
+          <feTurbulence type="fractalNoise" baseFrequency="0.30468317866325378 0.30468317866325378" numOctaves="3" seed="1005" />
+          <feDisplacementMap in="shape" scale="1.7902352809906006" xChannelSelector="R" yChannelSelector="G" result="displacedImage" width="100%" height="100%" />
+          <feMerge result="effect1_texture_20_1573">
+            <feMergeNode in="displacedImage"/>
+          </feMerge>
+        </filter>
+        <filter id="filter4_g_20_1573" x="71.3878" y="14.1262" width="38.9462" height="35.2791" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+          <feFlood flood-opacity="0" result="BackgroundImageFix"/>
+          <feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix" result="shape"/>
+          <feTurbulence type="fractalNoise" baseFrequency="0.30468317866325378 0.30468317866325378" numOctaves="3" seed="1005" />
+          <feDisplacementMap in="shape" scale="1.7902352809906006" xChannelSelector="R" yChannelSelector="G" result="displacedImage" width="100%" height="100%" />
+          <feMerge result="effect1_texture_20_1573">
+            <feMergeNode in="displacedImage"/>
+          </feMerge>
+        </filter>
+      </defs>
+    </svg>
+    <svg class="wordmark" role="img" aria-label="Minds" width="319" height="86" viewBox="0 0 319 86" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M294.413 85.92C278.213 85.92 268.613 77.4 268.133 64.32H280.613C280.973 71.76 285.653 76.44 294.293 76.44C301.493 76.44 306.293 73.08 306.293 67.92C306.293 63.72 303.053 61.32 296.453 60L288.533 58.44C277.013 56.28 270.053 50.64 270.053 41.28C270.053 31.32 279.653 23.88 293.333 23.88C308.213 23.88 317.213 31.32 317.813 43.32H305.453C304.733 36.96 300.173 33.36 292.973 33.36C286.733 33.36 282.533 36.12 282.533 40.68C282.533 44.76 285.293 46.8 292.253 48.12L300.293 49.68C311.333 51.84 318.653 57 318.653 66.96C318.653 77.76 309.293 85.92 294.413 85.92Z" fill="#E9ECD9"/>
+      <path d="M229.179 85.92C213.939 85.92 202.419 75.12 202.419 54.96C202.419 35.76 214.419 23.88 229.419 23.88C238.779 23.88 244.779 28.8 247.779 33.84C247.539 32.04 247.539 30.36 247.539 28.68V0H260.019V84H247.539V81.12C247.539 79.2 247.539 77.64 247.779 75.96C245.019 80.76 238.899 85.92 229.179 85.92ZM231.819 76.2C241.419 76.2 248.259 67.68 248.259 54.84C248.259 42 241.419 33.72 231.819 33.72C222.219 33.72 215.259 42.36 215.259 54.96C215.259 67.8 222.219 76.2 231.819 76.2Z" fill="#E9ECD9"/>
+      <path d="M140.786 84V25.8H153.266V29.04C153.266 30.6 153.146 32.04 153.026 33.84C156.146 28.44 162.386 23.88 171.626 23.88C185.306 23.88 193.226 33 193.226 47.76V84H180.626V49.44C180.626 39.6 176.786 33.72 168.146 33.72C158.906 33.72 153.266 41.04 153.266 49.8V84H140.786Z" fill="#E9ECD9"/>
+      <path d="M70.033 84V73.92H97.033V35.88H74.953V25.8H109.393V73.92H132.673V84H70.033ZM94.753 16.44V1.32001H109.753V16.44H94.753Z" fill="#E9ECD9"/>
+      <path d="M0 84V25.8H11.16V29.88C11.16 31.2 11.04 32.76 10.92 33.84C13.08 27.6 17.28 23.88 23.16 23.88C28.32 23.88 33 27 34.8 34.32C37.2 28.2 41.28 23.88 48.48 23.88C57.24 23.88 62.4 31.2 62.4 43.32V84H51.24V45.24C51.24 38.16 49.68 33.72 44.88 33.72C38.64 33.72 36.72 40.2 36.72 47.76V84H25.68V45.6C25.68 38.4 24 33.72 19.08 33.72C13.2 33.72 11.16 40.32 11.16 48V84H0Z" fill="#E9ECD9"/>
+    </svg>
   </div>
-
+  <div class="status" id="status-line"></div>
   <div id="error-view">
     <h1>Something went wrong</h1>
     <p class="message" id="error-message">Minds stopped unexpectedly.</p>
     <div class="actions">
       <button class="btn-primary" id="retry-btn">Retry</button>
+      <button class="btn-secondary" id="report-btn">Report a bug</button>
       <button class="btn-secondary" id="log-btn">View full log</button>
+    </div>
+    <div id="report-options">
+      <label>
+        <input type="checkbox" id="report-include-logs">
+        <span>Include recent logs</span>
+      </label>
+    </div>
+    <div id="report-result">
+      <span id="report-result-text"></span>
+      <code id="report-event-id"></code>
+      <button id="report-copy-btn" type="button">Copy</button>
     </div>
     <button class="toggle-details" id="toggle-details-btn">Show details</button>
     <pre class="details" id="error-details"></pre>
   </div>
 
   <script>
-    var loadingView = document.getElementById('loading-view');
     var errorView = document.getElementById('error-view');
+    var statusLine = document.getElementById('status-line');
+
+    // Quitting takeover: shell.html is loaded with a `#quitting` hash when a
+    // committed quit flips every window to this page. Reveal the status line and
+    // seed it before any IPC arrives so there's no empty flash.
+    if (location.hash === '#quitting') {
+      document.body.classList.add('quitting');
+      statusLine.textContent = 'Quitting…';
+    }
+
+    // The latest error-details payload, retained so the report button knows whether the
+    // backend is still up (use the full /help modal) or down (one-shot main-process report).
+    var lastErrorData = null;
 
     document.getElementById('retry-btn').addEventListener('click', function() {
       if (window.minds) window.minds.retry();
     });
     document.getElementById('log-btn').addEventListener('click', function() {
       if (window.minds) window.minds.openLogFile();
+    });
+
+    var reportBtn = document.getElementById('report-btn');
+    var reportOptions = document.getElementById('report-options');
+    var reportIncludeLogs = document.getElementById('report-include-logs');
+    var reportResult = document.getElementById('report-result');
+    var reportResultText = document.getElementById('report-result-text');
+    var reportEventId = document.getElementById('report-event-id');
+    var reportCopyBtn = document.getElementById('report-copy-btn');
+
+    function showReportResult(text, eventId) {
+      reportResultText.textContent = text;
+      if (eventId) {
+        reportEventId.textContent = eventId;
+        reportEventId.style.display = '';
+        reportCopyBtn.style.display = '';
+      } else {
+        reportEventId.textContent = '';
+        reportEventId.style.display = 'none';
+        reportCopyBtn.style.display = 'none';
+      }
+      reportResult.classList.add('visible');
+    }
+
+    reportCopyBtn.addEventListener('click', function() {
+      try {
+        if (navigator.clipboard) navigator.clipboard.writeText(reportEventId.textContent);
+        reportCopyBtn.textContent = 'Copied';
+        setTimeout(function() { reportCopyBtn.textContent = 'Copy'; }, 1500);
+      } catch (e) {
+        /* ignore */
+      }
+    });
+
+    reportBtn.addEventListener('click', function() {
+      if (!window.minds) return;
+      // Backend still up (e.g. discovery-pipeline stall): open the full /help modal so the
+      // report can include logs and diagnostics. Backend down: file a one-shot report of the
+      // on-screen error via the main-process Sentry and surface the copyable event id.
+      if (lastErrorData && lastErrorData.canUseBackendReport && window.minds.toggleHelp) {
+        window.minds.toggleHelp('');
+        return;
+      }
+      reportBtn.disabled = true;
+      showReportResult('Sending report…', null);
+      // Per-report opt-in only matters while the checkbox is shown (persistent
+      // include-logs setting off); when hidden, main's persistent setting decides.
+      var includeLogs = reportOptions.classList.contains('visible') && reportIncludeLogs.checked;
+      window.minds.reportError(includeLogs).then(function(res) {
+        if (res && res.ok && res.eventId) {
+          showReportResult('Report sent. Reference ID:', res.eventId);
+        } else {
+          reportBtn.disabled = false;
+          showReportResult('Could not send the report.', null);
+        }
+      }, function() {
+        reportBtn.disabled = false;
+        showReportResult('Could not send the report.', null);
+      });
     });
     document.getElementById('toggle-details-btn').addEventListener('click', function() {
       var el = document.getElementById('error-details');
@@ -154,14 +448,48 @@
     });
 
     if (window.minds) {
+      // Drives the status line in the quitting takeover (e.g. "Stopping 2
+      // minds…", "Closing…"). During startup loading the same messages arrive
+      // but the line stays hidden (no `quitting` class), so the loading screen
+      // is unaffected.
       window.minds.onStatusUpdate(function(message) {
-        document.getElementById('status-text').textContent = message;
+        if (message) statusLine.textContent = message;
       });
+      // A main-process modal (the report dialog) opened from this screen
+      // overlays the full window; toggle the drag-region suppression (see
+      // body.modal-open) so its interior is actually clickable, then restore
+      // the window drag when it closes.
+      if (window.minds.onModalStateChanged) {
+        window.minds.onModalStateChanged(function(data) {
+          if (data) document.body.classList.toggle('modal-open', !!data.open);
+        });
+      }
       window.minds.onErrorDetails(function(data) {
-        loadingView.style.display = 'none';
+        lastErrorData = data;
+        // This page is reused (not reloaded) across takeovers, so clear any prior
+        // report outcome and re-enable the button for the new error.
+        reportResult.classList.remove('visible');
+        reportBtn.disabled = false;
+        // Offer the per-report "include logs" opt-in only on the one-shot
+        // backend-down path (when the backend is up, the /help modal carries its
+        // own logs control) and only when the persistent include-logs setting is
+        // off (when on, logs are always attached, so the checkbox is redundant).
+        reportOptions.classList.remove('visible');
+        if (window.minds && window.minds.getLogInclusionSetting && !(data && data.canUseBackendReport)) {
+          window.minds.getLogInclusionSetting().then(function(enabled) {
+            if (!enabled) reportOptions.classList.add('visible');
+          }, function() { /* ignore: leave the checkbox hidden on failure */ });
+        }
+        document.body.classList.add('error');
         errorView.style.display = 'flex';
         if (data.message) document.getElementById('error-message').textContent = data.message;
         if (data.details) document.getElementById('error-details').textContent = data.details;
+        // Optional per-takeover label for the primary action (e.g. "Restart
+        // Minds" for the discovery-pipeline takeover). Falls back to the static
+        // "Retry" label for the generic backend-crash case. Always reassigned so
+        // a label set by a prior takeover (this page is reused, not reloaded,
+        // when the chrome view is already on shell.html) does not linger.
+        document.getElementById('retry-btn').textContent = data.actionLabel || 'Retry';
       });
     }
   </script>

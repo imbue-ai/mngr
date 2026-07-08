@@ -1,10 +1,18 @@
 from pathlib import Path
 
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr_lima.limactl import LimaSshConfig
 from imbue.mngr_lima.limactl import _strip_ssh_config_quotes
 from imbue.mngr_lima.limactl import host_name_from_instance_name
 from imbue.mngr_lima.limactl import lima_instance_name
+from imbue.mngr_lima.limactl import lima_instance_name_from_host_id
+
+
+def test_lima_instance_name_from_host_id() -> None:
+    host_id = HostId.generate()
+    name = lima_instance_name_from_host_id(host_id, "mngr-")
+    assert name == f"mngr-{host_id}"
 
 
 def test_lima_instance_name() -> None:

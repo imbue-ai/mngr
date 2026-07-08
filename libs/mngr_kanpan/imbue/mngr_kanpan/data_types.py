@@ -5,6 +5,7 @@ from typing import Any
 from typing import Literal
 
 from pydantic import Field
+from pydantic import SerializeAsAny
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -28,6 +29,41 @@ class BoardSection(UpperCaseStrEnum):
     MUTED = auto()
 
 
+# Section labels split into a leading phrase and a clarifying suffix. The TUI
+# heading renderer colors the prefix; the JSON output path joins them into a
+# plain human label.
+SECTION_PREFIX: dict[BoardSection, str] = {
+    BoardSection.PR_MERGED: "Done",
+    BoardSection.PR_CLOSED: "Cancelled",
+    BoardSection.PR_BEING_REVIEWED: "In review",
+    BoardSection.PR_DRAFT: "In progress",
+    BoardSection.STILL_COOKING: "In progress",
+    BoardSection.PRS_FAILED: "In progress",
+    BoardSection.MUTED: "Muted",
+}
+
+SECTION_SUFFIX: dict[BoardSection, str] = {
+    BoardSection.PR_MERGED: "PR merged",
+    BoardSection.PR_CLOSED: "PR closed",
+    BoardSection.PR_BEING_REVIEWED: "PR pending",
+    BoardSection.PR_DRAFT: "draft PR",
+    BoardSection.STILL_COOKING: "no PR yet",
+    BoardSection.PRS_FAILED: "PRs not loaded",
+    BoardSection.MUTED: "",
+}
+
+
+def section_label(section: BoardSection) -> str:
+    """Human-readable label for a board section, e.g. ``Done - PR merged``.
+
+    Mirrors the text the TUI heading shows (minus the agent count). Sections
+    with no suffix (e.g. MUTED) return just the prefix.
+    """
+    prefix = SECTION_PREFIX[section]
+    suffix = SECTION_SUFFIX[section]
+    return f"{prefix} - {suffix}" if suffix else prefix
+
+
 class AgentBoardEntry(FrozenModel):
     """A single agent entry on the kanpan board."""
 
@@ -37,7 +73,12 @@ class AgentBoardEntry(FrozenModel):
     work_dir: Path | None = Field(default=None, description="Local work directory (None for remote agents)")
     branch: str | None = Field(default=None, description="Git branch for this agent")
     is_muted: bool = Field(default=False, description="Whether the agent is muted (relegated to bottom)")
-    fields: dict[str, FieldValue] = Field(default_factory=dict, description="Field values from data sources")
+    fields: dict[str, SerializeAsAny[FieldValue]] = Field(
+        default_factory=dict,
+        description="Field values from data sources. SerializeAsAny so model_dump emits each "
+        "FieldValue subclass's full payload (incl. its `kind` discriminator) rather than only "
+        "the FieldValue base fields.",
+    )
     cells: dict[str, CellDisplay] = Field(
         default_factory=dict,
         description="Pre-computed cell displays from field.display(), keyed by field key",
@@ -224,46 +265,3 @@ class KanpanPluginConfig(PluginConfig):
         if self.staleness_threshold_seconds is not None:
             return self.staleness_threshold_seconds
         return STALENESS_FRACTION_OF_REFRESH_INTERVAL * self.refresh_interval_seconds
-
-    def merge_with(self, override: "PluginConfig") -> "KanpanPluginConfig":
-        """Merge this config with an override config."""
-        if not isinstance(override, KanpanPluginConfig):
-            return self
-        merged_enabled = override.enabled if override.enabled is not None else self.enabled
-        merged_commands = {**self.commands, **override.commands}
-        merged_column_order = override.column_order if override.column_order is not None else self.column_order
-        merged_section_order = override.section_order if override.section_order is not None else self.section_order
-        merged_refresh_interval = (
-            override.refresh_interval_seconds
-            if override.refresh_interval_seconds is not None
-            else self.refresh_interval_seconds
-        )
-        merged_auto_cooldown = (
-            override.retry_cooldown_seconds
-            if override.retry_cooldown_seconds is not None
-            else self.retry_cooldown_seconds
-        )
-        merged_staleness_threshold = (
-            override.staleness_threshold_seconds
-            if override.staleness_threshold_seconds is not None
-            else self.staleness_threshold_seconds
-        )
-        merged_data_sources = {**self.data_sources, **override.data_sources}
-        merged_shell_commands = {**self.shell_commands, **override.shell_commands}
-        merged_columns = {**self.columns, **override.columns}
-        merged_on_before_refresh = {**self.on_before_refresh, **override.on_before_refresh}
-        merged_on_after_refresh = {**self.on_after_refresh, **override.on_after_refresh}
-        return KanpanPluginConfig(
-            enabled=merged_enabled,
-            commands=merged_commands,
-            column_order=merged_column_order,
-            section_order=merged_section_order,
-            refresh_interval_seconds=merged_refresh_interval,
-            retry_cooldown_seconds=merged_auto_cooldown,
-            staleness_threshold_seconds=merged_staleness_threshold,
-            data_sources=merged_data_sources,
-            shell_commands=merged_shell_commands,
-            columns=merged_columns,
-            on_before_refresh=merged_on_before_refresh,
-            on_after_refresh=merged_on_after_refresh,
-        )

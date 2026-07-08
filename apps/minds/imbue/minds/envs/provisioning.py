@@ -20,7 +20,7 @@ Split into two deploy paths driven by the activated env's tier:
 
 The orchestration is pure logic; the CLI plumbing in
 ``imbue.minds.cli.env`` builds the :class:`Providers` bundle with the
-real Modal CLI / Neon HTTP / SuperTokens HTTP / OVH HTTP / Modal
+real Modal CLI / Neon HTTP / SuperTokens HTTP / Modal
 deploy callables, and dispatches to the right deploy function based
 on the activated env's name.
 
@@ -66,7 +66,7 @@ from imbue.minds.envs.local_store import env_root_exists
 from imbue.minds.envs.local_store import read_client_config_file
 from imbue.minds.envs.local_store import write_client_config
 from imbue.minds.envs.local_store import write_secrets_file
-from imbue.minds.envs.mngr_agent_cleanup import DestroyMngrAgentFn
+from imbue.minds.envs.mngr_agent_cleanup import DestroyMngrAgentsFn
 from imbue.minds.envs.mngr_agent_cleanup import destroy_all_mngr_agents_in_env
 from imbue.minds.envs.paths import client_config_file
 from imbue.minds.envs.paths import env_root_dir
@@ -86,7 +86,6 @@ from imbue.minds.envs.per_env_deploy import tier_litellm_proxy_url
 from imbue.minds.envs.primitives import DeployStrategy
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.envs.providers.neon_db import NeonProjectRecord
-from imbue.minds.envs.providers.ovh_tags import OvhCredentials
 from imbue.minds.envs.providers.supertokens_app import SuperTokensAppRecord
 from imbue.minds.envs.providers.supertokens_app import app_id_from_connection_uri
 from imbue.minds.envs.recover import RecoverTarget
@@ -101,7 +100,6 @@ from imbue.minds.envs.secret_lifecycle import gc_old_per_tier_secrets
 from imbue.minds.envs.secret_lifecycle import make_deploy_id
 from imbue.minds.envs.secret_lifecycle import timestamped_secret_name
 from imbue.minds.errors import MindError
-from imbue.mngr_ovh.iam_tags import IamResource
 
 # Env var the deployed connector reads at startup to identify which
 # minds env it belongs to. Pushed alongside ``MINDS_TIER_GENERATION_ID``
@@ -136,7 +134,7 @@ class ProviderCredentials(FrozenModel):
         description=(
             "Neon organization id under which per-dev-env Neon *projects* are created "
             "(one project per dev env named ``minds-<env>``). Operator-managed; lives in "
-            "``secrets/minds/dev/neon-admin.NEON_ORG_ID``. Required for the dev tier; "
+            "``secrets/minds/dev/neon-admin/NEON_ORG_ID``. Required for the dev tier; "
             "may be the empty string for shared tiers (which never call POST /projects)."
         ),
     )
@@ -152,24 +150,23 @@ class ProviderCredentials(FrozenModel):
         default=None,
         description=(
             "Existing Neon project id for shared tiers (``creates_resources=false``). "
-            "Read from ``secrets/minds/<tier>/neon-admin.NEON_PROJECT_ID``. Required for "
+            "Read from ``secrets/minds/<tier>/neon-admin/NEON_PROJECT_ID``. Required for "
             "shared-tier deploys so the pre-deploy snapshot + rollback restore can target "
             "the right project; ``None`` for dev (where the project is created per-env)."
         ),
     )
     supertokens_core_url: str = Field(description="Dev-tier SuperTokens core base URL.")
     supertokens_api_key: SecretStr = Field(description="Dev-tier SuperTokens admin API key.")
-    ovh_credentials: OvhCredentials = Field(description="Dev-tier OVH AK/AS/CK credentials (shared across dev envs).")
 
 
 # Tiers whose default deploy strategy is RECREATE: dev (every personal
-# dev env and every CI ephemeral env, since both deploy with
-# ``tier="dev"``). Operator deploys against these almost always follow
-# a "deploy then immediately observe" pattern where a stale warm
+# dev env) and ci (every CI ephemeral env stood up by the deployment-
+# tests orchestrator). Operator deploys against these almost always
+# follow a "deploy then immediately observe" pattern where a stale warm
 # container that keeps serving the prior version's behavior is the
 # opposite of what the operator wants. Shared tiers (staging,
 # production) fall through to ROLLOVER for zero-downtime.
-_DEFAULT_RECREATE_TIERS: Final[frozenset[str]] = frozenset({"dev"})
+_DEFAULT_RECREATE_TIERS: Final[frozenset[str]] = frozenset({"dev", "ci"})
 
 
 def resolve_deploy_strategy(
@@ -191,11 +188,12 @@ def resolve_deploy_strategy(
        deployed binary has not been tested against; cycling all
        containers immediately is the safe choice even for a
        "backwards-compatible" migration.
-    3. Otherwise, ``RECREATE`` for ``dev``-tier deploys (personal dev
-       envs + CI ephemeral envs). The operator's flow is "deploy and
-       immediately observe", and the stale-warm-container window
-       (several minutes for Modal's default rollover) silently masks
-       new code's behavior.
+    3. Otherwise, ``RECREATE`` for the per-env tiers (``dev`` for
+       personal dev envs and ``ci`` for CI ephemeral envs stood up by
+       the deployment-tests orchestrator). The operator's flow on
+       these tiers is "deploy and immediately observe", and the
+       stale-warm-container window (several minutes for Modal's
+       default rollover) silently masks new code's behavior.
     4. Otherwise (staging / production with no migration applied),
        ``ROLLOVER``. Shared tiers prioritize zero-downtime; the
        operator can opt in to ``RECREATE`` with ``--hard`` when they
@@ -220,8 +218,6 @@ CreateNeonProjectFn = Callable[[DevEnvName, str, SecretStr, ConcurrencyGroup], N
 DeleteNeonProjectFn = Callable[[DevEnvName, str, SecretStr], None]
 CreateSuperTokensAppFn = Callable[[DevEnvName, str, SecretStr], SuperTokensAppRecord]
 DeleteSuperTokensAppFn = Callable[[DevEnvName, str, SecretStr], None]
-ListOvhInstancesFn = Callable[[DevEnvName, OvhCredentials], tuple[IamResource, ...]]
-DeleteOvhInstancesFn = Callable[[tuple[IamResource, ...], OvhCredentials], None]
 ModalEnvOpFn = Callable[[DevEnvName, ConcurrencyGroup], None]
 PushPerEnvSecretFn = Callable[[str, dict[str, str], str, ConcurrencyGroup], None]
 # (modal_env, tier, min_containers, deploy_id, strategy, cg) -> deployed URL.
@@ -235,7 +231,8 @@ PushPerEnvSecretFn = Callable[[str, dict[str, str], str, ConcurrencyGroup], None
 # ``<svc>-<tier>-<id>`` Modal Secrets. ``strategy`` is forwarded to
 # ``modal deploy --strategy`` so a single deploy can cycle both apps
 # the same way (see :class:`DeployStrategy`).
-DeployModalAppFn = Callable[[str, str, int, str, DeployStrategy, ConcurrencyGroup], AnyUrl]
+# (modal_env, tier, min_containers, scaledown_window, deploy_id, strategy, cg) -> deployed URL.
+DeployModalAppFn = Callable[[str, str, int, int, str, DeployStrategy, ConcurrencyGroup], AnyUrl]
 # (app_name, modal_env, cg) -> None. Used by tier destroys to ``modal
 # app stop`` each deployed app. Idempotent in the underlying call.
 StopModalAppFn = Callable[[str, str, ConcurrencyGroup], None]
@@ -250,6 +247,9 @@ ListModalSecretsFn = Callable[[str, ConcurrencyGroup], tuple[str, ...]]
 # schema_migrations runner against the per-env host_pool DB. Tests
 # pass a no-op fake; the real implementation shells out to psql.
 ApplyPoolHostsMigrationsFn = Callable[[SecretStr, ConcurrencyGroup], tuple[Path, ...]]
+# (host_pool_dsn, domains, emails, cg) -> None. Seed-if-absent default paid
+# domains/emails into the host_pool DB after migrations. Tests pass a no-op fake.
+SeedPaidListDefaultsFn = Callable[[SecretStr, tuple[str, ...], tuple[str, ...], ConcurrencyGroup], None]
 # (app_name, modal_env, cg) -> latest deployed version id, or None for
 # never-deployed. Used at deploy start to capture pre-deploy state so
 # ``minds env recover`` can `modal app rollback` to it on failure.
@@ -293,6 +293,10 @@ ListCloudflareTunnelsFn = Callable[[DevEnvName, str, SecretStr], tuple[str, ...]
 # (tunnel_ids, account_id, api_token) -> None. Deletes the listed tunnels.
 DeleteCloudflareTunnelsFn = Callable[[tuple[str, ...], str, SecretStr], None]
 ReadPerEnvSecretValuesFn = Callable[[str, str, dict[str, str], ConcurrencyGroup], dict[str, str]]
+# (name, cg) -> None. Removes the env's mngr Docker state container +
+# backing volume, targeting the one exact container by name. No-op when
+# there is no Docker daemon. Real impl lives in ``envs.docker_cleanup``.
+CleanupStateContainerFn = Callable[[DevEnvName, ConcurrencyGroup], None]
 
 
 class Providers(FrozenModel):
@@ -318,8 +322,6 @@ class Providers(FrozenModel):
     )
     create_supertokens_app: CreateSuperTokensAppFn = Field(description="Create the per-dev-env SuperTokens app.")
     delete_supertokens_app: DeleteSuperTokensAppFn = Field(description="Delete the per-dev-env SuperTokens app.")
-    list_ovh_instances: ListOvhInstancesFn = Field(description="List OVH VPSes tagged for this dev env.")
-    delete_ovh_instances: DeleteOvhInstancesFn = Field(description="Delete the listed OVH VPSes.")
     read_per_env_secret_values: ReadPerEnvSecretValuesFn = Field(
         description="(service, tier_vault_prefix, overrides, cg) -> merged values dict for one Modal Secret.",
     )
@@ -345,6 +347,12 @@ class Providers(FrozenModel):
         description=(
             "(host_pool_dsn, cg) -> tuple of applied migration files. "
             "Runs the schema_migrations runner against the per-env host_pool DB."
+        ),
+    )
+    seed_paid_list_defaults: SeedPaidListDefaultsFn = Field(
+        description=(
+            "(host_pool_dsn, domains, emails, cg) -> seed-if-absent the tier's default "
+            "paid domains/emails into the host_pool DB after migrations."
         ),
     )
     get_modal_app_latest_version: GetModalAppLatestVersionFn = Field(
@@ -375,11 +383,19 @@ class Providers(FrozenModel):
             "definitive failure or timeout."
         ),
     )
-    destroy_mngr_agent: DestroyMngrAgentFn = Field(
+    destroy_mngr_agents: DestroyMngrAgentsFn = Field(
         description=(
-            "(agent_id, mngr_host_dir, mngr_prefix, cg) -> `mngr destroy <agent_id>` "
+            "(agent_ids, mngr_host_dir, mngr_prefix, cg) -> single `mngr destroy -f <ids...>` "
             "with the env's MNGR_* vars exported. Used before cloud teardown so the env's "
             "agents stop cleanly before their resources go away."
+        ),
+    )
+    cleanup_state_container: CleanupStateContainerFn = Field(
+        description=(
+            "(name, cg) -> remove the env's mngr Docker state container + backing volume. "
+            "Targets the one exact container by name; no-op when there is no Docker daemon. "
+            "Run right after the mngr-agent teardown so the singleton state container "
+            "(which `mngr destroy` does not touch) doesn't outlive the env."
         ),
     )
     wipe_supertokens_app_data: WipeSuperTokensAppFn = Field(
@@ -654,7 +670,7 @@ def _deploy_env_locked(
             f"Tier {tier!r} has creates_resources=false but no NEON_PROJECT_ID in Vault. "
             f"Pre-deploy snapshot + recover-time DB restore both require it; refusing to "
             "ship a deploy that can't be rolled back. Populate "
-            f"secrets/minds/{tier}/neon-admin.NEON_PROJECT_ID with the project id from the "
+            f"secrets/minds/{tier}/neon-admin/NEON_PROJECT_ID with the project id from the "
             "Neon console and re-run."
         )
 
@@ -759,6 +775,17 @@ def _deploy_env_locked(
         if applied:
             logger.info("Applied {} pool-hosts migration(s): {}", len(applied), [m.name for m in applied])
 
+    # Seed the tier's default paid domains/emails (seed-if-absent) now that the
+    # paid_domains / paid_emails tables exist. Runs every deploy for every tier;
+    # idempotent and a no-op when the tier configures no defaults.
+    paid_domains = tuple(str(d) for d in deploy_config.paid.domains)
+    paid_emails = tuple(str(e) for e in deploy_config.paid.emails)
+    if paid_domains or paid_emails:
+        with info_span(
+            "Seeding default paid-list entries (domains={}, emails={})", list(paid_domains), list(paid_emails)
+        ):
+            providers.seed_paid_list_defaults(host_pool_dsn, paid_domains, paid_emails, parent_concurrency_group)
+
     # Resolve the Modal deploy strategy now that we know whether a
     # migration ran. Done here (rather than at the CLI boundary) so the
     # decision sees the full deploy context the policy depends on; the
@@ -861,18 +888,22 @@ def _deploy_env_locked(
     # Step 5: modal deploys.
     litellm_proxy_min_containers = int(deploy_config.min_containers.litellm_proxy)
     connector_min_containers = int(deploy_config.min_containers.connector)
+    litellm_proxy_scaledown_window = int(deploy_config.scaledown_window.litellm_proxy)
+    connector_scaledown_window = int(deploy_config.scaledown_window.connector)
 
     with info_span(
-        "Deploying llm-{} into env {!r} (min_containers={}, strategy={})",
+        "Deploying llm-{} into env {!r} (min_containers={}, scaledown_window={}, strategy={})",
         tier,
         modal_env,
         litellm_proxy_min_containers,
+        litellm_proxy_scaledown_window,
         deploy_strategy.value,
     ):
         litellm_proxy_url = providers.deploy_litellm_proxy(
             modal_env,
             tier,
             litellm_proxy_min_containers,
+            litellm_proxy_scaledown_window,
             deploy_id,
             deploy_strategy,
             parent_concurrency_group,
@@ -880,16 +911,18 @@ def _deploy_env_locked(
     _assert_deploy_url_matches(actual=litellm_proxy_url, expected=expected_litellm_proxy_url, app=f"llm-{tier}")
 
     with info_span(
-        "Deploying rsc-{} into env {!r} (min_containers={}, strategy={})",
+        "Deploying rsc-{} into env {!r} (min_containers={}, scaledown_window={}, strategy={})",
         tier,
         modal_env,
         connector_min_containers,
+        connector_scaledown_window,
         deploy_strategy.value,
     ):
         connector_url = providers.deploy_remote_service_connector(
             modal_env,
             tier,
             connector_min_containers,
+            connector_scaledown_window,
             deploy_id,
             deploy_strategy,
             parent_concurrency_group,
@@ -1007,11 +1040,12 @@ def _resolve_host_pool_dsn_for_migrations(
 ) -> SecretStr:
     """Return the DSN ``apply_pool_hosts_migrations`` should target for this tier.
 
-    Dev tier (``creates_resources=true``): use the per-env host_pool DSN
-    from the freshly-created or adopted Neon project record. Shared
-    tier (``creates_resources=false``): read ``DATABASE_URL`` from the
-    operator-managed ``secrets/minds/<tier>/neon`` Vault entry (single
-    shared DB where pool_hosts + litellm tables co-exist).
+    Per-env tiers (dev / ci, ``creates_resources=true``): use the per-env
+    host_pool DSN from the freshly-created or adopted Neon project
+    record. Shared tier (``creates_resources=false``): read
+    ``DATABASE_URL`` from the operator-managed
+    ``secrets/minds/<tier>/neon`` Vault entry (single shared DB where
+    pool_hosts + litellm tables co-exist).
 
     Raises :class:`MindError` if the shared-tier Vault entry is missing
     or lacks ``DATABASE_URL`` -- we'd otherwise silently skip migrations
@@ -1130,21 +1164,20 @@ def destroy_env(
        so their cloud resources (Docker containers, pool hosts,
        Cloudflare tunnels) stop cleanly before being torn down.
        Skipped when ``keep_agents=True``.
-    2. Delete every OVH VPS tagged ``minds_env=<name>``.
-    3. Enumerate + delete every Cloudflare tunnel with
+    2. Enumerate + delete every Cloudflare tunnel with
        ``metadata.env=<name>`` (filtered by env name; the tag the
        connector sets at create time encodes the owning env, not the
        tier).
-    4. Clear SuperTokens app data (tier-dependent: delete the app
+    3. Clear SuperTokens app data (tier-dependent: delete the app
        outright for dev / wipe its users for shared tiers).
-    5. Clear Neon DB data (tier-dependent: delete the DB outright for
+    4. Clear Neon DB data (tier-dependent: delete the DB outright for
        dev / DROP SCHEMA for shared tiers).
-    6. Clear Modal infra (tier-dependent: delete the Modal env outright
+    5. Clear Modal infra (tier-dependent: delete the Modal env outright
        for dev / stop apps + delete secrets for shared tiers).
-    7. For shared tiers only: delete the tier generation id from Vault
+    6. For shared tiers only: delete the tier generation id from Vault
        so the next deploy mints a fresh one + every dev's next
        ``activate`` sees a mismatch and auto-wipes their local state.
-    8. Finally, remove ``~/.minds-<name>/`` -- ONLY if every prior step
+    7. Finally, remove ``~/.minds-<name>/`` -- ONLY if every prior step
        succeeded. On any failure, the env root stays so the operator
        can re-run ``destroy`` to pick up where things broke (rather
        than silently leaking expensive cloud resources because the
@@ -1153,7 +1186,7 @@ def destroy_env(
     Proceeds even when the env root is missing on disk. The local env
     root is a convenience pointer; the cloud-side resources are keyed
     off the env *name* (Modal env, Neon project, SuperTokens app,
-    Cloudflare tunnel tags, OVH IAM tags), all of which we can clean
+    Cloudflare tunnel tags), all of which we can clean
     up by name without needing the local directory. This makes destroy
     safe to re-run after an operator who manually ``rm -rf``'d the env
     root would otherwise be locked out of the cloud cleanup.
@@ -1178,7 +1211,8 @@ def destroy_env(
     # resources they reference.
     if keep_agents:
         logger.warning(
-            "minds env destroy {!r}: --keep-agents passed; skipping mngr-agent teardown. "
+            "minds env destroy {!r}: --keep-agents passed; skipping mngr-agent teardown "
+            "(and the Docker state-container cleanup, since kept agents still rely on it). "
             "Run `mngr destroy <agent>` manually for any agents bound to this env.",
             str(name),
         )
@@ -1186,20 +1220,21 @@ def destroy_env(
         with info_span("Destroying mngr agents under env {!r}", str(name)):
             destroyed_count = destroy_all_mngr_agents_in_env(
                 name,
-                destroy_agent=providers.destroy_mngr_agent,
+                destroy_agents=providers.destroy_mngr_agents,
                 parent_concurrency_group=parent_concurrency_group,
             )
             if destroyed_count:
                 logger.info("Destroyed {} mngr agent(s) under env {!r}", destroyed_count, str(name))
 
-    # Step 2: OVH VPSes tagged with this env.
-    with info_span("Cleaning up OVH VPSes tagged for env {!r}", str(name)):
-        ovh_instances = providers.list_ovh_instances(name, credentials.ovh_credentials)
-        if ovh_instances:
-            providers.delete_ovh_instances(ovh_instances, credentials.ovh_credentials)
-            logger.info("Deleted {} OVH VPS(es) for env {!r}", len(ovh_instances), str(name))
+        # Step 1b: remove the env's mngr Docker state container + backing
+        # volume. The singleton state container is independent of individual
+        # agents (it is not torn down by `mngr destroy`), so it must be removed
+        # explicitly -- before the env root, and the profile it derives user_id
+        # from, are gone. Skipped under keep_agents since kept agents need it.
+        with info_span("Cleaning up Docker state container for env {!r}", str(name)):
+            providers.cleanup_state_container(name, parent_concurrency_group)
 
-    # Step 3: Cloudflare tunnels tagged with this env. Keyed off env
+    # Step 2: Cloudflare tunnels tagged with this env. Keyed off env
     # NAME (not tier), since dev envs share the dev-tier CF account and
     # we want to find only this specific env's tunnels.
     with info_span("Cleaning up Cloudflare tunnels tagged for env {!r}", str(name)):
@@ -1215,7 +1250,7 @@ def destroy_env(
         if deleted_tunnels:
             logger.info("Deleted {} Cloudflare tunnel(s) for env {!r}", deleted_tunnels, str(name))
 
-    # Step 4: SuperTokens (dev deletes the per-env app outright; shared
+    # Step 3: SuperTokens (dev deletes the per-env app outright; shared
     # tiers wipe users via delete + recreate of the same app id).
     if lifecycle.creates_resources:
         with info_span("Deleting SuperTokens app for env {!r}", str(name)):
@@ -1234,7 +1269,7 @@ def destroy_env(
             )
             _wipe_supertokens_for_tier(supertokens_values, providers=providers, tier=tier)
 
-    # Step 5: Neon (dev deletes the per-env *project* outright -- atomic
+    # Step 4: Neon (dev deletes the per-env *project* outright -- atomic
     # teardown of both DBs + roles + endpoints; shared tiers DROP SCHEMA
     # on the operator-managed DB they keep across destroy/redeploy).
     if lifecycle.creates_resources:
@@ -1250,7 +1285,7 @@ def destroy_env(
             )
             _wipe_neon_for_tier(neon_values, providers=providers, tier=tier, parent_cg=parent_concurrency_group)
 
-    # Step 6: Modal (dev deletes the per-env Modal env outright which
+    # Step 5: Modal (dev deletes the per-env Modal env outright which
     # cascade-deletes its apps / secrets / volumes; shared tiers stop
     # the deployed apps + delete per-tier Modal Secrets so the next
     # deploy re-pushes fresh values from Vault).
@@ -1274,7 +1309,7 @@ def destroy_env(
                 parent_cg=parent_concurrency_group,
             )
 
-    # Step 7: generation id removal -- ONLY for tiers that use generation
+    # Step 6: generation id removal -- ONLY for tiers that use generation
     # tracking (driven by ``deploy_config.lifecycle.tracks_generation``).
     # For dev, there is no generation Vault entry to remove. Production
     # destroy is hard-refused at the CLI today, so this path is only
@@ -1283,7 +1318,7 @@ def destroy_env(
         with info_span("Deleting tier {!r} generation id from Vault", tier):
             providers.delete_generation_id(tier_vault_prefix, parent_concurrency_group)
 
-    # Step 8: env root removal LAST, only on full success.
+    # Step 7: env root removal LAST, only on full success.
     delete_env_root(name)
 
 

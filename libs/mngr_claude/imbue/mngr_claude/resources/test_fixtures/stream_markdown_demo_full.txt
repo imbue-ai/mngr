@@ -1,0 +1,50 @@
+[38;5;174m ▐[48;5;16m▛███▜[49m▌[39m   [1mClaude Code[0m [38;5;246mv2.1.167
+[38;5;174m▝▜[48;5;16m█████[49m▛▘[39m  [38;5;246mSonnet 4.6 with high effort · API Usage Billing
+[38;5;174m  ▘▘ ▝▝  [39m  [38;5;246m~/.mngr/worktrees/claude-stream-8c128ca22e704572a069b474dd50e3b2
+
+
+[39m [38;5;220m⚠[39m [38;5;220mBoth claude.ai and ANTHROPIC_API_KEY set · auth may not work as expected[39m                                                                                                                             
+   [38;5;246m· to use claude.ai: Unset the ANTHROPIC_API_KEY environment variable, or claude /logout then say "No" to the API key approval before login.[39m                                                          
+   [38;5;246m· to use ANTHROPIC_API_KEY: claude /logout to sign out of claude.ai.
+
+[38;5;239m[48;5;237m❯ [38;5;231mPrint a compact demo of markdown constructs so I can see terminal rendering. Include: a level-2 heading, a sentence with **bold** and *italic* words, an inline link like [39m                            
+  [38;5;231m[Anthropic](https://anthropic.com), a bulleted list of 3 items, a numbered list of 2 items, a blockquote, an inline code span like `foo()`, a fenced code block with two lines of python, and a [39m      
+  [38;5;231m3-column 3-row table. Keep it short.[39m                                                                                                                                                                  
+
+[38;5;231m[49m●[39m [1mMarkdown Demo
+
+[0m  This is [1mbold[0m and [3mitalic[0m text, with a link to [94m]8;id=1rhwlg0;https://anthropic.com\Anthropic[39m]8;;\.
+
+  - First item
+  - Second item
+  - Third item
+
+  1. Step one
+  2. Step two
+
+  [2m▎[0m [3mThis is a blockquote.
+
+[0m  Call [38;5;153mfoo()[39m inline.
+
+  [34mdef[33m [39mgreet(name):
+      [34mreturn[39m [31mf"Hello, [39m{name}"
+
+  ┌───────┬───────┬───────┐
+  │ Name  │ Type  │ Value │
+  ├───────┼───────┼───────┤
+  │ alpha │ int   │ 1     │
+  ├───────┼───────┼───────┤
+  │ beta  │ str   │ "hi"  │
+  ├───────┼───────┼───────┤
+  │ gamma │ float │ 3.14  │
+  └───────┴───────┴───────┘
+
+                                                                                                                                                                                                       
+[38;5;174m✻[39m [38;5;216mScurrying…[38;5;174m [38;5;246m(running stop hooks… 1/3 · 5s · ↓[39m [38;5;246m150 tokens)
+[39m                                                                                                                                                                                       [38;5;246m● high · /effort
+[38;5;244m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[38;5;246m❯ [39m                                    
+[2mResume this session with:[0m[38;5;244m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[2m[39mclaude --resume 5691e93f-71b7-43f6-915b-1665e0fc97c5[0m[38;5;246m/claude-stream-8c128ca22e704572a069b474dd50e3b2] mngr/claude-stream
+[39m[1]+  Terminated                 ( $MNGR_AGENT_STATE_DIR/commands/claude_background_tasks.sh mngr-robinhood-generous-quartz-urchin )
+[10:09:28 user@virtcomp ~/.mngr/worktrees/claude-stream-8c128ca22e704572a069b474dd50e3b2] 

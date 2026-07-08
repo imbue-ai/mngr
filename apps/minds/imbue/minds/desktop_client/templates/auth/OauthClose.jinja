@@ -1,0 +1,13 @@
+{#def email, display_name #}
+{#
+  Terminal page for the OAuth popup window: shows the signed-in identity
+  and instructs the user to close the tab. The opening tab receives a
+  postMessage and continues the flow.
+#}
+<PageNarrowContainer title="Signed in">
+  <div class="text-center">
+    <h1 class="type-heading-lg text-primary mb-2">Signed in</h1>
+    <p class="text-secondary mb-3">Signed in as <strong>{{ display_name or email }}</strong></p>
+    <p class="type-body text-secondary">You can close this tab and return to the app.</p>
+  </div>
+</PageNarrowContainer>

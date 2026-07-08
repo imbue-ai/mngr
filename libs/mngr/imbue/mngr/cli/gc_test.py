@@ -20,7 +20,10 @@ from imbue.mngr.cli.gc import _emit_jsonl_summary
 from imbue.mngr.cli.gc import _format_destroyed_message
 from imbue.mngr.cli.gc import gc
 from imbue.mngr.interfaces.data_types import BuildCacheInfo
+from imbue.mngr.interfaces.data_types import CleanupFailure
+from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.data_types import LogFileInfo
+from imbue.mngr.interfaces.data_types import ProviderResourceInfo
 from imbue.mngr.interfaces.data_types import SizeBytes
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import VolumeInfo
@@ -102,6 +105,17 @@ def _create_build_cache_info(path: str = "/tmp/cache", size_bytes: int = 2000) -
     )
 
 
+def _create_provider_resource_info(
+    name: str = "agent-host-nic", kind: str = "network_interface"
+) -> ProviderResourceInfo:
+    """Create a ProviderResourceInfo for testing."""
+    return ProviderResourceInfo(
+        provider_name=ProviderInstanceName("azure"),
+        kind=kind,
+        name=name,
+    )
+
+
 # =============================================================================
 # Tests for _format_destroyed_message
 # =============================================================================
@@ -162,6 +176,17 @@ def test_format_destroyed_message_volume() -> None:
     assert msg_dry_run == "Would destroy volume: data-vol"
 
 
+def test_format_destroyed_message_provider_resource() -> None:
+    """_format_destroyed_message should format provider-resource messages with kind and provider."""
+    resource = _create_provider_resource_info(name="agent-host-nic", kind="network_interface")
+
+    msg_destroy = _format_destroyed_message("provider_resource", resource, dry_run=False)
+    assert msg_destroy == "Destroyed network_interface: agent-host-nic (azure)"
+
+    msg_dry_run = _format_destroyed_message("provider_resource", resource, dry_run=True)
+    assert msg_dry_run == "Would destroy network_interface: agent-host-nic (azure)"
+
+
 def test_format_destroyed_message_log() -> None:
     """_format_destroyed_message should format log messages."""
     log = _create_log_file_info(path="/var/log/agent.log")
@@ -214,6 +239,7 @@ def test_emit_jsonl_summary_empty_result(capsys: pytest.CaptureFixture[str]) -> 
     assert output["volumes_count"] == 0
     assert output["logs_count"] == 0
     assert output["build_cache_count"] == 0
+    assert output["provider_resources_count"] == 0
     assert output["errors_count"] == 0
     assert output["dry_run"] is False
 
@@ -246,15 +272,17 @@ def test_emit_jsonl_summary_with_mixed_resources(capsys: pytest.CaptureFixture[s
     result.volumes_destroyed = [_create_volume_info(size_bytes=200)]
     result.logs_destroyed = [_create_log_file_info(size_bytes=100)]
     result.build_cache_destroyed = [_create_build_cache_info(size_bytes=300)]
+    result.provider_resources_destroyed = [_create_provider_resource_info()]
 
     _emit_jsonl_summary(result, dry_run=False)
 
     captured = capsys.readouterr()
     output = json.loads(captured.out.strip())
 
-    # 1 work_dir + 2 machines + 1 snapshot + 1 volume + 1 log + 1 build_cache = 7
-    assert output["total_count"] == 7
+    # 1 work_dir + 2 machines + 1 snapshot + 1 volume + 1 log + 1 build_cache + 1 provider_resource = 8
+    assert output["total_count"] == 8
     # 1000 (work_dir) + 500 (snapshot) + 200 (volume) + 100 (log) + 300 (build_cache) = 2100
+    # (provider resources carry no size)
     assert output["total_size_bytes"] == 2100
     assert output["work_dirs_count"] == 1
     assert output["machines_count"] == 2
@@ -262,6 +290,7 @@ def test_emit_jsonl_summary_with_mixed_resources(capsys: pytest.CaptureFixture[s
     assert output["volumes_count"] == 1
     assert output["logs_count"] == 1
     assert output["build_cache_count"] == 1
+    assert output["provider_resources_count"] == 1
 
 
 def test_emit_jsonl_summary_handles_none_snapshot_size(capsys: pytest.CaptureFixture[str]) -> None:
@@ -284,9 +313,12 @@ def test_emit_jsonl_summary_handles_none_snapshot_size(capsys: pytest.CaptureFix
 
 
 def test_emit_jsonl_summary_with_errors(capsys: pytest.CaptureFixture[str]) -> None:
-    """_emit_jsonl_summary should include errors in output."""
+    """_emit_jsonl_summary should include structured failures and formatted errors in output."""
     result = GcResult()
-    result.errors = ["Error 1", "Error 2"]
+    result.failures = [
+        CleanupFailure(category=CleanupFailureCategory.HOST_RESOURCE_REMAINS, message="Error 1"),
+        CleanupFailure(category=CleanupFailureCategory.OTHER, message="Error 2"),
+    ]
 
     _emit_jsonl_summary(result, dry_run=False)
 
@@ -294,7 +326,9 @@ def test_emit_jsonl_summary_with_errors(capsys: pytest.CaptureFixture[str]) -> N
     output = json.loads(captured.out.strip())
 
     assert output["errors_count"] == 2
-    assert output["errors"] == ["Error 1", "Error 2"]
+    assert output["errors"] == ["[HOST_RESOURCE_REMAINS] Error 1", "[OTHER] Error 2"]
+    assert [f["category"] for f in output["failures"]] == ["HOST_RESOURCE_REMAINS", "OTHER"]
+    assert [f["message"] for f in output["failures"]] == ["Error 1", "Error 2"]
 
 
 # =============================================================================
@@ -427,6 +461,7 @@ def test_emit_json_summary_empty_result(capsys: pytest.CaptureFixture[str]) -> N
     assert output["volumes_destroyed"] == []
     assert output["logs_destroyed"] == []
     assert output["build_cache_destroyed"] == []
+    assert output["provider_resources_destroyed"] == []
     assert output["errors"] == []
     assert output["dry_run"] is False
 
@@ -491,7 +526,10 @@ def test_emit_human_summary_shows_machine_records_deleted(capsys: pytest.Capture
 def test_emit_human_summary_errors_displayed(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_human_summary should display errors."""
     result = GcResult()
-    result.errors = ["Error A", "Error B"]
+    result.failures = [
+        CleanupFailure(category=CleanupFailureCategory.LOCAL_STATE_REMAINS, message="Error A"),
+        CleanupFailure(category=CleanupFailureCategory.OTHER, message="Error B"),
+    ]
     _emit_human_summary(result, dry_run=False)
     captured = capsys.readouterr()
     assert "Errors:" in captured.out
@@ -508,18 +546,20 @@ def test_emit_human_summary_with_all_resource_types(capsys: pytest.CaptureFixtur
     result.volumes_destroyed = [_create_volume_info()]
     result.logs_destroyed = [_create_log_file_info()]
     result.build_cache_destroyed = [_create_build_cache_info()]
-    result.errors = ["An error occurred"]
+    result.provider_resources_destroyed = [_create_provider_resource_info()]
+    result.failures = [CleanupFailure(category=CleanupFailureCategory.OTHER, message="An error occurred")]
 
     _emit_human_summary(result, dry_run=False)
     captured = capsys.readouterr()
 
-    assert "Destroyed 6 resource(s) total" in captured.out
+    assert "Destroyed 7 resource(s) total" in captured.out
     assert "Work directories: 1" in captured.out
     assert "Machines: 1" in captured.out
     assert "Snapshots: 1" in captured.out
     assert "Volumes: 1" in captured.out
     assert "Logs: 1" in captured.out
     assert "Build cache: 1" in captured.out
+    assert "Provider resources: 1" in captured.out
     assert "An error occurred" in captured.out
 
 

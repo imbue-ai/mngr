@@ -11,7 +11,6 @@ from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_PATTERN
 from imbue.minds.bootstrap import _ensure_mngr_settings
 from imbue.minds.bootstrap import apply_bootstrap
-from imbue.minds.bootstrap import disable_imbue_cloud_provider_for_account
 from imbue.minds.bootstrap import env_name_from_root_name
 from imbue.minds.bootstrap import is_minds_root_name_set_to_active_env
 from imbue.minds.bootstrap import minds_data_dir_for
@@ -20,6 +19,9 @@ from imbue.minds.bootstrap import mngr_prefix_for
 from imbue.minds.bootstrap import resolve_minds_root_name
 from imbue.minds.bootstrap import root_name_for_env_name
 from imbue.minds.bootstrap import set_imbue_cloud_provider_for_account
+from imbue.minds.bootstrap import set_provider_is_enabled
+from imbue.minds.primitives import CONFIGURED_AWS_REGIONS
+from imbue.minds.testing import stub_mngr_host_dir
 
 
 def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -223,6 +225,10 @@ def test_minds_root_name_pattern_canonical_examples() -> None:
     assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-staging") is not None
     assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-dev-josh-3") is not None
     assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-dev-tname") is not None
+    # CI ephemeral envs (minted by the deployment-tests orchestrator)
+    # share the same shape as dev envs but with a ``ci-`` prefix.
+    assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-ci-20260518t140212z") is not None
+    assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-ci-20260518t140212z-abcd") is not None
     assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "devminds") is None
     # Bare `minds-` with no suffix is rejected -- the env-name regex
     # forbids an empty suffix.
@@ -230,41 +236,25 @@ def test_minds_root_name_pattern_canonical_examples() -> None:
     # Single-char env-name suffixes are rejected -- DEV_ENV_NAME_PATTERN
     # requires both a leading and a trailing alphanumeric (2+ chars).
     assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-a") is None
-    # Dev envs MUST lead with ``dev-``; anything else under the prefix
-    # is rejected as not matching either the staging or dev shape.
+    # Dynamic envs MUST lead with ``dev-`` or ``ci-``; anything else
+    # under the prefix is rejected as not matching either the staging
+    # or dynamic-env shape.
     assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-josh-3") is None
     assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-josh") is None
     assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-production") is None
-    # Bare ``dev-`` with nothing after is rejected (the suffix needs 2+
-    # chars of [a-z0-9_-]).
+    # Bare ``dev-`` / ``ci-`` with nothing after is rejected (the
+    # suffix needs 2+ chars of [a-z0-9_-]).
     assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-dev-") is None
     assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-dev-a") is None
-
-
-def _stub_mngr_host_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, root_name: str) -> Path:
-    """Redirect ``Path.home()`` to ``tmp_path`` and seed a minimal mngr profile.
-
-    Returns the active ``settings.toml`` path. The bootstrap helpers refuse
-    to write anything until ``config.toml`` and the matching profile dir
-    exist, so we materialize them up front. ``Path.home()`` consults
-    ``$HOME`` on Linux/macOS, so swapping that in via monkeypatch.setenv
-    is enough to redirect the helpers without touching ``Path`` itself.
-    """
-    monkeypatch.setenv("HOME", str(tmp_path))
-    mngr_host_dir = mngr_host_dir_for(root_name)
-    mngr_host_dir.mkdir(parents=True, exist_ok=True)
-    profile_id = "testprofile"
-    (mngr_host_dir / "config.toml").write_text(f'profile = "{profile_id}"\n')
-    settings_dir = mngr_host_dir / "profiles" / profile_id
-    settings_dir.mkdir(parents=True, exist_ok=True)
-    return settings_dir / "settings.toml"
+    assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-ci-") is None
+    assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-ci-a") is None
 
 
 _FAKE_CONNECTOR_URL = "https://test--rsc-api.modal.run"
 
 
 def test_set_imbue_cloud_provider_for_account_writes_block(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    settings_path = _stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
     changed = set_imbue_cloud_provider_for_account(
         "alice@example.com",
         connector_url=_FAKE_CONNECTOR_URL,
@@ -278,36 +268,79 @@ def test_set_imbue_cloud_provider_for_account_writes_block(monkeypatch: pytest.M
         "account": "alice@example.com",
         "connector_url": _FAKE_CONNECTOR_URL,
         "is_enabled": True,
+        # Runsc + hardening args so the slow (rebuild) path runs under gVisor.
+        "docker_runtime": "runsc",
+        "install_gvisor_runtime": True,
+        "default_start_args": ["--workdir=/", "--security-opt=no-new-privileges"],
     }
 
 
-def test_disable_imbue_cloud_provider_for_account_flips_is_enabled(
+def test_set_provider_is_enabled_flips_is_enabled_on_existing_block(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    settings_path = _stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
     set_imbue_cloud_provider_for_account(
         "alice@example.com",
         connector_url=_FAKE_CONNECTOR_URL,
         root_name="minds-dev-tname",
     )
 
-    changed = disable_imbue_cloud_provider_for_account("alice@example.com", root_name="minds-dev-tname")
+    changed = set_provider_is_enabled("imbue_cloud_alice-example-com", False, root_name="minds-dev-tname")
     assert changed is True
     parsed = tomllib.loads(settings_path.read_text())
     assert parsed["providers"]["imbue_cloud_alice-example-com"]["is_enabled"] is False
 
-    # Idempotent: a second disable is a no-op.
-    assert disable_imbue_cloud_provider_for_account("alice@example.com", root_name="minds-dev-tname") is False
+    # Idempotent: setting to the same value is a no-op.
+    assert set_provider_is_enabled("imbue_cloud_alice-example-com", False, root_name="minds-dev-tname") is False
+
+    # Re-enabling flips the bit back.
+    assert set_provider_is_enabled("imbue_cloud_alice-example-com", True, root_name="minds-dev-tname") is True
+    parsed = tomllib.loads(settings_path.read_text())
+    assert parsed["providers"]["imbue_cloud_alice-example-com"]["is_enabled"] is True
+
+
+def test_set_provider_is_enabled_creates_override_block_for_missing_provider(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """When [providers.<name>] doesn't exist in minds' settings, it's created with just is_enabled."""
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+
+    changed = set_provider_is_enabled("docker", False, root_name="minds-dev-tname")
+    assert changed is True
+    parsed = tomllib.loads(settings_path.read_text())
+    assert parsed["providers"]["docker"] == {"is_enabled": False}
+
+    # Now re-enable: same block is updated.
+    changed = set_provider_is_enabled("docker", True, root_name="minds-dev-tname")
+    assert changed is True
+    parsed = tomllib.loads(settings_path.read_text())
+    assert parsed["providers"]["docker"] == {"is_enabled": True}
+
+
+def test_set_provider_is_enabled_creates_settings_file_when_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """If minds' active settings file does not yet exist, it is created."""
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    # Make sure no file exists yet
+    if settings_path.exists():
+        settings_path.unlink()
+
+    changed = set_provider_is_enabled("modal", False, root_name="minds-dev-tname")
+    assert changed is True
+    assert settings_path.exists()
+    parsed = tomllib.loads(settings_path.read_text())
+    assert parsed["providers"]["modal"] == {"is_enabled": False}
 
 
 def test_set_force_enable_re_enables_disabled_block(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    settings_path = _stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
     set_imbue_cloud_provider_for_account(
         "alice@example.com",
         connector_url=_FAKE_CONNECTOR_URL,
         root_name="minds-dev-tname",
     )
-    disable_imbue_cloud_provider_for_account("alice@example.com", root_name="minds-dev-tname")
+    set_provider_is_enabled("imbue_cloud_alice-example-com", False, root_name="minds-dev-tname")
 
     changed = set_imbue_cloud_provider_for_account(
         "alice@example.com",
@@ -321,16 +354,17 @@ def test_set_force_enable_re_enables_disabled_block(monkeypatch: pytest.MonkeyPa
 
 
 def test_set_preserve_does_not_re_enable_disabled_block(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """The bootstrap reconcile path must leave a previously auto-disabled
-    provider disabled -- only an explicit signin event force-enables.
+    """The bootstrap reconcile path must leave a previously disabled
+    provider (e.g. from the providers panel toggle) disabled -- only an
+    explicit signin event force-enables.
     """
-    settings_path = _stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
     set_imbue_cloud_provider_for_account(
         "alice@example.com",
         connector_url=_FAKE_CONNECTOR_URL,
         root_name="minds-dev-tname",
     )
-    disable_imbue_cloud_provider_for_account("alice@example.com", root_name="minds-dev-tname")
+    set_provider_is_enabled("imbue_cloud_alice-example-com", False, root_name="minds-dev-tname")
 
     changed = set_imbue_cloud_provider_for_account(
         "alice@example.com",
@@ -350,11 +384,99 @@ def test_ensure_mngr_settings_writes_default_imbue_cloud_disabled(
     instance so ``get_all_provider_instances`` doesn't auto-create one alongside
     the per-account ``imbue_cloud_<slug>`` entries.
     """
-    settings_path = _stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
     _ensure_mngr_settings("minds-dev-tname")
     parsed = tomllib.loads(settings_path.read_text())
     assert parsed["providers"]["imbue_cloud"] == {"backend": "imbue_cloud", "is_enabled": False}
     assert parsed["plugins"]["recursive"]["enabled"] is False
+
+
+def test_ensure_mngr_settings_writes_default_aws_disabled_without_credentials(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The region-less default ``[providers.aws]`` instance must be suppressed even with no AWS creds.
+
+    Otherwise ``get_all_provider_instances`` auto-creates it and its discovery
+    fails every ``mngr list`` cycle ("credentials not configured"), logging a
+    spurious warning. This is the no-credentials case, where no per-region
+    ``aws-<region>`` blocks are written, so the default would be the only AWS
+    provider present.
+    """
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    _ensure_mngr_settings("minds-dev-tname")
+    parsed = tomllib.loads(settings_path.read_text())
+    assert parsed["providers"]["aws"] == {"backend": "aws", "is_enabled": False}
+    assert not [name for name in parsed["providers"] if name.startswith("aws-")]
+
+
+def test_ensure_mngr_settings_keeps_default_aws_disabled_alongside_region_blocks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The default ``[providers.aws]`` stays suppressed even when per-region blocks are written."""
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIATEST")
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    _ensure_mngr_settings("minds-dev-tname")
+    parsed = tomllib.loads(settings_path.read_text())
+    assert parsed["providers"]["aws"] == {"backend": "aws", "is_enabled": False}
+    assert [name for name in parsed["providers"] if name.startswith("aws-")]
+
+
+def test_ensure_mngr_settings_writes_aws_blocks_when_credentials_present(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """One ``[providers.aws-<region>]`` block is written per configured region when AWS creds exist."""
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIATEST")
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    _ensure_mngr_settings("minds-dev-tname")
+    parsed = tomllib.loads(settings_path.read_text())
+    providers = parsed["providers"]
+    for region in CONFIGURED_AWS_REGIONS:
+        block = providers[f"aws-{region}"]
+        assert block == {
+            "backend": "aws",
+            "default_region": region,
+            "default_instance_type": "t3.large",
+            "install_gvisor_runtime": True,
+            "docker_runtime": "runsc",
+            "default_start_args": ["--tmpfs", "/run"],
+        }
+
+
+def test_ensure_mngr_settings_omits_aws_blocks_when_no_credentials(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No AWS provider blocks are written when no AWS credentials are configured.
+
+    Writing dead blocks would make ``mngr list`` fan out to AWS providers that
+    can't authenticate, logging a provider-unavailable error per region.
+    """
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    _ensure_mngr_settings("minds-dev-tname")
+    parsed = tomllib.loads(settings_path.read_text())
+    assert not [name for name in parsed["providers"] if name.startswith("aws-")]
+
+
+def test_ensure_mngr_settings_removes_stale_aws_blocks_when_credentials_removed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Stale ``aws-<region>`` blocks are pruned once AWS credentials are no longer present."""
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIATEST")
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    _ensure_mngr_settings("minds-dev-tname")
+    parsed = tomllib.loads(settings_path.read_text())
+    assert [name for name in parsed["providers"] if name.startswith("aws-")]
+
+    monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
+    _ensure_mngr_settings("minds-dev-tname")
+    parsed_after = tomllib.loads(settings_path.read_text())
+    assert not [name for name in parsed_after["providers"] if name.startswith("aws-")]
 
 
 def test_set_imbue_cloud_provider_for_account_also_writes_default_disabled_block(
@@ -372,7 +494,7 @@ def test_set_imbue_cloud_provider_for_account_also_writes_default_disabled_block
     dir doesn't exist yet at startup), so ``set_imbue_cloud_provider_for_account``
     has to ensure it as part of writing the per-account block.
     """
-    settings_path = _stub_mngr_host_dir(monkeypatch, tmp_path, "minds-staging")
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-staging")
     set_imbue_cloud_provider_for_account(
         "josh@imbue.com",
         connector_url=_FAKE_CONNECTOR_URL,
@@ -395,7 +517,7 @@ def test_set_imbue_cloud_provider_for_account_repairs_missing_default_block_on_r
     even when the per-account block itself is unchanged and the function
     short-circuits its per-account write path.
     """
-    settings_path = _stub_mngr_host_dir(monkeypatch, tmp_path, "minds-staging")
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-staging")
     # Pre-seed: a per-account block exists but the suppression block is missing
     # (mirrors the on-disk state of a staging env that signed in before the
     # fix landed).
@@ -405,6 +527,9 @@ def test_set_imbue_cloud_provider_for_account_repairs_missing_default_block_on_r
         'account = "josh@imbue.com"\n'
         f'connector_url = "{_FAKE_CONNECTOR_URL}"\n'
         "is_enabled = true\n"
+        'docker_runtime = "runsc"\n'
+        "install_gvisor_runtime = true\n"
+        'default_start_args = ["--workdir=/", "--security-opt=no-new-privileges"]\n'
     )
 
     changed = set_imbue_cloud_provider_for_account(

@@ -1,0 +1,19 @@
+{#def id="", card_extra="" #}
+{#
+  Overlay-style modal: fixed dimming backdrop centering an inner card.
+  The dialog is hidden by default (caller toggles ``hidden`` via JS to
+  show/dismiss). Lighter pattern used for in-page confirmation dialogs;
+  unrelated to the inbox modal (which is rendered as its own full page
+  inside a transparent desktop-client overlay view, not as a hidden
+  in-page element).
+
+  ``id`` -- attached to the outer wrapper so the page's JS can find it
+  to toggle visibility.
+  ``card_extra`` -- extra classes for the inner card (e.g. ``text-left``
+  to override the inherited text alignment).
+#}
+<div {% if id %}id="{{ id }}"{% endif %} class="hidden fixed inset-0 z-50 flex items-center justify-center bg-surface-overlay">
+  <div class="bg-surface-primary rounded-lg shadow-overlay border border-default max-w-sm w-full mx-4 p-6 {{ card_extra }}">
+    {{ content }}
+  </div>
+</div>

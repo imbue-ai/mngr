@@ -433,11 +433,14 @@ def test_duplicate_session_id_in_history(tmp_path: Path, stub_mngr_log_sh: str, 
     assert runner.get_output_uuids() == uuids
 
 
-@pytest.mark.parametrize("line_count", [1, 10, 50])
+# The empty-file (0-line) boundary is covered by test_empty_session_file, so this
+# only exercises a single representative non-zero size; 10/50 walked the identical
+# code path and were redundant.
+@pytest.mark.parametrize("line_count", [10])
 def test_various_file_sizes(
     tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str, line_count: int
 ) -> None:
-    """The script should handle session files of various sizes."""
+    """The script should handle a multi-line session file."""
     runner = ScriptRunner(tmp_path, stub_mngr_log_sh, mngr_transcript_lib_sh)
     uuids = [uuid4().hex for _ in range(line_count)]
     lines = [_make_jsonl_line(u) for u in uuids]

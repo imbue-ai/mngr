@@ -201,6 +201,31 @@ def test_check_state_match_host_target(
             None,
             id="no_match_returns_none",
         ),
+        # Agent-only terminal states beyond DONE/WAITING must also match via the
+        # `agent_state_str in target_states` branch.
+        pytest.param(
+            HostState.RUNNING,
+            AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE,
+            {"RUNNING_UNKNOWN_AGENT_TYPE"},
+            "RUNNING_UNKNOWN_AGENT_TYPE",
+            id="agent_running_unknown_type_matches",
+        ),
+        pytest.param(
+            HostState.RUNNING,
+            AgentLifecycleState.REPLACED,
+            {"REPLACED"},
+            "REPLACED",
+            id="agent_replaced_matches",
+        ),
+        # Host-only transient state on an agent target exercises the generic
+        # `host_state_str in target_states` branch.
+        pytest.param(
+            HostState.BUILDING,
+            AgentLifecycleState.RUNNING,
+            {"BUILDING"},
+            "BUILDING",
+            id="host_building_matches_for_agent",
+        ),
     ],
 )
 def test_check_state_match_agent_target(
@@ -214,6 +239,27 @@ def test_check_state_match_agent_target(
     assert result == expected
 
 
+@pytest.mark.parametrize(
+    "host_state, target_states, expected",
+    [
+        # Isolates the "host RUNNING is ignored when watching an agent" rule:
+        # with no agent state, host RUNNING + target {RUNNING} must NOT match.
+        pytest.param(HostState.RUNNING, {"RUNNING"}, None, id="host_running_ignored_when_agent_state_absent"),
+        # A host-only state with no agent state still matches via the host branch.
+        pytest.param(HostState.BUILDING, {"BUILDING"}, "BUILDING", id="host_building_matches_when_agent_state_absent"),
+    ],
+)
+def test_check_state_match_agent_target_with_no_agent_state(
+    host_state: HostState,
+    target_states: set[str],
+    expected: str | None,
+) -> None:
+    # agent_state is None: only the host branch of _check_agent_state_match runs.
+    combined_state = CombinedState(host_state=host_state, agent_state=None)
+    result = check_state_match(combined_state, WaitTargetType.AGENT, frozenset(target_states))
+    assert result == expected
+
+
 # === validate_state_strings ===
 
 
@@ -222,9 +268,25 @@ def test_validate_state_strings_accepts_valid_states() -> None:
     assert result == frozenset({"STOPPED", "RUNNING", "DONE"})
 
 
+def test_validate_state_strings_deduplicates_case_insensitively() -> None:
+    # The same state passed twice (in different cases) collapses to one element.
+    result = validate_state_strings(["STOPPED", "stopped"], ALL_VALID_STATE_STRINGS)
+    assert result == frozenset({"STOPPED"})
+
+
 def test_validate_state_strings_rejects_invalid_state() -> None:
-    with pytest.raises(UserInputError, match="Invalid state"):
+    # The error must name the offending state and enumerate the valid states so
+    # the user can correct their input.
+    with pytest.raises(UserInputError, match="Invalid state: 'NONEXISTENT'. Valid states:"):
         validate_state_strings(["NONEXISTENT"], ALL_VALID_STATE_STRINGS)
+
+
+def test_validate_state_strings_lists_valid_states_sorted_in_error() -> None:
+    # The valid-states enumeration in the message is sorted, against a small
+    # known set so the assertion is exact.
+    valid_states = frozenset({"STOPPED", "RUNNING", "DONE"})
+    with pytest.raises(UserInputError, match=r"Valid states: DONE, RUNNING, STOPPED$"):
+        validate_state_strings(["NONEXISTENT"], valid_states)
 
 
 def test_validate_state_strings_empty_input() -> None:

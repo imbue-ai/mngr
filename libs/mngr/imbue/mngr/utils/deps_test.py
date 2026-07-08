@@ -79,7 +79,7 @@ def test_install_hint_returns_platform_specific_hint() -> None:
         assert dep.install_hint == "use apt"
 
 
-# -- OsName / DependencyCategory / InstallMethod --
+# -- OsName --
 
 
 def test_detect_os_returns_valid_os_name() -> None:
@@ -89,28 +89,6 @@ def test_detect_os_returns_valid_os_name() -> None:
         assert os_name == OsName.MACOS
     else:
         assert os_name == OsName.LINUX
-
-
-def test_dependency_category_values() -> None:
-    """DependencyCategory has CORE and OPTIONAL members."""
-    assert DependencyCategory.CORE == "CORE"
-    assert DependencyCategory.OPTIONAL == "OPTIONAL"
-
-
-def test_install_method_construction() -> None:
-    """InstallMethod can be constructed with all fields."""
-    method = InstallMethod(brew_package="foo", apt_package="bar", custom_install_script="https://example.com")
-    assert method.brew_package == "foo"
-    assert method.apt_package == "bar"
-    assert method.custom_install_script == "https://example.com"
-
-
-def test_install_method_defaults_to_none() -> None:
-    """InstallMethod fields default to None."""
-    method = InstallMethod()
-    assert method.brew_package is None
-    assert method.apt_package is None
-    assert method.custom_install_script is None
 
 
 # -- Dependency catalog --
@@ -142,10 +120,13 @@ def test_all_deps_have_install_method() -> None:
 # -- check_bash_version --
 
 
-def test_check_bash_version_returns_bool() -> None:
-    """check_bash_version returns a boolean."""
-    result = check_bash_version()
-    assert isinstance(result, bool)
+def test_check_bash_version_with_unreachable_minimum_returns_false() -> None:
+    """check_bash_version exercises the version comparison: a minimum no real bash can meet returns False.
+
+    No shipped bash has a major version of 999, so this pins the `version >= minimum`
+    comparison branch (a regression that inverted or dropped the comparison would fail here).
+    """
+    assert check_bash_version(minimum=999) is False
 
 
 def test_check_bash_version_with_minimum_1_returns_true() -> None:

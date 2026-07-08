@@ -16,8 +16,10 @@ import json
 
 import pytest
 
+from imbue.mngr.api.testing import created_host
 from imbue.mngr.primitives import HostName
 from imbue.mngr_claude_usage.plugin import _provision_statusline_shim
+from imbue.mngr_claude_usage.plugin import _stable_shim_path
 from imbue.mngr_modal.instance import ModalProviderInstance
 
 
@@ -32,17 +34,16 @@ def test_provision_statusline_shim_on_modal_host(real_modal_provider: ModalProvi
     - ``read_json_dict_via_host`` reads the planted pre-existing
       ``settings.json`` from the remote host's work_dir.
     - ``install_packaged_script_on_host`` writes the shim and the writer
-      scripts onto the remote host's state_dir/commands/ with mode 0755.
-    - The user-statusline sidecar and the wrapping
-      ``<work_dir>/.claude/settings.local.json`` get written through the
-      remote host as well.
+      scripts onto the remote host's host-stable ``<host_dir>/commands/``
+      directory with mode 0755.
+    - The per-agent user-statusline sidecar under ``<state_dir>/commands/``
+      and the wrapping ``<work_dir>/.claude/settings.local.json`` get
+      written through the remote host as well.
     """
-    host = real_modal_provider.create_host(HostName("usage-test"))
-    try:
-        # All paths are absolute under the remote host's host_dir; mngr core's
-        # get_agent_state_dir_path would produce a parallel layout, but for
-        # this isolated test we pick our own to avoid colliding with anything
-        # else the sandbox might be doing.
+    with created_host(real_modal_provider, HostName("usage-test")) as host:
+        # State dir follows mngr core's ``get_agent_state_dir_path`` layout
+        # (``<host_dir>/agents/<id>``) so the sidecar lands where the shim
+        # expects it at render time.
         state_dir = host.host_dir / "agents" / "agent-modal-test"
         work_dir = host.host_dir / "work"
 
@@ -57,9 +58,10 @@ def test_provision_statusline_shim_on_modal_host(real_modal_provider: ModalProvi
         # Run the provisioner against the remote host.
         _provision_statusline_shim(host, state_dir, work_dir)
 
-        # The shim and writer scripts landed under state_dir/commands/.
-        shim_path = state_dir / "commands" / "claude_statusline.sh"
-        writer_path = state_dir / "commands" / "claude_usage_writer.sh"
+        # The shim and writer scripts land under the host-stable commands dir,
+        # not the per-agent state_dir.
+        shim_path = _stable_shim_path(host.host_dir)
+        writer_path = host.host_dir / "commands" / "claude_usage_writer.sh"
         shim_content = host.read_text_file(shim_path)
         writer_content = host.read_text_file(writer_path)
         # Shell scripts -- shebang sanity-check is enough here; content matches
@@ -68,11 +70,11 @@ def test_provision_statusline_shim_on_modal_host(real_modal_provider: ModalProvi
         assert shim_content.startswith("#!/bin/bash")
         assert writer_content.startswith("#!/bin/bash")
 
-        # Sidecar captured the pre-existing user statusline command.
+        # The runtime sidecar lives under the per-agent state_dir/commands/.
         sidecar = host.read_text_file(state_dir / "commands" / "user_statusline_cmd")
         assert sidecar == pre_existing_command
 
-        # settings.local.json on the remote host now points at our shim.
+        # settings.local.json on the remote host now points at the stable shim.
         installed_settings = json.loads(host.read_text_file(work_dir / ".claude" / "settings.local.json"))
         assert installed_settings["statusLine"] == {"type": "command", "command": str(shim_path)}
 
@@ -83,5 +85,3 @@ def test_provision_statusline_shim_on_modal_host(real_modal_provider: ModalProvi
         assert sidecar_after == pre_existing_command
         installed_settings_after = json.loads(host.read_text_file(work_dir / ".claude" / "settings.local.json"))
         assert installed_settings_after["statusLine"]["command"] == str(shim_path)
-    finally:
-        real_modal_provider.destroy_host(host)

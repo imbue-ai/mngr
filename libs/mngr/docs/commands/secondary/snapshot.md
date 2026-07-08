@@ -48,7 +48,7 @@ mngr snapshot [OPTIONS] COMMAND [ARGS]...
 | `--safe` | boolean | Always query all providers during discovery (disable event-stream optimization). Use this when interfacing with mngr from multiple machines. | `False` |
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
-| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths; append __extend to the leaf key to extend list/dict/set fields) [repeatable] | None |
 | `-h`, `--help` | boolean | Show this message and exit. | `False` |
 
 ## mngr snapshot create
@@ -71,13 +71,6 @@ snapshot_id, host_id, provider, agent_names.
 mngr snapshot create [OPTIONS] [IDENTIFIERS]...
 ```
 **Options:**
-
-## Target Selection
-
-| Name | Type | Description | Default |
-| ---- | ---- | ----------- | ------- |
-| `--agent` | agent_address | Agent address (NAME[@HOST[.PROVIDER]]) to snapshot (can be specified multiple times) | None |
-| `--host` | host_address | Host address (HOST[.PROVIDER]) to snapshot directly (can be specified multiple times) | None |
 
 ## Snapshot Options
 
@@ -109,7 +102,7 @@ mngr snapshot create [OPTIONS] [IDENTIFIERS]...
 | `--safe` | boolean | Always query all providers during discovery (disable event-stream optimization). Use this when interfacing with mngr from multiple machines. | `False` |
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
-| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths; append __extend to the leaf key to extend list/dict/set fields) [repeatable] | None |
 | `-h`, `--help` | boolean | Show this message and exit. | `False` |
 
 
@@ -167,13 +160,6 @@ mngr snapshot list [OPTIONS] [IDENTIFIERS]...
 ```
 **Options:**
 
-## Target Selection
-
-| Name | Type | Description | Default |
-| ---- | ---- | ----------- | ------- |
-| `--agent` | text | Agent name or ID to list snapshots for (can be specified multiple times) | None |
-| `--host` | text | Host ID or name to list snapshots for directly (can be specified multiple times) | None |
-
 ## Filtering
 
 | Name | Type | Description | Default |
@@ -195,7 +181,7 @@ mngr snapshot list [OPTIONS] [IDENTIFIERS]...
 | `--safe` | boolean | Always query all providers during discovery (disable event-stream optimization). Use this when interfacing with mngr from multiple machines. | `False` |
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
-| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths; append __extend to the leaf key to extend list/dict/set fields) [repeatable] | None |
 | `-h`, `--help` | boolean | Show this message and exit. | `False` |
 
 
@@ -237,9 +223,14 @@ Destroy snapshots for agent host(s).
 
 Requires either --snapshot (to delete specific snapshots) or --all-snapshots
 (to delete all snapshots for the resolved hosts). A confirmation prompt is
-shown unless --force is specified.
+shown unless --force is specified. Pass --dry-run to preview what would be
+destroyed without deleting anything.
 
-Use '-' in place of agent names to read them from stdin, one per line.
+Positional arguments can be agent names/IDs or host names/IDs. Each
+identifier is automatically resolved: if it matches a known agent, that
+agent's host is used; otherwise it is treated as a host identifier.
+
+Use '-' in place of identifiers to read them from stdin, one per line.
 
 Supports custom format templates via --format. Available fields:
 snapshot_id, host_id, provider.
@@ -247,7 +238,7 @@ snapshot_id, host_id, provider.
 **Usage:**
 
 ```text
-mngr snapshot destroy [OPTIONS] [AGENTS]...
+mngr snapshot destroy [OPTIONS] [IDENTIFIERS]...
 ```
 **Options:**
 
@@ -255,15 +246,15 @@ mngr snapshot destroy [OPTIONS] [AGENTS]...
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--agent` | agent_address | Agent address (NAME[@HOST[.PROVIDER]]) whose snapshots to destroy (can be specified multiple times) | None |
 | `--snapshot` | text | Snapshot ID to destroy (can be specified multiple times) | None |
-| `--all-snapshots` | boolean | Destroy all snapshots for the specified agent(s) | `False` |
+| `--all-snapshots` | boolean | Destroy all snapshots for the resolved hosts | `False` |
 
 ## Safety
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `-f`, `--force` | boolean | Skip confirmation prompt | `False` |
+| `--dry-run` | boolean | Show what would be destroyed without actually destroying anything | `False` |
 
 ## Common
 
@@ -278,7 +269,7 @@ mngr snapshot destroy [OPTIONS] [AGENTS]...
 | `--safe` | boolean | Always query all providers during discovery (disable event-stream optimization). Use this when interfacing with mngr from multiple machines. | `False` |
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
-| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths; append __extend to the leaf key to extend list/dict/set fields) [repeatable] | None |
 | `-h`, `--help` | boolean | Show this message and exit. | `False` |
 
 
@@ -300,6 +291,12 @@ $ mngr snapshot destroy my-agent --all-snapshots --force
 
 ```bash
 $ mngr snapshot destroy agent1 agent2 --all-snapshots --force
+```
+
+**Preview what a destroy would remove**
+
+```bash
+$ mngr snapshot destroy my-agent --all-snapshots --dry-run
 ```
 
 ## See Also

@@ -23,6 +23,7 @@ from pydantic import PrivateAttr
 from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.errors import ProcessSetupError
+from imbue.concurrency_group.errors import SingleExceptionExpectedError
 from imbue.concurrency_group.event_utils import ReadOnlyEvent
 from imbue.concurrency_group.event_utils import ShutdownEvent
 from imbue.concurrency_group.local_process import RunningProcess
@@ -186,17 +187,21 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
                 exceptions.append(ChildConcurrencyGroupDidNotExitError(child_message))
                 message = message or child_message
 
+        checked_exceptions: list[Exception] = []
         for exception in exceptions:
             if not isinstance(exception, Exception):
                 raise exception
+            checked_exceptions.append(exception)
         assert main_exception is None or isinstance(main_exception, Exception)
 
-        if len(exceptions) > 0:
-            exceptions = _deduplicate_exceptions(tuple(exceptions))
+        if len(checked_exceptions) > 0:
+            deduplicated_exceptions = _deduplicate_exceptions(tuple(checked_exceptions))
             assert message is not None
             if main_exception is not None:
-                raise ConcurrencyExceptionGroup(message, exceptions, main_exception=main_exception) from main_exception
-            raise ConcurrencyExceptionGroup(message, exceptions)
+                raise ConcurrencyExceptionGroup(
+                    message, deduplicated_exceptions, main_exception=main_exception
+                ) from main_exception
+            raise ConcurrencyExceptionGroup(message, deduplicated_exceptions)
 
     def _wait_for_all_strands_to_finish_with_timeout(self, timeout_seconds: float) -> None:
         start_time = time.monotonic()
@@ -430,6 +435,8 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
         cwd: Path | None = None,
         env: Mapping[str, str] | None = None,
         shutdown_event: ReadOnlyEvent | None = None,
+        # Open file descriptors to keep open in (and inherit into) the spawned child, by their fd numbers.
+        pass_fds: Sequence[int] = (),
     ) -> RunningProcess:
         """
         Run a process in the background, returning immediately.
@@ -449,6 +456,7 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
                 is_checked=is_checked_by_group,
                 timeout=timeout,
                 shutdown_event=self._maybe_wrap_external_shutdown_event(shutdown_event),
+                pass_fds=pass_fds,
                 process_class=RunningProcessWithOnLineCallback,
                 process_class_kwargs={"on_line_callback": on_output},
             )
@@ -660,5 +668,5 @@ class ConcurrencyExceptionGroup(ExceptionGroup):
         self,
     ) -> Exception:
         if len(self.exceptions) != 1:
-            raise ValueError("The exception group does not contain exactly one exception.")
+            raise SingleExceptionExpectedError("The exception group does not contain exactly one exception.")
         return self.exceptions[0]

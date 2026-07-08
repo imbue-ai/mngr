@@ -17,14 +17,17 @@ from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.label import parse_label_string
 from imbue.mngr.cli.output_helpers import emit_event
-from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.config.data_types import CommonCliOptions
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import InvalidName
 from imbue.mngr.primitives import OutputFormat
 
 
@@ -60,13 +63,78 @@ def _output_result(
     }
     match output_opts.output_format:
         case OutputFormat.JSON:
-            emit_final_json(result_data)
+            write_json_line(result_data)
         case OutputFormat.JSONL:
             emit_event("rename_result", result_data, OutputFormat.JSONL)
         case OutputFormat.HUMAN:
             write_human_line("Renamed agent: {} -> {}", old_name, new_name)
         case _ as unreachable:
             assert_never(unreachable)
+
+
+def _output_host_result(
+    old_name: str,
+    new_name: str,
+    host_id: str,
+    output_opts: OutputOptions,
+) -> None:
+    """Output the final result of a host rename."""
+    result_data = {
+        "old_name": old_name,
+        "new_name": new_name,
+        "host_id": host_id,
+    }
+    match output_opts.output_format:
+        case OutputFormat.JSON:
+            write_json_line(result_data)
+        case OutputFormat.JSONL:
+            emit_event("rename_host_result", result_data, OutputFormat.JSONL)
+        case OutputFormat.HUMAN:
+            write_human_line("Renamed host: {} -> {}", old_name, new_name)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _run_host_rename(
+    opts: RenameCliOptions,
+    output_opts: OutputOptions,
+    mngr_ctx: MngrContext,
+) -> None:
+    """Rename the host of the referenced agent via the provider.
+
+    The agent address identifies the host (every host has at least one agent);
+    only the provider's logical host name changes -- the agent name, tmux
+    session, env file, and git branch are left untouched.
+    """
+    # Validate the new name against HostName (stricter than AgentName: capped length).
+    try:
+        new_host_name = HostName(str(opts.new_name))
+    except InvalidName as e:
+        raise UserInputError(str(e)) from e
+
+    host_ref, _agent_ref, _agents_by_host = find_one_agent_and_agents_by_host(opts.current, mngr_ctx)
+    old_host_name = str(host_ref.host_name)
+
+    if old_host_name == str(new_host_name):
+        _output(f"Host already named: {new_host_name}", output_opts)
+        return
+
+    if opts.dry_run:
+        _output(f"Would rename host: {old_host_name} -> {new_host_name}", output_opts)
+        return
+
+    provider = get_provider_instance(host_ref.provider_name, mngr_ctx)
+    try:
+        provider.rename_host(host_ref.host_id, new_host_name)
+    except NotImplementedError as e:
+        raise UserInputError(f"Provider '{host_ref.provider_name}' does not support renaming hosts: {e}") from e
+
+    _output_host_result(
+        old_name=old_host_name,
+        new_name=str(new_host_name),
+        host_id=str(host_ref.host_id),
+        output_opts=output_opts,
+    )
 
 
 @click.command(name="rename")
@@ -92,7 +160,7 @@ def _output_result(
 @optgroup.option(
     "--host",
     is_flag=True,
-    help="Rename a host instead of an agent [future]",
+    help="Rename the host of the referenced agent (instead of the agent itself)",
 )
 @optgroup.group("Labels")
 @optgroup.option(
@@ -116,9 +184,12 @@ def rename(ctx: click.Context, **kwargs: Any) -> None:
     )
     logger.debug("Started rename command")
 
-    # Check for unsupported [future] options
+    # Renaming the host (rather than the agent) is a distinct operation: it
+    # mutates the provider's logical host name only, leaving the agent name,
+    # tmux session, env file, and git branch untouched.
     if opts.host:
-        raise NotImplementedError("--host is not implemented yet. Currently only agent renaming is supported.")
+        _run_host_rename(opts, output_opts, mngr_ctx)
+        return
 
     new_agent_name = opts.new_name
 
@@ -197,11 +268,18 @@ and the env file are updated alongside data.json.
 
 If a previous rename was interrupted (e.g., the tmux session was renamed
 but data.json was not updated), re-running the command will attempt
-to complete it.""",
+to complete it.
+
+With --host, the host of the referenced agent is renamed instead of the
+agent. Only the provider's logical host name changes (NEW-NAME is validated
+as a host name); the agent name, tmux session, env file, and git branch are
+untouched. Not all providers support host renaming (e.g. ssh host names are
+user-owned).""",
     aliases=("mv",),
     examples=(
         ("Rename an agent", "mngr rename my-agent new-name"),
         ("Preview what would be renamed", "mngr rename my-agent new-name --dry-run"),
+        ("Rename the host of an agent", "mngr rename --host my-agent new-host-name"),
         ("Use the alias", "mngr mv my-agent new-name"),
     ),
     see_also=(

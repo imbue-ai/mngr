@@ -1,0 +1,49 @@
+{#def email, display_name, provider, user_id_prefix #}
+{#
+  Account settings page. Read-only view of the signed-in user's email,
+  display name (if set), auth provider, and user-id prefix. Email-provider
+  accounts get a "Change password" link to the forgot-password flow. Every
+  variant has a Sign out button that POSTs to /auth/api/signout and
+  redirects home.
+
+  The per-machine error-reporting toggles live on the app-level Settings page
+  (/settings), not here.
+#}
+{% set _scripts %}
+<script>
+  document.getElementById('signout-btn').addEventListener('click', async function () {
+    await fetch('/auth/api/signout', { method: 'POST' });
+    window.location.href = '/';
+  });
+</script>
+{% endset %}
+<PageNarrowContainer title="Account settings" max_width="max-w-[480px]" scripts={{ _scripts }}>
+  <h1 class="type-heading-lg text-primary mb-2">Account settings</h1>
+  <p class="text-secondary mb-6">Manage your Imbue account</p>
+  <div class="flex justify-between items-center py-3 border-b border-subtle">
+    <span class="type-body text-secondary">Email</span>
+    <span class="text-primary font-semibold">{{ email }}</span>
+  </div>
+  {% if display_name %}
+    <div class="flex justify-between items-center py-3 border-b border-subtle">
+      <span class="type-body text-secondary">Name</span>
+      <span class="text-primary font-semibold">{{ display_name }}</span>
+    </div>
+  {% endif %}
+  <div class="flex justify-between items-center py-3 border-b border-subtle">
+    <span class="type-body text-secondary">Auth provider</span>
+    <span class="text-primary font-semibold">{{ provider }}</span>
+  </div>
+  <div class="flex justify-between items-center py-3 border-b border-subtle">
+    <span class="type-body text-secondary">User ID prefix</span>
+    <span class="text-primary font-mono type-label">{{ user_id_prefix }}</span>
+  </div>
+
+  <div class="mt-6 flex flex-col gap-2">
+    {% if provider == 'email' %}
+      <ButtonLink href="/auth/forgot-password" variant="secondary" size="lg" block>Change password</ButtonLink>
+    {% endif %}
+    <Button variant="danger" size="lg" block id="signout-btn">Sign out</Button>
+  </div>
+  <div class="text-center mt-4 type-body text-secondary"><Link href="/" weight="medium">Back to home</Link></div>
+</PageNarrowContainer>

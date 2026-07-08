@@ -9,7 +9,7 @@ from paramiko.pkey import PKey
 
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
-from imbue.mngr_vps_docker.errors import VpsProvisioningError
+from imbue.mngr_vps.errors import VpsProvisioningError
 
 _SSH_CONNECT_BACKOFF_SECONDS: float = 5.0
 _SSH_CONNECT_BANNER_TIMEOUT_SECONDS: float = 30.0
@@ -28,27 +28,6 @@ _ROOT_AUTHORIZED_KEYS_COPY_COMMAND: str = (
     "~/.ssh/authorized_keys /root/.ssh/authorized_keys"
 )
 _ROOT_VERIFY_COMMAND: str = 'test "$(whoami)" = root && echo OK'
-
-# Packages the OVH "Debian 12 - Docker" image does NOT ship that
-# ``mngr_vps_docker`` requires on the outer host:
-#
-# * ``rsync`` -- used by ``_upload_directory_to_outer`` to push the
-#   Docker build context onto the VPS. Without it the build aborts with
-#   ``bash: line 1: rsync: command not found`` after every other
-#   bootstrap step has already succeeded. Cloud-init-using backends
-#   (Vultr) get rsync for free because their base images include it;
-#   OVH does not, so the gap has to be closed here.
-#
-# Kept as a tuple so the list is easy to extend if future vps_docker
-# revisions need another tool the image doesn't ship.
-_REQUIRED_OUTER_PACKAGES: tuple[str, ...] = ("rsync",)
-# apt-get update + install on a fresh VPS routinely takes 30-90s
-# (Debian mirrors plus package extraction). The default
-# ``exec_command(timeout=60)`` is the per-read I/O timeout, but
-# ``recv_exit_status`` waits for the whole command to finish; bump the
-# wall-clock deadline so a slow apt mirror doesn't fail an otherwise-
-# fine bake.
-_OUTER_PACKAGES_INSTALL_TIMEOUT_SECONDS: float = 300.0
 
 
 class _SilentAcceptHostKeyPolicy(paramiko.MissingHostKeyPolicy):
@@ -166,7 +145,7 @@ def bootstrap_root_authorized_keys_via_user(
     in the ``docker`` group, so it can bootstrap root login itself.
 
     mngr operates as root everywhere downstream (the base
-    ``VpsDockerProvider`` opens its outer SSH sessions as ``root``,
+    ``VpsProvider`` opens its outer SSH sessions as ``root``,
     ``docker_over_ssh`` shells out as ``root``, etc.), so this helper
     bridges the OVH-default and the mngr expectation by sudo-copying
     the authorized_keys file into root's home before any other code
@@ -227,58 +206,6 @@ def verify_root_ssh(
         logger.info("Verified SSH as root works on {}:{}", hostname, port)
     finally:
         client.close()
-
-
-def install_required_outer_packages(
-    *,
-    hostname: str,
-    port: int,
-    private_key_path: Path,
-    known_hosts_path: Path,
-    timeout_seconds: float,
-    packages: tuple[str, ...] = _REQUIRED_OUTER_PACKAGES,
-) -> None:
-    """Install packages that ``mngr_vps_docker`` needs on the OVH outer host.
-
-    OVH has no cloud-init, so the package-list mechanism
-    ``generate_cloud_init_user_data`` provides for cloud-init backends
-    (Vultr) doesn't apply here. The OVH ``Debian 12 - Docker`` image
-    ships docker but not ``rsync`` -- which the build-context upload
-    needs -- so we apt-install the gap as the final outer-bootstrap step
-    before handing off to ``VpsDockerProvider.create_host``.
-
-    Runs ``apt-get update`` followed by a single ``apt-get install -y``
-    for the package set. ``DEBIAN_FRONTEND=noninteractive`` prevents
-    debconf from prompting on a non-interactive SSH session.
-
-    Idempotent: a re-run on an already-provisioned host is a no-op for
-    apt (packages already installed) and a refresh of the apt cache.
-    """
-    if not packages:
-        return
-    apt_env = "DEBIAN_FRONTEND=noninteractive"
-    package_list = " ".join(packages)
-    command = f"set -e && {apt_env} apt-get update && {apt_env} apt-get install -y {package_list}"
-    with log_span("Installing {} on OVH VPS {}:{}", list(packages), hostname, port):
-        client = _connect_with_retry(
-            hostname=hostname,
-            port=port,
-            ssh_user="root",
-            private_key_path=private_key_path,
-            known_hosts_path=known_hosts_path,
-            timeout_seconds=timeout_seconds,
-            failure_label=f"SSH as root for installing required outer packages {list(packages)}",
-        )
-        try:
-            _run_or_raise(
-                client,
-                command,
-                failure_label=f"apt-get install {' '.join(packages)}",
-                command_timeout_seconds=_OUTER_PACKAGES_INSTALL_TIMEOUT_SECONDS,
-            )
-            logger.info("Installed required outer packages on {}: {}", hostname, list(packages))
-        finally:
-            client.close()
 
 
 def _connect_with_retry(
@@ -353,7 +280,7 @@ def _connect_with_retry(
 def _load_private_key(private_key_path: Path) -> paramiko.PKey:
     """Load an SSH private key by trying each supported key type in turn.
 
-    The base ``VpsDockerProvider`` produces SSH keypairs via
+    The base ``VpsProvider`` produces SSH keypairs via
     ``ssh_utils.load_or_create_ssh_keypair`` -> ``generate_ssh_keypair``,
     which currently returns an **RSA** key in TraditionalOpenSSL PEM
     format. paramiko's per-class ``from_private_key_file`` constructors

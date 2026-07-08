@@ -23,6 +23,18 @@ mngr kanpan --exclude 'state == "DONE"'
 
 When any filter is active, the header displays a `[filtered]` indicator.
 
+## JSON output
+
+Pass `--format json` (or `--format jsonl`) to skip the TUI and print a single board snapshot to stdout instead. This is a read-only one-shot intended for scripting: it fetches the board once (reusing the on-disk field cache, without writing it back) and exits. The same `--include`/`--exclude` filters apply.
+
+`--format json` emits one object with `columns`, `sections`, `errors`, and `fetch_time_seconds`:
+
+- `columns` lists the displayed columns in board order (mirroring `column_order`). Headers are the plain column titles.
+- `sections` groups agents the same way the board does, in `section_order`, omitting empty sections. Each entry carries both `cells` (the pre-rendered text/url/color shown on the board) and `fields` (the structured underlying values -- e.g. the PR number as an integer -- so consumers don't have to parse display text).
+- Sections you exclude from a custom `section_order` are omitted from the output too, matching what the board shows.
+
+`--format jsonl` emits one agent record per line (each the same shape as an `entries` element, in board order), followed by one `{"event": "error", "message": "..."}` line per fetch error. Use it for streaming/line-oriented consumers; the column and section-order metadata that `json` carries is omitted.
+
 ## Data sources
 
 Kanpan uses pluggable data sources to fetch per-agent data. Each data source produces typed fields that become columns on the board. Built-in data sources:
@@ -79,7 +91,7 @@ Shell commands run once per agent in parallel. The stdout (trimmed) becomes the 
 | `MNGR_FIELD_CI_STATUS` | CI status (from cached fields) |
 | `MNGR_FIELD_<KEY>` | Display text for any other cached field, uppercased key (e.g. `MNGR_FIELD_COMMITS_AHEAD`) |
 
-If your script consumes any of the `MNGR_FIELD_<KEY>` env vars, declare those keys in `inputs` so staleness propagates correctly: the produced cell's `created` is the oldest `created` of the declared inputs (taint propagation). When `inputs` is unset (default), the produced cell is stamped with the current time.
+If your script consumes any `MNGR_FIELD_<KEY>` env vars, declare those keys in `inputs` so the cell is marked stale whenever the inputs it depends on are stale. When `inputs` is unset (default), the cell is treated as freshly produced.
 
 ```toml
 [plugins.kanpan.shell_commands.pr_age]
@@ -90,7 +102,7 @@ if [ -n "$MNGR_FIELD_PR_NUMBER" ]; then
   echo "PR #$MNGR_FIELD_PR_NUMBER"
 fi
 '''
-inputs = ["pr"]  # tainted by the cached `pr` field's `created`
+inputs = ["pr"]  # marked stale when the cached `pr` field is stale
 ```
 
 ### Label-backed columns
@@ -137,7 +149,7 @@ refresh_afterwards = true
 
 Each entry defines a keybinding (the table key, e.g. `c`) that appears in the status bar and runs with the `MNGR_AGENT_NAME` environment variable set to the focused agent's name. Custom commands override builtins when they share the same key. Set `enabled = false` to disable a builtin.
 
-By default, custom commands run immediately on the focused agent. Set `markable = true` to make a command use dired-style batch marking instead: pressing the key marks agents, then `x` executes all marks at once.
+By default, custom commands run immediately on the focused agent. Set `markable = true` to make a command use dired-style batch marking instead: pressing the key marks agents, then `x` executes all marks at once. If any operation fails (including a builtin delete), the marks for the failed agents are kept so you can retry, and the failures are listed at the bottom of the board (alongside fetch errors) until the next execution.
 
 ```toml
 [plugins.kanpan.commands.s]
@@ -190,9 +202,7 @@ retry_cooldown_seconds = 60.0
 
 ## Staleness
 
-Each cached field tracks a `created` timestamp. Cells whose `created` is older than `staleness_threshold_seconds` are rendered in dark grey to signal that the value may be out of date.
-
-When a value is computed from cached inputs (rather than directly from the world), `created` is the oldest `created` of the inputs it consumed -- staleness propagates through the dependency chain. For example, a PR cell whose lookup fell back to a stale cached `repo_path` (because the agent's labels no longer carry a remote) is itself rendered as stale.
+Cells whose underlying value is older than `staleness_threshold_seconds` are rendered in dark grey to signal that the value may be out of date.
 
 ```toml
 [plugins.kanpan]
@@ -201,5 +211,3 @@ When a value is computed from cached inputs (rather than directly from the world
 # updated by the most recent refresh cycle shows as stale.
 # staleness_threshold_seconds = 540.0
 ```
-
-Note that stale cells share their colour with muted-agent rows; they're both "de-emphasized." A muted row flattens its entire row to grey, while staleness applies per-cell on non-muted rows.

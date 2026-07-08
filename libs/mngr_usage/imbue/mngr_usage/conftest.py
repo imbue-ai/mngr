@@ -1,26 +1,9 @@
 """Test fixtures for mngr-usage.
 
 Uses shared plugin test fixtures from mngr (plugin manager, environment isolation,
-temp_mngr_ctx, etc.).
+temp_mngr_ctx, local_host, etc.).
 """
 
-import pytest
-
-from imbue.mngr.hosts.host import Host
-from imbue.mngr.primitives import HostName
-from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
-from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.plugin_testing import register_plugin_test_fixtures
 
 register_plugin_test_fixtures(globals())
-
-
-@pytest.fixture
-def local_host(local_provider: LocalProviderInstance) -> Host:
-    """Local-provider Host for tests that need to create real agents.
-
-    Mirrors libs/mngr/imbue/mngr/conftest.py's local_host fixture, exposed here
-    because register_plugin_test_fixtures doesn't share it across plugin
-    packages.
-    """
-    return local_provider.create_host(HostName(LOCAL_HOST_NAME))

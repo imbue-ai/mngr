@@ -7,13 +7,16 @@ builds ``uv tool install`` commands that preserve existing dependencies
 while adding or removing plugins.
 """
 
+import importlib.metadata
 import sys
 import tomllib
+from collections.abc import Callable
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 from typing import Final
 
+from loguru import logger
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -104,6 +107,59 @@ def read_receipt(receipt_path: Path) -> ToolReceipt:
     extras = [r for r in requirements if r.name != "imbue-mngr"]
 
     return ToolReceipt(base=base, extras=extras)
+
+
+def has_mngr_entry_points(package_name: str) -> bool:
+    """Return whether an installed package registers any ``mngr`` entry points.
+
+    This is what distinguishes an actual mngr plugin from a plain library: the
+    uv-tool receipt's extras include every ``--with`` dependency (e.g. workspace
+    libraries like ``imbue-common`` or ``concurrency-group``), but only packages
+    that declare ``mngr``-group entry points are plugins. Returns False if the
+    package is not installed.
+    """
+    try:
+        dist = importlib.metadata.distribution(package_name)
+    except importlib.metadata.PackageNotFoundError:
+        return False
+    return any(entry_point.group == "mngr" for entry_point in dist.entry_points)
+
+
+def get_installed_plugin_package_names(
+    receipt_path: Path | None = None,
+    is_plugin_package: Callable[[str], bool] | None = None,
+) -> list[str]:
+    """Return installed plugin package names from the uv-tool receipt, best-effort.
+
+    These are the package names ``mngr plugin remove`` accepts. The receipt's
+    extras list every ``--with`` dependency, including non-plugin libraries
+    pulled in alongside editable plugins; this filters those out, keeping only
+    packages that actually register ``mngr`` entry points (see
+    ``has_mngr_entry_points``).
+
+    Returns an empty list when mngr was not installed via ``uv tool`` or the
+    receipt cannot be read -- callers (e.g. the tab completion cache writer)
+    must never fail on a missing/garbled receipt.
+
+    ``receipt_path`` defaults to the live uv-tool receipt and
+    ``is_plugin_package`` to ``has_mngr_entry_points``; callers may pass either
+    explicitly (mainly for testing).
+    """
+    if receipt_path is None:
+        receipt_path = get_receipt_path()
+    if receipt_path is None:
+        return []
+    if is_plugin_package is None:
+        is_plugin_package = has_mngr_entry_points
+    try:
+        receipt = read_receipt(receipt_path)
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        # The receipt is machine-written by uv; a parse/read failure means it is
+        # corrupt or unreadable. Degrade gracefully (no completions) but surface
+        # the corruption rather than swallowing it silently.
+        logger.warning("Could not read uv-tool receipt at {} for plugin completion: {}", receipt_path, e)
+        return []
+    return sorted({requirement.name for requirement in receipt.extras if is_plugin_package(requirement.name)})
 
 
 @pure

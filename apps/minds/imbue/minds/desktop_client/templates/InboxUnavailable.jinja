@@ -1,0 +1,20 @@
+{#def message="" #}
+{#
+  Right-pane fragment shown when ?selected=<id> can't be resolved
+  (unknown id, already-resolved request, externally resolved while
+  open). Served by GET /inbox/detail/<id> for stale ids; also
+  innerHTML-swapped into #inbox-detail by the shell JS when an SSE
+  event resolves the currently-selected item.
+
+  ``message`` is an optional supporting sentence rendered under the
+  heading. Falls back to no extra paragraph so the heading is never
+  duplicated when callers omit a message.
+#}
+<div class="permissions-detail">
+  <h1 class="type-heading text-primary">
+    This permission request is no longer available
+  </h1>
+  {% if message %}
+    <p class="mt-2 text-secondary">{{ message }}</p>
+  {% endif %}
+</div>

@@ -57,7 +57,7 @@ def _run_deny(payload: dict[str, object] | None) -> Any:
 
 
 def test_deny_emits_short_skill_pointer_reason(hook_env: pytest.MonkeyPatch) -> None:
-    """Golden path: deny reason is a one-liner pointing at the mngr-subagents skill.
+    """Golden path: deny reason is a one-liner pointing at the mngr-proxy skill.
 
     No wait-script path, no target name, no prompt content -- the
     skill is the single source of truth for the protocol. ``hook_env``
@@ -74,7 +74,7 @@ def test_deny_emits_short_skill_pointer_reason(hook_env: pytest.MonkeyPatch) -> 
     reason = hook_out["permissionDecisionReason"]
     assert isinstance(reason, str)
     assert "deny mode" in reason
-    assert "mngr-subagents" in reason
+    assert "mngr-proxy" in reason
     # The skill is the single source of truth -- no wait-script path,
     # no target name, no prompt body should leak into the reason.
     assert "wait-" not in reason
@@ -157,7 +157,7 @@ def test_deny_does_not_require_state_dir_or_parent_name(clean_env: pytest.Monkey
     response = _run_deny(_hook_input())
 
     assert response["hookSpecificOutput"]["permissionDecision"] == "deny"
-    assert "mngr-subagents" in response["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "mngr-proxy" in response["hookSpecificOutput"]["permissionDecisionReason"]
 
 
 def test_deny_at_max_depth_emits_depth_limit_deny(hook_env: pytest.MonkeyPatch) -> None:
@@ -180,7 +180,7 @@ def test_deny_at_max_depth_emits_depth_limit_deny(hook_env: pytest.MonkeyPatch) 
     assert "3/3" in reason
     assert "Cannot spawn nested Task tools" in reason
     # Skill pointer is replaced with the depth-limit reason at the limit.
-    assert "mngr-subagents" not in reason
+    assert "mngr-proxy" not in reason
 
 
 def test_deny_below_max_depth_emits_skill_pointer_reason(hook_env: pytest.MonkeyPatch) -> None:
@@ -191,7 +191,7 @@ def test_deny_below_max_depth_emits_skill_pointer_reason(hook_env: pytest.Monkey
     response = _run_deny(_hook_input())
 
     reason = response["hookSpecificOutput"]["permissionDecisionReason"]
-    assert "mngr-subagents" in reason
+    assert "mngr-proxy" in reason
     assert "depth limit" not in reason
 
 
@@ -236,7 +236,7 @@ def test_deny_typed_subagent_reason_points_at_resolved_agent_definition(
 
     reason = response["hookSpecificOutput"]["permissionDecisionReason"]
     # Base skill pointer is still present.
-    assert "mngr-subagents" in reason
+    assert "mngr-proxy" in reason
     # Typed-subagent pointer appended with the resolved path.
     assert str(marketplace_agent) in reason
     assert "prepend the body" in reason
@@ -265,7 +265,7 @@ def test_deny_typed_subagent_reason_omits_pointer_for_unresolved_type(
 
     response = _run_deny(_hook_input())
     reason = response["hookSpecificOutput"]["permissionDecisionReason"]
-    assert "mngr-subagents" in reason
+    assert "mngr-proxy" in reason
     assert "prepend the body" not in reason
     assert ".md" not in reason
 
@@ -289,7 +289,7 @@ def test_deny_is_uniform_across_stdin_shapes(raw_stdin: str, hook_env: pytest.Mo
     (1) ``permissionDecision == "deny"`` for every stdin shape -- a
         passthrough would let the native Task tool run, defeating the
         point of deny mode.
-    (2) ``"mngr-subagents" in permissionDecisionReason`` -- the deny
+    (2) ``"mngr-proxy" in permissionDecisionReason`` -- the deny
         reason consistently points at the skill, regardless of what
         Claude was trying to delegate (or whether the hook input even
         parsed).
@@ -303,4 +303,4 @@ def test_deny_is_uniform_across_stdin_shapes(raw_stdin: str, hook_env: pytest.Mo
     deny_hook.run(stdin_buffer, stdout_buffer)
     hook_out = json.loads(stdout_buffer.getvalue())["hookSpecificOutput"]
     assert hook_out["permissionDecision"] == "deny"
-    assert "mngr-subagents" in hook_out["permissionDecisionReason"]
+    assert "mngr-proxy" in hook_out["permissionDecisionReason"]

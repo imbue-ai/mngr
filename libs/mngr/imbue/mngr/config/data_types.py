@@ -4,6 +4,7 @@ import os
 import shlex
 from enum import auto
 from pathlib import Path
+from typing import Annotated
 from typing import Any
 from typing import Final
 from typing import Self
@@ -11,18 +12,24 @@ from typing import TypeVar
 from uuid import uuid4
 
 import pluggy
+from pydantic import AfterValidator
 from pydantic import Field
 from pydantic import GetCoreSchemaHandler
 from pydantic import field_validator
+from pydantic import model_validator
 from pydantic_core import CoreSchema
 from pydantic_core import core_schema
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.primitives import PositiveFloat
 from imbue.imbue_common.pure import pure
+from imbue.mngr.config.field_markers import RegistryField
+from imbue.mngr.config.overlay_merge import merge_models_via_overlay
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import ParseSpecError
+from imbue.mngr.errors import ProviderTimeoutConfigError
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import LifecycleHook
@@ -34,6 +41,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import UserId
 from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr.utils.logging import LoggingConfig
+from imbue.overlay.markers import ScalarTuple
 
 USER_ID_FILENAME: Final[str] = "user_id"
 
@@ -47,10 +55,39 @@ _DEFAULT_DESTROYED_HOST_PERSISTED_SECONDS: Final[float] = 60.0 * 60.0 * 24.0 * 7
 # agent creation and discovery).
 _DEFAULT_MIN_ONLINE_HOST_AGE_SECONDS: Final[float] = 60.0 * 10.0
 
+# Per-provider discovery cadence and timeout defaults. Each provider is
+# discovered on its own decoupled loop (see api/discovery_events.py) so a slow
+# or hung provider cannot block discovery of any other provider. These bound
+# that loop with the project's two-threshold timeout pattern: warn first, then
+# declare the provider errored after the (longer) error timeout. The host and
+# agent sub-timeouts bound a single slow host/agent read so it surfaces as
+# UNKNOWN rather than holding up its whole provider; they are validated to stay
+# below the provider error timeout.
+_DEFAULT_DISCOVERY_POLL_INTERVAL_SECONDS: Final[float] = 30.0
+_DEFAULT_DISCOVERY_WARN_SECONDS: Final[float] = 20.0
+_DEFAULT_DISCOVERY_ERROR_TIMEOUT_SECONDS: Final[float] = 120.0
+_DEFAULT_HOST_DISCOVERY_TIMEOUT_SECONDS: Final[float] = 30.0
+_DEFAULT_AGENT_DISCOVERY_TIMEOUT_SECONDS: Final[float] = 30.0
+
 # === Helper Functions ===
 
-T = TypeVar("T")
 PluginConfigT = TypeVar("PluginConfigT", bound="PluginConfig")
+
+
+def _coerce_to_scalar_tuple(value: tuple[str, ...]) -> ScalarTuple:
+    """After-validator for ``ScalarStrTuple``: wrap the validated string tuple in
+    ``ScalarTuple`` so the settings-narrowing guard treats the field as
+    replace-by-default."""
+    return ScalarTuple(value)
+
+
+# A ``tuple[str, ...]`` config field that is semantically a single scalar value: a
+# higher-precedence settings layer that sets it replaces the whole value rather than
+# narrowing it. Use for fields where combining entries across config layers is never
+# the intent (e.g. an AWS provider's ``allowed_ssh_cidrs``). The narrowing exemption
+# only takes effect under ``model_validate`` (which runs the after-validator);
+# ``_parse_providers`` validates provider blocks, so provider-config fields qualify.
+ScalarStrTuple = Annotated[tuple[str, ...], AfterValidator(_coerce_to_scalar_tuple)]
 
 
 @pure
@@ -72,34 +109,6 @@ def split_cli_args_string(cli_args: str) -> tuple[str, ...]:
     return tuple(lexer)
 
 
-@pure
-def merge_tuples(base: tuple[str, ...], override: tuple[str, ...]) -> tuple[str, ...]:
-    """Merge tuples by concatenation, returning base unchanged if override is empty."""
-    if override:
-        return base + override
-    return base
-
-
-@pure
-def merge_list_fields(base: list[T], override: list[T] | None) -> list[T]:
-    """Merge list fields, concatenating if override is not None."""
-    if override is not None:
-        return list(base) + list(override)
-    return base
-
-
-K = TypeVar("K")
-V = TypeVar("V")
-
-
-@pure
-def merge_dict_fields(base: dict[K, V], override: dict[K, V] | None) -> dict[K, V]:
-    """Merge dict fields, with override keys taking precedence."""
-    if override is not None:
-        return {**base, **override}
-    return base
-
-
 # === Enums ===
 
 
@@ -108,6 +117,19 @@ class WorkDirExtraPathMode(UpperCaseStrEnum):
 
     SHARE = auto()
     COPY = auto()
+
+
+class ConfigScope(UpperCaseStrEnum):
+    """A settings-file layer: the user profile, the project, or the local override.
+
+    The lowercased member name is the value accepted by ``mngr config set
+    --scope`` and surfaced in diagnostics; ``get_config_path`` (cli/config.py)
+    and ``read_config_layers`` (pre_readers.py) both map these to the same files.
+    """
+
+    USER = auto()
+    PROJECT = auto()
+    LOCAL = auto()
 
 
 # === Value Types ===
@@ -151,18 +173,6 @@ class HookDefinition(FrozenModel):
 
 
 # === Config Types ===
-
-
-AGENT_TYPE_CONCAT_TUPLE_FIELDS: Final[frozenset[str]] = frozenset(
-    {
-        "cli_args",
-        "extra_provision_command",
-        "upload_file",
-        "create_directory",
-        "env",
-        "env_file",
-    }
-)
 
 
 class AgentTypeConfig(FrozenModel):
@@ -213,41 +223,6 @@ class AgentTypeConfig(FrozenModel):
             return split_cli_args_string(value) if value else ()
         return tuple(value)
 
-    def merge_with(self, override: Self) -> Self:
-        """Merge this config with an override config.
-
-        Important note: despite the type signatures, any of these fields may be None in the override--this means that they were NOT set in the toml (and thus should be ignored)
-
-        Uses model_fields_set to determine which fields were explicitly set in
-        the override config, so that subclass-specific fields (e.g., ClaudeAgentConfig's
-        auto_dismiss_dialogs) are correctly preserved during merges.
-
-        Scalar fields: override wins if explicitly set
-        Tuple fields (see AGENT_TYPE_CONCAT_TUPLE_FIELDS): concatenate
-        """
-        # Allow override to be the same class or a base class of self (e.g., when
-        # a secondary config file defines the same custom type without repeating
-        # parent_type, it gets parsed as the base AgentTypeConfig). Reject
-        # sibling subclasses (e.g., ClaudeAgentConfig vs CodexAgentConfig).
-        if not isinstance(self, type(override)):
-            raise ConfigParseError(f"Cannot merge {self.__class__.__name__} with {type(override).__name__}")
-
-        explicitly_set = override.model_fields_set
-        if not explicitly_set:
-            return self
-
-        base_values = self.model_dump()
-        override_values = override.model_dump()
-        updates: list[tuple[str, Any]] = []
-
-        for field_name in explicitly_set:
-            if field_name in AGENT_TYPE_CONCAT_TUPLE_FIELDS:
-                updates.append((field_name, merge_tuples(base_values[field_name], override_values[field_name])))
-            else:
-                updates.append((field_name, override_values[field_name]))
-
-        return self.model_copy_update(*updates)
-
 
 class ProviderInstanceConfig(FrozenModel):
     """Defines a custom provider instance."""
@@ -274,41 +249,54 @@ class ProviderInstanceConfig(FrozenModel):
         description="Minimum age (in seconds) before GC will destroy an online host with no agents. "
         "Overrides the global default_min_online_host_age_seconds when set.",
     )
+    discovery_poll_interval_seconds: PositiveFloat = Field(
+        default=PositiveFloat(_DEFAULT_DISCOVERY_POLL_INTERVAL_SECONDS),
+        description="How often (in seconds) this provider's decoupled discovery loop re-polls. "
+        "Each provider polls independently so a slow provider cannot delay any other.",
+    )
+    discovery_warn_seconds: PositiveFloat = Field(
+        default=PositiveFloat(_DEFAULT_DISCOVERY_WARN_SECONDS),
+        description="How long (in seconds) a single discovery poll for this provider may run before "
+        "a 'discovery is slow' warning is logged. The first threshold of the two-threshold timeout; "
+        "must be below discovery_error_timeout_seconds.",
+    )
+    discovery_error_timeout_seconds: PositiveFloat = Field(
+        default=PositiveFloat(_DEFAULT_DISCOVERY_ERROR_TIMEOUT_SECONDS),
+        description="How long (in seconds) a single discovery poll for this provider may run before it "
+        "is declared errored and a per-provider DiscoveryError is emitted (the poll's thread keeps "
+        "running and its late result is accepted if it eventually returns). Set effectively infinite "
+        "to reproduce the old wait-for-this-provider behavior.",
+    )
+    host_discovery_timeout_seconds: PositiveFloat = Field(
+        default=PositiveFloat(_DEFAULT_HOST_DISCOVERY_TIMEOUT_SECONDS),
+        description="How long (in seconds) to wait for a single host's discovery before marking it "
+        "UNKNOWN in the provider's snapshot. Must be below discovery_error_timeout_seconds.",
+    )
+    agent_discovery_timeout_seconds: PositiveFloat = Field(
+        default=PositiveFloat(_DEFAULT_AGENT_DISCOVERY_TIMEOUT_SECONDS),
+        description="How long (in seconds) to wait for a single agent's discovery before marking it "
+        "UNKNOWN in the provider's snapshot. Must be below discovery_error_timeout_seconds.",
+    )
 
-    def merge_with(self, override: "ProviderInstanceConfig") -> "ProviderInstanceConfig":
-        """Merge this config with an override config.
-
-        Important note: despite the type signatures, any of these fields may be None in the override--this means that they were NOT set in the toml (and thus should be ignored)
-
-        Scalar fields: override wins if not None
-        List fields: concatenate both lists
-        Dict fields: merge keys, with override keys taking precedence
-        """
-        # Ensure override is same type as self
-        if not isinstance(override, self.__class__):
-            raise ConfigParseError(f"Cannot merge {self.__class__.__name__} with different provider config type")
-
-        # Merge all fields: for each field, use appropriate merge strategy based on type
-        # Backend always comes from override
-        merged_values: dict[str, Any] = {}
-        for field_name in self.__class__.model_fields:
-            if field_name == "backend":
-                merged_values[field_name] = override.backend
-            else:
-                base_value = getattr(self, field_name)
-                override_value = getattr(override, field_name)
-                if isinstance(base_value, list):
-                    # Lists: concatenate
-                    merged_values[field_name] = merge_list_fields(base_value, override_value)
-                elif isinstance(base_value, dict):
-                    # Dicts: merge keys with override taking precedence
-                    merged_values[field_name] = merge_dict_fields(base_value, override_value)
-                elif override_value is not None:
-                    # Scalars: override wins if not None
-                    merged_values[field_name] = override_value
-                else:
-                    merged_values[field_name] = base_value
-        return self.__class__(**merged_values)
+    @model_validator(mode="after")
+    def _validate_discovery_timeouts_are_ordered(self) -> "ProviderInstanceConfig":
+        # The host/agent sub-provider timeouts and the warn threshold must all fire
+        # before the provider error timeout. Otherwise a slow host/agent could never
+        # surface as UNKNOWN before the whole provider is declared errored, and the
+        # "warn first, then error" two-threshold pattern would be incoherent.
+        for field_name, value in (
+            ("host_discovery_timeout_seconds", self.host_discovery_timeout_seconds),
+            ("agent_discovery_timeout_seconds", self.agent_discovery_timeout_seconds),
+            ("discovery_warn_seconds", self.discovery_warn_seconds),
+        ):
+            if value >= self.discovery_error_timeout_seconds:
+                raise ProviderTimeoutConfigError(
+                    f"{field_name} ({value}s) must be below discovery_error_timeout_seconds "
+                    f"({self.discovery_error_timeout_seconds}s) so a slow host/agent surfaces as "
+                    f"UNKNOWN (and the slow-discovery warning fires) before the whole provider is "
+                    f"declared errored"
+                )
+        return self
 
 
 class PluginConfig(FrozenModel):
@@ -318,16 +306,6 @@ class PluginConfig(FrozenModel):
         default=True,
         description="Whether this plugin is enabled",
     )
-
-    def merge_with(self, override: "PluginConfig") -> "PluginConfig":
-        """Merge this config with an override config.
-
-        Important note: despite the type signatures, any of these fields may be None in the override--this means that they were NOT set in the toml (and thus should be ignored)
-
-        Scalar fields: override wins if not None
-        """
-        merged_enabled = override.enabled if override.enabled is not None else self.enabled
-        return self.__class__(enabled=merged_enabled)
 
 
 class CommandDefaults(FrozenModel):
@@ -348,20 +326,6 @@ class CommandDefaults(FrozenModel):
         description="Default subcommand when this group is invoked with no recognized command. "
         "Empty string disables defaulting (shows help instead).",
     )
-
-    def merge_with(self, override: Self) -> Self:
-        """Merge this config with an override config.
-
-        Important note: despite the type signatures, any of these fields may be None in the override--this means that they were NOT set in the toml (and thus should be ignored)
-
-        For command defaults, later configs completely override earlier ones.
-        default_subcommand: scalar, override wins if not None.
-        """
-        merged_defaults = {**self.defaults, **override.defaults}
-        merged_default_subcommand = (
-            override.default_subcommand if override.default_subcommand is not None else self.default_subcommand
-        )
-        return self.__class__(defaults=merged_defaults, default_subcommand=merged_default_subcommand)
 
 
 class CreateTemplateName(str):
@@ -402,16 +366,6 @@ class CreateTemplate(FrozenModel):
         description="Map of parameter name to value for create command options",
     )
 
-    def merge_with(self, override: Self) -> Self:
-        """Merge this template with an override template.
-
-        Important note: despite the type signatures, any of these fields may be None in the override--this means that they were NOT set in the toml (and thus should be ignored)
-
-        For templates, later configs override earlier ones on a per-key basis.
-        """
-        merged_options = {**self.options, **override.options}
-        return self.__class__(options=merged_options)
-
 
 class RetryConfig(FrozenModel):
     """Configuration for connection retry behavior.
@@ -430,21 +384,56 @@ class RetryConfig(FrozenModel):
         description="Delay between connection retries (e.g., '5s', '1m')",
     )
 
-    def merge_with(self, override: "RetryConfig") -> "RetryConfig":
+
+class TmuxConfig(FrozenModel):
+    """Configuration for the tmux sessions that mngr runs agents in.
+
+    These options let tmux users customize how mngr creates and attaches to agent
+    sessions without resorting to a full ``connect_command`` override. See
+    ``docs/tmux_users.md`` for usage.
+    """
+
+    primary_window_name: str = Field(
+        default="agent",
+        min_length=1,
+        description="Name of the primary tmux window where the agent runs. mngr targets this "
+        "window by name rather than by index (``:0``), so its targeting works regardless of the "
+        "user's tmux 'base-index' setting.",
+    )
+    attach_args: tuple[str, ...] = Field(
+        default=(),
+        description="Extra tmux client flags inserted before the 'attach' subcommand when "
+        "connecting to an agent, i.e. ``tmux <attach_args> attach ...``. For example, "
+        "['-CC'] enables iTerm2 control mode; '-u' / '-2' force UTF-8 / 256-color.",
+    )
+    additional_config_path: Path | None = Field(
+        default=None,
+        description="Path (on the agent's host) to an additional tmux config file sourced into "
+        "every mngr session. Unlike the auto-generated ~/.mngr/tmux.conf, this file is never "
+        "overwritten by mngr, so it is a stable place for mngr-session-specific tmux config.",
+    )
+
+    @field_validator("attach_args", mode="before")
+    @classmethod
+    def _normalize_attach_args(cls, value: str | list[str] | tuple[str, ...]) -> tuple[str, ...]:
+        if isinstance(value, str):
+            return split_cli_args_string(value) if value else ()
+        return tuple(value)
+
+    def merge_with(self, override: Self) -> Self:
         """Merge this config with an override config.
 
-        Important note: despite the type signatures, any of these fields may be None in the override--this means that they were NOT set in the toml (and thus should be ignored)
-
-        Scalar fields: override wins if not None
+        Uses ``model_fields_set`` so only the fields the override layer actually
+        set replace the base value. ``attach_args`` is assign-by-default like
+        other aggregate fields; use ``tmux.attach_args__extend`` in TOML for
+        additive behavior.
         """
-        return RetryConfig(
-            connect_retry_times=override.connect_retry_times
-            if override.connect_retry_times is not None
-            else self.connect_retry_times,
-            connect_retry_delay=override.connect_retry_delay
-            if override.connect_retry_delay is not None
-            else self.connect_retry_delay,
-        )
+        explicitly_set = override.model_fields_set
+        if not explicitly_set:
+            return self
+        override_values = override.model_dump()
+        updates: list[tuple[str, Any]] = [(field_name, override_values[field_name]) for field_name in explicitly_set]
+        return self.model_copy_update(*updates)
 
 
 class MngrConfig(FrozenModel):
@@ -477,15 +466,15 @@ class MngrConfig(FrozenModel):
         default_factory=list,
         description="List of enabled provider backends. If empty, all backends are enabled. If non-empty, only the listed backends are enabled.",
     )
-    agent_types: dict[AgentTypeName, AgentTypeConfig] = Field(
+    agent_types: Annotated[dict[AgentTypeName, AgentTypeConfig], RegistryField()] = Field(
         default_factory=dict,
         description="Custom agent type definitions",
     )
-    providers: dict[ProviderInstanceName, ProviderInstanceConfig] = Field(
+    providers: Annotated[dict[ProviderInstanceName, ProviderInstanceConfig], RegistryField()] = Field(
         default_factory=dict,
         description="Custom provider instance definitions",
     )
-    plugins: dict[PluginName, PluginConfig] = Field(
+    plugins: Annotated[dict[PluginName, PluginConfig], RegistryField()] = Field(
         default_factory=dict,
         description="Plugin configurations",
     )
@@ -493,11 +482,11 @@ class MngrConfig(FrozenModel):
         default_factory=frozenset,
         description="Set of plugin names that were explicitly disabled (used to filter backends)",
     )
-    commands: dict[str, CommandDefaults] = Field(
+    commands: Annotated[dict[str, CommandDefaults], RegistryField()] = Field(
         default_factory=dict,
         description="Default values for CLI command parameters (e.g., 'commands.create')",
     )
-    create_templates: dict[CreateTemplateName, CreateTemplate] = Field(
+    create_templates: Annotated[dict[CreateTemplateName, CreateTemplate], RegistryField()] = Field(
         default_factory=dict,
         description="Named templates for the create command (e.g., 'create_templates.modal-dev')",
     )
@@ -521,12 +510,17 @@ class MngrConfig(FrozenModel):
     )
     connect_command: str | None = Field(
         default=None,
-        description="Custom command to run instead of the builtin connect when create or start connects to agents. "
+        description="Custom command to run instead of the builtin connect when create, start, or connect connects to agents. "
         "The environment variables MNGR_AGENT_NAME and MNGR_SESSION_NAME are set before running the command.",
     )
     is_nested_tmux_allowed: bool = Field(
         default=False,
         description="Allow attaching to tmux sessions from within an existing tmux session by unsetting $TMUX",
+    )
+    tmux: TmuxConfig = Field(
+        default_factory=TmuxConfig,
+        description="Configuration for the tmux sessions that mngr runs agents in "
+        "(primary window name, attach flags such as -CC, extra sourced config file).",
     )
     headless: bool = Field(
         default=False,
@@ -535,15 +529,15 @@ class MngrConfig(FrozenModel):
     )
     is_error_reporting_enabled: bool = Field(
         default=True,
-        description="Whether to prompt users to report unexpected errors as GitHub issues when running interactively",
+        description="Whether to suggest launching a diagnostic agent "
+        "when an unexpected error occurs while running interactively",
     )
     is_allowed_in_pytest: bool = Field(
-        default=True,
+        default=False,
         description=(
-            "Set this to False to prevent loading this config in pytest runs. "
-            "Tests that intentionally need to load a config with this set to False "
-            "(e.g. end-to-end tests of real mngr subprocesses) must set "
-            "MNGR_ALLOW_PYTEST=1 in the subprocess env as an explicit opt-in."
+            "Whether this config may be loaded during a pytest run. Defaults to False so a "
+            "poorly-scoped test cannot pick up a real config (e.g. ~/.mngr) and perform real "
+            "operations; configs written for tests set this to True to opt in."
         ),
     )
     default_destroyed_host_persisted_seconds: float = Field(
@@ -556,186 +550,59 @@ class MngrConfig(FrozenModel):
         description="Default minimum age (in seconds) before GC will destroy an online host with no agents. "
         "Can be overridden per provider via min_online_host_age_seconds in the provider config.",
     )
+    agent_ready_timeout: float = Field(
+        default=10.0,
+        description="Max seconds to wait for an agent to signal readiness before sending messages. "
+        "Hook-based polling returns early; this is an upper bound, not an unconditional delay.",
+    )
+    # Consider removing this global flag entirely: the per-key `__assign` suffix now gives a
+    # targeted opt-out from the narrowing guard, which may make a blanket escape hatch
+    # unnecessary. (The once-planned flip of this default to True is no longer planned.)
+    allow_settings_key_assignment_narrowing: bool = Field(
+        default=False,
+        description=(
+            "When False (the default), it is an error for a higher-precedence settings layer "
+            "(project local, env vars, --setting, etc.) to assign over a non-empty list/tuple/"
+            "dict/set value coming from a lower-precedence layer. This guards against silently "
+            "losing entries when a settings file is loaded with the assign-by-default merge "
+            "behavior; the user is told to use the __extend suffix to keep the additive behavior, "
+            "the __assign suffix to replace a specific key without this error, or to set this "
+            "field to True to allow assign-by-default narrowing globally."
+        ),
+    )
 
-    def merge_with(self, override: Self) -> Self:
-        """Merge this config with an override config.
+    def agent_session_name(self, agent_name: str) -> str:
+        """The tmux session name for an agent: the configured ``prefix`` + the agent name.
 
-        Important note: despite the type signatures, any of these fields may be None in the override--this means that they were NOT set in the toml (and thus should be ignored)
-
-        Scalar fields: override wins if not None
-        Dicts: merge keys, with per-key merge for nested config objects
-        Lists: concatenate both lists
+        Single source of truth for the ``prefix + name`` rule, so call sites do not
+        hand-roll the f-string (and so cannot drift from one another).
         """
-        # Merge prefix (scalar - override wins if not None)
-        merged_prefix = self.prefix
-        if override.prefix is not None:
-            merged_prefix = override.prefix
+        return f"{self.prefix}{agent_name}"
 
-        # Merge default_host_dir (scalar - override wins if not None)
-        merged_default_host_dir = self.default_host_dir
-        if override.default_host_dir is not None:
-            merged_default_host_dir = override.default_host_dir
+    def merge_with(self, override: Self) -> tuple[Self, list[str]]:
+        """Merge this config with an override config (the loader's whole-config merge),
+        returning the merged config and every narrowing path the overlay merge surfaced.
 
-        # Merge pager (scalar - override wins if not None)
-        merged_pager = override.pager if override.pager is not None else self.pager
+        Assign-by-default for aggregate fields; the top-level container dicts
+        (``agent_types``, ``providers``, ``plugins``, ``commands``, ``create_templates``)
+        merge per-key, and ``SettingsPatchField`` fields accumulate. Computed via the
+        overlay pipeline, behavior-identical to the old field-by-field merge; see
+        ``config/README.md`` for the scheme.
 
-        # Merge unset_vars (list - concatenate if override is not None)
-        merged_unset_vars = merge_list_fields(self.unset_vars, override.unset_vars)
-
-        # Merge work_dir_extra_paths (dict - override keys take precedence)
-        merged_work_dir_extra_paths = merge_dict_fields(self.work_dir_extra_paths, override.work_dir_extra_paths)
-
-        # Merge enabled_backends (list - override wins if not None/empty, otherwise keep base)
-        merged_enabled_backends = override.enabled_backends if override.enabled_backends else self.enabled_backends
-
-        # Merge agent_types (dict - merge keys, with per-key merge)
-        merged_agent_types: dict[AgentTypeName, AgentTypeConfig] = {}
-        all_type_keys = set(self.agent_types.keys()) | set(override.agent_types.keys())
-        for key in all_type_keys:
-            if key in self.agent_types and key in override.agent_types:
-                # Both have this key - merge the configs
-                merged_agent_types[key] = self.agent_types[key].merge_with(override.agent_types[key])
-            elif key in override.agent_types:
-                # Only override has this key
-                merged_agent_types[key] = override.agent_types[key]
-            else:
-                # Only base has this key
-                merged_agent_types[key] = self.agent_types[key]
-
-        # Merge providers (dict - merge keys, with per-key merge)
-        merged_providers: dict[ProviderInstanceName, ProviderInstanceConfig] = {}
-        all_provider_keys = set(self.providers.keys()) | set(override.providers.keys())
-        for key in all_provider_keys:
-            if key in self.providers and key in override.providers:
-                # Both have this key - merge the configs
-                merged_providers[key] = self.providers[key].merge_with(override.providers[key])
-            elif key in override.providers:
-                # Only override has this key
-                merged_providers[key] = override.providers[key]
-            else:
-                # Only base has this key
-                merged_providers[key] = self.providers[key]
-
-        # Merge plugins (dict - merge keys, with per-key merge)
-        merged_plugins: dict[PluginName, PluginConfig] = {}
-        all_plugin_keys = set(self.plugins.keys()) | set(override.plugins.keys())
-        for key in all_plugin_keys:
-            if key in self.plugins and key in override.plugins:
-                # Both have this key - merge the configs
-                merged_plugins[key] = self.plugins[key].merge_with(override.plugins[key])
-            elif key in override.plugins:
-                # Only override has this key
-                merged_plugins[key] = override.plugins[key]
-            else:
-                # Only base has this key
-                merged_plugins[key] = self.plugins[key]
-
-        # Merge disabled_plugins (union of both sets)
-        merged_disabled_plugins = self.disabled_plugins | override.disabled_plugins
-
-        # Merge commands (dict - merge keys, with per-key merge)
-        merged_commands: dict[str, CommandDefaults] = {}
-        all_command_keys = set(self.commands.keys()) | set(override.commands.keys())
-        for key in all_command_keys:
-            if key in self.commands and key in override.commands:
-                # Both have this key - merge the configs
-                merged_commands[key] = self.commands[key].merge_with(override.commands[key])
-            elif key in override.commands:
-                # Only override has this key
-                merged_commands[key] = override.commands[key]
-            else:
-                # Only base has this key
-                merged_commands[key] = self.commands[key]
-
-        # Merge create_templates (dict - merge keys, with per-key merge)
-        merged_create_templates: dict[CreateTemplateName, CreateTemplate] = {}
-        all_template_keys = set(self.create_templates.keys()) | set(override.create_templates.keys())
-        for key in all_template_keys:
-            if key in self.create_templates and key in override.create_templates:
-                # Both have this key - merge the templates
-                merged_create_templates[key] = self.create_templates[key].merge_with(override.create_templates[key])
-            elif key in override.create_templates:
-                # Only override has this key
-                merged_create_templates[key] = override.create_templates[key]
-            else:
-                # Only base has this key
-                merged_create_templates[key] = self.create_templates[key]
-
-        # Merge pre_command_scripts (dict - override keys take precedence)
-        merged_pre_command_scripts = merge_dict_fields(self.pre_command_scripts, override.pre_command_scripts)
-
-        is_remote_agent_installation_allowed = self.is_remote_agent_installation_allowed
-        if override.is_remote_agent_installation_allowed is not None:
-            is_remote_agent_installation_allowed = override.is_remote_agent_installation_allowed
-
-        # Merge connect_command (scalar - override wins if not None)
-        merged_connect_command = (
-            override.connect_command if override.connect_command is not None else self.connect_command
-        )
-
-        # Merge is_nested_tmux_allowed (scalar - override wins if not None)
-        merged_is_nested_tmux_allowed = self.is_nested_tmux_allowed
-        if override.is_nested_tmux_allowed is not None:
-            merged_is_nested_tmux_allowed = override.is_nested_tmux_allowed
-
-        # Merge headless (scalar - override wins if not None)
-        merged_headless = self.headless
-        if override.headless is not None:
-            merged_headless = override.headless
-
-        # Merge is_error_reporting_enabled (scalar - override wins if not None)
-        merged_is_error_reporting_enabled = self.is_error_reporting_enabled
-        if override.is_error_reporting_enabled is not None:
-            merged_is_error_reporting_enabled = override.is_error_reporting_enabled
-
-        is_allowed_in_pytest = self.is_allowed_in_pytest
-        if override.is_allowed_in_pytest is not None:
-            is_allowed_in_pytest = override.is_allowed_in_pytest
-
-        # Merge default_destroyed_host_persisted_seconds (scalar - override wins if not None)
-        default_destroyed_host_persisted_seconds = self.default_destroyed_host_persisted_seconds
-        if override.default_destroyed_host_persisted_seconds is not None:
-            default_destroyed_host_persisted_seconds = override.default_destroyed_host_persisted_seconds
-
-        # Merge default_min_online_host_age_seconds (scalar - override wins if not None)
-        default_min_online_host_age_seconds = self.default_min_online_host_age_seconds
-        if override.default_min_online_host_age_seconds is not None:
-            default_min_online_host_age_seconds = override.default_min_online_host_age_seconds
-
-        # Merge retry (nested config - use merge_with if override.retry is not None)
-        merged_retry = self.retry
-        if override.retry is not None:
-            merged_retry = self.retry.merge_with(override.retry)
-
-        # Merge logging (nested config - use merge_with if override.logging is not None)
-        merged_logging = self.logging
-        if override.logging is not None:
-            merged_logging = self.logging.merge_with(override.logging)
-
-        return self.__class__(
-            prefix=merged_prefix,
-            default_host_dir=merged_default_host_dir,
-            pager=merged_pager,
-            unset_vars=merged_unset_vars,
-            work_dir_extra_paths=merged_work_dir_extra_paths,
-            enabled_backends=merged_enabled_backends,
-            agent_types=merged_agent_types,
-            providers=merged_providers,
-            plugins=merged_plugins,
-            disabled_plugins=merged_disabled_plugins,
-            commands=merged_commands,
-            create_templates=merged_create_templates,
-            pre_command_scripts=merged_pre_command_scripts,
-            is_remote_agent_installation_allowed=is_remote_agent_installation_allowed,
-            connect_command=merged_connect_command,
-            retry=merged_retry,
-            logging=merged_logging,
-            is_nested_tmux_allowed=merged_is_nested_tmux_allowed,
-            headless=merged_headless,
-            is_error_reporting_enabled=merged_is_error_reporting_enabled,
-            is_allowed_in_pytest=is_allowed_in_pytest,
-            default_destroyed_host_persisted_seconds=default_destroyed_host_persisted_seconds,
-            default_min_online_host_age_seconds=default_min_online_host_age_seconds,
+        The narrowings are the single config-load narrowing detector: cross-scope
+        bare-drops of a non-empty aggregate by a higher-precedence layer -- both ordinary
+        assign-by-default field drops (e.g. ``agent_types.<name>.cli_args``,
+        ``commands.create.defaults.env``) and ``SettingsPatchField`` drops *inside* an
+        accumulating settings patch (e.g. ``agent_types.<name>.settings_overrides.<key>...``).
+        ``Static*`` atomic aggregates are exempt via the override-side re-marking. The loader
+        routes the whole list into its flag-gated narrowing aggregation; callers that only
+        need the merged value drop the second element explicitly.
+        """
+        return merge_models_via_overlay(
+            self,
+            override,
+            serialize_as_any=True,
+            drop_none_values=True,
         )
 
 
@@ -885,6 +752,7 @@ class CreateCliOptions(CommonCliOptions):
     name_style: str
     extra_window: tuple[str, ...]
     source: str | None
+    adopt_session: tuple[str, ...]
     target_path: str | None
     transfer: str | None
     rsync: bool | None
@@ -907,6 +775,8 @@ class CreateCliOptions(CommonCliOptions):
     snapshot: str | None
     build_arg: tuple[str, ...]
     start_arg: tuple[str, ...]
+    post_host_create_command: tuple[str, ...]
+    post_host_create_outer_command: tuple[str, ...]
     reconnect: bool
     message: str | None
     message_file: str | None
@@ -922,3 +792,6 @@ class CreateCliOptions(CommonCliOptions):
     upload_file: tuple[str, ...]
     update: bool
     yes: bool
+    tmux_width: int | None
+    tmux_height: int | None
+    tmux_window_size: str | None

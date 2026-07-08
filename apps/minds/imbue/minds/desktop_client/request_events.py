@@ -41,6 +41,9 @@ class RequestType(UpperCaseStrEnum):
 
     PERMISSIONS = auto()
     LATCHKEY_PERMISSION = auto()
+    FILE_SHARING_PERMISSION = auto()
+    WORKSPACE_PERMISSION = auto()
+    ACCOUNTS_PERMISSION = auto()
 
 
 class RequestStatus(UpperCaseStrEnum):
@@ -76,7 +79,7 @@ class PermissionsRequestEvent(RequestEvent):
     description: str = Field(default="", description="Human-readable description of the request")
 
 
-class LatchkeyPermissionRequestEvent(RequestEvent):
+class LatchkeyPredefinedPermissionRequestEvent(RequestEvent):
     """A request for the user to authorize the agent to use a latchkey-managed scope.
 
     The agent declares which Detent scope schema it wants (e.g.
@@ -98,6 +101,111 @@ class LatchkeyPermissionRequestEvent(RequestEvent):
         ),
     )
     rationale: str = Field(description="One-paragraph human-readable reason the agent needs this access.")
+    permissions_target_path: str | None = Field(
+        default=None,
+        description=(
+            "Absolute path of the permissions.json the agent's gateway JWT resolves to "
+            "(the streamed request's ``target`` field, i.e. the agent's opaque permissions "
+            "handle). Used to recover a host whose canonical permissions file was never "
+            "materialized. ``None`` when the event did not originate from the gateway stream."
+        ),
+    )
+
+
+class LatchkeyFileSharingPermissionRequestEvent(RequestEvent):
+    """A request for the user to grant the agent access to a single file path.
+
+    Delivered to the inbox when an agent submits a ``type=file-sharing``
+    permission request to the gateway. The dialog is presented as a
+    yes/no on a specific absolute path (no per-permission editing): on
+    approval the desktop client calls
+    ``POST /permission-requests/approve/<id>`` and lets the gateway
+    splice the precomputed effect into the per-host
+    ``latchkey_permissions.json``; on denial it falls back to the
+    existing ``DELETE /permission-requests/<id>`` path.
+
+    ``access`` distinguishes a read-only grant from a read-write one;
+    the agent declares which it needs in the request, and the gateway's
+    effect grants only the WebDAV verbs that match.
+    """
+
+    path: str = Field(description="Absolute filesystem path the agent wants access to.")
+    access: str = Field(
+        description=(
+            "Access mode the agent is requesting (``READ`` for read-only, ``WRITE`` for "
+            "read+write). Carried verbatim from the streamed gateway payload."
+        ),
+    )
+    rationale: str = Field(description="One-paragraph human-readable reason the agent needs this access.")
+    permissions_target_path: str | None = Field(
+        default=None,
+        description=(
+            "Absolute path of the permissions.json the agent's gateway JWT resolves to "
+            "(the streamed request's ``target`` field, i.e. the agent's opaque permissions "
+            "handle). Used to recover a host whose canonical permissions file was never "
+            "materialized. ``None`` when the event did not originate from the gateway stream."
+        ),
+    )
+
+
+class LatchkeyWorkspacePermissionRequestEvent(RequestEvent):
+    """A request for the user to grant the agent cross-workspace API access.
+
+    Delivered to the inbox when an agent submits a ``type=workspace``
+    permission request to the gateway. The agent declares which
+    ``minds-workspaces`` verbs it wants (e.g. ``minds-workspaces-destroy``)
+    and, for verbs that act on a specific workspace, the
+    ``target_workspace_id`` it wants to act on. The user picks the final
+    verb set in the dialog and chooses whether the targeted verbs apply to
+    the selected workspace only or to all workspaces; the desktop client
+    applies the grant by accumulating the approved target into each targeted
+    verb's per-host ``anyOf`` allowlist.
+    """
+
+    permissions: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "``minds-workspaces`` verb schema names the agent requested; the user may grant a "
+            "different subset in the dialog."
+        ),
+    )
+    target_workspace_id: str | None = Field(
+        default=None,
+        description=(
+            "Workspace (agent) id the targeted verbs act on, or ``None`` when the request "
+            "concerns only the non-targeted verbs (read / create)."
+        ),
+    )
+    rationale: str = Field(description="One-paragraph human-readable reason the agent needs this access.")
+    permissions_target_path: str | None = Field(
+        default=None,
+        description=(
+            "Absolute path of the permissions.json the agent's gateway JWT resolves to "
+            "(the streamed request's ``target`` field, i.e. the agent's opaque permissions "
+            "handle). ``None`` when the event did not originate from the gateway stream."
+        ),
+    )
+
+
+class LatchkeyAccountsPermissionRequestEvent(RequestEvent):
+    """A request for the user to let the agent list the device's signed-in accounts.
+
+    Delivered to the inbox when an agent submits a ``type=accounts`` permission
+    request to the gateway. The grant is all-or-nothing (read access to
+    ``GET /api/v1/accounts``) with no parameters, so -- unlike the workspace
+    request -- it carries no verb list or target; the user simply approves or
+    denies.
+    """
+
+    rationale: str = Field(description="One-paragraph human-readable reason the agent needs this access.")
+    permissions_target_path: str | None = Field(
+        default=None,
+        description=(
+            "Absolute path of the permissions.json the agent's gateway JWT resolves to "
+            "(the streamed request's ``target`` field, i.e. the agent's opaque permissions "
+            "handle). ``None`` when the event did not originate from the gateway stream."
+        ),
+    )
 
 
 class RequestResponseEvent(EventEnvelope):
@@ -110,21 +218,22 @@ class RequestResponseEvent(EventEnvelope):
         default=None,
         description=(
             "Detent scope schema (for request types that scope to one, e.g. latchkey-permission). "
-            "Used as part of the dedup key."
+            "Informational only -- pending-request filtering joins requests and responses on "
+            "``request_event_id``, not on ``scope``."
         ),
     )
     request_type: str = Field(description="Type of request that was responded to")
 
 
-def create_latchkey_permission_request_event(
+def create_latchkey_predefined_permission_request_event(
     agent_id: str,
     scope: str,
     rationale: str,
     permissions: tuple[str, ...] = (),
     is_user_requested: bool = False,
-) -> "LatchkeyPermissionRequestEvent":
+) -> "LatchkeyPredefinedPermissionRequestEvent":
     """Create a new latchkey-permission request event with auto-generated metadata."""
-    return LatchkeyPermissionRequestEvent(
+    return LatchkeyPredefinedPermissionRequestEvent(
         timestamp=_now_iso(),
         type=EventType("latchkey_permission_request"),
         event_id=_generate_event_id(),
@@ -134,6 +243,68 @@ def create_latchkey_permission_request_event(
         is_user_requested=is_user_requested,
         scope=scope,
         permissions=permissions,
+        rationale=rationale,
+    )
+
+
+def create_latchkey_file_sharing_permission_request_event(
+    agent_id: str,
+    path: str,
+    access: str,
+    rationale: str,
+    is_user_requested: bool = False,
+) -> "LatchkeyFileSharingPermissionRequestEvent":
+    """Create a new file-sharing permission request event with auto-generated metadata."""
+    return LatchkeyFileSharingPermissionRequestEvent(
+        timestamp=_now_iso(),
+        type=EventType("file_sharing_permission_request"),
+        event_id=_generate_event_id(),
+        source=EventSource(REQUESTS_EVENT_SOURCE_NAME),
+        agent_id=agent_id,
+        request_type=str(RequestType.FILE_SHARING_PERMISSION),
+        is_user_requested=is_user_requested,
+        path=path,
+        access=access,
+        rationale=rationale,
+    )
+
+
+def create_latchkey_workspace_permission_request_event(
+    agent_id: str,
+    rationale: str,
+    permissions: tuple[str, ...] = (),
+    target_workspace_id: str | None = None,
+    is_user_requested: bool = False,
+) -> "LatchkeyWorkspacePermissionRequestEvent":
+    """Create a new workspace-permission request event with auto-generated metadata."""
+    return LatchkeyWorkspacePermissionRequestEvent(
+        timestamp=_now_iso(),
+        type=EventType("workspace_permission_request"),
+        event_id=_generate_event_id(),
+        source=EventSource(REQUESTS_EVENT_SOURCE_NAME),
+        agent_id=agent_id,
+        request_type=str(RequestType.WORKSPACE_PERMISSION),
+        is_user_requested=is_user_requested,
+        permissions=permissions,
+        target_workspace_id=target_workspace_id,
+        rationale=rationale,
+    )
+
+
+def create_latchkey_accounts_permission_request_event(
+    agent_id: str,
+    rationale: str,
+    is_user_requested: bool = False,
+) -> "LatchkeyAccountsPermissionRequestEvent":
+    """Create a new accounts-permission request event with auto-generated metadata."""
+    return LatchkeyAccountsPermissionRequestEvent(
+        timestamp=_now_iso(),
+        type=EventType("accounts_permission_request"),
+        event_id=_generate_event_id(),
+        source=EventSource(REQUESTS_EVENT_SOURCE_NAME),
+        agent_id=agent_id,
+        request_type=str(RequestType.ACCOUNTS_PERMISSION),
+        is_user_requested=is_user_requested,
         rationale=rationale,
     )
 
@@ -159,21 +330,13 @@ def create_request_response_event(
     )
 
 
-def _dedup_key(event: RequestEvent | RequestResponseEvent) -> tuple[str, str | None, str]:
-    """Compute the deduplication key for a request or response event."""
-    if isinstance(event, (LatchkeyPermissionRequestEvent, RequestResponseEvent)):
-        scope = event.scope
-    else:
-        scope = None
-    return (event.agent_id, scope, event.request_type)
-
-
 class RequestInbox(FrozenModel):
     """Aggregates request and response events to compute the pending inbox.
 
     Maintains two ordered lists: requests and responses. The pending inbox
-    is computed by finding the latest request per dedup key that has no
-    corresponding response.
+    is every request, keyed only by ``event_id``, that has no corresponding
+    response. Each request the agent makes is a distinct card, even when
+    several share the same agent, scope, and permissions.
     """
 
     requests: list[RequestEvent] = Field(default_factory=list)
@@ -194,30 +357,53 @@ class RequestInbox(FrozenModel):
     def get_pending_requests(self) -> list[RequestEvent]:
         """Compute the list of pending (unresolved) requests.
 
-        For each dedup key, takes the most recent request. A request is
-        pending if no response references its event_id.
+        Requests are keyed solely by ``event_id``: every distinct
+        request the agent makes is its own pending card, even when
+        several carry the same agent, scope, and permissions. A request
+        is pending if no response references its ``event_id``.
+
+        Keying by ``event_id`` (rather than by content) means a
+        redelivery of the *same* request -- the gateway re-emits every
+        still-pending request on each stream reconnect -- collapses
+        onto the existing entry instead of producing a duplicate card,
+        while two genuinely separate requests are never merged.
         """
         responded_event_ids: set[str] = {str(r.request_event_id) for r in self.responses}
 
-        # Find latest request per dedup key
-        latest_by_key: dict[tuple[str, str | None, str], RequestEvent] = {}
+        # Keep the latest occurrence per event_id so a redelivered
+        # request idempotently overwrites the earlier copy.
+        latest_by_id: dict[str, RequestEvent] = {}
         for req in self.requests:
-            key = _dedup_key(req)
-            latest_by_key[key] = req
+            latest_by_id[str(req.event_id)] = req
 
         # Filter out responded requests
-        pending = [req for req in latest_by_key.values() if str(req.event_id) not in responded_event_ids]
+        pending = [req for req in latest_by_id.values() if str(req.event_id) not in responded_event_ids]
 
         # Sort by timestamp descending (most recent first)
         pending.sort(key=lambda r: str(r.timestamp), reverse=True)
         return pending
 
     def get_request_by_id(self, event_id: str) -> RequestEvent | None:
-        """Find a request event by its event_id."""
+        """Find a request event by its event_id.
+
+        Note: this returns the request regardless of whether it has been
+        responded to. Callers that must not act on an already-resolved
+        request (e.g. re-rendering the grant/deny page) should additionally
+        check :meth:`is_request_resolved`.
+        """
         for req in self.requests:
             if str(req.event_id) == event_id:
                 return req
         return None
+
+    def is_request_resolved(self, event_id: str) -> bool:
+        """Return whether a response has already been recorded for this request.
+
+        A granted or denied request lingers in ``requests`` (the log is
+        append-only), so its presence alone does not mean it is still
+        actionable -- a matching response in ``responses`` means it is done.
+        """
+        return any(str(r.request_event_id) == event_id for r in self.responses)
 
     def get_pending_count(self) -> int:
         """Return the number of pending requests."""
@@ -234,7 +420,13 @@ def parse_request_event(line: str) -> RequestEvent | None:
         if request_type == str(RequestType.PERMISSIONS):
             return PermissionsRequestEvent.model_validate(data)
         elif request_type == str(RequestType.LATCHKEY_PERMISSION):
-            return LatchkeyPermissionRequestEvent.model_validate(data)
+            return LatchkeyPredefinedPermissionRequestEvent.model_validate(data)
+        elif request_type == str(RequestType.FILE_SHARING_PERMISSION):
+            return LatchkeyFileSharingPermissionRequestEvent.model_validate(data)
+        elif request_type == str(RequestType.WORKSPACE_PERMISSION):
+            return LatchkeyWorkspacePermissionRequestEvent.model_validate(data)
+        elif request_type == str(RequestType.ACCOUNTS_PERMISSION):
+            return LatchkeyAccountsPermissionRequestEvent.model_validate(data)
         else:
             return RequestEvent.model_validate(data)
     except (json.JSONDecodeError, ValueError, TypeError) as e:

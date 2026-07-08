@@ -1,12 +1,18 @@
 """Unit tests for the help command and topic pages."""
 
+import tomllib
+from pathlib import Path
+
 import pluggy
 from click.testing import CliRunner
 
-from imbue.mngr.cli.help import TopicHelpPage
+from imbue.mngr.cli import builtin_help_topics
 from imbue.mngr.cli.help import format_topic_help
-from imbue.mngr.cli.help import get_all_topics
-from imbue.mngr.cli.help import get_topic
+from imbue.mngr.cli.help_topics import get_all_topics
+from imbue.mngr.cli.help_topics import get_topic
+from imbue.mngr.interfaces.help_topic import DocFile
+from imbue.mngr.interfaces.help_topic import InlineContent
+from imbue.mngr.interfaces.help_topic import TopicHelpPage
 from imbue.mngr.main import cli
 from imbue.mngr.utils.testing import capture_loguru
 
@@ -41,7 +47,7 @@ def test_get_all_topics_contains_registered_topics() -> None:
 
 
 def test_doc_based_topics_are_registered() -> None:
-    """Topics from generic/ and concepts/ docs directories are auto-registered."""
+    """The built-in doc-backed topics (generic/ and concepts/) are registered."""
     topics = get_all_topics()
     # generic/ topics
     assert "multi_target" in topics
@@ -54,20 +60,42 @@ def test_doc_based_topics_are_registered() -> None:
     assert "providers" in topics
 
 
-def test_doc_based_topic_has_content() -> None:
-    """Doc-based topics have content loaded from the markdown file."""
+def test_doc_based_topic_loads_body_from_file() -> None:
+    """A doc-backed topic loads its body lazily from the markdown file."""
     topic = get_topic("idle_detection")
     assert topic is not None
-    assert "idle" in topic.content.lower()
+    assert isinstance(topic.body, DocFile)
+    assert "idle" in topic.load_body().lower()
     assert topic.docs_path is not None
     assert topic.docs_path.endswith(".md")
 
 
-def test_doc_based_topic_has_description_from_heading() -> None:
-    """Doc-based topics extract their one-line description from the first heading."""
+def test_doc_based_topic_has_explicit_description() -> None:
+    """A doc-backed topic carries its one-line description explicitly (not parsed)."""
     topic = get_topic("idle_detection")
     assert topic is not None
     assert topic.one_line_description == "Idle Detection"
+
+
+def test_builtin_topic_docs_are_force_included_in_wheel() -> None:
+    """Every built-in topic's doc file lives under a dir force-included into the wheel.
+
+    The top-level docs/ tree isn't packaged, so only the force-included subdirs
+    ship; if a built-in topic's doc fell outside them, `mngr help <topic>` would
+    show nothing in a PyPI/wheel install. This keeps the pyproject force-include
+    in sync with the topics registered in builtin_help_topics.py.
+    """
+    pyproject = Path(builtin_help_topics.__file__).resolve().parents[3] / "pyproject.toml"
+    force_include = tomllib.loads(pyproject.read_text())["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
+    # included_dirs are the force-include keys, e.g. ("docs/concepts", "docs/commands/generic").
+    included_dirs = tuple(force_include.keys())
+    for topic in builtin_help_topics.register_help_topics():
+        assert topic.docs_path is not None, f"built-in topic {topic.key!r} has no docs_path"
+        repo_rel = f"docs/{topic.docs_path}"
+        assert any(repo_rel == d or repo_rel.startswith(f"{d}/") for d in included_dirs), (
+            f"built-in topic {topic.key!r} doc {repo_rel!r} is not under a wheel force-included dir "
+            f"{included_dirs}; add it to [tool.hatch.build.targets.wheel.force-include] in libs/mngr/pyproject.toml"
+        )
 
 
 # =============================================================================
@@ -75,41 +103,29 @@ def test_doc_based_topic_has_description_from_heading() -> None:
 # =============================================================================
 
 
-def test_format_topic_help_contains_name_section() -> None:
-    """format_topic_help includes a NAME section with key and description."""
+def test_format_topic_help_renders_inline_body() -> None:
+    """An inline (str) body is rendered as markdown -- raw markdown when not ansi."""
     topic = TopicHelpPage(
         key="test-topic",
         one_line_description="A test topic",
-        content="Some content here.",
+        body=InlineContent(markdown="First line.\n\nSecond paragraph."),
     )
-    output = format_topic_help(topic)
-    assert "NAME" in output
-    assert "test-topic - A test topic" in output
-
-
-def test_format_topic_help_contains_aliases() -> None:
-    """format_topic_help shows aliases in the NAME section."""
-    topic = TopicHelpPage(
-        key="test-topic",
-        one_line_description="A test topic",
-        aliases=("tt", "test"),
-        content="Some content here.",
-    )
-    output = format_topic_help(topic)
-    assert "test-topic (tt, test)" in output
-
-
-def test_format_topic_help_contains_description() -> None:
-    """format_topic_help includes a DESCRIPTION section with the content."""
-    topic = TopicHelpPage(
-        key="test-topic",
-        one_line_description="A test topic",
-        content="First line.\n\nSecond paragraph.",
-    )
-    output = format_topic_help(topic)
-    assert "DESCRIPTION" in output
+    output = format_topic_help(topic, use_ansi=False, width=80)
     assert "First line." in output
     assert "Second paragraph." in output
+    # Topics render their (markdown) body -- no man-page NAME/DESCRIPTION chrome.
+    assert "NAME" not in output
+
+
+def test_format_topic_help_renders_file_body(tmp_path: Path) -> None:
+    """A file (Path) body is rendered from the markdown file, including its heading."""
+    md = tmp_path / "topic.md"
+    md.write_text("# A Doc Topic\n\nThe body prose.")
+    topic = TopicHelpPage(key="doc-topic", one_line_description="A Doc Topic", body=DocFile(path=md))
+    output = format_topic_help(topic, use_ansi=False, width=80)
+    # Non-ansi emits the raw markdown body (rich is only used for interactive terminals).
+    assert "# A Doc Topic" in output
+    assert "The body prose." in output
 
 
 def test_format_topic_help_contains_see_also() -> None:
@@ -117,12 +133,25 @@ def test_format_topic_help_contains_see_also() -> None:
     topic = TopicHelpPage(
         key="test-topic",
         one_line_description="A test topic",
-        content="Some content.",
+        body=InlineContent(markdown="Some content."),
         see_also=(("other-topic", "Related topic"),),
     )
-    output = format_topic_help(topic)
+    output = format_topic_help(topic, use_ansi=False, width=80)
     assert "SEE ALSO" in output
     assert "mngr help other-topic" in output
+
+
+def test_format_topic_help_see_also_strips_anchor() -> None:
+    """format_topic_help drops a '#anchor' suffix from see_also refs (terminal can't jump to it)."""
+    topic = TopicHelpPage(
+        key="test-topic",
+        one_line_description="A test topic",
+        body=InlineContent(markdown="Some content."),
+        see_also=(("list#filtering", "Filtering agents"),),
+    )
+    output = format_topic_help(topic, use_ansi=False, width=80)
+    assert "mngr help list - Filtering agents" in output
+    assert "list#filtering" not in output
 
 
 def test_format_topic_help_omits_see_also_when_empty() -> None:
@@ -130,10 +159,86 @@ def test_format_topic_help_omits_see_also_when_empty() -> None:
     topic = TopicHelpPage(
         key="test-topic",
         one_line_description="A test topic",
-        content="Some content.",
+        body=InlineContent(markdown="Some content."),
     )
-    output = format_topic_help(topic)
+    output = format_topic_help(topic, use_ansi=False, width=80)
     assert "SEE ALSO" not in output
+
+
+# =============================================================================
+# Terminal link rewriting
+# =============================================================================
+
+
+def test_builtin_topic_carries_github_source_url() -> None:
+    """Built-in doc topics carry a GitHub blob source_url for their doc file.
+
+    The URL is what relative/anchor links in the body are resolved against for
+    clickable terminal hyperlinks. It points at the imbue-ai/mngr repo and ends
+    with the doc's repo-relative path (libs/mngr/docs/<docs_path>).
+    """
+    topic = get_topic("idle_detection")
+    assert topic is not None
+    assert isinstance(topic.body, DocFile)
+    source_url = topic.body.source_url
+    assert source_url is not None
+    assert source_url.startswith("https://github.com/imbue-ai/mngr/blob/")
+    assert source_url.endswith("/libs/mngr/docs/concepts/idle_detection.md")
+    # link_base_url() surfaces that same URL for the renderer.
+    assert topic.link_base_url() == source_url
+
+
+def test_inline_topic_has_no_link_base() -> None:
+    """An inline-bodied topic has no source location, so no link base."""
+    topic = TopicHelpPage(
+        key="test-topic",
+        one_line_description="A test topic",
+        body=InlineContent(markdown="See [x](../y.md)."),
+    )
+    assert topic.link_base_url() is None
+
+
+def test_format_topic_help_rewrites_relative_links_for_terminal(tmp_path: Path) -> None:
+    """For a terminal, relative/anchor links in a doc topic become absolute GitHub URLs.
+
+    Exercises the full path: format_topic_help reads the doc body and resolves its
+    relative and anchor links against the DocFile's source_url. rich emits each
+    link target as an OSC-8 hyperlink, so the resolved absolute URL appears
+    verbatim in the ANSI output.
+    """
+    md = tmp_path / "cron_recipes.md"
+    md.write_text("See [Waiting](../README.md#waiting-on-a-predicate) and [Section](#user-input-tracking).\n")
+    topic = TopicHelpPage(
+        key="usage_cron_recipes",
+        one_line_description="Cron recipes",
+        body=DocFile(
+            path=md,
+            source_url="https://github.com/imbue-ai/mngr/blob/v9.9.9/libs/mngr_usage/docs/cron_recipes.md",
+        ),
+    )
+    output = format_topic_help(topic, use_ansi=True, width=100)
+    assert "https://github.com/imbue-ai/mngr/blob/v9.9.9/libs/mngr_usage/README.md#waiting-on-a-predicate" in output
+    assert (
+        "https://github.com/imbue-ai/mngr/blob/v9.9.9/libs/mngr_usage/docs/cron_recipes.md#user-input-tracking"
+        in output
+    )
+
+
+def test_format_topic_help_keeps_relative_links_when_not_terminal(tmp_path: Path) -> None:
+    """Non-terminal (plain) output keeps the original relative links untouched."""
+    md = tmp_path / "cron_recipes.md"
+    md.write_text("See [Waiting](../README.md#waiting-on-a-predicate).\n")
+    topic = TopicHelpPage(
+        key="usage_cron_recipes",
+        one_line_description="Cron recipes",
+        body=DocFile(
+            path=md,
+            source_url="https://github.com/imbue-ai/mngr/blob/v9.9.9/libs/mngr_usage/docs/cron_recipes.md",
+        ),
+    )
+    output = format_topic_help(topic, use_ansi=False, width=100)
+    assert "[Waiting](../README.md#waiting-on-a-predicate)" in output
+    assert "github.com" not in output
 
 
 # =============================================================================
@@ -219,21 +324,22 @@ def test_help_doc_based_topic(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """'mngr help multi_target' shows a doc-based topic page."""
+    """'mngr help multi_target' renders the doc-backed topic's markdown body."""
     result = cli_runner.invoke(cli, ["help", "multi_target"], obj=plugin_manager, catch_exceptions=False)
     assert result.exit_code == 0
-    assert "multi_target" in result.output
-    assert "DESCRIPTION" in result.output
+    # Doc-backed topics render the markdown file body (no man-page NAME/DESCRIPTION
+    # chrome); the body's heading/prose is what appears.
+    assert "target" in result.output.lower()
 
 
 def test_help_concepts_topic(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """'mngr help idle_detection' shows a concepts topic page."""
+    """'mngr help idle_detection' renders the concepts topic's markdown body."""
     result = cli_runner.invoke(cli, ["help", "idle_detection"], obj=plugin_manager, catch_exceptions=False)
     assert result.exit_code == 0
-    assert "idle_detection" in result.output
+    assert "Idle Detection" in result.output
     assert "idle" in result.output.lower()
 
 

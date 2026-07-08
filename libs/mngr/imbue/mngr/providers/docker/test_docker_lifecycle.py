@@ -1,10 +1,13 @@
+from collections.abc import Generator
 from pathlib import Path
 
+import docker.errors
 import pytest
 
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderEmptyError
 from imbue.mngr.errors import SnapshotNotFoundError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
@@ -12,10 +15,16 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ImageReference
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
+from imbue.mngr.providers.docker.backend import DockerProviderBackend
+from imbue.mngr.providers.docker.config import DockerProviderConfig
 from imbue.mngr.providers.docker.instance import DockerProviderInstance
+from imbue.mngr.providers.docker.instance import create_docker_client
 from imbue.mngr.providers.docker.testing import make_docker_provider
+from imbue.mngr.providers.docker.testing import make_docker_provider_with_cleanup
+from imbue.mngr.providers.docker.volume import state_container_name
 
 pytestmark = [pytest.mark.acceptance, pytest.mark.timeout(600)]
 
@@ -140,6 +149,43 @@ def test_destroy_host_removes_container(docker_provider: DockerProviderInstance)
 
 @pytest.mark.docker
 @pytest.mark.docker_sdk
+def test_destroy_host_untags_build_image(docker_provider: DockerProviderInstance) -> None:
+    # The default (no --image) path builds and tags an image per host.
+    host = docker_provider.create_host(HostName("test-build-untag"))
+    host_id = host.id
+    build_tag = f"mngr-build-{host_id}"
+    assert docker_provider._docker_client.images.get(build_tag) is not None
+
+    # destroy_host untags the build image so built images don't pile up.
+    docker_provider.destroy_host(host)
+    with pytest.raises(docker.errors.ImageNotFound):
+        docker_provider._docker_client.images.get(build_tag)
+
+    # delete_host is idempotent and does not error on the already-removed tag.
+    offline = docker_provider.get_host(host_id)
+    docker_provider.delete_host(offline)
+
+
+@pytest.mark.docker
+@pytest.mark.docker_sdk
+def test_destroy_host_build_image_untag_preserves_snapshot_restore(
+    docker_provider: DockerProviderInstance,
+) -> None:
+    host = docker_provider.create_host(HostName("test-build-untag-snap"))
+    host_id = host.id
+    snapshot_id = docker_provider.create_snapshot(host_id, SnapshotName("snap-untag"))
+
+    # Untagging the build image on destroy must not break snapshot restore:
+    # snapshot images are independent commits that keep their own layers.
+    docker_provider.destroy_host(host)
+    restored = docker_provider.start_host(host_id, snapshot_id=snapshot_id)
+    assert isinstance(restored, Host)
+    result = restored.execute_idempotent_command("echo restored")
+    assert "restored" in result.stdout
+
+
+@pytest.mark.docker
+@pytest.mark.docker_sdk
 def test_get_host_by_id(docker_provider: DockerProviderInstance) -> None:
     host = docker_provider.create_host(HostName("test-get-id"))
     found = docker_provider.get_host(host.id)
@@ -232,6 +278,83 @@ def test_close_closes_docker_client(temp_mngr_ctx: MngrContext) -> None:
     # Access the client to initialize it
     _ = provider._docker_client
     provider.close()
+
+
+@pytest.mark.docker_sdk
+def test_read_only_construction_is_empty_and_creates_no_state_container(temp_mngr_ctx: MngrContext) -> None:
+    """Building the docker provider for a read-only op must not create the state container.
+
+    Mirrors the Modal backend: when nothing has been created yet,
+    build_provider_instance raises ProviderEmptyError (so the provider loader
+    skips docker) instead of lazily materializing the singleton state container
+    -- which is what caused read-only commands like `mngr list` to leak state
+    containers.
+    """
+    config = DockerProviderConfig(isolate_host_volumes=False)
+    user_id = str(temp_mngr_ctx.get_profile_user_id())
+    container_name = state_container_name(temp_mngr_ctx.config.prefix, user_id)
+
+    client = create_docker_client()
+    try:
+        with pytest.raises(ProviderEmptyError):
+            DockerProviderBackend.build_provider_instance(
+                name=ProviderInstanceName("docker"),
+                config=config,
+                mngr_ctx=temp_mngr_ctx,
+            )
+        # The read-only construction must not have created the state container.
+        with pytest.raises(docker.errors.NotFound):
+            client.containers.get(container_name)
+    finally:
+        # Defensive: if the assertion above regresses and a container WAS
+        # created, remove it so this test does not itself leak.
+        try:
+            client.containers.get(container_name).remove(force=True)
+        except docker.errors.NotFound:
+            pass
+        client.close()
+
+
+@pytest.mark.docker_sdk
+def test_bootstrap_for_host_creation_creates_state_container(temp_mngr_ctx: MngrContext) -> None:
+    """The create path bootstraps the state container so build then succeeds.
+
+    bootstrap_for_host_creation is the create-path counterpart to the read-only
+    emptiness guard: it creates the singleton state container up front so the
+    subsequent build_provider_instance call passes the guard instead of raising
+    ProviderEmptyError.
+    """
+    config = DockerProviderConfig(isolate_host_volumes=False)
+    user_id = str(temp_mngr_ctx.get_profile_user_id())
+    container_name = state_container_name(temp_mngr_ctx.config.prefix, user_id)
+
+    client = create_docker_client()
+    instance: DockerProviderInstance | None = None
+    try:
+        DockerProviderBackend.bootstrap_for_host_creation(
+            name=ProviderInstanceName("docker"),
+            config=config,
+            mngr_ctx=temp_mngr_ctx,
+        )
+        # Bootstrap created the state container...
+        assert client.containers.get(container_name) is not None
+        # ...so a subsequent read-only build no longer raises ProviderEmptyError.
+        built = DockerProviderBackend.build_provider_instance(
+            name=ProviderInstanceName("docker"),
+            config=config,
+            mngr_ctx=temp_mngr_ctx,
+        )
+        assert isinstance(built, DockerProviderInstance)
+        instance = built
+        assert instance.host_dir == Path("/mngr")
+    finally:
+        if instance is not None:
+            instance.close()
+        try:
+            client.containers.get(container_name).remove(force=True)
+        except docker.errors.NotFound:
+            pass
+        client.close()
 
 
 @pytest.mark.docker
@@ -456,7 +579,11 @@ def test_discover_hosts_excludes_destroyed_by_default(
 @pytest.mark.release
 @pytest.mark.docker_sdk
 def test_create_host_with_bad_image_fails(docker_provider: DockerProviderInstance) -> None:
-    """Verify create_host with a nonexistent image raises MngrError and saves a failed record."""
+    """create_host with a nonexistent image must raise MngrError, not silently succeed or hang.
+
+    The pytest.raises asserts the failed image pull is surfaced as an MngrError;
+    it would fail if create_host swallowed the error and returned a host.
+    """
     with pytest.raises(MngrError):
         docker_provider.create_host(
             HostName("test-bad-image"),
@@ -544,3 +671,64 @@ def test_disconnect_closes_paramiko_ssh_client(docker_provider: DockerProviderIn
     assert not old_transport.is_active(), (
         "paramiko transport is still active after disconnect -- the SSH connection was leaked"
     )
+
+
+# =============================================================================
+# Host-volume isolation (volume-subpath)
+# =============================================================================
+
+
+@pytest.fixture
+def isolated_docker_provider(temp_mngr_ctx: MngrContext) -> Generator[DockerProviderInstance, None, None]:
+    """Like the standard docker_provider fixture but creates hosts with isolate_host_volumes=True."""
+    yield from make_docker_provider_with_cleanup(temp_mngr_ctx, isolate_host_volumes=True)
+
+
+@pytest.mark.docker
+@pytest.mark.docker_sdk
+@pytest.mark.release
+def test_isolated_host_cannot_see_sibling_host_volumes(
+    isolated_docker_provider: DockerProviderInstance,
+) -> None:
+    """When isolate_host_volumes=True, host A must not be able to read host B's vol-* directory."""
+    host_a = isolated_docker_provider.create_host(HostName("test-iso-a"))
+    host_b = isolated_docker_provider.create_host(HostName("test-iso-b"))
+
+    # Write a marker file under host B's host_dir.
+    write_result = host_b.execute_idempotent_command("echo b-only > /mngr/marker.txt")
+    assert write_result.success
+
+    # The legacy shared-volume mount put /mngr-state into every host; in the
+    # isolated mode that mount does not exist, so /mngr-state must not be a
+    # directory in either host.
+    for host, label in ((host_a, "a"), (host_b, "b")):
+        result = host.execute_idempotent_command("test -d /mngr-state && echo present || echo absent")
+        assert result.success
+        assert "absent" in result.stdout, f"/mngr-state is unexpectedly visible in isolated host {label}"
+
+    # Host A must not see host B's marker file via any path. Sanity-check the
+    # marker is readable from B (so the test is meaningful).
+    read_b = host_b.execute_idempotent_command("cat /mngr/marker.txt")
+    assert read_b.success
+    assert "b-only" in read_b.stdout
+    read_a = host_a.execute_idempotent_command("cat /mngr/marker.txt")
+    assert not read_a.success or "b-only" not in read_a.stdout
+
+
+@pytest.mark.docker
+@pytest.mark.docker_sdk
+@pytest.mark.release
+def test_isolated_host_persists_data_across_restart(
+    isolated_docker_provider: DockerProviderInstance,
+) -> None:
+    """The isolated subpath mount persists host_dir contents across stop/start, same as the shared mount."""
+    host = isolated_docker_provider.create_host(HostName("test-iso-persist"))
+    write = host.execute_idempotent_command("echo persisted > /mngr/restart-marker.txt")
+    assert write.success
+
+    isolated_docker_provider.stop_host(host, create_snapshot=False)
+    restarted = isolated_docker_provider.start_host(host.id)
+    assert isinstance(restarted, Host)
+    read = restarted.execute_idempotent_command("cat /mngr/restart-marker.txt")
+    assert read.success
+    assert "persisted" in read.stdout

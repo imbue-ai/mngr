@@ -4,7 +4,7 @@ Spawned at desktop-client startup, owns a daemon thread that holds a
 long-lived ``GET /permission-requests?follow=true`` connection open
 against the shared latchkey gateway. Each pending request streamed
 over that connection is translated into a
-:class:`LatchkeyPermissionRequestEvent` and appended to the in-memory
+:class:`LatchkeyPredefinedPermissionRequestEvent` and appended to the in-memory
 :class:`RequestInbox` exactly the way agent-written JSONL events used
 to be (before latchkey 2.9.0 grew the extension layer).
 
@@ -22,6 +22,7 @@ from collections.abc import Callable
 from datetime import datetime
 from datetime import timezone
 from typing import Final
+from typing import assert_never
 
 from loguru import logger
 from pydantic import Field
@@ -34,11 +35,19 @@ from imbue.imbue_common.event_envelope import EventSource
 from imbue.imbue_common.event_envelope import EventType
 from imbue.imbue_common.event_envelope import IsoTimestamp
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.minds.desktop_client.latchkey.gateway_client import AccountsRequestPayload
+from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
+from imbue.minds.desktop_client.latchkey.gateway_client import PredefinedRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
-from imbue.minds.desktop_client.request_events import LatchkeyPermissionRequestEvent
+from imbue.minds.desktop_client.latchkey.gateway_client import WorkspaceRequestPayload
+from imbue.minds.desktop_client.request_events import LatchkeyAccountsPermissionRequestEvent
+from imbue.minds.desktop_client.request_events import LatchkeyFileSharingPermissionRequestEvent
+from imbue.minds.desktop_client.request_events import LatchkeyPredefinedPermissionRequestEvent
+from imbue.minds.desktop_client.request_events import LatchkeyWorkspacePermissionRequestEvent
 from imbue.minds.desktop_client.request_events import REQUESTS_EVENT_SOURCE_NAME
+from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestType
 
 # Backoff bounds for the reconnect loop. The lower bound keeps the
@@ -54,26 +63,81 @@ def _now_iso() -> IsoTimestamp:
     return IsoTimestamp(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"))
 
 
-def streamed_request_to_event(streamed: StreamedPermissionRequest) -> LatchkeyPermissionRequestEvent:
+def streamed_request_to_event(streamed: StreamedPermissionRequest) -> RequestEvent:
     """Translate a streamed permission request into the inbox's event shape.
 
     ``request_id`` from the extension is reused verbatim as the inbox
     ``event_id`` so the FastAPI routes (which look events up by
     ``event_id`` and DELETE the gateway record on grant/deny) can join
     the two systems on a single identifier.
+
+    Dispatches on the concrete type of ``streamed.payload``:
+    :class:`PredefinedRequestPayload` becomes a
+    :class:`LatchkeyPredefinedPermissionRequestEvent` (the legacy scope/perm
+    grant flow); :class:`FileSharingRequestPayload` becomes a
+    :class:`LatchkeyFileSharingPermissionRequestEvent` (rendered as a single
+    per-path yes/no dialog whose grant path goes through
+    ``POST /permission-requests/approve/<id>``);
+    :class:`WorkspaceRequestPayload` becomes a
+    :class:`LatchkeyWorkspacePermissionRequestEvent` (the cross-workspace
+    ``minds-workspaces`` verb + all-vs-selected target dialog).
     """
-    return LatchkeyPermissionRequestEvent(
-        timestamp=_now_iso(),
-        type=EventType("latchkey_permission_request"),
-        event_id=EventId(streamed.request_id),
-        source=EventSource(REQUESTS_EVENT_SOURCE_NAME),
-        agent_id=streamed.agent_id,
-        request_type=str(RequestType.LATCHKEY_PERMISSION),
-        is_user_requested=False,
-        scope=streamed.scope,
-        permissions=streamed.permissions,
-        rationale=streamed.rationale,
-    )
+    payload = streamed.payload
+    if isinstance(payload, PredefinedRequestPayload):
+        return LatchkeyPredefinedPermissionRequestEvent(
+            timestamp=_now_iso(),
+            type=EventType("latchkey_permission_request"),
+            event_id=EventId(streamed.request_id),
+            source=EventSource(REQUESTS_EVENT_SOURCE_NAME),
+            agent_id=streamed.agent_id,
+            request_type=str(RequestType.LATCHKEY_PERMISSION),
+            is_user_requested=False,
+            permissions_target_path=streamed.target,
+            scope=payload.scope,
+            permissions=payload.permissions,
+            rationale=streamed.rationale,
+        )
+    if isinstance(payload, FileSharingRequestPayload):
+        return LatchkeyFileSharingPermissionRequestEvent(
+            timestamp=_now_iso(),
+            type=EventType("file_sharing_permission_request"),
+            event_id=EventId(streamed.request_id),
+            source=EventSource(REQUESTS_EVENT_SOURCE_NAME),
+            agent_id=streamed.agent_id,
+            request_type=str(RequestType.FILE_SHARING_PERMISSION),
+            is_user_requested=False,
+            permissions_target_path=streamed.target,
+            path=payload.path,
+            access=str(payload.access),
+            rationale=streamed.rationale,
+        )
+    if isinstance(payload, WorkspaceRequestPayload):
+        return LatchkeyWorkspacePermissionRequestEvent(
+            timestamp=_now_iso(),
+            type=EventType("workspace_permission_request"),
+            event_id=EventId(streamed.request_id),
+            source=EventSource(REQUESTS_EVENT_SOURCE_NAME),
+            agent_id=streamed.agent_id,
+            request_type=str(RequestType.WORKSPACE_PERMISSION),
+            is_user_requested=False,
+            permissions_target_path=streamed.target,
+            permissions=payload.permissions,
+            target_workspace_id=payload.target_workspace_id,
+            rationale=streamed.rationale,
+        )
+    if isinstance(payload, AccountsRequestPayload):
+        return LatchkeyAccountsPermissionRequestEvent(
+            timestamp=_now_iso(),
+            type=EventType("accounts_permission_request"),
+            event_id=EventId(streamed.request_id),
+            source=EventSource(REQUESTS_EVENT_SOURCE_NAME),
+            agent_id=streamed.agent_id,
+            request_type=str(RequestType.ACCOUNTS_PERMISSION),
+            is_user_requested=False,
+            permissions_target_path=streamed.target,
+            rationale=streamed.rationale,
+        )
+    assert_never(payload)
 
 
 class PermissionRequestsConsumer(MutableModel):
@@ -91,10 +155,12 @@ class PermissionRequestsConsumer(MutableModel):
         frozen=True,
         description="HTTP client used to talk to the gateway's bundled extension endpoints.",
     )
-    on_request: Callable[[LatchkeyPermissionRequestEvent], None] = Field(
+    on_request: Callable[[RequestEvent], None] = Field(
         description=(
             "Callback invoked from the consumer thread for each streamed permission request "
-            "after translation into the inbox event shape."
+            "after translation into the inbox event shape. Receives either a "
+            ":class:`LatchkeyPredefinedPermissionRequestEvent` (for ``type=predefined``) or a "
+            ":class:`LatchkeyFileSharingPermissionRequestEvent` (for ``type=file-sharing``)."
         ),
     )
 
@@ -144,18 +210,27 @@ class PermissionRequestsConsumer(MutableModel):
                         return
                     try:
                         event = streamed_request_to_event(streamed)
-                    except ValueError as e:
-                        logger.warning("Could not translate streamed permission request {!r}: {}", streamed, e)
+                        self.on_request(event)
+                    except Exception as e:
+                        # A single request the consumer cannot process must never
+                        # take down this thread: it is the request inbox's source
+                        # of truth, so an uncaught error here silently stops EVERY
+                        # future permission request -- for any agent or service --
+                        # from reaching the UI until restart (and re-crashes on the
+                        # same record on each reconnect). Log the failure with its
+                        # traceback and skip just this request. The gateway
+                        # validates request bodies up front (see
+                        # permission_requests.mjs), so this broad catch is a
+                        # defense-in-depth backstop for malformed/legacy records,
+                        # not the primary guard.
+                        logger.opt(exception=e).error(
+                            "Skipping a permission request the consumer could not process "
+                            "(request_id={}, agent_id={}): {}",
+                            streamed.request_id,
+                            streamed.agent_id,
+                            e,
+                        )
                         continue
-                    # If ``on_request`` raises, the exception propagates
-                    # out through ``_run`` and is reported by
-                    # ``ObservableThread``'s top-level exception handler.
-                    # We intentionally do *not* catch broadly here: a
-                    # buggy callback should be loud rather than
-                    # silently dropped, and the consumer's reconnect
-                    # loop would only re-issue the same delivery on a
-                    # new stream.
-                    self.on_request(event)
                     # Reset backoff after a successful delivery.
                     delay = _RECONNECT_MIN_DELAY_SECONDS
             except LatchkeyGatewayClientError as e:

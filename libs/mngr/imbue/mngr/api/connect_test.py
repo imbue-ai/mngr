@@ -22,6 +22,7 @@ from imbue.mngr.api.connect import SIGNAL_EXIT_CODE_STOP
 from imbue.mngr.api.connect import _build_ssh_activity_wrapper_script
 from imbue.mngr.api.connect import _build_ssh_args
 from imbue.mngr.api.connect import _determine_post_disconnect_action
+from imbue.mngr.api.connect import build_attach_argv
 from imbue.mngr.api.connect import connect_to_agent
 from imbue.mngr.api.connect import resolve_connect_command
 from imbue.mngr.api.connect import run_connect_command
@@ -32,6 +33,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NestedTmuxError
 from imbue.mngr.hosts.host import Host
+from imbue.mngr.hosts.tmux import TmuxSessionTarget
 from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -59,7 +61,34 @@ def test_build_ssh_activity_wrapper_script_attaches_to_tmux_session() -> None:
     """Test that the wrapper script attaches to the correct tmux session."""
     script = _build_ssh_activity_wrapper_script("mngr-my-agent", Path("/home/user/.mngr"))
 
-    assert "tmux attach -t '=mngr-my-agent'" in script
+    # The attach command is built via build_attach_argv (raw `=name` from
+    # TmuxSessionTarget.as_target_arg) and rendered with shlex.join, which quotes a
+    # token only if it contains shell-special characters; '=mngr-my-agent' has none,
+    # so it appears unquoted.
+    assert "tmux attach -t =mngr-my-agent" in script
+
+
+def test_build_ssh_activity_wrapper_script_without_attach_args_is_plain_attach() -> None:
+    """With no attach_args the attach command is the plain `tmux attach` (no client flags)."""
+    script = _build_ssh_activity_wrapper_script("mngr-my-agent", Path("/home/user/.mngr"))
+    assert "tmux attach -t =mngr-my-agent" in script
+
+
+def test_build_ssh_activity_wrapper_script_inserts_attach_args_before_subcommand() -> None:
+    """attach_args are tmux client flags and must appear before the `attach` subcommand,
+    e.g. `tmux -CC attach` for iTerm2 control mode."""
+    script = _build_ssh_activity_wrapper_script("mngr-my-agent", Path("/home/user/.mngr"), attach_args=("-CC",))
+    assert "tmux -CC attach -t =mngr-my-agent" in script
+
+
+def test_build_ssh_activity_wrapper_script_no_longer_sends_sigwinch() -> None:
+    """The post-attach SIGWINCH nudge has moved to a per-session tmux client-attached
+    hook (set at session creation), so the connect wrapper must no longer send it.
+    This guards against reintroducing a redundant second nudge on `mngr connect`."""
+    script = _build_ssh_activity_wrapper_script("mngr-my-agent", Path("/home/user/.mngr"))
+
+    assert "kill -WINCH" not in script
+    assert "window-size" not in script
 
 
 def test_build_ssh_activity_wrapper_script_kills_activity_tracker_on_exit() -> None:
@@ -720,3 +749,23 @@ def test_resolve_connect_command_returns_none_when_neither_set(temp_mngr_ctx: Mn
     """resolve_connect_command should return None when neither CLI nor config is set."""
     result = resolve_connect_command(None, temp_mngr_ctx)
     assert result is None
+
+
+def test_build_attach_argv_without_attach_args_is_plain_attach() -> None:
+    """With no attach_args, the attach argv is the plain `tmux attach -t =<session>`."""
+    argv = build_attach_argv(TmuxSessionTarget(session_name="mngr-plain"), ())
+    assert argv == ["tmux", "attach", "-t", "=mngr-plain"]
+
+
+def test_build_attach_argv_inserts_attach_args_before_subcommand() -> None:
+    """attach_args are tmux client flags and must appear before the `attach` subcommand,
+    e.g. `tmux -CC attach` for iTerm2 control mode."""
+    argv = build_attach_argv(TmuxSessionTarget(session_name="mngr-ccmode"), ("-CC",))
+    assert argv == ["tmux", "-CC", "attach", "-t", "=mngr-ccmode"]
+
+
+def test_build_attach_argv_uses_raw_exact_match_target() -> None:
+    """The target is the raw `=name` (via TmuxSessionTarget.as_target_arg), not shell-quoted,
+    since argv reaches the exec'd process verbatim."""
+    argv = build_attach_argv(TmuxSessionTarget(session_name="mngr-weird name"), ("-CC", "-u"))
+    assert argv == ["tmux", "-CC", "-u", "attach", "-t", "=mngr-weird name"]

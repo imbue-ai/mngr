@@ -4,7 +4,9 @@ import shlex
 import shutil
 import subprocess
 import types
+from collections.abc import Iterator
 from collections.abc import Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -13,9 +15,31 @@ from pydantic import Field
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
-from imbue.mngr.api.sync import LocalGitContext
+from imbue.mngr.api.git import LocalGitContext
 from imbue.mngr.interfaces.data_types import CommandResult
+from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import HostName
+
+
+@contextmanager
+def created_host(
+    provider: ProviderInstanceInterface,
+    host_name: HostName,
+    **create_kwargs: Any,
+) -> Iterator[OnlineHostInterface]:
+    """Create a host via ``provider`` and destroy it on exit.
+
+    Replaces the create-host / ``try``-``finally``-``destroy_host`` boilerplate that
+    recurs across provider tests (modal, docker, ssh) with a single ``with`` block.
+    Extra keyword arguments are forwarded to ``provider.create_host``.
+    """
+    host = provider.create_host(host_name, **create_kwargs)
+    try:
+        yield host
+    finally:
+        provider.destroy_host(host)
 
 
 class FakeAgent(FrozenModel):
@@ -123,6 +147,21 @@ class FakeHost(MutableModel):
         """
         target_path.mkdir(parents=True, exist_ok=True)
         shutil.copytree(source_path, target_path, dirs_exist_ok=True)
+
+    def copy_local_directory(self, source_path: Path, target_path: Path, extra_args: str | None = None) -> None:
+        """Merge a local directory into target_path file-by-file (mimics rsync -r, additive).
+
+        Unlike a plain copytree, this handles a ``target_path`` of "/" (the real
+        upload path stages absolute remote paths and rsyncs to the filesystem root):
+        each staged file lands at ``target_path / <relative>``, which reconstructs the
+        intended absolute path. Ignores ``extra_args`` (include/exclude filters), like
+        ``copy_directory``.
+        """
+        for staged in Path(source_path).rglob("*"):
+            if staged.is_file():
+                dest = target_path / staged.relative_to(source_path)
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(staged, dest)
 
     def get_ssh_connection_info(self) -> tuple[str, str, int, Path] | None:
         """Return configured SSH connection info, or None for local hosts."""

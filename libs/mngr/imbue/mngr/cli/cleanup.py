@@ -27,13 +27,14 @@ from imbue.mngr.cli.agent_selector import filter_agents
 from imbue.mngr.cli.agent_selector import handle_search_key
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
+from imbue.mngr.cli.exit_codes import exit_code_for_failures
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import AbortError
 from imbue.mngr.cli.output_helpers import emit_event
-from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import emit_info
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.cli.urwid_utils import create_urwid_screen_preserving_terminal
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import OutputOptions
@@ -216,8 +217,9 @@ def _cleanup_impl(ctx: click.Context, **kwargs) -> None:
         error_behavior=error_behavior,
     )
 
-    # Output results
+    # Output results, then exit with a cause-specific code if any real failures remain.
     _emit_result(result, output_opts)
+    ctx.exit(exit_code_for_failures(result.failures))
 
 
 @pure
@@ -563,7 +565,7 @@ def _emit_no_agents_found(output_opts: OutputOptions) -> None:
     """Output message when no agents are found."""
     match output_opts.output_format:
         case OutputFormat.JSON:
-            emit_final_json({"agents": [], "message": "No agents found"})
+            write_json_line({"agents": [], "message": "No agents found"})
         case OutputFormat.JSONL:
             emit_event("info", {"message": "No agents found"}, OutputFormat.JSONL)
         case OutputFormat.HUMAN:
@@ -599,7 +601,7 @@ def _emit_dry_run_output(
 
     match output_opts.output_format:
         case OutputFormat.JSON:
-            emit_final_json({"action": action.value.lower(), "dry_run": True, "agents": agent_data})
+            write_json_line({"action": action.value.lower(), "dry_run": True, "agents": agent_data})
         case OutputFormat.JSONL:
             emit_event("dry_run", {"action": action.value.lower(), "agents": agent_data}, OutputFormat.JSONL)
         case OutputFormat.HUMAN:
@@ -621,18 +623,20 @@ def _emit_result(
     output_opts: OutputOptions,
 ) -> None:
     """Output the final result of the cleanup operation."""
+    exit_code = exit_code_for_failures(result.failures)
     result_data = {
         "destroyed_agents": [str(n) for n in result.destroyed_agents],
         "stopped_agents": [str(n) for n in result.stopped_agents],
-        "errors": result.errors,
+        "failures": [failure.model_dump(mode="json") for failure in result.failures],
         "destroyed_count": len(result.destroyed_agents),
         "stopped_count": len(result.stopped_agents),
-        "error_count": len(result.errors),
+        "failure_count": len(result.failures),
+        "exit_code": exit_code,
     }
 
     match output_opts.output_format:
         case OutputFormat.JSON:
-            emit_final_json(result_data)
+            write_json_line(result_data)
         case OutputFormat.JSONL:
             emit_event("cleanup_result", result_data, OutputFormat.JSONL)
         case OutputFormat.HUMAN:
@@ -644,10 +648,10 @@ def _emit_result(
                 write_human_line("Successfully stopped {} agent(s)", len(result.stopped_agents))
                 for name in result.stopped_agents:
                     write_human_line("  - {}", name)
-            if result.errors:
-                logger.warning("{} error(s) occurred:", len(result.errors))
-                for error in result.errors:
-                    logger.warning("  - {}", error)
+            if result.failures:
+                logger.warning("{} cleanup failure(s) -- resources may remain:", len(result.failures))
+                for failure in result.failures:
+                    logger.warning("  - [{}] {}", failure.category.value, failure.message)
             if not result.destroyed_agents and not result.stopped_agents:
                 write_human_line("No agents were affected")
         case _ as unreachable:

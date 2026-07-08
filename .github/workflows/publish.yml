@@ -47,15 +47,15 @@ jobs:
           fi
 
           if [ -n "$EXPECTED" ]; then
-            uv run scripts/verify_publish.py --expected-mngr-version "$EXPECTED"
+            uv run --all-packages scripts/verify_publish.py --expected-mngr-version "$EXPECTED"
           else
-            uv run scripts/verify_publish.py
+            uv run --all-packages scripts/verify_publish.py
           fi
 
       - name: Build all packages
         run: |
           set -euo pipefail
-          pkg_dirs_output=$(uv run scripts/verify_publish.py --list-package-dirs)
+          pkg_dirs_output=$(uv run --all-packages scripts/verify_publish.py --list-package-dirs)
           mapfile -t pkg_dirs <<< "$pkg_dirs_output"
           for pkg_dir in "${pkg_dirs[@]}"; do
             echo "::group::Build $pkg_dir"

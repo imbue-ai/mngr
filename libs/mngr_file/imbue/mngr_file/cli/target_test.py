@@ -1,16 +1,41 @@
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 
-import pytest
-
-from imbue.mngr.errors import MngrError
-from imbue.mngr.errors import UserInputError
+from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.hosts.offline_host import OfflineHostWithVolume
+from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
+from imbue.mngr.providers.docker.host_store import HostRecord
+from imbue.mngr.providers.docker.instance import DockerProviderInstance
+from imbue.mngr.providers.docker.testing import make_docker_provider_with_local_volume
 from imbue.mngr_file.cli.target import ResolveFileTargetResult
 from imbue.mngr_file.cli.target import _compute_agent_base_path
-from imbue.mngr_file.cli.target import _is_volume_accessible_path
-from imbue.mngr_file.cli.target import compute_volume_path
 from imbue.mngr_file.cli.target import resolve_full_path
 from imbue.mngr_file.data_types import PathRelativeTo
+
+_HOST_ID = "host-00000000000000000000000000000001"
+
+
+def _make_readable_offline_host(
+    provider: DockerProviderInstance,
+    host_id: HostId,
+) -> OfflineHostWithVolume:
+    """Build a volume-backed readable offline host, as resolve_file_target would."""
+    record = HostRecord(
+        certified_host_data=CertifiedHostData(
+            host_id=str(host_id),
+            host_name="h",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+    )
+    host = provider._create_host_from_host_record(record)
+    assert isinstance(host, OfflineHostWithVolume)
+    return host
+
 
 # --- resolve_full_path ---
 
@@ -53,81 +78,25 @@ def test_compute_agent_base_path_host() -> None:
     assert result == host_dir
 
 
-# --- _is_volume_accessible_path ---
-
-
-def test_is_volume_accessible_path_work_returns_false() -> None:
-    assert _is_volume_accessible_path(PathRelativeTo.WORK) is False
-
-
-def test_is_volume_accessible_path_state_returns_true() -> None:
-    assert _is_volume_accessible_path(PathRelativeTo.STATE) is True
-
-
-def test_is_volume_accessible_path_host_returns_true() -> None:
-    assert _is_volume_accessible_path(PathRelativeTo.HOST) is True
-
-
-# --- compute_volume_path ---
-
-
-def test_compute_volume_path_host_with_user_path() -> None:
-    assert (
-        compute_volume_path(PathRelativeTo.HOST, agent_id=None, user_path="events/logs/events.jsonl")
-        == "events/logs/events.jsonl"
-    )
-
-
-def test_compute_volume_path_host_without_user_path() -> None:
-    assert compute_volume_path(PathRelativeTo.HOST, agent_id=None, user_path=None) == "."
-
-
-def test_compute_volume_path_state_with_user_path() -> None:
-    agent_id = AgentId.generate()
-    assert (
-        compute_volume_path(PathRelativeTo.STATE, agent_id=agent_id, user_path="file.txt")
-        == f"agents/{agent_id}/file.txt"
-    )
-
-
-def test_compute_volume_path_state_without_user_path() -> None:
-    agent_id = AgentId.generate()
-    assert compute_volume_path(PathRelativeTo.STATE, agent_id=agent_id, user_path=None) == f"agents/{agent_id}"
-
-
-def test_compute_volume_path_state_without_agent_id_raises() -> None:
-    with pytest.raises(UserInputError, match="requires an agent target"):
-        compute_volume_path(PathRelativeTo.STATE, agent_id=None, user_path="file.txt")
-
-
-def test_compute_volume_path_work_raises() -> None:
-    with pytest.raises(UserInputError, match="offline"):
-        compute_volume_path(PathRelativeTo.WORK, agent_id=AgentId.generate(), user_path="file.txt")
-
-
 # --- ResolveFileTargetResult ---
 
 
-def test_resolve_file_target_result_host_raises_when_offline() -> None:
+def test_resolve_file_target_result_is_online_false_for_offline_host(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
+    host = _make_readable_offline_host(provider, HostId(_HOST_ID))
+
     result = ResolveFileTargetResult(
-        online_host=None,
-        volume=None,
-        base_path=Path("/test"),
+        host=host,
+        base_path=host.host_dir,
         is_agent=False,
         agent_id=None,
         relative_to=PathRelativeTo.HOST,
     )
-    with pytest.raises(MngrError, match="offline"):
-        _ = result.host
 
-
-def test_resolve_file_target_result_is_online_false_when_no_host() -> None:
-    result = ResolveFileTargetResult(
-        online_host=None,
-        volume=None,
-        base_path=Path("/test"),
-        is_agent=False,
-        agent_id=None,
-        relative_to=PathRelativeTo.HOST,
-    )
     assert result.is_online is False
+    assert not isinstance(result.host, OnlineHostInterface)
+    # The readable offline host exposes a real host_dir and reads by absolute path.
+    assert result.base_path == host.host_dir

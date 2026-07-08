@@ -8,7 +8,9 @@ Key concepts in the minds system:
 
 - **desktop client**: a local process (`minds run`) that handles authentication, agent creation, and reverse proxying. Multiplexes access to multiple workspaces through a single local endpoint.
 
-- **bootstrap service manager**: a process running inside each agent container that watches `services.toml` and starts/stops background services in tmux windows.
+- **bootstrap**: `uv run bootstrap`, the process that runs first-boot setup inside each agent container and then execs `supervisord -n` to launch the background services.
+
+- **supervisord**: the process-control system running inside each agent container that supervises the background services, each declared as a `[program:*]` section in `supervisord.conf` (logs under `/var/log/supervisor`). Replaces the old custom service manager that watched `services.toml` and ran services in tmux windows.
 
 - **application**: a service that exposes a port for forwarding. Registered in `runtime/applications.toml` via `scripts/forward_port.py`. Each application gets both a local URL (via the desktop client) and optionally a global URL (via Cloudflare tunnel).
 
@@ -18,4 +20,4 @@ Key concepts in the minds system:
 
 - **service event**: a JSON line in `events/services/events.jsonl` that registers (or deregisters) a service name and URL. The desktop client's MngrStreamManager watches these events to discover agent backends.
 
-- **launch mode**: how the agent runs. LOCAL mode runs in a Docker container on the user's machine. LIMA runs in a Lima VM. CLOUD runs in Docker on a Vultr VPS. IMBUE_CLOUD leases a pre-baked pool host via the imbue_cloud provider plugin.
+- **launch mode**: how the agent runs. DOCKER mode runs in a Docker container on the user's machine. LIMA runs in a Lima VM. CLOUD runs in Docker on a Vultr VPS. IMBUE_CLOUD leases a pre-baked pool host via the imbue_cloud provider plugin.

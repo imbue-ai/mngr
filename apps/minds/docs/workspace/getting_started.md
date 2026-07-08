@@ -35,7 +35,7 @@ minds run
 3. Fill in:
    - **Name**: a short identifier for the agent (e.g. "selene")
    - **Git repository**: URL or local path to a template repo (e.g. `https://github.com/imbue-ai/forever-claude-template`)
-   - **Launch mode**: LOCAL (Docker container on this machine), LIMA (Lima VM), CLOUD (Docker on a Vultr VPS), or IMBUE_CLOUD (leased pool host via the imbue_cloud provider)
+   - **Launch mode**: DOCKER (Docker container on this machine), LIMA (Lima VM), CLOUD (Docker on a Vultr VPS), or IMBUE_CLOUD (leased pool host via the imbue_cloud provider)
 4. Click "Create" and wait for the Docker build + agent setup
 5. You'll be redirected to the agent's web server when creation completes
 

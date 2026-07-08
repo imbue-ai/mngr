@@ -10,13 +10,14 @@ subprocess call.
 import json
 import os
 import subprocess
-from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 from loguru import logger
 
+from imbue.mngr.cli.exit_codes import EXIT_CODE_PROVIDER_INACCESSIBLE
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr_forward.data_types import ForwardAgentSnapshot
 from imbue.mngr_forward.data_types import ForwardListSnapshot
 from imbue.mngr_forward.errors import ForwardSubprocessError
@@ -28,19 +29,25 @@ def mngr_list_snapshot(
     mngr_binary: str = MNGR_BINARY,
     timeout_seconds: float = 30.0,
     extra_env: dict[str, str] | None = None,
+    error_behavior: ErrorBehavior = ErrorBehavior.ABORT,
 ) -> ForwardListSnapshot:
     """Run ``mngr list --format json`` once and parse the result.
 
     Returns a ``ForwardListSnapshot`` carrying every agent the user's mngr
     config currently sees, including labels and SSH info for remote hosts.
     Raises ``ForwardSubprocessError`` if the subprocess fails to spawn or
-    exits non-zero.
+    exits non-zero. Under ``ErrorBehavior.CONTINUE`` the snapshot passes
+    ``--on-error continue`` and tolerates an inaccessible/unauthenticated
+    provider (exit ``EXIT_CODE_PROVIDER_INACCESSIBLE``), forwarding the agents
+    the healthy providers still reported.
     """
-    command: Sequence[str] = (mngr_binary, "list", "--format", "json")
+    command: list[str] = [mngr_binary, "list", "--format", "json"]
+    if error_behavior == ErrorBehavior.CONTINUE:
+        command += ["--on-error", "continue"]
     cwd = Path.home()
     try:
         result = subprocess.run(  # noqa: S603 - command is fully controlled
-            list(command),
+            command,
             check=False,
             capture_output=True,
             text=True,
@@ -51,9 +58,21 @@ def mngr_list_snapshot(
     except (OSError, subprocess.TimeoutExpired) as e:
         raise ForwardSubprocessError(f"Failed to run `{' '.join(command)}`: {e}") from e
 
-    if result.returncode != 0:
+    # Under CONTINUE, an unauthenticated/unreachable provider makes `mngr list`
+    # exit EXIT_CODE_PROVIDER_INACCESSIBLE while still emitting the healthy
+    # providers' agents on stdout. Treat that as a partial success and forward
+    # what we can; any other nonzero exit is still a hard failure.
+    is_tolerated_provider_failure = (
+        error_behavior == ErrorBehavior.CONTINUE and result.returncode == EXIT_CODE_PROVIDER_INACCESSIBLE
+    )
+    if result.returncode != 0 and not is_tolerated_provider_failure:
         raise ForwardSubprocessError(
             f"`{' '.join(command)}` exited with code {result.returncode}: {result.stderr.strip()}"
+        )
+    if is_tolerated_provider_failure:
+        logger.debug(
+            "Tolerated inaccessible providers from `mngr list` (exit {}); forwarding agents from the healthy providers",
+            result.returncode,
         )
 
     return _parse_snapshot(result.stdout)

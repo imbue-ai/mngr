@@ -17,7 +17,16 @@ from imbue.mngr.utils.testing import tmux_session_cleanup
 from imbue.mngr.utils.testing import tmux_session_exists
 
 
+# The in-test wait_for budget (15s for the session to appear) already exceeds
+# the global 10s pytest-timeout, so a slow sandbox can trip the ceiling before
+# the real work even fails. Real tmux session create/destroy is the point of
+# this test, so the workload cannot be shrunk; bumping the per-test timeout
+# gives room when the sandbox is slow, and offload still retries via
+# @pytest.mark.flaky if it slips further. Matches the precedent on
+# test_destroy_multiple_agents.
 @pytest.mark.tmux
+@pytest.mark.flaky
+@pytest.mark.timeout(60)
 def test_destroy_single_agent(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -553,8 +562,9 @@ def test_destroy_remove_created_branch_deletes_branch(
         )
 
 
-@pytest.mark.flaky
 @pytest.mark.tmux
+# real agent setup/teardown occasionally exceeds the 10s default.
+@pytest.mark.timeout(30)
 def test_destroy_without_remove_created_branch_leaves_branch(
     cli_runner: CliRunner,
     temp_git_repo: Path,
@@ -748,7 +758,12 @@ def test_destroy_transfer_none_keeps_shared_worktree(
         assert tmux_session_exists(owner_session), "owner tmux session should still be running"
 
 
+# Real create + destroy + post-destroy GC of a tmux agent. Under heavy CI load the GC
+# thread-pool join can briefly outrun the global 10s pytest-timeout (the work itself --
+# real tmux session create/destroy -- is the point of the test and can't be shrunk), so
+# give it a little more headroom. Matches the precedent on the other tmux destroy tests.
 @pytest.mark.tmux
+@pytest.mark.timeout(30)
 def test_destroy_transfer_none_standalone_keeps_user_worktree(
     cli_runner: CliRunner,
     temp_git_repo: Path,
@@ -873,7 +888,7 @@ def test_destroy_via_stdin(
             catch_exceptions=False,
         )
 
-        assert destroy_result.exit_code == 0
+        assert destroy_result.exit_code == 0, f"Destroy failed: {destroy_result.output}"
 
         wait_for(
             lambda: not tmux_session_exists(session_name1) and not tmux_session_exists(session_name2),

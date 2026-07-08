@@ -1,3 +1,5 @@
 node_modules/
 resources/
 dist/
+electron/build-info.json
+.visual-diff/

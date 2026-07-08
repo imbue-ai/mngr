@@ -1,0 +1,29 @@
+{#def display_name, ws_name, agent_id, rationale, header_display_name_html="", rationale_label_html="" #}
+{#
+  Permissions dialog header: h1 ("Permission request: <name>") plus the
+  rationale card ("<workspace> says: ...").
+
+  ``header_display_name_html`` and ``rationale_label_html`` are optional
+  Markup overrides for backends that want fancier rendering (e.g. a
+  boxed monospace pill for a file path). When empty, the defaults are
+  plain text.
+#}
+<h1 class="type-heading-lg text-primary pr-8">
+  Permission request:
+  {% if header_display_name_html %}
+    {{ header_display_name_html }}
+  {% else %}
+    <span class="font-bold">{{ display_name }}</span>
+  {% endif %}
+</h1>
+
+<Card extra="mt-6">
+  <div>
+    {% if rationale_label_html %}
+      {{ rationale_label_html }}
+    {% else %}
+      <p class="type-label text-primary mb-1">{{ ws_name or agent_id }} says:</p>
+    {% endif %}
+    <p class="type-body italic whitespace-pre-wrap">{{ rationale }}</p>
+  </div>
+</Card>

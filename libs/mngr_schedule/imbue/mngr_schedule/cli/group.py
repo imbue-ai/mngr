@@ -134,6 +134,15 @@ def add_trigger_options(command: Any) -> Any:
 
     # Trigger Definition group
     command = optgroup.option(
+        "--timezone",
+        "timezone",
+        default=None,
+        help="IANA timezone name (e.g. 'America/Los_Angeles') in which to interpret the "
+        "--schedule cron expression. Defaults to the deploy machine's local timezone, so "
+        "pin this explicitly to keep the fire time independent of where the deploy ran. "
+        "Only supported for the modal provider.",
+    )(command)
+    command = optgroup.option(
         "--schedule",
         "schedule_cron",
         default=None,

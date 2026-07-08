@@ -1,0 +1,186 @@
+Run the test with: {{ run_cmd }}
+
+# The docstring is the contract
+
+This test's docstring defines its scope: exactly what the test is meant to
+verify. Your job is to make the test pass and make it verify exactly that scope
+-- no more, no less. The docstring is authoritative: do NOT re-derive the
+intended scope from the commands or the implementation. Read the docstring and
+take it as given.
+
+The docstring is READ-ONLY. Never edit it (the one narrow exception is in
+"# Correcting an outdated tutorial block" below).
+
+# If the test fails
+
+You can record multiple kinds of changes -- they are not mutually exclusive (one
+entry per kind, not per individual edit):
+
+- "FIX_TEST": fix the test code (including fixtures).
+- "FIX_IMPL": fix the program being tested.
+
+Each change has a status: "SUCCEEDED" if the fix worked, "FAILED" if you tried
+but could not complete it, or "BLOCKED" if the issue needs larger intervention
+beyond this task. If you cannot determine what is wrong, report no changes.
+
+When deciding whether to fix the test or the implementation, the docstring is the
+arbiter: the correct behavior is whatever the docstring's scope says it should
+be. If the implementation diverges from the documented scope, fix the
+implementation; if the test asserts something outside the documented scope, fix
+the test.
+
+# If the test succeeds - or after you fixed a failing test
+
+Make the test verify exactly its docstring scope -- check it in BOTH directions:
+
+- Coverage (forward): is everything the scope calls for actually verified? If the
+  scope says to observe a real effect (e.g. that an agent is running in a given
+  directory, not merely that the command exited 0), the test must observe it. Add
+  any missing verification the scope requires.
+
+- Trace (backward): does every assertion trace back to the scope? An assertion
+  that verifies something the scope does not mention is gold-plating: it adds
+  brittleness without verifying documented behavior. REMOVE it.
+
+A test that already verifies exactly its scope needs no change: leaving the
+changes object empty is a correct, good outcome, NOT a failure. Do not add
+assertions merely to be thorough -- the scope fixes what "thorough" means here.
+
+Removing or simplifying an over-fitted assertion is a real improvement, exactly
+as valuable as adding a missing one -- both are recorded under "IMPROVE_TEST".
+
+You may add a separate pytest function for an unhappy/error path when the
+docstring's scope includes that failure mode. Only do so when the scope calls for
+it -- not to manufacture extra coverage.
+
+If you make improvements (adding, removing, or restructuring), record a change
+under the key "IMPROVE_TEST". If an improvement needs a larger-scale
+intervention, use status "BLOCKED". If the test already verifies exactly its
+scope, leave the changes object empty.
+
+# Correcting an outdated tutorial block
+
+Some tests are anchored to a documentation tutorial: their docstring begins with
+a "Tutorial block:" section holding a shell snippet verbatim, kept in sync with
+libs/mngr/imbue/mngr/resources/mega_tutorial.sh. This block is the ONLY part of
+any docstring you may edit, and only in one case: the block is genuinely wrong or
+outdated relative to how the command actually behaves now.
+
+When that happens, update BOTH the "Tutorial block:" section in the docstring and
+the corresponding block in mega_tutorial.sh (keep them identical, modulo leading
+whitespace), and record the change under the key "FIX_TUTORIAL". This should be
+rare. The "Scope:" prose and every other docstring are always off-limits. Tests
+without a "Tutorial block:" section have no tutorial to fix.
+
+# Cross-cutting setup blockers
+
+Some problems can only be fixed by a substantial, shared setup change that is out
+of scope for a single test -- for example, the suite mocking an agent with a
+`sleep` command instead of a real fake-agent fixture, a missing shared helper, or
+a dependency on credentials absent from the environment (e.g. cloud credentials
+for a provider test). You see only one test, so you cannot tell whether such
+setup is duplicated across the suite, nor fix it suite-wide.
+
+When you hit one, do NOT paper over it with a brittle local hack. Instead:
+
+1. Leave a comment at the relevant spot in the code, on its own line, in exactly
+   this form so a later step can find it:
+
+     # FIXME(tmr): <one-line description of the shared setup change needed>
+
+2. Record a change (typically FIX_TEST or IMPROVE_TEST) with status "BLOCKED" and
+   explain the needed setup change in summary_markdown.
+
+A later integration step collects these comments, resolves the ones it can verify
+suite-wide, and surfaces the rest to the user. Your job is only to flag them
+clearly -- do not attempt the suite-wide change yourself.
+
+# Examining the test output
+
+After each test run, examine any output the test produced (logs, a CLI
+transcript in the test output directory, captured stdout/stderr). Look for
+unexpected output such as warnings, deprecation notices, or error messages that
+were not caught by the test assertions. If you find something concerning,
+consider whether the test should assert on it (only if the scope covers it), or
+whether the implementation should be fixed to avoid the warning.
+
+# Committing your changes
+
+IMPORTANT: Each change kind MUST get its own separate commit. Changes of the same
+kind should be combined in one commit. The commit message MUST start with the kind
+in brackets. Examples:
+
+  [FIX_TEST] Fix assertion to check exit code instead of stdout
+  [FIX_IMPL] Add missing timeout parameter to create command
+  [IMPROVE_TEST] Remove assertion outside the documented scope
+
+This means if you make both a FIX_TEST and a FIX_IMPL change, you should have
+exactly two commits. Do NOT mix different kinds in the same commit.
+
+# Running tests multiple times
+{% if e2e_run_name %}
+You may run the test multiple times during your work (initial run, then after
+each fix attempt). Each run should use a DIFFERENT --mngr-e2e-run-name value
+by appending a suffix to the base run name that was passed to you:
+
+  First run:  --mngr-e2e-run-name {{ e2e_run_name }}_try_1
+  Second run: --mngr-e2e-run-name {{ e2e_run_name }}_try_2
+  ...and so on.
+
+This ensures each run's artifacts (transcripts, recordings) are kept separately.
+Before each run, decide on a brief description: "initial run" for the first one,
+or something like "after fixing assertion timeout" for subsequent runs.
+{% else %}
+You may run the test multiple times during your work (initial run, then after
+each fix attempt). Before each run, decide on a brief description: "initial run"
+for the first one, or something like "after fixing assertion timeout" for
+subsequent runs. Record each run in the test_runs field of the outcome.
+{% endif %}
+# Writing the result
+
+Write the result atomically to avoid races with the orchestrator reading it:
+1. First write to .test_output/{{ outcome_filename }}.draft (relative to the git repo root)
+2. Then rename (mv) the .draft file to .test_output/{{ outcome_filename }}
+
+The schema is:
+
+{"changes": {"FIX_TEST": {"status": "SUCCEEDED", "summary_markdown": "Fixed assertion"}},
+ "errored": false,
+ "tests_passing_before": false,
+ "tests_passing_after": true,
+ "summary_markdown": "Fixed test assertion and verified it passes.",
+ "test_runs": [
+   {"run_name": "<try_1>", "description_markdown": "initial run"},
+   {"run_name": "<try_2>", "description_markdown": "after fixing assertion timeout"}
+ ]}
+
+Fields:
+- changes: object keyed by change kind (IMPROVE_TEST, FIX_TEST, FIX_IMPL,
+  FIX_TUTORIAL). Each value has status (SUCCEEDED, FAILED, BLOCKED) and
+  summary_markdown. One entry per kind -- do not duplicate kinds.
+- errored: true only for infrastructure errors that prevented you from working.
+- tests_passing_before: were tests passing before you made any changes?
+- tests_passing_after: are tests passing now, after all your changes?
+- summary_markdown: overall markdown summary of what happened.
+- test_runs: list of objects, one per test run, in order. Each has run_name
+  and description_markdown (brief description of what this run was for).
+
+# Publishing the outputs archive
+
+After the outcome file is written, package the outputs and publish them
+where the orchestrator can find them. Run this from the git repo root:
+
+{{ publish_snippet }}
+
+This MUST be the very last step. The orchestrator polls for outputs.tar.gz
+and treats its appearance as the signal that you are done. The .tmp + rename
+sequence prevents the orchestrator from reading a half-written archive. Omit
+branch.bundle when you made no commits beyond the base branch.
+
+# Important: do not ask for user input
+
+For this initial request, do NOT ask the user for any input or clarification.
+Work autonomously. If something is unclear or you are blocked, produce a result
+with the appropriate change status set to "BLOCKED" and explain in the
+summary_markdown. If the user sends follow-up messages later, you may ask them
+questions at that point.

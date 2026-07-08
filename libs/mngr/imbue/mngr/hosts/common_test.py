@@ -1,3 +1,4 @@
+import os
 import shlex
 import subprocess
 import types
@@ -7,6 +8,8 @@ from datetime import timezone
 from pathlib import Path
 from typing import cast
 
+import pytest
+
 from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.config.agent_class_registry import register_agent_class
 from imbue.mngr.config.agent_class_registry import reset_agent_class_registry
@@ -15,16 +18,20 @@ from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.hosts.common import add_safe_directory_on_remote
 from imbue.mngr.hosts.common import build_ssh_transport_command
 from imbue.mngr.hosts.common import check_agent_type_known
+from imbue.mngr.hosts.common import classify_waiting_reason
 from imbue.mngr.hosts.common import compute_idle_seconds
+from imbue.mngr.hosts.common import copy_on_host
 from imbue.mngr.hosts.common import determine_lifecycle_state
 from imbue.mngr.hosts.common import get_descendant_process_names
 from imbue.mngr.hosts.common import get_ssh_known_hosts_file
 from imbue.mngr.hosts.common import resolve_expected_process_name
+from imbue.mngr.hosts.common import symlink_on_host
 from imbue.mngr.hosts.common import timestamp_to_datetime
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.primitives import WaitingReason
 
 # =========================================================================
 # timestamp_to_datetime tests
@@ -312,6 +319,52 @@ def test_add_safe_directory_on_remote_is_noop_for_local_host(setup_git_config: N
 
 
 # =========================================================================
+# symlink_on_host / copy_on_host tests
+# =========================================================================
+
+
+def test_symlink_on_host_symlinks_even_when_source_absent(local_host: OnlineHostInterface, tmp_path: Path) -> None:
+    """symlink_on_host creates a (dangling) symlink to a not-yet-existing source, and a write goes through it."""
+    source = tmp_path / "real" / "tok"
+    dest = tmp_path / "agent" / "tok"
+
+    symlink_on_host(local_host, source, dest, ensure_source_parent=True)
+
+    assert dest.is_symlink()
+    assert Path(os.readlink(dest)) == source
+    # Dangling: source not created yet; ensure_source_parent created the shared parent dir.
+    assert not dest.exists()
+    assert source.parent.is_dir()
+    # A write through the dangling symlink creates the source (the write-through property).
+    dest.write_text("tok-data")
+    assert source.read_text() == "tok-data"
+
+
+def test_copy_on_host_copies_existing_source(local_host: OnlineHostInterface, tmp_path: Path) -> None:
+    source = tmp_path / "real" / "tok"
+    source.parent.mkdir(parents=True)
+    source.write_text("secret")
+    dest = tmp_path / "agent" / "tok"
+
+    result = copy_on_host(local_host, source, dest)
+
+    assert result is True
+    assert not dest.is_symlink()
+    assert dest.read_text() == "secret"
+    assert (dest.stat().st_mode & 0o777) == 0o600
+
+
+def test_copy_on_host_skips_when_source_absent(local_host: OnlineHostInterface, tmp_path: Path) -> None:
+    source = tmp_path / "real" / "missing"
+    dest = tmp_path / "agent" / "tok"
+
+    result = copy_on_host(local_host, source, dest)
+
+    assert result is False
+    assert not dest.exists()
+
+
+# =========================================================================
 # build_ssh_transport_command tests
 # =========================================================================
 
@@ -327,6 +380,8 @@ def test_build_ssh_transport_command_with_known_hosts_uses_strict_checking() -> 
     assert "-p 2222" in result
     assert "-o UserKnownHostsFile=/tmp/known_hosts" in result
     assert "-o StrictHostKeyChecking=yes" in result
+    assert "-o IdentitiesOnly=yes" in result
+    assert "-o IdentityAgent=none" in result
 
 
 def test_build_ssh_transport_command_without_known_hosts_uses_strict_checking() -> None:
@@ -336,6 +391,8 @@ def test_build_ssh_transport_command_without_known_hosts_uses_strict_checking() 
         known_hosts_file=None,
     )
     assert "-o StrictHostKeyChecking=yes" in result
+    assert "-o IdentitiesOnly=yes" in result
+    assert "-o IdentityAgent=none" in result
     assert "UserKnownHostsFile" not in result
 
 
@@ -391,3 +448,24 @@ def test_get_ssh_known_hosts_file_returns_none_for_dev_null() -> None:
     host = _make_host_with_known_hosts("/dev/null")
     result = get_ssh_known_hosts_file(host)
     assert result is None
+
+
+# classify_waiting_reason tests
+
+
+@pytest.mark.parametrize(
+    "is_active, is_blocked, expected",
+    [
+        # Idle (turn over): END_OF_TURN regardless of a stranded permission marker.
+        (False, False, WaitingReason.END_OF_TURN),
+        (False, True, WaitingReason.END_OF_TURN),
+        # In a turn: PERMISSIONS only while genuinely blocked, else actively running.
+        (True, True, WaitingReason.PERMISSIONS),
+        (True, False, None),
+    ],
+)
+def test_classify_waiting_reason(is_active: bool, is_blocked: bool, expected: WaitingReason | None) -> None:
+    """The shared gating rule used by every agent plugin's lifecycle promotion and
+    waiting_reason field generator: PERMISSIONS is gated on is_active, so a stranded
+    permission marker (active absent) never yields PERMISSIONS."""
+    assert classify_waiting_reason(is_active, is_blocked) == expected

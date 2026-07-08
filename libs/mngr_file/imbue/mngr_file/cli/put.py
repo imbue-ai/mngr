@@ -5,22 +5,22 @@ from typing import assert_never
 
 import click
 from click_option_group import optgroup
-from loguru import logger
 
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.cli.address_params import AGENT_OR_HOST_ADDRESS
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.output_helpers import emit_event
-from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.interfaces.host import HostFileWriteInterface
 from imbue.mngr.primitives import AgentOrHostAddress
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr_file.cli.group import file_group
-from imbue.mngr_file.cli.target import compute_volume_path
 from imbue.mngr_file.cli.target import resolve_file_target
 from imbue.mngr_file.cli.target import resolve_full_path
 from imbue.mngr_file.data_types import PathRelativeTo
@@ -47,7 +47,7 @@ def _emit_put_result(
     }
     match output_opts.output_format:
         case OutputFormat.JSON:
-            emit_final_json({"event": "file_written", **data})
+            write_json_line({"event": "file_written", **data})
         case OutputFormat.JSONL:
             emit_event("file_written", data, OutputFormat.JSONL)
         case OutputFormat.HUMAN:
@@ -122,18 +122,16 @@ def file_put(ctx: click.Context, **kwargs: Any) -> None:
     else:
         content = sys.stdin.buffer.read()
 
-    # Write file -- prefer online host, fall back to volume
+    # Write the file through the host's write interface. The resolved host is
+    # an online host (writes over SSH / locally) or a volume-backed stopped host
+    # (writes to its persisted volume; --mode is ignored there). Writing to a
+    # work-dir path on an offline host was already rejected during resolution.
     with log_span("Writing file"):
-        if resolved.is_online:
-            full_path = resolve_full_path(resolved.base_path, opts.path)
-            resolved.host.write_file(full_path, content, mode=opts.mode)
-            display_path = full_path
-        else:
-            assert resolved.volume is not None
-            if opts.mode is not None:
-                logger.warning("--mode is not supported when writing via volume (host is offline); ignoring")
-            vol_path = compute_volume_path(resolved.relative_to, resolved.agent_id, opts.path)
-            resolved.volume.write_files({vol_path: content})
-            display_path = Path(vol_path)
+        host = resolved.host
+        if not isinstance(host, HostFileWriteInterface):
+            raise MngrError(f"Host for target '{opts.target}' does not support writing files.")
+        full_path = resolve_full_path(resolved.base_path, opts.path)
+        host.write_file(full_path, content, mode=opts.mode)
+        display_path = full_path
 
     _emit_put_result(display_path, len(content), output_opts)

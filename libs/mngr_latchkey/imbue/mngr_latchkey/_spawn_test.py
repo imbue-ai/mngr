@@ -8,13 +8,19 @@ exercised by the integration tests in ``core_test.py``), and
 ``forward_supervisor_test.py``.
 """
 
+import json
 import threading
 import time
 from pathlib import Path
 
 import pytest
+from pydantic import SecretStr
 
 from imbue.mngr_latchkey._spawn import spawn_detached_latchkey_ensure_browser
+from imbue.mngr_latchkey._spawn import spawn_detached_mngr_latchkey_forward
+from imbue.mngr_latchkey.store import forward_events_log_path
+from imbue.mngr_latchkey.store import forward_log_path
+from imbue.mngr_latchkey.store import plugin_data_dir
 
 _POLL_INTERVAL_SECONDS = 0.05
 
@@ -84,6 +90,61 @@ def test_spawn_detached_latchkey_ensure_browser_sets_latchkey_directory(
     assert report_path.read_text() == f"{latchkey_directory}\n"
 
 
+def _make_encryption_key_reporter_binary(tmp_path: Path) -> Path:
+    """Build a fake ``latchkey`` that records ``LATCHKEY_ENCRYPTION_KEY`` and exits."""
+    script = tmp_path / "latchkey"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, sys\n"
+        'assert sys.argv[1] == "ensure-browser"\n'
+        "report_path = os.environ['FAKE_LATCHKEY_REPORT']\n"
+        "key = os.environ.get('LATCHKEY_ENCRYPTION_KEY', '')\n"
+        "open(report_path, 'a').write(key + '\\n')\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+def test_spawn_detached_latchkey_ensure_browser_injects_encryption_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_binary = _make_encryption_key_reporter_binary(tmp_path)
+    report_path = tmp_path / "report"
+    monkeypatch.setenv("FAKE_LATCHKEY_REPORT", str(report_path))
+    monkeypatch.delenv("LATCHKEY_ENCRYPTION_KEY", raising=False)
+
+    pid = spawn_detached_latchkey_ensure_browser(
+        latchkey_binary=str(fake_binary),
+        log_path=tmp_path / "log",
+        encryption_key=SecretStr("per-directory-key"),
+    )
+    assert pid > 0
+    assert _wait_for_file(report_path)
+    # The child sees the per-directory key, so Latchkey never falls through to
+    # the system keychain (which on macOS would pop an access dialog).
+    assert report_path.read_text() == "per-directory-key\n"
+
+
+def test_spawn_detached_latchkey_ensure_browser_operator_key_wins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_binary = _make_encryption_key_reporter_binary(tmp_path)
+    report_path = tmp_path / "report"
+    monkeypatch.setenv("FAKE_LATCHKEY_REPORT", str(report_path))
+    # An operator-set value already in the environment must win over the
+    # per-directory key passed by the caller.
+    monkeypatch.setenv("LATCHKEY_ENCRYPTION_KEY", "operator-key")
+
+    pid = spawn_detached_latchkey_ensure_browser(
+        latchkey_binary=str(fake_binary),
+        log_path=tmp_path / "log",
+        encryption_key=SecretStr("per-directory-key"),
+    )
+    assert pid > 0
+    assert _wait_for_file(report_path)
+    assert report_path.read_text() == "operator-key\n"
+
+
 def test_spawn_detached_latchkey_ensure_browser_raises_when_binary_missing(tmp_path: Path) -> None:
     missing = tmp_path / "definitely-not-here"
     with pytest.raises(FileNotFoundError):
@@ -91,3 +152,52 @@ def test_spawn_detached_latchkey_ensure_browser_raises_when_binary_missing(tmp_p
             latchkey_binary=str(missing),
             log_path=tmp_path / "log",
         )
+
+
+def _make_argv_reporter_mngr_binary(tmp_path: Path) -> Path:
+    """Build a fake ``mngr`` that records its argv to ``$FAKE_MNGR_REPORT`` and exits.
+
+    Writes the report atomically (temp file + ``os.replace``) so a reader that
+    polls only for the file's *existence* can never observe it truncated-but-empty
+    between ``open(..., "w")`` and ``write`` -- the race that made
+    :func:`test_spawn_detached_mngr_latchkey_forward_points_at_structured_log_file`
+    intermittently raise ``JSONDecodeError`` under parallel load.
+    """
+    script = tmp_path / "mngr"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "path = os.environ['FAKE_MNGR_REPORT']\n"
+        "tmp = path + '.tmp'\n"
+        "open(tmp, 'w').write(json.dumps(sys.argv[1:]))\n"
+        "os.replace(tmp, path)\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+def test_spawn_detached_mngr_latchkey_forward_points_at_structured_log_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_binary = _make_argv_reporter_mngr_binary(tmp_path)
+    report_path = tmp_path / "report.json"
+    monkeypatch.setenv("FAKE_MNGR_REPORT", str(report_path))
+    latchkey_directory = tmp_path / "latchkey"
+    plugin_dir = plugin_data_dir(latchkey_directory)
+
+    pid = spawn_detached_mngr_latchkey_forward(
+        mngr_binary=str(fake_binary),
+        latchkey_binary="latchkey",
+        latchkey_directory=latchkey_directory,
+        log_path=forward_log_path(plugin_dir),
+    )
+    assert pid > 0
+    assert _wait_for_file(report_path)
+    argv = json.loads(report_path.read_text())
+    # The forward process is pointed at its co-located structured JSONL log so
+    # its timestamped events do not get mixed into the shared host-dir stream.
+    assert "--log-file" in argv
+    assert argv[argv.index("--log-file") + 1] == str(forward_events_log_path(plugin_dir))
+    # ``--quiet`` suppresses the detached child's console handler so the raw
+    # stdout/stderr capture file does not accumulate in steady state.
+    assert "--quiet" in argv

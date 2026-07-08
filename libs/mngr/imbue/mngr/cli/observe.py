@@ -4,11 +4,11 @@ from typing import Any
 import click
 from loguru import logger
 
-from imbue.mngr.api.discovery_events import run_discovery_stream
 from imbue.mngr.api.observe import AgentObserver
 from imbue.mngr.api.observe import acquire_observe_lock
 from imbue.mngr.api.observe import get_default_events_base_dir
 from imbue.mngr.api.observe import release_observe_lock
+from imbue.mngr.api.provider_discovery_stream import run_per_provider_discovery_stream
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
@@ -30,14 +30,16 @@ class ObserveCliOptions(CommonCliOptions):
     "--events-dir",
     type=click.Path(path_type=Path),
     default=None,
-    help="Base directory for event output files and lock. Defaults to MNGR_HOST_DIR (~/.mngr).",
+    help="Base directory for the full observer's event output files and lock. Defaults to "
+    "MNGR_HOST_DIR (~/.mngr). Has no effect with --discovery-only (the discovery log always "
+    "lives under the default host dir).",
 )
 @click.option(
     "--discovery-only",
     is_flag=True,
     help="Stream only discovery events as JSONL (hosts and agents discovered/destroyed). "
-    "Outputs a full snapshot, then tails the event file for updates. "
-    "Periodically re-polls to catch any missed changes. "
+    "Polls each provider independently on its own loop, emitting a per-provider snapshot "
+    "as each finishes, then tails the event file for updates. "
     "Does not start activity streams or emit agent state events.",
 )
 @click.option(
@@ -61,13 +63,22 @@ def observe(ctx: click.Context, **kwargs: Any) -> None:
     if not opts.daemonize:
         start_parent_death_watcher(mngr_ctx.concurrency_group)
 
+    # The discovery log always lives under the default host dir, so --events-dir
+    # (which only relocates the full observer's agent-state events and lock) has no
+    # effect in --discovery-only mode. Fail loudly rather than silently ignore it.
+    if opts.discovery_only and opts.events_dir is not None:
+        raise click.UsageError(
+            "--events-dir has no effect with --discovery-only (the discovery log always lives under "
+            "the default host dir); pass only one of them."
+        )
+
+    if opts.discovery_only:
+        run_per_provider_discovery_stream(mngr_ctx=mngr_ctx)
+        return
+
     events_base_dir = opts.events_dir
     if events_base_dir is None:
         events_base_dir = get_default_events_base_dir(mngr_ctx.config)
-
-    if opts.discovery_only:
-        run_discovery_stream(mngr_ctx=mngr_ctx)
-        return
 
     # Acquire an exclusive lock per output directory
     lock_fd = acquire_observe_lock(events_base_dir)

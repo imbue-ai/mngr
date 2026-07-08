@@ -1,0 +1,31 @@
+{#def name, width="w-full", extra="" #}
+{#
+  Styled <select> with a custom dropdown chevron. The native <select> arrow
+  can't be themed, so we hide it (``appearance-none``) and overlay a
+  ``chevron-down`` Icon16 on the right; it inherits ``text-secondary`` via
+  currentColor (so it flips with the theme) and is ``pointer-events-none`` so
+  clicks fall through to the select. Children should be a sequence of
+  <option> elements; the caller owns per-option selected/disabled state.
+  Usage:
+    <Select name="launch_mode" id="launch_mode" width="w-48">
+      {% for mode in launch_modes %}
+        <option value="{{ mode.value }}" {% if mode.value == selected %}selected{% endif %}>{{ mode.value | lower }}</option>
+      {% endfor %}
+    </Select>
+
+  ``width`` is a Tailwind width utility (default ``w-full``); it sizes the
+  wrapper (the chevron anchors to its right edge) and the <select> fills it.
+
+  Any HTML attribute (id=, disabled, data-*) flows through via JinjaX's
+  attrs passthrough. The visual shell (border, padding, text size, focus
+  ring) comes from the shared ``INPUT_BASE`` catalog global; ``pr-8`` leaves
+  room for the chevron. As a single-line control it adds ``leading-tight``
+  to match TextInput's height.
+#}
+{%- set _cls = "appearance-none w-full pr-8 leading-tight " ~ INPUT_BASE ~ " rounded-md " ~ extra -%}
+<div class="relative {{ width }}">
+  <select {{ attrs.render(name=name, classes=_cls) }}>{{ content }}</select>
+  <span class="pointer-events-none absolute inset-y-0 right-2 flex items-center text-secondary">
+    <Icon16 name="chevron-down" />
+  </span>
+</div>

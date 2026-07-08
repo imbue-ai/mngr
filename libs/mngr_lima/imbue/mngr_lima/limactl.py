@@ -13,6 +13,7 @@ from imbue.concurrency_group.local_process import RunningProcess
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import LogLevel
 from imbue.mngr.primitives import ProviderInstanceName
@@ -126,18 +127,35 @@ def check_lima_version(
         raise LimaVersionError(provider_name, installed_str, minimum_str)
 
 
-def lima_instance_name(host_name: HostName, prefix: str) -> str:
-    """Build the Lima instance name from a mngr host name.
+def lima_instance_name_from_host_id(host_id: HostId, prefix: str) -> str:
+    """Build the Lima instance name from a mngr host id.
 
-    The prefix is the mngr config prefix (default 'mngr-').
+    New VMs derive their instance name from the immutable host id (not the
+    mutable host name) so a host can be renamed without the limactl instance
+    name drifting from the host name -- limactl has no native rename. The
+    instance name is persisted on the host record and used for all lifecycle
+    operations, so existing legacy ``<prefix><host_name>`` instances keep
+    working unchanged (discovery reads the stored instance name, never parses
+    it). The prefix is the mngr config prefix (default 'mngr-').
+    """
+    return f"{prefix}{host_id}"
+
+
+def lima_instance_name(host_name: HostName, prefix: str) -> str:
+    """Build the legacy Lima instance name from a mngr host name.
+
+    Deprecated: new VMs use :func:`lima_instance_name_from_host_id`. Retained
+    because some already-created VMs were named under this scheme; their
+    instance name is persisted on the host record, so they continue to work.
     """
     return f"{prefix}{host_name}"
 
 
 def host_name_from_instance_name(instance_name: str, prefix: str) -> HostName | None:
-    """Extract the mngr host name from a Lima instance name.
+    """Extract the mngr host name from a legacy Lima instance name.
 
     Returns None if the instance name does not start with the prefix.
+    Deprecated alongside :func:`lima_instance_name`.
     """
     if not instance_name.startswith(prefix):
         return None
@@ -152,7 +170,7 @@ def limactl_start_new(
     instance_name: str,
     yaml_path: Path,
     start_args: tuple[str, ...] = (),
-    timeout: float = 600.0,
+    timeout: float = 1800.0,
     on_output: Callable[[str, bool], None] | None = None,
 ) -> None:
     """Create and start a new Lima instance from a YAML config file.
@@ -232,6 +250,59 @@ def limactl_delete(
         result = cg.run_process_to_completion(cmd, timeout=timeout)
     if result.returncode != 0:
         raise LimaCommandError("delete", result.returncode, result.stderr)
+
+
+def limactl_disk_create(
+    cg: ConcurrencyGroup,
+    disk_name: str,
+    size: str,
+    timeout: float = 60.0,
+) -> None:
+    """Create a Lima-managed disk.
+
+    Runs: limactl disk create <disk_name> --size <size>
+
+    Lima only auto-formats an additionalDisk when the disk record already
+    exists at ``~/.lima/_disks/<name>/datadisk``; without this pre-create
+    step, ``limactl start`` fails with "could not load disk ... no such
+    file or directory". Always creates the disk as the default qcow2
+    format; the in-VM ``fsType`` (e.g. btrfs) is applied by Lima's
+    ``format: true`` machinery on first attach.
+    """
+    cmd = ["limactl", "disk", "create", disk_name, "--size", size]
+    with log_span("Running limactl disk create: {} (size {})", disk_name, size):
+        result = cg.run_process_to_completion(cmd, timeout=timeout)
+    if result.returncode != 0:
+        raise LimaCommandError("disk create", result.returncode, result.stderr)
+
+
+def limactl_disk_delete(
+    cg: ConcurrencyGroup,
+    disk_name: str,
+    force: bool = True,
+    timeout: float = 60.0,
+) -> None:
+    """Delete a Lima-managed disk.
+
+    Runs: limactl disk delete [--force] <disk_name>
+
+    Tolerates the disk already being absent (returncode != 0 plus a stderr
+    that mentions "not found") -- this is the case after a normal host
+    destroy that already removed the VM but the disk record is still
+    referenced.
+    """
+    cmd = ["limactl", "disk", "delete"]
+    if force:
+        cmd.append("--force")
+    cmd.append(disk_name)
+    with log_span("Running limactl disk delete: {}", disk_name):
+        result = cg.run_process_to_completion(cmd, timeout=timeout)
+    if result.returncode != 0:
+        stderr_lower = result.stderr.lower()
+        if "not found" in stderr_lower or "does not exist" in stderr_lower:
+            logger.debug("Lima disk {} already absent, skipping", disk_name)
+            return
+        raise LimaCommandError("disk delete", result.returncode, result.stderr)
 
 
 def limactl_list(cg: ConcurrencyGroup, timeout: float = 30.0) -> list[dict[str, Any]]:

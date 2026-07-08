@@ -35,7 +35,10 @@ def test_executor_respects_max_workers() -> None:
     current_concurrent = 0
     lock = threading.Lock()
     # Barrier synchronizes pairs of workers so they overlap, guaranteeing we observe concurrency.
+    # If max_workers were not honored and only one worker ran at a time, the barrier would never be
+    # satisfied and time out; we record that as a failure instead of swallowing it.
     barrier = threading.Barrier(2, timeout=5.0)
+    barrier_breaks: list[threading.BrokenBarrierError] = []
 
     def _track_concurrency() -> None:
         nonlocal max_concurrent, current_concurrent
@@ -44,8 +47,8 @@ def test_executor_respects_max_workers() -> None:
             max_concurrent = max(max_concurrent, current_concurrent)
         try:
             barrier.wait()
-        except threading.BrokenBarrierError:
-            pass
+        except threading.BrokenBarrierError as e:
+            barrier_breaks.append(e)
         with lock:
             current_concurrent -= 1
 
@@ -54,7 +57,11 @@ def test_executor_respects_max_workers() -> None:
             for _ in range(6):
                 executor.submit(_track_concurrency)
 
-    assert max_concurrent <= 2
+    # Two workers must actually run at the same time (not merely "at most two"): the barrier forces
+    # pairs to overlap, so a regression that serialized work would leave max_concurrent at 1 and
+    # break the barrier.
+    assert barrier_breaks == []
+    assert max_concurrent == 2
 
 
 def test_executor_propagates_exceptions_via_future() -> None:

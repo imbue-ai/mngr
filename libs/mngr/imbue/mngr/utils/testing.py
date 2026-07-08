@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 import typing
+from collections.abc import Callable
 from collections.abc import Generator
 from collections.abc import Sequence
 from contextlib import contextmanager
@@ -42,8 +43,11 @@ from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import ConfigStructureError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.hosts.tmux import build_tmux_capture_pane_command
+from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.data_types import AgentDetails
+from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.plugins import hookspecs
@@ -61,6 +65,7 @@ from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.registry import load_local_backend_only
+from imbue.mngr.utils.deps import CLAUDE
 from imbue.mngr.utils.env_utils import TEST_ENV_PATTERN
 from imbue.mngr.utils.env_utils import TEST_ENV_PREFIX
 from imbue.mngr.utils.polling import wait_for
@@ -73,6 +78,14 @@ from imbue.mngr.utils.polling import wait_for
 # Each xdist worker is a separate process with isolated memory, so this
 # list only contains IDs from tests run by THIS worker.
 worker_test_ids: list[str] = []
+
+# Track the mngr prefixes under which this worker's docker fixtures may have
+# created a singleton state container. Each xdist worker is a separate process,
+# so this only holds prefixes from THIS worker's tests. The session cleanup uses
+# it to attribute leaked state containers to us (and fail), as opposed to
+# containers from other concurrent workers/sessions (which it can only
+# warn-and-clean). Mirrors worker_test_ids.
+worker_docker_state_prefixes: list[str] = []
 
 # Track Modal app names that were created during tests for cleanup verification.
 # This enables detection of leaked apps that weren't properly cleaned up.
@@ -360,9 +373,12 @@ def assert_home_is_temp_directory() -> None:
     """
     actual_home = Path.home()
     actual_home_str = str(actual_home)
-    # pytest's tmp_path uses /tmp on Linux, /var/folders or /private/var on macOS
+    # pytest's tmp_path uses /tmp on Linux, /var/folders or /private/var on macOS.
+    # /private/tmp is also valid: when TMPDIR points into /tmp (e.g. a /tmp/<runner> sandbox),
+    # macOS realpath-resolves the /tmp -> /private/tmp symlink, so tmp_path lands under /private/tmp.
     if not (
         actual_home_str.startswith("/tmp")
+        or actual_home_str.startswith("/private/tmp")
         or actual_home_str.startswith("/var/folders")
         or actual_home_str.startswith("/private/var")
     ):
@@ -414,6 +430,29 @@ def setup_mngr_test_environment(
     # Safety check: verify Path.home() is in a temp directory.
     # If this fails, tests could accidentally modify the real home directory.
     assert_home_is_temp_directory()
+
+
+@contextmanager
+def capture_log_warnings() -> Generator[list[str], None, None]:
+    """Capture loguru warning messages, yielding the list they accumulate in.
+
+    Core logic shared by all log_warnings fixtures (in mngr/conftest.py and
+    plugin_testing.py). This is the single source of truth so the fixtures stay
+    thin delegation wrappers rather than duplicating the handler bookkeeping.
+
+    Tolerates handler removal during the test (e.g. setup_logging() calls
+    logger.remove() which clears all handlers, so the handler we added may no
+    longer exist by the time teardown runs).
+    """
+    messages: list[str] = []
+    handler_id = logger.add(lambda msg: messages.append(msg.record["message"]), level="WARNING", format="{message}")
+    try:
+        yield messages
+    finally:
+        try:
+            logger.remove(handler_id)
+        except ValueError:
+            pass
 
 
 def get_subprocess_test_env(
@@ -630,8 +669,9 @@ def cleanup_tmux_session(session_name: str) -> None:
     a hung ``tmux`` step can't block the rest of the cleanup.
     """
     # Collect all pane PIDs and their descendants before killing the session.
-    # Guard with has-session first: list-panes -s does not support the = prefix for
-    # exact matching, so it would prefix-match a different session if this one is gone.
+    # Guard with has-session first: list-panes -s does not honor the = exact-match
+    # prefix (cmd-find.c quirk), so without the guard a bare-name list-panes -s
+    # would silently misroute when this session is gone.
     has_result = _run_with_timeout("tmux", "has-session", "-t", f"={session_name}")
     all_pids: list[str] = []
     if has_result.returncode == 0:
@@ -667,8 +707,16 @@ def cleanup_tmux_session(session_name: str) -> None:
         except (ProcessLookupError, ValueError):
             pass
 
-    # Kill any orphaned activity monitors for this session (started with nohup, detached)
-    _run_with_timeout("pkill", "-9", "-f", f"list-panes -t {session_name}")
+    # Kill any orphaned activity monitors for this session (started with nohup, detached).
+    # The monitor runs `tmux list-panes -t =<session>:agent ...` (see
+    # _build_start_agent_shell_command, which routes the target through
+    # TmuxWindowTarget against the default primary window name "agent"). Anchoring
+    # the pkill substring on the full `=<session>:agent` form both keeps the match
+    # working (the bare `<session>` form is no longer in the command line) and
+    # avoids prefix-collision: a sibling session would appear as
+    # `=<session>-sibling:agent`, which contains `<session>` but not
+    # `<session>:agent`, so its monitor will not be killed by accident.
+    _run_with_timeout("pkill", "-9", "-f", f"list-panes -t ={session_name}:agent")
 
 
 @contextmanager
@@ -697,15 +745,19 @@ def mngr_agent_cleanup(
         run_mngr_subprocess(*args, env=env)
 
 
-def capture_tmux_pane_contents(session_name: str) -> str:
-    """Capture the contents of a tmux session's pane via local subprocess.
+def capture_tmux_pane_contents(target: TmuxWindowTarget) -> str:
+    """Capture the contents of a tmux pane via local subprocess.
 
     This is the local-only variant for test code that doesn't have a host object.
     For the host-based version (works over SSH), use
     imbue.mngr.hosts.tmux.capture_tmux_pane_content.
+
+    The :class:`TmuxWindowTarget` argument mirrors the host-version signature so
+    callers that already hold a structured target can pass it through without
+    deconstructing.
     """
     result = subprocess.run(
-        shlex.split(build_tmux_capture_pane_command(session_name)),
+        shlex.split(build_tmux_capture_pane_command(target)),
         capture_output=True,
         text=True,
     )
@@ -858,6 +910,22 @@ def make_ctx_with_plugins(
     return mngr_ctx.model_copy_update(to_update(mngr_ctx.field_ref().pm, pm))
 
 
+def get_cleanup_failures(operation: Callable[[], None]) -> list[CleanupFailure]:
+    """Run a best-effort cleanup operation and return its real failures as a list.
+
+    Cleanup operations (``Host.destroy_agent``, ``Host.stop_agents``,
+    ``ProviderInstance.destroy_host``) raise ``CleanupFailedGroup`` when they leave real
+    resources behind and return normally when they don't. This helper lets a test assert on
+    the aggregated failures uniformly: an empty list means the operation completed cleanly,
+    a non-empty list holds the failures the operation would otherwise have surfaced.
+    """
+    try:
+        operation()
+    except CleanupFailedGroup as group:
+        return list(group.failures)
+    return []
+
+
 def make_test_agent_details(
     name: str = "test-agent",
     state: AgentLifecycleState = AgentLifecycleState.RUNNING,
@@ -867,6 +935,7 @@ def make_test_agent_details(
     host_plugin: dict | None = None,
     host_tags: dict[str, str] | None = None,
     labels: dict[str, str] | None = None,
+    plugin: dict | None = None,
     host_id: HostId | None = None,
     provider_name: ProviderInstanceName | None = None,
     ssh: SSHInfo | None = None,
@@ -898,6 +967,7 @@ def make_test_agent_details(
         start_on_boot=False,
         state=state,
         labels=labels or {},
+        plugin=plugin or {},
         host=host_details,
     )
 
@@ -1017,7 +1087,7 @@ def get_stash_count(path: Path) -> int:
 
 def is_claude_installed() -> bool:
     """Check if the Claude Code CLI is installed and available on PATH."""
-    return shutil.which("claude") is not None
+    return CLAUDE.is_available()
 
 
 def write_executable_script(path: Path, content: str) -> None:
@@ -1179,7 +1249,10 @@ def delete_modal_apps_in_environment(environment_name: str) -> None:
             if app_id:
                 try:
                     stop_result = subprocess.run(
-                        ["uv", "run", "modal", "app", "stop", app_id],
+                        # --yes: skip the interactive confirmation, which otherwise aborts the
+                        # stop in non-interactive runs (CI / release tests) so the app is never
+                        # stopped and only the environment deletion reaps it.
+                        ["uv", "run", "modal", "app", "stop", app_id, "--yes"],
                         capture_output=True,
                         text=True,
                         timeout=30,
@@ -1453,6 +1526,19 @@ def local_sshd(
     authorized_keys_path = sshd_dir / "authorized_keys"
     authorized_keys_path.write_text(authorized_keys_content)
 
+    # Isolate git's global/system config for sessions on this sshd. mngr runs
+    # `git config --global ...` over SSH when preparing a remote target (e.g.
+    # `git config --global --add safe.directory <target>` in
+    # Host._transfer_git_repo and add_safe_directory_on_remote). That command
+    # runs inside the SSH login, which sees the real user's $HOME -- the
+    # HOME-redirection done by isolate_home()/setup_git_config cannot reach
+    # across the SSH hop, so without this those writes would land in the
+    # developer's real ~/.gitconfig. Point GIT_CONFIG_GLOBAL at a throwaway file
+    # inside the sshd sandbox and GIT_CONFIG_SYSTEM at /dev/null so the session
+    # git is fully isolated from the host's real config.
+    git_global_config_path = sshd_dir / "git_global_config"
+    git_global_config_path.touch()
+
     # Create sshd_config
     sshd_config_path = etc_dir / "sshd_config"
     current_user = os.environ.get("USER", "root")
@@ -1469,6 +1555,7 @@ PidFile {run_dir}/sshd.pid
 StrictModes no
 Subsystem sftp {_sftp_server_path()}
 AllowUsers {current_user}
+SetEnv GIT_CONFIG_GLOBAL={git_global_config_path} GIT_CONFIG_SYSTEM=/dev/null
 """
     sshd_config_path.write_text(sshd_config)
 
@@ -1574,6 +1661,18 @@ def write_discovery_snapshot_to_path(
         "hosts": hosts,
     }
     events_path.write_text(json.dumps(event) + "\n")
+
+
+class FakeTtyStream(StringIO):
+    """A StringIO that reports itself as a TTY, for exercising color logic.
+
+    Used by tests that need ``should_use_color`` (and the code paths gated on it,
+    e.g. ``MngrError.show``) to take the colored branch even though the test's
+    real streams are not terminals.
+    """
+
+    def isatty(self) -> bool:
+        return True
 
 
 def walk_concrete_subclasses(cls: type) -> list[type]:

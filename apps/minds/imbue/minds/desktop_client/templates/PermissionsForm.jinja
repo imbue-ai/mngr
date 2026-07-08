@@ -1,0 +1,19 @@
+{#def request_id #}
+{#
+  The form wrapper used inside an inbox detail fragment. Action
+  targets /requests/<request_id>/grant. The content slot is the form
+  body (the backend-specific input controls). Approve/Deny buttons
+  live in this component; Approve starts disabled and is enabled by
+  the inbox shell's ``updateApproveState`` once any
+  name="permissions" input is checked.
+#}
+<form id="permissions-form" method="POST"
+      action={{ "/requests/" ~ request_id ~ "/grant" }}
+      class="mt-6">
+  {{ content }}
+
+  <div class="flex gap-2 mt-4 justify-end">
+    <Button variant="danger" onclick="submitPermissionDeny()">Deny</Button>
+    <ButtonSubmit id="permissions-approve-btn" variant="success" disabled>Approve</ButtonSubmit>
+  </div>
+</form>

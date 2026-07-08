@@ -104,6 +104,10 @@ def test_build_new_issue_url_truncates_long_body() -> None:
 # =============================================================================
 
 
+# This test makes real curl + gh CLI calls against a nonexistent repo, so its
+# wall time depends on network latency. The default 10s timeout occasionally
+# trips on loaded offload sandboxes (it runs in ~2.5s locally), so allow 30s.
+@pytest.mark.timeout(30)
 def test_search_for_existing_issue_returns_none_when_both_fail(
     cg: ConcurrencyGroup, monkeypatch: pytest.MonkeyPatch
 ) -> None:

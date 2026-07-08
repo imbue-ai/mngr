@@ -3,6 +3,8 @@
 from pathlib import Path
 
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.loader import parse_config
+from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.ssh.backend import SSHProviderBackend
@@ -152,9 +154,80 @@ def test_build_provider_instance_with_key_file(tmp_path: Path, temp_mngr_ctx: Mn
     assert instance.hosts["server1"].key_file == key_path
 
 
+def test_build_provider_instance_preserves_known_hosts_file_with_key_file(temp_mngr_ctx: MngrContext) -> None:
+    """When a host sets both ``key_file`` and ``known_hosts_file``, expanding the
+    ``key_file`` path must not drop ``known_hosts_file``.
+
+    Regression test: ``build_provider_instance`` rebuilt ``SSHHostConfig`` while
+    expanding ``key_file`` but omitted ``known_hosts_file``, silently disabling
+    strict host-key checking for any host that configured both. The dynamic-hosts
+    path in ``SSHProviderInstance._read_dynamic_hosts`` already preserves it.
+    """
+    known_hosts_path = Path("/etc/ssh/ssh_known_hosts")
+    config = SSHProviderConfig(
+        hosts={
+            "server1": SSHHostConfig(
+                address="localhost",
+                key_file=Path("~/.ssh/id_ed25519"),
+                known_hosts_file=known_hosts_path,
+            ),
+        },
+    )
+    instance = SSHProviderBackend.build_provider_instance(
+        name=ProviderInstanceName("test"),
+        config=config,
+        mngr_ctx=temp_mngr_ctx,
+    )
+    assert isinstance(instance, SSHProviderInstance)
+    host_config = instance.hosts["server1"]
+    # known_hosts_file must be preserved exactly (strict host-key checking stays on).
+    assert host_config.known_hosts_file == known_hosts_path
+    # key_file must still be expanded (no leading "~").
+    assert host_config.key_file == Path("~/.ssh/id_ed25519").expanduser()
+    assert not str(host_config.key_file).startswith("~")
+
+
 def test_ssh_host_config_defaults() -> None:
     config = SSHHostConfig(address="localhost")
     assert config.address == "localhost"
     assert config.port == 22
     assert config.user == "root"
     assert config.key_file is None
+
+
+def test_static_hosts_from_settings_dict_are_coerced(temp_mngr_ctx: MngrContext) -> None:
+    """Static ``[providers.*.hosts.*]`` tables loaded through the config parser
+    must become ``SSHHostConfig`` objects, not raw dicts.
+
+    Regression test: provider configs are built with ``model_construct`` (to keep
+    unset top-level fields ``None`` for config-layer merging), which skips coercion
+    of nested model fields. Without coercion, ``hosts`` entries stayed raw dicts and
+    every host-enumerating command (``mngr list``, ``mngr connect``, ...) crashed
+    with ``AttributeError: 'dict' object has no attribute 'key_file'`` while
+    building the provider instance. This exercises the real parse path
+    (``parse_config``), unlike the other tests here which hand in already-built
+    ``SSHHostConfig`` objects.
+    """
+    raw_settings = {
+        "providers": {
+            "my-ssh": {
+                "backend": "ssh",
+                "hosts": {
+                    "server1": {"address": "192.168.1.1", "key_file": "~/.ssh/id_rsa"},
+                },
+            },
+        },
+    }
+    config = parse_config(raw_settings, disabled_plugins=frozenset())
+    provider_config = config.providers[ProviderInstanceName("my-ssh")]
+    assert isinstance(provider_config, SSHProviderConfig)
+    assert isinstance(provider_config.hosts["server1"], SSHHostConfig)
+
+    # End-to-end: building the instance and resolving the host must not raise.
+    instance = SSHProviderBackend.build_provider_instance(
+        name=ProviderInstanceName("my-ssh"),
+        config=provider_config,
+        mngr_ctx=temp_mngr_ctx,
+    )
+    host = instance.get_host(HostName("server1"))
+    assert host.id is not None

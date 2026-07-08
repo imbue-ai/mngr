@@ -25,6 +25,11 @@
 
 set -euo pipefail
 
+# Directory this script was installed into; the converter module is installed
+# alongside it (in the agent's commands/ dir in production, in resources/ under
+# test), so resolve it relative to ourselves.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 AGENT_DATA_DIR="${MNGR_AGENT_STATE_DIR:?MNGR_AGENT_STATE_DIR must be set}"
 INPUT_FILE="$AGENT_DATA_DIR/logs/claude_transcript/events.jsonl"
 OUTPUT_FILE="$AGENT_DATA_DIR/events/claude/common_transcript/events.jsonl"
@@ -37,6 +42,12 @@ _MNGR_LOG_FILE="$AGENT_DATA_DIR/events/logs/common_transcript/events.jsonl"
 # shellcheck source=mngr_log.sh
 source "$MNGR_AGENT_STATE_DIR/commands/mngr_log.sh"
 
+# Shared common-transcript primitives: the convert lock that serializes this
+# converter's read-modify-write against any concurrent --single-pass flush (see
+# the library header for why duplicates would result without it).
+# shellcheck source=mngr_common_transcript_lib.sh
+source "$MNGR_AGENT_STATE_DIR/commands/mngr_common_transcript_lib.sh"
+
 # Convert new Claude transcript events to the common format.
 #
 # Reads the full input file and the set of event_ids already in the output
@@ -48,286 +59,29 @@ convert_new_events() {
         return
     fi
 
+    if ! mngr_common_transcript_acquire_lock; then
+        log_warn "could not acquire convert lock; skipping pass"
+        return
+    fi
+
     local convert_stderr
     convert_stderr=$(mktemp)
+    # The converter prints the count of appended events to stdout; capture it
+    # here so it never reaches this watcher's stdout (which would surface in the
+    # agent's pane). Genuine errors go to stderr.
     local result
     result=$(_INPUT_FILE="$INPUT_FILE" \
-             _OUTPUT_FILE="$OUTPUT_FILE" \
-             python3 << 'CONVERT_SCRIPT' 2>"$convert_stderr" || true
-import json
-import os
-import sys
+        _OUTPUT_FILE="$OUTPUT_FILE" \
+        python3 "$SCRIPT_DIR/common_transcript_convert.py" 2>"$convert_stderr" || true)
 
-
-# Maximum length for tool input preview and tool output
-_MAX_INPUT_PREVIEW_LENGTH = 200
-_MAX_OUTPUT_LENGTH = 2000
-
-# Claude Code marks framework-injected user messages (stop hook output,
-# local-command caveats, etc.) with isMeta=true on the top-level event. We
-# use that flag to reclassify those messages as tool results so transcript
-# viewers show them under the tool role rather than the user role (no human
-# typed them).
-
-
-def _extract_text_content(content):
-    """Extract plain text from a message content field (string or list of blocks)."""
-    if isinstance(content, str):
-        return content
-    if not isinstance(content, list):
-        return ""
-    parts = []
-    for block in content:
-        if isinstance(block, dict) and block.get("type") == "text":
-            text = block.get("text", "")
-            if text:
-                parts.append(text)
-    return "\n".join(parts)
-
-
-def _has_tool_results_only(content):
-    """Check if a content list contains only tool_result blocks (no user text)."""
-    if isinstance(content, str):
-        return False
-    if not isinstance(content, list):
-        return True
-    for block in content:
-        if isinstance(block, dict):
-            block_type = block.get("type", "")
-            if block_type not in ("tool_result",):
-                return False
-        elif isinstance(block, str):
-            return False
-    return True
-
-
-def _make_event_id(uuid, suffix):
-    """Derive a deterministic event_id from the source UUID and a suffix."""
-    return f"{uuid}-{suffix}"
-
-
-def convert():
-    input_file = os.environ["_INPUT_FILE"]
-    output_file = os.environ["_OUTPUT_FILE"]
-
-    # Collect existing event IDs from the output file for dedup
-    existing_ids = set()
-    if os.path.isfile(output_file):
-        with open(output_file) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    existing_ids.add(json.loads(line)["event_id"])
-                except (json.JSONDecodeError, KeyError):
-                    continue
-
-    if not os.path.isfile(input_file):
-        print("0")
-        return
-
-    # Track tool_use_id -> tool_name from assistant messages so we can
-    # label tool results with the correct tool name
-    tool_name_by_call_id = {}
-
-    new_events = []
-
-    with open(input_file) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                raw = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
-            event_type = raw.get("type", "")
-            uuid = raw.get("uuid", "")
-            timestamp = raw.get("timestamp", "")
-            is_meta = bool(raw.get("isMeta", False))
-
-            if not uuid or not timestamp:
-                continue
-
-            # -- assistant messages --
-            if event_type == "assistant":
-                event_id = _make_event_id(uuid, "assistant")
-                if event_id in existing_ids:
-                    continue
-
-                message = raw.get("message", {})
-                content_blocks = message.get("content", [])
-                model = message.get("model", "unknown")
-                stop_reason = message.get("stop_reason")
-                usage_raw = message.get("usage", {})
-
-                # Extract text, tool calls
-                text_parts = []
-                tool_calls = []
-                for block in content_blocks:
-                    if not isinstance(block, dict):
-                        continue
-                    block_type = block.get("type", "")
-                    if block_type == "text":
-                        text = block.get("text", "")
-                        if text:
-                            text_parts.append(text)
-                    elif block_type == "tool_use":
-                        call_id = block.get("id", "")
-                        tool_name = block.get("name", "")
-                        tool_input = block.get("input", {})
-                        input_preview = json.dumps(tool_input, separators=(",", ":"))
-                        if len(input_preview) > _MAX_INPUT_PREVIEW_LENGTH:
-                            input_preview = input_preview[:_MAX_INPUT_PREVIEW_LENGTH] + "..."
-
-                        # Track for tool result labeling
-                        if call_id and tool_name:
-                            tool_name_by_call_id[call_id] = tool_name
-
-                        tool_calls.append({
-                            "tool_call_id": call_id,
-                            "tool_name": tool_name,
-                            "input_preview": input_preview,
-                        })
-
-                # Build usage
-                usage = None
-                if usage_raw:
-                    usage = {
-                        "input_tokens": usage_raw.get("input_tokens", 0),
-                        "output_tokens": usage_raw.get("output_tokens", 0),
-                        "cache_read_tokens": usage_raw.get("cache_read_input_tokens"),
-                        "cache_write_tokens": usage_raw.get("cache_creation_input_tokens"),
-                    }
-
-                event = {
-                    "timestamp": timestamp,
-                    "type": "assistant_message",
-                    "event_id": event_id,
-                    "source": "claude/common_transcript",
-                    "role": "assistant",
-                    "model": model,
-                    "text": "\n".join(text_parts),
-                    "tool_calls": tool_calls,
-                    "stop_reason": stop_reason,
-                    "usage": usage,
-                    "message_uuid": uuid,
-                }
-                new_events.append((timestamp, event))
-
-            # -- user messages (may contain text, tool results, or both) --
-            elif event_type == "user":
-                message = raw.get("message", {})
-                content = message.get("content")
-
-                # Emit user text message if there is actual user text
-                if not _has_tool_results_only(content):
-                    text = _extract_text_content(content)
-                    if is_meta:
-                        # Framework-injected message (stop hook output, etc.) --
-                        # reclassify as tool_result so it doesn't masquerade as user input.
-                        event_id = _make_event_id(uuid, "meta")
-                        if event_id not in existing_ids and text:
-                            output = text
-                            if len(output) > _MAX_OUTPUT_LENGTH:
-                                output = output[:_MAX_OUTPUT_LENGTH] + "..."
-                            event = {
-                                "timestamp": timestamp,
-                                "type": "tool_result",
-                                "event_id": event_id,
-                                "source": "claude/common_transcript",
-                                "tool_call_id": f"meta-{uuid}",
-                                "tool_name": "meta",
-                                "output": output,
-                                "is_error": False,
-                                "message_uuid": uuid,
-                            }
-                            new_events.append((timestamp, event))
-                    else:
-                        event_id = _make_event_id(uuid, "user")
-                        if event_id not in existing_ids:
-                            if text:
-                                event = {
-                                    "timestamp": timestamp,
-                                    "type": "user_message",
-                                    "event_id": event_id,
-                                    "source": "claude/common_transcript",
-                                    "role": "user",
-                                    "content": text,
-                                    "message_uuid": uuid,
-                                }
-                                new_events.append((timestamp, event))
-
-                # Emit tool result events for any tool_result blocks
-                if isinstance(content, list):
-                    for block in content:
-                        if not isinstance(block, dict):
-                            continue
-                        if block.get("type") != "tool_result":
-                            continue
-                        tool_call_id = block.get("tool_use_id", "")
-                        if not tool_call_id:
-                            continue
-
-                        event_id = _make_event_id(uuid, f"tool_result-{tool_call_id}")
-                        if event_id in existing_ids:
-                            continue
-
-                        # Extract output text
-                        result_content = block.get("content", "")
-                        if isinstance(result_content, list):
-                            parts = []
-                            for item in result_content:
-                                if isinstance(item, dict) and item.get("type") == "text":
-                                    parts.append(item.get("text", ""))
-                                elif isinstance(item, str):
-                                    parts.append(item)
-                            result_content = "\n".join(parts)
-                        elif not isinstance(result_content, str):
-                            result_content = str(result_content)
-
-                        if len(result_content) > _MAX_OUTPUT_LENGTH:
-                            result_content = result_content[:_MAX_OUTPUT_LENGTH] + "..."
-
-                        tool_name = tool_name_by_call_id.get(tool_call_id, "unknown")
-
-                        event = {
-                            "timestamp": timestamp,
-                            "type": "tool_result",
-                            "event_id": event_id,
-                            "source": "claude/common_transcript",
-                            "tool_call_id": tool_call_id,
-                            "tool_name": tool_name,
-                            "output": result_content,
-                            "is_error": bool(block.get("is_error", False)),
-                            "message_uuid": uuid,
-                        }
-                        new_events.append((timestamp, event))
-
-            # Skip: progress, file-history-snapshot, system, result, etc.
-
-    if not new_events:
-        print("0")
-        return
-
-    # Sort by timestamp and append to the output file
-    new_events.sort(key=lambda x: x[0])
-
-    os.makedirs(os.path.dirname(output_file), exist_ok=True)
-    with open(output_file, "a") as f:
-        for _, event in new_events:
-            f.write(json.dumps(event, separators=(",", ":")) + "\n")
-
-    print(str(len(new_events)))
-
-
-convert()
-CONVERT_SCRIPT
-)
+    # The read-modify-write is done; drop the lock before the (lock-free)
+    # logging below so a concurrent pass can proceed immediately.
+    mngr_common_transcript_release_lock
 
     if [ -s "$convert_stderr" ]; then
+        # A genuine converter error is logged (to events/logs/common_transcript)
+        # but never echoed to this watcher's stdout/stderr -- that would surface
+        # in the agent's pane.
         log_warn "convert error: $(cat "$convert_stderr")"
     fi
     rm -f "$convert_stderr"

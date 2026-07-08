@@ -51,7 +51,6 @@ mngr message [OPTIONS] [AGENTS]...
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--on-error` | choice (`abort` &#x7C; `continue`) | What to do when errors occur: abort (stop immediately) or continue (keep going) | `continue` |
-| `--provider` | text | Message only agents using specified provider (repeatable) | None |
 
 ## Common
 
@@ -66,7 +65,7 @@ mngr message [OPTIONS] [AGENTS]...
 | `--safe` | boolean | Always query all providers during discovery (disable event-stream optimization). Use this when interfacing with mngr from multiple machines. | `False` |
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
-| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths; append __extend to the leaf key to extend list/dict/set fields) [repeatable] | None |
 | `-h`, `--help` | boolean | Show this message and exit. | `False` |
 
 ## See Also
@@ -89,7 +88,7 @@ $ mngr message my-agent --message "Hello"
 $ mngr message agent1 agent2 --message "Hello to all"
 ```
 
-**Send to all agents**
+**Send to all agents via stdin**
 
 ```bash
 $ mngr list --ids | mngr message - --message 'Hello everyone'

@@ -14,6 +14,8 @@ from pyinfra.api.inventory import Inventory
 from pyinfra.connectors.sshuserclient.client import get_host_keys
 
 from imbue.mngr.errors import MngrError
+from imbue.mngr.utils.file_utils import atomic_write
+from imbue.mngr.utils.polling import poll_until
 
 
 def generate_ssh_keypair() -> tuple[str, str]:
@@ -41,6 +43,12 @@ def generate_ssh_keypair() -> tuple[str, str]:
 def save_ssh_keypair(key_dir: Path, key_name: str = "ssh_key") -> tuple[Path, Path]:
     """Generate and save an SSH keypair to the specified directory.
 
+    Both files are written atomically (temp file + ``os.replace``) so a
+    concurrent reader never observes a truncated key or public-key file. This
+    matters because the public-key file is probed by pyinfra/paramiko on every
+    SSH connection (as a possible certificate), and a half-written ``.pub``
+    raises ``ValueError: Not enough fields for public blob``.
+
     Returns a tuple of (private_key_path, public_key_path).
     """
     key_dir.mkdir(parents=True, exist_ok=True)
@@ -50,10 +58,9 @@ def save_ssh_keypair(key_dir: Path, key_name: str = "ssh_key") -> tuple[Path, Pa
 
     private_key_pem, public_key_openssh = generate_ssh_keypair()
 
-    private_key_path.write_text(private_key_pem)
+    atomic_write(private_key_path, private_key_pem)
     private_key_path.chmod(0o600)
-
-    public_key_path.write_text(public_key_openssh)
+    atomic_write(public_key_path, public_key_openssh)
     public_key_path.chmod(0o644)
 
     return private_key_path, public_key_path
@@ -61,6 +68,14 @@ def save_ssh_keypair(key_dir: Path, key_name: str = "ssh_key") -> tuple[Path, Pa
 
 def load_or_create_ssh_keypair(key_dir: Path, key_name: str = "ssh_key") -> tuple[Path, str]:
     """Load an existing SSH keypair or create a new one if it doesn't exist.
+
+    Creation is serialized with an exclusive file lock so that concurrent
+    callers (e.g. the parallel host-discovery fan-out, which opens one SSH
+    connection per VPS and lazily creates this keypair on first use) do not
+    each generate and write a different keypair over the top of one another --
+    which previously produced a transient zero-byte / mismatched ``.pub`` and a
+    ``ValueError`` deep in paramiko's certificate probe. Exactly one caller
+    creates the pair; the rest wait, then read the completed files.
 
     Returns a tuple of (private_key_path, public_key_content).
     """
@@ -70,7 +85,14 @@ def load_or_create_ssh_keypair(key_dir: Path, key_name: str = "ssh_key") -> tupl
     if private_key_path.exists() and public_key_path.exists():
         return private_key_path, public_key_path.read_text().strip()
 
-    save_ssh_keypair(key_dir, key_name)
+    key_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = key_dir / f".{key_name}.lock"
+    with open(lock_path, "w") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        # Re-check under the lock: another caller may have created the pair
+        # while we waited to acquire it.
+        if not (private_key_path.exists() and public_key_path.exists()):
+            save_ssh_keypair(key_dir, key_name)
     return private_key_path, public_key_path.read_text().strip()
 
 
@@ -246,6 +268,71 @@ def wait_for_sshd(hostname: str, port: int, timeout_seconds: float = 60.0) -> No
             else:
                 sock.close()
     raise MngrError(f"SSH server not ready after {timeout_seconds}s at {hostname}:{port}")
+
+
+def parse_openssh_public_key_blob(public_key: str) -> tuple[str, str]:
+    """Split an OpenSSH public key line into its (key_type, base64_blob).
+
+    ``"ssh-ed25519 AAAA... comment"`` -> ``("ssh-ed25519", "AAAA...")``. The
+    optional trailing comment is ignored.
+    """
+    parts = public_key.split()
+    if len(parts) < 2:
+        raise MngrError(f"Malformed OpenSSH public key (expected '<type> <base64> [comment]'): {public_key!r}")
+    return parts[0], parts[1]
+
+
+def _server_presents_host_key(hostname: str, port: int, expected_type: str, expected_blob: str) -> bool:
+    """Return True iff the server at hostname:port currently serves the expected host key.
+
+    One handshake attempt: any connection/SSH error (including a non-matching key)
+    is a clean False so the caller can keep polling.
+    """
+    transport = None
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.settimeout(5.0)
+        sock.connect((hostname, port))
+        transport = paramiko.Transport(sock)
+        transport.connect()
+        remote_key = transport.get_remote_server_key()
+        return remote_key.get_name() == expected_type and remote_key.get_base64() == expected_blob
+    except (socket.error, socket.timeout, paramiko.SSHException, EOFError, OSError):
+        return False
+    finally:
+        if transport is not None:
+            try:
+                transport.close()
+            except (OSError, paramiko.SSHException):
+                pass
+        else:
+            sock.close()
+
+
+def wait_for_expected_host_key(
+    hostname: str,
+    port: int,
+    expected_host_public_key: str,
+    timeout_seconds: float,
+    poll_interval_seconds: float = 2.0,
+) -> None:
+    """Poll until the server presents exactly ``expected_host_public_key``, then return.
+
+    For backends that install the host key after sshd starts (a GCE
+    ``startup-script``, unlike cloud-init which sets it pre-sshd), the server briefly
+    serves a boot-generated key first. Waiting here, before the strict-checked
+    provisioning connection, avoids a mismatch abort. Not TOFU: only the exact
+    expected key is accepted. Raises ``MngrError`` on timeout.
+    """
+    expected_type, expected_blob = parse_openssh_public_key_blob(expected_host_public_key)
+    if not poll_until(
+        lambda: _server_presents_host_key(hostname, port, expected_type, expected_blob),
+        timeout=timeout_seconds,
+        poll_interval=poll_interval_seconds,
+    ):
+        raise MngrError(
+            f"Server at {hostname}:{port} did not present the expected SSH host key within {timeout_seconds}s"
+        )
 
 
 def create_pyinfra_host(

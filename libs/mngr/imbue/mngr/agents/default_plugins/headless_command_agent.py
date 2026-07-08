@@ -1,67 +1,15 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
-from datetime import datetime
 from pathlib import Path
-from typing import Callable
 
-from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr import hookimpl
 from imbue.mngr.agents.base_headless_agent import BaseHeadlessAgent
-from imbue.mngr.agents.base_headless_agent import TAIL_POLL_INTERVAL
-from imbue.mngr.agents.base_headless_agent import TAIL_POLL_TIMEOUT
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.live_output import LiveOutputReader
+from imbue.mngr.interfaces.live_output import RawTextReader
 from imbue.mngr.primitives import CommandString
-from imbue.mngr.utils.polling import poll_until
-
-
-class _RawStreamTailState(MutableModel):
-    """Tails a raw text file via the host interface, yielding new content as it appears."""
-
-    stdout_path: Path
-    host: OnlineHostInterface
-    is_finished: Callable[[], bool]
-    last_mtime: datetime | None = None
-    chars_consumed: int = 0
-
-    def _has_new_data_or_finished(self) -> bool:
-        current_mtime = self.host.get_file_mtime(self.stdout_path)
-        if current_mtime is not None and current_mtime != self.last_mtime:
-            return True
-        return self.is_finished()
-
-    def _read_new_content(self) -> str | None:
-        """Read any new content from the file since the last read."""
-        self.last_mtime = self.host.get_file_mtime(self.stdout_path)
-
-        try:
-            content = self.host.read_text_file(self.stdout_path)
-        except FileNotFoundError:
-            return None
-
-        raw = content[self.chars_consumed :]
-        self.chars_consumed = len(content)
-        return raw if raw else None
-
-    def tail_until_done(self) -> Iterator[str]:
-        """Poll for file changes and yield raw text chunks until the agent finishes."""
-        while not self.is_finished():
-            poll_until(
-                self._has_new_data_or_finished,
-                timeout=TAIL_POLL_TIMEOUT,
-                poll_interval=TAIL_POLL_INTERVAL,
-            )
-
-            new_content = self._read_new_content()
-            if new_content:
-                yield new_content
-
-        # Final drain after agent exits
-        new_content = self._read_new_content()
-        if new_content:
-            yield new_content
 
 
 class HeadlessCommandConfig(AgentTypeConfig):
@@ -73,7 +21,9 @@ class HeadlessCommand(BaseHeadlessAgent[HeadlessCommandConfig]):
 
     Redirects stdout/stderr to files so callers can read output programmatically
     via stream_output(). Does not support interactive messages, paste detection,
-    or TUI readiness checking.
+    or TUI readiness checking. It does not wrap a known CLI (so the CLI-oriented
+    capabilities are ``n/a``) and runs unattended by construction via
+    ``BaseHeadlessAgent``.
     """
 
     def assemble_command(
@@ -100,31 +50,9 @@ class HeadlessCommand(BaseHeadlessAgent[HeadlessCommandConfig]):
     def _get_stderr_path(self) -> Path:
         return self._get_agent_dir() / "stderr.log"
 
-    def stream_output(self) -> Iterator[str]:
-        """Stream raw text output as it becomes available.
-
-        Tails $MNGR_AGENT_STATE_DIR/stdout.log via the host interface so it
-        works for both local and remote hosts. Yields raw text chunks.
-
-        Raises MngrError if the agent exits without producing any output.
-        """
-        stdout_path = self._get_stdout_path()
-
-        if not self._wait_for_stdout_file(stdout_path):
-            self._raise_no_output_error()
-
-        state = _RawStreamTailState(
-            stdout_path=stdout_path,
-            host=self.host,
-            is_finished=self._is_agent_finished,
-        )
-        is_any_output_yielded = False
-        for chunk in state.tail_until_done():
-            is_any_output_yielded = True
-            yield chunk
-
-        if not is_any_output_yielded:
-            self._raise_no_output_error()
+    def make_live_output_reader(self) -> LiveOutputReader:
+        """Stream the captured stdout as raw text, emitting newly-appended content."""
+        return RawTextReader()
 
 
 @hookimpl

@@ -33,7 +33,7 @@ ListAgentsByNameCallable = Callable[[], dict[str, AgentDetails] | None]
 
 # Label set by both PROXY and DENY-mode spawning paths on every child agent:
 # PROXY's wait-script attaches it via ``mngr create --label ...`` (see
-# hooks/spawn.py), and the ``mngr-subagents`` skill instructs Claude to
+# hooks/spawn.py), and the ``mngr-proxy`` skill instructs Claude to
 # attach it the same way for DENY-mode-spawned children. Used as the
 # server-side source of truth for "is this agent one of my children".
 PARENT_ID_LABEL: str = "mngr_claude_subagent_proxy_parent_id"

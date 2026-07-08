@@ -1,0 +1,36 @@
+{#
+  Shared bottom of the floating sidebar menu: the "New workspace" CTA, a
+  horizontal divider, a "Settings" entry, and the "Manage account(s)" / "Log in"
+  entry. Rendered inside Chrome.jinja (browser-mode inline sidebar) and
+  Sidebar.jinja (the sidebar page loaded into the shared modal WebContentsView in
+  Electron) so the markup and classes live in one place (the icons are shared
+  Icon16 glyphs -- ``plus``, ``settings``, ``user``). The button
+  ids (#sidebar-new-workspace, #sidebar-settings, #sidebar-account) are wired up
+  in chrome.js and sidebar.js respectively; the #sidebar-account-label span is
+  updated by both scripts when the auth status changes.
+
+  These elements are direct flex children of #sidebar-menu (JinjaX
+  inlines the component), so the panel's ``gap-0.5`` (2px) supplies the
+  spacing between every entry -- including the 2px above and below the
+  bare divider line, which therefore needs no padding of its own.
+#}
+<button id="sidebar-new-workspace"
+        type="button"
+        class="sidebar-action group flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer type-body text-secondary hover:text-primary hover:bg-fill-hover bg-transparent border-0 text-left">
+  <Icon16 name="plus" extra="shrink-0" />
+  <span>New workspace</span>
+</button>
+<div class="h-px bg-subtle"></div>
+<button id="sidebar-settings"
+        type="button"
+        class="sidebar-action group flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer type-body text-primary hover:bg-fill-hover bg-transparent border-0 text-left">
+  <Icon16 name="settings" extra="shrink-0" />
+  <span>Settings</span>
+</button>
+<button id="sidebar-account"
+        type="button"
+        class="sidebar-action group flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer type-body text-primary hover:bg-fill-hover bg-transparent border-0 text-left"
+        title="">
+  <Icon16 name="user" extra="shrink-0" />
+  <span id="sidebar-account-label">Log in</span>
+</button>

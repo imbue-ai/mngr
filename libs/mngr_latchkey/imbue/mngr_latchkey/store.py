@@ -41,7 +41,6 @@ the ``mngr_latchkey/`` subdir under the user's latchkey directory; it
 is what :attr:`Latchkey.plugin_data_dir` returns.
 """
 
-import json
 import os
 import uuid
 from datetime import datetime
@@ -49,8 +48,10 @@ from pathlib import Path
 from typing import Final
 
 from loguru import logger
+from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import JsonValue
+from pydantic import ValidationError
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
@@ -63,9 +64,13 @@ from imbue.mngr.primitives import HostId
 # upstream ``latchkey`` CLI writes under ``LATCHKEY_DIRECTORY``.
 PLUGIN_DATA_SUBDIR_NAME: Final[str] = "mngr_latchkey"
 
-_GATEWAY_LOG_FILENAME: Final[str] = "latchkey_gateway.log"
 _FORWARD_RECORD_FILENAME: Final[str] = "latchkey_forward.json"
 _FORWARD_LOG_FILENAME: Final[str] = "latchkey_forward.log"
+# The forward supervisor's structured log must be named exactly ``events.jsonl``
+# so the standard mngr JSONL sink prunes its rotated copies
+# (``events.jsonl.<rotation_timestamp>``), whose cleanup pattern is hard-coded to
+# that name. It lives directly in the plugin data dir (no extra subdirectory).
+_EVENTS_LOG_FILENAME: Final[str] = "events.jsonl"
 _DEFAULT_PERMISSIONS_FILENAME: Final[str] = "latchkey_default_permissions.json"
 _ADMIN_PERMISSIONS_FILENAME: Final[str] = "latchkey_admin_permissions.json"
 _PERMISSIONS_FILENAME: Final[str] = "latchkey_permissions.json"
@@ -80,14 +85,6 @@ def plugin_data_dir(latchkey_directory: Path) -> Path:
     :attr:`Latchkey.plugin_data_dir` for the in-class accessor.
     """
     return latchkey_directory / PLUGIN_DATA_SUBDIR_NAME
-
-
-# -- Gateway info --------------------------------------------------------------
-
-
-def gateway_log_path(data_dir: Path) -> Path:
-    """Return the log file path for the shared gateway subprocess."""
-    return data_dir / _GATEWAY_LOG_FILENAME
 
 
 # -- Forward supervisor info ---------------------------------------------------
@@ -181,8 +178,32 @@ def delete_forward_info(data_dir: Path) -> None:
 
 
 def forward_log_path(data_dir: Path) -> Path:
-    """Return the log file path for the detached ``mngr latchkey forward`` subprocess."""
+    """Return the raw stdout/stderr capture-log path for the detached ``mngr latchkey forward`` subprocess.
+
+    This file holds whatever the detached process writes to its real
+    stdout/stderr file descriptors (human-format console log lines, plus any
+    pre-logging tracebacks or Click error messages). Its fd is handed straight
+    to the subprocess, so it cannot be rotated mid-write and is intentionally
+    left unrotated. For the process's own structured, timestamped, in-run-rotated
+    log see :func:`forward_events_log_path`.
+    """
     return data_dir / _FORWARD_LOG_FILENAME
+
+
+def forward_events_log_path(data_dir: Path) -> Path:
+    """Return the structured JSONL log path for the detached ``mngr latchkey forward`` process.
+
+    Companion to :func:`forward_log_path`: where that file captures the raw
+    stdout/stderr of the detached process, this one receives the process's own
+    structured loguru events (nanosecond timestamps, level, message, ...) -- and
+    the shared ``latchkey gateway`` subprocess's output, which the supervisor
+    routes through loguru. It is the standard mngr JSONL log, size-rotated by
+    :func:`imbue.imbue_common.logging.make_jsonl_file_sink` (rotated copies
+    pruned), and the forward process is pointed at it via ``--log-file`` so its
+    structured log is co-located with the rest of the plugin's files instead of
+    mixed into the shared host-dir events stream.
+    """
+    return data_dir / _EVENTS_LOG_FILENAME
 
 
 def ensure_browser_log_path(data_dir: Path) -> Path:
@@ -205,10 +226,21 @@ class LatchkeyStoreError(Exception):
 class LatchkeyPermissionsConfig(FrozenModel):
     """In-memory representation of a Latchkey/Detent permissions config file.
 
-    Models the ``schemas`` and ``rules`` sections. Detent's ``include``
-    directive is not modeled; any hand-edited ``include`` entries are
-    silently dropped on the next minds-driven save.
+    Models only the subset of detent's config schema that minds itself
+    produces: the top-level ``rules`` and ``schemas`` sections, with
+    every rule in the plain ``{scope: [permission, ...]}`` shape (the
+    ``{"schemas": [...], "hooks": [...]}`` rule-value form is not used
+    by minds and is not modeled). Detent's ``include`` directive is
+    not modeled either; ``extra="ignore"`` makes Pydantic silently drop
+    any such hand-edited keys on load, so they disappear on the next
+    minds-driven save.
     """
+
+    # Override FrozenModel's ``extra="forbid"`` so hand-edited fields
+    # detent accepts but minds does not produce (notably ``include``)
+    # don't make ``load_permissions`` fail; they're dropped on the next
+    # save instead, matching the previous hand-rolled loader's behavior.
+    model_config = ConfigDict(extra="ignore")
 
     rules: tuple[dict[str, list[str]], ...] = Field(
         default_factory=tuple,
@@ -224,6 +256,11 @@ class LatchkeyPermissionsConfig(FrozenModel):
     )
 
 
+def hosts_dir(data_dir: Path) -> Path:
+    """Return the directory under ``data_dir`` that holds every per-host subdirectory."""
+    return data_dir / _HOSTS_DIR_NAME
+
+
 def permissions_path_for_host(data_dir: Path, host_id: HostId) -> Path:
     """Return the path to the per-host permissions file.
 
@@ -232,6 +269,28 @@ def permissions_path_for_host(data_dir: Path, host_id: HostId) -> Path:
     host inherit the same gateway credentials and the same permissions.
     """
     return data_dir / _HOSTS_DIR_NAME / str(host_id) / _PERMISSIONS_FILENAME
+
+
+def list_host_permissions_paths(data_dir: Path) -> list[Path]:
+    """Return every existing per-host permissions file under ``data_dir``.
+
+    Walks each ``<data_dir>/hosts/<host_id>/`` subdirectory and collects its
+    ``latchkey_permissions.json`` when present; host directories without one
+    (and stray non-directory entries) are skipped. Returns an empty list when
+    the hosts directory itself does not exist yet. Sorted so callers iterate
+    deterministically.
+    """
+    root = hosts_dir(data_dir)
+    if not root.is_dir():
+        return []
+    paths: list[Path] = []
+    for host_dir in root.iterdir():
+        if not host_dir.is_dir():
+            continue
+        path = host_dir / _PERMISSIONS_FILENAME
+        if path.is_file():
+            paths.append(path)
+    return sorted(paths)
 
 
 def default_permissions_path(data_dir: Path) -> Path:
@@ -339,36 +398,95 @@ def link_opaque_permissions_to_host(
             # First creation for this host_id: promote the baseline to
             # the canonical location.
             os.replace(opaque_path, host_path)
-        # Recreate ``opaque_path`` as a symlink. ``os.replace`` requires
-        # both paths to exist on the same filesystem, but that is
-        # guaranteed here: opaque_path and host_path both live under
-        # ``data_dir``.
+    except OSError as e:
+        raise LatchkeyStoreError(f"Failed to link opaque permissions handle {opaque_path} to {host_path}: {e}") from e
+    point_opaque_handle_at_host(data_dir, opaque_path, host_id)
+    logger.debug("Linked opaque latchkey permissions handle {} -> {}", opaque_path, host_path)
+
+
+def point_opaque_handle_at_host(
+    data_dir: Path,
+    opaque_path: Path,
+    host_id: HostId,
+) -> None:
+    """(Re)create ``opaque_path`` as a symlink to the host's canonical permissions file.
+
+    Unlike :func:`link_opaque_permissions_to_host`, this moves nothing: it
+    only ensures the opaque handle is a symlink pointing at
+    ``permissions_path_for_host``. Use it when the canonical file already
+    exists (or was materialized directly) and the handle needs to point at
+    it -- e.g. when recovering an agent whose opaque handle went missing.
+
+    Idempotent: an existing handle (regular file, wrong-target symlink, or
+    already-correct symlink) is atomically replaced by a fresh symlink. The
+    target is *absolute* so moving the symlink later doesn't break it.
+
+    Raises ``LatchkeyStoreError`` if the symlink cannot be (re)created.
+    """
+    host_path = permissions_path_for_host(data_dir, host_id)
+    try:
+        opaque_path.parent.mkdir(parents=True, exist_ok=True)
         absolute_target = host_path.resolve()
+        # ``os.replace`` requires both paths on the same filesystem, which is
+        # guaranteed here: the temp link and the handle both live under
+        # ``data_dir``.
         tmp_link = opaque_path.with_name(opaque_path.name + ".linktmp")
         if tmp_link.exists() or tmp_link.is_symlink():
             tmp_link.unlink()
         tmp_link.symlink_to(absolute_target)
         os.replace(tmp_link, opaque_path)
     except OSError as e:
-        raise LatchkeyStoreError(f"Failed to link opaque permissions handle {opaque_path} to {host_path}: {e}") from e
-    logger.debug("Linked opaque latchkey permissions handle {} -> {}", opaque_path, host_path)
+        raise LatchkeyStoreError(f"Failed to point opaque permissions handle {opaque_path} at {host_path}: {e}") from e
+    logger.debug("Pointed opaque latchkey permissions handle {} -> {}", opaque_path, host_path)
 
 
 def save_permissions(path: Path, config: LatchkeyPermissionsConfig) -> None:
     """Atomically write the permissions config to disk with mode 0o600.
 
-    Used only for the pre-gateway-startup write paths (deny-all default,
-    admin file, per-agent opaque baseline). Reads + per-host edits go
-    through the gateway's ``permissions`` extension instead.
+    Used by the pre-gateway-startup write paths (deny-all default,
+    admin file, per-agent opaque baseline) and by the host-allowed-agent
+    editor (:func:`imbue.mngr_latchkey.agent_setup.register_agent_for_host`).
+    User-driven per-service grants still go through the gateway's
+    ``permissions`` extension instead.
+
+    An empty ``schemas`` dict is omitted from the output (detent
+    accepts both shapes); ``rules`` is always emitted, even when empty.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-
-    serialized: dict[str, JsonValue] = {"rules": [dict(rule) for rule in config.rules]}
-    if config.schemas:
-        serialized["schemas"] = dict(config.schemas)
-
+    # Pydantic's ``exclude=`` drops the field entirely; we drop
+    # ``schemas`` when empty so existing on-disk files (and the
+    # gateway's own writers) keep emitting the same ``{"rules": ...}``
+    # shape they always have.
+    exclude: set[str] = set() if config.schemas else {"schemas"}
     tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(serialized, indent=2))
+    tmp_path.write_text(config.model_dump_json(indent=2, exclude=exclude))
     tmp_path.chmod(0o600)
     os.replace(tmp_path, path)
     logger.debug("Wrote permissions config to {} ({} rule(s))", path, len(config.rules))
+
+
+def load_permissions(path: Path) -> LatchkeyPermissionsConfig:
+    """Read a permissions config from disk.
+
+    Used by the host-allowed-agent editor (and tests) to read + extend
+    an existing permissions file. The reverse of :func:`save_permissions`:
+    parses the JSON file via Pydantic, which enforces the documented
+    shape (``rules`` is a list of ``{scope: [perm, ...]}`` objects,
+    ``schemas`` is an object of JSON values) and silently drops any
+    other top-level keys (e.g. detent's ``include``) per the model's
+    ``extra="ignore"`` config.
+
+    Raises:
+        LatchkeyStoreError: if the file is missing, unreadable, not
+            valid JSON, or doesn't match the documented schema.
+    """
+    if not path.is_file():
+        raise LatchkeyStoreError(f"Permissions file does not exist: {path}")
+    try:
+        raw = path.read_text()
+    except OSError as e:
+        raise LatchkeyStoreError(f"Failed to read permissions file {path}: {e}") from e
+    try:
+        return LatchkeyPermissionsConfig.model_validate_json(raw)
+    except ValidationError as e:
+        raise LatchkeyStoreError(f"Permissions file {path} is malformed: {e}") from e

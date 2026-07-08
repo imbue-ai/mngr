@@ -1,7 +1,6 @@
 import contextlib
 from pathlib import Path
 from threading import Event
-from time import monotonic
 from typing import Any
 from typing import Final
 
@@ -17,6 +16,7 @@ from imbue.concurrency_group.concurrency_group import InvalidConcurrencyGroupSta
 from imbue.concurrency_group.concurrency_group import StrandTimedOutError
 from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.local_process import RunningProcess
+from imbue.concurrency_group.test_utils import LONG_SLEEP_SECONDS
 from imbue.concurrency_group.test_utils import poll_until
 from imbue.concurrency_group.thread_utils import ObservableThread
 
@@ -32,9 +32,21 @@ def _raise_intentional_error() -> None:
     raise _IntentionalTestError("intentional test failure")
 
 
-# Process commands for tests: one that exits immediately, one that runs for a long time.
+def _signal_then_raise_intentional_error(ran_event: Event) -> None:
+    """Set ran_event (proving the thread reached this point) and then raise.
+
+    Used by suppression/unchecked tests so they can confirm the failing thread actually executed and
+    reached its raise, rather than passing vacuously when the thread never ran or never failed.
+    """
+    ran_event.set()
+    raise _IntentionalTestError("intentional test failure")
+
+
+# Process commands for tests: one that exits immediately, one that runs for a long time. The
+# long-running command uses a globally-unique sleep duration (see LONG_SLEEP_SECONDS) so it cannot
+# collide with unrelated processes.
 INSTANT_SUCCESS_COMMAND: Final[tuple[str, ...]] = ("true",)
-LONG_RUNNING_COMMAND: Final[tuple[str, ...]] = ("sleep", "30")
+LONG_RUNNING_COMMAND: Final[tuple[str, ...]] = ("sleep", LONG_SLEEP_SECONDS)
 
 
 def _block_and_return_1(release: Event) -> int:
@@ -77,13 +89,13 @@ def test_concurrency_group_shortly_waits_for_processes_to_finish(tmp_path: Path)
     assert process2.poll() is not None
 
 
-def test_concurrency_group_supports_running_process_to_completion(tmp_path: Path) -> None:
+def test_concurrency_group_supports_running_process_to_completion() -> None:
     with ConcurrencyGroup(name="outer") as cg:
         process = cg.run_process_to_completion(INSTANT_SUCCESS_COMMAND)
     assert process.returncode == 0
 
 
-def test_concurrency_group_supports_running_processes_with_on_output_callbacks(tmp_path: Path) -> None:
+def test_concurrency_group_supports_running_processes_with_on_output_callbacks() -> None:
     calls: list[tuple[str, bool]] = []
 
     def callback(line: str, is_stdout: bool) -> None:
@@ -96,7 +108,7 @@ def test_concurrency_group_supports_running_processes_with_on_output_callbacks(t
     assert calls[0] == ("foo\n", True)
 
 
-def test_concurrency_group_supports_running_running_local_process_in_background(tmp_path: Path) -> None:
+def test_concurrency_group_supports_running_running_local_process_in_background() -> None:
     with ConcurrencyGroup(name="outer") as cg:
         process = cg.run_process_in_background(INSTANT_SUCCESS_COMMAND)
         process.wait()
@@ -116,11 +128,11 @@ def test_concurrency_group_raises_timeout_when_not_finished_in_time() -> None:
 
 
 def test_concurrency_group_does_not_raise_when_within_timeout() -> None:
-    start_time = monotonic()
     with ConcurrencyGroup(name="outer", exit_timeout_seconds=SMALL_SLEEP) as cg:
         thread = cg.start_new_thread(target=lambda: None)
-    end_time = monotonic()
-    assert end_time - start_time < 0.1
+    # The group joined the fast thread well within its exit timeout: the `with` block exited without
+    # propagating a ConcurrencyExceptionGroup, and the thread is no longer alive. (We deliberately do
+    # not assert a wall-clock upper bound on exit duration, which would be flaky under load.)
     assert not thread.is_alive()
 
 
@@ -149,19 +161,31 @@ def test_failed_threads_raise_when_exiting() -> None:
 
 @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
 def test_failed_threads_do_not_raise_when_suppressed() -> None:
+    thread_ran = Event()
     with ConcurrencyGroup(name="outer") as cg:
-        cg.start_new_thread(target=_raise_intentional_error, suppressed_exceptions=(_IntentionalTestError,))
+        cg.start_new_thread(
+            target=_signal_then_raise_intentional_error,
+            args=(thread_ran,),
+            suppressed_exceptions=(_IntentionalTestError,),
+        )
         cg.raise_if_any_strands_or_ancestors_failed_or_is_shutting_down()
+    # The group exited without raising even though the thread really ran and raised the suppressed
+    # error -- asserting the thread executed prevents this test from passing vacuously.
+    assert poll_until(thread_ran.is_set, timeout=5.0)
 
 
 @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
 def test_failed_threads_do_not_raise_when_explicitly_unchecked() -> None:
+    thread_ran = Event()
     with ConcurrencyGroup(name="outer") as cg:
-        cg.start_new_thread(target=_raise_intentional_error, is_checked=False)
+        cg.start_new_thread(target=_signal_then_raise_intentional_error, args=(thread_ran,), is_checked=False)
         cg.raise_if_any_strands_or_ancestors_failed_or_is_shutting_down()
+    # The group exited without raising even though the unchecked thread really ran and raised --
+    # asserting the thread executed prevents this test from passing vacuously.
+    assert poll_until(thread_ran.is_set, timeout=5.0)
 
 
-def test_checked_failed_processes_raise_when_waited_for(tmp_path: Path) -> None:
+def test_checked_failed_processes_raise_when_waited_for() -> None:
     i = 0
     with pytest.raises(ConcurrencyExceptionGroup) as exception_info:
         with ConcurrencyGroup(name="outer") as cg:
@@ -173,7 +197,7 @@ def test_checked_failed_processes_raise_when_waited_for(tmp_path: Path) -> None:
     assert i == 0
 
 
-def test_checked_failed_processes_raise_when_probed(tmp_path: Path) -> None:
+def test_checked_failed_processes_raise_when_probed() -> None:
     i = 0
     with pytest.raises(ConcurrencyExceptionGroup) as exception_info:
         with ConcurrencyGroup(name="outer") as cg:
@@ -186,7 +210,7 @@ def test_checked_failed_processes_raise_when_probed(tmp_path: Path) -> None:
     assert i == 0
 
 
-def test_unchecked_failed_processes_do_not_raise(tmp_path: Path) -> None:
+def test_unchecked_failed_processes_do_not_raise() -> None:
     i = 0
     with ConcurrencyGroup(name="outer") as cg:
         process = cg.run_process_in_background(["bash", "-c", "exit 1"], is_checked_by_group=False)
@@ -197,7 +221,7 @@ def test_unchecked_failed_processes_do_not_raise(tmp_path: Path) -> None:
     assert i == 1
 
 
-def test_failed_background_processes_raise_by_default(tmp_path: Path) -> None:
+def test_failed_background_processes_raise_by_default() -> None:
     """Pins down that is_checked_by_group defaults to True so silent process failures don't slip through."""
     i = 0
     with pytest.raises(ConcurrencyExceptionGroup) as exception_info:
@@ -210,13 +234,13 @@ def test_failed_background_processes_raise_by_default(tmp_path: Path) -> None:
     assert i == 0
 
 
-def test_unchecked_failed_foreground_process_setup_does_not_raise(tmp_path: Path) -> None:
+def test_unchecked_failed_foreground_process_setup_does_not_raise() -> None:
     with ConcurrencyGroup(name="group") as cg:
         with contextlib.suppress(ProcessError):
             cg.run_process_to_completion(["does_not_exist_command"])
 
 
-def test_probing_does_not_raise_when_no_failures_happened(tmp_path: Path) -> None:
+def test_probing_does_not_raise_when_no_failures_happened() -> None:
     with ConcurrencyGroup(name="outer") as cg:
         process = cg.run_process_in_background(["bash", "-c", "exit 0"], is_checked_by_group=True)
         process.wait()
@@ -225,7 +249,7 @@ def test_probing_does_not_raise_when_no_failures_happened(tmp_path: Path) -> Non
         cg.raise_if_any_strands_or_ancestors_failed_or_is_shutting_down()
 
 
-def test_do_not_allow_starting_new_strands_if_the_previous_failed(tmp_path: Path) -> None:
+def test_do_not_allow_starting_new_strands_if_the_previous_failed() -> None:
     process1: RunningProcess | None = None
     process2: RunningProcess | None = None
     with pytest.raises(ConcurrencyExceptionGroup) as exception_info:
@@ -239,7 +263,7 @@ def test_do_not_allow_starting_new_strands_if_the_previous_failed(tmp_path: Path
     assert process2 is None
 
 
-def test_all_failure_modes_get_combined(tmp_path: Path) -> None:
+def test_all_failure_modes_get_combined() -> None:
     sleep_process: RunningProcess | None = None
     with pytest.raises(ConcurrencyExceptionGroup) as exception_info:
         with ConcurrencyGroup(name="outer", exit_timeout_seconds=SMALL_SLEEP) as cg:
@@ -247,7 +271,13 @@ def test_all_failure_modes_get_combined(tmp_path: Path) -> None:
             process2 = cg.run_process_in_background(["bash", "-c", "exit 1"], is_checked_by_group=True)
             assert poll_until(lambda: process2.poll() is not None, timeout=5.0)
             raise _IntentionalTestError("intentional test failure")
-    assert len(exception_info.value.exceptions) == 3
+    # Three distinct failure kinds are always combined regardless of timing: the explicitly-raised
+    # error, process2's non-zero exit (a ProcessError), and the StrandTimedOutError from waiting on
+    # the long-running sleep past the exit window. (The killed sleep process may also surface its own
+    # ProcessError, but whether that 4th exception races in before the group finishes combining is
+    # timing-dependent, so we assert on the kinds that must always be present rather than an exact
+    # count.)
+    assert len(exception_info.value.exceptions) >= 3
     assert any(isinstance(e, ProcessError) for e in exception_info.value.exceptions)
     assert any(isinstance(e, _IntentionalTestError) for e in exception_info.value.exceptions)
     assert any(isinstance(e, StrandTimedOutError) for e in exception_info.value.exceptions)
@@ -261,9 +291,14 @@ def test_all_failure_modes_get_combined(tmp_path: Path) -> None:
 
 
 def test_nesting_in_the_same_thread_just_works() -> None:
+    closure = {"i": 0}
     with ConcurrencyGroup(name="outer") as cg_outer:
-        with cg_outer.make_concurrency_group(name="inner"):
-            pass
+        with cg_outer.make_concurrency_group(name="inner") as cg_inner:
+            cg_inner.start_new_thread(target=lambda: closure.update({"i": 1}))
+        # The inner group waited for its thread and exited cleanly before control returned here.
+        assert cg_inner.state == ConcurrencyGroupState.EXITED
+    # The thread started in the inner group actually ran to completion (not merely "did not raise").
+    assert closure["i"] == 1
 
 
 def _create_nested_concurrency_group(
@@ -457,7 +492,6 @@ def test_exhausted_concurrency_group_cannot_make_nested_groups() -> None:
 def _create_nested_concurrency_group_and_run_process(
     concurrency_group: ConcurrencyGroup,
     closure: dict,
-    tmp_path: Path,
     process_started_event: Event,
     process_holder: list[RunningProcess],
 ) -> None:
@@ -472,14 +506,14 @@ def _create_nested_concurrency_group_and_run_process(
     closure["i"] += 10
 
 
-def test_shutdown_propagates_to_children_and_kills_processes(tmp_path: Path) -> None:
+def test_shutdown_propagates_to_children_and_kills_processes() -> None:
     closure = {"i": 0}
     process_started_event = Event()
     process_holder: list[RunningProcess] = []
     with ConcurrencyGroup(name="outer") as cg:
         cg.start_new_thread(
             target=_create_nested_concurrency_group_and_run_process,
-            args=(cg, closure, tmp_path, process_started_event, process_holder),
+            args=(cg, closure, process_started_event, process_holder),
         )
         process_started_event.wait(timeout=5.0)
         cg.shutdown()
@@ -494,7 +528,6 @@ def test_shutdown_propagates_to_children_and_kills_processes(tmp_path: Path) -> 
 
 def _create_nested_concurrency_group_and_run_process_while_shutting_down(
     concurrency_group: ConcurrencyGroup,
-    tmp_path: Path,
     closure: dict,
     process_started_event: Event,
 ) -> None:
@@ -509,7 +542,7 @@ def _create_nested_concurrency_group_and_run_process_while_shutting_down(
         assert exception_info.value.only_exception_is_instance_of(ConcurrentShutdownError)
 
 
-def test_new_resources_cannot_be_created_when_shutting_down(tmp_path: Path) -> None:
+def test_new_resources_cannot_be_created_when_shutting_down() -> None:
     # No process-reap wait needed here: `run_process_in_background` raises
     # ConcurrentShutdownError before any subprocess is spawned, so there is
     # nothing for the leak detector to see.
@@ -518,7 +551,7 @@ def test_new_resources_cannot_be_created_when_shutting_down(tmp_path: Path) -> N
     with ConcurrencyGroup(name="outer") as cg:
         cg.start_new_thread(
             target=_create_nested_concurrency_group_and_run_process_while_shutting_down,
-            args=(cg, tmp_path, closure, process_started_event),
+            args=(cg, closure, process_started_event),
         )
         process_started_event.wait(timeout=5.0)
         cg.shutdown()
@@ -526,6 +559,12 @@ def test_new_resources_cannot_be_created_when_shutting_down(tmp_path: Path) -> N
 
 
 def test_threads_get_cleaned_up() -> None:
+    # This verifies the leak-prevention behavior: finished strands are pruned from the internal
+    # tracking list rather than accumulating without bound. There is no public observable for the
+    # list's size (the whole point is that it stays small), so we inspect the private _threads list
+    # directly. The bound is `<= 1` rather than `== 1` because the just-started 21st thread may or
+    # may not have finished by the time the start_new_thread cleanup tick runs -- a broken cleanup
+    # would instead leave all 21 here.
     with ConcurrencyGroup(name="outer") as cg:
         for _ in range(20):
             cg.start_new_thread(target=lambda: 1).join()
@@ -534,6 +573,8 @@ def test_threads_get_cleaned_up() -> None:
 
 
 def test_processes_get_cleaned_up() -> None:
+    # See test_threads_get_cleaned_up: same leak-prevention check, applied to the internal _processes
+    # list, with the same rationale for inspecting the private attribute and the `<= 1` bound.
     with ConcurrencyGroup(name="outer") as cg:
         for _ in range(20):
             cg.run_process_in_background(["echo", "foo"]).wait()

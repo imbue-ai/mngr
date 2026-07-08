@@ -1,0 +1,21 @@
+{#def variant="info" #}
+{#
+  Info / warn / success / error notice box. Usage:
+    <Notice variant="warn">Careful: something may need attention.</Notice>
+
+  Any HTML attribute on the tag that is not declared above (id=,
+  class=, hidden, data-*) flows through via JinjaX's ``attrs``
+  passthrough. ``class="..."`` is appended to the component's
+  canonical class set; pass ``class="hidden"`` to start the notice
+  collapsed (the auth pages toggle this via classList.add/remove).
+#}
+{% set _notice_variants = {
+  "info":    "bg-[var(--c-info-surface)] text-info",
+  "warn":    "bg-[var(--c-warning-surface)] text-warning",
+  "success": "bg-[var(--c-success-surface)] text-success",
+  "error":   "bg-[var(--c-important-surface)] text-important",
+} %}
+{% set _cls = "px-3 py-2 rounded-md type-body my-2 " ~ _notice_variants[variant] %}
+<div {{ attrs.render(classes=_cls) }}>
+  {{ content }}
+</div>

@@ -1,0 +1,15 @@
+{#def size="md", tone="default", extra="" #}
+{#
+  Small / medium / large CSS-only spinner (.spinner class lives in app.css).
+  Usage:
+    <Spinner size="sm" />
+    <Spinner size="sm" tone="accent" />  -- blue ring, for primary-action spinners
+
+  ``tone="default"`` (zinc-200 ring + zinc-900 top) is the standard
+  spinner used everywhere. ``tone="accent"`` swaps to a blue ring +
+  blue top, used inside the backup-export "downloading..." indicator
+  where the surrounding text and affordance are already blue.
+#}
+{%- set _dim = {"sm": "w-3.5 h-3.5 border", "md": "w-[18px] h-[18px] border-2", "lg": "w-8 h-8 border-[3px]"} -%}
+{%- set _tone = " spinner-accent" if tone == "accent" else "" -%}
+<span class="spinner{{ _tone }} inline-block align-middle {{ _dim[size] }} {{ extra }}" aria-hidden="true"></span>

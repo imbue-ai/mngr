@@ -31,7 +31,25 @@ class GitOperationError(MindError):
 
 
 class MngrCommandError(MindError):
-    """Raised when an mngr CLI command fails."""
+    """Raised when an mngr CLI command fails (timed out, exited nonzero, or could not be launched)."""
+
+    def __init__(self, message: str, *, error_class: str | None = None) -> None:
+        super().__init__(message)
+        # mngr's exception class name, parsed from a structured JSONL ``error``
+        # event when available (e.g. ``FastPathUnavailableError``). Lets callers
+        # branch on the failure *type* without matching human-formatted text.
+        self.error_class = error_class
+
+
+class MngrCommandTimeoutError(MngrCommandError):
+    """Raised when an mngr CLI command did not finish within its timeout.
+
+    A distinct subclass so callers can tell "the command ran and failed" (still
+    a ``MngrCommandError``, with a body to inspect) apart from "the command
+    never completed". The recovery host-health probe keys on this: a listing
+    that times out is evidence the provider/network is unreachable, not that the
+    host is reachable-but-wedged, so it must not offer a destructive restart.
+    """
 
     ...
 
@@ -47,31 +65,73 @@ class MalformedMngrOutputError(MindError, ValueError):
     ...
 
 
+class InvalidJsonBodyError(MindError, ValueError):
+    """Raised when a request body is missing or not valid JSON.
+
+    Subclasses ``ValueError`` so the desktop client's request handlers can keep
+    catching ``(json.JSONDecodeError, ValueError)`` around body parsing.
+    """
+
+    ...
+
+
 class MindsConfigError(MindError):
     """Raised when minds config cannot be parsed or validated."""
 
     ...
 
 
-class TelegramError(MindError):
-    """Base exception for all telegram-related errors."""
+class DeployLifecycleConfigError(MindError, ValueError):
+    """Raised when a deploy lifecycle config combination is invalid."""
 
     ...
 
 
-class TelegramCredentialError(TelegramError, ValueError):
-    """Raised when telegram credentials are invalid or missing."""
+class EnvelopeStreamConsumerError(MindError, RuntimeError):
+    """Raised when the envelope stream consumer is used out of lifecycle order."""
 
     ...
 
 
-class TelegramCredentialExtractionError(TelegramError):
-    """Raised when credential extraction from the browser fails."""
+class BackupProvisioningError(MindError):
+    """Raised when configuring restic backups for a workspace fails."""
 
     ...
 
 
-class TelegramBotCreationError(TelegramError):
-    """Raised when bot creation via BotFather fails."""
+class LimaImageError(MindError):
+    """Base exception for the pre-baked Lima image cache."""
+
+    ...
+
+
+class LimaImageDownloadError(LimaImageError):
+    """Raised when downloading/assembling a published image fails (network, disk, desync)."""
+
+    ...
+
+
+class LimaImageVerificationError(LimaImageError):
+    """Raised when a downloaded manifest signature or assembled image hash does not verify.
+
+    An unverified image is never used: this is a hard failure (the create is
+    blocked with a retryable error) rather than a fall-through to build-in-VM.
+    """
+
+    ...
+
+
+class LimaImageToolError(LimaImageError):
+    """Raised when a required external tool (desync, minisign, qemu-img) is missing or errors."""
+
+    ...
+
+
+class InvalidSha256HexError(LimaImageError, ValueError):
+    """Raised when a string is not a valid lowercase hex SHA-256 digest.
+
+    Subclasses ``ValueError`` so pydantic treats it as a validation failure when
+    raised from the ``Sha256Hex`` primitive's constructor.
+    """
 
     ...

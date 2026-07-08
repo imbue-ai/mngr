@@ -1,0 +1,33 @@
+{#def title, padding="default", max_width="max-w-[420px]", scripts="" #}
+{#
+  Narrow, vertically-centered page layout. Renders the Base scaffold with
+  a body that flex-centers a single max-width column; the page's entire
+  content lives inside that column. Used by the auth flow (login, signup,
+  signin, etc.) and the workspace-creation form. It only constrains width
+  and padding -- it paints no surface chrome (no border/shadow/rounding);
+  the page background comes from Base.
+
+  Props:
+    title       <title> contents.
+    padding     "default" (``p-8``, used by the auth flow) or "form"
+                (``p-6``, used by the workspace-creation form and any
+                other page that mostly holds inputs).
+    max_width   Tailwind max-width utility on the column. Caller picks
+                per page (e.g. ``"max-w-[420px]"`` for auth,
+                ``"max-w-[520px]"`` for Create).
+    scripts     Page-specific <script> HTML, forwarded to Base. Prefer
+                src=/_static/foo.js over inline JS.
+
+  PageNarrowContainer is the centered, narrow analog of PageContainer
+  (the in-app settings-style ``max-w-[720px]`` wrapper). The two cover
+  almost every content page; only special-case shells (Chrome, Sidebar)
+  and overlay dialogs go outside both.
+#}
+{%- set _padding_cls = "p-8" if padding == "default" else "p-6" -%}
+<Base title={{ title }}
+      body_class="bg-surface-primary text-primary font-sans antialiased flex items-center justify-center min-h-screen p-4"
+      scripts={{ scripts }}>
+  <div class="{{ _padding_cls }} {{ max_width }} w-full">
+    {{ content }}
+  </div>
+</Base>
