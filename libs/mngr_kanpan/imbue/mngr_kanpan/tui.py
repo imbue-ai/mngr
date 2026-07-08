@@ -89,7 +89,7 @@ TRANSIENT_MESSAGE_SECONDS: float = 3.0
 # Peek panel: how many trailing transcript lines to show, how many recent
 # transcript events to fetch, and how often to refresh while the panel is open.
 PEEK_BODY_HEIGHT: int = 14
-PEEK_TRANSCRIPT_TAIL_EVENTS: int = 10
+PEEK_TRANSCRIPT_TAIL_EVENTS: int = 20
 PEEK_REFRESH_SECONDS: float = 2.0
 PEEK_REPLY_PROMPT: str = "reply> "
 
@@ -404,11 +404,13 @@ class _KanpanState(MutableModel):
     peek_alarm: Any = None
     # Fire-and-forget `mngr message` reply; kept only so the future is not dropped.
     peek_reply_future: Future[subprocess.CompletedProcess[str]] | None = None
-    # Dedicated executor for peek captures and replies. Kept separate from the
-    # shared `executor` (and sized for two workers) so a slow reply -- `mngr
-    # message` waits up to ~90s to confirm submission -- cannot freeze the live
-    # capture loop or a board refresh.
+    # Executor for peek transcript reads. Kept separate from the shared `executor`
+    # so a read cannot freeze a board refresh, and from the reply executor so a slow
+    # reply does not stall the live body refresh.
     peek_executor: ThreadPoolExecutor | None = None
+    # Single-worker executor for replies, so several queued replies reach the agent
+    # in submission order and their `mngr message` pastes cannot interleave.
+    peek_reply_executor: ThreadPoolExecutor | None = None
 
 
 class _KanpanInputHandler(MutableModel):
@@ -939,14 +941,24 @@ def _focus_row_by_name(state: _KanpanState, name: AgentName) -> None:
 
 
 def _run_transcript(agent_name: str) -> subprocess.CompletedProcess[str]:  # pragma: no cover
-    """Read the agent's recent transcript events. Called from a background thread.
+    """Read the agent's recent user/assistant messages. Called from a background thread.
 
-    All roles are fetched; the verbose tool bodies are collapsed to a one-line
-    summary in ``_meaningful_transcript_lines`` so a busy agent still shows what it
-    is doing without dumping full tool output into the peek.
+    Tool events are not fetched; the peek shows the conversation, not a tool trace.
+    The window is wide enough to reach past tool-only turns (which have no text) to
+    the last message a person would actually read.
     """
     return subprocess.run(
-        ["mngr", "transcript", agent_name, "--tail", str(PEEK_TRANSCRIPT_TAIL_EVENTS)],
+        [
+            "mngr",
+            "transcript",
+            agent_name,
+            "--role",
+            "user",
+            "--role",
+            "assistant",
+            "--tail",
+            str(PEEK_TRANSCRIPT_TAIL_EVENTS),
+        ],
         capture_output=True,
         text=True,
         timeout=30,
@@ -969,6 +981,17 @@ def _ensure_peek_executor(state: _KanpanState) -> ThreadPoolExecutor:
     return state.peek_executor
 
 
+def _ensure_peek_reply_executor(state: _KanpanState) -> ThreadPoolExecutor:
+    """Return the single-worker reply executor, creating it on first use.
+
+    One worker serializes replies so several queued sends reach the agent in the
+    order they were typed, without their `mngr message` pastes interleaving.
+    """
+    if state.peek_reply_executor is None:
+        state.peek_reply_executor = ThreadPoolExecutor(max_workers=1)
+    return state.peek_reply_executor
+
+
 @pure
 def _last_nonempty_line(text: str) -> str:
     """Return the last non-blank line of `text` (mngr errors append pane dumps)."""
@@ -978,20 +1001,14 @@ def _last_nonempty_line(text: str) -> str:
 
 # A ``mngr transcript`` message header, e.g. ``[2026-07-08T01:06:54Z] assistant:``.
 _TRANSCRIPT_HEADER_RE: re.Pattern[str] = re.compile(r"^\[\d{4}-\d{2}-\d{2}T[^\]]*\] ")
-# The same header for a tool call/result, e.g. ``[...] tool (Bash):``.
-_TOOL_HEADER_RE: re.Pattern[str] = re.compile(r"^\[\d{4}-\d{2}-\d{2}T[^\]]*\] tool ")
-# Max width of the one-line summary kept for a collapsed tool event.
-PEEK_TOOL_SUMMARY_CHARS: int = 100
 
 
 @pure
 def _meaningful_transcript_lines(stdout: str) -> list[str]:
-    """Split a transcript dump into message blocks, keeping what a person would read.
+    """Split a transcript dump into message blocks, keeping only those with real text.
 
-    User/assistant turns with real text are kept verbatim; tool-only turns render as
-    ``(no content)`` and are dropped. Tool events are collapsed to their header plus a
-    one-line summary so a busy agent still shows what it is doing without the full,
-    verbose tool output.
+    Tool-only turns render as ``(no content)`` under their header; dropping those empty
+    blocks leaves the last user/assistant message a person would actually read.
     """
     blocks: list[list[str]] = []
     for line in stdout.rstrip("\n").split("\n"):
@@ -1001,19 +1018,9 @@ def _meaningful_transcript_lines(stdout: str) -> list[str]:
             blocks[-1].append(line)
     kept: list[str] = []
     for block in blocks:
-        header = block[0] if _TRANSCRIPT_HEADER_RE.match(block[0]) else None
-        body = block[1:] if header is not None else block
-        if header is not None and _TOOL_HEADER_RE.match(header):
-            summary = next((line.strip() for line in body if line.strip()), "")
-            kept.append(header)
-            if summary:
-                kept.append(f"  {summary[:PEEK_TOOL_SUMMARY_CHARS]}")
-            kept.append("")
-        elif any(line.strip() and line.strip() != "(no content)" for line in body):
+        body = block[1:] if _TRANSCRIPT_HEADER_RE.match(block[0]) else block
+        if any(line.strip() and line.strip() != "(no content)" for line in body):
             kept.extend(block)
-        else:
-            # An empty or "(no content)" turn -- dropped so it does not clutter the peek.
-            pass
     return kept
 
 
@@ -1032,7 +1039,9 @@ def _peek_body_from_transcript(result: subprocess.CompletedProcess[str]) -> str:
     while lines and not lines[-1].strip():
         lines.pop()
     if not lines:
-        return "(no recent messages)"
+        # No readable user/assistant message in the window -- e.g. an agent running a
+        # long stretch of tool calls with no prose. Point at attach to watch it live.
+        return "(no recent messages -- attach to watch)"
     start = max(0, len(lines) - PEEK_BODY_HEIGHT)
     tail = lines[start:]
     if start > 0:
@@ -1190,7 +1199,7 @@ def _submit_peek_reply(state: _KanpanState) -> None:
     text = state.peek_input.get_edit_text().strip()
     if not text:
         return
-    executor = _ensure_peek_executor(state)
+    executor = _ensure_peek_reply_executor(state)
     state.peek_reply_future = executor.submit(_run_message, str(state.peek_agent_name), text)
     state.peek_input.set_edit_text("")
 
@@ -2137,3 +2146,5 @@ def run_kanpan(
                 state.executor.shutdown(wait=False)
             if state.peek_executor is not None:
                 state.peek_executor.shutdown(wait=False)
+            if state.peek_reply_executor is not None:
+                state.peek_reply_executor.shutdown(wait=False)

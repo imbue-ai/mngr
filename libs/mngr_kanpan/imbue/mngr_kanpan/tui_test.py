@@ -77,6 +77,7 @@ from imbue.mngr_kanpan.tui import _compute_board_column_widths
 from imbue.mngr_kanpan.tui import _compute_footer_display
 from imbue.mngr_kanpan.tui import _dispatch_command
 from imbue.mngr_kanpan.tui import _ensure_peek_executor
+from imbue.mngr_kanpan.tui import _ensure_peek_reply_executor
 from imbue.mngr_kanpan.tui import _execute_marks
 from imbue.mngr_kanpan.tui import _execute_next_in_batch
 from imbue.mngr_kanpan.tui import _field_cell_markup
@@ -1878,7 +1879,7 @@ def test_peek_body_from_transcript_reports_failure() -> None:
 
 def test_peek_body_from_transcript_empty_output() -> None:
     result = subprocess.CompletedProcess(args=[], returncode=0, stdout="\n\n", stderr="")
-    assert _peek_body_from_transcript(result) == "(no recent messages)"
+    assert _peek_body_from_transcript(result) == "(no recent messages -- attach to watch)"
 
 
 def test_peek_body_from_transcript_drops_empty_turns() -> None:
@@ -1898,25 +1899,22 @@ def test_peek_body_from_transcript_drops_empty_turns() -> None:
 def test_peek_body_from_transcript_all_empty_turns_reports_no_messages() -> None:
     stdout = "[2026-07-08T01:06:54Z] assistant:\n(no content)\n\n[2026-07-08T01:07:10Z] assistant:\n(no content)\n"
     result = subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
-    assert _peek_body_from_transcript(result) == "(no recent messages)"
+    assert _peek_body_from_transcript(result) == "(no recent messages -- attach to watch)"
 
 
-def test_peek_body_from_transcript_collapses_tool_events() -> None:
-    stdout = (
-        "[2026-07-08T01:57:39Z] assistant:\n(no content)\n\n"
-        "[2026-07-08T01:57:39Z] tool (Bash):\n21:from imbue.mngr.errors import HostNotFoundError\n"
-        "22:from imbue.mngr.errors import MngrError\n\n"
-        "[2026-07-08T01:57:45Z] assistant:\ndone debugging\n"
-    )
-    result = subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
-    body = _peek_body_from_transcript(result)
-    # Empty assistant turn dropped; tool event collapsed to header + one summary line;
-    # the assistant prose kept.
-    assert "tool (Bash):" in body
-    assert "21:from imbue.mngr.errors import HostNotFoundError" in body
-    assert "22:from imbue.mngr.errors import MngrError" not in body
-    assert "done debugging" in body
-    assert "(no content)" not in body
+def test_peek_reply_executor_serializes_in_order() -> None:
+    state = _make_state()
+    executor = _ensure_peek_reply_executor(state)
+    # A single worker guarantees FIFO, so several queued replies reach the agent in
+    # the order they were typed rather than their pastes interleaving.
+    assert executor._max_workers == 1
+    order: list[int] = []
+    futures = [executor.submit(order.append, i) for i in range(6)]
+    for future in futures:
+        future.result()
+    assert order == [0, 1, 2, 3, 4, 5]
+    # The same executor is reused across submits (not recreated per reply).
+    assert _ensure_peek_reply_executor(state) is executor
 
 
 def test_close_peek_restores_footer_and_clears_state() -> None:
