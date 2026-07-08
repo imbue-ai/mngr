@@ -255,6 +255,42 @@ def test_apply_update_commits_tag_content_and_restores_stash(tmp_path: Path) -> 
     assert (repo / "untracked.txt").read_text() == "scratch\n"
 
 
+def test_apply_update_removes_files_deleted_in_the_target_tag(tmp_path: Path) -> None:
+    # A plain `git checkout <tag> -- <path>` never deletes files the tag
+    # removed; the update must still converge to exactly the tag's content.
+    repo = _make_workspace_repo(tmp_path)
+    (repo / "libs" / "host_backup" / "stale.py").write_text("OBSOLETE = True\n")
+    run_git_for_backup_test(repo, "add", "-A")
+    run_git_for_backup_test(repo, "commit", "-q", "-m", "module the next release removes")
+    run_git_for_backup_test(repo, "checkout", "-q", "-b", "release")
+    run_git_for_backup_test(repo, "rm", "-q", "libs/host_backup/stale.py")
+    (repo / "libs" / "host_backup" / "service.py").write_text("VERSION = 2\n")
+    run_git_for_backup_test(repo, "add", "-A")
+    run_git_for_backup_test(repo, "commit", "-q", "-m", "release content")
+    run_git_for_backup_test(repo, "tag", "minds-v2.0.0")
+    run_git_for_backup_test(repo, "checkout", "-q", "main")
+
+    stub_bin = _make_stub_bin(tmp_path)
+    run = _run_script(
+        repo, BACKUP_APPLY_UPDATE_SCRIPT, ("--minds-version", "2.0.0", "--agent-id", "agent-x"), extra_path=stub_bin
+    )
+    payload = extract_marker_json(run["stdout"], UPDATE_RESULT_MARKER)
+    assert payload is not None, run
+    assert payload["status"] == "ok", payload
+    assert payload["committed"] is True
+    assert not (repo / "libs" / "host_backup" / "stale.py").exists()
+    assert (repo / "libs" / "host_backup" / "service.py").read_text() == "VERSION = 2\n"
+    # The content now matches the tag exactly, so a re-check reads clean.
+    diffed = subprocess.run(
+        ["git", "diff", "--quiet", "minds-v2.0.0", "--", "libs/host_backup"],
+        cwd=repo,
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+    assert diffed.returncode == 0
+
+
 def test_apply_update_is_blocked_by_running_chats_without_stop_flag(tmp_path: Path) -> None:
     repo = _make_workspace_repo(tmp_path)
     run_git_for_backup_test(repo, "tag", "minds-v1.0.0")

@@ -426,9 +426,19 @@ def _main():
             _finish(result, "failed", "git stash failed: %s" % (stashed.stderr or stashed.stdout).strip()[-500:])
         result["stashed"] = True
 
-    # Check out the backup service at the tag; commit only if content changed.
+    # Converge the backup service to exactly the tag's content; commit only if
+    # content changed. A plain `git checkout <tag> -- <path>` only overlays
+    # paths present in the tag's tree and never deletes files the tag removed,
+    # so the tracked content is removed first (the worktree is clean here --
+    # everything was stashed above) and then restored from the tag.
+    removed = _git(["rm", "-r", "-q", "--ignore-unmatch", "--", BACKUP_CODE_PATH])
+    if removed.returncode != 0:
+        _git(["checkout", "HEAD", "--", BACKUP_CODE_PATH])
+        _pop_stash_into(result)
+        _finish(result, "failed", "git rm failed: %s" % (removed.stderr or removed.stdout).strip()[-500:])
     checked_out = _git(["checkout", tag, "--", BACKUP_CODE_PATH])
     if checked_out.returncode != 0:
+        _git(["checkout", "HEAD", "--", BACKUP_CODE_PATH])
         _pop_stash_into(result)
         _finish(result, "failed", "git checkout failed: %s" % (checked_out.stderr or checked_out.stdout).strip()[-500:])
     changed = _run(["git", "status", "--porcelain", "--", BACKUP_CODE_PATH]).stdout.strip()
