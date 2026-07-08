@@ -25,6 +25,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: `mngr latchkey forward` discovery consumer migrated to mngr's per-provider discovery model. Each `DISCOVERY_PROVIDER` snapshot and every incremental discovery event now folds into the shared `DiscoveryStateAggregator` instead of hand-rolling its own prior-vs-fresh reconciliation; a snapshot is authoritative only for its own provider (one provider's poll no longer affects another's agents). Legacy global `DISCOVERY_FULL` snapshot handling has been removed. Fixes a span-awareness gap where a per-provider snapshot could re-establish a reverse tunnel for an agent destroyed during that snapshot's discovery span.
 - Changed: `POST /minds-api-proxy/api/v1/agents/<id>/report` (the per-agent minds bug-report route) is now reachable by any in-workspace agent without a prior per-agent permission grant — a baseline rule allows that exact path ahead of the unauthorized gate. Bearer-key auth still applies. Interim allowance pending broader minds-API-surface latchkey work.
 - Changed: Bumped pinned latchkey CLI on remote VPS environments (the secondary gateway) to 2.19.1; minimum installed CLI is now 2.19.1.
+- Changed: Bumped bundled Latchkey to 2.20.0.
 
 ### Fixed
 

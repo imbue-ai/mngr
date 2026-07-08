@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-07
+
+Added an `is_vm_runtime_enabled` setting to the Modal provider config that controls whether sandboxes run on Modal's VM runtime (https://modal.com/docs/guide/vm-sandboxes) instead of the default gVisor runtime. It defaults to false (gVisor); set `is_vm_runtime_enabled = true` under `[providers.modal]` to create sandboxes with `experimental_options = {"vm_runtime": True}`, which provides stronger isolation and broader syscall compatibility (e.g. Docker-in-sandbox state surviving a filesystem snapshot).
+
+Modal streaming discovery now reports each running host's SSH endpoint (via the shared `collect_cached_host_ssh_infos` helper) so the discovery poller re-emits it as a `HOST_SSH_INFO` event. Previously only a full `mngr list` surfaced SSH info, so a consumer that tunnels to Modal hosts through the streaming discovery path (e.g. the minds system_interface forward) could be left unable to reach them.
+
 ## 2026-07-06
 
 Updated the per-host-bounded discovery override to accept the new cross-poll read registry parameter (unused by this batch provider, which reads all hosts in one bounded pass). No behavioral change for this provider.

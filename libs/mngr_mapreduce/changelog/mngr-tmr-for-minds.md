@@ -1,0 +1,1 @@
+A map-reduce recipe's `name` (the identifier used to prefix agent, branch, and host names) is now a per-instance value rather than a class constant. This lets one recipe class serve multiple named variants of the same run (e.g. the `mngr tmr` command's new `--name` flag).

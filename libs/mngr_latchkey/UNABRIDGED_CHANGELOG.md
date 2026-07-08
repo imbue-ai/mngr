@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-07
+
+Bump Latchkey to 2.20.0.
+
 ## 2026-07-06
 
 Simplifies how cross-workspace (`minds-workspaces`) permission grants are stored, and removes the rule-ordering fragility that a granted grant depended on.

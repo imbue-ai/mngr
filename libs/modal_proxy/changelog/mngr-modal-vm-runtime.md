@@ -1,1 +1,0 @@
-`ModalInterface.sandbox_create` now accepts an optional `experimental_options` mapping, mirroring `modal.Sandbox.create`. This lets callers request Modal's VM runtime (https://modal.com/docs/guide/vm-sandboxes) via `experimental_options={"vm_runtime": True}`.
