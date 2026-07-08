@@ -20,6 +20,7 @@ from imbue.minds.desktop_client.backup_workspace_scripts import UPDATE_RESULT_MA
 from imbue.minds.desktop_client.backup_workspace_scripts import build_workspace_script_command
 from imbue.minds.desktop_client.backup_workspace_scripts import extract_marker_json
 from imbue.minds.testing import run_git_for_backup_test
+from imbue.minds.testing import tag_newer_release_content
 from imbue.minds.testing import write_stub_supervisorctl
 
 
@@ -35,23 +36,6 @@ def _make_workspace_repo(tmp_path: Path) -> Path:
     run_git_for_backup_test(repo, "add", "-A")
     run_git_for_backup_test(repo, "commit", "-q", "-m", "initial")
     return repo
-
-
-def _tag_newer_release_content(repo: Path, *, removed_file: str | None = None) -> None:
-    """Commit newer backup code on a side branch and tag it ``minds-v2.0.0``.
-
-    HEAD (main) then reads as *outdated* relative to the tag. ``removed_file``
-    additionally deletes that path inside the release commit, for exercising
-    convergence onto a tag that removed a file.
-    """
-    run_git_for_backup_test(repo, "checkout", "-q", "-b", "release")
-    if removed_file is not None:
-        run_git_for_backup_test(repo, "rm", "-q", removed_file)
-    (repo / "libs" / "host_backup" / "service.py").write_text("VERSION = 2\n")
-    run_git_for_backup_test(repo, "add", "-A")
-    run_git_for_backup_test(repo, "commit", "-q", "-m", "release content")
-    run_git_for_backup_test(repo, "tag", "minds-v2.0.0")
-    run_git_for_backup_test(repo, "checkout", "-q", "main")
 
 
 def _run_script(repo: Path, script: str, args: tuple[str, ...], *, extra_path: Path | None = None) -> dict:
@@ -153,7 +137,7 @@ def test_check_script_reports_outdated_when_tag_is_not_an_ancestor(tmp_path: Pat
     repo = _make_workspace_repo(tmp_path)
     # The tag lives on a side branch ahead of main: main's content differs and
     # does not contain the tag -> outdated.
-    _tag_newer_release_content(repo)
+    tag_newer_release_content(repo)
     stub_bin = _make_stub_bin(tmp_path)
     run = _run_script(repo, BACKUP_CHECK_SCRIPT, ("--minds-version", "2.0.0"), extra_path=stub_bin)
     payload = extract_marker_json(run["stdout"], CHECK_RESULT_MARKER)
@@ -238,7 +222,7 @@ def test_gate_probe_detects_in_flight_backup_tick(tmp_path: Path) -> None:
 def test_apply_update_commits_tag_content_and_restores_stash(tmp_path: Path) -> None:
     repo = _make_workspace_repo(tmp_path)
     # The target tag carries newer backup code on a side branch (outdated state).
-    _tag_newer_release_content(repo)
+    tag_newer_release_content(repo)
     # Uncommitted user work that must survive the update via the stash.
     (repo / "other.txt").write_text("user edit in progress\n")
     (repo / "untracked.txt").write_text("scratch\n")
@@ -269,7 +253,7 @@ def test_apply_update_removes_files_deleted_in_the_target_tag(tmp_path: Path) ->
     (repo / "libs" / "host_backup" / "stale.py").write_text("OBSOLETE = True\n")
     run_git_for_backup_test(repo, "add", "-A")
     run_git_for_backup_test(repo, "commit", "-q", "-m", "module the next release removes")
-    _tag_newer_release_content(repo, removed_file="libs/host_backup/stale.py")
+    tag_newer_release_content(repo, removed_file="libs/host_backup/stale.py")
 
     stub_bin = _make_stub_bin(tmp_path)
     run = _run_script(
@@ -307,7 +291,7 @@ def test_apply_update_is_blocked_by_running_chats_without_stop_flag(tmp_path: Pa
 
 def test_apply_update_rolls_back_when_service_restart_fails(tmp_path: Path) -> None:
     repo = _make_workspace_repo(tmp_path)
-    _tag_newer_release_content(repo)
+    tag_newer_release_content(repo)
     pre_content = (repo / "libs" / "host_backup" / "service.py").read_text()
 
     stub_bin = _make_stub_bin(tmp_path, restart_ok=False)

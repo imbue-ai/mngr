@@ -248,6 +248,24 @@ def write_stub_supervisorctl(stub_bin: Path, *, is_restart_ok: bool = True) -> P
     return stub
 
 
+def tag_newer_release_content(repo: Path, *, removed_file: str | None = None) -> None:
+    """Commit newer backup code on a side branch and tag it ``minds-v2.0.0``.
+
+    HEAD (main) then reads as *outdated* relative to the tag. ``removed_file``
+    additionally deletes that path inside the release commit, for exercising
+    convergence onto a tag that removed a file. Shared by
+    ``make_fct_shaped_repo`` and the script-level unit tests.
+    """
+    run_git_for_backup_test(repo, "checkout", "-q", "-b", "release")
+    if removed_file is not None:
+        run_git_for_backup_test(repo, "rm", "-q", removed_file)
+    (repo / "libs" / "host_backup" / "service.py").write_text("VERSION = 2\n")
+    run_git_for_backup_test(repo, "add", "-A")
+    run_git_for_backup_test(repo, "commit", "-q", "-m", "release content")
+    run_git_for_backup_test(repo, "tag", "minds-v2.0.0")
+    run_git_for_backup_test(repo, "checkout", "-q", "main")
+
+
 def make_fct_shaped_repo(tmp_path: Path) -> Path:
     """A committed git repo shaped like a workspace checkout.
 
@@ -272,10 +290,5 @@ def make_fct_shaped_repo(tmp_path: Path) -> Path:
     run_git_for_backup_test(repo, "add", "-A")
     run_git_for_backup_test(repo, "commit", "-q", "-m", "initial")
     # Tagged newer backup code on a side branch: HEAD (main) is outdated.
-    run_git_for_backup_test(repo, "checkout", "-q", "-b", "release")
-    (backup_dir / "service.py").write_text("VERSION = 2\n")
-    run_git_for_backup_test(repo, "add", "-A")
-    run_git_for_backup_test(repo, "commit", "-q", "-m", "release content")
-    run_git_for_backup_test(repo, "tag", "minds-v2.0.0")
-    run_git_for_backup_test(repo, "checkout", "-q", "main")
+    tag_newer_release_content(repo)
     return repo
