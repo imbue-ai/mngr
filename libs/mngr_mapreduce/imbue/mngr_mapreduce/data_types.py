@@ -17,7 +17,6 @@ from abc import abstractmethod
 from collections.abc import Sequence
 from enum import auto
 from pathlib import Path
-from typing import ClassVar
 
 from pydantic import Field
 
@@ -182,13 +181,15 @@ class MapReduceRecipe(ABC):
     a path, the framework best-effort-uploads it to S3.
     """
 
-    # Short identifier for this recipe. Subclasses must override.
+    # Short identifier for this recipe. Concrete recipes must provide it
+    # (e.g. as a pydantic field), which lets a single recipe class serve
+    # multiple named variants of the same run.
     #
     # Used as the prefix in agent names (``<name>-<run>-<slug>``), branch
-    # names (``<name>/<run>/<slug>``), and host names. Should be a valid
-    # identifier and stable across releases (used in ``mngr ls`` filter
-    # expressions to locate prior runs).
-    name: ClassVar[str]
+    # names (``<name>/<run>/<slug>``), and host names, so it must be a slug
+    # safe for those contexts. Stable across releases for a given variant
+    # (used in ``mngr ls`` filter expressions to locate prior runs).
+    name: str
 
     @abstractmethod
     def discover(self, ctx: MapReduceContext) -> list[MapReduceTask]:
