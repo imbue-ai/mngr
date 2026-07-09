@@ -67,12 +67,14 @@ from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
 from imbue.minds.primitives import LaunchMode
+from imbue.minds.utils.secret_redaction import redact_secret_env_assignments
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.utils.git_utils import rsync_worktree_over_clone
 from imbue.mngr_latchkey.agent_setup import AgentLatchkeySetup
+from imbue.mngr_latchkey.agent_setup import SECRET_LATCHKEY_ENV_VAR_NAMES
 from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
 from imbue.mngr_latchkey.core import Latchkey
@@ -1039,7 +1041,13 @@ def run_mngr_create(
         if anthropic_base_url is not None:
             subprocess_env["ANTHROPIC_BASE_URL"] = anthropic_base_url
 
-    logger.info("Running: {}", " ".join(mngr_command))
+    # The command carries the latchkey gateway password + permissions-override
+    # JWT as ``--host-env NAME=VALUE`` flags; mask their values before logging
+    # so the persistent logs (uploaded with bug reports) never carry the raw
+    # secrets. The subprocess below still receives the unredacted command.
+    loggable_command = redact_secret_env_assignments(mngr_command, secret_env_var_names=SECRET_LATCHKEY_ENV_VAR_NAMES)
+    loggable_command_str = " ".join(loggable_command)
+    logger.info("Running: {}", loggable_command_str)
 
     capture = _CreateEventCapture(inner_on_output=on_output)
     cg = _make_child_cg("mngr-create", parent_cg)
@@ -1050,6 +1058,10 @@ def run_mngr_create(
             is_checked_after=False,
             on_output=capture,
             env=subprocess_env,
+            # Name the reader thread with the redacted command so the gateway
+            # password + JWT never reach the JSONL log's ``thread_name`` (nor any
+            # ProcessError message); the real command is still what executes.
+            name=loggable_command_str,
         )
 
     if result.returncode != 0:
