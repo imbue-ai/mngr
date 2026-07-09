@@ -209,6 +209,23 @@ def _connect_backend_websocket(
     return websockets.connect(ws_url, subprotocols=ws_subprotocols)
 
 
+def _select_ws_receive_payload(event: Mapping[str, Any]) -> str | bytes | None:
+    """Return the payload of an ASGI ``websocket.receive`` event (text or bytes), or None.
+
+    Per the ASGI spec exactly one of ``text``/``bytes`` is non-None. We select by
+    value rather than key presence because hypercorn always includes BOTH keys
+    (setting the unused one to None), so a key-presence check would pick the
+    co-present ``text: None`` on a binary frame and forward ``None`` -- which
+    raises ``TypeError`` in the ``websockets`` client and kills the socket
+    (uvicorn omitted the unused key, which masked this). Returns None for an
+    event carrying neither payload, which the caller skips.
+    """
+    text = event.get("text")
+    if text is not None:
+        return text
+    return event.get("bytes")
+
+
 async def _forward_client_to_backend(
     client_websocket: WebSocket,
     backend_ws: ClientConnection,
@@ -219,10 +236,9 @@ async def _forward_client_to_backend(
             msg_type = data.get("type", "")
             if msg_type == "websocket.disconnect":
                 break
-            if "text" in data:
-                await backend_ws.send(data["text"])
-            elif "bytes" in data:
-                await backend_ws.send(data["bytes"])
+            payload = _select_ws_receive_payload(data)
+            if payload is not None:
+                await backend_ws.send(payload)
     except WebSocketDisconnect:
         logger.trace("Client WebSocket disconnected")
     except RuntimeError as e:

@@ -27,6 +27,7 @@ from imbue.mngr_forward.primitives import OneTimeCode
 from imbue.mngr_forward.resolver import ForwardResolver
 from imbue.mngr_forward.server import _is_loopback_url
 from imbue.mngr_forward.server import _sanitize_next_url
+from imbue.mngr_forward.server import _select_ws_receive_payload
 from imbue.mngr_forward.server import create_forward_app
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelError
@@ -1227,3 +1228,19 @@ def test_subdomain_forward_websocket_emits_failure_on_ssh_tunnel_setup_error(tmp
     payload = envelope["payload"]
     assert payload["type"] == "system_interface_backend_failure"
     assert payload["reason"] == "CONNECT_ERROR"
+
+
+def test_select_ws_receive_payload_selects_by_value_not_key() -> None:
+    """A binary frame must yield its bytes, not the co-present ``text: None``.
+
+    hypercorn emits every ``websocket.receive`` event with BOTH ``text`` and
+    ``bytes`` keys, setting the unused one to ``None`` (uvicorn omitted it). A
+    key-presence check would pick ``text=None`` on a binary frame and forward
+    ``None``, which raises ``TypeError`` in the ``websockets`` client and kills
+    the terminal / state sockets the workspace SPA relies on. Selecting by value
+    fixes it; an event with neither payload yields ``None`` (caller skips it).
+    """
+    assert _select_ws_receive_payload({"type": "websocket.receive", "bytes": None, "text": "hello"}) == "hello"
+    # The regression case: a binary frame carries text=None alongside its bytes.
+    assert _select_ws_receive_payload({"type": "websocket.receive", "bytes": b"world", "text": None}) == b"world"
+    assert _select_ws_receive_payload({"type": "websocket.receive", "bytes": None, "text": None}) is None
