@@ -106,6 +106,8 @@ from imbue.mngr.providers.ssh_utils import format_as_known_hosts_address
 from imbue.mngr.providers.ssh_utils import load_or_create_ssh_keypair
 from imbue.mngr.providers.ssh_utils import save_ssh_keypair
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
+from imbue.mngr.utils.file_utils import atomic_write
+from imbue.mngr.utils.file_utils import read_json_dict
 from imbue.mngr_imbue_cloud.config import ImbueCloudProviderConfig
 from imbue.mngr_imbue_cloud.config import get_provider_data_dir
 from imbue.mngr_imbue_cloud.connector.auth_helper import get_active_token
@@ -296,6 +298,73 @@ class ImbueCloudProvider(BaseProviderInstance):
 
     def _host_known_hosts_path(self, host_id: HostId) -> Path:
         return self._host_state_dir(host_id) / "known_hosts"
+
+    def _last_known_agents_path(self, host_id: HostId) -> Path:
+        return self._host_state_dir(host_id) / "last_known_agents.json"
+
+    # ------------------------------------------------------------------
+    # Sticky agent identity
+    #
+    # Discovery persists the identity (name + certified_data) of the agents
+    # seen in the last successful outer-listing pass, and re-attaches it in the
+    # fallback paths (outer SSH unreachable, or a successful pass with zero
+    # agents). Without this, a transiently-unreachable host emits a single
+    # label-less "husk" agent named by its lease id, and every consumer that
+    # filters on labels -- most importantly the minds forward's
+    # ``has(agent.labels.is_primary)`` -- silently drops the workspace, so it
+    # vanishes from the sidebar and 404s on restart. Persisting to disk (not
+    # just in-memory) lets the identity survive an app/forward relaunch into a
+    # flaky-network window, which is the production failure mode this fixes.
+    # ------------------------------------------------------------------
+
+    def _persist_last_known_agents(self, host_id: HostId, agent_refs: Sequence[DiscoveredAgent]) -> None:
+        """Persist the identity of the agents seen in a successful listing pass.
+
+        Stored as ``agent_id -> {name, certified_data}`` under the per-host
+        state dir. Best-effort: a write failure is logged, not raised --
+        discovery must not fail just because the sticky-identity cache could not
+        be refreshed. Only called with a non-empty ``agent_refs`` (a pass that
+        found real agents), so the cache is never clobbered by an empty result.
+        """
+        payload = {
+            str(ref.agent_id): {"name": str(ref.agent_name), "certified_data": dict(ref.certified_data)}
+            for ref in agent_refs
+        }
+        try:
+            atomic_write(self._last_known_agents_path(host_id), json.dumps(payload, indent=2))
+        except OSError as exc:
+            logger.warning(
+                "imbue_cloud[{}] could not persist last-known agents for host {}: {}", self.name, host_id, exc
+            )
+
+    def _load_last_known_agents(self, host_id: HostId) -> list[DiscoveredAgent]:
+        """Re-attach the last-known agents for a host, each marked stale.
+
+        Each reattached agent carries the persisted certified_data plus a
+        synthetic ``"stale": true`` key so consumers can distinguish cached
+        identity from a live listing. Returns an empty list when no cache exists
+        yet (first-ever discovery of a host), so the caller keeps its bare
+        lease-stub behavior with no change from today.
+        """
+        payload = read_json_dict(self._last_known_agents_path(host_id))
+        agents: list[DiscoveredAgent] = []
+        for agent_id_str, entry in payload.items():
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name")
+            certified = entry.get("certified_data", {})
+            if not name or not isinstance(certified, dict):
+                continue
+            agents.append(
+                DiscoveredAgent(
+                    agent_id=AgentId(agent_id_str),
+                    agent_name=AgentName(name),
+                    host_id=host_id,
+                    provider_name=self.name,
+                    certified_data={**certified, "stale": True},
+                )
+            )
+        return agents
 
     # ------------------------------------------------------------------
     # Auth helper
@@ -498,7 +567,15 @@ class ImbueCloudProvider(BaseProviderInstance):
                     provider_name=self.name,
                     host_state=fallback_state,
                 )
-                agent_refs = [
+                # Re-attach the full set of agents last seen on this host (each
+                # with its cached certified_data, marked stale) so the workspace
+                # keeps its labels -- and its is_primary sidebar/restart guard --
+                # through the unreachable window. Only when nothing was ever
+                # cached (first-ever discovery) do we fall back to the bare
+                # lease stub, preserving today's behavior for that case. The
+                # host state stays truthfully CRASHED/UNAUTHENTICATED: cached
+                # data restores identity, not liveness.
+                agent_refs = self._load_last_known_agents(host_id) or [
                     DiscoveredAgent(
                         agent_id=AgentId(entry.agent_id),
                         agent_name=AgentName(entry.agent_id),
@@ -549,18 +626,24 @@ class ImbueCloudProvider(BaseProviderInstance):
                         certified_data=data,
                     )
                 )
-            # If the outer-SSH discovery returned no agents (e.g. container
-            # gone, or data.json is empty), still synthesize a single agent
-            # from the lease so the host shows in the listing.
-            if not agent_refs:
-                agent_refs.append(
+            if agent_refs:
+                # A real listing: refresh the sticky-identity cache so a later
+                # unreachable pass can re-attach exactly these agents.
+                self._persist_last_known_agents(host_id, agent_refs)
+            else:
+                # The outer-SSH discovery returned no agents (e.g. container
+                # gone, or data.json is empty). Re-attach the last-known agents
+                # (marked stale) if we have them, so the host keeps its labels;
+                # otherwise synthesize a single agent from the lease so the host
+                # still shows in the listing (unchanged first-discovery behavior).
+                agent_refs = self._load_last_known_agents(host_id) or [
                     DiscoveredAgent(
                         agent_id=AgentId(entry.agent_id),
                         agent_name=AgentName(entry.agent_id),
                         host_id=host_id,
                         provider_name=self.name,
                     )
-                )
+                ]
             result[host_ref] = agent_refs
         return result
 

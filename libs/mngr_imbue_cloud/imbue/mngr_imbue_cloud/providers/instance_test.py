@@ -766,3 +766,182 @@ def test_fast_path_rejects_image_swap_and_names_only_the_image(temp_mngr_ctx: Mn
     assert "ghcr.io/example/custom:latest" in message
     assert "start args" not in message
     assert not provider._did_reach_fast_path
+
+
+# =============================================================================
+# Sticky agent labels (husk fix): discovery persists the identity (name +
+# certified_data) of the agents seen in the last successful outer-listing pass,
+# and re-attaches that full set -- each marked ``"stale": true`` -- in the two
+# fallback paths (outer SSH unreachable, or a successful pass with zero agents).
+# This keeps a transiently-unreachable workspace's labels (most importantly
+# ``is_primary``), so it never collapses to a single label-less "husk" agent and
+# vanishes from consumers that filter on labels. Persisting to disk lets the
+# identity survive an app/forward relaunch into a flaky-network window.
+# =============================================================================
+
+
+_STICKY_PROVIDER_NAME = ProviderInstanceName("imbue-cloud-test")
+
+
+class _SequencedListingProvider(ImbueCloudProvider):
+    """Drives ``discover_hosts_and_agents`` against a queue of canned outer-listing responses.
+
+    Each ``discover_hosts_and_agents`` pass pops one ``(raw, error, is_auth)``
+    tuple, so a test can script a successful pass followed by an unreachable one
+    and assert on how identity is persisted and re-attached. Everything below the
+    outer-SSH boundary (the persist/load-from-disk logic, the ref-building loop)
+    runs for real against ``mngr_ctx.profile_dir``.
+    """
+
+    _lease: LeasedHostInfo | None = None
+    _responses: list[tuple[dict[str, Any] | None, str | None, bool]] = []
+
+    def _list_leased_hosts_cached(self) -> list[LeasedHostInfo]:
+        return [self._lease] if self._lease is not None else []
+
+    def _collect_listing_raw_via_outer(self, lease: LeasedHostInfo) -> tuple[dict[str, Any] | None, str | None, bool]:
+        return self._responses.pop(0)
+
+
+def _agent_data(name: str, labels: Mapping[str, str], agent_type: str) -> dict[str, Any]:
+    return {"id": str(AgentId.generate()), "name": name, "labels": dict(labels), "type": agent_type}
+
+
+def _raw_with_agents(agent_datas: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "container_state": RUNNING_CONTAINER_STATE,
+        "certified_data": {"image": "some-image"},
+        "agents": [{"data": data} for data in agent_datas],
+    }
+
+
+def _make_sequenced_provider(
+    lease: LeasedHostInfo,
+    responses: list[tuple[dict[str, Any] | None, str | None, bool]],
+    mngr_ctx: MngrContext,
+) -> _SequencedListingProvider:
+    return _SequencedListingProvider.model_construct(
+        name=_STICKY_PROVIDER_NAME,
+        mngr_ctx=mngr_ctx,
+        _lease=lease,
+        _responses=list(responses),
+    )
+
+
+def _only_entry(
+    result: dict[DiscoveredHost, list[DiscoveredAgent]],
+) -> tuple[DiscoveredHost, list[DiscoveredAgent]]:
+    assert len(result) == 1
+    host_ref, agents = next(iter(result.items()))
+    return host_ref, agents
+
+
+def test_unreachable_pass_reattaches_all_cached_agents_marked_stale(temp_mngr_ctx: MngrContext) -> None:
+    """A successful pass persists every agent; a following unreachable pass re-attaches
+    the FULL cached set (including system-services), each with its labels and a stale marker."""
+    host_id = HostId.generate()
+    lease = _make_lease(host_id)
+    primary = _agent_data("primary-agent", {"is_primary": "true"}, "codex")
+    services = _agent_data("system-services", {"is_system": "true"}, "system-services")
+    provider = _make_sequenced_provider(
+        lease,
+        [
+            (_raw_with_agents([primary, services]), None, False),
+            (None, "outer SSH unreachable: connection timed out", False),
+        ],
+        temp_mngr_ctx,
+    )
+
+    _, live_agents = _only_entry(provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group))
+    # Live refs carry the real data and are NOT marked stale.
+    assert {str(agent.agent_name) for agent in live_agents} == {"primary-agent", "system-services"}
+    assert all("stale" not in agent.certified_data for agent in live_agents)
+
+    host_ref, cached_agents = _only_entry(provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group))
+    # The host is truthfully CRASHED (cached data restores identity, not liveness).
+    assert host_ref.host_state == HostState.CRASHED
+    # The full agent set survives -- not a single bare lease stub.
+    assert {str(agent.agent_name) for agent in cached_agents} == {"primary-agent", "system-services"}
+    # Every re-attached agent is marked stale and keeps its labels.
+    assert all(agent.certified_data.get("stale") is True for agent in cached_agents)
+    primary_ref = next(agent for agent in cached_agents if str(agent.agent_name) == "primary-agent")
+    assert primary_ref.labels["is_primary"] == "true"
+
+
+def test_cached_identity_survives_a_fresh_provider_instance(temp_mngr_ctx: MngrContext) -> None:
+    """The identity is persisted to disk, so a brand-new provider instance (the app/forward
+    relaunch case) re-attaches it on an unreachable pass -- the production failure mode."""
+    host_id = HostId.generate()
+    lease = _make_lease(host_id)
+    primary = _agent_data("primary-agent", {"is_primary": "true"}, "codex")
+
+    first_provider = _make_sequenced_provider(lease, [(_raw_with_agents([primary]), None, False)], temp_mngr_ctx)
+    first_provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group)
+
+    # A fresh instance shares only the profile_dir + provider name, so it must read
+    # the persisted cache from disk (no in-memory carry-over).
+    second_provider = _make_sequenced_provider(lease, [(None, "outer SSH unreachable", False)], temp_mngr_ctx)
+    host_ref, agents = _only_entry(second_provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group))
+
+    assert [str(agent.agent_name) for agent in agents] == ["primary-agent"]
+    assert agents[0].labels["is_primary"] == "true"
+    assert agents[0].certified_data.get("stale") is True
+
+
+def test_unauthenticated_pass_reattaches_cached_agents(temp_mngr_ctx: MngrContext) -> None:
+    """An auth rejection (UNAUTHENTICATED) re-attaches cached identity just like CRASHED does."""
+    host_id = HostId.generate()
+    lease = _make_lease(host_id)
+    primary = _agent_data("primary-agent", {"is_primary": "true"}, "codex")
+    provider = _make_sequenced_provider(
+        lease,
+        [
+            (_raw_with_agents([primary]), None, False),
+            (None, "outer SSH authentication failed", True),
+        ],
+        temp_mngr_ctx,
+    )
+
+    provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group)
+    host_ref, agents = _only_entry(provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group))
+
+    assert host_ref.host_state == HostState.UNAUTHENTICATED
+    assert [str(agent.agent_name) for agent in agents] == ["primary-agent"]
+    assert agents[0].certified_data.get("stale") is True
+
+
+def test_empty_agents_successful_pass_reattaches_cached_agents(temp_mngr_ctx: MngrContext) -> None:
+    """A successful pass that lists zero agents (stopped container / empty data.json) re-attaches
+    the cached identity rather than synthesizing a bare lease stub."""
+    host_id = HostId.generate()
+    lease = _make_lease(host_id)
+    primary = _agent_data("primary-agent", {"is_primary": "true"}, "codex")
+    provider = _make_sequenced_provider(
+        lease,
+        [
+            (_raw_with_agents([primary]), None, False),
+            (_raw_with_agents([]), None, False),
+        ],
+        temp_mngr_ctx,
+    )
+
+    provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group)
+    _, agents = _only_entry(provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group))
+
+    assert [str(agent.agent_name) for agent in agents] == ["primary-agent"]
+    assert agents[0].certified_data.get("stale") is True
+
+
+def test_first_discovery_with_no_cache_falls_back_to_bare_lease_stub(temp_mngr_ctx: MngrContext) -> None:
+    """With no successful pass ever observed, an unreachable pass behaves exactly as today:
+    a single lease stub named by the lease's agent_id, with no cached (stale) identity."""
+    host_id = HostId.generate()
+    lease = _make_lease(host_id)
+    provider = _make_sequenced_provider(lease, [(None, "outer SSH unreachable", False)], temp_mngr_ctx)
+
+    host_ref, agents = _only_entry(provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group))
+
+    assert host_ref.host_state == HostState.CRASHED
+    assert len(agents) == 1
+    assert str(agents[0].agent_id) == lease.agent_id
+    assert "stale" not in agents[0].certified_data
