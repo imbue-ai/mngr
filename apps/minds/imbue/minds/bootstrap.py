@@ -160,6 +160,20 @@ def _existing_aws_provider_names(providers_mapping: Mapping[str, object]) -> set
     return {name for name in providers_mapping if name.startswith(_AWS_PROVIDER_NAME_PREFIX)}
 
 
+def _existing_is_enabled(providers_section: Table, provider_name: str) -> bool | None:
+    """Return a provider block's panel-toggled ``is_enabled`` if present and boolean, else None.
+
+    ``is_enabled`` is the one user-owned field in the minds-written provider
+    blocks (the providers panel's Disable toggle writes it), so rewrites carry
+    an existing boolean value over rather than re-pinning it.
+    """
+    block = providers_section.get(provider_name)
+    if not isinstance(block, Mapping):
+        return None
+    is_enabled = block.get("is_enabled")
+    return is_enabled if isinstance(is_enabled, bool) else None
+
+
 def _write_aws_provider_blocks(providers_section: Table, desired_names: tuple[str, ...]) -> None:
     """Rewrite the ``[providers.aws-<region>]`` blocks so they exactly match ``desired_names``.
 
@@ -175,11 +189,9 @@ def _write_aws_provider_blocks(providers_section: Table, desired_names: tuple[st
     is_enabled_by_name: dict[str, bool] = {}
     for name in tuple(providers_section):
         if name.startswith(_AWS_PROVIDER_NAME_PREFIX):
-            existing_block = providers_section[name]
-            if isinstance(existing_block, dict):
-                existing_is_enabled = existing_block.get("is_enabled")
-                if isinstance(existing_is_enabled, bool):
-                    is_enabled_by_name[name] = existing_is_enabled
+            existing_is_enabled = _existing_is_enabled(providers_section, name)
+            if existing_is_enabled is not None:
+                is_enabled_by_name[name] = existing_is_enabled
             del providers_section[name]
     for name in desired_names:
         region = name[len(_AWS_PROVIDER_NAME_PREFIX) :]
@@ -329,12 +341,9 @@ def _ensure_mngr_settings(root_name: str) -> bool:
     # compute option. Always written; uses the local Modal token at create time.
     # As with the AWS blocks, a panel-toggled ``is_enabled`` is carried over
     # rather than re-pinned, so a user's Disable survives the rewrite.
-    existing_modal_block = providers_section.get(_MODAL_PROVIDER_NAME)
-    existing_modal_is_enabled = (
-        existing_modal_block.get("is_enabled") if isinstance(existing_modal_block, dict) else None
-    )
+    existing_modal_is_enabled = _existing_is_enabled(providers_section, _MODAL_PROVIDER_NAME)
     providers_section[_MODAL_PROVIDER_NAME] = _build_modal_provider_block(
-        is_enabled=existing_modal_is_enabled if isinstance(existing_modal_is_enabled, bool) else True,
+        is_enabled=True if existing_modal_is_enabled is None else existing_modal_is_enabled,
     )
 
     plugins_section = doc.setdefault("plugins", tomlkit.table())
