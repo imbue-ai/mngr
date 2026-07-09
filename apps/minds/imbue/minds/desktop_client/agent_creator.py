@@ -575,6 +575,11 @@ def provider_instance_name_for_launch(
             # Single instance: the ``modal`` provider talks to Modal with the local
             # token (``modal token new``).
             return "modal"
+        case LaunchMode.GCP | LaunchMode.AZURE:
+            # GCP / Azure have no ambient provider instances in minds -- they are
+            # reachable only through a bring-your-own account block, which the
+            # ``cloud_account`` short-circuit above already returned.
+            raise MngrCommandError(f"{launch_mode.value} mode requires a cloud account")
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -817,6 +822,25 @@ def _build_mngr_create_command(
             # run the provisioning chain over SSH on the freshly-created sandbox.
             mngr_command.extend(["--new-host", "--template", "main", "--template", "modal"])
             mngr_command.extend(_remote_host_env_flags())
+        case LaunchMode.GCP:
+            # Same shape as aws; the address already selects the ``byo-gcp-<slug>``
+            # account block. GCE is zonal, so the placement flag is ``--gcp-zone``
+            # (the form's "region" value for GCP is a zone).
+            mngr_command.extend(["--new-host", "--template", "main", "--template", "gcp"])
+            mngr_command.extend(_remote_host_env_flags())
+            if region:
+                mngr_command.extend(["-b", f"--gcp-zone={region}"])
+            if instance_type:
+                mngr_command.extend(["-b", f"--gcp-machine-type={instance_type}"])
+        case LaunchMode.AZURE:
+            # Same shape as aws; the address already selects the
+            # ``byo-azure-<slug>`` account block.
+            mngr_command.extend(["--new-host", "--template", "main", "--template", "azure"])
+            mngr_command.extend(_remote_host_env_flags())
+            if region:
+                mngr_command.extend(["-b", f"--azure-region={region}"])
+            if instance_type:
+                mngr_command.extend(["-b", f"--azure-vm-size={instance_type}"])
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -1131,9 +1155,46 @@ def run_mngr_aws_prepare(
     # pasted credentials prepare should authenticate with.
     if provider_name is None:
         provider_name = f"aws-{region}"
-    command = [MNGR_BINARY, "aws", "prepare", "--provider", provider_name, "--region", region]
+    _run_mngr_prepare_command(
+        [MNGR_BINARY, "aws", "prepare", "--provider", provider_name, "--region", region],
+        f"aws prepare for region {region}",
+        on_output,
+        parent_cg,
+    )
+
+
+def run_mngr_provider_prepare(
+    backend: str,
+    provider_name: str,
+    on_output: OutputCallback | None = None,
+    *,
+    parent_cg: ConcurrencyGroup | None = None,
+) -> None:
+    """Run ``mngr <backend> prepare --provider <provider_name>`` (gcp / azure).
+
+    Unlike the AWS path there is no ``--region`` flag: the bring-your-own
+    account block named by ``provider_name`` already pins the placement
+    (``default_zone`` / ``default_region``), the credentials, and the project /
+    subscription, and prepare reads all of them from the resolved provider
+    config. Idempotent like the AWS prepare; failures raise ``MngrCommandError``.
+    """
+    _run_mngr_prepare_command(
+        [MNGR_BINARY, backend, "prepare", "--provider", provider_name],
+        f"{backend} prepare for provider {provider_name}",
+        on_output,
+        parent_cg,
+    )
+
+
+def _run_mngr_prepare_command(
+    command: list[str],
+    description: str,
+    on_output: OutputCallback | None,
+    parent_cg: ConcurrencyGroup | None,
+) -> None:
+    """Shared runner for the per-provider ``mngr <backend> prepare`` subprocess."""
     logger.info("Running: {}", " ".join(command))
-    cg = _make_child_cg("mngr-aws-prepare", parent_cg)
+    cg = _make_child_cg("mngr-provider-prepare", parent_cg)
     with cg:
         result = cg.run_process_to_completion(
             command=command,
@@ -1142,8 +1203,8 @@ def run_mngr_aws_prepare(
         )
     if result.returncode != 0:
         raise MngrCommandError(
-            "mngr aws prepare failed for region {} (exit code {}):\n{}".format(
-                region,
+            "mngr {} failed (exit code {}):\n{}".format(
+                description,
                 result.returncode,
                 result.stderr.strip() if result.stderr.strip() else result.stdout.strip(),
             )
@@ -1781,6 +1842,19 @@ class AgentCreator(MutableModel):
                     else:
                         log_queue.put(f"[minds] Ensuring AWS security group is ready in {region}...")
                         run_mngr_aws_prepare(region, on_output=emit_log, parent_cg=self.root_concurrency_group)
+                elif launch_mode in (LaunchMode.GCP, LaunchMode.AZURE) and cloud_account:
+                    # Re-pin the account block when the user picked a different
+                    # zone/region in the form, then prepare (idempotent) so the
+                    # firewall/NSG + state bucket exist there before the create.
+                    if region:
+                        update_cloud_account_region(cloud_account, region)
+                    log_queue.put(f"[minds] Preparing cloud account '{cloud_account}'...")
+                    run_mngr_provider_prepare(
+                        launch_mode.value.lower(),
+                        cloud_account,
+                        on_output=emit_log,
+                        parent_cg=self.root_concurrency_group,
+                    )
 
                 parsed_host = HostName(host_name)
                 log_queue.put("[minds] Creating workspace '{}' (mode: {})...".format(host_name, launch_mode.value))

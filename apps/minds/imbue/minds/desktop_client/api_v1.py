@@ -59,6 +59,7 @@ from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
 from imbue.minds.desktop_client.agent_creator import provider_instance_name_for_launch
 from imbue.minds.desktop_client.agent_creator import resolve_template_version
 from imbue.minds.desktop_client.agent_creator import run_mngr_aws_prepare
+from imbue.minds.desktop_client.agent_creator import run_mngr_provider_prepare
 from imbue.minds.desktop_client.api_auth import handle_invalid_random_id as _handle_invalid_random_id
 from imbue.minds.desktop_client.api_auth import json_error as _json_error
 from imbue.minds.desktop_client.api_auth import json_field_error as _json_field_error
@@ -145,6 +146,10 @@ from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupEncryptionMethod
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CONFIGURED_AWS_INSTANCE_TYPES
+from imbue.minds.primitives import CONFIGURED_AZURE_REGIONS
+from imbue.minds.primitives import CONFIGURED_AZURE_VM_SIZES
+from imbue.minds.primitives import CONFIGURED_GCP_MACHINE_TYPES
+from imbue.minds.primitives import CONFIGURED_GCP_ZONES
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import ServiceName
@@ -200,6 +205,15 @@ def _handle_notification(agent_id: str) -> OkResponse | Response:
 
     dispatcher.dispatch(notification_request, agent_display_name)
     return OkResponse(ok=True)
+
+
+# Machine-size allowlists per compute mode (the create form's picker values).
+# Modes absent here have no size knob; a submitted instance_type is dropped.
+_INSTANCE_TYPES_BY_LAUNCH_MODE = {
+    LaunchMode.AWS: {value for value, _ in CONFIGURED_AWS_INSTANCE_TYPES},
+    LaunchMode.GCP: {value for value, _ in CONFIGURED_GCP_MACHINE_TYPES},
+    LaunchMode.AZURE: {value for value, _ in CONFIGURED_AZURE_VM_SIZES},
+}
 
 
 # -- Cross-workspace management routes --
@@ -475,9 +489,10 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
     submitted_region = str(body.get("region", "")).strip()
     instance_type = str(body.get("instance_type", "")).strip()
     if instance_type:
-        if launch_mode is not LaunchMode.AWS:
+        allowed_instance_types = _INSTANCE_TYPES_BY_LAUNCH_MODE.get(launch_mode)
+        if allowed_instance_types is None:
             instance_type = ""
-        elif instance_type not in {value for value, _ in CONFIGURED_AWS_INSTANCE_TYPES}:
+        elif instance_type not in allowed_instance_types:
             return _json_field_error(f"Unsupported instance type {instance_type!r}.", "instance_type")
     cloud_account = str(body.get("cloud_account", "")).strip()
     if cloud_account:
@@ -564,7 +579,16 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
     # callback that injects the Cloudflare tunnel token + associates the account
     # and persists the chosen region -- exactly as the create form does.
     minds_config = get_state().minds_config
-    region = resolve_effective_region(launch_mode, submitted_region, minds_config, get_state().geo_location_cache)
+    if launch_mode in (LaunchMode.GCP, LaunchMode.AZURE):
+        # No ambient region machinery exists for these modes (BYO-only): honor a
+        # submitted value from the form's curated list, else "" so the account
+        # block's pinned default_zone / default_region applies.
+        allowed_regions = CONFIGURED_GCP_ZONES if launch_mode is LaunchMode.GCP else CONFIGURED_AZURE_REGIONS
+        region = submitted_region if submitted_region in allowed_regions else ""
+    else:
+        region = resolve_effective_region(
+            launch_mode, submitted_region, minds_config, get_state().geo_location_cache
+        )
     on_created = build_create_on_created_callback(account_id, minds_config, launch_mode, region)
 
     creation_id = agent_creator.start_creation(
@@ -1471,19 +1495,57 @@ def _handle_create_cloud_account() -> CloudAccountPrepareResponse | Response:
     alias = str(body.get("alias", "")).strip()
     backend = str(body.get("backend", "")).strip().lower()
     region = str(body.get("region", "")).strip()
-    if backend != "aws":
-        return _json_field_error(f"Backend {backend!r} is not supported yet (aws only).", "backend")
-    access_key_id = str(body.get("aws_access_key_id", "")).strip()
-    secret_access_key = str(body.get("aws_secret_access_key", "")).strip()
-    session_token = str(body.get("aws_session_token", "")).strip()
-    if not access_key_id or not secret_access_key:
-        return _json_field_error("An AWS access key id and secret access key are required.", "aws_access_key_id")
+    if backend == "aws":
+        access_key_id = str(body.get("aws_access_key_id", "")).strip()
+        secret_access_key = str(body.get("aws_secret_access_key", "")).strip()
+        session_token = str(body.get("aws_session_token", "")).strip()
+        if not access_key_id or not secret_access_key:
+            return _json_field_error("An AWS access key id and secret access key are required.", "aws_access_key_id")
+        credentials = {
+            "aws_access_key_id": access_key_id,
+            "aws_secret_access_key": secret_access_key,
+            "aws_session_token": session_token,
+        }
+    elif backend == "gcp":
+        key_json = str(body.get("gcp_service_account_key_json", "")).strip()
+        if not key_json:
+            return _json_field_error(
+                "The service-account key JSON is required.", "gcp_service_account_key_json"
+            )
+        # Cheap structural check so an obviously-wrong paste (an API key, an
+        # OAuth client blob) fails here rather than mid-prepare.
+        try:
+            key_info = json.loads(key_json)
+        except json.JSONDecodeError:
+            return _json_field_error(
+                "That is not valid JSON. Paste the full contents of the downloaded key file.",
+                "gcp_service_account_key_json",
+            )
+        if not isinstance(key_info, dict) or key_info.get("type") != "service_account":
+            return _json_field_error(
+                "That JSON is not a service-account key (expected 'type': 'service_account').",
+                "gcp_service_account_key_json",
+            )
+        credentials = {"service_account_key_json": key_json}
+    elif backend == "azure":
+        subscription_id = str(body.get("azure_subscription_id", "")).strip()
+        tenant_id = str(body.get("azure_tenant_id", "")).strip()
+        client_id = str(body.get("azure_client_id", "")).strip()
+        client_secret = str(body.get("azure_client_secret", "")).strip()
+        if not (subscription_id and tenant_id and client_id and client_secret):
+            return _json_field_error(
+                "Subscription id, tenant id, client id, and client secret are all required.",
+                "azure_subscription_id",
+            )
+        credentials = {
+            "subscription_id": subscription_id,
+            "tenant_id": tenant_id,
+            "client_id": client_id,
+            "client_secret": client_secret,
+        }
+    else:
+        return _json_field_error(f"Backend {backend!r} is not supported (aws, gcp, azure).", "backend")
 
-    credentials = {
-        "aws_access_key_id": access_key_id,
-        "aws_secret_access_key": secret_access_key,
-        "aws_session_token": session_token,
-    }
     try:
         provider_name = set_cloud_account_provider(alias, backend, credentials, region)
     except BootstrapError as exc:
@@ -1498,7 +1560,12 @@ def _handle_create_cloud_account() -> CloudAccountPrepareResponse | Response:
     agent_creator: AgentCreator | None = get_state().agent_creator
     parent_cg = agent_creator.root_concurrency_group if agent_creator is not None else None
     try:
-        run_mngr_aws_prepare(region, on_output=_capture, provider_name=provider_name, parent_cg=parent_cg)
+        if backend == "aws":
+            run_mngr_aws_prepare(region, on_output=_capture, provider_name=provider_name, parent_cg=parent_cg)
+        else:
+            # gcp/azure prepare read placement + credentials from the account
+            # block itself, so only --provider is passed.
+            run_mngr_provider_prepare(backend, provider_name, on_output=_capture, parent_cg=parent_cg)
     except MngrCommandError as exc:
         # Roll back: a failed prepare means unusable credentials/permissions;
         # keeping the block would make every `mngr list` fan out to it.

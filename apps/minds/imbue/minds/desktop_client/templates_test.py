@@ -293,7 +293,14 @@ def test_render_create_form_prefills_values() -> None:
 
 def test_render_create_form_contains_all_launch_modes() -> None:
     html = render_create_form()
+    # GCP / AZURE are bring-your-own-account-only modes: they are reachable
+    # solely through configured cloud-account options (``BYO:<block>``), never
+    # rendered as ambient compute options.
+    byo_only_modes = {LaunchMode.GCP, LaunchMode.AZURE}
     for mode in LaunchMode:
+        if mode in byo_only_modes:
+            assert f'<option value="{mode.value}"' not in html
+            continue
         # Assert on the option's ``value=`` attribute (the exact enum value),
         # not the visible text: Modal renders a friendly label instead of the
         # lowercased value (it shows "Modal (1-day ephemeral)").

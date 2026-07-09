@@ -1,4 +1,4 @@
-{#def git_url, branch, host_name, launch_modes, selected_launch_mode, ai_providers, selected_ai_provider, backup_providers, selected_backup_provider, backup_encryption_methods, selected_backup_encryption_method, backup_api_key_env, has_saved_backup_password, accounts, default_account_id, anthropic_api_key, error_message, region_options_by_launch_mode, region_selected_by_launch_mode, cloud_accounts=[], aws_instance_types=[], default_aws_instance_type="t3.large", selected_preset="remote", start_advanced=False, color="#0b292b" #}
+{#def git_url, branch, host_name, launch_modes, selected_launch_mode, ai_providers, selected_ai_provider, backup_providers, selected_backup_provider, backup_encryption_methods, selected_backup_encryption_method, backup_api_key_env, has_saved_backup_password, accounts, default_account_id, anthropic_api_key, error_message, region_options_by_launch_mode, region_selected_by_launch_mode, cloud_accounts=[], instance_types_by_backend={}, default_instance_type_by_backend={}, byo_region_options={}, byo_region_selected={}, selected_preset="remote", start_advanced=False, color="#0b292b" #}
 {#
   Workspace creation form.
 
@@ -82,6 +82,12 @@
     var lastErrorField = null;
     var REGION_OPTIONS = {{ region_options_by_launch_mode | tojson }};
     var REGION_SELECTED = {{ region_selected_by_launch_mode | tojson }};
+    // BYO-only modes (GCP zones / Azure regions) merge into the same region
+    // machinery; the machine-size picker options come per backend.
+    Object.assign(REGION_OPTIONS, {{ byo_region_options | tojson }});
+    Object.assign(REGION_SELECTED, {{ byo_region_selected | tojson }});
+    var INSTANCE_TYPES = {{ instance_types_by_backend | tojson }};
+    var INSTANCE_TYPE_DEFAULT = {{ default_instance_type_by_backend | tojson }};
 
     // Bring-your-own account options carry value "BYO:<block-name>" plus a
     // data-backend attr naming the real LaunchMode. This resolves the select
@@ -480,11 +486,32 @@
     }
 
     function updateInstanceType() {
-      // Machine-size picker: AWS-backed selections only (ambient AWS or a BYO
-      // AWS account). Hidden + disabled elsewhere so no value is submitted.
-      var isAws = launchSelection().mode === 'AWS';
-      instanceTypeRow.classList.toggle('hidden', !isAws);
-      instanceTypeSelect.disabled = !isAws;
+      // Machine-size picker: cloud-VM selections only (AWS/GCP/Azure, ambient
+      // or BYO account). Hidden + disabled elsewhere so no value is submitted.
+      // Options are rebuilt per backend (keyed by the raw select value, like
+      // the region picker) so a user's explicit pick survives unrelated changes.
+      var mode = launchSelect.value;
+      var backend = launchSelection().mode;
+      var options = INSTANCE_TYPES[backend];
+      if (!options || options.length === 0) {
+        instanceTypeRow.classList.add('hidden');
+        instanceTypeSelect.disabled = true;
+        return;
+      }
+      if (instanceTypeSelect.getAttribute('data-mode') !== mode) {
+        var preselected = INSTANCE_TYPE_DEFAULT[backend] || options[0][0];
+        instanceTypeSelect.innerHTML = '';
+        for (var i = 0; i < options.length; i++) {
+          var opt = document.createElement('option');
+          opt.value = options[i][0];
+          opt.textContent = options[i][1];
+          if (options[i][0] === preselected) opt.selected = true;
+          instanceTypeSelect.appendChild(opt);
+        }
+        instanceTypeSelect.setAttribute('data-mode', mode);
+      }
+      instanceTypeRow.classList.remove('hidden');
+      instanceTypeSelect.disabled = false;
     }
 
     function update() {
@@ -557,6 +584,11 @@
     var caAlias = document.getElementById('ca-alias');
     var caAccessKeyId = document.getElementById('ca-access-key-id');
     var caSecretKey = document.getElementById('ca-secret-key');
+    var caGcpKeyJson = document.getElementById('ca-gcp-key-json');
+    var caAzureSubscriptionId = document.getElementById('ca-azure-subscription-id');
+    var caAzureTenantId = document.getElementById('ca-azure-tenant-id');
+    var caAzureClientId = document.getElementById('ca-azure-client-id');
+    var caAzureClientSecret = document.getElementById('ca-azure-client-secret');
     var caRegion = document.getElementById('ca-region');
     var caFormError = document.getElementById('ca-form-error');
     var caBarFill = document.getElementById('ca-bar-fill');
@@ -660,8 +692,10 @@
     }
 
     function caPopulateRegions() {
-      var options = REGION_OPTIONS['AWS'] || [];
-      var preselected = REGION_SELECTED['AWS'] || options[0];
+      // Placement options per backend: AWS/Azure regions, GCE zones.
+      var backendKey = caBackend.value.toUpperCase();
+      var options = REGION_OPTIONS[backendKey] || [];
+      var preselected = REGION_SELECTED[backendKey] || options[0];
       caRegion.innerHTML = '';
       for (var i = 0; i < options.length; i++) {
         var opt = document.createElement('option');
@@ -671,6 +705,20 @@
         caRegion.appendChild(opt);
       }
     }
+
+    function caUpdateBackendFields() {
+      // One blurb + one credential field-group per backend.
+      var backend = caBackend.value;
+      document.getElementById('ca-blurb-aws').classList.toggle('hidden', backend !== 'aws');
+      document.getElementById('ca-blurb-gcp').classList.toggle('hidden', backend !== 'gcp');
+      document.getElementById('ca-blurb-azure').classList.toggle('hidden', backend !== 'azure');
+      document.getElementById('ca-fields-aws').classList.toggle('hidden', backend !== 'aws');
+      document.getElementById('ca-fields-gcp').classList.toggle('hidden', backend !== 'gcp');
+      document.getElementById('ca-fields-azure').classList.toggle('hidden', backend !== 'azure');
+      caPopulateRegions();
+    }
+
+    caBackend.addEventListener('change', caUpdateBackendFields);
 
     function caStartBar() {
       // Time-eased fill to ~90% (mirrors the creating page's feel); snaps to
@@ -697,23 +745,36 @@
     function caSubmitAccount() {
       caFormError.classList.add('hidden');
       var alias = caAlias.value.trim();
-      var accessKeyId = caAccessKeyId.value.trim();
-      var secretKey = caSecretKey.value.trim();
+      var backend = caBackend.value;
       if (!alias) { caShowFormError('Give the account an alias.'); return; }
-      if (!accessKeyId || !secretKey) { caShowFormError('Both the access key ID and secret access key are required.'); return; }
+      var body = { alias: alias, backend: backend, region: caRegion.value };
+      if (backend === 'aws') {
+        body.aws_access_key_id = caAccessKeyId.value.trim();
+        body.aws_secret_access_key = caSecretKey.value.trim();
+        if (!body.aws_access_key_id || !body.aws_secret_access_key) {
+          caShowFormError('Both the access key ID and secret access key are required.'); return;
+        }
+      } else if (backend === 'gcp') {
+        body.gcp_service_account_key_json = caGcpKeyJson.value.trim();
+        if (!body.gcp_service_account_key_json) {
+          caShowFormError('Paste the service-account key JSON.'); return;
+        }
+      } else {
+        body.azure_subscription_id = caAzureSubscriptionId.value.trim();
+        body.azure_tenant_id = caAzureTenantId.value.trim();
+        body.azure_client_id = caAzureClientId.value.trim();
+        body.azure_client_secret = caAzureClientSecret.value.trim();
+        if (!body.azure_subscription_id || !body.azure_tenant_id || !body.azure_client_id || !body.azure_client_secret) {
+          caShowFormError('Subscription, tenant, client id, and client secret are all required.'); return;
+        }
+      }
       caPrepareInFlight = true;
       caShowView(caProgressView);
       caStartBar();
       fetch('/api/v1/desktop/cloud-accounts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          alias: alias,
-          backend: caBackend.value,
-          region: caRegion.value,
-          aws_access_key_id: accessKeyId,
-          aws_secret_access_key: secretKey
-        })
+        body: JSON.stringify(body)
       }).then(function (r) {
         return r.json().then(function (data) { return { ok: r.ok, data: data || {} }; });
       }).then(function (res) {
@@ -729,9 +790,14 @@
           caResultMessage.textContent = '"' + acct.alias + '" is set up in ' + acct.region +
             ' and selected as the compute provider for this workspace.';
           caResultBackBtn.classList.add('hidden');
-          // Wipe the pasted secret from the DOM now that it is stored.
+          // Wipe the pasted secrets from the DOM now that they are stored.
           caSecretKey.value = '';
           caAccessKeyId.value = '';
+          caGcpKeyJson.value = '';
+          caAzureSubscriptionId.value = '';
+          caAzureTenantId.value = '';
+          caAzureClientId.value = '';
+          caAzureClientSecret.value = '';
           caAlias.value = '';
         } else {
           var err = normalizeApiError(res.data);
@@ -765,7 +831,7 @@
     document.getElementById('open-cloud-accounts').addEventListener('click', caOpenModal);
     document.getElementById('ca-close-btn').addEventListener('click', caCloseModal);
     document.getElementById('ca-add-btn').addEventListener('click', function () {
-      caPopulateRegions();
+      caUpdateBackendFields();
       caFormError.classList.add('hidden');
       caShowView(caFormView);
     });
@@ -903,10 +969,13 @@
             </p>
           </div>
           <Select id="launch_mode" name="launch_mode" width="w-48">
-            {% for mode in launch_modes %}
+            {# GCP / AZURE are BYO-only (no ambient credentials path in minds),
+               so they are not offered as plain modes -- only via the account
+               options below. #}
+            {% for mode in launch_modes %}{% if mode.value not in ('GCP', 'AZURE') %}
               <option value="{{ mode.value }}"{% if mode.value == selected_launch_mode %} selected{% endif %}
                       {% if mode.value == 'IMBUE_CLOUD' %}data-requires-account="true"{% endif %}>{% if mode.value == 'MODAL' %}Modal (1-day ephemeral){% else %}{{ mode.value | lower }}{% endif %}</option>
-            {% endfor %}
+            {% endif %}{% endfor %}
             {# Bring-your-own cloud accounts (pasted keys). The value carries the
                provider block name; data-backend maps back to the LaunchMode the
                create request submits, data-default-region preselects the region. #}
@@ -1000,19 +1069,16 @@
         </div>
       </div>
 
-      {# Machine size: AWS-backed selections only (ambient AWS + BYO accounts).
-         The floor is 4 GB -- the workspace build OOMs on 2 GB boxes. #}
+      {# Machine size: cloud-VM selections only (AWS / GCP / Azure, ambient or
+         BYO account). Options are JS-populated per backend; the floor is 4 GB
+         -- the workspace build OOMs on 2 GB boxes. #}
       <div id="instance-type-row" class="hidden">
         <div class="flex items-start justify-between gap-3">
           <div>
             <FormLabel target="instance_type" inline>Machine size</FormLabel>
             <p class="mt-1 type-helper text-tertiary">Billed to your account while the machine runs. 8 GB is the tested default.</p>
           </div>
-          <Select id="instance_type" name="instance_type" width="w-80">
-            {% for pair in aws_instance_types %}
-              <option value="{{ pair[0] }}"{% if pair[0] == default_aws_instance_type %} selected{% endif %}>{{ pair[1] }}</option>
-            {% endfor %}
-          </Select>
+          <Select id="instance_type" name="instance_type" width="w-80"></Select>
         </div>
       </div>
 
@@ -1079,30 +1145,71 @@
         <FormLabel target="ca-backend" inline>Provider</FormLabel>
         <Select id="ca-backend" name="ca-backend" width="w-48">
           <option value="aws" selected>AWS</option>
-          <option value="gcp" disabled>GCP (coming soon)</option>
-          <option value="azure" disabled>Azure (coming soon)</option>
+          <option value="gcp">GCP</option>
+          <option value="azure">Azure</option>
         </Select>
       </div>
-      <p class="mt-3 type-helper text-tertiary">
+      <p id="ca-blurb-aws" class="mt-3 type-helper text-tertiary">
         You need an <strong>IAM user</strong> (not the root account) with the
         <code>AmazonEC2FullAccess</code> and <code>AmazonS3FullAccess</code> policies.
         In the AWS console: IAM &rarr; Users &rarr; Create user &rarr; attach those policies &rarr;
         Security credentials &rarr; Create access key. Paste the key pair below.
       </p>
+      <p id="ca-blurb-gcp" class="hidden mt-3 type-helper text-tertiary">
+        You need a <strong>service account</strong> in a project with billing enabled and the
+        <strong>Compute Engine + Cloud Storage APIs</strong> turned on. In the GCP console:
+        IAM &amp; Admin &rarr; Service Accounts &rarr; Create &rarr; grant
+        <code>Compute Admin</code>, <code>Storage Admin</code>, and <code>Service Account User</code>
+        &rarr; Keys &rarr; Add key (JSON). Paste the whole downloaded JSON file below.
+      </p>
+      <p id="ca-blurb-azure" class="hidden mt-3 type-helper text-tertiary">
+        You need a <strong>service principal with the Owner role</strong> on the subscription
+        (Contributor works, but idle auto-stop is disabled and machines bill until stopped
+        manually). In the Azure portal: Entra ID &rarr; App registrations &rarr; New &rarr;
+        note the client + tenant ids &rarr; Certificates &amp; secrets &rarr; New client secret;
+        then Subscription &rarr; Access control &rarr; assign Owner to the app.
+      </p>
       <div class="mt-3">
         <FormLabel target="ca-alias">Alias</FormLabel>
-        <TextInput id="ca-alias" name="ca-alias" placeholder="my aws account" />
+        <TextInput id="ca-alias" name="ca-alias" placeholder="my cloud account" />
       </div>
-      <div class="mt-3">
-        <FormLabel target="ca-access-key-id">Access key ID</FormLabel>
-        <TextInput id="ca-access-key-id" name="ca-access-key-id" placeholder="AKIA..." />
+      <div id="ca-fields-aws">
+        <div class="mt-3">
+          <FormLabel target="ca-access-key-id">Access key ID</FormLabel>
+          <TextInput id="ca-access-key-id" name="ca-access-key-id" placeholder="AKIA..." />
+        </div>
+        <div class="mt-3">
+          <FormLabel target="ca-secret-key">Secret access key</FormLabel>
+          <TextInput id="ca-secret-key" name="ca-secret-key" type="password" placeholder="paste the secret shown once at key creation" />
+        </div>
       </div>
-      <div class="mt-3">
-        <FormLabel target="ca-secret-key">Secret access key</FormLabel>
-        <TextInput id="ca-secret-key" name="ca-secret-key" type="password" placeholder="paste the secret shown once at key creation" />
+      <div id="ca-fields-gcp" class="hidden">
+        <div class="mt-3">
+          <FormLabel target="ca-gcp-key-json">Service-account key JSON</FormLabel>
+          <Textarea id="ca-gcp-key-json" name="ca-gcp-key-json" rows="5" extra="font-mono"
+                    placeholder='{"type": "service_account", "project_id": "...", ...}'></Textarea>
+        </div>
+      </div>
+      <div id="ca-fields-azure" class="hidden">
+        <div class="mt-3">
+          <FormLabel target="ca-azure-subscription-id">Subscription ID</FormLabel>
+          <TextInput id="ca-azure-subscription-id" name="ca-azure-subscription-id" placeholder="00000000-0000-0000-0000-000000000000" />
+        </div>
+        <div class="mt-3">
+          <FormLabel target="ca-azure-tenant-id">Tenant ID</FormLabel>
+          <TextInput id="ca-azure-tenant-id" name="ca-azure-tenant-id" placeholder="Entra directory (tenant) id" />
+        </div>
+        <div class="mt-3">
+          <FormLabel target="ca-azure-client-id">Client ID</FormLabel>
+          <TextInput id="ca-azure-client-id" name="ca-azure-client-id" placeholder="app registration (client) id" />
+        </div>
+        <div class="mt-3">
+          <FormLabel target="ca-azure-client-secret">Client secret</FormLabel>
+          <TextInput id="ca-azure-client-secret" name="ca-azure-client-secret" type="password" placeholder="the secret's Value (shown once)" />
+        </div>
       </div>
       <div class="mt-3 flex items-center justify-between gap-3">
-        <FormLabel target="ca-region" inline>Default region</FormLabel>
+        <FormLabel target="ca-region" inline>Default region / zone</FormLabel>
         <Select id="ca-region" name="ca-region" width="w-48"></Select>
       </div>
       <p id="ca-form-error" class="hidden mt-3 type-helper text-important"></p>
@@ -1117,8 +1224,8 @@
     <div id="ca-progress-view" class="hidden">
       <span class="type-heading text-primary">Setting up your account...</span>
       <p class="mt-2 type-helper text-tertiary">
-        Verifying the keys and creating the security group + state bucket
-        (<code>mngr aws prepare</code>). Usually under a minute.
+        Verifying the credentials and creating the network ingress + state storage
+        (<code>mngr &lt;provider&gt; prepare</code>). Usually under a minute.
       </p>
       <div class="mt-4 h-1.5 bg-fill-subtle rounded-full overflow-hidden">
         <div id="ca-bar-fill" class="h-full w-0 rounded-full bg-accent transition-[width] duration-300 ease-out"></div>

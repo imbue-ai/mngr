@@ -22,6 +22,8 @@ from loguru import logger
 from tomlkit.items import Table
 
 from imbue.minds.primitives import CONFIGURED_AWS_REGIONS
+from imbue.minds.primitives import DEFAULT_AZURE_VM_SIZE
+from imbue.minds.primitives import DEFAULT_GCP_MACHINE_TYPE
 
 MINDS_ROOT_NAME_ENV_VAR: Final[str] = "MINDS_ROOT_NAME"
 DEFAULT_MINDS_ROOT_NAME: Final[str] = "minds"
@@ -253,6 +255,8 @@ def _ensure_mngr_settings(root_name: str) -> None:
         recursive_plugin = plugins.get("recursive", {})
         default_imbue_cloud = providers.get(_IMBUE_CLOUD_BACKEND_NAME, {})
         default_aws = providers.get(_AWS_BACKEND_NAME, {})
+        default_gcp = providers.get(_GCP_BACKEND_NAME, {})
+        default_azure = providers.get(_AZURE_BACKEND_NAME, {})
         modal_provider = providers.get(_MODAL_PROVIDER_NAME, {})
         if (
             recursive_plugin.get("enabled") is False
@@ -261,6 +265,10 @@ def _ensure_mngr_settings(root_name: str) -> None:
             and default_imbue_cloud.get("is_enabled") is False
             and default_aws.get("backend") == _AWS_BACKEND_NAME
             and default_aws.get("is_enabled") is False
+            and default_gcp.get("backend") == _GCP_BACKEND_NAME
+            and default_gcp.get("is_enabled") is False
+            and default_azure.get("backend") == _AZURE_BACKEND_NAME
+            and default_azure.get("is_enabled") is False
             and _existing_aws_provider_names(providers) == set(desired_aws_names)
             # The Modal (Direct) block must already be present, enabled, AND
             # persistent, else fall through and rewrite it. The is_persistent
@@ -309,6 +317,17 @@ def _ensure_mngr_settings(root_name: str) -> None:
     default_aws_block["backend"] = _AWS_BACKEND_NAME
     default_aws_block["is_enabled"] = False
     providers_section[_AWS_BACKEND_NAME] = default_aws_block
+
+    # Suppress the default ``[providers.gcp]`` / ``[providers.azure]`` instances
+    # for the same reason: their registered backends would auto-create
+    # credential-less default providers whose discovery fails every ``mngr
+    # list`` cycle. The usable instances are the bring-your-own
+    # ``byo-gcp-<slug>`` / ``byo-azure-<slug>`` account blocks.
+    for backend_name in (_GCP_BACKEND_NAME, _AZURE_BACKEND_NAME):
+        suppressed_block = tomlkit.table()
+        suppressed_block["backend"] = backend_name
+        suppressed_block["is_enabled"] = False
+        providers_section[backend_name] = suppressed_block
 
     # Write one ``[providers.aws-<region>]`` block per configured region (when
     # AWS credentials are present), so ``mngr create @host.aws-<region>`` and
@@ -554,6 +573,8 @@ _IMBUE_CLOUD_DEFAULT_START_ARGS: Final[tuple[str, ...]] = ("--workdir=/", "--sec
 # runsc-hardened container; the matching ``docker run`` start args live in the
 # template ``[create_templates.aws]``.
 _AWS_BACKEND_NAME: Final[str] = "aws"
+_GCP_BACKEND_NAME: Final[str] = "gcp"
+_AZURE_BACKEND_NAME: Final[str] = "azure"
 _AWS_DOCKER_RUNTIME: Final[str] = "runsc"
 _AWS_INSTALL_GVISOR_RUNTIME: Final[bool] = True
 _AWS_PROVIDER_NAME_PREFIX: Final[str] = "aws-"
@@ -876,7 +897,7 @@ def unset_imbue_cloud_provider_for_account(email: str, *, root_name: str | None 
 # renaming an alias never renames the provider instance (which would orphan the
 # hosts created under it).
 _BYO_PROVIDER_NAME_PREFIX: Final[str] = "byo-"
-_BYO_SUPPORTED_BACKENDS: Final[tuple[str, ...]] = ("aws",)
+_BYO_SUPPORTED_BACKENDS: Final[tuple[str, ...]] = ("aws", "gcp", "azure")
 
 
 def _cloud_account_aliases_path(root_name: str) -> Path:
@@ -962,11 +983,22 @@ def set_cloud_account_provider(
         raise BootstrapError(f"A cloud account named {alias!r} already exists ({provider_name})")
     block = tomlkit.table()
     block["backend"] = backend
-    block["default_region"] = region
-    block["default_instance_type"] = _AWS_DEFAULT_INSTANCE_TYPE
-    block["install_gvisor_runtime"] = _AWS_INSTALL_GVISOR_RUNTIME
-    block["docker_runtime"] = _AWS_DOCKER_RUNTIME
-    block["default_start_args"] = list(_AWS_DEFAULT_START_ARGS)
+    # Per-backend placement + shape. AWS keeps the gVisor hardening knobs the
+    # ambient ``aws-<region>`` blocks get; GCP / Azure run the providers'
+    # default docker runtime (the FCT gcp/azure templates' hardening args are
+    # runtime-agnostic). GCE is zonal, so the GCP "region" value is a zone.
+    if backend == "aws":
+        block["default_region"] = region
+        block["default_instance_type"] = _AWS_DEFAULT_INSTANCE_TYPE
+        block["install_gvisor_runtime"] = _AWS_INSTALL_GVISOR_RUNTIME
+        block["docker_runtime"] = _AWS_DOCKER_RUNTIME
+        block["default_start_args"] = list(_AWS_DEFAULT_START_ARGS)
+    elif backend == "gcp":
+        block["default_zone"] = region
+        block["default_machine_type"] = DEFAULT_GCP_MACHINE_TYPE
+    else:
+        block["default_region"] = region
+        block["default_vm_size"] = DEFAULT_AZURE_VM_SIZE
     for key, value in credentials.items():
         if value:
             block[key] = value
@@ -998,18 +1030,39 @@ def list_cloud_account_providers(*, root_name: str | None = None) -> list[dict[s
     for name, block in sorted(providers.items()):
         if not name.startswith(_BYO_PROVIDER_NAME_PREFIX) or not isinstance(block, dict):
             continue
-        key_id = str(block.get("aws_access_key_id", ""))
-        identifier = f"{key_id[:4]}…{key_id[-4:]}" if len(key_id) >= 12 else key_id
         accounts.append(
             {
                 "name": name,
                 "alias": aliases.get(name, name),
                 "backend": str(block.get("backend", "")),
-                "region": str(block.get("default_region", "")),
-                "identifier": identifier,
+                # GCE is zonal: the GCP block pins default_zone, not default_region.
+                "region": str(block.get("default_region") or block.get("default_zone") or ""),
+                "identifier": _cloud_account_identifier(block),
             }
         )
     return accounts
+
+
+def _cloud_account_identifier(block: Mapping[str, object]) -> str:
+    """Masked, display-safe credential hint per backend; never a secret.
+
+    AWS: the access key id masked to its ends. GCP: the service account email
+    embedded in the pasted key JSON (an identifier, not a secret). Azure: the
+    service principal's client id (a plain identifier).
+    """
+    backend = str(block.get("backend", ""))
+    if backend == "aws":
+        key_id = str(block.get("aws_access_key_id", ""))
+        return f"{key_id[:4]}…{key_id[-4:]}" if len(key_id) >= 12 else key_id
+    if backend == "gcp":
+        try:
+            key_info = json.loads(str(block.get("service_account_key_json", "")))
+        except json.JSONDecodeError:
+            return ""
+        return str(key_info.get("client_email", "")) if isinstance(key_info, dict) else ""
+    if backend == "azure":
+        return str(block.get("client_id", ""))
+    return ""
 
 
 def set_cloud_account_alias(provider_name: str, alias: str, *, root_name: str | None = None) -> bool:
@@ -1048,11 +1101,13 @@ def update_cloud_account_region(provider_name: str, region: str, *, root_name: s
     block = providers[provider_name]
     if not isinstance(block, dict) or not str(provider_name).startswith(_BYO_PROVIDER_NAME_PREFIX):
         return False
-    if block.get("default_region") == region:
+    # GCE is zonal: the GCP block's placement knob is default_zone.
+    region_key = "default_zone" if block.get("backend") == "gcp" else "default_region"
+    if block.get(region_key) == region:
         return True
-    block["default_region"] = region
+    block[region_key] = region
     _atomic_write_settings(settings_path, doc)
-    logger.info("Cloud account {} re-pinned to region {}", provider_name, region)
+    logger.info("Cloud account {} re-pinned to {} {}", provider_name, region_key, region)
     return True
 
 

@@ -46,6 +46,43 @@ CONFIGURED_AWS_INSTANCE_TYPES: Final[tuple[tuple[str, str], ...]] = (
 )
 DEFAULT_AWS_INSTANCE_TYPE: Final[str] = "t3.large"
 
+# GCP / Azure analogs of the AWS machine-size list (same 4 GB floor, same
+# 8 GB recommended default). Values feed ``--gcp-machine-type=`` /
+# ``--azure-vm-size=`` build args.
+CONFIGURED_GCP_MACHINE_TYPES: Final[tuple[tuple[str, str], ...]] = (
+    ("e2-medium", "e2-medium — 2 vCPU / 4 GB (cheapest; heavy builds may be slow)"),
+    ("e2-standard-2", "e2-standard-2 — 2 vCPU / 8 GB (recommended)"),
+    ("e2-standard-4", "e2-standard-4 — 4 vCPU / 16 GB"),
+    ("e2-standard-8", "e2-standard-8 — 8 vCPU / 32 GB"),
+)
+DEFAULT_GCP_MACHINE_TYPE: Final[str] = "e2-standard-2"
+CONFIGURED_AZURE_VM_SIZES: Final[tuple[tuple[str, str], ...]] = (
+    ("Standard_B2s", "Standard_B2s — 2 vCPU / 4 GB (cheapest; heavy builds may be slow)"),
+    ("Standard_B2ms", "Standard_B2ms — 2 vCPU / 8 GB (recommended)"),
+    ("Standard_B4ms", "Standard_B4ms — 4 vCPU / 16 GB"),
+    ("Standard_B8ms", "Standard_B8ms — 8 vCPU / 32 GB"),
+)
+DEFAULT_AZURE_VM_SIZE: Final[str] = "Standard_B2ms"
+
+# Curated placement choices for bring-your-own GCP / Azure accounts (GCE is
+# zonal, so GCP offers zones; Azure offers regions). Small US-centric lists,
+# mirroring CONFIGURED_AWS_REGIONS; the account's pinned default comes first
+# in the create form via the option's data-default-region.
+CONFIGURED_GCP_ZONES: Final[tuple[str, ...]] = (
+    "us-west1-a",
+    "us-central1-a",
+    "us-east1-b",
+    "us-east4-a",
+)
+DEFAULT_GCP_ZONE: Final[str] = "us-west1-a"
+CONFIGURED_AZURE_REGIONS: Final[tuple[str, ...]] = (
+    "westus",
+    "westus2",
+    "eastus",
+    "eastus2",
+)
+DEFAULT_AZURE_REGION: Final[str] = "westus"
+
 
 class CreationId(RandomId):
     """Minds-internal handle for an in-flight ``mngr create`` invocation.
@@ -85,6 +122,12 @@ class LaunchMode(UpperCaseStrEnum):
     # sandboxes are ephemeral (~1 day max), so it is surfaced as "Modal (1-day
     # ephemeral)" and is testing-only.
     MODAL = auto()
+    # GCP / Azure are reachable ONLY through a bring-your-own cloud account
+    # (``byo-gcp-<slug>`` / ``byo-azure-<slug>`` provider blocks written by the
+    # accounts modal); the create form does not render them as ambient options,
+    # so no ambient region tables / provider blocks exist for them.
+    GCP = auto()
+    AZURE = auto()
 
 
 class AIProvider(UpperCaseStrEnum):

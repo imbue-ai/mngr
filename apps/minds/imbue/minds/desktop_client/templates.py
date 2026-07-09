@@ -35,8 +35,16 @@ from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupEncryptionMethod
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CONFIGURED_AWS_INSTANCE_TYPES
+from imbue.minds.primitives import CONFIGURED_AZURE_REGIONS
+from imbue.minds.primitives import CONFIGURED_AZURE_VM_SIZES
+from imbue.minds.primitives import CONFIGURED_GCP_MACHINE_TYPES
+from imbue.minds.primitives import CONFIGURED_GCP_ZONES
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import DEFAULT_AWS_INSTANCE_TYPE
+from imbue.minds.primitives import DEFAULT_AZURE_REGION
+from imbue.minds.primitives import DEFAULT_AZURE_VM_SIZE
+from imbue.minds.primitives import DEFAULT_GCP_MACHINE_TYPE
+from imbue.minds.primitives import DEFAULT_GCP_ZONE
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.utils.sentry.frontend import frontend_sentry_browser_payload
@@ -525,8 +533,24 @@ def render_create_form(
         },
         region_selected_by_launch_mode=dict(region_selected_by_launch_mode or {}),
         cloud_accounts=[dict(account) for account in (cloud_accounts or [])],
-        aws_instance_types=[list(pair) for pair in CONFIGURED_AWS_INSTANCE_TYPES],
-        default_aws_instance_type=DEFAULT_AWS_INSTANCE_TYPE,
+        # Machine-size picker options per compute mode, and the curated
+        # placement lists for the BYO-only modes (GCP zones / Azure regions) --
+        # merged into the region machinery client-side.
+        instance_types_by_backend={
+            "AWS": [list(pair) for pair in CONFIGURED_AWS_INSTANCE_TYPES],
+            "GCP": [list(pair) for pair in CONFIGURED_GCP_MACHINE_TYPES],
+            "AZURE": [list(pair) for pair in CONFIGURED_AZURE_VM_SIZES],
+        },
+        default_instance_type_by_backend={
+            "AWS": DEFAULT_AWS_INSTANCE_TYPE,
+            "GCP": DEFAULT_GCP_MACHINE_TYPE,
+            "AZURE": DEFAULT_AZURE_VM_SIZE,
+        },
+        byo_region_options={
+            "GCP": list(CONFIGURED_GCP_ZONES),
+            "AZURE": list(CONFIGURED_AZURE_REGIONS),
+        },
+        byo_region_selected={"GCP": DEFAULT_GCP_ZONE, "AZURE": DEFAULT_AZURE_REGION},
         selected_preset=effective_preset,
         start_advanced=start_advanced,
         color=color,
@@ -589,6 +613,8 @@ EXPECTED_CREATION_DURATION_SECONDS_BY_LAUNCH_MODE: Final[dict[LaunchMode, float]
     LaunchMode.LIMA: 600.0,
     LaunchMode.VULTR: 300.0,
     LaunchMode.AWS: 300.0,
+    LaunchMode.GCP: 300.0,
+    LaunchMode.AZURE: 300.0,
     LaunchMode.IMBUE_CLOUD: 30.0,
 }
 

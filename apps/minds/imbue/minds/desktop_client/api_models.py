@@ -228,11 +228,23 @@ class CloudAccountCreateRequest(ApiRequestModel):
     """Body for registering a bring-your-own cloud account (pasted credentials)."""
 
     alias: str = Field(min_length=1, description="Display name for the account (also seeds the block-name slug)")
-    backend: str = Field(description="Cloud backend: 'aws' (gcp/azure coming later)")
-    region: str = Field(min_length=1, description="Default region for machines created on this account")
+    backend: str = Field(description="Cloud backend: 'aws', 'gcp', or 'azure'")
+    region: str = Field(
+        min_length=1,
+        description="Default placement for machines created on this account (an AWS/Azure region, or a GCE zone)",
+    )
     aws_access_key_id: str | None = Field(default=None, description="AWS access key id (required for aws)")
     aws_secret_access_key: str | None = Field(default=None, description="AWS secret access key (required for aws)")
     aws_session_token: str | None = Field(default=None, description="Optional AWS session token (STS/SSO creds)")
+    gcp_service_account_key_json: str | None = Field(
+        default=None, description="Full JSON contents of a GCP service-account key (required for gcp)"
+    )
+    azure_subscription_id: str | None = Field(default=None, description="Azure subscription id (required for azure)")
+    azure_tenant_id: str | None = Field(default=None, description="Entra tenant id (required for azure)")
+    azure_client_id: str | None = Field(default=None, description="Service-principal client id (required for azure)")
+    azure_client_secret: str | None = Field(
+        default=None, description="Service-principal client secret (required for azure)"
+    )
 
 
 class CloudAccountPatchRequest(ApiRequestModel):
