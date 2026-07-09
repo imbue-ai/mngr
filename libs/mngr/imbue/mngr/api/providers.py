@@ -1,7 +1,9 @@
 import atexit
 
 from loguru import logger
+from pydantic import Field
 
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderEmptyError
@@ -170,18 +172,33 @@ def list_provider_names_to_load(
     return names
 
 
-def get_all_provider_instances(
+class SkippedProviderConstruction(FrozenModel):
+    """A provider instance whose construction was skipped during enumeration.
+
+    Carries what a caller needs to surface the skip (e.g. as a per-provider
+    discovery snapshot) without holding onto the exception itself.
+    """
+
+    provider_name: ProviderInstanceName = Field(description="Name of the skipped provider instance")
+    error_type_name: str = Field(description="The type name of the construction exception")
+    error_message: str = Field(description="The construction exception's message")
+    is_empty: bool = Field(
+        description="True when the provider was reached and is known-empty, False when unavailable/unauthorized"
+    )
+
+
+def get_all_provider_instances_and_skipped(
     mngr_ctx: MngrContext,
     provider_names: tuple[str, ...] | None = None,
     reset_caches: bool = False,
-) -> list[BaseProviderInstance]:
-    """Get all available provider instances.
+) -> tuple[list[BaseProviderInstance], list[SkippedProviderConstruction]]:
+    """Get all available provider instances, plus details of the ones that were skipped.
 
     If provider_names is provided, only returns providers matching those names,
     allowing skipping expensive initialization of providers that won't be used.
 
     Returns configured providers plus default instances for all registered backends,
-    excluding:
+    excluding (each exclusion below the first line is reported in the skipped list):
     - Backends disabled via --disable-plugin
     - Provider instances with is_enabled=False in their config
     - Backends not in enabled_backends list (if the list is non-empty)
@@ -196,25 +213,63 @@ def get_all_provider_instances(
       unknown in this case, but for ``mngr gc`` we still want to keep going
       against the providers we *can* reach.
 
+    Only the empty/unavailable construction skips are reported in the skipped
+    list -- disabled/filtered providers were deliberately excluded and are not
+    "skipped" in any surfaceable sense.
+
     Raises MngrError if ANY provider fails to instantiate for a reason other
     than ``ProviderEmptyError`` / ``ProviderUnavailableError``. Callers that want
     to tolerate per-provider instantiation errors should use
     ``list_provider_names_to_load``.
     """
     providers: list[BaseProviderInstance] = []
+    skipped: list[SkippedProviderConstruction] = []
     for name in list_provider_names_to_load(mngr_ctx, provider_names):
         try:
             providers.append(get_provider_instance(name, mngr_ctx))
         except ProviderEmptyError as e:
             logger.debug("Skipping provider {} (empty -- nothing to list): {}", name, e)
+            skipped.append(
+                SkippedProviderConstruction(
+                    provider_name=name,
+                    error_type_name=type(e).__name__,
+                    error_message=str(e),
+                    is_empty=True,
+                )
+            )
             continue
         except ProviderUnavailableError as e:
             logger.debug("Skipping provider {} (unavailable): {}", name, e)
+            skipped.append(
+                SkippedProviderConstruction(
+                    provider_name=name,
+                    error_type_name=type(e).__name__,
+                    error_message=str(e),
+                    is_empty=False,
+                )
+            )
             continue
 
     if reset_caches:
         for provider in providers:
             provider.reset_caches()
 
-    logger.trace("Loaded {} total provider instances", len(providers))
+    logger.trace("Loaded {} total provider instances ({} skipped)", len(providers), len(skipped))
+    return providers, skipped
+
+
+def get_all_provider_instances(
+    mngr_ctx: MngrContext,
+    provider_names: tuple[str, ...] | None = None,
+    reset_caches: bool = False,
+) -> list[BaseProviderInstance]:
+    """Get all available provider instances, dropping the skipped-provider details.
+
+    See :func:`get_all_provider_instances_and_skipped` for the full contract.
+    """
+    providers, _skipped = get_all_provider_instances_and_skipped(
+        mngr_ctx,
+        provider_names=provider_names,
+        reset_caches=reset_caches,
+    )
     return providers
