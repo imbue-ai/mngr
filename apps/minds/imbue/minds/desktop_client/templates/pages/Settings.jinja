@@ -262,9 +262,17 @@
          active state on both by toggling ``bg-fill-hover`` / ``text-primary`` /
          ``text-secondary``. Permissions starts active. #}
       <nav class="w-48 shrink-0 flex flex-col gap-0.5 sticky top-8 self-start" aria-label="Settings sections">
-        <button type="button" data-settings-nav="permissions"
+        <button type="button" data-settings-nav="connectors"
                 class="flex items-center h-8 px-2 rounded-md cursor-pointer type-body text-left border-0 hover:text-primary hover:bg-fill-hover bg-fill-hover text-primary">
-          Permissions
+          Connectors
+        </button>
+        <button type="button" data-settings-nav="file-sharing"
+                class="flex items-center h-8 px-2 rounded-md cursor-pointer type-body text-left border-0 hover:text-primary hover:bg-fill-hover text-secondary">
+          File sharing
+        </button>
+        <button type="button" data-settings-nav="workspace-delegation"
+                class="flex items-center h-8 px-2 rounded-md cursor-pointer type-body text-left border-0 hover:text-primary hover:bg-fill-hover text-secondary">
+          Workspace delegation
         </button>
         <button type="button" data-settings-nav="error-reporting"
                 class="flex items-center h-8 px-2 rounded-md cursor-pointer type-body text-left border-0 hover:text-primary hover:bg-fill-hover text-secondary">
@@ -274,20 +282,19 @@
 
       {# Right content #}
       <div class="flex-1 min-w-0">
-        {# -- Permissions panel -- #}
-        <section data-settings-panel="permissions">
-          <h2 class="type-heading text-primary mb-2">Permissions</h2>
+                {# -- Connectors panel (predefined / catalog services the agent connects to) -- #}
+        <section data-settings-panel="connectors">
+          <h2 class="type-heading text-primary mb-2">Connectors</h2>
           <p class="type-helper text-tertiary mb-6">
-            Third-party service access your agents have been granted, across all workspaces.
-            Revoking removes the permission; your saved sign-in is kept, and agents can ask again later.
+            Third-party services your agents have connected to. Revoking removes access; your saved
+            sign-in is kept, and agents can request it again later.
           </p>
-
           {% if permissions_unavailable %}
             <Notice variant="warn">
-              Permissions can't be loaded right now because the latchkey gateway is unavailable.
+              Connectors can't be loaded right now because the latchkey gateway is unavailable.
               Try again in a moment.
             </Notice>
-          {% elif services_overview or file_sharing_grants or workspace_op_groups %}
+          {% elif services_overview %}
             <div class="flex flex-col gap-8">
               {% for service in services_overview %}
                 {% set ws_count = service.workspace_grants | length %}
@@ -300,110 +307,135 @@
                     <Button variant="ghost" size="md" class="remove-all-btn">Revoke all</Button>
                   </div>
                   <div class="grid grid-cols-2 gap-3">
-                      {% for grant in service.workspace_grants %}
-                        <div class="minds-card p-4 flex flex-col gap-3"
-                             data-workspace-agent-id="{{ grant.workspace_agent_id }}"
-                             data-workspace-name="{{ grant.workspace_name }}">
-                          <div class="flex items-center gap-2">
-                            <span class="w-2.5 h-2.5 rounded-full shrink-0" style="background-color: {{ grant.color }}"></span>
-                            <span class="type-body font-semibold text-primary truncate">{{ grant.workspace_name }}</span>
-                          </div>
-                          <div>
-                            <p class="type-helper text-tertiary mb-1">Allowed</p>
-                            <div class="flex flex-wrap gap-1">
-                              {% for perm in grant.permissions %}
-                                <code class="code-pill"{% if perm.description %} data-tooltip="{{ perm.description }}"{% endif %}>{{ perm.label }}</code>
-                              {% endfor %}
-                            </div>
-                          </div>
-                          <div class="mt-auto">
-                            <Button variant="secondary" size="md" class="revoke-btn">Revoke</Button>
+                    {% for grant in service.workspace_grants %}
+                      <div class="minds-card p-4 flex flex-col gap-3"
+                           data-workspace-agent-id="{{ grant.workspace_agent_id }}"
+                           data-workspace-name="{{ grant.workspace_name }}">
+                        <div class="flex items-center gap-2">
+                          <span class="w-2.5 h-2.5 rounded-full shrink-0" style="background-color: {{ grant.color }}"></span>
+                          <span class="type-body font-semibold text-primary truncate">{{ grant.workspace_name }}</span>
+                        </div>
+                        <div>
+                          <p class="type-helper text-tertiary mb-1">Allowed</p>
+                          <div class="flex flex-wrap gap-1">
+                            {% for perm in grant.permissions %}
+                              <code class="code-pill"{% if perm.description %} data-tooltip="{{ perm.description }}"{% endif %}>{{ perm.label }}</code>
+                            {% endfor %}
                           </div>
                         </div>
-                      {% endfor %}
-                  </div>
-                </div>
-              {% endfor %}
-
-              {% if file_sharing_grants %}
-                {% set fs_count = file_sharing_grants | length %}
-                <div data-file-sharing="true">
-                  <div class="flex items-center justify-between gap-3 mb-3">
-                    <h3 class="type-heading text-primary">
-                      File sharing
-                      <span class="type-helper text-tertiary font-normal">&middot; {{ fs_count }} workspace{{ '' if fs_count == 1 else 's' }}</span>
-                    </h3>
-                    <Button variant="ghost" size="md" class="remove-all-fs-btn">Revoke all</Button>
-                  </div>
-                  <div class="grid grid-cols-2 gap-3">
-                      {% for grant in file_sharing_grants %}
-                        <div class="minds-card p-4 flex flex-col gap-3"
-                             data-workspace-agent-id="{{ grant.workspace_agent_id }}"
-                             data-workspace-name="{{ grant.workspace_name }}">
-                          <div class="flex items-center gap-2">
-                            <span class="w-2.5 h-2.5 rounded-full shrink-0" style="background-color: {{ grant.color }}"></span>
-                            <span class="type-body font-semibold text-primary truncate">{{ grant.workspace_name }}</span>
-                          </div>
-                          <div>
-                            <p class="type-helper text-tertiary mb-1">Allowed</p>
-                            <div class="flex flex-wrap gap-1">
-                              {% for perm in grant.permissions %}
-                                <code class="code-pill"{% if perm.description %} data-tooltip="{{ perm.description }}"{% endif %}>{{ perm.label }}</code>
-                              {% endfor %}
-                            </div>
-                          </div>
-                          <div class="mt-auto">
-                            <Button variant="secondary" size="md" class="revoke-fs-btn">Revoke</Button>
-                          </div>
+                        <div class="mt-auto">
+                          <Button variant="secondary" size="md" class="revoke-btn">Revoke</Button>
                         </div>
-                      {% endfor %}
-                  </div>
-                </div>
-              {% endif %}
-
-              {# Cross-workspace management: one panel for the shared
-                 (all-workspaces) grants, then one per specific target workspace.
-                 Cards here are the *granting* workspaces; the target is the panel. #}
-              {% for group in workspace_op_groups %}
-                {% set ws_count = group.cards | length %}
-                <div data-workspace-target="{{ group.target_workspace_id }}" data-workspace-target-label="{{ group.target_name }}">
-                  <div class="flex items-center justify-between gap-3 mb-3">
-                    <h3 class="type-heading text-primary">
-                      Workspace management &mdash; {{ group.target_name }}
-                      <span class="type-helper text-tertiary font-normal">&middot; {{ ws_count }} workspace{{ '' if ws_count == 1 else 's' }}</span>
-                    </h3>
-                    <Button variant="ghost" size="md" class="remove-all-ws-btn">Revoke all</Button>
-                  </div>
-                  <div class="grid grid-cols-2 gap-3">
-                      {% for card in group.cards %}
-                        <div class="minds-card p-4 flex flex-col gap-3"
-                             data-workspace-agent-id="{{ card.workspace_agent_id }}"
-                             data-workspace-name="{{ card.workspace_name }}">
-                          <div class="flex items-center gap-2">
-                            <span class="w-2.5 h-2.5 rounded-full shrink-0" style="background-color: {{ card.color }}"></span>
-                            <span class="type-body font-semibold text-primary truncate">{{ card.workspace_name }}</span>
-                          </div>
-                          <div>
-                            <p class="type-helper text-tertiary mb-1">Allowed</p>
-                            <div class="flex flex-wrap gap-1">
-                              {% for perm in card.permissions %}
-                                <code class="code-pill"{% if perm.description %} data-tooltip="{{ perm.description }}"{% endif %}>{{ perm.label }}</code>
-                              {% endfor %}
-                            </div>
-                          </div>
-                          <div class="mt-auto">
-                            <Button variant="secondary" size="md" class="revoke-ws-btn">Revoke</Button>
-                          </div>
-                        </div>
-                      {% endfor %}
+                      </div>
+                    {% endfor %}
                   </div>
                 </div>
               {% endfor %}
             </div>
           {% else %}
-            <Notice variant="info">
-              No permissions have been granted yet.
+            <Notice variant="info">No connectors have been authorized yet.</Notice>
+          {% endif %}
+        </section>
+
+        {# -- File sharing panel -- #}
+        <section data-settings-panel="file-sharing" class="hidden">
+          <div class="flex items-center justify-between gap-3 mb-2">
+            <h2 class="type-heading text-primary">File sharing</h2>
+            {% if file_sharing_grants %}
+              <Button variant="ghost" size="md" class="remove-all-fs-btn">Revoke all</Button>
+            {% endif %}
+          </div>
+          <p class="type-helper text-tertiary mb-6">
+            Local files and folders your agents can read or write over the shared file mount.
+            Revoking removes access; agents can request it again later.
+          </p>
+          {% if permissions_unavailable %}
+            <Notice variant="warn">
+              File sharing can't be loaded right now because the latchkey gateway is unavailable.
+              Try again in a moment.
             </Notice>
+          {% elif file_sharing_grants %}
+            <div class="grid grid-cols-2 gap-3">
+              {% for grant in file_sharing_grants %}
+                      <div class="minds-card p-4 flex flex-col gap-3"
+                           data-workspace-agent-id="{{ grant.workspace_agent_id }}"
+                           data-workspace-name="{{ grant.workspace_name }}">
+                        <div class="flex items-center gap-2">
+                          <span class="w-2.5 h-2.5 rounded-full shrink-0" style="background-color: {{ grant.color }}"></span>
+                          <span class="type-body font-semibold text-primary truncate">{{ grant.workspace_name }}</span>
+                        </div>
+                        <div>
+                          <p class="type-helper text-tertiary mb-1">Allowed</p>
+                          <div class="flex flex-wrap gap-1">
+                            {% for perm in grant.permissions %}
+                              <code class="code-pill"{% if perm.description %} data-tooltip="{{ perm.description }}"{% endif %}>{{ perm.label }}</code>
+                            {% endfor %}
+                          </div>
+                        </div>
+                        <div class="mt-auto">
+                          <Button variant="secondary" size="md" class="revoke-fs-btn">Revoke</Button>
+                        </div>
+                      </div>
+              {% endfor %}
+            </div>
+          {% else %}
+            <Notice variant="info">No files are being shared with agents yet.</Notice>
+          {% endif %}
+        </section>
+
+        {# -- Workspace delegation panel (agents managing other workspaces), grouped by target -- #}
+        <section data-settings-panel="workspace-delegation" class="hidden">
+          <h2 class="type-heading text-primary mb-2">Workspace delegation</h2>
+          <p class="type-helper text-tertiary mb-6">
+            Access you've granted agents in one workspace to manage other workspaces -- listing,
+            creating, destroying, SSH, health checks, and more -- grouped by the workspace being
+            managed. Revoking removes it; agents can request it again later.
+          </p>
+          {% if permissions_unavailable %}
+            <Notice variant="warn">
+              Workspace delegation can't be loaded right now because the latchkey gateway is unavailable.
+              Try again in a moment.
+            </Notice>
+          {% elif workspace_op_groups %}
+            <div class="flex flex-col gap-8">
+              {% for group in workspace_op_groups %}
+                {% set ws_count = group.cards | length %}
+                <div data-workspace-target="{{ group.target_workspace_id }}" data-workspace-target-label="{{ group.target_name }}">
+                  <div class="flex items-center justify-between gap-3 mb-3">
+                    <h3 class="type-heading text-primary">
+                      {{ "All workspaces" if group.is_shared else group.target_name }}
+                      <span class="type-helper text-tertiary font-normal">&middot; {{ ws_count }} workspace{{ '' if ws_count == 1 else 's' }}</span>
+                    </h3>
+                    <Button variant="ghost" size="md" class="remove-all-ws-btn">Revoke all</Button>
+                  </div>
+                  <div class="grid grid-cols-2 gap-3">
+                    {% for card in group.cards %}
+                      <div class="minds-card p-4 flex flex-col gap-3"
+                           data-workspace-agent-id="{{ card.workspace_agent_id }}"
+                           data-workspace-name="{{ card.workspace_name }}">
+                        <div class="flex items-center gap-2">
+                          <span class="w-2.5 h-2.5 rounded-full shrink-0" style="background-color: {{ card.color }}"></span>
+                          <span class="type-body font-semibold text-primary truncate">{{ card.workspace_name }}</span>
+                        </div>
+                        <div>
+                          <p class="type-helper text-tertiary mb-1">Allowed</p>
+                          <div class="flex flex-wrap gap-1">
+                            {% for perm in card.permissions %}
+                              <code class="code-pill"{% if perm.description %} data-tooltip="{{ perm.description }}"{% endif %}>{{ perm.label }}</code>
+                            {% endfor %}
+                          </div>
+                        </div>
+                        <div class="mt-auto">
+                          <Button variant="secondary" size="md" class="revoke-ws-btn">Revoke</Button>
+                        </div>
+                      </div>
+                    {% endfor %}
+                  </div>
+                </div>
+              {% endfor %}
+            </div>
+          {% else %}
+            <Notice variant="info">No workspace delegation has been granted yet.</Notice>
           {% endif %}
         </section>
 

@@ -167,7 +167,8 @@ def test_settings_page_empty_state_when_no_grants(tmp_path: Path) -> None:
     response = client.get("/settings")
 
     assert response.status_code == 200
-    assert "No permissions have been granted yet" in response.text
+    # Each category now has its own empty state.
+    assert "No connectors have been authorized yet." in response.text
 
 
 def test_revoke_service_for_workspace_removes_rule(tmp_path: Path) -> None:
@@ -237,7 +238,7 @@ def test_settings_page_shows_unavailable_notice_when_gateway_down(tmp_path: Path
 
     assert response.status_code == 200
     assert "gateway is unavailable" in response.text
-    assert "No permissions have been granted yet" not in response.text
+    assert "No connectors have been authorized yet." not in response.text
 
 
 # -- File sharing --------------------------------------------------------------
@@ -343,8 +344,10 @@ def test_settings_page_lists_workspace_ops_grouped_by_target(tmp_path: Path) -> 
 
     assert response.status_code == 200
     body = response.text
-    assert "Workspace management" in body
-    assert "all workspaces" in body
+    # The category is now its own nav item / panel; the shared group heading is
+    # "All workspaces".
+    assert "Workspace delegation" in body
+    assert "All workspaces" in body
     assert 'data-workspace-target=""' in body
     assert f'data-workspace-target="{target}"' in body
     assert ">read</code>" in body and ">ssh</code>" in body
