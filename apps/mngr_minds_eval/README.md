@@ -23,4 +23,17 @@ Each prepared clone lands at `/work/clones/<id>` with the persona slotted and co
 in-sandbox `chat_watcher` (on the FCT branch) later delivers that persona's `first_prompt` as the
 user, once the workspace's agent goes idle.
 
-`self-check` runs the offline asserts (persona loader, trial expansion, slug).
+## launch-workspaces
+
+Create a Modal workspace for every prepared clone under `--clones-dir` -- automating the create
+form, field for field: **Modal** compute, **API_KEY** provider (key from `$ANTHROPIC_API_KEY`),
+backup **configure-later**, and an **empty branch** (a local clone is already on the right commit;
+passing a branch trips mngr's `checkout_branch(FETCH_HEAD)`). Each workspace is named
+`EVAL-<eval-set>-CASE-<persona>`. Runs all creates in parallel.
+
+```
+ANTHROPIC_API_KEY=sk-ant-... \
+  uv run --package mngr-minds-eval mngr-minds-eval launch-workspaces --eval-set smoke-test
+```
+
+`self-check` runs the offline asserts (persona loader, trial expansion, slug, launch payload).
