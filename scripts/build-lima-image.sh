@@ -25,7 +25,11 @@ FCT_REF=""
 FCT_REPO="https://github.com/imbue-ai/forever-claude-template.git"
 CPUS=4
 MEMORY=8
-DISK=40
+# Must not exceed the disk size the FCT lima create template passes
+# (start_arg --disk=20): Lima grows a smaller image up to the instance size
+# but fatals on shrink ("disk shrinking is not supported"), so a bigger baked
+# image breaks every default fast-path create.
+DISK=20
 KEEP=0
 
 while [[ $# -gt 0 ]]; do
