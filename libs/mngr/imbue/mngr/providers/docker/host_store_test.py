@@ -34,7 +34,7 @@ def _make_host_record(
             updated_at=now,
         ),
         ssh_host=ssh_host,
-        ssh_port=ssh_port,
+        last_discovered_ssh_port=ssh_port,
         ssh_host_public_key=ssh_host_public_key,
         config=ContainerConfig(start_args=("--cpus=2", "--memory=4g")),
         container_id="abc123def456",
@@ -56,11 +56,44 @@ def test_write_and_read_host_record(store: DockerHostStore) -> None:
     assert result.certified_host_data.host_id == HOST_ID_A
     assert result.certified_host_data.host_name == "test-host"
     assert result.ssh_host == "127.0.0.1"
-    assert result.ssh_port == 12345
+    assert result.last_discovered_ssh_port == 12345
     assert result.ssh_host_public_key == "ssh-ed25519 AAAA"
     assert result.config is not None
     assert result.config.start_args == ("--cpus=2", "--memory=4g")
     assert result.container_id == "abc123def456"
+
+
+def test_host_record_persists_port_under_stable_ssh_port_key(store: DockerHostStore, tmp_path: Path) -> None:
+    """The renamed last_discovered_ssh_port field still serializes as "ssh_port" on disk.
+
+    Host records live on the shared state volume and are read by other mngr
+    clients (including older versions), so the JSON key must stay stable even
+    though the Python attribute was renamed for clarity.
+    """
+    record = _make_host_record()
+    store.write_host_record(record)
+
+    on_disk = (tmp_path / "docker-store" / "host_state" / f"{HOST_ID_A}.json").read_text()
+    assert '"ssh_port": 12345' in on_disk
+    assert "last_discovered_ssh_port" not in on_disk
+
+
+def test_host_record_reads_legacy_ssh_port_key(store: DockerHostStore, tmp_path: Path) -> None:
+    """A record written by an older client (with the "ssh_port" JSON key) loads correctly."""
+    record_dir = tmp_path / "docker-store" / "host_state"
+    record_dir.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(timezone.utc).isoformat()
+    (record_dir / f"{HOST_ID_A}.json").write_text(
+        "{"
+        f'"certified_host_data": {{"host_id": "{HOST_ID_A}", "host_name": "legacy-host", '
+        f'"created_at": "{now}", "updated_at": "{now}"}}, '
+        '"ssh_host": "127.0.0.1", "ssh_port": 54321, "ssh_host_public_key": "ssh-ed25519 AAAA"'
+        "}"
+    )
+
+    result = store.read_host_record(HostId(HOST_ID_A))
+    assert result is not None
+    assert result.last_discovered_ssh_port == 54321
 
 
 def test_read_host_record_returns_none_for_nonexistent(store: DockerHostStore) -> None:
