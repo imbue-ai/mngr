@@ -180,7 +180,7 @@ def _format_event_human(event: dict[str, Any]) -> str:
                 # FIXME: MIND-113, later remove this fallback logic. Flat text/tool_calls
                 # for agents on an emitter predating parts[] (before 2026-06-15) so their
                 # turns aren't blank; new agents all fill parts[], so this serves only
-                # existing old-emitter agents. Remove once they age out (~1 month).
+                # existing old-emitter agents. Remove once they age out.
                 text = event.get("text", "")
                 if text:
                     lines.append(text)
