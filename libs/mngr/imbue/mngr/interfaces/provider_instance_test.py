@@ -250,7 +250,9 @@ def _make_mock_online_agent(agent_id: AgentId) -> MagicMock:
 
 
 def _make_activity_config_mock() -> MagicMock:
-    return MagicMock(idle_mode=MagicMock(value="ssh"), idle_timeout_seconds=3600, activity_sources=(ActivitySource.SSH,))
+    return MagicMock(
+        idle_mode=MagicMock(value="ssh"), idle_timeout_seconds=3600, activity_sources=(ActivitySource.SSH,)
+    )
 
 
 def test_build_agent_details_populates_main_pid_for_local_host(host_id: HostId) -> None:

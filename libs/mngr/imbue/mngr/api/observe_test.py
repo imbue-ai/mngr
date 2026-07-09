@@ -1096,9 +1096,7 @@ def _make_observer_with_sink(
     )
 
 
-def test_agents_event_sink_receives_only_agents_stream_events(
-    temp_mngr_ctx: MngrContext, noop_binary: str
-) -> None:
+def test_agents_event_sink_receives_only_agents_stream_events(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
     """The sink gets AGENT_STATE but not the AGENT_STATE_CHANGE (which is on the agent_states stream)."""
     sink_events: list[EventEnvelope] = []
     observer = _make_observer_with_sink(temp_mngr_ctx, noop_binary, sink_events)
@@ -1141,9 +1139,7 @@ def test_no_sink_does_not_error(temp_mngr_ctx: MngrContext, noop_binary: str) ->
 # === Agent membership deltas (AGENT_REMOVED + added enqueues host) ===
 
 
-def test_discovery_added_agent_enqueues_its_host_for_reprobe(
-    temp_mngr_ctx: MngrContext, noop_binary: str
-) -> None:
+def test_discovery_added_agent_enqueues_its_host_for_reprobe(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
     """A newly discovered agent enqueues its host so the observer re-probes and emits real state."""
     observer = _make_observer(temp_mngr_ctx, noop_binary)
     agent = make_test_discovered_agent()
@@ -1162,7 +1158,9 @@ def test_discovery_removed_agent_emits_agent_removed_and_drops_tracking(
     observer = _make_observer(temp_mngr_ctx, noop_binary)
     agent = make_test_discovered_agent()
     # Seed per-agent tracking so we can assert it is dropped on removal.
-    observer._last_tracked_state_by_id[str(agent.agent_id)] = _TrackedState(agent_state="RUNNING", host_state="RUNNING")
+    observer._last_tracked_state_by_id[str(agent.agent_id)] = _TrackedState(
+        agent_state="RUNNING", host_state="RUNNING"
+    )
 
     with observer._concurrency_group:
         _feed_provider_snapshot(observer, ProviderInstanceName("local"), agents=[agent])
@@ -1228,7 +1226,9 @@ def test_reconcile_watcher_opens_replaces_and_closes(temp_mngr_ctx: MngrContext,
             assert not first_thread.is_alive()
 
             # No live process (main_pid None): watcher closed and removed.
-            observer._reconcile_watcher_for_agent(agent_a.model_copy_update(to_update(agent_a.field_ref().main_pid, None)))
+            observer._reconcile_watcher_for_agent(
+                agent_a.model_copy_update(to_update(agent_a.field_ref().main_pid, None))
+            )
             assert agent_id_str not in observer._watchers
     finally:
         for proc in (proc_a, proc_b):
@@ -1236,9 +1236,7 @@ def test_reconcile_watcher_opens_replaces_and_closes(temp_mngr_ctx: MngrContext,
             proc.wait()
 
 
-def test_pid_watcher_enqueues_host_when_watched_process_dies(
-    temp_mngr_ctx: MngrContext, noop_binary: str
-) -> None:
+def test_pid_watcher_enqueues_host_when_watched_process_dies(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
     """Killing a watched local agent's process enqueues its host, driving the re-probe that emits death."""
     observer = _make_observer(temp_mngr_ctx, noop_binary)
     proc = _spawn_sleeper()
