@@ -209,6 +209,10 @@ def build_create_argv(agent_name: str, skill: str, mngr_path: str = "mngr") -> t
         agent_name,
         DONATE_AGENT_TYPE,
         "--foreground",
+        # Source from the repo even with uncommitted changes: donate is meant to
+        # run unattended (incl. from cron), and the default clean-tree guard would
+        # fail every tick whenever the working repo has edits.
+        "--no-ensure-clean",
         "--message",
         build_donation_message(skill),
         "--",
@@ -231,21 +235,30 @@ def build_destroy_argv(agent_name: str, mngr_path: str = "mngr") -> tuple[str, .
 
 
 @pure
-def build_cron_command(mngr_path: str, workdir: str, skill: str, agent_name: str, log_path: str) -> str:
+def build_cron_command(
+    mngr_path: str, workdir: str, skill: str, agent_name: str, log_path: str, path_value: str = ""
+) -> str:
     """The shell command a scheduled donation tick runs (without the time spec).
 
     ``cd`` into ``workdir`` first: cron starts in ``$HOME``, but donate must run
     from a trusted git repo (``mngr create`` needs a git root). ``mngr_path`` is
     an absolute path to *this* mngr, since a scheduled ``mngr`` off ``$PATH`` may
-    resolve to a different install that lacks ``donate``. Only non-default options
-    are appended, so the line stays minimal. Output is appended to ``log_path``.
+    resolve to a different install that lacks ``donate``. ``path_value``, when
+    given, is exported first: cron runs with a bare ``/usr/bin:/bin`` PATH that
+    omits ``~/.local/bin``, so without it the launched agent can't find ``claude``
+    (nor ``git`` from Homebrew) and every tick fails. --start passes the PATH from
+    its own environment so scheduled ticks see the same tools the user does. Only
+    non-default options are appended; output is appended to ``log_path``.
     """
     command = f"cd {shlex.quote(workdir)} && {shlex.quote(mngr_path)} donate"
     if skill != DEFAULT_SKILL:
         command += f" --skill {shlex.quote(skill)}"
     if agent_name != DEFAULT_AGENT_NAME:
         command += f" --agent-name {shlex.quote(agent_name)}"
-    return f"{command} >> {shlex.quote(log_path)} 2>&1"
+    command += f" >> {shlex.quote(log_path)} 2>&1"
+    if path_value:
+        command = f"export PATH={shlex.quote(path_value)}; {command}"
+    return command
 
 
 @pure
@@ -484,7 +497,12 @@ def donate(ctx: click.Context, **kwargs: Any) -> None:
         raise MngrError("Pass only one of --start / --stop.")
     if opts.start:
         command = build_cron_command(
-            _current_mngr_path(), os.getcwd(), opts.skill, opts.agent_name, str(_cron_log_path())
+            _current_mngr_path(),
+            os.getcwd(),
+            opts.skill,
+            opts.agent_name,
+            str(_cron_log_path()),
+            os.environ.get("PATH", ""),
         )
         _write_crontab(upsert_managed_cron(_read_crontab(), build_cron_block(opts.interval_minutes, command)))
         emit_info(

@@ -132,16 +132,17 @@ def test_window_without_derivable_elapsed_yields_zero_pace_and_no_spare() -> Non
 
 def test_build_create_argv_launches_a_headless_agent_that_skips_permissions() -> None:
     argv = build_create_argv("donate-extra-quota-bio", "document-review")
-    assert argv[:7] == (
+    assert argv[:8] == (
         "mngr",
         "create",
         "donate-extra-quota-bio",
         "headless_claude",
         "--foreground",
+        "--no-ensure-clean",
         "--message",
         build_donation_message("document-review"),
     )
-    assert argv[7:] == (
+    assert argv[8:] == (
         "--",
         "--output-format",
         "stream-json",
