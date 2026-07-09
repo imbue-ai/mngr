@@ -56,6 +56,28 @@ def test_check_raises_process_error_when_nonzero_exit() -> None:
     assert exc_info.value.stderr == "stderr content"
 
 
+def test_check_propagates_display_name_and_hides_secret_command() -> None:
+    """A ``FinishedProcess`` carrying a ``display_name`` raises a ProcessError that renders
+    the name -- not the raw argv -- so a secret argument value stays out of the message,
+    while ``.command`` keeps the real argv."""
+    process = FinishedProcess(
+        returncode=1,
+        stdout="",
+        stderr="boom",
+        command=("modal", "secret", "create", "NAME=s3cr3t-value"),
+        is_timed_out=False,
+        is_output_already_logged=False,
+        display_name="modal secret create NAME=***",
+    )
+
+    with pytest.raises(ProcessError) as exc_info:
+        process.check()
+
+    assert "s3cr3t-value" not in str(exc_info.value)
+    assert exc_info.value.display_command == "modal secret create NAME=***"
+    assert exc_info.value.command == ("modal", "secret", "create", "NAME=s3cr3t-value")
+
+
 def test_check_returns_self_on_success() -> None:
     process = FinishedProcess(
         returncode=0,
