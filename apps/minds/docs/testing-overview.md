@@ -228,9 +228,10 @@ cross-component behavior.
    the contract the desktop client relies on for byte-forwarding.
 5. **Backup listing for an online workspace** [snapshot] -- if a restic repo is
    configured in the snapshot, `GET /workspaces/<id>/backups` lists snapshots and
-   `is_backing_up` is a bool; otherwise assert the 404/501 "backups not
-   configured" path. (Per-snapshot *export* is heavier; keep it [local] with a
-   seeded restic repo via `restic_backup_a_file`.)
+   `is_backing_up` is a bool; otherwise assert the unconfigured shape (200 with
+   an empty snapshot list and `is_configured` false). (Per-snapshot *export* is
+   heavier; keep it [local] with a seeded restic repo via
+   `restic_backup_a_file`.)
 6. **Cross-workspace notification route** [snapshot] -- `POST
    /api/v1/agents/<id>/notifications` for the resumed workspace returns `ok` and
    dispatches (assert via a recording dispatcher).
