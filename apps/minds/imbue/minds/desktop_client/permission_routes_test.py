@@ -48,7 +48,6 @@ from imbue.minds.desktop_client.state import get_state
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
-from imbue.mngr_latchkey.agent_setup import register_agent_for_host
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
@@ -456,44 +455,11 @@ def test_requests_payload_excludes_unresolvable_hosts(tmp_path: Path) -> None:
         known_agent_ids=(known_agent,),
     )
 
-    displayable = _displayable_pending_requests(inbox, backend_resolver, None)
-    payload = _build_requests_payload(inbox, backend_resolver, None)
+    displayable = _displayable_pending_requests(inbox, backend_resolver)
+    payload = _build_requests_payload(inbox, backend_resolver)
 
     assert [str(req.event_id) for req in displayable] == [str(visible_request.event_id)]
     assert payload == {"count": 1, "request_ids": [str(visible_request.event_id)]}
-
-
-def test_requests_payload_resolves_span_dropped_agent_via_latchkey_registry(tmp_path: Path) -> None:
-    """A request from an agent absent from discovery still displays when the
-    latchkey hosts registry maps it to a live workspace's host.
-
-    The in-VM chat agent that files a permission request can drop out of the
-    discovery snapshot while its workspace is alive; the hosts registry
-    written by ``LatchkeyAutoRegister`` is the durable agent->host record the
-    inbox falls back to.
-    """
-    host_id = HostId()
-    primary_agent = AgentId()
-    chat_agent = AgentId()
-    plugin_dir = tmp_path / "mngr_latchkey"
-    register_agent_for_host(plugin_dir, host_id, chat_agent)
-    request = create_latchkey_predefined_permission_request_event(
-        agent_id=str(chat_agent),
-        scope="slack-api",
-        rationale="from the in-vm chat agent",
-    )
-    inbox = RequestInbox().add_request(request)
-    backend_resolver = _HostKnownStaticResolver(
-        url_by_agent_and_service={},
-        fixed_host_id=host_id,
-        known_agent_ids=(primary_agent,),
-    )
-
-    displayable = _displayable_pending_requests(inbox, backend_resolver, plugin_dir)
-    payload = _build_requests_payload(inbox, backend_resolver, plugin_dir)
-
-    assert [str(req.event_id) for req in displayable] == [str(request.event_id)]
-    assert payload == {"count": 1, "request_ids": [str(request.event_id)]}
 
 
 def test_get_permission_request_page_shows_descriptions_when_present(tmp_path: Path) -> None:

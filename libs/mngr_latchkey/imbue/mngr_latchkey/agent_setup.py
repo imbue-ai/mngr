@@ -42,7 +42,6 @@ from pydantic import JsonValue
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
@@ -52,7 +51,6 @@ from imbue.mngr_latchkey.remote_gateway import INNER_PORT
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import link_opaque_permissions_to_host
-from imbue.mngr_latchkey.store import list_host_permissions_paths
 from imbue.mngr_latchkey.store import load_permissions
 from imbue.mngr_latchkey.store import new_opaque_permissions_path
 from imbue.mngr_latchkey.store import opaque_permissions_dir
@@ -367,53 +365,6 @@ def register_agent_for_host(
     }
     new_config = LatchkeyPermissionsConfig(rules=config.rules, schemas=schemas)
     save_permissions(path, new_config)
-
-
-def _registered_agent_ids(path: Path) -> list[str]:
-    """Agent ids in one host permissions file's allowed-agent block, ``[]`` if unreadable."""
-    try:
-        config = load_permissions(path)
-    except (LatchkeyStoreError, OSError):
-        return []
-    scope_schema = config.schemas.get(_SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED)
-    if not isinstance(scope_schema, dict):
-        return []
-    properties = scope_schema.get("properties")
-    if not isinstance(properties, dict):
-        return []
-    path_schema = properties.get("path")
-    if not isinstance(path_schema, dict):
-        return []
-    not_block = path_schema.get("not")
-    if not isinstance(not_block, dict):
-        return []
-    any_of = not_block.get("anyOf")
-    if not isinstance(any_of, list):
-        return []
-    try:
-        return [_extract_agent_id_from_anyof_entry(entry) for entry in any_of]
-    except LatchkeyStoreError:
-        return []
-
-
-def find_host_for_agent(plugin_data_dir: Path, agent_id: AgentId) -> HostId | None:
-    """Return the host under which ``agent_id`` is registered, or ``None``.
-
-    Reverse lookup over the ``hosts/<host_id>/latchkey_permissions.json``
-    allowed-agent lists that :func:`register_agent_for_host` maintains.
-    Best-effort: malformed or unreadable files are skipped rather than
-    raised, and a host directory whose name is not a valid ``HostId`` is
-    ignored.
-    """
-    target = str(agent_id)
-    for path in list_host_permissions_paths(plugin_data_dir):
-        if target not in _registered_agent_ids(path):
-            continue
-        try:
-            return HostId(path.parent.name)
-        except InvalidRandomIdError:
-            continue
-    return None
 
 
 class AgentLatchkeySetup(FrozenModel):

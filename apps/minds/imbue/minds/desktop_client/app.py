@@ -122,9 +122,7 @@ from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.minds.utils.sentry.core import latchkey_forward_sentry_consent_path
 from imbue.minds.utils.sentry.core import write_latchkey_forward_sentry_consent
 from imbue.mngr.primitives import AgentId
-from imbue.mngr_latchkey.agent_setup import find_host_for_agent
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
-from imbue.mngr_latchkey.store import plugin_data_dir
 
 _PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
 
@@ -1067,7 +1065,7 @@ def _handle_chrome_events() -> Response:
             last_providers_data = _build_providers_state_payload(backend_resolver)
             yield "data: {}\n\n".format(json.dumps({"type": "providers_state", **last_providers_data}))
             inbox: RequestInbox | None = get_state().request_inbox
-            last_requests_payload = _build_requests_payload(inbox, backend_resolver, _latchkey_plugin_dir_from_state())
+            last_requests_payload = _build_requests_payload(inbox, backend_resolver)
             # ``auto_open`` is bundled with the requests payload (rather than
             # its own SSE event) so the Electron shell sees both atomically
             # when deciding whether to auto-open the panel.
@@ -1222,9 +1220,7 @@ def _handle_chrome_events() -> Response:
                     yield "data: {}\n\n".format(json.dumps({"type": "providers_state", **current_providers_data}))
 
                 inbox = get_state().request_inbox
-                current_requests_payload = _build_requests_payload(
-                    inbox, backend_resolver, _latchkey_plugin_dir_from_state()
-                )
+                current_requests_payload = _build_requests_payload(inbox, backend_resolver)
                 # Diff the full payload (count + ordered pending ids), not just
                 # the count, so a change to the pending *set* at constant size
                 # still pushes an update and the panel refreshes.
@@ -1411,59 +1407,22 @@ def _build_workspace_list(
     return workspaces
 
 
-def _latchkey_plugin_dir_from_state() -> Path | None:
-    """The mngr_latchkey plugin data dir (hosts registry), or None without paths."""
-    paths = get_state().api_v1_paths
-    return plugin_data_dir(paths.latchkey_dir) if paths is not None else None
-
-
-def _resolve_request_agent_id(
-    agent_id: AgentId,
-    backend_resolver: BackendResolverInterface,
-    latchkey_plugin_dir: Path | None,
-) -> AgentId | None:
-    """Map a request's filing agent to a discovery-resolvable agent id.
-
-    Requests are filed from inside the workspace (the in-VM chat agent), and
-    that agent can drop out of the live discovery snapshot while its
-    workspace is alive. When direct resolution fails, fall back to the
-    latchkey hosts registry -- every agent the desktop has seen was
-    registered there under its host by ``LatchkeyAutoRegister`` -- and
-    represent the request by that host's primary workspace agent, which is
-    the identity the inbox displays anyway. Returns ``None`` when neither
-    resolves (the genuinely-gone-workspace case the inbox hides).
-    """
-    if backend_resolver.get_agent_display_info(agent_id) is not None:
-        return agent_id
-    if latchkey_plugin_dir is None:
-        return None
-    host_id = find_host_for_agent(latchkey_plugin_dir, agent_id)
-    if host_id is None:
-        return None
-    for primary_id in backend_resolver.list_known_workspace_ids():
-        info = backend_resolver.get_agent_display_info(primary_id)
-        if info is not None and info.host_id == str(host_id):
-            return primary_id
-    return None
-
-
 def _displayable_pending_requests(
     inbox: RequestInbox | None,
     backend_resolver: BackendResolverInterface,
-    latchkey_plugin_dir: Path | None,
 ) -> list[RequestEvent]:
-    """Pending requests whose originating agent maps to a resolvable workspace.
+    """Pending requests whose originating agent's host is currently resolvable.
 
     A permission request filed by an agent on a since-stopped workspace
     lingers in the inbox after that workspace disappears from discovery
     (the request file survives on the gateway). With no live agent to
     resolve, the inbox can only fall back to raw agent ids, which render
     as meaningless 16-char hex in the UI. Rather than show those, we hide
-    a request whenever ``_resolve_request_agent_id`` can't map its agent to
-    a live workspace (directly, or via the latchkey hosts registry for
-    in-VM agents absent from the discovery snapshot). The request itself is
-    untouched on the gateway, so it reappears if the workspace comes back
-    (or once a freshly-arrived request's host is discovered).
+    a request whenever ``get_agent_display_info`` can't resolve its agent
+    -- the same signal every other display path uses to map an agent to a
+    host/workspace. The request itself is untouched on the gateway, so it
+    reappears if the workspace comes back (or once a freshly-arrived
+    request's host is discovered).
     """
     pending = inbox.get_pending_requests() if inbox else []
     displayable: list[RequestEvent] = []
@@ -1475,7 +1434,7 @@ def _displayable_pending_requests(
             # resolve to a real agent, so it isn't displayable. Skip it rather than let
             # the AgentId() validation raise and take down the whole request panel.
             continue
-        if _resolve_request_agent_id(agent_id, backend_resolver, latchkey_plugin_dir) is not None:
+        if backend_resolver.get_agent_display_info(agent_id) is not None:
             displayable.append(req)
     return displayable
 
@@ -1483,7 +1442,6 @@ def _displayable_pending_requests(
 def _build_requests_payload(
     inbox: RequestInbox | None,
     backend_resolver: BackendResolverInterface,
-    latchkey_plugin_dir: Path | None,
 ) -> dict[str, Any]:
     """Build the content-based requests payload pushed over the chrome SSE.
 
@@ -1502,7 +1460,7 @@ def _build_requests_payload(
     :func:`_displayable_pending_requests`) so the badge count and the
     rendered cards stay in agreement.
     """
-    pending = _displayable_pending_requests(inbox, backend_resolver, latchkey_plugin_dir)
+    pending = _displayable_pending_requests(inbox, backend_resolver)
     request_ids = [str(req.event_id) for req in pending]
     return {"count": len(request_ids), "request_ids": request_ids}
 
@@ -1768,7 +1726,7 @@ def _build_inbox_cards() -> list[Mapping[str, str]]:
     """
     inbox: RequestInbox | None = get_state().request_inbox
     backend_resolver: BackendResolverInterface = get_state().backend_resolver
-    pending = _displayable_pending_requests(inbox, backend_resolver, _latchkey_plugin_dir_from_state())
+    pending = _displayable_pending_requests(inbox, backend_resolver)
     handlers: tuple[RequestEventHandler, ...] = get_state().request_event_handlers
     # Map ws_name -> "homepage agent id" so the card accent matches the
     # color the homepage tile and the titlebar use for that workspace
@@ -1799,12 +1757,9 @@ def _build_inbox_cards() -> list[Mapping[str, str]]:
             kind_label = "request"
             display_name = ""
         parsed_id = AgentId(req.agent_id)
-        display_id = (
-            _resolve_request_agent_id(parsed_id, backend_resolver, _latchkey_plugin_dir_from_state()) or parsed_id
-        )
-        ws_name = backend_resolver.get_workspace_name(display_id) or ""
+        ws_name = backend_resolver.get_workspace_name(parsed_id) or ""
         if not ws_name:
-            info = backend_resolver.get_agent_display_info(display_id)
+            info = backend_resolver.get_agent_display_info(parsed_id)
             ws_name = info.agent_name if info else req.agent_id[:16]
         # Inbox card accent mirrors the homepage tile's accent for the
         # workspace the request belongs to. ``primary_agent_id_by_ws_name``
@@ -1845,7 +1800,7 @@ def _resolve_inbox_selection(
     inbox: RequestInbox | None = get_state().request_inbox
     if inbox is None:
         return "", ""
-    pending = _displayable_pending_requests(inbox, backend_resolver, _latchkey_plugin_dir_from_state())
+    pending = _displayable_pending_requests(inbox, backend_resolver)
     if not pending:
         return "", ""
 

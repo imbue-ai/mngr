@@ -25,7 +25,6 @@ from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY_SECONDARY
 from imbue.mngr_latchkey.agent_setup import _build_allowed_agent_anyof_entry
 from imbue.mngr_latchkey.agent_setup import _extract_agent_id_from_anyof_entry
 from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
-from imbue.mngr_latchkey.agent_setup import find_host_for_agent
 from imbue.mngr_latchkey.agent_setup import maybe_recover_host_permissions_for_agent
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
 from imbue.mngr_latchkey.agent_setup import register_agent_for_host
@@ -493,19 +492,3 @@ def test_register_agent_for_host_raises_when_anyof_was_hand_edited(tmp_path: Pat
 # ``workspace`` permission request's effect and spliced in on approval (see
 # ``permission_requests.mjs`` and its end-to-end tests). Nothing about it lives
 # in ``agent_setup`` anymore.
-
-
-def test_find_host_for_agent_returns_registered_host(tmp_path: Path) -> None:
-    host_id = HostId()
-    agent_id = AgentId()
-    register_agent_for_host(tmp_path, host_id, agent_id)
-    assert find_host_for_agent(tmp_path, agent_id) == host_id
-
-
-def test_find_host_for_agent_unknown_agent_returns_none(tmp_path: Path) -> None:
-    register_agent_for_host(tmp_path, HostId(), AgentId())
-    assert find_host_for_agent(tmp_path, AgentId()) is None
-
-
-def test_find_host_for_agent_without_hosts_dir_returns_none(tmp_path: Path) -> None:
-    assert find_host_for_agent(tmp_path, AgentId()) is None
