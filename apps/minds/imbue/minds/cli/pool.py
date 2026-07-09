@@ -68,9 +68,10 @@ _SECRET_BEARING_FLAGS: Final[tuple[str, ...]] = ("--database-url",)
 _POOL_MGMT_PRIVATE_KEY_VAULT_FIELD: Final[str] = "POOL_SSH_PRIVATE_KEY"
 # Vault field (under ``<vault_prefix>/neon``) holding the pooled host_pool DSN.
 _POOL_DSN_VAULT_FIELD: Final[str] = "DATABASE_URL"
-# Shared ``--database-url`` help text for the create / list / destroy commands.
-# Hoisted to one constant so the three subcommands' ``--help`` output can't drift.
-_DATABASE_URL_HELP: Final[str] = (
+# Shared ``--database-url`` help text for every env-aware admin wrapper command
+# (pool create / list / destroy here, and the ``minds server`` commands). Hoisted to
+# one constant so the subcommands' ``--help`` output can't drift.
+DATABASE_URL_HELP: Final[str] = (
     "Neon PostgreSQL connection string for the pool DB. Optional: for "
     "staging/production it is read from Vault (secrets/minds/<tier>/neon); "
     "for dev/ci it auto-resolves from the activated env's secrets.toml. "
@@ -79,7 +80,7 @@ _DATABASE_URL_HELP: Final[str] = (
 # Env var the admin slice path reads the pool management private key from (see
 # ``mngr_imbue_cloud.cli.server._pool_private_key_path``). The slice backend needs
 # the private key itself to SSH the box and carve the lima VM.
-_POOL_PRIVATE_KEY_ENV_VAR: Final[str] = "POOL_SSH_PRIVATE_KEY"
+POOL_PRIVATE_KEY_ENV_VAR: Final[str] = "POOL_SSH_PRIVATE_KEY"
 
 
 def build_create_admin_args(
@@ -186,8 +187,10 @@ def tear_down_env_pool_slices(env_name: str) -> None:
         ) from exc
     database_url = resolve_host_pool_dsn(env_name, None)
     args = build_teardown_slices_admin_args(database_url=database_url)
-    _raise_on_failure(
-        "teardown-slices", _run_admin_command(args, extra_env={_POOL_PRIVATE_KEY_ENV_VAR: pool_private_key})
+    raise_on_admin_command_failure(
+        "pool",
+        "teardown-slices",
+        run_imbue_cloud_admin_command("pool", args, extra_env={POOL_PRIVATE_KEY_ENV_VAR: pool_private_key}),
     )
 
 
@@ -346,21 +349,24 @@ def resolve_host_pool_dsn(
     return dsn
 
 
-def _run_admin_command(args: list[str], *, extra_env: Mapping[str, str] | None = None) -> FinishedProcess:
-    """Run ``mngr imbue_cloud admin pool <args>`` and return the result.
+def run_imbue_cloud_admin_command(
+    subgroup: str, args: list[str], *, extra_env: Mapping[str, str] | None
+) -> FinishedProcess:
+    """Run ``mngr imbue_cloud admin <subgroup> <args>`` and return the result.
 
     Streams the child's output line-by-line so a multi-host bake isn't a
     silent black box. Forwards the current process env, with ``extra_env``
     layered on top so callers can inject the activated tier's POOL_SSH_PRIVATE_KEY
-    (read from Vault) without mutating the parent process's environment.
+    (read from Vault) without mutating the parent process's environment. Shared by
+    the ``minds pool`` and ``minds server`` wrapper commands.
     """
-    full_command = ["mngr", "imbue_cloud", "admin", "pool"] + args
+    full_command = ["mngr", "imbue_cloud", "admin", subgroup] + args
     loggable_command = redact_secret_flag_values(full_command, secret_bearing_flags=_SECRET_BEARING_FLAGS)
     logger.info("Running: {}", " ".join(shlex.quote(part) for part in loggable_command))
     subprocess_env: dict[str, str] | None = None
     if extra_env:
         subprocess_env = merge_extra_env_into_subprocess_env(shell_env=os.environ, extra_env=extra_env)
-    cg = ConcurrencyGroup(name="minds-pool")
+    cg = ConcurrencyGroup(name=f"minds-{subgroup}")
     with cg:
         return cg.run_process_to_completion(
             command=full_command,
@@ -371,9 +377,10 @@ def _run_admin_command(args: list[str], *, extra_env: Mapping[str, str] | None =
         )
 
 
-def _raise_on_failure(label: str, result: FinishedProcess) -> None:
+def raise_on_admin_command_failure(subgroup: str, label: str, result: FinishedProcess) -> None:
+    """Translate a non-zero admin subprocess exit into a ClickException naming the command."""
     if result.returncode != 0:
-        raise click.ClickException(f"mngr imbue_cloud admin pool {label} failed (exit {result.returncode}).")
+        raise click.ClickException(f"mngr imbue_cloud admin {subgroup} {label} failed (exit {result.returncode}).")
 
 
 def _run_slice_pool_create(
@@ -425,7 +432,11 @@ def _run_slice_pool_create(
         is_deferred_install_wait_skipped=is_deferred_install_wait_skipped,
         max_concurrency=max_concurrency,
     )
-    _raise_on_failure("create", _run_admin_command(args, extra_env={_POOL_PRIVATE_KEY_ENV_VAR: pool_private_key}))
+    raise_on_admin_command_failure(
+        "pool",
+        "create",
+        run_imbue_cloud_admin_command("pool", args, extra_env={POOL_PRIVATE_KEY_ENV_VAR: pool_private_key}),
+    )
 
 
 @click.group()
@@ -485,7 +496,7 @@ def pool() -> None:
     required=False,
     default=None,
     type=str,
-    help=_DATABASE_URL_HELP,
+    help=DATABASE_URL_HELP,
 )
 @click.option(
     "--mngr-source",
@@ -579,7 +590,7 @@ def pool_create(
     required=False,
     default=None,
     type=str,
-    help=_DATABASE_URL_HELP,
+    help=DATABASE_URL_HELP,
 )
 def pool_list(database_url: str | None) -> None:
     """List pool_hosts rows (forwards to ``mngr imbue_cloud admin pool list``)."""
@@ -590,7 +601,7 @@ def pool_list(database_url: str | None) -> None:
     # the staging/production host_pool DSN from Vault.
     env_name = require_activated_env_name()
     args = build_list_admin_args(database_url=resolve_host_pool_dsn(env_name, database_url))
-    _raise_on_failure("list", _run_admin_command(args))
+    raise_on_admin_command_failure("pool", "list", run_imbue_cloud_admin_command("pool", args, extra_env=None))
 
 
 @pool.command(name="backfill-host-keys")
@@ -599,7 +610,7 @@ def pool_list(database_url: str | None) -> None:
     required=False,
     default=None,
     type=str,
-    help=_DATABASE_URL_HELP,
+    help=DATABASE_URL_HELP,
 )
 def pool_backfill_host_keys(database_url: str | None) -> None:
     """One-time: keyscan + record SSH host public keys for pre-existing pool rows and boxes.
@@ -614,7 +625,9 @@ def pool_backfill_host_keys(database_url: str | None) -> None:
     """
     env_name = require_activated_env_name()
     args = build_backfill_host_keys_admin_args(database_url=resolve_host_pool_dsn(env_name, database_url))
-    _raise_on_failure("backfill-host-keys", _run_admin_command(args))
+    raise_on_admin_command_failure(
+        "pool", "backfill-host-keys", run_imbue_cloud_admin_command("pool", args, extra_env=None)
+    )
 
 
 @pool.command(name="destroy")
@@ -624,7 +637,7 @@ def pool_backfill_host_keys(database_url: str | None) -> None:
     required=False,
     default=None,
     type=str,
-    help=_DATABASE_URL_HELP,
+    help=DATABASE_URL_HELP,
 )
 @click.option(
     "--force",
@@ -674,7 +687,7 @@ def pool_destroy(
             raise click.ClickException(
                 f"Could not read the pool SSH private key from Vault for env '{env_name}': {exc}"
             ) from exc
-        extra_env = {_POOL_PRIVATE_KEY_ENV_VAR: pool_private_key}
+        extra_env = {POOL_PRIVATE_KEY_ENV_VAR: pool_private_key}
     args = build_destroy_admin_args(
         pool_host_ids=list(pool_host_ids),
         database_url=resolve_host_pool_dsn(env_name, database_url),
@@ -682,4 +695,4 @@ def pool_destroy(
         is_row_drop_only=is_row_drop_only,
         max_concurrency=max_concurrency,
     )
-    _raise_on_failure("destroy", _run_admin_command(args, extra_env=extra_env))
+    raise_on_admin_command_failure("pool", "destroy", run_imbue_cloud_admin_command("pool", args, extra_env=extra_env))

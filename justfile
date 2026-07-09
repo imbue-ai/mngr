@@ -1008,6 +1008,21 @@ add-paid-email email:
 list-pool-hosts:
     uv run minds pool list
 
+# List bare-metal servers (per-server + fleet slot accounting) for the activated
+# minds env (read-only; DSN resolved from the env, no manual exports).
+list-servers:
+    uv run minds server list
+
+# (Re-)prep a bare-metal box for slice baking: qemu/lima/tooling + image staging +
+# the per-box FCT image cache dir. Pool SSH key + DSN come from the activated
+# tier's Vault entry / env secrets, so no manual exports. Idempotent -- also how a
+# box prepped before 2026-06-27 gets the FCT cache dir that production
+# --from-tag bakes require.
+#
+#   just prep-server <bare-metal-server-id>
+prep-server server_id *extra_args:
+    uv run minds server prep --server-id "{{server_id}}" {{extra_args}}
+
 # One-time host-key backfill for the activated minds env. Keyscans every
 # pre-existing pool host + bare-metal box whose recorded sshd host key columns
 # are still null and records them, so rows baked before host-key pinning become

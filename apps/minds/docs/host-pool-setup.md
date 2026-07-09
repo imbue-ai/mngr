@@ -142,19 +142,29 @@ First register + prep the bare-metal box(es) the slices will be carved on (the
 box must be `ready` and have a free slot):
 
 ```bash
-# Order / register / prep a bare-metal box; see `--help` on each subcommand.
+# Order / register / set up a bare-metal box; see `--help` on each subcommand.
+# (These need OVH supplier creds and are not minds-wrapped.)
 uv run mngr imbue_cloud admin server order   ...   # order a box from the supplier
 uv run mngr imbue_cloud admin server register ...  # record it in bare_metal_servers
 uv run mngr imbue_cloud admin server setup --server-id <id>   # reinstall (injects our host key) + prep -> `ready`
-uv run mngr imbue_cloud admin server list          # find the ready box's id
+
+# Inspect / (re-)prep with the env-aware wrappers (tier activated; DSN + pool SSH
+# key resolved automatically, no manual exports):
+just list-servers                                  # find the ready box's id
+just prep-server <bare-metal-server-id>            # re-run just the prep step
 ```
 
-`server prep --server-id <id>` re-runs just the prep step (qemu/lima/tooling +
-image staging). It SSHes the box with strict host-key pinning, so the box's sshd
+`just prep-server <id>` (wrapping `mngr imbue_cloud admin server prep`) re-runs
+just the prep step (qemu/lima/tooling + image staging + the per-box FCT image
+cache dir). It SSHes the box with strict host-key pinning, so the box's sshd
 host key must already be recorded on its `bare_metal_servers` row -- which
 `server setup` does at OS reinstall, or `admin pool backfill-host-keys` captures
 once for a box installed out of band. `prep` fails closed (no trust-on-first-use)
 if no host key is recorded.
+
+Note: boxes prepped before 2026-06-27 lack the per-box FCT image cache directory
+that production (`--from-tag`) bakes require -- re-run `just prep-server <id>`
+(idempotent) on such a box before baking on it.
 
 Then bake slices onto a chosen box, after activating the tier:
 

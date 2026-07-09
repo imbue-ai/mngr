@@ -77,6 +77,12 @@ destroyable. First register + prep a box with `mngr imbue_cloud admin server
     same canonical remote, but the form value the client sends must match. Extra
     flags forward to `minds pool create` (e.g. `--mngr-source`).
 - `just list-pool-hosts` -- list `pool_hosts` rows for the activated env.
+- `just list-servers` -- list bare-metal servers with slot accounting for the
+  activated env (no manual DSN export needed).
+- `just prep-server <server-id>` -- (re-)prep a bare-metal box for slice baking;
+  pool SSH key + DSN resolved from the activated tier automatically. Idempotent;
+  also how pre-2026-06-27 boxes get the FCT image cache dir that production
+  `--from-tag` bakes require.
 - `just destroy-pool-hosts <pool-host-id> [<pool-host-id> ...]` -- tear down the
   named hosts in parallel: atomically claim each row (a user cannot lease it
   mid-destroy), destroy its slice lima VM, and drop the row (manual teardown, e.g.

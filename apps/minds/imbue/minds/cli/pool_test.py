@@ -9,7 +9,6 @@ we test that with :class:`click.testing.CliRunner`.
 
 from pathlib import Path
 
-import pytest
 from click.testing import CliRunner
 
 from imbue.minds.cli.pool import _SECRET_BEARING_FLAGS
@@ -22,14 +21,6 @@ from imbue.minds.cli.pool import merge_extra_env_into_subprocess_env
 from imbue.minds.cli.pool import pool
 from imbue.minds.cli.pool import resolve_host_pool_dsn
 from imbue.minds.utils.secret_redaction import redact_secret_flag_values
-
-
-@pytest.fixture
-def _isolated_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    """Strip activation env vars by default; tests opt in to a specific env."""
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.delenv("MINDS_ROOT_NAME", raising=False)
-    return tmp_path
 
 
 def _slice_args(
