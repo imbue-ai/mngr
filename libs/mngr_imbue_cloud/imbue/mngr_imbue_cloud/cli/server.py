@@ -1462,6 +1462,16 @@ def _wait_for_ssh_ready(
     ),
 )
 @click.option("--yes", is_flag=True, default=False, help="Skip the interactive confirmation and place the order.")
+@click.option(
+    "--dry-run",
+    "is_dry_run",
+    is_flag=True,
+    default=False,
+    help=(
+        "Build + assign a non-committal cart, print the real OVH price preview + derived specs, then delete "
+        "the cart without ordering. No charge and no prompt -- use it to confirm price/specs before ordering."
+    ),
+)
 @click.option("--database-url", default=None, help="Pool DSN (else resolved from env/activated minds env).")
 def order(
     plan_code: str,
@@ -1472,6 +1482,7 @@ def order(
     cpu_overcommit: float,
     option_codes: tuple[str, ...],
     yes: bool,
+    is_dry_run: bool,
     database_url: str | None,
 ) -> None:
     """Order a bare-metal server from OVH (THIS CHARGES the account) and record it at status 'ordered'.
@@ -1479,7 +1490,8 @@ def order(
     Builds + assigns the eco cart, shows the real OVH price preview for confirmation, places the order, and
     inserts a bare_metal_servers row (specs derived from the catalog). Then run ``await-delivery`` + ``setup``.
     Any mandatory option family with more than one offer (e.g. bandwidth, vrack) must be chosen explicitly
-    via ``--option``; needs OVH_* credentials and the pool DSN.
+    via ``--option``; needs OVH_* credentials and the pool DSN. Pass ``--dry-run`` to price + preview only
+    (no charge, no prompt, no DB write); ``--dry-run`` wins over ``--yes``.
     """
     config = _require_ovh_config()
     client = build_ovh_client(config)
@@ -1505,6 +1517,12 @@ def order(
         f"{disk_gb}GB usable disk ({raid_level}) -> {slot_count} slices of {memory_per_slice_gb}GB.\n"
         f"OVH price preview:\n{summarize_checkout_prices(preview)}"
     )
+    # A dry run stops here (before any prompt or charge), deleting the non-committal cart. Checked ahead of
+    # --yes so an accidental `--dry-run --yes` never charges.
+    if is_dry_run:
+        delete_cart_quietly(client, cart_id)
+        write_human_line("Dry run: cart deleted, no order placed.")
+        return
     if not yes and not click.confirm("Place this order now (this charges the account)?", default=False):
         delete_cart_quietly(client, cart_id)
         write_human_line("Aborted; cart deleted, no order placed.")

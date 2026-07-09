@@ -123,6 +123,15 @@ def test_server_group_help_lists_commands() -> None:
     assert "allocate-slice" not in result.output
 
 
+def test_order_command_exposes_dry_run_flag() -> None:
+    # `order --dry-run` is the no-charge price/spec preview the deployment playbook
+    # relies on; guard that the flag stays on the CLI surface with its no-charge contract.
+    result = CliRunner().invoke(server, ["order", "--help"])
+    assert result.exit_code == 0
+    assert "--dry-run" in result.output
+    assert "No charge" in result.output or "no charge" in result.output
+
+
 def test_kill_bake_worker_processes_terminates_a_child() -> None:
     # On a top-level kill the bake's in-flight `mngr create` workers must be reaped
     # so they don't keep carving VMs; this is the helper that does it. Spawn a child
