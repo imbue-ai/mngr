@@ -508,7 +508,7 @@ class ImbueCloudProvider(BaseProviderInstance):
     # (friendly name, image, tags, agents). The cached raw output is then
     # consumed by ``get_host_and_agent_details`` without another SSH.
     #
-    # Lease-only synthesis (with state=CRASHED and failure_reason carrying
+    # Lease-only synthesis (with state=UNKNOWN and failure_reason carrying
     # the underlying error) is reserved for the last-resort case where
     # even the outer SSH is unreachable -- in normal operation we expect
     # outer SSH to be reachable for every leased VPS.
@@ -556,11 +556,16 @@ class ImbueCloudProvider(BaseProviderInstance):
             raw, outer_error, is_auth_failure = self._collect_listing_raw_via_outer(entry)
             if raw is None:
                 # Outer SSH itself failed; fall back to a lease-only stub
-                # so the host doesn't disappear from `mngr list`. The state
-                # depends on whether the failure was an auth mismatch (the
-                # host is reachable, our key is just wrong) or something
-                # more terminal (network down, host destroyed).
-                fallback_state = HostState.UNAUTHENTICATED if is_auth_failure else HostState.CRASHED
+                # so the host doesn't disappear from `mngr list`. An auth
+                # mismatch means the host answered (it's reachable, our key
+                # is just wrong) -> UNAUTHENTICATED. Any other failure means
+                # we could not observe the host at all -- the box may be
+                # down, or the network path from this client may be broken --
+                # so the state is UNKNOWN, not CRASHED: an unreachable host
+                # is non-evidence about the container, and consumers (e.g.
+                # the minds recovery page) must not read it as a positive
+                # "container is down" verdict.
+                fallback_state = HostState.UNAUTHENTICATED if is_auth_failure else HostState.UNKNOWN
                 host_ref = DiscoveredHost(
                     host_id=host_id,
                     host_name=HostName(entry.host_name),
@@ -573,7 +578,7 @@ class ImbueCloudProvider(BaseProviderInstance):
                 # through the unreachable window. Only when nothing was ever
                 # cached (first-ever discovery) do we fall back to the bare
                 # lease stub, preserving today's behavior for that case. The
-                # host state stays truthfully CRASHED/UNAUTHENTICATED: cached
+                # host state stays truthfully UNKNOWN/UNAUTHENTICATED: cached
                 # data restores identity, not liveness.
                 agent_refs = self._load_last_known_agents(host_id) or [
                     DiscoveredAgent(
@@ -659,7 +664,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         reached. ``is_auth_failure`` is True iff the failure was an
         authentication error (``HostAuthenticationError``) -- in that case
         the host is reachable but our key was rejected, which is the
-        ``UNAUTHENTICATED`` state, not ``CRASHED``.
+        ``UNAUTHENTICATED`` state, not ``UNKNOWN``.
         """
         host_id = HostId(lease.host_id)
         host_dir = str(self.host_dir)
@@ -720,7 +725,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         round-trip and cached the parsed data; this method just shapes it
         into the typed details structures. When the cached raw indicates
         outer SSH failed during discovery, fall back to lease-only details
-        (state=CRASHED, ssh from lease, failure_reason carrying the
+        (state=UNKNOWN, ssh from lease, failure_reason carrying the
         original error).
         """
         host_id = host_ref.host_id
@@ -825,8 +830,8 @@ class ImbueCloudProvider(BaseProviderInstance):
         populated so the user can see the unreachable address;
         ``failure_reason`` carries the underlying error. The state comes
         from ``host_ref.host_state`` (which discovery set to
-        ``UNAUTHENTICATED`` for auth failures and ``CRASHED`` for other
-        outer-SSH errors), with ``CRASHED`` as a safe default if it's
+        ``UNAUTHENTICATED`` for auth failures and ``UNKNOWN`` for other
+        outer-SSH errors), with ``UNKNOWN`` as a safe default if it's
         unset.
         """
         ssh_info = self._build_lease_ssh_info(host_ref.host_id, lease)
@@ -834,7 +839,7 @@ class ImbueCloudProvider(BaseProviderInstance):
             id=host_ref.host_id,
             name=str(host_ref.host_name),
             provider_name=host_ref.provider_name,
-            state=host_ref.host_state or HostState.CRASHED,
+            state=host_ref.host_state or HostState.UNKNOWN,
             ssh=ssh_info,
             failure_reason=failure_message,
         )

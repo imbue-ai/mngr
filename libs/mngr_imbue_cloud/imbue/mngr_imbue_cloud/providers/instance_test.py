@@ -117,7 +117,7 @@ def test_build_offline_details_from_lease_preserves_host_and_failure_reason(tmp_
         host_id=host_id,
         host_name=HostName("crashed-host"),
         provider_name=provider_name,
-        host_state=HostState.CRASHED,
+        host_state=HostState.UNKNOWN,
     )
     agent_ref = DiscoveredAgent(
         host_id=host_id,
@@ -147,9 +147,9 @@ def test_build_offline_details_from_lease_preserves_host_and_failure_reason(tmp_
     assert host_details.ssh.user == lease.ssh_user
     assert host_details.ssh.host == lease.vps_address
     assert host_details.ssh.port == lease.container_ssh_port
-    # State defaults to CRASHED in the lease-only fallback (we have no
-    # outer-SSH-derived state to be more specific).
-    assert host_details.state == HostState.CRASHED
+    # State passes through from discovery's fallback (UNKNOWN: the host was
+    # not observable, so no container-state verdict can be derived from it).
+    assert host_details.state == HostState.UNKNOWN
     # ``failure_reason`` carries the underlying error.
     assert host_details.failure_reason == failure_message
     # One agent_details per agent_ref, all attached to the offline host.
@@ -858,8 +858,9 @@ def test_unreachable_pass_reattaches_all_cached_agents_marked_stale(temp_mngr_ct
     assert all("stale" not in agent.certified_data for agent in live_agents)
 
     host_ref, cached_agents = _only_entry(provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group))
-    # The host is truthfully CRASHED (cached data restores identity, not liveness).
-    assert host_ref.host_state == HostState.CRASHED
+    # The host is truthfully UNKNOWN -- unreachable is non-evidence about the
+    # container (cached data restores identity, not liveness).
+    assert host_ref.host_state == HostState.UNKNOWN
     # The full agent set survives -- not a single bare lease stub.
     assert {str(agent.agent_name) for agent in cached_agents} == {"primary-agent", "system-services"}
     # Every re-attached agent is marked stale and keeps its labels.
@@ -889,7 +890,7 @@ def test_cached_identity_survives_a_fresh_provider_instance(temp_mngr_ctx: MngrC
 
 
 def test_unauthenticated_pass_reattaches_cached_agents(temp_mngr_ctx: MngrContext) -> None:
-    """An auth rejection (UNAUTHENTICATED) re-attaches cached identity just like CRASHED does."""
+    """An auth rejection (UNAUTHENTICATED) re-attaches cached identity just like UNKNOWN does."""
     host_id = HostId.generate()
     lease = _make_lease(host_id)
     primary = _agent_data("primary-agent", {"is_primary": "true"}, "codex")
@@ -941,7 +942,7 @@ def test_first_discovery_with_no_cache_falls_back_to_bare_lease_stub(temp_mngr_c
 
     host_ref, agents = _only_entry(provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group))
 
-    assert host_ref.host_state == HostState.CRASHED
+    assert host_ref.host_state == HostState.UNKNOWN
     assert len(agents) == 1
     assert str(agents[0].agent_id) == lease.agent_id
     assert "stale" not in agents[0].certified_data

@@ -297,9 +297,28 @@ def test_dispatch_tier_host_unresponsive_when_container_running_but_exec_dead() 
     assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
 
 
-def test_dispatch_tier_host_unresponsive_for_ambiguous_host_state() -> None:
+def test_dispatch_tier_indeterminate_for_ambiguous_host_state() -> None:
+    """A transitional host state is not an observation of the container -> keep checking.
+
+    Only an observed RUNNING claim earns the consent-gated HOST_UNRESPONSIVE
+    verdict; a state that answers neither "running" nor "offline" is non-evidence,
+    so no verdict (and no restart affordance) is rendered off it.
+    """
     response = _response(host_state="STARTING", in_container_stdout=None)
-    assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
+    assert response.dispatch_tier == DispatchTier.INDETERMINATE
+
+
+def test_dispatch_tier_indeterminate_for_unknown_host_state() -> None:
+    """An UNKNOWN host state (host unobservable during discovery) -> keep checking.
+
+    The imbue_cloud provider surfaces UNKNOWN when a leased host's outer SSH is
+    unreachable: the *path* to the host is broken, which says nothing about the
+    container. Rendering a host-offline/unresponsive verdict (with its restart
+    affordance) off that would offer a restart that is doomed for exactly the
+    same reason the host is unreachable -- so it must classify INDETERMINATE.
+    """
+    response = _response(host_state="UNKNOWN", in_container_stdout=None)
+    assert response.dispatch_tier == DispatchTier.INDETERMINATE
 
 
 def test_dispatch_tier_indeterminate_when_probe_timed_out() -> None:

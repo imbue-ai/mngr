@@ -85,12 +85,12 @@ def test_persist_then_fallback_round_trip_preserves_identity_in_details(temp_mng
     fallback = provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group)
     assert len(fallback) == 1
     host_ref, agent_refs = next(iter(fallback.items()))
-    assert host_ref.host_state == HostState.CRASHED
+    assert host_ref.host_state == HostState.UNKNOWN
 
     # The rich-details path shapes the re-attached refs into AgentDetails without
     # any change of its own -- the cached name and labels flow straight through.
     host_details, agent_details_list = provider.get_host_and_agent_details(host_ref, agent_refs)
-    assert host_details.state == HostState.CRASHED
+    assert host_details.state == HostState.UNKNOWN
     assert host_details.failure_reason is not None
     assert len(agent_details_list) == 1
     agent_details = agent_details_list[0]
