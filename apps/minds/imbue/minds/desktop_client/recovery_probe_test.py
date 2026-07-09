@@ -123,6 +123,17 @@ def test_container_running_probe_says_no_when_host_state_is_stopped() -> None:
     assert _answer(response, "container running") == ProbeAnswer.NO
 
 
+def test_container_running_probe_says_yes_when_host_state_is_unauthenticated() -> None:
+    """UNAUTHENTICATED means the container was observed running but inner SSH is dead.
+
+    Both producers (docker's connection-error fallback hook and imbue_cloud's
+    listing path; PR #2247) emit it only after observing a running container, so
+    the "is the container running?" answer is an observed YES.
+    """
+    response = _response(host_state="UNAUTHENTICATED")
+    assert _answer(response, "container running") == ProbeAnswer.YES
+
+
 def test_container_running_probe_is_unknown_for_ambiguous_host_state() -> None:
     response = _response(host_state="STARTING")
     assert _answer(response, "container running") == ProbeAnswer.UNKNOWN
@@ -294,6 +305,19 @@ def test_dispatch_tier_host_unresponsive_when_container_running_but_exec_dead() 
     a live container.
     """
     response = _response(host_state="RUNNING", in_container_stdout=None)
+    assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
+
+
+def test_dispatch_tier_host_unresponsive_for_unauthenticated_host_state() -> None:
+    """Dead inner sshd (`pkill sshd` in the container) -> consent-gated host restart.
+
+    The provider observed the container running but could not get inside, so it
+    reported UNAUTHENTICATED. The consent-gated host restart is the engineered
+    recovery for this state (PR #2247): its stop step is not skipped, so the
+    stop/start relaunches the inner sshd. This must NOT classify INDETERMINATE --
+    a dead sshd never self-heals, so "keep checking" would strand the user.
+    """
+    response = _response(host_state="UNAUTHENTICATED", in_container_stdout=None)
     assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
 
 

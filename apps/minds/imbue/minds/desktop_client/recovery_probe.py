@@ -162,11 +162,16 @@ class DispatchTier(str, Enum):
     """Container is offline -- restart the host (no live work to interrupt)."""
 
     HOST_UNRESPONSIVE = "host_unresponsive"
-    """Container was observed running but the exec cleanly failed to reach it.
+    """Container was observed running but we cannot get inside it.
 
-    A host restart bounces a possibly-live container, so it requires explicit
-    user consent. Reserved for an observed RUNNING claim: a host state that
-    answers neither "running" nor "offline" is non-evidence and classifies
+    Covers an observed RUNNING claim whose exec cleanly failed, and the
+    UNAUTHENTICATED state -- which providers report when the container was
+    observed running but inner SSH is unreachable (e.g. its sshd died; see
+    PR #2247). A host restart bounces a possibly-live container, so it
+    requires explicit user consent -- and for the dead-inner-sshd case that
+    consent-gated restart is the engineered recovery (the stop step is not
+    skipped, so the relaunch brings sshd back). A host state that answers
+    neither "running" nor "offline" is non-evidence and classifies
     INDETERMINATE instead.
     """
 
@@ -310,6 +315,15 @@ def _coerce_optional_int(value: object) -> int | None:
 
 
 _RUNNING_STATE: Final[str] = "RUNNING"
+# UNAUTHENTICATED is, by provider convention (docker's connection-error fallback
+# hook and imbue_cloud's listing path; see PR #2247), "the container was observed
+# running but inner SSH is unreachable" -- so for the "is the container running?"
+# question it is an observed YES. This routes the dead-inner-sshd case to the
+# consent-gated HOST_UNRESPONSIVE restart that actually fixes it. The imbue_cloud
+# outer-SSH-auth-rejected fallback reuses the same state, where a restart fails on
+# the same auth error; distinguishing the two needs a dedicated provider state
+# (e.g. UNREACHABLE), which remains deferred (flagged in PR #2247).
+_OBSERVED_RUNNING_STATES: Final[frozenset[str]] = frozenset({_RUNNING_STATE, "UNAUTHENTICATED"})
 _OFFLINE_HOST_STATES: Final[frozenset[str]] = frozenset({"STOPPED", "STOPPING", "CRASHED", "FAILED"})
 
 
@@ -348,7 +362,7 @@ def _mngr_exec_command(mngr_binary: str, services_agent_id: AgentId | None, inne
 def _build_container_running_probe(host_state: str) -> Probe:
     """Probe 1: the workspace host's lifecycle state, read from the discovery snapshot."""
     upper = host_state.upper()
-    if upper == _RUNNING_STATE:
+    if upper in _OBSERVED_RUNNING_STATES:
         answer = ProbeAnswer.YES
     elif upper in _OFFLINE_HOST_STATES:
         answer = ProbeAnswer.NO
