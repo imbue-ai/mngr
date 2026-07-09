@@ -16,7 +16,12 @@ from imbue.mngr_usage.donate import CLAUDE_SOURCE
 from imbue.mngr_usage.donate import FIVE_HOUR_WINDOW
 from imbue.mngr_usage.donate import SEVEN_DAY_WINDOW
 from imbue.mngr_usage.donate import build_create_argv
+from imbue.mngr_usage.donate import build_cron_block
+from imbue.mngr_usage.donate import build_cron_command
 from imbue.mngr_usage.donate import build_destroy_argv
+from imbue.mngr_usage.donate import build_donation_message
+from imbue.mngr_usage.donate import remove_managed_cron
+from imbue.mngr_usage.donate import upsert_managed_cron
 from imbue.mngr_usage.donate import evaluate_capacity
 from imbue.mngr_usage.donate import weekly_pace_line
 
@@ -57,6 +62,7 @@ def test_spare_when_five_hour_has_budget_and_weekly_under_pace() -> None:
     )
     decision = evaluate_capacity(snap, _NOW)
     assert decision.has_spare is True
+    assert decision.has_usage_data is True
     assert decision.five_hour_used_percentage == pytest.approx(10.0)
     assert decision.weekly_elapsed_percentage == pytest.approx(50.0)
     assert decision.weekly_pace_line == pytest.approx(42.5)
@@ -84,16 +90,28 @@ def test_no_spare_when_weekly_usage_is_over_pace() -> None:
     assert evaluate_capacity(snap, _NOW).has_spare is False
 
 
-def test_missing_snapshot_is_treated_as_fully_used() -> None:
+def test_missing_snapshot_is_treated_as_fully_used_but_flagged_as_no_data() -> None:
     decision = evaluate_capacity(None, _NOW)
     assert decision.has_spare is False
+    # Conservative percentages, but flagged so the caller says "can't tell", not "maxed out".
+    assert decision.has_usage_data is False
     assert decision.five_hour_used_percentage == pytest.approx(100.0)
     assert decision.weekly_used_percentage == pytest.approx(100.0)
+
+
+def test_partial_reading_counts_as_having_usage_data() -> None:
+    # Only the 5h window has a reading; that's still real data, not a blank tick.
+    snap = _snapshot(**{FIVE_HOUR_WINDOW: WindowSnapshot(used_percentage=90.0)})
+    decision = evaluate_capacity(snap, _NOW)
+    assert decision.has_usage_data is True
+    assert decision.has_spare is False  # 90 >= 80 ceiling
 
 
 def test_snapshot_without_windows_is_conservative() -> None:
     decision = evaluate_capacity(_snapshot(), _NOW)
     assert decision.has_spare is False
+    # A snapshot with no windows carries no readings -> treated as "no data".
+    assert decision.has_usage_data is False
     assert decision.five_hour_used_percentage == pytest.approx(100.0)
     assert decision.weekly_used_percentage == pytest.approx(100.0)
 
@@ -113,14 +131,17 @@ def test_window_without_derivable_elapsed_yields_zero_pace_and_no_spare() -> Non
 
 
 def test_build_create_argv_launches_a_headless_agent_that_skips_permissions() -> None:
-    assert build_create_argv("donate-extra-quota-bio", "document-review") == (
+    argv = build_create_argv("donate-extra-quota-bio", "document-review")
+    assert argv[:7] == (
         "mngr",
         "create",
         "donate-extra-quota-bio",
         "headless_claude",
         "--foreground",
         "--message",
-        "Use the document-review skill",
+        build_donation_message("document-review"),
+    )
+    assert argv[7:] == (
         "--",
         "--output-format",
         "stream-json",
@@ -128,6 +149,48 @@ def test_build_create_argv_launches_a_headless_agent_that_skips_permissions() ->
         "--include-partial-messages",
         "--dangerously-skip-permissions",
     )
+
+
+def test_build_donation_message_names_the_skill() -> None:
+    assert "document-review" in build_donation_message("document-review")
+
+
+def test_build_cron_command_cds_into_workdir_and_omits_default_options() -> None:
+    command = build_cron_command(
+        "/venv/bin/mngr", "/repo", "document-review", "donate-extra-quota-bio", "/logs/cron.log"
+    )
+    # Defaults (skill/agent-name) are omitted; cd + abs mngr + redirect stay.
+    assert command == "cd /repo && /venv/bin/mngr donate >> /logs/cron.log 2>&1"
+
+
+def test_build_cron_command_includes_non_default_options() -> None:
+    command = build_cron_command("/venv/bin/mngr", "/repo", "other-skill", "my-agent", "/logs/cron.log")
+    assert "--skill other-skill" in command
+    assert "--agent-name my-agent" in command
+
+
+def test_managed_cron_upsert_is_idempotent_and_preserves_user_lines() -> None:
+    user_crontab = "# my own job\n0 3 * * * /usr/bin/backup\n"
+    block = build_cron_block(10, build_cron_command("/venv/bin/mngr", "/repo", "document-review", "donate-extra-quota-bio", "/logs/cron.log"))
+
+    once = upsert_managed_cron(user_crontab, block)
+    twice = upsert_managed_cron(once, block)
+    # Re-running --start must not stack duplicate managed blocks.
+    assert once == twice
+    assert once.count("*/10 * * * *") == 1
+    assert "/usr/bin/backup" in once
+
+    # --stop restores exactly the user's original crontab.
+    restored, removed = remove_managed_cron(once)
+    assert restored == user_crontab
+    assert removed == 3
+
+
+def test_remove_managed_cron_is_a_noop_when_nothing_is_managed() -> None:
+    user_crontab = "0 3 * * * /usr/bin/backup\n"
+    restored, removed = remove_managed_cron(user_crontab)
+    assert restored == user_crontab
+    assert removed == 0
 
 
 def test_build_destroy_argv_force_removes_a_stale_agent_by_name() -> None:

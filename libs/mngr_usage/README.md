@@ -79,3 +79,45 @@ specific source, use the top-level `source` field in CEL (e.g.
 For recurring automation, let `cron` own the cadence: poll the plain
 `mngr usage --format json` snapshot on a schedule and branch in the shell. See
 [cron automation recipes](https://github.com/imbue-ai/mngr/blob/main/libs/mngr_usage/imbue/mngr_usage/docs/cron_recipes.md) for worked examples.
+
+## Donating spare capacity (`mngr donate`)
+
+`mngr donate` is a productized version of the spare-capacity recipe: instead of
+letting idle quota expire, it spends it on a skill. One invocation is a single
+tick — read usage, and *if* there's spare capacity (5h window under budget **and**
+the week under its pace line), launch a headless Claude agent that runs a
+donation skill (default: `document-review`) to completion, then auto-cleans up.
+When there's no spare capacity — or no usage data to judge from — it does nothing
+and says so.
+
+```bash
+# From inside a trusted git repo (the agent is sourced from the current dir):
+mngr donate                       # one tick: donate now if there's spare capacity
+mngr donate --dry-run             # show the decision + numbers, launch nothing
+mngr donate --skill my-skill      # run a different skill (default: document-review)
+```
+
+A single tick spends at most one skill run's worth of quota. To actually *drain*
+spare capacity over time, schedule it — the schedule, not any one tick, is what
+uses up the idle quota:
+
+```bash
+mngr donate --start                    # install a crontab entry (every 10 min by default)
+mngr donate --start --interval-minutes 5
+mngr donate --stop                     # remove it
+```
+
+Notes:
+
+- **Run it from a trusted git repo.** The donation agent is created from the
+  current directory (like the cron recipes' `cd $PROJECT_DIR`); `--start` bakes
+  that directory into the crontab entry.
+- **It needs usage data.** Spare capacity is judged from the account-level
+  snapshot, which is populated by mngr-managed Claude agents. With none recorded
+  recently, `donate` reports "can't tell" and skips rather than guessing.
+- **Logs.** Each run's full event stream is tee'd to
+  `<host_dir>/donate-logs/<agent>-<ts>.jsonl` (scheduled runs append to
+  `cron.log`), so a run survives the agent's auto-destroy for later inspection.
+- **macOS + cron.** For `--start` to actually fire, the cron daemon
+  (`/usr/sbin/cron`) needs Full Disk Access (System Settings → Privacy &
+  Security). A native launchd LaunchAgent avoids this; not built in yet.

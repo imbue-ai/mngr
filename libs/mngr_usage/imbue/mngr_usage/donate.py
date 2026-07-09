@@ -1,15 +1,27 @@
 """``mngr donate`` -- spend spare Claude capacity on a donation skill.
 
-Sibling to ``mngr usage`` in this plugin: it reads the same account-level usage
-snapshot and, when there's capacity likely to go unused, launches a
-non-interactive agent that runs a donation skill (by default the
-``document-review`` skill). The capacity test is a Python port of the
-``spare-capacity.sh`` recipe (see ``mngr help usage_cron_recipes``): spare when
-the 5h window still has budget *and* weekly usage is under the pace line.
+Sibling to ``mngr usage`` in this plugin. One invocation is a single
+check-and-maybe-launch *tick*:
 
-The command does a single check-and-maybe-launch tick; it does not schedule
-itself. Wire it to cron / a LaunchAgent (or the ``scripts/`` recipes) to donate
-idle quota automatically.
+1. Read the account-level usage snapshot (the same one ``mngr usage`` shows).
+2. Decide whether there's *spare capacity* -- a Python port of the
+   ``spare-capacity.sh`` recipe (``mngr help usage_cron_recipes``): spare when
+   the rolling 5h window still has budget *and* the 7d window is under a
+   tapering pace line (:func:`evaluate_capacity`). Missing readings count as
+   "fully used", so a no-data tick never looks spare -- and that case is flagged
+   so the CLI can say "can't tell" rather than "maxed out".
+3. If spare, launch a *headless* Claude agent (:data:`DONATE_AGENT_TYPE`) that
+   runs the donation skill (default ``document-review``) unattended and
+   auto-destroys when done; otherwise do nothing. The agent's stream is tee'd to
+   a durable per-run log under ``<host_dir>/donate-logs/``.
+
+A single tick spends at most one skill run's worth of quota. To drain spare
+capacity over time, ``mngr donate --start`` installs a crontab entry that
+re-runs the tick on an interval (``--stop`` removes it) -- the schedule, not any
+one tick, is what actually uses up the idle quota.
+
+The launch mechanics (why headless, why the specific ``claude`` flags, why we
+pre-clear stale agents/worktrees) are documented at each helper below.
 """
 
 from __future__ import annotations
@@ -80,6 +92,11 @@ class DonateCapacity(FrozenModel):
     """
 
     has_spare: bool = Field(description="Whether there is capacity to spend on a donation agent this tick.")
+    has_usage_data: bool = Field(
+        description="Whether any Claude usage reading was found. When False the percentages below are the "
+        "conservative 'assume fully used' defaults, not real measurements -- so 'no spare' means 'can't "
+        "tell', not 'maxed out'."
+    )
     five_hour_used_percentage: float
     weekly_used_percentage: float
     weekly_elapsed_percentage: float
@@ -104,21 +121,18 @@ def evaluate_capacity(snapshot: UsageSnapshot | None, now: int) -> DonateCapacit
     Mirrors ``spare-capacity.sh``: spare when the 5h window is under
     ``FIVE_HOUR_USED_CEILING`` used *and* weekly usage is under
     :func:`weekly_pace_line`. Absent windows/fields are treated as fully used
-    (conservative), so ``None``/blank data yields ``has_spare=False``.
+    (conservative), so ``None``/blank data yields ``has_spare=False`` -- but
+    ``has_usage_data`` records whether that came from a real reading or the
+    default, so the caller can say "can't tell" instead of "maxed out".
     """
     five_hour = snapshot.windows.get(FIVE_HOUR_WINDOW) if snapshot is not None else None
     seven_day = snapshot.windows.get(SEVEN_DAY_WINDOW) if snapshot is not None else None
 
-    five_hour_used = (
-        five_hour.used_percentage
-        if five_hour is not None and five_hour.used_percentage is not None
-        else _ASSUME_USED_WHEN_UNKNOWN
-    )
-    weekly_used = (
-        seven_day.used_percentage
-        if seven_day is not None and seven_day.used_percentage is not None
-        else _ASSUME_USED_WHEN_UNKNOWN
-    )
+    five_hour_has_reading = five_hour is not None and five_hour.used_percentage is not None
+    weekly_has_reading = seven_day is not None and seven_day.used_percentage is not None
+
+    five_hour_used = five_hour.used_percentage if five_hour_has_reading else _ASSUME_USED_WHEN_UNKNOWN
+    weekly_used = seven_day.used_percentage if weekly_has_reading else _ASSUME_USED_WHEN_UNKNOWN
     weekly_elapsed = 0.0
     if seven_day is not None:
         _, elapsed_percentage = derive_elapsed(seven_day, now)
@@ -129,6 +143,7 @@ def evaluate_capacity(snapshot: UsageSnapshot | None, now: int) -> DonateCapacit
     has_spare = five_hour_used < FIVE_HOUR_USED_CEILING and weekly_used < pace
     return DonateCapacity(
         has_spare=has_spare,
+        has_usage_data=five_hour_has_reading or weekly_has_reading,
         five_hour_used_percentage=five_hour_used,
         weekly_used_percentage=weekly_used,
         weekly_elapsed_percentage=weekly_elapsed,
@@ -139,9 +154,10 @@ def evaluate_capacity(snapshot: UsageSnapshot | None, now: int) -> DonateCapacit
 # The donation agent runs headless (``claude --print``) on purpose: a plain
 # interactive ``claude`` agent blocks on the first tool-permission prompt, which
 # hangs ``mngr create`` and spends none of the quota. A headless agent streams
-# and auto-destroys after one pass (so repeat ticks never collide on the name),
-# and ``--dangerously-skip-permissions`` lets it actually run the skill's
-# commands -- in ``--print`` mode gated tools are otherwise denied, not prompted.
+# and auto-destroys after a successful pass, so a completed tick leaves nothing
+# behind (a tick that dies mid-way can, which is what the pre-launch cleanup in
+# `donate` handles). ``--dangerously-skip-permissions`` (below) is what lets it
+# actually run the skill's commands unattended.
 DONATE_AGENT_TYPE = "headless_claude"
 # ``--output-format stream-json`` (which Claude requires ``--verbose`` to pair
 # with ``--print``) is not optional here: mngr's headless runner reads the
@@ -390,6 +406,7 @@ def _result_data(capacity: DonateCapacity, opts: DonateCliOptions) -> dict[str, 
     """Structured fields shared by every output branch (JSON + human)."""
     return {
         "has_spare": capacity.has_spare,
+        "has_usage_data": capacity.has_usage_data,
         "five_hour_used_percentage": round(capacity.five_hour_used_percentage, 1),
         "weekly_used_percentage": round(capacity.weekly_used_percentage, 1),
         "weekly_elapsed_percentage": round(capacity.weekly_elapsed_percentage, 1),
@@ -497,17 +514,23 @@ def donate(ctx: click.Context, **kwargs: Any) -> None:
     data = _result_data(capacity, opts)
 
     if not capacity.has_spare:
+        if not capacity.has_usage_data:
+            since_hours = plugin_config.since_seconds // 3600
+            message = (
+                f"No Claude usage data in the last {since_hours}h, so spare capacity can't be judged -- "
+                f"skipping. (Usage is recorded by mngr-managed Claude agents; run one, e.g. "
+                f"`mngr create warmup claude`, to populate it.)"
+            )
+            action = "no_data"
+        else:
+            message = (
+                f"No spare capacity right now (5h used {data['five_hour_used_percentage']}%, "
+                f"weekly used {data['weekly_used_percentage']}% vs pace {data['weekly_pace_line']}%); skipping."
+            )
+            action = "skipped"
         emit_operator_result(
             "donate",
-            [
-                OperatorResultPart.shown(
-                    f"No spare capacity right now (5h used {data['five_hour_used_percentage']}%, "
-                    f"weekly used {data['weekly_used_percentage']}% vs pace "
-                    f"{data['weekly_pace_line']}%); skipping.",
-                    action="skipped",
-                    **data,
-                )
-            ],
+            [OperatorResultPart.shown(message, action=action, **data)],
             output_opts.output_format,
         )
         return
