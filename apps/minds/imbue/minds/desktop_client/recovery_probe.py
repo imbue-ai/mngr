@@ -198,7 +198,7 @@ class HostHealthResponse(FrozenModel):
         default=(), description="Ordered probe results to render in the diagnostics list."
     )
     dispatch_tier: DispatchTier = Field(
-        default=DispatchTier.HOST_UNRESPONSIVE,
+        default=DispatchTier.INDETERMINATE,
         description="Restart-tier classification derived from probe answers.",
     )
     unreachable_reason: str = Field(
