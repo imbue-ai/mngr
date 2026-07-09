@@ -1,13 +1,20 @@
+from collections.abc import Callable
 from pathlib import Path
+from threading import Lock
 
 import pytest
 
+from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.base_agent import SendKeysAgent
 from imbue.mngr.api.create import CreateAgentOptions
 from imbue.mngr.api.find import find_all_agents
 from imbue.mngr.api.message import MessageResult
+from imbue.mngr.api.message import _send_message_to_agent
 from imbue.mngr.api.message import send_message_to_agents
+from imbue.mngr.cli.testing import create_test_agent
+from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
@@ -280,6 +287,61 @@ def test_send_message_to_agents_revives_done_agent_when_start_desired(
 
     assert "revive-done-test" in result.successful_agents
     assert error_agents == []
+
+
+class _ReviveFailingAgent(BaseAgent[AgentTypeConfig]):
+    """Test agent that reports DONE and whose revive fails with AgentStartError."""
+
+    def get_lifecycle_state(self) -> AgentLifecycleState:
+        return AgentLifecycleState.DONE
+
+    def wait_for_ready_signal(
+        self,
+        is_creating: bool,
+        start_action: Callable[[], None],
+        timeout: float | None = None,
+    ) -> None:
+        raise AgentStartError(str(self.name), "agent did not become ready")
+
+
+def test_send_message_records_failure_when_revive_fails(
+    temp_work_dir: Path,
+    local_provider: LocalProviderInstance,
+) -> None:
+    """A failed revive must land in failed_agents, not vanish into a host-level log.
+
+    If reviving a DONE agent raises (e.g. the ready-wait times out), the failure has
+    to be recorded against the agent so `mngr message --start` reports it and exits
+    non-zero, instead of exiting 0 with the agent missing from both result lists.
+    """
+    agent = create_test_agent(
+        local_provider,
+        temp_work_dir,
+        agent_config=None,
+        agent_type=None,
+        extra_data=None,
+        agent_class=_ReviveFailingAgent,
+    )
+
+    result = MessageResult()
+    errors: list[tuple[str, str]] = []
+    _send_message_to_agent(
+        agent=agent,
+        host=agent.host,
+        message_content="hello",
+        result=result,
+        result_lock=Lock(),
+        error_behavior=ErrorBehavior.CONTINUE,
+        is_start_desired=True,
+        on_success=None,
+        on_error=lambda name, error: errors.append((name, error)),
+    )
+
+    assert result.successful_agents == []
+    assert result.failed_agents == [
+        (str(agent.name), f"Failed to start agent {agent.name}: agent did not become ready")
+    ]
+    assert errors == result.failed_agents
 
 
 @pytest.mark.tmux

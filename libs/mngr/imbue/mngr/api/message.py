@@ -206,10 +206,23 @@ def _send_message_to_agent(
     lifecycle_state = agent.get_lifecycle_state()
     if lifecycle_state in (AgentLifecycleState.STOPPED, AgentLifecycleState.DONE):
         if is_start_desired:
-            if lifecycle_state == AgentLifecycleState.DONE:
-                revive_done_agent(agent, host)
-            else:
-                ensure_agent_started(agent, host, is_start_desired=True)
+            # Record a failed (re)start against this agent just like a failed send,
+            # so it shows up in the result (and the exit code) instead of only in a
+            # host-level warning log.
+            try:
+                if lifecycle_state == AgentLifecycleState.DONE:
+                    revive_done_agent(agent, host)
+                else:
+                    ensure_agent_started(agent, host, is_start_desired=True)
+            except MngrError as e:
+                error_msg = str(e)
+                with result_lock:
+                    result.failed_agents.append((agent_name, error_msg))
+                if on_error:
+                    on_error(agent_name, error_msg)
+                if error_behavior == ErrorBehavior.ABORT:
+                    raise MngrError(error_msg) from e
+                return
         else:
             error_msg = f"Agent is not running (state: {lifecycle_state.value})"
             with result_lock:
