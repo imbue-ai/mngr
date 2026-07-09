@@ -21,8 +21,8 @@ import threading
 from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
-from contextlib import ExitStack
 from contextlib import contextmanager
+from contextlib import nullcontext
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -1105,9 +1105,9 @@ def destroy_pool_hosts_in_parallel(
     outcome_by_id: dict[str, dict[str, Any]] = {}
     outcomes_lock = threading.Lock()
     destroy_semaphore = threading.Semaphore(max_concurrency)
-    with ExitStack() as stack:
-        # A row-only drop never SSHes a box, so it must not require POOL_SSH_PRIVATE_KEY.
-        private_key_path = None if is_row_drop_only else stack.enter_context(_pool_private_key_path())
+    # A row-only drop never SSHes a box, so it must not require POOL_SSH_PRIVATE_KEY.
+    key_path_context = nullcontext(None) if is_row_drop_only else _pool_private_key_path()
+    with key_path_context as private_key_path:
         threads = [
             ObservableThread(
                 target=_destroy_into_outcomes,
