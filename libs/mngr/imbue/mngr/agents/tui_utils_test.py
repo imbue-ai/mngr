@@ -207,9 +207,11 @@ def test_send_enter_via_hook_returns_when_signal_received(signal_agent: _ProbeAg
     )
 
     try:
-        # Simulate the UserPromptSubmit hook firing the wait-for after a short delay.
+        # Simulate the UserPromptSubmit hook firing the wait-for. The delay must
+        # outlast the stale-signal drain, which by design consumes anything on the
+        # channel before Enter is sent; a real hook can only fire after Enter.
         signal_agent.host.execute_idempotent_command(
-            f"( sleep 0.1 && tmux wait-for -S '{wait_channel}' ) &",
+            f"( sleep 0.5 && tmux wait-for -S '{wait_channel}' ) &",
             timeout_seconds=1.0,
         )
 
@@ -217,9 +219,48 @@ def test_send_enter_via_hook_returns_when_signal_received(signal_agent: _ProbeAg
             signal_agent,
             tmux_target,
             wait_channel=wait_channel,
-            timeout_seconds=2.0,
+            timeout_seconds=3.0,
             accept_marker_command=None,
         )
+    finally:
+        signal_agent.host.execute_idempotent_command(
+            f"tmux kill-session -t '={session_name}' 2>/dev/null",
+            timeout_seconds=5.0,
+        )
+
+
+@pytest.mark.tmux
+@pytest.mark.allow_warnings
+def test_send_enter_via_hook_ignores_stale_latched_signal(signal_agent: _ProbeAgent) -> None:
+    """A signal left on the channel by an earlier send must not confirm this one.
+
+    tmux latches a ``wait-for -S`` sent while no waiter is registered: the next
+    ``wait-for`` returns immediately. Without draining, a leftover signal would
+    confirm submission before Enter was even processed.
+    """
+    session_name = f"{signal_agent.mngr_ctx.config.prefix}{signal_agent.name}"
+    tmux_target = TmuxWindowTarget(session_name=session_name, window=0)
+    wait_channel = f"mngr-submit-stale-{session_name}"
+
+    signal_agent.host.execute_idempotent_command(
+        f"tmux new-session -d -s '{session_name}' 'bash'",
+        timeout_seconds=5.0,
+    )
+
+    try:
+        signal_agent.host.execute_idempotent_command(
+            f"tmux wait-for -S '{wait_channel}'",
+            timeout_seconds=5.0,
+        )
+
+        with pytest.raises(SendMessageError, match="Timeout waiting for message submission signal"):
+            send_enter_via_tmux_wait_for_hook(
+                signal_agent,
+                tmux_target,
+                wait_channel=wait_channel,
+                timeout_seconds=1.0,
+                accept_marker_command=None,
+            )
     finally:
         signal_agent.host.execute_idempotent_command(
             f"tmux kill-session -t '={session_name}' 2>/dev/null",

@@ -81,7 +81,7 @@ Categories B, C, D, and E are the ones users cannot define: they are Claude Code
 | **`enqueue` / `dequeue`** | session JSONL, `type=queue-operation` | At accept, **only if the agent is busy** | `enqueue` carries the raw `content` before validity is checked. |
 | **Rejection entry** | session JSONL, `type=system, subtype=informational, level=warning`, `content="Unknown command: /x"` | At accept | Structured. The English string is for rendering only; match on `type` + `level`. |
 | **Local-command entry** | session JSONL, `type=system, subtype=local_command`, `content="<command-name>…"` then `"<local-command-stdout>…"` | **At completion** | An older shape (`type=user`, preceded by an `isMeta` `<local-command-caveat>`) also occurs; match the `<command-name>` substring, not the `type`. |
-| **Hook events** | dispatched to configured hooks | varies | Full set in the binary: `CwdChanged, Elicitation, ElicitationResult, FileChanged, MessageDisplay, Notification, PermissionDenied, PermissionRequest, PostToolBatch, PostToolUse, PostToolUseFailure, PreToolUse, SessionStart, Setup, Stop, SubagentStart, SubagentStop, UserPromptExpansion, UserPromptSubmit, WorktreeCreate`. **There is no `SlashCommand` hook.** |
+| **Hook events** | dispatched to configured hooks | varies | Full set in the binary: `CwdChanged, Elicitation, ElicitationResult, FileChanged, MessageDisplay, Notification, PermissionDenied, PermissionRequest, PostToolBatch, PostToolUse, PostToolUseFailure, PreToolUse, SessionStart, Setup, Stop, SubagentStart, SubagentStop, UserPromptExpansion, UserPromptSubmit, WorktreeCreate`. **There is no `SlashCommand` hook.** See "Which hooks fire" below. |
 | **Pane rendering** | tmux `capture-pane` | continuously | Prompt glyph, echoed messages, modal panels. See ISSUE-10: not a reliable oracle for buffer contents. |
 
 ### Produced by mngr
@@ -96,6 +96,37 @@ Installed into Claude's settings by `build_readiness_hooks_config` (`libs/mngr_c
 | `claude_session_id_history` (append `"<sid> <source>"`) | `SessionStart` hook | every session start, with its source | (original) |
 | `logs/claude_transcript/events.jsonl` | `stream_transcript.sh` tailing Claude's session JSONLs | continuously | Evan Ryan Gunter |
 | host activity events | `UserPromptSubmit` / idle hooks | lifecycle transitions | (original) |
+
+### Which hooks fire
+
+Measured by registering a logging handler for **all twenty** hook events via `claude --settings`, then submitting one input of each category:
+
+| Input | Hooks that fired |
+|---|---|
+| normal prompt | `UserPromptSubmit`, `MessageDisplay`, `Stop` |
+| `/zzztypohook` (invalid) | **none** |
+| `/cost` (modal) | **none** |
+| `/model` (modal) | **none** |
+| `/effort high` (local) | **none** |
+| `/clear` | `SessionStart` only |
+
+`/login` is `type:"local-jsx"` in the binary, the same class as `/cost` and `/model`, so it fires nothing either. **No hook exists that observes a TUI-local command.** `MessageDisplay` fires only for model-bound prompts, so it is not a receipt signal.
+
+### Modality is a property of the invocation, not the command name
+
+Claude Code classifies commands as `local-jsx` (75, renders a panel), `local` (37), and `prompt` (18). But whether an invocation *wedges the input row* depends on its arguments:
+
+| Invocation | Input row after submit |
+|---|---|
+| `/effort` | gone (modal) |
+| `/effort high` | present |
+| `/model` | gone (modal) |
+| `/model opus` | present |
+| `/add-dir` | gone (modal) |
+| `/status`, `/usage`, `/mcp`, `/plugin` | gone (modal) |
+| `/context`, `/agents` | present |
+
+**Warning:** a hardcoded reject-list keyed on the command *name* would therefore reject `/effort high` and `/model opus`, which work correctly today. Any rejection must be keyed on the observed effect (no input row after a bounded settle window), not on the name.
 
 ### Consumed by the send path
 
@@ -137,19 +168,54 @@ Ordered by severity. Each was reproduced against a real agent unless marked othe
 
 ### ISSUE-1: `timeout` is missing on macOS, and the failure is silent
 
-`_build_signal_only_command` and `_build_signal_or_marker_command` both run `timeout <n> tmux wait-for …`. GNU `timeout` is not present on a stock macOS. The command returns 127, `>/dev/null 2>&1` swallows it, `&&` short-circuits, and -- critically -- **the tmux waiter is never registered**, so when the `UserPromptSubmit` hook fires `tmux wait-for -S`, the signal wakes nobody and is lost.
+**Status: fixed in this branch.**
 
-Consequence: on any host without GNU coreutils, the hook half of the race is dead. Combined with ISSUE-3, **every** message to an idle agent times out at 90s, including a plain prompt.
+`_build_signal_only_command` and `_build_signal_or_marker_command` both ran `timeout <n> tmux wait-for …`. GNU `timeout` is not present on a stock macOS. The command returns 127, `>/dev/null 2>&1` swallows it, `&&` short-circuits, and -- critically -- **the tmux waiter is never registered**, so when the `UserPromptSubmit` hook fires `tmux wait-for -S`, the signal wakes nobody.
+
+Consequence: on any host without GNU coreutils, the hook half of the race is dead. Combined with ISSUE-3, **every** message to an idle agent timed out at 90s, including a plain prompt.
 
 Evidence: `command -v timeout` -> missing; the exact construct writes no sentinel (`rc=127`), and writes one when a `timeout` shim is placed on `PATH`. tmux signalling itself round-trips correctly. A plain prompt that Claude demonstrably answered (34 transcript events, `assistant` reply) was reported as `Failed to send message` after 93.6s.
 
+No single binary bounds a command's runtime on both platforms: `timeout` is GNU-only, and macOS's `gtimeout` requires `brew install coreutils` -- unacceptable for a tool installed from PyPI. The fix uses plain bash, which these commands already run under: the waiter is backgrounded and raced against a `sleep`-then-`kill -9`, and `wait` reports the outcome. See ISSUE-1b for why the kill must be `SIGKILL`, and why the waiter must not be wrapped in a subshell (killing the subshell would orphan the `tmux wait-for` client, which stays registered on the channel and steals a later submission's signal).
+
+Measured after the fix, on the same macOS host where every case previously failed at ~93s:
+
+| message | before | after |
+|---|---|---|
+| `reply with exactly the word ok` | exit 1, 93.6s | exit 0, 2.1s |
+| `/clear` | exit 1, 93.7s | exit 0, 2.1s |
+| `/clear` then a prompt | exit 1 | exit 0, 4.0s, no concatenation |
+
+### ISSUE-1b: tmux latches `wait-for` signals, so a stale signal can confirm the wrong send
+
+**Status: fixed in this branch.**
+
+The code asserted the opposite. `_build_signal_only_command`'s docstring read "signals wake exactly one waiter; a signal with none registered is lost". Measured:
+
+```
+tmux wait-for -S chan     # no waiter registered
+tmux wait-for chan        # returns immediately, rc=0
+```
+
+tmux **remembers** the signal and the next `wait-for` consumes it. A signal left on the channel by an earlier submission -- one that timed out, or whose hook fired after mngr gave up -- would therefore confirm the *next* `mngr message` instantly, before Enter is even processed. Because ISSUE-1 stops the waiter from ever registering, this hazard is currently masked; fixing ISSUE-1 alone would expose it.
+
+The fix drains the channel before registering the waiter. A regression test (`test_send_enter_via_hook_ignores_stale_latched_signal`) latches the channel and asserts the send still times out.
+
+**Note:** the drain has a cost. A legitimate signal that lands inside the drain window is consumed. This cannot happen for the send's own message (the drain completes before Enter is sent), but a *concurrent* submission's signal can be eaten -- turning a false success into a false timeout, which is the safer failure.
+
+**Warning:** `tmux wait-for` handles `SIGTERM` and exits **0**, which is indistinguishable from being woken. Any deadline enforcement must use `SIGKILL` (exit 137), or a timed-out waiter reads as a successful submission.
+
 ### ISSUE-2: `tac` is missing on macOS; its stderr is injected into the agent's input box
 
-`libs/mngr/imbue/mngr/resources/mngr_transcript_lib.sh:105` runs `done < <(tac "$session_file")` as part of transcript offset reconciliation (Evan Ryan Gunter, 2026-05-18). `tac` does not exist on macOS.
+**Status: fixed in this branch.**
 
-Two consequences. First, the error text `mngr_transcript_lib.sh: line 82: tac: command not found` is printed into the agent's terminal and **paints over the Claude input row**. Second, offset reconciliation is the mechanism that prevents re-emitting lines; duplicated `Unknown command` entries were observed in `events.jsonl`, which is consistent with reconciliation failing (**suspected, not proven**).
+`mngr_transcript_lib.sh` ran `done < <(tac "$session_file")` as part of transcript offset reconciliation (Evan Ryan Gunter, 2026-05-18). `tac` does not exist on macOS.
+
+Three consequences. First, the error text `mngr_transcript_lib.sh: line 82: tac: command not found` is printed into the agent's terminal and **paints over the Claude input row**. Second, that pollution makes `wait_for_paste_visible` fail, so the *next* `mngr message` dies after 16.7s -- a distinct failure from the 90s submission timeout. Third, offset reconciliation is what prevents re-emitting lines; duplicated `Unknown command` entries were observed in `events.jsonl`, consistent with reconciliation failing (**suspected, not proven**).
 
 `events.jsonl` is the file the current accept marker reads.
+
+The fix is a `mngr_transcript_reverse_lines` helper that prefers `tac` and falls back to `tail -r` (BSD). Both stream, so neither buffers the file. This follows the precedent set when `tail --follow=name` was replaced with the portable `tail -F` in `mngr_lima`.
 
 ### ISSUE-3: the accept marker cannot fire on an idle agent
 
@@ -184,6 +250,8 @@ mngr message -m "/zzzblocked2" -> exit 1   after 31.6s                never deli
 31.6s is `wait_for_tui_ready`'s 30s timeout. The agent stays wedged until someone presses Escape. `_preflight_send_message` does not catch it because these panels are not in `_DIALOG_INDICATORS`, so the send dies in a generic timeout rather than failing fast with a reason.
 
 This is the strongest argument that **delivered** is not a sufficient postcondition for `mngr message`.
+
+Rejecting these commands up front is a net improvement over timing out and wedging -- but it cannot be keyed on the command name, because modality depends on the arguments (`/model` wedges, `/model opus` does not). The reject condition must be the observed effect: no input row after a bounded settle window. Recovery is a single `Escape`, which is what a human does.
 
 ### ISSUE-6: busy and idle disagree about the same input
 

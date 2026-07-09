@@ -39,6 +39,20 @@ _SEND_ENTER_NO_SIGNAL_PER_ATTEMPT_TIMEOUT_SECONDS: Final[float] = 2.0
 
 _NON_ALNUM_RE: Final[re.Pattern[str]] = re.compile(r"[^a-z0-9]")
 
+# How long to wait for a stale latched signal before concluding the channel is clean.
+_DRAIN_STALE_SIGNAL_SECONDS: Final[float] = 0.15
+
+# tmux remembers a ``wait-for -S`` sent while no waiter is registered: the next
+# ``wait-for`` on that channel returns immediately, consuming the latch. A signal
+# left over from an earlier submission would otherwise confirm this one before
+# Enter is even processed, so the channel is drained before a waiter is registered.
+# Shell locals are underscore-prefixed to stay clear of the callers' names.
+_DRAIN_STALE_SIGNAL: Final[str] = (
+    'tmux wait-for "$1" & _d=$!; '
+    f"( sleep {_DRAIN_STALE_SIGNAL_SECONDS}; kill -9 $_d 2>/dev/null ) & _dk=$!; "
+    "wait $_d 2>/dev/null; kill -9 $_dk 2>/dev/null; "
+)
+
 
 def _normalize_for_match(text: str) -> str:
     """Strip non-alphanumeric characters and lowercase for fuzzy matching."""
@@ -303,17 +317,25 @@ def _send_enter_and_wait_for_signal(
 def _build_signal_only_command(full_timeout: float, wait_channel: str, tmux_target: TmuxWindowTarget) -> str:
     """The original behavior: send Enter, then block on the hook's wait-for channel.
 
-    Used for TUIs with no acceptance-marker command to watch. The waiter is started (in the
-    foreground here) before Enter is sent from a backgrounded subshell, so the
-    signal cannot fire before a waiter is registered (signals wake exactly one
-    waiter; a signal with none registered is lost).
+    Used for TUIs with no acceptance-marker command to watch. The channel is
+    drained of any stale latched signal, then a waiter is registered before
+    Enter is sent from a backgrounded subshell.
+
+    The waiter is bounded by a backgrounded ``sleep``-then-``kill`` rather than
+    ``timeout(1)``, which GNU coreutils provides but macOS does not ship. The
+    kill must be SIGKILL: ``tmux wait-for`` handles SIGTERM and exits 0, which is
+    indistinguishable from being woken by the signal. Under SIGKILL ``wait``
+    reports 137, so a timeout is a non-zero exit.
     """
-    return (
-        f"bash -c '"
-        f'( sleep 0.1 && tmux send-keys -t "$1" Enter ) & '
-        f'timeout {full_timeout} tmux wait-for "$0"'
-        f"' {shlex.quote(wait_channel)} {tmux_target.as_shell_arg()}"
+    script = (
+        _DRAIN_STALE_SIGNAL + 'tmux wait-for "$1" & _w=$!; '
+        f"( sleep {full_timeout}; kill -9 $_w 2>/dev/null ) & _k=$!; "
+        '( sleep 0.1 && tmux send-keys -t "$2" Enter ) & '
+        "wait $_w; _rc=$?; "
+        "kill -9 $_k 2>/dev/null; "
+        "exit $_rc"
     )
+    return f"bash -c {shlex.quote(script)} _ {shlex.quote(wait_channel)} {tmux_target.as_shell_arg()}"
 
 
 def _build_signal_or_marker_command(
@@ -325,13 +347,16 @@ def _build_signal_or_marker_command(
     """Succeed as soon as EITHER the hook signal fires OR a fresh acceptance marker appears.
 
     A single remote command so the two conditions are watched concurrently with
-    no dangling process: it registers the (full-timeout) hook waiter in the
-    background -- which writes a sentinel file on success, preserving the
-    register-before-Enter ordering so the signal is never missed (which matters
-    for submissions that only ever fire the signal, never recording a marker)
-    -- sends Enter, then polls both the sentinel and the acceptance marker until
-    either confirms or the deadline passes. Exit 0 = confirmed, non-zero =
-    timeout.
+    no dangling process: it drains any stale latched signal, registers the hook
+    waiter in the background -- which writes a sentinel file on success, before
+    Enter is sent, so the signal is never missed (which matters for submissions
+    that only ever fire the signal, never recording a marker) -- sends Enter,
+    then polls both the sentinel and the acceptance marker until either confirms
+    or the deadline passes. Exit 0 = confirmed, non-zero = timeout.
+
+    The waiter needs no timeout of its own: the poll loop below owns the
+    deadline, and the EXIT trap reaps the waiter on every exit path. This also
+    keeps the command free of ``timeout(1)``, which macOS does not ship.
 
     ``accept_marker_command`` is the agent-supplied shell snippet that prints the
     agent's latest acceptance-marker token (empty if none yet). A baseline is
@@ -349,9 +374,18 @@ def _build_signal_or_marker_command(
         # outlives a fast marker-win and would recreate "$sig" -- leaking the
         # temp file -- when the hook finally fires). Runs exactly once on exit.
         'trap \'p="$(jobs -p)"; [ -n "$p" ] && kill $p 2>/dev/null; rm -f "$sig"\' EXIT; '
-        f'base="$({accept_marker_command})"; '
-        # Register the hook waiter first (full timeout), sentinel on success.
-        f'( timeout {full_timeout} tmux wait-for "$1" >/dev/null 2>&1 && echo 1 > "$sig" ) & '
+        f'base="$({accept_marker_command})"; ' + _DRAIN_STALE_SIGNAL +
+        # Register the hook waiter first; sentinel on success. The waiter runs
+        # as a direct child of the subshell, and the subshell's EXIT/TERM trap
+        # SIGKILLs it, so the outer trap can never leave a `tmux wait-for`
+        # orphaned -- an orphan would still be registered on the channel and
+        # would steal a later submission's signal. Only a clean wake (exit 0)
+        # writes the sentinel; a SIGKILLed waiter exits 137.
+        "( trap 'kill -9 $_c 2>/dev/null' EXIT TERM; "
+        'tmux wait-for "$1" & _c=$!; '
+        f"( sleep {full_timeout}; kill -9 $_c 2>/dev/null ) & _ck=$!; "
+        "wait $_c; _r=$?; kill -9 $_ck 2>/dev/null; "
+        '[ "$_r" -eq 0 ] && echo 1 > "$sig" ) & '
         # Then submit, after a beat so the waiter is registered.
         '( sleep 0.1 && tmux send-keys -t "$2" Enter ) & '
         f'end="$(( $(date +%s) + {int(full_timeout) + 1} ))"; '

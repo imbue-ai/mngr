@@ -74,11 +74,23 @@ mngr_transcript_build_id_set() {
     done < "$output_file"
 }
 
+# Stream the lines of FILE in reverse order.
+#
+# GNU coreutils provides `tac`; BSD (macOS) provides `tail -r` instead. Both
+# stream, so neither buffers the whole file.
+mngr_transcript_reverse_lines() {
+    if command -v tac >/dev/null 2>&1; then
+        tac "$1"
+    else
+        tail -r "$1"
+    fi
+}
+
 # Reverse-scan SESSION_FILE to find the last emitted line.
 #
-# Walks the file backwards (via `tac`) and returns the 1-indexed line number
-# whose FIELD value is already in _MNGR_TRANSCRIPT_ID_SET. Returns 0 if no
-# already-emitted line is found.
+# Walks the file backwards and returns the 1-indexed line number whose FIELD
+# value is already in _MNGR_TRANSCRIPT_ID_SET. Returns 0 if no already-emitted
+# line is found.
 mngr_transcript_reconcile_offset() {
     local session_file="$1"
     local field="$2"
@@ -102,7 +114,7 @@ mngr_transcript_reconcile_offset() {
             echo "$found"
             return 0
         fi
-    done < <(tac "$session_file")
+    done < <(mngr_transcript_reverse_lines "$session_file")
 
     echo 0
 }
