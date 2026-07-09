@@ -1520,6 +1520,11 @@ kill -TERM 1
                         "Stop the host first to restore from a snapshot.",
                         host_id,
                     )
+                # Install the (possibly freshly reconciled) Host in the cache so
+                # a stale cached Host on a dead port is disconnected instead of
+                # being served by later get_host calls (mirrors get_host and
+                # discover_hosts).
+                self._evict_cached_host(host_id, replacement=host_obj)
                 return host_obj
 
         # Check for failed host
