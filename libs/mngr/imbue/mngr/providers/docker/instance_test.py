@@ -1424,3 +1424,33 @@ def test_port_reconciliation_invalidates_cached_host_with_stale_port(
     assert healed_host is not None
     assert healed_host is not stale_host
     assert _connector_ssh_port(healed_host) == _LIVE_SSH_PORT
+
+
+def test_port_reconciliation_keeps_recorded_port_when_live_mapping_unreadable(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """An unreadable live port mapping keeps the recorded port and record intact.
+
+    Reconciliation is best-effort healing: a container whose port mapping
+    cannot be read (e.g. it stopped in the window since the caller's status
+    check) must not break paths that previously worked, so the connection
+    falls back to the recorded port, the record is not rewritten, and a
+    warning is logged.
+    """
+    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
+    _write_host_record_with_ssh_port(provider, HOST_ID_A, _RECORDED_STALE_SSH_PORT)
+    container_without_mapping = _FakePortedContainer(HOST_ID_A, _LIVE_SSH_PORT)
+    container_without_mapping.ports = {}
+
+    with capture_loguru() as log_output:
+        host = provider._create_host_from_container(_as_sdk_container(container_without_mapping))
+
+    assert host is not None
+    assert _connector_ssh_port(host) == _RECORDED_STALE_SSH_PORT
+
+    stored_record = provider._host_store.read_host_record(HostId(HOST_ID_A), use_cache=False)
+    assert stored_record is not None
+    assert stored_record.ssh_port == _RECORDED_STALE_SSH_PORT
+
+    assert "Could not read live SSH port" in log_output.getvalue()
