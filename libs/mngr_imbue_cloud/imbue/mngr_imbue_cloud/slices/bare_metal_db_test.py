@@ -138,7 +138,7 @@ def test_server_from_row_round_trips() -> None:
 class _FakeCursor:
     """Minimal cursor that returns scripted rows and records executed SQL (no real DB)."""
 
-    def __init__(self, rows: list[tuple], rowcount: int = 0) -> None:
+    def __init__(self, rows: list[tuple], rowcount: int) -> None:
         self._rows = rows
         self.rowcount = rowcount
         self.executed_sql: str | None = None
@@ -164,7 +164,7 @@ class _FakeCursor:
 class _FakeConn:
     """Minimal connection yielding a scripted cursor (no real DB)."""
 
-    def __init__(self, rows: list[tuple], rowcount: int = 0) -> None:
+    def __init__(self, rows: list[tuple], rowcount: int) -> None:
         self._cursor = _FakeCursor(rows, rowcount)
         self.commit_count = 0
 
@@ -176,16 +176,23 @@ class _FakeConn:
 
 
 def test_fetch_unleased_slice_teardown_row_ids_maps_rows_to_strings() -> None:
-    row_ids = fetch_unleased_slice_teardown_row_ids(_FakeConn([("row-1",), ("row-2",)]))
+    fake_conn = _FakeConn([("row-1",), ("row-2",)], rowcount=0)
+    eligible = destroy_eligible_pool_host_statuses(is_leased_destroy_allowed=False)
+    row_ids = fetch_unleased_slice_teardown_row_ids(fake_conn, eligible)
     assert row_ids == ["row-1", "row-2"]
+    # The status filter is the SAME claimable set the destroy uses, passed as a bind
+    # parameter -- so a selected row is always claimable and the predicates can't drift.
+    assert fake_conn._cursor.executed_params == (list(eligible),)
 
 
-def test_unleased_teardown_query_excludes_only_leased() -> None:
-    # Leased slices are torn down by their agent's release path and must be excluded.
-    # 'removing' rows ARE included: a row stranded mid-teardown (crashed release or a
-    # destroy whose box was unreachable) must not leak when the env is destroyed.
-    assert "p.status != 'leased'" in _SELECT_UNLEASED_SLICE_TEARDOWN_ROW_IDS_SQL
-    assert "removing" not in _SELECT_UNLEASED_SLICE_TEARDOWN_ROW_IDS_SQL
+def test_unleased_teardown_query_filters_by_the_claimable_status_set() -> None:
+    # Leased slices are torn down by their agent's release path and must be excluded --
+    # which falls out of the claimable set (it omits 'leased' without --force). 'removing'
+    # rows ARE included: a row stranded mid-teardown (crashed release or a destroy whose
+    # box was unreachable) must not leak when the env is destroyed.
+    assert "p.status = ANY(%s)" in _SELECT_UNLEASED_SLICE_TEARDOWN_ROW_IDS_SQL
+    assert "leased" not in destroy_eligible_pool_host_statuses(is_leased_destroy_allowed=False)
+    assert "removing" in destroy_eligible_pool_host_statuses(is_leased_destroy_allowed=False)
     # The inner JOIN on bare_metal_server_id already restricts to slice rows.
     assert "JOIN bare_metal_servers" in _SELECT_UNLEASED_SLICE_TEARDOWN_ROW_IDS_SQL
 
@@ -222,13 +229,12 @@ def test_claim_pool_host_for_removal_reports_whether_the_row_was_claimed() -> No
 def test_fetch_pool_host_destroy_target_maps_null_box_columns() -> None:
     # A row whose box record was deleted still comes back (LEFT JOIN), with null box
     # columns, so the caller can report it precisely instead of erroring on lookup.
-    target = fetch_pool_host_destroy_target(_FakeConn([("row-1", "mngr-slice-dev-a", None, None, None)]), "row-1")
+    target = fetch_pool_host_destroy_target(_FakeConn([("mngr-slice-dev-a", None, None, None)], rowcount=0), "row-1")
     assert target is not None
-    assert target.pool_host_row_id == "row-1"
     assert target.lima_instance_name == "mngr-slice-dev-a"
     assert target.box_public_address is None
     assert target.lima_service_user is None
-    assert fetch_pool_host_destroy_target(_FakeConn([]), "row-gone") is None
+    assert fetch_pool_host_destroy_target(_FakeConn([], rowcount=0), "row-gone") is None
 
 
 def test_count_slices_counts_removing_rows_as_occupied() -> None:

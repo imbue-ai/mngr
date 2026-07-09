@@ -81,6 +81,7 @@ from imbue.mngr_imbue_cloud.slices.bare_metal import count_slice_resource_names
 from imbue.mngr_imbue_cloud.slices.bare_metal import find_server_capacity_by_id
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_disk_name
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_instance_name
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import POOL_HOST_STATUS_LEASED
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import build_slice_pool_host_insert_values
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import claim_pool_host_for_removal
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import delete_pool_host_row
@@ -958,6 +959,15 @@ DESTROY_OUTCOME_ALREADY_GONE: Final[str] = "already_gone"
 DESTROY_OUTCOME_FAILED: Final[str] = "failed"
 
 
+@pure
+def _already_gone_outcome(pool_host_id: str) -> dict[str, Any]:
+    return {
+        "pool_host_id": pool_host_id,
+        "status": DESTROY_OUTCOME_ALREADY_GONE,
+        "detail": "row no longer exists (already destroyed)",
+    }
+
+
 def _destroy_one_pool_host(
     *,
     pool_host_id: str,
@@ -968,6 +978,37 @@ def _destroy_one_pool_host(
     is_row_drop_only: bool,
 ) -> dict[str, Any]:
     """Claim, tear down, and delete one pool host row; returns an outcome dict (never raises).
+
+    Any expected error class (DB, SSH, mngr) becomes a per-host 'failed' outcome, so one
+    bad id or a transient Neon hiccup never aborts the sibling destroys or suppresses the
+    batch report.
+    """
+    try:
+        return _run_pool_host_destroy_steps(
+            pool_host_id=pool_host_id,
+            database_url=database_url,
+            private_key_path=private_key_path,
+            eligible_statuses=eligible_statuses,
+            is_row_drop_only=is_row_drop_only,
+        )
+    except (MngrError, psycopg2.Error, OSError) as exc:
+        logger.warning("Destroy of pool host {} failed: {}", pool_host_id, exc)
+        return {
+            "pool_host_id": pool_host_id,
+            "status": DESTROY_OUTCOME_FAILED,
+            "detail": f"destroy failed: {exc}",
+        }
+
+
+def _run_pool_host_destroy_steps(
+    *,
+    pool_host_id: str,
+    database_url: str,
+    private_key_path: Path | None,
+    eligible_statuses: tuple[str, ...],
+    is_row_drop_only: bool,
+) -> dict[str, Any]:
+    """Run one host's claim -> VM teardown -> row delete and return its outcome.
 
     The atomic claim (flip to 'removing' from an eligible status, committed before any
     teardown) is what closes the destroy-vs-lease race: the connector's lease only
@@ -983,21 +1024,26 @@ def _destroy_one_pool_host(
         if not is_claimed:
             current_status = fetch_pool_host_status(conn, pool_host_id)
             if current_status is None:
+                return _already_gone_outcome(pool_host_id)
+            if current_status == POOL_HOST_STATUS_LEASED:
+                logger.warning(
+                    "Skipping pool host {}: it is leased (likely grabbed between listing and destroying)",
+                    pool_host_id,
+                )
                 return {
                     "pool_host_id": pool_host_id,
-                    "status": DESTROY_OUTCOME_ALREADY_GONE,
-                    "detail": "row no longer exists (already destroyed)",
+                    "status": DESTROY_OUTCOME_SKIPPED_LEASED,
+                    "detail": "row is 'leased'; pass --force to destroy leased rows",
                 }
+            # A miss on an existing, non-leased row means a status outside the known
+            # vocabulary -- report it precisely rather than guessing at a cause.
             logger.warning(
-                "Skipping pool host {}: status is '{}' (not in {}; likely just leased)",
-                pool_host_id,
-                current_status,
-                eligible_statuses,
+                "Cannot claim pool host {}: status '{}' is not in {}", pool_host_id, current_status, eligible_statuses
             )
             return {
                 "pool_host_id": pool_host_id,
-                "status": DESTROY_OUTCOME_SKIPPED_LEASED,
-                "detail": f"row is '{current_status}'; pass --force to destroy leased rows",
+                "status": DESTROY_OUTCOME_FAILED,
+                "detail": f"row is in unexpected status '{current_status}' (claimable: {', '.join(eligible_statuses)})",
             }
         target = fetch_pool_host_destroy_target(conn, pool_host_id)
     finally:
@@ -1005,11 +1051,7 @@ def _destroy_one_pool_host(
     if target is None:
         # Deleted between the claim and the fetch -- only a concurrent destroy of the
         # same id can do that, and the end state (row gone) is what we wanted.
-        return {
-            "pool_host_id": pool_host_id,
-            "status": DESTROY_OUTCOME_ALREADY_GONE,
-            "detail": "row no longer exists (already destroyed)",
-        }
+        return _already_gone_outcome(pool_host_id)
 
     # Tear the slice VM down before dropping the row, so a failure keeps the row
     # ('removing') and the teardown stays retryable -- never a stranded VM.
@@ -1045,7 +1087,9 @@ def _destroy_one_pool_host(
                 "detail": f"VM teardown failed ({target.lima_instance_name} on {target.box_public_address}): {exc}",
             }
 
-    # The VM is gone (or the operator asked for a row-only drop); drop the row.
+    # The VM is gone (or the operator asked for a row-only drop); drop the row. A fresh
+    # connection on purpose: the SSH teardown above can take minutes, and a Neon
+    # connection held idle across it may be dropped server-side by the time we delete.
     conn_for_delete = psycopg2.connect(database_url)
     try:
         delete_pool_host_row(conn_for_delete, pool_host_id)
@@ -1168,9 +1212,10 @@ def tear_down_unleased_slices(database_url: str, *, max_concurrency: int) -> dic
     ``BareMetalProvisioningError`` listing every slice whose box could not be
     reached, so the caller can stop the destroy rather than silently leak.
     """
+    eligible_statuses = destroy_eligible_pool_host_statuses(is_leased_destroy_allowed=False)
     conn = psycopg2.connect(database_url)
     try:
-        row_ids = fetch_unleased_slice_teardown_row_ids(conn)
+        row_ids = fetch_unleased_slice_teardown_row_ids(conn, eligible_statuses)
     finally:
         conn.close()
     if not row_ids:
@@ -1178,7 +1223,7 @@ def tear_down_unleased_slices(database_url: str, *, max_concurrency: int) -> dic
     outcomes = destroy_pool_hosts_in_parallel(
         pool_host_ids=row_ids,
         database_url=database_url,
-        eligible_statuses=destroy_eligible_pool_host_statuses(is_leased_destroy_allowed=False),
+        eligible_statuses=eligible_statuses,
         is_row_drop_only=False,
         max_concurrency=max_concurrency,
     )

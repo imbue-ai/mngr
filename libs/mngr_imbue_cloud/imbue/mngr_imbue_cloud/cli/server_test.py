@@ -8,6 +8,7 @@ import pytest
 from click.testing import CliRunner
 
 from imbue.mngr_imbue_cloud.cli.server import _box_ssh_host_key_options
+from imbue.mngr_imbue_cloud.cli.server import _destroy_one_pool_host
 from imbue.mngr_imbue_cloud.cli.server import _format_capacity_table
 from imbue.mngr_imbue_cloud.cli.server import _kill_bake_worker_processes
 from imbue.mngr_imbue_cloud.cli.server import _resolve_vendored_mngr_source
@@ -203,3 +204,23 @@ def test_destroy_pool_hosts_in_parallel_rejects_nonpositive_concurrency() -> Non
             is_row_drop_only=False,
             max_concurrency=0,
         )
+
+
+def test_destroy_worker_turns_db_errors_into_failed_outcomes() -> None:
+    """A DB failure in one worker must become a per-host 'failed' outcome, not a raise.
+
+    ObservableThread.join() re-raises worker exceptions, so an uncaught psycopg2 error
+    in one thread would abort the whole batch mid-join, skip the outcome report, and
+    tear down the shared temp key dir under the sibling threads.
+    """
+    outcome = _destroy_one_pool_host(
+        pool_host_id="11111111-1111-1111-1111-111111111111",
+        # Port 1 on localhost refuses connections immediately -- a fast, deterministic
+        # psycopg2.OperationalError without any real DB.
+        database_url="postgresql://user@127.0.0.1:1/db",
+        private_key_path=None,
+        eligible_statuses=("available",),
+        is_row_drop_only=True,
+    )
+    assert outcome["status"] == "failed"
+    assert outcome["pool_host_id"] == "11111111-1111-1111-1111-111111111111"
