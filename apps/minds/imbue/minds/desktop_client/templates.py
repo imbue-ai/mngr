@@ -1172,10 +1172,10 @@ _RECOVERY_SCRIPT: Final[str] = """\
           if (providerReasonEl) { providerReasonEl.textContent = ''; show(providerReasonEl, false); }
           latestHealth = null;
         }
-        // The shared "Workspace unresponsive" state -- shown for ambiguous-host
-        // states, after a restart failure, and whenever the container is live
-        // but unreachable (bouncing it would interrupt user agents, so we want
-        // explicit consent before doing so).
+        // The shared "Workspace unresponsive" state -- shown after a restart
+        // failure and for the host_unresponsive tier (container observed
+        // running but unreachable: bouncing it would interrupt user agents, so
+        // we want explicit consent before doing so).
         function renderUnresponsive() {
           titleEl.textContent = 'Workspace unresponsive';
           messageEl.textContent =
@@ -1193,9 +1193,11 @@ _RECOVERY_SCRIPT: Final[str] = """\
           armHealthyPoll();
         }
         // INDETERMINATE: we lack trustworthy evidence to classify -- the
-        // in-container probe timed out (observed nothing), or discovery has not
-        // re-observed the host since the outage began, so its host state may be
-        // stale. Render neither a verdict nor a restart button, just a live
+        // in-container probe timed out (observed nothing), discovery has not
+        // re-observed the host since the outage began (so its host state may be
+        // stale), or the snapshot carries no observation of the container (host
+        // state UNKNOWN, transitional, or absent).
+        // Render neither a verdict nor a restart button, just a live
         // "reconnecting" spinner. The cheap liveness poll (armed here) returns the
         // user home the instant the workspace answers; a slow heavy re-probe
         // converges to a real tier if it is genuinely down and a fresh snapshot
@@ -1315,8 +1317,9 @@ _RECOVERY_SCRIPT: Final[str] = """\
             scheduleRefresh();
             return;
           }
-          // No trustworthy evidence to classify (probe timed out, or discovery has
-          // not re-observed the host since the outage). Show a live "reconnecting"
+          // No trustworthy evidence to classify (probe timed out, discovery has
+          // not re-observed the host since the outage, or the snapshot carries no
+          // observation of the container). Show a live "reconnecting"
           // state and keep checking -- never a verdict or an auto-restart off
           // non-evidence -- on EITHER entry path. Checked before the restart_failed
           // branch below so an indeterminate result there also keeps checking
