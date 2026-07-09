@@ -397,6 +397,10 @@ def _run_and_tee(argv: tuple[str, ...], log_path: Path) -> int:
     whole run in memory. Returns the child's exit status.
     """
     with open(log_path, "w", encoding="utf-8") as log_file:
+        # Header only in the file (not stdout) so it timestamps the per-run log
+        # without double-stamping cron.log, which already gets the tick line above.
+        log_file.write(f"===== donate launch {time.strftime('%Y-%m-%d %H:%M:%S')} =====\n")
+        log_file.flush()
         process = subprocess.Popen(
             list(argv), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
         )
@@ -523,6 +527,10 @@ def donate(ctx: click.Context, **kwargs: Any) -> None:
 
     plugin_config = mngr_ctx.get_plugin_config("usage", UsagePluginConfig)
     now = int(time.time())
+    # Stamp every tick up front so an accumulating log (esp. cron.log) shows when
+    # each run fired and what it decided -- printed for all branches (skip / no
+    # data / launch) since it lands before the capacity check.
+    emit_info(f"===== donate tick {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(now))} =====", output_opts.output_format)
     snapshots = gather_usage_snapshots(
         mngr_ctx,
         include_filters=(),
