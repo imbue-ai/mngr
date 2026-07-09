@@ -21,17 +21,19 @@ from imbue.mngr_imbue_cloud.primitives import R2BucketAccess
 from imbue.mngr_imbue_cloud.primitives import SuperTokensUserId
 
 
-class SliceTeardownTarget(FrozenModel):
-    """A slice pool host to tear down: its lima resources and the box that hosts them."""
+class PoolHostDestroyTarget(FrozenModel):
+    """A claimed pool_hosts row to destroy, with its box teardown info when the box record still exists.
+
+    The lima / box fields are None for degenerate rows (a deleted bare_metal_servers
+    record, or a legacy row without lima identifiers); those rows cannot have their VM
+    torn down and can only be dropped with ``--drop-row-only``.
+    """
 
     pool_host_row_id: str = Field(description="The pool_hosts row id (deleted after the VM is torn down)")
-    lima_instance_name: str = Field(description="The slice's lima instance name on the box")
-    lima_disk_name: str | None = Field(default=None, description="The slice's lima data-disk name, if recorded")
-    box_public_address: str = Field(description="SSH-reachable address of the bare-metal box hosting the slice")
-    lima_service_user: str = Field(description="The box's non-root lima user that owns the VMs")
-    box_host_public_key: str | None = Field(
-        default=None, description="The box's sshd host public key, pinned for the teardown SSH"
-    )
+    lima_instance_name: str | None = Field(description="The slice's lima instance name on the box, if recorded")
+    box_public_address: str | None = Field(description="SSH-reachable address of the box, if its record exists")
+    lima_service_user: str | None = Field(description="The box's non-root lima user that owns the VMs, if recorded")
+    box_host_public_key: str | None = Field(description="The box's sshd host public key, pinned for the teardown SSH")
 
 
 class PaidListEntry(FrozenModel):

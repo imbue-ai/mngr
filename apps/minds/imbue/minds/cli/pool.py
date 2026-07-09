@@ -32,6 +32,7 @@ import os
 import shlex
 import sys
 from collections.abc import Mapping
+from collections.abc import Sequence
 from typing import Final
 
 import click
@@ -215,16 +216,23 @@ def build_backfill_host_keys_admin_args(*, database_url: str | None) -> list[str
 
 
 def build_destroy_admin_args(
-    *, pool_host_id: str, database_url: str | None, force: bool, skip_vps_cancel: bool
+    *,
+    pool_host_ids: Sequence[str],
+    database_url: str | None,
+    is_leased_destroy_allowed: bool,
+    is_row_drop_only: bool,
+    max_concurrency: int | None,
 ) -> list[str]:
-    """Compose the ``mngr imbue_cloud admin pool destroy`` argv."""
-    args = ["destroy", pool_host_id]
+    """Compose the ``mngr imbue_cloud admin pool destroy`` argv (all ids in one invocation)."""
+    args = ["destroy", *pool_host_ids]
     if database_url is not None:
         args.extend(["--database-url", database_url])
-    if force:
+    if is_leased_destroy_allowed:
         args.append("--force")
-    if skip_vps_cancel:
-        args.append("--skip-vps-cancel")
+    if is_row_drop_only:
+        args.append("--drop-row-only")
+    if max_concurrency is not None:
+        args.extend(["--max-concurrency", str(max_concurrency)])
     return args
 
 
@@ -610,7 +618,7 @@ def pool_backfill_host_keys(database_url: str | None) -> None:
 
 
 @pool.command(name="destroy")
-@click.argument("pool_host_id")
+@click.argument("pool_host_ids", nargs=-1, required=True)
 @click.option(
     "--database-url",
     required=False,
@@ -618,25 +626,48 @@ def pool_backfill_host_keys(database_url: str | None) -> None:
     type=str,
     help=_DATABASE_URL_HELP,
 )
-@click.option("--force", is_flag=True, help="Drop the row even if status != 'released'")
 @click.option(
-    "--skip-vps-cancel",
+    "--force",
+    "is_leased_destroy_allowed",
+    is_flag=True,
+    help="Also destroy rows that are currently leased (tears down the leasing user's live workspace).",
+)
+@click.option(
+    "--drop-row-only",
+    "is_row_drop_only",
     is_flag=True,
     default=False,
-    help=("Only drop the DB row; do NOT destroy the underlying slice lima VM. Use only when the VM is already gone."),
+    help=(
+        "Only drop the DB rows; do NOT attempt VM teardown. Exclusively for rows whose "
+        "bare-metal box record is gone or whose machine is permanently dead."
+    ),
 )
-def pool_destroy(pool_host_id: str, database_url: str | None, force: bool, skip_vps_cancel: bool) -> None:
-    """Full teardown of a pool host: destroy its slice lima VM, then drop the row.
+@click.option(
+    "--max-concurrency",
+    "max_concurrency",
+    type=int,
+    default=None,
+    help="Max hosts destroyed at once; the rest queue. Omitted: the admin CLI's default applies.",
+)
+def pool_destroy(
+    pool_host_ids: tuple[str, ...],
+    database_url: str | None,
+    is_leased_destroy_allowed: bool,
+    is_row_drop_only: bool,
+    max_concurrency: int | None,
+) -> None:
+    """Full teardown of pool hosts: destroy each slice lima VM in parallel, then drop its row.
 
-    Forwards to ``mngr imbue_cloud admin pool destroy``, which by default destroys the
-    row's slice lima VM (freeing the box slot) before deleting the row. The
+    Forwards all ids to one ``mngr imbue_cloud admin pool destroy`` invocation, which
+    atomically claims each row (so a user lease can never race the teardown), destroys
+    the slice lima VMs concurrently (freeing the box slots), and deletes the rows. The
     POOL_SSH_PRIVATE_KEY teardown secret is read from the activated tier's Vault entry
-    and injected into the subprocess, mirroring ``pool create``. Pass
-    ``--skip-vps-cancel`` to only drop the row when the VM is already gone.
+    and injected into the subprocess, mirroring ``pool create`` (skipped for
+    ``--drop-row-only``, which never SSHes a box).
     """
     env_name = require_activated_env_name()
     extra_env: dict[str, str] | None = None
-    if not skip_vps_cancel:
+    if not is_row_drop_only:
         try:
             pool_private_key = read_pool_private_key_from_vault(env_name)
         except VaultReadError as exc:
@@ -645,9 +676,10 @@ def pool_destroy(pool_host_id: str, database_url: str | None, force: bool, skip_
             ) from exc
         extra_env = {_POOL_PRIVATE_KEY_ENV_VAR: pool_private_key}
     args = build_destroy_admin_args(
-        pool_host_id=pool_host_id,
+        pool_host_ids=list(pool_host_ids),
         database_url=resolve_host_pool_dsn(env_name, database_url),
-        force=force,
-        skip_vps_cancel=skip_vps_cancel,
+        is_leased_destroy_allowed=is_leased_destroy_allowed,
+        is_row_drop_only=is_row_drop_only,
+        max_concurrency=max_concurrency,
     )
     _raise_on_failure("destroy", _run_admin_command(args, extra_env=extra_env))

@@ -31,13 +31,14 @@ from imbue.mngr_imbue_cloud.cli._common import emit_json
 from imbue.mngr_imbue_cloud.cli._common import fail_with_json
 from imbue.mngr_imbue_cloud.cli._common import resolve_pool_database_url
 from imbue.mngr_imbue_cloud.cli.server import DEFAULT_SLICE_BAKE_CONCURRENCY
+from imbue.mngr_imbue_cloud.cli.server import DEFAULT_SLICE_DESTROY_CONCURRENCY
 from imbue.mngr_imbue_cloud.cli.server import allocate_slices
-from imbue.mngr_imbue_cloud.cli.server import destroy_slice_vm
+from imbue.mngr_imbue_cloud.cli.server import build_pool_host_destroy_report
+from imbue.mngr_imbue_cloud.cli.server import destroy_pool_hosts_in_parallel
 from imbue.mngr_imbue_cloud.cli.server import tear_down_unleased_slices
 from imbue.mngr_imbue_cloud.errors import RepoIdentityError
-from imbue.mngr_imbue_cloud.primitives import BareMetalServerDbId
 from imbue.mngr_imbue_cloud.primitives import KNOWN_OVH_US_REGIONS
-from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_server_by_id
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import destroy_eligible_pool_host_statuses
 
 
 @click.group(name="admin")
@@ -324,38 +325,8 @@ def pool_list(database_url: str | None) -> None:
     emit_json([dict(zip(_POOL_HOST_LIST_COLUMNS, row, strict=True)) for row in rows])
 
 
-def _destroy_slice_pool_host_vm(
-    *,
-    conn: Any,
-    pool_host_id: str,
-    bare_metal_server_id: str | None,
-    lima_instance_name: str | None,
-) -> None:
-    """Destroy a slice pool host's lima VM on its bare-metal box (before dropping the row).
-
-    Resolves the box from ``bare_metal_server_id`` and tears down the
-    ``lima_instance_name`` VM via the pool key (POOL_SSH_PRIVATE_KEY). Raises -- so
-    the caller keeps the row and the teardown stays retryable -- when the slice row
-    lacks its lima identifiers or the referenced box no longer exists.
-    """
-    if not bare_metal_server_id or not lima_instance_name:
-        fail_with_json(
-            f"Slice row {pool_host_id} is missing its bare_metal_server_id / lima_instance_name; "
-            "cannot locate the VM to destroy. Pass --skip-vps-cancel to drop the row only.",
-            error_class="UnsafeDelete",
-        )
-    server = fetch_server_by_id(conn, BareMetalServerDbId(bare_metal_server_id))
-    if server is None:
-        fail_with_json(
-            f"Slice row {pool_host_id} references bare_metal_server {bare_metal_server_id}, which no "
-            "longer exists; cannot reach the box. Pass --skip-vps-cancel to drop the row only.",
-            error_class="UnsafeDelete",
-        )
-    destroy_slice_vm(server=server, lima_instance_name=lima_instance_name)
-
-
 @pool.command(name="destroy")
-@click.argument("pool_host_id")
+@click.argument("pool_host_ids", nargs=-1, required=True)
 @click.option(
     "--database-url",
     required=False,
@@ -368,65 +339,63 @@ def _destroy_slice_pool_host_vm(
         "is enough). Pass this explicitly when operating outside an activated env."
     ),
 )
-@click.option("--force", is_flag=True, help="Drop the row even if status != 'released'")
 @click.option(
-    "--skip-vps-cancel",
-    "is_vm_teardown_skipped",
+    "--force",
+    "is_leased_destroy_allowed",
+    is_flag=True,
+    help="Also destroy rows that are currently leased (tears down the leasing user's live workspace).",
+)
+@click.option(
+    "--drop-row-only",
+    "is_row_drop_only",
     is_flag=True,
     default=False,
     help=(
-        "Only drop the DB row; do NOT destroy the underlying slice lima VM. Use "
-        "exclusively when the VM is already gone -- otherwise the default path tears "
-        "it down so no box slot is left occupied."
+        "Only drop the DB rows; do NOT attempt VM teardown. Exclusively for rows whose "
+        "bare-metal box record is gone or whose machine is permanently dead -- the default "
+        "path already tolerates a VM that is merely absent."
     ),
 )
-def pool_destroy(pool_host_id: str, database_url: str | None, force: bool, is_vm_teardown_skipped: bool) -> None:
-    """Remove a pool_hosts row, destroying its slice lima VM first (full teardown).
+@click.option(
+    "--max-concurrency",
+    "max_concurrency",
+    type=int,
+    default=DEFAULT_SLICE_DESTROY_CONCURRENCY,
+    show_default=True,
+    help="Max hosts destroyed at once; the rest queue and start as slots free.",
+)
+def pool_destroy(
+    pool_host_ids: tuple[str, ...],
+    database_url: str | None,
+    is_leased_destroy_allowed: bool,
+    is_row_drop_only: bool,
+    max_concurrency: int,
+) -> None:
+    """Destroy pool hosts: claim each row, tear down its slice lima VM, then drop the row.
 
-    The slice VM on the bare-metal box is destroyed (freeing the slot) *before* the
-    row is deleted, so a failure keeps the row and the teardown stays retryable --
-    never a stranded slice VM. Pass ``--skip-vps-cancel`` only when the VM is already
-    gone. Teardown needs POOL_SSH_PRIVATE_KEY in the environment to SSH the box (the
-    minds ``pool destroy`` wrapper injects it from Vault).
+    All named hosts are destroyed concurrently (at most ``--max-concurrency`` at a
+    time, regardless of which box each slice is on). Each row is first atomically
+    claimed (flipped to 'removing' in a committed transaction), so a user lease can
+    never race the teardown: a row that got leased first is skipped and reported.
+    'available' and stale 'removing' rows are destroyed by default; a 'leased' row
+    needs ``--force``. The VM is destroyed *before* the row is deleted, so a failure
+    keeps the row ('removing', unleasable) and re-running the same command retries
+    it. Teardown needs POOL_SSH_PRIVATE_KEY in the environment to SSH the boxes (the
+    minds ``pool destroy`` wrapper injects it from Vault). Exits non-zero only when a
+    teardown actually failed.
     """
     resolved_database_url = resolve_pool_database_url(database_url)
-    conn = psycopg2.connect(resolved_database_url)
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT status, bare_metal_server_id, lima_instance_name FROM pool_hosts WHERE id = %s",
-                (pool_host_id,),
-            )
-            row = cur.fetchone()
-            if row is None:
-                fail_with_json(f"No pool_hosts row with id {pool_host_id}", error_class="NotFound")
-            status, bare_metal_server_id, lima_instance_name = row
-            if status != "released" and not force:
-                fail_with_json(
-                    f"Row {pool_host_id} is in status '{status}'; pass --force to delete anyway",
-                    error_class="UnsafeDelete",
-                )
-        # Tear the slice VM down BEFORE deleting the row: if it fails we keep the row
-        # so the teardown stays retryable (no silent slot orphan).
-        if not is_vm_teardown_skipped:
-            _destroy_slice_pool_host_vm(
-                conn=conn,
-                pool_host_id=pool_host_id,
-                bare_metal_server_id=bare_metal_server_id,
-                lima_instance_name=lima_instance_name,
-            )
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute("DELETE FROM pool_hosts WHERE id = %s", (pool_host_id,))
-    finally:
-        conn.close()
-    emit_json(
-        {
-            "deleted": True,
-            "pool_host_id": pool_host_id,
-            "slice_vm_destroyed": not is_vm_teardown_skipped,
-        }
+    outcomes = destroy_pool_hosts_in_parallel(
+        pool_host_ids=list(pool_host_ids),
+        database_url=resolved_database_url,
+        eligible_statuses=destroy_eligible_pool_host_statuses(is_leased_destroy_allowed=is_leased_destroy_allowed),
+        is_row_drop_only=is_row_drop_only,
+        max_concurrency=max_concurrency,
     )
+    report = build_pool_host_destroy_report(outcomes)
+    emit_json(report)
+    if report["failed"]:
+        raise SystemExit(1)
 
 
 @pool.command(name="teardown-slices")
@@ -441,18 +410,29 @@ def pool_destroy(pool_host_id: str, database_url: str | None, force: bool, is_vm
         "NEON_HOST_POOL_DSN field. Pass explicitly when operating outside an activated env."
     ),
 )
-def pool_teardown_slices(database_url: str | None) -> None:
+@click.option(
+    "--max-concurrency",
+    "max_concurrency",
+    type=int,
+    default=DEFAULT_SLICE_DESTROY_CONCURRENCY,
+    show_default=True,
+    help="Max slices torn down at once; the rest queue and start as slots free.",
+)
+def pool_teardown_slices(database_url: str | None, max_concurrency: int) -> None:
     """Tear down every unleased slice VM in the pool DB and drop its row.
 
     Used by ``minds env destroy`` (before the per-env DB is deleted) so the env's
     baked-but-unleased pool slices don't leak their VMs on the shared bare-metal
     boxes. Leased slices are excluded -- they are torn down via their agent's release
-    path. Needs POOL_SSH_PRIVATE_KEY in the environment to SSH the boxes (the minds
-    wrapper injects it from Vault). Idempotent per VM; fails (non-zero) if any box
-    could not be reached, so the caller can stop rather than silently leak.
+    path; rows stranded in 'removing' by a crashed release ARE included. Each row is
+    atomically claimed before its VM is touched, so a lease cannot race the teardown,
+    and the slices are torn down concurrently. Needs POOL_SSH_PRIVATE_KEY in the
+    environment to SSH the boxes (the minds wrapper injects it from Vault).
+    Idempotent per VM; fails (non-zero) if any box could not be reached, so the
+    caller can stop rather than silently leak.
     """
     resolved_database_url = resolve_pool_database_url(database_url)
-    result = tear_down_unleased_slices(resolved_database_url)
+    result = tear_down_unleased_slices(resolved_database_url, max_concurrency=max_concurrency)
     emit_json(result)
 
 

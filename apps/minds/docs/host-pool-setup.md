@@ -225,13 +225,42 @@ psql "$NEON_DB_DIRECT" -c "SELECT id, vps_address, status, attributes FROM pool_
 
 ## Cleanup
 
-Destroy a specific pool host (destroys its slice lima VM, freeing the box slot,
-then drops the row):
+Destroy pool hosts (destroys each slice lima VM, freeing the box slot, then
+drops the row). Multiple ids are destroyed in parallel (bounded by
+`--max-concurrency`, default 8), and each row is atomically claimed in the DB
+(flipped to status `removing`) before its VM is touched, so a user lease
+attempt can never race a destroy -- a row that got leased first is skipped and
+reported:
 
 ```bash
-just list-pool-hosts                          # find the row id (tier activated)
-just destroy-pool-host <pool-host-id>         # pool SSH key + DSN from the tier's Vault entry
+just list-pool-hosts                             # find the row ids (tier activated)
+just destroy-pool-hosts <id> [<id> ...]          # pool SSH key + DSN from the tier's Vault entry
 ```
+
+Unleased (`available`) rows are destroyed without extra flags; a `leased` row
+is refused unless you pass `--force` (which tears down the leasing user's live
+workspace). A destroy that fails partway leaves the row in status `removing`
+(unleasable); re-run the same command with the same ids to retry -- ids whose
+rows are already gone report `already_gone` and count as success. Pass
+`--drop-row-only` to drop rows without attempting VM teardown; that is only
+for rows whose bare-metal box record is gone or whose machine is permanently
+dead (the default path already tolerates a VM that is merely absent).
+
+### Upgrading the pool
+
+To roll the pool to a new FCT version, bake the new generation first, then
+destroy the old `available` rows in one command:
+
+```bash
+just bake-slice-prod US-WEST-OR v0.4.0 4 --server-id <bare-metal-server-id>
+just list-pool-hosts                             # note the old-version rows with status 'available'
+just destroy-pool-hosts <old-id-1> <old-id-2> <old-id-3>
+```
+
+Hosts leased at the old version keep running until their leases end (the
+connector destroys each slice VM at release). A user who leases an old row
+mid-upgrade simply keeps it until release; the destroy skips it and reports
+`skipped_leased`.
 
 ## Development workflow
 

@@ -19,6 +19,9 @@ import signal
 import tempfile
 import threading
 from collections.abc import Iterator
+from collections.abc import Mapping
+from collections.abc import Sequence
+from contextlib import ExitStack
 from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
@@ -37,6 +40,7 @@ from tabulate import tabulate
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.concurrency_group import ObservableThread
 from imbue.imbue_common.logging import log_span
+from imbue.imbue_common.pure import pure
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import HostId
@@ -78,12 +82,16 @@ from imbue.mngr_imbue_cloud.slices.bare_metal import find_server_capacity_by_id
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_disk_name
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_instance_name
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import build_slice_pool_host_insert_values
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import claim_pool_host_for_removal
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import delete_pool_host_row
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import destroy_eligible_pool_host_statuses
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_pool_host_destroy_target
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_pool_host_status
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_server_by_id
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_server_capacities
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_slice_disk_names_for_server
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_slice_instance_names_for_server
-from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_unleased_slice_teardown_targets
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_unleased_slice_teardown_row_ids
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import insert_bare_metal_server
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import insert_slice_pool_host
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import update_server
@@ -938,76 +946,253 @@ def _reap_orphan_slice_resources(
             logger.warning("Orphan reap: failed to delete disk {} on {}: {}", disk_name, server.public_address, exc)
 
 
-def destroy_slice_vm(*, server: BareMetalServer, lima_instance_name: str) -> None:
-    """Destroy one slice's lima VM (and its data disk) on its box, freeing the box slot.
+# Max pool hosts destroyed at once by default. Destroys are light (a few seconds of
+# limactl over SSH each, no box lock involved), so the bound mainly protects the
+# boxes' sshd connection limits and basic IO -- higher than the bake's default 4.
+DEFAULT_SLICE_DESTROY_CONCURRENCY: Final[int] = 8
 
-    The teardown counterpart of the carve: SSHes the bare-metal box with the pool
-    management key (POOL_SSH_PRIVATE_KEY) and runs ``limactl delete`` for the named
-    instance -- the same client + key path the orphan reaper uses, but targeted at a
-    single known instance so ``admin pool destroy`` can fully tear down a slice
-    before dropping its ``pool_hosts`` row (instead of stranding the VM on the box).
+# Per-host outcome statuses in the destroy report.
+DESTROY_OUTCOME_DESTROYED: Final[str] = "destroyed"
+DESTROY_OUTCOME_SKIPPED_LEASED: Final[str] = "skipped_leased"
+DESTROY_OUTCOME_ALREADY_GONE: Final[str] = "already_gone"
+DESTROY_OUTCOME_FAILED: Final[str] = "failed"
+
+
+def _destroy_one_pool_host(
+    *,
+    pool_host_id: str,
+    database_url: str,
+    # None only when ``is_row_drop_only`` (no box SSH happens).
+    private_key_path: Path | None,
+    eligible_statuses: tuple[str, ...],
+    is_row_drop_only: bool,
+) -> dict[str, Any]:
+    """Claim, tear down, and delete one pool host row; returns an outcome dict (never raises).
+
+    The atomic claim (flip to 'removing' from an eligible status, committed before any
+    teardown) is what closes the destroy-vs-lease race: the connector's lease only
+    selects 'available' rows, so once claimed the row can never be handed to a user.
+    A teardown failure leaves the row 'removing' -- unleasable and retryable by
+    re-running the destroy with the same id.
     """
-    if not server.public_address:
-        raise BareMetalProvisioningError(
-            f"server {server.id} has no public_address; cannot reach the box to destroy {lima_instance_name}"
-        )
-    ssh_user = server.lima_service_user or "limahost"
-    with _pool_private_key_path() as private_key_path:
+    # Claim the row; a miss means it no longer exists (already destroyed) or its
+    # status is not eligible (e.g. it was leased between listing and destroying).
+    conn = psycopg2.connect(database_url)
+    try:
+        is_claimed = claim_pool_host_for_removal(conn, pool_host_id, eligible_statuses)
+        if not is_claimed:
+            current_status = fetch_pool_host_status(conn, pool_host_id)
+            if current_status is None:
+                return {
+                    "pool_host_id": pool_host_id,
+                    "status": DESTROY_OUTCOME_ALREADY_GONE,
+                    "detail": "row no longer exists (already destroyed)",
+                }
+            logger.warning(
+                "Skipping pool host {}: status is '{}' (not in {}; likely just leased)",
+                pool_host_id,
+                current_status,
+                eligible_statuses,
+            )
+            return {
+                "pool_host_id": pool_host_id,
+                "status": DESTROY_OUTCOME_SKIPPED_LEASED,
+                "detail": f"row is '{current_status}'; pass --force to destroy leased rows",
+            }
+        target = fetch_pool_host_destroy_target(conn, pool_host_id)
+    finally:
+        conn.close()
+    if target is None:
+        # Deleted between the claim and the fetch -- only a concurrent destroy of the
+        # same id can do that, and the end state (row gone) is what we wanted.
+        return {
+            "pool_host_id": pool_host_id,
+            "status": DESTROY_OUTCOME_ALREADY_GONE,
+            "detail": "row no longer exists (already destroyed)",
+        }
+
+    # Tear the slice VM down before dropping the row, so a failure keeps the row
+    # ('removing') and the teardown stays retryable -- never a stranded VM.
+    if not is_row_drop_only:
+        if not target.lima_instance_name or not target.box_public_address:
+            return {
+                "pool_host_id": pool_host_id,
+                "status": DESTROY_OUTCOME_FAILED,
+                "detail": (
+                    "cannot locate the VM to destroy (missing lima_instance_name or the box record is gone); "
+                    "pass --drop-row-only to drop the row without teardown"
+                ),
+            }
+        if private_key_path is None:
+            return {
+                "pool_host_id": pool_host_id,
+                "status": DESTROY_OUTCOME_FAILED,
+                "detail": "no pool management key available for the box SSH (POOL_SSH_PRIVATE_KEY)",
+            }
         client = LimaSliceVpsClient(
-            box_address=str(server.public_address),
-            box_ssh_user=ssh_user,
+            box_address=target.box_public_address,
+            box_ssh_user=target.lima_service_user or "limahost",
             private_key_path=str(private_key_path),
-            box_host_public_key=server.box_host_public_key,
+            box_host_public_key=target.box_host_public_key,
         )
-        client.destroy_instance(VpsInstanceId(lima_instance_name))
+        try:
+            client.destroy_instance(VpsInstanceId(target.lima_instance_name))
+        except (MngrError, OSError) as exc:
+            logger.warning("Failed to tear down slice {}: {}", target.lima_instance_name, exc)
+            return {
+                "pool_host_id": pool_host_id,
+                "status": DESTROY_OUTCOME_FAILED,
+                "detail": f"VM teardown failed ({target.lima_instance_name} on {target.box_public_address}): {exc}",
+            }
+
+    # The VM is gone (or the operator asked for a row-only drop); drop the row.
+    conn_for_delete = psycopg2.connect(database_url)
+    try:
+        delete_pool_host_row(conn_for_delete, pool_host_id)
+    finally:
+        conn_for_delete.close()
+    logger.info("Destroyed pool host {} ({})", pool_host_id, target.lima_instance_name or "no VM")
+    outcome = {"pool_host_id": pool_host_id, "status": DESTROY_OUTCOME_DESTROYED}
+    if is_row_drop_only:
+        outcome["detail"] = "row dropped without VM teardown (--drop-row-only)"
+    return outcome
 
 
-def tear_down_unleased_slices(database_url: str) -> dict[str, Any]:
+def _destroy_into_outcomes(
+    *,
+    pool_host_id: str,
+    database_url: str,
+    private_key_path: Path | None,
+    eligible_statuses: tuple[str, ...],
+    is_row_drop_only: bool,
+    semaphore: "threading.Semaphore",
+    total: int,
+    outcome_by_id: dict[str, dict[str, Any]],
+    outcomes_lock: "threading.Lock",
+) -> None:
+    """Thread target: destroy one pool host under the concurrency semaphore, recording progress."""
+    with semaphore:
+        outcome = _destroy_one_pool_host(
+            pool_host_id=pool_host_id,
+            database_url=database_url,
+            private_key_path=private_key_path,
+            eligible_statuses=eligible_statuses,
+            is_row_drop_only=is_row_drop_only,
+        )
+    with outcomes_lock:
+        outcome_by_id[pool_host_id] = outcome
+        done = len(outcome_by_id)
+    logger.info("Pool host destroy progress: {}/{} done -- {} {}", done, total, pool_host_id, outcome.get("status"))
+
+
+def destroy_pool_hosts_in_parallel(
+    *,
+    pool_host_ids: Sequence[str],
+    database_url: str,
+    eligible_statuses: tuple[str, ...],
+    is_row_drop_only: bool,
+    max_concurrency: int,
+) -> list[dict[str, Any]]:
+    """Destroy pool hosts concurrently (claim -> VM teardown -> row delete), one outcome per id.
+
+    All targets run in parallel under one global semaphore regardless of which box each
+    slice is on -- deletes never take the box's carve-time reservation lock, so
+    parallelism within a single box is safe. Outcomes are returned in input order.
+    """
+    if max_concurrency <= 0:
+        raise click.UsageError("--max-concurrency must be positive")
+    unique_ids = list(dict.fromkeys(pool_host_ids))
+    outcome_by_id: dict[str, dict[str, Any]] = {}
+    outcomes_lock = threading.Lock()
+    destroy_semaphore = threading.Semaphore(max_concurrency)
+    with ExitStack() as stack:
+        # A row-only drop never SSHes a box, so it must not require POOL_SSH_PRIVATE_KEY.
+        private_key_path = None if is_row_drop_only else stack.enter_context(_pool_private_key_path())
+        threads = [
+            ObservableThread(
+                target=_destroy_into_outcomes,
+                kwargs=dict(
+                    pool_host_id=pool_host_id,
+                    database_url=database_url,
+                    private_key_path=private_key_path,
+                    eligible_statuses=eligible_statuses,
+                    is_row_drop_only=is_row_drop_only,
+                    semaphore=destroy_semaphore,
+                    total=len(unique_ids),
+                    outcome_by_id=outcome_by_id,
+                    outcomes_lock=outcomes_lock,
+                ),
+                name=f"destroy-{idx}",
+            )
+            for idx, pool_host_id in enumerate(unique_ids)
+        ]
+        logger.info("Destroying {} pool host(s) ({} at a time)", len(unique_ids), max_concurrency)
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    return [outcome_by_id[pool_host_id] for pool_host_id in unique_ids]
+
+
+@pure
+def build_pool_host_destroy_report(outcomes: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Aggregate per-host destroy outcomes into the summary report the destroy commands emit.
+
+    ``already_gone`` counts as destroyed (the desired end state -- the row is gone --
+    so re-running the same id list after a partial failure converges cleanly).
+    """
+    destroyed_count = sum(
+        1 for outcome in outcomes if outcome.get("status") in (DESTROY_OUTCOME_DESTROYED, DESTROY_OUTCOME_ALREADY_GONE)
+    )
+    skipped_count = sum(1 for outcome in outcomes if outcome.get("status") == DESTROY_OUTCOME_SKIPPED_LEASED)
+    failed_count = sum(1 for outcome in outcomes if outcome.get("status") == DESTROY_OUTCOME_FAILED)
+    return {
+        "requested": len(outcomes),
+        "destroyed": destroyed_count,
+        "skipped": skipped_count,
+        "failed": failed_count,
+        "hosts": [dict(outcome) for outcome in outcomes],
+    }
+
+
+def tear_down_unleased_slices(database_url: str, *, max_concurrency: int) -> dict[str, Any]:
     """Tear down every unleased slice VM recorded in ``database_url`` and drop its row.
 
     The teardown an env destroy runs (before its per-env DB is deleted) so the env's
     baked-but-unleased pool slices don't leak their VMs on the shared boxes. Leased
-    slices are excluded: they are torn down via their agent's release path. Each VM
-    teardown is idempotent (an already-absent VM counts as success); the row is
-    dropped only after its VM is gone. Must-succeed: raises
+    slices are excluded: they are torn down via their agent's release path. Rows
+    stranded in 'removing' (a crashed release) are included so they never leak. Each
+    row is atomically claimed before its VM is touched, so a lease cannot race the
+    teardown; each VM teardown is idempotent (an already-absent VM counts as success)
+    and the row is dropped only after its VM is gone. Must-succeed: raises
     ``BareMetalProvisioningError`` listing every slice whose box could not be
     reached, so the caller can stop the destroy rather than silently leak.
     """
     conn = psycopg2.connect(database_url)
     try:
-        targets = fetch_unleased_slice_teardown_targets(conn)
+        row_ids = fetch_unleased_slice_teardown_row_ids(conn)
     finally:
         conn.close()
-    if not targets:
-        return {"torn_down": 0, "failed": 0}
-    torn_down_count = 0
-    failures: list[str] = []
-    with _pool_private_key_path() as private_key_path:
-        for target in targets:
-            client = LimaSliceVpsClient(
-                box_address=target.box_public_address,
-                box_ssh_user=target.lima_service_user,
-                private_key_path=str(private_key_path),
-                box_host_public_key=target.box_host_public_key,
-            )
-            try:
-                client.destroy_instance(VpsInstanceId(target.lima_instance_name))
-            except (MngrError, OSError) as exc:
-                logger.warning("Failed to tear down slice {}: {}", target.lima_instance_name, exc)
-                failures.append(f"{target.lima_instance_name} on {target.box_public_address}: {exc}")
-                continue
-            conn = psycopg2.connect(database_url)
-            try:
-                delete_pool_host_row(conn, target.pool_host_row_id)
-            finally:
-                conn.close()
-            torn_down_count += 1
-            logger.info("Tore down unleased slice {} on {}", target.lima_instance_name, target.box_public_address)
+    if not row_ids:
+        return build_pool_host_destroy_report([])
+    outcomes = destroy_pool_hosts_in_parallel(
+        pool_host_ids=row_ids,
+        database_url=database_url,
+        eligible_statuses=destroy_eligible_pool_host_statuses(is_leased_destroy_allowed=False),
+        is_row_drop_only=False,
+        max_concurrency=max_concurrency,
+    )
+    report = build_pool_host_destroy_report(outcomes)
+    failures = [
+        f"{outcome['pool_host_id']}: {outcome.get('detail', 'unknown failure')}"
+        for outcome in outcomes
+        if outcome.get("status") == DESTROY_OUTCOME_FAILED
+    ]
     if failures:
         raise BareMetalProvisioningError(
             f"failed to tear down {len(failures)} slice(s); their VMs may still be running: {'; '.join(failures)}"
         )
-    return {"torn_down": torn_down_count, "failed": 0}
+    return report
 
 
 def _resolve_vendored_mngr_source(*, mngr_source: str | None, repo_root: Path, is_from_tag: bool) -> Path | None:

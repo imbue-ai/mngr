@@ -3,6 +3,7 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 
+import click
 import pytest
 from click.testing import CliRunner
 
@@ -10,8 +11,10 @@ from imbue.mngr_imbue_cloud.cli.server import _box_ssh_host_key_options
 from imbue.mngr_imbue_cloud.cli.server import _format_capacity_table
 from imbue.mngr_imbue_cloud.cli.server import _kill_bake_worker_processes
 from imbue.mngr_imbue_cloud.cli.server import _resolve_vendored_mngr_source
+from imbue.mngr_imbue_cloud.cli.server import build_pool_host_destroy_report
 from imbue.mngr_imbue_cloud.cli.server import build_registered_server
 from imbue.mngr_imbue_cloud.cli.server import compute_server_slice_sizing
+from imbue.mngr_imbue_cloud.cli.server import destroy_pool_hosts_in_parallel
 from imbue.mngr_imbue_cloud.cli.server import server
 from imbue.mngr_imbue_cloud.cli.server import slice_advertised_attributes
 from imbue.mngr_imbue_cloud.data_types import BareMetalServer
@@ -163,3 +166,40 @@ def test_explicit_mngr_source_always_wins() -> None:
             mngr_source="/some/other/mngr", repo_root=Path("/monorepo"), is_from_tag=is_from_tag
         )
         assert resolved == Path("/some/other/mngr")
+
+
+def test_destroy_report_counts_already_gone_as_destroyed() -> None:
+    """Re-running the same id list after a partial failure must converge to success.
+
+    Ids whose rows are already gone report 'already_gone' and count as destroyed;
+    only genuine teardown failures make the report (and thus the command) fail.
+    """
+    report = build_pool_host_destroy_report(
+        [
+            {"pool_host_id": "a", "status": "destroyed"},
+            {"pool_host_id": "b", "status": "already_gone"},
+            {"pool_host_id": "c", "status": "skipped_leased"},
+            {"pool_host_id": "d", "status": "failed", "detail": "box unreachable"},
+        ]
+    )
+    assert report["requested"] == 4
+    assert report["destroyed"] == 2
+    assert report["skipped"] == 1
+    assert report["failed"] == 1
+    assert [host["pool_host_id"] for host in report["hosts"]] == ["a", "b", "c", "d"]
+
+
+def test_destroy_report_for_no_hosts_is_all_zero() -> None:
+    report = build_pool_host_destroy_report([])
+    assert report == {"requested": 0, "destroyed": 0, "skipped": 0, "failed": 0, "hosts": []}
+
+
+def test_destroy_pool_hosts_in_parallel_rejects_nonpositive_concurrency() -> None:
+    with pytest.raises(click.UsageError):
+        destroy_pool_hosts_in_parallel(
+            pool_host_ids=["row-1"],
+            database_url="postgres://example",
+            eligible_statuses=("available",),
+            is_row_drop_only=False,
+            max_concurrency=0,
+        )

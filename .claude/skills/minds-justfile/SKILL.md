@@ -77,10 +77,11 @@ destroyable. First register + prep a box with `mngr imbue_cloud admin server
     same canonical remote, but the form value the client sends must match. Extra
     flags forward to `minds pool create` (e.g. `--mngr-source`).
 - `just list-pool-hosts` -- list `pool_hosts` rows for the activated env.
-- `just destroy-pool-host <pool-host-id>` -- tear down one host's underlying
-  machine (destroy the slice's lima VM, or cancel a legacy OVH VPS) + drop its row
-  (manual single-host teardown; steady-state release is automatic via the
-  connector's hourly cron, and `minds env destroy` tears down a whole tier).
+- `just destroy-pool-hosts <pool-host-id> [<pool-host-id> ...]` -- tear down the
+  named hosts in parallel: atomically claim each row (a user cannot lease it
+  mid-destroy), destroy its slice lima VM, and drop the row (manual teardown, e.g.
+  retiring old rows after baking a new pool generation; steady-state release is
+  automatic via the connector, and `minds env destroy` tears down a whole tier).
 
 Desktop client / dev loop:
 - `just minds-start` / `just minds-stop` / `just minds-build`

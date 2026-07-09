@@ -1,0 +1,1 @@
+- Changed: the `destroy-pool-host` justfile recipe is renamed to `destroy-pool-hosts` and now takes any number of pool-host ids (clean break, no alias). It forwards to `minds pool destroy`, which destroys all named slices in parallel after atomically claiming each row so a user lease cannot race the destroy. The `minds-justfile` skill doc was updated to match.

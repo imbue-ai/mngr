@@ -5,13 +5,18 @@ from imbue.mngr_imbue_cloud.data_types import BareMetalServer
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerDbId
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerStatus
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_READY
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import _CLAIM_POOL_HOST_FOR_REMOVAL_SQL
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import _COUNT_SLICES_SQL
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import _INSERT_BARE_METAL_SERVER_SQL
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import _INSERT_SLICE_POOL_HOST_SQL
-from imbue.mngr_imbue_cloud.slices.bare_metal_db import _SELECT_UNLEASED_SLICE_TEARDOWN_TARGETS_SQL
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import _SELECT_UNLEASED_SLICE_TEARDOWN_ROW_IDS_SQL
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import _server_from_row
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import build_bare_metal_server_insert_values
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import build_slice_pool_host_insert_values
-from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_unleased_slice_teardown_targets
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import claim_pool_host_for_removal
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import destroy_eligible_pool_host_statuses
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_pool_host_destroy_target
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_unleased_slice_teardown_row_ids
 
 
 def _ready_server() -> BareMetalServer:
@@ -131,11 +136,13 @@ def test_server_from_row_round_trips() -> None:
 
 
 class _FakeCursor:
-    """Minimal cursor that returns scripted rows for the one SELECT under test."""
+    """Minimal cursor that returns scripted rows and records executed SQL (no real DB)."""
 
-    def __init__(self, rows: list[tuple]) -> None:
+    def __init__(self, rows: list[tuple], rowcount: int = 0) -> None:
         self._rows = rows
+        self.rowcount = rowcount
         self.executed_sql: str | None = None
+        self.executed_params: tuple | None = None
 
     def __enter__(self) -> "_FakeCursor":
         return self
@@ -145,46 +152,86 @@ class _FakeCursor:
 
     def execute(self, sql: str, params: tuple = ()) -> None:
         self.executed_sql = sql
+        self.executed_params = params
 
     def fetchall(self) -> list[tuple]:
         return self._rows
+
+    def fetchone(self) -> tuple | None:
+        return self._rows[0] if self._rows else None
 
 
 class _FakeConn:
     """Minimal connection yielding a scripted cursor (no real DB)."""
 
-    def __init__(self, rows: list[tuple]) -> None:
-        self._cursor = _FakeCursor(rows)
+    def __init__(self, rows: list[tuple], rowcount: int = 0) -> None:
+        self._cursor = _FakeCursor(rows, rowcount)
+        self.commit_count = 0
 
     def cursor(self) -> _FakeCursor:
         return self._cursor
 
-
-def test_fetch_unleased_slice_teardown_targets_maps_rows_to_targets() -> None:
-    rows = [
-        (
-            "row-1",
-            "mngr-slice-dev-josh-aaa",
-            "mngr-slice-dev-josh-aaa-data",
-            "15.0.0.1",
-            "limahost",
-            "ssh-ed25519 AAAAbox1",
-        ),
-        # A row whose lima_service_user is NULL falls back to root.
-        ("row-2", "mngr-slice-dev-josh-bbb", None, "15.0.0.2", None, None),
-    ]
-    targets = fetch_unleased_slice_teardown_targets(_FakeConn(rows))
-    assert [t.pool_host_row_id for t in targets] == ["row-1", "row-2"]
-    assert targets[0].lima_disk_name == "mngr-slice-dev-josh-aaa-data"
-    assert targets[1].lima_disk_name is None
-    assert targets[0].box_public_address == "15.0.0.1"
-    assert targets[1].lima_service_user == "root"
-    assert targets[0].box_host_public_key == "ssh-ed25519 AAAAbox1"
+    def commit(self) -> None:
+        self.commit_count += 1
 
 
-def test_fetch_unleased_slice_teardown_targets_query_excludes_leased_and_removing() -> None:
-    # Leased slices are torn down by their agent's release path; removing rows are
-    # already mid-teardown by the connector sweep -- both must be excluded here.
-    assert "NOT IN ('leased', 'removing')" in _SELECT_UNLEASED_SLICE_TEARDOWN_TARGETS_SQL
+def test_fetch_unleased_slice_teardown_row_ids_maps_rows_to_strings() -> None:
+    row_ids = fetch_unleased_slice_teardown_row_ids(_FakeConn([("row-1",), ("row-2",)]))
+    assert row_ids == ["row-1", "row-2"]
+
+
+def test_unleased_teardown_query_excludes_only_leased() -> None:
+    # Leased slices are torn down by their agent's release path and must be excluded.
+    # 'removing' rows ARE included: a row stranded mid-teardown (crashed release or a
+    # destroy whose box was unreachable) must not leak when the env is destroyed.
+    assert "p.status != 'leased'" in _SELECT_UNLEASED_SLICE_TEARDOWN_ROW_IDS_SQL
+    assert "removing" not in _SELECT_UNLEASED_SLICE_TEARDOWN_ROW_IDS_SQL
     # The inner JOIN on bare_metal_server_id already restricts to slice rows.
-    assert "JOIN bare_metal_servers" in _SELECT_UNLEASED_SLICE_TEARDOWN_TARGETS_SQL
+    assert "JOIN bare_metal_servers" in _SELECT_UNLEASED_SLICE_TEARDOWN_ROW_IDS_SQL
+
+
+def test_destroy_eligible_statuses_require_force_for_leased() -> None:
+    # The default claim set covers available rows, stale 'removing' rows (a retry of a
+    # prior failed teardown), and the legacy 'released' value; only --force adds leased.
+    assert destroy_eligible_pool_host_statuses(is_leased_destroy_allowed=False) == (
+        "available",
+        "released",
+        "removing",
+    )
+    assert "leased" in destroy_eligible_pool_host_statuses(is_leased_destroy_allowed=True)
+
+
+def test_claim_pool_host_for_removal_is_a_single_conditional_update() -> None:
+    # The claim must flip the status and check eligibility in ONE statement -- that
+    # atomicity (vs the connector's lease, which only selects 'available' rows) is
+    # what closes the destroy-vs-lease race.
+    assert _CLAIM_POOL_HOST_FOR_REMOVAL_SQL.startswith("UPDATE pool_hosts SET status = 'removing'")
+    assert "status = ANY(%s)" in _CLAIM_POOL_HOST_FOR_REMOVAL_SQL
+
+
+def test_claim_pool_host_for_removal_reports_whether_the_row_was_claimed() -> None:
+    claimed_conn = _FakeConn([], rowcount=1)
+    assert claim_pool_host_for_removal(claimed_conn, "row-1", ("available",)) is True
+    assert claimed_conn.commit_count == 1
+    missed_conn = _FakeConn([], rowcount=0)
+    assert claim_pool_host_for_removal(missed_conn, "row-1", ("available",)) is False
+    # The miss is still committed so the (no-op) transaction does not linger.
+    assert missed_conn.commit_count == 1
+
+
+def test_fetch_pool_host_destroy_target_maps_null_box_columns() -> None:
+    # A row whose box record was deleted still comes back (LEFT JOIN), with null box
+    # columns, so the caller can report it precisely instead of erroring on lookup.
+    target = fetch_pool_host_destroy_target(_FakeConn([("row-1", "mngr-slice-dev-a", None, None, None)]), "row-1")
+    assert target is not None
+    assert target.pool_host_row_id == "row-1"
+    assert target.lima_instance_name == "mngr-slice-dev-a"
+    assert target.box_public_address is None
+    assert target.lima_service_user is None
+    assert fetch_pool_host_destroy_target(_FakeConn([]), "row-gone") is None
+
+
+def test_count_slices_counts_removing_rows_as_occupied() -> None:
+    # A 'removing' row's VM may still be tearing down; it holds its box slot until the
+    # VM is destroyed and the row deleted, so slot accounting must not exclude it.
+    assert "status" not in _COUNT_SLICES_SQL

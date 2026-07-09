@@ -163,7 +163,11 @@ def test_build_backfill_host_keys_admin_args_forwards_dsn_when_present() -> None
 
 def test_build_destroy_admin_args_without_force() -> None:
     assert build_destroy_admin_args(
-        pool_host_id="abc-123", database_url="postgres://x", force=False, skip_vps_cancel=False
+        pool_host_ids=["abc-123"],
+        database_url="postgres://x",
+        is_leased_destroy_allowed=False,
+        is_row_drop_only=False,
+        max_concurrency=None,
     ) == [
         "destroy",
         "abc-123",
@@ -172,9 +176,26 @@ def test_build_destroy_admin_args_without_force() -> None:
     ]
 
 
+def test_build_destroy_admin_args_forwards_all_ids_in_one_invocation() -> None:
+    # Parallel destroy: every id rides in a single admin invocation (the admin CLI
+    # fans them out concurrently), never one subprocess per host.
+    args = build_destroy_admin_args(
+        pool_host_ids=["id-1", "id-2", "id-3"],
+        database_url=None,
+        is_leased_destroy_allowed=False,
+        is_row_drop_only=False,
+        max_concurrency=None,
+    )
+    assert args[:4] == ["destroy", "id-1", "id-2", "id-3"]
+
+
 def test_build_destroy_admin_args_with_force() -> None:
     args = build_destroy_admin_args(
-        pool_host_id="abc-123", database_url="postgres://x", force=True, skip_vps_cancel=False
+        pool_host_ids=["abc-123"],
+        database_url="postgres://x",
+        is_leased_destroy_allowed=True,
+        is_row_drop_only=False,
+        max_concurrency=None,
     )
     assert "--force" in args
     # ``--force`` is a flag, not an arg-value, so order is the only thing
@@ -182,14 +203,27 @@ def test_build_destroy_admin_args_with_force() -> None:
     assert args.index("--force") > args.index("abc-123")
 
 
-def test_build_destroy_admin_args_skip_vps_cancel() -> None:
-    args = build_destroy_admin_args(pool_host_id="abc-123", database_url=None, force=True, skip_vps_cancel=True)
-    assert "--skip-vps-cancel" in args
-    # Default teardown (skip_vps_cancel=False) must NOT pass the flag, so the
-    # admin command's VM-teardown path stays the default.
-    assert "--skip-vps-cancel" not in build_destroy_admin_args(
-        pool_host_id="abc-123", database_url=None, force=True, skip_vps_cancel=False
+def test_build_destroy_admin_args_drop_row_only_and_max_concurrency() -> None:
+    args = build_destroy_admin_args(
+        pool_host_ids=["abc-123"],
+        database_url=None,
+        is_leased_destroy_allowed=False,
+        is_row_drop_only=True,
+        max_concurrency=4,
     )
+    assert "--drop-row-only" in args
+    assert args[args.index("--max-concurrency") + 1] == "4"
+    # Default teardown must NOT pass either flag, so the admin command's
+    # VM-teardown path and its default concurrency stay in effect.
+    default_args = build_destroy_admin_args(
+        pool_host_ids=["abc-123"],
+        database_url=None,
+        is_leased_destroy_allowed=False,
+        is_row_drop_only=False,
+        max_concurrency=None,
+    )
+    assert "--drop-row-only" not in default_args
+    assert "--max-concurrency" not in default_args
 
 
 def test_pool_create_requires_activated_env(_isolated_env: Path) -> None:

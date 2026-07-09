@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
 from typing import Any
@@ -6,10 +7,20 @@ from typing import Final
 from imbue.imbue_common.pure import pure
 from imbue.mngr_imbue_cloud.data_types import BareMetalServer
 from imbue.mngr_imbue_cloud.data_types import BareMetalServerCapacity
-from imbue.mngr_imbue_cloud.data_types import SliceTeardownTarget
+from imbue.mngr_imbue_cloud.data_types import PoolHostDestroyTarget
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerDbId
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerStatus
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_capacity
+
+# Wire / DB values for pool_hosts.status. Rows are inserted 'available', flipped to
+# 'leased' by the connector's /hosts/lease, and to 'removing' (the durable, retryable
+# in-progress teardown marker) by both the connector's release path and the admin
+# destroy's atomic claim. 'released' is a legacy value nothing writes anymore (release
+# deletes the row); it stays claimable so historical rows can still be destroyed.
+POOL_HOST_STATUS_AVAILABLE: Final[str] = "available"
+POOL_HOST_STATUS_LEASED: Final[str] = "leased"
+POOL_HOST_STATUS_REMOVING: Final[str] = "removing"
+POOL_HOST_STATUS_RELEASED: Final[str] = "released"
 
 # Admin tooling writes bare_metal_servers + slice pool_hosts rows directly to the
 # connector's host_pool Neon DB (laptop-side), mirroring how `admin pool create`
@@ -43,11 +54,11 @@ _SELECT_SERVERS_SQL: Final[str] = (
     "created_at, updated_at, box_host_public_key FROM bare_metal_servers ORDER BY created_at ASC"
 )
 
-# Count the baked slices currently on a server (any non-removed pool_hosts row);
-# a server's free slots = slot_count - this count.
-_COUNT_SLICES_SQL: Final[str] = (
-    "SELECT COUNT(*) FROM pool_hosts WHERE bare_metal_server_id = %s AND status != 'removing'"
-)
+# Count the baked slices currently on a server. Every row -- including 'removing'
+# ones, whose VM teardown may still be in flight -- occupies its box slot until the
+# VM is destroyed and the row deleted, so a server's free slots = slot_count - this
+# count stays truthful while destroys run.
+_COUNT_SLICES_SQL: Final[str] = "SELECT COUNT(*) FROM pool_hosts WHERE bare_metal_server_id = %s"
 
 # Every slice's lima instance name on a server (any status). Used to reconcile the
 # box's running VMs against the DB and reap orphans (VMs with no row).
@@ -233,36 +244,98 @@ def insert_slice_pool_host(conn: Any, values: tuple[Any, ...]) -> None:
     conn.commit()
 
 
-# Unleased slice rows (and the box that hosts each) -- the pool backlog that an env
-# destroy must tear down so it does not leak VMs once the env's DB is gone. Leased
-# slices are deliberately excluded: they are torn down via their agent's release
-# path (`mngr destroy` -> connector release), and tearing their VM down here would
-# race that path. ``removing`` rows are already mid-teardown by the connector sweep.
-_SELECT_UNLEASED_SLICE_TEARDOWN_TARGETS_SQL: Final[str] = (
-    "SELECT p.id, p.lima_instance_name, p.lima_disk_name, s.public_address, s.lima_service_user, "
-    "s.box_host_public_key "
+# Unleased slice row ids -- the pool backlog that an env destroy must tear down so it
+# does not leak VMs once the env's DB is gone. Leased slices are deliberately
+# excluded: they are torn down via their agent's release path (`mngr destroy` ->
+# connector release), and tearing their VM down here would race that path.
+# ``removing`` rows ARE included: a row stranded mid-teardown (a crashed release, or
+# a prior destroy whose box was unreachable) would otherwise never be cleaned up --
+# both the VM destroy and the row delete are idempotent, so re-tearing one down is
+# harmless even against an in-flight release.
+_SELECT_UNLEASED_SLICE_TEARDOWN_ROW_IDS_SQL: Final[str] = (
+    "SELECT p.id "
     "FROM pool_hosts p JOIN bare_metal_servers s ON p.bare_metal_server_id = s.id "
-    "WHERE p.status NOT IN ('leased', 'removing') "
+    "WHERE p.status != 'leased' "
     "AND p.lima_instance_name IS NOT NULL AND s.public_address IS NOT NULL"
 )
 
 
-def fetch_unleased_slice_teardown_targets(conn: Any) -> list[SliceTeardownTarget]:
-    """Return every unleased slice in the DB paired with the box that hosts it."""
+def fetch_unleased_slice_teardown_row_ids(conn: Any) -> list[str]:
+    """Return the row id of every unleased slice whose box is still reachable in the DB."""
     with conn.cursor() as cur:
-        cur.execute(_SELECT_UNLEASED_SLICE_TEARDOWN_TARGETS_SQL)
-        rows = cur.fetchall()
-    return [
-        SliceTeardownTarget(
-            pool_host_row_id=str(row[0]),
-            lima_instance_name=str(row[1]),
-            lima_disk_name=str(row[2]) if row[2] else None,
-            box_public_address=str(row[3]),
-            lima_service_user=str(row[4]) if row[4] else "root",
-            box_host_public_key=row[5],
-        )
-        for row in rows
-    ]
+        cur.execute(_SELECT_UNLEASED_SLICE_TEARDOWN_ROW_IDS_SQL)
+        return [str(row[0]) for row in cur.fetchall()]
+
+
+# Atomically claim a row for teardown by flipping it to 'removing', but only from a
+# caller-approved status set -- the WHERE makes the claim and the eligibility check a
+# single statement, so it cannot race the connector's lease (which only ever selects
+# 'available' rows, under FOR UPDATE): either the lease commits first and the claim
+# matches nothing, or the claim commits first and the row is invisible to leasing.
+_CLAIM_POOL_HOST_FOR_REMOVAL_SQL: Final[str] = (
+    "UPDATE pool_hosts SET status = 'removing' WHERE id = %s AND status = ANY(%s)"
+)
+
+_SELECT_POOL_HOST_STATUS_SQL: Final[str] = "SELECT status FROM pool_hosts WHERE id = %s"
+
+# The claimed row's teardown coordinates. LEFT JOIN so a row whose box record was
+# deleted still comes back (with null box columns) and can be reported precisely.
+_SELECT_POOL_HOST_DESTROY_TARGET_SQL: Final[str] = (
+    "SELECT p.id, p.lima_instance_name, s.public_address, s.lima_service_user, s.box_host_public_key "
+    "FROM pool_hosts p LEFT JOIN bare_metal_servers s ON p.bare_metal_server_id = s.id "
+    "WHERE p.id = %s"
+)
+
+
+@pure
+def destroy_eligible_pool_host_statuses(is_leased_destroy_allowed: bool) -> tuple[str, ...]:
+    """The statuses an admin destroy may atomically claim.
+
+    'removing' is always claimable so a destroy that failed mid-teardown can be
+    retried by re-running with the same id; 'leased' requires the explicit
+    ``--force`` opt-in (it tears down a user's live workspace).
+    """
+    base = (POOL_HOST_STATUS_AVAILABLE, POOL_HOST_STATUS_RELEASED, POOL_HOST_STATUS_REMOVING)
+    if is_leased_destroy_allowed:
+        return base + (POOL_HOST_STATUS_LEASED,)
+    return base
+
+
+def claim_pool_host_for_removal(conn: Any, row_id: str, eligible_statuses: Sequence[str]) -> bool:
+    """Atomically flip a row to 'removing' (committing immediately); True if this call claimed it.
+
+    False means the row is gone or in a non-eligible status (e.g. it was leased
+    between the operator listing it and the destroy running).
+    """
+    with conn.cursor() as cur:
+        cur.execute(_CLAIM_POOL_HOST_FOR_REMOVAL_SQL, (row_id, list(eligible_statuses)))
+        is_claimed = cur.rowcount == 1
+    conn.commit()
+    return is_claimed
+
+
+def fetch_pool_host_status(conn: Any, row_id: str) -> str | None:
+    """Return a pool_hosts row's status, or None if the row does not exist."""
+    with conn.cursor() as cur:
+        cur.execute(_SELECT_POOL_HOST_STATUS_SQL, (row_id,))
+        row = cur.fetchone()
+    return str(row[0]) if row else None
+
+
+def fetch_pool_host_destroy_target(conn: Any, row_id: str) -> PoolHostDestroyTarget | None:
+    """Return a row's teardown coordinates (box columns None when the box record is gone)."""
+    with conn.cursor() as cur:
+        cur.execute(_SELECT_POOL_HOST_DESTROY_TARGET_SQL, (row_id,))
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return PoolHostDestroyTarget(
+        pool_host_row_id=str(row[0]),
+        lima_instance_name=str(row[1]) if row[1] else None,
+        box_public_address=str(row[2]) if row[2] else None,
+        lima_service_user=str(row[3]) if row[3] else None,
+        box_host_public_key=row[4],
+    )
 
 
 def delete_pool_host_row(conn: Any, row_id: str) -> None:
