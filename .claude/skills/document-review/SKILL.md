@@ -5,7 +5,6 @@ description: >
   Pull a paper, grant, or data-access application from the review coordinator,
   read the linked source documents (PubMed/MEDLINE/PMC/NIH RePORTER/bioRxiv),
   run YOUR local versioned prompt, and submit the structured JSON review back.
-disable-model-invocation: true
 ---
 
 # Document Review Skill
