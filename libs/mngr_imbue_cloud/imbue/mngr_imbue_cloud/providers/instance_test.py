@@ -109,13 +109,13 @@ def test_build_offline_details_from_lease_preserves_host_and_failure_reason(tmp_
         container_ssh_port=2222,
         agent_id=str(agent_id),
         host_id=str(host_id),
-        host_name="crashed-host",
+        host_name="unreachable-host",
         attributes={},
         leased_at="2025-01-01T00:00:00Z",
     )
     host_ref = DiscoveredHost(
         host_id=host_id,
-        host_name=HostName("crashed-host"),
+        host_name=HostName("unreachable-host"),
         provider_name=provider_name,
         host_state=HostState.UNKNOWN,
     )
