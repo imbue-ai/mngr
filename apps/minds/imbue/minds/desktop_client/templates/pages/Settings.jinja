@@ -252,17 +252,16 @@
 </script>
 {% endset %}
 <Base title="Settings" scripts={{ _scripts }}>
-  <div class="h-screen flex flex-col overflow-hidden">
-    <div class="w-full max-w-[960px] mx-auto px-6 pt-12 pb-6 shrink-0">
-      <h1 class="type-heading-lg text-primary">Settings</h1>
-    </div>
-    <div class="w-full max-w-[960px] mx-auto px-6 flex gap-8 flex-1 min-h-0">
-      {# Left column: fixed (does not scroll); nav at the top and "Back to
-         workspaces" pinned to the bottom via ``mt-auto``. Nav entries share
-         identical base classes (notably no ``bg-transparent``, which would beat
-         the toggled-on ``bg-fill-hover`` and leave the active entry
-         un-highlighted); ``selectSection`` in the page script toggles state. #}
-      <div class="w-48 shrink-0 flex flex-col pb-12">
+  <div class="max-w-[960px] mx-auto px-6">
+    <div class="flex gap-8 items-start">
+      {# Left column: ``sticky top-0`` + full viewport height so it stays put
+         while the whole window scrolls (scrollbar at the window edge, as
+         before), with "Back to workspaces" pinned to the bottom via ``mt-auto``.
+         Nav entries share identical base classes (notably no ``bg-transparent``,
+         which would beat the toggled-on ``bg-fill-hover`` and leave the active
+         entry un-highlighted); ``selectSection`` in the page script toggles state. #}
+      <div class="w-48 shrink-0 sticky top-0 h-screen flex flex-col py-12">
+        <h1 class="type-heading-lg text-primary mb-6">Settings</h1>
         <nav class="flex flex-col gap-0.5" aria-label="Settings sections">
         <button type="button" data-settings-nav="connectors"
                 class="flex items-center h-8 px-2 rounded-md cursor-pointer type-body text-left border-0 hover:text-primary hover:bg-fill-hover bg-fill-hover text-primary">
@@ -281,12 +280,12 @@
           Error reporting
         </button>
         </nav>
-        <div class="mt-auto pt-6"><Link href="/" extra="type-helper">&larr; Back to workspaces</Link></div>
+        <div class="mt-auto"><Link href="/" extra="type-helper">&larr; Back to workspaces</Link></div>
       </div>
 
-      {# Right column: the only area that scrolls. ``pr-4`` keeps the content off
-         the scrollbar so it doesn't feel squeezed against it. #}
-      <div class="flex-1 min-w-0 overflow-y-auto pb-12 pr-4">
+      {# Right column: normal flow, so the whole window scrolls and the scrollbar
+         sits at the window edge, away from the content. #}
+      <div class="flex-1 min-w-0 py-12">
                 {# -- Connectors panel (predefined / catalog services the agent connects to) -- #}
         <section data-settings-panel="connectors">
           <h2 class="type-heading-lg text-primary mb-2">Connectors</h2>
