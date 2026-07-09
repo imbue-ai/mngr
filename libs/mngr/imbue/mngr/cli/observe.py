@@ -9,12 +9,19 @@ from imbue.mngr.api.observe import acquire_observe_lock
 from imbue.mngr.api.observe import get_default_events_base_dir
 from imbue.mngr.api.observe import release_observe_lock
 from imbue.mngr.api.provider_discovery_stream import run_per_provider_discovery_stream
+from imbue.imbue_common.event_envelope import EventEnvelope
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
+from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.utils.parent_process import start_parent_death_watcher
+
+
+def _echo_agents_event_to_stdout(event: EventEnvelope) -> None:
+    """Sink for AgentObserver that streams each agents-stream event to stdout as JSONL."""
+    write_json_line(event.model_dump(mode="json"))
 
 
 class ObserveCliOptions(CommonCliOptions):
@@ -22,6 +29,7 @@ class ObserveCliOptions(CommonCliOptions):
 
     events_dir: Path | None = None
     discovery_only: bool = False
+    stream_events: bool = False
     daemonize: bool = False
 
 
@@ -41,6 +49,14 @@ class ObserveCliOptions(CommonCliOptions):
     "Polls each provider independently on its own loop, emitting a per-provider snapshot "
     "as each finishes, then tails the event file for updates. "
     "Does not start activity streams or emit agent state events.",
+)
+@click.option(
+    "--stream-events",
+    is_flag=True,
+    help="Echo each agents-stream event (AGENT_STATE, AGENTS_FULL_STATE, AGENT_REMOVED) "
+    "to stdout as compact JSONL, in addition to writing the event files. Lets a parent "
+    "process consume live agent lifecycle state (including event-driven process death) by "
+    "reading this observer's stdout. Cannot be combined with --discovery-only.",
 )
 @click.option(
     "--daemonize/--no-daemonize",
@@ -72,6 +88,15 @@ def observe(ctx: click.Context, **kwargs: Any) -> None:
             "the default host dir); pass only one of them."
         )
 
+    # --stream-events is a property of the full observer (it echoes the agents
+    # stream); --discovery-only runs a different code path entirely, so combining
+    # them is contradictory rather than additive.
+    if opts.discovery_only and opts.stream_events:
+        raise click.UsageError(
+            "--stream-events cannot be combined with --discovery-only; --stream-events applies to the "
+            "full observer's agents stream."
+        )
+
     if opts.discovery_only:
         run_per_provider_discovery_stream(mngr_ctx=mngr_ctx)
         return
@@ -84,7 +109,11 @@ def observe(ctx: click.Context, **kwargs: Any) -> None:
     lock_fd = acquire_observe_lock(events_base_dir)
     try:
         logger.info("Starting agent observer writing to {} (Ctrl+C to stop)", events_base_dir)
-        observer = AgentObserver(mngr_ctx=mngr_ctx, events_base_dir=events_base_dir)
+        observer = AgentObserver(
+            mngr_ctx=mngr_ctx,
+            events_base_dir=events_base_dir,
+            agents_event_sink=_echo_agents_event_to_stdout if opts.stream_events else None,
+        )
         observer.run()
     finally:
         release_observe_lock(lock_fd)
@@ -94,7 +123,7 @@ def observe(ctx: click.Context, **kwargs: Any) -> None:
 CommandHelpMetadata(
     key="observe",
     one_line_description="Observe agent state changes across all hosts [experimental]",
-    synopsis="mngr observe [--events-dir DIR] [--discovery-only]",
+    synopsis="mngr observe [--events-dir DIR] [--discovery-only] [--stream-events]",
     arguments_description="",
     description="""Continuously monitors agent state across all hosts and writes
 events to local JSONL files:
@@ -117,12 +146,19 @@ With --discovery-only, only the host/agent discovery stream is emitted as JSONL
 to stdout. This is useful for programmatically tracking which agents and hosts
 exist without the full observe overhead.
 
+With --stream-events, the full observer additionally echoes each agents-stream
+event (AGENT_STATE, AGENTS_FULL_STATE, AGENT_REMOVED) to stdout as compact JSONL,
+in addition to writing the usual event files. A parent process can then consume
+live agent lifecycle state -- including event-driven detection of an agent
+process dying on its own -- by reading this observer's stdout.
+
 Press Ctrl+C to stop.""",
     examples=(
         ("Start observing all agents", "mngr observe"),
         ("Write events to a custom directory", "mngr observe --events-dir /path/to/events"),
         ("Start in quiet mode", "mngr observe --quiet"),
         ("Stream only discovery events", "mngr observe --discovery-only"),
+        ("Stream full agent state events to stdout", "mngr observe --stream-events"),
     ),
     see_also=(
         ("list", "List available agents"),

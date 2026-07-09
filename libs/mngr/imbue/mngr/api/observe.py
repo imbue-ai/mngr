@@ -3,6 +3,7 @@ import json
 import os
 import queue
 import threading
+from collections.abc import Callable
 from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
@@ -10,7 +11,9 @@ from enum import auto
 from pathlib import Path
 from typing import Final
 
+import psutil
 from loguru import logger
+from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
 
@@ -42,6 +45,7 @@ from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
@@ -57,6 +61,11 @@ ACTIVITY_EVENT_SOURCE: Final[EventSource] = EventSource("mngr/activity")
 OBSERVE_LOCK_FILENAME: Final[str] = "observe_lock"
 FULL_STATE_INTERVAL_SECONDS: Final[float] = 300.0
 _ACTIVITY_DEBOUNCE_SECONDS: Final[float] = 2.0
+# Timeout for each psutil wait() call in a PID watcher's loop. Bounds how long a
+# watcher takes to notice a stop request (it cannot interrupt an in-flight wait),
+# so it must stay small; process death itself is detected event-driven, well
+# before this elapses.
+_WATCH_POLL_SECONDS: Final[float] = 1.0
 
 
 # === Event Types ===
@@ -68,6 +77,7 @@ class ObserveEventType(UpperCaseStrEnum):
     AGENT_STATE = auto()
     AGENTS_FULL_STATE = auto()
     AGENT_STATE_CHANGE = auto()
+    AGENT_REMOVED = auto()
 
 
 class AgentStateEvent(EventEnvelope):
@@ -95,6 +105,19 @@ class AgentStateChangeEvent(EventEnvelope):
     old_host_state: str | None = Field(description="Previous host state value, or None if first observation")
     new_host_state: str | None = Field(description="New host state value")
     agent: AgentDetails = Field(description="Full AgentDetails at time of state change")
+
+
+class AgentRemovedEvent(EventEnvelope):
+    """Emitted on the agents stream when a previously-known agent is destroyed.
+
+    The full observer already conveys create/update via AGENT_STATE and
+    AGENTS_FULL_STATE; this closes the loop for removals so a consumer reading the
+    agents stream (e.g. via ``--stream-events``) learns promptly that an agent is
+    gone instead of inferring it from the next full snapshot.
+    """
+
+    agent_id: AgentId = Field(description="ID of the removed agent")
+    agent_name: AgentName = Field(description="Name of the removed agent")
 
 
 # === Path Helpers ===
@@ -190,6 +213,51 @@ def make_agent_state_change_event(
         new_host_state=agent.host.state.value if agent.host.state is not None else None,
         agent=agent,
     )
+
+
+def make_agent_removed_event(agent_id: AgentId, agent_name: AgentName) -> AgentRemovedEvent:
+    """Build an event recording that a single agent was removed."""
+    timestamp, event_id = _make_envelope_fields()
+    return AgentRemovedEvent(
+        timestamp=timestamp,
+        type=EventType(ObserveEventType.AGENT_REMOVED),
+        event_id=event_id,
+        source=OBSERVE_EVENT_SOURCE,
+        agent_id=agent_id,
+        agent_name=agent_name,
+    )
+
+
+# === Event Parsing ===
+
+
+def parse_observe_event_line(line: str) -> AgentStateEvent | FullAgentStateEvent | AgentRemovedEvent | None:
+    """Parse one JSONL line from the agents stream into its observe event type.
+
+    Handles exactly the event types written to the ``mngr/agents`` stream:
+    AGENT_STATE, AGENTS_FULL_STATE, and AGENT_REMOVED. The AGENT_STATE_CHANGE
+    events live on the separate ``mngr/agent_states`` stream and are not echoed
+    by ``--stream-events``, so any other (or unknown) type returns None rather
+    than raising -- this keeps a consumer robust to forward-compatible additions.
+
+    Returns None for empty/whitespace-only lines and for unrecognized event
+    types. Raises ``json.JSONDecodeError`` for malformed JSON and
+    ``pydantic.ValidationError`` for a known type whose payload does not match
+    the current schema (a real upstream problem that should surface).
+    """
+    stripped = line.strip()
+    if not stripped:
+        return None
+
+    data = json.loads(stripped)
+    event_type = data.get("type")
+    if event_type == ObserveEventType.AGENT_STATE:
+        return AgentStateEvent.model_validate(data)
+    if event_type == ObserveEventType.AGENTS_FULL_STATE:
+        return FullAgentStateEvent.model_validate(data)
+    if event_type == ObserveEventType.AGENT_REMOVED:
+        return AgentRemovedEvent.model_validate(data)
+    return None
 
 
 # === File I/O ===
@@ -326,6 +394,22 @@ class _KnownHost(FrozenModel):
     host_name: HostName = Field(description="Human-readable name of the host")
 
 
+class _AgentWatcher(FrozenModel):
+    """Bookkeeping for one local agent's PID-death watcher thread.
+
+    ``pid`` is what the watcher is currently bound to, so a reconcile can tell
+    whether the agent's main process changed. Holds a live thread and stop Event
+    (hence arbitrary_types_allowed); it is never serialized.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
+
+    pid: int = Field(description="PID the watcher is bound to")
+    host_id: str = Field(description="Host id to enqueue for re-probe when the process exits")
+    stop_event: threading.Event = Field(description="Set to ask the watcher thread to stop")
+    thread: threading.Thread = Field(description="The running watcher thread")
+
+
 def _make_unknown_agent_details(last_known: AgentDetails) -> AgentDetails:
     """Build a synthetic AgentDetails representing an UNKNOWN agent.
 
@@ -371,6 +455,12 @@ class AgentObserver(MutableModel):
     mngr_ctx: MngrContext = Field(frozen=True)
     events_base_dir: Path = Field(frozen=True, description="Base directory for event output files and lock")
     mngr_binary: str = Field(default="mngr", frozen=True)
+    # Optional sink invoked for every agents-stream event (AGENT_STATE /
+    # AGENTS_FULL_STATE / AGENT_REMOVED) in addition to the file write, so a parent
+    # process can consume state live (e.g. the CLI's --stream-events echoes each to
+    # stdout). Injected rather than writing stdout here to keep this api-layer module
+    # free of cli output concerns. The agent_states change stream is never sent here.
+    agents_event_sink: Callable[[EventEnvelope], None] | None = Field(default=None, frozen=True)
 
     _concurrency_group: ConcurrencyGroup = PrivateAttr(default_factory=lambda: ConcurrencyGroup(name="agent-observer"))
     # Folds the per-provider discovery stream into a consistent view (known hosts,
@@ -380,7 +470,16 @@ class AgentObserver(MutableModel):
     _discovery_stream_process: RunningProcess = PrivateAttr(default_factory=dict)
     _events_processes: dict[str, RunningProcess] = PrivateAttr(default_factory=dict)
     _last_tracked_state_by_id: dict[str, _TrackedState] = PrivateAttr(default_factory=dict)
+    # PID-death watchers for local agents, keyed by agent id. Each entry owns a
+    # thread that blocks on psutil until the agent's main process exits, then
+    # enqueues the agent's host for a re-probe so the death is emitted as state.
+    _watchers: dict[str, _AgentWatcher] = PrivateAttr(default_factory=dict)
+    _watchers_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    # Serializes agents_event_sink calls from the several threads that emit
+    # agents-stream events (activity worker, snapshot loop, discovery-output
+    # handler), so the sink's output never interleaves.
+    _sink_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _stop_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     _activity_queue: queue.Queue[str] = PrivateAttr(default_factory=queue.Queue)
     # UNKNOWN-state tracking. Populated only during this process's lifetime
@@ -446,6 +545,7 @@ class AgentObserver(MutableModel):
                 pass
             finally:
                 self._stop_event.set()
+                self._close_all_watchers()
                 activity_worker.join(timeout=5.0)
 
     def _on_activity_failure(self, e: BaseException):
@@ -485,11 +585,48 @@ class AgentObserver(MutableModel):
         if event is None:
             return
 
+        # Snapshot the agent map before applying so we can name agents that this
+        # event removes (the delta carries only ids, and the aggregator forgets
+        # the agent's data as part of applying the removal).
+        agents_before = self._aggregator.get_agent_by_id()
         delta = self._aggregator.apply_event(event)
         self._sync_known_state_from_aggregator()
         self._reconcile_activity_streams(delta)
+        self._handle_agent_membership_delta(delta, agents_before)
         if _is_provider_error_event(event):
             self._snapshot_trigger.set()
+
+    def _handle_agent_membership_delta(
+        self, delta: AggregatorDelta, agents_before: dict[str, DiscoveredAgent]
+    ) -> None:
+        """React to agents appearing/disappearing in the discovery stream.
+
+        The discovery stream is the low-latency membership signal. A newly
+        discovered agent enqueues its host for a re-probe so its real lifecycle
+        state (and main_pid) is emitted promptly, matching the near-instant create
+        latency consumers had when they read the discovery stream directly. A
+        removed agent emits an AGENT_REMOVED event on the agents stream and drops
+        its per-agent tracking and PID watcher, so a consumer of --stream-events
+        learns of the removal without waiting for the next full snapshot.
+        """
+        if delta.added_agent_ids:
+            agents_after = self._aggregator.get_agent_by_id()
+            for agent_id_str in delta.added_agent_ids:
+                agent = agents_after.get(agent_id_str)
+                if agent is not None:
+                    self._activity_queue.put(str(agent.host_id))
+        for agent_id_str in delta.removed_agent_ids:
+            prior = agents_before.get(agent_id_str)
+            agent_name = prior.agent_name if prior is not None else AgentName(agent_id_str)
+            self._emit_agent_removed(AgentId(agent_id_str), agent_name)
+            self._drop_agent_tracking(agent_id_str)
+
+    def _drop_agent_tracking(self, agent_id_str: str) -> None:
+        """Forget all per-agent state for a removed agent and close its PID watcher."""
+        self._close_watcher(agent_id_str)
+        with self._lock:
+            self._last_tracked_state_by_id.pop(agent_id_str, None)
+            self._last_known_details_by_id.pop(agent_id_str, None)
 
     def _sync_known_state_from_aggregator(self) -> None:
         """Refresh known hosts and provider error/known sets from the aggregator."""
@@ -703,7 +840,7 @@ class AgentObserver(MutableModel):
 
         # Emit the full state event (includes all agents regardless of change)
         event = make_full_agent_state_event(emitted_agents)
-        append_observe_event(self.events_base_dir, event)
+        self._emit_observe_event(event)
         logger.debug(
             "Emitted full agent state event with {} agent(s) ({} live, {} unknown)",
             len(emitted_agents),
@@ -715,10 +852,151 @@ class AgentObserver(MutableModel):
         for agent, old_agent_state, old_host_state in state_changes:
             self._emit_state_change(agent, old_agent_state, old_host_state)
 
+        # Reconcile PID watchers from the live listing (open/replace/close by
+        # main_pid), and close watchers for agents dropped from tracking. The
+        # synthesized UNKNOWN agents are intentionally left untouched: their
+        # provider is unreachable, so the last-known watcher (if any) stays as-is.
+        for agent in agents:
+            self._reconcile_watcher_for_agent(agent)
+        for agent_id_str in ids_to_drop:
+            self._close_watcher(agent_id_str)
+
+    # === PID Watchers (local agents only) ===
+
+    def _reconcile_watcher_for_agent(self, agent: AgentDetails) -> None:
+        """Open, replace, or close the PID watcher for one agent from its probed details.
+
+        Only local-provider agents carry a ``main_pid`` (populated on the probe),
+        so this watches exactly those. A missing ``main_pid`` (remote agent, or a
+        local agent that is no longer running) closes any existing watcher.
+        """
+        agent_id_str = str(agent.id)
+        if agent.main_pid is None:
+            self._close_watcher(agent_id_str)
+            return
+        self._open_or_replace_watcher(agent_id_str, str(agent.host.id), agent.main_pid)
+
+    def _open_or_replace_watcher(self, agent_id_str: str, host_id_str: str, pid: int) -> None:
+        """Ensure a watcher thread is running for ``pid``, replacing one on a stale PID.
+
+        Held under ``_watchers_lock`` for its whole duration so two reconcile paths
+        (the activity worker and the snapshot loop) cannot each start a thread for
+        the same agent and leak one. The stale-watcher stop/join is inlined rather
+        than delegated to ``_close_watcher`` to avoid re-acquiring the non-reentrant
+        lock; joining here is deadlock-free because ``_watch_pid`` never takes it.
+        """
+        with self._watchers_lock:
+            existing = self._watchers.get(agent_id_str)
+            if existing is not None and existing.pid == pid:
+                return
+            # New agent or the main process changed (PID differs): stop the stale
+            # watcher first, then start a fresh one bound to the current PID.
+            if existing is not None:
+                self._watchers.pop(agent_id_str, None)
+                existing.stop_event.set()
+                existing.thread.join(timeout=5.0)
+            try:
+                process = psutil.Process(pid)
+            except psutil.NoSuchProcess:
+                # The process is already gone. Enqueue a re-probe so the next listing
+                # emits the stopped/done state rather than silently missing the death.
+                self._activity_queue.put(host_id_str)
+                return
+            stop_event = threading.Event()
+            thread = self._concurrency_group.start_new_thread(
+                target=lambda: self._watch_pid(agent_id_str, host_id_str, process, pid, stop_event),
+                daemon=True,
+                name=f"observe-pid-watch-{agent_id_str[:8]}",
+                on_failure=self._on_watcher_failure,
+            )
+            self._watchers[agent_id_str] = _AgentWatcher(
+                pid=pid, host_id=host_id_str, stop_event=stop_event, thread=thread
+            )
+
+    def _watch_pid(
+        self,
+        agent_id_str: str,
+        host_id_str: str,
+        process: psutil.Process,
+        pid: int,
+        stop_event: threading.Event,
+    ) -> None:
+        """Block until the watched process exits (or a stop is requested), then signal activity.
+
+        psutil implements ``wait`` event-driven (os.pidfd_open on Linux, kqueue on
+        macOS), so death is noticed within milliseconds; the short per-call timeout
+        exists only to re-check the stop flags, since an in-flight wait cannot be
+        interrupted.
+        """
+        while not (stop_event.is_set() or self._stop_event.is_set()):
+            try:
+                process.wait(timeout=_WATCH_POLL_SECONDS)
+            except psutil.TimeoutExpired:
+                continue
+            except psutil.Error as e:
+                logger.debug("PID watch for agent {} (pid {}) errored, treating as exit: {}", agent_id_str, pid, e)
+            # Reached once the process has exited (wait returned) or errored out.
+            logger.debug(
+                "Local agent {} main process (pid {}) exited; enqueueing host {} for re-probe",
+                agent_id_str,
+                pid,
+                host_id_str,
+            )
+            self._activity_queue.put(host_id_str)
+            return
+
+    def _close_watcher(self, agent_id_str: str) -> None:
+        """Stop and join the watcher for an agent, if any. Idempotent.
+
+        Held under ``_watchers_lock`` through the join (deadlock-free because the
+        watcher thread never takes that lock) so it cannot race a concurrent
+        reconcile into leaving two entries for the same agent.
+        """
+        with self._watchers_lock:
+            watcher = self._watchers.pop(agent_id_str, None)
+            if watcher is None:
+                return
+            watcher.stop_event.set()
+            watcher.thread.join(timeout=5.0)
+
+    def _close_all_watchers(self) -> None:
+        """Tear down every PID watcher (observer shutdown)."""
+        with self._watchers_lock:
+            agent_id_strs = list(self._watchers.keys())
+        for agent_id_str in agent_id_strs:
+            self._close_watcher(agent_id_str)
+
+    def _on_watcher_failure(self, e: BaseException) -> None:
+        """Log an unexpected watcher-thread failure without tearing down the observer.
+
+        One local agent's watch dying should not stop observing every other agent;
+        the periodic snapshot still catches that agent's death, just less promptly.
+        """
+        logger.opt(exception=e).warning("PID watcher thread failed")
+
+    def _emit_observe_event(self, event: EventEnvelope) -> None:
+        """Append an agents-stream event to its file and forward it to the sink when set.
+
+        The file write is the canonical event bus (history replay, multi-consumer
+        tailing); the sink is the additive opt-in for a parent process that consumes
+        events live. The sink is called under a lock so events from the observer's
+        several threads never interleave in the sink's output.
+        """
+        append_observe_event(self.events_base_dir, event)
+        if self.agents_event_sink is not None:
+            with self._sink_lock:
+                self.agents_event_sink(event)
+
+    def _emit_agent_removed(self, agent_id: AgentId, agent_name: AgentName) -> None:
+        """Emit an AGENT_REMOVED event to the agents stream for a destroyed agent."""
+        event = make_agent_removed_event(agent_id, agent_name)
+        self._emit_observe_event(event)
+        logger.debug("Emitted agent removed event for {} ({})", agent_name, agent_id)
+
     def _emit_agent_state(self, agent: AgentDetails) -> None:
         """Emit a single agent state event, check for state/host state change, and update tracking."""
         event = make_agent_state_event(agent)
-        append_observe_event(self.events_base_dir, event)
+        self._emit_observe_event(event)
         logger.debug("Emitted agent state event for {} (state={})", agent.name, agent.state.value)
 
         agent_id_str = str(agent.id)
@@ -736,6 +1014,9 @@ class AgentObserver(MutableModel):
 
         if old_agent_state != new_agent_state or old_host_state != new_host_state:
             self._emit_state_change(agent, old_agent_state, old_host_state)
+
+        # Keep this agent's PID watcher in sync with what we just observed.
+        self._reconcile_watcher_for_agent(agent)
 
     def _emit_state_change(self, agent: AgentDetails, old_state: str | None, old_host_state: str | None) -> None:
         """Emit a state change event to the agent_states stream."""

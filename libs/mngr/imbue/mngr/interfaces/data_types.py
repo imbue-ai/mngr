@@ -611,6 +611,14 @@ class AgentDetails(FrozenModel):
     state: AgentLifecycleState = Field(
         description="Agent lifecycle state (STOPPED/RUNNING/WAITING/REPLACED/RUNNING_UNKNOWN_AGENT_TYPE/DONE/UNKNOWN)"
     )
+    main_pid: int | None = Field(
+        default=None,
+        description=(
+            "PID of the agent's main process (e.g. claude) on the host, populated only for "
+            "local-provider agents that are running; None for remote providers and stopped agents. "
+            "Watchable via psutil only because a local agent runs on the same machine as the reader."
+        ),
+    )
     url: str | None = Field(default=None, description="Agent URL (reported)")
     start_time: datetime | None = Field(default=None, description="Last start time (reported)")
     runtime_seconds: float | None = Field(default=None, description="Runtime in seconds")

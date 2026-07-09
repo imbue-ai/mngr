@@ -126,6 +126,7 @@ Fields marked `(cel only)` cannot be used in `--fields`/`--format` template stri
 - `create_time` - Creation timestamp
 - `start_on_boot` - Whether agent starts on host boot
 - `state` - Agent lifecycle state (STOPPED/RUNNING/WAITING/REPLACED/RUNNING_UNKNOWN_AGENT_TYPE/DONE/UNKNOWN)
+- `main_pid` - PID of the agent's main process (e.g. claude) on the host, populated only for local-provider agents that are running; None for remote providers and stopped agents. Watchable via psutil only because a local agent runs on the same machine as the reader.
 - `url` - Agent URL (reported)
 - `start_time` - Last start time (reported)
 - `runtime_seconds` - Runtime in seconds

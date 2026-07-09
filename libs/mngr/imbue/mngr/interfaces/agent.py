@@ -149,6 +149,17 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         """Return the lifecycle state of this agent."""
         ...
 
+    def get_lifecycle_state_and_main_pid(self) -> tuple[AgentLifecycleState, int | None]:
+        """Return the lifecycle state and the agent's main process PID (None if unavailable).
+
+        Default implementation returns the lifecycle state with no PID;
+        implementations that can cheaply surface the running process's PID from
+        the same probe (e.g. BaseAgent) override this. The PID is only meaningful
+        to a watcher on the same machine as the process, so callers must gate its
+        use on the host being local.
+        """
+        return self.get_lifecycle_state(), None
+
     @abstractmethod
     def get_initial_message(self) -> str | None:
         """Return the initial message to send to the agent on creation, or None if not set."""

@@ -22,6 +22,7 @@ from imbue.mngr.hosts.common import classify_waiting_reason
 from imbue.mngr.hosts.common import compute_idle_seconds
 from imbue.mngr.hosts.common import copy_on_host
 from imbue.mngr.hosts.common import determine_lifecycle_state
+from imbue.mngr.hosts.common import determine_lifecycle_state_and_main_pid
 from imbue.mngr.hosts.common import get_descendant_process_names
 from imbue.mngr.hosts.common import get_ssh_known_hosts_file
 from imbue.mngr.hosts.common import resolve_expected_process_name
@@ -185,6 +186,55 @@ def test_lifecycle_waiting_when_modified_title_and_expected_in_descendants() -> 
     """WAITING when tmux reports version string but claude is running as descendant."""
     ps_output = "123 1 bash\n456 123 claude\n"
     assert determine_lifecycle_state("0|2.1.73|123", False, "claude", ps_output) == AgentLifecycleState.WAITING
+
+
+# =========================================================================
+# determine_lifecycle_state_and_main_pid tests
+# =========================================================================
+
+
+def test_main_pid_is_claude_descendant_when_running() -> None:
+    """The returned PID is the descendant whose comm matches the expected process."""
+    ps_output = "100 1 init\n200 123 bash\n300 200 claude\n"
+    state, main_pid = determine_lifecycle_state_and_main_pid("0|bash|123", True, "claude", ps_output)
+    assert state == AgentLifecycleState.RUNNING
+    assert main_pid == "300"
+
+
+def test_main_pid_is_pane_pid_when_process_runs_directly_in_pane() -> None:
+    """When claude is the pane's own top process (not under a shell), its PID is the pane PID."""
+    ps_output = "123 1 claude\n"
+    state, main_pid = determine_lifecycle_state_and_main_pid("0|claude|123", True, "claude", ps_output)
+    assert state == AgentLifecycleState.RUNNING
+    assert main_pid == "123"
+
+
+def test_main_pid_found_when_title_modified_and_claude_is_descendant() -> None:
+    """A modified tmux title still yields the claude PID from the ps tree (WAITING here)."""
+    ps_output = "123 1 bash\n456 123 claude\n"
+    state, main_pid = determine_lifecycle_state_and_main_pid("0|2.1.73|123", False, "claude", ps_output)
+    assert state == AgentLifecycleState.WAITING
+    assert main_pid == "456"
+
+
+def test_main_pid_none_when_stopped() -> None:
+    state, main_pid = determine_lifecycle_state_and_main_pid(None, False, "claude", "")
+    assert state == AgentLifecycleState.STOPPED
+    assert main_pid is None
+
+
+def test_main_pid_none_when_done() -> None:
+    state, main_pid = determine_lifecycle_state_and_main_pid("1|bash|123", False, "claude", "")
+    assert state == AgentLifecycleState.DONE
+    assert main_pid is None
+
+
+def test_main_pid_none_when_replaced() -> None:
+    """A non-claude, non-shell descendant is REPLACED and carries no main PID."""
+    ps_output = "200 123 python3\n"
+    state, main_pid = determine_lifecycle_state_and_main_pid("0|bash|123", True, "claude", ps_output)
+    assert state == AgentLifecycleState.REPLACED
+    assert main_pid is None
 
 
 # =========================================================================

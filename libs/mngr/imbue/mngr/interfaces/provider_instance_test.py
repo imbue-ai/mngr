@@ -20,6 +20,7 @@ from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_instance import HostDiscoveryReadRegistry
+from imbue.mngr.interfaces.provider_instance import _build_agent_details_from_online_agent
 from imbue.mngr.interfaces.provider_instance import _discover_agents_on_host
 from imbue.mngr.interfaces.provider_instance import build_agent_details_from_offline_ref
 from imbue.mngr.interfaces.provider_instance import collect_cached_host_ssh_infos
@@ -27,6 +28,7 @@ from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
@@ -81,6 +83,11 @@ def _make_mock_online_host(host_id: HostId) -> MagicMock:
     """
     host = MagicMock(spec=OnlineHostInterface)
     host.id = host_id
+    # Default these mocks to a remote host: main_pid is only populated for local
+    # hosts, and a bare MagicMock is_local would otherwise be truthy and route
+    # detail-building through the local PID probe. Tests that exercise the local
+    # branch set is_local=True explicitly.
+    host.is_local = False
     host.get_name.return_value = "test-host"
     host.get_state.return_value = HostState.RUNNING
     host.get_ssh_connection_info.return_value = None
@@ -221,6 +228,60 @@ def test_connection_error_during_agent_detail_building_falls_back_to_offline(
     assert len(agent_details_list) == 1
     assert agent_details_list[0].name == "test-agent"
     assert agent_details_list[0].state == AgentLifecycleState.STOPPED
+
+
+def _make_mock_online_agent(agent_id: AgentId) -> MagicMock:
+    """A MagicMock agent with the minimum wiring _build_agent_details_from_online_agent needs."""
+    agent = MagicMock()
+    agent.id = agent_id
+    agent.name = AgentName("live-agent")
+    agent.agent_type = "claude"
+    agent.get_reported_activity_time.return_value = None
+    agent.get_command.return_value = CommandString("claude")
+    agent.work_dir = Path("/tmp/work")
+    agent.get_created_branch_name.return_value = None
+    agent.create_time = datetime.now(timezone.utc)
+    agent.get_is_start_on_boot.return_value = False
+    agent.get_reported_url.return_value = None
+    agent.get_labels.return_value = {}
+    agent.get_lifecycle_state.return_value = AgentLifecycleState.RUNNING
+    agent.get_lifecycle_state_and_main_pid.return_value = (AgentLifecycleState.RUNNING, 4321)
+    return agent
+
+
+def _make_activity_config_mock() -> MagicMock:
+    return MagicMock(idle_mode=MagicMock(value="ssh"), idle_timeout_seconds=3600, activity_sources=(ActivitySource.SSH,))
+
+
+def test_build_agent_details_populates_main_pid_for_local_host(host_id: HostId) -> None:
+    """A local host surfaces the probed main_pid (from the single-probe tuple method)."""
+    online_host = _make_mock_online_host(host_id)
+    online_host.is_local = True
+    online_host.get_activity_config.return_value = _make_activity_config_mock()
+    agent = _make_mock_online_agent(AgentId.generate())
+    host_details = HostDetails(id=host_id, name="test-host", provider_name=ProviderInstanceName("local"))
+
+    details = _build_agent_details_from_online_agent(agent, host_details, online_host, None, {})
+
+    assert details.state == AgentLifecycleState.RUNNING
+    assert details.main_pid == 4321
+    agent.get_lifecycle_state_and_main_pid.assert_called_once()
+
+
+def test_build_agent_details_omits_main_pid_for_remote_host(host_id: HostId) -> None:
+    """A remote host never carries a main_pid, and does not call the PID-probing method."""
+    online_host = _make_mock_online_host(host_id)
+    online_host.is_local = False
+    online_host.get_activity_config.return_value = _make_activity_config_mock()
+    agent = _make_mock_online_agent(AgentId.generate())
+    host_details = HostDetails(id=host_id, name="test-host", provider_name=ProviderInstanceName("modal"))
+
+    details = _build_agent_details_from_online_agent(agent, host_details, online_host, None, {})
+
+    assert details.state == AgentLifecycleState.RUNNING
+    assert details.main_pid is None
+    agent.get_lifecycle_state_and_main_pid.assert_not_called()
+    agent.get_lifecycle_state.assert_called_once()
 
 
 def test_connection_error_fallback_applies_provider_state_override(

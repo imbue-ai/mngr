@@ -6,6 +6,7 @@ from datetime import timezone
 from pathlib import Path
 from typing import Any
 
+import psutil
 import pytest
 
 from imbue.mngr.agents.base_agent import BaseAgent
@@ -110,6 +111,30 @@ def test_lifecycle_state_running_when_expected_process_exists(
             lambda: test_agent.get_lifecycle_state() == AgentLifecycleState.RUNNING,
             error_message="Expected agent lifecycle state to be RUNNING",
         )
+    finally:
+        cleanup_tmux_session(session_name)
+
+
+@pytest.mark.tmux
+def test_lifecycle_state_and_main_pid_returns_live_process_pid(
+    local_provider: LocalProviderInstance,
+    temp_work_dir: Path,
+) -> None:
+    """A running agent yields RUNNING plus the live PID of its expected process, from one real probe."""
+    test_agent, session_name = _create_running_agent(local_provider, temp_work_dir, 847293)
+
+    try:
+        wait_for(
+            lambda: test_agent.get_lifecycle_state_and_main_pid()[1] is not None,
+            error_message="Expected the agent's main process PID to be discovered",
+        )
+        state, main_pid = test_agent.get_lifecycle_state_and_main_pid()
+        assert state == AgentLifecycleState.RUNNING
+        assert main_pid is not None
+        # The PID is a live process whose name matches the expected process (sleep).
+        process = psutil.Process(main_pid)
+        assert process.is_running()
+        assert process.name() == test_agent.get_expected_process_name()
     finally:
         cleanup_tmux_session(session_name)
 

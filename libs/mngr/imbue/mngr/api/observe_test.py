@@ -1,4 +1,7 @@
 import json
+import queue
+import subprocess
+import time
 from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
@@ -6,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from imbue.imbue_common.event_envelope import EventEnvelope
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.api.discovery_events import DISCOVERY_EVENT_SOURCE
 from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import DiscoveryError
@@ -20,6 +25,7 @@ from imbue.mngr.api.observe import AgentStateChangeEvent
 from imbue.mngr.api.observe import AgentStateEvent
 from imbue.mngr.api.observe import FullAgentStateEvent
 from imbue.mngr.api.observe import OBSERVE_EVENT_SOURCE
+from imbue.mngr.api.observe import AgentRemovedEvent
 from imbue.mngr.api.observe import ObserveEventType
 from imbue.mngr.api.observe import ObserveLockError
 from imbue.mngr.api.observe import _TrackedState
@@ -36,12 +42,16 @@ from imbue.mngr.api.observe import get_observe_lock_path
 from imbue.mngr.api.observe import load_base_state_from_history
 from imbue.mngr.api.observe import make_agent_state_change_event
 from imbue.mngr.api.observe import make_agent_state_event
+from imbue.mngr.api.observe import make_agent_removed_event
 from imbue.mngr.api.observe import make_full_agent_state_event
+from imbue.mngr.api.observe import parse_observe_event_line
 from imbue.mngr.api.observe import release_observe_lock
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
+from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
@@ -1031,3 +1041,234 @@ def test_process_snapshot_agents_unknown_scoped_to_errored_provider(
     assert observer._last_known_details_by_id[str(errored_agent.id)].state == AgentLifecycleState.UNKNOWN
     # The healthy provider's absent agent is dropped (implicit destroy).
     assert str(healthy_agent.id) not in observer._last_known_details_by_id
+
+
+# === Observe-event parsing (agents stream) ===
+
+
+def test_parse_observe_event_line_round_trips_agent_state() -> None:
+    agent = make_test_agent_details(name="parsed")
+    line = json.dumps(make_agent_state_event(agent).model_dump(mode="json"))
+    parsed = parse_observe_event_line(line)
+    assert isinstance(parsed, AgentStateEvent)
+    assert parsed.agent.name == "parsed"
+
+
+def test_parse_observe_event_line_round_trips_full_state() -> None:
+    agents = [make_test_agent_details(name="a"), make_test_agent_details(name="b")]
+    line = json.dumps(make_full_agent_state_event(agents).model_dump(mode="json"))
+    parsed = parse_observe_event_line(line)
+    assert isinstance(parsed, FullAgentStateEvent)
+    assert {a.name for a in parsed.agents} == {"a", "b"}
+
+
+def test_parse_observe_event_line_round_trips_agent_removed() -> None:
+    agent_id = AgentId.generate()
+    event = make_agent_removed_event(agent_id, AgentName("gone"))
+    line = json.dumps(event.model_dump(mode="json"))
+    parsed = parse_observe_event_line(line)
+    assert isinstance(parsed, AgentRemovedEvent)
+    assert parsed.agent_id == agent_id
+    assert parsed.agent_name == "gone"
+
+
+def test_parse_observe_event_line_returns_none_for_state_change_and_unknown() -> None:
+    # AGENT_STATE_CHANGE lives on the separate agent_states stream and is not part
+    # of the agents stream; an unknown/forward-compatible type is also ignored.
+    agent = make_test_agent_details()
+    change_line = json.dumps(make_agent_state_change_event(agent, None, None).model_dump(mode="json"))
+    assert parse_observe_event_line(change_line) is None
+    assert parse_observe_event_line('{"type":"SOMETHING_NEW"}') is None
+    assert parse_observe_event_line("   ") is None
+
+
+# === agents_event_sink forwarding (drives --stream-events) ===
+
+
+def _make_observer_with_sink(
+    temp_mngr_ctx: MngrContext, noop_binary: str, sink_events: list[EventEnvelope]
+) -> AgentObserver:
+    return AgentObserver(
+        mngr_ctx=temp_mngr_ctx,
+        events_base_dir=get_default_events_base_dir(temp_mngr_ctx.config),
+        mngr_binary=noop_binary,
+        agents_event_sink=sink_events.append,
+    )
+
+
+def test_agents_event_sink_receives_only_agents_stream_events(
+    temp_mngr_ctx: MngrContext, noop_binary: str
+) -> None:
+    """The sink gets AGENT_STATE but not the AGENT_STATE_CHANGE (which is on the agent_states stream)."""
+    sink_events: list[EventEnvelope] = []
+    observer = _make_observer_with_sink(temp_mngr_ctx, noop_binary, sink_events)
+    agent = make_test_agent_details(name="streamed", state=AgentLifecycleState.RUNNING)
+
+    # This emit also writes an AGENT_STATE_CHANGE (None -> RUNNING) to the agent_states
+    # stream, which must NOT reach the agents-stream sink.
+    observer._emit_agent_state(agent)
+
+    assert [e.type for e in sink_events] == [ObserveEventType.AGENT_STATE]
+    assert isinstance(sink_events[0], AgentStateEvent)
+    assert sink_events[0].agent.name == "streamed"
+
+
+def test_agents_event_sink_receives_full_state_and_removed_events(
+    temp_mngr_ctx: MngrContext, noop_binary: str
+) -> None:
+    """A snapshot forwards AGENTS_FULL_STATE, and a discovery removal forwards AGENT_REMOVED."""
+    sink_events: list[EventEnvelope] = []
+    observer = _make_observer_with_sink(temp_mngr_ctx, noop_binary, sink_events)
+    agent = make_test_discovered_agent()
+
+    with observer._concurrency_group:
+        observer._process_snapshot_agents([])
+        _feed_provider_snapshot(observer, ProviderInstanceName("local"), agents=[agent])
+        _feed_provider_snapshot(observer, ProviderInstanceName("local"), agents=[])
+
+    forwarded_types = [e.type for e in sink_events]
+    assert ObserveEventType.AGENTS_FULL_STATE in forwarded_types
+    assert ObserveEventType.AGENT_REMOVED in forwarded_types
+
+
+def test_no_sink_does_not_error(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
+    """With no sink (the default), emitting still writes the file and does not raise."""
+    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    observer._emit_agent_state(make_test_agent_details(name="silent"))
+    assert get_observe_events_path(observer.events_base_dir).exists()
+
+
+# === Agent membership deltas (AGENT_REMOVED + added enqueues host) ===
+
+
+def test_discovery_added_agent_enqueues_its_host_for_reprobe(
+    temp_mngr_ctx: MngrContext, noop_binary: str
+) -> None:
+    """A newly discovered agent enqueues its host so the observer re-probes and emits real state."""
+    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    agent = make_test_discovered_agent()
+
+    with observer._concurrency_group:
+        _feed_provider_snapshot(observer, ProviderInstanceName("local"), agents=[agent])
+
+    queued_hosts = _drain_activity_queue(observer)
+    assert str(agent.host_id) in queued_hosts
+
+
+def test_discovery_removed_agent_emits_agent_removed_and_drops_tracking(
+    temp_mngr_ctx: MngrContext, noop_binary: str
+) -> None:
+    """An agent absent from a later snapshot for its provider yields an AGENT_REMOVED event."""
+    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    agent = make_test_discovered_agent()
+    # Seed per-agent tracking so we can assert it is dropped on removal.
+    observer._last_tracked_state_by_id[str(agent.agent_id)] = _TrackedState(agent_state="RUNNING", host_state="RUNNING")
+
+    with observer._concurrency_group:
+        _feed_provider_snapshot(observer, ProviderInstanceName("local"), agents=[agent])
+        _feed_provider_snapshot(observer, ProviderInstanceName("local"), agents=[])
+
+    events_path = get_observe_events_path(observer.events_base_dir)
+    removed = [
+        data
+        for line in events_path.read_text().splitlines()
+        if line.strip()
+        for data in [json.loads(line)]
+        if data["type"] == "AGENT_REMOVED"
+    ]
+    assert len(removed) == 1
+    assert removed[0]["agent_id"] == str(agent.agent_id)
+    assert removed[0]["agent_name"] == str(agent.agent_name)
+    assert str(agent.agent_id) not in observer._last_tracked_state_by_id
+
+
+# === PID watchers (local agents) ===
+
+
+def _drain_activity_queue(observer: AgentObserver) -> set[str]:
+    """Return every host id currently queued, draining the queue."""
+    drained: set[str] = set()
+    while not observer._activity_queue.empty():
+        try:
+            drained.add(observer._activity_queue.get_nowait())
+        except queue.Empty:
+            break
+    return drained
+
+
+def _spawn_sleeper() -> subprocess.Popen[bytes]:
+    """Start a long-lived child process to be watched by PID, killed by the test."""
+    return subprocess.Popen(["sleep", "60"])
+
+
+def test_reconcile_watcher_opens_replaces_and_closes(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
+    """The watcher registry opens on first sighting, replaces on PID change, and closes when the PID is gone."""
+    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    proc_a = _spawn_sleeper()
+    proc_b = _spawn_sleeper()
+    host_id = HostId.generate()
+    try:
+        with observer._concurrency_group:
+            agent_a = make_test_agent_details(name="watched", host_id=host_id, main_pid=proc_a.pid)
+            agent_id_str = str(agent_a.id)
+
+            # First sighting opens a watcher bound to proc_a.
+            observer._reconcile_watcher_for_agent(agent_a)
+            assert observer._watchers[agent_id_str].pid == proc_a.pid
+            first_thread = observer._watchers[agent_id_str].thread
+
+            # Same PID: no replacement (same watcher thread kept).
+            observer._reconcile_watcher_for_agent(agent_a)
+            assert observer._watchers[agent_id_str].thread is first_thread
+
+            # PID changed: watcher is replaced and the old thread is stopped.
+            agent_b = agent_a.model_copy_update(to_update(agent_a.field_ref().main_pid, proc_b.pid))
+            observer._reconcile_watcher_for_agent(agent_b)
+            assert observer._watchers[agent_id_str].pid == proc_b.pid
+            assert not first_thread.is_alive()
+
+            # No live process (main_pid None): watcher closed and removed.
+            observer._reconcile_watcher_for_agent(agent_a.model_copy_update(to_update(agent_a.field_ref().main_pid, None)))
+            assert agent_id_str not in observer._watchers
+    finally:
+        for proc in (proc_a, proc_b):
+            proc.terminate()
+            proc.wait()
+
+
+def test_pid_watcher_enqueues_host_when_watched_process_dies(
+    temp_mngr_ctx: MngrContext, noop_binary: str
+) -> None:
+    """Killing a watched local agent's process enqueues its host, driving the re-probe that emits death."""
+    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    proc = _spawn_sleeper()
+    host_id = HostId.generate()
+    try:
+        with observer._concurrency_group:
+            agent = make_test_agent_details(name="dying", host_id=host_id, main_pid=proc.pid)
+            observer._reconcile_watcher_for_agent(agent)
+            assert str(agent.id) in observer._watchers
+
+            # The process dies on its own; the watcher should notice via psutil and
+            # enqueue the agent's host for a re-probe.
+            proc.terminate()
+
+            host_id_str = str(agent.host.id)
+            deadline = time.monotonic() + 10.0
+            got_host = False
+            while time.monotonic() < deadline:
+                try:
+                    if observer._activity_queue.get(timeout=0.5) == host_id_str:
+                        got_host = True
+                        break
+                except queue.Empty:
+                    continue
+            assert got_host, "watcher did not enqueue the host after the process died"
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        # Reap if psutil's wait did not already (avoids a lingering zombie).
+        try:
+            proc.wait(timeout=1.0)
+        except (subprocess.TimeoutExpired, ChildProcessError):
+            pass
