@@ -988,6 +988,7 @@ mngr imbue_cloud admin server order [OPTIONS]
 | `--cpu-overcommit` | float | CPU overcommit factor recorded for slice sizing on this box. | `2.0` |
 | `--option` | text | Explicit planCode for a mandatory option family that offers more than one choice (e.g. bandwidth, vrack). Repeatable. Required when the plan offers a real choice -- run once without it and the error lists each family's offers + monthly prices so you can re-run with --option. | None |
 | `--yes` | boolean | Skip the interactive confirmation and place the order. | `False` |
+| `--dry-run` | boolean | Build + assign a non-committal cart, print the real OVH price preview + derived specs, then delete the cart without ordering. No charge and no prompt -- use it to confirm price/specs before ordering. | `False` |
 | `--database-url` | text | Pool DSN (else resolved from env/activated minds env). | None |
 
 ## mngr imbue_cloud admin server await-delivery
