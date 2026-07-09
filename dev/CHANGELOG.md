@@ -4,6 +4,18 @@ A concise, human-friendly summary of changes for repo-level dev tooling: CI work
 
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
+## 2026-07-08
+
+### Added
+
+- Added: `just tmr-mngr` and `just tmr-minds` recipes as the canonical per-suite flag sets for `mngr tmr` (the TMR workflow inputs mirror them). The minds recipe targets the `apps/minds` tree with the minds-tailored mapper prompt and defaults to the plain `@release` tests; the capability suites (snapshot/deployment/services) are documented as extra args needing their own secrets and setup.
+- Added: `tmr-minds-scheduled.yml` — the daily scheduled TMR run is split into two independent per-variant wrappers. `tmr-mngr-scheduled.yml` (renamed from the single `tmr-scheduled.yml`, at 08:00 UTC) and `tmr-minds-scheduled.yml` (09:00 UTC) each own a gate label (`tmr-mngr-periodic` / `tmr-minds-periodic`), concurrency group, and periodic PR, so the two suites schedule and review independently. The gate policy (auto-close a periodic PR older than 4 days, else skip) moved into a shared reusable workflow `tmr-gate.yml`, and `tmr.yml` gained a `periodic_label` input to route each variant's PR to its own gate.
+
+### Changed
+
+- Changed: `.github/workflows/tmr.yml` accepts `name`, `mapper_prompt`, and `reducer_prompt` inputs, so a dispatch can run a named TMR variant (e.g. `tmr-minds` over `apps/minds`) with its own branch/agent prefix and optional prompt-template overrides.
+- Changed: `minds-launch-to-msg.yml` freezes its `commit_sha` (mngr) and `template_ref` (forever-claude-template) inputs to full SHAs exactly once, in `check_should_run`, at run start. Inputs accept a full 40-char SHA, branch, or tag; every downstream job consumes the frozen SHAs instead of re-resolving. Fixes a race where a `template_ref=main` run could test a different FCT commit than the one recorded in the green marker and slack message (agent creation used the raw ref, resolved ~15-45 min after the pair-key fingerprint). Also cleaned up the workflow file (net -135 lines): deduplicated ref resolution into a single `resolve_ref` function, looped the ToDesktop secrets check, and replaced the hardcoded screenshot-prefix list in the summary manifest with a sorted glob. Caveat: SHAs must be full 40-hex and reachable from some ref; FCT-SHA creates need a binary built from mngr `02bb71b44` (2026-06-11) or later.
+
 ## 2026-07-07
 
 ### Changed

@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-08
+
+Add `SECRET_LATCHKEY_ENV_VAR_NAMES` to `agent_setup`: the subset of latchkey wiring env vars whose values are secrets (the gateway password and the permissions-override JWT). Callers that render a command carrying these as `--host-env NAME=VALUE` flags use it to mask the values before logging.
+
 ## 2026-07-07
 
 Bump Latchkey to 2.20.0.

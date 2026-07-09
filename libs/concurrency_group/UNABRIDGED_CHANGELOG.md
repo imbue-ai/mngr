@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-08
+
+`RunningProcess` (and the `run_process_to_completion` / `run_process_in_background` / `run_background` spawn APIs) now accept an optional `name`: a log-safe label used as the reader thread's name and as the display command in any `ProcessError` / `TimeoutExpired` it raises. Callers whose command carries secret argument values (e.g. `--host-env PASSWORD=...`) can pass a masked/friendly `name` so those secrets never reach the JSONL log's `thread_name` field or an error message; the real command is still what executes. Defaults to the joined command, preserving prior behavior.
+
+`ProcessError` gains a `display_name` (and a `display_command` property) used for its rendered message while `.command` keeps the real argv; `FinishedProcess` gains a matching `display_name`.
+
 ## 2026-07-01
 
 Added a new async/await ratchet (`test_prevent_async_await`) that freezes the current amount of `async def` / `await` usage in this project and fails if new async code is added. We strongly prefer synchronous code: it is far easier to debug, and our software is intentionally low-scale, so async provides no benefit. Existing usage is grandfathered in at its current count; the count can only decrease.
