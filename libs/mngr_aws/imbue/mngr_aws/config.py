@@ -9,6 +9,7 @@ from botocore.exceptions import ClientError
 from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
+from pydantic import SecretStr
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.errors import MngrError
@@ -82,11 +83,14 @@ DEFAULT_AMI_BY_REGION: Final[dict[str, str]] = {
 class AwsProviderConfig(PublicIpVpsProviderConfig):
     """Configuration for the AWS EC2 VPS Docker provider.
 
-    Credentials are deliberately not stored in this config. boto3's default
-    credential resolution chain (``AWS_*`` env vars, ``~/.aws/credentials``,
-    ``~/.aws/config``, EC2 IMDS) is used exclusively. This matches the
-    Modal provider convention and the broader project preference: do not
-    handle credentials in mngr configs when an SDK can do it for us.
+    Credentials resolve in two ways. By default this config stores none and
+    boto3's default credential chain (``AWS_*`` env vars, ``~/.aws/credentials``,
+    ``~/.aws/config``, EC2 IMDS) is used exclusively -- the Modal/GCP/Azure
+    convention. When explicit ``aws_access_key_id`` + ``aws_secret_access_key``
+    are set (the Minds "bring your own account" paste flow), they take
+    precedence and are handed straight to ``boto3.Session``; the ambient chain
+    is bypassed. Mirrors the OVH/Vultr providers, which also hold ``SecretStr``
+    key material for exactly this reason.
     """
 
     # Cache for the resolved AWS account id (from sts:GetCallerIdentity), used
@@ -176,6 +180,25 @@ class AwsProviderConfig(PublicIpVpsProviderConfig):
             "instance role."
         ),
     )
+    aws_access_key_id: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Explicit AWS access key id. When set together with aws_secret_access_key, these are "
+            "passed directly to boto3 and take precedence over the ambient credential chain. Used by "
+            "the Minds bring-your-own-account paste flow. Leave unset to use the ambient chain."
+        ),
+    )
+    aws_secret_access_key: SecretStr | None = Field(
+        default=None,
+        description="Explicit AWS secret access key. See aws_access_key_id.",
+    )
+    aws_session_token: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Optional AWS session token, for temporary (STS/SSO) credentials. Only used when "
+            "aws_access_key_id / aws_secret_access_key are set."
+        ),
+    )
 
     def get_session(self) -> boto3.Session:
         """Build a boto3 Session that resolves credentials via boto3's default chain.
@@ -190,7 +213,21 @@ class AwsProviderConfig(PublicIpVpsProviderConfig):
         resolvable from any (enabled) source. Lets ``botocore.exceptions.BotoCoreError``
         subclasses (e.g., ``ProfileNotFound``) propagate when boto3 itself rejects
         the environment.
+
+        When explicit ``aws_access_key_id`` + ``aws_secret_access_key`` are set,
+        they are passed straight to ``boto3.Session`` and the ambient chain is
+        bypassed entirely (no IMDS surgery, no ``AwsConfigError``).
         """
+        access_key = self.aws_access_key_id.get_secret_value() if self.aws_access_key_id else None
+        secret_key = self.aws_secret_access_key.get_secret_value() if self.aws_secret_access_key else None
+        if access_key and secret_key:
+            session_token = self.aws_session_token.get_secret_value() if self.aws_session_token else None
+            return boto3.Session(
+                aws_access_key_id=access_key,
+                aws_secret_access_key=secret_key,
+                aws_session_token=session_token,
+                region_name=self.default_region,
+            )
         botocore_session = botocore.session.Session()
         if not self.use_ec2_instance_metadata:
             botocore_session.get_component("credential_provider").remove(IMDS_CREDENTIAL_PROVIDER_NAME)

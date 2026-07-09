@@ -862,3 +862,221 @@ def unset_imbue_cloud_provider_for_account(email: str, *, root_name: str | None 
     _atomic_write_settings(settings_path, doc)
     logger.info("imbue_cloud provider {} removed from {}", provider_name, settings_path)
     return True
+
+
+# -- Bring-your-own cloud accounts (pasted credentials) --
+#
+# A "cloud account" is one ``[providers.byo-<backend>-<slug>]`` block in the
+# active settings.toml, holding the user's pasted credentials plus the same
+# hardening knobs the ambient per-region blocks get. The ``byo-`` prefix keeps
+# these outside ``_write_aws_provider_blocks``'s ``aws-*`` reconcile (which
+# deletes and rewrites its prefix on every boot), so accounts survive restarts.
+# The display alias lives in a sidecar TOML (not the provider block --
+# ``ProviderInstanceConfig`` forbids unknown fields), keyed by block name, so
+# renaming an alias never renames the provider instance (which would orphan the
+# hosts created under it).
+_BYO_PROVIDER_NAME_PREFIX: Final[str] = "byo-"
+_BYO_SUPPORTED_BACKENDS: Final[tuple[str, ...]] = ("aws",)
+
+
+def _cloud_account_aliases_path(root_name: str) -> Path:
+    """Return the sidecar TOML mapping account block names to display aliases."""
+    return minds_data_dir_for(root_name) / "cloud_account_aliases.toml"
+
+
+def _slugify_cloud_account_alias(alias: str) -> str:
+    """Slugify an alias for use in the provider block name; raises on an empty result."""
+    slug = re.sub(r"[^a-z0-9]+", "-", alias.strip().lower()).strip("-")
+    if not slug:
+        raise BootstrapError(f"Alias {alias!r} contains no usable characters")
+    return slug
+
+
+def cloud_account_provider_name(backend: str, alias: str) -> str:
+    """Return the provider block name for a new cloud account (``byo-<backend>-<slug>``)."""
+    return f"{_BYO_PROVIDER_NAME_PREFIX}{backend}-{_slugify_cloud_account_alias(alias)}"
+
+
+def _read_cloud_account_aliases(root_name: str) -> dict[str, str]:
+    """Read the block-name -> display-alias sidecar; empty when absent/unparseable."""
+    path = _cloud_account_aliases_path(root_name)
+    if not path.exists():
+        return {}
+    try:
+        parsed = tomllib.loads(path.read_text())
+    except tomllib.TOMLDecodeError:
+        logger.warning("Unparseable cloud account aliases file at {}; ignoring", path)
+        return {}
+    return {name: alias for name, alias in parsed.items() if isinstance(alias, str)}
+
+
+def _write_cloud_account_alias(root_name: str, provider_name: str, alias: str | None) -> None:
+    """Set (or, with ``None``, remove) one display alias in the sidecar file."""
+    path = _cloud_account_aliases_path(root_name)
+    doc = tomlkit.loads(path.read_text()) if path.exists() else tomlkit.document()
+    if alias is None:
+        if provider_name not in doc:
+            return
+        del doc[provider_name]
+    else:
+        doc[provider_name] = alias
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(".tmp")
+    tmp_path.write_text(tomlkit.dumps(doc))
+    tmp_path.rename(path)
+
+
+def set_cloud_account_provider(
+    alias: str,
+    backend: str,
+    credentials: Mapping[str, str],
+    region: str,
+    *,
+    root_name: str | None = None,
+) -> str:
+    """Register a bring-your-own cloud account as ``[providers.byo-<backend>-<slug>]``.
+
+    ``credentials`` are the backend's pasted-credential config fields verbatim
+    (AWS: ``aws_access_key_id`` / ``aws_secret_access_key`` / optionally
+    ``aws_session_token``); they land as plaintext TOML the same way the
+    imbue_cloud session store persists its secrets (0600-class local files).
+    The block also pins the minds workspace shape (instance type + gVisor
+    hardening) exactly like the ambient ``aws-<region>`` blocks. Returns the
+    block name (the mngr provider-instance name creates target).
+
+    Raises ``BootstrapError`` for an unsupported backend, an unusable alias, a
+    duplicate account name, or an uninitialized mngr profile.
+    """
+    if backend not in _BYO_SUPPORTED_BACKENDS:
+        raise BootstrapError(f"Unsupported cloud account backend {backend!r} (supported: {_BYO_SUPPORTED_BACKENDS})")
+    if root_name is None:
+        root_name = resolve_minds_root_name()
+    _ensure_mngr_settings(root_name)
+    settings_path = _resolve_active_settings_path(root_name)
+    if settings_path is None:
+        raise BootstrapError("mngr is not initialized yet; cannot register a cloud account")
+    provider_name = cloud_account_provider_name(backend, alias)
+    doc = tomlkit.loads(settings_path.read_text()) if settings_path.exists() else tomlkit.document()
+    providers = doc.setdefault("providers", tomlkit.table())
+    if provider_name in providers:
+        raise BootstrapError(f"A cloud account named {alias!r} already exists ({provider_name})")
+    block = tomlkit.table()
+    block["backend"] = backend
+    block["default_region"] = region
+    block["default_instance_type"] = _AWS_DEFAULT_INSTANCE_TYPE
+    block["install_gvisor_runtime"] = _AWS_INSTALL_GVISOR_RUNTIME
+    block["docker_runtime"] = _AWS_DOCKER_RUNTIME
+    block["default_start_args"] = list(_AWS_DEFAULT_START_ARGS)
+    for key, value in credentials.items():
+        if value:
+            block[key] = value
+    providers[provider_name] = block
+    _atomic_write_settings(settings_path, doc)
+    _write_cloud_account_alias(root_name, provider_name, alias)
+    logger.info("Cloud account {} ({}) registered in {}", provider_name, backend, settings_path)
+    return provider_name
+
+
+def list_cloud_account_providers(*, root_name: str | None = None) -> list[dict[str, str]]:
+    """List registered cloud accounts: ``{name, alias, backend, region, identifier}`` each.
+
+    ``identifier`` is a masked, display-safe hint of which credential the
+    account holds (e.g. ``AKIA…F5X2``); never the secret. Returns ``[]`` when
+    mngr isn't initialized yet or no accounts exist.
+    """
+    if root_name is None:
+        root_name = resolve_minds_root_name()
+    settings_path = _resolve_active_settings_path(root_name)
+    if settings_path is None or not settings_path.exists():
+        return []
+    parsed = tomllib.loads(settings_path.read_text())
+    providers = parsed.get("providers")
+    if not isinstance(providers, dict):
+        return []
+    aliases = _read_cloud_account_aliases(root_name)
+    accounts: list[dict[str, str]] = []
+    for name, block in sorted(providers.items()):
+        if not name.startswith(_BYO_PROVIDER_NAME_PREFIX) or not isinstance(block, dict):
+            continue
+        key_id = str(block.get("aws_access_key_id", ""))
+        identifier = f"{key_id[:4]}…{key_id[-4:]}" if len(key_id) >= 12 else key_id
+        accounts.append(
+            {
+                "name": name,
+                "alias": aliases.get(name, name),
+                "backend": str(block.get("backend", "")),
+                "region": str(block.get("default_region", "")),
+                "identifier": identifier,
+            }
+        )
+    return accounts
+
+
+def set_cloud_account_alias(provider_name: str, alias: str, *, root_name: str | None = None) -> bool:
+    """Update the display alias of an existing cloud account (sidecar only).
+
+    The provider block name is deliberately left untouched: it is the mngr
+    provider-instance name existing hosts were created under. Returns ``False``
+    when no such account exists.
+    """
+    if root_name is None:
+        root_name = resolve_minds_root_name()
+    if not any(account["name"] == provider_name for account in list_cloud_account_providers(root_name=root_name)):
+        return False
+    _write_cloud_account_alias(root_name, provider_name, alias)
+    return True
+
+
+def update_cloud_account_region(provider_name: str, region: str, *, root_name: str | None = None) -> bool:
+    """Set ``default_region`` on a cloud account block (create-time region switch).
+
+    The AWS client is bound to the block's ``default_region`` and refuses
+    cross-region creates, so picking a different region in the create form
+    re-pins the block first (prepare then runs for the new region). Returns
+    ``False`` when the account does not exist; ``True`` when the file changed
+    or already matched.
+    """
+    if root_name is None:
+        root_name = resolve_minds_root_name()
+    settings_path = _resolve_active_settings_path(root_name)
+    if settings_path is None or not settings_path.exists():
+        return False
+    doc = tomlkit.loads(settings_path.read_text())
+    providers = doc.get("providers")
+    if not isinstance(providers, dict) or provider_name not in providers:
+        return False
+    block = providers[provider_name]
+    if not isinstance(block, dict) or not str(provider_name).startswith(_BYO_PROVIDER_NAME_PREFIX):
+        return False
+    if block.get("default_region") == region:
+        return True
+    block["default_region"] = region
+    _atomic_write_settings(settings_path, doc)
+    logger.info("Cloud account {} re-pinned to region {}", provider_name, region)
+    return True
+
+
+def delete_cloud_account_provider(provider_name: str, *, root_name: str | None = None) -> bool:
+    """Remove a cloud account block (and its alias) from minds' settings.
+
+    Only deletes ``byo-*`` blocks -- never the ambient/reconciled providers.
+    Cloud-side resources (security group, state bucket) are deliberately left
+    in place; ``mngr <backend> cleanup`` is the explicit teardown for those.
+    Returns ``True`` when the file was modified.
+    """
+    if not provider_name.startswith(_BYO_PROVIDER_NAME_PREFIX):
+        return False
+    if root_name is None:
+        root_name = resolve_minds_root_name()
+    settings_path = _resolve_active_settings_path(root_name)
+    if settings_path is None or not settings_path.exists():
+        return False
+    doc = tomlkit.loads(settings_path.read_text())
+    providers = doc.get("providers")
+    if not isinstance(providers, dict) or provider_name not in providers:
+        return False
+    del providers[provider_name]
+    _atomic_write_settings(settings_path, doc)
+    _write_cloud_account_alias(root_name, provider_name, None)
+    logger.info("Cloud account {} removed from {}", provider_name, settings_path)
+    return True

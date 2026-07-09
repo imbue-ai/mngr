@@ -425,6 +425,7 @@ def render_create_form(
     error_message: str = "",
     region_options_by_launch_mode: Mapping[str, Sequence[str]] | None = None,
     region_selected_by_launch_mode: Mapping[str, str] | None = None,
+    cloud_accounts: Sequence[Mapping[str, str]] | None = None,
     selected_preset: str | None = None,
     start_advanced: bool = False,
     color: str = DEFAULT_WORKSPACE_COLOR,
@@ -521,6 +522,7 @@ def render_create_form(
             key: list(value) for key, value in (region_options_by_launch_mode or {}).items()
         },
         region_selected_by_launch_mode=dict(region_selected_by_launch_mode or {}),
+        cloud_accounts=[dict(account) for account in (cloud_accounts or [])],
         selected_preset=effective_preset,
         start_advanced=start_advanced,
         color=color,

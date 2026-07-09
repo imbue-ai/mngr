@@ -1,10 +1,13 @@
+import json
 import shutil
 
 import google.auth
 from google.auth import exceptions as google_auth_exceptions
 from google.auth.credentials import Credentials
+from google.oauth2 import service_account
 from loguru import logger
 from pydantic import Field
+from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ConcurrencyGroupError
@@ -89,6 +92,12 @@ class GcpProviderConfig(OfflineCapableVpsProviderConfig):
 
     ``project_id`` and ``service_account_email`` / ``service_account_scopes``
     are plain, non-secret identifiers -- not credential material.
+
+    Exception: when ``service_account_key_json`` is set (the Minds bring-your-own-
+    account paste flow), that pasted service-account key is used to build
+    credentials directly, bypassing ADC, and its embedded ``project_id`` becomes
+    the resolved-project fallback. Mirrors the OVH/Vultr providers holding
+    ``SecretStr`` key material.
     """
 
     backend: ProviderBackendName = Field(
@@ -189,6 +198,15 @@ class GcpProviderConfig(OfflineCapableVpsProviderConfig):
             "up the GCS bucket it needs. Set False to turn it off."
         ),
     )
+    service_account_key_json: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Full JSON contents of a GCP service-account key. When set, credentials are built from "
+            "it directly (bypassing Application Default Credentials) and its embedded project_id is "
+            "used as the resolved-project fallback. Used by the Minds bring-your-own-account paste "
+            "flow. Leave unset to use ADC."
+        ),
+    )
 
     def get_credentials_and_resolved_project(self) -> tuple[Credentials, str | None]:
         """Resolve Google Application Default Credentials and the project ADC infers.
@@ -215,7 +233,23 @@ class GcpProviderConfig(OfflineCapableVpsProviderConfig):
         treating an unreachable provider's hosts as garbage. The resolved
         project may be ``None`` even when credentials succeed (e.g. a bare
         service-account key with no project and no ``GOOGLE_CLOUD_PROJECT``).
+
+        When ``service_account_key_json`` is set (the paste flow), credentials
+        are built from that key instead of ADC, and the key's embedded
+        ``project_id`` is returned as the resolved-project fallback.
         """
+        if self.service_account_key_json is not None:
+            try:
+                key_info = json.loads(self.service_account_key_json.get_secret_value())
+            except json.JSONDecodeError as e:
+                raise GcpCredentialsError(
+                    "GCP service_account_key_json is not valid JSON. Paste the full contents of a "
+                    "service-account key file (the object with 'type': 'service_account')."
+                ) from e
+            credentials = service_account.Credentials.from_service_account_info(
+                key_info, scopes=DEFAULT_SERVICE_ACCOUNT_SCOPES
+            )
+            return credentials, key_info.get("project_id")
         try:
             credentials, resolved_project = google.auth.default()
         except google_auth_exceptions.DefaultCredentialsError as e:

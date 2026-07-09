@@ -147,6 +147,14 @@ class CreateWorkspaceRequest(ApiRequestModel):
         default=None, description="Anthropic API key (required when ai_provider is API_KEY)"
     )
     region: str | None = Field(default=None, description="Provider region")
+    cloud_account: str | None = Field(
+        default=None,
+        description=(
+            "Bring-your-own cloud account to create on: the ``byo-<backend>-<slug>`` provider "
+            "block name from /desktop/cloud-accounts. When set, launch_mode must match the "
+            "account's backend (AWS today) and the create targets that provider instance."
+        ),
+    )
     backup_provider: BackupProvider | None = Field(
         default=None, description="Restic backup provider (default CONFIGURE_LATER)"
     )
@@ -210,6 +218,46 @@ class BugReportRequest(ApiRequestModel):
     """
 
     description: str = Field(min_length=1, description="What went wrong (required, non-empty)")
+
+
+class CloudAccountCreateRequest(ApiRequestModel):
+    """Body for registering a bring-your-own cloud account (pasted credentials)."""
+
+    alias: str = Field(min_length=1, description="Display name for the account (also seeds the block-name slug)")
+    backend: str = Field(description="Cloud backend: 'aws' (gcp/azure coming later)")
+    region: str = Field(min_length=1, description="Default region for machines created on this account")
+    aws_access_key_id: str | None = Field(default=None, description="AWS access key id (required for aws)")
+    aws_secret_access_key: str | None = Field(default=None, description="AWS secret access key (required for aws)")
+    aws_session_token: str | None = Field(default=None, description="Optional AWS session token (STS/SSO creds)")
+
+
+class CloudAccountPatchRequest(ApiRequestModel):
+    """Body for renaming a cloud account's display alias."""
+
+    alias: str = Field(min_length=1, description="New display alias")
+
+
+class CloudAccountSummary(FrozenModel):
+    """One registered bring-your-own cloud account."""
+
+    name: str = Field(description="Provider block name (byo-<backend>-<slug>) -- the stable id")
+    alias: str = Field(description="Display alias")
+    backend: str = Field(description="Cloud backend (e.g. 'aws')")
+    region: str = Field(description="The account's current default region")
+    identifier: str = Field(description="Masked credential hint (e.g. 'AKIA…F5X2'); never the secret")
+
+
+class CloudAccountsResponse(FrozenModel):
+    """All registered bring-your-own cloud accounts."""
+
+    accounts: tuple[CloudAccountSummary, ...] = Field(description="Registered accounts")
+
+
+class CloudAccountPrepareResponse(FrozenModel):
+    """Result of registering + preparing a cloud account."""
+
+    account: CloudAccountSummary = Field(description="The registered account")
+    prepare_log: str = Field(description="Tail of the `mngr <backend> prepare` output")
 
 
 class SetProviderEnabledRequest(ApiRequestModel):

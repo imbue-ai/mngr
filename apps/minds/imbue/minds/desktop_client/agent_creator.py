@@ -41,6 +41,7 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.minds.bootstrap import update_cloud_account_region
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.backend_resolver import SYSTEM_SERVICES_AGENT_NAME
@@ -530,6 +531,7 @@ def provider_instance_name_for_launch(
     launch_mode: LaunchMode,
     imbue_cloud_account: str | None = None,
     region: str | None = None,
+    cloud_account: str | None = None,
 ) -> str:
     """Return the mngr provider-instance name a ``mngr create`` on ``launch_mode`` targets.
 
@@ -543,7 +545,14 @@ def provider_instance_name_for_launch(
     the create form's availability check (which must agree on what "taken" means)
     never drift apart. ``imbue_cloud_account`` is the account *email* (slugified to
     match the provider block minds registers); ``region`` is required for AWS.
+
+    ``cloud_account`` is a bring-your-own account's provider block name
+    (``byo-<backend>-<slug>``, written by ``bootstrap.set_cloud_account_provider``).
+    When set it IS the provider instance name, so it short-circuits the
+    per-mode mapping (the block already pins backend + credentials + region).
     """
+    if cloud_account:
+        return cloud_account
     match launch_mode:
         case LaunchMode.DOCKER:
             return "docker"
@@ -579,6 +588,7 @@ def _build_mngr_create_command(
     imbue_cloud_branch_or_tag: str | None = None,
     imbue_cloud_fast_mode: str | None = None,
     region: str | None = None,
+    cloud_account: str | None = None,
     latchkey_env: Mapping[str, str] | None = None,
     color: str | None = None,
     original_minds_version: str | None = None,
@@ -635,7 +645,7 @@ def _build_mngr_create_command(
     # uniqueness check runs in) is derived once here so the create address and the
     # form's availability check share a single mapping.
     provider_instance = provider_instance_name_for_launch(
-        launch_mode, imbue_cloud_account=imbue_cloud_account, region=region
+        launch_mode, imbue_cloud_account=imbue_cloud_account, region=region, cloud_account=cloud_account
     )
     address = f"{_DEFAULT_AGENT_NAME}@{host_name}.{provider_instance}"
 
@@ -967,6 +977,7 @@ def run_mngr_create(
     imbue_cloud_branch_or_tag: str | None = None,
     imbue_cloud_fast_mode: str | None = None,
     region: str | None = None,
+    cloud_account: str | None = None,
     anthropic_api_key: str | None = None,
     anthropic_base_url: str | None = None,
     latchkey_env: Mapping[str, str] | None = None,
@@ -1009,6 +1020,7 @@ def run_mngr_create(
         imbue_cloud_branch_or_tag=imbue_cloud_branch_or_tag,
         imbue_cloud_fast_mode=imbue_cloud_fast_mode,
         region=region,
+        cloud_account=cloud_account,
         latchkey_env=latchkey_env,
         color=color,
         original_minds_version=original_minds_version,
@@ -1083,6 +1095,7 @@ def run_mngr_aws_prepare(
     region: str,
     on_output: OutputCallback | None = None,
     *,
+    provider_name: str | None = None,
     parent_cg: ConcurrencyGroup | None = None,
 ) -> None:
     """Ensure the AWS security group for ``region`` exists before an AWS create.
@@ -1106,7 +1119,11 @@ def run_mngr_aws_prepare(
     # consistently regardless of which step trips first.
     if not region:
         raise MngrCommandError("AWS mode requires a region")
-    provider_name = f"aws-{region}"
+    # ``provider_name`` overrides the ambient per-region block for
+    # bring-your-own accounts (``byo-aws-<slug>``), whose block carries the
+    # pasted credentials prepare should authenticate with.
+    if provider_name is None:
+        provider_name = f"aws-{region}"
     command = [MNGR_BINARY, "aws", "prepare", "--provider", provider_name, "--region", region]
     logger.info("Running: {}", " ".join(command))
     cg = _make_child_cg("mngr-aws-prepare", parent_cg)
@@ -1144,6 +1161,9 @@ class _MngrCreateAttemptParams(FrozenModel):
     repo_source: str | None
     branch_or_tag: str | None
     region: str | None
+    # Bring-your-own account provider block name (``byo-<backend>-<slug>``), or
+    # None for the ambient per-mode providers.
+    cloud_account: str | None
     anthropic_api_key: str | None
     anthropic_base_url: str | None
     parent_cg: ConcurrencyGroup | None
@@ -1183,6 +1203,7 @@ def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams
         # (-b --vultr-region=), and AWS (-b --aws-region=); the command builder
         # ignores it for DOCKER/LIMA.
         region=(params.region or None),
+        cloud_account=params.cloud_account,
         anthropic_api_key=params.anthropic_api_key,
         anthropic_base_url=params.anthropic_base_url,
         color=params.color,
@@ -1378,6 +1399,7 @@ class AgentCreator(MutableModel):
         account_email: str = "",
         branch_or_tag: str = "",
         region: str = "",
+        cloud_account: str = "",
         anthropic_api_key: str = "",
         on_created: Callable[[AgentId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
@@ -1455,6 +1477,7 @@ class AgentCreator(MutableModel):
                 account_email,
                 branch_or_tag,
                 region,
+                cloud_account,
                 anthropic_api_key,
                 on_created,
                 backup_request,
@@ -1518,6 +1541,7 @@ class AgentCreator(MutableModel):
         account_email: str = "",
         branch_or_tag: str = "",
         region: str = "",
+        cloud_account: str = "",
         anthropic_api_key: str = "",
         on_created: Callable[[AgentId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
@@ -1727,9 +1751,23 @@ class AgentCreator(MutableModel):
                 # ``mngr create`` (the provider looks it up read-only and
                 # refuses to launch without it). prepare is read-only-first, so
                 # this is a no-op describe when the region is already prepared.
+                # For a bring-your-own account the account's block (which holds
+                # the pasted credentials) is the prepare target, and a region
+                # switch re-pins the block first: the AWS client is bound to
+                # the block's default_region and refuses cross-region creates.
                 if launch_mode is LaunchMode.AWS:
-                    log_queue.put(f"[minds] Ensuring AWS security group is ready in {region}...")
-                    run_mngr_aws_prepare(region, on_output=emit_log, parent_cg=self.root_concurrency_group)
+                    if cloud_account:
+                        update_cloud_account_region(cloud_account, region)
+                        log_queue.put(f"[minds] Preparing cloud account '{cloud_account}' in {region}...")
+                        run_mngr_aws_prepare(
+                            region,
+                            on_output=emit_log,
+                            provider_name=cloud_account,
+                            parent_cg=self.root_concurrency_group,
+                        )
+                    else:
+                        log_queue.put(f"[minds] Ensuring AWS security group is ready in {region}...")
+                        run_mngr_aws_prepare(region, on_output=emit_log, parent_cg=self.root_concurrency_group)
 
                 parsed_host = HostName(host_name)
                 log_queue.put("[minds] Creating workspace '{}' (mode: {})...".format(host_name, launch_mode.value))
@@ -1768,6 +1806,7 @@ class AgentCreator(MutableModel):
                     repo_source=repo_source,
                     branch_or_tag=branch_or_tag,
                     region=region,
+                    cloud_account=cloud_account or None,
                     anthropic_api_key=effective_anthropic_api_key,
                     anthropic_base_url=effective_anthropic_base_url,
                     parent_cg=self.root_concurrency_group,
