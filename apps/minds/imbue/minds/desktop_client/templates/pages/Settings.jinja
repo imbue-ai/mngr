@@ -284,8 +284,9 @@
         <div class="mt-auto pt-6"><Link href="/" extra="type-helper">&larr; Back to workspaces</Link></div>
       </div>
 
-      {# Right column: the only area that scrolls. #}
-      <div class="flex-1 min-w-0 overflow-y-auto pb-12">
+      {# Right column: the only area that scrolls. ``pr-4`` keeps the content off
+         the scrollbar so it doesn't feel squeezed against it. #}
+      <div class="flex-1 min-w-0 overflow-y-auto pb-12 pr-4">
                 {# -- Connectors panel (predefined / catalog services the agent connects to) -- #}
         <section data-settings-panel="connectors">
           <h2 class="type-heading-lg text-primary mb-2">Connectors</h2>
