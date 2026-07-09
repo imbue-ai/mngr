@@ -15,6 +15,7 @@ idle quota automatically.
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -33,6 +34,7 @@ from imbue.mngr.cli.output_helpers import OperatorResultPart
 from imbue.mngr.cli.output_helpers import emit_info
 from imbue.mngr.cli.output_helpers import emit_operator_result
 from imbue.mngr.config.data_types import CommonCliOptions
+from imbue.mngr.config.host_dir import read_default_host_dir
 from imbue.mngr.errors import MngrError
 from imbue.mngr_usage.api import derive_elapsed
 from imbue.mngr_usage.api import gather_usage_snapshots
@@ -48,6 +50,15 @@ SEVEN_DAY_WINDOW = "seven_day"
 
 DEFAULT_SKILL = "document-review"
 DEFAULT_AGENT_NAME = "donate-extra-quota-bio"
+
+# `mngr donate --start` writes a single crontab entry that re-runs `mngr donate`
+# on this interval; each firing re-checks spare capacity and does another batch,
+# so the schedule -- not any one tick -- is what drains all the spare quota.
+DEFAULT_INTERVAL_MINUTES = 10
+# The managed crontab entry is wrapped in these marker lines so --stop can remove
+# exactly what --start added, leaving any hand-written crontab lines untouched.
+_CRON_BEGIN = "# >>> mngr donate (managed -- edit via `mngr donate --start/--stop`) >>>"
+_CRON_END = "# <<< mngr donate (managed) <<<"
 
 # Spare-capacity thresholds, mirroring spare-capacity.sh exactly:
 #   spare  <=>  five_hour.used% < 80  AND  weekly.used% < pace_line(weekly.elapsed%)
@@ -150,15 +161,27 @@ DONATE_AGENT_ARGS = (
 
 
 @pure
+def build_donation_message(skill: str) -> str:
+    """The first message the donation agent receives.
+
+    Kept minimal: run the skill and work through whatever it leases, then stop.
+    How much is leased per run is the skill's own concern (e.g. document-review's
+    ``skill_config.yaml`` ``count``), not something donate can cap from here.
+    """
+    return f"Use the {skill} skill to complete the work it leases, then stop."
+
+
+@pure
 def build_create_argv(agent_name: str, skill: str) -> tuple[str, ...]:
     """The ``mngr create`` invocation that launches a donation agent.
 
     Launches a **headless** claude agent so the donation runs unattended (see
     :data:`DONATE_AGENT_TYPE`). ``--foreground`` is required for headless types
-    (it streams output and auto-destroys when done). The skill name is passed as
-    the agent's first message; ``--dangerously-skip-permissions`` is spliced in
-    after ``--`` so it reaches ``claude`` as an agent arg. Runs from the caller's
-    cwd, so invoke ``mngr donate`` from a trusted repo (like the recipes' ``cd``).
+    (it streams output and auto-destroys when done). The skill instruction (see
+    :func:`build_donation_message`) is passed as the agent's first message;
+    ``--dangerously-skip-permissions`` is spliced in after ``--`` so it reaches
+    ``claude`` as an agent arg. Runs from the caller's cwd, so invoke ``mngr
+    donate`` from a trusted repo (like the recipes' ``cd``).
     """
     return (
         "mngr",
@@ -167,7 +190,7 @@ def build_create_argv(agent_name: str, skill: str) -> tuple[str, ...]:
         DONATE_AGENT_TYPE,
         "--foreground",
         "--message",
-        f"Use the {skill} skill",
+        build_donation_message(skill),
         "--",
         *DONATE_AGENT_ARGS,
     )
@@ -184,6 +207,97 @@ def build_destroy_argv(agent_name: str) -> tuple[str, ...]:
     skips confirmation and a no-op destroy of a missing agent is harmless.
     """
     return ("mngr", "destroy", agent_name, "--force")
+
+
+@pure
+def build_cron_command(mngr_path: str, workdir: str, skill: str, agent_name: str, log_path: str) -> str:
+    """The shell command a scheduled donation tick runs (without the time spec).
+
+    ``cd`` into ``workdir`` first: cron starts in ``$HOME``, but donate must run
+    from a trusted git repo (``mngr create`` needs a git root). ``mngr_path`` is
+    an absolute path to *this* mngr, since a scheduled ``mngr`` off ``$PATH`` may
+    resolve to a different install that lacks ``donate``. Only non-default options
+    are appended, so the line stays minimal. Output is appended to ``log_path``.
+    """
+    command = f"cd {shlex.quote(workdir)} && {shlex.quote(mngr_path)} donate"
+    if skill != DEFAULT_SKILL:
+        command += f" --skill {shlex.quote(skill)}"
+    if agent_name != DEFAULT_AGENT_NAME:
+        command += f" --agent-name {shlex.quote(agent_name)}"
+    return f"{command} >> {shlex.quote(log_path)} 2>&1"
+
+
+@pure
+def build_cron_block(interval_minutes: int, command: str) -> str:
+    """The full marker-wrapped crontab block for one managed donation schedule."""
+    schedule = f"*/{interval_minutes} * * * *"
+    return f"{_CRON_BEGIN}\n{schedule} {command}\n{_CRON_END}"
+
+
+@pure
+def remove_managed_cron(existing_crontab: str) -> tuple[str, int]:
+    """Strip the managed donation block from a crontab, if present.
+
+    Returns the crontab without any lines between (and including) the marker
+    pair, plus the number of lines removed (0 when nothing was managed). Lines
+    outside the markers -- the user's own entries -- are preserved verbatim.
+    """
+    kept: list[str] = []
+    removed = 0
+    inside_block = False
+    for line in existing_crontab.splitlines():
+        if line.strip() == _CRON_BEGIN:
+            inside_block = True
+            removed += 1
+            continue
+        if line.strip() == _CRON_END:
+            inside_block = False
+            removed += 1
+            continue
+        if inside_block:
+            removed += 1
+            continue
+        kept.append(line)
+    body = "\n".join(kept).strip("\n")
+    return (body + "\n" if body else ""), removed
+
+
+@pure
+def upsert_managed_cron(existing_crontab: str, block: str) -> str:
+    """Return ``existing_crontab`` with the managed block replaced (or appended).
+
+    Idempotent: any prior managed block is removed first, so repeated ``--start``
+    calls never stack duplicate entries.
+    """
+    without_managed, _ = remove_managed_cron(existing_crontab)
+    if without_managed.strip():
+        return without_managed.rstrip("\n") + "\n" + block + "\n"
+    return block + "\n"
+
+
+def _current_mngr_path() -> str:
+    """Absolute path to the mngr executable now running, for the crontab entry."""
+    candidate = os.path.abspath(sys.argv[0])
+    if os.path.isfile(candidate):
+        return candidate
+    return shutil.which("mngr") or candidate
+
+
+def _cron_log_path() -> Path:
+    """Stable log file the scheduled ticks append to (under the host dir)."""
+    return _donate_log_dir() / "cron.log"
+
+
+def _read_crontab() -> str:
+    """The user's current crontab, or empty string when none is installed."""
+    result = subprocess.run(("crontab", "-l"), check=False, capture_output=True, text=True)
+    # `crontab -l` exits non-zero with "no crontab for user" when none exists.
+    return result.stdout if result.returncode == 0 else ""
+
+
+def _write_crontab(content: str) -> None:
+    """Replace the user's crontab with ``content`` (piped to ``crontab -``)."""
+    subprocess.run(("crontab", "-"), input=content, text=True, check=True)
 
 
 def _clear_stale_worktree(agent_name: str) -> None:
@@ -217,19 +331,27 @@ def _clear_stale_worktree(agent_name: str) -> None:
     subprocess.run(("git", "branch", "-D", branch), check=False, capture_output=True)
 
 
-def _donation_log_path(agent_name: str, now: int) -> Path:
-    """Where to persist the donation agent's streamed event log.
+def _donate_log_dir() -> Path:
+    """The dir donate writes its run logs to, created if missing.
 
-    Under the mngr host dir (``$MNGR_HOST_DIR`` or ``~/.mngr``) so it outlives
-    the agent: a headless agent auto-destroys on success, taking its own
-    ``stdout.jsonl`` with it, and a donation you can't inspect afterwards is a
-    donation you can't audit. ``now`` (passed in, not read here) keeps successive
-    ticks from clobbering each other's logs.
+    Lives under mngr's host dir via :func:`read_default_host_dir` -- the same
+    ``MNGR_HOST_DIR``-or-``~/.mngr`` resolution mngr uses everywhere else -- so we
+    don't re-derive (and drift from) that path here.
     """
-    host_dir = Path(os.environ.get("MNGR_HOST_DIR") or (Path.home() / ".mngr"))
-    log_dir = host_dir / "donate-logs"
+    log_dir = read_default_host_dir() / "donate-logs"
     log_dir.mkdir(parents=True, exist_ok=True)
-    return log_dir / f"{agent_name}-{now}.jsonl"
+    return log_dir
+
+
+def _donation_log_path(agent_name: str, now: int) -> Path:
+    """Where to persist one donation agent's streamed event log.
+
+    A headless agent auto-destroys on success, taking its own ``stdout.jsonl``
+    with it, and a donation you can't inspect afterwards is one you can't audit --
+    so we keep a copy under the host dir. ``now`` (passed in, not read here) keeps
+    successive ticks from clobbering each other's logs.
+    """
+    return _donate_log_dir() / f"{agent_name}-{now}.jsonl"
 
 
 def _run_and_tee(argv: tuple[str, ...], log_path: Path) -> int:
@@ -259,6 +381,9 @@ class DonateCliOptions(CommonCliOptions):
     skill: str
     agent_name: str
     dry_run: bool
+    start: bool
+    stop: bool
+    interval_minutes: int
 
 
 def _result_data(capacity: DonateCapacity, opts: DonateCliOptions) -> dict[str, Any]:
@@ -293,6 +418,25 @@ def _result_data(capacity: DonateCapacity, opts: DonateCliOptions) -> dict[str, 
     default=False,
     help="Report the spare-capacity decision without creating an agent.",
 )
+@click.option(
+    "--start",
+    is_flag=True,
+    default=False,
+    help="Schedule donate to run automatically (installs a crontab entry) and exit.",
+)
+@click.option(
+    "--stop",
+    is_flag=True,
+    default=False,
+    help="Remove the scheduled donate crontab entry and exit.",
+)
+@click.option(
+    "--interval-minutes",
+    type=click.IntRange(min=1),
+    default=DEFAULT_INTERVAL_MINUTES,
+    show_default=True,
+    help="With --start: how often the scheduled donate runs.",
+)
 @add_common_options
 @click.pass_context
 def donate(ctx: click.Context, **kwargs: Any) -> None:
@@ -301,15 +445,42 @@ def donate(ctx: click.Context, **kwargs: Any) -> None:
     Reads account-level usage (the same snapshot ``mngr usage`` shows): when the
     5h window still has budget and the week is under pace, create a
     non-interactive agent that runs the donation skill; otherwise do nothing.
-    One tick per invocation -- schedule it (``mngr help usage_cron_recipes``) to
-    donate idle quota automatically. Run it from a trusted git repo, since the
-    created agent is sourced from the current directory.
+    One tick per invocation -- use ``--start`` to install a crontab entry that
+    re-runs it on an interval (``--stop`` removes it), so spare quota is drained
+    over many ticks. Run it from a trusted git repo, since the created agent is
+    sourced from the current directory.
     """
     mngr_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,
         command_name="donate",
         command_class=DonateCliOptions,
     )
+
+    # --start / --stop manage the crontab schedule and exit; they don't do a tick,
+    # so they run before (and independently of) the spare-capacity check.
+    if opts.start and opts.stop:
+        raise MngrError("Pass only one of --start / --stop.")
+    if opts.start:
+        command = build_cron_command(
+            _current_mngr_path(), os.getcwd(), opts.skill, opts.agent_name, str(_cron_log_path())
+        )
+        _write_crontab(upsert_managed_cron(_read_crontab(), build_cron_block(opts.interval_minutes, command)))
+        emit_info(
+            f"Scheduled donate every {opts.interval_minutes} min from {os.getcwd()} "
+            f"(running the {opts.skill} skill; logs -> {_cron_log_path()}).\n"
+            f"Stop it with `mngr donate --stop`.",
+            output_opts.output_format,
+        )
+        return
+    if opts.stop:
+        new_crontab, removed = remove_managed_cron(_read_crontab())
+        if removed:
+            _write_crontab(new_crontab)
+            emit_info("Unscheduled donate (removed the managed crontab entry).", output_opts.output_format)
+        else:
+            emit_info("No scheduled donate found; nothing to remove.", output_opts.output_format)
+        return
+
     plugin_config = mngr_ctx.get_plugin_config("usage", UsagePluginConfig)
     now = int(time.time())
     snapshots = gather_usage_snapshots(
