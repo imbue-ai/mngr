@@ -1,0 +1,5 @@
+Add a `--use-http2` flag to `mngr forward` that terminates TLS and negotiates HTTP/2 (via ALPN) for the workspace origin instead of serving plain HTTP/1.1.
+
+HTTP/2 multiplexes many streams over one connection, so the workspace UI is no longer capped by Chromium's ~6-connection-per-origin HTTP/1.1 limit (which hangs the UI once enough chat/app streams are open). When the flag is set, the proxy generates a fresh self-signed cert at startup (SANs `localhost`, `*.localhost`, `127.0.0.1`; kept in memory, never persisted), serves TLS + h2 via hypercorn (replacing uvicorn), and its client-facing URLs become `https`/`wss` with the `mngr_forward_session` cookie marked `Secure`. WebSocket upgrades negotiate `http/1.1` per-connection and are unaffected.
+
+The flag is off by default, so a human running `mngr forward` still gets plain HTTP/1.1 with no cert friction; only clients that can trust the self-signed cert (the minds desktop app) should enable it. There is no runtime HTTP fallback -- if TLS setup fails the proxy exits during startup with a log line naming TLS/HTTP-2 as the cause.

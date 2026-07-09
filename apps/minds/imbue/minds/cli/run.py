@@ -41,6 +41,7 @@ from imbue.minds.build_info import resolve_release_id
 from imbue.minds.config.data_types import DEFAULT_DESKTOP_CLIENT_HOST
 from imbue.minds.config.data_types import DEFAULT_DESKTOP_CLIENT_PORT
 from imbue.minds.config.data_types import MNGR_BINARY
+from imbue.minds.config.data_types import MNGR_FORWARD_USE_HTTP2
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.config.loader import load_client_config
 from imbue.minds.desktop_client.agent_creator import AgentCreator
@@ -455,7 +456,8 @@ def run(
             f"{_MNGR_FORWARD_LISTEN_TIMEOUT_SECONDS:.0f}s; the plugin likely failed to start. "
             "Check the logs above for its stderr and retry."
         )
-    logger.info("  mngr forward: http://127.0.0.1:{}", mngr_forward_port)
+    forward_scheme = "https" if MNGR_FORWARD_USE_HTTP2 else "http"
+    logger.info("  mngr forward: {}://127.0.0.1:{}", forward_scheme, mngr_forward_port)
 
     # AgentCreator is constructed *after* ``start_mngr_forward`` so the
     # readiness probe can use the same preauth cookie the plugin accepts and
@@ -516,6 +518,10 @@ def run(
         {
             "preauth_cookie": preauth_cookie,
             "mngr_forward_port": mngr_forward_port,
+            # Tells the Electron shell the proxy origin's scheme so it builds
+            # https/wss URLs, marks the cookie Secure, and trusts the
+            # self-signed cert -- kept in lockstep with the --use-http2 flag.
+            "use_http2": MNGR_FORWARD_USE_HTTP2,
         },
         output_format,
     )

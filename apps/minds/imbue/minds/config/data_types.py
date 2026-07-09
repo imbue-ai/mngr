@@ -24,6 +24,17 @@ DEFAULT_DESKTOP_CLIENT_PORT: Final[int] = 8420
 # `uv run --active` puts the venv bin on PATH, so bare `mngr` resolves.
 MNGR_BINARY: Final[str] = "mngr"
 
+# Whether minds runs `mngr forward` with TLS + HTTP/2 for the workspace origin.
+# HTTP/2 multiplexes many streams over one connection, so the workspace UI is no
+# longer capped by Chromium's ~6-connection-per-origin HTTP/1.1 limit (which
+# hangs the UI once enough chat/app streams are open). The single source of
+# truth for every place that must agree on the proxy origin's scheme: the
+# `--use-http2` flag passed to the subprocess, the `https`/`wss` URLs the Python
+# side and the Electron shell construct, and the `Secure` session cookie. The
+# minds Electron app trusts the proxy's self-signed cert for its loopback
+# origins, so enabling this is safe here.
+MNGR_FORWARD_USE_HTTP2: Final[bool] = True
+
 
 class WorkspacePaths(FrozenModel):
     """Resolved filesystem paths for minds data storage."""

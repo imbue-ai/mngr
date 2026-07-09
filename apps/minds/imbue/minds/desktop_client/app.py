@@ -2131,9 +2131,9 @@ def create_desktop_client(
     The agent-subdomain forwarding lives in the ``mngr_forward`` plugin
     (``libs/mngr_forward``) now; this app only serves minds-specific routes
     on the bare origin (login, landing, accounts, workspace settings,
-    sharing, agent create / destroy). Workspace links go to
-    ``http://localhost:<mngr_forward_port>/goto/<agent>/`` instead of being
-    routed in-process.
+    sharing, agent create / destroy). Workspace links go to the proxy's
+    ``localhost:<mngr_forward_port>/goto/<agent>/`` route (``https`` when the
+    proxy serves HTTP/2, else ``http``) instead of being routed in-process.
 
     ``envelope_stream_consumer`` feeds discovery events into
     ``backend_resolver`` and is also the bounce target for ``SIGHUP``-style

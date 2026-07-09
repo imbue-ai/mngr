@@ -45,6 +45,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import MNGR_BINARY
+from imbue.minds.config.data_types import MNGR_FORWARD_USE_HTTP2
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import REQUESTS_EVENT_SOURCE_NAME
@@ -616,25 +617,7 @@ def start_mngr_forward(
     dropped.
     """
     preauth_cookie = secrets.token_urlsafe(_PREAUTH_TOKEN_LENGTH)
-    command: list[str] = [
-        config.mngr_binary,
-        "forward",
-        "--host",
-        "127.0.0.1",
-        "--service",
-        config.service,
-        # Tail the shared discovery log written by the single `mngr observe` under
-        # `mngr latchkey forward` rather than spawning a second discovery observer.
-        "--observe-via-file",
-        "--preauth-cookie",
-        preauth_cookie,
-        "--format",
-        "jsonl",
-    ]
-    for include in config.agent_include:
-        command.extend(["--agent-include", include])
-    for spec in config.reverse_specs:
-        command.extend(["--reverse", spec])
+    command = _build_forward_command(config, preauth_cookie)
     env = dict(os.environ)
     env["MNGR_HOST_DIR"] = str(config.mngr_host_dir)
     logger.info("Spawning `mngr forward` subprocess: {}", " ".join(_redact_secrets(command)))
@@ -652,6 +635,35 @@ def start_mngr_forward(
     consumer = EnvelopeStreamConsumer(resolver=resolver)
     consumer.attach(process)
     return consumer, preauth_cookie
+
+
+def _build_forward_command(config: ForwardSubprocessConfig, preauth_cookie: str) -> list[str]:
+    """Build the ``mngr forward`` argv for the subprocess minds spawns."""
+    command: list[str] = [
+        config.mngr_binary,
+        "forward",
+        "--host",
+        "127.0.0.1",
+        "--service",
+        config.service,
+        # Tail the shared discovery log written by the single `mngr observe` under
+        # `mngr latchkey forward` rather than spawning a second discovery observer.
+        "--observe-via-file",
+        "--preauth-cookie",
+        preauth_cookie,
+        "--format",
+        "jsonl",
+    ]
+    if MNGR_FORWARD_USE_HTTP2:
+        # TLS + HTTP/2 so the workspace origin is not capped by Chromium's
+        # per-origin HTTP/1.1 connection limit. The Electron shell trusts the
+        # proxy's self-signed cert for its loopback origins.
+        command.append("--use-http2")
+    for include in config.agent_include:
+        command.extend(["--agent-include", include])
+    for spec in config.reverse_specs:
+        command.extend(["--reverse", spec])
+    return command
 
 
 def _redact_secrets(command: list[str]) -> list[str]:
