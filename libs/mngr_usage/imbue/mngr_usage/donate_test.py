@@ -16,12 +16,9 @@ from imbue.mngr_usage.donate import CLAUDE_SOURCE
 from imbue.mngr_usage.donate import FIVE_HOUR_WINDOW
 from imbue.mngr_usage.donate import SEVEN_DAY_WINDOW
 from imbue.mngr_usage.donate import build_create_argv
-from imbue.mngr_usage.donate import build_cron_block
-from imbue.mngr_usage.donate import build_cron_command
 from imbue.mngr_usage.donate import build_destroy_argv
 from imbue.mngr_usage.donate import build_donation_message
-from imbue.mngr_usage.donate import remove_managed_cron
-from imbue.mngr_usage.donate import upsert_managed_cron
+from imbue.mngr_usage.donate import build_launchd_plist
 from imbue.mngr_usage.donate import evaluate_capacity
 from imbue.mngr_usage.donate import weekly_pace_line
 
@@ -156,42 +153,30 @@ def test_build_donation_message_names_the_skill() -> None:
     assert "document-review" in build_donation_message("document-review")
 
 
-def test_build_cron_command_cds_into_workdir_and_omits_default_options() -> None:
-    command = build_cron_command(
-        "/venv/bin/mngr", "/repo", "document-review", "donate-extra-quota-bio", "/logs/cron.log"
+def test_build_launchd_plist_embeds_program_env_and_interval() -> None:
+    plist = build_launchd_plist(
+        "/venv/bin/mngr", "/repo", "document-review", "donate-extra-quota-bio", "/logs/schedule.log", "/usr/bin:/bin", 600
     )
-    # Defaults (skill/agent-name) are omitted; cd + abs mngr + redirect stay.
-    assert command == "cd /repo && /venv/bin/mngr donate >> /logs/cron.log 2>&1"
+    # Runs mngr donate directly (no shell), in the repo, with the given PATH + interval.
+    assert "<string>/venv/bin/mngr</string>" in plist
+    assert "<string>donate</string>" in plist
+    assert "<string>/repo</string>" in plist  # WorkingDirectory
+    assert "<string>/usr/bin:/bin</string>" in plist  # EnvironmentVariables PATH
+    assert "<integer>600</integer>" in plist  # StartInterval seconds
+    assert "<string>/logs/schedule.log</string>" in plist
+    # Defaults are omitted from ProgramArguments (kept minimal).
+    assert "--skill" not in plist
+    assert "--agent-name" not in plist
 
 
-def test_build_cron_command_includes_non_default_options() -> None:
-    command = build_cron_command("/venv/bin/mngr", "/repo", "other-skill", "my-agent", "/logs/cron.log")
-    assert "--skill other-skill" in command
-    assert "--agent-name my-agent" in command
-
-
-def test_managed_cron_upsert_is_idempotent_and_preserves_user_lines() -> None:
-    user_crontab = "# my own job\n0 3 * * * /usr/bin/backup\n"
-    block = build_cron_block(10, build_cron_command("/venv/bin/mngr", "/repo", "document-review", "donate-extra-quota-bio", "/logs/cron.log"))
-
-    once = upsert_managed_cron(user_crontab, block)
-    twice = upsert_managed_cron(once, block)
-    # Re-running --start must not stack duplicate managed blocks.
-    assert once == twice
-    assert once.count("*/10 * * * *") == 1
-    assert "/usr/bin/backup" in once
-
-    # --stop restores exactly the user's original crontab.
-    restored, removed = remove_managed_cron(once)
-    assert restored == user_crontab
-    assert removed == 3
-
-
-def test_remove_managed_cron_is_a_noop_when_nothing_is_managed() -> None:
-    user_crontab = "0 3 * * * /usr/bin/backup\n"
-    restored, removed = remove_managed_cron(user_crontab)
-    assert restored == user_crontab
-    assert removed == 0
+def test_build_launchd_plist_includes_non_default_options() -> None:
+    plist = build_launchd_plist(
+        "/venv/bin/mngr", "/repo", "other-skill", "my-agent", "/logs/schedule.log", "/usr/bin", 60
+    )
+    assert "<string>--skill</string>" in plist
+    assert "<string>other-skill</string>" in plist
+    assert "<string>--agent-name</string>" in plist
+    assert "<string>my-agent</string>" in plist
 
 
 def test_build_destroy_argv_force_removes_a_stale_agent_by_name() -> None:

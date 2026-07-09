@@ -102,22 +102,27 @@ spare capacity over time, schedule it — the schedule, not any one tick, is wha
 uses up the idle quota:
 
 ```bash
-mngr donate --start                    # install a crontab entry (every 10 min by default)
+mngr donate --start                    # install a launchd LaunchAgent (every 10 min by default)
 mngr donate --start --interval-minutes 5
 mngr donate --stop                     # remove it
 ```
 
+`--start`/`--stop` are **macOS-only** and install a **launchd LaunchAgent**
+(`com.imbue.mngr.donate` in `~/Library/LaunchAgents/`). launchd — not cron —
+because the agent must run inside your **login session** to reach the macOS
+keychain where Claude's subscription token lives; a cron job runs outside it and
+every tick fails `Not logged in`. launchd also catches up after sleep. On other
+platforms, schedule `mngr donate` yourself.
+
 Notes:
 
 - **Run it from a trusted git repo.** The donation agent is created from the
-  current directory (like the cron recipes' `cd $PROJECT_DIR`); `--start` bakes
-  that directory into the crontab entry.
+  current directory; `--start` bakes that directory (and your `PATH`) into the
+  LaunchAgent so scheduled ticks find `claude`/`git` and a git root.
 - **It needs usage data.** Spare capacity is judged from the account-level
   snapshot, which is populated by mngr-managed Claude agents. With none recorded
   recently, `donate` reports "can't tell" and skips rather than guessing.
 - **Logs.** Each run's full event stream is tee'd to
-  `<host_dir>/donate-logs/<agent>-<ts>.jsonl` (scheduled runs append to
-  `cron.log`), so a run survives the agent's auto-destroy for later inspection.
-- **macOS + cron.** For `--start` to actually fire, the cron daemon
-  (`/usr/sbin/cron`) needs Full Disk Access (System Settings → Privacy &
-  Security). A native launchd LaunchAgent avoids this; not built in yet.
+  `<host_dir>/donate-logs/<agent>-<ts>.jsonl`, and scheduled runs also append to
+  `<host_dir>/donate-logs/schedule.log`, so a run survives the agent's
+  auto-destroy for later inspection.

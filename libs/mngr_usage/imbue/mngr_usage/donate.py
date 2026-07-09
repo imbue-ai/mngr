@@ -16,9 +16,11 @@ check-and-maybe-launch *tick*:
    a durable per-run log under ``<host_dir>/donate-logs/``.
 
 A single tick spends at most one skill run's worth of quota. To drain spare
-capacity over time, ``mngr donate --start`` installs a crontab entry that
-re-runs the tick on an interval (``--stop`` removes it) -- the schedule, not any
-one tick, is what actually uses up the idle quota.
+capacity over time, ``mngr donate --start`` installs a launchd LaunchAgent
+(macOS) that re-runs the tick on an interval (``--stop`` removes it) -- the
+schedule, not any one tick, is what actually uses up the idle quota. launchd
+(not cron) because it runs in the login session, the only context that can reach
+the keychain where Claude's subscription token lives.
 
 The launch mechanics (why headless, why the specific ``claude`` flags, why we
 pre-clear stale agents/worktrees) are documented at each helper below.
@@ -27,13 +29,13 @@ pre-clear stale agents/worktrees) are documented at each helper below.
 from __future__ import annotations
 
 import os
-import shlex
 import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Any
+from xml.sax.saxutils import escape
 
 import click
 from pydantic import Field
@@ -63,14 +65,13 @@ SEVEN_DAY_WINDOW = "seven_day"
 DEFAULT_SKILL = "document-review"
 DEFAULT_AGENT_NAME = "donate-extra-quota-bio"
 
-# `mngr donate --start` writes a single crontab entry that re-runs `mngr donate`
-# on this interval; each firing re-checks spare capacity and does another batch,
-# so the schedule -- not any one tick -- is what drains all the spare quota.
+# `mngr donate --start` installs a scheduler that re-runs `mngr donate` on this
+# interval; each firing re-checks spare capacity and does another batch, so the
+# schedule -- not any one tick -- is what drains all the spare quota. macOS uses a
+# launchd LaunchAgent (see build_launchd_plist); other platforms use crontab.
 DEFAULT_INTERVAL_MINUTES = 10
-# The managed crontab entry is wrapped in these marker lines so --stop can remove
-# exactly what --start added, leaving any hand-written crontab lines untouched.
-_CRON_BEGIN = "# >>> mngr donate (managed -- edit via `mngr donate --start/--stop`) >>>"
-_CRON_END = "# <<< mngr donate (managed) <<<"
+# The LaunchAgent's label, and thus its plist filename in ~/Library/LaunchAgents.
+LAUNCHD_LABEL = "com.imbue.mngr.donate"
 
 # Spare-capacity thresholds, mirroring spare-capacity.sh exactly:
 #   spare  <=>  five_hour.used% < 80  AND  weekly.used% < pace_line(weekly.elapsed%)
@@ -210,8 +211,8 @@ def build_create_argv(agent_name: str, skill: str, mngr_path: str = "mngr") -> t
         DONATE_AGENT_TYPE,
         "--foreground",
         # Source from the repo even with uncommitted changes: donate is meant to
-        # run unattended (incl. from cron), and the default clean-tree guard would
-        # fail every tick whenever the working repo has edits.
+        # run unattended (incl. from a schedule), and the default clean-tree guard
+        # would fail every tick whenever the working repo has edits.
         "--no-ensure-clean",
         "--message",
         build_donation_message(skill),
@@ -234,104 +235,136 @@ def build_destroy_argv(agent_name: str, mngr_path: str = "mngr") -> tuple[str, .
     return (mngr_path, "destroy", agent_name, "--force")
 
 
-@pure
-def build_cron_command(
-    mngr_path: str, workdir: str, skill: str, agent_name: str, log_path: str, path_value: str = ""
-) -> str:
-    """The shell command a scheduled donation tick runs (without the time spec).
-
-    ``cd`` into ``workdir`` first: cron starts in ``$HOME``, but donate must run
-    from a trusted git repo (``mngr create`` needs a git root). ``mngr_path`` is
-    an absolute path to *this* mngr, since a scheduled ``mngr`` off ``$PATH`` may
-    resolve to a different install that lacks ``donate``. ``path_value``, when
-    given, is exported first: cron runs with a bare ``/usr/bin:/bin`` PATH that
-    omits ``~/.local/bin``, so without it the launched agent can't find ``claude``
-    (nor ``git`` from Homebrew) and every tick fails. --start passes the PATH from
-    its own environment so scheduled ticks see the same tools the user does. Only
-    non-default options are appended; output is appended to ``log_path``.
-    """
-    command = f"cd {shlex.quote(workdir)} && {shlex.quote(mngr_path)} donate"
-    if skill != DEFAULT_SKILL:
-        command += f" --skill {shlex.quote(skill)}"
-    if agent_name != DEFAULT_AGENT_NAME:
-        command += f" --agent-name {shlex.quote(agent_name)}"
-    command += f" >> {shlex.quote(log_path)} 2>&1"
-    if path_value:
-        command = f"export PATH={shlex.quote(path_value)}; {command}"
-    return command
-
-
-@pure
-def build_cron_block(interval_minutes: int, command: str) -> str:
-    """The full marker-wrapped crontab block for one managed donation schedule."""
-    schedule = f"*/{interval_minutes} * * * *"
-    return f"{_CRON_BEGIN}\n{schedule} {command}\n{_CRON_END}"
-
-
-@pure
-def remove_managed_cron(existing_crontab: str) -> tuple[str, int]:
-    """Strip the managed donation block from a crontab, if present.
-
-    Returns the crontab without any lines between (and including) the marker
-    pair, plus the number of lines removed (0 when nothing was managed). Lines
-    outside the markers -- the user's own entries -- are preserved verbatim.
-    """
-    kept: list[str] = []
-    removed = 0
-    inside_block = False
-    for line in existing_crontab.splitlines():
-        if line.strip() == _CRON_BEGIN:
-            inside_block = True
-            removed += 1
-            continue
-        if line.strip() == _CRON_END:
-            inside_block = False
-            removed += 1
-            continue
-        if inside_block:
-            removed += 1
-            continue
-        kept.append(line)
-    body = "\n".join(kept).strip("\n")
-    return (body + "\n" if body else ""), removed
-
-
-@pure
-def upsert_managed_cron(existing_crontab: str, block: str) -> str:
-    """Return ``existing_crontab`` with the managed block replaced (or appended).
-
-    Idempotent: any prior managed block is removed first, so repeated ``--start``
-    calls never stack duplicate entries.
-    """
-    without_managed, _ = remove_managed_cron(existing_crontab)
-    if without_managed.strip():
-        return without_managed.rstrip("\n") + "\n" + block + "\n"
-    return block + "\n"
-
-
 def _current_mngr_path() -> str:
-    """Absolute path to the mngr executable now running, for the crontab entry."""
+    """Absolute path to the mngr executable now running, for the LaunchAgent."""
     candidate = os.path.abspath(sys.argv[0])
     if os.path.isfile(candidate):
         return candidate
     return shutil.which("mngr") or candidate
 
 
-def _cron_log_path() -> Path:
+def _schedule_log_path() -> Path:
     """Stable log file the scheduled ticks append to (under the host dir)."""
-    return _donate_log_dir() / "cron.log"
+    return _donate_log_dir() / "schedule.log"
 
 
-def _read_crontab() -> str:
-    """The user's current crontab, or empty string when none is installed."""
-    result = subprocess.run(("crontab", "-l"), check=False, capture_output=True, text=True)
-    # `crontab -l` exits non-zero with "no crontab for user" when none exists.
-    return result.stdout if result.returncode == 0 else ""
+@pure
+def build_launchd_plist(
+    mngr_path: str, workdir: str, skill: str, agent_name: str, log_path: str, path_value: str, interval_seconds: int
+) -> str:
+    """The LaunchAgent plist that schedules donate on macOS.
+
+    Preferred over cron on macOS for one decisive reason: a LaunchAgent runs
+    inside the user's GUI login session, so it can reach the login **keychain**
+    where Claude stores the subscription token -- which cron cannot, making every
+    cron-launched tick fail "Not logged in". It also catches up after sleep.
+
+    ``ProgramArguments`` runs mngr directly (no shell); ``WorkingDirectory`` gives
+    ``mngr create`` its git root, ``EnvironmentVariables.PATH`` lets it find
+    ``claude``/``git`` (launchd starts with a minimal PATH), and stdout/stderr are
+    captured to ``log_path``. ``StartInterval`` fires every ``interval_seconds``;
+    ``RunAtLoad`` is false so installing doesn't kick off a tick immediately.
+    """
+    args = [mngr_path, "donate"]
+    if skill != DEFAULT_SKILL:
+        args += ["--skill", skill]
+    if agent_name != DEFAULT_AGENT_NAME:
+        args += ["--agent-name", agent_name]
+    program_args = "\n".join(f"        <string>{escape(a)}</string>" for a in args)
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+        '<plist version="1.0">\n'
+        "<dict>\n"
+        f"    <key>Label</key>\n    <string>{LAUNCHD_LABEL}</string>\n"
+        f"    <key>ProgramArguments</key>\n    <array>\n{program_args}\n    </array>\n"
+        f"    <key>WorkingDirectory</key>\n    <string>{escape(workdir)}</string>\n"
+        "    <key>EnvironmentVariables</key>\n    <dict>\n"
+        f"        <key>PATH</key>\n        <string>{escape(path_value)}</string>\n    </dict>\n"
+        f"    <key>StartInterval</key>\n    <integer>{interval_seconds}</integer>\n"
+        f"    <key>StandardOutPath</key>\n    <string>{escape(log_path)}</string>\n"
+        f"    <key>StandardErrorPath</key>\n    <string>{escape(log_path)}</string>\n"
+        "    <key>RunAtLoad</key>\n    <false/>\n"
+        "</dict>\n</plist>\n"
+    )
 
 
-def _write_crontab(content: str) -> None:
-    """Replace the user's crontab with ``content`` (piped to ``crontab -``)."""
-    subprocess.run(("crontab", "-"), input=content, text=True, check=True)
+def _launchd_plist_path() -> Path:
+    """Path to the donate LaunchAgent plist, creating ~/Library/LaunchAgents if needed."""
+    agents_dir = Path.home() / "Library" / "LaunchAgents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    return agents_dir / f"{LAUNCHD_LABEL}.plist"
+
+
+def _install_launchd(plist: str, interval_minutes: int) -> None:
+    """Write the plist and (re)load it into the user's launchd GUI domain."""
+    plist_path = _launchd_plist_path()
+    plist_path.write_text(plist)
+    domain = f"gui/{os.getuid()}"
+    # Boot out any prior instance (ignored if absent) before bootstrapping the new
+    # one. bootout is asynchronous, so the service can still be tearing down when
+    # bootstrap runs -- which surfaces as "Bootstrap failed: 5: Input/output
+    # error". Retry through that transient window before giving up.
+    subprocess.run(("launchctl", "bootout", f"{domain}/{LAUNCHD_LABEL}"), check=False, capture_output=True)
+    last_error = ""
+    for _attempt in range(5):
+        result = subprocess.run(
+            ("launchctl", "bootstrap", domain, str(plist_path)), check=False, capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            return
+        last_error = (result.stderr or result.stdout).strip()
+        time.sleep(0.5)
+    raise MngrError(f"launchctl bootstrap failed: {last_error}")
+
+
+def _uninstall_launchd() -> bool:
+    """Boot out the LaunchAgent and delete its plist. Returns whether it existed."""
+    subprocess.run(
+        ("launchctl", "bootout", f"gui/{os.getuid()}/{LAUNCHD_LABEL}"), check=False, capture_output=True
+    )
+    plist_path = _launchd_plist_path()
+    existed = plist_path.exists()
+    plist_path.unlink(missing_ok=True)
+    return existed
+
+
+def _require_macos() -> None:
+    """Guard ``--start``/``--stop``: scheduling is implemented via launchd (macOS only).
+
+    A launchd LaunchAgent is the only scheduler that reaches the login keychain
+    where Claude's subscription token lives -- cron runs outside the login session
+    and every tick fails "Not logged in". Rather than ship a scheduler that
+    silently can't authenticate, we scope ``--start`` to macOS; elsewhere, run
+    ``mngr donate`` from your own scheduler (its env already has keychain access).
+    """
+    if sys.platform != "darwin":
+        raise MngrError(
+            "`mngr donate --start`/`--stop` is macOS-only (it installs a launchd LaunchAgent). "
+            "On other platforms, schedule `mngr donate` yourself (e.g. a cron entry that runs it)."
+        )
+
+
+def _install_schedule(skill: str, agent_name: str, interval_minutes: int) -> str:
+    """Install the launchd LaunchAgent that runs donate on an interval."""
+    _require_macos()
+    log_path = str(_schedule_log_path())
+    plist = build_launchd_plist(
+        _current_mngr_path(), os.getcwd(), skill, agent_name, log_path, os.environ.get("PATH", ""), interval_minutes * 60
+    )
+    _install_launchd(plist, interval_minutes)
+    return (
+        f"Scheduled donate via launchd ({LAUNCHD_LABEL}) every {interval_minutes} min from {os.getcwd()}; "
+        f"logs -> {log_path}. It runs in your login session, so it can use your keychain login "
+        f"(unlike cron) and catches up after sleep."
+    )
+
+
+def _remove_schedule() -> str:
+    """Remove the donate LaunchAgent; returns a status message."""
+    _require_macos()
+    removed = _uninstall_launchd()
+    return "Unscheduled donate (removed the launchd agent)." if removed else "No scheduled donate found; nothing to remove."
 
 
 def _clear_stale_worktree(agent_name: str) -> None:
@@ -461,13 +494,13 @@ def _result_data(capacity: DonateCapacity, opts: DonateCliOptions) -> dict[str, 
     "--start",
     is_flag=True,
     default=False,
-    help="Schedule donate to run automatically (installs a crontab entry) and exit.",
+    help="Schedule donate to run automatically (installs a launchd LaunchAgent; macOS only) and exit.",
 )
 @click.option(
     "--stop",
     is_flag=True,
     default=False,
-    help="Remove the scheduled donate crontab entry and exit.",
+    help="Remove the scheduled donate LaunchAgent and exit.",
 )
 @click.option(
     "--interval-minutes",
@@ -484,10 +517,10 @@ def donate(ctx: click.Context, **kwargs: Any) -> None:
     Reads account-level usage (the same snapshot ``mngr usage`` shows): when the
     5h window still has budget and the week is under pace, create a
     non-interactive agent that runs the donation skill; otherwise do nothing.
-    One tick per invocation -- use ``--start`` to install a crontab entry that
-    re-runs it on an interval (``--stop`` removes it), so spare quota is drained
-    over many ticks. Run it from a trusted git repo, since the created agent is
-    sourced from the current directory.
+    One tick per invocation -- use ``--start`` to install a launchd LaunchAgent
+    (macOS) that re-runs it on an interval (``--stop`` removes it), so spare quota
+    is drained over many ticks. Run it from a trusted git repo, since the created
+    agent is sourced from the current directory.
     """
     mngr_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,
@@ -500,29 +533,11 @@ def donate(ctx: click.Context, **kwargs: Any) -> None:
     if opts.start and opts.stop:
         raise MngrError("Pass only one of --start / --stop.")
     if opts.start:
-        command = build_cron_command(
-            _current_mngr_path(),
-            os.getcwd(),
-            opts.skill,
-            opts.agent_name,
-            str(_cron_log_path()),
-            os.environ.get("PATH", ""),
-        )
-        _write_crontab(upsert_managed_cron(_read_crontab(), build_cron_block(opts.interval_minutes, command)))
-        emit_info(
-            f"Scheduled donate every {opts.interval_minutes} min from {os.getcwd()} "
-            f"(running the {opts.skill} skill; logs -> {_cron_log_path()}).\n"
-            f"Stop it with `mngr donate --stop`.",
-            output_opts.output_format,
-        )
+        message = _install_schedule(opts.skill, opts.agent_name, opts.interval_minutes)
+        emit_info(f"{message}\nStop it with `mngr donate --stop`.", output_opts.output_format)
         return
     if opts.stop:
-        new_crontab, removed = remove_managed_cron(_read_crontab())
-        if removed:
-            _write_crontab(new_crontab)
-            emit_info("Unscheduled donate (removed the managed crontab entry).", output_opts.output_format)
-        else:
-            emit_info("No scheduled donate found; nothing to remove.", output_opts.output_format)
+        emit_info(_remove_schedule(), output_opts.output_format)
         return
 
     plugin_config = mngr_ctx.get_plugin_config("usage", UsagePluginConfig)
