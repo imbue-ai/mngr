@@ -868,6 +868,32 @@ def test_backup_enable_repair_and_destination_change_on_resumed_workspace(
 
     container_name = running_workspace.container_name
     agent_id = AgentId(running_workspace.services_agent_id)
+
+    # Heal the persisted SSH endpoint before the first host-side connection.
+    # The fixture resumed the workspace with a raw `docker start`, and docker
+    # may re-publish the container's random SSH port on restart -- while the
+    # docker provider connects via the port persisted in its host record at
+    # snapshot time, so host-side execs can fail with "Unable to connect".
+    # Resuming through host-side `mngr start` on a *stopped* container re-runs
+    # the provider's SSH setup and rewrites the record with the live port
+    # (exactly what a real desktop resume does); a running container would
+    # early-return with the stale record, so stop it first.
+    stop_result = subprocess.run(
+        ["docker", "stop", container_name], capture_output=True, text=True, check=False, timeout=120
+    )
+    assert stop_result.returncode == 0, stop_result.stderr
+    # cwd must be a uv project for `uv run`; the config guard reads the
+    # opted-in MNGR_PROJECT_CONFIG_DIR rather than the repo's .mngr.
+    start_result = subprocess.run(
+        ["uv", "run", "mngr", "start", str(agent_id), "--quiet"],
+        cwd=str(_REPO_ROOT),
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=600,
+    )
+    assert start_result.returncode == 0, (start_result.stdout, start_result.stderr)
+
     data_dir = tmp_path / "minds-data"
     data_dir.mkdir()
     paths = WorkspacePaths(data_dir=data_dir)
