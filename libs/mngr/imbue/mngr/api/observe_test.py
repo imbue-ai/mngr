@@ -21,11 +21,11 @@ from imbue.mngr.api.discovery_events import make_discovered_provider
 from imbue.mngr.api.discovery_events import make_provider_discovery_snapshot_event
 from imbue.mngr.api.observe import AGENT_STATES_EVENT_SOURCE
 from imbue.mngr.api.observe import AgentObserver
+from imbue.mngr.api.observe import AgentRemovedEvent
 from imbue.mngr.api.observe import AgentStateChangeEvent
 from imbue.mngr.api.observe import AgentStateEvent
 from imbue.mngr.api.observe import FullAgentStateEvent
 from imbue.mngr.api.observe import OBSERVE_EVENT_SOURCE
-from imbue.mngr.api.observe import AgentRemovedEvent
 from imbue.mngr.api.observe import ObserveEventType
 from imbue.mngr.api.observe import ObserveLockError
 from imbue.mngr.api.observe import _TrackedState
@@ -40,9 +40,9 @@ from imbue.mngr.api.observe import get_observe_events_dir
 from imbue.mngr.api.observe import get_observe_events_path
 from imbue.mngr.api.observe import get_observe_lock_path
 from imbue.mngr.api.observe import load_base_state_from_history
+from imbue.mngr.api.observe import make_agent_removed_event
 from imbue.mngr.api.observe import make_agent_state_change_event
 from imbue.mngr.api.observe import make_agent_state_event
-from imbue.mngr.api.observe import make_agent_removed_event
 from imbue.mngr.api.observe import make_full_agent_state_event
 from imbue.mngr.api.observe import parse_observe_event_line
 from imbue.mngr.api.observe import release_observe_lock

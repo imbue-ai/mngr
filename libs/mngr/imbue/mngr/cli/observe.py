@@ -4,12 +4,12 @@ from typing import Any
 import click
 from loguru import logger
 
+from imbue.imbue_common.event_envelope import EventEnvelope
 from imbue.mngr.api.observe import AgentObserver
 from imbue.mngr.api.observe import acquire_observe_lock
 from imbue.mngr.api.observe import get_default_events_base_dir
 from imbue.mngr.api.observe import release_observe_lock
 from imbue.mngr.api.provider_discovery_stream import run_per_provider_discovery_stream
-from imbue.imbue_common.event_envelope import EventEnvelope
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
