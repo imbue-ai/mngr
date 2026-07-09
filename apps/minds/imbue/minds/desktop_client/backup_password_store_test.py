@@ -11,6 +11,7 @@ from imbue.minds.desktop_client.backup_password_store import backup_password_has
 from imbue.minds.desktop_client.backup_password_store import delete_saved_backup_password
 from imbue.minds.desktop_client.backup_password_store import ensure_backup_password_hash
 from imbue.minds.desktop_client.backup_password_store import has_saved_backup_password
+from imbue.minds.desktop_client.backup_password_store import is_master_password_set
 from imbue.minds.desktop_client.backup_password_store import read_saved_backup_password
 from imbue.minds.desktop_client.backup_password_store import resolve_backup_password_for_use
 from imbue.minds.desktop_client.backup_password_store import save_backup_password
@@ -106,6 +107,16 @@ def test_write_hash_stores_no_plaintext(tmp_path: Path) -> None:
     hash_content = backup_password_hash_file_path(paths).read_text()
     assert "visible-nowhere" not in hash_content
     assert hash_content.startswith("$argon2")
+
+
+def test_is_master_password_set_reflects_the_hash_state(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    # Fresh install: the (seeded) hash is the empty password -> not set.
+    assert is_master_password_set(paths) is False
+    write_backup_password_hash(paths, SecretStr("something"))
+    assert is_master_password_set(paths) is True
+    write_backup_password_hash(paths, SecretStr(""))
+    assert is_master_password_set(paths) is False
 
 
 # -- Resolution for repo-initializing flows --

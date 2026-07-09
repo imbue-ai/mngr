@@ -1224,6 +1224,52 @@ def _handle_backup_service_configure(agent_id: str) -> tuple[OperationHandleResp
 
 
 @require_api_or_cookie_auth
+@API_SPEC.validate(resp=json_response_model(OperationHandleResponse, status_code=202))
+def _handle_backup_service_disable(agent_id: str) -> tuple[OperationHandleResponse, int] | Response:
+    """Turn a workspace's backups off; return a handle to poll.
+
+    Archives the canonical env minds-side (old snapshots stay reachable
+    through the archive) and rotates the workspace's ``restic.env`` aside so
+    the backup service goes idle. Env-only -- no chat gate, and no master
+    password is needed to turn backups off. The verification check will
+    afterwards report NOT_CONFIGURED, which is accurate.
+    """
+    context = _resolve_backup_route_context(agent_id)
+    if isinstance(context, Response):
+        return context
+    parsed_id, paths, parent_cg = context
+    state = get_state()
+    registry = state.workspace_operation_registry
+    if not registry.start_if_idle(parsed_id, WorkspaceOperationKind.BACKUP_CONFIGURE, datetime.now(timezone.utc)):
+        existing = registry.get(parsed_id)
+        kind_note = f" ({existing.kind.value})" if existing is not None else ""
+        return _json_error(f"Another operation{kind_note} is already running for {agent_id}", 409)
+    registry.append_log(parsed_id, "Disabling backups...")
+    try:
+        parent_cg.start_new_thread(
+            target=backup_update_module.run_backup_disable_sequence,
+            kwargs={
+                "agent_id": parsed_id,
+                "paths": paths,
+                "parent_cg": parent_cg,
+                "registry": registry,
+            },
+            name=f"backup-disable-{parsed_id}",
+            daemon=True,
+            is_checked=False,
+            on_failure=backup_update_module.BackupWorkerFailureHandler(
+                workspace_agent_id=parsed_id, registry=registry
+            ),
+        )
+    except (OSError, RuntimeError, ConcurrencyGroupError) as exc:
+        logger.warning("Failed to spawn backup disable worker for {}: {}", parsed_id, exc)
+        message = f"Could not start the backup disable worker: {exc}"
+        registry.fail(parsed_id, message)
+        return _json_error(message, 503)
+    return OperationHandleResponse(operation_id=str(parsed_id), kind="backup_configure"), 202
+
+
+@require_api_or_cookie_auth
 @API_SPEC.validate(json=BackupVerificationToggleRequest, resp=json_response_model(EmptyResponse))
 def _handle_backup_verification_toggle(agent_id: str) -> EmptyResponse | Response:
     """Enable/disable backup verification (checks + badge) for one workspace."""
@@ -1913,6 +1959,11 @@ def create_api_v1_blueprint() -> Blueprint:
     blueprint.add_url_rule(
         "/workspaces/<agent_id>/backup-service/configure",
         view_func=_handle_backup_service_configure,
+        methods=["POST"],
+    )
+    blueprint.add_url_rule(
+        "/workspaces/<agent_id>/backup-service/disable",
+        view_func=_handle_backup_service_disable,
         methods=["POST"],
     )
     blueprint.add_url_rule(

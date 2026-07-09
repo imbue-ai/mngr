@@ -1,13 +1,17 @@
 // Backup section of the workspace settings page: shows the combined
 // snapshot status + backup-service verification breakdown from this
-// workspace's /api/v1/workspaces/<id>/backups, and drives the three actions:
+// workspace's /api/v1/workspaces/<id>/backups, and drives the actions:
+//   - the verification Enable/Disable button (top of the section: the whole
+//     breakdown below it only exists while verification is on),
 //   - "Update backup service" (one idempotent converge; tracked operation
 //     polled at /api/v1/workspaces/operations/backup/<id>, with a
 //     "Stop all chats and retry" follow-up when running chats block it and
 //     a Cancel that works while the update is still waiting),
-//   - "Configure backups..." (enable on a configure-later workspace, or
-//     change the destination; same tracked-operation polling),
-//   - the per-workspace "verify backups" toggle.
+//   - "Configure backups..." (enable, change destination, or disable via the
+//     "None" provider; same tracked-operation polling).
+//
+// Conditional buttons are shown/hidden via their wrapper spans (a `hidden`
+// class directly on a Button loses to its inline-flex display class).
 (function () {
   var section = document.getElementById('backup-section');
   if (!section) return;
@@ -17,21 +21,30 @@
   var versionsEl = document.getElementById('backup-versions');
   var problemsEl = document.getElementById('backup-problems');
   var updateBtn = document.getElementById('backup-update-btn');
+  var updateBtnWrap = document.getElementById('backup-update-btn-wrap');
   var stopChatsBtn = document.getElementById('backup-stop-chats-btn');
+  var stopChatsBtnWrap = document.getElementById('backup-stop-chats-btn-wrap');
   var cancelBtn = document.getElementById('backup-cancel-btn');
+  var cancelBtnWrap = document.getElementById('backup-cancel-btn-wrap');
   var spinner = document.getElementById('backup-op-spinner');
   var progressEl = document.getElementById('backup-op-progress');
   var errorEl = document.getElementById('backup-error');
-  var verificationToggle = document.getElementById('backup-verification-toggle');
+  var verificationBtn = document.getElementById('backup-verification-btn');
+  var verificationBtnWrap = document.getElementById('backup-verification-btn-wrap');
+  var verificationSpinner = document.getElementById('backup-verification-spinner');
 
   var configureToggleBtn = document.getElementById('backup-configure-toggle-btn');
   var configureForm = document.getElementById('backup-configure-form');
   var providerSelect = document.getElementById('backup-provider-select');
+  var masterPasswordRow = document.getElementById('backup-master-password-row');
   var masterPasswordInput = document.getElementById('backup-master-password-input');
   var savePasswordInput = document.getElementById('backup-save-password-input');
   var apiKeyRow = document.getElementById('backup-api-key-row');
   var apiKeyEnvInput = document.getElementById('backup-api-key-env-input');
   var configureSubmitBtn = document.getElementById('backup-configure-submit-btn');
+
+  // The latest known verification state, driving the Enable/Disable label.
+  var isVerificationEnabled = true;
 
   var PROBLEM_LABELS = {
     NOT_CONFIGURED: 'Backups are not configured for this workspace.',
@@ -41,6 +54,10 @@
     SERVICE_NOT_RUNNING: 'The backup service is not running.',
     UNVERIFIABLE: 'The backup service could not be verified.',
   };
+
+  function setShown(el, isShown) {
+    if (el) el.classList.toggle('hidden', !isShown);
+  }
 
   function showError(message) {
     errorEl.textContent = message;
@@ -69,16 +86,20 @@
 
   function renderEntry(entry) {
     statusLine.textContent = snapshotText(entry);
-    verificationToggle.checked = !!entry.is_verification_enabled;
+    isVerificationEnabled = !!entry.is_verification_enabled;
+    verificationBtn.textContent = isVerificationEnabled ? 'Disable' : 'Enable';
+    setShown(verificationBtnWrap, true);
 
     problemsEl.textContent = '';
     problemsEl.classList.add('hidden');
     versionsEl.classList.add('hidden');
-    updateBtn.classList.add('hidden');
+    setShown(updateBtnWrap, false);
 
     if (entry.check_state === 'DISABLED') {
-      statusLine.textContent += ' Backup verification is disabled for this workspace.';
-      updateBtn.classList.remove('hidden');
+      statusLine.textContent += ' Backup service verification is disabled for this workspace.';
+      // The update is an idempotent converge and does not depend on
+      // verification, so it stays available.
+      setShown(updateBtnWrap, true);
       return;
     }
     if (entry.check_state === 'OFFLINE') {
@@ -98,7 +119,7 @@
     // The update is an idempotent converge, so the button is always offered
     // for a reachable workspace -- even at the target version it usefully
     // resets a wedged backup service.
-    updateBtn.classList.remove('hidden');
+    setShown(updateBtnWrap, true);
     if (entry.check_state === 'PROBLEMS') {
       (entry.problems || []).forEach(function (problem) {
         var li = document.createElement('li');
@@ -132,7 +153,48 @@
       });
   }
 
-  // -- Tracked operation driving (update + configure share the poller) ------
+  // -- Verification Enable/Disable ------------------------------------------
+
+  verificationBtn.addEventListener('click', function () {
+    clearError();
+    var targetEnabled = !isVerificationEnabled;
+    setShown(verificationBtnWrap, false);
+    verificationSpinner.textContent = targetEnabled ? 'Enabling...' : 'Disabling...';
+    verificationSpinner.classList.remove('hidden');
+    fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backup-service/verification', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: targetEnabled }),
+    })
+      .then(function (resp) {
+        if (!resp.ok) {
+          verificationSpinner.classList.add('hidden');
+          setShown(verificationBtnWrap, true);
+          showError('Could not update the verification setting (HTTP ' + resp.status + ').');
+          return null;
+        }
+        // Re-fetching also re-runs the (possibly slow) service check; the
+        // spinner keeps showing what we're doing until the fresh state lands.
+        return fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backups')
+          .then(function (entryResp) { return entryResp.ok ? entryResp.json() : null; })
+          .then(function (entry) {
+            verificationSpinner.classList.add('hidden');
+            if (entry) {
+              renderEntry(entry);
+              if (window.mindsBackupHealth) window.mindsBackupHealth.ingestEntry(entry);
+            } else {
+              setShown(verificationBtnWrap, true);
+            }
+          });
+      })
+      .catch(function () {
+        verificationSpinner.classList.add('hidden');
+        setShown(verificationBtnWrap, true);
+        showError('Could not update the verification setting (network error).');
+      });
+  });
+
+  // -- Tracked operation driving (update + configure/disable share the poller)
 
   // Cancel only affects a still-waiting backup *update* (the cancel route
   // 404s for configure operations, which have no waiting phase), so the
@@ -142,7 +204,7 @@
     updateBtn.disabled = isRunning;
     configureSubmitBtn.disabled = isRunning;
     stopChatsBtn.disabled = isRunning;
-    cancelBtn.classList.toggle('hidden', !(isRunning && isCancellable));
+    setShown(cancelBtnWrap, isRunning && isCancellable);
     if (!isRunning) progressEl.classList.add('hidden');
   }
 
@@ -172,7 +234,7 @@
           return;
         }
         setOperationRunning(false);
-        stopChatsBtn.classList.add('hidden');
+        setShown(stopChatsBtnWrap, false);
         if (op.is_done) {
           refreshHealth();
           return;
@@ -182,7 +244,7 @@
             'Chats are running in this workspace (' + op.blocked_chats.join(', ') +
             '). Stop them before updating the backup service; they resume on your next message.'
           );
-          stopChatsBtn.classList.remove('hidden');
+          setShown(stopChatsBtnWrap, true);
           return;
         }
         showError(op.error || 'The backup operation failed.');
@@ -221,7 +283,7 @@
     startOperation('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backup-service/update', { stop_chats: false }, true);
   });
   stopChatsBtn.addEventListener('click', function () {
-    stopChatsBtn.classList.add('hidden');
+    setShown(stopChatsBtnWrap, false);
     startOperation('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backup-service/update', { stop_chats: true }, true);
   });
   cancelBtn.addEventListener('click', function () {
@@ -229,11 +291,15 @@
       .catch(function () {});
   });
 
-  // -- Configure form -------------------------------------------------------
+  // -- Configure form (enable / change destination / disable) ---------------
 
   function syncConfigureFormVisibility() {
-    var isApiKey = providerSelect.value === 'API_KEY';
-    apiKeyRow.classList.toggle('hidden', !isApiKey);
+    var provider = providerSelect.value;
+    apiKeyRow.classList.toggle('hidden', provider !== 'API_KEY');
+    // The master-password row only exists when a non-empty master password is
+    // set; it is only *needed* when a repository will be initialized, which
+    // "None" (disable) never does.
+    if (masterPasswordRow) masterPasswordRow.classList.toggle('hidden', provider === 'NONE');
   }
   configureToggleBtn.addEventListener('click', function () {
     configureForm.classList.toggle('hidden');
@@ -245,6 +311,10 @@
   // is validated server-side against the stored hash; save_password persists
   // the just-validated typed value as the plaintext convenience copy.
   configureSubmitBtn.addEventListener('click', function () {
+    if (providerSelect.value === 'NONE') {
+      startOperation('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backup-service/disable', {}, false);
+      return;
+    }
     var body = {
       backup_provider: providerSelect.value,
       api_key_env: apiKeyEnvInput ? apiKeyEnvInput.value : '',
@@ -252,21 +322,6 @@
       save_password: savePasswordInput ? savePasswordInput.checked : false,
     };
     startOperation('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backup-service/configure', body, false);
-  });
-
-  // -- Verification toggle --------------------------------------------------
-
-  verificationToggle.addEventListener('change', function () {
-    fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backup-service/verification', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled: verificationToggle.checked }),
-    })
-      .then(function (resp) {
-        if (!resp.ok) showError('Could not update the verification setting (HTTP ' + resp.status + ').');
-        else refreshHealth();
-      })
-      .catch(function () { showError('Could not update the verification setting (network error).'); });
   });
 
   refreshHealth();

@@ -41,6 +41,7 @@ from imbue.minds.desktop_client.backup_env_store import read_canonical_env
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.backup_provisioning import change_backup_destination_for_host
 from imbue.minds.desktop_client.backup_provisioning import configure_backups_for_host
+from imbue.minds.desktop_client.backup_provisioning import disable_backups_for_host
 from imbue.minds.desktop_client.backup_provisioning import reinject_canonical_env
 from imbue.minds.desktop_client.backup_verification import MINIMUM_BACKUP_SERVICE_TAG
 from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_APPLY_UPDATE_SCRIPT
@@ -956,3 +957,32 @@ def test_backup_enable_repair_and_destination_change_on_resumed_workspace(
     assert archived[0].read_text() == canonical_one
     # The old repository is untouched and still reachable via the archive.
     assert (repo_one / "config").is_file()
+
+    # Disable: the canonical env is archived and the workspace copy rotated
+    # aside, so the backup service reads "not configured" again.
+    disable_backups_for_host(agent_id=agent_id, paths=paths)
+    assert read_canonical_env(paths, agent_id) is None
+    gone = _exec_in_container(container_name, "test -f /code/runtime/secrets/restic.env", timeout=30)
+    assert gone.returncode != 0, "the workspace restic.env should be rotated aside after disabling"
+    archived_after_disable = list((data_dir / "backup_envs").glob(f"{agent_id}.env.*"))
+    assert len(archived_after_disable) == 2
+    # Disabling again is an idempotent no-op.
+    disable_backups_for_host(agent_id=agent_id, paths=paths)
+
+    # Re-enable after the disable: fresh provisioning works again (the
+    # disable/enable loop is the intended way to reset a workspace's backups).
+    repo_three = tmp_path / "restic-repo-3"
+    configure_backups_for_host(
+        agent_id=agent_id,
+        host_id="host-snapshot-test",
+        request=BackupSetupRequest(
+            backup_provider=BackupProvider.API_KEY, api_key_env_text=f"RESTIC_REPOSITORY={repo_three}"
+        ),
+        imbue_cloud_cli=None,
+        paths=paths,
+    )
+    canonical_three = read_canonical_env(paths, agent_id)
+    assert canonical_three is not None
+    assert f"RESTIC_REPOSITORY={repo_three}" in canonical_three
+    assert (repo_three / "config").is_file()
+    assert read_workspace_env() == canonical_three

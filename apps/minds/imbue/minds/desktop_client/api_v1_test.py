@@ -1864,6 +1864,31 @@ def test_backup_service_configure_rejects_configure_later_and_invalid_providers(
     assert invalid.status_code == 400
 
 
+def test_backup_service_disable_unknown_workspace_returns_404(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    resolver = make_resolver_with_data(make_agents_json(AgentId()))
+    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
+
+    response = client.post(f"/api/v1/workspaces/{AgentId()}/backup-service/disable", headers=_auth_header())
+
+    assert response.status_code == 404
+
+
+def test_backup_service_disable_conflicts_with_a_running_operation(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    agent_id = AgentId()
+    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.RESTART, datetime.now(timezone.utc))
+
+    response = client.post(f"/api/v1/workspaces/{agent_id}/backup-service/disable", headers=_auth_header())
+
+    assert response.status_code == 409
+
+
 def test_backup_operation_status_unknown_or_wrong_kind_returns_404(tmp_path: Path) -> None:
     agent_id = AgentId()
     client = _client_with_workspace(tmp_path, agent_id)

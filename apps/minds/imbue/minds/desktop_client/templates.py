@@ -417,6 +417,7 @@ def render_create_form(
     backup_provider: BackupProvider | None = None,
     backup_api_key_env: str = "",
     has_saved_backup_password: bool = False,
+    is_master_password_set: bool = False,
     accounts: Sequence[object] | None = None,
     default_account_id: str = "",
     anthropic_api_key: str = "",
@@ -451,8 +452,9 @@ def render_create_form(
     ``start_advanced`` opens the advanced view on first paint -- used when
     re-rendering a submit error, whose fields live there.
 
-    ``has_saved_backup_password`` adds the "leave blank to use your saved
-    password" helper under the (always-rendered) master-password input.
+    ``is_master_password_set`` renders the master-password input at all (a
+    still-empty master password never needs typing); ``has_saved_backup_password``
+    adds the "leave blank to use your saved password" helper under it.
 
     ``host_name`` is an optional explicit workspace name, exposed as a "Name"
     field in the advanced view. When empty the name is chosen automatically
@@ -504,6 +506,7 @@ def render_create_form(
         selected_backup_provider=effective_backup_provider.value,
         backup_api_key_env=backup_api_key_env,
         has_saved_backup_password=has_saved_backup_password,
+        is_master_password_set=is_master_password_set,
         accounts=accounts or [],
         default_account_id=default_account_id,
         anthropic_api_key=anthropic_api_key,
@@ -1580,6 +1583,7 @@ def render_workspace_settings(
     current_color: str = DEFAULT_WORKSPACE_COLOR,
     is_stale: bool = False,
     has_saved_backup_password: bool = False,
+    is_master_password_set: bool = False,
     has_account: bool = False,
 ) -> str:
     """Render the workspace settings page.
@@ -1611,6 +1615,7 @@ def render_workspace_settings(
         current_color=current_color,
         is_stale=is_stale,
         has_saved_backup_password=has_saved_backup_password,
+        is_master_password_set=is_master_password_set,
         has_account=has_account,
         palette=WORKSPACE_PALETTE,
     )

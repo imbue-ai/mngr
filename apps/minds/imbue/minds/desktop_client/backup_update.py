@@ -41,6 +41,7 @@ from imbue.minds.desktop_client.backup_env_store import has_canonical_env
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.backup_provisioning import change_backup_destination_for_host
 from imbue.minds.desktop_client.backup_provisioning import configure_backups_for_host
+from imbue.minds.desktop_client.backup_provisioning import disable_backups_for_host
 from imbue.minds.desktop_client.backup_provisioning import reinject_canonical_env
 from imbue.minds.desktop_client.backup_provisioning import run_mngr_exec_on_agent
 from imbue.minds.desktop_client.backup_verification import BackupServiceCheckState
@@ -308,6 +309,28 @@ def run_backup_configure_sequence(
             )
     except (BackupProvisioningError, ImbueCloudCliError) as exc:
         logger.warning("Backup configure for {} failed: {}", agent_id, exc)
+        registry.fail(agent_id, str(exc))
+        return
+    registry.complete(agent_id)
+
+
+def run_backup_disable_sequence(
+    *,
+    agent_id: AgentId,
+    paths: WorkspacePaths,
+    parent_cg: ConcurrencyGroup | None,
+    registry: WorkspaceOperationRegistryInterface,
+) -> None:
+    """Worker-thread entry point for the disable-backups operation.
+
+    Env-only (archives the canonical env and rotates the workspace copy
+    aside), so no chat gate applies. The caller has already registered the
+    operation; this ends it.
+    """
+    try:
+        disable_backups_for_host(agent_id=agent_id, paths=paths, parent_cg=parent_cg)
+    except BackupProvisioningError as exc:
+        logger.warning("Backup disable for {} failed: {}", agent_id, exc)
         registry.fail(agent_id, str(exc))
         return
     registry.complete(agent_id)

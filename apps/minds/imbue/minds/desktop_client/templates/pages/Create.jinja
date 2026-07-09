@@ -1,4 +1,4 @@
-{#def git_url, branch, host_name, launch_modes, selected_launch_mode, ai_providers, selected_ai_provider, backup_providers, selected_backup_provider, backup_api_key_env, has_saved_backup_password, accounts, default_account_id, anthropic_api_key, error_message, region_options_by_launch_mode, region_selected_by_launch_mode, selected_preset="remote", start_advanced=False, color="#0b292b" #}
+{#def git_url, branch, host_name, launch_modes, selected_launch_mode, ai_providers, selected_ai_provider, backup_providers, selected_backup_provider, backup_api_key_env, has_saved_backup_password, is_master_password_set, accounts, default_account_id, anthropic_api_key, error_message, region_options_by_launch_mode, region_selected_by_launch_mode, selected_preset="remote", start_advanced=False, color="#0b292b" #}
 {#
   Workspace creation form.
 
@@ -672,10 +672,14 @@
                     :value="backup_api_key_env if backup_api_key_env else _default_restic_env" />
         </div>
 
+        {% if is_master_password_set %}
+        {# Only rendered when a non-empty master password exists (it is needed
+           to initialize the repository); the JS shows it only while a real
+           backup provider is selected. #}
         <div id="backup-master-password-row" class="mt-2 hidden">
           <FormLabel target="backup_master_password">Backup master password</FormLabel>
           <TextInput type="password" name="backup_master_password" id="backup_master_password"
-                     placeholder="the shared backup master password (initially empty)" />
+                     placeholder="the shared backup master password" />
           {% if has_saved_backup_password %}
             <p class="mt-1 type-helper text-secondary">Leave blank to use your saved password.</p>
           {% endif %}
@@ -684,6 +688,7 @@
             Save this password so you don't have to retype it
           </label>
         </div>
+        {% endif %}
       </div>
 
       <div id="region-row" class="hidden">

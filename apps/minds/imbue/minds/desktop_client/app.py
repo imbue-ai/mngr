@@ -46,6 +46,7 @@ from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backup_password_rotation import rotate_backup_master_password
 from imbue.minds.desktop_client.backup_password_store import ensure_backup_password_hash
 from imbue.minds.desktop_client.backup_password_store import has_saved_backup_password
+from imbue.minds.desktop_client.backup_password_store import is_master_password_set
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
@@ -796,6 +797,7 @@ def _handle_landing_page() -> Response:
     accounts = session_store.list_accounts() if session_store else []
     default_account_id = minds_config.get_default_account_id() if minds_config else None
     is_backup_password_saved = has_saved_backup_password(agent_creator.paths) if agent_creator is not None else False
+    is_backup_password_set = is_master_password_set(agent_creator.paths) if agent_creator is not None else False
     region_options, region_selected = _build_region_form_context(minds_config, geo_cache)
     html = render_create_form(
         git_url=git_url,
@@ -803,6 +805,7 @@ def _handle_landing_page() -> Response:
         accounts=accounts,
         default_account_id=default_account_id or "",
         has_saved_backup_password=is_backup_password_saved,
+        is_master_password_set=is_backup_password_set,
         region_options_by_launch_mode=region_options,
         region_selected_by_launch_mode=region_selected,
         # A deep-link that pre-fills a repo/branch wants those advanced fields
@@ -883,6 +886,7 @@ def _handle_create_page() -> Response:
     accounts = session_store.list_accounts() if session_store else []
     default_account_id = minds_config.get_default_account_id() if minds_config else None
     is_backup_password_saved = has_saved_backup_password(agent_creator.paths) if agent_creator is not None else False
+    is_backup_password_set = is_master_password_set(agent_creator.paths) if agent_creator is not None else False
     region_options, region_selected = _build_region_form_context(minds_config, geo_cache)
     html = render_create_form(
         git_url=git_url,
@@ -890,6 +894,7 @@ def _handle_create_page() -> Response:
         accounts=accounts,
         default_account_id=default_account_id or "",
         has_saved_backup_password=is_backup_password_saved,
+        is_master_password_set=is_backup_password_set,
         region_options_by_launch_mode=region_options,
         region_selected_by_launch_mode=region_selected,
         # A deep-link that pre-fills a repo/branch wants those advanced fields
@@ -1888,6 +1893,7 @@ def _handle_workspace_settings(
     # an account is associated (imbue_cloud backups require one).
     paths = get_state().api_v1_paths
     is_backup_password_saved = has_saved_backup_password(paths) if paths is not None else False
+    is_backup_password_set = is_master_password_set(paths) if paths is not None else False
 
     html = render_workspace_settings(
         agent_id=agent_id,
@@ -1899,6 +1905,7 @@ def _handle_workspace_settings(
         current_color=current_color,
         is_stale=is_stale,
         has_saved_backup_password=is_backup_password_saved,
+        is_master_password_set=is_backup_password_set,
         has_account=current_account is not None,
     )
     return make_html_response(content=html)

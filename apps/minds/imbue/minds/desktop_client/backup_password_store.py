@@ -138,6 +138,15 @@ def verify_backup_password(paths: WorkspacePaths, candidate: SecretStr) -> bool:
     return True
 
 
+def is_master_password_set(paths: WorkspacePaths) -> bool:
+    """Return whether the master password is currently non-empty.
+
+    Drives which forms need a password input at all: while the hash is still
+    the empty-password seed, no flow ever needs the user to type anything.
+    """
+    return not verify_backup_password(paths, SecretStr(""))
+
+
 def resolve_backup_password_for_use(
     paths: WorkspacePaths, typed_password: SecretStr
 ) -> tuple[SecretStr | None, str | None]:

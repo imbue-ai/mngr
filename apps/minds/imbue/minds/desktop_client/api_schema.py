@@ -163,6 +163,9 @@ _ROUTE_MODELS: Final[Mapping[tuple[str, str], _RouteModels]] = {
     ("POST", "/api/v1/workspaces/{agent_id}/backup-service/configure"): _RouteModels(
         request_model=BackupServiceConfigureRequest, response_model=OperationHandleResponse, success_status=202
     ),
+    ("POST", "/api/v1/workspaces/{agent_id}/backup-service/disable"): _RouteModels(
+        response_model=OperationHandleResponse, success_status=202
+    ),
     ("POST", "/api/v1/workspaces/{agent_id}/backup-service/verification"): _RouteModels(
         request_model=BackupVerificationToggleRequest, response_model=EmptyResponse
     ),

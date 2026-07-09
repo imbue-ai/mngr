@@ -398,6 +398,37 @@ def reinject_canonical_env(
     _inject_canonical_env(agent_id, canonical_env, parent_cg=parent_cg)
 
 
+def disable_backups_for_host(
+    *,
+    agent_id: AgentId,
+    paths: WorkspacePaths,
+    parent_cg: ConcurrencyGroup | None = None,
+) -> None:
+    """Turn a workspace's backups off: archive the canonical env, rotate the workspace copy aside.
+
+    The canonical env moves to the minds-side archive (old snapshots stay
+    reachable through it) and the workspace's ``restic.env`` is rotated to
+    ``restic.env.<timestamp>`` -- a missing file means "not configured", so the
+    host-backup service goes idle and the rotated copy cannot be re-adopted.
+    Idempotent: disabling an already-disabled workspace is a no-op.
+    """
+    with log_span("Disabling backups for agent {}", agent_id):
+        archived_path = archive_canonical_env(paths, agent_id, now=datetime.now(timezone.utc))
+        if archived_path is not None:
+            logger.info("Archived canonical restic.env for {} to {}", agent_id, archived_path.name)
+        quoted_path = shlex.quote(_RESTIC_ENV_REMOTE_PATH)
+        rotated_path = shlex.quote(
+            f"{_RESTIC_ENV_REMOTE_PATH}.{datetime.now(timezone.utc).strftime(ENV_ARCHIVE_TIMESTAMP_FORMAT)}"
+        )
+        command_str = f"if [ -f {quoted_path} ]; then mv {quoted_path} {rotated_path}; fi"
+        result = run_mngr_exec_on_agent(agent_id, command_str, parent_cg=parent_cg)
+        if result.returncode != 0:
+            raise BackupProvisioningError(
+                f"Failed to rotate {_RESTIC_ENV_REMOTE_PATH} aside on agent {agent_id}: "
+                f"{result.stderr.strip() or result.stdout.strip()}"
+            )
+
+
 def change_backup_destination_for_host(
     *,
     agent_id: AgentId,
