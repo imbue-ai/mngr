@@ -158,7 +158,7 @@ class ImbueCloudCli(MutableModel):
         default_factory=get_default_mngr_caller,
         description=(
             "Runs each `mngr imbue_cloud …` invocation in a pre-warmed process. Defaults to the "
-            "process-wide shared caller (prewarmed at startup) so imbue_cloud calls reuse the same "
+            "process-wide shared caller (initialized at startup) so imbue_cloud calls reuse the same "
             "warm-process machinery as the rest of the app."
         ),
     )

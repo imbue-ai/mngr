@@ -49,6 +49,7 @@ from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.testing import stub_mngr_host_dir
+from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
@@ -69,6 +70,10 @@ def _client_with_workspace(tmp_path: Path, agent_id: AgentId) -> FlaskClient:
         http_client=None,
         paths=WorkspacePaths(data_dir=tmp_path / "minds"),
         minds_api_key=_TEST_KEY,
+        # A recording caller so routes that shell out (e.g. the version route's
+        # in-workspace git read) are fast in-memory no-ops, never spawning a
+        # real ``mngr`` process.
+        mngr_caller=RecordingMngrCaller(),
     )
     return app.test_client()
 
@@ -327,8 +332,9 @@ def test_malformed_workspace_id_returns_400_not_500(tmp_path: Path) -> None:
 
 
 def test_workspace_version_returns_original_version_label(tmp_path: Path) -> None:
-    # The static resolver has no labels, so original is null and the git-derived
-    # fields default to null/[] (no concurrency group is wired in this test).
+    # The static resolver has no labels, so original is null; the git-derived
+    # fields default to null/[] because the recording caller returns empty
+    # stdout, which parses to no current version and no upgrade merges.
     agent_id = AgentId()
     client = _client_with_workspace(tmp_path, agent_id)
 
@@ -830,6 +836,7 @@ def _build_client(
         imbue_cloud_cli=imbue_cloud_cli,
         session_store=session_store,
         system_interface_health_tracker=system_interface_health_tracker,
+        mngr_caller=RecordingMngrCaller(),
     )
     return app.test_client()
 

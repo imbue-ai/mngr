@@ -5,8 +5,10 @@ from pathlib import Path
 import click
 import pytest
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.mngr_caller import MngrCaller
+from imbue.minds.utils.mngr_caller import MngrCallerNotInitializedError
 from imbue.minds.utils.mngr_caller import _coerce_exit_code
 from imbue.minds.utils.mngr_caller import _execute_mngr_cli
 from imbue.mngr.utils.polling import wait_for
@@ -28,18 +30,28 @@ def _make_cwd_capturing_command(captured: list[str]) -> click.Command:
 
 @pytest.fixture()
 def mngr_caller() -> Iterator[MngrCaller]:
-    """A standalone caller whose warm processes are torn down after the test.
+    """An initialized caller whose warm processes are torn down after the test.
 
-    A real :meth:`MngrCaller.call` leaves an idle warm process waiting on a
-    socket for the next call. ``stop`` terminates it (and tears down the owned
-    concurrency group + socket directory) so the per-session leak checker does
-    not flag the lingering subprocess.
+    :meth:`MngrCaller.initialize` adopts an externally-owned concurrency group
+    (required before any call). A real :meth:`MngrCaller.call` leaves an idle
+    warm process waiting on a socket for the next call; ``stop`` terminates it
+    and the concurrency group's own teardown reaps anything still tracked, so
+    the per-session leak checker does not flag a lingering subprocess.
     """
     caller = MngrCaller()
-    try:
-        yield caller
-    finally:
-        caller.stop()
+    with ConcurrencyGroup(name="test-mngr-caller") as concurrency_group:
+        caller.initialize(concurrency_group)
+        try:
+            yield caller
+        finally:
+            caller.stop()
+
+
+def test_call_before_initialize_raises() -> None:
+    """A call on an uninitialized caller is refused rather than spawning a process."""
+    caller = MngrCaller()
+    with pytest.raises(MngrCallerNotInitializedError):
+        caller.call(["--version"], timeout=1.0)
 
 
 def test_coerce_exit_code_none_is_success() -> None:
