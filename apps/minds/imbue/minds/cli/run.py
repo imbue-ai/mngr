@@ -375,7 +375,7 @@ def run(
         mngr_message_sender=mngr_message_sender,
     )
     imbue_cloud_cli = ImbueCloudCli(
-        parent_concurrency_group=root_concurrency_group,
+        mngr_caller=mngr_caller,
         connector_url=client_env_config.connector_url,
     )
     session_store = MultiAccountSessionStore(data_dir=data_directory, cli=imbue_cloud_cli)

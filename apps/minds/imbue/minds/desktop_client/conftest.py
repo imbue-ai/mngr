@@ -75,7 +75,6 @@ class FakeImbueCloudCli(ImbueCloudCli):
 def make_fake_imbue_cloud_cli() -> FakeImbueCloudCli:
     """Build a :class:`FakeImbueCloudCli` rooted at a fresh ``ConcurrencyGroup``."""
     return FakeImbueCloudCli(
-        parent_concurrency_group=ConcurrencyGroup(name="fake-imbue-cloud-cli"),
         connector_url=FAKE_CONNECTOR_URL,
     )
 

@@ -1,11 +1,29 @@
+import os
 from collections.abc import Iterator
+from pathlib import Path
 
+import click
 import pytest
 
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.mngr_caller import _coerce_exit_code
+from imbue.minds.utils.mngr_caller import _execute_mngr_cli
 from imbue.mngr.utils.polling import wait_for
+
+
+def _make_cwd_capturing_command(captured: list[str]) -> click.Command:
+    """Build a tiny stand-in CLI that records the process working directory.
+
+    The directory is captured into ``captured`` (rather than printed) so the test
+    can assert on the cwd the CLI actually ran in.
+    """
+
+    @click.command()
+    def _command() -> None:
+        captured.append(os.getcwd())
+
+    return _command
 
 
 @pytest.fixture()
@@ -43,6 +61,32 @@ def test_call_result_defaults() -> None:
     assert result.stdout == ""
     assert result.stderr == ""
     assert result.is_timed_out is False
+
+
+def test_execute_mngr_cli_changes_to_requested_cwd(tmp_path: Path) -> None:
+    """A non-None ``cwd`` makes the CLI run from that directory.
+
+    ``_execute_mngr_cli`` runs in the throwaway warm process, so ``os.chdir`` is
+    safe there; the test restores its own cwd afterwards.
+    """
+    captured_cwd: list[str] = []
+    original_cwd = Path.cwd()
+    try:
+        returncode, _stdout, _stderr = _execute_mngr_cli(_make_cwd_capturing_command(captured_cwd), (), {}, tmp_path)
+    finally:
+        os.chdir(original_cwd)
+    assert returncode == 0
+    assert Path(captured_cwd[0]).resolve() == tmp_path.resolve()
+
+
+def test_execute_mngr_cli_keeps_cwd_when_none() -> None:
+    """A ``None`` ``cwd`` leaves the working directory untouched."""
+    captured_cwd: list[str] = []
+    original_cwd = Path.cwd()
+    returncode, _stdout, _stderr = _execute_mngr_cli(_make_cwd_capturing_command(captured_cwd), (), {}, None)
+    assert returncode == 0
+    assert Path(captured_cwd[0]).resolve() == original_cwd.resolve()
+    assert Path.cwd() == original_cwd
 
 
 # These tests spawn a real warm ``mngr`` process (a fresh interpreter that

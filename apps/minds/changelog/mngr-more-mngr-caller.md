@@ -1,0 +1,3 @@
+Cloudflare sharing (and every other `mngr imbue_cloud …` call) is now routed through the shared pre-warmed `MngrCaller` instead of spawning a fresh `mngr` subprocess each time. A single sharing action fires several sequential `mngr imbue_cloud tunnels …` invocations, each of which previously re-paid the multi-second Python interpreter + plugin-import startup cost; reusing the warm-process machinery removes that per-call fixed cost.
+
+`MngrCaller.call` gained an optional `cwd` argument so callers whose config resolution must not depend on the minds backend's working directory (like `imbue_cloud`, which runs from `$HOME`) can pin it. The warm process `chdir`s into it before running the CLI, safely, since it is a throwaway process.

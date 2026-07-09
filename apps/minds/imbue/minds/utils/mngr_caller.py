@@ -46,6 +46,7 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from multiprocessing.connection import Connection
 from multiprocessing.connection import Pipe
+from pathlib import Path
 from subprocess import TimeoutExpired
 from typing import Final
 
@@ -97,17 +98,23 @@ def _execute_mngr_cli(
     cli: click.Command,
     argv: tuple[str, ...],
     env_overrides: Mapping[str, str],
+    cwd: Path | None,
 ) -> tuple[int, str, str]:
     """Run ``mngr <argv>`` in this (throwaway) warm process and capture its output.
 
-    All of mngr's global-state mutation (loguru, ``sys.argv``, stdout/stderr) is
-    confined to this process, which exits right after, so it never affects the
-    minds backend.
+    All of mngr's global-state mutation (loguru, ``sys.argv``, stdout/stderr,
+    ``os.chdir``) is confined to this process, which exits right after, so it
+    never affects the minds backend.
     """
     stdout_buffer = io.StringIO()
     stderr_buffer = io.StringIO()
     returncode = 0
     os.environ.update(env_overrides)
+    # Change directory in the throwaway process only; callers that must not
+    # resolve project config from the minds backend's cwd (e.g. the monorepo
+    # root in a dev checkout) pass their own cwd, typically ``$HOME``.
+    if cwd is not None:
+        os.chdir(cwd)
     sys.argv = ["mngr", *argv]
     with contextlib.redirect_stdout(stdout_buffer), contextlib.redirect_stderr(stderr_buffer):
         try:
@@ -151,14 +158,14 @@ def _run_warm_mngr_server(connection_fd: int) -> None:
     connection = Connection(connection_fd)
     try:
         try:
-            argv, env_overrides = connection.recv()
+            argv, env_overrides, cwd = connection.recv()
         except EOFError:
             # The parent (minds backend) went away before sending a request --
             # e.g. it was killed without a chance to terminate us. Exit cleanly
             # rather than hanging on the socket or crashing with a traceback, so
             # no orphaned warm process is left behind.
             return
-        returncode, stdout, stderr = _execute_mngr_cli(cli, argv, env_overrides)
+        returncode, stdout, stderr = _execute_mngr_cli(cli, argv, env_overrides, cwd)
         connection.send((returncode, stdout, stderr))
     finally:
         connection.close()
@@ -311,19 +318,23 @@ class MngrCaller(MutableModel):
         argv: Sequence[str],
         timeout: float | None = None,
         env_overrides: Mapping[str, str] | None = None,
+        cwd: Path | None = None,
     ) -> MngrCallResult:
         """Run ``mngr <argv>`` in a pre-warmed process and return its result.
 
         ``argv`` is the argument vector *after* the ``mngr`` program name (e.g.
         ``["message", "-m", "hi", "--", "agent"]``). ``env_overrides`` are applied
-        to the warm process's ``os.environ`` before the CLI runs. On timeout the
-        warm process is terminated and a result with ``is_timed_out=True`` and a
-        non-zero ``returncode`` is returned.
+        to the warm process's ``os.environ`` before the CLI runs. ``cwd``, when
+        given, is the directory the warm process ``chdir``s into before running
+        the CLI (used by callers whose config resolution must not depend on the
+        minds backend's cwd). On timeout the warm process is terminated and a
+        result with ``is_timed_out=True`` and a non-zero ``returncode`` is
+        returned.
         """
         resolved_timeout = self.default_timeout_seconds if timeout is None else timeout
         warm_process = self._claim_warm_process()
         connection = warm_process.connection
-        request = (tuple(argv), dict(env_overrides or {}))
+        request = (tuple(argv), dict(env_overrides or {}), cwd)
         # Always reap the claimed warm process (normally it exits on its own after
         # responding; on an exec failure or a hang it must be terminated). On a
         # cold call the warm process may still be importing ``mngr`` -- the request

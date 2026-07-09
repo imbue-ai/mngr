@@ -1252,7 +1252,6 @@ def _sharing_client(
 
 def _fake_sharing_cli(tunnel: TunnelInfo | None = None, **kwargs: Any) -> FakeSharingCli:
     return FakeSharingCli(
-        parent_concurrency_group=ConcurrencyGroup(name="fake-sharing-cli"),
         connector_url=FAKE_CONNECTOR_URL,
         tunnel=tunnel,
         **kwargs,
