@@ -21,6 +21,8 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.primitives import ServiceName
+from imbue.minds.utils.mngr_caller import MngrCaller
+from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.primitives import AgentId
@@ -42,8 +44,14 @@ class FakeImbueCloudCli(ImbueCloudCli):
     subprocess-driven methods on the real CLI keep their default
     implementations and will spawn ``mngr imbue_cloud …`` if a test
     invokes them, so prefer narrower stubs when those paths matter.
+
+    The ``mngr_caller`` defaults to a :class:`RecordingMngrCaller` (rather than
+    the process-wide warm-process caller) so any code that reaches through
+    ``cli.mngr_caller`` -- e.g. the tunnel-token injection in the sharing flow --
+    is a fast in-memory no-op instead of spawning a real ``mngr`` process.
     """
 
+    mngr_caller: MngrCaller = Field(default_factory=RecordingMngrCaller)
     accounts_to_return: list[ImbueCloudAuthAccount] = Field(default_factory=list)
 
     def auth_list(self) -> list[ImbueCloudAuthAccount]:

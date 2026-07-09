@@ -1287,16 +1287,14 @@ def test_sharing_status_disabled_when_no_tunnel(tmp_path: Path) -> None:
     assert json.loads(response.data)["enabled"] is False
 
 
-def test_sharing_enable_returns_json(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_sharing_enable_returns_json(tmp_path: Path) -> None:
     agent_id = AgentId()
     cli = _fake_sharing_cli(
         tunnel=TunnelInfo(tunnel_name="tn", tunnel_id="ti", token=SecretStr("token"), services=("web",))
     )
-    # The tunnel-token injection shells out to `mngr exec` (resolved via PATH);
-    # a fake mngr on PATH keeps that a fast no-op.
-    fake_mngr_dir = tmp_path / "bin"
-    _write_fake_mngr(fake_mngr_dir)
-    monkeypatch.setenv("PATH", f"{fake_mngr_dir}{os.pathsep}{os.environ['PATH']}")
+    # The tunnel-token injection runs `mngr exec` through ``cli.mngr_caller``,
+    # which the fake CLI defaults to an in-memory RecordingMngrCaller -- a fast
+    # no-op, so no real ``mngr`` process is spawned.
     client = _sharing_client(
         tmp_path,
         agent_id,

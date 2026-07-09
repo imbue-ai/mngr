@@ -299,14 +299,11 @@ def _handle_workspace_version(agent_id: str) -> WorkspaceVersionResponse | Respo
         return _json_error(f"Unknown workspace {agent_id}", 404)
 
     original = backend_resolver.get_agent_label(parsed_id, "original_minds_version")
-    parent_cg = get_state().root_concurrency_group
+    # Gate the (best-effort) in-workspace git read on the backend being fully
+    # wired; the read itself runs through the shared warm-process MngrCaller.
     git_version = workspace_version.WorkspaceGitVersion()
-    if parent_cg is not None:
-        git_version = workspace_version.read_workspace_git_version(
-            mngr_binary=get_state().mngr_binary,
-            agent_id=parsed_id,
-            parent_cg=parent_cg,
-        )
+    if get_state().root_concurrency_group is not None:
+        git_version = workspace_version.read_workspace_git_version(agent_id=parsed_id)
     return WorkspaceVersionResponse(
         agent_id=str(parsed_id),
         original_minds_version=original,

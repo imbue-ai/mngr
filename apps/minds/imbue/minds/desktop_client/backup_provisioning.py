@@ -38,10 +38,8 @@ from pydantic import Field
 from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
-from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client import restic_cli
 from imbue.minds.desktop_client.backup_env_store import parse_restic_env
@@ -52,6 +50,8 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import R2BucketKeyMaterial
 from imbue.minds.errors import BackupProvisioningError
 from imbue.minds.primitives import BackupProvider
+from imbue.minds.utils.mngr_caller import MngrCallResult
+from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.mngr.primitives import AgentId
 
 _RESTIC_ENV_REMOTE_PATH = "runtime/secrets/restic.env"
@@ -140,21 +140,16 @@ def build_canonical_env_content(
 # ---------------------------------------------------------------------------
 
 
-def _run_mngr_exec(
-    agent_id: AgentId,
-    command_str: str,
-    *,
-    parent_cg: ConcurrencyGroup | None,
-) -> FinishedProcess:
-    """Run a single shell command on the agent's host via ``mngr exec``."""
-    name = "backup-inject"
-    cg = parent_cg.make_concurrency_group(name=name) if parent_cg is not None else ConcurrencyGroup(name=name)
-    with cg:
-        return cg.run_process_to_completion(
-            command=[MNGR_BINARY, "exec", str(agent_id), command_str],
-            timeout=_MNGR_EXEC_TIMEOUT_SECONDS,
-            is_checked_after=False,
-        )
+def _run_mngr_exec(agent_id: AgentId, command_str: str) -> MngrCallResult:
+    """Run a single shell command on the agent's host via ``mngr exec``.
+
+    Uses the shared warm-process :class:`~imbue.minds.utils.mngr_caller.MngrCaller`
+    so this doesn't re-pay the mngr interpreter + plugin-import startup cost.
+    """
+    return get_default_mngr_caller().call(
+        ["exec", str(agent_id), command_str],
+        timeout=_MNGR_EXEC_TIMEOUT_SECONDS,
+    )
 
 
 def _write_remote_file(
@@ -163,7 +158,6 @@ def _write_remote_file(
     content: str,
     *,
     mode: str | None,
-    parent_cg: ConcurrencyGroup | None,
 ) -> None:
     """Write ``content`` to ``remote_path`` (relative to the agent work_dir) via mngr exec.
 
@@ -178,16 +172,16 @@ def _write_remote_file(
         f"mkdir -p {shlex.quote(parent_dir)} && "
         f"printf %s '{encoded}' | base64 -d > {shlex.quote(remote_path)}{chmod_suffix}"
     )
-    result = _run_mngr_exec(agent_id, command_str, parent_cg=parent_cg)
+    result = _run_mngr_exec(agent_id, command_str)
     if result.returncode != 0:
         raise BackupProvisioningError(
             f"Failed to write {remote_path} on agent {agent_id}: {result.stderr.strip() or result.stdout.strip()}"
         )
 
 
-def _inject_canonical_env(agent_id: AgentId, content: str, *, parent_cg: ConcurrencyGroup | None) -> None:
+def _inject_canonical_env(agent_id: AgentId, content: str) -> None:
     """Inject the canonical restic.env into the workspace's runtime/secrets/restic.env."""
-    _write_remote_file(agent_id, _RESTIC_ENV_REMOTE_PATH, content, mode=_RESTIC_ENV_MODE, parent_cg=parent_cg)
+    _write_remote_file(agent_id, _RESTIC_ENV_REMOTE_PATH, content, mode=_RESTIC_ENV_MODE)
 
 
 # ---------------------------------------------------------------------------
@@ -309,7 +303,7 @@ def configure_backups_for_host(
         existing_canonical = read_canonical_env(paths, agent_id)
         if existing_canonical is not None:
             logger.debug("Reusing existing canonical restic.env for agent {}; re-injecting", agent_id)
-            _inject_canonical_env(agent_id, existing_canonical, parent_cg=parent_cg)
+            _inject_canonical_env(agent_id, existing_canonical)
             return
 
         repository, backend_env = _resolve_repository_and_backend_env(
@@ -338,5 +332,5 @@ def configure_backups_for_host(
         # Persist the definitive copy first (so a later injection failure still
         # leaves minds able to reach the repo / show status), then inject.
         write_canonical_env(paths, agent_id, canonical_env)
-        _inject_canonical_env(agent_id, canonical_env, parent_cg=parent_cg)
+        _inject_canonical_env(agent_id, canonical_env)
         logger.debug("Injected restic backup config into agent {}", agent_id)
