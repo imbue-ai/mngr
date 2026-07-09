@@ -1,3 +1,0 @@
-`RunningProcess` (and the `run_process_to_completion` / `run_process_in_background` / `run_background` spawn APIs) now accept an optional `name`: a log-safe label used as the reader thread's name and as the display command in any `ProcessError` / `TimeoutExpired` it raises. Callers whose command carries secret argument values (e.g. `--host-env PASSWORD=...`) can pass a masked/friendly `name` so those secrets never reach the JSONL log's `thread_name` field or an error message; the real command is still what executes. Defaults to the joined command, preserving prior behavior.
-
-`ProcessError` gains a `display_name` (and a `display_command` property) used for its rendered message while `.command` keeps the real argv; `FinishedProcess` gains a matching `display_name`.

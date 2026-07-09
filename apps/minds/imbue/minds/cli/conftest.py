@@ -34,3 +34,15 @@ def isolate_mind_tests(
 
     with isolate_git(monkeypatch), isolate_tmux_server(monkeypatch):
         yield
+
+
+@pytest.fixture
+def _isolated_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Strip minds-env activation env vars by default; tests opt in to a specific env.
+
+    Used by the ``minds pool`` / ``minds server`` wrapper tests to assert that the
+    commands refuse to run without an activated env.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("MINDS_ROOT_NAME", raising=False)
+    return tmp_path
