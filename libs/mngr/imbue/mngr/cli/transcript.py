@@ -153,12 +153,11 @@ def _format_event_human(event: dict[str, Any]) -> str:
             return f"[{timestamp}] user:\n{content}"
 
         case "assistant_message":
-            # parts[] is the authoritative ordered view when present; the flat text +
-            # tool_calls are a baseline some emitters (e.g. claude's common_transcript)
-            # fill instead of parts[]. Render parts[] if it has content, else fall back
-            # to the flat fields -- otherwise a message with real text shows as empty.
+            # Every emitter fills the ordered parts[]; render it directly (the flat
+            # text + tool_calls are kept on the record as a convenience baseline, but
+            # parts[] is the authoritative ordered view).
             lines: list[str] = []
-            for part in event.get("parts") or []:
+            for part in event.get("parts", []):
                 if not isinstance(part, dict):
                     continue
                 if part.get("type") == "text":
@@ -173,6 +172,10 @@ def _format_event_human(event: dict[str, Any]) -> str:
                     # Unknown part type (e.g. a future reasoning part): nothing to render here.
                     continue
             if not lines:
+                # FIXME: MIND-113, later remove this fallback logic. Flat text/tool_calls
+                # for agents on an emitter predating parts[] (before 2026-06-15) so their
+                # turns aren't blank; new agents all fill parts[], so this serves only
+                # existing old-emitter agents. Remove once they age out.
                 text = event.get("text", "")
                 if text:
                     lines.append(text)

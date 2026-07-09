@@ -294,7 +294,10 @@ def test_render_create_form_prefills_values() -> None:
 def test_render_create_form_contains_all_launch_modes() -> None:
     html = render_create_form()
     for mode in LaunchMode:
-        assert mode.value.lower() in html
+        # Assert on the option's ``value=`` attribute (the exact enum value),
+        # not the visible text: Modal renders a friendly label instead of the
+        # lowercased value (it shows "Modal (1-day ephemeral)").
+        assert f'value="{mode.value}"' in html
 
 
 def test_render_create_form_selects_imbue_cloud_compute_by_default() -> None:

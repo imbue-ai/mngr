@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-07
+
+VPS streaming discovery now reports each running host's SSH endpoint (via the shared `collect_cached_host_ssh_infos` helper) so the discovery poller re-emits it as a `HOST_SSH_INFO` event. Previously only a full `mngr list` surfaced SSH info, so a consumer that tunnels to VPS hosts through the streaming discovery path (e.g. the minds system_interface forward) could be left unable to reach them.
+
 ## 2026-07-06
 
 Updated the per-host-bounded discovery override to accept the new cross-poll read registry parameter (unused by this batch provider, which reads all hosts in one bounded pass). No behavioral change for this provider.
