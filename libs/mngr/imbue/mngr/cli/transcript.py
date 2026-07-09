@@ -153,12 +153,14 @@ def _format_event_human(event: dict[str, Any]) -> str:
             return f"[{timestamp}] user:\n{content}"
 
         case "assistant_message":
-            # Render the ordered parts[]; the current emitter always fills it (since the
-            # 2026-06-15 OTel alignment) alongside the flat text/tool_calls baseline.
             # `event.get("parts") or []`, not `.get("parts", [])`: a record may carry
             # parts=None (explicit null), which the two-arg get returns as-is and would
-            # crash `for part in None`. `or []` coerces absent/None/empty alike to an empty
-            # iterable, so a parts-less record leaves `lines` empty and the fallback runs.
+            # crash `for part in None`. `or []` coerces absent/None/empty to an empty
+            # iterable (crash-safety -- keep this even after the fallback below is removed).
+            #
+            # FIXME: MIND-113, remove this explanation. The current emitter always fills
+            # parts[] (since the 2026-06-15 OTel alignment); only agents on an older emitter
+            # version leave it empty, which is what the flat-field fallback below serves.
             lines: list[str] = []
             for part in event.get("parts") or []:
                 if not isinstance(part, dict):
@@ -175,10 +177,10 @@ def _format_event_human(event: dict[str, Any]) -> str:
                     # Unknown part type (e.g. a future reasoning part): nothing to render here.
                     continue
             if not lines:
-                # Fallback for agents on an emitter predating parts[] (before 2026-06-15):
-                # show the flat text/tool_calls so their turns aren't blank. New agents all
-                # fill parts[], so this serves only existing old-emitter agents; remove once
-                # they age out (~1 month). See MIND-113.
+                # FIXME: MIND-113, later remove this fallback logic. Flat text/tool_calls
+                # for agents on an emitter predating parts[] (before 2026-06-15) so their
+                # turns aren't blank; new agents all fill parts[], so this serves only
+                # existing old-emitter agents. Remove once they age out (~1 month).
                 text = event.get("text", "")
                 if text:
                     lines.append(text)
