@@ -73,6 +73,15 @@ ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE: Final[str] = "LATCHKEY_GATEWAY_PERMIS
 # always set it so each agent does not get counted as a separate user.
 ENV_LATCHKEY_DISABLE_COUNTING: Final[str] = "LATCHKEY_DISABLE_COUNTING"
 
+# The subset of the latchkey wiring env vars whose values are secrets: the
+# gateway listen password and the permissions-override JWT. Callers that render
+# a command carrying these as ``--host-env NAME=VALUE`` flags (e.g. minds'
+# ``mngr create`` invocation) must mask their values before logging. The gateway
+# URLs and the disable-counting flag are not secret and are deliberately absent.
+SECRET_LATCHKEY_ENV_VAR_NAMES: Final[frozenset[str]] = frozenset(
+    {ENV_LATCHKEY_GATEWAY_PASSWORD, ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE}
+)
+
 # Detent schema names and host string for the gateway-self baseline that
 # every agent inherits. Defined inline (in the agent's permissions file)
 # rather than relying on detent's built-in catalog so the names are

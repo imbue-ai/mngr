@@ -22,6 +22,7 @@ from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY_PASSWORD
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY_SECONDARY
+from imbue.mngr_latchkey.agent_setup import SECRET_LATCHKEY_ENV_VAR_NAMES
 from imbue.mngr_latchkey.agent_setup import _build_allowed_agent_anyof_entry
 from imbue.mngr_latchkey.agent_setup import _extract_agent_id_from_anyof_entry
 from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
@@ -41,6 +42,21 @@ from imbue.mngr_latchkey.testing import make_full_fake_latchkey
 
 def _full_fake(tmp_path: Path) -> FakeLatchkey:
     return make_full_fake_latchkey(tmp_path)
+
+
+def test_secret_latchkey_env_var_names_are_exactly_password_and_jwt() -> None:
+    """The secret-name set names the two credential-bearing wiring vars and nothing else.
+
+    Callers that render a command carrying the latchkey wiring as ``--host-env
+    NAME=VALUE`` flags mask exactly these values before logging; the gateway URLs
+    and the disable-counting flag are not secret and must stay out of the set.
+    """
+    assert SECRET_LATCHKEY_ENV_VAR_NAMES == frozenset(
+        {ENV_LATCHKEY_GATEWAY_PASSWORD, ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE}
+    )
+    assert ENV_LATCHKEY_GATEWAY not in SECRET_LATCHKEY_ENV_VAR_NAMES
+    assert ENV_LATCHKEY_GATEWAY_SECONDARY not in SECRET_LATCHKEY_ENV_VAR_NAMES
+    assert ENV_LATCHKEY_DISABLE_COUNTING not in SECRET_LATCHKEY_ENV_VAR_NAMES
 
 
 # -- prepare_agent_latchkey ---------------------------------------------------
