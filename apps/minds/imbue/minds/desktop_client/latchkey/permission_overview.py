@@ -466,6 +466,46 @@ def _resolve_target_workspace_name(backend_resolver: BackendResolverInterface, t
     return info.agent_name if info is not None else target_workspace_id
 
 
+def _build_workspace_op_group(
+    target: str | None,
+    per_agent: dict[str, set[str]],
+    host_by_agent: dict[str, _WorkspaceHost],
+    backend_resolver: BackendResolverInterface,
+) -> WorkspaceOpTargetGroup:
+    """Assemble one target group's cards from its granting-agent -> verbs mapping.
+
+    ``target`` is ``None`` for the shared (all-workspaces) group; otherwise the
+    target workspace agent id. Cards are sorted by granting-workspace name.
+    """
+    cards = [
+        WorkspaceOpGrantCard(
+            workspace_agent_id=host_by_agent[agent_id].agent_id,
+            workspace_name=host_by_agent[agent_id].workspace_name,
+            host_id=str(host_by_agent[agent_id].host_id),
+            color=host_by_agent[agent_id].color,
+            permissions=_workspace_verb_chips(verb_permissions),
+        )
+        for agent_id, verb_permissions in per_agent.items()
+    ]
+    cards.sort(key=lambda card: card.workspace_name.lower())
+    return WorkspaceOpTargetGroup(
+        target_workspace_id="" if target is None else target,
+        target_name="all workspaces" if target is None else _resolve_target_workspace_name(backend_resolver, target),
+        is_shared=target is None,
+        cards=tuple(cards),
+    )
+
+
+def _workspace_permission_targets(permission_name: str, target_workspace_id: str | None) -> bool:
+    """Whether ``permission_name`` is a workspace verb scoped to ``target_workspace_id``.
+
+    ``target_workspace_id`` is ``None`` for the shared (all-workspaces) grants.
+    Non-workspace permissions never match.
+    """
+    parsed = _parse_workspace_permission(permission_name)
+    return parsed is not None and parsed[1] == target_workspace_id
+
+
 def build_workspace_overview(
     backend_resolver: BackendResolverInterface,
     gateway_client: LatchkeyGatewayClient,
@@ -499,32 +539,13 @@ def build_workspace_overview(
             verb_permission, target = parsed
             verbs_by_target.setdefault(target, {}).setdefault(host.agent_id, set()).add(verb_permission)
 
-    def _build_group(target: str | None, per_agent: dict[str, set[str]]) -> WorkspaceOpTargetGroup:
-        cards = [
-            WorkspaceOpGrantCard(
-                workspace_agent_id=host_by_agent[agent_id].agent_id,
-                workspace_name=host_by_agent[agent_id].workspace_name,
-                host_id=str(host_by_agent[agent_id].host_id),
-                color=host_by_agent[agent_id].color,
-                permissions=_workspace_verb_chips(verb_permissions),
-            )
-            for agent_id, verb_permissions in per_agent.items()
-        ]
-        cards.sort(key=lambda card: card.workspace_name.lower())
-        return WorkspaceOpTargetGroup(
-            target_workspace_id="" if target is None else target,
-            target_name="all workspaces"
-            if target is None
-            else _resolve_target_workspace_name(backend_resolver, target),
-            is_shared=target is None,
-            cards=tuple(cards),
-        )
-
     groups: list[WorkspaceOpTargetGroup] = []
     if None in verbs_by_target:
-        groups.append(_build_group(None, verbs_by_target[None]))
+        groups.append(_build_workspace_op_group(None, verbs_by_target[None], host_by_agent, backend_resolver))
     target_groups = [
-        _build_group(target, per_agent) for target, per_agent in verbs_by_target.items() if target is not None
+        _build_workspace_op_group(target, per_agent, host_by_agent, backend_resolver)
+        for target, per_agent in verbs_by_target.items()
+        if target is not None
     ]
     target_groups.sort(key=lambda group: group.target_name.lower())
     groups.extend(target_groups)
@@ -543,12 +564,7 @@ def _revoke_workspace_ops_at_path(
     stripped from the ``latchkey-self`` rule; unrelated permissions are preserved.
     """
     permissions = gateway_client.get_permission_rules(permissions_file_path).get(_SELF_SCOPE, ())
-
-    def _matches(permission_name: str) -> bool:
-        parsed = _parse_workspace_permission(permission_name)
-        return parsed is not None and parsed[1] == target_workspace_id
-
-    kept = tuple(name for name in permissions if not _matches(name))
+    kept = tuple(name for name in permissions if not _workspace_permission_targets(name, target_workspace_id))
     if len(kept) == len(permissions):
         return
     gateway_client.set_permission_rule(permissions_file_path, _SELF_SCOPE, kept)

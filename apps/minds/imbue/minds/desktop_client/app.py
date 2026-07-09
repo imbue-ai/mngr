@@ -3,6 +3,7 @@ import os
 import queue
 import threading
 import time
+from collections.abc import Callable
 from collections.abc import Collection
 from collections.abc import Iterator
 from collections.abc import Mapping
@@ -1809,129 +1810,136 @@ def _handle_settings_page() -> Response:
     return make_html_response(content=html)
 
 
-def _handle_revoke_service_for_workspace() -> Response:
-    """Revoke a predefined service's grants for one workspace (POST /settings/permissions/revoke).
+# The revoke routes below (predefined services, file sharing, workspace
+# delegation; per-workspace and across-all-workspaces) share the same plumbing.
+# ``_revoke_prelude`` does auth + body parsing + locating the
+# predefined-permission handler (which owns the shared gateway client +
+# latchkey); ``_apply_revoke`` runs the route-specific revoke and maps its two
+# failure modes to status codes. Each route is then a short, linear body that
+# extracts its fields between the two.
 
-    Body: ``{"workspace_agent_id": "...", "service_name": "..."}``. Removes every
-    rule the service owns from that workspace's host permissions file (credentials
-    untouched). Returns 200 on success, 400 for a bad request/unknown service,
-    503 when the handler or gateway is unavailable.
+
+def _revoke_prelude() -> Response | tuple[Mapping[str, Any], LatchkeyPermissionGrantHandler]:
+    """Auth + JSON-body + handler lookup shared by the revoke routes.
+
+    Returns an error :class:`Response` (403 unauthenticated, 400 invalid body,
+    503 when the predefined-permission handler is unavailable), or ``(body,
+    handler)`` on success.
     """
     if not _is_request_authenticated():
         return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
     body = request.get_json(silent=True, force=True)
     if not isinstance(body, dict):
         return make_response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
-    workspace_agent_id = str(body.get("workspace_agent_id", ""))
-    service_name = str(body.get("service_name", ""))
-    if not workspace_agent_id or not service_name:
-        return _json_error("workspace_agent_id and service_name are required", status_code=400)
     handler = _find_predefined_permission_handler()
     if handler is None:
         return _json_error("Permission management is unavailable", status_code=503)
+    return body, handler
+
+
+def _apply_revoke(revoke: Callable[..., object], **kwargs: Any) -> Response:
+    """Run a revoke call and map its outcome to an HTTP response (its return value is ignored).
+
+    :class:`PermissionOverviewError` (bad request / unresolvable target) -> 400;
+    :class:`LatchkeyGatewayClientError` (gateway unreachable) -> 502; success ->
+    ``200 {"status": "ok"}``.
+    """
     try:
-        revoke_service_for_workspace(
-            backend_resolver=get_state().backend_resolver,
-            gateway_client=handler.gateway_client,
-            services_catalog=handler.services_catalog,
-            latchkey=handler.latchkey,
-            workspace_agent_id=workspace_agent_id,
-            service_name=service_name,
-        )
+        revoke(**kwargs)
     except PermissionOverviewError as e:
         return _json_error(str(e), status_code=400)
     except LatchkeyGatewayClientError as e:
-        logger.warning("Could not revoke {} for workspace {}: {}", service_name, workspace_agent_id, e)
+        logger.warning("Could not revoke through the latchkey gateway: {}", e)
         return _json_error(f"Could not revoke through the latchkey gateway: {e}", status_code=502)
     return make_response(content='{"status": "ok"}', media_type="application/json")
+
+
+def _handle_revoke_service_for_workspace() -> Response:
+    """Revoke a predefined service's grants for one workspace (POST /settings/permissions/revoke).
+
+    Body: ``{"workspace_agent_id": "...", "service_name": "..."}``. Removes every
+    rule the service owns from that workspace's host permissions file (stored
+    credentials untouched).
+    """
+    prelude = _revoke_prelude()
+    if isinstance(prelude, Response):
+        return prelude
+    body, handler = prelude
+    workspace_agent_id = str(body.get("workspace_agent_id", ""))
+    service_name = str(body.get("service_name", ""))
+    if not workspace_agent_id or not service_name:
+        return _json_error("workspace_agent_id and service_name are required.", status_code=400)
+    return _apply_revoke(
+        revoke_service_for_workspace,
+        backend_resolver=get_state().backend_resolver,
+        gateway_client=handler.gateway_client,
+        services_catalog=handler.services_catalog,
+        latchkey=handler.latchkey,
+        workspace_agent_id=workspace_agent_id,
+        service_name=service_name,
+    )
 
 
 def _handle_revoke_service_for_all_workspaces() -> Response:
     """Revoke a predefined service's grants across every active workspace (POST /settings/permissions/revoke-all).
 
-    Body: ``{"service_name": "..."}``. Returns 200 on success, 400 for a bad
-    request/unknown service, 503 when the handler is unavailable.
+    Body: ``{"service_name": "..."}``.
     """
-    if not _is_request_authenticated():
-        return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
-    body = request.get_json(silent=True, force=True)
-    if not isinstance(body, dict):
-        return make_response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
+    prelude = _revoke_prelude()
+    if isinstance(prelude, Response):
+        return prelude
+    body, handler = prelude
     service_name = str(body.get("service_name", ""))
     if not service_name:
-        return _json_error("service_name is required", status_code=400)
-    handler = _find_predefined_permission_handler()
-    if handler is None:
-        return _json_error("Permission management is unavailable", status_code=503)
-    try:
-        revoke_service_for_all_workspaces(
-            backend_resolver=get_state().backend_resolver,
-            gateway_client=handler.gateway_client,
-            services_catalog=handler.services_catalog,
-            latchkey=handler.latchkey,
-            service_name=service_name,
-        )
-    except PermissionOverviewError as e:
-        return _json_error(str(e), status_code=400)
-    except LatchkeyGatewayClientError as e:
-        logger.warning("Could not revoke {} across workspaces: {}", service_name, e)
-        return _json_error(f"Could not revoke through the latchkey gateway: {e}", status_code=502)
-    return make_response(content='{"status": "ok"}', media_type="application/json")
+        return _json_error("service_name is required.", status_code=400)
+    return _apply_revoke(
+        revoke_service_for_all_workspaces,
+        backend_resolver=get_state().backend_resolver,
+        gateway_client=handler.gateway_client,
+        services_catalog=handler.services_catalog,
+        latchkey=handler.latchkey,
+        service_name=service_name,
+    )
 
 
 def _handle_revoke_file_sharing_for_workspace() -> Response:
     """Revoke all file-sharing grants for one workspace (POST /settings/permissions/file-sharing/revoke).
 
     Body: ``{"workspace_agent_id": "..."}``. Removes every ``minds-file-server-*``
-    permission from that workspace's host file, leaving unrelated permissions and
-    stored state intact.
+    permission from that workspace's host file, leaving unrelated permissions
+    intact.
     """
-    if not _is_request_authenticated():
-        return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
-    body = request.get_json(silent=True, force=True)
-    if not isinstance(body, dict):
-        return make_response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
+    prelude = _revoke_prelude()
+    if isinstance(prelude, Response):
+        return prelude
+    body, handler = prelude
     workspace_agent_id = str(body.get("workspace_agent_id", ""))
     if not workspace_agent_id:
-        return _json_error("workspace_agent_id is required", status_code=400)
-    handler = _find_predefined_permission_handler()
-    if handler is None:
-        return _json_error("Permission management is unavailable", status_code=503)
-    try:
-        revoke_file_sharing_for_workspace(
-            backend_resolver=get_state().backend_resolver,
-            gateway_client=handler.gateway_client,
-            latchkey=handler.latchkey,
-            workspace_agent_id=workspace_agent_id,
-        )
-    except PermissionOverviewError as e:
-        return _json_error(str(e), status_code=400)
-    except LatchkeyGatewayClientError as e:
-        logger.warning("Could not revoke file sharing for workspace {}: {}", workspace_agent_id, e)
-        return _json_error(f"Could not revoke through the latchkey gateway: {e}", status_code=502)
-    return make_response(content='{"status": "ok"}', media_type="application/json")
+        return _json_error("workspace_agent_id is required.", status_code=400)
+    return _apply_revoke(
+        revoke_file_sharing_for_workspace,
+        backend_resolver=get_state().backend_resolver,
+        gateway_client=handler.gateway_client,
+        latchkey=handler.latchkey,
+        workspace_agent_id=workspace_agent_id,
+    )
 
 
 def _handle_revoke_file_sharing_for_all_workspaces() -> Response:
     """Revoke file-sharing grants across every active workspace (POST /settings/permissions/file-sharing/revoke-all).
 
-    Takes no body parameters. Returns 200 on success, 503 when the handler is unavailable.
+    Takes no body parameters.
     """
-    if not _is_request_authenticated():
-        return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
-    handler = _find_predefined_permission_handler()
-    if handler is None:
-        return _json_error("Permission management is unavailable", status_code=503)
-    try:
-        revoke_file_sharing_for_all_workspaces(
-            backend_resolver=get_state().backend_resolver,
-            gateway_client=handler.gateway_client,
-            latchkey=handler.latchkey,
-        )
-    except LatchkeyGatewayClientError as e:
-        logger.warning("Could not revoke file sharing across workspaces: {}", e)
-        return _json_error(f"Could not revoke through the latchkey gateway: {e}", status_code=502)
-    return make_response(content='{"status": "ok"}', media_type="application/json")
+    prelude = _revoke_prelude()
+    if isinstance(prelude, Response):
+        return prelude
+    _, handler = prelude
+    return _apply_revoke(
+        revoke_file_sharing_for_all_workspaces,
+        backend_resolver=get_state().backend_resolver,
+        gateway_client=handler.gateway_client,
+        latchkey=handler.latchkey,
+    )
 
 
 def _handle_revoke_workspace_ops_for_workspace() -> Response:
@@ -1941,33 +1949,22 @@ def _handle_revoke_workspace_ops_for_workspace() -> Response:
     ``{"workspace_agent_id": "...", "target_workspace_id": "..."|null}`` where a
     null/absent ``target_workspace_id`` means the shared (all-workspaces) grants.
     """
-    if not _is_request_authenticated():
-        return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
-    body = request.get_json(silent=True, force=True)
-    if not isinstance(body, dict):
-        return make_response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
+    prelude = _revoke_prelude()
+    if isinstance(prelude, Response):
+        return prelude
+    body, handler = prelude
     workspace_agent_id = str(body.get("workspace_agent_id", ""))
     if not workspace_agent_id:
-        return _json_error("workspace_agent_id is required", status_code=400)
+        return _json_error("workspace_agent_id is required.", status_code=400)
     raw_target = body.get("target_workspace_id")
-    target_workspace_id = str(raw_target) if raw_target else None
-    handler = _find_predefined_permission_handler()
-    if handler is None:
-        return _json_error("Permission management is unavailable", status_code=503)
-    try:
-        revoke_workspace_ops_for_workspace(
-            backend_resolver=get_state().backend_resolver,
-            gateway_client=handler.gateway_client,
-            latchkey=handler.latchkey,
-            workspace_agent_id=workspace_agent_id,
-            target_workspace_id=target_workspace_id,
-        )
-    except PermissionOverviewError as e:
-        return _json_error(str(e), status_code=400)
-    except LatchkeyGatewayClientError as e:
-        logger.warning("Could not revoke workspace ops for workspace {}: {}", workspace_agent_id, e)
-        return _json_error(f"Could not revoke through the latchkey gateway: {e}", status_code=502)
-    return make_response(content='{"status": "ok"}', media_type="application/json")
+    return _apply_revoke(
+        revoke_workspace_ops_for_workspace,
+        backend_resolver=get_state().backend_resolver,
+        gateway_client=handler.gateway_client,
+        latchkey=handler.latchkey,
+        workspace_agent_id=workspace_agent_id,
+        target_workspace_id=str(raw_target) if raw_target else None,
+    )
 
 
 def _handle_revoke_workspace_ops_for_all_workspaces() -> Response:
@@ -1977,27 +1974,18 @@ def _handle_revoke_workspace_ops_for_all_workspaces() -> Response:
     ``{"target_workspace_id": "..."|null}`` where a null/absent value means the
     shared (all-workspaces) grants.
     """
-    if not _is_request_authenticated():
-        return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
-    body = request.get_json(silent=True, force=True)
-    if not isinstance(body, dict):
-        return make_response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
+    prelude = _revoke_prelude()
+    if isinstance(prelude, Response):
+        return prelude
+    body, handler = prelude
     raw_target = body.get("target_workspace_id")
-    target_workspace_id = str(raw_target) if raw_target else None
-    handler = _find_predefined_permission_handler()
-    if handler is None:
-        return _json_error("Permission management is unavailable", status_code=503)
-    try:
-        revoke_workspace_ops_for_all_workspaces(
-            backend_resolver=get_state().backend_resolver,
-            gateway_client=handler.gateway_client,
-            latchkey=handler.latchkey,
-            target_workspace_id=target_workspace_id,
-        )
-    except LatchkeyGatewayClientError as e:
-        logger.warning("Could not revoke workspace ops across workspaces: {}", e)
-        return _json_error(f"Could not revoke through the latchkey gateway: {e}", status_code=502)
-    return make_response(content='{"status": "ok"}', media_type="application/json")
+    return _apply_revoke(
+        revoke_workspace_ops_for_all_workspaces,
+        backend_resolver=get_state().backend_resolver,
+        gateway_client=handler.gateway_client,
+        latchkey=handler.latchkey,
+        target_workspace_id=str(raw_target) if raw_target else None,
+    )
 
 
 def _handle_set_default_account() -> Response:
