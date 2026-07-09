@@ -147,6 +147,10 @@ class CreateWorkspaceRequest(ApiRequestModel):
         default=None, description="Anthropic API key (required when ai_provider is API_KEY)"
     )
     region: str | None = Field(default=None, description="Provider region")
+    instance_type: str | None = Field(
+        default=None,
+        description="EC2 instance type (AWS modes only); must be one of the form's offered types",
+    )
     cloud_account: str | None = Field(
         default=None,
         description=(

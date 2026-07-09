@@ -589,6 +589,7 @@ def _build_mngr_create_command(
     imbue_cloud_fast_mode: str | None = None,
     region: str | None = None,
     cloud_account: str | None = None,
+    instance_type: str | None = None,
     latchkey_env: Mapping[str, str] | None = None,
     color: str | None = None,
     original_minds_version: str | None = None,
@@ -782,6 +783,10 @@ def _build_mngr_create_command(
             # provider's cross-region guard confirms the placement.
             if region:
                 mngr_command.extend(["-b", f"--aws-region={region}"])
+            # Per-create machine size (the form's picker); overrides the
+            # provider block's default_instance_type when set.
+            if instance_type:
+                mngr_command.extend(["-b", f"--aws-instance-type={instance_type}"])
         case LaunchMode.IMBUE_CLOUD:
             # imbue_cloud follows the same shape as the other modes: the
             # ``main`` + ``imbue_cloud`` templates set ``idle_mode = disabled``
@@ -978,6 +983,7 @@ def run_mngr_create(
     imbue_cloud_fast_mode: str | None = None,
     region: str | None = None,
     cloud_account: str | None = None,
+    instance_type: str | None = None,
     anthropic_api_key: str | None = None,
     anthropic_base_url: str | None = None,
     latchkey_env: Mapping[str, str] | None = None,
@@ -1021,6 +1027,7 @@ def run_mngr_create(
         imbue_cloud_fast_mode=imbue_cloud_fast_mode,
         region=region,
         cloud_account=cloud_account,
+        instance_type=instance_type,
         latchkey_env=latchkey_env,
         color=color,
         original_minds_version=original_minds_version,
@@ -1164,6 +1171,8 @@ class _MngrCreateAttemptParams(FrozenModel):
     # Bring-your-own account provider block name (``byo-<backend>-<slug>``), or
     # None for the ambient per-mode providers.
     cloud_account: str | None
+    # Per-create EC2 machine size (AWS modes only), or None for the block default.
+    instance_type: str | None
     anthropic_api_key: str | None
     anthropic_base_url: str | None
     parent_cg: ConcurrencyGroup | None
@@ -1204,6 +1213,7 @@ def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams
         # ignores it for DOCKER/LIMA.
         region=(params.region or None),
         cloud_account=params.cloud_account,
+        instance_type=params.instance_type,
         anthropic_api_key=params.anthropic_api_key,
         anthropic_base_url=params.anthropic_base_url,
         color=params.color,
@@ -1400,6 +1410,7 @@ class AgentCreator(MutableModel):
         branch_or_tag: str = "",
         region: str = "",
         cloud_account: str = "",
+        instance_type: str = "",
         anthropic_api_key: str = "",
         on_created: Callable[[AgentId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
@@ -1478,6 +1489,7 @@ class AgentCreator(MutableModel):
                 branch_or_tag,
                 region,
                 cloud_account,
+                instance_type,
                 anthropic_api_key,
                 on_created,
                 backup_request,
@@ -1542,6 +1554,7 @@ class AgentCreator(MutableModel):
         branch_or_tag: str = "",
         region: str = "",
         cloud_account: str = "",
+        instance_type: str = "",
         anthropic_api_key: str = "",
         on_created: Callable[[AgentId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
@@ -1807,6 +1820,7 @@ class AgentCreator(MutableModel):
                     branch_or_tag=branch_or_tag,
                     region=region,
                     cloud_account=cloud_account or None,
+                    instance_type=instance_type or None,
                     anthropic_api_key=effective_anthropic_api_key,
                     anthropic_base_url=effective_anthropic_base_url,
                     parent_cg=self.root_concurrency_group,

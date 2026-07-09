@@ -144,6 +144,7 @@ from imbue.minds.errors import MngrCommandError
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupEncryptionMethod
 from imbue.minds.primitives import BackupProvider
+from imbue.minds.primitives import CONFIGURED_AWS_INSTANCE_TYPES
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import ServiceName
@@ -472,6 +473,12 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
     account_id = str(body.get("account_id", "")).strip()
     anthropic_api_key = str(body.get("anthropic_api_key", "")).strip()
     submitted_region = str(body.get("region", "")).strip()
+    instance_type = str(body.get("instance_type", "")).strip()
+    if instance_type:
+        if launch_mode is not LaunchMode.AWS:
+            instance_type = ""
+        elif instance_type not in {value for value, _ in CONFIGURED_AWS_INSTANCE_TYPES}:
+            return _json_field_error(f"Unsupported instance type {instance_type!r}.", "instance_type")
     cloud_account = str(body.get("cloud_account", "")).strip()
     if cloud_account:
         # A bring-your-own account must exist and match the submitted launch
@@ -574,6 +581,7 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
         branch_or_tag=branch_or_tag,
         region=region,
         cloud_account=cloud_account,
+        instance_type=instance_type,
         anthropic_api_key=anthropic_api_key,
         on_created=on_created,
         backup_request=backup_request,

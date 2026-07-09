@@ -1,4 +1,4 @@
-{#def git_url, branch, host_name, launch_modes, selected_launch_mode, ai_providers, selected_ai_provider, backup_providers, selected_backup_provider, backup_encryption_methods, selected_backup_encryption_method, backup_api_key_env, has_saved_backup_password, accounts, default_account_id, anthropic_api_key, error_message, region_options_by_launch_mode, region_selected_by_launch_mode, cloud_accounts=[], selected_preset="remote", start_advanced=False, color="#0b292b" #}
+{#def git_url, branch, host_name, launch_modes, selected_launch_mode, ai_providers, selected_ai_provider, backup_providers, selected_backup_provider, backup_encryption_methods, selected_backup_encryption_method, backup_api_key_env, has_saved_backup_password, accounts, default_account_id, anthropic_api_key, error_message, region_options_by_launch_mode, region_selected_by_launch_mode, cloud_accounts=[], aws_instance_types=[], default_aws_instance_type="t3.large", selected_preset="remote", start_advanced=False, color="#0b292b" #}
 {#
   Workspace creation form.
 
@@ -64,6 +64,8 @@
     var submitBtn = document.getElementById('create-submit');
     var regionRow = document.getElementById('region-row');
     var regionSelect = document.getElementById('region');
+    var instanceTypeRow = document.getElementById('instance-type-row');
+    var instanceTypeSelect = document.getElementById('instance_type');
     var presetCards = document.querySelectorAll('[data-preset]');
     var accountError = document.getElementById('account-error');
     // Inputs read when building the create request body (some -- master password,
@@ -360,7 +362,8 @@
         backup_api_key_env: fieldValue(backupApiKeyEnvInput),
         backup_master_password: fieldValue(backupMasterPasswordInput),
         backup_save_password: backupSavePasswordInput ? backupSavePasswordInput.checked : false,
-        region: fieldValue(regionSelect)
+        region: fieldValue(regionSelect),
+        instance_type: fieldValue(instanceTypeSelect)
       };
       fetch('/api/v1/workspaces', {
         method: 'POST',
@@ -476,6 +479,14 @@
       regionRow.classList.remove('hidden');
     }
 
+    function updateInstanceType() {
+      // Machine-size picker: AWS-backed selections only (ambient AWS or a BYO
+      // AWS account). Hidden + disabled elsewhere so no value is submitted.
+      var isAws = launchSelection().mode === 'AWS';
+      instanceTypeRow.classList.toggle('hidden', !isAws);
+      instanceTypeSelect.disabled = !isAws;
+    }
+
     function update() {
       var hasAccount = accountSelect.value !== '';
 
@@ -518,6 +529,7 @@
       submitBtn.disabled = false;
 
       updateRegion();
+      updateInstanceType();
     }
 
     accountSelect.addEventListener('change', onAccountChange);
@@ -985,6 +997,22 @@
             <p class="mt-1 type-helper text-tertiary">Where the machine is created. If a region is out of capacity, try another.</p>
           </div>
           <Select id="region" name="region" width="w-48"></Select>
+        </div>
+      </div>
+
+      {# Machine size: AWS-backed selections only (ambient AWS + BYO accounts).
+         The floor is 4 GB -- the workspace build OOMs on 2 GB boxes. #}
+      <div id="instance-type-row" class="hidden">
+        <div class="flex items-start justify-between gap-3">
+          <div>
+            <FormLabel target="instance_type" inline>Machine size</FormLabel>
+            <p class="mt-1 type-helper text-tertiary">Billed to your account while the machine runs. 8 GB is the tested default.</p>
+          </div>
+          <Select id="instance_type" name="instance_type" width="w-80">
+            {% for pair in aws_instance_types %}
+              <option value="{{ pair[0] }}"{% if pair[0] == default_aws_instance_type %} selected{% endif %}>{{ pair[1] }}</option>
+            {% endfor %}
+          </Select>
         </div>
       </div>
 

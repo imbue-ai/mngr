@@ -34,7 +34,9 @@ from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupEncryptionMethod
 from imbue.minds.primitives import BackupProvider
+from imbue.minds.primitives import CONFIGURED_AWS_INSTANCE_TYPES
 from imbue.minds.primitives import CreationId
+from imbue.minds.primitives import DEFAULT_AWS_INSTANCE_TYPE
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.utils.sentry.frontend import frontend_sentry_browser_payload
@@ -523,6 +525,8 @@ def render_create_form(
         },
         region_selected_by_launch_mode=dict(region_selected_by_launch_mode or {}),
         cloud_accounts=[dict(account) for account in (cloud_accounts or [])],
+        aws_instance_types=[list(pair) for pair in CONFIGURED_AWS_INSTANCE_TYPES],
+        default_aws_instance_type=DEFAULT_AWS_INSTANCE_TYPE,
         selected_preset=effective_preset,
         start_advanced=start_advanced,
         color=color,

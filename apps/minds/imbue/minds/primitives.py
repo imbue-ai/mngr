@@ -33,6 +33,19 @@ CONFIGURED_AWS_REGIONS: Final[tuple[str, ...]] = (
 # of ``CONFIGURED_AWS_REGIONS``.
 DEFAULT_AWS_REGION: Final[str] = "us-east-1"
 
+# EC2 instance types the create form offers, (value, label) pairs. Floor is
+# 4 GB: the forever-claude-template build (uv sync + npm ci/build) is
+# documented to OOM/thrash on 2 GB (see ``_AWS_DEFAULT_INSTANCE_TYPE`` in
+# ``bootstrap``), so nothing smaller is offered. t3.large (8 GB) is the
+# known-good default. Values feed the ``--aws-instance-type=`` build arg.
+CONFIGURED_AWS_INSTANCE_TYPES: Final[tuple[tuple[str, str], ...]] = (
+    ("t3.medium", "t3.medium — 2 vCPU / 4 GB (cheapest; heavy builds may be slow)"),
+    ("t3.large", "t3.large — 2 vCPU / 8 GB (recommended)"),
+    ("t3.xlarge", "t3.xlarge — 4 vCPU / 16 GB"),
+    ("t3.2xlarge", "t3.2xlarge — 8 vCPU / 32 GB"),
+)
+DEFAULT_AWS_INSTANCE_TYPE: Final[str] = "t3.large"
+
 
 class CreationId(RandomId):
     """Minds-internal handle for an in-flight ``mngr create`` invocation.
