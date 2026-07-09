@@ -1,4 +1,3 @@
-import os
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -22,14 +21,7 @@ from imbue.mngr_lima.host_store import LimaHostConfig
 from imbue.mngr_lima.instance import LimaProviderInstance
 from imbue.mngr_lima.instance import _parse_size_to_gb
 from imbue.mngr_lima.limactl import LimaSshConfig
-
-
-def _write_fake_limactl(directory: Path, script_body: str) -> None:
-    """Install an executable fake ``limactl`` in ``directory`` (prepend it to PATH)."""
-    directory.mkdir(parents=True, exist_ok=True)
-    fake = directory / "limactl"
-    fake.write_text("#!/bin/sh\n" + script_body)
-    fake.chmod(0o755)
+from imbue.mngr_lima.testing import install_fake_limactl
 
 
 def test_discover_hosts_reports_provider_unavailable_when_limactl_crashes(
@@ -45,12 +37,12 @@ def test_discover_hosts_reports_provider_unavailable_when_limactl_crashes(
     mirroring a mid-session limactl startup fault (e.g. the getpwuid init panic).
     """
     bin_dir = tmp_path / "bin"
-    _write_fake_limactl(
+    install_fake_limactl(
         bin_dir,
         'if [ "$1" = "--version" ]; then echo "limactl version 2.0.3"; exit 0; fi\n'
         'echo "panic: user: unknown userid 501" >&2\nexit 2\n',
+        monkeypatch,
     )
-    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
 
     with pytest.raises(LimaCommandUnavailableError, match="not available"):
         lima_provider.discover_hosts(lima_provider.mngr_ctx.concurrency_group)
@@ -71,11 +63,11 @@ def test_discover_hosts_degrades_to_empty_when_limactl_unavailable(
     limactl that runs but fails at runtime is reported as provider-unavailable.
     """
     bin_dir = tmp_path / "bin"
-    _write_fake_limactl(
+    install_fake_limactl(
         bin_dir,
         'if [ "$1" = "--version" ]; then echo "limactl version 0.9.0"; exit 0; fi\nexit 0\n',
+        monkeypatch,
     )
-    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
 
     assert lima_provider.discover_hosts(lima_provider.mngr_ctx.concurrency_group) == []
 

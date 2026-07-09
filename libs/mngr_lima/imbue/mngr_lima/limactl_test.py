@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 
 import pytest
@@ -13,14 +12,7 @@ from imbue.mngr_lima.limactl import host_name_from_instance_name
 from imbue.mngr_lima.limactl import lima_instance_name
 from imbue.mngr_lima.limactl import lima_instance_name_from_host_id
 from imbue.mngr_lima.limactl import limactl_list
-
-
-def _write_fake_limactl(directory: Path, script_body: str) -> None:
-    """Install an executable fake ``limactl`` in ``directory`` (prepend it to PATH)."""
-    directory.mkdir(parents=True, exist_ok=True)
-    fake = directory / "limactl"
-    fake.write_text("#!/bin/sh\n" + script_body)
-    fake.chmod(0o755)
+from imbue.mngr_lima.testing import install_fake_limactl
 
 
 def test_lima_instance_name_from_host_id() -> None:
@@ -77,8 +69,7 @@ def test_limactl_list_raises_lima_command_error_on_nonzero_exit(
     discovery as an unclassified error.
     """
     bin_dir = tmp_path / "bin"
-    _write_fake_limactl(bin_dir, 'echo "panic: user: unknown userid 501" >&2\nexit 2\n')
-    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    install_fake_limactl(bin_dir, 'echo "panic: user: unknown userid 501" >&2\nexit 2\n', monkeypatch)
 
     with pytest.raises(LimaCommandError):
         limactl_list(temp_mngr_ctx.concurrency_group)
