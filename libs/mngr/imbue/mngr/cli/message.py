@@ -64,7 +64,7 @@ class MessageCliOptions(CommonCliOptions):
     "--start/--no-start",
     default=False,
     show_default=True,
-    help="Automatically start offline hosts and stopped agents before sending",
+    help="Automatically start offline hosts and stopped or exited agents before sending",
 )
 @optgroup.group("Message Content")
 @optgroup.option(
