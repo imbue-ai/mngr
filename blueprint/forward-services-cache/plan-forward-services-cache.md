@@ -1,17 +1,25 @@
 # Plan: `mngr forward` last-known service-map cache (fast first-load)
 
-Design source: `docs/design/forward-fast-first-load.md`. This spec implements the
-"seed from last-known" direction (the doc's option (b) family), located entirely
-in the `mngr_forward` plugin.
+Implements the "seed from last-known" fast-first-load fix for `mngr forward`,
+located entirely in the `mngr_forward` plugin. Root cause, live evidence, and the
+alternatives considered are captured below so this spec stands alone.
 
 ## Overview
 
 - **Problem:** on launch, `mngr forward` starts with an empty routing table.
-  `resolve()` returns `None` (the 503 "Loading workspace" loader) until the slow
-  per-agent `mngr event … services --follow` stream delivers the agent's service
-  URL. Measured live: a cold single stream takes ~10s; under spawn contention
-  across many `is_primary` agents the tail workspace waits ~50-55s. Local Docker
-  minds load in ~20s.
+  `resolve()` returns `None` — the 503 "Loading workspace" loader
+  (`resolver.py:153-167`, `server.py:579-582`) — until the slow per-agent
+  `mngr event … services --follow` stream (`stream_manager.py:432-535`) delivers the
+  agent's service URL. Membership + SSH info arrive fast (~t+2.5s) from the cached
+  discovery-snapshot replay (`--observe-via-file`); only the service URL is the
+  laggard. Measured live (staging/prod, read-only): a cold single stream takes
+  ~10s; under spawn contention across many `is_primary` agents the tail workspace
+  waits ~50-55s. Local Docker minds load in ~20s.
+- **Where service URLs live:** in-container services self-register (once they bind
+  a port) into `<host_dir>/agents/<id>/events/services/events.jsonl` on the host;
+  the forward reads them only via the per-agent SSH-backed `mngr event` stream.
+  They are absent from the discovery snapshot today (verified live: imbue_cloud
+  `certified_data` carries no `url`/`services`).
 - **Fix:** persist the resolver's per-agent service map to disk while the plugin
   runs, and **seed** the resolver from that cache at startup. The route becomes
   resolvable as soon as fresh discovery supplies membership + SSH info (~t+3s),
@@ -78,10 +86,21 @@ in the `mngr_forward` plugin.
   staging/prod/local minds keep separate caches automatically.
 - **No behavior when empty/absent.** A missing, empty, or unreadable cache file is
   a no-op seed — the resolver starts empty for those agents, exactly as today.
-- **Out of scope (explicitly not built):** the priority-agent hint (option c), the
-  discovery-snapshot service map (option a), any persistent per-agent streams or
-  supervisor changes, and any grace/provisional-route logic. These remain future
-  options documented in `docs/design/forward-fast-first-load.md`.
+- **Alternatives considered, not built (future options):**
+
+  - *Discovery-snapshot seed:* have discovery read each agent's `events/services`
+    file during its existing per-host visit and carry the map on the snapshot, so
+    the resolver seeds from replay with poll-fresh data and no per-agent SSH.
+    Fresher than the cache, but heavier — touches mngr core discovery, the
+    snapshot schema, and every provider's listing script.
+
+  - *Priority-agent hint:* an app-agnostic `--priority-agent` flag so the
+    open-window agent's live stream spawns first / uncontended. Removes spawn
+    contention but floors at the measured ~10s single-stream cost, so it cannot
+    reach the cache's ~3s.
+
+  - Also not built: persistent per-agent streams or supervisor changes, and any
+    grace/provisional-route logic (Q&A chose to accept the narrow fixed-port risk).
 - **Residual open item to verify during implementation:** minds' recovery-redirect
   freshness math compares outage onset against discovery snapshot timestamps
   (`system_interface_health.py`); confirm a seeded route does not perturb that
