@@ -132,7 +132,8 @@ def test_build_overview_relabels_wildcard_as_all(tmp_path: Path) -> None:
     assert len(overview) == 1
     wildcard = overview[0].workspace_grants[0].permissions
     assert tuple(p.label for p in wildcard) == ("all",)
-    assert wildcard[0].description  # the catch-all carries a non-empty tooltip description
+    # The catch-all carries a non-empty tooltip description.
+    assert wildcard[0].description
 
 
 def test_build_overview_omits_services_with_no_grants(tmp_path: Path) -> None:
@@ -398,3 +399,64 @@ def test_revoke_workspace_ops_for_all_workspaces(tmp_path: Path) -> None:
             "latchkey-self"
         ]
         assert remaining == (_BASELINE_SELF_PERM,)
+
+
+# -- Round-trip guardrails -----------------------------------------------------
+#
+# These lock the parsers to the exact permission-name format the gateway emits
+# (``minds-file-server-<access>-<path>`` and ``minds-workspaces-<verb>`` /
+# ``minds-workspaces-<verb>-<target>``). The *gateway* side of this contract --
+# that a real grant produces exactly these names -- is verified against a live
+# Node gateway in ``mngr_latchkey``'s ``permission_requests_test.py``; these
+# tests are the other half: given those canonical names, the parser must recover
+# the original fields. The names below are written as literals on purpose (not
+# via the parser's own constants), so a rename of the parser's convention breaks
+# these instead of silently mis-parsing. They deliberately include the awkward
+# cases: a hyphenated verb (``backups-export``), a verb whose name is a prefix
+# of another (``read`` vs ``recover``), paths containing hyphens, and a path
+# that itself starts with an access-like token.
+
+
+def test_file_sharing_parser_round_trips_canonical_gateway_names(tmp_path: Path) -> None:
+    latchkey = _latchkey(tmp_path)
+    agent, host = str(AgentId()), HostId()
+    # Each case is (path, access-token-in-name, expected-access-label). The
+    # awkward ones: a hyphen inside the path, a path that begins with an
+    # access-like token, and a path with a space (kept verbatim in the name).
+    cases = (
+        ("/home/user/docs", "read", "read"),
+        ("/home/user/my-notes.txt", "write", "read and write"),
+        ("/read-only/data", "read", "read"),
+        ("/home/with space/file.txt", "read", "read"),
+    )
+    names = [f"minds-file-server-{access}-{path}" for path, access, _ in cases]
+    _seed_host(latchkey, host, ({"latchkey-self": [_BASELINE_SELF_PERM, *names]},))
+    resolver = _resolver({agent: host}, {agent: "WS"})
+
+    overview = build_file_sharing_overview(resolver, build_fake_gateway_client(), latchkey)
+
+    assert len(overview) == 1
+    recovered = {shared.path: shared.access_label for shared in overview[0].paths}
+    assert recovered == {path: label for path, _, label in cases}
+
+
+def test_workspace_parser_round_trips_canonical_gateway_names(tmp_path: Path) -> None:
+    latchkey = _latchkey(tmp_path)
+    agent, host = str(AgentId()), HostId()
+    target = str(AgentId())
+    # Shared: a non-targeted verb (read) and a targeted verb granted for all
+    # workspaces (destroy). Per-target: recover (whose name must not be read as
+    # ``read``) and backups-export (a hyphenated verb name).
+    names = (
+        "minds-workspaces-read",
+        "minds-workspaces-destroy",
+        f"minds-workspaces-recover-{target}",
+        f"minds-workspaces-backups-export-{target}",
+    )
+    _seed_host(latchkey, host, ({"latchkey-self": [_BASELINE_SELF_PERM, *names]},))
+    resolver = _resolver({agent: host}, {agent: "Ops"})
+
+    overview = build_workspace_overview(resolver, build_fake_gateway_client(), latchkey)
+
+    verbs_by_target = {group.target_workspace_id: {p.label for p in group.cards[0].permissions} for group in overview}
+    assert verbs_by_target == {"": {"read", "destroy"}, target: {"recover", "backups-export"}}
