@@ -1,4 +1,7 @@
+import os
 from pathlib import Path
+
+import pytest
 
 from imbue.mngr_forward.service_map_cache import ServiceMapCache
 
@@ -50,6 +53,23 @@ def test_load_drops_malformed_entries(tmp_path: Path) -> None:
     assert ServiceMapCache(cache_path=cache_path).load() == {
         "agent-good": {"system_interface": "http://127.0.0.1:8000"}
     }
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root bypasses file permission checks, so the file stays readable",
+)
+def test_load_swallows_read_error(tmp_path: Path) -> None:
+    # An existing-but-unreadable cache file must degrade to {} rather than
+    # raising, so a permission/IO error can never break forward startup
+    # (load runs on the startup critical path via resolver.seed_services).
+    cache_path = tmp_path / "service_map.json"
+    cache_path.write_text('{"agent-a": {"system_interface": "http://127.0.0.1:8000"}}')
+    cache_path.chmod(0o000)
+    try:
+        assert ServiceMapCache(cache_path=cache_path).load() == {}
+    finally:
+        cache_path.chmod(0o600)
 
 
 def test_persist_swallows_write_error(tmp_path: Path) -> None:

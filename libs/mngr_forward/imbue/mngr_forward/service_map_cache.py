@@ -42,7 +42,12 @@ class ServiceMapCache(FrozenModel):
         kept; anything else is dropped so a corrupt file can never inject a bad
         route.
         """
-        return _coerce_service_map(read_json_dict(self.cache_path))
+        try:
+            raw = read_json_dict(self.cache_path)
+        except OSError as e:
+            logger.warning("Could not read forward service-map cache {} ({}); ignoring.", self.cache_path, e)
+            return {}
+        return _coerce_service_map(raw)
 
     def persist(self, services_by_agent: dict[str, dict[str, str]]) -> None:
         """Atomically write the full service map to disk (best effort).
