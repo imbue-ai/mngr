@@ -165,7 +165,7 @@ actually run), but these tests do **not** require an imbue_cloud login.
 - **Deployment/services** (`deployment_tests/conftest.py`): `shared_env(role)`,
   `verified_user`, `ephemeral_env`, `signup_email` (mail.tm).
 - **General minds helpers** (`imbue/minds/testing.py`): `make_git_repo`,
-  `init_and_commit_git_repo`, `run_mngr`, `parse_mngr_list_json`, `find_agent`,
+  `init_and_commit_git_repo`,
   `stub_mngr_host_dir`, `extract_response`; `desktop_client/testing.py`
   (`restic_backup_a_file`); `utils/testing.py` (`RecordingMngrCaller`);
   `latchkey/testing.py` (`FakeLatchkeyGatewayClient`, `build_fake_gateway_client`).
