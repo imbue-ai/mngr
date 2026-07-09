@@ -38,7 +38,7 @@ Give the forever-claude-template "system interface" a real, event-driven, proces
 * `mngr observe --stream-events` behaves like `mngr observe` but additionally echoes each `agents`-stream event (`AGENT_STATE`, `AGENTS_FULL_STATE`, `AGENT_REMOVED`) as one JSON line to stdout, for a consumer that spawns it and reads its stdout. The `agent_states` change stream is not echoed.
 * Agent create/destroy still propagate promptly to consumers of the `agents` stream: a newly discovered agent triggers a re-probe + `AGENT_STATE` emit; a destroyed agent triggers an `AGENT_REMOVED` emit — matching the near-instant membership latency the discovery stream provides today.
 * In the system interface, each agent's liveness state is now real and live: an agent whose prompt dies shows as not-running, which (via the unchanged `is_agent_running` gate) drops its "Thinking..." indicator to idle; the dot/indicator UI itself is unchanged.
-* The system interface's first paint is still fast: the existing one-shot startup discovery seeds real state immediately, and the observer's stream then takes over — but the stream no longer clobbers that state to `"RUNNING"`.
+* If the existing one-shot startup discovery is kept, the system interface's first paint is seeded with real state immediately and the observer's stream then takes over — and the stream no longer clobbers that state to `"RUNNING"`.
 * On macOS (dev/tests only) the behavior is identical to Linux, because psutil uses `kqueue` there; there is no separate macOS poll path to maintain.
 
 ## Changes
@@ -63,7 +63,7 @@ Give the forever-claude-template "system interface" a real, event-driven, proces
 * **Preserve membership side-effects** (`agent_manager.py`): compute added/removed agent-id sets from the folded events and keep firing the existing per-agent lifecycle side-effects (start/stop app + activity watchers, assist auto-open, `broadcast_agents_updated`) that the discovery `AggregatorDelta` used to drive.
 * **Messaging match identity** (`agent_manager.py`, `_build_agent_match`): source `host_id` and `provider_name` from `AgentDetails.host.{id,provider_name}` (both present on `AgentDetails`), replacing the `DiscoveredAgent`-sourced values.
 * **Retire discovery-specific plumbing** for the observe path (the `DiscoveryStateAggregator` usage and discovery-event handling), replaced by the observe-event fold above.
-* **Keep the startup seed** (`agent_manager.py`, `_initial_discover`): retained as a fast on-connect real-state seed; it is no longer clobbered by the stream. (Safe to drop if minimalism is preferred — correctness does not depend on it.)
+* **Startup seed — keep or drop (decide by measurement)** (`agent_manager.py`, `_initial_discover`): correctness does not depend on it (the observer emits a startup `AGENTS_FULL_STATE`, and it is no longer clobbered by the stream). Its only remaining value is *first-paint latency*: the in-process `list_agents()` avoids the cold Python + `imbue.mngr` import that the spawned `mngr observe` subprocess pays before its first snapshot. This is an unmeasured hypothesis — keep the seed only if a quick measurement (`mngr observe` cold-start-to-first-snapshot vs. in-process `list_agents()`) shows a meaningful win; otherwise drop it as redundant.
 * **No UI changes**: the dot / dot-shape / `ActivityIndicator` / `derive_activity_state` gate are untouched; only `AgentStateItem.state`'s source changes.
 
 ### Tests
