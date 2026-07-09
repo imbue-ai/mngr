@@ -20,7 +20,6 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 DEFAULT_FCT_REPO = "https://github.com/imbue-ai/forever-claude-template.git"
@@ -187,16 +186,22 @@ def launch_workspaces(eval_set: str, *, clones_dir: Path, api_key: str) -> list[
     clones = list_prepared_clones(clones_dir)
     if not clones:
         raise SystemExit("no prepared clones under {} -- run prepare-test-clones first".format(clones_dir))
-    print(">> launching {} workspace(s) for eval set {!r} ...".format(len(clones), eval_set))
+    # Sequential -- exactly like pressing Create N times in the UI. Concurrent creates race to
+    # make mngr's shared per-instance Modal environment (minds-staging-<hash>): the first wins,
+    # the rest die with "environment with the same name already exists". One at a time, the first
+    # creates it and every later create reuses it (which is why the UI works for many workspaces).
+    print(">> launching {} workspace(s) one at a time for eval set {!r}".format(len(clones), eval_set), flush=True)
+    print("   (each Modal workspace takes a few minutes -- same as the UI)", flush=True)
     results = []
-    with ThreadPoolExecutor(max_workers=min(8, len(clones))) as pool:
-        futures = [pool.submit(launch_one, c, eval_set, api_key) for c in clones]
-        for future in as_completed(futures):
-            r = future.result()
-            results.append(r)
-            print("  [{}] {}: {}".format("OK " if r["ok"] else "ERR", r["name"], r.get("agent_id") or r.get("error")))
+    for i, clone in enumerate(clones, 1):
+        name = workspace_name(eval_set, clone.name)
+        print("  [{}/{}] {} ... creating".format(i, len(clones), name), flush=True)
+        r = launch_one(clone, eval_set, api_key)
+        results.append(r)
+        detail = "OK {}".format(r.get("agent_id")) if r["ok"] else "ERR {}".format(r.get("error"))
+        print("  [{}/{}] {} -> {}".format(i, len(clones), name, detail), flush=True)
     ok = sum(1 for r in results if r["ok"])
-    print(">> done: {}/{} workspaces launched -- all in the dashboard.".format(ok, len(results)))
+    print(">> done: {}/{} workspaces launched.".format(ok, len(results)), flush=True)
     return results
 
 
