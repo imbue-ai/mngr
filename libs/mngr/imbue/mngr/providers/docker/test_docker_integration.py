@@ -327,7 +327,7 @@ def test_host_store_write_and_discover(docker_provider: DockerProviderInstance) 
     host_record = HostRecord(
         certified_host_data=host_data,
         ssh_host="127.0.0.1",
-        ssh_port=12345,
+        last_discovered_ssh_port=12345,
         ssh_host_public_key="ssh-ed25519 AAAA-test-key",
         config=ContainerConfig(start_args=("--cpus=2", "--memory=4g")),
         container_id=container.id,
@@ -339,7 +339,7 @@ def test_host_store_write_and_discover(docker_provider: DockerProviderInstance) 
     assert read_back is not None
     assert read_back.container_id == container.id
     assert read_back.ssh_host == "127.0.0.1"
-    assert read_back.ssh_port == 12345
+    assert read_back.last_discovered_ssh_port == 12345
 
     # Verify container is discoverable by host_id
     found = docker_provider._find_container_by_host_id(host_id)
@@ -367,7 +367,7 @@ def test_save_failed_host_record(docker_provider: DockerProviderInstance) -> Non
     assert record.certified_host_data.user_tags == {"env": "test"}
     # Failed hosts have no SSH info
     assert record.ssh_host is None
-    assert record.ssh_port is None
+    assert record.last_discovered_ssh_port is None
 
 
 # =========================================================================
