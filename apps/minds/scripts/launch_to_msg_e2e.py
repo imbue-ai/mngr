@@ -89,6 +89,7 @@ from loguru import logger
 # `--remote-debugging-port=<N>` so its Chromium DevTools endpoint is reachable,
 # then `chromium.connect_over_cdp()`. Same API for pages, locators, etc.
 from playwright.async_api import BrowserContext
+from playwright.async_api import Frame
 from playwright.async_api import Page
 from playwright.async_api import async_playwright
 from pydantic import BaseModel
@@ -630,6 +631,23 @@ async def find_chat_window(ctx: BrowserContext) -> Page | None:
         with contextlib.suppress(Exception):
             if pat.search(w.url):
                 return w
+    return None
+
+
+def find_inbox_frame(ctx: BrowserContext) -> tuple[Page, Frame] | None:
+    """Locate the open inbox: the (owner page, frame at /inbox) pair, or None.
+
+    The inbox renders as an iframe inside the warm overlay host
+    (``/_chrome/overlay``): ``openModal`` sends ``show-modal`` to overlay.js,
+    which mounts a modal iframe at ``/inbox`` -- the modal view's own URL
+    never changes. A page's main frame is included in ``page.frames``, so a
+    window navigated directly to ``/inbox`` also matches.
+    """
+    for w in all_pages(ctx):
+        with contextlib.suppress(Exception):
+            for f in w.frames:
+                if "/inbox" in f.url:
+                    return (w, f)
     return None
 
 
@@ -1837,26 +1855,23 @@ async def _advance_approval(
     if decision not in ("approve", "deny"):
         raise E2EFailure(f"_advance_approval: decision must be approve|deny, got {decision!r}")
     snap_stage0, snap_stage1, snap_stage2_pre, snap_stage2_post = snap_prefix_pair
-    # The "permission panel" was refactored into an inbox modal whose
-    # WebContentsView serves /inbox; the master/detail split lives in
-    # one page (left list = .inbox-card, right detail loads via
+    # The inbox renders as a modal iframe at /inbox inside the warm overlay
+    # host (see find_inbox_frame); the master/detail split lives in that one
+    # document (left list = .inbox-card, right detail loads via
     # /inbox/detail/<id> fragment and contains the Approve/Deny form).
-    # Stage 0 waits for /inbox (it auto-opens on new pending requests by
-    # default, see MindsConfig.get_auto_open_requests_panel). Stage 1
-    # clicks the inbox card for the slack request to load the detail
-    # fragment. Stage 2 clicks Approve / Deny within the same page.
+    # Stage 0 waits for the /inbox frame (it auto-opens on new pending
+    # requests by default, see MindsConfig.get_auto_open_requests_panel).
+    # Stage 1 clicks the inbox card for the slack request to load the detail
+    # fragment. Stage 2 clicks Approve / Deny within the same frame.
     if stage == 0:
-        # Check if the inbox modal already auto-opened.
-        panel = None
-        for w in all_pages(ctx):
-            with contextlib.suppress(Exception):
-                if "/inbox" in w.url:
-                    panel = w
-                    break
-        if panel is not None:
+        # Check if the inbox modal already auto-opened (an /inbox iframe in
+        # the overlay host; see find_inbox_frame).
+        found = find_inbox_frame(ctx)
+        if found is not None:
+            owner, _ = found
             logger.info("inbox modal auto-opened; advancing to stage 1")
             state["stage"] = 1
-            await snap_page(panel, snap_stage0)
+            await snap_page(owner, snap_stage0)
             return
         # Wait for the agent to emit its request signal first. Case-fold
         # because Claude rephrases the message each run (eg "Waiting"
@@ -1892,14 +1907,10 @@ async def _advance_approval(
 
     # Stage 1: click the slack entry in the inbox left list.
     elif stage == 1:
-        panel = None
-        for w in all_pages(ctx):
-            with contextlib.suppress(Exception):
-                if "/inbox" in w.url:
-                    panel = w
-                    break
-        if panel is None:
+        found = find_inbox_frame(ctx)
+        if found is None:
             return
+        owner, panel = found
         # Prefer the slack-named .inbox-card; fall back to the first
         # selectable card if there's only one pending request.
         for sel in (
@@ -1911,7 +1922,7 @@ async def _advance_approval(
                 loc = panel.locator(sel).first
                 if await loc.count() > 0 and await loc.is_visible():
                     logger.info("clicking inbox card via {!r}", sel)
-                    await snap_page(panel, snap_stage1)
+                    await snap_page(owner, snap_stage1)
                     await loc.click()
                     state["stage"] = 2
                     return
@@ -1927,52 +1938,54 @@ async def _advance_approval(
             )
         else:
             button_selectors = ('button:has-text("Deny")',)
-        for w in all_pages(ctx):
-            try:
-                if "/inbox" not in w.url:
-                    continue
-                btn = None
-                for bsel in button_selectors:
-                    candidate = w.locator(bsel).first
-                    if await candidate.count() > 0 and await candidate.is_visible():
-                        btn = candidate
-                        break
-                if btn is None:
-                    continue
-                logger.info("clicking {} button on inbox detail", decision)
-                await snap_page(w, snap_stage2_pre)
-                await btn.click()
-                state["stage"] = 3
-                # Snap a beat later. For approve the inbox shows the
-                # browser-launch / success notice; for deny the inbox
-                # closes back to the chat window.
-                await asyncio.sleep(2)
-                snap_target = w
-                if decision == "deny":
-                    chat_after = await find_chat_window(ctx)
-                    if chat_after is not None:
-                        snap_target = chat_after
-                with contextlib.suppress(Exception):
-                    await snap_page(snap_target, snap_stage2_post)
-                if decision == "approve":
-                    # Surface latchkey-side authorisation failures
-                    # immediately rather than waiting DRIVE_SLACK_TIMEOUT
-                    # seconds for a timeout. The post-approve page renders
-                    # the error banner verbatim; parse the visible text
-                    # and raise so CI fails on the actual signal, not a
-                    # timeout that happens to coincide.
-                    with contextlib.suppress(Exception):
-                        body_text = await w.evaluate("document.body.innerText")
-                        if "Authorization failed" in body_text or "No browser configured" in body_text:
-                            raise E2EFailure(
-                                f"{snap_stage2_post} shows authorization failure: "
-                                + body_text.replace("\n", " | ")[:400]
-                            )
-                # Kicks are sent from the main poll loop after a
-                # KICK_DELAY settle period; see slack-flow loop.
+        found = find_inbox_frame(ctx)
+        if found is None:
+            return
+        owner, panel = found
+        try:
+            btn = None
+            for bsel in button_selectors:
+                candidate = panel.locator(bsel).first
+                if await candidate.count() > 0 and await candidate.is_visible():
+                    btn = candidate
+                    break
+            if btn is None:
                 return
-            except Exception:
-                pass
+            logger.info("clicking {} button on inbox detail", decision)
+            await snap_page(owner, snap_stage2_pre)
+            await btn.click()
+            state["stage"] = 3
+            # Snap a beat later. For approve the inbox shows the
+            # browser-launch / success notice; for deny the inbox
+            # closes back to the chat window.
+            await asyncio.sleep(2)
+            snap_target = owner
+            if decision == "deny":
+                chat_after = await find_chat_window(ctx)
+                if chat_after is not None:
+                    snap_target = chat_after
+            with contextlib.suppress(Exception):
+                await snap_page(snap_target, snap_stage2_post)
+            if decision == "approve":
+                # Surface latchkey-side authorisation failures
+                # immediately rather than waiting DRIVE_SLACK_TIMEOUT
+                # seconds for a timeout. The post-approve page renders
+                # the error banner verbatim; parse the visible text
+                # and raise so CI fails on the actual signal, not a
+                # timeout that happens to coincide.
+                with contextlib.suppress(Exception):
+                    body_text = await panel.evaluate("document.body.innerText")
+                    if "Authorization failed" in body_text or "No browser configured" in body_text:
+                        raise E2EFailure(
+                            f"{snap_stage2_post} shows authorization failure: " + body_text.replace("\n", " | ")[:400]
+                        )
+            # Kicks are sent from the main poll loop after a
+            # KICK_DELAY settle period; see slack-flow loop.
+            return
+        except E2EFailure:
+            raise
+        except Exception:
+            pass
 
 
 def main() -> int:
