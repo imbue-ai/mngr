@@ -141,10 +141,13 @@ def test_render_fragment_shows_verbs_rationale_and_target_choice(tmp_path: Path)
     assert "<html" not in body
     # Targeted request: both the general and the workspace-specific groups show,
     # and the general (non-targeted) read verb still appears alongside the
-    # targeted destroy verb.
+    # targeted destroy verb. The workspace-specific group shows the plain hint,
+    # not the broad-scope caution (which is reserved for target-less requests).
     assert "General permissions" in body
     assert "Workspace-specific permissions" in body
     assert PERM_WORKSPACES_READ in body
+    assert "These act on individual workspaces." in body
+    assert "c-warning-surface" not in body
 
 
 def test_render_fragment_without_target_offers_broad_only(tmp_path: Path) -> None:
@@ -163,19 +166,16 @@ def test_render_fragment_without_target_offers_broad_only(tmp_path: Path) -> Non
     # No target named: both groups still show (the workspace-specific verbs can
     # be granted), but the only possible scope is broad, so there is a single
     # pre-selected "All workspaces" radio and no per-workspace ("selected")
-    # option. The broad-scope caution shares a grid cell with the default hint
-    # and starts invisible -- the inbox shell JS reveals it (hiding the hint)
-    # only while a workspace-specific (data-targeted) box is checked.
+    # option. The broad-scope caution is shown in place of the plain hint.
     assert "General permissions" in body
     assert "Workspace-specific permissions" in body
     assert PERM_WORKSPACES_READ in body
     assert PERM_WORKSPACES_DESTROY in body
     assert 'name="target_scope" value="all"' in body
     assert 'value="selected"' not in body
-    assert 'id="workspace-broad-scope-warning"' in body
-    assert 'id="workspace-scope-hint"' in body
-    assert "invisible" in body
-    assert 'data-targeted="true"' in body
+    assert "c-warning-surface" in body
+    assert "all workspaces" in body
+    assert "These act on individual workspaces." not in body
 
 
 # -- apply_grant_request --

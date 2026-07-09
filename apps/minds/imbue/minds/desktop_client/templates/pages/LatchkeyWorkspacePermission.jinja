@@ -12,11 +12,8 @@
   The workspace-specific group is always shown. Its target radio depends on the
   request: when it named a target workspace the user chooses "Only this
   workspace" or "All workspaces"; when it named none, only a pre-selected "All
-  workspaces" option is offered and a caution notice under the group header
-  explains the grant can only be broad. That notice shares a fixed-height grid
-  cell with the default hint, and the inbox shell JS swaps their visibility --
-  revealing the caution only while at least one workspace-specific box is
-  checked -- without reflowing the checkboxes below.
+  workspaces" option is offered and a caution notice -- shown under the group
+  header in place of the usual hint -- explains the grant can only be broad.
 
   The form submits ``permissions`` (the verb checkboxes) and ``target_scope``
   (``selected`` | ``all``). The targeted verbs honor ``target_scope``; the
@@ -63,33 +60,23 @@
          single, pre-selected "All workspaces" option. #}
     <h2 class="type-label text-primary mt-6 mb-2">Workspace-specific permissions</h2>
     {% if show_target_choice %}
-      <p class="type-body text-primary mb-2">These act on a single workspace, chosen below.</p>
+      <p class="type-body text-primary mb-2">These act on individual workspaces.</p>
     {% else %}
       {# The request named no target workspace, so any of these the user grants
-         necessarily apply to all workspaces. The default hint and the
-         broad-scope caution are stacked in a single grid cell so the taller of
-         the two (the caution) fixes the slot height: the inbox shell JS
-         (updateApproveState) swaps their visibility -- revealing the caution
-         only while at least one workspace-specific box is checked -- without
-         ever reflowing the checkboxes below, so a box stays under the cursor
-         for a second (un-checking) click. #}
-      <div class="grid mb-2">
-        <p id="workspace-scope-hint" class="col-start-1 row-start-1 type-body text-primary">
-          These act on individual workspaces.
-        </p>
-        <Notice variant="warn" id="workspace-broad-scope-warning" class="col-start-1 row-start-1 invisible !my-0">
-          This request did not name a specific workspace, so any
-          workspace-specific permissions you grant will apply to
-          <span class="font-semibold">all workspaces</span> (current and future).
-          Grant them only if you intend that broad access.
-        </Notice>
-      </div>
+         necessarily apply to all workspaces. Shown in place of the usual hint,
+         the caution makes that explicit. #}
+      <Notice variant="warn">
+        This request did not name a specific workspace, so any
+        workspace-specific permissions you grant will apply to
+        <span class="font-semibold">all workspaces</span> (current and future).
+        Grant them only if you intend that broad access.
+      </Notice>
     {% endif %}
     <Card extra="space-y-3">
       {% for verb in verbs if verb.is_targeted %}
         <label class="flex items-start gap-2 cursor-pointer">
           <input type="checkbox" name="permissions" value="{{ verb.permission }}"
-                 class="mt-1 shrink-0" data-targeted="true"
+                 class="mt-1 shrink-0"
                  {% if verb.permission in checked_permissions %}checked{% endif %}>
           <span class="min-w-0">
             <code class="type-body font-mono text-primary">{{ verb.display_name }}</code>
