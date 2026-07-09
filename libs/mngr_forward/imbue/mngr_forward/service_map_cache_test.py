@@ -34,6 +34,15 @@ def test_load_corrupt_json_returns_empty(tmp_path: Path) -> None:
     assert ServiceMapCache(cache_path=cache_path).load() == {}
 
 
+def test_load_invalid_utf8_returns_empty(tmp_path: Path) -> None:
+    # A cache file with non-UTF-8 bytes is malformed; load must degrade to {}
+    # rather than leaking UnicodeDecodeError, since load runs on the forward
+    # startup critical path via resolver.seed_services.
+    cache_path = tmp_path / "service_map.json"
+    cache_path.write_bytes(b"\xff\xfe garbage")
+    assert ServiceMapCache(cache_path=cache_path).load() == {}
+
+
 def test_load_non_object_json_returns_empty(tmp_path: Path) -> None:
     cache_path = tmp_path / "service_map.json"
     cache_path.write_text('["a", "b"]')

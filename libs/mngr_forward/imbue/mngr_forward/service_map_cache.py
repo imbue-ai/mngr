@@ -44,7 +44,10 @@ class ServiceMapCache(FrozenModel):
         """
         try:
             raw = read_json_dict(self.cache_path)
-        except OSError as e:
+        except (OSError, UnicodeDecodeError) as e:
+            # OSError: unreadable file (permissions, IO). UnicodeDecodeError:
+            # non-UTF-8 bytes, which read_json_dict does not catch. Either way
+            # the file is unusable, so degrade to {} instead of breaking startup.
             logger.warning("Could not read forward service-map cache {} ({}); ignoring.", self.cache_path, e)
             return {}
         return _coerce_service_map(raw)
