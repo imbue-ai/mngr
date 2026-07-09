@@ -69,8 +69,11 @@ _CHROME_PATH_PATTERN: Final[re.Pattern[str]] = re.compile(r"^http://localhost:\d
 _INBOX_PATH_PATTERN: Final[re.Pattern[str]] = re.compile(r"^http://localhost:\d+/inbox(?:/|$|\?)")
 # The agent subdomain URL the create flow redirects to once the workspace's
 # ``system_interface`` is reachable. The desktop client wraps that origin in
-# the mngr_forward plugin, so the port may differ from the bare backend.
-_AGENT_SUBDOMAIN_PATTERN: Final[re.Pattern[str]] = re.compile(r"^http://agent-[a-f0-9]+\.localhost:\d+(?:/|$)")
+# the mngr_forward plugin, so the port may differ from the bare backend. The
+# scheme is ``https`` when the proxy serves TLS + HTTP/2 (the default) and
+# ``http`` otherwise, so accept both. (The bare minds backend origin stays
+# plain ``http`` -- see ``_BACKEND_ORIGIN_PATTERN``.)
+_AGENT_SUBDOMAIN_PATTERN: Final[re.Pattern[str]] = re.compile(r"^https?://agent-[a-f0-9]+\.localhost:\d+(?:/|$)")
 
 # Default env tier when nothing is activated. Staging's ``client.toml`` is
 # committed under apps/minds/imbue/minds/config/envs/staging/ so callers
