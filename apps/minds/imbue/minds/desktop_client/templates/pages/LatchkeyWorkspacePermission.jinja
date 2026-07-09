@@ -11,9 +11,10 @@
 
   The workspace-specific group is always shown. Its target radio depends on the
   request: when it named a target workspace the user chooses "Only this
-  workspace" or "All workspaces"; when it named none, a caution notice explains
-  the grant can only be broad and a single pre-selected "All workspaces" option
-  is offered.
+  workspace" or "All workspaces"; when it named none, only a pre-selected "All
+  workspaces" option is offered and a caution notice under the group header
+  explains the grant can only be broad. That notice is revealed by the inbox
+  shell JS only while at least one workspace-specific box is checked.
 
   The form submits ``permissions`` (the verb checkboxes) and ``target_scope``
   (``selected`` | ``all``). The targeted verbs honor ``target_scope``; the
@@ -63,12 +64,23 @@
       <p class="type-body text-primary mb-2">These act on a single workspace, chosen below.</p>
     {% else %}
       <p class="type-body text-primary mb-2">These act on individual workspaces.</p>
+      {# Broad-scope caution. The request named no target workspace, so any of
+         these the user grants necessarily apply to all workspaces. The inbox
+         shell JS (updateApproveState) reveals this only while at least one
+         workspace-specific box is checked -- an empty selection grants nothing
+         to warn about. #}
+      <Notice variant="warn" id="workspace-broad-scope-warning" class="hidden">
+        This request did not name a specific workspace, so any
+        workspace-specific permissions you grant will apply to
+        <span class="font-semibold">all workspaces</span> (current and future).
+        Grant them only if you intend that broad access.
+      </Notice>
     {% endif %}
     <Card extra="space-y-3">
       {% for verb in verbs if verb.is_targeted %}
         <label class="flex items-start gap-2 cursor-pointer">
           <input type="checkbox" name="permissions" value="{{ verb.permission }}"
-                 class="mt-1 shrink-0"
+                 class="mt-1 shrink-0" data-targeted="true"
                  {% if verb.permission in checked_permissions %}checked{% endif %}>
           <span class="min-w-0">
             <code class="type-body font-mono text-primary">{{ verb.display_name }}</code>
@@ -101,15 +113,9 @@
         </label>
       </Card>
     {% else %}
-      {# No target workspace named: the only possible scope is broad. Warn
-         clearly, then carry the choice through a single checked "All
-         workspaces" radio (submitting ``target_scope=all``). #}
-      <Notice variant="warn">
-        This request did not name a specific workspace, so any
-        workspace-specific permissions you grant will apply to
-        <span class="font-semibold">all workspaces</span> (current and future).
-        Grant them only if you intend that broad access.
-      </Notice>
+      {# No target workspace named: the only possible scope is broad. Carry the
+         choice through a single checked "All workspaces" radio (submitting
+         ``target_scope=all``); the caution above the checkboxes explains it. #}
       <Card extra="space-y-2">
         <label class="flex items-start gap-2 cursor-pointer">
           <input type="radio" name="target_scope" value="all" class="mt-1 shrink-0" checked>

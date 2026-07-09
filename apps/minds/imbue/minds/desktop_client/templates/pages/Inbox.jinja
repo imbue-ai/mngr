@@ -207,12 +207,27 @@
       });
     }
 
+    // The workspace (cross-workspace) dialog, when the request named no target
+    // workspace, carries a broad-scope caution above the workspace-specific
+    // checkboxes. Reveal it only while at least one such box is checked -- an
+    // empty selection grants nothing to warn about. Other dialogs lack the
+    // element and are left untouched.
+    function syncWorkspaceBroadScopeWarning() {
+      var warning = document.getElementById("workspace-broad-scope-warning");
+      if (!warning) return;
+      var form = document.getElementById("permissions-form");
+      var anyTargetedChecked =
+        !!(form && form.querySelector('input[name="permissions"][data-targeted]:checked'));
+      warning.classList.toggle("hidden", !anyTargetedChecked);
+    }
+
     function updateApproveState() {
       var form = document.getElementById("permissions-form");
       if (!form) return;
       var approveBtn = document.getElementById("permissions-approve-btn");
       if (!approveBtn) return;
       syncPermissionWildcardExclusivity();
+      syncWorkspaceBroadScopeWarning();
       var anyChecked = form.querySelector('input[name="permissions"]:checked') !== null;
       // The file-sharing dialog adds an editable path field. Its hidden
       // "permissions" checkbox is always checked, so gate Approve on the
