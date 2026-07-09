@@ -53,14 +53,26 @@
       .then(function (resp) { return resp.ok ? resp.json() : null; })
       .then(function (data) {
         if (!data) return;
+        var currentIds = {};
         (data.workspaces || []).forEach(function (workspace) {
           var agentId = workspace.agent_id || workspace.id;
           if (!agentId) return;
+          currentIds[agentId] = true;
           fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backups')
             .then(function (resp) { return resp.ok ? resp.json() : null; })
             .then(function (entry) { if (entry) ingestEntry(entry); })
             .catch(function () {});
         });
+        // Drop warnings for workspaces that no longer exist (e.g. destroyed),
+        // mirroring the per-refresh reset the old batch ingest performed.
+        var removedAny = false;
+        Object.keys(warningByAgentId).forEach(function (agentId) {
+          if (!currentIds[agentId]) {
+            delete warningByAgentId[agentId];
+            removedAny = true;
+          }
+        });
+        if (removedAny) notifyListeners();
       })
       .catch(function () {});
   }
