@@ -4,6 +4,46 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-08
+
+Fixed the workspace-recovery flow stranding users on a "Workspace unresponsive" page after their computer wakes from sleep, even when the workspace was healthy the whole time.
+
+Five changes to the recovery/probing logic:
+
+- The recovery page now runs a cheap liveness poll from the moment it opens and keeps it running under every state (including "Workspace unresponsive" and after a failed restart). The instant the workspace answers, the page returns you to it -- so a workspace that comes back on its own (e.g. after a wake) no longer leaves you stranded on a static verdict page.
+
+- A workspace health probe that times out is now treated as "no answer yet, keep checking" rather than as proof the workspace is down. A probe interrupted by the machine sleeping no longer produces a false "unresponsive" verdict.
+
+- The recovery page can now appear promptly when a workspace stops responding, instead of waiting for fresh discovery data first. The freshness check moved to where it actually matters -- deciding whether to show a restart verdict or auto-restart -- so a healthy workspace returns you home fast, while a genuinely-broken one still waits for trustworthy data before offering a restart. When that data hasn't arrived yet (or the probe timed out) the page shows a live "Reconnecting to your workspace" state that self-heals, rather than an indefinite loader with no recourse.
+
+- When the recovery page's own health request is dropped mid-flight -- most often because the machine slept and the browser aborted the in-flight fetch -- the page now shows the live "Reconnecting to your workspace" state and retries the probe, instead of dead-ending on a static "Workspace unresponsive" verdict. A dropped request is absence of an answer, not proof the workspace is down, so the page keeps checking and returns you home the instant the workspace responds.
+
+- The workspace health probe now re-reads the host's state at the moment it decides whether its classification is trustworthy, instead of using the state read before its slow in-container check. Previously, a discovery update landing during that check could open the freshness gate for a stale reading -- rendering a consent-gated "Workspace unresponsive" verdict (host supposedly still running) when the fresh data already showed the host fully stopped, a state that should instead trigger an automatic unattended restart.
+
+Permission request dialog now shows clear progress while an approval is being processed in the background (e.g. a browser sign-in for a Google Calendar or other integration). Clicking Approve disables both the Approve and Deny buttons and shows a spinner with an "Approving..." label until the approval succeeds or fails, so the user always has an indication that work is happening and cannot double-submit. If the approval fails or needs manual credentials, both buttons re-enable so the user can retry.
+
+Redact secrets from persisted logs.
+
+The `mngr create` subprocess is now given a log-safe process `name` (via the new `concurrency_group` `name` parameter) with the latchkey gateway password and permissions-override JWT masked, so those secrets no longer leak into the JSONL log's `thread_name` field (nor any `ProcessError` message). The same command's "Running:" log line already masks them.
+
+The `modal secret create` subprocess (used by `minds env` deploy tooling) is likewise named with its `KEY=VALUE` secret values masked, so raw Vault secrets no longer reach the thread name or error messages.
+
+The Electron backend log (`minds.log`, uploaded with bug reports) now masks the `mngr forward` preauth cookie -- a reusable, session-lifetime bearer token -- before writing backend stdout events to disk. (The single-use one-time login code is intentionally left as-is: it is spent immediately at session start.)
+
+# Docs: launch-to-msg CI freeze semantics
+
+Documented the new launch-to-msg CI pinning behavior in `docs/release.md` (step 4) and `docs/testing-overview.md`: the workflow's `commit_sha` / `template_ref` inputs accept a full 40-char SHA, branch, or tag, and are frozen to SHAs at run start — the frozen mngr SHA is what gets built and the frozen FCT SHA is what the agent is created from, so pushing to a branch after dispatch does not affect an in-flight run, and the `ref (sha)` values in the slack message are exactly what ran.
+
+Added a minds-tailored TMR mapper prompt at `apps/minds/tmr/mapper.j2`, used by the `tmr-minds` variant. It keeps the shared docstring-as-contract philosophy but drops the mngr-only tutorial-block guidance and calls out minds-specific setup blockers (a Docker daemon, a snapshot image, a deployed env, or secrets), which the agent flags with `FIXME(tmr)` and a BLOCKED status rather than hacking around.
+
+Adds Modal as a selectable compute provider in the create form (the "Modal (1-day ephemeral)" option, DIRECT mode -- the local machine authenticates to Modal with its own token). Selecting it shows a short note on how to authenticate (`uv tool install modal`, `modal token new`, or `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET`). The create wires up like the other remote providers (a `modal` host address plus the `main` + `modal` provisioning templates), and `bootstrap` writes a default `[providers.modal]` block (DIRECT, persistent) at startup.
+
+Fixes "Destroying..." spinning forever for cloud workspaces: the detached destroy subprocess (`mngr list | mngr destroy`) now inherits `MNGR_HOST_DIR`, like every other minds->mngr shell-out. Without it the destroy targeted the default host dir and silently found nothing to tear down.
+
+Fixes the "Restart workspace" recovery action for providers that cannot stop a host in place (Modal): a host-restart runs `mngr stop --stop-host` then `mngr start`, but `mngr stop --stop-host` raises `HostShutdownNotSupportedError` for such providers, which previously aborted the whole restart. The restart worker now treats that specific error as "skip the stop" and proceeds to `mngr start`, which restarts the host on its own (reconnect-if-alive, else recreate-from-snapshot). Provider-agnostic -- it keys off the error, not a hardcoded backend name. The stderr match now uses mngr's exported `HOST_SHUTDOWN_NOT_SUPPORTED_MESSAGE` constant (one shared source of truth) instead of a duplicated literal string.
+
+Modal deliberately gets no Stop/Resume/state-label lifecycle UI -- it behaves like the other cloud providers (aws/vultr/imbue_cloud), which also have no liveness UI. The reliable behaviors are: create a Modal workspace, destroy it, and reconnect to one that is still running. A Modal sandbox that has timed out may still appear in the list (there is no liveness polling to mark it dead); resuming a dead sandbox from a snapshot is intentionally not offered.
+
 ## 2026-07-07
 
 Bump Latchkey to 2.20.0.
