@@ -163,9 +163,9 @@ def test_render_fragment_without_target_offers_broad_only(tmp_path: Path) -> Non
     # No target named: both groups still show (the workspace-specific verbs can
     # be granted), but the only possible scope is broad, so there is a single
     # pre-selected "All workspaces" radio and no per-workspace ("selected")
-    # option. The broad-scope caution is present but starts hidden -- the inbox
-    # shell JS reveals it only while a workspace-specific (data-targeted) box is
-    # checked.
+    # option. The broad-scope caution shares a grid cell with the default hint
+    # and starts invisible -- the inbox shell JS reveals it (hiding the hint)
+    # only while a workspace-specific (data-targeted) box is checked.
     assert "General permissions" in body
     assert "Workspace-specific permissions" in body
     assert PERM_WORKSPACES_READ in body
@@ -173,7 +173,8 @@ def test_render_fragment_without_target_offers_broad_only(tmp_path: Path) -> Non
     assert 'name="target_scope" value="all"' in body
     assert 'value="selected"' not in body
     assert 'id="workspace-broad-scope-warning"' in body
-    assert "class=\"hidden" in body
+    assert 'id="workspace-scope-hint"' in body
+    assert "invisible" in body
     assert 'data-targeted="true"' in body
 
 
