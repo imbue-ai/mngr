@@ -5,7 +5,7 @@ module.exports = {
   id: '26032588hqdzk',
   icon: './electron/assets/icon.png',
   appPath: '.',
-  uploadSizeLimit: 600,
+  uploadSizeLimit: 650,
   nodeVersion: pkg.engines.node,
   pnpmVersion: pkg.engines.pnpm,
   extraResources: [{ from: 'resources/', to: '.' }],
