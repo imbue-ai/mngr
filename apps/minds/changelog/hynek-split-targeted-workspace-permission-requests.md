@@ -1,0 +1,3 @@
+The workspace (cross-workspace access) permission request dialog now splits the grantable actions into two clearly labeled groups: "General permissions" (which apply across all workspaces, e.g. listing/reading and creating workspaces) and "Workspace-specific permissions" (which act on a single chosen workspace, e.g. destroy, start/stop, SSH).
+
+When a request does not name a target workspace, the workspace-specific group and its target selector are now hidden entirely, since there is no way to pick which workspace those actions would apply to. This removes the previous confusion where non-workspace-specific checkboxes appeared alongside a per-workspace target choice that did not affect them.
