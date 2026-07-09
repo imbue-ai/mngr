@@ -41,7 +41,16 @@ class LimaCommandUnavailableError(ProviderUnavailableError):
     """
 
     def __init__(self, provider_name: ProviderInstanceName, reason: str) -> None:
-        super().__init__(provider_name, reason)
+        super().__init__(
+            provider_name,
+            reason,
+            user_help_text=(
+                "limactl is installed but a limactl command failed to run (it may have crashed). "
+                "This is often transient -- try again. If it persists, reinstall Lima: "
+                "https://lima-vm.io/docs/installation/"
+            ),
+            short_remediation="retry; reinstall Lima if it persists",
+        )
 
 
 class LimaConfigError(MngrError, ValueError):
