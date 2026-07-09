@@ -171,7 +171,10 @@ def test_prevent_exit_stack() -> None:
 
 
 def test_prevent_async_await() -> None:
-    rc.check_async_await(_DIR, snapshot(194))
+    # 198: +4 from the launch-to-msg e2e's deterministic CDP-target pick
+    # (pick_backend_page) -- the harness drives Electron via playwright's
+    # async API, so its helpers are necessarily async.
+    rc.check_async_await(_DIR, snapshot(198))
 
 
 # --- Hardcoded paths ---
