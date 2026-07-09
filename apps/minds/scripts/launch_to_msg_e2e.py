@@ -802,8 +802,8 @@ def _create_workspace_and_first_message(
     while time.time() < deadline and not done:
         stat = win.evaluate(
             """async (id) => {
-                const r = fetch('/api/v1/workspaces/operations/create/' + id);
-                return {status: r.status, body: r.text()};
+                const r = await fetch('/api/v1/workspaces/operations/create/' + id);
+                return {status: r.status, body: await r.text()};
             }""",
             creation_id,
         )
@@ -1594,8 +1594,8 @@ def run_e2e() -> int:
             while time.time() < destroy_deadline:
                 resp = win.evaluate(
                     """async (aid) => {
-                        const r = fetch('/api/v1/workspaces/operations/destroy/' + aid);
-                        return {status: r.status, body: r.text()};
+                        const r = await fetch('/api/v1/workspaces/operations/destroy/' + aid);
+                        return {status: r.status, body: await r.text()};
                     }""",
                     w2_agent_id,
                 )
