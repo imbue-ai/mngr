@@ -631,8 +631,17 @@ class DockerProviderInstance(BaseProviderInstance):
     def _get_container_ssh_port(self, container: docker.models.containers.Container) -> int:
         """Get the host-mapped SSH port for a container."""
         container.reload()
-        ports = container.ports
-        ssh_bindings = ports.get("22/tcp")
+        return self._read_container_ssh_port(container)
+
+    @staticmethod
+    def _read_container_ssh_port(container: docker.models.containers.Container) -> int:
+        """Read the host-mapped SSH port from the container's already-loaded attributes.
+
+        Callers that have just reloaded the container (e.g. via
+        ``_is_container_running``) can use this instead of
+        ``_get_container_ssh_port`` to avoid a second Docker API round-trip.
+        """
+        ssh_bindings = container.ports.get(f"{CONTAINER_SSH_PORT}/tcp")
         if not ssh_bindings:
             raise MngrError(f"Container {container.id} has no SSH port mapping")
         return int(ssh_bindings[0]["HostPort"])
@@ -696,7 +705,7 @@ class DockerProviderInstance(BaseProviderInstance):
 
         host_record = HostRecord(
             ssh_host=ssh_host,
-            ssh_port=ssh_port,
+            last_discovered_ssh_port=ssh_port,
             ssh_host_public_key=host_public_key,
             config=config,
             certified_host_data=host_data,
@@ -1119,6 +1128,51 @@ kill -TERM 1
                 )
             return
 
+    def _reconcile_recorded_ssh_port(
+        self,
+        container: docker.models.containers.Container,
+        host_record: HostRecord,
+        recorded_ssh_port: int,
+    ) -> int:
+        """Reconcile the recorded SSH port with the container's live port mapping.
+
+        Docker assigns randomly-published host ports at container start and does
+        not preserve them across a daemon restart (a reboot can even reshuffle
+        ports between containers), so the port persisted at create time is only
+        a hint. The container is ground truth: when the live mapping differs,
+        the record is rewritten with the live port so later connections target
+        the container instead of a dead (or wrong) port. Returns the effective
+        port to connect to.
+
+        Reads the port from the container's already-loaded attributes, so the
+        happy path (port unchanged) costs no extra Docker API call.
+        """
+        try:
+            live_ssh_port = self._read_container_ssh_port(container)
+        except MngrError as e:
+            # Reconciliation is best-effort healing: a container whose port
+            # mapping cannot be read right now (e.g. it stopped in the window
+            # since the caller's status check) must not break paths that
+            # previously worked, so keep the recorded port.
+            logger.warning("Could not read live SSH port for host {}: {}", host_record.certified_host_data.host_id, e)
+            return recorded_ssh_port
+
+        if live_ssh_port == recorded_ssh_port:
+            return recorded_ssh_port
+
+        logger.info(
+            "SSH port for host {} changed from {} to {} (Docker reassigns published ports when the daemon "
+            "restarts); updating host record",
+            host_record.certified_host_data.host_id,
+            recorded_ssh_port,
+            live_ssh_port,
+        )
+        updated_record = host_record.model_copy_update(
+            to_update(host_record.field_ref().last_discovered_ssh_port, live_ssh_port),
+        )
+        self._host_store.write_host_record(updated_record)
+        return live_ssh_port
+
     def _create_host_from_container(
         self,
         container: docker.models.containers.Container,
@@ -1126,6 +1180,11 @@ kill -TERM 1
         """Create a Host object from a running Docker container.
 
         Returns None if the host record doesn't exist.
+
+        The recorded SSH port is reconciled with the container's live port
+        mapping first (healing records that went stale across a Docker daemon
+        restart), so both connection setup and discovery converge on the live
+        port.
 
         If a cached Host already exists for this host_id and the SSH
         connection details (host, port, key) have not changed, the cached
@@ -1139,33 +1198,47 @@ kill -TERM 1
             logger.warning("Skipped container {}: no host record", container.short_id)
             return None
 
-        if host_record.ssh_host is None or host_record.ssh_port is None or host_record.ssh_host_public_key is None:
+        if (
+            host_record.ssh_host is None
+            or host_record.last_discovered_ssh_port is None
+            or host_record.ssh_host_public_key is None
+        ):
             logger.warning("Skipped container {}: missing SSH info (likely failed host)", container.short_id)
             return None
 
-        # Reuse the cached Host if the SSH details have not changed.
+        ssh_host = host_record.ssh_host
+        ssh_host_public_key = host_record.ssh_host_public_key
+        ssh_port = self._reconcile_recorded_ssh_port(container, host_record, host_record.last_discovered_ssh_port)
+
+        # Reuse the cached Host if the SSH details have not changed. A cached
+        # Host still holding a stale pre-reconciliation port fails this check
+        # and is replaced (the caller's cache eviction disconnects it).
         # This avoids creating a new pyinfra connector (and eventually a
         # new SSH connection) on every discovery poll when the underlying
         # container is the same.
         cached = self._host_by_id_cache.get(host_id)
         if isinstance(cached, Host):
             cached_name = cached.connector.name
-            expected_name = host_record.ssh_host
             cached_port = cached.connector.host.data.get("ssh_port")
-            if cached_name == expected_name and cached_port == host_record.ssh_port:
+            if cached_name == ssh_host and cached_port == ssh_port:
                 return cached
 
+        # known_hosts entries are keyed by [host]:port, and a daemon restart can
+        # hand this host a port that previously belonged to a different
+        # container -- add_host_to_known_hosts replaces such a stale entry (same
+        # key type) with this host's recorded key rather than failing
+        # verification against it.
         add_host_to_known_hosts(
             self._known_hosts_path,
-            host_record.ssh_host,
-            host_record.ssh_port,
-            host_record.ssh_host_public_key,
+            ssh_host,
+            ssh_port,
+            ssh_host_public_key,
         )
 
         private_key_path, _ = self._get_ssh_keypair()
         pyinfra_host = self._create_pyinfra_host(
-            host_record.ssh_host,
-            host_record.ssh_port,
+            ssh_host,
+            ssh_port,
             private_key_path,
         )
         connector = PyinfraConnector(pyinfra_host)
@@ -1451,6 +1524,11 @@ kill -TERM 1
                         "Stop the host first to restore from a snapshot.",
                         host_id,
                     )
+                # Install the (possibly freshly reconciled) Host in the cache so
+                # a stale cached Host on a dead port is disconnected instead of
+                # being served by later get_host calls (mirrors get_host and
+                # discover_hosts).
+                self._evict_cached_host(host_id, replacement=host_obj)
                 return host_obj
 
         # Check for failed host
@@ -2244,20 +2322,24 @@ kill -TERM 1
         if host_record is None:
             raise HostNotFoundError(self.name, host_id)
 
-        if host_record.ssh_host is None or host_record.ssh_port is None or host_record.ssh_host_public_key is None:
+        if (
+            host_record.ssh_host is None
+            or host_record.last_discovered_ssh_port is None
+            or host_record.ssh_host_public_key is None
+        ):
             raise MngrError(f"Cannot get connector for host {host_id}: host has no SSH info (likely a failed host)")
 
         add_host_to_known_hosts(
             self._known_hosts_path,
             host_record.ssh_host,
-            host_record.ssh_port,
+            host_record.last_discovered_ssh_port,
             host_record.ssh_host_public_key,
         )
 
         private_key_path, _ = self._get_ssh_keypair()
         return self._create_pyinfra_host(
             host_record.ssh_host,
-            host_record.ssh_port,
+            host_record.last_discovered_ssh_port,
             private_key_path,
         )
 
