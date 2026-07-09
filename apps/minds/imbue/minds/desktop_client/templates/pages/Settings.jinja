@@ -54,12 +54,24 @@
       panels.forEach(function (panel) {
         panel.classList.toggle('hidden', panel.getAttribute('data-settings-panel') !== name);
       });
+      // Remember the active section in the URL hash so a revoke's reload (or a
+      // manual refresh) restores the same tab instead of snapping to the first.
+      try { history.replaceState(null, '', '#' + name); } catch (e) {}
     }
     navButtons.forEach(function (btn) {
       btn.addEventListener('click', function () {
         selectSection(btn.getAttribute('data-settings-nav'));
       });
     });
+    // Restore the active section from the URL hash on load (survives the reload
+    // a revoke triggers). Falls back to the markup default (Connectors).
+    var sectionNames = Array.prototype.map.call(navButtons, function (btn) {
+      return btn.getAttribute('data-settings-nav');
+    });
+    var initialSection = (window.location.hash || '').replace(/^#/, '');
+    if (sectionNames.indexOf(initialSection) !== -1) {
+      selectSection(initialSection);
+    }
 
     // -- Error reporting toggles -----------------------------------------
     var reportToggle = document.getElementById('report-errors-toggle');
@@ -446,7 +458,7 @@
               {% endfor %}
             </div>
           {% else %}
-            <Notice variant="info">No workspace delegation has been granted yet.</Notice>
+            <Notice variant="info">No workspace management has been delegated to agents yet.</Notice>
           {% endif %}
         </section>
 

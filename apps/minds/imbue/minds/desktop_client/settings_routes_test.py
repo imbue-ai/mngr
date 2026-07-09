@@ -168,7 +168,7 @@ def test_settings_page_empty_state_when_no_grants(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     # Each category now has its own empty state.
-    assert "No connectors have been authorized yet." in response.text
+    assert "No connectors have been added yet." in response.text
 
 
 def test_revoke_service_for_workspace_removes_rule(tmp_path: Path) -> None:
@@ -237,8 +237,8 @@ def test_settings_page_shows_unavailable_notice_when_gateway_down(tmp_path: Path
     response = client.get("/settings")
 
     assert response.status_code == 200
-    assert "gateway is unavailable" in response.text
-    assert "No connectors have been authorized yet." not in response.text
+    assert "can't be loaded right now" in response.text
+    assert "No connectors have been added yet." not in response.text
 
 
 # -- File sharing --------------------------------------------------------------
