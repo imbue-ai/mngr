@@ -1297,7 +1297,7 @@ def _write_host_record_with_ssh_port(
             updated_at=now,
         ),
         ssh_host="127.0.0.1",
-        ssh_port=ssh_port,
+        last_discovered_ssh_port=ssh_port,
         ssh_host_public_key=_RECONCILE_HOST_PUBLIC_KEY,
     )
     provider._host_store.write_host_record(record)
@@ -1342,7 +1342,7 @@ def test_create_host_from_container_heals_stale_recorded_ssh_port(
 
     stored_record = provider._host_store.read_host_record(HostId(HOST_ID_A), use_cache=False)
     assert stored_record is not None
-    assert stored_record.ssh_port == _LIVE_SSH_PORT
+    assert stored_record.last_discovered_ssh_port == _LIVE_SSH_PORT
 
     assert f"changed from {_RECORDED_STALE_SSH_PORT} to {_LIVE_SSH_PORT}" in log_output.getvalue()
 
@@ -1451,6 +1451,6 @@ def test_port_reconciliation_keeps_recorded_port_when_live_mapping_unreadable(
 
     stored_record = provider._host_store.read_host_record(HostId(HOST_ID_A), use_cache=False)
     assert stored_record is not None
-    assert stored_record.ssh_port == _RECORDED_STALE_SSH_PORT
+    assert stored_record.last_discovered_ssh_port == _RECORDED_STALE_SSH_PORT
 
     assert "Could not read live SSH port" in log_output.getvalue()

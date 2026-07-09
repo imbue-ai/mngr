@@ -705,7 +705,7 @@ class DockerProviderInstance(BaseProviderInstance):
 
         host_record = HostRecord(
             ssh_host=ssh_host,
-            ssh_port=ssh_port,
+            last_discovered_ssh_port=ssh_port,
             ssh_host_public_key=host_public_key,
             config=config,
             certified_host_data=host_data,
@@ -1168,7 +1168,7 @@ kill -TERM 1
             live_ssh_port,
         )
         updated_record = host_record.model_copy_update(
-            to_update(host_record.field_ref().ssh_port, live_ssh_port),
+            to_update(host_record.field_ref().last_discovered_ssh_port, live_ssh_port),
         )
         self._host_store.write_host_record(updated_record)
         return live_ssh_port
@@ -1198,13 +1198,17 @@ kill -TERM 1
             logger.warning("Skipped container {}: no host record", container.short_id)
             return None
 
-        if host_record.ssh_host is None or host_record.ssh_port is None or host_record.ssh_host_public_key is None:
+        if (
+            host_record.ssh_host is None
+            or host_record.last_discovered_ssh_port is None
+            or host_record.ssh_host_public_key is None
+        ):
             logger.warning("Skipped container {}: missing SSH info (likely failed host)", container.short_id)
             return None
 
         ssh_host = host_record.ssh_host
         ssh_host_public_key = host_record.ssh_host_public_key
-        ssh_port = self._reconcile_recorded_ssh_port(container, host_record, host_record.ssh_port)
+        ssh_port = self._reconcile_recorded_ssh_port(container, host_record, host_record.last_discovered_ssh_port)
 
         # Reuse the cached Host if the SSH details have not changed. A cached
         # Host still holding a stale pre-reconciliation port fails this check
@@ -2318,20 +2322,24 @@ kill -TERM 1
         if host_record is None:
             raise HostNotFoundError(self.name, host_id)
 
-        if host_record.ssh_host is None or host_record.ssh_port is None or host_record.ssh_host_public_key is None:
+        if (
+            host_record.ssh_host is None
+            or host_record.last_discovered_ssh_port is None
+            or host_record.ssh_host_public_key is None
+        ):
             raise MngrError(f"Cannot get connector for host {host_id}: host has no SSH info (likely a failed host)")
 
         add_host_to_known_hosts(
             self._known_hosts_path,
             host_record.ssh_host,
-            host_record.ssh_port,
+            host_record.last_discovered_ssh_port,
             host_record.ssh_host_public_key,
         )
 
         private_key_path, _ = self._get_ssh_keypair()
         return self._create_pyinfra_host(
             host_record.ssh_host,
-            host_record.ssh_port,
+            host_record.last_discovered_ssh_port,
             private_key_path,
         )
 

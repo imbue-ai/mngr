@@ -145,10 +145,10 @@ def test_get_host_heals_stale_recorded_ssh_port(docker_provider: DockerProviderI
     host = docker_provider.create_host(HostName("test-stale-port"))
     record = docker_provider._host_store.read_host_record(host.id, use_cache=False)
     assert record is not None
-    live_port = record.ssh_port
+    live_port = record.last_discovered_ssh_port
     assert live_port is not None
 
-    stale_record = record.model_copy_update(to_update(record.field_ref().ssh_port, live_port + 1))
+    stale_record = record.model_copy_update(to_update(record.field_ref().last_discovered_ssh_port, live_port + 1))
     docker_provider._host_store.write_host_record(stale_record)
     # Drop all cached handles: after a reboot, a fresh process starts with none.
     docker_provider.on_connection_error(host.id)
@@ -161,7 +161,7 @@ def test_get_host_heals_stale_recorded_ssh_port(docker_provider: DockerProviderI
 
     healed_record = docker_provider._host_store.read_host_record(host.id, use_cache=False)
     assert healed_record is not None
-    assert healed_record.ssh_port == live_port
+    assert healed_record.last_discovered_ssh_port == live_port
 
 
 @pytest.mark.docker
