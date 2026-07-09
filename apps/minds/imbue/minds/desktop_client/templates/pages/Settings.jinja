@@ -252,16 +252,18 @@
 </script>
 {% endset %}
 <Base title="Settings" scripts={{ _scripts }}>
-  <div class="max-w-[960px] mx-auto px-6 py-12">
-    <h1 class="type-heading-lg text-primary mb-6">Settings</h1>
-    <div class="flex gap-8 items-start">
-      {# Left nav #}
-      {# Both entries share identical base classes (notably no ``bg-transparent``,
-         which would beat the toggled-on ``bg-fill-hover`` and leave the active
-         entry un-highlighted); ``selectSection`` in the page script drives the
-         active state on both by toggling ``bg-fill-hover`` / ``text-primary`` /
-         ``text-secondary``. Permissions starts active. #}
-      <nav class="w-48 shrink-0 flex flex-col gap-0.5 sticky top-8 self-start" aria-label="Settings sections">
+  <div class="h-screen flex flex-col overflow-hidden">
+    <div class="w-full max-w-[960px] mx-auto px-6 pt-12 pb-6 shrink-0">
+      <h1 class="type-heading-lg text-primary">Settings</h1>
+    </div>
+    <div class="w-full max-w-[960px] mx-auto px-6 flex gap-8 flex-1 min-h-0">
+      {# Left column: fixed (does not scroll); nav at the top and "Back to
+         workspaces" pinned to the bottom via ``mt-auto``. Nav entries share
+         identical base classes (notably no ``bg-transparent``, which would beat
+         the toggled-on ``bg-fill-hover`` and leave the active entry
+         un-highlighted); ``selectSection`` in the page script toggles state. #}
+      <div class="w-48 shrink-0 flex flex-col pb-12">
+        <nav class="flex flex-col gap-0.5" aria-label="Settings sections">
         <button type="button" data-settings-nav="connectors"
                 class="flex items-center h-8 px-2 rounded-md cursor-pointer type-body text-left border-0 hover:text-primary hover:bg-fill-hover bg-fill-hover text-primary">
           Connectors
@@ -278,16 +280,19 @@
                 class="flex items-center h-8 px-2 rounded-md cursor-pointer type-body text-left border-0 hover:text-primary hover:bg-fill-hover text-secondary">
           Error reporting
         </button>
-      </nav>
+        </nav>
+        <div class="mt-auto pt-6"><Link href="/" extra="type-helper">&larr; Back to workspaces</Link></div>
+      </div>
 
-      {# Right content #}
-      <div class="flex-1 min-w-0">
+      {# Right column: the only area that scrolls. #}
+      <div class="flex-1 min-w-0 overflow-y-auto pb-12">
                 {# -- Connectors panel (predefined / catalog services the agent connects to) -- #}
         <section data-settings-panel="connectors">
-          <h2 class="type-heading text-primary mb-2">Connectors</h2>
-          <p class="type-helper text-tertiary mb-6">
-            Third-party services your agents have connected to. Revoking removes access; your saved
-            sign-in is kept, and agents can request it again later.
+          <h2 class="type-heading-lg text-primary mb-2">Connectors</h2>
+          <p class="type-body text-secondary mb-6">
+            Third-party services your agents have connected to. To connect a new one, just ask an
+            agent in a workspace to use it. Revoking here removes access -- your saved sign-in is
+            kept, so agents can reconnect later.
           </p>
           {% if permissions_unavailable %}
             <Notice variant="warn">
@@ -340,14 +345,15 @@
         {# -- File sharing panel -- #}
         <section data-settings-panel="file-sharing" class="hidden">
           <div class="flex items-center justify-between gap-3 mb-2">
-            <h2 class="type-heading text-primary">File sharing</h2>
+            <h2 class="type-heading-lg text-primary">File sharing</h2>
             {% if file_sharing_grants %}
               <Button variant="ghost" size="md" class="remove-all-fs-btn">Revoke all</Button>
             {% endif %}
           </div>
-          <p class="type-helper text-tertiary mb-6">
-            Local files and folders your agents can read or write over the shared file mount.
-            Revoking removes access; agents can request it again later.
+          <p class="type-body text-secondary mb-6">
+            Files and folders on this machine that your agents can read or write. To share a new
+            location, ask an agent in a workspace to access it. Revoking removes access; agents can
+            ask again later.
           </p>
           {% if permissions_unavailable %}
             <Notice variant="warn">
@@ -389,11 +395,12 @@
 
         {# -- Workspace delegation panel (agents managing other workspaces), grouped by target -- #}
         <section data-settings-panel="workspace-delegation" class="hidden">
-          <h2 class="type-heading text-primary mb-2">Workspace delegation</h2>
-          <p class="type-helper text-tertiary mb-6">
-            Access you've granted agents in one workspace to manage other workspaces -- listing,
-            creating, destroying, SSH, health checks, and more -- grouped by the workspace being
-            managed. Revoking removes it; agents can request it again later.
+          <h2 class="type-heading-lg text-primary mb-2">Workspace delegation</h2>
+          <p class="type-body text-secondary mb-6">
+            Access you've granted agents in one workspace to manage other workspaces (listing,
+            creating, destroying, SSH, health checks, and more), grouped by the workspace being
+            managed. To grant more, ask an agent to perform the operation on the target workspace.
+            Revoking removes it; agents can ask again later.
           </p>
           {% if permissions_unavailable %}
             <Notice variant="warn">
@@ -445,8 +452,8 @@
 
         {# -- Error reporting panel -- #}
         <section data-settings-panel="error-reporting" class="hidden">
-          <h2 class="type-heading text-primary mb-2">Error reporting</h2>
-          <p class="type-helper text-tertiary mb-3">Applies to this device, regardless of which account is signed in.</p>
+          <h2 class="type-heading-lg text-primary mb-2">Error reporting</h2>
+          <p class="type-body text-secondary mb-3">Applies to this device, regardless of which account is signed in.</p>
           <label class="flex items-start justify-between gap-3 py-3 border-b border-subtle cursor-pointer">
             <span>
               <span class="type-body text-primary font-semibold">Report unexpected errors</span>
@@ -467,8 +474,6 @@
         </section>
       </div>
     </div>
-
-    <div class="mt-8"><Link href="/" extra="type-helper">&larr; Back to workspaces</Link></div>
   </div>
 
   <Modal id="revoke-dialog" card_extra="text-left">
