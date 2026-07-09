@@ -18,6 +18,7 @@ import shutil
 import signal
 import tempfile
 import threading
+from collections.abc import Callable
 from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -28,6 +29,7 @@ from datetime import timezone
 from pathlib import Path
 from typing import Any
 from typing import Final
+from typing import TypeVar
 from urllib.parse import urlencode
 from uuid import uuid4
 
@@ -768,60 +770,111 @@ def _bake_one_slice(
         return {"host_name": host_name, "server_id": str(server.id), "status": "failed", "error": str(exc)}
 
 
-def _bake_into_outcomes(
+# The per-item result type produced by a bounded fan-out's workers (bake and
+# destroy outcomes today).
+OutcomeT = TypeVar("OutcomeT")
+
+
+def _run_worker_into_outcomes(
     *,
-    server: BareMetalServer,
-    sizing: dict[str, int],
-    lease_attributes: dict[str, Any],
-    region: str,
-    env_name: str | None,
-    workspace_dir: Path,
-    pool_public_key: str,
-    private_key_path: Path,
-    database_url: str,
-    port_range_start: int,
-    port_range_end: int,
-    is_deferred_install_wait_skipped: bool,
-    fct_cache_tag: str | None,
+    worker: Callable[..., OutcomeT],
+    worker_kwargs: Mapping[str, Any],
     semaphore: "threading.Semaphore",
     total: int,
-    outcomes: list[dict[str, Any]],
+    progress_noun: str,
+    describe_outcome: Callable[[OutcomeT], str],
+    outcomes: list[OutcomeT],
     outcomes_lock: "threading.Lock",
 ) -> None:
-    """Thread target: bake one slice under the concurrency semaphore, recording progress.
+    """Thread target: run one outcome worker under the concurrency semaphore, recording progress.
 
-    The semaphore caps how many bakes run at once (the rest block here until a slot
-    frees). Each bake has its own per-create timeout, so one slice failing or timing
-    out releases its slot and lets the queued ones proceed -- it never aborts the rest.
+    The semaphore caps how many workers run at once (the rest block here until a
+    slot frees). Workers return their outcome instead of raising, so one item
+    failing never aborts the rest.
     """
     with semaphore:
-        outcome = _bake_one_slice(
-            server=server,
-            sizing=sizing,
-            lease_attributes=lease_attributes,
-            region=region,
-            env_name=env_name,
-            workspace_dir=workspace_dir,
-            pool_public_key=pool_public_key,
-            private_key_path=private_key_path,
-            database_url=database_url,
-            port_range_start=port_range_start,
-            port_range_end=port_range_end,
-            is_deferred_install_wait_skipped=is_deferred_install_wait_skipped,
-            fct_cache_tag=fct_cache_tag,
-        )
+        outcome = worker(**worker_kwargs)
     with outcomes_lock:
         outcomes.append(outcome)
         done = len(outcomes)
-        succeeded_so_far = sum(1 for entry in outcomes if entry.get("status") == "succeeded")
-    logger.info(
-        "Slice bake progress: {}/{} done ({} succeeded) -- {} {}",
-        done,
-        total,
-        succeeded_so_far,
-        outcome.get("host_name"),
-        outcome.get("status"),
-    )
+    logger.info("{} progress: {}/{} done -- {}", progress_noun, done, total, describe_outcome(outcome))
+
+
+def run_outcome_workers_in_bounded_threads(
+    *,
+    worker: Callable[..., OutcomeT],
+    worker_kwargs_list: Sequence[Mapping[str, Any]],
+    max_concurrency: int,
+    thread_name_prefix: str,
+    progress_noun: str,
+    describe_outcome: Callable[[OutcomeT], str],
+    # Invoked once if the join loop is interrupted (e.g. the bake's SIGTERM-raised
+    # termination), before the threads are re-joined and the exception re-raised --
+    # the caller's chance to kill in-flight worker subprocesses so the re-join can
+    # finish. None: interruptions propagate immediately.
+    on_join_interrupted: Callable[[], None] | None,
+) -> list[OutcomeT]:
+    """Run one worker call per kwargs mapping in parallel threads, at most ``max_concurrency`` at once.
+
+    The shared fan-out used by both the slice bake and the pool-host destroy.
+    Returns the outcomes in completion order. Workers must return their outcome
+    rather than raising -- an exception escaping a worker aborts the whole batch
+    at join time (``ObservableThread.join`` re-raises it).
+    """
+    outcomes: list[OutcomeT] = []
+    outcomes_lock = threading.Lock()
+    worker_semaphore = threading.Semaphore(max_concurrency)
+    threads = [
+        ObservableThread(
+            target=_run_worker_into_outcomes,
+            kwargs=dict(
+                worker=worker,
+                worker_kwargs=worker_kwargs,
+                semaphore=worker_semaphore,
+                total=len(worker_kwargs_list),
+                progress_noun=progress_noun,
+                describe_outcome=describe_outcome,
+                outcomes=outcomes,
+                outcomes_lock=outcomes_lock,
+            ),
+            name=f"{thread_name_prefix}-{idx}",
+        )
+        for idx, worker_kwargs in enumerate(worker_kwargs_list)
+    ]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    except BaseException:
+        if on_join_interrupted is not None:
+            on_join_interrupted()
+            for thread in threads:
+                # An interruption during the start loop can leave later threads
+                # never-started; joining those would raise a second error.
+                if thread.ident is not None:
+                    thread.join()
+        raise
+    return outcomes
+
+
+def _describe_bake_outcome(outcome: dict[str, Any]) -> str:
+    return f"{outcome.get('host_name')} {outcome.get('status')}"
+
+
+def _handle_bake_join_interruption(is_main_thread: bool) -> None:
+    """React to the bake fan-out's join loop being interrupted (a SIGTERM/SIGINT-raised error).
+
+    Without this, the in-flight ``mngr create`` workers would be reparented and keep
+    carving VMs after we exit. Ignore further signals, then kill the workers so no
+    new VM appears; the fan-out re-joins the worker threads afterward and the bake's
+    ``finally`` reaps the orphans.
+    """
+    if is_main_thread:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+    logger.warning("Slice bake terminated by signal; killing in-flight workers before reap")
+    _kill_bake_worker_processes()
 
 
 def _raise_on_bake_termination_signal(signum: int, _frame: object) -> None:
@@ -1102,31 +1155,8 @@ def _run_pool_host_destroy_steps(
     return outcome
 
 
-def _destroy_into_outcomes(
-    *,
-    pool_host_id: str,
-    database_url: str,
-    private_key_path: Path | None,
-    eligible_statuses: tuple[str, ...],
-    is_row_drop_only: bool,
-    semaphore: "threading.Semaphore",
-    total: int,
-    outcome_by_id: dict[str, dict[str, Any]],
-    outcomes_lock: "threading.Lock",
-) -> None:
-    """Thread target: destroy one pool host under the concurrency semaphore, recording progress."""
-    with semaphore:
-        outcome = _destroy_one_pool_host(
-            pool_host_id=pool_host_id,
-            database_url=database_url,
-            private_key_path=private_key_path,
-            eligible_statuses=eligible_statuses,
-            is_row_drop_only=is_row_drop_only,
-        )
-    with outcomes_lock:
-        outcome_by_id[pool_host_id] = outcome
-        done = len(outcome_by_id)
-    logger.info("Pool host destroy progress: {}/{} done -- {} {}", done, total, pool_host_id, outcome.get("status"))
+def _describe_destroy_outcome(outcome: dict[str, Any]) -> str:
+    return f"{outcome.get('pool_host_id')} {outcome.get('status')}"
 
 
 def destroy_pool_hosts_in_parallel(
@@ -1146,35 +1176,29 @@ def destroy_pool_hosts_in_parallel(
     if max_concurrency <= 0:
         raise click.UsageError("--max-concurrency must be positive")
     unique_ids = list(dict.fromkeys(pool_host_ids))
-    outcome_by_id: dict[str, dict[str, Any]] = {}
-    outcomes_lock = threading.Lock()
-    destroy_semaphore = threading.Semaphore(max_concurrency)
+    logger.info("Destroying {} pool host(s) ({} at a time)", len(unique_ids), max_concurrency)
     # A row-only drop never SSHes a box, so it must not require POOL_SSH_PRIVATE_KEY.
     key_path_context = nullcontext(None) if is_row_drop_only else _pool_private_key_path()
     with key_path_context as private_key_path:
-        threads = [
-            ObservableThread(
-                target=_destroy_into_outcomes,
-                kwargs=dict(
+        outcomes = run_outcome_workers_in_bounded_threads(
+            worker=_destroy_one_pool_host,
+            worker_kwargs_list=[
+                dict(
                     pool_host_id=pool_host_id,
                     database_url=database_url,
                     private_key_path=private_key_path,
                     eligible_statuses=eligible_statuses,
                     is_row_drop_only=is_row_drop_only,
-                    semaphore=destroy_semaphore,
-                    total=len(unique_ids),
-                    outcome_by_id=outcome_by_id,
-                    outcomes_lock=outcomes_lock,
-                ),
-                name=f"destroy-{idx}",
-            )
-            for idx, pool_host_id in enumerate(unique_ids)
-        ]
-        logger.info("Destroying {} pool host(s) ({} at a time)", len(unique_ids), max_concurrency)
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
+                )
+                for pool_host_id in unique_ids
+            ],
+            max_concurrency=max_concurrency,
+            thread_name_prefix="destroy",
+            progress_noun="Pool host destroy",
+            describe_outcome=_describe_destroy_outcome,
+            on_join_interrupted=None,
+        )
+    outcome_by_id = {outcome["pool_host_id"]: outcome for outcome in outcomes}
     return [outcome_by_id[pool_host_id] for pool_host_id in unique_ids]
 
 
@@ -1374,41 +1398,27 @@ def allocate_slices(
         # mutable content under a branch label, so they always build (fct_cache_tag=None).
         repo_branch_or_tag = lease_attributes.get("repo_branch_or_tag")
         fct_cache_tag = f"fct:{repo_branch_or_tag}" if (is_from_tag and repo_branch_or_tag) else None
-        # Spawn one thread per slice but cap how many bake at once with a semaphore
-        # (``max_concurrency``): each thread blocks on it before its ``mngr create``,
-        # so the box is never contended by more than K simultaneous carves+builds
+        # One worker per slice, capped at ``max_concurrency`` at once by the shared
+        # fan-out: each bake blocks on the semaphore before its ``mngr create``, so
+        # the box is never contended by more than K simultaneous carves+builds
         # (which would push each create past its timeout). Every bake is handed the
         # FULL box port range: the on-box reservation lock makes concurrent carves
         # (this env's and other envs') pick distinct free ports from it.
-        outcomes: list[dict[str, Any]] = []
-        outcomes_lock = threading.Lock()
-        bake_semaphore = threading.Semaphore(max_concurrency)
-        threads = [
-            ObservableThread(
-                target=_bake_into_outcomes,
-                kwargs=dict(
-                    server=server,
-                    sizing=sizing,
-                    lease_attributes=lease_attributes,
-                    region=region,
-                    env_name=env_name,
-                    workspace_dir=workspace_dir,
-                    pool_public_key=pool_public_key,
-                    private_key_path=private_key_path,
-                    database_url=database_url,
-                    port_range_start=DEFAULT_SLICE_PORT_RANGE_START,
-                    port_range_end=DEFAULT_SLICE_PORT_RANGE_END,
-                    is_deferred_install_wait_skipped=is_deferred_install_wait_skipped,
-                    fct_cache_tag=fct_cache_tag,
-                    semaphore=bake_semaphore,
-                    total=count,
-                    outcomes=outcomes,
-                    outcomes_lock=outcomes_lock,
-                ),
-                name=f"bake-{idx}",
-            )
-            for idx in range(count)
-        ]
+        bake_worker_kwargs = dict(
+            server=server,
+            sizing=sizing,
+            lease_attributes=lease_attributes,
+            region=region,
+            env_name=env_name,
+            workspace_dir=workspace_dir,
+            pool_public_key=pool_public_key,
+            private_key_path=private_key_path,
+            database_url=database_url,
+            port_range_start=DEFAULT_SLICE_PORT_RANGE_START,
+            port_range_end=DEFAULT_SLICE_PORT_RANGE_END,
+            is_deferred_install_wait_skipped=is_deferred_install_wait_skipped,
+            fct_cache_tag=fct_cache_tag,
+        )
         logger.info("Baking {} slice(s) on {} ({} at a time)", count, server.public_address, max_concurrency)
 
         # ``signal.signal`` only works on the main thread; the admin CLI always runs
@@ -1418,23 +1428,21 @@ def allocate_slices(
         previous_sigterm = signal.signal(signal.SIGTERM, _raise_on_bake_termination_signal) if is_main_thread else None
         previous_sigint = signal.signal(signal.SIGINT, _raise_on_bake_termination_signal) if is_main_thread else None
         try:
-            for thread in threads:
-                thread.start()
-            for thread in threads:
-                thread.join()
+            outcomes = run_outcome_workers_in_bounded_threads(
+                worker=_bake_one_slice,
+                worker_kwargs_list=[bake_worker_kwargs for _ in range(count)],
+                max_concurrency=max_concurrency,
+                thread_name_prefix="bake",
+                progress_noun="Slice bake",
+                describe_outcome=_describe_bake_outcome,
+                on_join_interrupted=lambda: _handle_bake_join_interruption(is_main_thread),
+            )
         except SliceBakeTerminatedError:
             # Top-level kill (e.g. the minds wrapper's subprocess timeout SIGTERMs us).
-            # Without this, the workers would be reparented and keep carving VMs. Ignore
-            # further signals, kill the in-flight workers so no new VM is carved, and let
-            # their threads settle; the finally reaps the orphans. Exit non-zero so the
-            # caller sees the failure.
-            if is_main_thread:
-                signal.signal(signal.SIGTERM, signal.SIG_IGN)
-                signal.signal(signal.SIGINT, signal.SIG_IGN)
-            logger.warning("Slice bake terminated by signal; killing in-flight workers before reap")
-            _kill_bake_worker_processes()
-            for thread in threads:
-                thread.join()
+            # The fan-out's on_join_interrupted hook has already ignored further
+            # signals, killed the in-flight workers (so no new VM is carved), and let
+            # their threads settle; the finally reaps the orphans. Exit non-zero so
+            # the caller sees the failure.
             raise SystemExit(1) from None
         finally:
             # Reap VMs left orphaned by a killed/timed-out create (carved but never

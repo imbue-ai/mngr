@@ -1,7 +1,9 @@
 import subprocess
+import threading
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from typing import Any
 
 import click
 import pytest
@@ -16,6 +18,7 @@ from imbue.mngr_imbue_cloud.cli.server import build_pool_host_destroy_report
 from imbue.mngr_imbue_cloud.cli.server import build_registered_server
 from imbue.mngr_imbue_cloud.cli.server import compute_server_slice_sizing
 from imbue.mngr_imbue_cloud.cli.server import destroy_pool_hosts_in_parallel
+from imbue.mngr_imbue_cloud.cli.server import run_outcome_workers_in_bounded_threads
 from imbue.mngr_imbue_cloud.cli.server import server
 from imbue.mngr_imbue_cloud.cli.server import slice_advertised_attributes
 from imbue.mngr_imbue_cloud.data_types import BareMetalServer
@@ -224,3 +227,36 @@ def test_destroy_worker_turns_db_errors_into_failed_outcomes() -> None:
     )
     assert outcome["status"] == "failed"
     assert outcome["pool_host_id"] == "11111111-1111-1111-1111-111111111111"
+
+
+def test_bounded_fan_out_caps_concurrency_and_collects_all_outcomes() -> None:
+    """The shared fan-out runs at most max_concurrency workers at once and returns every outcome.
+
+    The Barrier(2) forces each admitted pair to overlap (so the cap is actually
+    exercised, not just scheduled around), and the counter asserts the semaphore
+    never admits more than the cap.
+    """
+    barrier = threading.Barrier(2)
+    concurrency_lock = threading.Lock()
+    concurrency_state = {"current": 0, "max": 0}
+
+    def worker(item: int) -> dict[str, Any]:
+        with concurrency_lock:
+            concurrency_state["current"] += 1
+            concurrency_state["max"] = max(concurrency_state["max"], concurrency_state["current"])
+        barrier.wait(timeout=30)
+        with concurrency_lock:
+            concurrency_state["current"] -= 1
+        return {"item": item, "status": "done"}
+
+    outcomes = run_outcome_workers_in_bounded_threads(
+        worker=worker,
+        worker_kwargs_list=[dict(item=idx) for idx in range(4)],
+        max_concurrency=2,
+        thread_name_prefix="fanout-test",
+        progress_noun="Fan-out test",
+        describe_outcome=lambda outcome: str(outcome["item"]),
+        on_join_interrupted=None,
+    )
+    assert sorted(outcome["item"] for outcome in outcomes) == [0, 1, 2, 3]
+    assert concurrency_state["max"] == 2
