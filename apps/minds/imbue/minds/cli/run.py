@@ -229,6 +229,9 @@ def run(
 
     # Bootstrap couldn't write provider entries without the connector URL,
     # so the reconcile happens here once we've loaded the client config.
+    # Its "settings modified" return is deliberately unused: the latchkey
+    # forward supervisor is restarted unconditionally below, so any provider-set
+    # change written here is picked up by the fresh observe process.
     reconcile_imbue_cloud_providers_from_sessions(connector_url_str, root_name=root_name)
 
     auth_store = FileAuthStore(data_directory=paths.auth_dir)
