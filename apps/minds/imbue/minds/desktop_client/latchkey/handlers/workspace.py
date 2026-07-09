@@ -170,11 +170,12 @@ class WorkspacePermissionGrantHandler(RequestEventHandler):
         # Pre-check the verbs the agent requested (intersected with the known
         # verb catalog); the user may broaden or narrow in the dialog.
         checked = tuple(verb.permission for verb in WORKSPACE_VERBS if verb.permission in requested)
-        # The dialog splits the verbs into a "general" (non-targeted) group that
-        # always appears and a "workspace-specific" (targeted) group shown only
-        # when the request names a target workspace. Offer the all-vs-selected
-        # choice on the same condition: with no named target there is no way to
-        # pick one, so the targeted group (and its radio) is omitted entirely.
+        # The dialog splits the verbs into a "general" (non-targeted) group and
+        # a "workspace-specific" (targeted) group; both always appear. Offer the
+        # all-vs-selected choice only when the request names a target workspace.
+        # With no named target the targeted verbs can still be granted, but only
+        # broadly ("all"), which the dialog makes explicit via a caution notice
+        # and a single pre-selected "All workspaces" option.
         return render_workspace_permission_dialog(
             agent_id=req_event.agent_id,
             request_id=str(req_event.event_id),
