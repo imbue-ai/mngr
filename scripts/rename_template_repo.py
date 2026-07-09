@@ -1,10 +1,15 @@
 """One-shot migration tool that renames the forever-claude-template repo to a new name.
 
-Given the new name on the command line, derives every case form (kebab, snake,
-SNAKE_UPPER, Title, Pascal, and a compact single token that replaces the ``fct``
-abbreviation), rewrites all live references across this monorepo and an optional
-template checkout, renames files and directories whose names embed the old name,
-and can rename the GitHub repo itself.
+Given the new name (and optionally a shorthand that replaces the ``fct``
+abbreviation), derives every case form, rewrites all live references across this
+monorepo and an optional template checkout, renames files and directories whose
+names embed the old name, and can rename the GitHub repo itself.
+
+The shorthand is applied context-sensitively: snake_case next to ``_`` and for
+bare identifiers (``$FCT``, ``fct=""``), kebab-case next to ``-`` or ``:``
+(``fct-seed``, ``fct:<tag>``). A cleanup pass collapses word duplication the
+rename introduces (``DEFAULT_DEFAULT_WORKSPACE_TEMPLATE`` ->
+``DEFAULT_WORKSPACE_TEMPLATE``) and fixes a/an article agreement.
 
 Dry-run by default; ``--apply`` edits in place. Idempotent: once applied, a rerun
 finds nothing to change. ``--check`` verifies that no live references remain.
@@ -14,11 +19,14 @@ Reported but never rewritten: changelog entries and consolidated CHANGELOG files
 via ``just sync-vendor-mngr``), and ``uv.lock`` (regenerate with ``uv lock``).
 
 Usage:
-    uv run python scripts/rename_template_repo.py --new-name mindstem
-    uv run python scripts/rename_template_repo.py --new-name mindstem \\
+    uv run python scripts/rename_template_repo.py --new-name default-workspace-template \\
+        --new-abbreviation "workspace template"
+    uv run python scripts/rename_template_repo.py --new-name default-workspace-template \\
+        --new-abbreviation "workspace template" \\
         --template-dir ~/Developer/imbue/forever-claude-template --show-diff
-    uv run python scripts/rename_template_repo.py --new-name mindstem --apply --rename-github
-    uv run python scripts/rename_template_repo.py --new-name mindstem --check
+    uv run python scripts/rename_template_repo.py --new-name default-workspace-template \\
+        --new-abbreviation "workspace template" --apply --rename-github
+    uv run python scripts/rename_template_repo.py --new-name default-workspace-template --check
 """
 
 import difflib
@@ -78,17 +86,22 @@ _LEFTOVER_PATTERN: Final[str] = (
     r"(?i)forever[-_ ]?claude|" + _ABBREVIATION_PREFIX + _OLD_ABBREVIATION + _ABBREVIATION_SUFFIX
 )
 
+_VOWELS: Final[frozenset[str]] = frozenset("aeiou")
+
 
 class NameForms(FrozenModel):
-    """Every case form of the new name that the rewrite needs."""
+    """Every case form of the new name and its shorthand that the rewrite needs."""
 
-    kebab: str = Field(description="Repo slug, e.g. `mind-stem`")
-    snake: str = Field(description="e.g. `mind_stem`")
-    snake_upper: str = Field(description="e.g. `MIND_STEM`")
-    title: str = Field(description="e.g. `Mind Stem`")
-    pascal: str = Field(description="e.g. `MindStem`")
-    compact: str = Field(description="Single token replacing `fct`, e.g. `mindstem`")
-    compact_upper: str = Field(description="e.g. `MINDSTEM`, replacing `FCT`")
+    kebab: str = Field(description="Repo slug, e.g. `default-workspace-template`")
+    snake: str = Field(description="e.g. `default_workspace_template`")
+    snake_upper: str = Field(description="e.g. `DEFAULT_WORKSPACE_TEMPLATE`")
+    title: str = Field(description="e.g. `Default Workspace Template`")
+    pascal: str = Field(description="e.g. `DefaultWorkspaceTemplate`")
+    first_word: str = Field(description="First word of the name, used by the duplication cleanup")
+    abbreviation_snake: str = Field(description="Replaces `fct` next to `_` and bare, e.g. `workspace_template`")
+    abbreviation_kebab: str = Field(description="Replaces `fct` next to `-` or `:`, e.g. `workspace-template`")
+    abbreviation_snake_upper: str = Field(description="Replaces `FCT`, e.g. `WORKSPACE_TEMPLATE`")
+    abbreviation_pascal: str = Field(description="Replaces `Fct`, e.g. `WorkspaceTemplate`")
 
 
 class Replacement(FrozenModel):
@@ -97,6 +110,9 @@ class Replacement(FrozenModel):
     label: str = Field(description="The old form, shown in reports")
     pattern: str = Field(description="Regex matching the old form")
     new_text: str = Field(description="Replacement text")
+    hyphen_adjacent_text: str | None = Field(
+        default=None, description="Used instead of new_text when the match touches `-` or `:`"
+    )
 
 
 class FileRewrite(FrozenModel):
@@ -141,28 +157,94 @@ class Leftover(FrozenModel):
     line_text: str = Field(description="The matching line, stripped")
 
 
-def derive_name_forms(new_name: str) -> NameForms:
-    """Split the human-entered name into words and derive every case form.
+def _split_words(name: str) -> tuple[str, ...]:
+    """Lowercased words of a name, split on separators and camelCase humps."""
+    with_camel_breaks = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", name)
+    return tuple(word.lower() for word in re.split(r"[^A-Za-z0-9]+", with_camel_breaks) if word)
 
-    Raises InvalidNewNameError when no words can be derived or the result still
-    contains the old name (which would break idempotency).
+
+def derive_name_forms(new_name: str, new_abbreviation: str | None = None) -> NameForms:
+    """Derive every case form of the new name and its shorthand.
+
+    The shorthand replaces the old ``fct`` abbreviation and defaults to the full
+    name. Raises InvalidNewNameError when no words can be derived or the result
+    still contains the old name (which would break idempotency).
     """
-    with_camel_breaks = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", new_name)
-    words = [word.lower() for word in re.split(r"[^A-Za-z0-9]+", with_camel_breaks) if word]
-    if not words:
-        raise InvalidNewNameError(f"cannot derive a name from {new_name!r}")
-    compact = "".join(words)
-    if _OLD_ABBREVIATION in compact or "foreverclaude" in compact:
-        raise InvalidNewNameError(f"new name {new_name!r} contains the old name, so the rewrite would not converge")
+    words = _split_words(new_name)
+    abbreviation_words = _split_words(new_abbreviation) if new_abbreviation is not None else words
+    if not words or not abbreviation_words:
+        raise InvalidNewNameError(f"cannot derive a name from {new_name!r} / {new_abbreviation!r}")
+    for joined in ("".join(words), "".join(abbreviation_words)):
+        if _OLD_ABBREVIATION in joined or "foreverclaude" in joined:
+            raise InvalidNewNameError(
+                f"new name {new_name!r} / {new_abbreviation!r} contains the old name, "
+                "so the rewrite would not converge"
+            )
     return NameForms(
         kebab="-".join(words),
         snake="_".join(words),
         snake_upper="_".join(words).upper(),
         title=" ".join(word.capitalize() for word in words),
         pascal="".join(word.capitalize() for word in words),
-        compact=compact,
-        compact_upper=compact.upper(),
+        first_word=words[0],
+        abbreviation_snake="_".join(abbreviation_words),
+        abbreviation_kebab="-".join(abbreviation_words),
+        abbreviation_snake_upper="_".join(abbreviation_words).upper(),
+        abbreviation_pascal="".join(word.capitalize() for word in abbreviation_words),
     )
+
+
+def _duplication_cleanup_rules(forms: NameForms) -> tuple[Replacement, ...]:
+    """Collapse first-word duplication the rename introduces.
+
+    `DEFAULT_FOREVER_CLAUDE_GIT_URL` first becomes
+    `DEFAULT_DEFAULT_WORKSPACE_TEMPLATE_GIT_URL`; these rules reduce it to
+    `DEFAULT_WORKSPACE_TEMPLATE_GIT_URL`. The duplicated forms contain the new
+    name, so they cannot pre-exist and the cleanup stays idempotent.
+    """
+    first = forms.first_word
+    identifier_pairs = (
+        (f"{first}-{forms.kebab}", forms.kebab),
+        (f"{first} {forms.kebab}", forms.kebab),
+        (f"{first}_{forms.snake}", forms.snake),
+        (f"{first.upper()}_{forms.snake_upper}", forms.snake_upper),
+        (f"{first.capitalize()} {forms.title}", forms.title),
+        (f"{first.capitalize()}{forms.pascal}", forms.pascal),
+    )
+    rules = [Replacement(label=old, pattern=re.escape(old), new_text=new) for old, new in identifier_pairs]
+    # Prose like "the FCT template" first becomes "the WORKSPACE_TEMPLATE
+    # template"; collapse the duplicated trailing word to "workspace template".
+    # The \b keeps plurals ("... templates") out; identifier rules above must
+    # stay boundary-free to match inside longer names like ..._GIT_URL.
+    if "_" in forms.abbreviation_snake:
+        spaced = forms.abbreviation_snake.replace("_", " ")
+        last_word = spaced.rsplit(" ", 1)[-1]
+        for old in (f"{forms.abbreviation_snake_upper} {last_word}", f"{forms.abbreviation_snake} {last_word}"):
+            rules.append(Replacement(label=old, pattern=re.escape(old) + r"\b", new_text=spaced))
+    return tuple(rules)
+
+
+def _article_agreement_rules(forms: NameForms) -> tuple[Replacement, ...]:
+    """Fix `a`/`an` before tokens the rename introduces (vowel-letter heuristic)."""
+    tokens = {
+        forms.kebab,
+        forms.title,
+        forms.abbreviation_snake,
+        forms.abbreviation_kebab,
+        forms.abbreviation_snake_upper,
+    }
+    rules: list[Replacement] = []
+    for token in sorted(tokens):
+        starts_with_vowel = token[0].lower() in _VOWELS
+        wrong, right = ("a", "an") if starts_with_vowel else ("an", "a")
+        for wrong_cased, right_cased in ((wrong, right), (wrong.capitalize(), right.capitalize())):
+            old = f"{wrong_cased} {token}"
+            rules.append(
+                Replacement(
+                    label=old, pattern=rf"\b{wrong_cased} {re.escape(token)}\b", new_text=f"{right_cased} {token}"
+                )
+            )
+    return tuple(rules)
 
 
 def build_replacements(forms: NameForms) -> tuple[Replacement, ...]:
@@ -180,23 +262,43 @@ def build_replacements(forms: NameForms) -> tuple[Replacement, ...]:
         ("ForeverClaude", forms.pascal),
     )
     literal_rules = tuple(Replacement(label=old, pattern=re.escape(old), new_text=new) for old, new in literal_pairs)
-    abbreviation_pairs = (
-        ("FCT", forms.compact_upper),
-        ("Fct", forms.pascal),
-        ("fct", forms.compact),
+    abbreviation_triples = (
+        ("FCT", forms.abbreviation_snake_upper, forms.abbreviation_kebab),
+        ("Fct", forms.abbreviation_pascal, forms.abbreviation_kebab),
+        ("fct", forms.abbreviation_snake, forms.abbreviation_kebab),
     )
     abbreviation_rules = tuple(
-        Replacement(label=old, pattern=_ABBREVIATION_PREFIX + old + _ABBREVIATION_SUFFIX, new_text=new)
-        for old, new in abbreviation_pairs
+        Replacement(
+            label=old,
+            pattern=_ABBREVIATION_PREFIX + old + _ABBREVIATION_SUFFIX,
+            new_text=new,
+            hyphen_adjacent_text=hyphen_adjacent,
+        )
+        for old, new, hyphen_adjacent in abbreviation_triples
     )
-    return literal_rules + abbreviation_rules
+    return literal_rules + abbreviation_rules + _duplication_cleanup_rules(forms) + _article_agreement_rules(forms)
+
+
+def _substitute(text: str, rule: Replacement) -> tuple[str, int]:
+    """Apply one rule, choosing the kebab form when the match touches `-` or `:`."""
+
+    def _pick(match: re.Match[str]) -> str:
+        if rule.hyphen_adjacent_text is None:
+            return rule.new_text
+        preceding = match.string[match.start() - 1] if match.start() > 0 else ""
+        following = match.string[match.end()] if match.end() < len(match.string) else ""
+        if preceding == "-" or following in "-:":
+            return rule.hyphen_adjacent_text
+        return rule.new_text
+
+    return re.subn(rule.pattern, _pick, text)
 
 
 def rewrite_text(text: str, replacements: tuple[Replacement, ...]) -> tuple[str, int]:
     """Apply every rule to the text; returns the new text and the total replacement count."""
     total = 0
     for rule in replacements:
-        text, count = re.subn(rule.pattern, lambda _match, new_text=rule.new_text: new_text, text)
+        text, count = _substitute(text, rule)
         total += count
     return text, total
 
@@ -372,7 +474,8 @@ def _report_leftovers(repo_root: Path, leftovers: tuple[Leftover, ...]) -> None:
 class RenameCliArguments(FrozenModel):
     """Parsed command line arguments for the rename tool."""
 
-    new_name: str = Field(description="Human-entered new repo name, e.g. 'mindstem' or 'Mind Stem'")
+    new_name: str = Field(description="Human-entered new repo name, e.g. 'default-workspace-template'")
+    new_abbreviation: str | None = Field(description="Shorthand replacing `fct`, e.g. 'workspace template'")
     mngr_root: Path = Field(description="Root of the mngr monorepo checkout")
     template_dir: Path | None = Field(description="Optional path to a forever-claude-template checkout")
     is_apply: bool = Field(description="Whether to edit files (False means dry-run)")
@@ -383,6 +486,11 @@ class RenameCliArguments(FrozenModel):
 
 @click.command()
 @click.option("--new-name", required=True, help="New repo name; all case forms are derived from it.")
+@click.option(
+    "--new-abbreviation",
+    default=None,
+    help="Shorthand that replaces the `fct` abbreviation (defaults to the full name).",
+)
 @click.option(
     "--mngr-root",
     type=click.Path(exists=True, file_okay=False, path_type=Path),
@@ -401,6 +509,7 @@ class RenameCliArguments(FrozenModel):
 @click.option("--show-diff", "should_show_diff", is_flag=True, help="Print unified diffs of planned rewrites.")
 def main(
     new_name: str,
+    new_abbreviation: str | None,
     mngr_root: Path,
     template_dir: Path | None,
     is_apply: bool,
@@ -411,6 +520,7 @@ def main(
     """Rename the forever-claude-template repo (references, paths, GitHub) to a new name."""
     arguments = RenameCliArguments(
         new_name=new_name,
+        new_abbreviation=new_abbreviation,
         mngr_root=mngr_root,
         template_dir=template_dir,
         is_apply=is_apply,
@@ -425,7 +535,7 @@ def main(
 
 
 def _run_from_arguments(arguments: RenameCliArguments) -> None:
-    forms = derive_name_forms(arguments.new_name)
+    forms = derive_name_forms(arguments.new_name, arguments.new_abbreviation)
     repo_roots = [arguments.mngr_root] + ([arguments.template_dir] if arguments.template_dir else [])
     if arguments.is_check:
         all_leftovers: list[Leftover] = []

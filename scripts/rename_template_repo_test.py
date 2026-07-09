@@ -20,19 +20,30 @@ def test_derive_name_forms_single_word() -> None:
     assert forms.snake_upper == "MINDSTEM"
     assert forms.title == "Mindstem"
     assert forms.pascal == "Mindstem"
-    assert forms.compact == "mindstem"
-    assert forms.compact_upper == "MINDSTEM"
+    assert forms.abbreviation_snake == "mindstem"
+    assert forms.abbreviation_kebab == "mindstem"
+    assert forms.abbreviation_snake_upper == "MINDSTEM"
+    assert forms.abbreviation_pascal == "Mindstem"
 
 
-def test_derive_name_forms_multi_word() -> None:
+def test_derive_name_forms_multi_word_with_abbreviation() -> None:
+    forms = derive_name_forms("default-workspace-template", "workspace template")
+    assert forms.kebab == "default-workspace-template"
+    assert forms.snake == "default_workspace_template"
+    assert forms.snake_upper == "DEFAULT_WORKSPACE_TEMPLATE"
+    assert forms.title == "Default Workspace Template"
+    assert forms.pascal == "DefaultWorkspaceTemplate"
+    assert forms.first_word == "default"
+    assert forms.abbreviation_snake == "workspace_template"
+    assert forms.abbreviation_kebab == "workspace-template"
+    assert forms.abbreviation_snake_upper == "WORKSPACE_TEMPLATE"
+    assert forms.abbreviation_pascal == "WorkspaceTemplate"
+
+
+def test_derive_name_forms_abbreviation_defaults_to_name() -> None:
     forms = derive_name_forms("Mind Stem")
-    assert forms.kebab == "mind-stem"
-    assert forms.snake == "mind_stem"
-    assert forms.snake_upper == "MIND_STEM"
-    assert forms.title == "Mind Stem"
-    assert forms.pascal == "MindStem"
-    assert forms.compact == "mindstem"
-    assert forms.compact_upper == "MINDSTEM"
+    assert forms.abbreviation_snake == "mind_stem"
+    assert forms.abbreviation_kebab == "mind-stem"
 
 
 def test_derive_name_forms_splits_camel_case() -> None:
@@ -48,27 +59,45 @@ def test_derive_name_forms_rejects_empty_and_old_names() -> None:
         derive_name_forms("fct2")
     with pytest.raises(InvalidNewNameError):
         derive_name_forms("forever-claude-v2")
+    with pytest.raises(InvalidNewNameError):
+        derive_name_forms("fine-name", "fct-ish")
 
 
 def test_rewrite_text_representative_lines() -> None:
-    replacements = build_replacements(derive_name_forms("mindstem"))
+    replacements = build_replacements(derive_name_forms("default-workspace-template", "workspace template"))
     cases = (
         (
             'URL = "https://github.com/imbue-ai/forever-claude-template.git"',
-            'URL = "https://github.com/imbue-ai/mindstem.git"',
+            'URL = "https://github.com/imbue-ai/default-workspace-template.git"',
         ),
-        ("DEFAULT_FOREVER_CLAUDE_GIT_URL: Final[str]", "DEFAULT_MINDSTEM_GIT_URL: Final[str]"),
+        ("DEFAULT_FOREVER_CLAUDE_GIT_URL: Final[str]", "DEFAULT_WORKSPACE_TEMPLATE_GIT_URL: Final[str]"),
         (
             "from imbue.minds.desktop_client.fct_worktree import materialize_paired_fct_worktree",
-            "from imbue.minds.desktop_client.mindstem_worktree import materialize_paired_mindstem_worktree",
+            "from imbue.minds.desktop_client.workspace_template_worktree import materialize_paired_workspace_template_worktree",
         ),
         (
             'post_host_create_command__extend = ["/usr/local/bin/fct-seed"]',
-            'post_host_create_command__extend = ["/usr/local/bin/mindstem-seed"]',
+            'post_host_create_command__extend = ["/usr/local/bin/workspace-template-seed"]',
         ),
-        ("docker tag fct:minds-v0.3.5", "docker tag mindstem:minds-v0.3.5"),
-        ("FCT_DIR=/abs/path/to/forever-claude-template", "MINDSTEM_DIR=/abs/path/to/mindstem"),
-        ("the FCT template and the Forever Claude runtime", "the MINDSTEM template and the Mindstem runtime"),
+        ("docker tag fct:minds-v0.3.5", "docker tag workspace-template:minds-v0.3.5"),
+        (
+            "FCT_DIR=/abs/path/to/forever-claude-template",
+            "WORKSPACE_TEMPLATE_DIR=/abs/path/to/default-workspace-template",
+        ),
+        (
+            "export MNGR=/your/mngr FCT=/your/forever-claude-template",
+            "export MNGR=/your/mngr WORKSPACE_TEMPLATE=/your/default-workspace-template",
+        ),
+        ('sync-vendor-mngr fct="":', 'sync-vendor-mngr workspace_template="":'),
+        ('fct_wt="$(pwd)/{{fct}}"', 'workspace_template_wt="$(pwd)/{{workspace_template}}"'),
+        ("All FCT-owned paths", "All workspace-template-owned paths"),
+        ("pin an FCT tag", "pin a WORKSPACE_TEMPLATE tag"),
+        (
+            "the FCT template lags; FCT templates stack",
+            "the workspace template lags; WORKSPACE_TEMPLATE templates stack",
+        ),
+        ("the default forever-claude-template repo URL", "the default-workspace-template repo URL"),
+        ("Forever Claude runtime state", "Default Workspace Template runtime state"),
     )
     for old_line, expected in cases:
         new_line, count = rewrite_text(old_line, replacements)
@@ -77,17 +106,17 @@ def test_rewrite_text_representative_lines() -> None:
 
 
 def test_rewrite_text_leaves_lookalike_words_alone() -> None:
-    replacements = build_replacements(derive_name_forms("mindstem"))
+    replacements = build_replacements(derive_name_forms("default-workspace-template", "workspace template"))
     for line in ("no defects here", "fctl is not the abbreviation", "affctx"):
         new_line, count = rewrite_text(line, replacements)
         assert new_line == line
         assert count == 0
 
 
-def test_multi_word_name_keeps_identifiers_single_token() -> None:
-    replacements = build_replacements(derive_name_forms("Mind Stem"))
-    new_line, _ = rewrite_text("fct_worktree FCT_DIR fct-seed", replacements)
-    assert new_line == "mindstem_worktree MINDSTEM_DIR mindstem-seed"
+def test_single_word_name_degrades_to_uniform_token() -> None:
+    replacements = build_replacements(derive_name_forms("mindstem"))
+    new_line, _ = rewrite_text("fct_worktree FCT_DIR fct-seed fct:tag", replacements)
+    assert new_line == "mindstem_worktree MINDSTEM_DIR mindstem-seed mindstem:tag"
 
 
 def test_skip_reason() -> None:
@@ -115,18 +144,18 @@ def _make_git_repo(root: Path) -> None:
 
 def test_end_to_end_apply_is_idempotent_and_checkable(tmp_path: Path) -> None:
     _make_git_repo(tmp_path)
-    replacements = build_replacements(derive_name_forms("mindstem"))
+    replacements = build_replacements(derive_name_forms("default-workspace-template", "workspace template"))
 
     plan = plan_repo(tmp_path, replacements, include_diffs=False)
     assert {rewrite.rel_path for rewrite in plan.rewrites} == {Path("README.md"), Path("src/fct_worktree.py")}
     assert [(rename.old_rel_path, rename.new_rel_path) for rename in plan.renames] == [
-        (Path("src/fct_worktree.py"), Path("src/mindstem_worktree.py"))
+        (Path("src/fct_worktree.py"), Path("src/workspace_template_worktree.py"))
     ]
     assert {entry.rel_path for entry in plan.skipped} == {Path("changelog/entry.md")}
 
     apply_plan(plan)
-    assert (tmp_path / "src" / "mindstem_worktree.py").read_text() == "MINDSTEM_DIR = 'x'\n"
-    assert (tmp_path / "README.md").read_text() == "# mindstem\n\nThe MINDSTEM template.\n"
+    assert (tmp_path / "src" / "workspace_template_worktree.py").read_text() == "WORKSPACE_TEMPLATE_DIR = 'x'\n"
+    assert (tmp_path / "README.md").read_text() == "# default-workspace-template\n\nThe workspace template.\n"
     assert (tmp_path / "changelog" / "entry.md").read_text() == "renamed forever-claude-template\n"
 
     second_plan = plan_repo(tmp_path, replacements, include_diffs=False)
