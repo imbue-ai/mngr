@@ -156,6 +156,19 @@ def build_create_argv(agent_name: str, skill: str) -> tuple[str, ...]:
     )
 
 
+@pure
+def build_destroy_argv(agent_name: str) -> tuple[str, ...]:
+    """The ``mngr destroy`` invocation that clears a stale donation agent.
+
+    Run best-effort before :func:`build_create_argv` so a repeat tick never
+    collides on the fixed agent name. A headless agent only auto-destroys after
+    a *successful* pass, so a launch that failed part-way leaves the name taken;
+    ``--reuse`` isn't an option (headless agent types reject it). ``--force``
+    skips confirmation and a no-op destroy of a missing agent is harmless.
+    """
+    return ("mngr", "destroy", agent_name, "--force")
+
+
 class DonateCliOptions(CommonCliOptions):
     """Options for ``mngr donate`` (plus the common output/logging options)."""
 
@@ -266,6 +279,11 @@ def donate(ctx: click.Context, **kwargs: Any) -> None:
         f"Spare capacity available -- launching '{opts.agent_name}' to run the {opts.skill} skill.",
         output_opts.output_format,
     )
+    # Clear any stale agent of this name (from a prior tick that failed mid-launch)
+    # so the create below can't collide. Best-effort: destroying a missing agent
+    # is a harmless no-op, and we don't want a stale-cleanup failure to mask the
+    # create's own error, so its output/exit are swallowed.
+    subprocess.run(list(build_destroy_argv(opts.agent_name)), check=False, capture_output=True)
     completed = subprocess.run(list(argv), check=False)
     if completed.returncode != 0:
         raise MngrError(f"`{' '.join(argv)}` exited with status {completed.returncode}.")

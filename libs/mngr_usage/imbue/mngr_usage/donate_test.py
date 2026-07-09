@@ -16,6 +16,7 @@ from imbue.mngr_usage.donate import CLAUDE_SOURCE
 from imbue.mngr_usage.donate import FIVE_HOUR_WINDOW
 from imbue.mngr_usage.donate import SEVEN_DAY_WINDOW
 from imbue.mngr_usage.donate import build_create_argv
+from imbue.mngr_usage.donate import build_destroy_argv
 from imbue.mngr_usage.donate import evaluate_capacity
 from imbue.mngr_usage.donate import weekly_pace_line
 
@@ -122,4 +123,13 @@ def test_build_create_argv_launches_a_headless_agent_that_skips_permissions() ->
         "Use the document-review skill",
         "--",
         "--dangerously-skip-permissions",
+    )
+
+
+def test_build_destroy_argv_force_removes_a_stale_agent_by_name() -> None:
+    assert build_destroy_argv("donate-extra-quota-bio") == (
+        "mngr",
+        "destroy",
+        "donate-extra-quota-bio",
+        "--force",
     )
