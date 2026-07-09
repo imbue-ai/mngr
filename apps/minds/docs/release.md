@@ -98,6 +98,8 @@ gh workflow run minds-launch-to-msg.yml -R imbue-ai/mngr \
 
 `build` packages/reuses (keyed by `commit_sha`) the bundle; `launch_to_msg` launches it, creates an agent from the FCT ref, sends a first message, asserts the round-trip. Invoke from the mngr cwd — from the FCT cwd it has 404'd mid-create and duplicated the run.
 
+Both inputs accept a full 40-char SHA, branch, or tag, and are **frozen to SHAs at run start**: the run builds the frozen mngr SHA and creates the agent from the frozen FCT SHA, so pushing more commits to either branch after dispatch does nothing to an in-flight run — re-dispatch to pick them up. The slack message and step summaries report `ref (sha)`; those SHAs are exactly what ran. Passing `$GREEN_MNGR_SHA` and the FCT branch's current SHA directly (instead of branch names) makes the pin explicit and replayable.
+
 ### 5. Review real code only (if any)
 
 The version bump and the `vendor/mngr` refresh need no review (see "The two release branches"). The only thing to read is reviewable code that rode along — mngr/minds code on the mngr branch, or a `system_interface` fix on the FCT branch. With `main` unprotected, even that review is social, not a gate. Nothing is tagged yet.

@@ -217,6 +217,29 @@ test target:
 test-sdk-live args="":
   RUN_SDK_LIVE_TESTS=1 PYTEST_MAX_DURATION_SECONDS=2400 uv run pytest -sv --no-cov -n 0 -o timeout=900 -m sdk_live libs/mngr_robinhood {{args}}
 
+# === TMR (test map-reduce) variants ===
+# Canonical per-suite flag sets for `mngr tmr` (one agent per test, run + fix in
+# parallel). Each variant gets its own --name prefix so its agents, branches, and
+# PRs stay separate and reviewable on their own. The CI workflow
+# (.github/workflows/tmr.yml) mirrors these via its name / mapper_prompt inputs.
+# Extra flags pass through before the `--` separator, e.g.
+#   just tmr-minds --provider modal --env ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY"
+
+# mngr release suite (scoped to libs/mngr; the apps/minds tree is a separate variant).
+tmr-mngr *args:
+  uv run --project libs/mngr_tmr mngr tmr libs/mngr --name tmr-mngr {{args}} -- -m 'release and not docker and not docker_sdk'
+
+# Defaults to the plain @release tests that need no ci env / snapshot image. The
+# capability suites additionally need their own setup, appended as extra args:
+#   - minds_snapshot_resume: a pre-baked snapshot image (--snapshot <id>) on a
+#     vm_runtime host, plus ANTHROPIC_API_KEY.
+#   - minds_deployment / minds_services: Modal deploy tokens + the env secrets
+#     (litellm, etc.); each deployment test mints its own ephemeral env.
+#
+# minds release suite (the apps/minds tree), with the minds-tailored mapper prompt.
+tmr-minds *args:
+  uv run --project libs/mngr_tmr mngr tmr apps/minds --name tmr-minds --mapper-prompt apps/minds/tmr/mapper.j2 {{args}} -- -m 'release and not minds_deployment and not minds_services and not minds_snapshot_resume'
+
 # === minds deployment / services test orchestrator ===
 # Wraps apps/minds/scripts/test_deployments.py. See specs/minds-deployment-tests.md
 # and apps/minds/deployment_tests/README.md for the full design + usage.
@@ -936,7 +959,7 @@ create-new-mind-repo repo_name parent_dir="$HOME/project":
 #   eval "$(uv run minds env activate <name>)"
 #
 # Pool hosts are baked as bare-metal SLICES (recipes below). List them with
-# `just list-pool-hosts` and remove them with `just destroy-pool-host`.
+# `just list-pool-hosts` and remove them with `just destroy-pool-hosts`.
 
 # === minds bare-metal SLICES (carved on a pre-registered bare-metal box) ===
 #
@@ -985,6 +1008,21 @@ add-paid-email email:
 list-pool-hosts:
     uv run minds pool list
 
+# List bare-metal servers (per-server + fleet slot accounting) for the activated
+# minds env (read-only; DSN resolved from the env, no manual exports).
+list-servers:
+    uv run minds server list
+
+# (Re-)prep a bare-metal box for slice baking: qemu/lima/tooling + image staging +
+# the per-box FCT image cache dir. Pool SSH key + DSN come from the activated
+# tier's Vault entry / env secrets, so no manual exports. Idempotent -- also how a
+# box prepped before 2026-06-27 gets the FCT cache dir that production
+# --from-tag bakes require.
+#
+#   just prep-server <bare-metal-server-id>
+prep-server server_id *extra_args:
+    uv run minds server prep --server-id "{{server_id}}" {{extra_args}}
+
 # One-time host-key backfill for the activated minds env. Keyscans every
 # pre-existing pool host + bare-metal box whose recorded sshd host key columns
 # are still null and records them, so rows baked before host-key pinning become
@@ -998,18 +1036,20 @@ list-pool-hosts:
 backfill-pool-host-keys:
     uv run minds pool backfill-host-keys
 
-# Destroy a single pool host: destroy its slice lima VM (freeing the box slot),
-# then drop its pool_hosts row. Find the id with `just list-pool-hosts`. Extra
-# flags forward to `minds pool destroy` (e.g. --force to drop a non-released row,
-# --skip-vps-cancel if the slice VM is already gone).
+# Destroy pool hosts in parallel: atomically claim each row (so a user cannot lease
+# it mid-destroy), destroy its slice lima VM (freeing the box slot), then drop the
+# row. Find the ids with `just list-pool-hosts`. Extra flags forward to
+# `minds pool destroy` (e.g. --force to also destroy a leased row, --drop-row-only
+# for rows whose box record is gone or whose machine is permanently dead).
 #
-#   just destroy-pool-host <pool-host-id>
+#   just destroy-pool-hosts <pool-host-id> [<pool-host-id> ...]
 #
 # Note: the steady-state teardown is automatic -- the connector destroys a host's
 # slice VM when its lease ends. `minds env destroy` tears down a whole env's
-# unleased slices. This recipe is the manual single-host escape hatch.
-destroy-pool-host pool_host_id *extra_args:
-    uv run minds pool destroy "{{pool_host_id}}" {{extra_args}}
+# unleased slices. This recipe is the manual escape hatch (e.g. retiring the old
+# `available` rows after baking a new pool generation).
+destroy-pool-hosts *args:
+    uv run minds pool destroy {{args}}
 
 # Args forward as-is, e.g. `just release patch`, `just release patch --dry-run
 # --minor mngr`, or `just release --watch`. See scripts/release.py's header for

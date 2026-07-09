@@ -4,6 +4,22 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-08
+
+`discover_hosts_and_agents` now reads a **running** host's agents **live** off the sandbox instead of only from the state volume. Agents created *inside* the sandbox (for example the user's workspace agent) are never written to the outer state volume -- only host-side agents like `system-services` are -- so resolving from the volume alone left `mngr destroy` / `mngr start` unable to find a live in-sandbox agent (`Agent not found`), and minds' teardown spun on "Destroying..." forever. Offline hosts still resolve from the volume, and if the live read fails the host falls back to the volume so it still lists. This mirrors the VPS (aws/vultr) providers, which already read running hosts live.
+
+`stop_host` no longer silently swallows a failed `sandbox.terminate()`. A failed terminate means the Modal sandbox is still running (a billing orphan), so it now raises a `ModalMngrError`; `destroy_host` records it as a cleanup failure so `mngr destroy` reports failure (and exits non-zero) instead of falsely succeeding while the sandbox keeps running.
+
+`start_host` now clears `stop_reason` on the persisted host record when it resumes a host from a snapshot. Previously a host that was resumed (from PAUSED/STOPPED) and then later hard-killed was mis-derived as PAUSED/STOPPED instead of CRASHED, so it was never garbage-collected and wrongly showed a Resume control. This mirrors the lima provider's behavior on restart.
+
+`start_host` auto-restart (no explicit `snapshot_id`) selects the most recent snapshot. The "initial" snapshot is taken in `on_agent_created` (after the agent is created and its initial message delivered), so it carries the agent and is a valid restore point; a graceful stop/pause leaves a newer snapshot that is preferred. When the host has no snapshots at all it raises `NoSnapshotsModalMngrError` (recreate the workspace rather than restart).
+
+## 2026-07-07
+
+Added an `is_vm_runtime_enabled` setting to the Modal provider config that controls whether sandboxes run on Modal's VM runtime (https://modal.com/docs/guide/vm-sandboxes) instead of the default gVisor runtime. It defaults to false (gVisor); set `is_vm_runtime_enabled = true` under `[providers.modal]` to create sandboxes with `experimental_options = {"vm_runtime": True}`, which provides stronger isolation and broader syscall compatibility (e.g. Docker-in-sandbox state surviving a filesystem snapshot).
+
+Modal streaming discovery now reports each running host's SSH endpoint (via the shared `collect_cached_host_ssh_infos` helper) so the discovery poller re-emits it as a `HOST_SSH_INFO` event. Previously only a full `mngr list` surfaced SSH info, so a consumer that tunnels to Modal hosts through the streaming discovery path (e.g. the minds system_interface forward) could be left unable to reach them.
+
 ## 2026-07-06
 
 Updated the per-host-bounded discovery override to accept the new cross-poll read registry parameter (unused by this batch provider, which reads all hosts in one bounded pass). No behavioral change for this provider.

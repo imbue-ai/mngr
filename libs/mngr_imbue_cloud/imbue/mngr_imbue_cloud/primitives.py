@@ -3,6 +3,7 @@ from enum import auto
 from typing import Final
 from typing import Self
 
+from imbue.imbue_common.enums import LowerCaseStrEnum
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.primitives import NonEmptyStr
 
@@ -87,6 +88,27 @@ class ImbueCloudKeyType(UpperCaseStrEnum):
     """The class of secret being requested."""
 
     LITELLM = auto()
+
+
+class PoolHostDestroyOutcomeStatus(LowerCaseStrEnum):
+    """Per-host outcome of an admin pool destroy, as emitted in the JSON report.
+
+    Lowercase wire values (``destroyed`` / ``skipped_leased`` / ``already_gone`` /
+    ``failed``) -- the format operators and scripts read from ``admin pool destroy``
+    and ``teardown-slices``.
+    """
+
+    DESTROYED = auto()
+    SKIPPED_LEASED = auto()
+    ALREADY_GONE = auto()
+    FAILED = auto()
+
+
+class SliceBakeOutcomeStatus(LowerCaseStrEnum):
+    """Per-slice outcome of an admin pool create (bake), as emitted in the JSON report."""
+
+    SUCCEEDED = auto()
+    FAILED = auto()
 
 
 class FastMode(UpperCaseStrEnum):

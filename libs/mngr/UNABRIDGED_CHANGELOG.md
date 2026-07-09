@@ -4,6 +4,32 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-08
+
+Fixed an unbounded memory leak in long-running `mngr observe` (discovery) processes. Each discovery poll spins up worker threads that create per-thread gevent hubs; destroying a hub without first joining it left the hub greenlet parked mid-`LoopExit`, whose traceback pinned the poll's entire object graph in a cycle the garbage collector could not reclaim. Over days this grew to multiple gigabytes. Worker-thread cleanup now joins the hub before destroying it (the pattern gevent prescribes for this leak, gevent issue 1601), so repeated polls no longer strand a hub per iteration.
+
+Regenerated the `mngr tmr` command reference to document the new variant flags (`--name`, `--mapper-prompt`, `--reducer-prompt`) for running distinct test suites as separate runs.
+
+Exported the marker text of `HostShutdownNotSupportedError`'s message as an importable `HOST_SHUTDOWN_NOT_SUPPORTED_MESSAGE` constant in `imbue.mngr.errors`, and built the exception's message from it. This lets out-of-process callers (e.g. minds, which runs `mngr` as a subprocess and only sees exit code and stderr) match on one shared source of truth instead of duplicating the literal string. No user-visible change -- the error message text is unchanged.
+
+## 2026-07-07
+
+Fixed the grandparent-death watcher being a silent no-op on macOS (MIND-103). The watcher (used by the minds backend to reap itself, and its `mngr forward`/`event`/`observe` subprocess tree, when the Electron GUI exits uncleanly) resolved its grandparent PID by reading Linux's `/proc/<ppid>/status`, which raises on macOS -- so it never armed, and a force-quit or crash of Electron left the whole backend tree orphaned under `launchd` indefinitely.
+
+`_read_grandparent_pid()` now falls back to `ps -o ppid= -p <pid>` when `/proc` is unavailable, so the watcher arms on macOS too and SIGTERMs the backend once its grandparent disappears. The `/proc` fast path is unchanged on Linux. The `ps` subprocess is spawned through the caller's `ConcurrencyGroup` (a required parameter, so its ownership is always explicit at the call site).
+
+Acquiring a remote host's cooperative lock (part of every `mngr create`/`start` on a remote host) is now resilient to transient SSH failures. Previously, if the SSH connection to a host dropped ("Connection reset by peer" leaving a dead transport), opening the lock channel raised a raw paramiko `SSHException: SSH session not active` that leaked past callers.
+
+The lock path now retries transient SSH errors after rebuilding the dropped connection (matching how remote shell/file operations already behave), and surfaces a failure that survives the retries as a structured `HostConnectionError` instead of a raw paramiko exception.
+
+This keeps a single unreachable machine from crashing an operation that spans many hosts at once: the mapreduce/TMR orchestrator launches one agent per task and already isolates per-agent `MngrError`s, so one host with a flaky connection is now recorded as a single failed launch rather than aborting the entire run.
+
+Fixed several bugs where a long-running `mngr observe` discovery stream underfed consumers that tunnel to remote hosts (most visibly the minds app's system_interface forward), leaving a freshly created cloud workspace stuck loading.
+
+- The per-provider poller reused one provider instance for every poll but never reset its per-cycle caches, so the first poll's result (including an empty leased-hosts list) was cached for the lifetime of the process. Because the minds discovery observer starts a moment before a workspace's cloud host is leased, it kept emitting empty imbue_cloud snapshots that clobbered the correct ones in the shared discovery log, so the workspace flickered in and out and its web UI hung on "Waiting for system interface to be ready...". The poller now resets each provider's per-cycle caches at the start of every poll (matching the `reset_caches=True` already used by `mngr list`), so newly leased/destroyed hosts are picked up on the next poll.
+
+- The streaming per-provider discovery never emitted `HOST_SSH_INFO` events -- only a full `mngr list` did, which the running app never does periodically. So a consumer that lost a host's SSH endpoint (e.g. after the host briefly left discovery during the flapping above) never regained it and refused to dial the host's loopback-registered service URL. `BoundedProviderDiscoveryResult` now carries per-host SSH info, and the poller re-emits it as `HOST_SSH_INFO` on every successful poll. This is wired up for **all** providers, not just imbue_cloud: the base per-host-bounded discovery captures each host's SSH endpoint from the host it already connects to (covering docker, lima, local, ssh, aws, gcp, azure), and a shared `collect_cached_host_ssh_infos` helper covers the batch providers (vps, modal). So any remote workspace -- local docker/lima included -- is now reliably reachable through the streaming path.
+
 ## 2026-07-06
 
 Bounded per-host discovery reads so a wedged host can no longer leak background threads or be re-read on every poll.

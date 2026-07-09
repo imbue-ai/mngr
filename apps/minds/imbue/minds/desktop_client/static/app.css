@@ -431,6 +431,15 @@ html {
   border-color: rgb(from var(--c-accent) r g b / 0.4);
   border-top-color: var(--c-accent);
 }
+/*
+ * Inverse spinner: ring + top derived from ``currentColor`` so a spinner sat
+ * inside a solid-filled button (the success-variant Approve button uses white
+ * text) picks up that button's text color and reads clearly against the fill.
+ */
+.spinner-inverse {
+  border-color: rgb(from currentColor r g b / 0.4);
+  border-top-color: currentColor;
+}
 @keyframes spin {
   to {
     transform: rotate(360deg);

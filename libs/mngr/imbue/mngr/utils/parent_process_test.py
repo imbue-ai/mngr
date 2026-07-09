@@ -1,4 +1,5 @@
 import os
+import subprocess
 import threading
 from uuid import uuid4
 
@@ -7,6 +8,7 @@ import pytest
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.utils.parent_process import _PARENT_POLL_INTERVAL_SECONDS
 from imbue.mngr.utils.parent_process import _read_grandparent_pid
+from imbue.mngr.utils.parent_process import _read_ppid_via_ps
 from imbue.mngr.utils.parent_process import start_grandparent_death_watcher
 from imbue.mngr.utils.parent_process import start_parent_death_watcher
 
@@ -44,11 +46,32 @@ def test_read_grandparent_pid_returns_alive_grandparent() -> None:
     run pytest directly under PID 1, leaving no grandparent; in that case the
     helper correctly returns ``None`` and the test skips.
     """
-    grandparent_pid = _read_grandparent_pid()
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        grandparent_pid = _read_grandparent_pid(cg)
     if grandparent_pid is None:
         pytest.skip("No resolvable grandparent in this process tree (e.g. offload sandbox)")
     assert grandparent_pid > 1
     os.kill(grandparent_pid, 0)
+
+
+def test_read_ppid_via_ps_returns_parent_pid_of_a_child_process() -> None:
+    """The ``/proc``-free ppid resolver must report a child's real parent PID.
+
+    ``ps -o ppid=`` is the cross-platform path that lets the grandparent-death
+    watcher arm on macOS, which has no ``/proc`` (MIND-103). We spawn a real
+    child whose parent is this test process, so resolving the child's parent
+    PID must return our own PID. This runs identically on Linux and macOS, so
+    it fails on the pre-fix code (the resolver does not exist) and passes once
+    the fallback is added.
+    """
+    child = subprocess.Popen(["sleep", "51763"])
+    try:
+        with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+            resolved_ppid = _read_ppid_via_ps(child.pid, cg)
+    finally:
+        child.terminate()
+        child.wait()
+    assert resolved_ppid == os.getpid()
 
 
 def test_start_grandparent_death_watcher_starts_thread_when_resolvable() -> None:
@@ -58,7 +81,7 @@ def test_start_grandparent_death_watcher_starts_thread_when_resolvable() -> None
         threads = [t for t in cg._threads if t.thread.name == "grandparent-death-watcher"]
         # If the test runner has no resolvable grandparent (very unusual), the
         # watcher is a no-op; both shapes are valid.
-        if _read_grandparent_pid() is None:
+        if _read_grandparent_pid(cg) is None:
             assert threads == []
             return
         assert len(threads) == 1
