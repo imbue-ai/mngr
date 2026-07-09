@@ -47,7 +47,7 @@ if _BUNDLED_RESTIC.exists() and "MINDS_RESTIC_BINARY" not in os.environ:
     os.environ["MINDS_RESTIC_BINARY"] = str(_BUNDLED_RESTIC)
 
 # Likewise point ``MINDS_QEMU_IMG_BINARY`` at the bundled ``resources/qemu/bin/
-# qemu-img`` (the relocated, self-contained payload) so lima_image tests use it
+# qemu-img`` (a self-contained static-deps binary) so lima_image tests use it
 # instead of a system-wide qemu. Left unset when the payload isn't staged
 # (``pnpm build`` / the download hasn't run), so the converter falls back to a
 # PATH ``qemu-img``.

@@ -105,23 +105,25 @@ The desktop app bundles platform-specific binaries so users need zero prerequisi
 - **lima**: Required for the Lima launch mode (running agents in Linux VMs). Downloaded from GitHub releases during `pnpm build`. Self-contained on macOS Apple Silicon via Lima's `vz` backend; macOS Intel and Linux still run the VM itself via host QEMU.
 - **restic**: Per-workspace backup repositories. Downloaded from GitHub releases.
 - **desync**: Content-defined-chunking client that fetches the pre-baked Lima image (issue #2306). Downloaded from GitHub releases. macOS/Linux only.
-- **qemu-img**: Converts the pre-baked Lima image `raw`<->`qcow2` (issue #2306). Needed on **every** platform including Apple Silicon -- the conversion is orthogonal to the VM backend. No upstream static build exists (qemu-img links glib; macOS has no static libc), so we ship a relocated, self-contained payload -- `bin/qemu-img` plus its dylib closure under `lib/`, load paths rewritten to `@executable_path/../lib` -- produced by `scripts/build-qemu-payload.sh` and hosted as a GitHub release asset. macOS/Linux only.
+- **qemu-img**: Converts the pre-baked Lima image `raw`<->`qcow2` (issue #2306). Needed on **every** platform including Apple Silicon -- the conversion is orthogonal to the VM backend. No upstream release exists, so we build our own from pinned sources (modeled on `containers/podman-machine-qemu`): a tools-only QEMU build with every optional feature disabled, glib and its deps (libffi, libintl, pcre2) linked **statically**, leaving a single binary that links only always-present system libraries. Produced by `scripts/build-qemu-payload.sh` and hosted as a GitHub release asset. macOS/Linux only.
 
 Each is placed in the `resources/` directory (outside the asar archive) and added to `PATH` in the child process environment. `restic` and `qemu-img` are additionally passed by explicit absolute path (`MINDS_RESTIC_BINARY`, `MINDS_QEMU_IMG_BINARY`) so resolution never depends on `PATH` ordering.
 
 ### Producing and hosting the qemu-img payload
 
-`qemu-img` is the one bundled binary with no upstream download, so its payload is produced by hand and hosted on a GitHub release. This is a rare, maintenance-time step -- only when bumping `QEMU_IMG_VERSION` (in `scripts/download-binaries.js`).
+`qemu-img` is the one bundled binary with no upstream download, so its payload is built from source and hosted on a GitHub release. This is a rare, maintenance-time step -- only when bumping `QEMU_IMG_VERSION` (in `scripts/download-binaries.js`) or a pinned dependency.
 
-For each target arch, on a matching macOS host with Homebrew (`brew install qemu dylibbundler`):
+`scripts/build-qemu-payload.sh` (macOS; needs Xcode CLT + `brew install meson ninja pkg-config`) builds everything from SHA256-pinned source tarballs, following `containers/podman-machine-qemu`: libffi, libintl (gettext-runtime), pcre2, and glib are compiled as static libraries into a scratch prefix, then a tools-only QEMU is configured with `--without-default-features` so no optional dependency (gnutls/libssh/curl/zstd/...) is probed or linked. The result is a single `qemu-img` binary whose only runtime dependencies are `/usr/lib` + `/System` libraries present on every Mac -- nothing to relocate, one entry to sign. The script verifies that property with `otool -L`, smoke-tests a `raw`->`qcow2` conversion under a scrubbed environment, and writes a deterministic `qemu-img-<ver>-darwin-<arch>.tar.gz` (rebuilding from the same pins in the same work dir reproduces the SHA).
 
-1. Run `scripts/build-qemu-payload.sh`. It relocates the closure with `dylibbundler`, smoke-tests a `raw`->`qcow2` conversion with Homebrew unreachable, writes `qemu-img-<ver>-darwin-<arch>.tar.gz`, and prints (a) the `EXPECTED_SHA256` line to pin in `scripts/download-binaries.js` and (b) the `mac.additionalBinariesToSign` entries for `todesktop.js`. The dylib closure tracks the host's Homebrew dependency versions, so regenerate the SHA **and** the signing list together whenever they move.
+For each target arch, on a matching macOS host:
+
+1. Run `scripts/build-qemu-payload.sh`. It prints the `EXPECTED_SHA256` line to pin in `scripts/download-binaries.js`.
 2. Upload every arch's tarball as an asset on a GitHub release tagged `qemu-img-v<ver>` in `imbue-ai/mngr` (the base URL is `QEMU_PAYLOAD_BASE_URL` in `scripts/download-binaries.js`).
-3. Paste each printed SHA into `EXPECTED_SHA256` and, if the closure changed, replace the qemu block in `todesktop.js` `mac.additionalBinariesToSign`.
+3. Paste each printed SHA into `EXPECTED_SHA256`.
 
-`aarch64` and `x86_64` payloads must be produced on their respective host arches. Linux payloads use the same GitHub-release + pinned-SHA fetch path but a different producer (patchelf `$ORIGIN`-relative rpaths); that producer is not yet written -- a Linux packaged build is not wired up (`todesktop.js` ships only a `mac:` block). Until an arch's tarball is uploaded and its SHA pinned, a build for that arch aborts loudly in `verifyChecksum`.
+`aarch64` and `x86_64` payloads must be produced on their respective host arches (ToDesktop currently packages macOS arm64 only, so the aarch64 payload is the load-bearing one). Linux payloads use the same GitHub-release + pinned-SHA fetch path; the same from-source recipe works there (static linking is easier on Linux), but no Linux producer is wired up yet -- a packaged Linux build does not exist (`todesktop.js` ships only a `mac:` block). Until an arch's tarball is uploaded and its SHA pinned, a build for that arch aborts loudly in `verifyChecksum`.
 
-To exercise a packaged or clean-`pnpm start` build locally before the release exists, stage the payload straight into the resources dir instead of downloading it: `scripts/build-qemu-payload.sh apps/minds/resources` writes `resources/qemu/{bin,lib}` in place, which `ensure-binaries.js` then treats as already present.
+To exercise a packaged or clean-`pnpm start` build locally before the release exists, stage the payload straight into the resources dir instead of downloading it: `scripts/build-qemu-payload.sh apps/minds/resources` writes `resources/qemu/bin/qemu-img` in place, which `ensure-binaries.js` then treats as already present.
 
 ## Data directory
 
@@ -285,6 +287,6 @@ apps/minds/
   scripts/
     build.js                # Downloads runtime binaries, builds wheels, stages resources/
     download-binaries.js    # Fetches uv/git/restic/desync/qemu-img (ToDesktop beforeInstall + dev)
-    build-qemu-payload.sh   # Maintainer tool: produces the relocated qemu-img release payload
+    build-qemu-payload.sh   # Maintainer tool: builds the static qemu-img release payload from pinned sources
   resources/                # (gitignored) Built artifacts for packaging
 ```

@@ -53,10 +53,9 @@ function getDesyncBinDir() {
 
 /**
  * Path to the bundled qemu-img, used to convert the pre-baked Lima image
- * raw<->qcow2 (issue #2306). Ships as a self-contained payload under
- * ``resources/qemu/``: ``bin/qemu-img`` loads its dylib closure from the
- * sibling ``lib/`` via @executable_path/../lib. build.js / download-binaries.js
- * stage it per target platform.
+ * raw<->qcow2 (issue #2306). A single static-deps binary at
+ * ``resources/qemu/bin/qemu-img`` (only system libraries linked), staged per
+ * target platform by build.js / download-binaries.js.
  */
 function getQemuImgPath() {
   return path.join(getResourcesDir(), 'qemu', 'bin', 'qemu-img');

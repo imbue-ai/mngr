@@ -29,12 +29,11 @@ const RESTIC_VERSION = '0.18.1';
 // (issue #2306). Only bundled on macOS/Linux (the Lima launch mode's platforms).
 const DESYNC_VERSION = '1.0.3';
 // qemu-img: converts the pre-baked Lima image raw<->qcow2 (issue #2306). Only
-// bundled on macOS/Linux (the Lima launch mode's platforms). No upstream static
-// build exists (qemu-img links glib; macOS has no static libc), so we ship a
-// relocated, self-contained payload -- qemu-img plus its dylib closure under
-// lib/, load paths rewritten to @executable_path/../lib -- produced by
-// scripts/build-qemu-payload.sh and hosted as a GitHub release asset. See
-// docs/desktop-app.md for the produce/host/pin runbook.
+// bundled on macOS/Linux (the Lima launch mode's platforms). No upstream
+// release exists, so we build our own from pinned sources: a single binary
+// with glib and friends linked statically (only system libraries remain),
+// produced by scripts/build-qemu-payload.sh and hosted as a GitHub release
+// asset. See docs/desktop-app.md for the produce/host/pin runbook.
 const QEMU_IMG_VERSION = '10.2.2';
 const QEMU_PAYLOAD_BASE_URL = `https://github.com/imbue-ai/mngr/releases/download/qemu-img-v${QEMU_IMG_VERSION}`;
 
@@ -71,7 +70,7 @@ const EXPECTED_SHA256 = {
   // The other three qemu-img targets (darwin-x86_64, linux-x86_64, linux-aarch64)
   // are pinned once produced on a matching host and uploaded; until then a build
   // for those targets aborts loudly in verifyChecksum. See docs/desktop-app.md.
-  'qemu-img-10.2.2-darwin-aarch64.tar.gz': '0d00444127c4b71e8f822bcc576496859d3224ffcf3fed7816f461a0f3f4477c',
+  'qemu-img-10.2.2-darwin-aarch64.tar.gz': 'e1abac7e272b1212b7123935012139aa6e65ceeb3d56b09c847d37f5ff8377cf',
 };
 
 const MAX_REDIRECTS = 5;
@@ -341,9 +340,8 @@ async function downloadQemuImg(resourcesDir, { platform, arch }) {
   const archive = await download(url);
   verifyChecksum(archive, filename);
 
-  // The payload tars bin/ + lib/ at its root, so extract without stripping:
-  // resources/qemu/bin/qemu-img loads its closure from resources/qemu/lib/
-  // via the @executable_path/../lib load paths baked in at production time.
+  // The payload tars bin/ at its root, so extract without stripping:
+  // resources/qemu/bin/qemu-img is a single static-deps binary.
   const tarPath = path.join(qemuDir, 'qemu.tar.gz');
   fs.writeFileSync(tarPath, archive);
   execSync(`tar xzf "${tarPath}" -C "${qemuDir}"`, { stdio: 'inherit' });
