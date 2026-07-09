@@ -416,13 +416,38 @@
       }
     }
 
-    async function submitGrant(form, resolvedId) {
+    // Toggle the "an approval is running in the background" state. While
+    // busy, BOTH buttons are disabled and the Approve label is swapped for
+    // a spinner + "Approving...", so the user always has a clear signal
+    // that work is underway (a browser sign-in, a follow-up grant, or any
+    // other step that runs until the approval succeeds or fails) and
+    // cannot double-submit or deny mid-flight. When cleared, Deny is
+    // re-enabled, the spinner hidden, the label restored, and Approve's
+    // availability is recomputed from the checkbox state.
+    function setApproveBusy(isBusy) {
       var approveBtn = document.getElementById("permissions-approve-btn");
+      var denyBtn = document.getElementById("permissions-deny-btn");
+      var spinner = document.getElementById("permissions-approve-spinner");
+      var label = document.getElementById("permissions-approve-label");
+      if (isBusy) {
+        if (approveBtn) approveBtn.disabled = true;
+        if (denyBtn) denyBtn.disabled = true;
+        if (spinner) spinner.classList.remove("hidden");
+        if (label) label.textContent = "Approving\u2026";
+      } else {
+        if (denyBtn) denyBtn.disabled = false;
+        if (spinner) spinner.classList.add("hidden");
+        if (label) label.textContent = "Approve";
+        updateApproveState();
+      }
+    }
+
+    async function submitGrant(form, resolvedId) {
       var errorBox = document.getElementById("permissions-error");
       var errorMsg = document.getElementById("permissions-error-message");
       var manualBox = document.getElementById("permissions-manual-credentials");
       var progress = document.getElementById("permissions-progress");
-      if (approveBtn) approveBtn.disabled = true;
+      setApproveBusy(true);
       if (errorBox) errorBox.classList.add("hidden");
       if (manualBox) manualBox.classList.add("hidden");
       if (progress) {
@@ -456,7 +481,7 @@
             manualBox.classList.remove("hidden");
             scrollDetailIntoView(manualBox);
           }
-          updateApproveState();
+          setApproveBusy(false);
           return;
         }
         // FAILED: the approval did not complete (e.g. the browser sign-in
@@ -470,7 +495,7 @@
             errorBox.classList.remove("hidden");
             scrollDetailIntoView(errorBox);
           }
-          if (approveBtn) approveBtn.disabled = false;
+          setApproveBusy(false);
           return;
         }
         if (errorMsg) errorMsg.textContent = data.message || "Authorization failed.";
@@ -478,7 +503,7 @@
           errorBox.classList.remove("hidden");
           scrollDetailIntoView(errorBox);
         }
-        if (approveBtn) approveBtn.disabled = false;
+        setApproveBusy(false);
       } catch (err) {
         if (progress) progress.classList.add("hidden");
         if (errorMsg) errorMsg.textContent = err && err.message ? err.message : String(err);
@@ -486,7 +511,7 @@
           errorBox.classList.remove("hidden");
           scrollDetailIntoView(errorBox);
         }
-        if (approveBtn) approveBtn.disabled = false;
+        setApproveBusy(false);
       }
     }
 
@@ -503,8 +528,12 @@
         var card = inboxList.querySelector('.inbox-card[data-request-id="' + resolvedId + '"]');
         if (card) card.classList.add("is-denying");
       }
+      // Disable both buttons so the resolving card can't be re-actioned
+      // while the deny POST is in flight and the inbox advances.
       var approveBtn = document.getElementById("permissions-approve-btn");
       if (approveBtn) approveBtn.disabled = true;
+      var denyBtn = document.getElementById("permissions-deny-btn");
+      if (denyBtn) denyBtn.disabled = true;
       var denyUrl = form.action.replace(/\/grant\b/, "/deny");
       // Fire-and-forget so the user doesn't wait for mngr message round trips,
       // and so the next-item swap can start immediately. keepalive lets the
@@ -602,7 +631,7 @@
            style="-webkit-app-region: drag;">
         <div></div>
         <h1 class="type-section text-primary text-center">Requests</h1>
-        <button type="button" aria-label="Close"
+        <button type="button" aria-label="Close" data-tooltip="Close"
                 id="inbox-close-btn"
                 onclick="closeInbox()"
                 style="-webkit-app-region: no-drag;"

@@ -4,6 +4,70 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-08
+
+Fixed an unbounded memory leak in long-running `mngr observe` (discovery) processes. Each discovery poll spins up worker threads that create per-thread gevent hubs; destroying a hub without first joining it left the hub greenlet parked mid-`LoopExit`, whose traceback pinned the poll's entire object graph in a cycle the garbage collector could not reclaim. Over days this grew to multiple gigabytes. Worker-thread cleanup now joins the hub before destroying it (the pattern gevent prescribes for this leak, gevent issue 1601), so repeated polls no longer strand a hub per iteration.
+
+Regenerated the `mngr tmr` command reference to document the new variant flags (`--name`, `--mapper-prompt`, `--reducer-prompt`) for running distinct test suites as separate runs.
+
+Exported the marker text of `HostShutdownNotSupportedError`'s message as an importable `HOST_SHUTDOWN_NOT_SUPPORTED_MESSAGE` constant in `imbue.mngr.errors`, and built the exception's message from it. This lets out-of-process callers (e.g. minds, which runs `mngr` as a subprocess and only sees exit code and stderr) match on one shared source of truth instead of duplicating the literal string. No user-visible change -- the error message text is unchanged.
+
+## 2026-07-07
+
+Fixed the grandparent-death watcher being a silent no-op on macOS (MIND-103). The watcher (used by the minds backend to reap itself, and its `mngr forward`/`event`/`observe` subprocess tree, when the Electron GUI exits uncleanly) resolved its grandparent PID by reading Linux's `/proc/<ppid>/status`, which raises on macOS -- so it never armed, and a force-quit or crash of Electron left the whole backend tree orphaned under `launchd` indefinitely.
+
+`_read_grandparent_pid()` now falls back to `ps -o ppid= -p <pid>` when `/proc` is unavailable, so the watcher arms on macOS too and SIGTERMs the backend once its grandparent disappears. The `/proc` fast path is unchanged on Linux. The `ps` subprocess is spawned through the caller's `ConcurrencyGroup` (a required parameter, so its ownership is always explicit at the call site).
+
+Acquiring a remote host's cooperative lock (part of every `mngr create`/`start` on a remote host) is now resilient to transient SSH failures. Previously, if the SSH connection to a host dropped ("Connection reset by peer" leaving a dead transport), opening the lock channel raised a raw paramiko `SSHException: SSH session not active` that leaked past callers.
+
+The lock path now retries transient SSH errors after rebuilding the dropped connection (matching how remote shell/file operations already behave), and surfaces a failure that survives the retries as a structured `HostConnectionError` instead of a raw paramiko exception.
+
+This keeps a single unreachable machine from crashing an operation that spans many hosts at once: the mapreduce/TMR orchestrator launches one agent per task and already isolates per-agent `MngrError`s, so one host with a flaky connection is now recorded as a single failed launch rather than aborting the entire run.
+
+Fixed several bugs where a long-running `mngr observe` discovery stream underfed consumers that tunnel to remote hosts (most visibly the minds app's system_interface forward), leaving a freshly created cloud workspace stuck loading.
+
+- The per-provider poller reused one provider instance for every poll but never reset its per-cycle caches, so the first poll's result (including an empty leased-hosts list) was cached for the lifetime of the process. Because the minds discovery observer starts a moment before a workspace's cloud host is leased, it kept emitting empty imbue_cloud snapshots that clobbered the correct ones in the shared discovery log, so the workspace flickered in and out and its web UI hung on "Waiting for system interface to be ready...". The poller now resets each provider's per-cycle caches at the start of every poll (matching the `reset_caches=True` already used by `mngr list`), so newly leased/destroyed hosts are picked up on the next poll.
+
+- The streaming per-provider discovery never emitted `HOST_SSH_INFO` events -- only a full `mngr list` did, which the running app never does periodically. So a consumer that lost a host's SSH endpoint (e.g. after the host briefly left discovery during the flapping above) never regained it and refused to dial the host's loopback-registered service URL. `BoundedProviderDiscoveryResult` now carries per-host SSH info, and the poller re-emits it as `HOST_SSH_INFO` on every successful poll. This is wired up for **all** providers, not just imbue_cloud: the base per-host-bounded discovery captures each host's SSH endpoint from the host it already connects to (covering docker, lima, local, ssh, aws, gcp, azure), and a shared `collect_cached_host_ssh_infos` helper covers the batch providers (vps, modal). So any remote workspace -- local docker/lima included -- is now reliably reachable through the streaming path.
+
+## 2026-07-06
+
+Bounded per-host discovery reads so a wedged host can no longer leak background threads or be re-read on every poll.
+
+- The per-host-bounded discovery path now threads the provider's `host_discovery_timeout_seconds` down as a hard per-command timeout on the discovery reads (the agent-directory listing and each `data.json` read). A host that connects and then stalls mid-read now self-terminates its reads (surfacing as a connection error that falls back to the host's last-known offline agents) instead of leaving an abandoned discovery thread running forever.
+
+- Added cross-poll per-host de-duplication: a host whose previous discovery read is still in flight is not re-read on the next poll (its still-running read is reused), bounding accumulation to at most one in-flight read per host. Each such skip is logged as a warning -- with the per-command timeout in place this should essentially never fire, so it acts as a precise "host wedged past its timeout" alarm.
+
+- Connect-phase timeouts are unchanged (already bounded); batch providers (modal / vps / imbue_cloud) are unaffected (they read all hosts in one bounded pass and spawn no per-host reads).
+
+Made provider discovery per-provider and resilient to slow/hung providers, so a single stuck provider can no longer block discovery of all the others.
+
+- Each provider is now discovered independently and emits its own `ProviderDiscoverySnapshotEvent`, authoritative only for its own provider. `mngr observe --discovery-only` runs one decoupled poll loop per provider, and `mngr list` writes one per-provider snapshot per provider as a side-effect.
+
+- The legacy global `FullDiscoverySnapshotEvent` / `DISCOVERY_FULL` snapshot is no longer produced and all live usages were removed, but the type is kept (deprecated) so historical on-disk discovery logs still parse.
+
+- Added per-provider discovery cadence and timeout settings to each `[providers.<name>]` block: `discovery_poll_interval_seconds` (default 30), `discovery_warn_seconds` (default 20), `discovery_error_timeout_seconds` (default 120), and per-host / per-agent `host_discovery_timeout_seconds` / `agent_discovery_timeout_seconds` (default 30, validated to stay below the provider error timeout). A slow host whose read exceeds its timeout surfaces as explicitly UNKNOWN (its previously-known agents retained as unknown) instead of holding up its whole provider's snapshot.
+
+- A hung provider is bounded without killing threads: discovery warns after the warn threshold, then emits a per-provider `DiscoveryError` after the error timeout while the abandoned read keeps running; its late result is accepted on a later poll.
+
+- Added a shared, span-aware discovery state aggregator (`DiscoveryStateAggregator`) so a host/agent state change that arrives while a provider is mid-discovery is no longer clobbered by that older in-flight snapshot. All discovery consumers now reconcile through it. The aggregator's retain/drop rule supersedes the former `partition_removed_agents_by_provider_error` helper, which has been removed now that every consumer reconciles through the aggregator.
+
+- Kept shell-completion fast: the TAB-completion replay scan stops at the most recent legacy full snapshot instead of parsing every snapshot line in the (potentially large) discovery events file.
+
+- Preserved read-after-write consistency for agent/host resolution: an agent created (or destroyed) during a provider's in-flight discovery span is no longer lost (or resurrected) when resolving it from the event stream. The stream replay used by `mngr stop --stop-host` (and the cached-snapshot attach used by `mngr forward --observe-via-file`) now replays back to each provider's snapshot span start and applies the same span-aware rule as the aggregator, and `mngr stop` falls back to a live discovery for any agent not yet in the stream -- so stopping a just-created agent works immediately.
+
+Changed: agents now repaint on *every* tmux attach, not just on `mngr connect`. The post-attach `SIGWINCH` redraw nudge moved from `mngr connect`'s SSH wrapper into a per-session tmux `client-attached` hook set when the agent is created, so a plain `tmux attach`, the ttyd agent terminal, or a web-shell attach all trigger a clean redraw too.
+
+This resolves the garbled-pane / failed-send symptom seen when a client attaches at a different terminal size than the agent's session was created at: previously the agent's TUI could be left showing a stale, unpainted frame (which also broke message sending, since the paste-visibility check could not read the corrupted pane).
+
+Note: only newly created agents get the hook. Agents already running when you upgrade will not get the repaint nudge on attach (the old `mngr connect` nudge has been removed) until they are recreated.
+
+`mngr rename --host <agent> <new-name>` now renames the host of the referenced agent (previously a `[future]` placeholder). Only the provider's logical host name changes; the agent name, tmux session, env file, and git branch are untouched. Not all providers support host renaming (e.g. `ssh` host names remain user-owned).
+
+Host names are now length-capped (`HostName`, 63 characters -- the DNS-label limit), since they end up in provider-side identifiers with their own length limits. The cap is generous so existing host-name generators are unaffected; callers that derive a pretty slug from arbitrary text apply their own smaller target on top. Agent names and provider instance names are unaffected. Auto-generated host names are kept within the cap.
+
+Integrates the "simple names" work: `mngr rename --host <agent> <new-name>` now renames the referenced agent's host (previously a `[future]` placeholder), changing only the provider's logical host name (the agent name, tmux session, env file, and git branch are untouched; not all providers support it). Host names are now length-capped at 63 characters (the DNS-label limit) since they flow into provider-side identifiers. Agent names and provider instance names are unaffected.
+
 ## 2026-07-01
 
 Bumped the release Dockerfile's `CLAUDE_CODE_VERSION` from `2.1.141` to `2.1.160` to match the pin in forever-claude-template's `.mngr/settings.toml` (`[agent_types.claude].version`). The two had drifted, which the `test_claude_code_version_matches_forever_claude_template_pin` release test flags because a mismatch makes agent provisioning fail with "Claude version mismatch".

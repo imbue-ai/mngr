@@ -4,6 +4,131 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-08
+
+Fixed the workspace-recovery flow stranding users on a "Workspace unresponsive" page after their computer wakes from sleep, even when the workspace was healthy the whole time.
+
+Five changes to the recovery/probing logic:
+
+- The recovery page now runs a cheap liveness poll from the moment it opens and keeps it running under every state (including "Workspace unresponsive" and after a failed restart). The instant the workspace answers, the page returns you to it -- so a workspace that comes back on its own (e.g. after a wake) no longer leaves you stranded on a static verdict page.
+
+- A workspace health probe that times out is now treated as "no answer yet, keep checking" rather than as proof the workspace is down. A probe interrupted by the machine sleeping no longer produces a false "unresponsive" verdict.
+
+- The recovery page can now appear promptly when a workspace stops responding, instead of waiting for fresh discovery data first. The freshness check moved to where it actually matters -- deciding whether to show a restart verdict or auto-restart -- so a healthy workspace returns you home fast, while a genuinely-broken one still waits for trustworthy data before offering a restart. When that data hasn't arrived yet (or the probe timed out) the page shows a live "Reconnecting to your workspace" state that self-heals, rather than an indefinite loader with no recourse.
+
+- When the recovery page's own health request is dropped mid-flight -- most often because the machine slept and the browser aborted the in-flight fetch -- the page now shows the live "Reconnecting to your workspace" state and retries the probe, instead of dead-ending on a static "Workspace unresponsive" verdict. A dropped request is absence of an answer, not proof the workspace is down, so the page keeps checking and returns you home the instant the workspace responds.
+
+- The workspace health probe now re-reads the host's state at the moment it decides whether its classification is trustworthy, instead of using the state read before its slow in-container check. Previously, a discovery update landing during that check could open the freshness gate for a stale reading -- rendering a consent-gated "Workspace unresponsive" verdict (host supposedly still running) when the fresh data already showed the host fully stopped, a state that should instead trigger an automatic unattended restart.
+
+Permission request dialog now shows clear progress while an approval is being processed in the background (e.g. a browser sign-in for a Google Calendar or other integration). Clicking Approve disables both the Approve and Deny buttons and shows a spinner with an "Approving..." label until the approval succeeds or fails, so the user always has an indication that work is happening and cannot double-submit. If the approval fails or needs manual credentials, both buttons re-enable so the user can retry.
+
+Redact secrets from persisted logs.
+
+The `mngr create` subprocess is now given a log-safe process `name` (via the new `concurrency_group` `name` parameter) with the latchkey gateway password and permissions-override JWT masked, so those secrets no longer leak into the JSONL log's `thread_name` field (nor any `ProcessError` message). The same command's "Running:" log line already masks them.
+
+The `modal secret create` subprocess (used by `minds env` deploy tooling) is likewise named with its `KEY=VALUE` secret values masked, so raw Vault secrets no longer reach the thread name or error messages.
+
+The Electron backend log (`minds.log`, uploaded with bug reports) now masks the `mngr forward` preauth cookie -- a reusable, session-lifetime bearer token -- before writing backend stdout events to disk. (The single-use one-time login code is intentionally left as-is: it is spent immediately at session start.)
+
+# Docs: launch-to-msg CI freeze semantics
+
+Documented the new launch-to-msg CI pinning behavior in `docs/release.md` (step 4) and `docs/testing-overview.md`: the workflow's `commit_sha` / `template_ref` inputs accept a full 40-char SHA, branch, or tag, and are frozen to SHAs at run start — the frozen mngr SHA is what gets built and the frozen FCT SHA is what the agent is created from, so pushing to a branch after dispatch does not affect an in-flight run, and the `ref (sha)` values in the slack message are exactly what ran.
+
+Added a minds-tailored TMR mapper prompt at `apps/minds/tmr/mapper.j2`, used by the `tmr-minds` variant. It keeps the shared docstring-as-contract philosophy but drops the mngr-only tutorial-block guidance and calls out minds-specific setup blockers (a Docker daemon, a snapshot image, a deployed env, or secrets), which the agent flags with `FIXME(tmr)` and a BLOCKED status rather than hacking around.
+
+Adds Modal as a selectable compute provider in the create form (the "Modal (1-day ephemeral)" option, DIRECT mode -- the local machine authenticates to Modal with its own token). Selecting it shows a short note on how to authenticate (`uv tool install modal`, `modal token new`, or `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET`). The create wires up like the other remote providers (a `modal` host address plus the `main` + `modal` provisioning templates), and `bootstrap` writes a default `[providers.modal]` block (DIRECT, persistent) at startup.
+
+Fixes "Destroying..." spinning forever for cloud workspaces: the detached destroy subprocess (`mngr list | mngr destroy`) now inherits `MNGR_HOST_DIR`, like every other minds->mngr shell-out. Without it the destroy targeted the default host dir and silently found nothing to tear down.
+
+Fixes the "Restart workspace" recovery action for providers that cannot stop a host in place (Modal): a host-restart runs `mngr stop --stop-host` then `mngr start`, but `mngr stop --stop-host` raises `HostShutdownNotSupportedError` for such providers, which previously aborted the whole restart. The restart worker now treats that specific error as "skip the stop" and proceeds to `mngr start`, which restarts the host on its own (reconnect-if-alive, else recreate-from-snapshot). Provider-agnostic -- it keys off the error, not a hardcoded backend name. The stderr match now uses mngr's exported `HOST_SHUTDOWN_NOT_SUPPORTED_MESSAGE` constant (one shared source of truth) instead of a duplicated literal string.
+
+Modal deliberately gets no Stop/Resume/state-label lifecycle UI -- it behaves like the other cloud providers (aws/vultr/imbue_cloud), which also have no liveness UI. The reliable behaviors are: create a Modal workspace, destroy it, and reconnect to one that is still running. A Modal sandbox that has timed out may still appear in the list (there is no liveness polling to mark it dead); resuming a dead sandbox from a snapshot is intentionally not offered.
+
+## 2026-07-07
+
+Bump Latchkey to 2.20.0.
+
+## 2026-07-06
+
+Fix the "Report a bug" button doing nothing on the full-app error takeover screen. When the backend is still up (the discovery-pipeline takeover), that button opens the in-app `/help` report modal, but it was unreachable for two reasons: (1) the error-state window layout collapsed every non-chrome view, including the modal, to zero size, so the modal opened invisibly; and (2) once visible, the modal's interior was unclickable -- the takeover screen is a full-window drag region, and macOS unions drag regions across stacked views, so the OS intercepted every click meant for the modal. The error layout now lets an open modal overlay the full window (it carries its own dim backdrop, so the error screen shows through behind it), and the takeover screen drops its window-drag region while a modal is open (mirroring the main chrome titlebar), so the report flow is both visible and interactive from the takeover screen.
+
+Fix the bug-report form's text field losing focus once per second whenever it is opened over a "Loading workspace" screen. The loading and workspace-recovery pages re-attempted the workspace by full-reloading themselves every second, and in Electron a full reload of one view steals OS focus from any sibling view layered over it (the report modal), so the textarea was cleared of focus every tick and could not be typed into (the already-entered text survived, since the modal itself was never reloaded). Both the proxy loader and the recovery page's "restarting" state now poll the workspace in the background and only navigate once its state actually changes, leaving the focused report form untouched while it waits.
+
+Harden the "have an agent help fix the problem" flow, which spawns an in-workspace `/assist` chat:
+
+- Only offer it when the displayed workspace is actually reachable. The option was enabled whenever a workspace URL was showing -- including the "Loading workspace" loader that the proxy serves at the workspace's own URL while the backend is unreachable -- so the spawned chat couldn't be seen or used. Gating on the system-interface health status alone was not enough: that status isn't set during the loading phase (it is deliberately suppressed until discovery re-confirms the host), so a workspace still on the loader -- e.g. one opened while its container is stopped, before the recovery redirect fires -- read as "healthy" and kept the option enabled. The titlebar now also tracks whether the content view is showing a real workspace page versus the loader (from the content view's HTTP status: the loader is served as 503), and enables agent help only when the workspace is healthy AND its content has actually loaded. A loading/stuck workspace shows the option disabled ("Available once this workspace is responding") while a bug report stays scoped to that workspace.
+
+- Refuse before spawning when the workspace can't host the chat. A workspace created from a template predating the `/assist` skill would accept the `mngr create` but hang for the full send timeout on the unknown `/assist` command, leaving a half-created chat and a dead spinner. The app now probes the workspace for the skill first (a quick filesystem check via `mngr exec`) and, if it is missing or the workspace is unreachable, returns a clear error instead of spawning.
+
+- Show a proper error state instead of a stuck spinner. When starting an agent fails (skill missing, workspace unreachable, or the create errors), the modal now swaps to an error screen with the reason and a "Back to report" button, rather than leaving the loading spinner up.
+
+Replaced the Minds desktop app icon (`electron/assets/icon.{png,svg}`) with new branding: a profile-head mark with interlocking thought-rings on a maroon/cream palette, replacing the previous blue droplet. The SVG source now uses Apple's continuous-curvature squircle corner mask (rather than a plain rounded rectangle) and the PNG master ToDesktop consumes is now 1024x1024 (up from 512x512), so the largest macOS icon slots are no longer upscaled.
+
+Dev runs of the desktop app now show a distinct "dev"-labeled dock icon on macOS (`electron/assets/icon-dev.png`) instead of the generic Electron icon, making a running dev build easy to tell apart from a packaged Minds. This is applied at runtime via `app.dock.setIcon` and only in unpackaged builds; packaged builds keep the shipped icon.
+
+Rebranded the startup/quitting/error splash screen (`electron/shell.html`) to match: a deep-maroon (`#492222`) surface with cream (`#E9ECD9`) text, the new head illustration stacked above a "minds" wordmark. The intro animation now reveals head -> M -> i -> n -> d -> s in sequence after a short opening pause, with the head holding while the wordmark loops. The error view's buttons are recolored on-brand (slate-blue Retry, cream secondaries), and the log/details panel and report reference-ID chip keep a light background but now use dark-brown text (fixing a low-contrast, near-invisible reference ID).
+
+Titlebar buttons (Main Menu, Home, Back, Forward, Get help, Requests, and the window controls) now show custom styled tooltips on hover and keyboard focus, replacing the OS `title=` tooltips that were unreliable in the desktop window and could not extend past the titlebar. Tooltips appear after a short hover delay, float above both the chrome and the workspace content, and reposition to stay on-screen. The buttons keep an accessible name (`aria-label`) so screen readers still announce them.
+
+Under the hood, the desktop client's overlay layer was unified onto a single always-warm surface that floats above both the chrome and the workspace content. The workspace menu, inbox, help, and sign-in dialogs now render on this surface (each created when opened and torn down when closed, as before), and the custom tooltips render on it too; the dialogs' appearance and behavior are unchanged.
+
+Tooltips can also be triggered from elements inside the overlay's dialogs (rendered above the open dialog) -- the inbox, help, and sign-in dialogs' close buttons now show a "Close" tooltip.
+
+The landing page's per-workspace action buttons (Start, Stop, Restart, Open in new window, Settings) now show the same custom styled tooltips, replacing their native `title=` tooltips. The landing page renders in the workspace content view, which has no bridge to the overlay surface, so it draws these tooltips in-page instead; both paths share one style so the bubbles look identical.
+
+The cross-workspace (`minds-workspaces`) permission handler no longer stamps a `scope` label on its grant/deny response events. The label was informational only and redundant with the event's `request_type`, and the cross-workspace verbs no longer live under a dedicated detent scope (they attach to the shared `latchkey-self` scope), so the accounts handler's convention of omitting `scope` is now followed here too. No user-visible behavior change.
+
+The minds backend's Sentry error-reporting machinery moved into the shared `imbue.imbue_common.sentry` library; minds keeps its own project-specific Sentry config -- the deploy-environment model (`SentryDeployEnvironment`), the Python-backend DSNs, the environment-to-S3-bucket mapping, the consent-setting gates, the Flask integration, and its flat `~/.minds/logs` attachment layout. No user-visible change to minds' own error reporting.
+
+When `minds run` spawns the detached `mngr latchkey forward` supervisor, it now also publishes `MNGR_LATCHKEY_SENTRY_*` environment variables into it, resolving the concrete DSN, environment label, and S3 bucket from minds' own settings. This makes the long-running latchkey daemon report errors to the same Sentry project as the backend (tagged as a distinct `mngr-latchkey-forward` service).
+
+The daemon inherits minds' error-reporting / log-inclusion consent via a small consent file that minds writes (and rewrites whenever the user changes their error-reporting settings in the consent screen or the settings page). The daemon reads it live on every event, so toggling consent takes effect on the running daemon immediately -- a revoke stops the detached daemon's reports without waiting for a restart, and a grant starts them -- mirroring how minds' own Sentry gating is read live.
+
+Migrated the minds desktop app's discovery consumption from the removed global discovery snapshot to mngr's new per-provider model, so a single slow or erroring provider no longer disrupts discovery of the others.
+
+- The discovery consumer now folds every observed event into the shared, span-aware `DiscoveryStateAggregator` and pushes its reconciled view into the backend resolver, replacing the old global prior-vs-fresh agent diff. It consumes per-provider `ProviderDiscoverySnapshotEvent`s and ignores the legacy global snapshot.
+
+- Provider state is tracked per provider: a snapshot for one provider no longer erases another provider's error state, and discovery freshness is now recorded per provider. The providers panel's "time since last discovery" counters use the aggregate (max) across providers.
+
+- The workspace recovery redirect's freshness gate now uses the workspace's own provider's last snapshot time (falling back to the aggregate only when the agent's provider is unknown), so a healthy workspace is not held back by an unrelated provider being down.
+
+- Fixed a slow memory leak in the discovery consumer: cached per-host SSH info is now forgotten when a host is removed, instead of accumulating for the lifetime of the session.
+
+- Added `apps/minds/docs/persistent-terminals.md`, a short doc explaining the
+  lifecycle of the dockview terminals (in-memory tmux sessions that survive
+  closing a tab, reloading, and terminal-service restarts, but not a container
+  restart) and how a user could opt in to on-disk persistence. The
+  in-workspace terminal banner links here.
+
+- The terminal feature itself (named, in-memory-persistent tmux sessions,
+  close-vs-destroy, a reattach list, live tab-title tracking, and the banner)
+  lives in the forever-claude-template repo (system_interface + `run_ttyd.sh` +
+  tmux config); this monorepo change is just the linked doc.
+
+Workspaces can now be renamed. A new `POST /api/v1/workspaces/<agent_id>/rename` endpoint updates the workspace's normalized host name (slug) and its human-readable display name together, so the two never drift. When the new name normalizes to the same slug as the current host name, only the display name changes (no host rename -- works on every provider, online or offline). Collisions with another active workspace on the same provider are rejected (409).
+
+Workspace names are now decoupled into two concepts with a single canonical home each:
+
+- The human-readable display name is arbitrary (any characters, mixed case). It lives in a `workspace_display_name` label on the workspace's `system-services` agent, and is what the UI shows.
+
+- The host name is a normalized lowercase slug derived from the display name (non-alphanumeric runs become dashes, truncated). A name that normalizes to nothing (e.g. all punctuation/emoji) is rejected.
+
+The `workspace` label has been removed entirely: workspace discovery now keys off the `is_primary` label, per-provider name collisions are checked against the actual host name, and the display name comes from the new label. Legacy workspaces (created before the display label existed) fall back to showing their host name; this fallback is temporary and can be removed around September 2026. (This requires the companion forever-claude-template change that drops the in-container `mngr list` `has(labels.workspace)` filter to ship first, so the primary agent stays visible in that listing.)
+
+The imbue_cloud LiteLLM key is no longer minted with `host_name` metadata.
+
+Workspace-creation tests (the minds snapshot bake + resume and the create+chat Electron acceptance test) now exercise *paired* mngr+forever-claude-template changes. A new test-only helper materializes an FCT working tree from the FCT branch whose name matches the current mngr branch (or FCT `main` when none exists), with the mngr checkout under test vendored into `vendor/mngr`, and points the create flow at it via the existing `MINDS_WORKSPACE_*` env vars. The tree is prepared where git works (the CI runner before staging, or the local `just minds-test-electron` recipe) and baked into the snapshot image; the tests only consume it and error loudly if it is missing. This lets a coordinated mngr+FCT change (like this one's `has(labels.workspace)` removal) be validated together instead of always running the released FCT tag.
+
+Integrates the workspace-rename ("simple names") work onto the recent-changes stack, and fixes four bugs it surfaced:
+
+- The workspace-settings Rename "Save" button was permanently disabled. It passed its disabled state to the JinjaX `<Button>` component via a plain-Jinja `{{ "disabled" if is_stale else "" }}` attribute, which JinjaX tokenizes into a bare (always-present) `disabled` attribute -- so the button never honored `is_stale` and could never be clicked. It now uses the component idiom `:disabled="is_stale"`, so Save is enabled on healthy workspaces and disabled only when the workspace's provider is unreachable.
+
+- The paired-FCT-worktree materialization (`materialize_paired_fct_worktree`) now clones with `gc.auto=0` / `maintenance.auto=false`. Otherwise git's automatic maintenance runs detached in the background and rewrites the worktree's `.git` (e.g. `update-server-info` regenerates `.git/info/refs`) while the minds snapshot build uploads that tree with its live `.git`, intermittently failing the `build-minds-snapshot` job with "was modified during build process". The materialized tree is a throwaway baked into a one-shot e2e image, so it never needs gc/packing.
+
+- The rename endpoint's display-name write always failed with "Must specify at least one label with --label KEY=VALUE": it passed the label as a positional `mngr label <agent> workspace_display_name=<name>` argument (which `mngr label` treats as a second agent) instead of via the `--label` flag. It now invokes `mngr label <agent> --label workspace_display_name=<name>`, matching the create path, so renaming a workspace actually persists the new name.
+
+- After a successful rename the settings input briefly showed the *old* name (correct again after navigating away and back). The name is rendered from the discovery-fed resolver cache, which lags the write, and the immediate post-rename page reload raced ahead of the next discovery snapshot. The rename endpoint now optimistically records the new display name (and host-name slug, for a slug-changing rename) in the resolver via a short-lived override that masks the stale discovery value until discovery re-reads the renamed labels or a 90s TTL elapses -- mirroring the existing host-state override -- so the reload shows the new name immediately and every name surface (settings, sidebar) stays consistent.
+
 ## 2026-07-01
 
 The minds release-tier tests (`deployment_tests/`, marked `minds_deployment` / `minds_services`) now also carry `@pytest.mark.release`, so the whole release suite -- mngr and minds -- is discoverable by the `release` tag rather than by path.

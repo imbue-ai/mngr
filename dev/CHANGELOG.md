@@ -4,6 +4,36 @@ A concise, human-friendly summary of changes for repo-level dev tooling: CI work
 
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
+## 2026-07-08
+
+### Added
+
+- Added: `just tmr-mngr` and `just tmr-minds` recipes as the canonical per-suite flag sets for `mngr tmr` (the TMR workflow inputs mirror them). The minds recipe targets the `apps/minds` tree with the minds-tailored mapper prompt and defaults to the plain `@release` tests; the capability suites (snapshot/deployment/services) are documented as extra args needing their own secrets and setup.
+- Added: `tmr-minds-scheduled.yml` — the daily scheduled TMR run is split into two independent per-variant wrappers. `tmr-mngr-scheduled.yml` (renamed from the single `tmr-scheduled.yml`, at 08:00 UTC) and `tmr-minds-scheduled.yml` (09:00 UTC) each own a gate label (`tmr-mngr-periodic` / `tmr-minds-periodic`), concurrency group, and periodic PR, so the two suites schedule and review independently. The gate policy (auto-close a periodic PR older than 4 days, else skip) moved into a shared reusable workflow `tmr-gate.yml`, and `tmr.yml` gained a `periodic_label` input to route each variant's PR to its own gate.
+
+### Changed
+
+- Changed: `.github/workflows/tmr.yml` accepts `name`, `mapper_prompt`, and `reducer_prompt` inputs, so a dispatch can run a named TMR variant (e.g. `tmr-minds` over `apps/minds`) with its own branch/agent prefix and optional prompt-template overrides.
+- Changed: `minds-launch-to-msg.yml` freezes its `commit_sha` (mngr) and `template_ref` (forever-claude-template) inputs to full SHAs exactly once, in `check_should_run`, at run start. Inputs accept a full 40-char SHA, branch, or tag; every downstream job consumes the frozen SHAs instead of re-resolving. Fixes a race where a `template_ref=main` run could test a different FCT commit than the one recorded in the green marker and slack message (agent creation used the raw ref, resolved ~15-45 min after the pair-key fingerprint). Also cleaned up the workflow file (net -135 lines): deduplicated ref resolution into a single `resolve_ref` function, looped the ToDesktop secrets check, and replaced the hardcoded screenshot-prefix list in the summary manifest with a sorted glob. Caveat: SHAs must be full 40-hex and reachable from some ref; FCT-SHA creates need a binary built from mngr `02bb71b44` (2026-06-11) or later.
+
+## 2026-07-07
+
+### Changed
+
+- Changed: Migrated GitHub Actions workflows off GitHub-stored secrets onto HashiCorp Vault via the `imbue-ai/use-vault-secrets` OIDC action. CI test/TMR jobs fetch the Anthropic key, imbue Modal token id/secret, and TMR S3 credentials from `mngr/ci/*` (role `mngr_ci_gh`); the minds CI-env jobs fetch the minds-dev Modal token from `minds/ci/*`; `minds-launch-to-msg.yml`'s build job fetches ToDesktop signing credentials from an environment-gated `minds/release/*` (role `minds_release_gh`, GitHub Environment `minds-release`). `scripts/changelog_deploy.sh` now reads its bot token from `secrets/mngr/dev/GH_TOKEN` and Anthropic key from `secrets/mngr/ci/ANTHROPIC_API_KEY`. The `MODAL_TOKEN_ID` repo variable and the `ANTHROPIC_API_KEY` / `MODAL_TOKEN_SECRET` / `MINDS_DEV_MODAL_TOKEN_*` / `AWS_*` Actions secrets are retired. The self-hosted macOS `minds-runner` needs `curl` and `jq` on PATH for the Vault action.
+
+## 2026-07-06
+
+### Added
+
+- Added: Design plans for overlay-surface + custom tooltips (`blueprint/overlay-surface-tooltips/`), per-provider discovery (`blueprint/per-provider-discovery/`, plus follow-up spec `spec-bounded-per-host-discovery.md`), persistent terminals (`blueprint/persistent-terminals/`), the SIGWINCH attach-hook implementation (`specs/sigwinch-attach-hook/spec.md`), and simplifying workspace names (`blueprint/simplify-workspace-names/`).
+- Added: Paired forever-claude-template worktree in the minds snapshot bake — `scripts/snapshot_minds_e2e_state.py` now materializes the FCT branch matching the current mngr branch (else `main`) with the current mngr vendored into `vendor/mngr`, baked into the snapshot image via a separate upload. Workspace-creation tests now exercise coordinated mngr+FCT changes together instead of the released FCT tag. `just minds-test-electron` materializes the worktree before the local run.
+
+### Changed
+
+- Changed: Raised the repo-wide bash strict-mode ratchet from 11 to 12 (`test_meta_ratchets.py::test_prevent_bash_without_strict_mode`) to account for `libs/mngr/imbue/mngr/resources/sigwinch_panes.sh`, a best-effort tmux repaint sweep that deliberately uses `set -uo pipefail` (omitting `-e`). Refreshed the test's stale docstring.
+- Changed: Excluded `/imbue_common/sentry` from coverage.
+
 ## 2026-07-01
 
 ### Added

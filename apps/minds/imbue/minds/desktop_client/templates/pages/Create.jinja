@@ -51,6 +51,7 @@
     var apiKeyInput = document.getElementById('anthropic_api_key');
     var launchModeError = document.getElementById('launch-mode-account-error');
     var awsCredentialsNote = document.getElementById('aws-credentials-note');
+    var modalDirectNote = document.getElementById('modal-direct-note');
     var aiProviderError = document.getElementById('ai-provider-account-error');
     var backupSelect = document.getElementById('backup_provider');
     var backupApiKeyRow = document.getElementById('backup-api-key-row');
@@ -485,6 +486,7 @@
       var backupInvalid = !hasAccount && backupValue === 'IMBUE_CLOUD';
       launchModeError.classList.toggle('hidden', !launchInvalid);
       if (awsCredentialsNote) awsCredentialsNote.classList.toggle('hidden', launchSelect.value !== 'AWS');
+      if (modalDirectNote) modalDirectNote.classList.toggle('hidden', launchSelect.value !== 'MODAL');
       aiProviderError.classList.toggle('hidden', !aiInvalid);
       backupProviderError.classList.toggle('hidden', !backupInvalid);
 
@@ -625,11 +627,18 @@
               or <code>AWS_PROFILE</code>, or <code>~/.aws/credentials</code>).
               Pick a region below.
             </p>
+            <p id="modal-direct-note" class="hidden mt-1 type-helper text-tertiary">
+              Modal creates sandboxes from this machine using your own Modal token.
+              If you haven't authenticated yet, install the CLI and log in:
+              <code>uv tool install modal</code>, then <code>modal token new</code>
+              (or set <code>MODAL_TOKEN_ID</code> / <code>MODAL_TOKEN_SECRET</code>).
+              Sandboxes are ephemeral (~1 day) -- testing only.
+            </p>
           </div>
           <Select id="launch_mode" name="launch_mode" width="w-48">
             {% for mode in launch_modes %}
               <option value="{{ mode.value }}"{% if mode.value == selected_launch_mode %} selected{% endif %}
-                      {% if mode.value == 'IMBUE_CLOUD' %}data-requires-account="true"{% endif %}>{{ mode.value | lower }}</option>
+                      {% if mode.value == 'IMBUE_CLOUD' %}data-requires-account="true"{% endif %}>{% if mode.value == 'MODAL' %}Modal (1-day ephemeral){% else %}{{ mode.value | lower }}{% endif %}</option>
             {% endfor %}
           </Select>
         </div>

@@ -15,6 +15,7 @@ the system interface auto-opens its tab.
 the ``--message`` argument.
 """
 
+import enum
 import secrets
 import shlex
 from typing import Final
@@ -27,6 +28,75 @@ from imbue.mngr.primitives import AgentId
 # Label marking a chat as a get-help ``/assist`` session. The system interface
 # auto-opens the tab for any newly-discovered agent carrying it.
 ASSIST_CHAT_LABEL: Final[str] = "assist"
+
+# Path (relative to the workspace's work_dir, where ``mngr exec`` runs) of the
+# FCT skill the /assist flow drives. Workspaces created from an FCT older than
+# the skill's introduction lack this file; sending them ``/assist <text>`` makes
+# Claude reject an unknown slash command, which never submits a prompt, so the
+# ``mngr create --message`` send hangs to its full timeout. We probe for the file
+# first and refuse rather than spawn a chat that can only fail.
+_ASSIST_SKILL_PATH: Final[str] = ".agents/skills/assist/SKILL.md"
+
+# Sentinels the probe echoes so we can tell "file absent" (workspace reachable,
+# just an older template) from "the probe never ran" (host/workspace
+# unreachable), which a bare exit code would conflate.
+_ASSIST_PRESENT_SENTINEL: Final[str] = "MNGR_ASSIST_SKILL_PRESENT"
+_ASSIST_ABSENT_SENTINEL: Final[str] = "MNGR_ASSIST_SKILL_ABSENT"
+
+# The probe is a single filesystem check inside an already-running container, so
+# it should return near-instantly; keep the ceiling low so an unreachable
+# workspace fails fast instead of blocking the get-help modal.
+_ASSIST_PROBE_TIMEOUT_SECONDS: Final[float] = 30.0
+
+
+class AssistSupport(enum.Enum):
+    """Whether a workspace can host an ``/assist`` chat, per the skill probe."""
+
+    SUPPORTED = "supported"
+    """The workspace has the ``/assist`` skill; spawning a chat will work."""
+    UNSUPPORTED = "unsupported"
+    """The workspace is reachable but predates the ``/assist`` skill."""
+    UNREACHABLE = "unreachable"
+    """The probe could not run (host/workspace down); support is unknown."""
+
+
+def build_assist_support_probe_args(workspace_agent_id: AgentId) -> list[str]:
+    """Build the ``mngr`` CLI args that probe a workspace for the ``/assist`` skill.
+
+    Runs, in the workspace's work_dir (where ``mngr exec`` lands by default), a shell
+    ``test`` for :data:`_ASSIST_SKILL_PATH` that echoes a present/absent sentinel. The
+    sentinel -- rather than the command's exit code -- is what distinguishes a reachable
+    workspace missing the skill from a probe that never ran (host unreachable).
+    """
+    check = (
+        f"if [ -f {shlex.quote(_ASSIST_SKILL_PATH)} ]; "
+        f"then echo {_ASSIST_PRESENT_SENTINEL}; else echo {_ASSIST_ABSENT_SENTINEL}; fi"
+    )
+    return ["exec", "--agent", str(workspace_agent_id), check]
+
+
+def check_assist_support(mngr_caller: MngrCaller, workspace_agent_id: AgentId) -> AssistSupport:
+    """Probe ``workspace_agent_id`` for the ``/assist`` skill and classify the result.
+
+    Returns :attr:`AssistSupport.SUPPORTED`/:attr:`~AssistSupport.UNSUPPORTED` when the
+    probe reports the skill present/absent, and :attr:`~AssistSupport.UNREACHABLE` when it
+    produced neither sentinel (a non-zero exit, timeout, or unreachable host).
+    """
+    result = mngr_caller.call(
+        build_assist_support_probe_args(workspace_agent_id), timeout=_ASSIST_PROBE_TIMEOUT_SECONDS
+    )
+    if _ASSIST_PRESENT_SENTINEL in result.stdout:
+        return AssistSupport.SUPPORTED
+    if _ASSIST_ABSENT_SENTINEL in result.stdout:
+        return AssistSupport.UNSUPPORTED
+    logger.warning(
+        "Assist-support probe for workspace {} produced no sentinel (exit {}): {}",
+        workspace_agent_id,
+        result.returncode,
+        result.stderr.strip(),
+    )
+    return AssistSupport.UNREACHABLE
+
 
 # The mngr binary to invoke *inside* the container. Bare ``mngr`` resolves on the
 # container's PATH (set up by ``mngr exec``'s source-env prefix); the outer
@@ -46,7 +116,6 @@ def generate_assist_chat_name() -> str:
 
 def build_assist_chat_mngr_args(
     workspace_agent_id: AgentId,
-    workspace_name: str | None,
     description: str,
     chat_name: str,
 ) -> list[str]:
@@ -56,6 +125,10 @@ def build_assist_chat_mngr_args(
     workspace agent by id (a bare id is a valid agent address), whose single COMMAND
     argument is an inner ``mngr create`` shell string. The inner string is built with
     ``shlex.join`` so the free-text ``--message`` value is safely quoted.
+
+    The chat is grouped with its workspace by living in the same host/container
+    (it is created via ``exec`` into the workspace agent); no grouping label is
+    needed.
     """
     inner_parts = [
         _CONTAINER_MNGR_BINARY,
@@ -69,10 +142,6 @@ def build_assist_chat_mngr_args(
         "--label",
         f"{ASSIST_CHAT_LABEL}=true",
     ]
-    # Group the chat with its workspace (the same ``workspace=<host_name>`` label
-    # the workspace's own agents carry) when we can resolve the name.
-    if workspace_name:
-        inner_parts += ["--label", f"workspace={workspace_name}"]
     inner_parts += ["--message", f"/assist {description}"]
     inner_command = shlex.join(inner_parts)
     return ["exec", "--agent", str(workspace_agent_id), inner_command]
@@ -81,7 +150,6 @@ def build_assist_chat_mngr_args(
 def spawn_assist_chat(
     mngr_caller: MngrCaller,
     workspace_agent_id: AgentId,
-    workspace_name: str | None,
     description: str,
     chat_name: str | None = None,
 ) -> bool:
@@ -97,7 +165,6 @@ def spawn_assist_chat(
     resolved_chat_name = chat_name if chat_name is not None else generate_assist_chat_name()
     args = build_assist_chat_mngr_args(
         workspace_agent_id=workspace_agent_id,
-        workspace_name=workspace_name,
         description=description,
         chat_name=resolved_chat_name,
     )

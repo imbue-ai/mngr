@@ -22,9 +22,9 @@ from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY_PASSWORD
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY_SECONDARY
+from imbue.mngr_latchkey.agent_setup import SECRET_LATCHKEY_ENV_VAR_NAMES
 from imbue.mngr_latchkey.agent_setup import _build_allowed_agent_anyof_entry
 from imbue.mngr_latchkey.agent_setup import _extract_agent_id_from_anyof_entry
-from imbue.mngr_latchkey.agent_setup import _with_gateway_self_catchall_last
 from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
 from imbue.mngr_latchkey.agent_setup import maybe_recover_host_permissions_for_agent
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
@@ -42,6 +42,21 @@ from imbue.mngr_latchkey.testing import make_full_fake_latchkey
 
 def _full_fake(tmp_path: Path) -> FakeLatchkey:
     return make_full_fake_latchkey(tmp_path)
+
+
+def test_secret_latchkey_env_var_names_are_exactly_password_and_jwt() -> None:
+    """The secret-name set names the two credential-bearing wiring vars and nothing else.
+
+    Callers that render a command carrying the latchkey wiring as ``--host-env
+    NAME=VALUE`` flags mask exactly these values before logging; the gateway URLs
+    and the disable-counting flag are not secret and must stay out of the set.
+    """
+    assert SECRET_LATCHKEY_ENV_VAR_NAMES == frozenset(
+        {ENV_LATCHKEY_GATEWAY_PASSWORD, ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE}
+    )
+    assert ENV_LATCHKEY_GATEWAY not in SECRET_LATCHKEY_ENV_VAR_NAMES
+    assert ENV_LATCHKEY_GATEWAY_SECONDARY not in SECRET_LATCHKEY_ENV_VAR_NAMES
+    assert ENV_LATCHKEY_DISABLE_COUNTING not in SECRET_LATCHKEY_ENV_VAR_NAMES
 
 
 # -- prepare_agent_latchkey ---------------------------------------------------
@@ -486,73 +501,6 @@ def test_register_agent_for_host_raises_when_anyof_was_hand_edited(tmp_path: Pat
     path.write_text(json.dumps(config))
     with pytest.raises(LatchkeyStoreError):
         register_agent_for_host(tmp_path, host_id, agent_id)
-
-
-def test_with_gateway_self_catchall_last_moves_catchall_to_end() -> None:
-    """The domain-only ``latchkey-self`` catch-all is moved last; other rules keep order."""
-    rules = (
-        {"minds-api-proxy-per-agent-unauthorized": []},
-        {"latchkey-self": ["latchkey-self-read-self-permissions"]},
-        {"minds-workspaces": ["minds-workspaces-read"]},
-    )
-    assert _with_gateway_self_catchall_last(rules) == (
-        {"minds-api-proxy-per-agent-unauthorized": []},
-        {"minds-workspaces": ["minds-workspaces-read"]},
-        {"latchkey-self": ["latchkey-self-read-self-permissions"]},
-    )
-
-
-def test_with_gateway_self_catchall_last_is_noop_when_already_canonical() -> None:
-    """A file whose catch-all is already last is returned unchanged (so register no-ops)."""
-    rules = (
-        {"minds-api-proxy-per-agent-unauthorized": []},
-        {"minds-workspaces": ["minds-workspaces-read"]},
-        {"latchkey-self": ["latchkey-self-read-self-permissions"]},
-    )
-    assert _with_gateway_self_catchall_last(rules) == rules
-
-
-def test_register_agent_for_host_repairs_grant_appended_after_catchall(tmp_path: Path) -> None:
-    """A workspace grant appended after the ``latchkey-self`` catch-all is reordered before it.
-
-    An older build appended a ``minds-workspaces`` grant at the end of the rules
-    array, after the domain-only ``latchkey-self`` catch-all. Because detent
-    treats the first rule whose scope matches as authoritative, that catch-all
-    then shadowed the grant and vetoed every ``/workspaces`` request. Registering
-    the (already-allowed) agent again -- which happens on every app restart via
-    the auto-register sweep -- must repair the order in place so the grant takes
-    effect, without disturbing the grant or the allowlist.
-    """
-    host_id = HostId.generate()
-    agent_id = AgentId.generate()
-    register_agent_for_host(tmp_path, host_id, agent_id)
-    path = permissions_path_for_host(tmp_path, host_id)
-    config = json.loads(path.read_text())
-    # Simulate the pre-fix on-disk state: the grant appended after the catch-all.
-    config["rules"].append({"minds-workspaces": ["minds-workspaces-read", "minds-workspaces-create"]})
-    assert [next(iter(rule.keys())) for rule in config["rules"]] == [
-        "minds-api-proxy-report",
-        "minds-api-proxy-per-agent-unauthorized",
-        "latchkey-self",
-        "minds-workspaces",
-    ]
-    path.write_text(json.dumps(config))
-
-    # Re-registering the same, already-allowed agent repairs the order.
-    register_agent_for_host(tmp_path, host_id, agent_id)
-    repaired = json.loads(path.read_text())
-    assert [next(iter(rule.keys())) for rule in repaired["rules"]] == [
-        "minds-api-proxy-report",
-        "minds-api-proxy-per-agent-unauthorized",
-        "minds-workspaces",
-        "latchkey-self",
-    ]
-    # The grant itself is preserved -- only its position changed.
-    workspace_rule = next(rule for rule in repaired["rules"] if "minds-workspaces" in rule)
-    assert workspace_rule["minds-workspaces"] == ["minds-workspaces-read", "minds-workspaces-create"]
-    # The repair write must not duplicate the agent in the allowlist.
-    any_of = _allowed_anyof_for_host(tmp_path, host_id)
-    assert len(any_of) == 1
 
 
 # The ``minds-workspaces`` cross-workspace API scope is no longer part of the

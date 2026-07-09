@@ -217,6 +217,29 @@ test target:
 test-sdk-live args="":
   RUN_SDK_LIVE_TESTS=1 PYTEST_MAX_DURATION_SECONDS=2400 uv run pytest -sv --no-cov -n 0 -o timeout=900 -m sdk_live libs/mngr_robinhood {{args}}
 
+# === TMR (test map-reduce) variants ===
+# Canonical per-suite flag sets for `mngr tmr` (one agent per test, run + fix in
+# parallel). Each variant gets its own --name prefix so its agents, branches, and
+# PRs stay separate and reviewable on their own. The CI workflow
+# (.github/workflows/tmr.yml) mirrors these via its name / mapper_prompt inputs.
+# Extra flags pass through before the `--` separator, e.g.
+#   just tmr-minds --provider modal --env ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY"
+
+# mngr release suite (scoped to libs/mngr; the apps/minds tree is a separate variant).
+tmr-mngr *args:
+  uv run --project libs/mngr_tmr mngr tmr libs/mngr --name tmr-mngr {{args}} -- -m 'release and not docker and not docker_sdk'
+
+# Defaults to the plain @release tests that need no ci env / snapshot image. The
+# capability suites additionally need their own setup, appended as extra args:
+#   - minds_snapshot_resume: a pre-baked snapshot image (--snapshot <id>) on a
+#     vm_runtime host, plus ANTHROPIC_API_KEY.
+#   - minds_deployment / minds_services: Modal deploy tokens + the env secrets
+#     (litellm, etc.); each deployment test mints its own ephemeral env.
+#
+# minds release suite (the apps/minds tree), with the minds-tailored mapper prompt.
+tmr-minds *args:
+  uv run --project libs/mngr_tmr mngr tmr apps/minds --name tmr-minds --mapper-prompt apps/minds/tmr/mapper.j2 {{args}} -- -m 'release and not minds_deployment and not minds_services and not minds_snapshot_resume'
+
 # === minds deployment / services test orchestrator ===
 # Wraps apps/minds/scripts/test_deployments.py. See specs/minds-deployment-tests.md
 # and apps/minds/deployment_tests/README.md for the full design + usage.
@@ -258,7 +281,11 @@ minds-test-deployment-only *tests:
 # the gitignored stylesheet. The test lives in the snapshot-resume suite (it
 # runs in CI in the snapshot offload stage, reusing that image's warm Electron
 # toolchain) but creates its own fresh workspace, so it runs fine locally too.
+# The test itself only consumes the FCT worktree (erroring if absent), so this
+# recipe first materializes it (paired FCT branch + vendored mngr) unless an
+# operator worktree is already present, mirroring the CI snapshot bake.
 minds-test-electron *args: minds-css
+  uv run python -c 'from imbue.minds.desktop_client.fct_worktree import materialize_paired_fct_worktree; materialize_paired_fct_worktree()'
   xvfb-run -a uv run pytest apps/minds/test_snapshot_resume.py::test_create_apikey_workspace_and_chat_via_electron -v --no-cov --cov-fail-under=0 {{args}}
 
 # Drive the FULL Electron workspace lifecycle end-to-end (create local Docker

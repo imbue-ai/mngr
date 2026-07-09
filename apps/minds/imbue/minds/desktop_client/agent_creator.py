@@ -66,12 +66,14 @@ from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
 from imbue.minds.primitives import LaunchMode
+from imbue.minds.utils.secret_redaction import redact_secret_env_assignments
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.utils.git_utils import rsync_worktree_over_clone
 from imbue.mngr_latchkey.agent_setup import AgentLatchkeySetup
+from imbue.mngr_latchkey.agent_setup import SECRET_LATCHKEY_ENV_VAR_NAMES
 from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
 from imbue.mngr_latchkey.core import Latchkey
@@ -560,6 +562,10 @@ def provider_instance_name_for_launch(
             if not imbue_cloud_account:
                 raise MngrCommandError("IMBUE_CLOUD mode requires imbue_cloud_account")
             return f"imbue_cloud_{_slugify_account(imbue_cloud_account)}"
+        case LaunchMode.MODAL:
+            # Single instance: the ``modal`` provider talks to Modal with the local
+            # token (``modal token new``).
+            return "modal"
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -567,6 +573,7 @@ def provider_instance_name_for_launch(
 def _build_mngr_create_command(
     launch_mode: LaunchMode,
     host_name: HostName,
+    display_name: str = "",
     imbue_cloud_account: str | None = None,
     imbue_cloud_repo_url: str | None = None,
     imbue_cloud_branch_or_tag: str | None = None,
@@ -679,8 +686,12 @@ def _build_mngr_create_command(
         "--no-connect",
         "--format",
         "jsonl",
+        # The workspace's arbitrary human-readable display name lives on the
+        # primary (system-services) agent; the host's normalized slug name lives
+        # on the host itself. There is no ``workspace`` label. Falls back to the
+        # host name when no separate display name is supplied.
         "--label",
-        f"workspace={host_name}",
+        f"workspace_display_name={display_name or host_name}",
         # Pin the agent's per-workspace branch to the host name. mngr's
         # default for ``--branch`` is ``:mngr/*`` where ``*`` expands to the
         # agent name, but our agent name is the constant ``system-services``
@@ -786,6 +797,11 @@ def _build_mngr_create_command(
             # "no capacity in <region>" error if none is available there.
             if region:
                 mngr_command.extend(["-b", f"region={region}"])
+        case LaunchMode.MODAL:
+            # Same remote shape as vultr/aws: the ``main`` + ``modal`` templates
+            # run the provisioning chain over SSH on the freshly-created sandbox.
+            mngr_command.extend(["--new-host", "--template", "main", "--template", "modal"])
+            mngr_command.extend(_remote_host_env_flags())
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -944,6 +960,7 @@ def run_mngr_create(
     launch_mode: LaunchMode,
     workspace_dir: Path | None,
     host_name: HostName,
+    display_name: str = "",
     on_output: OutputCallback | None = None,
     imbue_cloud_account: str | None = None,
     imbue_cloud_repo_url: str | None = None,
@@ -986,6 +1003,7 @@ def run_mngr_create(
     mngr_command = _build_mngr_create_command(
         launch_mode,
         host_name,
+        display_name,
         imbue_cloud_account=imbue_cloud_account,
         imbue_cloud_repo_url=imbue_cloud_repo_url,
         imbue_cloud_branch_or_tag=imbue_cloud_branch_or_tag,
@@ -1011,7 +1029,13 @@ def run_mngr_create(
         if anthropic_base_url is not None:
             subprocess_env["ANTHROPIC_BASE_URL"] = anthropic_base_url
 
-    logger.info("Running: {}", " ".join(mngr_command))
+    # The command carries the latchkey gateway password + permissions-override
+    # JWT as ``--host-env NAME=VALUE`` flags; mask their values before logging
+    # so the persistent logs (uploaded with bug reports) never carry the raw
+    # secrets. The subprocess below still receives the unredacted command.
+    loggable_command = redact_secret_env_assignments(mngr_command, secret_env_var_names=SECRET_LATCHKEY_ENV_VAR_NAMES)
+    loggable_command_str = " ".join(loggable_command)
+    logger.info("Running: {}", loggable_command_str)
 
     capture = _CreateEventCapture(inner_on_output=on_output)
     cg = _make_child_cg("mngr-create", parent_cg)
@@ -1022,6 +1046,10 @@ def run_mngr_create(
             is_checked_after=False,
             on_output=capture,
             env=subprocess_env,
+            # Name the reader thread with the redacted command so the gateway
+            # password + JWT never reach the JSONL log's ``thread_name`` (nor any
+            # ProcessError message); the real command is still what executes.
+            name=loggable_command_str,
         )
 
     if result.returncode != 0:
@@ -1109,6 +1137,7 @@ class _MngrCreateAttemptParams(FrozenModel):
     launch_mode: LaunchMode
     workspace_dir: Path | None
     host_name: HostName
+    display_name: str
     on_output: OutputCallback
     latchkey_env: Mapping[str, str] | None
     account_email: str | None
@@ -1137,6 +1166,7 @@ def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams
         launch_mode=params.launch_mode,
         workspace_dir=params.workspace_dir,
         host_name=params.host_name,
+        display_name=params.display_name,
         on_output=params.on_output,
         latchkey_env=params.latchkey_env,
         imbue_cloud_account=params.account_email if is_imbue_cloud else None,
@@ -1341,6 +1371,7 @@ class AgentCreator(MutableModel):
         self,
         repo_source: str,
         host_name: str = "",
+        display_name: str = "",
         branch: str = "",
         launch_mode: LaunchMode = LaunchMode.DOCKER,
         ai_provider: AIProvider = AIProvider.SUBSCRIPTION,
@@ -1396,6 +1427,10 @@ class AgentCreator(MutableModel):
         # input fails inside the background thread with an error_message
         # rather than crashing this synchronous entry point.
         effective_name = host_name.strip() if host_name.strip() else extract_repo_name(repo_source)
+        # The arbitrary human-readable display name. Falls back to the host-name
+        # slug when the caller did not supply a separate display name (e.g. an
+        # auto-generated ``workspace-N``).
+        effective_display_name = display_name.strip() if display_name.strip() else effective_name
         effective_branch = branch.strip()
 
         creation_id = CreationId()
@@ -1412,6 +1447,7 @@ class AgentCreator(MutableModel):
                 creation_id,
                 repo_source,
                 effective_name,
+                effective_display_name,
                 effective_branch,
                 log_queue,
                 launch_mode,
@@ -1474,6 +1510,7 @@ class AgentCreator(MutableModel):
         creation_id: CreationId,
         repo_source: str,
         host_name: str,
+        display_name: str,
         branch: str,
         log_queue: queue.Queue[str],
         launch_mode: LaunchMode,
@@ -1635,12 +1672,14 @@ class AgentCreator(MutableModel):
                             self._statuses[cid_str] = AgentCreationStatus.PROVISIONING_AI
                         log_queue.put(f"[minds] Minting LiteLLM virtual key for account {account_email}...")
                         try:
+                            # No host_name metadata: the key is minted before the
+                            # host exists (so no host id is available), and the host
+                            # name is mutable, so it would only go stale on rename.
                             key_material: LiteLLMKeyMaterial = self.imbue_cloud_cli.create_litellm_key(
                                 account=account_email,
                                 alias=None,
                                 max_budget=100.0,
                                 budget_duration="1d",
-                                metadata={"host_name": host_name},
                             )
                         except ImbueCloudCliError as exc:
                             raise MngrCommandError(f"Failed to create LiteLLM key: {exc}") from exc
@@ -1722,6 +1761,7 @@ class AgentCreator(MutableModel):
                     launch_mode=launch_mode,
                     workspace_dir=workspace_dir,
                     host_name=parsed_host,
+                    display_name=display_name or str(parsed_host),
                     on_output=emit_log,
                     latchkey_env=latchkey_setup.env,
                     account_email=account_email,

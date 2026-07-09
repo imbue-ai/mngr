@@ -9,7 +9,6 @@ from imbue.mngr.utils.testing import assert_init_first_param_is_provider_name
 from imbue.mngr.utils.testing import walk_concrete_subclasses
 from imbue.mngr_lima.errors import LimaCommandError
 from imbue.mngr_lima.errors import LimaHostCreationError
-from imbue.mngr_lima.errors import LimaHostRenameError
 from imbue.mngr_lima.errors import LimaNotInstalledError
 from imbue.mngr_lima.errors import LimaVersionError
 
@@ -41,12 +40,6 @@ def test_lima_host_creation_error() -> None:
     assert isinstance(error, HostCreationError)
     assert error.provider_name == ProviderInstanceName("lima")
     assert "disk full" in str(error)
-
-
-def test_lima_host_rename_error() -> None:
-    error = LimaHostRenameError()
-    assert isinstance(error, MngrError)
-    assert "cannot be renamed" in str(error)
 
 
 _LIMA_PROVIDER_ERROR_SUBCLASSES = [

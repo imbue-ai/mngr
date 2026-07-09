@@ -24,6 +24,12 @@ If a previous rename was interrupted (e.g., the tmux session was renamed
 but data.json was not updated), re-running the command will attempt
 to complete it.
 
+With --host, the host of the referenced agent is renamed instead of the
+agent. Only the provider's logical host name changes (NEW-NAME is validated
+as a host name); the agent name, tmux session, env file, and git branch are
+untouched. Not all providers support host renaming (e.g. ssh host names are
+user-owned).
+
 Alias: mv
 
 **Usage:**
@@ -44,7 +50,7 @@ mngr rename [OPTIONS] CURRENT NEW-NAME
 | ---- | ---- | ----------- | ------- |
 | `--dry-run` | boolean | Show what would be renamed without actually renaming | `False` |
 | `--start`, `--no-start` | boolean | If the host is offline, start it before renaming so the tmux session and on-host env file are updated alongside data.json. Default: do not start; rename only edits the provider's persisted agent data. | `False` |
-| `--host` | boolean | Rename a host instead of an agent [future] | `False` |
+| `--host` | boolean | Rename the host of the referenced agent (instead of the agent itself) | `False` |
 
 ## Labels
 
@@ -86,6 +92,12 @@ $ mngr rename my-agent new-name
 
 ```bash
 $ mngr rename my-agent new-name --dry-run
+```
+
+**Rename the host of an agent**
+
+```bash
+$ mngr rename --host my-agent new-host-name
 ```
 
 **Use the alias**

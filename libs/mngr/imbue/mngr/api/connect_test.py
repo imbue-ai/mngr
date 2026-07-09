@@ -45,21 +45,21 @@ from imbue.mngr.providers.local.instance import LocalProviderInstance
 
 def test_build_ssh_activity_wrapper_script_creates_activity_directory() -> None:
     """Test that the wrapper script creates the activity directory."""
-    script = _build_ssh_activity_wrapper_script("mngr-test-session", Path("/home/user/.mngr"), "agent")
+    script = _build_ssh_activity_wrapper_script("mngr-test-session", Path("/home/user/.mngr"))
 
     assert "mkdir -p '/home/user/.mngr/activity'" in script
 
 
 def test_build_ssh_activity_wrapper_script_writes_to_activity_file() -> None:
     """Test that the wrapper script writes to the activity/ssh file."""
-    script = _build_ssh_activity_wrapper_script("mngr-test-session", Path("/home/user/.mngr"), "agent")
+    script = _build_ssh_activity_wrapper_script("mngr-test-session", Path("/home/user/.mngr"))
 
     assert "'/home/user/.mngr/activity/ssh'" in script
 
 
 def test_build_ssh_activity_wrapper_script_attaches_to_tmux_session() -> None:
     """Test that the wrapper script attaches to the correct tmux session."""
-    script = _build_ssh_activity_wrapper_script("mngr-my-agent", Path("/home/user/.mngr"), "agent")
+    script = _build_ssh_activity_wrapper_script("mngr-my-agent", Path("/home/user/.mngr"))
 
     # The attach command is built via build_attach_argv (raw `=name` from
     # TmuxSessionTarget.as_target_arg) and rendered with shlex.join, which quotes a
@@ -70,64 +70,37 @@ def test_build_ssh_activity_wrapper_script_attaches_to_tmux_session() -> None:
 
 def test_build_ssh_activity_wrapper_script_without_attach_args_is_plain_attach() -> None:
     """With no attach_args the attach command is the plain `tmux attach` (no client flags)."""
-    script = _build_ssh_activity_wrapper_script("mngr-my-agent", Path("/home/user/.mngr"), "agent")
+    script = _build_ssh_activity_wrapper_script("mngr-my-agent", Path("/home/user/.mngr"))
     assert "tmux attach -t =mngr-my-agent" in script
 
 
 def test_build_ssh_activity_wrapper_script_inserts_attach_args_before_subcommand() -> None:
     """attach_args are tmux client flags and must appear before the `attach` subcommand,
     e.g. `tmux -CC attach` for iTerm2 control mode."""
-    script = _build_ssh_activity_wrapper_script(
-        "mngr-my-agent", Path("/home/user/.mngr"), "agent", attach_args=("-CC",)
-    )
+    script = _build_ssh_activity_wrapper_script("mngr-my-agent", Path("/home/user/.mngr"), attach_args=("-CC",))
     assert "tmux -CC attach -t =mngr-my-agent" in script
 
 
-def test_build_ssh_activity_wrapper_script_silences_sigwinch_stdout_for_control_mode() -> None:
-    """The background SIGWINCH helper's stdout must be redirected (not just stderr) so a
-    control-mode (-CC) attach is not corrupted by stray tmux output on the SSH stdout stream."""
-    script = _build_ssh_activity_wrapper_script(
-        "mngr-my-agent", Path("/home/user/.mngr"), "agent", attach_args=("-CC",)
-    )
-    assert ">/dev/null 2>&1 &" in script
+def test_build_ssh_activity_wrapper_script_no_longer_sends_sigwinch() -> None:
+    """The post-attach SIGWINCH nudge has moved to a per-session tmux client-attached
+    hook (set at session creation), so the connect wrapper must no longer send it.
+    This guards against reintroducing a redundant second nudge on `mngr connect`."""
+    script = _build_ssh_activity_wrapper_script("mngr-my-agent", Path("/home/user/.mngr"))
 
-
-def test_build_ssh_activity_wrapper_script_guards_sigwinch_on_manual_window_size() -> None:
-    # The post-attach SIGWINCH nudge must be skipped for a pinned ("manual") window:
-    # it never resizes on attach, so there is nothing to redraw. The check is done on
-    # the remote host at attach time via tmux show-options (-wv, a window option). The
-    # window is addressed by name (not the literal :0 index) so the guard is
-    # independent of the user's tmux base-index.
-    script = _build_ssh_activity_wrapper_script("mngr-my-agent", Path("/home/user/.mngr"), "agent")
-
-    assert "show-options -t =mngr-my-agent:agent -wv window-size" in script
-    assert "!= manual" in script
-    # The SIGWINCH nudge is present (run only when not manual). We must NOT use
-    # tmux resize-window, which would flip window-size to manual and pin the
-    # window, breaking live resize tracking under the default window-size=latest.
-    assert "kill -WINCH" in script
-    assert "resize-window" not in script
-
-
-def test_build_ssh_activity_wrapper_script_sigwinch_guard_targets_named_window() -> None:
-    """A custom primary_window_name flows into the manual-pin guard's window target,
-    so the guard works regardless of the user's tmux base-index (the index :0 is never used)."""
-    script = _build_ssh_activity_wrapper_script("mngr-my-agent", Path("/home/user/.mngr"), "primary")
-
-    assert "show-options -t =mngr-my-agent:primary -wv window-size" in script
-    assert "=mngr-my-agent:0" not in script
+    assert "kill -WINCH" not in script
+    assert "window-size" not in script
 
 
 def test_build_ssh_activity_wrapper_script_kills_activity_tracker_on_exit() -> None:
     """Test that the wrapper script kills the activity tracker when tmux exits."""
-    script = _build_ssh_activity_wrapper_script("mngr-test", Path("/tmp/.mngr"), "agent")
+    script = _build_ssh_activity_wrapper_script("mngr-test", Path("/tmp/.mngr"))
 
     assert "kill $MNGR_ACTIVITY_PID" in script
 
 
 def test_build_ssh_activity_wrapper_script_writes_json_with_time_and_pid() -> None:
     """Test that the activity file contains JSON with time and ssh_pid."""
-    script = _build_ssh_activity_wrapper_script("mngr-test", Path("/tmp/.mngr"), "agent")
+    script = _build_ssh_activity_wrapper_script("mngr-test", Path("/tmp/.mngr"))
 
     # The script should write JSON with time and ssh_pid fields
     assert "time" in script
@@ -137,7 +110,7 @@ def test_build_ssh_activity_wrapper_script_writes_json_with_time_and_pid() -> No
 
 def test_build_ssh_activity_wrapper_script_handles_paths_with_spaces() -> None:
     """Test that the wrapper script handles paths with spaces correctly."""
-    script = _build_ssh_activity_wrapper_script("mngr-test", Path("/home/user/my dir/.mngr"), "agent")
+    script = _build_ssh_activity_wrapper_script("mngr-test", Path("/home/user/my dir/.mngr"))
 
     # Paths should be quoted to handle spaces
     assert "'/home/user/my dir/.mngr/activity'" in script
@@ -146,7 +119,7 @@ def test_build_ssh_activity_wrapper_script_handles_paths_with_spaces() -> None:
 
 def test_build_ssh_activity_wrapper_script_checks_for_signal_file() -> None:
     """Test that the wrapper script checks for the session-specific signal file."""
-    script = _build_ssh_activity_wrapper_script("mngr-my-agent", Path("/home/user/.mngr"), "agent")
+    script = _build_ssh_activity_wrapper_script("mngr-my-agent", Path("/home/user/.mngr"))
 
     assert "'/home/user/.mngr/signals/mngr-my-agent'" in script
     assert "SIGNAL_FILE=" in script
@@ -154,7 +127,7 @@ def test_build_ssh_activity_wrapper_script_checks_for_signal_file() -> None:
 
 def test_build_ssh_activity_wrapper_script_exits_with_destroy_code_on_destroy_signal() -> None:
     """Test that the wrapper script exits with SIGNAL_EXIT_CODE_DESTROY when signal is 'destroy'."""
-    script = _build_ssh_activity_wrapper_script("mngr-test", Path("/tmp/.mngr"), "agent")
+    script = _build_ssh_activity_wrapper_script("mngr-test", Path("/tmp/.mngr"))
 
     assert f"exit {SIGNAL_EXIT_CODE_DESTROY}" in script
     assert '"destroy"' in script
@@ -162,7 +135,7 @@ def test_build_ssh_activity_wrapper_script_exits_with_destroy_code_on_destroy_si
 
 def test_build_ssh_activity_wrapper_script_exits_with_stop_code_on_stop_signal() -> None:
     """Test that the wrapper script exits with SIGNAL_EXIT_CODE_STOP when signal is 'stop'."""
-    script = _build_ssh_activity_wrapper_script("mngr-test", Path("/tmp/.mngr"), "agent")
+    script = _build_ssh_activity_wrapper_script("mngr-test", Path("/tmp/.mngr"))
 
     assert f"exit {SIGNAL_EXIT_CODE_STOP}" in script
     assert '"stop"' in script
@@ -170,14 +143,14 @@ def test_build_ssh_activity_wrapper_script_exits_with_stop_code_on_stop_signal()
 
 def test_build_ssh_activity_wrapper_script_removes_signal_file_after_reading() -> None:
     """Test that the wrapper script removes the signal file after reading it."""
-    script = _build_ssh_activity_wrapper_script("mngr-test", Path("/tmp/.mngr"), "agent")
+    script = _build_ssh_activity_wrapper_script("mngr-test", Path("/tmp/.mngr"))
 
     assert 'rm -f "$SIGNAL_FILE"' in script
 
 
 def test_build_ssh_activity_wrapper_script_signal_file_uses_session_name() -> None:
     """Test that the signal file path includes the session name for per-session signals."""
-    script = _build_ssh_activity_wrapper_script("mngr-unique-session", Path("/data/.mngr"), "agent")
+    script = _build_ssh_activity_wrapper_script("mngr-unique-session", Path("/data/.mngr"))
 
     assert "'/data/.mngr/signals/mngr-unique-session'" in script
 
@@ -641,7 +614,7 @@ def test_ssh_wrapper_script_is_correctly_quoted_for_bash_c() -> None:
     bash -c only receives the first word (e.g. 'mkdir'), causing errors like
     'mkdir: missing operand'.
     """
-    wrapper_script = _build_ssh_activity_wrapper_script("mngr-test", Path("/mngr"), "agent")
+    wrapper_script = _build_ssh_activity_wrapper_script("mngr-test", Path("/mngr"))
     remote_command = "bash -c " + shlex.quote(wrapper_script)
 
     # When the remote shell parses this command, bash should receive

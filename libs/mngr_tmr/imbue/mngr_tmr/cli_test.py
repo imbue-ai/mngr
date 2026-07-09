@@ -50,6 +50,14 @@ def test_cli_help_drops_removed_options(cli_runner: CliRunner) -> None:
     assert "--use-snapshot" not in result.output
 
 
+def test_cli_help_contains_variant_options(cli_runner: CliRunner) -> None:
+    """The variant-identity and prompt-override flags are surfaced in help."""
+    result = cli_runner.invoke(tmr, ["--help"])
+    assert "--name" in result.output
+    assert "--mapper-prompt" in result.output
+    assert "--reducer-prompt" in result.output
+
+
 def test_cli_help_contains_timeout_options(cli_runner: CliRunner) -> None:
     result = cli_runner.invoke(tmr, ["--help"])
     assert "--timeout" in result.output

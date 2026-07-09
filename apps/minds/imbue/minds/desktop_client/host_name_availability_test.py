@@ -37,13 +37,14 @@ _ACCOUNT_PROVIDER = "imbue_cloud_alice-imbue-com"
 
 
 def _workspace_agent(host_id: HostId, agent_id: AgentId, name: str, provider: str) -> DiscoveredAgent:
-    """A primary-workspace agent whose ``workspace`` label carries its host name."""
+    """A primary (``is_primary``) workspace agent. Its host name is supplied separately
+    via the resolver's ``host_name_by_host_id`` map (the canonical source), not a label."""
     return DiscoveredAgent(
         host_id=host_id,
         agent_id=agent_id,
         agent_name=AgentName("system-services"),
         provider_name=ProviderInstanceName(provider),
-        certified_data={"labels": {"workspace": name, "is_primary": "true"}},
+        certified_data={"labels": {"is_primary": "true"}},
     )
 
 
@@ -66,6 +67,13 @@ def _resolver_with_sample_workspaces() -> MngrCliBackendResolver:
                 _workspace_agent(cloud_host, cloud_agent, "cloud-mind", _ACCOUNT_PROVIDER),
             ),
             host_state_by_host_id={str(destroyed_host): HostState.DESTROYED},
+            # Host names are the canonical slugs, sourced from discovery host info.
+            # Stored with mixed case to exercise case-insensitive matching.
+            host_name_by_host_id={
+                str(active_host): "My-Mind",
+                str(destroyed_host): "ghost",
+                str(cloud_host): "cloud-mind",
+            },
         )
     )
     return resolver
