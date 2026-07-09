@@ -31,6 +31,7 @@ import shlex
 from collections.abc import Iterator
 from datetime import datetime
 from datetime import timezone
+from typing import Final
 
 from flask import Blueprint
 from flask import Response
@@ -334,6 +335,13 @@ def _handle_workspace_version(agent_id: str) -> WorkspaceVersionResponse | Respo
     )
 
 
+# Exit budget for the per-request concurrency group in the backups route. The
+# check thread is bounded by the check's own exec timeout, so this margin
+# guarantees the group exit waits the check out (a slow check delays the
+# response) instead of timing out the strand and turning the route into a 500.
+_BACKUP_DETAIL_EXIT_TIMEOUT_SECONDS: Final[float] = backup_verification.CHECK_EXEC_TIMEOUT_SECONDS + 30.0
+
+
 class _WorkspaceSnapshotListing(FrozenModel):
     """The snapshot half of the per-workspace backups response."""
 
@@ -426,7 +434,11 @@ def _handle_workspace_backups(agent_id: str) -> WorkspaceBackupsResponse | Respo
         check_results.append(_check_backup_service_safely(paths, parsed_id, resolver, parent_cg))
 
     cg_name = f"backup-detail-{parsed_id}"
-    cg = parent_cg.make_concurrency_group(name=cg_name) if parent_cg is not None else ConcurrencyGroup(name=cg_name)
+    cg = (
+        parent_cg.make_concurrency_group(name=cg_name, exit_timeout_seconds=_BACKUP_DETAIL_EXIT_TIMEOUT_SECONDS)
+        if parent_cg is not None
+        else ConcurrencyGroup(name=cg_name, exit_timeout_seconds=_BACKUP_DETAIL_EXIT_TIMEOUT_SECONDS)
+    )
     with cg:
         cg.start_new_thread(target=_run_check_into_results, name=f"backup-check-{parsed_id}")
         listing = _list_workspace_snapshots_safely(paths, parsed_id)

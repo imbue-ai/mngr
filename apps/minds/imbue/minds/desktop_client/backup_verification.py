@@ -54,8 +54,9 @@ from imbue.mngr.primitives import HostState
 # One exec runs the whole check; sized to cover a first-encounter `git fetch
 # official --tags` on a slow network (the script gives the fetch 300s) on top
 # of the (fast, local) git diff, so the script's structured "fetch failed"
-# detail always beats the exec timeout.
-_CHECK_EXEC_TIMEOUT_SECONDS: Final[float] = 360.0
+# detail always beats the exec timeout. Public so the backups route can size
+# its concurrency-group exit budget to outlast the check thread.
+CHECK_EXEC_TIMEOUT_SECONDS: Final[float] = 360.0
 
 # The minimum required backup-service version. Workspaces at or above it are
 # never flagged; the update action still converges to the tag matching the
@@ -236,7 +237,7 @@ def check_backup_service_for_workspace(
         BACKUP_CHECK_SCRIPT, ("--minimum-tag", minimum_backup_tag(), "--agent-id", str(agent_id))
     )
     result = run_mngr_exec_on_agent(
-        agent_id, command_str, parent_cg=parent_cg, timeout_seconds=_CHECK_EXEC_TIMEOUT_SECONDS
+        agent_id, command_str, parent_cg=parent_cg, timeout_seconds=CHECK_EXEC_TIMEOUT_SECONDS
     )
     if result.returncode != 0 or result.is_timed_out:
         detail = (result.stderr or result.stdout).strip()[-500:]
