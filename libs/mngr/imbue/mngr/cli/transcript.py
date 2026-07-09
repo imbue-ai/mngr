@@ -153,16 +153,11 @@ def _format_event_human(event: dict[str, Any]) -> str:
             return f"[{timestamp}] user:\n{content}"
 
         case "assistant_message":
-            # `event.get("parts") or []`, not `.get("parts", [])`: a record may carry
-            # parts=None (explicit null), which the two-arg get returns as-is and would
-            # crash `for part in None`. `or []` coerces absent/None/empty to an empty
-            # iterable (crash-safety -- keep this even after the fallback below is removed).
-            #
-            # FIXME: MIND-113, remove this explanation. The current emitter always fills
-            # parts[] (since the 2026-06-15 OTel alignment); only agents on an older emitter
-            # version leave it empty, which is what the flat-field fallback below serves.
+            # Every emitter fills the ordered parts[]; render it directly (the flat
+            # text + tool_calls are kept on the record as a convenience baseline, but
+            # parts[] is the authoritative ordered view).
             lines: list[str] = []
-            for part in event.get("parts") or []:
+            for part in event.get("parts", []):
                 if not isinstance(part, dict):
                     continue
                 if part.get("type") == "text":
