@@ -1,3 +1,4 @@
+import os
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -6,6 +7,7 @@ import pytest
 
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostNotFoundError
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.primitives import HostId
@@ -14,11 +16,68 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr_lima.config import LimaProviderConfig
+from imbue.mngr_lima.errors import LimaCommandUnavailableError
 from imbue.mngr_lima.host_store import HostRecord
 from imbue.mngr_lima.host_store import LimaHostConfig
 from imbue.mngr_lima.instance import LimaProviderInstance
 from imbue.mngr_lima.instance import _parse_size_to_gb
 from imbue.mngr_lima.limactl import LimaSshConfig
+
+
+def _write_fake_limactl(directory: Path, script_body: str) -> None:
+    """Install an executable fake ``limactl`` in ``directory`` (prepend it to PATH)."""
+    directory.mkdir(parents=True, exist_ok=True)
+    fake = directory / "limactl"
+    fake.write_text("#!/bin/sh\n" + script_body)
+    fake.chmod(0o755)
+
+
+def test_discover_hosts_reports_provider_unavailable_when_limactl_crashes(
+    lima_provider: LimaProviderInstance,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A limactl that is installed and correctly versioned but crashes on ``list`` is
+    reported as provider unavailability (like an unreachable Docker daemon), not
+    silently swallowed into an all-offline view.
+
+    ``--version`` succeeds so the availability check passes; only ``list`` crashes,
+    mirroring a mid-session limactl startup fault (e.g. the getpwuid init panic).
+    """
+    bin_dir = tmp_path / "bin"
+    _write_fake_limactl(
+        bin_dir,
+        'if [ "$1" = "--version" ]; then echo "limactl version 2.0.3"; exit 0; fi\n'
+        'echo "panic: user: unknown userid 501" >&2\nexit 2\n',
+    )
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+
+    with pytest.raises(LimaCommandUnavailableError, match="not available"):
+        lima_provider.discover_hosts(lima_provider.mngr_ctx.concurrency_group)
+
+
+def test_discover_hosts_degrades_to_empty_when_limactl_unavailable(
+    lima_provider: LimaProviderInstance,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When limactl is unavailable in a recognized way (here: too old to meet the
+    minimum version), discovery degrades gracefully -- it returns hosts from local
+    records only (all offline) rather than raising, so Lima-less/underprovisioned
+    environments still work. With no host records that is an empty list.
+
+    This is the counterpart to the crash case above: a *recognized* unavailability
+    (absent/too-old limactl, both ProviderUnavailableError) is swallowed, whereas a
+    limactl that runs but fails at runtime is reported as provider-unavailable.
+    """
+    bin_dir = tmp_path / "bin"
+    _write_fake_limactl(
+        bin_dir,
+        'if [ "$1" = "--version" ]; then echo "limactl version 0.9.0"; exit 0; fi\nexit 0\n',
+    )
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+
+    assert lima_provider.discover_hosts(lima_provider.mngr_ctx.concurrency_group) == []
 
 
 def test_provider_capabilities(lima_provider: LimaProviderInstance) -> None:

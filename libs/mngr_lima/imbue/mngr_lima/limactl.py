@@ -105,7 +105,9 @@ def get_lima_version(cg: ConcurrencyGroup) -> tuple[int, int, int]:
 
     Parses the output of `limactl --version`.
     """
-    result = cg.run_process_to_completion(["limactl", "--version"], timeout=10.0)
+    result = cg.run_process_to_completion(["limactl", "--version"], timeout=10.0, is_checked_after=False)
+    if result.returncode != 0:
+        raise LimaCommandError("--version", result.returncode, result.stderr)
     version_str = result.stdout.strip()
     # limactl --version outputs something like "limactl version 1.0.2"
     match = re.search(r"(\d+)\.(\d+)\.(\d+)", version_str)
@@ -227,7 +229,7 @@ def limactl_stop(
     """
     cmd = ["limactl", "stop", instance_name]
     with log_span("Running limactl stop: {}", instance_name):
-        result = cg.run_process_to_completion(cmd, timeout=timeout)
+        result = cg.run_process_to_completion(cmd, timeout=timeout, is_checked_after=False)
     if result.returncode != 0:
         raise LimaCommandError("stop", result.returncode, result.stderr)
 
@@ -247,7 +249,7 @@ def limactl_delete(
         cmd.append("--force")
     cmd.append(instance_name)
     with log_span("Running limactl delete: {}", instance_name):
-        result = cg.run_process_to_completion(cmd, timeout=timeout)
+        result = cg.run_process_to_completion(cmd, timeout=timeout, is_checked_after=False)
     if result.returncode != 0:
         raise LimaCommandError("delete", result.returncode, result.stderr)
 
@@ -271,7 +273,7 @@ def limactl_disk_create(
     """
     cmd = ["limactl", "disk", "create", disk_name, "--size", size]
     with log_span("Running limactl disk create: {} (size {})", disk_name, size):
-        result = cg.run_process_to_completion(cmd, timeout=timeout)
+        result = cg.run_process_to_completion(cmd, timeout=timeout, is_checked_after=False)
     if result.returncode != 0:
         raise LimaCommandError("disk create", result.returncode, result.stderr)
 
@@ -296,7 +298,7 @@ def limactl_disk_delete(
         cmd.append("--force")
     cmd.append(disk_name)
     with log_span("Running limactl disk delete: {}", disk_name):
-        result = cg.run_process_to_completion(cmd, timeout=timeout)
+        result = cg.run_process_to_completion(cmd, timeout=timeout, is_checked_after=False)
     if result.returncode != 0:
         stderr_lower = result.stderr.lower()
         if "not found" in stderr_lower or "does not exist" in stderr_lower:
@@ -311,7 +313,7 @@ def limactl_list(cg: ConcurrencyGroup, timeout: float = 30.0) -> list[dict[str, 
     Runs: limactl list --json
     """
     cmd = ["limactl", "list", "--json"]
-    result = cg.run_process_to_completion(cmd, timeout=timeout)
+    result = cg.run_process_to_completion(cmd, timeout=timeout, is_checked_after=False)
     if result.returncode != 0:
         raise LimaCommandError("list", result.returncode, result.stderr)
 
@@ -359,7 +361,7 @@ def limactl_show_ssh(
     Parses the output of: limactl show-ssh --format config <instance_name>
     """
     cmd = ["limactl", "show-ssh", "--format", "config", instance_name]
-    result = cg.run_process_to_completion(cmd, timeout=timeout)
+    result = cg.run_process_to_completion(cmd, timeout=timeout, is_checked_after=False)
     if result.returncode != 0:
         raise LimaCommandError("show-ssh", result.returncode, result.stderr)
 
@@ -394,5 +396,5 @@ def limactl_shell(
     Returns: (returncode, stdout, stderr)
     """
     cmd = ["limactl", "shell", instance_name, "--", "sh", "-c", command]
-    result = cg.run_process_to_completion(cmd, timeout=timeout)
+    result = cg.run_process_to_completion(cmd, timeout=timeout, is_checked_after=False)
     return result.returncode, result.stdout, result.stderr

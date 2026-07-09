@@ -61,6 +61,7 @@ from imbue.mngr_lima.config import LimaProviderConfig
 from imbue.mngr_lima.constants import CLOUD_INIT_TIMEOUT_SECONDS
 from imbue.mngr_lima.constants import lima_host_data_disk_name
 from imbue.mngr_lima.errors import LimaCommandError
+from imbue.mngr_lima.errors import LimaCommandUnavailableError
 from imbue.mngr_lima.errors import LimaHostCreationError
 from imbue.mngr_lima.host_store import HostRecord
 from imbue.mngr_lima.host_store import LimaHostConfig
@@ -997,9 +998,14 @@ sudo poweroff
     ) -> list[DiscoveredHost]:
         """Discover all Lima hosts managed by this provider instance.
 
-        If limactl is not installed, returns host records from local state only
-        (all marked as offline). This allows discovery to succeed gracefully
-        in environments without Lima.
+        If limactl is not installed (or too old), returns host records from local
+        state only (all marked as offline). This allows discovery to succeed
+        gracefully in environments without Lima.
+
+        If limactl *is* installed and correctly versioned but the invocation
+        fails at runtime (e.g. it crashes at startup), raises
+        LimaCommandUnavailableError -- no Lima host can be enumerated, so the
+        provider is reported unavailable rather than silently all-offline.
         """
         prefix = self.mngr_ctx.config.prefix
 
@@ -1008,10 +1014,17 @@ sudo poweroff
         try:
             self._ensure_lima_available()
             instances = limactl_list(cg)
-        except (LimaCommandError, OSError) as e:
-            logger.warning("Failed to list Lima instances: {}", e)
         except ProviderUnavailableError as e:
+            # limactl is absent or too old: degrade to local host records (all
+            # marked offline) so discovery still succeeds where Lima isn't set up.
             logger.debug("Lima provider not available for discovery: {}", e)
+        except (LimaCommandError, OSError) as e:
+            # limactl is present and new enough but the invocation itself failed
+            # (e.g. it crashed before listing). No Lima host can be reached this
+            # cycle, so surface provider unavailability -- matching how other
+            # providers report an unreachable backend -- instead of reporting
+            # every host offline.
+            raise LimaCommandUnavailableError(self.name, f"limactl could not be run: {e}") from e
 
         # Build a map of instance_name -> status
         instance_status: dict[str, str] = {}

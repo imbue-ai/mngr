@@ -30,6 +30,20 @@ class LimaVersionError(ProviderUnavailableError):
         )
 
 
+class LimaCommandUnavailableError(ProviderUnavailableError):
+    """Raised when limactl is installed and correctly versioned but fails to run.
+
+    Distinct from LimaNotInstalledError (binary absent) and LimaVersionError
+    (binary too old): here the binary is present and new enough, but a limactl
+    invocation failed at runtime (e.g. it crashed at startup). No Lima host can
+    be reached, so this is surfaced as provider unavailability rather than an
+    opaque command error.
+    """
+
+    def __init__(self, provider_name: ProviderInstanceName, reason: str) -> None:
+        super().__init__(provider_name, reason)
+
+
 class LimaConfigError(MngrError, ValueError):
     """Raised when a LimaProviderConfig combines mutually-incompatible options."""
 

@@ -1,12 +1,26 @@
+import os
 from pathlib import Path
 
+import pytest
+
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr_lima.errors import LimaCommandError
 from imbue.mngr_lima.limactl import LimaSshConfig
 from imbue.mngr_lima.limactl import _strip_ssh_config_quotes
 from imbue.mngr_lima.limactl import host_name_from_instance_name
 from imbue.mngr_lima.limactl import lima_instance_name
 from imbue.mngr_lima.limactl import lima_instance_name_from_host_id
+from imbue.mngr_lima.limactl import limactl_list
+
+
+def _write_fake_limactl(directory: Path, script_body: str) -> None:
+    """Install an executable fake ``limactl`` in ``directory`` (prepend it to PATH)."""
+    directory.mkdir(parents=True, exist_ok=True)
+    fake = directory / "limactl"
+    fake.write_text("#!/bin/sh\n" + script_body)
+    fake.chmod(0o755)
 
 
 def test_lima_instance_name_from_host_id() -> None:
@@ -46,6 +60,28 @@ def test_strip_ssh_config_quotes() -> None:
     assert _strip_ssh_config_quotes('"127.0.0.1"') == "127.0.0.1"
     assert _strip_ssh_config_quotes('"/path/with spaces/key"') == "/path/with spaces/key"
     assert _strip_ssh_config_quotes("  60022  ") == "60022"
+
+
+def test_limactl_list_raises_lima_command_error_on_nonzero_exit(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A crashing ``limactl list`` surfaces as LimaCommandError, not a raw ProcessError.
+
+    Regression guard: limactl_list must run with ``is_checked_after=False`` so the
+    non-zero exit becomes the domain LimaCommandError its callers catch. Without it,
+    ``run_process_to_completion`` raises a ConcurrencyGroup ProcessError first (and the
+    ``raise LimaCommandError`` below is dead code), which slips past every caller that
+    only catches LimaCommandError -- exactly how a limactl startup crash leaked out of
+    discovery as an unclassified error.
+    """
+    bin_dir = tmp_path / "bin"
+    _write_fake_limactl(bin_dir, 'echo "panic: user: unknown userid 501" >&2\nexit 2\n')
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+
+    with pytest.raises(LimaCommandError):
+        limactl_list(temp_mngr_ctx.concurrency_group)
 
 
 def test_lima_ssh_config() -> None:
