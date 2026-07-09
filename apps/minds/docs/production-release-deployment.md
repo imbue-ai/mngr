@@ -48,8 +48,11 @@ fast path.
 ```bash
 cd <repo-root>
 
-# The release you are deploying. Both mngr and forever-claude-template are tagged
-# minds-v<version> (see apps/minds/docs/release.md). Example: 0.3.6
+# The release whose slices you are baking. Both mngr and forever-claude-template
+# are tagged minds-v<version> (see apps/minds/docs/release.md). Example: 0.3.6.
+# NOTE: this tag pins the *desktop* binary and the FCT slice bake (Step 6) -- NOT
+# the server. The connector/proxy deploy (Step 1) tracks `main`, which is normally
+# ahead of the tag.
 export REL_VERSION=0.3.6
 export REL_TAG="minds-v${REL_VERSION}"
 
@@ -82,13 +85,17 @@ vault token lookup >/dev/null && echo "vault ok"
 
 ## Step 1 -- start the production deploy (in the background)
 
-Check out the release you are shipping, then kick off the connector + LiteLLM
-proxy deploy **in the background** so it runs while you confirm the order
+Deploy the connector + LiteLLM proxy **from the tip of `main`** -- the server is
+redeployed frequently and tracks `main`, which is normally ahead of the latest
+release tag. Do **not** check out `${REL_TAG}` for this: the tag pins the desktop
+binary and the FCT slice bake (Step 6), not the server. (Only pin the server to a
+literal tag in the rare case you deliberately need it at an exact release.) Kick
+the deploy off **in the background** so it runs while you confirm the order
 (instead of blocking on it):
 
 ```bash
-git fetch --tags
-git checkout "${REL_TAG}"            # or the release SHA on main
+git fetch origin
+git checkout main && git pull --ff-only
 
 ( eval "$(uv run minds env activate --deploy production)" \
   && uv run minds env deploy --yes-i-mean-production ) \
@@ -102,10 +109,11 @@ This pushes every production Vault secret into Modal and `modal deploy`s both
 is the mandatory safety bar. It typically finishes in a few minutes -- long
 before the boxes ordered below are delivered.
 
-> The connector/proxy deploy is independent of the slice FCT version (slices
-> carry the release via their baked FCT tag, Step 6). We start it first only so
-> the runtime services match the release before the new capacity comes online; we
-> gate on its success before setting up the boxes (Step 5).
+> The connector/proxy deploy tracks `main` and is independent of the slice FCT
+> version: slices carry the release via their baked FCT tag (Step 6, `--from-tag
+> ${REL_TAG}`), while the server runs whatever is on `main`. We start the deploy
+> first only so the runtime services are current before the new capacity comes
+> online; we gate on its success before setting up the boxes (Step 5).
 
 ## Step 2 -- preview + approve the orders (while the deploy runs)
 
