@@ -188,7 +188,7 @@ def build_donation_message(skill: str) -> str:
 
 
 @pure
-def build_create_argv(agent_name: str, skill: str) -> tuple[str, ...]:
+def build_create_argv(agent_name: str, skill: str, mngr_path: str = "mngr") -> tuple[str, ...]:
     """The ``mngr create`` invocation that launches a donation agent.
 
     Launches a **headless** claude agent so the donation runs unattended (see
@@ -198,9 +198,13 @@ def build_create_argv(agent_name: str, skill: str) -> tuple[str, ...]:
     ``--dangerously-skip-permissions`` is spliced in after ``--`` so it reaches
     ``claude`` as an agent arg. Runs from the caller's cwd, so invoke ``mngr
     donate`` from a trusted repo (like the recipes' ``cd``).
+
+    ``mngr_path`` is the mngr executable to spawn. The command passes an absolute
+    path (:func:`_current_mngr_path`) so the launch never depends on ``mngr``
+    being on ``$PATH`` in whatever environment donate happens to run from.
     """
     return (
-        "mngr",
+        mngr_path,
         "create",
         agent_name,
         DONATE_AGENT_TYPE,
@@ -213,7 +217,7 @@ def build_create_argv(agent_name: str, skill: str) -> tuple[str, ...]:
 
 
 @pure
-def build_destroy_argv(agent_name: str) -> tuple[str, ...]:
+def build_destroy_argv(agent_name: str, mngr_path: str = "mngr") -> tuple[str, ...]:
     """The ``mngr destroy`` invocation that clears a stale donation agent.
 
     Run best-effort before :func:`build_create_argv` so a repeat tick never
@@ -221,8 +225,9 @@ def build_destroy_argv(agent_name: str) -> tuple[str, ...]:
     a *successful* pass, so a launch that failed part-way leaves the name taken;
     ``--reuse`` isn't an option (headless agent types reject it). ``--force``
     skips confirmation and a no-op destroy of a missing agent is harmless.
+    ``mngr_path`` is the mngr executable (see :func:`build_create_argv`).
     """
-    return ("mngr", "destroy", agent_name, "--force")
+    return (mngr_path, "destroy", agent_name, "--force")
 
 
 @pure
@@ -550,9 +555,10 @@ def donate(ctx: click.Context, **kwargs: Any) -> None:
         )
         return
 
-    argv = build_create_argv(opts.agent_name, opts.skill)
-    if shutil.which(argv[0]) is None:
-        raise MngrError(f"Could not find '{argv[0]}' on PATH to launch the donation agent.")
+    mngr_path = _current_mngr_path()
+    if shutil.which(mngr_path) is None and not Path(mngr_path).is_file():
+        raise MngrError(f"Could not locate an mngr executable to launch the donation agent (tried {mngr_path!r}).")
+    argv = build_create_argv(opts.agent_name, opts.skill, mngr_path)
     log_path = _donation_log_path(opts.agent_name, now)
     emit_info(
         f"Spare capacity available -- launching '{opts.agent_name}' to run the {opts.skill} skill.\n"
@@ -563,7 +569,7 @@ def donate(ctx: click.Context, **kwargs: Any) -> None:
     # collide: first the tracked agent, then an orphaned git worktree/branch that
     # `mngr destroy` doesn't cover. Both best-effort -- a missing agent/worktree
     # is the normal case, and a cleanup failure shouldn't mask the create's own.
-    subprocess.run(list(build_destroy_argv(opts.agent_name)), check=False, capture_output=True)
+    subprocess.run(list(build_destroy_argv(opts.agent_name, mngr_path)), check=False, capture_output=True)
     _clear_stale_worktree(opts.agent_name)
     returncode = _run_and_tee(argv, log_path)
     if returncode != 0:
