@@ -8,6 +8,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Added
 
+- Added: Optional `name` parameter on `RunningProcess` and the `run_process_to_completion` / `run_process_in_background` / `run_background` spawn APIs — a log-safe label used as the reader thread's name and as the display command in any `ProcessError` / `TimeoutExpired` raised. Callers whose command carries secret argument values (e.g. `--host-env PASSWORD=...`) can pass a masked/friendly `name` so those secrets never reach the JSONL log's `thread_name` field or an error message; the real argv still executes. Defaults to the joined command. `ProcessError` gains a `display_name` (and a `display_command` property) used for its rendered message while `.command` keeps the real argv; `FinishedProcess` gains a matching `display_name`.
 - Added: Optional `pass_fds` parameter on `ConcurrencyGroup.run_process_in_background`, `run_background`, and `run_local_command_modern_version`, forwarded to `subprocess.Popen(pass_fds=...)` so callers can hand an already-connected `socketpair` endpoint to a child process without a rendezvous file on disk.
 
 ### Changed
