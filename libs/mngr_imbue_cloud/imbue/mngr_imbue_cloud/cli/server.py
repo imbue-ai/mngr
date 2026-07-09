@@ -646,7 +646,7 @@ def _bake_one_slice(
 ) -> SliceBakeOutcome:
     """Bake one slice (laptop-driven ``mngr create`` against the slice provider) + insert its pool row.
 
-    Returns an outcome dict (never raises). ``bake_pool_host`` carves the VM (over
+    Returns an outcome (never raises). ``bake_pool_host`` carves the VM (over
     SSH on the box, inside the slice provider) and bakes the shared container; the
     shared :func:`finalize_baked_pool_host` then hardens the container sshd and
     tears down the bootstrap chat agent over the slice (direct-SSH) transport. Any
