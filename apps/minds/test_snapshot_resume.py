@@ -490,15 +490,13 @@ def _prepare_electron_workspace_inputs(tmp_path: Path, monkeypatch: pytest.Monke
     # No Modal creds here, so silence the Electron-spawned mngr's Modal discovery.
     monkeypatch.setenv("MNGR__PROVIDERS__MODAL__IS_ENABLED", "false")
     # Pin the local-docker workspace to runc; gVisor (runsc) is absent in CI /
-    # the sandbox. Two layers, because runsc can be selected two ways:
-    #   1. MINDS_DOCKER_RUNTIME_DEFAULT pins the create form / API default to
-    #      runc so minds never stacks the `docker_runsc` create-template (whose
-    #      docker_runtime an mngr env var cannot override once explicitly stacked).
-    #   2. MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME=runc still overrides the FCT
-    #      `docker` template's own default, covering an older resolved FCT whose
-    #      `[providers.docker]` block hardcodes runsc without a separate overlay.
+    # the sandbox. MINDS_DOCKER_RUNTIME_DEFAULT pins the create form / API default
+    # to runc so minds never stacks the `docker_runsc` create-template -- the only
+    # way runsc gets selected, now that the pinned FCT `docker` template already
+    # defaults to runc. (A provider-config env var like
+    # MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME cannot help: an explicitly stacked
+    # template's docker_runtime outranks it.)
     monkeypatch.setenv("MINDS_DOCKER_RUNTIME_DEFAULT", "RUNC")
-    monkeypatch.setenv("MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME", "runc")
     # The Electron-spawned mngr loads two project-config trees under
     # PYTEST_CURRENT_TEST: the host-side config (a throwaway opted-in copy built
     # here) and the FCT worktree. The FCT worktree is materialized ahead of time

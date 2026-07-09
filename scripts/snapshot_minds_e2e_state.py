@@ -144,18 +144,14 @@ _IN_SANDBOX_RUNNER_PROGRAM: Final[str] = textwrap.dedent(
     # vm_runtime sandbox only has the default runc registered (no gVisor), so a
     # runsc container fails with "unknown or invalid runtime name: runsc". The
     # Modal VM is already the isolation boundary for this throwaway snapshot, so
-    # gVisor buys nothing here. Two layers, because runsc can be selected two ways:
-    #   1. MINDS_DOCKER_RUNTIME_DEFAULT pins the create form / API default to
-    #      runc so minds never stacks the `docker_runsc` create-template. This is
-    #      the one that matters now -- an explicitly stacked template's
-    #      docker_runtime cannot be overridden by the mngr env var below.
-    #   2. MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME=runc still overrides the FCT
-    #      `docker` template's own default, covering an older resolved FCT whose
-    #      [providers.docker] block hardcodes runsc without a separate overlay.
-    # Mirrors the same overrides the pytest path applies in
+    # gVisor buys nothing here. MINDS_DOCKER_RUNTIME_DEFAULT pins the create form
+    # / API default to runc so minds never stacks the `docker_runsc`
+    # create-template -- the only way runsc gets selected, now that the pinned FCT
+    # `docker` template already defaults to runc. (A provider-config env var like
+    # MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME cannot help here: an explicitly
+    # stacked template's docker_runtime outranks it.) Mirrors the pytest path in
     # apps/minds/test_snapshot_resume.py.
     _write_to_os_environ("MINDS_DOCKER_RUNTIME_DEFAULT", "RUNC")
-    _write_to_os_environ("MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME", "runc")
     # The paired FCT worktree was materialized on the runner and baked into the
     # image at ``.external_worktrees/forever-claude-template``; resolve it
     # (errors loudly if the bake did not stage it).
