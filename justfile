@@ -838,7 +838,6 @@ create-new-mind-repo repo_name parent_dir="$HOME/project":
     set -ueo pipefail
     repo="{{repo_name}}"
     parent="{{parent_dir}}"
-    fct="${FCT_DIR:-$HOME/project/forever-claude-template}"
 
     if ! command -v gh >/dev/null 2>&1; then
         echo "error: gh CLI not found on PATH" >&2; exit 2
@@ -849,12 +848,6 @@ create-new-mind-repo repo_name parent_dir="$HOME/project":
     owner=$(gh api user --jq .login)
     if [ -z "$owner" ]; then
         echo "error: could not determine GitHub username from 'gh api user'" >&2; exit 2
-    fi
-    if [ ! -d "$fct/.git" ]; then
-        echo "error: no forever-claude-template checkout at $fct" >&2
-        echo "       set FCT_DIR (in a gitignored apps/minds/.env, or your shell) to your fct clone," >&2
-        echo "       or clone fct to that path." >&2
-        exit 2
     fi
     if [ ! -d "$parent" ]; then
         echo "error: parent directory '$parent' does not exist" >&2; exit 2
