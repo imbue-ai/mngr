@@ -162,7 +162,6 @@ from imbue.mngr_antigravity.antigravity_config import build_onboarding_seed
 from imbue.mngr_antigravity.antigravity_config import extract_statusline_command
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_cli_dir
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_conversations_dir
-from imbue.mngr_antigravity.antigravity_config import get_antigravity_global_instructions_path
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_hooks_config_path
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_mcp_config_path
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_oauth_token_path
@@ -427,18 +426,6 @@ class AntigravityAgentConfig(AgentTypeConfig):
         "mcpServers map (agy's own schema: {\"<name>\": {\"command\":..., \"args\":[...], "
         '"env":{...}} for stdio, or {"<name>": {"serverUrl":...}} for SSE). Example: '
         '{"memory": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-memory"]}}.',
-    )
-    # agy has no per-project AGENTS.md/CLAUDE.md auto-discovery of its own --
-    # it natively reads only a single GLOBAL $HOME/.gemini/GEMINI.md. Written
-    # only when set (None by default), same "don't create what nobody asked
-    # for" convention as mcp_servers. Typical use: a short rule telling agy
-    # to also check the project workspace for AGENTS.md, since that's the
-    # only documented way to get it to honor a per-project instructions file
-    # at all.
-    global_instructions_md: str | None = Field(
-        default=None,
-        description="Content written verbatim to the per-agent $HOME/.gemini/GEMINI.md -- "
-        "agy's own native (global, not per-project) instructions file. Unset by default.",
     )
     # sync_home_settings mirrors mngr_claude's flag: a *data-source* choice
     # inside the one settings builder, never a second code path. When True
@@ -985,11 +972,11 @@ class AntigravityAgent(
             host.write_text_file(hooks_path, serialize_antigravity_hooks(build_antigravity_hooks_config()))
 
         # Unlike settings.json/hooks.json/onboarding cache above (always
-        # rewritten), mcp_config.json and GEMINI.md are only created when
-        # their field is set -- so a re-provision where the field went from
-        # set to empty/None must explicitly delete the stale file, or agy
-        # keeps reading the old config, contradicting this method's own
-        # "idempotent each provision" contract (found by code review).
+        # rewritten), mcp_config.json is only created when the field is set --
+        # so a re-provision where the field went from set to empty/None must
+        # explicitly delete the stale file, or agy keeps reading the old
+        # config, contradicting this method's own "idempotent each provision"
+        # contract (found by code review).
         mcp_config_path = get_antigravity_mcp_config_path(agy_home)
         if self.agent_config.mcp_servers:
             with log_span("Writing per-agent antigravity MCP config to {}", mcp_config_path):
@@ -999,13 +986,6 @@ class AntigravityAgent(
                 )
         else:
             host.execute_idempotent_command(f"rm -f {shlex.quote(str(mcp_config_path))}", timeout_seconds=5.0)
-
-        global_instructions_path = get_antigravity_global_instructions_path(agy_home)
-        if self.agent_config.global_instructions_md is not None:
-            with log_span("Writing per-agent antigravity GEMINI.md to {}", global_instructions_path):
-                host.write_text_file(global_instructions_path, self.agent_config.global_instructions_md)
-        else:
-            host.execute_idempotent_command(f"rm -f {shlex.quote(str(global_instructions_path))}", timeout_seconds=5.0)
 
     def _provision_user_statusline_command(self, host: OnlineHostInterface, user_statusline: Any) -> None:
         """Record a user's own statusLine command for statusline.sh to compose, or clear a stale one.

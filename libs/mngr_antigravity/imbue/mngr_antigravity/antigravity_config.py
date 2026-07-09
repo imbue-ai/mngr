@@ -148,20 +148,6 @@ def get_antigravity_mcp_config_path(home: Path) -> Path:
     return home.joinpath(_GEMINI_DIR_NAME, *_MCP_CONFIG_RELATIVE)
 
 
-# agy's OWN native project-instructions convention is ``$HOME/.gemini/GEMINI.md``
-# -- a single GLOBAL file, not a per-project ``AGENTS.md``/``CLAUDE.md`` auto-
-# discovered by walking up from cwd the way codex/opencode/claude do (confirmed:
-# agy does not read AGENTS.md or CLAUDE.md on its own). The documented workaround
-# is to put a rule INSIDE GEMINI.md instructing agy to also check for AGENTS.md
-# in the project workspace. Under a per-agent ``$HOME`` this is the single
-# instructions path, same reasoning as _HOOKS_CONFIG_RELATIVE/_MCP_CONFIG_RELATIVE.
-_GLOBAL_INSTRUCTIONS_FILENAME: str = "GEMINI.md"
-
-
-def get_antigravity_global_instructions_path(home: Path) -> Path:
-    """Return ``<home>/.gemini/GEMINI.md`` -- agy's own native (global, not per-project) instructions file."""
-    return home / _GEMINI_DIR_NAME / _GLOBAL_INSTRUCTIONS_FILENAME
-
 
 TRUSTED_WORKSPACES_KEY: str = "trustedWorkspaces"
 

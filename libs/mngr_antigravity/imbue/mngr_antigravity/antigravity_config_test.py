@@ -19,7 +19,6 @@ from imbue.mngr_antigravity.antigravity_config import build_isolated_settings
 from imbue.mngr_antigravity.antigravity_config import build_onboarding_seed
 from imbue.mngr_antigravity.antigravity_config import extract_statusline_command
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_cli_dir
-from imbue.mngr_antigravity.antigravity_config import get_antigravity_global_instructions_path
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_hooks_config_path
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_mcp_config_path
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_oauth_token_path
@@ -43,7 +42,6 @@ def test_path_helpers_address_the_gemini_tree_under_a_given_home() -> None:
     assert get_antigravity_onboarding_cache_path(home) == cli_dir / "cache" / "onboarding.json"
     assert get_antigravity_hooks_config_path(home) == home / ".gemini" / "config" / "hooks.json"
     assert get_antigravity_mcp_config_path(home) == home / ".gemini" / "config" / "mcp_config.json"
-    assert get_antigravity_global_instructions_path(home) == home / ".gemini" / "GEMINI.md"
 
 
 def test_serialize_round_trips_to_two_space_indented_json() -> None:

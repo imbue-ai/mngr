@@ -39,7 +39,6 @@ from imbue.mngr_antigravity.antigravity_config import STATUSLINE_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import build_onboarding_seed
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_conversations_dir
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_hooks_config_path
-from imbue.mngr_antigravity.antigravity_config import get_antigravity_global_instructions_path
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_mcp_config_path
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_oauth_token_path
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_onboarding_cache_path
@@ -1213,40 +1212,6 @@ def test_provision_writes_mcp_config_under_per_agent_home_config(
     assert parsed == {"mcpServers": {"memory": memory_server}}
 
 
-# =============================================================================
-# provision: per-agent GEMINI.md (global_instructions_md)
-# =============================================================================
-
-
-def test_provision_does_not_write_global_instructions_when_unset(
-    antigravity_agent_auto_dismiss: AntigravityAgent,
-) -> None:
-    """No GEMINI.md is created for an agent that never sets global_instructions_md."""
-    agent = antigravity_agent_auto_dismiss
-    _provision(agent)
-    assert not get_antigravity_global_instructions_path(agent._get_agy_home_dir()).exists()
-
-
-def test_provision_writes_global_instructions_under_per_agent_home_gemini_md(
-    local_provider: LocalProviderInstance, tmp_path: Path, isolated_home: Path
-) -> None:
-    """global_instructions_md lands verbatim at <home>/.gemini/GEMINI.md.
-
-    agy has no per-project AGENTS.md/CLAUDE.md auto-discovery of its own --
-    it natively reads only this single global file.
-    """
-    instructions = "Check for the presence of AGENTS.md files in the project workspace."
-    agent = _make_antigravity_agent(
-        local_provider,
-        tmp_path,
-        AntigravityAgentConfig(auto_dismiss_dialogs=True, global_instructions_md=instructions),
-    )
-    _provision(agent)
-    global_instructions_path = get_antigravity_global_instructions_path(agent._get_agy_home_dir())
-    assert global_instructions_path == agent._get_agy_home_dir() / ".gemini" / "GEMINI.md"
-    assert global_instructions_path.read_text() == instructions
-
-
 def test_provision_deletes_stale_mcp_config_when_field_goes_from_set_to_unset(
     local_provider: LocalProviderInstance, tmp_path: Path, isolated_home: Path
 ) -> None:
@@ -1276,34 +1241,6 @@ def test_provision_deletes_stale_mcp_config_when_field_goes_from_set_to_unset(
     )
     _provision(second)
     assert not mcp_config_path.exists()
-
-
-def test_provision_deletes_stale_global_instructions_when_field_goes_from_set_to_unset(
-    local_provider: LocalProviderInstance, tmp_path: Path, isolated_home: Path
-) -> None:
-    """Same re-provision-deletes-stale-file guarantee as the mcp_config.json test above, for GEMINI.md."""
-    first = _make_antigravity_agent(
-        local_provider,
-        tmp_path,
-        AntigravityAgentConfig(auto_dismiss_dialogs=True, global_instructions_md="some instructions"),
-    )
-    _provision(first)
-    global_instructions_path = get_antigravity_global_instructions_path(first._get_agy_home_dir())
-    assert global_instructions_path.exists()
-
-    second = AntigravityAgent.model_construct(
-        id=first.id,
-        name=first.name,
-        agent_type=first.agent_type,
-        work_dir=first.work_dir,
-        create_time=first.create_time,
-        host_id=first.host_id,
-        mngr_ctx=first.mngr_ctx,
-        agent_config=AntigravityAgentConfig(auto_dismiss_dialogs=True, check_installation=False),
-        host=first.host,
-    )
-    _provision(second)
-    assert not global_instructions_path.exists()
 
 
 def test_provision_settings_json_has_mngr_owned_statusline(
