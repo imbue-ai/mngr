@@ -141,7 +141,10 @@ class DispatchTier(str, Enum):
     Either the in-container probe timed out (it observed nothing -- absence of
     evidence, not evidence the workspace is down), or the discovery snapshot
     backing the host state predates the outage onset (a pre-outage snapshot still
-    reads the stale host state, e.g. a just-stopped container still shows RUNNING).
+    reads the stale host state, e.g. a just-stopped container still shows RUNNING),
+    or the snapshot itself carries no observation of the container (host state
+    UNKNOWN -- the host was unobservable during discovery -- or a
+    transitional/absent state).
     A negative verdict or an auto-dispatched restart off such non-evidence is
     exactly the misclassification this tier avoids. The recovery page renders a
     live "reconnecting" state and keeps checking: the cheap liveness poll returns
@@ -159,10 +162,12 @@ class DispatchTier(str, Enum):
     """Container is offline -- restart the host (no live work to interrupt)."""
 
     HOST_UNRESPONSIVE = "host_unresponsive"
-    """Container claims running but we can't reach it -- require explicit user consent.
+    """Container was observed running but the exec cleanly failed to reach it.
 
-    Also the fallback for any ambiguous host state: the host is not responding
-    in the way we expect, so we ask the user before bouncing it.
+    A host restart bounces a possibly-live container, so it requires explicit
+    user consent. Reserved for an observed RUNNING claim: a host state that
+    answers neither "running" nor "offline" is non-evidence and classifies
+    INDETERMINATE instead.
     """
 
     BACKEND_UNREACHABLE = "backend_unreachable"
