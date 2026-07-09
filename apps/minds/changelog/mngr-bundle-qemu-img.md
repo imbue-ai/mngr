@@ -5,3 +5,5 @@ There is no upstream `qemu-img` release for macOS, so the bundled binary is buil
 The `raw`->`qcow2` conversion in the pre-baked-image prefetch (`QemuImageFormatConverter`) now sources its binary from `MINDS_QEMU_IMG_BINARY` (set by the Electron shell in both dev and packaged mode), falling back to a `PATH` `qemu-img` when the var is unset.
 
 Linux payloads are produced by `scripts/build-qemu-payload-linux.sh` (Docker + Alpine): Linux has no static-libc limitation, so QEMU's `--static` against musl yields a fully static ELF with zero runtime dependencies. Both linux arches are published on the same GitHub release; ToDesktop's Linux builder runs the same `beforeInstall` hook, so these assets are required for `pnpm dist` even though no Linux app ships yet.
+
+Also fixed: `desync` was never staged by `scripts/build.js` (only by the ToDesktop `beforeInstall` hook, whose outputs do not reach the shipped bundle), so no packaged app has ever contained it -- the pre-baked image download could not work in any packaged build. `build.js` now stages desync alongside the other binaries, and `ensure-binaries.js` requires it in dev.

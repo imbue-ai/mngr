@@ -24,6 +24,7 @@ const REQUIRED = [
   path.join(RESOURCES, 'uv', 'uv'),
   path.join(RESOURCES, 'git', 'bin', 'git'),
   path.join(RESOURCES, 'lima', 'bin', 'limactl'),
+  path.join(RESOURCES, 'desync', 'desync'),
 ];
 // downloadQemuImg skips darwin-x86_64 (no payload published), so requiring it
 // there would re-trigger the full download on every start.
