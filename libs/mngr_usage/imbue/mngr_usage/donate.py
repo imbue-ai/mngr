@@ -186,6 +186,37 @@ def build_destroy_argv(agent_name: str) -> tuple[str, ...]:
     return ("mngr", "destroy", agent_name, "--force")
 
 
+def _clear_stale_worktree(agent_name: str) -> None:
+    """Best-effort removal of a leftover ``mngr/<agent>`` git worktree + branch.
+
+    mngr creates each agent in a git worktree on a branch named
+    ``mngr/<agent-name>``. A run that errors after the worktree is created (or an
+    agent that never auto-destroyed) leaves the worktree and branch behind, and
+    the next ``mngr create`` fails with "a branch named 'mngr/<agent>' already
+    exists" -- ``mngr destroy`` clears the tracked agent but not this orphan.
+    Runs ``git`` in the caller's cwd (the repo mngr sourced the agent from). All
+    steps are swallowed: a missing worktree/branch is the normal, healthy case.
+    """
+    branch = f"mngr/{agent_name}"
+    listing = subprocess.run(
+        ("git", "worktree", "list", "--porcelain"), check=False, capture_output=True, text=True
+    )
+    worktree_path: str | None = None
+    current_path: str | None = None
+    for line in listing.stdout.splitlines():
+        if line.startswith("worktree "):
+            current_path = line[len("worktree ") :]
+        elif line.strip() == f"branch refs/heads/{branch}":
+            worktree_path = current_path
+            break
+    if worktree_path is not None:
+        subprocess.run(
+            ("git", "worktree", "remove", "--force", worktree_path), check=False, capture_output=True
+        )
+    subprocess.run(("git", "worktree", "prune"), check=False, capture_output=True)
+    subprocess.run(("git", "branch", "-D", branch), check=False, capture_output=True)
+
+
 def _donation_log_path(agent_name: str, now: int) -> Path:
     """Where to persist the donation agent's streamed event log.
 
@@ -334,11 +365,12 @@ def donate(ctx: click.Context, **kwargs: Any) -> None:
         f"Streaming its steps below; full event log at {log_path}",
         output_opts.output_format,
     )
-    # Clear any stale agent of this name (from a prior tick that failed mid-launch)
-    # so the create below can't collide. Best-effort: destroying a missing agent
-    # is a harmless no-op, and we don't want a stale-cleanup failure to mask the
-    # create's own error, so its output/exit are swallowed.
+    # Clear anything a prior failed tick left behind so the create below can't
+    # collide: first the tracked agent, then an orphaned git worktree/branch that
+    # `mngr destroy` doesn't cover. Both best-effort -- a missing agent/worktree
+    # is the normal case, and a cleanup failure shouldn't mask the create's own.
     subprocess.run(list(build_destroy_argv(opts.agent_name)), check=False, capture_output=True)
+    _clear_stale_worktree(opts.agent_name)
     returncode = _run_and_tee(argv, log_path)
     if returncode != 0:
         raise MngrError(f"`{' '.join(argv)}` exited with status {returncode} (see {log_path}).")
