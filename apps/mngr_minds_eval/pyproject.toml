@@ -1,0 +1,18 @@
+[project]
+name = "mngr-minds-eval"
+version = "0.1.0"
+description = "Minds eval harness: create one Modal workspace per persona x trial via the Minds create API, and drive the in-sandbox autosend flow."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+mngr-minds-eval = "imbue.mngr_minds_eval.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["imbue"]
+exclude = ["*_test.py", "test_*.py", "**/conftest.py"]
