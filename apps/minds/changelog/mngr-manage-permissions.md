@@ -4,7 +4,7 @@ The app-level Settings page gains three new permission sections in its left nav,
 
 "Connectors": third-party services your agents have connected to (Slack, GitHub, ...). Each service lists one card per workspace that has access, with the granted permissions; hover a permission to see what it allows. Revoke a single workspace's access, or use "Revoke all" to revoke that service from every workspace at once. Your saved sign-in is kept, so agents can reconnect later.
 
-"File sharing": local files and folders your agents can access over the shared file mount. Each workspace card shows its access level -- "read" and/or "read and write" -- and hovering it lists the actual shared paths (one per line). Revoke a single workspace's file sharing or all of it at once.
+"File sharing": local files and folders your agents can access over the shared file mount. Each workspace gets a full-width card listing every shared path with its access level ("read" or "read and write"). Revoke a single workspace's file sharing or all of it at once.
 
 "Workspace delegation": access you've granted agents in one workspace to manage other workspaces (list/create plus targeted operations like destroy, start/stop, SSH, and health checks), grouped by the workspace being managed. Each card is a workspace that holds the access, and hovering a verb explains what it allows. Revoke per workspace within a group, or a whole group at once.
 

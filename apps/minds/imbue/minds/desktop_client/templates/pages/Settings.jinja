@@ -355,27 +355,31 @@
               Try again in a moment.
             </Notice>
           {% elif file_sharing_grants %}
-            <div class="grid grid-cols-2 gap-3">
+            {# Full-width cards so each shared path can be listed on its own row. #}
+            <div class="flex flex-col gap-3">
               {% for grant in file_sharing_grants %}
-                      <div class="minds-card p-4 flex flex-col gap-3"
-                           data-workspace-agent-id="{{ grant.workspace_agent_id }}"
-                           data-workspace-name="{{ grant.workspace_name }}">
-                        <div class="flex items-center gap-2">
-                          <span class="w-2.5 h-2.5 rounded-full shrink-0" style="background-color: {{ grant.color }}"></span>
-                          <span class="type-body font-semibold text-primary truncate">{{ grant.workspace_name }}</span>
+                <div class="minds-card p-4 flex flex-col gap-3"
+                     data-workspace-agent-id="{{ grant.workspace_agent_id }}"
+                     data-workspace-name="{{ grant.workspace_name }}">
+                  <div class="flex items-center justify-between gap-3">
+                    <div class="flex items-center gap-2 min-w-0">
+                      <span class="w-2.5 h-2.5 rounded-full shrink-0" style="background-color: {{ grant.color }}"></span>
+                      <span class="type-body font-semibold text-primary truncate">{{ grant.workspace_name }}</span>
+                    </div>
+                    <Button variant="secondary" size="md" class="revoke-fs-btn">Revoke</Button>
+                  </div>
+                  <div>
+                    <p class="type-helper text-tertiary mb-1">Allowed</p>
+                    <div class="flex flex-col gap-1">
+                      {% for shared in grant.paths %}
+                        <div class="flex items-center justify-between gap-3">
+                          <code class="code-pill truncate min-w-0" data-tooltip="{{ shared.path }}">{{ shared.path }}</code>
+                          <span class="type-helper text-secondary shrink-0">{{ shared.access_label }}</span>
                         </div>
-                        <div>
-                          <p class="type-helper text-tertiary mb-1">Allowed</p>
-                          <div class="flex flex-wrap gap-1">
-                            {% for perm in grant.permissions %}
-                              <code class="code-pill"{% if perm.description %} data-tooltip="{{ perm.description }}"{% endif %}>{{ perm.label }}</code>
-                            {% endfor %}
-                          </div>
-                        </div>
-                        <div class="mt-auto">
-                          <Button variant="secondary" size="md" class="revoke-fs-btn">Revoke</Button>
-                        </div>
-                      </div>
+                      {% endfor %}
+                    </div>
+                  </div>
+                </div>
               {% endfor %}
             </div>
           {% else %}

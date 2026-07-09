@@ -231,10 +231,10 @@ def test_build_file_sharing_overview_groups_by_access(tmp_path: Path) -> None:
     overview = build_file_sharing_overview(resolver, build_fake_gateway_client(), latchkey)
 
     assert len(overview) == 1
-    labels = {p.label: p.description for p in overview[0].permissions}
-    # Paths are newline-separated so the tooltip renders as a list.
-    assert labels["read"] == "/home/docs\n/tmp/x"
-    assert labels["read and write"] == "/home/out"
+    # Each path is listed individually with its effective access level, sorted by path.
+    access_by_path = {p.path: p.access_label for p in overview[0].paths}
+    assert access_by_path == {"/home/docs": "read", "/home/out": "read and write", "/tmp/x": "read"}
+    assert [p.path for p in overview[0].paths] == ["/home/docs", "/home/out", "/tmp/x"]
 
 
 def test_build_file_sharing_overview_omits_workspaces_without_grants(tmp_path: Path) -> None:

@@ -85,23 +85,28 @@ class GrantedPermission(FrozenModel):
     )
 
 
+class SharedPath(FrozenModel):
+    """A single shared filesystem path and the access level granted on it."""
+
+    path: str = Field(description="Absolute path shared with the agent.")
+    access_label: str = Field(description="User-facing access level: ``read`` or ``read and write``.")
+
+
 class WorkspaceFileSharingGrant(FrozenModel):
     """The file-sharing access a single workspace's host has been granted.
 
-    Mirrors :class:`WorkspaceServiceGrant` so the settings template can render it
-    with the same card markup. ``permissions`` holds at most two entries -- a
-    ``read`` chip and/or a ``read and write`` chip -- whose ``description`` is the
-    comma-separated list of shared paths at that access level (shown as a
-    tooltip).
+    ``paths`` lists every shared path with its effective access level (a path that
+    has a write grant reads as ``read and write``; read-only paths read as
+    ``read``), sorted by path. The settings template renders these as full-width
+    cards, one path per row, so the individual paths are visible rather than
+    hidden behind a tooltip.
     """
 
     workspace_agent_id: str = Field(description="Primary workspace agent id (used to resolve the host on revoke).")
     workspace_name: str = Field(description="Human-readable workspace display name shown as the card header.")
     host_id: str = Field(description="Host the grant lives on (every agent on the host shares it).")
     color: str = Field(description="Workspace accent color hex (``#rrggbb``) for the card header dot.")
-    permissions: tuple[GrantedPermission, ...] = Field(
-        description="``read`` / ``read and write`` access chips, each tooltip-listing its shared paths.",
-    )
+    paths: tuple[SharedPath, ...] = Field(description="Shared paths with their access level, sorted by path.")
 
 
 class WorkspaceServiceGrant(FrozenModel):
@@ -287,7 +292,8 @@ def build_file_sharing_overview(
 
     Reads each active workspace host's permissions file once (through the gateway
     extension), pulls the ``minds-file-server-*`` permissions out of the shared
-    ``latchkey-self`` rule, and groups the shared paths by access level. Only
+    ``latchkey-self`` rule, and lists every shared path with its effective access
+    level (a path that has a write grant reads as ``read and write``). Only
     workspaces with at least one file-sharing grant are returned, sorted by
     workspace name. Raises :class:`LatchkeyGatewayClientError` on a read failure
     (see :func:`build_permission_overview`).
@@ -297,34 +303,32 @@ def build_file_sharing_overview(
     for host in _list_active_workspace_hosts(backend_resolver):
         path = permissions_path_for_host(plugin_data_dir, host.host_id)
         permissions = gateway_client.get_permission_rules(path).get(_SELF_SCOPE, ())
-        read_paths: list[str] = []
-        write_paths: list[str] = []
+        read_paths: set[str] = set()
+        write_paths: set[str] = set()
         for permission_name in permissions:
             parsed = _parse_file_sharing_permission(permission_name)
             if parsed is None:
                 continue
             access, shared_path = parsed
-            (write_paths if access == _FILE_SHARING_WRITE else read_paths).append(shared_path)
-        # One path per line so the chip's tooltip reads as a list (the tooltip
-        # bubble renders newlines via ``white-space: pre-line``).
-        chips: list[GrantedPermission] = []
-        if read_paths:
-            chips.append(
-                GrantedPermission(label=_FILE_SHARING_READ_LABEL, description="\n".join(sorted(set(read_paths))))
-            )
-        if write_paths:
-            chips.append(
-                GrantedPermission(label=_FILE_SHARING_WRITE_LABEL, description="\n".join(sorted(set(write_paths))))
-            )
-        if not chips:
+            (write_paths if access == _FILE_SHARING_WRITE else read_paths).add(shared_path)
+        all_paths = read_paths | write_paths
+        if not all_paths:
             continue
+        # A path with a write grant is read+write; otherwise read-only.
+        shared_paths = tuple(
+            SharedPath(
+                path=shared_path,
+                access_label=_FILE_SHARING_WRITE_LABEL if shared_path in write_paths else _FILE_SHARING_READ_LABEL,
+            )
+            for shared_path in sorted(all_paths)
+        )
         grants.append(
             WorkspaceFileSharingGrant(
                 workspace_agent_id=host.agent_id,
                 workspace_name=host.workspace_name,
                 host_id=str(host.host_id),
                 color=host.color,
-                permissions=tuple(chips),
+                paths=shared_paths,
             )
         )
     return tuple(sorted(grants, key=lambda grant: grant.workspace_name.lower()))
