@@ -1,0 +1,1 @@
+Fixed the `test_create_help_succeeds` e2e release test so it no longer hits the default 10s pytest timeout. `mngr create --help` legitimately takes ~20s because it loads every provider plugin to render the PROVIDER BUILD/START ARGUMENTS section, so the test now carries an explicit `@pytest.mark.timeout(120)` like the rest of the e2e suite.

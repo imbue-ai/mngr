@@ -32,8 +32,8 @@ def _write_with_tests_template(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.modal
 @pytest.mark.tmux
+@pytest.mark.timeout(120)
 def test_templates_setup_via_config_edit(e2e: E2eSession) -> None:
     """Tutorial block:
         # templates are defined in your config (user, project, or local scope).
@@ -60,11 +60,19 @@ def test_templates_setup_via_config_edit(e2e: E2eSession) -> None:
             comment="open the project config",
         )
     ).to_succeed()
+    # `config edit` must have created the project config file on disk (it writes
+    # a fresh template when the file does not yet exist). Verify that directly,
+    # before the append below, so the "creates the project config file" part of
+    # the scope is observed rather than assumed (the `echo >>` would otherwise
+    # create the file itself, masking whether `config edit` did).
+    project_cfg = ".$MNGR_ROOT_NAME/settings.toml"
+    expect(
+        e2e.run(f"test -f {project_cfg}", comment="config edit created the project config file")
+    ).to_succeed()
     # Simulate the in-editor edit by appending the template to the project
     # config that `config edit` just created. is_allowed_in_pytest opts this
     # newly created project config into the pytest run (it defaults to False,
     # so without it the config loader would refuse to load it during the test).
-    project_cfg = ".$MNGR_ROOT_NAME/settings.toml"
     expect(
         e2e.run(
             f"echo '' >> {project_cfg}"
@@ -84,6 +92,7 @@ def test_templates_setup_via_config_edit(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.timeout(120)
 def test_create_template_short_form(e2e: E2eSession) -> None:
     """Tutorial block:
         # short form
@@ -141,6 +150,26 @@ def test_create_stack_templates(e2e: E2eSession) -> None:
         )
     ).to_succeed()
 
+    # Confirm the stacked templates were actually applied, not just that the
+    # command exited 0. modal-big is substituted with transfer=none for this
+    # local test, so applying it means the agent runs in-place: its work
+    # directory is the session cwd rather than a generated worktree. Verify with
+    # `mngr exec`, which targets the local agent directly, mirroring the
+    # short-form test. (with-tests only sets ensure_clean=false, which the
+    # command's --no-ensure-clean already forces, so its stacked value is a
+    # benign no-op here and has no independently observable effect.)
+    session_pwd = e2e.run("pwd", comment="get the session cwd for comparison")
+    expect(session_pwd).to_succeed()
+    agent_pwd = e2e.run("mngr exec my-task pwd", comment="confirm the agent was created and runs in-place")
+    expect(agent_pwd).to_succeed()
+    # exec appends a status line after the command's output, so take the first line.
+    agent_work_dir = agent_pwd.stdout.strip().splitlines()[0]
+    assert os.path.realpath(agent_work_dir) == os.path.realpath(session_pwd.stdout.strip()), (
+        "Expected the stacked modal-big template (transfer=none) to run the agent in-place.\n"
+        f"  agent pwd:   {agent_work_dir}\n"
+        f"  session cwd: {session_pwd.stdout.strip()}"
+    )
+
 
 @pytest.mark.release
 @pytest.mark.timeout(60)
@@ -162,6 +191,12 @@ def test_create_stack_templates_with_unknown_template_fails(e2e: E2eSession) -> 
     )
     expect(result).to_fail()
     # The error must name the offending template and not silently fall back to
-    # only applying the templates that do exist.
+    # only applying the templates that do exist. A "not found" template error is
+    # only ever raised by template resolution during CLI option processing, which
+    # runs before any agent or host is provisioned -- so this message is itself
+    # the evidence that create failed fast during resolution. (The scope's "no
+    # tmux or remote provider is touched" is likewise enforced structurally: this
+    # test carries neither the tmux nor the modal marker, so the resource guards
+    # would fail it if provisioning were reached.)
     expect(result.stderr).to_contain("does-not-exist")
     expect(result.stderr).to_contain("not found")

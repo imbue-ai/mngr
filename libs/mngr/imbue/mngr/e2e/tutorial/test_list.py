@@ -168,6 +168,10 @@ def test_list_archived_filter(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+# `mngr list` runs the provider-discovery path (including an authenticated Modal
+# environment lookup), which routinely takes ~10s -- past the default 10s
+# per-test timeout. The release CI lane already overrides this globally to 90s.
+@pytest.mark.timeout(60)
 def test_list_active_filter(e2e: E2eSession) -> None:
     """Tutorial block:
         # show only active agents (anything not archived/destroyed/crashed/failed)
@@ -299,6 +303,13 @@ def test_list_remote_filter(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+# `mngr list --provider modal` runs the full provider-discovery path (an
+# authenticated Modal lookup plus Docker/Vultr probes), which routinely takes
+# ~10s -- past the default 10s per-test timeout. The release CI lane already
+# overrides this globally to 90s; match the sibling filter tests
+# (test_list_local_filter/test_list_remote_filter) so the test also passes
+# locally under the default timeout.
+@pytest.mark.timeout(60)
 def test_list_provider_filter(e2e: E2eSession) -> None:
     """Tutorial block:
         # filter by provider
@@ -372,6 +383,12 @@ def test_list_label_filter(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+# The malformed --label is rejected before any provider discovery runs, but
+# invoking `mngr` at all still pays the ~12s Python import/startup cost, which
+# exceeds the default 10s per-test timeout. The release CI lane overrides the
+# timeout globally to 90s; set an explicit per-test timeout so this fast-fail
+# path is robust even without that override.
+@pytest.mark.timeout(60)
 def test_list_label_filter_invalid_format(e2e: E2eSession) -> None:
     """Tutorial block:
         # filter by agent label
@@ -405,6 +422,12 @@ def test_list_host_label_filter(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+# The malformed `--host-label` is rejected before any discovery, so the command
+# itself does no provider work. But mngr's CLI cold-start (imports plus context
+# setup) alone routinely takes ~10s -- right at the default 10s per-test timeout,
+# which makes this test flaky. The release CI lane already overrides the timeout
+# to 90s globally; set it explicitly here so the test is robust locally too.
+@pytest.mark.timeout(60)
 def test_list_host_label_filter_invalid_format(e2e: E2eSession) -> None:
     """Tutorial block:
         # filter by host label
@@ -516,6 +539,7 @@ def test_list_limit(e2e: E2eSession) -> None:
 # @pytest.mark.modal as a NEVER_INVOKED violation. The watch-mode behavior
 # under test (wrapping `mngr list` in watch(1)) is provider-agnostic.
 @pytest.mark.release
+@pytest.mark.timeout(90)
 def test_list_watch_mode(e2e: E2eSession) -> None:
     """Tutorial block:
         # watch mode: refresh the list every 5 seconds
@@ -529,15 +553,21 @@ def test_list_watch_mode(e2e: E2eSession) -> None:
     # `watch` blocks until SIGINT; wrap with a short `timeout` so the test
     # exits without waiting for a full refresh interval. `timeout` returns 124
     # on expiry (then `|| true` masks it), so a clean exit is expected. The
-    # window must be long enough for `watch` to run `mngr list` once and render
-    # its output -- we then assert that the actual list output ("No agents
-    # found", in this fresh environment) made it into watch's rendered frame,
-    # proving watch genuinely executed the wrapped command rather than merely
-    # starting up. `watch -n5` runs the command immediately on launch, so an
-    # 8-second window comfortably captures the first frame.
+    # window must be long enough for `watch` to run `mngr list` to completion
+    # *and* render its first frame -- watch renders only after the wrapped
+    # command exits, and `mngr list` runs the full provider-discovery path,
+    # which routinely takes ~10s in a fresh environment (see
+    # test_list_local_filter). An 8-second window is too short: watch gets
+    # killed mid-`mngr list` and never renders a frame, leaving only the
+    # alternate-screen setup/teardown escape codes in the output. A 25-second
+    # window comfortably captures the first rendered frame. We then assert that
+    # the actual list output ("No agents found", in this fresh environment)
+    # made it into that frame, proving watch genuinely executed the wrapped
+    # command rather than merely starting up.
     result = e2e.run(
-        "timeout 8 watch -n5 mngr list || true",
+        "timeout 25 watch -n5 mngr list || true",
         comment="watch mode: refresh the list every 5 seconds",
+        timeout=60.0,
     )
     expect(result).to_succeed()
     # watch renders onto the alternate screen with terminal escape sequences,
@@ -547,6 +577,7 @@ def test_list_watch_mode(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+@pytest.mark.tmux
 def test_list_format_jsonl(e2e: E2eSession) -> None:
     """Tutorial block:
         # output each entry as a JSON object (useful for scripting)
@@ -556,19 +587,42 @@ def test_list_format_jsonl(e2e: E2eSession) -> None:
     (the JSONL contract, as opposed to the single big array from `--format
     json`); every non-empty emitted line parses as a JSON object.
     """
+    # Create two local command agents so the JSONL stream has real rows. With no
+    # agents the stream is empty and the "one standalone JSON object per line"
+    # contract (as opposed to the single big array from --format json) is never
+    # observed -- the per-line check would pass vacuously. --transfer=none keeps
+    # the agents local (no rsync) and --type command -- sleep <N> stands in for a
+    # real agent so the test needs no claude install; the pinned sleep value lets
+    # any leaked process trace back to this call. Command agents run under tmux,
+    # hence @pytest.mark.tmux.
+    for name in ("jsonl-first", "jsonl-second"):
+        expect(
+            e2e.run(
+                f"mngr create {name} --transfer=none --type command --no-ensure-clean --no-connect -- sleep 100131",
+                comment=f"create local agent {name} so the JSONL stream has rows",
+            )
+        ).to_succeed()
+
     result = e2e.run("mngr list --format jsonl", comment="output each entry as a JSON object")
     expect(result).to_succeed()
     # The JSONL contract is "one standalone JSON object per line" (as opposed to
-    # the single big array produced by --format json). Verify every emitted line
-    # parses as a JSON object. With no agents the stream is empty, which is also
-    # valid JSONL.
-    for line in result.stdout.splitlines():
-        if line.strip():
-            assert isinstance(json.loads(line), dict), f"JSONL line is not a JSON object: {line!r}"
+    # the single big array produced by --format json). Every non-empty line must
+    # parse as a JSON object on its own.
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    parsed_lines = [json.loads(line) for line in lines]
+    for line, parsed in zip(lines, parsed_lines):
+        assert isinstance(parsed, dict), f"JSONL line is not a JSON object: {line!r}"
+    # Both agents appear, each as its own standalone object line -- one JSON
+    # object per line rather than a single array wrapping them.
+    listed_names = {parsed["name"] for parsed in parsed_lines if "name" in parsed}
+    assert {"jsonl-first", "jsonl-second"} <= listed_names, listed_names
+    # The whole stream is NOT the single big JSON array that --format json emits:
+    # concatenated JSONL objects are not one parseable JSON document.
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(result.stdout)
 
 
 @pytest.mark.release
-@pytest.mark.modal
 def test_observe_discovery_only(e2e: E2eSession) -> None:
     """Tutorial block:
         # continually stream discovery events as JSONL (useful for piping to jq to turn this data into an event stream)
@@ -580,10 +634,21 @@ def test_observe_discovery_only(e2e: E2eSession) -> None:
     without error (it runs indefinitely, so it is wrapped in a short `timeout`
     and the timeout-expiry exit is masked to a clean exit).
     """
+    # Intentionally NOT marked @pytest.mark.modal: like the fresh-environment
+    # `mngr list` filter tests, `mngr observe --discovery-only` discovers via the
+    # provider SDKs (Modal gRPC) and never shells out to the `modal` CLI binary,
+    # which is the only Modal usage the resource guard can observe across the mngr
+    # subprocess boundary. With the mark, the guard flags it as a never-invoked
+    # resource.
     # `mngr observe` streams indefinitely; wrap with a short `timeout` so the
-    # test doesn't hang. `timeout` exits 124 on expiry.
+    # test doesn't hang. The stream never self-exits, so a healthy run is always
+    # terminated by the timeout (exit 124). Masking *only* 124 to a clean exit --
+    # rather than a blanket `|| true` -- means the assertion still fails if observe
+    # crashes early with any other exit code, which is what verifies the command
+    # "starts and streams discovery events without error" instead of merely that a
+    # `|| true` pipeline exited 0.
     result = e2e.run(
-        "timeout 1 mngr observe --discovery-only || true",
+        'timeout 1 mngr observe --discovery-only; test "$?" -eq 124',
         comment="continually stream discovery events as JSONL",
     )
     expect(result).to_succeed()

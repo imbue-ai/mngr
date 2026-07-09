@@ -30,7 +30,11 @@ def _create_named_agents(e2e: E2eSession, names_and_sleeps: list[tuple[str, int]
         ).to_succeed()
 
 
-@pytest.mark.rsync
+# No @pytest.mark.rsync: this test creates a local agent from a *clean* git repo,
+# so the git-worktree transfer has no uncommitted or gitignored files to copy and
+# _transfer_extra_files skips rsync entirely. The create/start path here never
+# invokes rsync, so the mark would be superfluous (the resource guard fails a
+# passing test that carries a mark for a resource it never used).
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(180)
@@ -44,6 +48,10 @@ def test_start_idempotent(e2e: E2eSession) -> None:
     agent down (it stays reachable, with exec landing in worktrees/my-task).
     """
     _create_my_task(e2e, 100500)
+    # Precondition: create leaves the agent running, so the start below exercises
+    # the "already running" case the scope is about (not the stopped-agent path
+    # that test_start_stopped_agent covers). Confirm it is reachable first.
+    expect(e2e.run("mngr exec my-task pwd", comment="confirm the agent is already running")).to_succeed()
     # Starting an already-running agent is idempotent: it succeeds rather than erroring.
     expect(e2e.run("mngr start my-task", comment="start a stopped agent (idempotent)")).to_succeed()
     # The redundant start must not have torn the agent down: it is still reachable, and
@@ -53,7 +61,6 @@ def test_start_idempotent(e2e: E2eSession) -> None:
     expect(reachable.stdout).to_contain("worktrees/my-task")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(180)
@@ -75,11 +82,11 @@ def test_start_stopped_agent(e2e: E2eSession) -> None:
     expect(e2e.run("mngr exec my-task pwd", comment="verify the restarted agent is reachable")).to_succeed()
 
 
-# Local command agents create + start via tmux/rsync; starting a named agent
-# resolves it locally and never enumerates Modal, so this test does not carry
+# Local command agents create + start via tmux (the work_dir is a same-host git
+# worktree, so no rsync is involved); starting a named agent resolves it locally
+# and never enumerates Modal, so this test carries neither @pytest.mark.rsync nor
 # @pytest.mark.modal. The default 10s pytest timeout is too tight for the full
 # create + start round-trip (~15s), so bump it.
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -94,24 +101,32 @@ def test_start_connect(e2e: E2eSession) -> None:
     start-then-connect path ran (a plain start would not write it).
     """
     _create_my_task(e2e, 100501)
-    expect(e2e.run("mngr start my-task --connect", comment="start and immediately connect")).to_succeed()
-    # --connect runs the configured connect_command. The e2e harness's
-    # connect_command (mngr-e2e-connect) records the session and writes a
-    # "<agent>.pid" file into MNGR_TEST_ASCIINEMA_DIR (== e2e.output_dir). The
-    # connect step only runs when start actually started a stopped agent, so the
-    # file's presence verifies the whole start-then-connect path -- the behavior
-    # that distinguishes --connect from a plain start. This is a local,
-    # filesystem-only check that (unlike `mngr list`/`mngr exec`) does not
-    # enumerate remote providers, keeping the test free of Modal usage.
+    # The tutorial block starts a *stopped* agent, so stop it first to exercise
+    # exactly that path. Stopping a named local agent is a tmux-only operation
+    # (it does not enumerate remote providers), keeping the test free of Modal.
+    expect(e2e.run("mngr stop my-task", comment="stop my-task so start has a stopped agent to start")).to_succeed()
+    expect(e2e.run("mngr start my-task --connect", comment="start the stopped agent and immediately connect")).to_succeed()
+    # --connect runs the configured connect_command after the start. The e2e
+    # harness's connect_command (mngr-e2e-connect) records the session and writes
+    # a "<agent>.pid" file into MNGR_TEST_ASCIINEMA_DIR (== e2e.output_dir). A
+    # plain start (without --connect) would not run the connect_command and so
+    # would not write this file, so its presence verifies the whole
+    # start-then-connect path -- the behavior that distinguishes --connect from a
+    # plain start. This is a local, filesystem-only check that (unlike
+    # `mngr list`/`mngr exec`) does not enumerate remote providers, keeping the
+    # test free of Modal usage.
     assert (e2e.output_dir / "my-task.pid").exists(), (
         f"Expected --connect to invoke the connect command and write my-task.pid in {e2e.output_dir}, "
         f"but it is missing. Directory contents: {sorted(p.name for p in e2e.output_dir.iterdir())}"
     )
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+# Creating three command agents and then starting all of them in a single
+# invocation is well over the default 10s pytest timeout (each create + start
+# round-trip is ~15s), so bump it to match the other multi-step lifecycle tests.
+@pytest.mark.timeout(180)
 def test_start_multiple_agents(e2e: E2eSession) -> None:
     """Tutorial block:
         # start multiple agents at once
@@ -131,7 +146,6 @@ def test_start_multiple_agents(e2e: E2eSession) -> None:
         expect(result.stdout).to_contain(name)
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -148,7 +162,15 @@ def test_start_all_via_stdin(e2e: E2eSession) -> None:
     # Stop the agent first so the stdin-driven start does real work (starting a
     # stopped agent), matching the tutorial's "start all stopped agents" intent.
     expect(e2e.run("mngr stop my-task", comment="stop my-task so it is actually stopped")).to_succeed()
-    stopped = e2e.run("mngr list --stopped", comment="confirm my-task is stopped")
+    # The --stopped verification queries are scoped to the local provider to
+    # avoid enumerating remote providers (which this test never uses): with a
+    # remote backend such as aws enabled but unreachable, an unscoped `mngr list`
+    # exits non-zero (EXIT_CODE_PROVIDER_INACCESSIBLE) even though my-task, a
+    # local agent, is listed correctly. The tutorial's own
+    # `mngr list --ids | mngr start -` is left verbatim: in a pipe the checked
+    # exit code is `mngr start -`'s, and `mngr list --ids` still emits the local
+    # id on stdout.
+    stopped = e2e.run("mngr list --provider local --stopped", comment="confirm my-task is stopped")
     expect(stopped).to_succeed()
     expect(stopped.stdout).to_contain("my-task")
     # start all stopped agents by piping their ids from "mngr list" into stdin.
@@ -156,13 +178,15 @@ def test_start_all_via_stdin(e2e: E2eSession) -> None:
     expect(result).to_succeed()
     expect(result.stdout).to_contain("my-task")
     # Verify the start took effect: the agent is no longer in the stopped set.
-    after = e2e.run("mngr list --stopped", comment="verify my-task is no longer stopped after stdin-driven start")
+    after = e2e.run(
+        "mngr list --provider local --stopped",
+        comment="verify my-task is no longer stopped after stdin-driven start",
+    )
     expect(after).to_succeed()
     expect(after.stdout).not_to_contain("my-task")
 
 
 @pytest.mark.timeout(120)
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 def test_start_dry_run(e2e: E2eSession) -> None:
@@ -177,8 +201,13 @@ def test_start_dry_run(e2e: E2eSession) -> None:
     _create_my_task(e2e, 100506)
 
     # Capture every agent's lifecycle state before the dry-run so we can prove
-    # the dry-run leaves all of them untouched.
-    state_before = e2e.run("mngr list --format '{name}={state}'", comment="capture agent state before the dry-run")
+    # the dry-run leaves all of them untouched. Scope the query to the local
+    # provider: this test only ever creates local agents, so enumerating remote
+    # providers (which it never uses) would be outside its scope and can fail the
+    # listing outright when a remote provider is enabled but unreachable.
+    state_before = e2e.run(
+        "mngr list --provider local --format '{name}={state}'", comment="capture agent state before the dry-run"
+    )
     expect(state_before).to_succeed()
 
     dry_run = e2e.run("mngr list --ids | mngr start - --dry-run", comment="dry-run to see what would happen")
@@ -190,13 +219,13 @@ def test_start_dry_run(e2e: E2eSession) -> None:
     # A dry-run must be a no-op: every agent's state is identical afterwards, so
     # nothing was actually started.
     state_after = e2e.run(
-        "mngr list --format '{name}={state}'", comment="confirm the dry-run did not change any agent state"
+        "mngr list --provider local --format '{name}={state}'",
+        comment="confirm the dry-run did not change any agent state",
     )
     expect(state_after).to_succeed()
     expect(state_after.stdout).to_equal(state_before.stdout)
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(180)
@@ -212,16 +241,17 @@ def test_stop_basic(e2e: E2eSession) -> None:
     _create_my_task(e2e, 100507)
     expect(e2e.run("mngr stop my-task", comment="stop a running agent")).to_succeed()
     # Verify the stop actually took effect: my-task should now be reported as
-    # stopped and should no longer appear among the running agents.
-    stopped = e2e.run("mngr list --stopped", comment="verify my-task is now stopped")
+    # stopped and should no longer appear among the running agents. List queries
+    # are scoped to the local provider to avoid enumerating remote providers
+    # (which the test never uses and may be unreachable in the environment).
+    stopped = e2e.run("mngr list --provider local --stopped", comment="verify my-task is now stopped")
     expect(stopped).to_succeed()
     assert "my-task" in stopped.stdout, f"expected my-task in stopped list, got: {stopped.stdout!r}"
-    running = e2e.run("mngr list --running", comment="verify my-task is no longer running")
+    running = e2e.run("mngr list --provider local --running", comment="verify my-task is no longer running")
     expect(running).to_succeed()
     assert "my-task" not in running.stdout, f"expected my-task to not be running, got: {running.stdout!r}"
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -257,10 +287,9 @@ def test_stop_archive(e2e: E2eSession) -> None:
     expect(active_result.stdout).not_to_contain("my-task")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
+@pytest.mark.timeout(120)
 def test_archive_command(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can also archive an agent via the "archive" command, which is basically just a shortcut for "stop --archive"
@@ -278,18 +307,22 @@ def test_archive_command(e2e: E2eSession) -> None:
     expect(e2e.run("mngr stop my-task", comment="stop my-task before archiving")).to_succeed()
     expect(e2e.run("mngr archive my-task", comment="archive shortcut for stop --archive")).to_succeed()
     # Archiving sets an "archived_at" label; verify the agent is actually
-    # archived rather than just trusting the command's exit code.
-    list_result = e2e.run("mngr list --archived --format json", comment="verify my-task is archived")
+    # archived rather than just trusting the command's exit code. The listing is
+    # scoped to the local provider (matching sibling test_stop_archive): my-task
+    # is a local command agent, and the documented scope is local-only, so there
+    # is no reason to enumerate remote providers (which the test never uses).
+    list_result = e2e.run(
+        "mngr list --provider local --archived --format json", comment="verify my-task is archived"
+    )
     expect(list_result).to_succeed()
     archived_agents = [a for a in json.loads(list_result.stdout)["agents"] if a["name"] == "my-task"]
     assert len(archived_agents) == 1, f"expected my-task in archived list, got {list_result.stdout}"
     assert "archived_at" in archived_agents[0]["labels"], archived_agents[0]["labels"]
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
+@pytest.mark.timeout(120)
 def test_archive_running_agent_is_skipped(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can also archive an agent via the "archive" command, which is basically just a shortcut for "stop --archive"
@@ -306,15 +339,19 @@ def test_archive_running_agent_is_skipped(e2e: E2eSession) -> None:
     result = e2e.run("mngr archive my-task", comment="archive a running agent (skipped without --force)")
     expect(result).to_succeed()
     expect(result.stdout + result.stderr).to_contain("Skipping running agent")
-    # Confirm nothing was archived.
-    list_result = e2e.run("mngr list --archived --format json", comment="verify my-task was not archived")
+    # Confirm nothing was archived. The listing is scoped to the local provider
+    # (where my-task, a command agent, actually lives) to avoid enumerating
+    # remote providers the test never uses -- mirroring test_stop_archive.
+    list_result = e2e.run(
+        "mngr list --provider local --archived --format json", comment="verify my-task was not archived"
+    )
     expect(list_result).to_succeed()
     assert not [a for a in json.loads(list_result.stdout)["agents"] if a["name"] == "my-task"], list_result.stdout
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.timeout(180)
 def test_stop_all_via_stdin(e2e: E2eSession) -> None:
     """Tutorial block:
         # stop all running agents
@@ -331,18 +368,20 @@ def test_stop_all_via_stdin(e2e: E2eSession) -> None:
     # The command reports which agents it stopped.
     expect(stop_result.stdout).to_contain("my-task")
     # Verify the concrete effect: the agent is no longer running, but still
-    # exists in a stopped state (stop is not destroy/archive).
-    running_after = e2e.run("mngr list --running", comment="verify nothing is left running")
+    # exists in a stopped state (stop is not destroy/archive). List queries are
+    # scoped to the local provider (where my-task lives) to avoid enumerating
+    # remote providers the test never uses.
+    running_after = e2e.run("mngr list --provider local --running", comment="verify nothing is left running")
     expect(running_after).to_succeed()
     expect(running_after.stdout).not_to_contain("my-task")
-    stopped_after = e2e.run("mngr list --stopped", comment="verify the agent is now stopped")
+    stopped_after = e2e.run("mngr list --provider local --stopped", comment="verify the agent is now stopped")
     expect(stopped_after).to_succeed()
     expect(stopped_after.stdout).to_contain("my-task")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.timeout(120)
 def test_archive_stopped_via_stdin(e2e: E2eSession) -> None:
     """Tutorial block:
         # archive all stopped agents (handy for cleaning up "mngr list" after a batch of finished work).
@@ -381,10 +420,9 @@ def test_archive_stopped_via_stdin(e2e: E2eSession) -> None:
     expect(active_after.stdout).not_to_contain("my-task")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
+@pytest.mark.timeout(180)
 def test_stop_dry_run(e2e: E2eSession) -> None:
     """Tutorial block:
         # dry-run to see what would be stopped
@@ -396,7 +434,16 @@ def test_stop_dry_run(e2e: E2eSession) -> None:
     stops it).
     """
     _create_my_task(e2e, 100512)
-    dry_run_result = e2e.run("mngr list --ids | mngr stop - --dry-run", comment="dry-run to see what would be stopped")
+    # The `mngr list --ids` half of the pipe enumerates every enabled provider.
+    # The remote-provider round-trips routinely push this past the 30s default
+    # subprocess timeout, so give it the remote-provider budget. (No modal mark:
+    # the per-user Modal environment never exists here, so Modal is skipped as
+    # empty during enumeration rather than actually invoked.)
+    dry_run_result = e2e.run(
+        "mngr list --ids | mngr stop - --dry-run",
+        comment="dry-run to see what would be stopped",
+        timeout=120.0,
+    )
     expect(dry_run_result).to_succeed()
     # The dry-run must report the agent that would be stopped...
     expect(dry_run_result.stdout).to_contain("Would stop")

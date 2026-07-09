@@ -1,0 +1,1 @@
+Removed a spurious `@pytest.mark.rsync` from the `mngr transcript --tail 5` e2e test. The test never invokes rsync (it creates a local claude agent and reads its transcript), so the resource guard failed the test at teardown. The mark is now dropped, matching the identical `--tail 1` sibling test.

@@ -10,7 +10,6 @@ from imbue.mngr.e2e.conftest import E2eSession
 from imbue.skitwright.expect import expect
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(60)
@@ -101,7 +100,6 @@ def _create_my_task(e2e: E2eSession, sleep_value: int) -> None:
     ).to_succeed()
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(180)
@@ -123,6 +121,11 @@ def test_destroy_specific(e2e: E2eSession) -> None:
     # Pipe "y\n" to confirm the destructive prompt that --force would suppress.
     destroy_result = e2e.run("yes | mngr destroy my-task", comment="destroy a specific agent", timeout=90.0)
     expect(destroy_result).to_succeed()
+    # The bare (no --force) form must actually prompt for confirmation -- that is
+    # the whole point of this variant versus the --force companion test. Assert
+    # the confirmation prompt was shown, so a regression that silently skipped it
+    # (destroying without asking) would fail here rather than pass unnoticed.
+    expect(destroy_result.stdout).to_contain("Are you sure you want to continue?")
     expect(destroy_result.stdout).to_contain("Destroyed agent: my-task")
     # Verify the agent is actually gone, not just that the command exited 0.
     list_result = e2e.run("mngr list", comment="verify the agent no longer exists")
@@ -130,7 +133,6 @@ def test_destroy_specific(e2e: E2eSession) -> None:
     expect(list_result.stdout).not_to_contain("my-task")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -153,7 +155,10 @@ def test_destroy_short_form(e2e: E2eSession) -> None:
     expect(destroy_result.stdout).to_contain("Destroyed agent: my-task")
 
     # `rm` is an alias for `destroy`, so the agent must actually be gone afterward.
-    list_result = e2e.run("mngr list", comment="Verify agent no longer appears in list")
+    # Scope the listing to the local provider (where this command agent lives) so
+    # the check does not fail on an unrelated remote provider being unreachable --
+    # this matches the convention used across the rest of the e2e suite.
+    list_result = e2e.run("mngr list --provider local", comment="Verify agent no longer appears in list")
     expect(list_result).to_succeed()
     expect(list_result.stdout).not_to_contain("my-task")
 
@@ -183,7 +188,6 @@ def test_destroy_short_form_running_requires_force(e2e: E2eSession) -> None:
     expect(list_result.stdout).to_contain("my-task")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(60)
@@ -391,7 +395,6 @@ def test_destroy_with_gc(e2e: E2eSession) -> None:
     expect(list_result.stdout).not_to_contain("my-task")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -426,6 +429,7 @@ def test_destroy_no_gc(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+@pytest.mark.timeout(60)
 def test_destroy_by_session_name(e2e: E2eSession) -> None:
     """Tutorial block:
         # destroy has a special variant for finding an agent by its tmux session name:

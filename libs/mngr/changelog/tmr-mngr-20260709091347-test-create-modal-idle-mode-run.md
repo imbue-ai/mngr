@@ -1,0 +1,1 @@
+Scoped the `mngr list` call in the `--idle-mode run` Modal tutorial e2e test to `--provider modal`, so the verification no longer queries unrelated enabled providers (e.g. aws) that may lack credentials in the test environment and cause a spurious provider-inaccessible exit.
