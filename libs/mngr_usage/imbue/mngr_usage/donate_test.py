@@ -122,6 +122,10 @@ def test_build_create_argv_launches_a_headless_agent_that_skips_permissions() ->
         "--message",
         "Use the document-review skill",
         "--",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--include-partial-messages",
         "--dangerously-skip-permissions",
     )
 

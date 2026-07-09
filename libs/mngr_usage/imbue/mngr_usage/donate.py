@@ -14,9 +14,12 @@ idle quota automatically.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
+import sys
 import time
+from pathlib import Path
 from typing import Any
 
 import click
@@ -129,7 +132,21 @@ def evaluate_capacity(snapshot: UsageSnapshot | None, now: int) -> DonateCapacit
 # and ``--dangerously-skip-permissions`` lets it actually run the skill's
 # commands -- in ``--print`` mode gated tools are otherwise denied, not prompted.
 DONATE_AGENT_TYPE = "headless_claude"
-DONATE_AGENT_ARGS = ("--dangerously-skip-permissions",)
+# ``--output-format stream-json`` (which Claude requires ``--verbose`` to pair
+# with ``--print``) is not optional here: mngr's headless runner reads the
+# agent's stdout as stream-json, so a bare ``--print`` blob is seen as "no
+# output" and the run is reported as failed even when the skill completed. It
+# also turns the run into a per-event log -- every tool call and the skill's
+# outbound HTTP -- which ``--foreground`` streams live and we tee to a file.
+# ``--dangerously-skip-permissions`` lets the unattended agent run the skill's
+# commands (in ``--print`` mode gated tools are denied, not prompted).
+DONATE_AGENT_ARGS = (
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--include-partial-messages",
+    "--dangerously-skip-permissions",
+)
 
 
 @pure
@@ -167,6 +184,42 @@ def build_destroy_argv(agent_name: str) -> tuple[str, ...]:
     skips confirmation and a no-op destroy of a missing agent is harmless.
     """
     return ("mngr", "destroy", agent_name, "--force")
+
+
+def _donation_log_path(agent_name: str, now: int) -> Path:
+    """Where to persist the donation agent's streamed event log.
+
+    Under the mngr host dir (``$MNGR_HOST_DIR`` or ``~/.mngr``) so it outlives
+    the agent: a headless agent auto-destroys on success, taking its own
+    ``stdout.jsonl`` with it, and a donation you can't inspect afterwards is a
+    donation you can't audit. ``now`` (passed in, not read here) keeps successive
+    ticks from clobbering each other's logs.
+    """
+    host_dir = Path(os.environ.get("MNGR_HOST_DIR") or (Path.home() / ".mngr"))
+    log_dir = host_dir / "donate-logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return log_dir / f"{agent_name}-{now}.jsonl"
+
+
+def _run_and_tee(argv: tuple[str, ...], log_path: Path) -> int:
+    """Run ``argv``, streaming its combined output to both stdout and ``log_path``.
+
+    The headless agent emits stream-json (one event per line: tool calls,
+    assistant text, the skill's outbound HTTP + submission), so teeing
+    line-by-line gives a live view *and* a durable record without holding the
+    whole run in memory. Returns the child's exit status.
+    """
+    with open(log_path, "w", encoding="utf-8") as log_file:
+        process = subprocess.Popen(
+            list(argv), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
+        )
+        assert process.stdout is not None
+        for line in process.stdout:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            log_file.write(line)
+            log_file.flush()
+        return process.wait()
 
 
 class DonateCliOptions(CommonCliOptions):
@@ -275,8 +328,10 @@ def donate(ctx: click.Context, **kwargs: Any) -> None:
     argv = build_create_argv(opts.agent_name, opts.skill)
     if shutil.which(argv[0]) is None:
         raise MngrError(f"Could not find '{argv[0]}' on PATH to launch the donation agent.")
+    log_path = _donation_log_path(opts.agent_name, now)
     emit_info(
-        f"Spare capacity available -- launching '{opts.agent_name}' to run the {opts.skill} skill.",
+        f"Spare capacity available -- launching '{opts.agent_name}' to run the {opts.skill} skill.\n"
+        f"Streaming its steps below; full event log at {log_path}",
         output_opts.output_format,
     )
     # Clear any stale agent of this name (from a prior tick that failed mid-launch)
@@ -284,9 +339,9 @@ def donate(ctx: click.Context, **kwargs: Any) -> None:
     # is a harmless no-op, and we don't want a stale-cleanup failure to mask the
     # create's own error, so its output/exit are swallowed.
     subprocess.run(list(build_destroy_argv(opts.agent_name)), check=False, capture_output=True)
-    completed = subprocess.run(list(argv), check=False)
-    if completed.returncode != 0:
-        raise MngrError(f"`{' '.join(argv)}` exited with status {completed.returncode}.")
+    returncode = _run_and_tee(argv, log_path)
+    if returncode != 0:
+        raise MngrError(f"`{' '.join(argv)}` exited with status {returncode} (see {log_path}).")
     emit_operator_result(
         "donate",
         [
