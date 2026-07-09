@@ -111,13 +111,15 @@ def test_window_without_derivable_elapsed_yields_zero_pace_and_no_spare() -> Non
     assert decision.has_spare is False
 
 
-def test_build_create_argv_matches_the_recipe_one_liner() -> None:
+def test_build_create_argv_launches_a_headless_agent_that_skips_permissions() -> None:
     assert build_create_argv("donate-extra-quota-bio", "document-review") == (
         "mngr",
         "create",
         "donate-extra-quota-bio",
-        "claude",
-        "--no-connect",
+        "headless_claude",
+        "--foreground",
         "--message",
         "Use the document-review skill",
+        "--",
+        "--dangerously-skip-permissions",
     )

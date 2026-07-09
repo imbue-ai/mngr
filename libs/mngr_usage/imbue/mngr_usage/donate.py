@@ -122,23 +122,37 @@ def evaluate_capacity(snapshot: UsageSnapshot | None, now: int) -> DonateCapacit
     )
 
 
+# The donation agent runs headless (``claude --print``) on purpose: a plain
+# interactive ``claude`` agent blocks on the first tool-permission prompt, which
+# hangs ``mngr create`` and spends none of the quota. A headless agent streams
+# and auto-destroys after one pass (so repeat ticks never collide on the name),
+# and ``--dangerously-skip-permissions`` lets it actually run the skill's
+# commands -- in ``--print`` mode gated tools are otherwise denied, not prompted.
+DONATE_AGENT_TYPE = "headless_claude"
+DONATE_AGENT_ARGS = ("--dangerously-skip-permissions",)
+
+
 @pure
 def build_create_argv(agent_name: str, skill: str) -> tuple[str, ...]:
     """The ``mngr create`` invocation that launches a donation agent.
 
-    Matches the donate one-liner in the launch post / cron recipes:
-    ``mngr create <name> claude --no-connect --message "Use the <skill> skill"``.
-    Runs from the caller's cwd, so invoke ``mngr donate`` from a trusted repo
-    (same as the recipes' ``cd $PROJECT_DIR``).
+    Launches a **headless** claude agent so the donation runs unattended (see
+    :data:`DONATE_AGENT_TYPE`). ``--foreground`` is required for headless types
+    (it streams output and auto-destroys when done). The skill name is passed as
+    the agent's first message; ``--dangerously-skip-permissions`` is spliced in
+    after ``--`` so it reaches ``claude`` as an agent arg. Runs from the caller's
+    cwd, so invoke ``mngr donate`` from a trusted repo (like the recipes' ``cd``).
     """
     return (
         "mngr",
         "create",
         agent_name,
-        "claude",
-        "--no-connect",
+        DONATE_AGENT_TYPE,
+        "--foreground",
         "--message",
         f"Use the {skill} skill",
+        "--",
+        *DONATE_AGENT_ARGS,
     )
 
 
