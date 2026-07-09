@@ -198,7 +198,8 @@ def get_all_provider_instances_and_skipped(
     allowing skipping expensive initialization of providers that won't be used.
 
     Returns configured providers plus default instances for all registered backends,
-    excluding (each exclusion below the first line is reported in the skipped list):
+    excluding (only the last two exclusions -- the construction skips -- are
+    reported in the skipped list):
     - Backends disabled via --disable-plugin
     - Provider instances with is_enabled=False in their config
     - Backends not in enabled_backends list (if the list is non-empty)
