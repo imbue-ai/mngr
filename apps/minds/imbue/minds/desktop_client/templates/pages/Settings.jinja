@@ -296,7 +296,7 @@
           </p>
           {% if permissions_unavailable %}
             <Notice variant="warn">
-              Connectors can't be loaded right now because the latchkey gateway is unavailable.
+              Connectors can't be loaded right now.
               Try again in a moment.
             </Notice>
           {% elif services_overview %}
@@ -338,7 +338,7 @@
               {% endfor %}
             </div>
           {% else %}
-            <Notice variant="info">No connectors have been authorized yet.</Notice>
+            <Notice variant="info">No connectors have been added yet.</Notice>
           {% endif %}
         </section>
 
@@ -352,12 +352,12 @@
           </div>
           <p class="type-body text-secondary mb-6">
             Files and folders on this machine that your agents can read or write. To share a new
-            location, ask an agent in a workspace to access it. Revoking removes access; agents can
-            ask again later.
+            location, ask an agent in a workspace to access it or to write data in there.
+            Revoking removes access; agents can ask again later.
           </p>
           {% if permissions_unavailable %}
             <Notice variant="warn">
-              File sharing can't be loaded right now because the latchkey gateway is unavailable.
+              File sharing can't be loaded right now.
               Try again in a moment.
             </Notice>
           {% elif file_sharing_grants %}
@@ -404,7 +404,7 @@
           </p>
           {% if permissions_unavailable %}
             <Notice variant="warn">
-              Workspace delegation can't be loaded right now because the latchkey gateway is unavailable.
+              Workspace delegation can't be loaded right now.
               Try again in a moment.
             </Notice>
           {% elif workspace_op_groups %}
