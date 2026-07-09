@@ -1,0 +1,1 @@
+- Added: `LowerCaseStrEnum` in `imbue.imbue_common.enums` -- the lowercase sibling of `UpperCaseStrEnum`, for enums whose values are an externally visible, already-lowercase wire format (first used by the pool bake / destroy outcome statuses in `mngr_imbue_cloud`).
