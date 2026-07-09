@@ -121,7 +121,7 @@ For each target arch, on a matching macOS host:
 2. Upload every arch's tarball as an asset on a GitHub release tagged `qemu-img-v<ver>` in `imbue-ai/mngr` (the base URL is `QEMU_PAYLOAD_BASE_URL` in `scripts/download-binaries.js`).
 3. Paste each printed SHA into `EXPECTED_SHA256`.
 
-`aarch64` and `x86_64` payloads must be produced on their respective host arches (ToDesktop currently packages macOS arm64 only, so the aarch64 payload is the load-bearing one). Linux payloads use the same GitHub-release + pinned-SHA fetch path; the same from-source recipe works there (static linking is easier on Linux), but no Linux producer is wired up yet -- a packaged Linux build does not exist (`todesktop.js` ships only a `mac:` block). Until an arch's tarball is uploaded and its SHA pinned, a build for that arch aborts loudly in `verifyChecksum`.
+macOS `aarch64` and `x86_64` payloads must be produced on their respective host arches (ToDesktop's mac builder is arm64, so the aarch64 payload is the load-bearing one). Linux payloads come from `scripts/build-qemu-payload-linux.sh` (Docker + Alpine): Linux has no static-libc limitation, so QEMU's own `--static` against Alpine's musl produces a fully static ELF that runs on any distro -- one script run per arch, either arch buildable from any host via Docker binfmt emulation. ToDesktop's Linux builder runs the same `beforeInstall` hook even though no Linux app ships, so the linux assets must exist for `pnpm dist` to pass. Until an arch's tarball is uploaded and its SHA pinned, a build for that arch aborts loudly in `verifyChecksum`.
 
 To exercise a packaged or clean-`pnpm start` build locally before the release exists, stage the payload straight into the resources dir instead of downloading it: `scripts/build-qemu-payload.sh apps/minds/resources` writes `resources/qemu/bin/qemu-img` in place, which `ensure-binaries.js` then treats as already present.
 
@@ -287,6 +287,7 @@ apps/minds/
   scripts/
     build.js                # Downloads runtime binaries, builds wheels, stages resources/
     download-binaries.js    # Fetches uv/git/restic/desync/qemu-img (ToDesktop beforeInstall + dev)
-    build-qemu-payload.sh   # Maintainer tool: builds the static qemu-img release payload from pinned sources
+    build-qemu-payload.sh   # Maintainer tool: builds the static qemu-img release payload from pinned sources (macOS)
+    build-qemu-payload-linux.sh # Maintainer tool: builds the fully static Linux qemu-img payload via Docker+Alpine
   resources/                # (gitignored) Built artifacts for packaging
 ```
