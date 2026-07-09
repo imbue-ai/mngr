@@ -16,8 +16,10 @@ from imbue.mngr_imbue_cloud.primitives import FastMode
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.primitives import KNOWN_OVH_US_REGIONS
 from imbue.mngr_imbue_cloud.primitives import LeaseDbId
+from imbue.mngr_imbue_cloud.primitives import PoolHostDestroyOutcomeStatus
 from imbue.mngr_imbue_cloud.primitives import R2AccessKeyId
 from imbue.mngr_imbue_cloud.primitives import R2BucketAccess
+from imbue.mngr_imbue_cloud.primitives import SliceBakeOutcomeStatus
 from imbue.mngr_imbue_cloud.primitives import SuperTokensUserId
 
 
@@ -28,6 +30,55 @@ class PoolHostDestroyTarget(FrozenModel):
     box_public_address: str | None = Field(description="SSH-reachable address of the box, if its record exists")
     lima_service_user: str | None = Field(description="The box's non-root lima user that owns the VMs, if recorded")
     box_host_public_key: str | None = Field(description="The box's sshd host public key, pinned for the teardown SSH")
+
+
+class PoolHostDestroyOutcome(FrozenModel):
+    """The result of destroying one pool host row (one entry in the destroy report)."""
+
+    pool_host_id: str = Field(description="The pool_hosts row id the destroy targeted")
+    status: PoolHostDestroyOutcomeStatus = Field(description="How the row/VM ended up")
+    detail: str | None = Field(default=None, description="Human-readable elaboration (failure reason, skip cause)")
+
+
+class PoolHostDestroyReport(FrozenModel):
+    """The summary the destroy commands emit: per-host outcomes plus counts.
+
+    ``already_gone`` counts as destroyed (the desired end state -- the row is gone --
+    so re-running the same id list after a partial failure converges cleanly).
+    """
+
+    requested: int = Field(description="Number of (unique) pool hosts the invocation targeted")
+    destroyed: int = Field(description="Hosts destroyed (including rows that were already gone)")
+    skipped: int = Field(description="Hosts skipped because their row is leased")
+    failed: int = Field(description="Hosts whose teardown failed (their rows stay 'removing' for retry)")
+    hosts: tuple[PoolHostDestroyOutcome, ...] = Field(description="Per-host outcomes, in input order")
+
+
+class SliceBakeOutcome(FrozenModel):
+    """The result of baking one slice pool host (one entry in the bake report)."""
+
+    host_name: str = Field(description="The baked host's generated name")
+    server_id: str = Field(description="The bare_metal_servers row id the slice was carved on")
+    status: SliceBakeOutcomeStatus = Field(description="Whether the bake succeeded")
+    host_id: str | None = Field(default=None, description="The baked mngr host id (succeeded only)")
+    agent_id: str | None = Field(default=None, description="The baked services agent id (succeeded only)")
+    vm_ssh_port: int | None = Field(default=None, description="Box port forwarded to the VM sshd (succeeded only)")
+    container_ssh_port: int | None = Field(
+        default=None, description="Box port forwarded to the container sshd (succeeded only)"
+    )
+    attributes: dict[str, Any] | None = Field(
+        default=None, description="Lease attributes stamped on the pool row (succeeded only)"
+    )
+    error: str | None = Field(default=None, description="The failure description (failed only)")
+
+
+class SliceBakeReport(FrozenModel):
+    """The summary ``admin pool create`` emits: per-slice outcomes plus counts."""
+
+    requested: int = Field(description="Number of slices the invocation tried to bake")
+    succeeded: int = Field(description="Slices baked and inserted into the pool")
+    failed: int = Field(description="Slices that failed to bake (their VMs are rolled back/reaped)")
+    slices: tuple[SliceBakeOutcome, ...] = Field(description="Per-slice outcomes, in completion order")
 
 
 class PaidListEntry(FrozenModel):

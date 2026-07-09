@@ -9,3 +9,5 @@
 - Changed: `admin pool teardown-slices` claims each row as `removing` before teardown, tears the slice VMs down through the same parallel helper (with its own `--max-concurrency`, default 8), and now also includes rows already stranded in `removing` (e.g. by a crashed connector release), so an env destroy never leaks their VMs or rows. It emits the same unified outcome report.
 
 - Changed: DB-side slot accounting now counts `removing` rows as still occupying their box slot (their VM may still be tearing down), so `admin server list` capacity numbers stay truthful while destroys run.
+
+- Changed: the bake and destroy fan-outs now share one bounded parallel helper (`run_outcome_workers_in_bounded_threads`), and their per-item outcomes and summary reports are typed FrozenModels (`SliceBakeOutcome`/`SliceBakeReport`, `PoolHostDestroyOutcome`/`PoolHostDestroyReport`) with `LowerCaseStrEnum` statuses instead of stringly-typed dicts. The emitted JSON wire format is unchanged (lowercase statuses, absent fields omitted).

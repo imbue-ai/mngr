@@ -59,16 +59,22 @@ from imbue.mngr_imbue_cloud.cli._common import emit_json
 from imbue.mngr_imbue_cloud.cli._common import resolve_pool_database_url
 from imbue.mngr_imbue_cloud.data_types import BareMetalServer
 from imbue.mngr_imbue_cloud.data_types import BareMetalServerCapacity
+from imbue.mngr_imbue_cloud.data_types import PoolHostDestroyOutcome
+from imbue.mngr_imbue_cloud.data_types import PoolHostDestroyReport
+from imbue.mngr_imbue_cloud.data_types import SliceBakeOutcome
+from imbue.mngr_imbue_cloud.data_types import SliceBakeReport
 from imbue.mngr_imbue_cloud.data_types import SlicePricingRow
 from imbue.mngr_imbue_cloud.errors import BareMetalProvisioningError
 from imbue.mngr_imbue_cloud.errors import SliceBakeTerminatedError
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerDbId
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerStatus
 from imbue.mngr_imbue_cloud.primitives import OVH_US_DATACENTER_CODES
+from imbue.mngr_imbue_cloud.primitives import PoolHostDestroyOutcomeStatus
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_DELIVERED
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_INSTALLING
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_ORDERED
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_READY
+from imbue.mngr_imbue_cloud.primitives import SliceBakeOutcomeStatus
 from imbue.mngr_imbue_cloud.slices.bare_metal import DEFAULT_MEMORY_PER_SLICE_GB
 from imbue.mngr_imbue_cloud.slices.bare_metal import DEFAULT_SLICE_CPU_OVERCOMMIT_RATIO
 from imbue.mngr_imbue_cloud.slices.bare_metal import DEFAULT_SLICE_PORT_RANGE_END
@@ -637,7 +643,7 @@ def _bake_one_slice(
     port_range_end: int,
     is_deferred_install_wait_skipped: bool,
     fct_cache_tag: str | None,
-) -> dict[str, Any]:
+) -> SliceBakeOutcome:
     """Bake one slice (laptop-driven ``mngr create`` against the slice provider) + insert its pool row.
 
     Returns an outcome dict (never raises). ``bake_pool_host`` carves the VM (over
@@ -755,19 +761,21 @@ def _bake_one_slice(
             baked.outer_ssh_port,
             baked.ssh_port,
         )
-        return {
-            "host_name": host_name,
-            "server_id": str(server.id),
-            "host_id": baked.host_id,
-            "agent_id": baked.agent_id,
-            "vm_ssh_port": baked.outer_ssh_port,
-            "container_ssh_port": baked.ssh_port,
-            "attributes": attributes,
-            "status": "succeeded",
-        }
+        return SliceBakeOutcome(
+            host_name=host_name,
+            server_id=str(server.id),
+            status=SliceBakeOutcomeStatus.SUCCEEDED,
+            host_id=baked.host_id,
+            agent_id=baked.agent_id,
+            vm_ssh_port=baked.outer_ssh_port,
+            container_ssh_port=baked.ssh_port,
+            attributes=attributes,
+        )
     except (PoolBakeError, BareMetalProvisioningError, MngrError, psycopg2.Error, OSError) as exc:
         logger.warning("Slice bake {} failed: {}", host_name, exc)
-        return {"host_name": host_name, "server_id": str(server.id), "status": "failed", "error": str(exc)}
+        return SliceBakeOutcome(
+            host_name=host_name, server_id=str(server.id), status=SliceBakeOutcomeStatus.FAILED, error=str(exc)
+        )
 
 
 # The per-item result type produced by a bounded fan-out's workers (bake and
@@ -808,10 +816,13 @@ def run_outcome_workers_in_bounded_threads(
     thread_name_prefix: str,
     progress_noun: str,
     describe_outcome: Callable[[OutcomeT], str],
-    # Invoked once if the join loop is interrupted (e.g. the bake's SIGTERM-raised
-    # termination), before the threads are re-joined and the exception re-raised --
-    # the caller's chance to kill in-flight worker subprocesses so the re-join can
-    # finish. None: interruptions propagate immediately.
+    # The exception types that count as an interruption of the start/join loop (e.g.
+    # the bake's SIGTERM-raised SliceBakeTerminatedError). Empty: nothing is
+    # intercepted and any exception propagates immediately.
+    interruption_exception_types: tuple[type[Exception], ...],
+    # Invoked once when an interruption exception arrives, before the threads are
+    # re-joined and the exception re-raised -- the caller's chance to kill in-flight
+    # worker subprocesses so the re-join can finish.
     on_join_interrupted: Callable[[], None] | None,
 ) -> list[OutcomeT]:
     """Run one worker call per kwargs mapping in parallel threads, at most ``max_concurrency`` at once.
@@ -846,7 +857,8 @@ def run_outcome_workers_in_bounded_threads(
             thread.start()
         for thread in threads:
             thread.join()
-    except BaseException:
+    except interruption_exception_types:
+        # The exception always propagates after the hook + re-join.
         if on_join_interrupted is not None:
             on_join_interrupted()
             for thread in threads:
@@ -858,8 +870,8 @@ def run_outcome_workers_in_bounded_threads(
     return outcomes
 
 
-def _describe_bake_outcome(outcome: dict[str, Any]) -> str:
-    return f"{outcome.get('host_name')} {outcome.get('status')}"
+def _describe_bake_outcome(outcome: SliceBakeOutcome) -> str:
+    return f"{outcome.host_name} {outcome.status}"
 
 
 def _handle_bake_join_interruption(is_main_thread: bool) -> None:
@@ -1005,20 +1017,14 @@ def _reap_orphan_slice_resources(
 # boxes' sshd connection limits and basic IO -- higher than the bake's default 4.
 DEFAULT_SLICE_DESTROY_CONCURRENCY: Final[int] = 8
 
-# Per-host outcome statuses in the destroy report.
-DESTROY_OUTCOME_DESTROYED: Final[str] = "destroyed"
-DESTROY_OUTCOME_SKIPPED_LEASED: Final[str] = "skipped_leased"
-DESTROY_OUTCOME_ALREADY_GONE: Final[str] = "already_gone"
-DESTROY_OUTCOME_FAILED: Final[str] = "failed"
-
 
 @pure
-def _already_gone_outcome(pool_host_id: str) -> dict[str, Any]:
-    return {
-        "pool_host_id": pool_host_id,
-        "status": DESTROY_OUTCOME_ALREADY_GONE,
-        "detail": "row no longer exists (already destroyed)",
-    }
+def _already_gone_outcome(pool_host_id: str) -> PoolHostDestroyOutcome:
+    return PoolHostDestroyOutcome(
+        pool_host_id=pool_host_id,
+        status=PoolHostDestroyOutcomeStatus.ALREADY_GONE,
+        detail="row no longer exists (already destroyed)",
+    )
 
 
 def _destroy_one_pool_host(
@@ -1029,8 +1035,8 @@ def _destroy_one_pool_host(
     private_key_path: Path | None,
     eligible_statuses: tuple[str, ...],
     is_row_drop_only: bool,
-) -> dict[str, Any]:
-    """Claim, tear down, and delete one pool host row; returns an outcome dict (never raises).
+) -> PoolHostDestroyOutcome:
+    """Claim, tear down, and delete one pool host row; returns its outcome (never raises).
 
     Any expected error class (DB, SSH, mngr) becomes a per-host 'failed' outcome, so one
     bad id or a transient Neon hiccup never aborts the sibling destroys or suppresses the
@@ -1046,11 +1052,11 @@ def _destroy_one_pool_host(
         )
     except (MngrError, psycopg2.Error, OSError) as exc:
         logger.warning("Destroy of pool host {} failed: {}", pool_host_id, exc)
-        return {
-            "pool_host_id": pool_host_id,
-            "status": DESTROY_OUTCOME_FAILED,
-            "detail": f"destroy failed: {exc}",
-        }
+        return PoolHostDestroyOutcome(
+            pool_host_id=pool_host_id,
+            status=PoolHostDestroyOutcomeStatus.FAILED,
+            detail=f"destroy failed: {exc}",
+        )
 
 
 def _run_pool_host_destroy_steps(
@@ -1060,7 +1066,7 @@ def _run_pool_host_destroy_steps(
     private_key_path: Path | None,
     eligible_statuses: tuple[str, ...],
     is_row_drop_only: bool,
-) -> dict[str, Any]:
+) -> PoolHostDestroyOutcome:
     """Run one host's claim -> VM teardown -> row delete and return its outcome.
 
     The atomic claim (flip to 'removing' from an eligible status, committed before any
@@ -1083,21 +1089,21 @@ def _run_pool_host_destroy_steps(
                     "Skipping pool host {}: it is leased (likely grabbed between listing and destroying)",
                     pool_host_id,
                 )
-                return {
-                    "pool_host_id": pool_host_id,
-                    "status": DESTROY_OUTCOME_SKIPPED_LEASED,
-                    "detail": "row is 'leased'; pass --force to destroy leased rows",
-                }
+                return PoolHostDestroyOutcome(
+                    pool_host_id=pool_host_id,
+                    status=PoolHostDestroyOutcomeStatus.SKIPPED_LEASED,
+                    detail="row is 'leased'; pass --force to destroy leased rows",
+                )
             # A miss on an existing, non-leased row means a status outside the known
             # vocabulary -- report it precisely rather than guessing at a cause.
             logger.warning(
                 "Cannot claim pool host {}: status '{}' is not in {}", pool_host_id, current_status, eligible_statuses
             )
-            return {
-                "pool_host_id": pool_host_id,
-                "status": DESTROY_OUTCOME_FAILED,
-                "detail": f"row is in unexpected status '{current_status}' (claimable: {', '.join(eligible_statuses)})",
-            }
+            return PoolHostDestroyOutcome(
+                pool_host_id=pool_host_id,
+                status=PoolHostDestroyOutcomeStatus.FAILED,
+                detail=f"row is in unexpected status '{current_status}' (claimable: {', '.join(eligible_statuses)})",
+            )
         target = fetch_pool_host_destroy_target(conn, pool_host_id)
     finally:
         conn.close()
@@ -1110,20 +1116,20 @@ def _run_pool_host_destroy_steps(
     # ('removing') and the teardown stays retryable -- never a stranded VM.
     if not is_row_drop_only:
         if not target.lima_instance_name or not target.box_public_address:
-            return {
-                "pool_host_id": pool_host_id,
-                "status": DESTROY_OUTCOME_FAILED,
-                "detail": (
+            return PoolHostDestroyOutcome(
+                pool_host_id=pool_host_id,
+                status=PoolHostDestroyOutcomeStatus.FAILED,
+                detail=(
                     "cannot locate the VM to destroy (missing lima_instance_name or the box record is gone); "
                     "pass --drop-row-only to drop the row without teardown"
                 ),
-            }
+            )
         if private_key_path is None:
-            return {
-                "pool_host_id": pool_host_id,
-                "status": DESTROY_OUTCOME_FAILED,
-                "detail": "no pool management key available for the box SSH (POOL_SSH_PRIVATE_KEY)",
-            }
+            return PoolHostDestroyOutcome(
+                pool_host_id=pool_host_id,
+                status=PoolHostDestroyOutcomeStatus.FAILED,
+                detail="no pool management key available for the box SSH (POOL_SSH_PRIVATE_KEY)",
+            )
         client = LimaSliceVpsClient(
             box_address=target.box_public_address,
             box_ssh_user=target.lima_service_user or "limahost",
@@ -1134,11 +1140,11 @@ def _run_pool_host_destroy_steps(
             client.destroy_instance(VpsInstanceId(target.lima_instance_name))
         except (MngrError, OSError) as exc:
             logger.warning("Failed to tear down slice {}: {}", target.lima_instance_name, exc)
-            return {
-                "pool_host_id": pool_host_id,
-                "status": DESTROY_OUTCOME_FAILED,
-                "detail": f"VM teardown failed ({target.lima_instance_name} on {target.box_public_address}): {exc}",
-            }
+            return PoolHostDestroyOutcome(
+                pool_host_id=pool_host_id,
+                status=PoolHostDestroyOutcomeStatus.FAILED,
+                detail=f"VM teardown failed ({target.lima_instance_name} on {target.box_public_address}): {exc}",
+            )
 
     # The VM is gone (or the operator asked for a row-only drop); drop the row. A fresh
     # connection on purpose: the SSH teardown above can take minutes, and a Neon
@@ -1149,14 +1155,14 @@ def _run_pool_host_destroy_steps(
     finally:
         conn_for_delete.close()
     logger.info("Destroyed pool host {} ({})", pool_host_id, target.lima_instance_name or "no VM")
-    outcome = {"pool_host_id": pool_host_id, "status": DESTROY_OUTCOME_DESTROYED}
-    if is_row_drop_only:
-        outcome["detail"] = "row dropped without VM teardown (--drop-row-only)"
-    return outcome
+    detail = "row dropped without VM teardown (--drop-row-only)" if is_row_drop_only else None
+    return PoolHostDestroyOutcome(
+        pool_host_id=pool_host_id, status=PoolHostDestroyOutcomeStatus.DESTROYED, detail=detail
+    )
 
 
-def _describe_destroy_outcome(outcome: dict[str, Any]) -> str:
-    return f"{outcome.get('pool_host_id')} {outcome.get('status')}"
+def _describe_destroy_outcome(outcome: PoolHostDestroyOutcome) -> str:
+    return f"{outcome.pool_host_id} {outcome.status}"
 
 
 def destroy_pool_hosts_in_parallel(
@@ -1166,7 +1172,7 @@ def destroy_pool_hosts_in_parallel(
     eligible_statuses: tuple[str, ...],
     is_row_drop_only: bool,
     max_concurrency: int,
-) -> list[dict[str, Any]]:
+) -> list[PoolHostDestroyOutcome]:
     """Destroy pool hosts concurrently (claim -> VM teardown -> row delete), one outcome per id.
 
     All targets run in parallel under one global semaphore regardless of which box each
@@ -1196,34 +1202,33 @@ def destroy_pool_hosts_in_parallel(
             thread_name_prefix="destroy",
             progress_noun="Pool host destroy",
             describe_outcome=_describe_destroy_outcome,
+            interruption_exception_types=(),
             on_join_interrupted=None,
         )
-    outcome_by_id = {outcome["pool_host_id"]: outcome for outcome in outcomes}
+    outcome_by_id = {outcome.pool_host_id: outcome for outcome in outcomes}
     return [outcome_by_id[pool_host_id] for pool_host_id in unique_ids]
 
 
 @pure
-def build_pool_host_destroy_report(outcomes: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """Aggregate per-host destroy outcomes into the summary report the destroy commands emit.
-
-    ``already_gone`` counts as destroyed (the desired end state -- the row is gone --
-    so re-running the same id list after a partial failure converges cleanly).
-    """
+def build_pool_host_destroy_report(outcomes: Sequence[PoolHostDestroyOutcome]) -> PoolHostDestroyReport:
+    """Aggregate per-host destroy outcomes into the summary report the destroy commands emit."""
     destroyed_count = sum(
-        1 for outcome in outcomes if outcome.get("status") in (DESTROY_OUTCOME_DESTROYED, DESTROY_OUTCOME_ALREADY_GONE)
+        1
+        for outcome in outcomes
+        if outcome.status in (PoolHostDestroyOutcomeStatus.DESTROYED, PoolHostDestroyOutcomeStatus.ALREADY_GONE)
     )
-    skipped_count = sum(1 for outcome in outcomes if outcome.get("status") == DESTROY_OUTCOME_SKIPPED_LEASED)
-    failed_count = sum(1 for outcome in outcomes if outcome.get("status") == DESTROY_OUTCOME_FAILED)
-    return {
-        "requested": len(outcomes),
-        "destroyed": destroyed_count,
-        "skipped": skipped_count,
-        "failed": failed_count,
-        "hosts": [dict(outcome) for outcome in outcomes],
-    }
+    skipped_count = sum(1 for outcome in outcomes if outcome.status == PoolHostDestroyOutcomeStatus.SKIPPED_LEASED)
+    failed_count = sum(1 for outcome in outcomes if outcome.status == PoolHostDestroyOutcomeStatus.FAILED)
+    return PoolHostDestroyReport(
+        requested=len(outcomes),
+        destroyed=destroyed_count,
+        skipped=skipped_count,
+        failed=failed_count,
+        hosts=tuple(outcomes),
+    )
 
 
-def tear_down_unleased_slices(database_url: str, *, max_concurrency: int) -> dict[str, Any]:
+def tear_down_unleased_slices(database_url: str, *, max_concurrency: int) -> PoolHostDestroyReport:
     """Tear down every unleased slice VM recorded in ``database_url`` and drop its row.
 
     The teardown an env destroy runs (before its per-env DB is deleted) so the env's
@@ -1253,9 +1258,9 @@ def tear_down_unleased_slices(database_url: str, *, max_concurrency: int) -> dic
     )
     report = build_pool_host_destroy_report(outcomes)
     failures = [
-        f"{outcome['pool_host_id']}: {outcome.get('detail', 'unknown failure')}"
+        f"{outcome.pool_host_id}: {outcome.detail or 'unknown failure'}"
         for outcome in outcomes
-        if outcome.get("status") == DESTROY_OUTCOME_FAILED
+        if outcome.status == PoolHostDestroyOutcomeStatus.FAILED
     ]
     if failures:
         raise BareMetalProvisioningError(
@@ -1435,6 +1440,7 @@ def allocate_slices(
                 thread_name_prefix="bake",
                 progress_noun="Slice bake",
                 describe_outcome=_describe_bake_outcome,
+                interruption_exception_types=(SliceBakeTerminatedError,),
                 on_join_interrupted=lambda: _handle_bake_join_interruption(is_main_thread),
             )
         except SliceBakeTerminatedError:
@@ -1457,16 +1463,12 @@ def allocate_slices(
                 signal.signal(signal.SIGTERM, previous_sigterm)
                 signal.signal(signal.SIGINT, previous_sigint)
 
-    succeeded = [outcome for outcome in outcomes if outcome.get("status") == "succeeded"]
-    emit_json(
-        {
-            "requested": count,
-            "succeeded": len(succeeded),
-            "failed": count - len(succeeded),
-            "slices": outcomes,
-        }
+    succeeded = [outcome for outcome in outcomes if outcome.status == SliceBakeOutcomeStatus.SUCCEEDED]
+    report = SliceBakeReport(
+        requested=count, succeeded=len(succeeded), failed=count - len(succeeded), slices=tuple(outcomes)
     )
-    if len(succeeded) < count:
+    emit_json(report.model_dump(mode="json", exclude_none=True))
+    if report.failed:
         raise SystemExit(1)
 
 

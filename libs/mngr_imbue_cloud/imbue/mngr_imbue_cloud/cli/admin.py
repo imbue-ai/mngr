@@ -393,8 +393,8 @@ def pool_destroy(
         max_concurrency=max_concurrency,
     )
     report = build_pool_host_destroy_report(outcomes)
-    emit_json(report)
-    if report["failed"]:
+    emit_json(report.model_dump(mode="json", exclude_none=True))
+    if report.failed:
         raise SystemExit(1)
 
 
@@ -433,7 +433,7 @@ def pool_teardown_slices(database_url: str | None, max_concurrency: int) -> None
     """
     resolved_database_url = resolve_pool_database_url(database_url)
     result = tear_down_unleased_slices(resolved_database_url, max_concurrency=max_concurrency)
-    emit_json(result)
+    emit_json(result.model_dump(mode="json", exclude_none=True))
 
 
 _KEYSCAN_TIMEOUT_SECONDS: Final[int] = 15
