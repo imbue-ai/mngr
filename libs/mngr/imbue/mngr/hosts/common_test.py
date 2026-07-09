@@ -184,6 +184,26 @@ def test_lifecycle_replaced_when_non_shell_foreground_and_known_type() -> None:
     )
 
 
+def test_lifecycle_replaced_when_non_shell_foreground_child_and_known_type() -> None:
+    """A known-type agent whose pane shell has a non-shell *foreground* child is
+    REPLACED, not DONE.
+
+    This is the common takeover shape: the pane's root process is still the shell
+    (so its ps comm is a shell), but another program runs in the foreground -- e.g.
+    a window deliberately held by `sleep infinity && claude`, or a user who ctrl-c'd
+    the agent and launched something else. tmux reports the foreground child as
+    pane_current_command, which is what distinguishes this from a pane sitting at a
+    bare prompt with only *background* helpers left (DONE, see above). Messaging
+    treats DONE as revivable and tears the session down, so misreading this as DONE
+    would destroy the occupying program.
+    """
+    ps_output = "123 1 bash\n200 123 sleep\n"
+    assert (
+        determine_lifecycle_state("0|sleep|123", True, "claude", ps_output, is_agent_type_known=True)
+        == AgentLifecycleState.REPLACED
+    )
+
+
 def test_lifecycle_done_when_shell_and_unknown_type() -> None:
     """Unknown type does not affect DONE state (shell in pane means agent exited)."""
     assert (

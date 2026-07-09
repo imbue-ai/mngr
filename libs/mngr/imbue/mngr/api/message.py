@@ -14,6 +14,7 @@ from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.find import ensure_agent_started
 from imbue.mngr.api.find import ensure_host_started
 from imbue.mngr.api.find import group_agents_by_host
+from imbue.mngr.api.find import revive_done_agent
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentNotFoundOnHostError
@@ -200,12 +201,15 @@ def _send_message_to_agent(
     # already exited (a ctrl-c, a crash, or an OOM shed leaves tmux holding the
     # pane open on a bare shell). In both cases there is no agent to deliver to, so
     # a raw send would just type the message into a dead shell and silently lose
-    # it. ensure_agent_started revives the agent first (should_revive_done_agent
-    # tears down a DONE husk so the relaunch actually happens) before we send.
+    # it. A DONE husk must be torn down before the relaunch actually happens
+    # (revive_done_agent), whereas a STOPPED agent just needs a plain start.
     lifecycle_state = agent.get_lifecycle_state()
     if lifecycle_state in (AgentLifecycleState.STOPPED, AgentLifecycleState.DONE):
         if is_start_desired:
-            ensure_agent_started(agent, host, is_start_desired=True, should_revive_done_agent=True)
+            if lifecycle_state == AgentLifecycleState.DONE:
+                revive_done_agent(agent, host)
+            else:
+                ensure_agent_started(agent, host, is_start_desired=True)
         else:
             error_msg = f"Agent is not running (state: {lifecycle_state.value})"
             with result_lock:
