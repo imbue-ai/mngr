@@ -65,25 +65,27 @@
       changeError.classList.remove('hidden');
     }
 
+    function appendResultLine(text) {
+      var li = document.createElement('li');
+      li.textContent = text;
+      changeResults.appendChild(li);
+    }
+
     function renderRotationResults(results, isAllOk) {
       changeResults.textContent = '';
       if (!results || results.length === 0) {
-        changeResults.textContent = isAllOk
+        appendResultLine(isAllOk
           ? 'Master password updated. No existing workspaces had backups to rekey.'
-          : 'The master password change failed.';
+          : 'The master password change failed.');
       } else {
         results.forEach(function (entry) {
-          var li = document.createElement('li');
-          li.textContent = entry.is_ok
+          appendResultLine(entry.is_ok
             ? (entry.workspace_name + ': rekeyed')
-            : (entry.workspace_name + ': FAILED - ' + (entry.error || 'unknown error'));
-          changeResults.appendChild(li);
+            : (entry.workspace_name + ': FAILED - ' + (entry.error || 'unknown error')));
         });
-        var summary = document.createElement('li');
-        summary.textContent = isAllOk
+        appendResultLine(isAllOk
           ? 'Master password updated everywhere.'
-          : 'Master password updated; re-run the change to retry the failed workspaces.';
-        changeResults.appendChild(summary);
+          : 'Master password updated; re-run the change to retry the failed workspaces.');
       }
       changeResults.classList.remove('hidden');
     }
