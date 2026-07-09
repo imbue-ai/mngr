@@ -20,6 +20,7 @@ from imbue.mngr.errors import DockerBuildTimeoutError
 from imbue.mngr.errors import DockerRuntimeNotRegisteredError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import OfflineHostWithVolume
 from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
@@ -33,6 +34,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.docker.config import DockerProviderConfig
+from imbue.mngr.providers.docker.host_store import DockerHostStore
 from imbue.mngr.providers.docker.host_store import HostRecord
 from imbue.mngr.providers.docker.instance import CONTAINER_SSH_PORT
 from imbue.mngr.providers.docker.instance import DockerProviderInstance
@@ -53,6 +55,7 @@ from imbue.mngr.providers.docker.testing import write_fake_docker_context
 from imbue.mngr.providers.docker.volume import STATE_CONTAINER_TYPE_LABEL
 from imbue.mngr.providers.docker.volume import STATE_CONTAINER_TYPE_VALUE
 from imbue.mngr.providers.local.volume import LocalVolume
+from imbue.mngr.utils.testing import capture_loguru
 
 HOST_ID_A = "host-00000000000000000000000000000001"
 HOST_ID_B = "host-00000000000000000000000000000002"
@@ -1245,3 +1248,209 @@ def test_non_gvisor_runtime_is_not_treated_as_ephemeral() -> None:
 def test_unregistered_runtime_is_not_treated_as_ephemeral() -> None:
     """A runtime absent from the daemon config is left to Docker's own unknown-runtime error."""
     assert _is_gvisor_runtime_rootfs_ephemeral("runsc", {}) is False
+
+
+# =========================================================================
+# Recorded SSH Port Reconciliation (stale after Docker daemon restart)
+# =========================================================================
+
+# Ports from the real-world reproduction: a host reboot left the record at
+# 52918 while docker reported 49315.
+_RECORDED_STALE_SSH_PORT = 52918
+_LIVE_SSH_PORT = 49315
+
+_RECONCILE_HOST_PUBLIC_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIRecordedHostKeyForPortReconcileTests"
+
+
+class _FakePortedContainer:
+    """Duck-typed stand-in for a running docker SDK container as read by
+    ``_create_host_from_container``: labels for identity plus the live
+    published-port mapping consumed by ``_read_container_ssh_port``."""
+
+    def __init__(self, host_id: str, ssh_host_port: int) -> None:
+        self.labels = build_container_labels(HostId(host_id), HostName("port-heal-host"), "test-docker", None)
+        self.status = "running"
+        self.id = f"fake-container-{host_id}"
+        self.short_id = self.id[:10]
+        self.ports = {f"{CONTAINER_SSH_PORT}/tcp": [{"HostIp": "0.0.0.0", "HostPort": str(ssh_host_port)}]}
+
+    def reload(self) -> None:
+        """No-op: the fake's attributes are fixed."""
+
+
+def _as_sdk_container(container: _FakePortedContainer) -> docker.models.containers.Container:
+    # The provider only reads duck-typed attributes; cast satisfies the static type.
+    return cast(docker.models.containers.Container, container)
+
+
+def _write_host_record_with_ssh_port(
+    provider: DockerProviderInstance,
+    host_id: str,
+    ssh_port: int,
+) -> HostRecord:
+    now = datetime.now(timezone.utc)
+    record = HostRecord(
+        certified_host_data=CertifiedHostData(
+            host_id=host_id,
+            host_name="port-heal-host",
+            created_at=now,
+            updated_at=now,
+        ),
+        ssh_host="127.0.0.1",
+        last_discovered_ssh_port=ssh_port,
+        ssh_host_public_key=_RECONCILE_HOST_PUBLIC_KEY,
+    )
+    provider._host_store.write_host_record(record)
+    return record
+
+
+class _WriteCountingHostStore(DockerHostStore):
+    """DockerHostStore that counts record writes, so tests can assert the
+    happy path (recorded port already matches) performs no redundant rewrite."""
+
+    write_call_count: int = 0
+
+    def write_host_record(self, host_record: HostRecord) -> None:
+        self.write_call_count += 1
+        super().write_host_record(host_record)
+
+
+def _connector_ssh_port(host: Host) -> int | None:
+    return host.connector.host.data.get("ssh_port")
+
+
+def test_create_host_from_container_heals_stale_recorded_ssh_port(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """A record holding a dead port is healed from the container's live mapping.
+
+    Docker does not preserve randomly-published host ports across a daemon
+    restart, so the port persisted at create time can go stale. The connection
+    must target the live port and the record must be rewritten with it, so
+    workspaces reconnect after a reboot instead of dialing the dead port forever.
+    """
+    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
+    _write_host_record_with_ssh_port(provider, HOST_ID_A, _RECORDED_STALE_SSH_PORT)
+    container = _as_sdk_container(_FakePortedContainer(HOST_ID_A, _LIVE_SSH_PORT))
+
+    with capture_loguru(level="INFO") as log_output:
+        host = provider._create_host_from_container(container)
+
+    assert host is not None
+    assert _connector_ssh_port(host) == _LIVE_SSH_PORT
+
+    stored_record = provider._host_store.read_host_record(HostId(HOST_ID_A), use_cache=False)
+    assert stored_record is not None
+    assert stored_record.last_discovered_ssh_port == _LIVE_SSH_PORT
+
+    assert f"changed from {_RECORDED_STALE_SSH_PORT} to {_LIVE_SSH_PORT}" in log_output.getvalue()
+
+
+def test_create_host_from_container_matching_port_is_not_rewritten(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """When the recorded port matches the live mapping, nothing is rewritten or logged.
+
+    The reconciliation must stay free on the happy path: no record write and no
+    port-change log line -- and a cached Host with the matching port is reused
+    as-is (preserving its SSH connection).
+    """
+    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
+    counting_store = _WriteCountingHostStore(volume=LocalVolume(root_path=tmp_path))
+    provider.__dict__["_host_store"] = counting_store
+    _write_host_record_with_ssh_port(provider, HOST_ID_A, _LIVE_SSH_PORT)
+    container = _as_sdk_container(_FakePortedContainer(HOST_ID_A, _LIVE_SSH_PORT))
+
+    cached_host = provider._create_host_from_container(container)
+    assert cached_host is not None
+    provider._host_by_id_cache[HostId(HOST_ID_A)] = cached_host
+    write_count_before = counting_store.write_call_count
+
+    with capture_loguru(level="INFO") as log_output:
+        host = provider._create_host_from_container(container)
+
+    assert host is cached_host
+    assert counting_store.write_call_count == write_count_before
+    assert "changed from" not in log_output.getvalue()
+
+
+def test_port_reconciliation_replaces_stale_known_hosts_entry_for_new_port(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """A stale known_hosts key on the host's new port is replaced, not fatal.
+
+    After a reboot, a container's new port may previously have belonged to a
+    different container, leaving a known_hosts entry for [host]:port that does
+    not match this host's key. Connection setup must replace that entry with
+    the host's recorded public key so host-key verification succeeds.
+    """
+    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
+    _write_host_record_with_ssh_port(provider, HOST_ID_A, _RECORDED_STALE_SSH_PORT)
+    stale_entry = f"[127.0.0.1]:{_LIVE_SSH_PORT} ssh-ed25519 AAAAStaleKeyLeftByAnotherContainer"
+    provider._known_hosts_path.parent.mkdir(parents=True, exist_ok=True)
+    provider._known_hosts_path.write_text(f"{stale_entry}\n")
+    container = _as_sdk_container(_FakePortedContainer(HOST_ID_A, _LIVE_SSH_PORT))
+
+    host = provider._create_host_from_container(container)
+
+    assert host is not None
+    known_hosts_content = provider._known_hosts_path.read_text()
+    assert stale_entry not in known_hosts_content
+    assert f"[127.0.0.1]:{_LIVE_SSH_PORT} {_RECONCILE_HOST_PUBLIC_KEY}" in known_hosts_content
+
+
+def test_port_reconciliation_invalidates_cached_host_with_stale_port(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """A cached Host still holding the old port is replaced by one on the live port.
+
+    Without this, the provider keeps handing back the cached connector that
+    dials the dead port even after the record is healed.
+    """
+    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
+    _write_host_record_with_ssh_port(provider, HOST_ID_A, _RECORDED_STALE_SSH_PORT)
+    stale_container = _as_sdk_container(_FakePortedContainer(HOST_ID_A, _RECORDED_STALE_SSH_PORT))
+    stale_host = provider._create_host_from_container(stale_container)
+    assert stale_host is not None
+    provider._host_by_id_cache[HostId(HOST_ID_A)] = stale_host
+
+    live_container = _as_sdk_container(_FakePortedContainer(HOST_ID_A, _LIVE_SSH_PORT))
+    healed_host = provider._create_host_from_container(live_container)
+
+    assert healed_host is not None
+    assert healed_host is not stale_host
+    assert _connector_ssh_port(healed_host) == _LIVE_SSH_PORT
+
+
+def test_port_reconciliation_keeps_recorded_port_when_live_mapping_unreadable(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """An unreadable live port mapping keeps the recorded port and record intact.
+
+    Reconciliation is best-effort healing: a container whose port mapping
+    cannot be read (e.g. it stopped in the window since the caller's status
+    check) must not break paths that previously worked, so the connection
+    falls back to the recorded port, the record is not rewritten, and a
+    warning is logged.
+    """
+    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
+    _write_host_record_with_ssh_port(provider, HOST_ID_A, _RECORDED_STALE_SSH_PORT)
+    container_without_mapping = _FakePortedContainer(HOST_ID_A, _LIVE_SSH_PORT)
+    container_without_mapping.ports = {}
+
+    with capture_loguru() as log_output:
+        host = provider._create_host_from_container(_as_sdk_container(container_without_mapping))
+
+    assert host is not None
+    assert _connector_ssh_port(host) == _RECORDED_STALE_SSH_PORT
+
+    stored_record = provider._host_store.read_host_record(HostId(HOST_ID_A), use_cache=False)
+    assert stored_record is not None
+    assert stored_record.last_discovered_ssh_port == _RECORDED_STALE_SSH_PORT
+
+    assert "Could not read live SSH port" in log_output.getvalue()
