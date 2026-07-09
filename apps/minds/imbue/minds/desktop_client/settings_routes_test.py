@@ -135,8 +135,8 @@ def test_settings_page_lists_granted_service_per_workspace(tmp_path: Path) -> No
     assert 'data-service-name="slack"' in body
     # The per-permission description is surfaced as a tooltip on the pill.
     assert 'data-tooltip="All read operations across the Slack API."' in body
-    # The service panel carries a per-service revoke-all action and a workspace count.
-    assert "Remove all authorizations" in body
+    # The service section carries a per-service revoke-all action and a workspace count.
+    assert "Revoke all" in body
     assert "1 workspace" in body
 
 

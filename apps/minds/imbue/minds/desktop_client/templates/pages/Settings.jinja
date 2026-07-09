@@ -253,7 +253,7 @@
 {% endset %}
 <Base title="Settings" scripts={{ _scripts }}>
   <div class="max-w-[960px] mx-auto px-6 py-12">
-    <h1 class="type-heading text-primary mb-6">Settings</h1>
+    <h1 class="type-heading-lg text-primary mb-6">Settings</h1>
     <div class="flex gap-8 items-start">
       {# Left nav #}
       {# Both entries share identical base classes (notably no ``bg-transparent``,
@@ -261,7 +261,7 @@
          entry un-highlighted); ``selectSection`` in the page script drives the
          active state on both by toggling ``bg-fill-hover`` / ``text-primary`` /
          ``text-secondary``. Permissions starts active. #}
-      <nav class="w-48 shrink-0 flex flex-col gap-0.5" aria-label="Settings sections">
+      <nav class="w-48 shrink-0 flex flex-col gap-0.5 sticky top-8 self-start" aria-label="Settings sections">
         <button type="button" data-settings-nav="permissions"
                 class="flex items-center h-8 px-2 rounded-md cursor-pointer type-body text-left border-0 hover:text-primary hover:bg-fill-hover bg-fill-hover text-primary">
           Permissions
@@ -288,21 +288,18 @@
               Try again in a moment.
             </Notice>
           {% elif services_overview or file_sharing_grants or workspace_op_groups %}
-            <div class="flex flex-col gap-6">
+            <div class="flex flex-col gap-8">
               {% for service in services_overview %}
                 {% set ws_count = service.workspace_grants | length %}
-                <div class="border border-subtle rounded-lg overflow-hidden"
-                     data-service-name="{{ service.service_name }}" data-service-label="{{ service.display_name }}">
-                  <div class="flex items-center justify-between gap-3 px-4 py-3 bg-fill-subtle border-b border-subtle">
-                    <h3 class="type-body font-semibold text-primary">
+                <div data-service-name="{{ service.service_name }}" data-service-label="{{ service.display_name }}">
+                  <div class="flex items-center justify-between gap-3 mb-3">
+                    <h3 class="type-heading text-primary">
                       {{ service.display_name }}
                       <span class="type-helper text-tertiary font-normal">&middot; {{ ws_count }} workspace{{ '' if ws_count == 1 else 's' }}</span>
                     </h3>
-                    <Button variant="ghost" size="md"
-                            class="remove-all-btn !text-important !border-important/40 hover:!bg-[var(--c-important-surface)]">Remove all authorizations</Button>
+                    <Button variant="ghost" size="md" class="remove-all-btn">Revoke all</Button>
                   </div>
-                  <div class="p-4">
-                    <div class="grid grid-cols-2 gap-3">
+                  <div class="grid grid-cols-2 gap-3">
                       {% for grant in service.workspace_grants %}
                         <div class="minds-card p-4 flex flex-col gap-3"
                              data-workspace-agent-id="{{ grant.workspace_agent_id }}"
@@ -324,24 +321,21 @@
                           </div>
                         </div>
                       {% endfor %}
-                    </div>
                   </div>
                 </div>
               {% endfor %}
 
               {% if file_sharing_grants %}
                 {% set fs_count = file_sharing_grants | length %}
-                <div class="border border-subtle rounded-lg overflow-hidden" data-file-sharing="true">
-                  <div class="flex items-center justify-between gap-3 px-4 py-3 bg-fill-subtle border-b border-subtle">
-                    <h3 class="type-body font-semibold text-primary">
+                <div data-file-sharing="true">
+                  <div class="flex items-center justify-between gap-3 mb-3">
+                    <h3 class="type-heading text-primary">
                       File sharing
                       <span class="type-helper text-tertiary font-normal">&middot; {{ fs_count }} workspace{{ '' if fs_count == 1 else 's' }}</span>
                     </h3>
-                    <Button variant="ghost" size="md"
-                            class="remove-all-fs-btn !text-important !border-important/40 hover:!bg-[var(--c-important-surface)]">Remove all authorizations</Button>
+                    <Button variant="ghost" size="md" class="remove-all-fs-btn">Revoke all</Button>
                   </div>
-                  <div class="p-4">
-                    <div class="grid grid-cols-2 gap-3">
+                  <div class="grid grid-cols-2 gap-3">
                       {% for grant in file_sharing_grants %}
                         <div class="minds-card p-4 flex flex-col gap-3"
                              data-workspace-agent-id="{{ grant.workspace_agent_id }}"
@@ -363,7 +357,6 @@
                           </div>
                         </div>
                       {% endfor %}
-                    </div>
                   </div>
                 </div>
               {% endif %}
@@ -373,18 +366,15 @@
                  Cards here are the *granting* workspaces; the target is the panel. #}
               {% for group in workspace_op_groups %}
                 {% set ws_count = group.cards | length %}
-                <div class="border border-subtle rounded-lg overflow-hidden"
-                     data-workspace-target="{{ group.target_workspace_id }}" data-workspace-target-label="{{ group.target_name }}">
-                  <div class="flex items-center justify-between gap-3 px-4 py-3 bg-fill-subtle border-b border-subtle">
-                    <h3 class="type-body font-semibold text-primary">
+                <div data-workspace-target="{{ group.target_workspace_id }}" data-workspace-target-label="{{ group.target_name }}">
+                  <div class="flex items-center justify-between gap-3 mb-3">
+                    <h3 class="type-heading text-primary">
                       Workspace management &mdash; {{ group.target_name }}
                       <span class="type-helper text-tertiary font-normal">&middot; {{ ws_count }} workspace{{ '' if ws_count == 1 else 's' }}</span>
                     </h3>
-                    <Button variant="ghost" size="md"
-                            class="remove-all-ws-btn !text-important !border-important/40 hover:!bg-[var(--c-important-surface)]">Remove all authorizations</Button>
+                    <Button variant="ghost" size="md" class="remove-all-ws-btn">Revoke all</Button>
                   </div>
-                  <div class="p-4">
-                    <div class="grid grid-cols-2 gap-3">
+                  <div class="grid grid-cols-2 gap-3">
                       {% for card in group.cards %}
                         <div class="minds-card p-4 flex flex-col gap-3"
                              data-workspace-agent-id="{{ card.workspace_agent_id }}"
@@ -406,7 +396,6 @@
                           </div>
                         </div>
                       {% endfor %}
-                    </div>
                   </div>
                 </div>
               {% endfor %}
