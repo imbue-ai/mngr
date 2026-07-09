@@ -24,8 +24,12 @@ const REQUIRED = [
   path.join(RESOURCES, 'uv', 'uv'),
   path.join(RESOURCES, 'git', 'bin', 'git'),
   path.join(RESOURCES, 'lima', 'bin', 'limactl'),
-  path.join(RESOURCES, 'qemu', 'bin', 'qemu-img'),
 ];
+// downloadQemuImg skips darwin-x86_64 (no payload published), so requiring it
+// there would re-trigger the full download on every start.
+if (!(process.platform === 'darwin' && process.arch === 'x64')) {
+  REQUIRED.push(path.join(RESOURCES, 'qemu', 'bin', 'qemu-img'));
+}
 
 const missing = REQUIRED.filter((p) => !fs.existsSync(p));
 if (missing.length === 0) {

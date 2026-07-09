@@ -331,6 +331,16 @@ async function downloadQemuImg(resourcesDir, { platform, arch }) {
     console.log('[download-binaries] Skipping qemu-img on win32 (no Lima launch mode).');
     return;
   }
+  // ToDesktop also builds a mac x64 app. No darwin-x86_64 payload is
+  // published (producing one needs an Intel Mac or a cross-compile), and no
+  // pre-baked x86_64 image is published either, so an Intel app's prefetch
+  // reports VERSION_UNAVAILABLE and builds in-VM regardless -- skipping the
+  // binary loses nothing today. Remove this skip when an Intel payload +
+  // image ship.
+  if (platform === 'darwin' && arch === 'x86_64') {
+    console.log('[download-binaries] Skipping qemu-img on darwin-x86_64 (no payload published; Intel fast path not served).');
+    return;
+  }
   const qemuDir = path.join(resourcesDir, 'qemu');
   if (fs.existsSync(qemuDir)) fs.rmSync(qemuDir, { recursive: true });
   fs.mkdirSync(qemuDir, { recursive: true });
