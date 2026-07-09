@@ -268,13 +268,15 @@ def _ensure_mngr_settings(root_name: str) -> bool:
             and default_aws.get("backend") == _AWS_BACKEND_NAME
             and default_aws.get("is_enabled") is False
             and _existing_aws_provider_names(providers) == set(desired_aws_names)
-            # The Modal (Direct) block must already be present, enabled, AND
-            # persistent, else fall through and rewrite it. The is_persistent
-            # check matters: an older build wrote is_persistent=false, which makes
-            # Modal create an ephemeral app that nukes the sandbox the moment
-            # `mngr create` exits -- this catches + overwrites that stale value.
+            # The Modal (Direct) block must already be present AND persistent,
+            # else fall through and rewrite it. The is_persistent check matters:
+            # an older build wrote is_persistent=false, which makes Modal create
+            # an ephemeral app that nukes the sandbox the moment `mngr create`
+            # exits -- this catches + overwrites that stale value. is_enabled is
+            # deliberately NOT checked: it is the user-owned field (the providers
+            # panel's Disable toggle writes it), so a disabled block is a valid
+            # desired shape, not drift to correct.
             and modal_provider.get("mode") == _MODAL_MODE_DIRECT
-            and modal_provider.get("is_enabled") is True
             and modal_provider.get("is_persistent") is True
         ):
             # Already in the desired shape -- recursive disabled, no stale
@@ -325,7 +327,15 @@ def _ensure_mngr_settings(root_name: str) -> bool:
 
     # ``[providers.modal]`` (DIRECT) for the "Modal (1-day ephemeral) - Direct"
     # compute option. Always written; uses the local Modal token at create time.
-    providers_section[_MODAL_PROVIDER_NAME] = _build_modal_provider_block()
+    # As with the AWS blocks, a panel-toggled ``is_enabled`` is carried over
+    # rather than re-pinned, so a user's Disable survives the rewrite.
+    existing_modal_block = providers_section.get(_MODAL_PROVIDER_NAME)
+    existing_modal_is_enabled = (
+        existing_modal_block.get("is_enabled") if isinstance(existing_modal_block, dict) else None
+    )
+    providers_section[_MODAL_PROVIDER_NAME] = _build_modal_provider_block(
+        is_enabled=existing_modal_is_enabled if isinstance(existing_modal_is_enabled, bool) else True,
+    )
 
     plugins_section = doc.setdefault("plugins", tomlkit.table())
     recursive_block = tomlkit.table()
@@ -584,7 +594,7 @@ _MODAL_PROVIDER_NAME: Final[str] = "modal"
 _MODAL_MODE_DIRECT: Final[str] = "DIRECT"
 
 
-def _build_modal_provider_block() -> Table:
+def _build_modal_provider_block(is_enabled: bool) -> Table:
     """Build the ``[providers.modal]`` block (DIRECT mode).
 
     ``is_persistent=True`` is set EXPLICITLY (not inherited): each ``mngr create``
@@ -592,12 +602,14 @@ def _build_modal_provider_block() -> Table:
     terminate the sandbox the instant that subprocess exits. Setting it explicitly
     also lets the idempotency check below detect (and overwrite) a stale
     ``is_persistent = false`` left by an older build. Sizing + 24h sandbox timeout
-    come from the ModalProviderConfig defaults.
+    come from the ModalProviderConfig defaults. ``is_enabled`` is the user-owned
+    field: callers pass the existing value (or True for a fresh block) so a
+    panel-toggled Disable is never reset by a rewrite.
     """
     block = tomlkit.table()
     block["backend"] = _MODAL_BACKEND_NAME
     block["mode"] = _MODAL_MODE_DIRECT
-    block["is_enabled"] = True
+    block["is_enabled"] = is_enabled
     block["is_persistent"] = True
     return block
 

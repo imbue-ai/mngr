@@ -478,6 +478,61 @@ def test_ensure_mngr_settings_returns_whether_file_was_modified(
     assert _ensure_mngr_settings("minds-dev-tname") is False
 
 
+def test_ensure_mngr_settings_leaves_panel_disabled_modal_alone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A panel-toggled ``is_enabled = false`` on ``[providers.modal]`` is a valid desired
+    shape: it neither triggers a rewrite nor gets reset back to enabled."""
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    _ensure_mngr_settings("minds-dev-tname")
+    set_provider_is_enabled("modal", False, root_name="minds-dev-tname")
+
+    assert _ensure_mngr_settings("minds-dev-tname") is False
+    parsed = tomllib.loads(settings_path.read_text())
+    assert parsed["providers"]["modal"]["is_enabled"] is False
+    assert parsed["providers"]["modal"]["mode"] == "DIRECT"
+    assert parsed["providers"]["modal"]["is_persistent"] is True
+
+
+def test_ensure_mngr_settings_preserves_modal_is_enabled_on_rewrite(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """When something else forces a rewrite, a panel-toggled modal Disable is carried
+    over while the minds-controlled fields are re-pinned."""
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    _ensure_mngr_settings("minds-dev-tname")
+    set_provider_is_enabled("modal", False, root_name="minds-dev-tname")
+
+    # Force the rewrite path: a stale extra aws-* block makes the desired-shape
+    # check fail, so every minds-controlled block is re-pinned.
+    with settings_path.open("a") as f:
+        f.write('\n[providers.aws-eu-central-9]\nbackend = "aws"\n')
+
+    assert _ensure_mngr_settings("minds-dev-tname") is True
+    parsed = tomllib.loads(settings_path.read_text())
+    modal_block = parsed["providers"]["modal"]
+    assert modal_block["is_enabled"] is False
+    assert modal_block["mode"] == "DIRECT"
+    assert modal_block["is_persistent"] is True
+
+
+def test_ensure_mngr_settings_pins_modal_fields_around_legacy_panel_only_block(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A legacy ``[providers.modal]`` holding only a panel-written ``is_enabled = false``
+    (from before the Modal-Direct block existed) gets the pinned fields added while the
+    user's Disable is preserved."""
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    settings_path.write_text("[providers.modal]\nis_enabled = false\n")
+
+    assert _ensure_mngr_settings("minds-dev-tname") is True
+    parsed = tomllib.loads(settings_path.read_text())
+    modal_block = parsed["providers"]["modal"]
+    assert modal_block["is_enabled"] is False
+    assert modal_block["mode"] == "DIRECT"
+    assert modal_block["is_persistent"] is True
+
+
 def test_set_imbue_cloud_provider_for_account_also_writes_default_disabled_block(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
