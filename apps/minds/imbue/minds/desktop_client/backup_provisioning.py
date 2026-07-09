@@ -15,8 +15,8 @@ carries no repo-init logic. Concretely, enabling backups:
    create/reuse a per-workspace R2 bucket + readwrite key; ``API_KEY``:
    from the user's free-form env block),
 2. generates a random per-workspace ``RESTIC_PASSWORD``,
-3. ``restic init``s the repo using the user's master password (or empty for
-   the ``no_password`` encryption method),
+3. ``restic init``s the repo using the user's master password (which may be
+   empty),
 4. ``restic key add``s the random per-workspace password,
 5. writes the canonical ``restic.env`` (repo + creds + random password) to
    the minds-side store (see ``backup_env_store``), and
@@ -85,7 +85,7 @@ class BackupSetupRequest(FrozenModel):
         default=None,
         description=(
             "The user's master/recovery password used (only) to `restic init` the repo. None means "
-            "the no_password encryption method -- the repo is initialized with an empty password. "
+            "the master password is empty -- the repo is initialized with an empty password. "
             "This is never written into the workspace; the workspace gets its own random password."
         ),
     )
