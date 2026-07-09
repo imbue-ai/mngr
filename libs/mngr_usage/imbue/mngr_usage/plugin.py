@@ -32,6 +32,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr_usage import hookspecs as usage_hookspecs
 from imbue.mngr_usage.cli import usage
+from imbue.mngr_usage.donate import donate
 from imbue.mngr_usage.data_types import UsagePluginConfig
 from imbue.mngr_usage.preservation import preserve_agent_usage
 
@@ -50,8 +51,8 @@ register_plugin_config("usage", UsagePluginConfig)
 
 @hookimpl
 def register_cli_commands() -> Sequence[click.Command] | None:
-    """Register the `mngr usage` command."""
-    return [usage]
+    """Register the `mngr usage` and `mngr donate` commands."""
+    return [usage, donate]
 
 
 @hookimpl
