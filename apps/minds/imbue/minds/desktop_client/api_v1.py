@@ -409,6 +409,17 @@ def _check_backup_service_safely(
         return backup_verification.BackupServiceCheck(state=backup_verification.BackupServiceCheckState.UNKNOWN)
 
 
+def _append_backup_service_check(
+    results: list["backup_verification.BackupServiceCheck"],
+    paths: WorkspacePaths,
+    parsed_id: AgentId,
+    resolver: BackendResolverInterface,
+    parent_cg: ConcurrencyGroup | None,
+) -> None:
+    """Thread target: run the check and hand the result back through ``results``."""
+    results.append(_check_backup_service_safely(paths, parsed_id, resolver, parent_cg))
+
+
 @require_api_or_cookie_auth
 @API_SPEC.validate(resp=json_response_model(WorkspaceBackupsResponse))
 def _handle_workspace_backups(agent_id: str) -> WorkspaceBackupsResponse | Response:
@@ -430,9 +441,6 @@ def _handle_workspace_backups(agent_id: str) -> WorkspaceBackupsResponse | Respo
     resolver = state.backend_resolver
     parent_cg = state.root_concurrency_group
 
-    def _run_check_into_results() -> None:
-        check_results.append(_check_backup_service_safely(paths, parsed_id, resolver, parent_cg))
-
     cg_name = f"backup-detail-{parsed_id}"
     cg = (
         parent_cg.make_concurrency_group(name=cg_name, exit_timeout_seconds=_BACKUP_DETAIL_EXIT_TIMEOUT_SECONDS)
@@ -440,7 +448,11 @@ def _handle_workspace_backups(agent_id: str) -> WorkspaceBackupsResponse | Respo
         else ConcurrencyGroup(name=cg_name, exit_timeout_seconds=_BACKUP_DETAIL_EXIT_TIMEOUT_SECONDS)
     )
     with cg:
-        cg.start_new_thread(target=_run_check_into_results, name=f"backup-check-{parsed_id}")
+        cg.start_new_thread(
+            target=_append_backup_service_check,
+            args=(check_results, paths, parsed_id, resolver, parent_cg),
+            name=f"backup-check-{parsed_id}",
+        )
         listing = _list_workspace_snapshots_safely(paths, parsed_id)
     check = (
         check_results[0]
