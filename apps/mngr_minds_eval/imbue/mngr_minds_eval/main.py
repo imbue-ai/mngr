@@ -21,6 +21,8 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 DEFAULT_FCT_REPO = "https://github.com/imbue-ai/forever-claude-template.git"
@@ -395,6 +397,63 @@ def _list_eval_workspaces(eval_set: str) -> list[tuple[str, str]]:
     return out
 
 
+def _retrieve_one(persona: str, agent_id: str, stem: str, out_dir: Path, env: dict) -> dict:
+    record: dict = {"persona": persona, "agent_id": agent_id}
+
+    # 1. read the state file (mngr rsync syncs INTO a directory, so use a scratch dir).
+    state_dir = out_dir / ".state-{}".format(agent_id)
+    proc, state_file = _rsync_out(agent_id, _EVAL_STATE_REMOTE_PATH, env, state_dir)
+    if state_file is None:
+        kind = _classify_error(proc.stderr or proc.stdout) if proc.returncode != 0 else "absent"
+        shutil.rmtree(state_dir, ignore_errors=True)
+        record["status"] = {"unreachable": "unreachable", "absent": "no_state"}.get(kind, "error")
+        if kind == "unreachable":
+            print("  [ERR ] {}: machine not accessible".format(persona), flush=True)
+        elif kind == "absent":
+            print("  [WAIT] {}: no eval_state.json yet (test not started?)".format(persona), flush=True)
+        else:
+            record["error"] = (proc.stderr or "").strip()[:300]
+            print("  [ERR ] {}: {}".format(persona, record["error"]), flush=True)
+        return record
+
+    try:
+        state = json.loads(state_file.read_text())
+    except (ValueError, OSError) as exc:
+        record["status"] = "error"
+        record["error"] = str(exc)
+        print("  [ERR ] {}: unreadable state file ({})".format(persona, exc), flush=True)
+        return record
+    finally:
+        shutil.rmtree(state_dir, ignore_errors=True)
+
+    waits = state.get("waits_processed_count")
+    record["waits_processed_count"] = waits
+    if state.get("test_state") != "finished":
+        record["status"] = "ongoing"
+        print("  [ONGO] {}: ongoing, {} wait(s) processed".format(persona, waits), flush=True)
+        return record
+
+    # 2. finished -> pull the Claude transcript. The workspace's API agent_id resolves to the
+    #    host's system-services agent (no transcript); the CHAT agent id lives in the sandbox.
+    chat_dir = out_dir / ".chatid-{}".format(agent_id)
+    _cproc, chat_id_file = _rsync_out(agent_id, _CHAT_AGENT_ID_REMOTE_PATH, env, chat_dir)
+    chat_agent_id = chat_id_file.read_text().strip() if chat_id_file else agent_id
+    shutil.rmtree(chat_dir, ignore_errors=True)
+
+    transcript_path = out_dir / "{}.jsonl".format(stem)
+    tproc = _run_mngr(["transcript", chat_agent_id, "--format", "jsonl"], env)
+    if tproc.returncode != 0:
+        record["status"] = "finished_no_transcript"
+        record["error"] = (tproc.stderr or "").strip()[:300]
+        print("  [ERR ] {}: finished ({} waits) but transcript failed: {}".format(persona, waits, record["error"]), flush=True)
+    else:
+        transcript_path.write_text(tproc.stdout)
+        record["status"] = "finished"
+        record["transcript"] = str(transcript_path)
+        print("  [DONE] {}: finished ({} waits) -> {}".format(persona, waits, transcript_path.name), flush=True)
+    return record
+
+
 def retrieve_test_results(eval_set: str, out_dir: Path) -> list[dict]:
     out_dir.mkdir(parents=True, exist_ok=True)
     env = _mngr_env()
@@ -403,70 +462,17 @@ def retrieve_test_results(eval_set: str, out_dir: Path) -> list[dict]:
         print("no workspaces named EVAL-{}-CASE-* -- nothing to retrieve".format(eval_set))
         return []
 
-    print(">> retrieving {} case(s) for eval set {!r} -> {}".format(len(workspaces), eval_set, out_dir), flush=True)
-    results = []
-    seen: set[str] = set()
-    for persona, agent_id in sorted(workspaces):
-        record: dict = {"persona": persona, "agent_id": agent_id}
+    # Each mngr call re-runs a Modal discovery pass (~15s) + an SSH tunnel with no cross-call cache,
+    # so run the cases in parallel -- wall-clock collapses from N x ~15s to about one case's time.
+    counts = Counter(persona for persona, _ in workspaces)
 
-        # 1. read the state file (mngr rsync syncs INTO a directory, so use a scratch dir).
-        state_dir = out_dir / ".state-{}".format(agent_id)
-        proc, state_file = _rsync_out(agent_id, _EVAL_STATE_REMOTE_PATH, env, state_dir)
+    def stem(persona: str, agent_id: str) -> str:
+        return persona if counts[persona] == 1 else "{}.{}".format(persona, agent_id[:8])
 
-        if state_file is None:
-            kind = _classify_error(proc.stderr or proc.stdout) if proc.returncode != 0 else "absent"
-            shutil.rmtree(state_dir, ignore_errors=True)
-            record["status"] = {"unreachable": "unreachable", "absent": "no_state"}.get(kind, "error")
-            if kind == "unreachable":
-                print("  [ERR ] {}: machine not accessible".format(persona), flush=True)
-            elif kind == "absent":
-                print("  [WAIT] {}: no eval_state.json yet (test not started?)".format(persona), flush=True)
-            else:
-                record["error"] = (proc.stderr or "").strip()[:300]
-                print("  [ERR ] {}: {}".format(persona, record["error"]), flush=True)
-            results.append(record)
-            continue
-
-        try:
-            state = json.loads(state_file.read_text())
-        except (ValueError, OSError) as exc:
-            record["status"] = "error"
-            record["error"] = str(exc)
-            print("  [ERR ] {}: unreadable state file ({})".format(persona, exc), flush=True)
-            results.append(record)
-            continue
-        finally:
-            shutil.rmtree(state_dir, ignore_errors=True)
-
-        waits = state.get("waits_processed_count")
-        record["waits_processed_count"] = waits
-        if state.get("test_state") != "finished":
-            record["status"] = "ongoing"
-            print("  [ONGO] {}: ongoing, {} wait(s) processed".format(persona, waits), flush=True)
-            results.append(record)
-            continue
-
-        # 2. finished -> pull the Claude transcript. The workspace's API agent_id resolves to the
-        #    host's system-services agent (no transcript); the CHAT agent id lives in the sandbox.
-        chat_dir = out_dir / ".chatid-{}".format(agent_id)
-        _cproc, chat_id_file = _rsync_out(agent_id, _CHAT_AGENT_ID_REMOTE_PATH, env, chat_dir)
-        chat_agent_id = chat_id_file.read_text().strip() if chat_id_file else agent_id
-        shutil.rmtree(chat_dir, ignore_errors=True)
-
-        stem = persona if persona not in seen else "{}.{}".format(persona, agent_id[:8])
-        seen.add(persona)
-        transcript_path = out_dir / "{}.jsonl".format(stem)
-        tproc = _run_mngr(["transcript", chat_agent_id, "--format", "jsonl"], env)
-        if tproc.returncode != 0:
-            record["status"] = "finished_no_transcript"
-            record["error"] = (tproc.stderr or "").strip()[:300]
-            print("  [ERR ] {}: finished ({} waits) but transcript failed: {}".format(persona, waits, record["error"]), flush=True)
-        else:
-            transcript_path.write_text(tproc.stdout)
-            record["status"] = "finished"
-            record["transcript"] = str(transcript_path)
-            print("  [DONE] {}: finished ({} waits) -> {}".format(persona, waits, transcript_path.name), flush=True)
-        results.append(record)
+    print(">> retrieving {} case(s) for eval set {!r} -> {} (parallel) ...".format(len(workspaces), eval_set, out_dir), flush=True)
+    with ThreadPoolExecutor(max_workers=min(8, len(workspaces))) as pool:
+        futures = [pool.submit(_retrieve_one, p, a, stem(p, a), out_dir, env) for p, a in sorted(workspaces)]
+        results = [f.result() for f in as_completed(futures)]
 
     (out_dir / "summary.json").write_text(json.dumps({"eval_set": eval_set, "results": results}, indent=2))
     done = sum(1 for r in results if r["status"] == "finished")
