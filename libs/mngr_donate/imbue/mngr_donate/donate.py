@@ -208,11 +208,20 @@ def build_donation_message(skill_dir: str) -> str:
     there in manual mode, then stop. We pass an explicit path rather than relying
     on Claude's skill auto-discovery because the skill lives in a host-dir cache,
     not the agent's git worktree.
+
+    The no-repo-changes paragraph is a guard against the *host repo's* hooks: the
+    agent works from a worktree of whatever repo donate ran in, so that repo's
+    stop hooks (e.g. a reviewer's "no stopping without a PR") apply and once
+    goaded a donation agent into opening a junk draft PR. The task touches no
+    repo files, so the agent can truthfully say so and stop.
     """
     return (
         f"Follow the instructions in {skill_dir}/SKILL.md to review documents: run its client.py "
         f"from {skill_dir} to lease a work item, review it against the active prompt yourself, and "
-        f"submit the result. Complete the work it leases, then stop."
+        f"submit the result. Complete the work it leases, then stop.\n\n"
+        f"This task only talks to the skill's coordination server -- it makes no changes to the "
+        f"repository you are running in. Do not commit, push, or open pull requests. If a stop hook "
+        f"demands a PR or review, state that this session changed no repository files and stop."
     )
 
 
