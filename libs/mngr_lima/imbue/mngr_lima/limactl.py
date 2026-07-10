@@ -1,9 +1,11 @@
 import json
+import os
 import re
 import shutil
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from typing import Final
 
 from loguru import logger
 from pydantic import Field
@@ -19,8 +21,22 @@ from imbue.mngr.primitives import LogLevel
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_lima.constants import MINIMUM_LIMA_VERSION
 from imbue.mngr_lima.errors import LimaCommandError
+from imbue.mngr_lima.errors import LimaInstanceNameTooLongError
 from imbue.mngr_lima.errors import LimaNotInstalledError
 from imbue.mngr_lima.errors import LimaVersionError
+
+
+# Lima rejects a VM whose SSH control-socket path would reach UNIX_PATH_MAX. It
+# builds that path as `<LIMA_HOME>/<instance>/ssh.sock.<suffix>` and requires it
+# to be strictly shorter than this many bytes (the value limactl reports).
+_UNIX_PATH_MAX: Final[int] = 104
+# Bytes Lima adds around the instance name when forming the socket path: the two
+# path separators, the literal `ssh.sock.`, and a per-connection suffix of up to
+# 16 chars. So the socket path length is `len(LIMA_HOME) + len(name) + this`.
+_LIMA_SOCKET_PATH_OVERHEAD: Final[int] = len("/") + len("/ssh.sock.") + 16
+# Never truncate the random hex tail below this many chars: 8 hex chars is 32
+# bits of entropy, which keeps collisions among one machine's VMs negligible.
+_MIN_INSTANCE_NAME_HEX_CHARS: Final[int] = 8
 
 
 def _log_lima_output(line: str, is_stdout: bool) -> None:
@@ -127,7 +143,15 @@ def check_lima_version(
         raise LimaVersionError(provider_name, installed_str, minimum_str)
 
 
-def lima_instance_name_from_host_id(host_id: HostId, prefix: str) -> str:
+def _resolve_lima_home() -> Path:
+    """Resolve LIMA_HOME the way limactl does: the ``LIMA_HOME`` env var, else ``~/.lima``."""
+    lima_home_env = os.environ.get("LIMA_HOME")
+    if lima_home_env:
+        return Path(lima_home_env).expanduser()
+    return Path.home() / ".lima"
+
+
+def lima_instance_name_from_host_id(host_id: HostId, prefix: str, lima_home: Path | None = None) -> str:
     """Build the Lima instance name from a mngr host id.
 
     New VMs derive their instance name from the immutable host id (not the
@@ -137,8 +161,28 @@ def lima_instance_name_from_host_id(host_id: HostId, prefix: str) -> str:
     operations, so existing legacy ``<prefix><host_name>`` instances keep
     working unchanged (discovery reads the stored instance name, never parses
     it). The prefix is the mngr config prefix (default 'mngr-').
+
+    The full ``<prefix>host-<32 hex>`` name can exceed what Lima allows: Lima
+    rejects a VM whose derived SSH socket path reaches UNIX_PATH_MAX, and that
+    ceiling shrinks as ``LIMA_HOME`` (i.e. the home path) grows. To stay under
+    it, the random hex tail is truncated just enough to fit, keeping the full
+    32-char id whenever it already fits (so short home paths are unchanged).
+    Nothing parses the id back out of the instance name, so truncation is safe.
+    Raises :class:`LimaInstanceNameTooLongError` if the prefix plus LIMA_HOME
+    leave no room for even a minimal id.
     """
-    return f"{prefix}{host_id}"
+    if lima_home is None:
+        lima_home = _resolve_lima_home()
+    # Everything in the name except the shortenable random hex tail.
+    fixed_part = f"{prefix}{host_id.PREFIX}-"
+    # Longest instance name that keeps the socket path strictly under the max.
+    max_name_length = _UNIX_PATH_MAX - 1 - _LIMA_SOCKET_PATH_OVERHEAD - len(str(lima_home))
+    available_for_hex = max_name_length - len(fixed_part)
+    if available_for_hex < _MIN_INSTANCE_NAME_HEX_CHARS:
+        raise LimaInstanceNameTooLongError(prefix, str(lima_home))
+    # Slicing past the end just yields the whole 32-char hex, so the common
+    # (fits) case reproduces the original ``f"{prefix}{host_id}"`` verbatim.
+    return f"{fixed_part}{host_id.get_uuid().hex[:available_for_hex]}"
 
 
 def lima_instance_name(host_name: HostName, prefix: str) -> str:
