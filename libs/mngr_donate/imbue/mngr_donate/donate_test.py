@@ -13,6 +13,7 @@ import pytest
 from imbue.mngr_donate.donate import CLAUDE_SOURCE
 from imbue.mngr_donate.donate import FIVE_HOUR_WINDOW
 from imbue.mngr_donate.donate import SEVEN_DAY_WINDOW
+from imbue.mngr_donate.donate import build_agent_env
 from imbue.mngr_donate.donate import build_create_argv
 from imbue.mngr_donate.donate import build_destroy_argv
 from imbue.mngr_donate.donate import build_donation_message
@@ -203,3 +204,20 @@ def test_build_destroy_argv_force_removes_a_stale_agent_by_name() -> None:
         "donate-extra-quota-bio",
         "--force",
     )
+
+
+def test_agent_env_inherits_unchanged_when_token_already_set() -> None:
+    # An explicit CLAUDE_CODE_OAUTH_TOKEN in the environment wins over the stash.
+    assert build_agent_env({"CLAUDE_CODE_OAUTH_TOKEN": "already-set"}, "stashed-token") is None
+
+
+def test_agent_env_injects_stashed_keychain_token() -> None:
+    env = build_agent_env({"PATH": "/usr/bin"}, "stashed-token")
+    assert env is not None
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "stashed-token"
+    # The rest of the environment passes through.
+    assert env["PATH"] == "/usr/bin"
+
+
+def test_agent_env_inherits_unchanged_when_no_token_is_stashed() -> None:
+    assert build_agent_env({"PATH": "/usr/bin"}, None) is None

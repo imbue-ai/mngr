@@ -237,7 +237,7 @@ def test_prevent_bare_urwid_tty_signal_keys() -> None:
 
 
 def test_prevent_direct_subprocess() -> None:
-    rc.check_direct_subprocess(_DIR, snapshot(13))
+    rc.check_direct_subprocess(_DIR, snapshot(14))
 
 
 def test_prevent_bare_tmux_targets() -> None:

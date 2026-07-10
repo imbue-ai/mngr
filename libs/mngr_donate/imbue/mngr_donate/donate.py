@@ -80,6 +80,13 @@ DEFAULT_SKILL_REPO = (
 # to track the branch instead.
 DEFAULT_SKILL_REF = "c2e9bbe799c20c9da3896c2205991164f10555fd"
 
+# Optional macOS keychain entry holding a long-lived OAuth token from
+# `claude setup-token`. Headless agents can't refresh Claude's short-lived (~8h)
+# session token -- the desktop app refreshes only its own copy -- so without this,
+# scheduled ticks start failing with `401 Invalid authentication credentials` as
+# soon as the session token lapses. See README "Authentication".
+OAUTH_KEYCHAIN_SERVICE = "mngr-donate-oauth"
+
 # `mngr donate --start` installs a scheduler that re-runs `mngr donate` on this
 # interval; each firing re-checks spare capacity and does another batch, so the
 # schedule -- not any one tick -- is what drains all the spare quota. macOS uses a
@@ -502,7 +509,51 @@ def _donation_log_path(agent_name: str, now: int) -> Path:
     return _donate_log_dir() / f"{agent_name}-{now}.jsonl"
 
 
-def _run_and_tee(argv: tuple[str, ...], log_path: Path) -> int:
+@pure
+def build_agent_env(base_env: dict[str, str], stashed_token: str | None) -> dict[str, str] | None:
+    """The donation agent's environment: ``base_env`` plus the stashed OAuth token.
+
+    Returns None (inherit unchanged) when the variable is already set -- an
+    explicit override wins -- or when there's no stashed token to add.
+    """
+    if base_env.get("CLAUDE_CODE_OAUTH_TOKEN"):
+        return None
+    if stashed_token is None:
+        return None
+    return {**base_env, "CLAUDE_CODE_OAUTH_TOKEN": stashed_token}
+
+
+def _read_stashed_oauth_token() -> str | None:
+    """The long-lived OAuth token from the macOS keychain, or None if not stashed.
+
+    This is the year-long token from `claude setup-token`, stored under
+    OAUTH_KEYCHAIN_SERVICE (see README "Authentication"). Exporting it as
+    CLAUDE_CODE_OAUTH_TOKEN lets the headless agent outlive the ~8h session
+    token it can't refresh.
+    """
+    if sys.platform != "darwin":
+        return None
+    result = subprocess.run(
+        ("security", "find-generic-password", "-s", OAUTH_KEYCHAIN_SERVICE, "-w"),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    token = result.stdout.strip()
+    if result.returncode != 0 or not token:
+        return None
+    return token
+
+
+def _donation_agent_env() -> dict[str, str] | None:
+    """Environment for the donation agent, with the stashed token if one exists."""
+    base_env = dict(os.environ)
+    if base_env.get("CLAUDE_CODE_OAUTH_TOKEN"):
+        return None
+    return build_agent_env(base_env, _read_stashed_oauth_token())
+
+
+def _run_and_tee(argv: tuple[str, ...], log_path: Path, env: dict[str, str] | None = None) -> int:
     """Run ``argv``, streaming its combined output to both stdout and ``log_path``.
 
     The headless agent emits stream-json (one event per line: tool calls,
@@ -515,7 +566,9 @@ def _run_and_tee(argv: tuple[str, ...], log_path: Path) -> int:
         # without double-stamping cron.log, which already gets the tick line above.
         log_file.write(f"===== donate launch {time.strftime('%Y-%m-%d %H:%M:%S')} =====\n")
         log_file.flush()
-        process = subprocess.Popen(list(argv), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+        process = subprocess.Popen(
+            list(argv), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env
+        )
         assert process.stdout is not None
         for line in process.stdout:
             sys.stdout.write(line)
@@ -710,7 +763,7 @@ def donate(ctx: click.Context, **kwargs: Any) -> None:
     # is the normal case, and a cleanup failure shouldn't mask the create's own.
     subprocess.run(list(build_destroy_argv(opts.agent_name, mngr_path)), check=False, capture_output=True)
     _clear_stale_worktree(opts.agent_name)
-    returncode = _run_and_tee(argv, log_path)
+    returncode = _run_and_tee(argv, log_path, env=_donation_agent_env())
     if returncode != 0:
         raise MngrError(f"`{' '.join(argv)}` exited with status {returncode} (see {log_path}).")
     emit_operator_result(
