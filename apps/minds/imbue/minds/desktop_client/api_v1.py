@@ -883,6 +883,10 @@ def _handle_create_operation_status(operation_id: str) -> CreateOperationStatusR
         # redirects without reconstructing it client-side.
         redirect_url=info.redirect_url,
         error=info.error,
+        # Machine-readable failure classification (e.g. GIT_AUTH_REQUIRED for a
+        # private/nonexistent GitHub repo); the creating page reveals static
+        # guidance for kinds it knows about.
+        error_kind=str(info.error_kind) if info.error_kind is not None else None,
     )
 
 

@@ -208,6 +208,23 @@ class AgentCreationStatus(UpperCaseStrEnum):
     FAILED = auto()
 
 
+class CreationErrorKind(UpperCaseStrEnum):
+    """Machine-readable classification of a creation failure.
+
+    Carried alongside the human-readable ``error`` message so the creating
+    page can gate extra static guidance on the failure *type* instead of
+    substring-matching the message client-side. Only failure kinds that
+    change what the UI shows get a value here; unclassified failures carry
+    no kind and the UI shows just the error message.
+    """
+
+    # The workspace source is a github.com URL and git hit an authentication
+    # challenge cloning it: the repo is private (or does not exist -- GitHub
+    # deliberately answers both the same way, to avoid leaking which private
+    # repos exist) and none of this machine's git credentials can see it.
+    GIT_AUTH_REQUIRED = auto()
+
+
 class AgentCreationInfo(FrozenModel):
     """Snapshot of agent creation state, returned to callers for status polling.
 
@@ -243,6 +260,13 @@ class AgentCreationInfo(FrozenModel):
     )
     redirect_url: str | None = Field(default=None, description="URL to redirect to when creation is done")
     error: str | None = Field(default=None, description="Error message, set when status is FAILED")
+    error_kind: CreationErrorKind | None = Field(
+        default=None,
+        description=(
+            "Machine-readable classification of the failure, set alongside ``error`` when the "
+            "failure is recognized (see ``classify_creation_error``); ``None`` otherwise"
+        ),
+    )
 
 
 def extract_repo_name(git_url: str) -> str:
@@ -270,6 +294,62 @@ def _is_local_path(repo_source: str) -> bool:
     if "://" in repo_source:
         return False
     return repo_source.startswith(("/", "./", "../", "~"))
+
+
+def _is_github_https_url(repo_source: str) -> bool:
+    """Check if a repo source is an http(s) URL on github.com.
+
+    Gates the private-repo failure classification (and the sign-in guidance
+    the creating page shows for it, which recommends the GitHub CLI) to
+    sources where that guidance is actually correct.
+    """
+    parts = urlsplit(repo_source)
+    if parts.scheme not in ("http", "https"):
+        return False
+    return parts.hostname in ("github.com", "www.github.com")
+
+
+# Substrings of git's output that identify an authentication-shaped clone
+# failure. ``clone_git_repo`` runs every git command with GIT_TERMINAL_PROMPT=0,
+# so the no-usable-credentials case deterministically produces "could not read
+# Username ... terminal prompts disabled" instead of hanging on a prompt. The
+# other markers cover a credential helper supplying credentials that GitHub
+# rejects ("Authentication failed"), credentials that cannot see the repo
+# ("Repository not found" -- GitHub reports inaccessible and nonexistent repos
+# identically), and access blocked by a policy such as SAML SSO (403).
+_GIT_AUTH_OUTPUT_MARKERS: Final[tuple[str, ...]] = (
+    "could not read Username",
+    "could not read Password",
+    "terminal prompts disabled",
+    "Authentication failed",
+    "Repository not found",
+    "The requested URL returned error: 403",
+)
+
+
+def classify_creation_error(repo_source: str, error: Exception) -> CreationErrorKind | None:
+    """Classify a creation failure into a ``CreationErrorKind``, when recognizable.
+
+    Currently recognizes exactly one case: the clone of a
+    ``https://github.com/...`` workspace source failed with an
+    authentication-shaped git error (see ``_GIT_AUTH_OUTPUT_MARKERS``) --
+    i.e. the repo is private (or does not exist) and this machine's git
+    credentials cannot see it. The creating page shows static sign-in
+    guidance for this kind. Every other failure returns ``None``.
+
+    Matching git's error text is the only option here (git has no structured
+    error output), but the no-credentials shape is under our control:
+    ``clone_git_repo`` disables terminal prompting, which makes git emit its
+    stable "could not read Username" error for any auth challenge.
+    """
+    if not isinstance(error, GitCloneError):
+        return None
+    if not _is_github_https_url(repo_source):
+        return None
+    message = str(error)
+    if any(marker in message for marker in _GIT_AUTH_OUTPUT_MARKERS):
+        return CreationErrorKind.GIT_AUTH_REQUIRED
+    return None
 
 
 def _redact_url_credentials(url: str) -> str:
@@ -393,6 +473,17 @@ def clone_git_repo(
     # which would otherwise leak tokens from credentialed URLs into logs.
     redacted_on_output = _RedactingOutputCallback(inner=on_output) if on_output is not None else None
 
+    # Never let git prompt for credentials on the controlling terminal: the
+    # desktop client has no terminal for the user to answer on, and when minds
+    # is launched from a dev shell the prompt would hang the creation thread
+    # forever. With prompts disabled, cloning a repo we lack credentials for
+    # fails fast with git's stable "could not read Username ... terminal
+    # prompts disabled" error, which ``classify_creation_error`` recognizes.
+    # Credential helpers (e.g. the macOS keychain) still work as usual -- only
+    # interactive terminal prompting is disabled. Mirrors the same fix in the
+    # FCT bootstrap's git calls.
+    git_env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+
     # All steps run under the same child concurrency group so cancellation is
     # uniform; the failure is raised AFTER the `with cg` block to keep
     # GitCloneError from being wrapped in a ConcurrencyExceptionGroup. For the
@@ -419,6 +510,7 @@ def clone_git_repo(
                 cwd=clone_dir,
                 is_checked_after=False,
                 on_output=redacted_on_output,
+                env=git_env,
             )
             if result.returncode != 0:
                 stderr = result.stderr.strip()
@@ -1361,6 +1453,7 @@ class AgentCreator(MutableModel):
     _canonical_agent_ids: dict[str, AgentId] = PrivateAttr(default_factory=dict)
     _redirect_urls: dict[str, str] = PrivateAttr(default_factory=dict)
     _errors: dict[str, str] = PrivateAttr(default_factory=dict)
+    _error_kinds: dict[str, CreationErrorKind] = PrivateAttr(default_factory=dict)
     _launch_modes: dict[str, LaunchMode] = PrivateAttr(default_factory=dict)
     _host_names: dict[str, str] = PrivateAttr(default_factory=dict)
     _log_queues: dict[str, queue.Queue[str]] = PrivateAttr(default_factory=dict)
@@ -1498,6 +1591,7 @@ class AgentCreator(MutableModel):
                 host_name=self._host_names.get(cid_str, ""),
                 redirect_url=self._redirect_urls.get(cid_str),
                 error=self._errors.get(cid_str),
+                error_kind=self._error_kinds.get(cid_str),
             )
 
     def get_log_queue(self, creation_id: CreationId) -> queue.Queue[str] | None:
@@ -1882,9 +1976,12 @@ class AgentCreator(MutableModel):
         except (GitCloneError, GitOperationError, MngrCommandError, ImbueCloudCliError, ValueError, OSError) as e:
             logger.opt(exception=e).error("Failed to create agent for creation {}", creation_id)
             log_queue.put("[minds] ERROR: {}".format(e))
+            error_kind = classify_creation_error(repo_source, e)
             with self._lock:
                 self._statuses[cid_str] = AgentCreationStatus.FAILED
                 self._errors[cid_str] = str(e)
+                if error_kind is not None:
+                    self._error_kinds[cid_str] = error_kind
         finally:
             log_queue.put(LOG_SENTINEL)
 
