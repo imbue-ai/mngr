@@ -1225,7 +1225,9 @@
       <span class="type-heading text-primary">Setting up your account...</span>
       <p class="mt-2 type-helper text-tertiary">
         Verifying the credentials and creating the network ingress + state storage
-        (<code>mngr &lt;provider&gt; prepare</code>). Usually under a minute.
+        (<code>mngr &lt;provider&gt; prepare</code>). Usually under a minute &mdash; except a
+        brand-new Azure subscription's first setup, which can take 10-15 minutes while
+        Azure registers its resource providers (one-time). Leave this open.
       </p>
       <div class="mt-4 h-1.5 bg-fill-subtle rounded-full overflow-hidden">
         <div id="ca-bar-fill" class="h-full w-0 rounded-full bg-accent transition-[width] duration-300 ease-out"></div>
