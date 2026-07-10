@@ -1,0 +1,16 @@
+# Copy to skill_config.yaml. Env vars REVIEW_SERVER_URL / REVIEW_WORKER_ID override these.
+
+# Coordination API: hands out item IDs via GET /next and receives reviews via
+# POST /reviews. Point this at your server's IP:port (env REVIEW_SERVER_URL wins).
+server_url: "http://api.elsichecklist.org"     # e.g. http://<your-server-ip>:8888
+# worker_id: "reviewer-01"      # if you want a fixed worker ID, defaults to host:PID
+count: 10                        # items to lease per /next call (server caps at max_batch)
+item_type: null                 # or "paper" | "grant" | "data_application" to filter
+
+# The prompt is owned here. Its SHA-256 is what the server keys replication off.
+prompts_dir: "./prompts"
+prompt_version: "population-descriptors_v1"     # file stem in prompts_dir; switch to run a different prompt
+
+auto:                           # only used by `client.py auto`
+  model: "claude-opus-4-8"
+  max_tokens: 2000

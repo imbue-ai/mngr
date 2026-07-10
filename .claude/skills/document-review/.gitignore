@@ -1,0 +1,9 @@
+# Per-worker live config (copy from skill_config.example.yaml). Holds worker_id/server_url.
+skill_config.yaml
+# Prompts are pulled fresh at run time from the skill's upstream repo by `mngr donate`
+# (see mngr_donate) -- they are NOT committed here, so the source of truth stays the lab's repo.
+prompts/
+# Runtime artifacts
+result.json
+__pycache__/
+*.pyc
