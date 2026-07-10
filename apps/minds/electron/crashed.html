@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<!--
+  Content-view crash page (Chrome "Aw, Snap!" style).
+
+  Loaded LOCALLY into the workspace content view by main.js when that view's
+  renderer process dies (render-process-gone), so the user sees a recoverable
+  page instead of the pinned-white background the dead renderer leaves behind.
+  Runs under content-relay-preload.js (no window.minds bridge), so its buttons
+  drive the shell only through the allowlisted postMessage relay:
+    * Reload      -> minds:reload-crashed-view (re-loads the pre-crash URL)
+    * Report a bug -> minds:open-help (the existing report modal)
+
+  The crash reason / exit code / workspace id arrive as query params from
+  main.js. The page is stateless: it does NOT auto-reload (a page that caused the
+  crash would loop), matching Chrome/Firefox/VS Code -- the user is the loop-breaker.
+-->
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Workspace crashed</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    /* Match the app's loading/error takeover surface: deep-maroon (#492222)
+       with cream (#E9ECD9) text, per the Minds branding. */
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #492222;
+      color: #E9ECD9;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      user-select: none;
+      text-align: center;
+      padding: 24px;
+    }
+    .glyph { font-size: 56px; line-height: 1; margin-bottom: 20px; opacity: 0.9; }
+    h1 { font-size: 20px; font-weight: 600; margin-bottom: 10px; }
+    p { font-size: 14px; line-height: 1.5; opacity: 0.8; max-width: 420px; }
+    .detail {
+      font-family: "SF Mono", "Fira Code", Menlo, monospace;
+      font-size: 12px;
+      opacity: 0.55;
+      margin-top: 10px;
+    }
+    .actions { display: flex; gap: 12px; margin-top: 28px; }
+    button {
+      font: inherit;
+      font-size: 14px;
+      font-weight: 500;
+      padding: 9px 18px;
+      border-radius: 8px;
+      border: 1px solid transparent;
+      cursor: pointer;
+      transition: background 0.12s ease, border-color 0.12s ease;
+    }
+    .primary { background: #E9ECD9; color: #492222; }
+    .primary:hover { background: #ffffff; }
+    .secondary { background: transparent; color: #E9ECD9; border-color: rgba(233, 236, 217, 0.4); }
+    .secondary:hover { border-color: rgba(233, 236, 217, 0.85); }
+  </style>
+</head>
+<body>
+  <div class="glyph">&#128533;</div>
+  <h1>This workspace view stopped responding</h1>
+  <p>The page displaying this workspace crashed. Your work on the underlying mind is safe &mdash; reload to reconnect.</p>
+  <div class="detail" id="detail"></div>
+  <div class="actions">
+    <button class="primary" id="reload">Reload</button>
+    <button class="secondary" id="report">Report a bug</button>
+  </div>
+  <script>
+    (function () {
+      var params = new URLSearchParams(window.location.search);
+      var reason = params.get('reason') || 'unknown';
+      var exitCode = params.get('exitCode') || '';
+      var workspace = params.get('workspace') || '';
+
+      var detail = 'Reason: ' + reason;
+      if (exitCode !== '') detail += ' (exit code ' + exitCode + ')';
+      document.getElementById('detail').textContent = detail;
+
+      document.getElementById('reload').addEventListener('click', function () {
+        window.postMessage({ type: 'minds:reload-crashed-view' }, '*');
+      });
+      document.getElementById('report').addEventListener('click', function () {
+        // agentId is validated in the preload + main process; empty -> unscoped report.
+        window.postMessage({ type: 'minds:open-help', agentId: workspace }, '*');
+      });
+    })();
+  </script>
+</body>
+</html>

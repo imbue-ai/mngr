@@ -233,20 +233,40 @@ function newestFileMatching(dir, predicate) {
 }
 
 /**
+ * The named log file ``name`` in ``dir`` as a candidate, or null when it is
+ * absent / not a regular file. Used to attach specific logs by exact name
+ * (rather than newest-by-suffix) so a backend-down report always carries both
+ * the backend's minds.log AND the Electron main-process electron.log.
+ */
+function namedFile(dir, name) {
+  const filePath = path.join(dir, name);
+  try {
+    if (!fs.statSync(filePath).isFile()) return null;
+    return { filePath, name };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Gzip the tails of the most relevant log files into Sentry attachments: the
- * live Python backend log (``*.jsonl``, written by the now-dead backend but
- * still on disk) and the Electron main-process log (``*.log``). Returns [] when
- * the logs directory is unreadable. Best-effort per file -- a file that can't be
- * read (or that would breach the compressed-attachment budget) is skipped rather
- * than aborting the whole report.
+ * backend log (``minds.log``, the backend's stdout/stderr, written by the shell
+ * even when the backend has died), the Electron main-process log
+ * (``electron.log``), and the live Python backend jsonl log. Returns [] when the
+ * logs directory is unreadable. Best-effort per file -- a file that can't be read
+ * (or that would breach the compressed-attachment budget) is skipped rather than
+ * aborting the whole report.
  */
 function collectLogAttachments() {
   const logDir = paths.getLogDir();
-  // The live backend log is exactly ``*.jsonl``; rotated logs are ``*.jsonl.<ts>``.
-  // Matching the bare suffix keeps us on the live file rather than a rotated one.
+  // minds.log and electron.log are attached by exact name (a backend-down report
+  // wants BOTH -- why the backend died and what the shell did about it). The live
+  // backend jsonl log is exactly ``*.jsonl``; rotated logs are ``*.jsonl.<ts>``,
+  // so matching the bare suffix keeps us on the live file rather than a rotated one.
   const candidates = [
+    namedFile(logDir, 'minds.log'),
+    namedFile(logDir, 'electron.log'),
     newestFileMatching(logDir, (name) => name.endsWith('.jsonl')),
-    newestFileMatching(logDir, (name) => name.endsWith('.log')),
   ];
   const attachments = [];
   let totalCompressedBytes = 0;
