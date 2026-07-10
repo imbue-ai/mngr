@@ -6,6 +6,7 @@ from imbue.minds.cli.env import env
 from imbue.minds.cli.paid import paid
 from imbue.minds.cli.pool import pool
 from imbue.minds.cli.run import run
+from imbue.minds.cli.server import server
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.utils.logging import console_level_from_verbose_and_quiet
 from imbue.minds.utils.logging import setup_logging
@@ -41,5 +42,6 @@ def cli(ctx: click.Context, verbose: int, quiet: bool, output_format: str, log_f
 
 cli.add_command(run)
 cli.add_command(pool)
+cli.add_command(server)
 cli.add_command(env)
 cli.add_command(paid)

@@ -688,7 +688,7 @@ mngr imbue_cloud admin pool list [OPTIONS]
 **Usage:**
 
 ```text
-mngr imbue_cloud admin pool destroy [OPTIONS] POOL_HOST_ID
+mngr imbue_cloud admin pool destroy [OPTIONS] POOL_HOST_IDS...
 ```
 **Options:**
 
@@ -697,8 +697,9 @@ mngr imbue_cloud admin pool destroy [OPTIONS] POOL_HOST_ID
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--database-url` | text | Neon PostgreSQL direct connection string for the pool DB. Defaults to MINDS_HOST_POOL_DSN env var, or the activated minds env's secrets.toml NEON_HOST_POOL_DSN field (so `minds env activate <dev-env>` is enough). Pass this explicitly when operating outside an activated env. | None |
-| `--force` | boolean | Drop the row even if status != 'released' | `False` |
-| `--skip-vps-cancel` | boolean | Only drop the DB row; do NOT destroy the underlying slice lima VM. Use exclusively when the VM is already gone -- otherwise the default path tears it down so no box slot is left occupied. | `False` |
+| `--force` | boolean | Also destroy rows that are currently leased (tears down the leasing user's live workspace). | `False` |
+| `--drop-row-only` | boolean | Only drop the DB rows; do NOT attempt VM teardown. Exclusively for rows whose bare-metal box record is gone or whose machine is permanently dead -- the default path already tolerates a VM that is merely absent. | `False` |
+| `--max-concurrency` | integer | Max hosts destroyed at once; the rest queue and start as slots free. | `8` |
 
 ## mngr imbue_cloud admin pool teardown-slices
 
@@ -714,6 +715,7 @@ mngr imbue_cloud admin pool teardown-slices [OPTIONS]
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--database-url` | text | Neon PostgreSQL direct connection string for the pool DB. Defaults to MINDS_HOST_POOL_DSN env var, or the activated minds env's secrets.toml NEON_HOST_POOL_DSN field. Pass explicitly when operating outside an activated env. | None |
+| `--max-concurrency` | integer | Max slices torn down at once; the rest queue and start as slots free. | `8` |
 
 ## mngr imbue_cloud admin pool backfill-host-keys
 
@@ -988,6 +990,7 @@ mngr imbue_cloud admin server order [OPTIONS]
 | `--cpu-overcommit` | float | CPU overcommit factor recorded for slice sizing on this box. | `2.0` |
 | `--option` | text | Explicit planCode for a mandatory option family that offers more than one choice (e.g. bandwidth, vrack). Repeatable. Required when the plan offers a real choice -- run once without it and the error lists each family's offers + monthly prices so you can re-run with --option. | None |
 | `--yes` | boolean | Skip the interactive confirmation and place the order. | `False` |
+| `--dry-run` | boolean | Build + assign a non-committal cart, print the real OVH price preview + derived specs, then delete the cart without ordering. No charge and no prompt -- use it to confirm price/specs before ordering. | `False` |
 | `--database-url` | text | Pool DSN (else resolved from env/activated minds env). | None |
 
 ## mngr imbue_cloud admin server await-delivery

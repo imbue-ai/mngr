@@ -4,6 +4,31 @@ A concise, human-friendly summary of changes for repo-level dev tooling: CI work
 
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
+## 2026-07-09
+
+### Added
+
+- Added: `just list-servers` and `just prep-server <server-id>` recipes wrapping the new env-aware `minds server {list,prep}` commands (DSN + pool SSH key resolved from the activated tier automatically). The `minds-justfile` skill doc was updated to match.
+- Added: `specs/backup-update-fixes/concise.md` and `specs/injected-backup-service/concise.md` — plans for the per-workspace backup health route (with master-password hash + rotation, fixed minimum backup version, `official` remote, snapshot-resume test rewrite) and the drift-detection + one-click converging update on running workspaces.
+
+### Changed
+
+- Changed: `destroy-pool-host` justfile recipe renamed to `destroy-pool-hosts` and now takes any number of pool-host ids (clean break, no alias). Forwards to `minds pool destroy`, which destroys all named slices in parallel after atomically claiming each row so a user lease cannot race the destroy. The `minds-justfile` skill doc was updated to match.
+- Changed: Pre-commit `regenerate-cli-docs` hook now also triggers on plugin CLI files (`libs/mngr_*/imbue/**/cli/*.py`), so editing a plugin's click commands can no longer leave the generated `libs/mngr/docs/commands/` reference stale until an unrelated PR trips the check.
+- Changed: `scripts/snapshot_minds_e2e_state.py`'s docs no longer hardcode stale snapshot image ids or describe the script as a one-off prototype — it is documented as the standing producer for the `build-minds-snapshot` CI stage, with instructions for minting an image id manually and running individual tests against it via `just test-offload-minds-snapshot <image-id> '--filter <test_name>'`.
+
+## 2026-07-08
+
+### Added
+
+- Added: `just tmr-mngr` and `just tmr-minds` recipes as the canonical per-suite flag sets for `mngr tmr` (the TMR workflow inputs mirror them). The minds recipe targets the `apps/minds` tree with the minds-tailored mapper prompt and defaults to the plain `@release` tests; the capability suites (snapshot/deployment/services) are documented as extra args needing their own secrets and setup.
+- Added: `tmr-minds-scheduled.yml` — the daily scheduled TMR run is split into two independent per-variant wrappers. `tmr-mngr-scheduled.yml` (renamed from the single `tmr-scheduled.yml`, at 08:00 UTC) and `tmr-minds-scheduled.yml` (09:00 UTC) each own a gate label (`tmr-mngr-periodic` / `tmr-minds-periodic`), concurrency group, and periodic PR, so the two suites schedule and review independently. The gate policy (auto-close a periodic PR older than 4 days, else skip) moved into a shared reusable workflow `tmr-gate.yml`, and `tmr.yml` gained a `periodic_label` input to route each variant's PR to its own gate.
+
+### Changed
+
+- Changed: `.github/workflows/tmr.yml` accepts `name`, `mapper_prompt`, and `reducer_prompt` inputs, so a dispatch can run a named TMR variant (e.g. `tmr-minds` over `apps/minds`) with its own branch/agent prefix and optional prompt-template overrides.
+- Changed: `minds-launch-to-msg.yml` freezes its `commit_sha` (mngr) and `template_ref` (forever-claude-template) inputs to full SHAs exactly once, in `check_should_run`, at run start. Inputs accept a full 40-char SHA, branch, or tag; every downstream job consumes the frozen SHAs instead of re-resolving. Fixes a race where a `template_ref=main` run could test a different FCT commit than the one recorded in the green marker and slack message (agent creation used the raw ref, resolved ~15-45 min after the pair-key fingerprint). Also cleaned up the workflow file (net -135 lines): deduplicated ref resolution into a single `resolve_ref` function, looped the ToDesktop secrets check, and replaced the hardcoded screenshot-prefix list in the summary manifest with a sorted glob. Caveat: SHAs must be full 40-hex and reachable from some ref; FCT-SHA creates need a binary built from mngr `02bb71b44` (2026-06-11) or later.
+
 ## 2026-07-07
 
 ### Changed

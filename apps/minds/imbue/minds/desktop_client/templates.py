@@ -32,7 +32,6 @@ from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
 from imbue.minds.primitives import AIProvider
-from imbue.minds.primitives import BackupEncryptionMethod
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import DockerRuntime
@@ -286,7 +285,7 @@ _FALLBACK_GIT_URL: Final[str] = DEFAULT_FOREVER_CLAUDE_GIT_URL
 # Pin to an annotated FCT tag so a shipped binary clones the exact FCT
 # snapshot it was verified against. Bump to a newer tag only after
 # re-verifying launch-to-msg CI against (this binary, the new tag).
-FALLBACK_BRANCH: Final[str] = "minds-v0.3.5"
+FALLBACK_BRANCH: Final[str] = "minds-v0.3.6"
 
 # Env var (set by ``just minds-start`` and the e2e workspace runner) that opts a
 # launch into the operator's local-worktree create-form defaults. Gating on an
@@ -419,9 +418,9 @@ def render_create_form(
     ai_provider: AIProvider | None = None,
     docker_runtime: DockerRuntime | None = None,
     backup_provider: BackupProvider | None = None,
-    backup_encryption_method: BackupEncryptionMethod | None = None,
     backup_api_key_env: str = "",
     has_saved_backup_password: bool = False,
+    is_master_password_set: bool = False,
     accounts: Sequence[object] | None = None,
     default_account_id: str = "",
     anthropic_api_key: str = "",
@@ -445,8 +444,7 @@ def render_create_form(
     follow the selected preset so the highlighted card matches what a plain
     submit would create: the ``remote`` preset maps to ``IMBUE_CLOUD`` for all
     three, the ``local`` preset to ``LIMA`` / ``SUBSCRIPTION`` /
-    ``CONFIGURE_LATER``. The backup encryption method defaults to
-    ``NO_PASSWORD``.
+    ``CONFIGURE_LATER``.
 
     ``selected_preset`` picks which preset card starts selected. When ``None``
     it defaults to ``remote`` on a fresh form (regardless of whether an account
@@ -457,9 +455,9 @@ def render_create_form(
     ``start_advanced`` opens the advanced view on first paint -- used when
     re-rendering a submit error, whose fields live there.
 
-    ``has_saved_backup_password`` toggles the master-password input between a
-    "enter a passphrase" field (no saved password yet) and a read-only
-    "a saved password will be used" indicator.
+    ``is_master_password_set`` renders the master-password input at all (a
+    still-empty master password never needs typing); ``has_saved_backup_password``
+    adds the "leave blank to use your saved password" helper under it.
 
     ``host_name`` is an optional explicit workspace name, exposed as a "Name"
     field in the advanced view. When empty the name is chosen automatically
@@ -502,9 +500,6 @@ def render_create_form(
         if backup_provider is not None
         else (BackupProvider.IMBUE_CLOUD if is_remote_preset else BackupProvider.CONFIGURE_LATER)
     )
-    effective_backup_encryption = (
-        backup_encryption_method if backup_encryption_method is not None else BackupEncryptionMethod.NO_PASSWORD
-    )
     return CATALOG.render(
         "pages.Create",
         git_url=effective_url,
@@ -518,10 +513,9 @@ def render_create_form(
         selected_docker_runtime=effective_docker_runtime.value,
         backup_providers=list(BackupProvider),
         selected_backup_provider=effective_backup_provider.value,
-        backup_encryption_methods=list(BackupEncryptionMethod),
-        selected_backup_encryption_method=effective_backup_encryption.value,
         backup_api_key_env=backup_api_key_env,
         has_saved_backup_password=has_saved_backup_password,
+        is_master_password_set=is_master_password_set,
         accounts=accounts or [],
         default_account_id=default_account_id,
         anthropic_api_key=anthropic_api_key,
@@ -716,6 +710,7 @@ def render_inbox_page(
     detail_html: str = "",
     is_empty: bool = False,
     auto_open: bool = True,
+    keep_open: bool = False,
 ) -> str:
     """Render the full inbox modal page served by ``GET /inbox``.
 
@@ -725,7 +720,11 @@ def render_inbox_page(
     fragment, or empty). ``is_empty`` is True when there are no
     pending requests and the layout collapses to a centered message.
     ``auto_open`` is the initial state of the "Auto-open on new
-    request" checkbox in the inbox header.
+    request" checkbox in the inbox header. ``keep_open`` is True only
+    when the user intentionally opened the whole inbox (via the
+    Requests button); when False, resolving a request via Approve/Deny
+    dismisses the whole window instead of advancing to the next
+    pending request.
     """
     return CATALOG.render(
         "pages.Inbox",
@@ -734,6 +733,7 @@ def render_inbox_page(
         detail_html=detail_html,
         is_empty=is_empty,
         auto_open=auto_open,
+        keep_open=keep_open,
     )
 
 
@@ -1686,6 +1686,9 @@ def render_workspace_settings(
     is_leased_imbue_cloud: bool = False,
     current_color: str = DEFAULT_WORKSPACE_COLOR,
     is_stale: bool = False,
+    has_saved_backup_password: bool = False,
+    is_master_password_set: bool = False,
+    has_account: bool = False,
 ) -> str:
     """Render the workspace settings page.
 
@@ -1715,6 +1718,9 @@ def render_workspace_settings(
         is_leased_imbue_cloud=is_leased_imbue_cloud,
         current_color=current_color,
         is_stale=is_stale,
+        has_saved_backup_password=has_saved_backup_password,
+        is_master_password_set=is_master_password_set,
+        has_account=has_account,
         palette=WORKSPACE_PALETTE,
     )
 
@@ -1762,16 +1768,45 @@ def render_accounts_page(
 def render_settings_page(
     report_unexpected_errors: bool = False,
     include_error_logs: bool = False,
+    services_overview: Sequence[object] | None = None,
+    file_sharing_grants: Sequence[object] | None = None,
+    workspace_delegation_grants: Sequence[object] | None = None,
+    permissions_unavailable: bool = False,
+    has_saved_backup_password: bool = False,
 ) -> str:
     """Render the app-level settings page (reachable from the sidebar's "Settings" entry).
 
+    The page has a left nav (Permissions / Error reporting) and a right content
+    pane.
+
     ``report_unexpected_errors`` / ``include_error_logs`` seed the per-machine
     error-reporting toggles hosted on this page (the same settings the
-    first-launch consent screen records). They are global to the machine, not
-    account-scoped.
+    first-launch consent screen records); ``has_saved_backup_password`` feeds
+    the backup master-password section's helper text. All are global to the
+    machine, not account-scoped.
+
+    ``services_overview`` is a sequence of
+    :class:`~imbue.minds.desktop_client.latchkey.permission_overview.ServicePermissionOverview`
+    describing the predefined-service grants held across all active workspaces
+    (empty when nothing is granted). ``file_sharing_grants`` is a sequence of
+    :class:`~imbue.minds.desktop_client.latchkey.permission_overview.WorkspaceFileSharingGrant`
+    describing the file-sharing access granted per workspace, rendered as a
+    separate section below the services. ``workspace_delegation_grants`` is a
+    sequence of
+    :class:`~imbue.minds.desktop_client.latchkey.permission_overview.WorkspaceDelegationGrant`
+    describing the cross-workspace-management grants, grouped by the granting
+    workspace with one row per verb (naming the target[s] it covers), rendered
+    below file sharing. ``permissions_unavailable`` is True when the latchkey
+    gateway could not be reached to read grants, so the page shows a notice
+    instead of an empty list.
     """
     return CATALOG.render(
         "pages.Settings",
         report_unexpected_errors=report_unexpected_errors,
         include_error_logs=include_error_logs,
+        services_overview=list(services_overview or []),
+        file_sharing_grants=list(file_sharing_grants or []),
+        workspace_delegation_grants=list(workspace_delegation_grants or []),
+        permissions_unavailable=permissions_unavailable,
+        has_saved_backup_password=has_saved_backup_password,
     )
