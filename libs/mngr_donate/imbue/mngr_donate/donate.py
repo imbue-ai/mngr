@@ -405,9 +405,7 @@ def _require_macos() -> None:
         )
 
 
-def _install_schedule(
-    skill: str, skill_repo: str, skill_ref: str, agent_name: str, interval_minutes: int
-) -> str:
+def _install_schedule(skill: str, skill_repo: str, skill_ref: str, agent_name: str, interval_minutes: int) -> str:
     """Install the launchd LaunchAgent that runs donate on an interval."""
     _require_macos()
     log_path = str(_schedule_log_path())
