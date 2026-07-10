@@ -74,7 +74,11 @@ DEFAULT_AGENT_NAME = "donate-extra-quota-bio"
 DEFAULT_SKILL_REPO = (
     "https://gitlab.com/sinnott-armstrong-lab/elsi-checklist/credits-for-science/document-review-skill.git"
 )
-DEFAULT_SKILL_REF = "main"
+# Pinned to a reviewed commit (NOT "main") so unattended/scheduled runs execute an
+# audited version -- the agent runs this code with --dangerously-skip-permissions.
+# Bump this SHA in a reviewed PR to adopt the lab's updates; pass `--skill-ref main`
+# to track the branch instead.
+DEFAULT_SKILL_REF = "c2e9bbe799c20c9da3896c2205991164f10555fd"
 
 # `mngr donate --start` installs a scheduler that re-runs `mngr donate` on this
 # interval; each firing re-checks spare capacity and does another batch, so the
