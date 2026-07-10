@@ -295,7 +295,15 @@ def _schedule_log_path() -> Path:
 
 @pure
 def build_launchd_plist(
-    mngr_path: str, workdir: str, skill: str, agent_name: str, log_path: str, path_value: str, interval_seconds: int
+    mngr_path: str,
+    workdir: str,
+    skill: str,
+    skill_repo: str,
+    skill_ref: str,
+    agent_name: str,
+    log_path: str,
+    path_value: str,
+    interval_seconds: int,
 ) -> str:
     """The LaunchAgent plist that schedules donate on macOS.
 
@@ -309,10 +317,19 @@ def build_launchd_plist(
     ``claude``/``git`` (launchd starts with a minimal PATH), and stdout/stderr are
     captured to ``log_path``. ``StartInterval`` fires every ``interval_seconds``;
     ``RunAtLoad`` is false so installing doesn't kick off a tick immediately.
+
+    Every non-default skill/agent option the user passed to ``--start`` is carried
+    into the scheduled invocation (defaults are omitted to keep it minimal), so a
+    schedule installed with e.g. ``--skill-ref main`` actually tracks that ref on
+    every tick instead of silently reverting to the pinned default.
     """
     args = [mngr_path, "donate"]
     if skill != DEFAULT_SKILL:
         args += ["--skill", skill]
+    if skill_repo != DEFAULT_SKILL_REPO:
+        args += ["--skill-repo", skill_repo]
+    if skill_ref != DEFAULT_SKILL_REF:
+        args += ["--skill-ref", skill_ref]
     if agent_name != DEFAULT_AGENT_NAME:
         args += ["--agent-name", agent_name]
     program_args = "\n".join(f"        <string>{escape(a)}</string>" for a in args)
@@ -388,7 +405,9 @@ def _require_macos() -> None:
         )
 
 
-def _install_schedule(skill: str, agent_name: str, interval_minutes: int) -> str:
+def _install_schedule(
+    skill: str, skill_repo: str, skill_ref: str, agent_name: str, interval_minutes: int
+) -> str:
     """Install the launchd LaunchAgent that runs donate on an interval."""
     _require_macos()
     log_path = str(_schedule_log_path())
@@ -396,6 +415,8 @@ def _install_schedule(skill: str, agent_name: str, interval_minutes: int) -> str
         _current_mngr_path(),
         os.getcwd(),
         skill,
+        skill_repo,
+        skill_ref,
         agent_name,
         log_path,
         os.environ.get("PATH", ""),
@@ -689,7 +710,9 @@ def donate(ctx: click.Context, **kwargs: Any) -> None:
     if opts.start and opts.stop:
         raise MngrError("Pass only one of --start / --stop.")
     if opts.start:
-        message = _install_schedule(opts.skill, opts.agent_name, opts.interval_minutes)
+        message = _install_schedule(
+            opts.skill, opts.skill_repo, opts.skill_ref, opts.agent_name, opts.interval_minutes
+        )
         emit_info(f"{message}\nStop it with `mngr donate --stop`.", output_opts.output_format)
         return
     if opts.stop:

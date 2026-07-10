@@ -11,6 +11,9 @@ from __future__ import annotations
 import pytest
 
 from imbue.mngr_donate.donate import CLAUDE_SOURCE
+from imbue.mngr_donate.donate import DEFAULT_SKILL
+from imbue.mngr_donate.donate import DEFAULT_SKILL_REF
+from imbue.mngr_donate.donate import DEFAULT_SKILL_REPO
 from imbue.mngr_donate.donate import FIVE_HOUR_WINDOW
 from imbue.mngr_donate.donate import SEVEN_DAY_WINDOW
 from imbue.mngr_donate.donate import build_agent_env
@@ -166,7 +169,9 @@ def test_build_launchd_plist_embeds_program_env_and_interval() -> None:
     plist = build_launchd_plist(
         "/venv/bin/mngr",
         "/repo",
-        "document-review",
+        DEFAULT_SKILL,
+        DEFAULT_SKILL_REPO,
+        DEFAULT_SKILL_REF,
         "donate-extra-quota-bio",
         "/logs/schedule.log",
         "/usr/bin:/bin",
@@ -184,15 +189,31 @@ def test_build_launchd_plist_embeds_program_env_and_interval() -> None:
     assert "<string>/logs/schedule.log</string>" in plist
     # Defaults are omitted from ProgramArguments (kept minimal).
     assert "--skill" not in plist
+    assert "--skill-repo" not in plist
+    assert "--skill-ref" not in plist
     assert "--agent-name" not in plist
 
 
 def test_build_launchd_plist_includes_non_default_options() -> None:
     plist = build_launchd_plist(
-        "/venv/bin/mngr", "/repo", "other-skill", "my-agent", "/logs/schedule.log", "/usr/bin", 60
+        "/venv/bin/mngr",
+        "/repo",
+        "other-skill",
+        "https://example.com/other-skill.git",
+        "some-branch",
+        "my-agent",
+        "/logs/schedule.log",
+        "/usr/bin",
+        60,
     )
     assert "<string>--skill</string>" in plist
     assert "<string>other-skill</string>" in plist
+    # Non-default skill repo/ref are carried into the scheduled invocation, so a
+    # schedule installed with a custom ref actually runs against that ref.
+    assert "<string>--skill-repo</string>" in plist
+    assert "<string>https://example.com/other-skill.git</string>" in plist
+    assert "<string>--skill-ref</string>" in plist
+    assert "<string>some-branch</string>" in plist
     assert "<string>--agent-name</string>" in plist
     assert "<string>my-agent</string>" in plist
 
