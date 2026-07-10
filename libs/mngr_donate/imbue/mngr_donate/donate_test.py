@@ -1,4 +1,4 @@
-"""Unit tests for ``mngr_usage.donate`` -- the spare-capacity decision and argv builder.
+"""Unit tests for ``mngr_donate.donate`` -- the spare-capacity decision and argv builder.
 
 The decision logic is a pure function over a usage snapshot, so it's tested here
 directly with hand-built snapshots (no config/host setup). The ``donate`` command
