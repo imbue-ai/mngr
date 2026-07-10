@@ -2381,25 +2381,28 @@ def list_tunnels(request: Request) -> list[dict[str, object]]:
 
 
 @web_app.get("/tunnels/by-agent/{agent_id}")
-def get_tunnel_for_agent(request: Request, agent_id: str) -> dict[str, object]:
+def get_tunnel_for_agent(request: Request, agent_id: str) -> dict[str, object] | None:
     """Resolve the authenticated user's tunnel for ``agent_id`` (O(1) lookup).
 
     Uses Cloudflare's server-side name filter plus one config fetch (2
     Cloudflare calls) instead of the O(n) ``GET /tunnels`` path that
-    enumerates every tunnel and fetches each one's config. Returns 404 when
-    the user has no tunnel for the agent yet, letting the client distinguish
-    "sharing not enabled" from other failures. The static ``by-agent`` prefix
-    can never collide with a real ``{tunnel_name}`` (those always contain the
-    ``--`` separator), so there is no ambiguity with the other ``/tunnels/*``
-    routes.
+    enumerates every tunnel and fetches each one's config. The static
+    ``by-agent`` prefix can never collide with a real ``{tunnel_name}``
+    (those always contain the ``--`` separator), so there is no ambiguity
+    with the other ``/tunnels/*`` routes.
+
+    Returns HTTP 200 with ``null`` when the user has no tunnel for the agent
+    yet (rather than 404). This is deliberate: a client hitting a connector
+    that predates this endpoint gets FastAPI's generic 404-for-unknown-route,
+    so reserving 404 exclusively for "endpoint absent" lets the client tell
+    "this connector is too old, fall back to enumerating ``GET /tunnels``"
+    apart from "the endpoint works and there is simply no tunnel" (200 null).
     """
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
         admin = require_admin(auth)
         tunnel = get_ctx().get_tunnel_for_agent(admin.username, agent_id)
-        if tunnel is None:
-            raise HTTPException(status_code=404, detail=f"No tunnel found for agent '{agent_id}'")
-        return tunnel.model_dump()
+        return tunnel.model_dump() if tunnel is not None else None
 
 
 @web_app.delete("/tunnels/{tunnel_name}")

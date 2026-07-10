@@ -476,10 +476,13 @@ def test_route_get_tunnel_for_agent_admin(monkeypatch: pytest.MonkeyPatch) -> No
     assert resp.json()["tunnel_name"] == "testuser--agent1"
 
 
-def test_route_get_tunnel_for_agent_returns_404_when_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_route_get_tunnel_for_agent_returns_null_when_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 200 + null (not 404) so a client can tell "no tunnel" apart from
+    # "this connector predates the endpoint" (an unknown-route 404).
     client = _make_test_client(monkeypatch)
     resp = client.get("/tunnels/by-agent/agent1", headers=_admin_headers())
-    assert resp.status_code == 404
+    assert resp.status_code == 200
+    assert resp.json() is None
 
 
 def test_route_get_tunnel_for_agent_agent_forbidden(monkeypatch: pytest.MonkeyPatch) -> None:
