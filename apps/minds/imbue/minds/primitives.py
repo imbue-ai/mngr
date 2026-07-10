@@ -63,6 +63,7 @@ class LaunchMode(UpperCaseStrEnum):
     """How a workspace agent should be launched."""
 
     DOCKER = auto()
+    DOCKER_NIXOS = auto()
     VULTR = auto()
     LIMA = auto()
     IMBUE_CLOUD = auto()

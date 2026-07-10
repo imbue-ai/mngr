@@ -298,6 +298,7 @@ def test_render_create_form_contains_all_launch_modes() -> None:
         # not the visible text: Modal renders a friendly label instead of the
         # lowercased value (it shows "Modal (1-day ephemeral)").
         assert f'value="{mode.value}"' in html
+    assert "docker/nixos" in html
 
 
 def test_render_create_form_selects_imbue_cloud_compute_by_default() -> None:
@@ -315,6 +316,12 @@ def test_render_create_form_selects_specified_launch_mode() -> None:
     html = render_create_form(launch_mode=LaunchMode.VULTR)
     assert 'value="VULTR" selected' in html
     assert 'value="LIMA" selected' not in html
+
+
+def test_render_create_form_selects_docker_nixos_launch_mode() -> None:
+    html = render_create_form(launch_mode=LaunchMode.DOCKER_NIXOS)
+    assert 'value="DOCKER_NIXOS" selected' in html
+    assert "docker/nixos" in html
 
 
 def test_render_create_form_contains_ai_provider_options() -> None:

@@ -547,6 +547,8 @@ def provider_instance_name_for_launch(
     match launch_mode:
         case LaunchMode.DOCKER:
             return "docker"
+        case LaunchMode.DOCKER_NIXOS:
+            return "docker"
         case LaunchMode.LIMA:
             return "lima"
         case LaunchMode.VULTR:
@@ -743,6 +745,9 @@ def _build_mngr_create_command(
     match launch_mode:
         case LaunchMode.DOCKER:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "docker"])
+            mngr_command.extend(_remote_host_env_flags())
+        case LaunchMode.DOCKER_NIXOS:
+            mngr_command.extend(["--new-host", "--template", "main", "--template", "docker-nixos"])
             mngr_command.extend(_remote_host_env_flags())
         case LaunchMode.LIMA:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "lima"])

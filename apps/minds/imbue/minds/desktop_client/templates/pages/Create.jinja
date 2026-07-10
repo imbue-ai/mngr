@@ -633,7 +633,7 @@
           <Select id="launch_mode" name="launch_mode" width="w-48">
             {% for mode in launch_modes %}
               <option value="{{ mode.value }}"{% if mode.value == selected_launch_mode %} selected{% endif %}
-                      {% if mode.value == 'IMBUE_CLOUD' %}data-requires-account="true"{% endif %}>{% if mode.value == 'MODAL' %}Modal (1-day ephemeral){% else %}{{ mode.value | lower }}{% endif %}</option>
+                      {% if mode.value == 'IMBUE_CLOUD' %}data-requires-account="true"{% endif %}>{% if mode.value == 'DOCKER_NIXOS' %}docker/nixos{% elif mode.value == 'MODAL' %}Modal (1-day ephemeral){% else %}{{ mode.value | lower }}{% endif %}</option>
             {% endfor %}
           </Select>
         </div>
