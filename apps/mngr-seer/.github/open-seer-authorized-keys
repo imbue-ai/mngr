@@ -1,0 +1,18 @@
+# SSH public keys authorized to connect to open-seer's modal agents
+# (sweep-* and fixer-* machines).
+#
+# open-seer runs all agents under the shared MNGR_USER_ID "open-seer", so the
+# keys below are installed on every fixer image at spawn (DESIGN.md §2, §9).
+# The connect command for each fixer is posted as a comment on its Sentry
+# issue.
+#
+# To add yourself: run (from the open-seer repo root; the script imports mngr
+# internals, so it runs in your mngr checkout's environment)
+#   uv run --project <path-to-mngr-checkout> python scripts/setup_debug_access.py
+# and append the printed public key as a new line below. Open a PR.
+#
+# Lines starting with '#' and blank lines are ignored.
+#
+# To debug after your key is merged:
+#   MNGR_HOST_DIR=~/.mngr-open-seer mngr list
+#   MNGR_HOST_DIR=~/.mngr-open-seer mngr connect <agent-id>

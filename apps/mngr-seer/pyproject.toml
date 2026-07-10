@@ -1,0 +1,16 @@
+[project]
+name = "open-seer"
+version = "0.1.0"
+description = "Autonomous Sentry-error-to-PR system: hourly deterministic tick on Modal; all judgment lives in agent skills."
+requires-python = ">=3.10"
+dependencies = [
+    "modal",
+    "requests",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

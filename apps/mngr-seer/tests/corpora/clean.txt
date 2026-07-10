@@ -1,0 +1,48 @@
+# Clean corpus for the open-seer Gitleaks gate (DESIGN.md §11).
+# Ordinary code/diff text, deliberately salted with things that LOOK like
+# secrets or PII to a naive regex. Nothing in this file may be flagged by
+# gitleaks running with the repo's .gitleaks.toml.
+
+# --- version strings are not IPs ---
+__version__ = "1.2.3"
+gitleaks_version = "8.30.1"
+firmware version 10.1.2.3 shipped last week
+pip install urllib3==1.26.5.1
+kernel 5.15.0.101.98 (five components, never an IP)
+
+# --- non-identifying IP constants ---
+server.bind(("0.0.0.0", 8080))
+PING 127.0.0.1 (127.0.0.1): 56 data bytes
+allow_from = "169.254.10.20"
+
+# --- @ that is not an email ---
+@pytest.fixture
+def client():
+    return weights @ features.T
+
+remote = "git@github.com:imbue-ai/mngr.git"
+placeholder_sender = "user@example.com"
+reserved_tld = "someone@integration.test"
+bot = "noreply@ci.internal.example"
+
+# --- colons that are not IPv6 ---
+std::vector<int> frames;
+let parsed = config::loader::parse(input);
+timestamp = "2026-07-10T12:34:56"
+mac_address = "00:1a:2b:3c:4d:5e"
+
+# --- header names without header values ---
+# docs: pass "Authorization: Bearer <YOUR_TOKEN>" with your token filled in
+Cookie: session=<omitted>
+comment = "a bearer token is required for this endpoint"
+
+# --- identifier code, not identifier data ---
+user_id = current_user.id
+uid: str = Field(default_factory=new_uid)
+account_id = account.id
+customer_id_column = "customer_id"
+
+# --- connection strings done right ---
+DATABASE_URL = "postgres://minds:${DB_PASSWORD}@db.internal:5432/minds"
+REDIS_URL = "redis://cache.internal:6379/0"
+docs_url = "https://docs.sentry.io/api/events/"

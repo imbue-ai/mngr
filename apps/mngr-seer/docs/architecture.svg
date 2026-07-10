@@ -1,0 +1,39 @@
+<svg width="680" viewBox="0 0 680 530" role="img" xmlns="http://www.w3.org/2000/svg">
+<title>open-seer system architecture (v2)</title>
+<desc>An hourly Modal cron polls Sentry for unassigned unresolved minds errors and spawns an ephemeral sweep agent via mngr, which merges and assigns issues in Sentry and spawns one fixer agent per root cause on a fresh SSH-able image; fixers open single-commit GitHub PRs, with a feedback loop back to Sentry.</desc>
+<style>
+  text { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+  .th { font-size: 14px; font-weight: 500; }
+  .ts { font-size: 12px; font-weight: 400; fill: #5F5E5A; }
+  rect.shape { stroke-width: 0.5; }
+  .c-teal rect.shape { fill: #E1F5EE; stroke: #0F6E56; }
+  .c-teal .th { fill: #085041; }
+  .c-teal .ts { fill: #0F6E56; }
+  .c-purple rect.shape { fill: #EEEDFE; stroke: #534AB7; }
+  .c-purple .th { fill: #3C3489; }
+  .c-purple .ts { fill: #534AB7; }
+  .c-gray rect.shape { fill: #F1EFE8; stroke: #5F5E5A; }
+  .c-gray .th { fill: #444441; }
+  .c-gray .ts { fill: #5F5E5A; }
+  .arr { stroke: #5F5E5A; stroke-width: 1.5; fill: none; }
+  .leader { stroke: #888780; stroke-width: 0.75; stroke-dasharray: 4 3; fill: none; }
+</style>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#5F5E5A" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+<g class="c-teal"><rect class="shape" x="40" y="50" width="320" height="56" rx="4"/><text class="th" x="200" y="74" text-anchor="middle">Sentry · minds-* projects</text><text class="ts" x="200" y="92" text-anchor="middle">assigned = agent on it · merged = grouped</text></g>
+<line class="arr" x1="160" y1="106" x2="160" y2="152" marker-end="url(#arrow)"/>
+<g class="c-gray"><rect class="shape" x="40" y="156" width="240" height="56" rx="4"/><text class="th" x="160" y="180" text-anchor="middle">Hourly poll · Modal cron</text><text class="ts" x="160" y="198" text-anchor="middle">unassigned + unresolved</text></g>
+<line class="arr" x1="280" y1="184" x2="396" y2="184" marker-end="url(#arrow)"/>
+<g class="c-gray"><rect class="shape" x="400" y="156" width="200" height="56" rx="4"/><text class="th" x="500" y="180" text-anchor="middle">Mirror sync</text><text class="ts" x="500" y="198" text-anchor="middle">mngr → agentic-mngr</text></g>
+<line class="arr" x1="160" y1="212" x2="160" y2="258" marker-end="url(#arrow)"/>
+<g class="c-purple"><rect class="shape" x="40" y="262" width="370" height="56" rx="4"/><text class="th" x="225" y="286" text-anchor="middle">Sweep agent · fresh per tick</text><text class="ts" x="225" y="304" text-anchor="middle">mngr create · killed when idle</text></g>
+<line class="arr" x1="225" y1="318" x2="225" y2="364" marker-end="url(#arrow)"/>
+<rect x="40" y="368" width="370" height="100" rx="4" fill="none" stroke="#B4B2A9" stroke-width="0.75" stroke-dasharray="4 3"/>
+<text class="ts" x="225" y="388" text-anchor="middle">one per root cause · ≤10/sweep · SSH-able</text>
+<g class="c-purple"><rect class="shape" x="56" y="398" width="338" height="56" rx="4"/><text class="th" x="225" y="422" text-anchor="middle">Fixer agents · fresh image</text><text class="ts" x="225" y="440" text-anchor="middle">worktree · repro · fix · guardian · gitleaks</text></g>
+<line class="arr" x1="410" y1="426" x2="436" y2="426" marker-end="url(#arrow)"/>
+<g class="c-teal"><rect class="shape" x="440" y="398" width="160" height="56" rx="4"/><text class="th" x="520" y="422" text-anchor="middle">Draft → ready PR</text><text class="ts" x="520" y="440" text-anchor="middle">single commit</text></g>
+<path class="leader" d="M 600 426 H 640 V 64 H 368" marker-end="url(#arrow)"/>
+<g class="c-gray"><rect class="shape" x="40" y="488" width="12" height="12" rx="2"/></g><text class="ts" x="58" y="498">deterministic core</text>
+<g class="c-purple"><rect class="shape" x="200" y="488" width="12" height="12" rx="2"/></g><text class="ts" x="218" y="498">agents</text>
+<g class="c-teal"><rect class="shape" x="300" y="488" width="12" height="12" rx="2"/></g><text class="ts" x="318" y="498">external systems</text>
+</svg>
