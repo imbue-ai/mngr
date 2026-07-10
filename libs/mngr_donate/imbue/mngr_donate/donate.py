@@ -340,7 +340,7 @@ def _launchd_plist_path() -> Path:
     return agents_dir / f"{LAUNCHD_LABEL}.plist"
 
 
-def _install_launchd(plist: str, interval_minutes: int) -> None:
+def _install_launchd(plist: str) -> None:
     """Write the plist and (re)load it into the user's launchd GUI domain."""
     plist_path = _launchd_plist_path()
     plist_path.write_text(plist)
@@ -400,7 +400,7 @@ def _install_schedule(skill: str, agent_name: str, interval_minutes: int) -> str
         os.environ.get("PATH", ""),
         interval_minutes * 60,
     )
-    _install_launchd(plist, interval_minutes)
+    _install_launchd(plist)
     return (
         f"Scheduled donate via launchd ({LAUNCHD_LABEL}) every {interval_minutes} min from {os.getcwd()}; "
         f"logs -> {log_path}. It runs in your login session, so it can use your keychain login "
