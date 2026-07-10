@@ -17,6 +17,7 @@ import imbue.remote_service_connector.app as app_mod
 from imbue.remote_service_connector.app import AdminAuth
 from imbue.remote_service_connector.app import AuthPolicy
 from imbue.remote_service_connector.app import CloudflareApiError
+from imbue.remote_service_connector.app import ForwardingCtx
 from imbue.remote_service_connector.app import HttpCloudflareOps
 from imbue.remote_service_connector.app import InvalidR2BucketNameError
 from imbue.remote_service_connector.app import InvalidTunnelComponentError
@@ -214,6 +215,63 @@ def test_list_tunnels_filters_by_user() -> None:
     assert len(tunnels) == 2
 
 
+def test_get_tunnel_for_agent_returns_none_when_absent() -> None:
+    ctx = make_fake_forwarding_ctx()
+    assert ctx.get_tunnel_for_agent("alice", "agent1") is None
+
+
+def test_get_tunnel_for_agent_returns_tunnel_with_services() -> None:
+    ctx = make_fake_forwarding_ctx()
+    ctx.create_tunnel("alice", "agent1")
+    ctx.add_service("alice--agent1", "alice", "web", "http://localhost:8080")
+    tunnel = ctx.get_tunnel_for_agent("alice", "agent1")
+    assert tunnel is not None
+    assert tunnel.tunnel_name == "alice--agent1"
+    assert [s.service_name for s in tunnel.services] == ["web"]
+
+
+class _CallCountingCloudflareOps(FakeCloudflareOps):
+    """FakeCloudflareOps that counts the O(n)-prone tunnel calls.
+
+    Used to assert the ``get_tunnel_for_agent`` fast path never enumerates the
+    account (``list_tunnels``) and fetches only the matched tunnel's config.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.list_tunnels_calls = 0
+        self.get_tunnel_config_calls = 0
+
+    def list_tunnels(self, include_prefix: str = "") -> list[dict[str, Any]]:
+        self.list_tunnels_calls += 1
+        return super().list_tunnels(include_prefix=include_prefix)
+
+    def get_tunnel_config(self, tunnel_id: str) -> dict[str, Any]:
+        self.get_tunnel_config_calls += 1
+        return super().get_tunnel_config(tunnel_id)
+
+
+def test_get_tunnel_for_agent_targets_by_name_not_enumeration() -> None:
+    """The O(1) lookup must resolve the exact tunnel without enumerating the
+    account (``list_tunnels``) or fetching every tunnel's config.
+
+    Creates many tunnels for the user, then counts the expensive calls: the
+    lookup must hit ``get_tunnel_config`` exactly once (for the matched
+    tunnel) and never call ``list_tunnels``.
+    """
+    ops = _CallCountingCloudflareOps()
+    ctx = ForwardingCtx(ops=ops, domain="example.com")
+    for i in range(10):
+        ctx.create_tunnel("alice", f"agent{i}")
+    ops.get_tunnel_config_calls = 0
+    ops.list_tunnels_calls = 0
+    tunnel = ctx.get_tunnel_for_agent("alice", "agent7")
+    assert tunnel is not None
+    assert tunnel.tunnel_name == "alice--agent7"
+    assert ops.get_tunnel_config_calls == 1
+    assert ops.list_tunnels_calls == 0
+
+
 def test_delete_tunnel_cascades() -> None:
     ctx = make_fake_forwarding_ctx()
     ctx.create_tunnel("alice", "agent1")
@@ -408,6 +466,27 @@ def test_route_list_tunnels_admin(monkeypatch: pytest.MonkeyPatch) -> None:
     resp = client.get("/tunnels", headers=_admin_headers())
     assert resp.status_code == 200
     assert len(resp.json()) == 1
+
+
+def test_route_get_tunnel_for_agent_admin(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _make_test_client(monkeypatch)
+    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
+    resp = client.get("/tunnels/by-agent/agent1", headers=_admin_headers())
+    assert resp.status_code == 200
+    assert resp.json()["tunnel_name"] == "testuser--agent1"
+
+
+def test_route_get_tunnel_for_agent_returns_404_when_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _make_test_client(monkeypatch)
+    resp = client.get("/tunnels/by-agent/agent1", headers=_admin_headers())
+    assert resp.status_code == 404
+
+
+def test_route_get_tunnel_for_agent_agent_forbidden(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _make_test_client(monkeypatch)
+    client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
+    resp = client.get("/tunnels/by-agent/agent1", headers=_agent_headers("tunnel-1"))
+    assert resp.status_code == 403
 
 
 def test_route_add_service_admin(monkeypatch: pytest.MonkeyPatch) -> None:

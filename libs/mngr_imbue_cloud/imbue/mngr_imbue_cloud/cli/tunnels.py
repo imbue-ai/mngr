@@ -84,6 +84,34 @@ def list_tunnels(account: str | None, connector_url: str | None) -> None:
     )
 
 
+@tunnels.command(name="find-by-agent")
+@click.argument("agent_id")
+@click.option("--account", default=None, help="Account email (defaults to the active account)")
+@click.option("--connector-url", default=None, help="Override connector URL")
+@handle_imbue_cloud_errors
+def find_by_agent(agent_id: str, account: str | None, connector_url: str | None) -> None:
+    """Resolve this account's tunnel for AGENT_ID via the connector's O(1) lookup.
+
+    Emits the tunnel JSON, or the JSON literal ``null`` when no tunnel exists
+    for the agent yet.
+    """
+    client = make_connector_client(connector_url)
+    store = make_session_store()
+    parsed_account = resolve_account_or_active(store, account)
+    token = get_active_token(store, client, parsed_account)
+    info = client.find_tunnel_for_agent(token, agent_id)
+    if info is None:
+        emit_json(None)
+        return
+    emit_json(
+        {
+            "tunnel_name": info.tunnel_name,
+            "tunnel_id": info.tunnel_id,
+            "services": list(info.services),
+        }
+    )
+
+
 @tunnels.command(name="delete")
 @click.argument("tunnel_name")
 @click.option("--account", default=None, help="Account email (defaults to the active account)")

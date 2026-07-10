@@ -509,6 +509,27 @@ class ImbueCloudConnectorClient(MutableModel):
             return []
         return [_parse_tunnel_info(entry) for entry in body if isinstance(entry, dict)]
 
+    def find_tunnel_for_agent(self, access_token: SecretStr, agent_id: str) -> TunnelInfo | None:
+        """Resolve the caller's tunnel for ``agent_id`` via the O(1) connector lookup.
+
+        Hits ``GET /tunnels/by-agent/{agent_id}``, which resolves the exact
+        tunnel through Cloudflare's server-side name filter (2 Cloudflare
+        calls) rather than enumerating every tunnel and fetching each one's
+        config. Returns ``None`` when the connector reports 404 (no tunnel for
+        the agent yet).
+        """
+        response = self._send(
+            "GET",
+            self._url(f"/tunnels/by-agent/{agent_id}"),
+            exc_cls=ImbueCloudTunnelError,
+            headers=self._bearer(access_token),
+            timeout=self.timeout_seconds,
+        )
+        if response.status_code == 404:
+            return None
+        body = self._check(response, ImbueCloudTunnelError)
+        return _parse_tunnel_info(body)
+
     def delete_tunnel(self, access_token: SecretStr, tunnel_name: str) -> None:
         response = self._send(
             "DELETE",

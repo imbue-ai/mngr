@@ -547,3 +547,23 @@ def test_send_does_not_retry_http_status_errors(monkeypatch: pytest.MonkeyPatch)
     with pytest.raises(ImbueCloudTunnelError):
         client.list_tunnels(SecretStr("tok"))
     assert state["calls"] == 1
+
+
+def test_find_tunnel_for_agent_parses_tunnel(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/tunnels/by-agent/agent-abc123"
+        return httpx.Response(200, json={"tunnel_name": "owner--abc123", "tunnel_id": "t-1", "services": ["web"]})
+
+    client, _state = _install_flaky_httpx_get(monkeypatch, fail_times=0, handler=handler)
+    tunnel = client.find_tunnel_for_agent(SecretStr("tok"), "agent-abc123")
+    assert tunnel is not None
+    assert tunnel.tunnel_name == "owner--abc123"
+    assert tunnel.services == ("web",)
+
+
+def test_find_tunnel_for_agent_returns_none_on_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"detail": "No tunnel found for agent 'agent-abc123'"})
+
+    client, _state = _install_flaky_httpx_get(monkeypatch, fail_times=0, handler=handler)
+    assert client.find_tunnel_for_agent(SecretStr("tok"), "agent-abc123") is None

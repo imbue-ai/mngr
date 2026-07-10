@@ -144,6 +144,7 @@ When `CLOUDFLARE_ALLOWED_IDPS` is set, Access Applications created for forwarded
 
 - `POST /tunnels` -- Create a tunnel. Body: `{"agent_id": "...", "default_auth_policy": ...}`. Returns tunnel info with token.
 - `GET /tunnels` -- List your tunnels with their configured services.
+- `GET /tunnels/by-agent/{agent_id}` -- Resolve your tunnel for a single agent (O(1)): looks the tunnel up by its exact name (`<username>--<agent-prefix>`) via Cloudflare's server-side name filter plus one config fetch, instead of enumerating every tunnel like `GET /tunnels`. Returns the tunnel info (no token) or 404 when no tunnel exists for that agent yet.
 - `DELETE /tunnels/{tunnel_name}` -- Delete a tunnel and all its DNS records, Access Applications, ingress rules, and KV entries.
 
 ### Services (admin or agent)
