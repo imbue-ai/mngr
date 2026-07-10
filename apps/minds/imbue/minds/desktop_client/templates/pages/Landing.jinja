@@ -24,6 +24,14 @@
     // pre-action liveness) does not clobber the transient back. Cleared once the
     // authoritative state reaches the target or the action fails.
     var pendingMindActionByAgent = {};
+    // When the user last issued a Start/Stop (ms epoch). A host mid-transition
+    // can transiently drop out of the discovery snapshot (a stopping VM is
+    // briefly neither live-listable nor yet offline-reconstructed); within this
+    // grace window a rows-disappeared diff must NOT trigger the reload below,
+    // or the page reloads into the zero-workspace create form and the row
+    // "vanishes" until discovery catches up.
+    var lastMindActionAt = 0;
+    var MIND_ACTION_GRACE_MS = 180000;
     var isElectronShell = navigator.userAgent.indexOf('Electron') !== -1;
 
     function getRow(agentId) {
@@ -33,9 +41,13 @@
     function applyRowHealth(agentId, status) {
       var row = getRow(agentId);
       if (!row) return;
-      // A stopped container has no server to be unhealthy; suppress the health
-      // badge entirely so it doesn't compete with the "Stopped" state badge.
-      if (mindLivenessByAgent[agentId] === 'STOPPED') {
+      // A stopped container has no server to be unhealthy, and a host mid
+      // Start/Stop is *expected* to be unreachable (a cloud VM transition takes
+      // 30-90s); suppress the health badge in those states so "Server not
+      // responding" doesn't compete with the state badge that already explains
+      // what's happening.
+      var liveness = mindLivenessByAgent[agentId];
+      if (liveness === 'STOPPED' || liveness === 'STOPPING' || liveness === 'STARTING') {
         status = 'healthy';
       }
       var badge = row.querySelector('.landing-health-badge');
@@ -164,6 +176,7 @@
       if (!row) return;
       var agentId = row.dataset.agentId;
       pendingMindActionByAgent[agentId] = 'RUNNING';
+      lastMindActionAt = Date.now();
       applyMindLiveness(agentId, 'STARTING');
       // The endpoint is synchronous: it resolves only once the host has actually
       // started (or failed), so a non-ok response is a real failure to revert.
@@ -202,6 +215,7 @@
         + 'Data is preserved and you can start it again.');
       if (!ok) return;
       pendingMindActionByAgent[agentId] = 'STOPPED';
+      lastMindActionAt = Date.now();
       applyMindLiveness(agentId, 'STOPPING');
       fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/stop', { method: 'POST' })
         .then(function (response) {
@@ -600,10 +614,16 @@
         if (data.type !== 'workspaces' || !Array.isArray(data.workspaces)) return;
         var liveIds = data.workspaces.map(function (w) { return w.id; });
         var liveSet = new Set(liveIds);
-        var differs = liveIds.length !== renderedSet.size
-          || liveIds.some(function (id) { return !renderedSet.has(id); })
-          || renderedIds.some(function (id) { return !liveSet.has(id); });
-        if (differs) {
+        var added = liveIds.some(function (id) { return !renderedSet.has(id); });
+        var removed = renderedIds.some(function (id) { return !liveSet.has(id); });
+        // Rows disappearing during (or shortly after) a Start/Stop are the
+        // host's transition window, not a destroy: a stopping VM transiently
+        // drops out of discovery before its offline record is readable. Keep
+        // the rendered rows sticky through that window instead of reloading
+        // into a (possibly empty -> create form) page. New rows always reload.
+        var inLifecycleChurn = Object.keys(pendingMindActionByAgent).length > 0
+          || (Date.now() - lastMindActionAt) < MIND_ACTION_GRACE_MS;
+        if (added || (removed && !inLifecycleChurn)) {
           es.close();
           location.reload();
           return;
