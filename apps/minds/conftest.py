@@ -86,8 +86,8 @@ def mngr_test_prefix() -> str:
     prefix into that subprocess is os.environ, which the autouse fixture
     (setup_test_mngr_env -> monkeypatch.setenv("MNGR_PREFIX", ...)) already owns.
     Overriding mngr_test_prefix here makes the autouse put the correct value in
-    os.environ for the whole test, covering both the desktop client's in-process
-    spawn AND clean_env()-based subprocess calls uniformly.
+    os.environ for the whole test, covering every mngr subprocess the desktop
+    client spawns uniformly.
     """
     return f"{generate_test_environment_name()}-"
 

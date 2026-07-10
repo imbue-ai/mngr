@@ -1,1 +1,0 @@
-Documentation: the `mngr imbue_cloud admin server order` CLI reference now lists the new `--dry-run` flag (build + price a non-committal OVH cart and print the preview, then delete it without ordering).
