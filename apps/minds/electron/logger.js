@@ -8,6 +8,16 @@
 // unhandled rejections, so those failures are durably diagnosable and uploadable
 // with bug reports. Initialize this as the very first thing in main.js (before
 // initSentry) so startup output is captured.
+//
+// Why not the `electron-log` library: it is the usual pick for durable Electron
+// logging, but it does not gzip its rotations and names them differently, and we
+// specifically want on-disk gzipped rotations under fixed, exact names
+// (`electron.log` / `electron.log.<ts>.gz`, mirroring the backend's `minds.log`
+// scheme) so the Sentry `LogAttachmentGroup` globs in utils/sentry/core.py can
+// upload the current file plus the newest rotation with no extra transform. The
+// shared electron/log-rotation.js gives us exactly that and mirrors the Python
+// jsonl sink's 100MB/keep-10 behavior, so a small, purpose-fit helper is
+// preferable to adapting a heavier general-purpose dependency here.
 const path = require('path');
 const util = require('util');
 const paths = require('./paths');

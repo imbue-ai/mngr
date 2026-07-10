@@ -33,6 +33,26 @@ function waitForGz(dir, baseName, timeoutMs = 2000) {
   });
 }
 
+// The rotating stream is async (fs.WriteStream), so a just-written line reaches
+// disk on a later tick. Poll the file until it equals the expected content.
+function waitForFileContent(filePath, expected, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  return new Promise((resolve, reject) => {
+    const poll = () => {
+      let content = '';
+      try {
+        content = fs.readFileSync(filePath, 'utf8');
+      } catch {
+        content = '';
+      }
+      if (content === expected) return resolve(content);
+      if (Date.now() >= deadline) return reject(new Error(`file never became ${JSON.stringify(expected)} (was ${JSON.stringify(content)})`));
+      setTimeout(poll, 20);
+    };
+    poll();
+  });
+}
+
 test('rotationTimestamp is a fixed-width, chronologically-sortable UTC string', () => {
   const earlier = rotationTimestamp(new Date('2025-01-02T03:04:05.006Z'));
   const later = rotationTimestamp(new Date('2025-01-02T03:04:05.007Z'));
@@ -41,13 +61,13 @@ test('rotationTimestamp is a fixed-width, chronologically-sortable UTC string', 
   assert.ok(earlier < later, 'later timestamp must sort after the earlier one');
 });
 
-test('writes below the threshold do not rotate', () => {
+test('writes below the threshold do not rotate', async () => {
   const dir = tempDir();
   const filePath = path.join(dir, 'electron.log');
   const stream = createRotatingLogStream({ filePath, maxSizeBytes: 1000, maxRotatedCount: 5 });
   stream.write('a'.repeat(100) + '\n');
   stream.write('b'.repeat(100) + '\n');
-  stream.end();
+  await stream.end(); // resolves once the async stream has flushed
 
   assert.equal(fs.readdirSync(dir).length, 1, 'no rotation expected');
   assert.ok(fs.readFileSync(filePath, 'utf8').includes('aaaa'));
@@ -57,20 +77,20 @@ test('crossing the threshold rotates, gzips the old file, and starts a fresh one
   const dir = tempDir();
   const filePath = path.join(dir, 'electron.log');
   const stream = createRotatingLogStream({ filePath, maxSizeBytes: 200, maxRotatedCount: 5 });
-  // First write pushes tracked size past the threshold; the SECOND write sees
-  // the over-size file and rotates before writing.
+  // The first write pushes tracked size past the threshold; the SECOND write sees
+  // the over-size file and triggers rotation, then is replayed into the fresh file.
   stream.write('x'.repeat(250) + '\n');
   stream.write('fresh-line\n');
-  stream.end();
 
   const gz = await waitForGz(dir, 'electron.log');
   assert.equal(gz.length, 1);
   // The rotated (gzipped) file holds the pre-rotation content...
   const rotatedContent = zlib.gunzipSync(fs.readFileSync(path.join(dir, gz[0]))).toString();
   assert.ok(rotatedContent.includes('xxxx'));
-  // ...and the current file holds only what was written after rotating.
-  const currentContent = fs.readFileSync(filePath, 'utf8');
+  // ...and the fresh file eventually holds only what was written after rotating.
+  const currentContent = await waitForFileContent(filePath, 'fresh-line\n');
   assert.equal(currentContent, 'fresh-line\n');
+  await stream.end();
 });
 
 test('pruneRotated keeps only the newest N gzipped rotations', () => {

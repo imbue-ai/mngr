@@ -92,12 +92,15 @@ function compressRotatedFile(rawPath, dir, baseName, maxRotatedCount) {
 /**
  * Open an append-mode, size-rotating log sink at ``filePath``.
  *
- * Returns ``{ write(chunk), end() }``. Writes are synchronous (fd-based) so the
- * file is fully flushed before a rotation renames it -- the gzip of the rotated
- * file then never races a partial flush. When the tracked size reaches
- * ``maxSizeBytes`` the current file is renamed to ``<name>.<timestamp>``, a
- * fresh file is opened immediately (logging continues), and the rotated file is
- * gzipped in the background and pruned to ``maxRotatedCount`` newest.
+ * Returns ``{ write(chunk), end() }``. Backed by an async ``fs.WriteStream``
+ * (matching the non-blocking log stream this replaced -- writes never block the
+ * Electron main thread). When the tracked size reaches ``maxSizeBytes`` the
+ * stream is ended (which flushes all buffered writes and closes the fd) and only
+ * THEN is the file renamed to ``<name>.<timestamp>`` -- so the background gzip
+ * can never read a partially-flushed file. A fresh stream is opened, the rotated
+ * file is gzipped and pruned to ``maxRotatedCount`` newest, and any lines that
+ * arrived mid-rotation are replayed. ``end()`` returns a promise that resolves
+ * once the current stream has flushed.
  */
 function createRotatingLogStream(options) {
   const filePath = options.filePath;
@@ -109,51 +112,84 @@ function createRotatingLogStream(options) {
   fs.mkdirSync(dir, { recursive: true });
   pruneRotated(dir, baseName, maxRotatedCount);
 
-  let fd = fs.openSync(filePath, 'a');
+  // Never throw from an async stream 'error' (that would crash the main process),
+  // and never route it through console.* (which is teed back into a log stream) --
+  // write it straight to stderr.
+  const attachErrorHandler = (writeStream) => {
+    writeStream.on('error', (err) => {
+      try {
+        process.stderr.write(`[log-rotation] write stream error for ${filePath}: ${err && err.message}\n`);
+      } catch {
+        // Nothing more we can do.
+      }
+    });
+  };
+
+  const openStream = () => {
+    const writeStream = fs.createWriteStream(filePath, { flags: 'a' });
+    attachErrorHandler(writeStream);
+    return writeStream;
+  };
+
+  let stream = openStream();
   let size = 0;
   try {
     size = fs.statSync(filePath).size;
   } catch {
     size = 0;
   }
+  let isRotating = false;
+  // Lines that arrive after the old stream starts closing but before the fresh
+  // one opens are buffered here and replayed once rotation completes.
+  const pendingDuringRotation = [];
 
-  function rotateIfNeeded() {
-    if (size < maxSizeBytes) return;
-    try {
-      fs.closeSync(fd);
-      const rawPath = filePath + '.' + rotationTimestamp();
-      fs.renameSync(filePath, rawPath);
-      fd = fs.openSync(filePath, 'a');
-      size = 0;
-      compressRotatedFile(rawPath, dir, baseName, maxRotatedCount);
-    } catch (err) {
-      console.warn(`[log-rotation] rotation failed for ${filePath}: ${err && err.message}`);
-      // Ensure we still hold a usable fd so logging keeps working.
+  const rotate = () => {
+    isRotating = true;
+    const rotating = stream;
+    // end()'s callback fires after all buffered writes have flushed and the fd is
+    // closed; renaming only then guarantees the gzip reads a complete file.
+    rotating.end(() => {
       try {
-        fd = fs.openSync(filePath, 'a');
-      } catch {
-        // Nothing more we can do; subsequent writes will no-op on the closed fd.
+        const rawPath = filePath + '.' + rotationTimestamp();
+        fs.renameSync(filePath, rawPath);
+        compressRotatedFile(rawPath, dir, baseName, maxRotatedCount);
+      } catch (err) {
+        console.warn(`[log-rotation] rotation failed for ${filePath}: ${err && err.message}`);
       }
+      stream = openStream();
+      size = 0;
+      isRotating = false;
+      const buffered = pendingDuringRotation.splice(0);
+      for (const chunk of buffered) writeChunk(chunk);
+    });
+  };
+
+  function writeChunk(text) {
+    if (isRotating) {
+      pendingDuringRotation.push(text);
+      return;
     }
+    if (size >= maxSizeBytes) {
+      pendingDuringRotation.push(text);
+      rotate();
+      return;
+    }
+    stream.write(text);
+    size += Buffer.byteLength(text);
   }
 
   return {
     write(chunk) {
-      const text = typeof chunk === 'string' ? chunk : String(chunk);
-      rotateIfNeeded();
-      try {
-        fs.writeSync(fd, text);
-      } catch {
-        // A broken log fd must never bring down the app.
-      }
-      size += Buffer.byteLength(text);
+      writeChunk(typeof chunk === 'string' ? chunk : String(chunk));
     },
     end() {
-      try {
-        fs.closeSync(fd);
-      } catch {
-        // Already closed -- fine.
-      }
+      return new Promise((resolve) => {
+        try {
+          stream.end(resolve);
+        } catch {
+          resolve();
+        }
+      });
     },
   };
 }
