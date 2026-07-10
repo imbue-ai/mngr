@@ -12,15 +12,15 @@ import pytest
 
 from imbue.mngr_usage.data_types import UsageSnapshot
 from imbue.mngr_usage.data_types import WindowSnapshot
-from imbue.mngr_usage.donate import CLAUDE_SOURCE
-from imbue.mngr_usage.donate import FIVE_HOUR_WINDOW
-from imbue.mngr_usage.donate import SEVEN_DAY_WINDOW
-from imbue.mngr_usage.donate import build_create_argv
-from imbue.mngr_usage.donate import build_destroy_argv
-from imbue.mngr_usage.donate import build_donation_message
-from imbue.mngr_usage.donate import build_launchd_plist
-from imbue.mngr_usage.donate import evaluate_capacity
-from imbue.mngr_usage.donate import weekly_pace_line
+from imbue.mngr_donate.donate import CLAUDE_SOURCE
+from imbue.mngr_donate.donate import FIVE_HOUR_WINDOW
+from imbue.mngr_donate.donate import SEVEN_DAY_WINDOW
+from imbue.mngr_donate.donate import build_create_argv
+from imbue.mngr_donate.donate import build_destroy_argv
+from imbue.mngr_donate.donate import build_donation_message
+from imbue.mngr_donate.donate import build_launchd_plist
+from imbue.mngr_donate.donate import evaluate_capacity
+from imbue.mngr_donate.donate import weekly_pace_line
 
 # A fixed "now" and a 7-day window; resets_at is set relative to NOW so a chosen
 # fraction of the window has elapsed.
@@ -45,7 +45,8 @@ def _snapshot(**windows: WindowSnapshot) -> UsageSnapshot:
 def test_weekly_pace_line_starts_below_and_meets_the_plain_line() -> None:
     # Early in the cycle the ceiling sits ~30% under the plain used==elapsed line...
     assert weekly_pace_line(0.0) == pytest.approx(0.0)
-    assert weekly_pace_line(50.0) == pytest.approx(42.5)  # 50 * (1 - 0.30 * 0.5)
+    # 50 * (1 - 0.30 * 0.5) == 42.5
+    assert weekly_pace_line(50.0) == pytest.approx(42.5)
     # ...and meets it exactly at the end of the cycle.
     assert weekly_pace_line(100.0) == pytest.approx(100.0)
 
@@ -101,7 +102,8 @@ def test_partial_reading_counts_as_having_usage_data() -> None:
     snap = _snapshot(**{FIVE_HOUR_WINDOW: WindowSnapshot(used_percentage=90.0)})
     decision = evaluate_capacity(snap, _NOW)
     assert decision.has_usage_data is True
-    assert decision.has_spare is False  # 90 >= 80 ceiling
+    # 90 >= 80 ceiling
+    assert decision.has_spare is False
 
 
 def test_snapshot_without_windows_is_conservative() -> None:
@@ -128,7 +130,7 @@ def test_window_without_derivable_elapsed_yields_zero_pace_and_no_spare() -> Non
 
 
 def test_build_create_argv_launches_a_headless_agent_that_skips_permissions() -> None:
-    argv = build_create_argv("donate-extra-quota-bio", "document-review")
+    argv = build_create_argv("donate-extra-quota-bio", "/host/donate-skills/document-review")
     assert argv[:8] == (
         "mngr",
         "create",
@@ -137,7 +139,7 @@ def test_build_create_argv_launches_a_headless_agent_that_skips_permissions() ->
         "--foreground",
         "--no-ensure-clean",
         "--message",
-        build_donation_message("document-review"),
+        build_donation_message("/host/donate-skills/document-review"),
     )
     assert argv[8:] == (
         "--",
@@ -149,8 +151,11 @@ def test_build_create_argv_launches_a_headless_agent_that_skips_permissions() ->
     )
 
 
-def test_build_donation_message_names_the_skill() -> None:
-    assert "document-review" in build_donation_message("document-review")
+def test_build_donation_message_points_the_agent_at_the_skill_dir() -> None:
+    message = build_donation_message("/host/donate-skills/document-review")
+    # Points at the assembled cache dir (not Claude skill auto-discovery) and its SKILL.md.
+    assert "/host/donate-skills/document-review/SKILL.md" in message
+    assert "client.py" in message
 
 
 def test_build_launchd_plist_embeds_program_env_and_interval() -> None:
@@ -160,9 +165,12 @@ def test_build_launchd_plist_embeds_program_env_and_interval() -> None:
     # Runs mngr donate directly (no shell), in the repo, with the given PATH + interval.
     assert "<string>/venv/bin/mngr</string>" in plist
     assert "<string>donate</string>" in plist
-    assert "<string>/repo</string>" in plist  # WorkingDirectory
-    assert "<string>/usr/bin:/bin</string>" in plist  # EnvironmentVariables PATH
-    assert "<integer>600</integer>" in plist  # StartInterval seconds
+    # WorkingDirectory
+    assert "<string>/repo</string>" in plist
+    # EnvironmentVariables PATH
+    assert "<string>/usr/bin:/bin</string>" in plist
+    # StartInterval seconds (600s == 10 min)
+    assert "<integer>600</integer>" in plist
     assert "<string>/logs/schedule.log</string>" in plist
     # Defaults are omitted from ProgramArguments (kept minimal).
     assert "--skill" not in plist

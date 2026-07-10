@@ -1,0 +1,1 @@
+Moved `mngr donate` out of this plugin into the new standalone `imbue-mngr-donate` plugin (donating spare quota is orthogonal to measuring usage). `mngr usage` is unchanged; if you want `mngr donate`, install `imbue-mngr-donate` (which depends on this package).

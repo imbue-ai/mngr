@@ -1,7 +1,7 @@
 """``mngr donate`` -- spend spare Claude capacity on a donation skill.
 
-Sibling to ``mngr usage`` in this plugin. One invocation is a single
-check-and-maybe-launch *tick*:
+Companion to ``mngr usage`` (a separate plugin this one depends on for the
+spare-capacity snapshot). One invocation is a single check-and-maybe-launch *tick*:
 
 1. Read the account-level usage snapshot (the same one ``mngr usage`` shows).
 2. Decide whether there's *spare capacity* -- a Python port of the
@@ -64,6 +64,14 @@ SEVEN_DAY_WINDOW = "seven_day"
 
 DEFAULT_SKILL = "document-review"
 DEFAULT_AGENT_NAME = "donate-extra-quota-bio"
+
+# Where the donation skill's PROMPTS are pulled from at run time. The skill's CODE
+# is pinned/reviewed in this repo under .claude/skills/<name>/; only the prompts
+# (the experiment rubrics) come from the lab's upstream repo, so scientists can
+# revise them without an mngr release. Overridable via --skill-repo.
+DEFAULT_SKILL_REPO = (
+    "https://gitlab.com/sinnott-armstrong-lab/elsi-checklist/credits-for-science/document-review-skill.git"
+)
 
 # `mngr donate --start` installs a scheduler that re-runs `mngr donate` on this
 # interval; each firing re-checks spare capacity and does another batch, so the
@@ -178,27 +186,33 @@ DONATE_AGENT_ARGS = (
 
 
 @pure
-def build_donation_message(skill: str) -> str:
+def build_donation_message(skill_dir: str) -> str:
     """The first message the donation agent receives.
 
-    Kept minimal: run the skill and work through whatever it leases, then stop.
-    How much is leased per run is the skill's own concern (e.g. document-review's
-    ``skill_config.yaml`` ``count``), not something donate can cap from here.
+    Points the agent at the assembled skill dir (pinned code + freshly-pulled
+    prompts; see :func:`prepare_skill_dir`) and tells it to run the skill from
+    there in manual mode, then stop. We pass an explicit path rather than relying
+    on Claude's skill auto-discovery because the skill lives in a host-dir cache,
+    not the agent's git worktree.
     """
-    return f"Use the {skill} skill to complete the work it leases, then stop."
+    return (
+        f"Follow the instructions in {skill_dir}/SKILL.md to review documents: run its client.py "
+        f"from {skill_dir} to lease a work item, review it against the active prompt yourself, and "
+        f"submit the result. Complete the work it leases, then stop."
+    )
 
 
 @pure
-def build_create_argv(agent_name: str, skill: str, mngr_path: str = "mngr") -> tuple[str, ...]:
+def build_create_argv(agent_name: str, skill_dir: str, mngr_path: str = "mngr") -> tuple[str, ...]:
     """The ``mngr create`` invocation that launches a donation agent.
 
     Launches a **headless** claude agent so the donation runs unattended (see
     :data:`DONATE_AGENT_TYPE`). ``--foreground`` is required for headless types
     (it streams output and auto-destroys when done). The skill instruction (see
-    :func:`build_donation_message`) is passed as the agent's first message;
-    ``--dangerously-skip-permissions`` is spliced in after ``--`` so it reaches
-    ``claude`` as an agent arg. Runs from the caller's cwd, so invoke ``mngr
-    donate`` from a trusted repo (like the recipes' ``cd``).
+    :func:`build_donation_message`, pointed at ``skill_dir``) is passed as the
+    agent's first message; ``--dangerously-skip-permissions`` is spliced in after
+    ``--`` so it reaches ``claude`` as an agent arg. Runs from the caller's cwd, so
+    invoke ``mngr donate`` from a trusted repo (like the recipes' ``cd``).
 
     ``mngr_path`` is the mngr executable to spawn. The command passes an absolute
     path (:func:`_current_mngr_path`) so the launch never depends on ``mngr``
@@ -215,7 +229,7 @@ def build_create_argv(agent_name: str, skill: str, mngr_path: str = "mngr") -> t
         # would fail every tick whenever the working repo has edits.
         "--no-ensure-clean",
         "--message",
-        build_donation_message(skill),
+        build_donation_message(skill_dir),
         "--",
         *DONATE_AGENT_ARGS,
     )
@@ -390,6 +404,8 @@ def _clear_stale_worktree(agent_name: str) -> None:
         elif line.strip() == f"branch refs/heads/{branch}":
             worktree_path = current_path
             break
+        else:
+            continue
     if worktree_path is not None:
         subprocess.run(
             ("git", "worktree", "remove", "--force", worktree_path), check=False, capture_output=True
@@ -408,6 +424,83 @@ def _donate_log_dir() -> Path:
     log_dir = read_default_host_dir() / "donate-logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     return log_dir
+
+
+def _donate_skill_dir(skill_name: str) -> Path:
+    """The host-dir cache where donate assembles a runnable copy of the skill.
+
+    Under mngr's host dir (like the logs), so it persists across ticks -- the
+    last-pulled prompts survive a later network hiccup.
+    """
+    return read_default_host_dir() / "donate-skills" / skill_name
+
+
+# The pinned skill CODE files copied from the in-repo skill dir into the cache each
+# tick. Excludes prompts/ (pulled from the upstream repo) and the live per-worker
+# artifacts (the generated skill_config / result.json / __pycache__).
+_SKILL_CODE_FILES = (
+    "SKILL.md",
+    "client.py",
+    "sources.py",
+    "prompts.py",
+    "requirements.txt",
+    "skill_config.example.yaml",
+)
+
+
+def _repo_skill_source(skill_name: str) -> Path:
+    """The in-repo pinned skill dir (``<git root>/.claude/skills/<name>``).
+
+    donate is run from a trusted git repo (the same one ``mngr create`` sources the
+    agent from); the reviewed skill code lives there. Resolved from the git
+    top-level so it works from any subdir of the repo.
+    """
+    result = subprocess.run(("git", "rev-parse", "--show-toplevel"), check=False, capture_output=True, text=True)
+    root = Path(result.stdout.strip()) if result.returncode == 0 else Path.cwd()
+    return root / ".claude" / "skills" / skill_name
+
+
+def prepare_skill_dir(skill_name: str, skill_repo: str) -> Path:
+    """Assemble a runnable skill dir = pinned in-repo code + freshly-pulled prompts.
+
+    The code is copied from the reviewed in-repo skill (:func:`_repo_skill_source`);
+    the prompts are pulled from ``skill_repo`` (the lab's upstream) so experiment
+    rubrics update without an mngr release. Best-effort on the pull: a network
+    failure keeps the last-pulled prompts, and only a *first* run with no cached
+    prompts and an unreachable repo is fatal. Returns the cache dir for the agent.
+    """
+    cache = _donate_skill_dir(skill_name)
+    cache.mkdir(parents=True, exist_ok=True)
+
+    # 1. Copy the pinned code (overwrite each tick so it tracks the reviewed repo).
+    source = _repo_skill_source(skill_name)
+    if not source.is_dir():
+        raise MngrError(f"Pinned skill code not found at {source} -- run `mngr donate` from the mngr repo.")
+    for name in _SKILL_CODE_FILES:
+        src_file = source / name
+        if src_file.is_file():
+            shutil.copy2(src_file, cache / name)
+
+    # 2. Pull the upstream prompts into a sibling checkout, then sync them in.
+    checkout = _donate_skill_dir(f"{skill_name}-upstream")
+    if (checkout / ".git").is_dir():
+        pulled = subprocess.run(("git", "-C", str(checkout), "pull", "--ff-only"), check=False, capture_output=True)
+    else:
+        shutil.rmtree(checkout, ignore_errors=True)
+        pulled = subprocess.run(
+            ("git", "clone", "--depth", "1", skill_repo, str(checkout)), check=False, capture_output=True
+        )
+    prompts_dst = cache / "prompts"
+    upstream_prompts = checkout / "prompts"
+    if pulled.returncode == 0 and upstream_prompts.is_dir():
+        shutil.rmtree(prompts_dst, ignore_errors=True)
+        shutil.copytree(upstream_prompts, prompts_dst)
+    elif not (prompts_dst.is_dir() and any(prompts_dst.glob("*.txt"))):
+        raise MngrError(f"Could not pull donation prompts from {skill_repo}, and no cached prompts exist.")
+    else:
+        # pull failed but cached prompts are still usable -- reuse them
+        pass
+    return cache
 
 
 def _donation_log_path(agent_name: str, now: int) -> Path:
@@ -450,6 +543,7 @@ class DonateCliOptions(CommonCliOptions):
     """Options for ``mngr donate`` (plus the common output/logging options)."""
 
     skill: str
+    skill_repo: str
     agent_name: str
     dry_run: bool
     start: bool
@@ -476,7 +570,13 @@ def _result_data(capacity: DonateCapacity, opts: DonateCliOptions) -> dict[str, 
     "--skill",
     default=DEFAULT_SKILL,
     show_default=True,
-    help="Skill the donation agent should run (passed as its first message).",
+    help="Donation skill to run (its pinned code lives in the repo's .claude/skills/<skill>/).",
+)
+@click.option(
+    "--skill-repo",
+    default=DEFAULT_SKILL_REPO,
+    show_default=True,
+    help="Git repo to pull the skill's prompts from fresh each run.",
 )
 @click.option(
     "--agent-name",
@@ -599,11 +699,14 @@ def donate(ctx: click.Context, **kwargs: Any) -> None:
     mngr_path = _current_mngr_path()
     if shutil.which(mngr_path) is None and not Path(mngr_path).is_file():
         raise MngrError(f"Could not locate an mngr executable to launch the donation agent (tried {mngr_path!r}).")
-    argv = build_create_argv(opts.agent_name, opts.skill, mngr_path)
+    # Assemble the skill dir (pinned code + freshly-pulled prompts) before launch,
+    # and point the agent at it.
+    skill_dir = prepare_skill_dir(opts.skill, opts.skill_repo)
+    argv = build_create_argv(opts.agent_name, str(skill_dir), mngr_path)
     log_path = _donation_log_path(opts.agent_name, now)
     emit_info(
-        f"Spare capacity available -- launching '{opts.agent_name}' to run the {opts.skill} skill.\n"
-        f"Streaming its steps below; full event log at {log_path}",
+        f"Spare capacity available -- launching '{opts.agent_name}' to run the {opts.skill} skill "
+        f"from {skill_dir}.\nStreaming its steps below; full event log at {log_path}",
         output_opts.output_format,
     )
     # Clear anything a prior failed tick left behind so the create below can't

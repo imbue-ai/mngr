@@ -1,0 +1,1 @@
+Registered the new `libs/mngr_donate` package as a uv workspace member (root `pyproject.toml` and `uv.lock`) as part of extracting `mngr donate` into the standalone `imbue-mngr-donate` plugin. No user-visible change to build or tooling behavior.

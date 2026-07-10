@@ -1,0 +1,1 @@
+Added a `CatalogEntry` for the new `imbue-mngr-donate` plugin (`donate` entry point) to the plugin catalog, so the install wizard and plugin tooling recognize it. The entry is a DEPENDENT-tier plugin gated on `imbue-mngr-usage` being present. No behavior change to existing commands.
