@@ -4,6 +4,14 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-09
+
+# Cover the new backup disable route with the backups-manage verb
+
+- The `minds-workspaces-backups-manage` target-scoped verb's path pattern now also covers `POST /api/v1/workspaces/<id>/backup-service/disable` (the minds app's new "turn backups off" action), and its description mentions disabling.
+
+Added a new target-scoped verb to the `minds-workspaces` permission scope: `minds-workspaces-backups-manage`, gating the new backup-management routes (`/backup-service/update`, `/backup-service/update/cancel`, `/backup-service/configure`, `/backup-service/verification`) so an agent needs an explicit per-target grant to update a workspace's backup service, enable/repoint its backups, or toggle backup verification.
+
 ## 2026-07-08
 
 Add `SECRET_LATCHKEY_ENV_VAR_NAMES` to `agent_setup`: the subset of latchkey wiring env vars whose values are secrets (the gateway password and the permissions-override JWT). Callers that render a command carrying these as `--host-env NAME=VALUE` flags use it to mask the values before logging.
