@@ -60,6 +60,7 @@ from imbue.minds.desktop_client.agent_creator import provider_instance_name_for_
 from imbue.minds.desktop_client.agent_creator import resolve_template_version
 from imbue.minds.desktop_client.agent_creator import run_mngr_aws_prepare
 from imbue.minds.desktop_client.agent_creator import run_mngr_provider_prepare
+from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
 from imbue.minds.desktop_client.api_auth import handle_invalid_random_id as _handle_invalid_random_id
 from imbue.minds.desktop_client.api_auth import json_error as _json_error
 from imbue.minds.desktop_client.api_auth import json_field_error as _json_field_error
@@ -1575,6 +1576,12 @@ def _handle_create_cloud_account() -> CloudAccountPrepareResponse | Response:
     matching = next((a for a in list_cloud_account_providers() if a["name"] == provider_name), None)
     if matching is None:
         return _json_error("Account was prepared but could not be read back.", 500)
+    # The discovery daemon (`mngr observe`) read the settings file at launch, so
+    # it cannot see the just-written provider block until restarted -- without
+    # this bounce the new account's workspaces never enter the per-provider
+    # snapshots (no liveness, no Stop/Start controls). Mirrors
+    # desktop_control.set_provider_enabled's bounce-on-change.
+    bounce_latchkey_forward_supervisor(get_state().latchkey_forward_supervisor)
     return CloudAccountPrepareResponse(
         account=_cloud_account_summary(matching),
         prepare_log="\n".join(prepare_lines[-50:]),
@@ -1611,6 +1618,8 @@ def _handle_delete_cloud_account(account_name: str) -> OkResponse | Response:
         )
     if not delete_cloud_account_provider(account_name):
         return _json_error(f"Unknown cloud account {account_name!r}.", 404)
+    # Restart discovery so it stops fanning out to the removed provider.
+    bounce_latchkey_forward_supervisor(get_state().latchkey_forward_supervisor)
     return OkResponse(ok=True)
 
 
