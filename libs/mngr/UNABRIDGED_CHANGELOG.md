@@ -4,6 +4,14 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-09
+
+Documentation: the `mngr imbue_cloud admin server order` CLI reference now lists the new `--dry-run` flag (build + price a non-committal OVH cart and print the preview, then delete it without ordering).
+
+- Changed: regenerated the `mngr imbue_cloud` CLI reference (`docs/commands/secondary/imbue_cloud.md`) for the reworked `admin pool destroy` (multiple ids destroyed in parallel, `--max-concurrency`, `--drop-row-only` replacing `--skip-vps-cancel`, `--force` re-scoped to leased rows) and the new `admin pool teardown-slices --max-concurrency` flag.
+
+Fixed Docker workspaces becoming permanently unreachable after a reboot (or any Docker daemon restart). Docker reassigns randomly-published SSH host ports when the daemon restarts (and can even reshuffle them between containers), but the Docker provider persisted the port resolved at create time and trusted it forever -- every later connection dialed the dead port, so the host showed STOPPED/UNAUTHENTICATED and the minds UI hung on "Loading workspace...". The recorded port is now treated as a hint: connection setup and discovery reconcile it against the container's live port mapping, heal the host record, replace any stale known_hosts entry left on the new port by a different container, and drop cached connectors still holding the old port. Workspaces now reconnect automatically after a reboot, and `mngr list` passively heals stale records.
+
 ## 2026-07-08
 
 Fixed an unbounded memory leak in long-running `mngr observe` (discovery) processes. Each discovery poll spins up worker threads that create per-thread gevent hubs; destroying a hub without first joining it left the hub greenlet parked mid-`LoopExit`, whose traceback pinned the poll's entire object graph in a cycle the garbage collector could not reclaim. Over days this grew to multiple gigabytes. Worker-thread cleanup now joins the hub before destroying it (the pattern gevent prescribes for this leak, gevent issue 1601), so repeated polls no longer strand a hub per iteration.
