@@ -15,6 +15,7 @@ from concurrent.futures import Future
 from contextlib import contextmanager
 from typing import Any
 from typing import Callable
+from typing import Final
 from typing import TypeVar
 
 # No public API exists for checking Hub existence without creating one.
@@ -30,16 +31,31 @@ from imbue.imbue_common.frozen_model import FrozenModel
 
 T = TypeVar("T")
 
+# Upper bound on how long to wait for the hub's event loop to go idle before
+# destroying it. An idle hub (the normal case once a task's work has finished)
+# joins instantly, so this only caps the pathological case where a task left a
+# greenlet or watcher running; there we fall through to destroy anyway rather
+# than block the calling thread indefinitely.
+_HUB_JOIN_TIMEOUT_SECONDS: Final[float] = 5.0
+
 
 def cleanup_thread_local_resources() -> None:
     """Release thread-local resources that would otherwise leak FDs.
 
     Destroys the thread-local gevent Hub (and its OS-level pipe) if one exists.
     Safe to call on threads that never touched gevent -- it's a no-op there.
+
+    Joins the hub before destroying it. ``Hub.destroy`` alone leaves the hub
+    greenlet parked mid-throw of the ``LoopExit`` it raises into its parent; the
+    exception's traceback then pins the worker's frames (and everything they
+    reference) in a cycle anchored in greenlet C state that the GC cannot break.
+    Running ``Hub.join`` first lets the loop finish and release those frames,
+    which is the pattern gevent itself prescribes for this leak (gevent issue 1601).
     """
     hub = get_hub_if_exists()
     if hub is None:
         return
+    hub.join(timeout=_HUB_JOIN_TIMEOUT_SECONDS)
     hub.destroy(destroy_loop=True)
 
 

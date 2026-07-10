@@ -66,12 +66,14 @@ from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
 from imbue.minds.primitives import LaunchMode
+from imbue.minds.utils.secret_redaction import redact_secret_env_assignments
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.utils.git_utils import rsync_worktree_over_clone
 from imbue.mngr_latchkey.agent_setup import AgentLatchkeySetup
+from imbue.mngr_latchkey.agent_setup import SECRET_LATCHKEY_ENV_VAR_NAMES
 from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
 from imbue.mngr_latchkey.core import Latchkey
@@ -560,6 +562,10 @@ def provider_instance_name_for_launch(
             if not imbue_cloud_account:
                 raise MngrCommandError("IMBUE_CLOUD mode requires imbue_cloud_account")
             return f"imbue_cloud_{_slugify_account(imbue_cloud_account)}"
+        case LaunchMode.MODAL:
+            # Single instance: the ``modal`` provider talks to Modal with the local
+            # token (``modal token new``).
+            return "modal"
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -791,6 +797,11 @@ def _build_mngr_create_command(
             # "no capacity in <region>" error if none is available there.
             if region:
                 mngr_command.extend(["-b", f"region={region}"])
+        case LaunchMode.MODAL:
+            # Same remote shape as vultr/aws: the ``main`` + ``modal`` templates
+            # run the provisioning chain over SSH on the freshly-created sandbox.
+            mngr_command.extend(["--new-host", "--template", "main", "--template", "modal"])
+            mngr_command.extend(_remote_host_env_flags())
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -1018,7 +1029,13 @@ def run_mngr_create(
         if anthropic_base_url is not None:
             subprocess_env["ANTHROPIC_BASE_URL"] = anthropic_base_url
 
-    logger.info("Running: {}", " ".join(mngr_command))
+    # The command carries the latchkey gateway password + permissions-override
+    # JWT as ``--host-env NAME=VALUE`` flags; mask their values before logging
+    # so the persistent logs (uploaded with bug reports) never carry the raw
+    # secrets. The subprocess below still receives the unredacted command.
+    loggable_command = redact_secret_env_assignments(mngr_command, secret_env_var_names=SECRET_LATCHKEY_ENV_VAR_NAMES)
+    loggable_command_str = " ".join(loggable_command)
+    logger.info("Running: {}", loggable_command_str)
 
     capture = _CreateEventCapture(inner_on_output=on_output)
     cg = _make_child_cg("mngr-create", parent_cg)
@@ -1029,6 +1046,10 @@ def run_mngr_create(
             is_checked_after=False,
             on_output=capture,
             env=subprocess_env,
+            # Name the reader thread with the redacted command so the gateway
+            # password + JWT never reach the JSONL log's ``thread_name`` (nor any
+            # ProcessError message); the real command is still what executes.
+            name=loggable_command_str,
         )
 
     if result.returncode != 0:

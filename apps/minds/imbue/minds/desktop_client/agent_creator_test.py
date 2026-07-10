@@ -56,9 +56,11 @@ from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
 from imbue.minds.primitives import LaunchMode
+from imbue.minds.utils.secret_redaction import redact_secret_env_assignments
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
+from imbue.mngr_latchkey.agent_setup import SECRET_LATCHKEY_ENV_VAR_NAMES
 
 
 def test_extract_repo_name_strips_dot_git_and_trailing_slash() -> None:
@@ -173,6 +175,41 @@ def test_build_mngr_create_command_lifts_latchkey_env_to_host_env_flags() -> Non
             assert command[index - 1] == "--host-env", (
                 f"Latchkey arg {arg!r} should be passed via --host-env, got {command[index - 1]!r}"
             )
+
+
+def test_create_command_secrets_are_masked_for_logging() -> None:
+    """The command ``run_mngr_create`` renders into the ``Running:`` log line masks the
+    latchkey gateway password and permissions-override JWT while keeping the flag, the
+    variable names, and the non-secret gateway URL / counting flag intact.
+
+    This mirrors exactly what the log site does: build the real command, then run it
+    through :func:`redact_secret_env_assignments` with the latchkey secret-name set
+    before joining it for the log.
+    """
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.DOCKER,
+        host_name=HostName("hello"),
+        latchkey_env={
+            "LATCHKEY_GATEWAY": "http://127.0.0.1:1989",
+            "LATCHKEY_GATEWAY_PASSWORD": "sup3rs3cret",
+            "LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE": "eyJhbGc.fake.jwt",
+            "LATCHKEY_DISABLE_COUNTING": "1",
+        },
+    )
+
+    loggable = redact_secret_env_assignments(command, secret_env_var_names=SECRET_LATCHKEY_ENV_VAR_NAMES)
+    rendered = " ".join(loggable)
+
+    # The two secrets must not survive into the log rendering.
+    assert "sup3rs3cret" not in rendered
+    assert "eyJhbGc.fake.jwt" not in rendered
+    assert "LATCHKEY_GATEWAY_PASSWORD=***" in loggable
+    assert "LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE=***" in loggable
+    # The non-secret wiring stays legible so the log remains diagnostic.
+    assert "LATCHKEY_GATEWAY=http://127.0.0.1:1989" in loggable
+    assert "LATCHKEY_DISABLE_COUNTING=1" in loggable
+    # The real command handed to the subprocess is untouched.
+    assert "LATCHKEY_GATEWAY_PASSWORD=sup3rs3cret" in command
 
 
 def test_build_mngr_create_command_attaches_color_label_when_provided() -> None:
@@ -320,6 +357,24 @@ def test_build_mngr_create_command_forwards_region_for_imbue_cloud() -> None:
     )
     # The explicit region must reach mngr as a hard -b region= build arg.
     assert "region=US-WEST-OR" in command
+
+
+def test_build_mngr_create_command_modal_targets_modal_provider() -> None:
+    """Modal addresses the ``modal`` provider instance (local-token mode)."""
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.MODAL,
+        host_name=HostName("hello"),
+    )
+    # Exact list-element match so it can't be confused with ``modal_proxied``.
+    assert "system-services@hello.modal" in command
+    assert "system-services@hello.modal_proxied" not in command
+    # Same remote shape as vultr/aws: new host + main + modal templates.
+    assert "--new-host" in command
+    assert command.count("--template") == 2
+    assert "modal" in command
+    assert "main" in command
+    # No --reuse (that is only for imbue_cloud pool adoption).
+    assert "--reuse" not in command
 
 
 def test_build_mngr_create_command_forwards_region_for_vultr() -> None:

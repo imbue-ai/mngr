@@ -6,14 +6,22 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `is_vm_runtime_enabled` option under `[providers.modal]` (default false) creates sandboxes on Modal's VM runtime (`experimental_options = {"vm_runtime": True}`) instead of gVisor, giving stronger isolation and broader syscall compatibility (e.g. Docker-in-sandbox state surviving a filesystem snapshot).
+
 ### Changed
 
+- Changed: `discover_hosts_and_agents` now reads a **running** host's agents **live** off the sandbox instead of only from the state volume. Agents created inside the sandbox (e.g. the user's workspace agent) are never written to the outer state volume, so resolving from the volume alone left `mngr destroy` / `mngr start` unable to find a live in-sandbox agent (`Agent not found`), and minds' teardown spun on "Destroying..." forever. Offline hosts still resolve from the volume; if the live read fails the host falls back to the volume. Mirrors the aws/vultr providers.
+- Changed: `start_host` auto-restart (no explicit `snapshot_id`) selects the most recent snapshot instead of the initial one. The initial snapshot (taken in `on_agent_created`) still carries the agent and is a valid restore point; a graceful stop/pause leaves a newer snapshot that is preferred. When the host has no snapshots at all it raises `NoSnapshotsModalMngrError` (recreate the workspace rather than restart).
 - Changed: Modal provider updated for mngr's new per-provider discovery — implements the bounded `discover_hosts_and_agents_within_timeouts` entry point. Because Modal reads all host and agent state from the state volume in one batched pass, individual host reads are not separately bounded (still bounded by the provider-level discovery error timeout; no host is marked UNKNOWN by this path).
 - Changed: Unauthenticated Modal provider now raises the shared `ProviderNotAuthorizedError` from provider construction; `ModalAuthError` is now a subclass of `ProviderNotAuthorizedError`. Modal raises `ProviderUnavailableError` (was a plain `MngrError`) on unresolvable credentials, with curated help pointing at `uvx modal token set`. Modal auth failures are now reported consistently with the other cloud providers in `mngr list` (one consistent error line and the granular provider-inaccessible exit code) instead of an ad-hoc plugin error.
 - Changed: Modal agent lifecycle detection now targets the agent's primary tmux window by name (`tmux.primary_window_name`, default `agent`) instead of the literal `:0` index, so it works regardless of the user's tmux `base-index`.
 
 ### Fixed
 
+- Fixed: `stop_host` no longer silently swallows a failed `sandbox.terminate()` — it now raises `ModalMngrError`, and `destroy_host` records the failure as a cleanup failure so `mngr destroy` reports failure (and exits non-zero) instead of falsely succeeding while the sandbox keeps running (a billing orphan).
+- Fixed: `start_host` now clears `stop_reason` on the persisted host record when it resumes a host from a snapshot. A host that was resumed and then later hard-killed was previously mis-derived as PAUSED/STOPPED instead of CRASHED, so it was never garbage-collected and wrongly showed a Resume control. Mirrors the lima provider's behavior on restart.
 - Fixed: Host lock reporting for Modal hosts now derives status from a real flock held-probe rather than the lock file's presence (the lock file now persists after release).
 
 ## [v0.2.17] - 2026-06-18
