@@ -17,10 +17,10 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 DEFAULT_FCT_REPO = "https://github.com/imbue-ai/forever-claude-template.git"
@@ -160,69 +160,153 @@ def list_prepared_clones(clones_dir: Path) -> list[Path]:
     return sorted((p for p in clones_dir.iterdir() if (p / ".git").exists()), key=lambda p: p.name)
 
 
-def launch_one(clone_path: Path, eval_set: str, api_key: str, poll_timeout: float = 900.0) -> dict:
-    persona = clone_path.name
-    name = workspace_name(eval_set, persona)
+def _start_create(clone_path: Path, eval_set: str, api_key: str) -> dict:
+    """POST the create (returns immediately); the server provisions in the background."""
+    name = workspace_name(eval_set, clone_path.name)
     status, body = _post_json("{}/api/v1/workspaces".format(_api_base()), build_launch_payload(clone_path, name, api_key))
     if status != 202:
-        return {"persona": persona, "name": name, "ok": False, "error": "create HTTP {}: {}".format(status, body)}
-    operation_id = body["operation_id"]
-
-    deadline = time.time() + poll_timeout
-    while time.time() < deadline:
-        try:
-            info = _get_json("{}/api/v1/workspaces/operations/create/{}".format(_api_base(), operation_id))
-        except (urllib.error.URLError, OSError):
-            time.sleep(5)
-            continue
-        if info.get("is_done"):
-            return {"persona": persona, "name": name, "ok": True, "agent_id": info.get("agent_id")}
-        if info.get("error"):
-            return {"persona": persona, "name": name, "ok": False, "error": info.get("error")}
-        time.sleep(5)
-    return {"persona": persona, "name": name, "ok": False, "error": "timed out after {}s".format(int(poll_timeout))}
+        return {"name": name, "op": None, "error": "create HTTP {}: {}".format(status, body)}
+    return {"name": name, "op": body.get("operation_id"), "error": None}
 
 
-def _result_detail(r: dict) -> str:
-    return "OK {}".format(r.get("agent_id")) if r["ok"] else "ERR {}".format(r.get("error"))
+def _poll_op(operation_id: str) -> dict:
+    try:
+        return _get_json("{}/api/v1/workspaces/operations/create/{}".format(_api_base(), operation_id))
+    except (urllib.error.URLError, OSError, ValueError):
+        return {}
+
+
+def _fmt_elapsed(seconds: float) -> str:
+    minutes, secs = divmod(int(seconds), 60)
+    return "{}m{:02d}s".format(minutes, secs) if minutes else "{}s".format(secs)
+
+
+def _term_width() -> int:
+    return max(48, shutil.get_terminal_size((100, 24)).columns - 1)
+
+
+_SPINNER = "|/-\\"
+
+
+def _status_row(final: dict | None, name: str, stage: str, elapsed: str, spin: str, width: int) -> str:
+    if final is None:
+        icon, detail = spin, stage
+    elif final["ok"]:
+        icon, detail = "OK", "ready: {}".format(final.get("agent_id"))
+    else:
+        icon, detail = "XX", "FAILED: {}".format(final.get("error", ""))
+    return "  {:<2} {:<34} {:<30} {:>7}".format(icon, name[:34], detail[:30], elapsed)[:width]
+
+
+class _Live:
+    """Redraw a block of lines in place on a TTY; plain per-line logging otherwise."""
+
+    def __init__(self, enabled: bool):
+        self.enabled = enabled
+        self._lines = 0
+
+    def update(self, lines: list[str]) -> None:
+        if not self.enabled:
+            return
+        if self._lines:
+            sys.stdout.write("\033[{}A".format(self._lines))
+        sys.stdout.write("".join("\033[K" + line + "\n" for line in lines))
+        sys.stdout.flush()
+        self._lines = len(lines)
+
+    def seal(self) -> None:
+        self._lines = 0  # commit the current block so the next update() starts below it
+
+
+def _drive(started: list[dict], live: _Live, title: str, timeout: float = 1200.0) -> list[dict]:
+    """Poll the started creates to completion, live-rendering a table (TTY) or logging lines."""
+    starts = {s["name"]: time.time() for s in started}
+    finals: dict[str, dict] = {}
+    width = _term_width()
+    tick = 0
+    deadline = time.time() + timeout
+    while True:
+        rows, newly = [], []
+        for s in started:
+            name = s["name"]
+            elapsed = _fmt_elapsed(time.time() - starts[name])
+            if name in finals:
+                rows.append(_status_row(finals[name], name, "", elapsed, "", width))
+                continue
+            if s["op"] is None:
+                finals[name] = {"name": name, "ok": False, "error": s["error"]}
+                newly.append(finals[name])
+                rows.append(_status_row(finals[name], name, "", elapsed, "", width))
+                continue
+            info = _poll_op(s["op"])
+            if info.get("is_done"):
+                finals[name] = {"name": name, "ok": True, "agent_id": info.get("agent_id")}
+                newly.append(finals[name])
+                rows.append(_status_row(finals[name], name, "", elapsed, "", width))
+            elif info.get("error"):
+                finals[name] = {"name": name, "ok": False, "error": info.get("error")}
+                newly.append(finals[name])
+                rows.append(_status_row(finals[name], name, "", elapsed, "", width))
+            else:
+                stage = info.get("status_text") or info.get("status") or "working..."
+                rows.append(_status_row(None, name, stage, elapsed, _SPINNER[tick % len(_SPINNER)], width))
+        ready = sum(1 for f in finals.values() if f["ok"])
+        header = "{}  (ready {}, working {}, failed {})".format(
+            title, ready, len(started) - len(finals), len(finals) - ready)[:width]
+        if live.enabled:
+            live.update([header] + rows)
+        else:
+            for f in newly:
+                tail = f.get("agent_id") if f["ok"] else f.get("error")
+                print("  [{}] {} : {}".format("OK " if f["ok"] else "ERR", f["name"], tail), flush=True)
+        if len(finals) == len(started) or time.time() > deadline:
+            break
+        tick += 1
+        time.sleep(2.0)
+    for s in started:
+        finals.setdefault(s["name"], {"name": s["name"], "ok": False, "error": "timed out"})
+    live.seal()
+    return [finals[s["name"]] for s in started]
 
 
 def launch_workspaces(eval_set: str, *, clones_dir: Path, api_key: str) -> list[dict]:
     clones = list_prepared_clones(clones_dir)
     if not clones:
         raise SystemExit("no prepared clones under {} -- run prepare-test-clones first".format(clones_dir))
-    # `mngr create` is parallel-safe EXCEPT the one-time creation of the shared Modal environment
-    # (minds-staging-<hash>, one per instance): from a cold env, concurrent creates all try to make
-    # it and all but one die ("environment with the same name already exists"). So PRIME the env
-    # with the first create (serial), then fan the rest out in parallel -- wall-clock ~= 2x one
-    # create regardless of N. If priming fails the env may be absent, so fall back to serial.
     total = len(clones)
-    print(">> launching {} workspace(s) for eval set {!r}".format(total, eval_set), flush=True)
+    live = _Live(sys.stdout.isatty())
+    rule = "=" * min(_term_width(), 66)
 
-    first, rest = clones[0], clones[1:]
-    first_name = workspace_name(eval_set, first.name)
-    print("  [prime 1/{}] {} ... (creates the shared Modal environment)".format(total, first_name), flush=True)
-    primed = launch_one(first, eval_set, api_key)
-    print("  [prime 1/{}] {} -> {}".format(total, first_name, _result_detail(primed)), flush=True)
+    print(rule, flush=True)
+    print("  LAUNCHING {} WORKSPACE(S)   eval set: {}".format(total, eval_set), flush=True)
+    print("  compute: Modal    ai: api_key    (the shared Modal env is primed first)", flush=True)
+    print(rule, flush=True)
+
+    # STEP 1 -- prime the shared Modal environment with the first create (solo). Concurrent creates
+    # only race on this one-time env creation; once it exists, the rest are parallel-safe.
+    first = clones[0]
+    print("\n>> STEP 1/2  PRIME -- first workspace solo, creates the shared Modal environment:", flush=True)
+    primed = _drive([_start_create(first, eval_set, api_key)], live, "  priming")[0]
     results = [primed]
 
+    # STEP 2 -- the rest, in parallel (env now exists). Serial fallback if the prime failed.
+    rest = clones[1:]
     if rest and not primed["ok"]:
-        print("  !! prime create failed -- running the rest one at a time to avoid the env race", flush=True)
-        for i, clone in enumerate(rest, 2):
-            r = launch_one(clone, eval_set, api_key)
-            results.append(r)
-            print("  [{}/{}] {} -> {}".format(i, total, workspace_name(eval_set, clone.name), _result_detail(r)), flush=True)
+        print("\n>> STEP 2/2  prime FAILED -- env may be missing; creating the rest ONE AT A TIME:", flush=True)
+        for clone in rest:
+            results.extend(_drive([_start_create(clone, eval_set, api_key)], live, "  serial"))
     elif rest:
-        print("  [2-{}/{}] launching {} more in parallel ...".format(total, total, len(rest)), flush=True)
-        with ThreadPoolExecutor(max_workers=min(8, len(rest))) as pool:
-            futures = [pool.submit(launch_one, c, eval_set, api_key) for c in rest]
-            for future in as_completed(futures):
-                r = future.result()
-                results.append(r)
-                print("  [par] {} -> {}".format(r["name"], _result_detail(r)), flush=True)
+        print("\n>> STEP 2/2  PARALLEL -- launching the remaining {} at once:".format(len(rest)), flush=True)
+        started = [_start_create(c, eval_set, api_key) for c in rest]
+        results.extend(_drive(started, live, "  launching"))
 
     ok = sum(1 for r in results if r["ok"])
-    print(">> done: {}/{} workspaces launched.".format(ok, len(results)), flush=True)
+    print("\n" + rule, flush=True)
+    print("  RESULT: {}/{} workspaces up   eval set: {}".format(ok, total, eval_set), flush=True)
+    for r in results:
+        tail = "agent {}".format(r.get("agent_id")) if r["ok"] else str(r.get("error"))[:60]
+        print("  [{}] {:<40} {}".format("OK " if r["ok"] else "ERR", r["name"][:40], tail), flush=True)
+    print(rule, flush=True)
     return results
 
 
@@ -376,6 +460,7 @@ def self_check() -> None:
     assert _classify_error("rsync: link_stat /mngr/eval_state.json failed: No such file or directory") == "absent"
     assert _classify_error("ssh: connect to host h port 22: Connection refused") == "unreachable"
     assert _classify_error("some other failure") == "error"
+    assert _fmt_elapsed(9) == "9s" and _fmt_elapsed(75) == "1m15s"
     print("self-check OK")
 
 
