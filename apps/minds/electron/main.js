@@ -3009,18 +3009,13 @@ async function handleMngrForwardStarted(event) {
     console.warn('[startup] mngr_forward_started missing port or preauth_cookie:', event);
     return;
   }
-  // When the proxy serves TLS + HTTP/2 the origin is https and the session
-  // cookie must be Secure (a Secure cookie is only sent over https), so the
-  // cookie's url and secure flag must match the scheme the proxy speaks.
-  const useHttp2 = !!event.use_http2;
-  const scheme = useHttp2 ? 'https' : 'http';
-  const url = `${scheme}://localhost:${port}`;
+  // The proxy serves TLS + HTTP/2, so the origin is https and the session
+  // cookie must be Secure (a Secure cookie is only sent over https).
+  const url = `https://localhost:${port}`;
   // Cache the plugin origin so workspaceUrlForAgent() can build /goto/ URLs
   // against the correct port (the plugin, not minds).
   mngrForwardBaseUrl = url;
-  if (useHttp2) {
-    trustLoopbackCertsForWorkspaceContent();
-  }
+  trustLoopbackCertsForWorkspaceContent();
   const baseSpec = {
     url,
     name: 'mngr_forward_session',
@@ -3028,7 +3023,7 @@ async function handleMngrForwardStarted(event) {
     httpOnly: true,
     sameSite: 'lax',
     path: '/',
-    secure: useHttp2,
+    secure: true,
   };
   try {
     await session.defaultSession.cookies.set(baseSpec);

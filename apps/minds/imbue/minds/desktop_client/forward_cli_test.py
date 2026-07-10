@@ -23,7 +23,6 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.event_envelope import EventId
 from imbue.imbue_common.event_envelope import EventSource
 from imbue.imbue_common.event_envelope import IsoTimestamp
-from imbue.minds.config.data_types import MNGR_FORWARD_USE_HTTP2
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.forward_cli import ForwardSubprocessConfig
@@ -686,16 +685,16 @@ def test_start_before_attach_raises(consumer: EnvelopeStreamConsumer) -> None:
 
 
 def test_build_forward_command_includes_use_http2_flag() -> None:
-    """The spawned argv carries --use-http2 exactly when minds runs the proxy with TLS.
+    """The spawned argv always carries --use-http2 so the proxy serves TLS.
 
-    The flag and the https/wss URLs the rest of minds builds both derive from
-    ``MNGR_FORWARD_USE_HTTP2``; this asserts the subprocess is actually told to
-    serve TLS in lockstep, so a client that expects https reaches an https proxy.
+    minds always runs the proxy with TLS + HTTP/2, matching the https/wss URLs
+    the rest of minds builds, so a client that expects https reaches an https
+    proxy.
     """
     config = ForwardSubprocessConfig(service="system_interface")
     command = _build_forward_command(config, preauth_cookie="a-secret")
-    assert ("--use-http2" in command) == MNGR_FORWARD_USE_HTTP2
-    # Core flags are always present regardless of the TLS toggle.
+    assert "--use-http2" in command
+    # Core flags are always present alongside the TLS flag.
     assert command[:2] == [config.mngr_binary, "forward"]
     assert "--observe-via-file" in command
     assert command[command.index("--service") + 1] == "system_interface"

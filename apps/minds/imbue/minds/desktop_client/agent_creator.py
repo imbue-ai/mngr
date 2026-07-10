@@ -42,7 +42,6 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import MNGR_BINARY
-from imbue.minds.config.data_types import MNGR_FORWARD_USE_HTTP2
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.backend_resolver import SYSTEM_SERVICES_AGENT_NAME
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
@@ -95,11 +94,10 @@ _MNGR_FORWARD_SESSION_COOKIE_NAME: Final[str] = "mngr_forward_session"
 # assumption about which app that is or which routes it implements.
 _WORKSPACE_PROBE_PATH: Final[str] = "/"
 
-# Scheme of the `mngr forward` proxy origin. Kept in lockstep with the
-# `--use-http2` flag minds passes to the subprocess (both derive from the same
-# constant), so the probe/redirect URLs the Python side builds always match the
-# transport the proxy actually speaks.
-_MNGR_FORWARD_SCHEME: Final[str] = "https" if MNGR_FORWARD_USE_HTTP2 else "http"
+# Scheme of the `mngr forward` proxy origin. minds always runs the proxy with
+# `--use-http2`, so it terminates TLS and the probe/redirect URLs the Python
+# side builds are always `https`.
+_MNGR_FORWARD_SCHEME: Final[str] = "https"
 
 
 def make_workspace_probe_client(preauth_cookie: str, probe_timeout_seconds: float) -> httpx.Client:
@@ -109,7 +107,7 @@ def make_workspace_probe_client(preauth_cookie: str, probe_timeout_seconds: floa
     pass it to ``probe_workspace_through_plugin`` on each iteration, instead
     of letting the helper construct a one-shot client per call.
 
-    When the proxy serves TLS (HTTP/2), cert verification is disabled: these
+    The proxy serves TLS (HTTP/2), so cert verification is disabled: these
     probes dial ``127.0.0.1`` with a ``Host: agent-<hex>.localhost`` header, so
     hostname verification could never pass, and the cert is a self-signed
     ephemeral one the probe is not positioned to validate anyway. Loopback-only.
@@ -118,7 +116,7 @@ def make_workspace_probe_client(preauth_cookie: str, probe_timeout_seconds: floa
         timeout=probe_timeout_seconds,
         follow_redirects=False,
         cookies={_MNGR_FORWARD_SESSION_COOKIE_NAME: preauth_cookie},
-        verify=not MNGR_FORWARD_USE_HTTP2,
+        verify=False,
     )
 
 

@@ -27,7 +27,6 @@ from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.minds.bootstrap import is_imbue_cloud_provider_enabled_for_account
 from imbue.minds.bootstrap import list_disabled_provider_names
 from imbue.minds.config.data_types import ClientEnvConfig
-from imbue.minds.config.data_types import MNGR_FORWARD_USE_HTTP2
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import make_workspace_probe_client
@@ -193,14 +192,13 @@ def _get_mngr_forward_origin() -> str:
     """Build the bare-origin URL of the ``mngr forward`` plugin.
 
     Used by templates to construct ``/goto/<agent>/`` URLs that target the
-    plugin (which owns subdomain forwarding) rather than minds. The scheme
-    matches the transport the proxy actually speaks (``https`` when it serves
-    TLS + HTTP/2), so the rendered links reach it rather than failing a
-    plaintext request against the TLS listener.
+    plugin (which owns subdomain forwarding) rather than minds. minds always
+    runs the proxy with TLS + HTTP/2, so the scheme is ``https`` and the
+    rendered links reach it rather than failing a plaintext request against
+    the TLS listener.
     """
-    scheme = "https" if MNGR_FORWARD_USE_HTTP2 else "http"
     port = get_state().mngr_forward_port or 8421
-    return f"{scheme}://localhost:{port}"
+    return f"https://localhost:{port}"
 
 
 def _get_is_mac() -> bool:

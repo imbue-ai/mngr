@@ -1,10 +1,11 @@
 """Ephemeral in-memory TLS for ``mngr forward`` (self-signed cert + hypercorn config).
 
 Used only when ``--use-http2`` is set: the proxy terminates TLS and negotiates
-HTTP/2 (via ALPN) so the workspace origin is not capped by Chromium's
-per-origin HTTP/1.1 connection limit. The certificate is self-signed,
-regenerated every startup, and only ever trusted by clients that opt in (the
-minds Electron desktop app), so no OS trust store or CA install is involved.
+HTTP/2 (via ALPN), which multiplexes many streams over a single connection.
+The certificate is self-signed, regenerated every startup, and covers only
+loopback names (``localhost``, ``*.localhost``, ``127.0.0.1``), so it is
+trusted only by clients that opt in -- no OS trust store or CA install is
+involved.
 """
 
 import ipaddress
