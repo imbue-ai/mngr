@@ -1,5 +1,7 @@
 """Unit tests for tui_utils."""
 
+import os
+import subprocess
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -346,3 +348,32 @@ def test_send_enter_via_hook_confirms_on_the_hook_when_the_marker_never_advances
             f"tmux kill-session -t '={session_name}' 2>/dev/null",
             timeout_seconds=5.0,
         )
+
+
+def _run_with_failing_tmux(command: str, tmp_path: Path) -> subprocess.CompletedProcess[str]:
+    """Run a built submission command with a ``tmux`` on PATH that fails immediately."""
+    shim_dir = tmp_path / "failing_tmux_bin"
+    shim_dir.mkdir()
+    tmux_shim = shim_dir / "tmux"
+    tmux_shim.write_text("#!/bin/sh\nexit 1\n")
+    tmux_shim.chmod(0o755)
+    env = dict(os.environ)
+    env["PATH"] = f"{shim_dir}{os.pathsep}{env['PATH']}"
+    return subprocess.run(command, shell=True, capture_output=True, text=True, env=env, timeout=60)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        _build_signal_only_command(0.5, "chan", _TARGET),
+        _build_signal_or_marker_command(0.5, "chan", _TARGET, "printf 'frozen'"),
+    ],
+)
+def test_submission_command_fails_when_tmux_itself_fails(command: str, tmp_path: Path) -> None:
+    """A ``tmux wait-for`` that errors out (no server, dead session) is not a submission.
+
+    A killed ``tmux wait-for`` exits 0, so the deadline is tracked separately; the
+    wait status still has to be honored, or an unreachable tmux reports success.
+    """
+    result = _run_with_failing_tmux(command, tmp_path)
+    assert result.returncode != 0, f"reported success though tmux failed: {result.stdout!r}"

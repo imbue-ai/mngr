@@ -312,11 +312,13 @@ def _build_signal_only_command(full_timeout: float, wait_channel: str, tmux_targ
     ``timeout(1)``, which is GNU coreutils and absent on macOS. Three properties
     the watchdog has to reproduce by hand:
 
-    - ``tmux wait-for`` exits 0 whether it was signalled or killed, so the
-      watchdog marks ``$tmo`` *before* killing and that marker -- not the wait
-      status -- decides the exit code, the way ``timeout`` returns 124.
     - The waiter must be the tmux client itself, not a wrapper subshell, or the
       kill hits the subshell and leaves the client running forever.
+    - A killed ``tmux wait-for`` exits 0, so the wait status alone cannot mean
+      success. The watchdog writes ``$tmo`` *before* killing, and a non-empty
+      ``$tmo`` means the deadline passed, the way ``timeout`` returns 124. The
+      wait status still decides the rest: ``tmux wait-for`` exits non-zero when
+      it fails outright (no server, dead session), which is not a submission.
     - Background jobs redirect stdout, because a job that inherits it holds the
       caller's stdout open until it exits, stalling every submission for the
       full deadline even when the signal lands immediately.
@@ -327,8 +329,9 @@ def _build_signal_only_command(full_timeout: float, wait_channel: str, tmux_targ
         'tmux wait-for "$2" & waiter=$!; '
         '( sleep "$1"; echo 1 > "$tmo"; kill "$waiter" ) >/dev/null 2>&1 & watchdog=$!; '
         '( sleep 0.1 && tmux send-keys -t "$3" Enter ) >/dev/null 2>&1 & '
-        'wait "$waiter" 2>/dev/null; '
-        '[ ! -s "$tmo" ]'
+        'wait "$waiter" 2>/dev/null; waited=$?; '
+        'kill "$watchdog" 2>/dev/null; '
+        '[ ! -s "$tmo" ] && [ "$waited" -eq 0 ]'
     )
     return f"bash -c {shlex.quote(script)} _ {full_timeout} {shlex.quote(wait_channel)} {tmux_target.as_shell_arg()}"
 
@@ -354,9 +357,10 @@ def _build_signal_or_marker_command(
     :func:`_build_signal_only_command` for the three properties that hand-rolled
     watchdog has to reproduce; the one that shapes this variant is that the
     waiter must be the tmux client itself, so the loop detects a fired hook by
-    the client having exited (``kill -0``) without the watchdog's ``$tmo``
-    marker, rather than by wrapping the client in a subshell that writes a
-    sentinel.
+    the client having exited (``kill -0``) with a zero wait status and no
+    ``$tmo`` marker, rather than by wrapping the client in a subshell that
+    writes a sentinel. Once the waiter is gone without confirming, the marker is
+    the only thing left that can, so the loop keeps polling it.
 
     ``accept_marker_command`` is the agent-supplied shell snippet that prints the
     agent's latest acceptance-marker token (empty if none yet). A baseline is
@@ -379,8 +383,11 @@ def _build_signal_or_marker_command(
         # Then submit, after a beat so the waiter is registered.
         '( sleep 0.1 && tmux send-keys -t "$2" Enter ) >/dev/null 2>&1 & '
         f'end="$(( $(date +%s) + {int(full_timeout) + 1} ))"; '
+        "hook_pending=1; "
         'while [ "$(date +%s)" -lt "$end" ]; do '
-        'if ! kill -0 "$waiter" 2>/dev/null && [ ! -s "$tmo" ]; then exit 0; fi; '
+        'if [ "$hook_pending" -eq 1 ] && ! kill -0 "$waiter" 2>/dev/null; then '
+        'wait "$waiter" 2>/dev/null && [ ! -s "$tmo" ] && exit 0; '
+        "hook_pending=0; fi; "
         f'cur="$({accept_marker_command})"; '
         'if [[ -n "$cur" && "$cur" > "$base" ]]; then exit 0; fi; '
         "sleep 0.25; "
