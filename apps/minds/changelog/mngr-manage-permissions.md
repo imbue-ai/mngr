@@ -6,7 +6,7 @@ The app-level Settings page gains three new permission sections in its left nav,
 
 "File sharing": local files and folders your agents can access over the shared file mount. Each workspace gets a full-width card listing every shared path with its access level ("read" or "read and write"). Revoke a single workspace's file sharing or all of it at once.
 
-"Workspace delegation": access you've granted agents in one workspace to manage other workspaces (list/create plus targeted operations like destroy, start/stop, SSH, and health checks), grouped by the workspace being managed. Each card is a workspace that holds the access, and hovering a verb explains what it allows. Revoke per workspace within a group, or a whole group at once.
+"Workspace delegation": access you've granted agents in one workspace to manage other workspaces (list/create plus targeted operations like destroy, start/stop, SSH, and health checks). It's grouped by the granting workspace, with one row per operation showing which workspace(s) it applies to ("All workspaces" or specific ones); hover an operation to see what it allows. Each row can be revoked individually.
 
 Revocation only removes the relevant rules and leaves unrelated permissions intact.
 
