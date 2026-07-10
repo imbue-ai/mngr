@@ -376,6 +376,14 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         is_recommended=True,
         gate=RequiredPackagesGate(packages=("imbue-mngr-pi-coding", "imbue-mngr-usage")),
     ),
+    CatalogEntry(
+        entry_point_name="donate",
+        package_name="imbue-mngr-donate",
+        description="Spend spare Claude capacity on a donation skill (`mngr donate`)",
+        tier=PluginTier.DEPENDENT,
+        is_recommended=True,
+        gate=RequiredPackagesGate(packages=("imbue-mngr-usage",)),
+    ),
     # --- INDEPENDENT, no signal ---
     CatalogEntry(
         entry_point_name="usage",
