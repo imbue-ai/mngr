@@ -2144,6 +2144,11 @@ def _handle_inbox_page() -> Response:
     selected_id, detail_html = _resolve_inbox_selection(selected_query, backend_resolver)
     minds_config: MindsConfig | None = get_state().minds_config
     auto_open = minds_config.get_auto_open_requests_panel() if minds_config else True
+    # ``keep_open=1`` is set only when the user intentionally opens the whole
+    # inbox via the Requests button; without it (notification click, workspace
+    # relay, or auto-open on a new request), resolving a request dismisses the
+    # whole window rather than advancing to an unrelated stale request.
+    keep_open = request.args.get("keep_open") == "1"
     return make_html_response(
         content=render_inbox_page(
             cards=cards,
@@ -2151,6 +2156,7 @@ def _handle_inbox_page() -> Response:
             detail_html=detail_html,
             is_empty=len(cards) == 0,
             auto_open=auto_open,
+            keep_open=keep_open,
         )
     )
 

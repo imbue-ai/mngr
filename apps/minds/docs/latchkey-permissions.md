@@ -35,6 +35,16 @@ and how the agent receives the answer.
    button, a backdrop click, or Escape -- returns them to their work with
    no context lost. (Opened directly in a browser, with no modal host, the
    page degrades to a dimmed, centered card and dismissal navigates home.)
+
+   When the inbox was opened for a **single request** -- a notification
+   click, a workspace relay, or auto-open on a new request -- resolving
+   it via Approve/Deny dismisses the whole window. This is the default;
+   it prevents an unrelated, stale request from another agent suddenly
+   becoming visible after the user acts. Only when the user
+   **intentionally opens the whole inbox** via the Requests button (which
+   loads `/inbox?keep_open=1`) does resolving a request advance to the
+   next pending one instead of closing the window.
+
    The page renders a single-scope permission dialog:
    * The dialog header names the service plainly (no monospace pill) and
      attributes the agent's rationale prominently as
