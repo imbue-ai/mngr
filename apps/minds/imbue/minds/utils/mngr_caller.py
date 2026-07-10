@@ -23,6 +23,14 @@ is live from the moment the child is forked, so "the warm process is not ready
 yet" is handled for free: the parent's request simply buffers in the socket
 until the child finishes importing ``mngr`` and reads it.
 
+An idle warm process (blocked in ``recv``) already dies on its own when the
+parent goes away, since the closed socket then reports EOF. But once a request
+has been read the warm process stops reading the socket to run the (possibly
+slow or hung) ``mngr`` command, and during that window a socket EOF can no
+longer wake it. To cover that window the warm process also runs mngr's
+parent-death watcher: if the parent (the minds backend) dies while the warm
+process is busy, the watcher SIGTERMs it so no orphaned warm process lingers.
+
 This deliberately avoids the ``multiprocessing`` forkserver's fork-without-exec
 model, which is unreliable on macOS. Each warm process is a clean, freshly
 execed interpreter, so there is no inherited process-global state to worry
@@ -59,9 +67,13 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.local_process import RunningProcess
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.errors import MngrError
+from imbue.mngr.utils.parent_process import start_parent_death_watcher
 
 # Module path of the warm-server entry point, launched as ``python -m <module>``.
 _WARM_SERVER_MODULE: Final[str] = "imbue.minds.utils.mngr_caller"
+
+# Name of the throwaway warm process's concurrency group (used for its logs).
+_WARM_PROCESS_GROUP_NAME: Final[str] = "mngr-caller-warm-process"
 
 _DEFAULT_CALL_TIMEOUT_SECONDS: Final[float] = 60.0
 
@@ -141,21 +153,24 @@ def _execute_mngr_cli(
     return returncode, stdout_buffer.getvalue(), stderr_buffer.getvalue()
 
 
-def _run_warm_mngr_server(connection_fd: int) -> None:
-    """Warm-process entry point: import mngr, then serve exactly one CLI request.
+def _serve_one_request(
+    connection: Connection,
+    cli: click.Command,
+    concurrency_group: ConcurrencyGroup,
+) -> None:
+    """Start the parent-death watcher, then serve exactly one CLI request.
 
-    Imports ``imbue.mngr.main`` eagerly (this is the warm-up), then reads one
-    request off the inherited socket file descriptor, runs the CLI, and sends the
-    result back. Serves a single request and then returns, so each warm process
-    is single-use.
+    Split out from :func:`_run_warm_mngr_server` (which owns the concurrency
+    group and supplies the real ``mngr`` CLI) so the watcher wiring can be
+    exercised in tests with an inspectable concurrency group and a lightweight
+    stand-in command.
+
+    The parent-death watcher is armed *before* the (blocking) ``recv`` so it also
+    covers the busy window after a request is read, when the socket is no longer
+    being watched for EOF -- if the parent dies then, the watcher SIGTERMs this
+    warm process so it does not linger as an orphan.
     """
-    # This inline import is the whole point of the warm process: it pays mngr's
-    # multi-second import cost here (in a throwaway interpreter), off the minds
-    # backend's request path. It is intentionally allow-listed by the
-    # inline-imports ratchet.
-    from imbue.mngr.main import cli
-
-    connection = Connection(connection_fd)
+    start_parent_death_watcher(concurrency_group)
     try:
         try:
             argv, env_overrides, cwd = connection.recv()
@@ -169,6 +184,28 @@ def _run_warm_mngr_server(connection_fd: int) -> None:
         connection.send((returncode, stdout, stderr))
     finally:
         connection.close()
+
+
+def _run_warm_mngr_server(connection_fd: int) -> None:
+    """Warm-process entry point: import mngr, then serve exactly one CLI request.
+
+    Imports ``imbue.mngr.main`` eagerly (this is the warm-up), then reads one
+    request off the inherited socket file descriptor, runs the CLI, and sends the
+    result back. Serves a single request and then returns, so each warm process
+    is single-use. A parent-death watcher is armed for the whole serve so a warm
+    process that is orphaned mid-request does not linger.
+    """
+    # This inline import is the whole point of the warm process: it pays mngr's
+    # multi-second import cost here (in a throwaway interpreter), off the minds
+    # backend's request path. It is intentionally allow-listed by the
+    # inline-imports ratchet.
+    from imbue.mngr.main import cli
+
+    connection = Connection(connection_fd)
+    # The concurrency group owns the parent-death watcher thread; it is a fresh,
+    # throwaway interpreter so a process-lifetime group is appropriate here.
+    with ConcurrencyGroup(name=_WARM_PROCESS_GROUP_NAME) as concurrency_group:
+        _serve_one_request(connection, cli, concurrency_group)
 
 
 class _WarmMngrProcess(MutableModel):
