@@ -415,6 +415,26 @@ def _is_git_worktree(repo_dir: Path) -> bool:
     return dot_git.is_file()
 
 
+def _git_noninteractive_env() -> dict[str, str]:
+    """Environment for the desktop client's git calls: never prompt for credentials.
+
+    Git prompts for a username/password on the controlling terminal when a
+    remote needs auth and no credential is available -- but the desktop client
+    has no terminal for the user to answer on, and when minds is launched from
+    a dev shell the prompt would hang the creation thread forever. With
+    ``GIT_TERMINAL_PROMPT=0``, cloning a repo this machine lacks credentials
+    for fails fast with git's stable "could not read Username ... terminal
+    prompts disabled" error, which ``classify_creation_error`` recognizes.
+    Credential helpers (e.g. the macOS keychain) still work as usual -- only
+    interactive terminal prompting is disabled.
+
+    Deliberately a small per-file copy of the same one-line helper the FCT's
+    ``bootstrap.manager`` and ``runtime_backup.runner`` carry (same name, same
+    body), rather than a shared cross-package import.
+    """
+    return {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+
+
 def clone_git_repo(
     git_url: GitUrl,
     clone_dir: Path,
@@ -473,16 +493,7 @@ def clone_git_repo(
     # which would otherwise leak tokens from credentialed URLs into logs.
     redacted_on_output = _RedactingOutputCallback(inner=on_output) if on_output is not None else None
 
-    # Never let git prompt for credentials on the controlling terminal: the
-    # desktop client has no terminal for the user to answer on, and when minds
-    # is launched from a dev shell the prompt would hang the creation thread
-    # forever. With prompts disabled, cloning a repo we lack credentials for
-    # fails fast with git's stable "could not read Username ... terminal
-    # prompts disabled" error, which ``classify_creation_error`` recognizes.
-    # Credential helpers (e.g. the macOS keychain) still work as usual -- only
-    # interactive terminal prompting is disabled. Mirrors the same fix in the
-    # FCT bootstrap's git calls.
-    git_env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    git_env = _git_noninteractive_env()
 
     # All steps run under the same child concurrency group so cancellation is
     # uniform; the failure is raised AFTER the `with cg` block to keep
