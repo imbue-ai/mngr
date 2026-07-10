@@ -184,7 +184,7 @@ def disassociate_workspace_account(
             tunnel = imbue_cloud_cli.find_tunnel_for_agent(account=str(account.email), agent_id=str(agent_id))
             if tunnel is not None:
                 imbue_cloud_cli.delete_tunnel(account=str(account.email), tunnel_name=tunnel.tunnel_name)
-                clear_tunnel_token_from_agent(agent_id)
+                clear_tunnel_token_from_agent(agent_id, imbue_cloud_cli.mngr_caller)
         except ImbueCloudCliError as exc:
             logger.warning("Failed to delete tunnel during disassociation: {}", exc)
     session_store.disassociate_workspace(str(account.user_id), str(agent_id))

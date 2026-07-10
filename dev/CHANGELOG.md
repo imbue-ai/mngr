@@ -4,6 +4,19 @@ A concise, human-friendly summary of changes for repo-level dev tooling: CI work
 
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
+## 2026-07-09
+
+### Added
+
+- Added: `just list-servers` and `just prep-server <server-id>` recipes wrapping the new env-aware `minds server {list,prep}` commands (DSN + pool SSH key resolved from the activated tier automatically). The `minds-justfile` skill doc was updated to match.
+- Added: `specs/backup-update-fixes/concise.md` and `specs/injected-backup-service/concise.md` — plans for the per-workspace backup health route (with master-password hash + rotation, fixed minimum backup version, `official` remote, snapshot-resume test rewrite) and the drift-detection + one-click converging update on running workspaces.
+
+### Changed
+
+- Changed: `destroy-pool-host` justfile recipe renamed to `destroy-pool-hosts` and now takes any number of pool-host ids (clean break, no alias). Forwards to `minds pool destroy`, which destroys all named slices in parallel after atomically claiming each row so a user lease cannot race the destroy. The `minds-justfile` skill doc was updated to match.
+- Changed: Pre-commit `regenerate-cli-docs` hook now also triggers on plugin CLI files (`libs/mngr_*/imbue/**/cli/*.py`), so editing a plugin's click commands can no longer leave the generated `libs/mngr/docs/commands/` reference stale until an unrelated PR trips the check.
+- Changed: `scripts/snapshot_minds_e2e_state.py`'s docs no longer hardcode stale snapshot image ids or describe the script as a one-off prototype — it is documented as the standing producer for the `build-minds-snapshot` CI stage, with instructions for minting an image id manually and running individual tests against it via `just test-offload-minds-snapshot <image-id> '--filter <test_name>'`.
+
 ## 2026-07-08
 
 ### Added

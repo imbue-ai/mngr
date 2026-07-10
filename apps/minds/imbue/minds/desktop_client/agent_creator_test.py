@@ -1282,7 +1282,6 @@ def test_start_creation_imbue_cloud_ai_with_local_compute_mints_litellm_key(tmp_
     provider is not IMBUE_CLOUD. The actual ``mngr create`` invocation will fail (no
     real binary / no real repo) but the key-mint must happen first."""
     cli = _RecordingImbueCloudCli(
-        parent_concurrency_group=ConcurrencyGroup(name="recording-cli"),
         connector_url=FAKE_CONNECTOR_URL,
     )
     creator = _make_creator_with_cli(tmp_path, cli)
@@ -1310,7 +1309,6 @@ def test_start_creation_api_key_ai_does_not_mint_litellm_key(tmp_path: Path) -> 
     """The API_KEY branch uses the user-supplied key directly and must never call
     ``create_litellm_key``."""
     cli = _RecordingImbueCloudCli(
-        parent_concurrency_group=ConcurrencyGroup(name="recording-cli"),
         connector_url=FAKE_CONNECTOR_URL,
     )
     creator = _make_creator_with_cli(tmp_path, cli)
@@ -1335,7 +1333,6 @@ def test_start_creation_subscription_ai_does_not_mint_litellm_key(tmp_path: Path
     """The SUBSCRIPTION branch injects no Anthropic creds and must never call
     ``create_litellm_key``."""
     cli = _RecordingImbueCloudCli(
-        parent_concurrency_group=ConcurrencyGroup(name="recording-cli"),
         connector_url=FAKE_CONNECTOR_URL,
     )
     creator = _make_creator_with_cli(tmp_path, cli)
@@ -1359,7 +1356,6 @@ def test_start_creation_api_key_ai_without_key_fails_with_clear_message(tmp_path
     """The API_KEY branch must reject an empty key with a specific error rather than
     silently falling through to mngr create with no key set."""
     cli = _RecordingImbueCloudCli(
-        parent_concurrency_group=ConcurrencyGroup(name="recording-cli"),
         connector_url=FAKE_CONNECTOR_URL,
     )
     creator = _make_creator_with_cli(tmp_path, cli)

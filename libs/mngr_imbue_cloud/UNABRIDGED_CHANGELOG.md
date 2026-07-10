@@ -4,6 +4,24 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-09
+
+`mngr imbue_cloud admin server order` now takes a `--dry-run` flag: it builds and prices a non-committal OVH cart, prints the real price preview plus the derived server specs and slice count, then deletes the cart without ordering. No charge, no interactive prompt, and no DB write, so it can be used to confirm price/specs before committing to an order. `--dry-run` takes precedence over `--yes`, so `--dry-run --yes` never charges.
+
+- Changed: `mngr imbue_cloud admin pool destroy` now accepts multiple pool-host ids and destroys them concurrently (bounded by a new `--max-concurrency` flag, default 8), regardless of which bare-metal box each slice is on. It keeps going through all ids on failure and emits a per-host outcome report (`{requested, destroyed, skipped, failed, hosts: [...]}`), exiting non-zero only when a VM teardown actually failed.
+
+- Changed: `admin pool destroy` now closes the destroy-vs-lease race: each row is atomically claimed (flipped to status `removing` in a committed transaction, from an eligible status set) before any teardown, so the connector's `/hosts/lease` can never hand a mid-destroy host to a user. A row that got leased first is skipped and reported as `skipped_leased`; a failed teardown leaves the row `removing` (unleasable) so re-running the same command retries it, and ids whose rows are already gone report `already_gone` (success).
+
+- Changed: destroying `available` (and stale `removing`) rows no longer requires `--force` -- the old `status != 'released'` guard was vestigial since nothing writes `released` anymore. `--force` now specifically means "also destroy rows that are currently leased" (and funnels through the same atomic claim, so the user's later release lands as an idempotent no-op).
+
+- Changed: `--skip-vps-cancel` is replaced by `--drop-row-only` (clean break). The default teardown already tolerates a VM that is merely absent; the flag exists only for rows whose bare-metal box record is gone or whose machine is permanently dead, and it also goes through the atomic claim.
+
+- Changed: `admin pool teardown-slices` claims each row as `removing` before teardown, tears the slice VMs down through the same parallel helper (with its own `--max-concurrency`, default 8), and now also includes rows already stranded in `removing` (e.g. by a crashed connector release), so an env destroy never leaks their VMs or rows. It emits the same unified outcome report.
+
+- Changed: DB-side slot accounting now counts `removing` rows as still occupying their box slot (their VM may still be tearing down), so `admin server list` capacity numbers stay truthful while destroys run.
+
+- Changed: the bake and destroy fan-outs now share one bounded parallel helper (`run_outcome_workers_in_bounded_threads`), and their per-item outcomes and summary reports are typed FrozenModels (`SliceBakeOutcome`/`SliceBakeReport`, `PoolHostDestroyOutcome`/`PoolHostDestroyReport`) with `LowerCaseStrEnum` statuses instead of stringly-typed dicts. The emitted JSON wire format is unchanged (lowercase statuses, absent fields omitted).
+
 ## 2026-07-07
 
 Fixed two ways imbue_cloud's streaming (per-provider) discovery underfed consumers, leaving a cloud workspace stuck loading in the minds app.
