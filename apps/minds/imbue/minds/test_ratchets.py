@@ -361,10 +361,9 @@ def test_prevent_if_elif_without_else() -> None:
 
 
 def test_prevent_inline_functions() -> None:
-    # The added inline function is the ``record_loss`` helper nested in the
-    # ported Sentry HTTP transport's ``_send_request`` (it closes over the
-    # envelope being sent).
-    rc.check_inline_functions(_DIR, snapshot(8))
+    # The most recent addition is ``_run_check_into_results`` in api_v1.py: a
+    # thread target that closes over the list it appends its check result to.
+    rc.check_inline_functions(_DIR, snapshot(9))
 
 
 def test_prevent_underscore_imports() -> None:
