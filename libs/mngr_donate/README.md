@@ -13,6 +13,38 @@ This is a separate plugin from `imbue-mngr-usage` on purpose (measuring usage an
 spare quota are orthogonal), but it depends on it: installing `imbue-mngr-donate` pulls in
 `imbue-mngr-usage`, whose snapshot API + `usage` plugin config donate reads at runtime.
 
+## Before you start: authentication (one-time setup)
+
+Do this first. The donation agent is **headless**, and headless Claude authenticates
+differently from the Claude app you use interactively -- skipping this step is why a
+donate setup "randomly breaks" hours after it worked:
+
+- The desktop app's login popup (`/login`) renews **only the app's own session**. It does
+  not refresh the credentials headless `claude` reads.
+- A plain web login yields a **short-lived (~8h) access token with no refresh token**. A
+  donate setup leaning on it works for a few hours, then every tick fails with
+  `Failed to authenticate. API Error: 401 Invalid authentication credentials` -- typically
+  overnight.
+
+What donate needs instead is a **long-lived (~1 year) token** minted for exactly this
+use case:
+
+```bash
+# 1. Mint it (same login popup, but prints a long sk-ant-oat... token in the terminal --
+#    copy ALL of it; it usually wraps across lines):
+claude setup-token
+
+# 2. Stash it in the macOS keychain (prompts for a "password" -- paste the token there,
+#    so it never lands in a file or shell history). Add -U to overwrite an existing entry:
+security add-generic-password -s mngr-donate-oauth -a "$USER" -w
+```
+
+At each tick, donate looks for that `mngr-donate-oauth` keychain entry and exports it to the
+agent as `CLAUDE_CODE_OAUTH_TOKEN` (which takes precedence over the session token). If
+`CLAUDE_CODE_OAUTH_TOKEN` is already set in the environment, or the entry doesn't exist, the
+environment is inherited unchanged -- so without the stash, donate still runs, but only as
+long as your current session token does (and starts 401ing when it lapses).
+
 ## Run a donation
 
 ```bash
@@ -38,36 +70,6 @@ mngr donate --stop                     # remove it
 agent must run inside your **login session** to reach the macOS keychain where Claude's
 subscription token lives; a cron job runs outside it and every tick fails `Not logged in`.
 launchd also catches up after sleep. On other platforms, schedule `mngr donate` yourself.
-
-## Authentication (read this when ticks start failing with 401)
-
-The donation agent is **headless**, and headless Claude authenticates differently from the
-Claude app you use interactively -- this difference will bite you:
-
-- The desktop app's login popup (`/login`) renews **only the app's own session**. It does
-  not refresh the credentials headless `claude` reads.
-- A plain web login yields a **short-lived (~8h) access token with no refresh token**. Any
-  scheduled donate setup that leans on it works for a few hours, then every tick fails with
-  `Failed to authenticate. API Error: 401 Invalid authentication credentials` -- typically
-  overnight, which makes it look like the schedule "randomly broke."
-
-The fix is a **long-lived (~1 year) token** minted for exactly this use case. One-time setup:
-
-```bash
-# 1. Mint it (same login popup, but prints a long sk-ant-oat... token in the terminal --
-#    copy ALL of it; it usually wraps across lines):
-claude setup-token
-
-# 2. Stash it in the macOS keychain (prompts for a "password" -- paste the token there,
-#    so it never lands in a file or shell history). Add -U to overwrite an existing entry:
-security add-generic-password -s mngr-donate-oauth -a "$USER" -w
-```
-
-At each tick, donate looks for that `mngr-donate-oauth` keychain entry and exports it to the
-agent as `CLAUDE_CODE_OAUTH_TOKEN` (which takes precedence over the session token). If
-`CLAUDE_CODE_OAUTH_TOKEN` is already set in the environment, or the entry doesn't exist, the
-environment is inherited unchanged -- so without the stash, donate works exactly as long as
-your current session token does.
 
 ## Skills: pinned code, dynamic prompts
 
