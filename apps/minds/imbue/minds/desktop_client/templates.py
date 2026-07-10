@@ -701,6 +701,7 @@ def render_inbox_page(
     detail_html: str = "",
     is_empty: bool = False,
     auto_open: bool = True,
+    keep_open: bool = False,
 ) -> str:
     """Render the full inbox modal page served by ``GET /inbox``.
 
@@ -710,7 +711,11 @@ def render_inbox_page(
     fragment, or empty). ``is_empty`` is True when there are no
     pending requests and the layout collapses to a centered message.
     ``auto_open`` is the initial state of the "Auto-open on new
-    request" checkbox in the inbox header.
+    request" checkbox in the inbox header. ``keep_open`` is True only
+    when the user intentionally opened the whole inbox (via the
+    Requests button); when False, resolving a request via Approve/Deny
+    dismisses the whole window instead of advancing to the next
+    pending request.
     """
     return CATALOG.render(
         "pages.Inbox",
@@ -719,6 +724,7 @@ def render_inbox_page(
         detail_html=detail_html,
         is_empty=is_empty,
         auto_open=auto_open,
+        keep_open=keep_open,
     )
 
 
