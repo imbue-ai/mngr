@@ -14,6 +14,15 @@ const paths = require('./paths');
 const { createRotatingLogStream } = require('./log-rotation');
 
 let logStream = null;
+// Reentrancy guard: a log write can itself emit a console.* call (e.g. the
+// rotation helper's console.warn when a rename fails), and console.* is wrapped
+// below to call back into writeLine. Without this guard a persistent rotation
+// failure would recurse (writeLine -> logStream.write -> rotateIfNeeded ->
+// console.warn -> writeLine -> ...) until the stack overflows and the main
+// process crashes. A try/catch cannot stop it because rotateIfNeeded swallows
+// its own error rather than throwing. When guarded, the nested console.* still
+// reaches stdout/stderr via the wrapper's original(...), so nothing is lost.
+let isWritingLine = false;
 
 /** ``LEVEL`` + ISO-8601 UTC timestamp prefix, matching console formatting semantics via util.format. */
 function formatLine(level, args) {
@@ -21,11 +30,14 @@ function formatLine(level, args) {
 }
 
 function writeLine(level, args) {
-  if (!logStream) return;
+  if (!logStream || isWritingLine) return;
+  isWritingLine = true;
   try {
     logStream.write(formatLine(level, args));
   } catch {
-    // A broken log sink must never disturb the caller (or recurse via console).
+    // A broken log sink must never disturb the caller.
+  } finally {
+    isWritingLine = false;
   }
 }
 
