@@ -1,6 +1,6 @@
 The app-level Settings page is now organized into a left nav (Permissions, Error reporting) with a right content pane, replacing the single-column layout.
 
-The app-level Settings page gains three new permission sections in its left nav, letting you inspect and revoke -- across all active workspaces -- the access your agents have been granted:
+The app-level Settings page gains three new permission sections, grouped under a "Permissions" heading in the left nav ("Connectors", "Local files", "Workspaces"; "Error reporting" sits under "Other"), letting you inspect and revoke -- across all active workspaces -- the access your agents have been granted:
 
 "Connectors": third-party services your agents have connected to (Slack, GitHub, ...). Each service lists one card per workspace that has access, with the granted permissions; hover a permission to see what it allows. Revoke a single workspace's access, or use "Revoke all" to revoke that service from every workspace at once. Your saved sign-in is kept, so agents can reconnect later.
 

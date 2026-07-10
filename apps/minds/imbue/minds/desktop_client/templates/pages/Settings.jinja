@@ -262,23 +262,30 @@
          entry un-highlighted); ``selectSection`` in the page script toggles state. #}
       <div class="w-48 shrink-0 sticky top-0 h-screen flex flex-col py-12">
         <h1 class="type-heading-lg text-primary mb-6">Settings</h1>
+        {# Grouped into non-interactive section eyebrows ("Permissions" /
+           "Other"). The eyebrows carry no ``data-settings-nav``, so the page
+           script's nav/panel wiring ignores them. The visible labels are the
+           compact grouped names; the right-pane panel headings stay more
+           descriptive (e.g. "Workspace delegation"). #}
         <nav class="flex flex-col gap-0.5" aria-label="Settings sections">
-        <button type="button" data-settings-nav="connectors"
-                class="flex items-center h-8 px-2 rounded-md cursor-pointer type-body text-left border-0 hover:text-primary hover:bg-fill-hover bg-fill-hover text-primary">
-          Connectors
-        </button>
-        <button type="button" data-settings-nav="file-sharing"
-                class="flex items-center h-8 px-2 rounded-md cursor-pointer type-body text-left border-0 hover:text-primary hover:bg-fill-hover text-secondary">
-          File sharing
-        </button>
-        <button type="button" data-settings-nav="workspace-delegation"
-                class="flex items-center h-8 px-2 rounded-md cursor-pointer type-body text-left border-0 hover:text-primary hover:bg-fill-hover text-secondary">
-          Workspace delegation
-        </button>
-        <button type="button" data-settings-nav="error-reporting"
-                class="flex items-center h-8 px-2 rounded-md cursor-pointer type-body text-left border-0 hover:text-primary hover:bg-fill-hover text-secondary">
-          Error reporting
-        </button>
+          <p class="type-section text-tertiary px-2 mb-1">Permissions</p>
+          <button type="button" data-settings-nav="connectors"
+                  class="flex items-center h-8 px-2 rounded-md cursor-pointer type-body text-left border-0 hover:text-primary hover:bg-fill-hover bg-fill-hover text-primary">
+            Connectors
+          </button>
+          <button type="button" data-settings-nav="file-sharing"
+                  class="flex items-center h-8 px-2 rounded-md cursor-pointer type-body text-left border-0 hover:text-primary hover:bg-fill-hover text-secondary">
+            Local files
+          </button>
+          <button type="button" data-settings-nav="workspace-delegation"
+                  class="flex items-center h-8 px-2 rounded-md cursor-pointer type-body text-left border-0 hover:text-primary hover:bg-fill-hover text-secondary">
+            Workspaces
+          </button>
+          <p class="type-section text-tertiary px-2 mt-4 mb-1">Other</p>
+          <button type="button" data-settings-nav="error-reporting"
+                  class="flex items-center h-8 px-2 rounded-md cursor-pointer type-body text-left border-0 hover:text-primary hover:bg-fill-hover text-secondary">
+            Error reporting
+          </button>
         </nav>
         <div class="mt-auto"><Link href="/" extra="type-helper">&larr; Back to workspaces</Link></div>
       </div>
