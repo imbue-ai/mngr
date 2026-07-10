@@ -24,6 +24,7 @@ members = [
     "imbue-mngr-claude-usage",
     "imbue-mngr-codex",
     "imbue-mngr-codex-usage",
+    "imbue-mngr-donate",
     "imbue-mngr-file",
     "imbue-mngr-forward",
     "imbue-mngr-gcp",
@@ -2360,6 +2361,25 @@ requires-dist = [
     { name = "imbue-mngr", editable = "libs/mngr" },
     { name = "imbue-mngr-codex", editable = "libs/mngr_codex" },
     { name = "imbue-mngr-usage", editable = "libs/mngr_usage" },
+]
+
+[[package]]
+name = "imbue-mngr-donate"
+version = "0.1.0"
+source = { editable = "libs/mngr_donate" }
+dependencies = [
+    { name = "click" },
+    { name = "imbue-mngr" },
+    { name = "imbue-mngr-usage" },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "click", specifier = ">=8.0" },
+    { name = "imbue-mngr", editable = "libs/mngr" },
+    { name = "imbue-mngr-usage", editable = "libs/mngr_usage" },
+    { name = "pydantic", specifier = ">=2.0" },
 ]
 
 [[package]]
