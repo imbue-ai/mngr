@@ -228,6 +228,13 @@ def build_create_argv(agent_name: str, skill_dir: str, mngr_path: str = "mngr") 
         # run unattended (incl. from a schedule), and the default clean-tree guard
         # would fail every tick whenever the working repo has edits.
         "--no-ensure-clean",
+        # Share the user's real Claude config/keychain instead of an isolated
+        # per-agent copy. Isolated copies of a subscription OAuth token go stale
+        # (~24h) and 401 -- fatal for an unattended donor whose owner may never open
+        # the interactive claude CLI to refresh them. Forced here so donate works
+        # out of the box regardless of the user's agent_types.headless_claude config.
+        "-S",
+        f"agent_types.{DONATE_AGENT_TYPE}.isolate_local_config_dir=false",
         "--message",
         build_donation_message(skill_dir),
         "--",
