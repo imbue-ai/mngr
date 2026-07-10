@@ -32,11 +32,13 @@ def _response(
     provider_error_message: str | None = None,
     provider_label: str = "",
     mngr_exec_command: str = "",
+    probe_timed_out: bool = False,
+    classification_is_trustworthy: bool = True,
 ) -> HostHealthResponse:
     """Call ``build_host_health_response`` with resolver-sourced defaults.
 
-    Defaults to a healthy RUNNING host so each test only has to vary the inputs
-    it exercises.
+    Defaults to a healthy RUNNING host with a completed probe and a trustworthy
+    (post-onset) snapshot, so each test only has to vary the inputs it exercises.
     """
     return build_host_health_response(
         host_state=host_state,
@@ -46,6 +48,8 @@ def _response(
         provider_error_message=provider_error_message,
         provider_label=provider_label,
         mngr_exec_command=mngr_exec_command,
+        probe_timed_out=probe_timed_out,
+        classification_is_trustworthy=classification_is_trustworthy,
     )
 
 
@@ -282,11 +286,12 @@ def test_dispatch_tier_host_offline_when_container_is_offline() -> None:
 
 
 def test_dispatch_tier_host_unresponsive_when_container_running_but_exec_dead() -> None:
-    """SSH-dead path: host claims RUNNING but exec failed -> consent-gated host restart.
+    """SSH-dead path: host claims RUNNING but the exec cleanly failed -> consent-gated host restart.
 
-    The recovery page is only reached once discovery is fresh (the redirect is
-    gated on freshness upstream), so the RUNNING claim is trustworthy here and
-    HOST_UNRESPONSIVE is returned unconditionally.
+    A clean exit with no sentinel (ssh dead) is a real negative signal, distinct
+    from a timeout; with a trustworthy (post-onset) snapshot backing the RUNNING
+    claim, this classifies as HOST_UNRESPONSIVE and asks the user before bouncing
+    a live container.
     """
     response = _response(host_state="RUNNING", in_container_stdout=None)
     assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
@@ -295,6 +300,70 @@ def test_dispatch_tier_host_unresponsive_when_container_running_but_exec_dead() 
 def test_dispatch_tier_host_unresponsive_for_ambiguous_host_state() -> None:
     response = _response(host_state="STARTING", in_container_stdout=None)
     assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
+
+
+def test_dispatch_tier_indeterminate_when_probe_timed_out() -> None:
+    """A timed-out in-container probe observed nothing, so no verdict is rendered.
+
+    This is the macOS-sleep case: the probe was killed by its own timeout (the
+    laptop suspended across it), which is absence of evidence -- not proof the
+    workspace is down. It must classify as INDETERMINATE ("keep checking"), not
+    the HOST_UNRESPONSIVE verdict a clean-exit ssh-dead probe earns.
+    """
+    response = _response(host_state="RUNNING", in_container_stdout=None, probe_timed_out=True)
+    assert response.dispatch_tier == DispatchTier.INDETERMINATE
+
+
+def test_dispatch_tier_indeterminate_when_snapshot_is_stale() -> None:
+    """A negative verdict off a pre-outage snapshot is untrustworthy -> INDETERMINATE.
+
+    Without direct in-container evidence, the host state comes from a discovery
+    snapshot that predates the outage onset (still reading the stale value), so no
+    host-state-derived verdict can be trusted yet.
+    """
+    response = _response(host_state="RUNNING", in_container_stdout=None, classification_is_trustworthy=False)
+    assert response.dispatch_tier == DispatchTier.INDETERMINATE
+
+
+def test_dispatch_tier_stale_snapshot_does_not_downgrade_offline_verdict_to_a_restart() -> None:
+    """A stale STOPPED reading is not trusted enough to auto-dispatch a host restart.
+
+    HOST_OFFLINE auto-dispatches an unattended restart, so it must only fire off a
+    trusted observation. With a stale snapshot the container-offline reading yields
+    INDETERMINATE instead.
+    """
+    response = _response(host_state="STOPPED", in_container_stdout=None, classification_is_trustworthy=False)
+    assert response.dispatch_tier == DispatchTier.INDETERMINATE
+
+
+def test_dispatch_tier_healthy_direct_evidence_beats_a_stale_snapshot() -> None:
+    """A live GET / 200 is trusted regardless of snapshot freshness.
+
+    Positive in-container evidence short-circuits the INDETERMINATE guard: even
+    with an untrustworthy snapshot (and a host_state that stale-reads STOPPED), an
+    exec that reached the container and got a 200 proves the workspace is up, so
+    the user is sent home (HEALTHY) rather than parked on "reconnecting".
+    """
+    response = _response(
+        host_state="STOPPED",
+        in_container_stdout=_probe_stdout({"inner_port": 8000, "curl_status": "200"}),
+        classification_is_trustworthy=False,
+        probe_timed_out=False,
+    )
+    assert response.dispatch_tier == DispatchTier.HEALTHY
+
+
+def test_dispatch_tier_backend_unreachable_beats_indeterminate() -> None:
+    """A provider error wins even when the classification would otherwise be INDETERMINATE."""
+    response = _response(
+        host_state="RUNNING",
+        in_container_stdout=None,
+        probe_timed_out=True,
+        classification_is_trustworthy=False,
+        provider_error_message="Your login expired.",
+        provider_label="Imbue Cloud",
+    )
+    assert response.dispatch_tier == DispatchTier.BACKEND_UNREACHABLE
 
 
 # --- provider reachability tiers -----------------------------------------
