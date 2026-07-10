@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shlex
 import stat
 from abc import ABC
@@ -444,15 +445,19 @@ class OuterHostInterface(HostFileReadInterface, HostFileWriteInterface, ABC):
             if not path.is_dir():
                 return SizeBytes(0)
             total = 0
-            for entry in path.rglob("*"):
-                try:
-                    entry_stat = entry.lstat()
-                except FileNotFoundError:
-                    continue
-                if stat.S_ISREG(entry_stat.st_mode):
-                    total += entry_stat.st_size
+            for dir_path, _dir_names, file_names in os.walk(path):
+                for file_name in file_names:
+                    try:
+                        entry_stat = os.lstat(os.path.join(dir_path, file_name))
+                    except OSError:
+                        continue
+                    if stat.S_ISREG(entry_stat.st_mode):
+                        total += entry_stat.st_size
             return SizeBytes(total)
-        result = self.execute_idempotent_command(f"du -sk {shlex.quote(str(path))}", timeout_seconds=30.0)
+        quoted_path = shlex.quote(str(path))
+        result = self.execute_idempotent_command(
+            f"test -d {quoted_path} && du -sk {quoted_path}", timeout_seconds=30.0
+        )
         if not result.success or not result.stdout.strip():
             return SizeBytes(0)
         return SizeBytes(int(result.stdout.split()[0]) * 1024)

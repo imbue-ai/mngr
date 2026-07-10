@@ -123,11 +123,11 @@ def test_send_enter_waits_on_hook_only_without_a_marker_command() -> None:
         accept_marker_command=None,
     )
     assert result is True
-    # Exactly one host round-trip, and it waits on the hook with no marker probe
-    # (the signal-only path uses no sentinel file).
+    # Exactly one host round-trip, and it blocks on the hook rather than polling
+    # (no marker to poll for).
     assert len(commands) == 1
     assert "tmux wait-for" in commands[0]
-    assert "mktemp" not in commands[0]
+    assert "while" not in commands[0]
 
 
 def test_send_enter_watches_marker_and_hook_concurrently_with_a_marker_command() -> None:

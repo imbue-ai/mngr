@@ -14,9 +14,7 @@
 #   - mngr_transcript_build_id_set OUTPUT_FILE FIELD
 #       Populate the associative array _MNGR_TRANSCRIPT_ID_SET with every value
 #       of FIELD found in OUTPUT_FILE. Used at startup and when a late-
-#       appearing session file needs reconciliation. Iterates line-by-line via
-#       mngr_transcript_extract_field so the extraction is consistent with the
-#       per-line lookup in mngr_transcript_reconcile_offset.
+#       appearing session file needs reconciliation.
 #
 #   - mngr_transcript_reconcile_offset SESSION_FILE FIELD
 #       Echo the largest line offset N such that lines 1..N of SESSION_FILE
@@ -42,6 +40,16 @@
 # (so it survives function-local scope) and for clearing it when no longer
 # needed.
 
+# Set _MNGR_TRANSCRIPT_FIELD_PATTERN to the ERE matching a top-level
+# "<FIELD>": "<value>" pair, capturing the value.
+#
+# The per-line loops below match with this pattern directly rather than calling
+# mngr_transcript_extract_field, because a command substitution forks a subshell
+# per line -- prohibitive on a session file with tens of thousands of lines.
+_mngr_transcript_set_field_pattern() {
+    _MNGR_TRANSCRIPT_FIELD_PATTERN="\"$1\"[[:space:]]*:[[:space:]]*\"([^\"]*)\""
+}
+
 # Extract a top-level JSON string field from a single line.
 #
 # Limitations: matches the *first* "<FIELD>": "<value>" in the line. Nested
@@ -52,8 +60,8 @@
 mngr_transcript_extract_field() {
     local field="$1"
     local line="$2"
-    local pattern="\"${field}\"[[:space:]]*:[[:space:]]*\"([^\"]*)\""
-    if [[ "$line" =~ $pattern ]]; then
+    _mngr_transcript_set_field_pattern "$field"
+    if [[ "$line" =~ $_MNGR_TRANSCRIPT_FIELD_PATTERN ]]; then
         printf '%s\n' "${BASH_REMATCH[1]}"
     fi
     return 0
@@ -67,11 +75,11 @@ mngr_transcript_build_id_set() {
     if [ ! -s "$output_file" ]; then
         return 0
     fi
-    local line value
+    _mngr_transcript_set_field_pattern "$field"
+    local line
     while IFS= read -r line; do
-        value=$(mngr_transcript_extract_field "$field" "$line")
-        if [ -n "$value" ]; then
-            _MNGR_TRANSCRIPT_ID_SET["$value"]=1
+        if [[ "$line" =~ $_MNGR_TRANSCRIPT_FIELD_PATTERN ]] && [ -n "${BASH_REMATCH[1]}" ]; then
+            _MNGR_TRANSCRIPT_ID_SET["${BASH_REMATCH[1]}"]=1
         fi
     done < "$output_file"
 }
@@ -89,14 +97,17 @@ mngr_transcript_reconcile_offset() {
         return 0
     fi
 
+    _mngr_transcript_set_field_pattern "$field"
     local idx=0
     local found=0
     local line value
     while IFS= read -r line; do
         idx=$((idx + 1))
-        value=$(mngr_transcript_extract_field "$field" "$line")
-        if [ -n "$value" ] && [ "${_MNGR_TRANSCRIPT_ID_SET[$value]+exists}" ]; then
-            found=$idx
+        if [[ "$line" =~ $_MNGR_TRANSCRIPT_FIELD_PATTERN ]]; then
+            value="${BASH_REMATCH[1]}"
+            if [ -n "$value" ] && [ "${_MNGR_TRANSCRIPT_ID_SET[$value]+exists}" ]; then
+                found=$idx
+            fi
         fi
     done < "$session_file"
 

@@ -307,3 +307,42 @@ def test_signal_or_marker_command_kills_the_tmux_client_not_a_wrapper_subshell()
     command = _build_signal_or_marker_command(2.0, "chan", _TARGET, "printf ''")
     assert 'tmux wait-for "$1" & waiter=$!' in command
     assert 'kill "$waiter" "$watchdog"' in command
+
+
+@pytest.mark.tmux
+def test_send_enter_via_hook_confirms_on_the_hook_when_the_marker_never_advances(
+    signal_agent: _ProbeAgent,
+) -> None:
+    """With a marker command, a submission that records no marker still confirms via the hook.
+
+    This is the shape of Claude's ``/clear`` and ``/compact``: the TUI fires the
+    submit hook but never enqueues a model turn, so the acceptance marker never
+    moves and only the hook can confirm.
+    """
+    session_name = f"{signal_agent.mngr_ctx.config.prefix}{signal_agent.name}"
+    tmux_target = TmuxWindowTarget(session_name=session_name, window=0)
+    wait_channel = f"mngr-submit-marker-never-moves-{session_name}"
+
+    signal_agent.host.execute_idempotent_command(
+        f"tmux new-session -d -s '{session_name}' 'bash'",
+        timeout_seconds=5.0,
+    )
+    try:
+        signal_agent.host.execute_idempotent_command(
+            f"( sleep 0.1 && tmux wait-for -S '{wait_channel}' ) &",
+            timeout_seconds=1.0,
+        )
+        send_enter_via_tmux_wait_for_hook(
+            signal_agent,
+            tmux_target,
+            wait_channel=wait_channel,
+            timeout_seconds=3.0,
+            # A constant token never sorts after its own baseline, so the marker
+            # can never be what confirms this submission.
+            accept_marker_command="printf 'frozen-marker'",
+        )
+    finally:
+        signal_agent.host.execute_idempotent_command(
+            f"tmux kill-session -t '={session_name}' 2>/dev/null",
+            timeout_seconds=5.0,
+        )
