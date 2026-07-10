@@ -1,0 +1,5 @@
+Added `DiscoveryErrorLogSuppressor`, a shared per-process deduplicator for provider-level discovery-error log lines: a provider stuck on the same failure (e.g. missing credentials) is logged once (with a note that repeats are suppressed), a different error logs immediately, and a clean snapshot from the provider logs an info-level recovery line and re-arms suppression. Host- and agent-attributed discovery errors are never suppressed.
+
+`mngr observe --discovery-only` now emits one startup `DISCOVERY_PROVIDER` snapshot for each provider skipped at stream startup: an error snapshot for unavailable/unauthorized providers and a clean zero-agent snapshot for known-empty ones (e.g. Modal with no per-user environment), each carrying the provider's config. Consumers such as the minds providers panel now see these providers' state from the stream instead of only from a full `mngr list` side effect.
+
+Added `get_all_provider_instances_and_skipped`, which reports the providers whose construction was skipped as unavailable/unauthorized/empty alongside the constructed instances.
