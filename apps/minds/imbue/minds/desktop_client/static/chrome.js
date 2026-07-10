@@ -473,6 +473,12 @@
   // -- SSE-driven sidebar (browser mode only) -------------------------------
   var lastWorkspaces = [];
 
+  // Repaint rows when the shared backup-health cache updates so the backup
+  // warning badge appears/disappears without a workspace-list event.
+  if (window.mindsBackupHealth) {
+    window.mindsBackupHealth.onUpdate(function () { renderWorkspaces(lastWorkspaces); });
+  }
+
   function renderWorkspaces(workspaces) {
     var container = document.getElementById('sidebar-workspaces');
     if (!container) return;
