@@ -1753,19 +1753,45 @@ def render_accounts_page(
 def render_settings_page(
     report_unexpected_errors: bool = False,
     include_error_logs: bool = False,
+    services_overview: Sequence[object] | None = None,
+    file_sharing_grants: Sequence[object] | None = None,
+    workspace_delegation_grants: Sequence[object] | None = None,
+    permissions_unavailable: bool = False,
     has_saved_backup_password: bool = False,
 ) -> str:
     """Render the app-level settings page (reachable from the sidebar's "Settings" entry).
+
+    The page has a left nav (Permissions / Error reporting) and a right content
+    pane.
 
     ``report_unexpected_errors`` / ``include_error_logs`` seed the per-machine
     error-reporting toggles hosted on this page (the same settings the
     first-launch consent screen records); ``has_saved_backup_password`` feeds
     the backup master-password section's helper text. All are global to the
     machine, not account-scoped.
+
+    ``services_overview`` is a sequence of
+    :class:`~imbue.minds.desktop_client.latchkey.permission_overview.ServicePermissionOverview`
+    describing the predefined-service grants held across all active workspaces
+    (empty when nothing is granted). ``file_sharing_grants`` is a sequence of
+    :class:`~imbue.minds.desktop_client.latchkey.permission_overview.WorkspaceFileSharingGrant`
+    describing the file-sharing access granted per workspace, rendered as a
+    separate section below the services. ``workspace_delegation_grants`` is a
+    sequence of
+    :class:`~imbue.minds.desktop_client.latchkey.permission_overview.WorkspaceDelegationGrant`
+    describing the cross-workspace-management grants, grouped by the granting
+    workspace with one row per verb (naming the target[s] it covers), rendered
+    below file sharing. ``permissions_unavailable`` is True when the latchkey
+    gateway could not be reached to read grants, so the page shows a notice
+    instead of an empty list.
     """
     return CATALOG.render(
         "pages.Settings",
         report_unexpected_errors=report_unexpected_errors,
         include_error_logs=include_error_logs,
+        services_overview=list(services_overview or []),
+        file_sharing_grants=list(file_sharing_grants or []),
+        workspace_delegation_grants=list(workspace_delegation_grants or []),
+        permissions_unavailable=permissions_unavailable,
         has_saved_backup_password=has_saved_backup_password,
     )
