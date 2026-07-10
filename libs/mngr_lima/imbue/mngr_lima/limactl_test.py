@@ -12,6 +12,7 @@ from imbue.mngr_lima.limactl import _strip_ssh_config_quotes
 from imbue.mngr_lima.limactl import host_name_from_instance_name
 from imbue.mngr_lima.limactl import lima_instance_name
 from imbue.mngr_lima.limactl import lima_instance_name_from_host_id
+from imbue.mngr_lima.limactl import resolve_lima_home
 
 
 def _lima_socket_path_length(instance_name: str, lima_home: Path) -> int:
@@ -53,6 +54,16 @@ def test_lima_instance_name_from_host_id_raises_when_no_id_fits() -> None:
     host_id = HostId.generate()
     with pytest.raises(LimaInstanceNameTooLongError):
         lima_instance_name_from_host_id(host_id, "minds-staging-", lima_home=Path("/" + "d" * 90 + "/.lima"))
+
+
+def test_resolve_lima_home_uses_env_var_when_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LIMA_HOME", "/custom/lima/home")
+    assert resolve_lima_home() == Path("/custom/lima/home")
+
+
+def test_resolve_lima_home_defaults_to_dot_lima(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LIMA_HOME", raising=False)
+    assert resolve_lima_home() == Path.home() / ".lima"
 
 
 def test_lima_instance_name() -> None:

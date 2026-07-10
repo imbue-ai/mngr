@@ -81,6 +81,7 @@ from imbue.mngr_lima.limactl import limactl_show_ssh
 from imbue.mngr_lima.limactl import limactl_start_existing
 from imbue.mngr_lima.limactl import limactl_start_new
 from imbue.mngr_lima.limactl import limactl_stop
+from imbue.mngr_lima.limactl import resolve_lima_home
 
 # Lima instance status values mapped to mngr HostState
 _LIMA_STATUS_TO_HOST_STATE: dict[str, HostState] = {
@@ -475,7 +476,9 @@ sudo poweroff
         # Derive the limactl instance name from the immutable host id, not the
         # (mutable) host name, so a later rename never leaves the VM's instance
         # name out of sync with the host name (limactl has no rename).
-        instance_name = lima_instance_name_from_host_id(host_id, self.mngr_ctx.config.prefix)
+        instance_name = lima_instance_name_from_host_id(
+            host_id, self.mngr_ctx.config.prefix, resolve_lima_home()
+        )
         logger.info("Creating Lima VM host {} ({}) ...", name, instance_name)
 
         # Resolve the host_dir layout once and lock it in on the host record.
