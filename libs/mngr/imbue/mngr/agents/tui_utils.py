@@ -216,12 +216,10 @@ def send_enter_via_tmux_wait_for_hook(
     """Strategy 3: send Enter and wait for a tmux wait-for channel fired by a TUI hook.
 
     Used by agents whose TUI exposes a UserPromptSubmit-style hook that fires
-    ``tmux wait-for -S $channel`` once the message is submitted. The waiter
-    is run in the **foreground** so it registers with the tmux server
-    synchronously, then Enter is sent from a backgrounded subshell after a
-    short delay. This avoids a race where the hook signal fires before the
-    waiter has registered (signals wake exactly one waiter; if none exists
-    the signal is lost).
+    ``tmux wait-for -S $channel`` once the message is submitted. The waiter is
+    started before Enter is sent, and Enter is sent from a backgrounded subshell
+    after a short delay, so that the waiter has registered with the tmux server
+    by the time the hook can fire.
 
     ``accept_marker_command`` (when supplied) is an agent-provided shell snippet
     that prints a lexicographically-monotonic token -- e.g. an ISO-8601
@@ -306,29 +304,21 @@ def _build_signal_only_command(full_timeout: float, wait_channel: str, tmux_targ
     Used for TUIs with no acceptance-marker command to watch. The waiter is
     started before Enter is sent from a backgrounded subshell, so it is
     registered by the time the hook can fire. Exit 0 = signalled, non-zero =
-    deadline reached.
+    deadline reached or tmux failed.
 
-    The deadline is a backgrounded ``sleep``-then-``kill`` watchdog rather than
-    ``timeout(1)``, which is GNU coreutils and absent on macOS. Three properties
-    the watchdog has to reproduce by hand:
-
-    - The waiter must be the tmux client itself, not a wrapper subshell, or the
-      kill hits the subshell and leaves the client running forever.
-    - A killed ``tmux wait-for`` exits 0, so the wait status alone cannot mean
-      success. The watchdog writes ``$tmo`` *before* killing, and a non-empty
-      ``$tmo`` means the deadline passed, the way ``timeout`` returns 124. The
-      wait status still decides the rest: ``tmux wait-for`` exits non-zero when
-      it fails outright (no server, dead session), which is not a submission.
-    - Background jobs redirect stdout, because a job that inherits it holds the
-      caller's stdout open until it exits, stalling every submission for the
-      full deadline even when the signal lands immediately.
+    macOS ships no ``timeout`` binary, so the deadline is a ``sleep``-then-``kill``
+    watchdog. ``$waiter`` is the tmux client itself, so the kill reaps it. A
+    killed ``tmux wait-for`` exits 0, so the deadline is recorded in ``$tmo``
+    before the kill, and the wait status separates a signal from an outright
+    tmux failure. Background jobs redirect stdout, which they would otherwise
+    hold open until they exit, stalling the caller for the full deadline.
     """
     script = (
-        'tmo="$(mktemp)"; '
-        'trap \'kill "$waiter" "$watchdog" 2>/dev/null; rm -f "$tmo"\' EXIT; '
+        'tmo="$(mktemp)" || exit 1; '
+        'trap \'kill "$waiter" "$watchdog" "$submit" 2>/dev/null; rm -f "$tmo"\' EXIT; '
         'tmux wait-for "$2" & waiter=$!; '
         '( sleep "$1"; echo 1 > "$tmo"; kill "$waiter" ) >/dev/null 2>&1 & watchdog=$!; '
-        '( sleep 0.1 && tmux send-keys -t "$3" Enter ) >/dev/null 2>&1 & '
+        '( sleep 0.1 && tmux send-keys -t "$3" Enter ) >/dev/null 2>&1 & submit=$!; '
         'wait "$waiter" 2>/dev/null; waited=$?; '
         'kill "$watchdog" 2>/dev/null; '
         '[ ! -s "$tmo" ] && [ "$waited" -eq 0 ]'
@@ -345,22 +335,19 @@ def _build_signal_or_marker_command(
     """Succeed as soon as EITHER the hook signal fires OR a fresh acceptance marker appears.
 
     A single remote command so the two conditions are watched concurrently with
-    no dangling process: it registers the hook waiter in the background -- which
-    writes a sentinel file on success, preserving the register-before-Enter
-    ordering so the signal is never missed (which matters for submissions that
-    only ever fire the signal, never recording a marker) -- sends Enter, then
-    polls both the sentinel and the acceptance marker until either confirms or
-    the deadline passes. Exit 0 = confirmed, non-zero = timeout.
+    no dangling process: it registers the hook waiter in the background,
+    preserving the register-before-Enter ordering so the signal is never missed
+    (which matters for submissions that only ever fire the signal, never
+    recording a marker), sends Enter, then polls both the waiter and the
+    acceptance marker until either confirms or the deadline passes. Exit 0 =
+    confirmed, non-zero = timeout.
 
-    The hook waiter is bounded by a ``sleep``-then-``kill`` watchdog rather than
-    ``timeout(1)`` (GNU coreutils, absent on macOS). See
-    :func:`_build_signal_only_command` for the three properties that hand-rolled
-    watchdog has to reproduce; the one that shapes this variant is that the
-    waiter must be the tmux client itself, so the loop detects a fired hook by
-    the client having exited (``kill -0``) with a zero wait status and no
-    ``$tmo`` marker, rather than by wrapping the client in a subshell that
-    writes a sentinel. Once the waiter is gone without confirming, the marker is
-    the only thing left that can, so the loop keeps polling it.
+    macOS ships no ``timeout`` binary, so the hook waiter is bounded by a
+    ``sleep``-then-``kill`` watchdog. ``$waiter`` is the tmux client itself, so
+    the loop reads a fired hook as the client having exited (``kill -0``) with a
+    zero wait status and no ``$tmo`` deadline marker. A waiter that is gone
+    without confirming leaves the marker as the only thing that still can, so
+    the loop keeps polling it.
 
     ``accept_marker_command`` is the agent-supplied shell snippet that prints the
     agent's latest acceptance-marker token (empty if none yet). A baseline is
@@ -372,16 +359,15 @@ def _build_signal_or_marker_command(
     agent that supplies it.
     """
     script = (
-        'tmo="$(mktemp)"; '
-        # Clean up on every exit path: kill the tmux client and the watchdog
-        # (either may outlive a fast marker-win) and remove the marker file.
-        'trap \'kill "$waiter" "$watchdog" 2>/dev/null; rm -f "$tmo"\' EXIT; '
+        'tmo="$(mktemp)" || exit 1; '
+        # Any of the three background jobs can outlive a fast marker-win.
+        'trap \'kill "$waiter" "$watchdog" "$submit" 2>/dev/null; rm -f "$tmo"\' EXIT; '
         f'base="$({accept_marker_command})"; '
         # Register the hook waiter first, bounded by the watchdog.
         'tmux wait-for "$1" & waiter=$!; '
         f'( sleep {full_timeout}; echo 1 > "$tmo"; kill "$waiter" ) >/dev/null 2>&1 & watchdog=$!; '
         # Then submit, after a beat so the waiter is registered.
-        '( sleep 0.1 && tmux send-keys -t "$2" Enter ) >/dev/null 2>&1 & '
+        '( sleep 0.1 && tmux send-keys -t "$2" Enter ) >/dev/null 2>&1 & submit=$!; '
         f'end="$(( $(date +%s) + {int(full_timeout) + 1} ))"; '
         "hook_pending=1; "
         'while [ "$(date +%s)" -lt "$end" ]; do '

@@ -5,24 +5,17 @@
 # share the parts of raw-transcript capture that are structurally identical
 # regardless of the agent's native session schema:
 #
-#   - mngr_transcript_extract_field FIELD LINE
-#       Extract the first top-level "<FIELD>": "<value>" string from one JSONL
-#       line. Used to read uuid / id / similar correlation fields without
-#       requiring jq. Echoes the bare value (no quotes) on stdout, empty if no
-#       match. Always returns 0 (safe under `set -e` command substitution).
-#
 #   - mngr_transcript_build_id_set OUTPUT_FILE FIELD
 #       Populate the associative array _MNGR_TRANSCRIPT_ID_SET with every value
 #       of FIELD found in OUTPUT_FILE. Used at startup and when a late-
-#       appearing session file needs reconciliation.
+#       appearing session file needs reconciliation. Correlation fields (uuid,
+#       id) are matched with a bash regex, so no jq is required.
 #
 #   - mngr_transcript_reconcile_offset SESSION_FILE FIELD
-#       Echo the largest line offset N such that lines 1..N of SESSION_FILE
-#       have FIELD values already present in _MNGR_TRANSCRIPT_ID_SET. Used to
-#       recover after a crash that may have dropped the stored offset. Echoes
-#       0 if no match is found or the file is empty. Scans forward rather than
-#       reversing the file, so it needs no `tac` (GNU coreutils, absent on
-#       macOS).
+#       Echo the highest 1-indexed line of SESSION_FILE whose FIELD value is
+#       already present in _MNGR_TRANSCRIPT_ID_SET, or 0 if there is none. Used
+#       to recover after a crash that may have dropped the stored offset. Scans
+#       forward, so it needs no `tac` (GNU coreutils, absent on macOS).
 #
 #   - mngr_transcript_emit_lines_range SESSION_FILE START END OUTPUT_FILE
 #       Append lines START..END (inclusive, 1-indexed) of SESSION_FILE to
@@ -40,32 +33,14 @@
 # (so it survives function-local scope) and for clearing it when no longer
 # needed.
 
-# Set _MNGR_TRANSCRIPT_FIELD_PATTERN to the ERE matching a top-level
-# "<FIELD>": "<value>" pair, capturing the value.
+# The ERE matching a top-level "<FIELD>": "<value>" pair, capturing the value.
+# Matched inline in the loops below: a command substitution would fork a subshell
+# per line, and a session file runs to tens of thousands of lines.
 #
-# The per-line loops below match with this pattern directly rather than calling
-# mngr_transcript_extract_field, because a command substitution forks a subshell
-# per line -- prohibitive on a session file with tens of thousands of lines.
-_mngr_transcript_set_field_pattern() {
-    _MNGR_TRANSCRIPT_FIELD_PATTERN="\"$1\"[[:space:]]*:[[:space:]]*\"([^\"]*)\""
-}
-
-# Extract a top-level JSON string field from a single line.
-#
-# Limitations: matches the *first* "<FIELD>": "<value>" in the line. Nested
-# occurrences inside arrays / sub-objects with the same key are also matched
-# if they precede the top-level one, but in practice agent-emitted JSONL
-# events keep correlation fields (uuid, id) at the top so the first match
-# is the right one.
-mngr_transcript_extract_field() {
-    local field="$1"
-    local line="$2"
-    _mngr_transcript_set_field_pattern "$field"
-    if [[ "$line" =~ $_MNGR_TRANSCRIPT_FIELD_PATTERN ]]; then
-        printf '%s\n' "${BASH_REMATCH[1]}"
-    fi
-    return 0
-}
+# Limitations: matches the *first* such pair in the line. Agent-emitted JSONL
+# events keep correlation fields (uuid, id) at the top, so the first match is the
+# right one.
+_MNGR_TRANSCRIPT_FIELD_ERE='"%s"[[:space:]]*:[[:space:]]*"([^"]*)"'
 
 # Build _MNGR_TRANSCRIPT_ID_SET from every FIELD value in OUTPUT_FILE.
 mngr_transcript_build_id_set() {
@@ -75,10 +50,11 @@ mngr_transcript_build_id_set() {
     if [ ! -s "$output_file" ]; then
         return 0
     fi
-    _mngr_transcript_set_field_pattern "$field"
+    local pattern
+    printf -v pattern "$_MNGR_TRANSCRIPT_FIELD_ERE" "$field"
     local line
     while IFS= read -r line; do
-        if [[ "$line" =~ $_MNGR_TRANSCRIPT_FIELD_PATTERN ]] && [ -n "${BASH_REMATCH[1]}" ]; then
+        if [[ "$line" =~ $pattern ]] && [ -n "${BASH_REMATCH[1]}" ]; then
             _MNGR_TRANSCRIPT_ID_SET["${BASH_REMATCH[1]}"]=1
         fi
     done < "$output_file"
@@ -97,13 +73,14 @@ mngr_transcript_reconcile_offset() {
         return 0
     fi
 
-    _mngr_transcript_set_field_pattern "$field"
+    local pattern
+    printf -v pattern "$_MNGR_TRANSCRIPT_FIELD_ERE" "$field"
     local idx=0
     local found=0
     local line value
     while IFS= read -r line; do
         idx=$((idx + 1))
-        if [[ "$line" =~ $_MNGR_TRANSCRIPT_FIELD_PATTERN ]]; then
+        if [[ "$line" =~ $pattern ]]; then
             value="${BASH_REMATCH[1]}"
             if [ -n "$value" ] && [ "${_MNGR_TRANSCRIPT_ID_SET[$value]+exists}" ]; then
                 found=$idx

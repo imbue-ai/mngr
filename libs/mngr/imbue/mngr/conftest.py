@@ -44,6 +44,7 @@ from imbue.mngr.utils.testing import cleanup_tmux_session
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import worker_docker_state_prefixes
 from imbue.mngr.utils.testing import worker_test_ids
+from imbue.mngr.utils.testing import write_executable_script
 
 # Resource guards (tmux, rsync, unison, modal, docker_cli, docker_sdk) are
 # registered automatically via the resource_guards entry point group.
@@ -800,17 +801,17 @@ _MINIMUM_BASH_MAJOR_VERSION: Final[int] = 4
 
 @pytest.fixture
 def posix_only_path(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
-    """An environment whose PATH shadows GNU-coreutils-only binaries with shims that exit 127.
+    """An environment whose PATH shadows ``tac`` and ``timeout`` with shims that exit 127.
 
-    mngr must run on stock macOS, whose BSD userland has no ``tac`` or ``timeout``.
-    Poisoning them means a reintroduced dependency fails on Linux too, rather than
-    passing in CI and breaking only on a user's mac.
+    Stock macOS ships a BSD userland with neither, so poisoning them makes a
+    reintroduced dependency on either fail on Linux too, rather than passing in CI
+    and breaking only on a user's mac. It is a targeted guard for those two names,
+    not a general macOS-portability check: a GNU-only *flag* on a binary BSD does
+    ship (``du -b``, ``stat -c``) passes straight through it.
     """
     poison_dir = tmp_path_factory.mktemp("posix_only_bin")
     for binary in _GNU_ONLY_BINARIES:
-        shim = poison_dir / binary
-        shim.write_text(f'#!/bin/sh\necho "{binary}: command not found" >&2\nexit 127\n')
-        shim.chmod(0o755)
+        write_executable_script(poison_dir / binary, f'#!/bin/sh\necho "{binary}: command not found" >&2\nexit 127\n')
     env = dict(os.environ)
     env["PATH"] = f"{poison_dir}{os.pathsep}{env['PATH']}"
     return env

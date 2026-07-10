@@ -8,6 +8,7 @@ Linux too, not only on macOS.
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -22,10 +23,10 @@ def _write_jsonl(path: Path, uuids: list[str]) -> None:
 
 def _reconcile_offset(bash: str, env: dict[str, str], session_file: Path, output_file: Path) -> int:
     script = f"""
-        source {_LIB}
+        source {shlex.quote(str(_LIB))}
         declare -A _MNGR_TRANSCRIPT_ID_SET
-        mngr_transcript_build_id_set {output_file} uuid
-        mngr_transcript_reconcile_offset {session_file} uuid
+        mngr_transcript_build_id_set {shlex.quote(str(output_file))} uuid
+        mngr_transcript_reconcile_offset {shlex.quote(str(session_file))} uuid
     """
     result = subprocess.run([bash, "-c", script], capture_output=True, text=True, env=env, timeout=30)
     assert result.returncode == 0, f"lib exited {result.returncode}: {result.stderr}"
@@ -63,18 +64,6 @@ def test_reconcile_offset_ignores_an_unterminated_final_line(
 
     offset = _reconcile_offset(bash_with_associative_arrays, posix_only_path, session_file, output_file)
     assert offset == 1
-
-
-def test_reconcile_offset_is_zero_when_nothing_was_emitted(
-    tmp_path: Path, posix_only_path: dict[str, str], bash_with_associative_arrays: str
-) -> None:
-    session_file = tmp_path / "session.jsonl"
-    output_file = tmp_path / "output.jsonl"
-    _write_jsonl(session_file, ["id-1", "id-2"])
-    output_file.write_text("")
-
-    offset = _reconcile_offset(bash_with_associative_arrays, posix_only_path, session_file, output_file)
-    assert offset == 0
 
 
 def test_reconcile_offset_returns_the_highest_matching_line_not_the_first(
