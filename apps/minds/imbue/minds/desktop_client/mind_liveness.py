@@ -37,13 +37,17 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 
 # Provider backends whose hosts can currently be stopped and started from minds.
-# These are the local backends, whose hosts run on the user's own machine and so
-# consume local resources while alive; remote backends (Modal, OVH, ...) do not
-# yet surface host shutdown to minds. This is the *one* place that encodes that
-# restriction: when a remote provider gains host shutdown support, widen this set
+# Local backends (docker / lima) consume the user's own machine while alive, and
+# the cloud-VM backends (aws / gcp / azure) support real VM-level stop/start via
+# ``mngr stop --stop-host`` (EC2 stop / GCE stop / Azure deallocate) -- for the
+# bring-your-own-account flow, stopping is what halts the user's own cloud
+# billing, and the provider's offline state bucket keeps a stopped workspace
+# visible in the UI. Remote backends without a real host-stop (Modal, OVH,
+# imbue_cloud leases) stay out. This is the *one* place that encodes that
+# restriction: when another provider gains host shutdown support, widen this set
 # (or replace it with a richer per-provider capability check) and every Start /
 # Stop surface follows. See ``provider_backend_supports_shutdown``.
-_SHUTDOWN_CAPABLE_PROVIDER_BACKENDS: Final[frozenset[str]] = frozenset({"docker", "lima"})
+_SHUTDOWN_CAPABLE_PROVIDER_BACKENDS: Final[frozenset[str]] = frozenset({"docker", "lima", "aws", "gcp", "azure"})
 
 # Discovery ``HostState`` values that mean the container exists but is not
 # running. Mirrors the offline set the recovery-diagnostics probe uses.
