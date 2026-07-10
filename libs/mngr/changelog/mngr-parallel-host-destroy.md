@@ -1,1 +1,0 @@
-- Changed: regenerated the `mngr imbue_cloud` CLI reference (`docs/commands/secondary/imbue_cloud.md`) for the reworked `admin pool destroy` (multiple ids destroyed in parallel, `--max-concurrency`, `--drop-row-only` replacing `--skip-vps-cancel`, `--force` re-scoped to leased rows) and the new `admin pool teardown-slices --max-concurrency` flag.
