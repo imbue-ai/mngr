@@ -56,10 +56,17 @@ CONFIGURED_GCP_MACHINE_TYPES: Final[tuple[tuple[str, str], ...]] = (
     ("e2-standard-8", "e2-standard-8 — 8 vCPU / 32 GB"),
 )
 DEFAULT_GCP_MACHINE_TYPE: Final[str] = "e2-standard-2"
+# Two families on purpose: new pay-as-you-go subscriptions frequently hit
+# SkuNotAvailable capacity restrictions on the cheap burstable B-series in
+# popular regions; the Dsv5/Dasv5 families draw from different hardware pools
+# and often have capacity where B-series is gated.
 CONFIGURED_AZURE_VM_SIZES: Final[tuple[tuple[str, str], ...]] = (
     ("Standard_B2s", "Standard_B2s — 2 vCPU / 4 GB (cheapest; heavy builds may be slow)"),
     ("Standard_B2ms", "Standard_B2ms — 2 vCPU / 8 GB (recommended)"),
+    ("Standard_D2as_v5", "Standard_D2as_v5 — 2 vCPU / 8 GB (AMD; try if B-series is unavailable)"),
+    ("Standard_D2s_v5", "Standard_D2s_v5 — 2 vCPU / 8 GB (Intel; try if B-series is unavailable)"),
     ("Standard_B4ms", "Standard_B4ms — 4 vCPU / 16 GB"),
+    ("Standard_D4as_v5", "Standard_D4as_v5 — 4 vCPU / 16 GB (AMD)"),
     ("Standard_B8ms", "Standard_B8ms — 8 vCPU / 32 GB"),
 )
 DEFAULT_AZURE_VM_SIZE: Final[str] = "Standard_B2ms"
@@ -75,13 +82,19 @@ CONFIGURED_GCP_ZONES: Final[tuple[str, ...]] = (
     "us-east4-a",
 )
 DEFAULT_GCP_ZONE: Final[str] = "us-west1-a"
+# eastus2 first: new-subscription capacity restrictions bite hardest in the
+# oldest/most popular regions (westus, eastus); eastus2 / centralus /
+# northcentralus / westus3 are the commonly-recommended less-congested picks.
 CONFIGURED_AZURE_REGIONS: Final[tuple[str, ...]] = (
-    "westus",
-    "westus2",
-    "eastus",
     "eastus2",
+    "centralus",
+    "northcentralus",
+    "westus2",
+    "westus3",
+    "westus",
+    "eastus",
 )
-DEFAULT_AZURE_REGION: Final[str] = "westus"
+DEFAULT_AZURE_REGION: Final[str] = "eastus2"
 
 
 class CreationId(RandomId):
