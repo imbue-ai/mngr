@@ -10,8 +10,6 @@ from __future__ import annotations
 
 import pytest
 
-from imbue.mngr_usage.data_types import UsageSnapshot
-from imbue.mngr_usage.data_types import WindowSnapshot
 from imbue.mngr_donate.donate import CLAUDE_SOURCE
 from imbue.mngr_donate.donate import FIVE_HOUR_WINDOW
 from imbue.mngr_donate.donate import SEVEN_DAY_WINDOW
@@ -21,6 +19,8 @@ from imbue.mngr_donate.donate import build_donation_message
 from imbue.mngr_donate.donate import build_launchd_plist
 from imbue.mngr_donate.donate import evaluate_capacity
 from imbue.mngr_donate.donate import weekly_pace_line
+from imbue.mngr_usage.data_types import UsageSnapshot
+from imbue.mngr_usage.data_types import WindowSnapshot
 
 # A fixed "now" and a 7-day window; resets_at is set relative to NOW so a chosen
 # fraction of the window has elapsed.
