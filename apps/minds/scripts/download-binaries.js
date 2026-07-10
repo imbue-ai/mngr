@@ -497,8 +497,9 @@ async function downloadGit(resourcesDir, { platform }) {
  * pnpm and Node are NOT provisioned here -- ToDesktop's `pnpmVersion`
  * and `nodeVersion` fields in `todesktop.js` cover that. This hook only
  * handles binaries ToDesktop has no first-class knob for: `uv`, `git`,
- * and `restic` (used by the desktop client to manage per-workspace
- * backups).
+ * `restic` (per-workspace backups), and, for the Lima launch mode on
+ * macOS/Linux, `desync` and `qemu-img` (fetch + convert the pre-baked
+ * Lima image).
  */
 async function downloadBinaries(resourcesDir) {
   const { platform, arch } = getPlatformArch();
