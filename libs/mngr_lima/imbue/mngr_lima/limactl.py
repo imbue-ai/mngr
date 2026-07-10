@@ -25,7 +25,6 @@ from imbue.mngr_lima.errors import LimaInstanceNameTooLongError
 from imbue.mngr_lima.errors import LimaNotInstalledError
 from imbue.mngr_lima.errors import LimaVersionError
 
-
 # Lima rejects a VM whose SSH control-socket path would reach UNIX_PATH_MAX. In
 # pkg/instance/create.go it forms that path as
 # `filepath.Join(LIMA_HOME, instance_name, filenames.LongestSock)` and fails

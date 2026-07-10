@@ -476,9 +476,7 @@ sudo poweroff
         # Derive the limactl instance name from the immutable host id, not the
         # (mutable) host name, so a later rename never leaves the VM's instance
         # name out of sync with the host name (limactl has no rename).
-        instance_name = lima_instance_name_from_host_id(
-            host_id, self.mngr_ctx.config.prefix, resolve_lima_home()
-        )
+        instance_name = lima_instance_name_from_host_id(host_id, self.mngr_ctx.config.prefix, resolve_lima_home())
         logger.info("Creating Lima VM host {} ({}) ...", name, instance_name)
 
         # Resolve the host_dir layout once and lock it in on the host record.

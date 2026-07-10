@@ -5,9 +5,9 @@ import pytest
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr_lima.errors import LimaInstanceNameTooLongError
+from imbue.mngr_lima.limactl import LimaSshConfig
 from imbue.mngr_lima.limactl import _LIMA_SOCKET_PATH_OVERHEAD
 from imbue.mngr_lima.limactl import _UNIX_PATH_MAX
-from imbue.mngr_lima.limactl import LimaSshConfig
 from imbue.mngr_lima.limactl import _strip_ssh_config_quotes
 from imbue.mngr_lima.limactl import host_name_from_instance_name
 from imbue.mngr_lima.limactl import lima_instance_name
