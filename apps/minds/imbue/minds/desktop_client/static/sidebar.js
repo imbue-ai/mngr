@@ -128,6 +128,12 @@
     dismissModal();
   });
 
+  // Repaint rows when the shared backup-health cache updates so the backup
+  // warning badge appears/disappears without a workspace-list event.
+  if (window.mindsBackupHealth) {
+    window.mindsBackupHealth.onUpdate(function () { renderWorkspaces(lastWorkspaces); });
+  }
+
   if (isElectron && window.minds.onCurrentWorkspaceChanged) {
     window.minds.onCurrentWorkspaceChanged(function (agentId) {
       currentWorkspaceId = agentId || null;

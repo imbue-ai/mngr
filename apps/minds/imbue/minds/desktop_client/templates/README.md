@@ -59,7 +59,7 @@ root of `templates/`. Auth-flow components live under `templates/auth/`.
 | `Notice` | Info / warn / success / error banner. Use HTML attribute passthrough (`id=`, `class="hidden"`) for JS-toggled messages. |
 | `StatusBadge` | Compact pill. `variant="neutral"` / `success` / `error` / `warn` / `info`. |
 | `Badge` | Notification badge on the `important` hue. `count` set -> a count pill (`type-badge` text, caps at 99+); no `count` -> an 8px dot. The titlebar requests button shows the count inline beside the icon (icon + badge in a `gap-[3px]` row; chrome.js sets the text + toggles the native `hidden` attribute -- not a `hidden` class, which the pill's baked-in `inline-flex` would beat). Carries no position; the caller places it. |
-| `Spinner` | CSS-only animated circle. `size="sm"` / `"md"` / `"lg"` ; `tone="default"` / `"accent"` (blue, for primary-action spinners). |
+| `Spinner` | CSS-only animated circle. `size="sm"` / `"md"` / `"lg"` ; `tone="default"` / `"accent"` (blue, for primary-action spinners) / `"inverse"` (derives from `currentColor`, for spinners inside solid-filled buttons like the Approve busy state). |
 
 ### Icons
 
@@ -98,7 +98,7 @@ instead (e.g. `.minds-tooltip`):
 |---|---|
 | `.minds-card` | Card surface (bg-surface-primary, border-default, rounded-lg). Match `Card.jinja`. |
 | `.minds-tooltip` | Custom tooltip bubble (uses `@apply`). Shared appearance for the overlay tooltip (`overlay.js`) and the in-page fallback (`tooltip_triggers.js`); positioning is set per-backend in JS. |
-| `.spinner` / `.spinner-accent` | Animated circular spinner (token-driven ring/top; `-accent` uses the accent token). Match `Spinner.jinja`. |
+| `.spinner` / `.spinner-accent` / `.spinner-inverse` | Animated circular spinner (token-driven ring/top; `-accent` uses the accent token; `-inverse` derives from `currentColor`). Match `Spinner.jinja`. |
 | `.code-pill` | Inline `<code>` pill (bg-fill-subtle, rounded-md, monospace, 0.95em). Match `Sharing.jinja`'s service-name pills. |
 | `.accent-spine` | Vertical workspace-accent stripe on the left edge. Used by Landing workspace rows + Destroying. |
 | `.sidebar-dot` | Per-workspace accent circle in the workspace menu rows. Sized by Tailwind (`w-2.5 h-2.5 rounded-full`); colored inline per workspace by `sidebar.js` / `chrome.js`. Not an app.css class -- listed here as the accent-surface to keep in sync. (The workspace row itself carries the `.sidebar-item` class purely as a JS selector hook + `is-current` / `is-stale` state marker; it has no app.css styling.) |
@@ -109,7 +109,7 @@ instead (e.g. `.minds-tooltip`):
 | Source | Contents |
 |---|---|
 | `templates.py` | `BTN_BASE` / `BTN_SIZES` / `BTN_VARIANTS` (button shell), `INPUT_BASE` (form-control shell), `ICONS_16` / `ICONS_12` (SVG path data). Exposed as JinjaX Catalog globals. |
-| `static/app.css` | The `@theme` design tokens (colors, radius, type ramp, elevation) plus hand-written recipes: `.minds-card`, `.spinner` + `.spinner-accent`, `.code-pill`, `.accent-spine`, `.accent-swatch`, `.color-swatch` / `.color-hex-pill` (workspace color picker rim + selection-ring / hex-input pill), `.titlebar-surface` / `.titlebar-btn-danger`, and the runtime `--workspace-accent` / `--titlebar-bg` (set via inline style on the document root by chrome.js). |
+| `static/app.css` | The `@theme` design tokens (colors, radius, type ramp, elevation) plus hand-written recipes: `.minds-card`, `.spinner` + `.spinner-accent` / `.spinner-inverse`, `.code-pill`, `.accent-spine`, `.accent-swatch`, `.color-swatch` / `.color-hex-pill` (workspace color picker rim + selection-ring / hex-input pill), `.titlebar-surface` / `.titlebar-btn-danger`, and the runtime `--workspace-accent` / `--titlebar-bg` (set via inline style on the document root by chrome.js). |
 | `templates/pages/DevStyleguide.jinja` | The live visual catalog. Mount at `/_dev/styleguide` in a running app. Tells you what exists and what each variant looks like. |
 
 The type ramp (h1/h2/body/caption sizes), the text-color ramp (the 5

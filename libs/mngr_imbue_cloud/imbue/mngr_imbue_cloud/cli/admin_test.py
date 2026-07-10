@@ -155,3 +155,25 @@ def test_pool_create_rejects_both_bake_source_selectors(tmp_path: Any) -> None:
     result = CliRunner().invoke(pool, _slice_create_args(["--from-tag", "v0.3.0", "--workspace-dir", str(tmp_path)]))
     assert result.exit_code != 0
     assert "exactly one" in result.output
+
+
+def test_pool_destroy_requires_at_least_one_id() -> None:
+    result = CliRunner().invoke(pool, ["destroy", "--database-url", "postgres://example"])
+    assert result.exit_code != 0
+    assert "POOL_HOST_IDS" in result.output
+
+
+def test_pool_destroy_rejects_the_removed_skip_vps_cancel_flag() -> None:
+    """The vestigial --skip-vps-cancel flag was replaced by --drop-row-only (clean break)."""
+    result = CliRunner().invoke(pool, ["destroy", "row-1", "--skip-vps-cancel"])
+    assert result.exit_code != 0
+    assert "No such option" in result.output
+
+
+def test_pool_destroy_rejects_nonpositive_max_concurrency() -> None:
+    result = CliRunner().invoke(
+        pool,
+        ["destroy", "row-1", "--database-url", "postgres://example", "--max-concurrency", "0"],
+    )
+    assert result.exit_code != 0
+    assert "--max-concurrency must be positive" in result.output

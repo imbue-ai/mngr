@@ -4,6 +4,14 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-08
+
+Fixed an unbounded memory leak in long-running `mngr observe` (discovery) processes. Each discovery poll spins up worker threads that create per-thread gevent hubs; destroying a hub without first joining it left the hub greenlet parked mid-`LoopExit`, whose traceback pinned the poll's entire object graph in a cycle the garbage collector could not reclaim. Over days this grew to multiple gigabytes. Worker-thread cleanup now joins the hub before destroying it (the pattern gevent prescribes for this leak, gevent issue 1601), so repeated polls no longer strand a hub per iteration.
+
+Regenerated the `mngr tmr` command reference to document the new variant flags (`--name`, `--mapper-prompt`, `--reducer-prompt`) for running distinct test suites as separate runs.
+
+Exported the marker text of `HostShutdownNotSupportedError`'s message as an importable `HOST_SHUTDOWN_NOT_SUPPORTED_MESSAGE` constant in `imbue.mngr.errors`, and built the exception's message from it. This lets out-of-process callers (e.g. minds, which runs `mngr` as a subprocess and only sees exit code and stderr) match on one shared source of truth instead of duplicating the literal string. No user-visible change -- the error message text is unchanged.
+
 ## 2026-07-07
 
 Fixed the grandparent-death watcher being a silent no-op on macOS (MIND-103). The watcher (used by the minds backend to reap itself, and its `mngr forward`/`event`/`observe` subprocess tree, when the Electron GUI exits uncleanly) resolved its grandparent PID by reading Linux's `/proc/<ppid>/status`, which raises on macOS -- so it never armed, and a force-quit or crash of Electron left the whole backend tree orphaned under `launchd` indefinitely.

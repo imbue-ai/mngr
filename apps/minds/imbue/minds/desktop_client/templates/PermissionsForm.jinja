@@ -6,6 +6,14 @@
   live in this component; Approve starts disabled and is enabled by
   the inbox shell's ``updateApproveState`` once any
   name="permissions" input is checked.
+
+  While an approval is in flight (a browser sign-in, a follow-up grant,
+  etc.), the inbox shell disables BOTH buttons and swaps the Approve
+  label for a spinner + "Approving...", so the user always sees that
+  work is happening in the background and cannot double-submit. The
+  spinner and label are addressed by id (#permissions-approve-spinner /
+  #permissions-approve-label) and the Deny button carries an id
+  (#permissions-deny-btn) so the shell can toggle it too.
 #}
 <form id="permissions-form" method="POST"
       action={{ "/requests/" ~ request_id ~ "/grant" }}
@@ -13,7 +21,10 @@
   {{ content }}
 
   <div class="flex gap-2 mt-4 justify-end">
-    <Button variant="danger" onclick="submitPermissionDeny()">Deny</Button>
-    <ButtonSubmit id="permissions-approve-btn" variant="success" disabled>Approve</ButtonSubmit>
+    <Button id="permissions-deny-btn" variant="danger" onclick="submitPermissionDeny()">Deny</Button>
+    <ButtonSubmit id="permissions-approve-btn" variant="success" disabled>
+      <span id="permissions-approve-spinner" class="hidden"><Spinner size="sm" tone="inverse" /></span>
+      <span id="permissions-approve-label">Approve</span>
+    </ButtonSubmit>
   </div>
 </form>

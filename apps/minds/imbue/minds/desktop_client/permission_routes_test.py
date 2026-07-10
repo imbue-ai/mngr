@@ -305,6 +305,15 @@ def test_get_permission_request_page_pre_checks_agent_requested_permissions(tmp_
     # user confirms / interacts with the form).
     assert 'id="permissions-approve-btn"' in body
     assert "disabled" in body
+    # The form carries the elements the inbox shell toggles while an
+    # approval runs in the background so the user sees work is happening
+    # and can't double-submit or deny mid-flight: an id on Deny, plus a
+    # hidden spinner + a label span inside Approve. The spinner uses the
+    # inverse tone so it stays legible on the solid success button.
+    assert 'id="permissions-deny-btn"' in body
+    assert 'id="permissions-approve-spinner"' in body
+    assert 'id="permissions-approve-label"' in body
+    assert "spinner-inverse" in body
 
 
 def test_get_permission_request_page_labels_wildcard_permission_as_all(tmp_path: Path) -> None:
