@@ -8,6 +8,8 @@ import pydantic
 import pytest
 
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.tui_utils import _build_signal_only_command
+from imbue.mngr.agents.tui_utils import _build_signal_or_marker_command
 from imbue.mngr.agents.tui_utils import _check_paste_content
 from imbue.mngr.agents.tui_utils import _normalize_for_match
 from imbue.mngr.agents.tui_utils import send_enter_and_poll_for_cleared_indicator
@@ -254,3 +256,54 @@ def test_send_enter_via_hook_raises_on_timeout(signal_agent: _ProbeAgent) -> Non
             f"tmux kill-session -t '={session_name}' 2>/dev/null",
             timeout_seconds=5.0,
         )
+
+
+# === Submission command builders ===
+
+_TARGET = TmuxWindowTarget(session_name="sess", window=0)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        _build_signal_only_command(2.0, "chan", _TARGET),
+        _build_signal_or_marker_command(2.0, "chan", _TARGET, "printf ''"),
+    ],
+)
+def test_submission_commands_invoke_no_gnu_only_binary(command: str) -> None:
+    """Both builders run on the agent's host, which for a local agent is the user's machine.
+
+    macOS ships a BSD userland with no ``timeout``, so the deadline has to be a
+    hand-rolled watchdog.
+    """
+    assert "timeout" not in command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        _build_signal_only_command(2.0, "chan", _TARGET),
+        _build_signal_or_marker_command(2.0, "chan", _TARGET, "printf ''"),
+    ],
+)
+def test_submission_commands_wait_on_the_channel_and_send_to_the_target(command: str) -> None:
+    """The channel reaches ``tmux wait-for`` and the target reaches ``tmux send-keys``, not vice versa."""
+    assert "chan" in command
+    assert _TARGET.as_shell_arg() in command
+    channel_index = command.index("chan")
+    target_index = command.index(_TARGET.as_shell_arg())
+    assert channel_index < target_index
+
+
+def test_signal_only_command_bounds_the_waiter_with_a_watchdog() -> None:
+    """A killed ``tmux wait-for`` exits 0, so the exit code must come from the watchdog's marker."""
+    command = _build_signal_only_command(2.0, "chan", _TARGET)
+    assert 'kill "$waiter"' in command
+    assert '[ ! -s "$tmo" ]' in command
+
+
+def test_signal_or_marker_command_kills_the_tmux_client_not_a_wrapper_subshell() -> None:
+    """The waiter must be the tmux client itself, or killing it leaves the client running forever."""
+    command = _build_signal_or_marker_command(2.0, "chan", _TARGET, "printf ''")
+    assert 'tmux wait-for "$1" & waiter=$!' in command
+    assert 'kill "$waiter" "$watchdog"' in command

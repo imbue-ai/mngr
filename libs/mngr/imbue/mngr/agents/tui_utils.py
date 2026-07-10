@@ -301,19 +301,36 @@ def _send_enter_and_wait_for_signal(
 
 
 def _build_signal_only_command(full_timeout: float, wait_channel: str, tmux_target: TmuxWindowTarget) -> str:
-    """The original behavior: send Enter, then block on the hook's wait-for channel.
+    """Send Enter, then block on the hook's wait-for channel until it fires or the deadline passes.
 
-    Used for TUIs with no acceptance-marker command to watch. The waiter is started (in the
-    foreground here) before Enter is sent from a backgrounded subshell, so the
-    signal cannot fire before a waiter is registered (signals wake exactly one
-    waiter; a signal with none registered is lost).
+    Used for TUIs with no acceptance-marker command to watch. The waiter is
+    started before Enter is sent from a backgrounded subshell, so it is
+    registered by the time the hook can fire. Exit 0 = signalled, non-zero =
+    deadline reached.
+
+    The deadline is a backgrounded ``sleep``-then-``kill`` watchdog rather than
+    ``timeout(1)``, which is GNU coreutils and absent on macOS. Three properties
+    the watchdog has to reproduce by hand:
+
+    - ``tmux wait-for`` exits 0 whether it was signalled or killed, so the
+      watchdog marks ``$tmo`` *before* killing and that marker -- not the wait
+      status -- decides the exit code, the way ``timeout`` returns 124.
+    - The waiter must be the tmux client itself, not a wrapper subshell, or the
+      kill hits the subshell and leaves the client running forever.
+    - Background jobs redirect stdout, because a job that inherits it holds the
+      caller's stdout open until it exits, stalling every submission for the
+      full deadline even when the signal lands immediately.
     """
-    return (
-        f"bash -c '"
-        f'( sleep 0.1 && tmux send-keys -t "$1" Enter ) & '
-        f'timeout {full_timeout} tmux wait-for "$0"'
-        f"' {shlex.quote(wait_channel)} {tmux_target.as_shell_arg()}"
+    script = (
+        'tmo="$(mktemp)"; '
+        'trap \'kill "$waiter" "$watchdog" 2>/dev/null; rm -f "$tmo"\' EXIT; '
+        'tmux wait-for "$2" & waiter=$!; '
+        '( sleep "$1"; echo 1 > "$tmo"; kill "$waiter" ) >/dev/null 2>&1 & watchdog=$!; '
+        '( sleep 0.1 && tmux send-keys -t "$3" Enter ) >/dev/null 2>&1 & '
+        'wait "$waiter" 2>/dev/null; '
+        '[ ! -s "$tmo" ]'
     )
+    return f"bash -c {shlex.quote(script)} _ {full_timeout} {shlex.quote(wait_channel)} {tmux_target.as_shell_arg()}"
 
 
 def _build_signal_or_marker_command(
@@ -325,13 +342,21 @@ def _build_signal_or_marker_command(
     """Succeed as soon as EITHER the hook signal fires OR a fresh acceptance marker appears.
 
     A single remote command so the two conditions are watched concurrently with
-    no dangling process: it registers the (full-timeout) hook waiter in the
-    background -- which writes a sentinel file on success, preserving the
-    register-before-Enter ordering so the signal is never missed (which matters
-    for submissions that only ever fire the signal, never recording a marker)
-    -- sends Enter, then polls both the sentinel and the acceptance marker until
-    either confirms or the deadline passes. Exit 0 = confirmed, non-zero =
-    timeout.
+    no dangling process: it registers the hook waiter in the background -- which
+    writes a sentinel file on success, preserving the register-before-Enter
+    ordering so the signal is never missed (which matters for submissions that
+    only ever fire the signal, never recording a marker) -- sends Enter, then
+    polls both the sentinel and the acceptance marker until either confirms or
+    the deadline passes. Exit 0 = confirmed, non-zero = timeout.
+
+    The hook waiter is bounded by a ``sleep``-then-``kill`` watchdog rather than
+    ``timeout(1)`` (GNU coreutils, absent on macOS). See
+    :func:`_build_signal_only_command` for the three properties that hand-rolled
+    watchdog has to reproduce; the one that shapes this variant is that the
+    waiter must be the tmux client itself, so the loop detects a fired hook by
+    the client having exited (``kill -0``) without the watchdog's ``$tmo``
+    marker, rather than by wrapping the client in a subshell that writes a
+    sentinel.
 
     ``accept_marker_command`` is the agent-supplied shell snippet that prints the
     agent's latest acceptance-marker token (empty if none yet). A baseline is
@@ -343,20 +368,19 @@ def _build_signal_or_marker_command(
     agent that supplies it.
     """
     script = (
-        'sig="$(mktemp)"; '
-        # Clean up on every exit path: remove the sentinel file and reap any
-        # still-running background job (notably the hook waiter, which otherwise
-        # outlives a fast marker-win and would recreate "$sig" -- leaking the
-        # temp file -- when the hook finally fires). Runs exactly once on exit.
-        'trap \'p="$(jobs -p)"; [ -n "$p" ] && kill $p 2>/dev/null; rm -f "$sig"\' EXIT; '
+        'tmo="$(mktemp)"; '
+        # Clean up on every exit path: kill the tmux client and the watchdog
+        # (either may outlive a fast marker-win) and remove the marker file.
+        'trap \'kill "$waiter" "$watchdog" 2>/dev/null; rm -f "$tmo"\' EXIT; '
         f'base="$({accept_marker_command})"; '
-        # Register the hook waiter first (full timeout), sentinel on success.
-        f'( timeout {full_timeout} tmux wait-for "$1" >/dev/null 2>&1 && echo 1 > "$sig" ) & '
+        # Register the hook waiter first, bounded by the watchdog.
+        'tmux wait-for "$1" & waiter=$!; '
+        f'( sleep {full_timeout}; echo 1 > "$tmo"; kill "$waiter" ) >/dev/null 2>&1 & watchdog=$!; '
         # Then submit, after a beat so the waiter is registered.
-        '( sleep 0.1 && tmux send-keys -t "$2" Enter ) & '
+        '( sleep 0.1 && tmux send-keys -t "$2" Enter ) >/dev/null 2>&1 & '
         f'end="$(( $(date +%s) + {int(full_timeout) + 1} ))"; '
         'while [ "$(date +%s)" -lt "$end" ]; do '
-        'if [ -s "$sig" ]; then exit 0; fi; '
+        'if ! kill -0 "$waiter" 2>/dev/null && [ ! -s "$tmo" ]; then exit 0; fi; '
         f'cur="$({accept_marker_command})"; '
         'if [[ -n "$cur" && "$cur" > "$base" ]]; then exit 0; fi; '
         "sleep 0.25; "

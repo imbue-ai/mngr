@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shlex
+import stat
 from abc import ABC
 from abc import abstractmethod
 from contextlib import contextmanager
@@ -26,6 +27,7 @@ from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.data_types import PyinfraConnector
+from imbue.mngr.interfaces.data_types import SizeBytes
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import VolumeFile
 from imbue.mngr.primitives import ActivitySource
@@ -426,6 +428,34 @@ class OuterHostInterface(HostFileReadInterface, HostFileWriteInterface, ABC):
         if self.is_local:
             return path.exists()
         return self.execute_idempotent_command(f"test -e {shlex.quote(str(path))}", timeout_seconds=5.0).success
+
+    def get_directory_size(self, path: Path) -> SizeBytes:
+        """Total size of the regular files under ``path``, or 0 if it does not exist.
+
+        Uses the local filesystem for local hosts and ``du -sk`` over SSH for
+        remote hosts. Implemented on the interface so callers (including plugins)
+        don't have to branch on ``is_local`` themselves.
+
+        ``-k`` is the only ``du`` block size POSIX defines, so remote sizes are
+        whole kibibytes; local sizes are exact. Entries that vanish mid-walk are
+        skipped, since callers scan directories that may still be in use.
+        """
+        if self.is_local:
+            if not path.is_dir():
+                return SizeBytes(0)
+            total = 0
+            for entry in path.rglob("*"):
+                try:
+                    entry_stat = entry.lstat()
+                except FileNotFoundError:
+                    continue
+                if stat.S_ISREG(entry_stat.st_mode):
+                    total += entry_stat.st_size
+            return SizeBytes(total)
+        result = self.execute_idempotent_command(f"du -sk {shlex.quote(str(path))}", timeout_seconds=30.0)
+        if not result.success or not result.stdout.strip():
+            return SizeBytes(0)
+        return SizeBytes(int(result.stdout.split()[0]) * 1024)
 
 
 class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):

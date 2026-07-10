@@ -788,3 +788,44 @@ def session_cleanup() -> Generator[None, None, None]:
             "These resources have been cleaned up, but tests should not leak!\n"
             "Please fix the test(s) that failed to clean up properly."
         )
+
+
+# Binaries that exist in GNU coreutils but not in the BSD userland macOS ships.
+_GNU_ONLY_BINARIES: Final[tuple[str, ...]] = ("tac", "timeout")
+
+# macOS ships bash 3.2, which has no associative arrays (`declare -A`).
+_BASH_CANDIDATES: Final[tuple[str, ...]] = ("bash", "/opt/homebrew/bin/bash", "/usr/local/bin/bash")
+_MINIMUM_BASH_MAJOR_VERSION: Final[int] = 4
+
+
+@pytest.fixture
+def posix_only_path(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
+    """An environment whose PATH shadows GNU-coreutils-only binaries with shims that exit 127.
+
+    mngr must run on stock macOS, whose BSD userland has no ``tac`` or ``timeout``.
+    Poisoning them means a reintroduced dependency fails on Linux too, rather than
+    passing in CI and breaking only on a user's mac.
+    """
+    poison_dir = tmp_path_factory.mktemp("posix_only_bin")
+    for binary in _GNU_ONLY_BINARIES:
+        shim = poison_dir / binary
+        shim.write_text(f'#!/bin/sh\necho "{binary}: command not found" >&2\nexit 127\n')
+        shim.chmod(0o755)
+    env = dict(os.environ)
+    env["PATH"] = f"{poison_dir}{os.pathsep}{env['PATH']}"
+    return env
+
+
+@pytest.fixture
+def bash_with_associative_arrays() -> str:
+    """Path to a bash new enough for ``declare -A``, which the shared shell libs require."""
+    for candidate in _BASH_CANDIDATES:
+        resolved = shutil.which(candidate)
+        if resolved is None:
+            continue
+        probe = subprocess.run(
+            [resolved, "-c", "echo ${BASH_VERSINFO[0]}"], capture_output=True, text=True, timeout=30
+        )
+        if probe.returncode == 0 and int(probe.stdout.strip()) >= _MINIMUM_BASH_MAJOR_VERSION:
+            return resolved
+    pytest.skip(f"no bash >= {_MINIMUM_BASH_MAJOR_VERSION} found (macOS ships 3.2; try `brew install bash`)")

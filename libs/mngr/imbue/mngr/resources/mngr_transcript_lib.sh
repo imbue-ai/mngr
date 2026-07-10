@@ -22,7 +22,9 @@
 #       Echo the largest line offset N such that lines 1..N of SESSION_FILE
 #       have FIELD values already present in _MNGR_TRANSCRIPT_ID_SET. Used to
 #       recover after a crash that may have dropped the stored offset. Echoes
-#       0 if no match is found or the file is empty.
+#       0 if no match is found or the file is empty. Scans forward rather than
+#       reversing the file, so it needs no `tac` (GNU coreutils, absent on
+#       macOS).
 #
 #   - mngr_transcript_emit_lines_range SESSION_FILE START END OUTPUT_FILE
 #       Append lines START..END (inclusive, 1-indexed) of SESSION_FILE to
@@ -74,11 +76,10 @@ mngr_transcript_build_id_set() {
     done < "$output_file"
 }
 
-# Reverse-scan SESSION_FILE to find the last emitted line.
+# Scan SESSION_FILE to find the last emitted line.
 #
-# Walks the file backwards (via `tac`) and returns the 1-indexed line number
-# whose FIELD value is already in _MNGR_TRANSCRIPT_ID_SET. Returns 0 if no
-# already-emitted line is found.
+# Returns the highest 1-indexed line number whose FIELD value is already in
+# _MNGR_TRANSCRIPT_ID_SET, or 0 if no already-emitted line is found.
 mngr_transcript_reconcile_offset() {
     local session_file="$1"
     local field="$2"
@@ -88,23 +89,18 @@ mngr_transcript_reconcile_offset() {
         return 0
     fi
 
-    local file_lines
-    file_lines=$(wc -l < "$session_file")
-    file_lines=${file_lines// /}
-
-    local reverse_idx=0
-    local line value found
+    local idx=0
+    local found=0
+    local line value
     while IFS= read -r line; do
-        reverse_idx=$((reverse_idx + 1))
+        idx=$((idx + 1))
         value=$(mngr_transcript_extract_field "$field" "$line")
         if [ -n "$value" ] && [ "${_MNGR_TRANSCRIPT_ID_SET[$value]+exists}" ]; then
-            found=$((file_lines - reverse_idx + 1))
-            echo "$found"
-            return 0
+            found=$idx
         fi
-    done < <(tac "$session_file")
+    done < "$session_file"
 
-    echo 0
+    echo "$found"
 }
 
 # Append lines START..END of SESSION_FILE to OUTPUT_FILE.
