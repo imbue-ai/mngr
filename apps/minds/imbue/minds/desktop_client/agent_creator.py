@@ -1843,10 +1843,13 @@ class AgentCreator(MutableModel):
                         log_queue.put(f"[minds] Ensuring AWS security group is ready in {region}...")
                         run_mngr_aws_prepare(region, on_output=emit_log, parent_cg=self.root_concurrency_group)
                 elif launch_mode in (LaunchMode.GCP, LaunchMode.AZURE) and cloud_account:
-                    # Re-pin the account block when the user picked a different
-                    # zone/region in the form, then prepare (idempotent) so the
-                    # firewall/NSG + state bucket exist there before the create.
-                    if region:
+                    # GCP: re-pin the account block when the user picked a
+                    # different zone in the form (its firewall is global and its
+                    # bucket region-independent, so zone moves are free), then
+                    # prepare (idempotent). Azure never re-pins: an account
+                    # entry's region is fixed for life (its resource group /
+                    # vnet live there) and the create form sends no region.
+                    if region and launch_mode is LaunchMode.GCP:
                         update_cloud_account_region(cloud_account, region)
                     log_queue.put(f"[minds] Preparing cloud account '{cloud_account}'...")
                     run_mngr_provider_prepare(

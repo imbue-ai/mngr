@@ -22,10 +22,17 @@ from imbue.imbue_common.primitives import NonEmptyStr
 # imports ``mngr``) so the early ``bootstrap`` module can read it without
 # violating its no-mngr-on-import contract.
 CONFIGURED_AWS_REGIONS: Final[tuple[str, ...]] = (
+    # Exactly the regions with a pinned AMI in mngr_aws's DEFAULT_AMI_BY_REGION
+    # -- the one hard constraint on this list (a region without an AMI fails at
+    # create). Widen the AMI table first to widen this.
     "us-east-1",
     "us-east-2",
     "us-west-1",
     "us-west-2",
+    "eu-west-1",
+    "eu-central-1",
+    "ap-southeast-1",
+    "ap-northeast-1",
 )
 
 # Hardcoded fallback AWS region for the create form when there is no stored
@@ -41,7 +48,10 @@ DEFAULT_AWS_REGION: Final[str] = "us-east-1"
 CONFIGURED_AWS_INSTANCE_TYPES: Final[tuple[tuple[str, str], ...]] = (
     ("t3.medium", "t3.medium — 2 vCPU / 4 GB (cheapest; heavy builds may be slow)"),
     ("t3.large", "t3.large — 2 vCPU / 8 GB (recommended)"),
+    ("t3a.large", "t3a.large — 2 vCPU / 8 GB (AMD; slightly cheaper)"),
+    ("m6i.large", "m6i.large — 2 vCPU / 8 GB (non-burstable)"),
     ("t3.xlarge", "t3.xlarge — 4 vCPU / 16 GB"),
+    ("m6i.xlarge", "m6i.xlarge — 4 vCPU / 16 GB (non-burstable)"),
     ("t3.2xlarge", "t3.2xlarge — 8 vCPU / 32 GB"),
 )
 DEFAULT_AWS_INSTANCE_TYPE: Final[str] = "t3.large"
@@ -52,7 +62,9 @@ DEFAULT_AWS_INSTANCE_TYPE: Final[str] = "t3.large"
 CONFIGURED_GCP_MACHINE_TYPES: Final[tuple[tuple[str, str], ...]] = (
     ("e2-medium", "e2-medium — 2 vCPU / 4 GB (cheapest; heavy builds may be slow)"),
     ("e2-standard-2", "e2-standard-2 — 2 vCPU / 8 GB (recommended)"),
+    ("n2-standard-2", "n2-standard-2 — 2 vCPU / 8 GB (non-shared-core pool)"),
     ("e2-standard-4", "e2-standard-4 — 4 vCPU / 16 GB"),
+    ("n2-standard-4", "n2-standard-4 — 4 vCPU / 16 GB (non-shared-core pool)"),
     ("e2-standard-8", "e2-standard-8 — 8 vCPU / 32 GB"),
 )
 DEFAULT_GCP_MACHINE_TYPE: Final[str] = "e2-standard-2"
@@ -80,11 +92,20 @@ CONFIGURED_GCP_ZONES: Final[tuple[str, ...]] = (
     "us-central1-a",
     "us-east1-b",
     "us-east4-a",
+    "europe-west1-b",
+    "europe-west4-a",
+    "asia-southeast1-a",
+    "asia-northeast1-a",
+    "australia-southeast1-a",
 )
 DEFAULT_GCP_ZONE: Final[str] = "us-west1-a"
 # eastus2 first: new-subscription capacity restrictions bite hardest in the
 # oldest/most popular regions (westus, eastus); eastus2 / centralus /
-# northcentralus / westus3 are the commonly-recommended less-congested picks.
+# northcentralus / westus3 are the commonly-recommended less-congested US picks,
+# and less-used non-US regions are often the easiest of all for new subs.
+# Offered only in the add-account form: an Azure account entry is pinned to one
+# region for life (its resource group / vnet live there); add another entry for
+# another region.
 CONFIGURED_AZURE_REGIONS: Final[tuple[str, ...]] = (
     "eastus2",
     "centralus",
@@ -93,6 +114,16 @@ CONFIGURED_AZURE_REGIONS: Final[tuple[str, ...]] = (
     "westus3",
     "westus",
     "eastus",
+    "canadacentral",
+    "northeurope",
+    "westeurope",
+    "uksouth",
+    "swedencentral",
+    "australiaeast",
+    "southeastasia",
+    "japaneast",
+    "koreacentral",
+    "centralindia",
 )
 DEFAULT_AZURE_REGION: Final[str] = "eastus2"
 

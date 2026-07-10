@@ -458,7 +458,13 @@
       var mode = launchSelect.value;
       var selection = launchSelection();
       var options = REGION_OPTIONS[selection.mode];
-      if (!options || options.length === 0) {
+      // Azure account entries are pinned to one region for life (the entry's
+      // resource group / vnet live there), so no region choice is offered at
+      // create time -- the pinned region shows as a static note instead (see
+      // update()). The AZURE entry in REGION_OPTIONS exists for the
+      // add-account form only.
+      var isRegionFixed = selection.mode === 'AZURE';
+      if (!options || options.length === 0 || isRegionFixed) {
         regionRow.classList.add('hidden');
         regionSelect.disabled = true;
         return;
@@ -544,6 +550,19 @@
       launchModeError.classList.toggle('hidden', !launchInvalid);
       if (awsCredentialsNote) awsCredentialsNote.classList.toggle('hidden', launchSelect.value !== 'AWS');
       if (modalDirectNote) modalDirectNote.classList.toggle('hidden', launchSelect.value !== 'MODAL');
+      // Azure BYO: the region is pinned per account entry; surface it as a
+      // static note (from the option's data-default-region) instead of a picker.
+      var azureRegionNote = document.getElementById('azure-region-note');
+      if (azureRegionNote) {
+        var azureSel = launchSelection();
+        var isAzureByo = azureSel.mode === 'AZURE' && azureSel.cloudAccount !== '';
+        if (isAzureByo) {
+          var pinned = launchSelect.options[launchSelect.selectedIndex].getAttribute('data-default-region') || '';
+          azureRegionNote.textContent = 'Runs in ' + pinned + ' — the region was fixed when this account was added. '
+            + 'For a different region, add another account entry with the same keys.';
+        }
+        azureRegionNote.classList.toggle('hidden', !isAzureByo);
+      }
       aiProviderError.classList.toggle('hidden', !aiInvalid);
       backupProviderError.classList.toggle('hidden', !backupInvalid);
 
@@ -986,6 +1005,7 @@
           </Select>
         </div>
         <p id="launch-mode-account-error" class="hidden mt-1 type-helper text-warning text-right">imbue_cloud requires a selected account.</p>
+        <p id="azure-region-note" class="hidden mt-1 type-helper text-tertiary"></p>
         <p class="mt-1 type-helper text-tertiary text-right">
           Want to use your own AWS / GCP / Azure account?
           <button type="button" id="open-cloud-accounts" class="underline hover:text-primary cursor-pointer">Configure</button>
@@ -1168,6 +1188,10 @@
         manually). In the Azure portal: Entra ID &rarr; App registrations &rarr; New &rarr;
         note the client + tenant ids &rarr; Certificates &amp; secrets &rarr; New client secret;
         then Subscription &rarr; Access control &rarr; assign Owner to the app.
+        The region you pick below is <strong>permanent for this entry</strong> (Azure's network
+        scaffolding is region-locked); add another entry with the same keys for another region.
+        Tip: new subscriptions often lack capacity in westus/eastus &mdash; prefer eastus2 or a
+        less-used region.
       </p>
       <div class="mt-3">
         <FormLabel target="ca-alias">Alias</FormLabel>

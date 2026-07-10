@@ -580,12 +580,16 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
     # callback that injects the Cloudflare tunnel token + associates the account
     # and persists the chosen region -- exactly as the create form does.
     minds_config = get_state().minds_config
-    if launch_mode in (LaunchMode.GCP, LaunchMode.AZURE):
-        # No ambient region machinery exists for these modes (BYO-only): honor a
-        # submitted value from the form's curated list, else "" so the account
-        # block's pinned default_zone / default_region applies.
-        allowed_regions = CONFIGURED_GCP_ZONES if launch_mode is LaunchMode.GCP else CONFIGURED_AZURE_REGIONS
-        region = submitted_region if submitted_region in allowed_regions else ""
+    if launch_mode is LaunchMode.AZURE:
+        # An Azure account entry is pinned to one region for life (its resource
+        # group / vnet live there); the create form offers no region and any
+        # submitted value is ignored so the block's default_region always rules.
+        region = ""
+    elif launch_mode is LaunchMode.GCP:
+        # No ambient region machinery exists for this mode (BYO-only): honor a
+        # submitted zone from the form's curated list, else "" so the account
+        # block's pinned default_zone applies.
+        region = submitted_region if submitted_region in CONFIGURED_GCP_ZONES else ""
     else:
         region = resolve_effective_region(
             launch_mode, submitted_region, minds_config, get_state().geo_location_cache

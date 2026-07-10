@@ -999,6 +999,12 @@ def set_cloud_account_provider(
     else:
         block["default_region"] = region
         block["default_vm_size"] = DEFAULT_AZURE_VM_SIZE
+        # Azure's scaffolding (resource group / vnet / NSG) is region-locked, so
+        # each account entry is pinned to its region for life and gets its OWN
+        # resource group (named per entry + region). A user who wants another
+        # region adds another entry (same keys) -- the per-entry group names let
+        # them coexist with no cross-region conflicts.
+        block["resource_group"] = f"{provider_name}-{region}"
     for key, value in credentials.items():
         if value:
             block[key] = value
