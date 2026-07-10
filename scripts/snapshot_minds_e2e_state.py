@@ -1,33 +1,30 @@
 #!/usr/bin/env python3
 """Snapshot a Modal sandbox that already has a minds workspace + Docker
-container provisioned, so future test runs can boot from that state nearly
-instantly via offload's ``--override-image-id`` flag (offload v0.9.7+).
+container provisioned, so test runs can boot from that state nearly
+instantly via offload's ``--override-image-id`` flag.
 
-Verified end-to-end against Modal on 2026-05-27. The most recently
-verified snapshot id is ``im-01KSMZYQ5X1MKME78EQYRNW6CT`` (the earlier
-``im-01KSK6YY0V97VGXJZMCB4S9D12`` works equivalently but lacks the
-``/app -> /code/mngr`` symlink the snapshot script now layers in --
-offload's ``--override-image-id`` path hardcodes ``workdir="/app"``
-on the resumed sandbox, so the symlink is what lets ``uv run pytest``
-find the project from offload's chosen workdir).
+This is the standing producer for the ``minds_snapshot_resume`` test stage:
+the ``build-minds-snapshot`` CI job runs it on every PR to mint a fresh
+snapshot image, and ``test-minds-snapshot`` then fans the
+``minds_snapshot_resume`` suite (``apps/minds/test_snapshot_resume.py``)
+out against it. See ``apps/minds/docs/testing-overview.md`` (section on the
+modal-snapshot stage) for the full picture.
 
-End-to-end:
-``just test-offload-minds-snapshot im-01KSMZYQ5X1MKME78EQYRNW6CT`` runs
-the ``minds_snapshot_resume`` test suite (today: one sanity test in
-``apps/minds/test_snapshot_resume.py``) against the snapshot in ~17-20s
-wall clock per run, 4/4 successive runs green.
+To run the suite yourself:
 
-A couple of vm_runtime sandboxes did fail intermittently with
-exit_code=137 + missing junit.xml during early testing on
-2026-05-27, before vm_runtime went generally available. If you hit
-a transient failure like that, just retry; if it turns into a
-pattern, capture the failing batch's verbose offload log and check
-the modal_sandbox.py exec path before assuming offload's at fault.
+1. Mint a snapshot image id (multi-minute; needs Modal credentials):
+       uv run python scripts/snapshot_minds_e2e_state.py
+   The image id (``im-...``) is printed at the end. CI mints its own per
+   run, so ids are throwaway -- never hardcode one.
+2. Run the whole suite, or a single test, against it:
+       just test-offload-minds-snapshot <image-id>
+       just test-offload-minds-snapshot <image-id> '--filter <test_name>'
 
-vm_runtime is now generally available on Modal, so no profile-level
-preview opt-in is required.
+The ``/app -> /code/mngr`` symlink layered in below matters: offload's
+``--override-image-id`` path hardcodes ``workdir="/app"`` on the resumed
+sandbox, and the symlink is what lets ``uv run pytest`` find the project
+from offload's chosen workdir.
 
-This is a one-off demonstration script for the test-efficiency groundwork.
 The flow is:
 
 1. Build a Modal image with the full Electron e2e toolchain: Python + uv +
@@ -60,8 +57,8 @@ Usage:
 
 The script intentionally lives outside the regular test suite -- it's
 expensive (multi-minute), it requires Modal credentials, and it produces a
-snapshot ID that downstream tests then reference rather than something CI
-would re-derive on every run.
+snapshot ID that the test stage then references (CI re-derives one per run;
+operators mint one manually for local iteration).
 """
 
 import argparse
@@ -107,8 +104,8 @@ _CLAUDE_CODE_VERSION: Final[str] = "2.1.160"
 # Two notes on why this is a python -c string instead of a checked-in
 # helper script:
 # - Keeping the entrypoint adjacent to the snapshot script makes it
-#   obvious that this is a one-off operator tool and that any cleanup
-#   skip here is *intentional*.
+#   obvious that the cleanup skip here is *intentional* (the snapshot
+#   must capture the live workspace).
 # - The mngr clone inside the sandbox already has the runner under
 #   ``imbue.minds.desktop_client.e2e_workspace_runner`` (installed via
 #   the image's ``uv sync --all-packages``), so a single import is all
