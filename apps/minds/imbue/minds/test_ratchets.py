@@ -89,7 +89,7 @@ def test_prevent_silent_decode_error_catches() -> None:
     # The added catch is ``build_info.py`` parsing the desktop app's package.json
     # for the Sentry release id: a malformed file degrades to a fallback version
     # (logged at debug) rather than crashing startup.
-    rc.check_silent_decode_error_catches(_DIR, snapshot(7))
+    rc.check_silent_decode_error_catches(_DIR, snapshot(5))
 
 
 # --- Import style ---
@@ -171,7 +171,7 @@ def test_prevent_exit_stack() -> None:
 
 
 def test_prevent_async_await() -> None:
-    rc.check_async_await(_DIR, snapshot(14))
+    rc.check_async_await(_DIR, snapshot(12))
 
 
 # --- Hardcoded paths ---
@@ -361,10 +361,11 @@ def test_prevent_if_elif_without_else() -> None:
 
 
 def test_prevent_inline_functions() -> None:
-    # The added inline function is the ``record_loss`` helper nested in the
+    # One of the inline functions is the ``record_loss`` helper nested in the
     # ported Sentry HTTP transport's ``_send_request`` (it closes over the
-    # envelope being sent).
-    rc.check_inline_functions(_DIR, snapshot(21))
+    # envelope being sent). The recorded count reflects the actual finder count
+    # for the current tree.
+    rc.check_inline_functions(_DIR, snapshot(9))
 
 
 def test_prevent_underscore_imports() -> None:

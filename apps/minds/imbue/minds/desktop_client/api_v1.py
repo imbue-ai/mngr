@@ -149,6 +149,7 @@ from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import ServiceName
+from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
@@ -312,14 +313,13 @@ def _handle_workspace_version(agent_id: str) -> WorkspaceVersionResponse | Respo
         return _json_error(f"Unknown workspace {agent_id}", 404)
 
     original = backend_resolver.get_agent_label(parsed_id, "original_minds_version")
-    parent_cg = get_state().root_concurrency_group
-    git_version = workspace_version.WorkspaceGitVersion()
-    if parent_cg is not None:
-        git_version = workspace_version.read_workspace_git_version(
-            mngr_binary=get_state().mngr_binary,
-            agent_id=parsed_id,
-            parent_cg=parent_cg,
-        )
+    # The (best-effort) in-workspace git read runs through the shared
+    # warm-process MngrCaller (initialized at startup); any failure yields the
+    # empty/None defaults rather than raising.
+    git_version = workspace_version.read_workspace_git_version(
+        agent_id=parsed_id,
+        mngr_caller=get_state().mngr_caller or get_default_mngr_caller(),
+    )
     return WorkspaceVersionResponse(
         agent_id=str(parsed_id),
         original_minds_version=original,
