@@ -220,6 +220,14 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
       const bundledClientConfig = paths.getBundledClientConfigPath();
       const configFileArgs = bundledClientConfig ? ['--config-file', bundledClientConfig] : [];
 
+      // No qemu-img payload is published for darwin-x86_64, so download-binaries.js
+      // skips it there and nothing is staged. Only advertise the bundled binary
+      // when it actually exists -- otherwise MINDS_QEMU_IMG_BINARY would name a
+      // missing file and the converter would exec that instead of falling back
+      // to a qemu-img on PATH.
+      const qemuImgPath = paths.getQemuImgPath();
+      const hasBundledQemuImg = fs.existsSync(qemuImgPath);
+
       if (paths.isDev()) {
         // Dev mode: use system uv with the monorepo workspace venv
         uvBin = 'uv';
@@ -245,7 +253,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           // The prestart hook (ensure-binaries.js) stages resources/qemu/ before
           // the dev app launches, so point the converter at the bundled binary
           // rather than depending on a Homebrew qemu on the dev's PATH.
-          MINDS_QEMU_IMG_BINARY: paths.getQemuImgPath(),
+          ...(hasBundledQemuImg ? { MINDS_QEMU_IMG_BINARY: qemuImgPath } : {}),
           MINDS_RELEASE_ID: releaseId,
           MINDS_GIT_SHA: gitSha,
         };
@@ -256,7 +264,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
         const gitBinDir = paths.getGitBinDir();
         const limaBinDir = paths.getLimaBinDir();
         const desyncBinDir = paths.getDesyncBinDir();
-        const qemuImgBinDir = paths.getQemuImgBinDir();
+        const qemuImgBinDirSegment = hasBundledQemuImg ? `${paths.getQemuImgBinDir()}:` : '';
         const uvCacheDir = paths.getUvCacheDir();
         const uvPythonDir = paths.getUvPythonDir();
         const pyprojectDir = paths.getPyprojectDir();
@@ -297,7 +305,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           : systemPath;
         env = {
           ...process.env,
-          PATH: `${uvBinDir}:${gitBinDir}:${limaBinDir}:${desyncBinDir}:${qemuImgBinDir}:${augmentedSystemPath}`,
+          PATH: `${uvBinDir}:${gitBinDir}:${limaBinDir}:${desyncBinDir}:${qemuImgBinDirSegment}${augmentedSystemPath}`,
           UV_CACHE_DIR: uvCacheDir,
           UV_PYTHON_INSTALL_DIR: uvPythonDir,
           MINDS_ELECTRON: '1',
@@ -307,7 +315,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           MINDS_LATCHKEY_BINARY: paths.getLatchkeyPath(),
           MINDS_LATCHKEY_DIRECTORY: paths.getLatchkeyDirectory(),
           MINDS_RESTIC_BINARY: paths.getResticPath(),
-          MINDS_QEMU_IMG_BINARY: paths.getQemuImgPath(),
+          ...(hasBundledQemuImg ? { MINDS_QEMU_IMG_BINARY: qemuImgPath } : {}),
           // Tell the packaged latchkey shim which Electron binary to use as Node.
           MINDS_ELECTRON_EXEC_PATH: process.execPath,
           // Set VIRTUAL_ENV to the per-user venv so `uv run --active` uses

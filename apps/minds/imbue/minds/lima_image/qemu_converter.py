@@ -27,7 +27,7 @@ def resolve_qemu_img_binary() -> str:
 
 
 class QemuImageFormatConverter(ImageFormatConverterInterface):
-    """Converts between raw and qcow2 via the ``qemu-img`` CLI (bundled with Lima's deps)."""
+    """Converts between raw and qcow2 via the ``qemu-img`` CLI."""
 
     qemu_img_binary: str = Field(default="qemu-img", frozen=True, description="Path/name of the qemu-img executable")
     concurrency_group: ConcurrencyGroup = Field(
