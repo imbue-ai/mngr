@@ -1,0 +1,1 @@
+Added a blueprint plan (`blueprint/electron-log-and-crash-page/`) for persisting Electron main-process logs to a new rotated/gzipped `electron.log` (uploaded with bug reports alongside a newly-rotated `minds.log`) and for handling workspace content-view renderer death with a Chrome-style crash page offering manual Reload and Report-a-bug actions.
