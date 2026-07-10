@@ -20,6 +20,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 DEFAULT_FCT_REPO = "https://github.com/imbue-ai/forever-claude-template.git"
@@ -182,24 +183,44 @@ def launch_one(clone_path: Path, eval_set: str, api_key: str, poll_timeout: floa
     return {"persona": persona, "name": name, "ok": False, "error": "timed out after {}s".format(int(poll_timeout))}
 
 
+def _result_detail(r: dict) -> str:
+    return "OK {}".format(r.get("agent_id")) if r["ok"] else "ERR {}".format(r.get("error"))
+
+
 def launch_workspaces(eval_set: str, *, clones_dir: Path, api_key: str) -> list[dict]:
     clones = list_prepared_clones(clones_dir)
     if not clones:
         raise SystemExit("no prepared clones under {} -- run prepare-test-clones first".format(clones_dir))
-    # Sequential -- exactly like pressing Create N times in the UI. Concurrent creates race to
-    # make mngr's shared per-instance Modal environment (minds-staging-<hash>): the first wins,
-    # the rest die with "environment with the same name already exists". One at a time, the first
-    # creates it and every later create reuses it (which is why the UI works for many workspaces).
-    print(">> launching {} workspace(s) one at a time for eval set {!r}".format(len(clones), eval_set), flush=True)
-    print("   (each Modal workspace takes a few minutes -- same as the UI)", flush=True)
-    results = []
-    for i, clone in enumerate(clones, 1):
-        name = workspace_name(eval_set, clone.name)
-        print("  [{}/{}] {} ... creating".format(i, len(clones), name), flush=True)
-        r = launch_one(clone, eval_set, api_key)
-        results.append(r)
-        detail = "OK {}".format(r.get("agent_id")) if r["ok"] else "ERR {}".format(r.get("error"))
-        print("  [{}/{}] {} -> {}".format(i, len(clones), name, detail), flush=True)
+    # `mngr create` is parallel-safe EXCEPT the one-time creation of the shared Modal environment
+    # (minds-staging-<hash>, one per instance): from a cold env, concurrent creates all try to make
+    # it and all but one die ("environment with the same name already exists"). So PRIME the env
+    # with the first create (serial), then fan the rest out in parallel -- wall-clock ~= 2x one
+    # create regardless of N. If priming fails the env may be absent, so fall back to serial.
+    total = len(clones)
+    print(">> launching {} workspace(s) for eval set {!r}".format(total, eval_set), flush=True)
+
+    first, rest = clones[0], clones[1:]
+    first_name = workspace_name(eval_set, first.name)
+    print("  [prime 1/{}] {} ... (creates the shared Modal environment)".format(total, first_name), flush=True)
+    primed = launch_one(first, eval_set, api_key)
+    print("  [prime 1/{}] {} -> {}".format(total, first_name, _result_detail(primed)), flush=True)
+    results = [primed]
+
+    if rest and not primed["ok"]:
+        print("  !! prime create failed -- running the rest one at a time to avoid the env race", flush=True)
+        for i, clone in enumerate(rest, 2):
+            r = launch_one(clone, eval_set, api_key)
+            results.append(r)
+            print("  [{}/{}] {} -> {}".format(i, total, workspace_name(eval_set, clone.name), _result_detail(r)), flush=True)
+    elif rest:
+        print("  [2-{}/{}] launching {} more in parallel ...".format(total, total, len(rest)), flush=True)
+        with ThreadPoolExecutor(max_workers=min(8, len(rest))) as pool:
+            futures = [pool.submit(launch_one, c, eval_set, api_key) for c in rest]
+            for future in as_completed(futures):
+                r = future.result()
+                results.append(r)
+                print("  [par] {} -> {}".format(r["name"], _result_detail(r)), flush=True)
+
     ok = sum(1 for r in results if r["ok"])
     print(">> done: {}/{} workspaces launched.".format(ok, len(results)), flush=True)
     return results
