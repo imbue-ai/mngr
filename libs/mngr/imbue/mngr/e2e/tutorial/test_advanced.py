@@ -341,9 +341,7 @@ def test_tips_exec_env_inspect(e2e: E2eSession) -> None:
     # lookup to the local provider (where the substituted command agent lives) so
     # it never contacts modal/aws -- an unconfigured aws provider otherwise hangs
     # the query. Only one agent exists, so `mngr list --ids` prints exactly its id.
-    list_result = e2e.run(
-        "mngr list --provider local --ids", comment="get the agent id to cross-check the exec env"
-    )
+    list_result = e2e.run("mngr list --provider local --ids", comment="get the agent id to cross-check the exec env")
     expect(list_result).to_succeed()
     agent_id = list_result.stdout.strip()
     assert agent_id, f"expected an agent id from `mngr list --ids`, got: {list_result.stdout!r}"

@@ -6,10 +6,15 @@ easy to maintain the mapping between tutorial content and test coverage via the
 tutorial_matcher script.
 """
 
+import itertools
 import json
-import time
 
 import pytest
+from tenacity import RetryCallState
+from tenacity import Retrying
+from tenacity import retry_if_result
+from tenacity import stop_after_attempt
+from tenacity import wait_fixed
 
 from imbue.mngr.e2e.conftest import E2eSession
 from imbue.skitwright.data_types import CommandResult
@@ -39,13 +44,25 @@ def _exec_until_reachable(
     result; if every attempt fails, return the last result so the caller's
     assertion surfaces the real error.
     """
-    result = e2e.run(command, comment=comment, timeout=_REMOTE_TIMEOUT)
-    for _ in range(attempts - 1):
-        if result.exit_code == 0:
-            return result
-        time.sleep(retry_delay_seconds)
-        result = e2e.run(command, comment=f"{comment} (retry)", timeout=_REMOTE_TIMEOUT)
-    return result
+    attempt_counter = itertools.count()
+
+    def _run_once() -> CommandResult:
+        run_comment = comment if next(attempt_counter) == 0 else f"{comment} (retry)"
+        return e2e.run(command, comment=run_comment, timeout=_REMOTE_TIMEOUT)
+
+    def _return_last_result(retry_state: RetryCallState) -> CommandResult:
+        # On exhaustion, surface the last result rather than raising so the
+        # caller's own assertion reports the real error.
+        assert retry_state.outcome is not None
+        return retry_state.outcome.result()
+
+    retrying = Retrying(
+        stop=stop_after_attempt(attempts),
+        wait=wait_fixed(retry_delay_seconds),
+        retry=retry_if_result(lambda result: result.exit_code != 0),
+        retry_error_callback=_return_last_result,
+    )
+    return retrying(_run_once)
 
 
 # All tests in this file invoke the Modal CLI indirectly (via environment_create

@@ -303,7 +303,7 @@ def test_config_unset(e2e: E2eSession, project_config_dir: Path) -> None:
     # the opt-in here alongside the value keeps the follow-up read valid.
     # (This mirrors test_config_unset_missing_key.)
     settings_path = project_config_dir / "settings.toml"
-    settings_path.write_text("is_allowed_in_pytest = true\n\n[commands.create]\nprovider = \"modal\"\n")
+    settings_path.write_text('is_allowed_in_pytest = true\n\n[commands.create]\nprovider = "modal"\n')
     # Confirm the value really is in the project settings file before we remove
     # it, the way a human would when debugging.
     settings_before = e2e.run(

@@ -62,9 +62,7 @@ def test_config_set_headless_globally(e2e: E2eSession) -> None:
     # The `mngr` subprocess cold-start can exceed the 10s global pytest timeout,
     # so this test overrides that marker (@pytest.mark.timeout above) and gives
     # each subprocess matching headroom past the 30s default.
-    path_result = e2e.run(
-        "mngr config path --scope project", comment="locate the project config file", timeout=120.0
-    )
+    path_result = e2e.run("mngr config path --scope project", comment="locate the project config file", timeout=120.0)
     expect(path_result).to_succeed()
     project_config_path = Path(path_result.stdout.strip())
 

@@ -56,9 +56,7 @@ def test_gc_default(e2e: E2eSession) -> None:
     # this environment (e.g. AWS without credentials), which is unrelated to
     # whether the agent survived gc. Like gc, this list queries Modal over the
     # network, so give it headroom past the default 30s run budget.
-    list_after = e2e.run(
-        "mngr list --provider modal", comment="verify the active agent survived gc", timeout=60.0
-    )
+    list_after = e2e.run("mngr list --provider modal", comment="verify the active agent survived gc", timeout=60.0)
     expect(list_after).to_succeed()
     expect(list_after.stdout).to_contain("my-task")
 

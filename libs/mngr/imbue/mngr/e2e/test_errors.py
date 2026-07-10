@@ -70,9 +70,7 @@ def test_create_duplicate_name_fails(e2e: E2eSession) -> None:
     # provider (the agents are created locally): an unrelated remote provider
     # being unreachable (e.g. AWS without credentials in CI) would otherwise
     # make `mngr list` exit non-zero for a reason outside this test's scope.
-    list_result = e2e.run(
-        "mngr list --provider local --format json", comment="Verify the original agent is intact"
-    )
+    list_result = e2e.run("mngr list --provider local --format json", comment="Verify the original agent is intact")
     expect(list_result).to_succeed()
     agent_names = [agent["name"] for agent in json.loads(list_result.stdout)["agents"]]
     assert agent_names == ["my-task"], f"Expected only the original 'my-task', got {agent_names}"

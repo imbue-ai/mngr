@@ -105,7 +105,9 @@ def test_start_connect(e2e: E2eSession) -> None:
     # exactly that path. Stopping a named local agent is a tmux-only operation
     # (it does not enumerate remote providers), keeping the test free of Modal.
     expect(e2e.run("mngr stop my-task", comment="stop my-task so start has a stopped agent to start")).to_succeed()
-    expect(e2e.run("mngr start my-task --connect", comment="start the stopped agent and immediately connect")).to_succeed()
+    expect(
+        e2e.run("mngr start my-task --connect", comment="start the stopped agent and immediately connect")
+    ).to_succeed()
     # --connect runs the configured connect_command after the start. The e2e
     # harness's connect_command (mngr-e2e-connect) records the session and writes
     # a "<agent>.pid" file into MNGR_TEST_ASCIINEMA_DIR (== e2e.output_dir). A
@@ -311,9 +313,7 @@ def test_archive_command(e2e: E2eSession) -> None:
     # scoped to the local provider (matching sibling test_stop_archive): my-task
     # is a local command agent, and the documented scope is local-only, so there
     # is no reason to enumerate remote providers (which the test never uses).
-    list_result = e2e.run(
-        "mngr list --provider local --archived --format json", comment="verify my-task is archived"
-    )
+    list_result = e2e.run("mngr list --provider local --archived --format json", comment="verify my-task is archived")
     expect(list_result).to_succeed()
     archived_agents = [a for a in json.loads(list_result.stdout)["agents"] if a["name"] == "my-task"]
     assert len(archived_agents) == 1, f"expected my-task in archived list, got {list_result.stdout}"

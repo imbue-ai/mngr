@@ -66,9 +66,7 @@ def test_templates_setup_via_config_edit(e2e: E2eSession) -> None:
     # the scope is observed rather than assumed (the `echo >>` would otherwise
     # create the file itself, masking whether `config edit` did).
     project_cfg = ".$MNGR_ROOT_NAME/settings.toml"
-    expect(
-        e2e.run(f"test -f {project_cfg}", comment="config edit created the project config file")
-    ).to_succeed()
+    expect(e2e.run(f"test -f {project_cfg}", comment="config edit created the project config file")).to_succeed()
     # Simulate the in-editor edit by appending the template to the project
     # config that `config edit` just created. is_allowed_in_pytest opts this
     # newly created project config into the pytest run (it defaults to False,

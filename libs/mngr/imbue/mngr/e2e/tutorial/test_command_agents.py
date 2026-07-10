@@ -283,4 +283,6 @@ def test_command_agent_batch_job_modal(e2e: E2eSession) -> None:
         lambda: (batch_job_host_state() or "") in online_host_states,
         timeout=90.0,
         poll_interval=5.0,
-    ), f"batch-job host did not return to a running state after reconnect; last observed host state: {batch_job_host_state()}"
+    ), (
+        f"batch-job host did not return to a running state after reconnect; last observed host state: {batch_job_host_state()}"
+    )

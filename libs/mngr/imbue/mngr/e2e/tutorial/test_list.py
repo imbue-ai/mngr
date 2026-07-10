@@ -610,7 +610,7 @@ def test_list_format_jsonl(e2e: E2eSession) -> None:
     # parse as a JSON object on its own.
     lines = [line for line in result.stdout.splitlines() if line.strip()]
     parsed_lines = [json.loads(line) for line in lines]
-    for line, parsed in zip(lines, parsed_lines):
+    for line, parsed in zip(lines, parsed_lines, strict=True):
         assert isinstance(parsed, dict), f"JSONL line is not a JSON object: {line!r}"
     # Both agents appear, each as its own standalone object line -- one JSON
     # object per line rather than a single array wrapping them.
