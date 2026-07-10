@@ -69,6 +69,7 @@ _BACKEND_UNREACHABLE_STATUSES: Final[frozenset[int]] = frozenset({502, 503, 504}
 def should_enroll_suspect_for_backend_failure(
     reason: SystemInterfaceBackendFailureReason,
     status_code: int | None,
+    is_provider_errored: bool,
 ) -> bool:
     """Whether a ``system_interface_backend_failure`` should enroll a probe suspect.
 
@@ -80,18 +81,27 @@ def should_enroll_suspect_for_backend_failure(
     they are left alone; the background probe still catches a genuinely-wrong or
     wedged backend.
 
-    ``UNRESOLVED`` is ignored outright: it means the forward has no route for the
-    agent at all. A restart routes *through* the forward, so it cannot help a
-    routeless agent regardless. In practice ``UNRESOLVED`` is either a cold-start
-    / fresh-forward warm-up (the forward has not caught up to discovery yet --
-    this self-resolves the moment it does, so enrolling would only mark a healthy
-    workspace STUCK and needlessly restart it) or a genuinely-gone agent (which a
-    restart cannot revive). A workspace that is present but unreachable does NOT
-    land here: discovery retains its (stale) route, so the dial failure surfaces
-    as ``CONNECT_ERROR`` / a 5xx, which still enrolls and still drives recovery.
+    ``UNRESOLVED`` means the forward has no route for the agent at all, which has
+    two very different causes distinguished by ``is_provider_errored`` (whether
+    the agent's provider currently has a surfaced discovery error):
+
+    - Provider healthy (``is_provider_errored`` False): a warm-up. The route is
+      still resolving (a cold remote workspace can take ~tens of seconds) and
+      will arrive on its own, so enrolling would only flag a healthy workspace
+      STUCK. Left alone -- today's behavior.
+    - Provider errored (``is_provider_errored`` True): a doomed cold load. The
+      provider is unreachable, so the route will never resolve; enrolling lets
+      the probe loop confirm it (a routeless agent keeps returning the forward's
+      5xx) and drive the recovery page's "Can't connect to <provider>" screen.
+      Self-debouncing: if the provider error was a blip and the route resolves
+      within the stuck threshold, the probe succeeds and no STUCK fires.
+
+    Once a workspace has loaded, a present-but-unreachable outage surfaces as
+    ``CONNECT_ERROR`` / a 5xx instead (discovery retains its stale route), which
+    enrolls regardless of ``is_provider_errored``.
     """
     if reason == SystemInterfaceBackendFailureReason.UNRESOLVED:
-        return False
+        return is_provider_errored
     return status_code is None or status_code in _BACKEND_UNREACHABLE_STATUSES
 
 
