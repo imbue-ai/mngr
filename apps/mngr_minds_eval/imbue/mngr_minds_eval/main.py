@@ -71,13 +71,31 @@ def ensure_base(repo: str, branch: str, base_dir: Path) -> None:
     _sh("git", "clone", "--branch", branch, repo, str(base_dir))
 
 
-def prepare_one(config: dict, clones_dir: Path, base_dir: Path) -> Path:
-    """Local-clone the base, slot the persona config, commit. Only committed content ships."""
+_VENDOR_EXCLUDES = (".git", ".venv", "node_modules", "__pycache__", "*.pyc", ".pytest_cache",
+                    ".mypy_cache", ".ruff_cache", "dist", "build", "*.egg-info", ".coverage")
+
+
+def _vendor_mngr_into(mngr_src: Path, clone: Path) -> None:
+    """Overlay the box's mngr checkout onto the clone's vendor/mngr so the sandbox runs THAT mngr.
+    rsync the source (minus venv/build/caches) over vendor/mngr; the later commit ships it."""
+    dest = clone / "vendor" / "mngr"
+    dest.mkdir(parents=True, exist_ok=True)
+    args = ["rsync", "-a", "--delete"]
+    for pattern in _VENDOR_EXCLUDES:
+        args += ["--exclude", pattern]
+    args += [str(mngr_src).rstrip("/") + "/", str(dest).rstrip("/") + "/"]
+    _sh(*args)
+
+
+def prepare_one(config: dict, clones_dir: Path, base_dir: Path, vendor_mngr: Path | None = None) -> Path:
+    """Local-clone the base, optionally vendor mngr, slot the persona config, commit."""
     cid = config["id"]
     clone = clones_dir / cid
     if clone.exists():
         shutil.rmtree(clone)
     _sh("git", "clone", str(base_dir), str(clone))
+    if vendor_mngr is not None:
+        _vendor_mngr_into(vendor_mngr, clone)
     (clone / "scripts" / "first_command.json").write_text(json.dumps(config, indent=2))
     _sh("git", "-C", str(clone), "add", "-A")
     _sh("git", "-C", str(clone), "-c", "user.email=eval@minds", "-c", "user.name=minds-eval",
@@ -93,15 +111,18 @@ def prepare_test_clones(
     trials: int,
     clones_dir: Path,
     base_dir: Path,
+    vendor_mngr: Path | None = None,
 ) -> list[Path]:
     personas = load_personas_from_obj(json.loads(Path(personas_path).read_text()))
     tasks = expand(personas, trials)
     clones_dir.mkdir(parents=True, exist_ok=True)
-    ensure_base(repo, branch, base_dir)
+    ensure_base(repo, branch, base_dir)  # fresh clone of the branch tip every run (rm + git clone)
+    if vendor_mngr is not None:
+        print(">> vendoring mngr from {} into each clone's vendor/mngr".format(vendor_mngr))
     print(">> preparing {} clone(s): {} persona x {} trial ...".format(len(tasks), len(personas), trials))
     clones = []
     for config in tasks:
-        clone = prepare_one(config, clones_dir, base_dir)
+        clone = prepare_one(config, clones_dir, base_dir, vendor_mngr=vendor_mngr)
         clones.append(clone)
         print("  [OK] {}: {}".format(config["id"], clone))
     print(">> done: {} clone(s) ready under {}".format(len(clones), clones_dir))
@@ -317,6 +338,9 @@ def launch_workspaces(eval_set: str, *, clones_dir: Path, api_key: str) -> list[
 _NON_MODAL_PROVIDERS = ("DOCKER", "AZURE", "AWS", "VULTR", "LIMA", "IMBUE_CLOUD", "GCP", "OVH")
 # The in-sandbox chat_watcher writes this (under MNGR_HOST_DIR, above the agent's repo).
 _EVAL_STATE_REMOTE_PATH = "/mngr/eval_state.json"
+# The workspace's chat (primary) agent id -- the transcript we want, NOT the system-services agent
+# the workspace's API agent_id resolves to.
+_CHAT_AGENT_ID_REMOTE_PATH = "/mngr/initial_chat_agent_id"
 _UNREACHABLE_HINTS = ("connection", "timed out", "timeout", "unreachable", "refused",
                       "could not resolve", "no route", "kex_exchange", "ssh:", "closed by remote")
 _ABSENT_HINTS = ("no such file", "link_stat", "failed to open", "change_dir")
@@ -345,6 +369,15 @@ def _classify_error(text: str) -> str:
     if any(h in low for h in _UNREACHABLE_HINTS):
         return "unreachable"
     return "error"
+
+
+def _rsync_out(agent_id: str, remote_path: str, env: dict, dest_dir: Path):
+    """rsync a remote file out into dest_dir (mngr rsync syncs INTO a dir). Returns (proc, file|None)."""
+    shutil.rmtree(dest_dir, ignore_errors=True)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    proc = _run_mngr(["rsync", "{}:{}".format(agent_id, remote_path), str(dest_dir) + "/"], env)
+    local = dest_dir / Path(remote_path).name
+    return proc, (local if local.is_file() else None)
 
 
 def _persona_from_name(name: str, eval_set: str) -> str | None:
@@ -376,11 +409,13 @@ def retrieve_test_results(eval_set: str, out_dir: Path) -> list[dict]:
     for persona, agent_id in sorted(workspaces):
         record: dict = {"persona": persona, "agent_id": agent_id}
 
-        # 1. read the state file via rsync (reliable file transport).
-        state_local = out_dir / ".{}.state.json".format(agent_id)
-        proc = _run_mngr(["rsync", "{}:{}".format(agent_id, _EVAL_STATE_REMOTE_PATH), str(state_local)], env)
-        if proc.returncode != 0:
-            kind = _classify_error(proc.stderr or proc.stdout)
+        # 1. read the state file (mngr rsync syncs INTO a directory, so use a scratch dir).
+        state_dir = out_dir / ".state-{}".format(agent_id)
+        proc, state_file = _rsync_out(agent_id, _EVAL_STATE_REMOTE_PATH, env, state_dir)
+
+        if state_file is None:
+            kind = _classify_error(proc.stderr or proc.stdout) if proc.returncode != 0 else "absent"
+            shutil.rmtree(state_dir, ignore_errors=True)
             record["status"] = {"unreachable": "unreachable", "absent": "no_state"}.get(kind, "error")
             if kind == "unreachable":
                 print("  [ERR ] {}: machine not accessible".format(persona), flush=True)
@@ -393,7 +428,7 @@ def retrieve_test_results(eval_set: str, out_dir: Path) -> list[dict]:
             continue
 
         try:
-            state = json.loads(state_local.read_text())
+            state = json.loads(state_file.read_text())
         except (ValueError, OSError) as exc:
             record["status"] = "error"
             record["error"] = str(exc)
@@ -401,7 +436,7 @@ def retrieve_test_results(eval_set: str, out_dir: Path) -> list[dict]:
             results.append(record)
             continue
         finally:
-            state_local.unlink(missing_ok=True)
+            shutil.rmtree(state_dir, ignore_errors=True)
 
         waits = state.get("waits_processed_count")
         record["waits_processed_count"] = waits
@@ -411,11 +446,17 @@ def retrieve_test_results(eval_set: str, out_dir: Path) -> list[dict]:
             results.append(record)
             continue
 
-        # 2. finished -> pull the Claude transcript.
+        # 2. finished -> pull the Claude transcript. The workspace's API agent_id resolves to the
+        #    host's system-services agent (no transcript); the CHAT agent id lives in the sandbox.
+        chat_dir = out_dir / ".chatid-{}".format(agent_id)
+        _cproc, chat_id_file = _rsync_out(agent_id, _CHAT_AGENT_ID_REMOTE_PATH, env, chat_dir)
+        chat_agent_id = chat_id_file.read_text().strip() if chat_id_file else agent_id
+        shutil.rmtree(chat_dir, ignore_errors=True)
+
         stem = persona if persona not in seen else "{}.{}".format(persona, agent_id[:8])
         seen.add(persona)
         transcript_path = out_dir / "{}.jsonl".format(stem)
-        tproc = _run_mngr(["transcript", agent_id, "--format", "jsonl"], env)
+        tproc = _run_mngr(["transcript", chat_agent_id, "--format", "jsonl"], env)
         if tproc.returncode != 0:
             record["status"] = "finished_no_transcript"
             record["error"] = (tproc.stderr or "").strip()[:300]
@@ -475,6 +516,8 @@ def main() -> None:
     p.add_argument("-n", "--trials", type=int, default=1, help="clones to prepare per persona")
     p.add_argument("--clones-dir", type=Path, default=DEFAULT_CLONES_DIR)
     p.add_argument("--base-dir", type=Path, default=DEFAULT_BASE_DIR)
+    p.add_argument("--vendor-mngr", type=Path, default=None,
+                   help="rsync this mngr checkout into each clone's vendor/mngr (sandbox runs THAT mngr)")
 
     lw = sub.add_parser("launch-workspaces", help="create a Modal workspace for every prepared clone")
     lw.add_argument("--eval-set", required=True, help="eval set name; workspace = EVAL-<set>-CASE-<persona>")
@@ -502,6 +545,7 @@ def main() -> None:
             trials=args.trials,
             clones_dir=args.clones_dir,
             base_dir=args.base_dir,
+            vendor_mngr=args.vendor_mngr,
         )
         return
     if args.command == "launch-workspaces":
