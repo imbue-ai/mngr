@@ -844,11 +844,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
         """
         with self._lock:
             provider_name = next(
-                (
-                    agent.provider_name
-                    for agent in self._agents_result.discovered_agents
-                    if agent.agent_id == agent_id
-                ),
+                (agent.provider_name for agent in self._agents_result.discovered_agents if agent.agent_id == agent_id),
                 None,
             )
             return provider_name is not None and provider_name in self._error_by_provider_name
