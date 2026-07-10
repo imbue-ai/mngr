@@ -169,3 +169,52 @@ def test_find_leftovers_reports_live_references(tmp_path: Path) -> None:
     _make_git_repo(tmp_path)
     leftovers = find_leftovers(tmp_path)
     assert {leftover.rel_path for leftover in leftovers} == {Path("README.md"), Path("src/fct_worktree.py")}
+
+
+def test_reintroduced_old_file_dropped_when_identical(tmp_path: Path) -> None:
+    _make_git_repo(tmp_path)
+    (tmp_path / "src" / "default_workspace_template_worktree.py").write_text("DEFAULT_WORKSPACE_TEMPLATE_DIR = 'x'\n")
+    subprocess.run(("git", "add", "-A"), cwd=tmp_path, check=True)
+    replacements = build_replacements(derive_name_forms("default-workspace-template"))
+
+    plan = plan_repo(tmp_path, replacements, include_diffs=False)
+    rename = next(r for r in plan.renames if r.old_rel_path == Path("src/fct_worktree.py"))
+    assert rename.target_exists and rename.target_identical
+
+    apply_plan(plan)
+    assert not (tmp_path / "src" / "fct_worktree.py").exists()
+    assert (
+        tmp_path / "src" / "default_workspace_template_worktree.py"
+    ).read_text() == "DEFAULT_WORKSPACE_TEMPLATE_DIR = 'x'\n"
+
+
+def test_reintroduced_old_file_kept_when_different(tmp_path: Path) -> None:
+    _make_git_repo(tmp_path)
+    (tmp_path / "src" / "default_workspace_template_worktree.py").write_text("something_else = True\n")
+    subprocess.run(("git", "add", "-A"), cwd=tmp_path, check=True)
+    replacements = build_replacements(derive_name_forms("default-workspace-template"))
+
+    plan = plan_repo(tmp_path, replacements, include_diffs=False)
+    rename = next(r for r in plan.renames if r.old_rel_path == Path("src/fct_worktree.py"))
+    assert rename.target_exists and not rename.target_identical
+
+    apply_plan(plan)
+    assert (tmp_path / "src" / "fct_worktree.py").exists()
+    assert (tmp_path / "src" / "default_workspace_template_worktree.py").read_text() == "something_else = True\n"
+
+
+def test_symlink_target_rewritten(tmp_path: Path) -> None:
+    _make_git_repo(tmp_path)
+    (tmp_path / "seed_link").symlink_to("src/fct_worktree.py")
+    subprocess.run(("git", "add", "-A"), cwd=tmp_path, check=True)
+    replacements = build_replacements(derive_name_forms("default-workspace-template"))
+
+    plan = plan_repo(tmp_path, replacements, include_diffs=False)
+    assert [(s.rel_path, s.new_target) for s in plan.symlinks] == [
+        (Path("seed_link"), "src/default_workspace_template_worktree.py")
+    ]
+
+    apply_plan(plan)
+    link = tmp_path / "seed_link"
+    assert str(link.readlink()) == "src/default_workspace_template_worktree.py"
+    assert link.resolve().read_text() == "DEFAULT_WORKSPACE_TEMPLATE_DIR = 'x'\n"

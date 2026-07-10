@@ -14,6 +14,13 @@ rename introduces (``DEFAULT_DEFAULT_WORKSPACE_TEMPLATE`` ->
 Dry-run by default; ``--apply`` edits in place. Idempotent: once applied, a rerun
 finds nothing to change. ``--check`` verifies that no live references remain.
 
+Open branches: run this script from the branch worktree and commit BEFORE merging
+main, so both sides use the new names and only real conflicts remain. When a merge
+reintroduces an old-name file next to its renamed twin, apply drops the old file if
+the rewritten content matches and warns (keeping both) if it differs. Symlinks whose
+targets embed the old name get their targets rewritten. On apply with
+``--template-dir``, uv.lock is regenerated there automatically.
+
 Reported but never rewritten: changelog entries and consolidated CHANGELOG files,
 ``specs/`` and ``blueprint/`` (historical records), ``vendor/`` trees (refreshed
 via ``just sync-vendor-mngr``), and ``uv.lock`` (regenerate with ``uv lock``).
@@ -137,6 +144,20 @@ class PathRename(FrozenModel):
 
     old_rel_path: Path = Field(description="Current path relative to the repo root")
     new_rel_path: Path = Field(description="Renamed path relative to the repo root")
+    target_exists: bool = Field(
+        default=False, description="The new path already exists (an old-name file reintroduced by a merge)"
+    )
+    target_identical: bool = Field(
+        default=False, description="The rewritten old file matches the existing target byte-for-byte"
+    )
+
+
+class SymlinkFix(FrozenModel):
+    """A tracked symlink whose target path embeds the old name."""
+
+    rel_path: Path = Field(description="Symlink path relative to the repo root")
+    old_target: str = Field(description="Current symlink target")
+    new_target: str = Field(description="Rewritten symlink target")
 
 
 class RepoPlan(FrozenModel):
@@ -145,6 +166,7 @@ class RepoPlan(FrozenModel):
     repo_root: Path = Field(description="Absolute path to the repository")
     rewrites: tuple[FileRewrite, ...] = Field(description="Planned content rewrites")
     renames: tuple[PathRename, ...] = Field(description="Planned path renames, deepest first")
+    symlinks: tuple[SymlinkFix, ...] = Field(description="Symlinks whose targets need rewriting")
     skipped: tuple[SkippedFile, ...] = Field(description="Files with matches that are left untouched")
     undecodable: tuple[Path, ...] = Field(description="Tracked files that are not valid UTF-8")
 
@@ -333,8 +355,15 @@ def list_tracked_files(repo_root: Path) -> tuple[Path, ...]:
     return tuple(Path(entry) for entry in stdout.split("\0") if entry)
 
 
-def plan_renames(tracked: tuple[Path, ...], replacements: tuple[Replacement, ...]) -> tuple[PathRename, ...]:
-    """Renames for every non-skipped file or directory whose own name embeds the old name, deepest first."""
+def plan_renames(
+    repo_root: Path, tracked: tuple[Path, ...], replacements: tuple[Replacement, ...]
+) -> tuple[PathRename, ...]:
+    """Renames for every non-skipped file or directory whose own name embeds the old name, deepest first.
+
+    When the target already exists (an old-name file reintroduced by merging a
+    pre-rename branch), the rename is marked: identical content (after rewrite)
+    means the old file can be dropped; differing content needs a manual merge.
+    """
     pairs: dict[Path, Path] = {}
     for path in tracked:
         if skip_reason(path) is not None:
@@ -345,17 +374,40 @@ def plan_renames(tracked: tuple[Path, ...], replacements: tuple[Replacement, ...
             if new_name != prefix.name:
                 pairs[prefix] = prefix.with_name(new_name)
     ordered = sorted(pairs.items(), key=lambda item: len(item[0].parts), reverse=True)
-    return tuple(PathRename(old_rel_path=old, new_rel_path=new) for old, new in ordered)
+    renames: list[PathRename] = []
+    for old, new in ordered:
+        old_absolute = repo_root / old
+        new_absolute = repo_root / new
+        target_exists = new_absolute.exists()
+        target_identical = False
+        if target_exists and old_absolute.is_file() and new_absolute.is_file():
+            rewritten_old, _ = rewrite_text(old_absolute.read_bytes().decode("utf-8", errors="replace"), replacements)
+            target_identical = rewritten_old == new_absolute.read_bytes().decode("utf-8", errors="replace")
+        renames.append(
+            PathRename(
+                old_rel_path=old, new_rel_path=new, target_exists=target_exists, target_identical=target_identical
+            )
+        )
+    return tuple(renames)
 
 
 def plan_repo(repo_root: Path, replacements: tuple[Replacement, ...], include_diffs: bool) -> RepoPlan:
     """Scan one repository and plan every content rewrite and path rename."""
     tracked = list_tracked_files(repo_root)
     rewrites: list[FileRewrite] = []
+    symlinks: list[SymlinkFix] = []
     skipped: list[SkippedFile] = []
     undecodable: list[Path] = []
     for rel_path in tracked:
         absolute = repo_root / rel_path
+        if absolute.is_symlink():
+            # Rewriting through a symlink would mutate its target; fix the
+            # target path instead (it may embed the old name).
+            old_target = str(absolute.readlink())
+            new_target, target_count = rewrite_text(old_target, replacements)
+            if target_count > 0 and skip_reason(rel_path) is None:
+                symlinks.append(SymlinkFix(rel_path=rel_path, old_target=old_target, new_target=new_target))
+            continue
         if not absolute.is_file():
             continue
         try:
@@ -384,18 +436,37 @@ def plan_repo(repo_root: Path, replacements: tuple[Replacement, ...], include_di
     return RepoPlan(
         repo_root=repo_root,
         rewrites=tuple(rewrites),
-        renames=plan_renames(tracked, replacements),
+        renames=plan_renames(repo_root, tracked, replacements),
+        symlinks=tuple(symlinks),
         skipped=tuple(skipped),
         undecodable=tuple(undecodable),
     )
 
 
 def apply_plan(plan: RepoPlan) -> None:
-    """Write the planned content rewrites, then `git mv` the planned renames (deepest first)."""
+    """Write the planned content rewrites, then apply renames and symlink fixes.
+
+    A rename whose target already exists is resolved by dropping the old file
+    when the rewritten content matches the target, and kept (with a warning)
+    when it differs -- that needs a manual merge.
+    """
     for rewrite in plan.rewrites:
         (plan.repo_root / rewrite.rel_path).write_bytes(rewrite.new_text.encode("utf-8"))
     for rename in plan.renames:
+        if rename.target_exists:
+            if rename.target_identical:
+                _run(("git", "-C", str(plan.repo_root), "rm", "-q", "-f", str(rename.old_rel_path)))
+            else:
+                click.echo(
+                    f"WARNING: {rename.new_rel_path} already exists and differs from {rename.old_rel_path}; "
+                    "kept both -- merge manually."
+                )
+            continue
         _run(("git", "-C", str(plan.repo_root), "mv", str(rename.old_rel_path), str(rename.new_rel_path)))
+    for symlink in plan.symlinks:
+        absolute = plan.repo_root / symlink.rel_path
+        absolute.unlink()
+        absolute.symlink_to(symlink.new_target)
 
 
 def find_leftovers(repo_root: Path) -> tuple[Leftover, ...]:
@@ -416,6 +487,16 @@ def find_leftovers(repo_root: Path) -> tuple[Leftover, ...]:
             if pattern.search(line):
                 leftovers.append(Leftover(rel_path=rel_path, line_number=line_number, line_text=line.strip()))
     return tuple(leftovers)
+
+
+def _regenerate_lockfile(repo_root: Path) -> None:
+    """Regenerate uv.lock after the pyproject name change; a failure is reported, not fatal."""
+    try:
+        _run(("uv", "lock"), cwd=repo_root)
+    except ExternalCommandError as e:
+        click.echo(f"WARNING: `uv lock` failed in {repo_root}; run it manually. ({e})")
+        return
+    click.echo(f"regenerated uv.lock in {repo_root}")
 
 
 def rename_github_repo(forms: NameForms, is_apply: bool) -> None:
@@ -448,7 +529,19 @@ def _report_plan(plan: RepoPlan, is_apply: bool, should_show_diff: bool) -> None
         verb = "renamed" if is_apply else "would rename"
         click.echo(f"{verb} {len(plan.renames)} paths:")
         for rename in plan.renames:
-            click.echo(f"    {rename.old_rel_path} -> {rename.new_rel_path}")
+            note = ""
+            if rename.target_exists:
+                note = (
+                    "  [target exists: drop old, identical]"
+                    if rename.target_identical
+                    else "  [target exists and DIFFERS: manual merge]"
+                )
+            click.echo(f"    {rename.old_rel_path} -> {rename.new_rel_path}{note}")
+    if plan.symlinks:
+        verb = "fixed" if is_apply else "would fix"
+        click.echo(f"{verb} {len(plan.symlinks)} symlink targets:")
+        for symlink in plan.symlinks:
+            click.echo(f"    {symlink.rel_path}: {symlink.old_target} -> {symlink.new_target}")
     if plan.skipped:
         left = sum(entry.match_count for entry in plan.skipped)
         click.echo(f"left untouched ({left} matches in {len(plan.skipped)} files):")
@@ -555,12 +648,16 @@ def _run_from_arguments(arguments: RenameCliArguments) -> None:
         if arguments.is_apply:
             apply_plan(plan)
         _report_plan(plan, arguments.is_apply, arguments.should_show_diff)
+        if arguments.is_apply and repo_root == arguments.template_dir:
+            _regenerate_lockfile(repo_root)
     if arguments.is_apply:
         click.echo(
-            "\nfollow-ups: run `uv lock` in the template checkout (its pyproject name changed), "
-            "refresh vendor/mngr via `just sync-vendor-mngr`, update any personal FCT_DIR env/.env entries, "
+            "\nfollow-ups: refresh vendor/mngr via `just sync-vendor-mngr`, "
+            "update any personal FCT_DIR env/.env entries, "
             "run the full test suites in both repos, and never create a new repo at the old GitHub name "
-            "(it would break the rename redirects)."
+            "(it would break the rename redirects). Open branches: run this script from the branch "
+            "worktree and commit BEFORE merging main, so both sides use the new names and only real "
+            "conflicts remain."
         )
     else:
         click.echo(
