@@ -35,6 +35,16 @@ and how the agent receives the answer.
    button, a backdrop click, or Escape -- returns them to their work with
    no context lost. (Opened directly in a browser, with no modal host, the
    page degrades to a dimmed, centered card and dismissal navigates home.)
+
+   When the inbox was opened for a **single request** -- a notification
+   click, a workspace relay, or auto-open on a new request -- resolving
+   it via Approve/Deny dismisses the whole window. This is the default;
+   it prevents an unrelated, stale request from another agent suddenly
+   becoming visible after the user acts. Only when the user
+   **intentionally opens the whole inbox** via the Requests button (which
+   loads `/inbox?keep_open=1`) does resolving a request advance to the
+   next pending one instead of closing the window.
+
    The page renders a single-scope permission dialog:
    * The dialog header names the service plainly (no monospace pill) and
      attributes the agent's rationale prominently as
@@ -186,10 +196,13 @@ agents on the same machine.
 Minds exposes a cross-workspace management API (`/api/v1/workspaces/...`)
 that lets an agent in one workspace act on *other* workspaces -- listing,
 reading detail/version/backups, creating, destroying, starting/stopping,
-exporting backups, and establishing SSH access. It is reached through the
-same `minds-api-proxy` extension and gated by a single `minds-workspaces`
-detent scope with one named permission per verb (`minds-workspaces-read`,
-`-create`, `-destroy`, `-lifecycle`, `-backups-export`, `-ssh`). Nothing is
+exporting and managing backups, establishing SSH access, updating settings,
+recovering (health check / restart), and managing service sharing. It is
+reached through the same `minds-api-proxy` extension and gated by a single
+`minds-workspaces` detent scope with one named permission per verb
+(`minds-workspaces-read`, `-create`, `-destroy`, `-lifecycle`,
+`-backups-export`, `-backups-manage`, `-ssh`, `-update`, `-recover`,
+`-sharing`). Nothing is
 pre-granted, so an agent's first cross-workspace call gets a 403 until the
 user approves; the scope and verb schemas are not part of the agent baseline
 at all -- they arrive, fully self-described, with the grant (see below).
@@ -207,7 +220,8 @@ The verbs split on a **target axis**:
 * `read` and `create` are all-or-nothing: a grant applies to every
   workspace (listing does not leak per-target data, and create takes no
   target).
-* `destroy`, `lifecycle`, `backups-export`, and `ssh` are *target-scoped*.
+* `destroy`, `lifecycle`, `backups-export`, `backups-manage`, `ssh`,
+  `update`, `recover`, and `sharing` are *target-scoped*.
   A "selected" grant for one of these verbs mints a **uniquely-named
   per-target permission schema** (`minds-workspaces-<verb>-<target_id>`)
   whose path pins that single workspace; an "all workspaces" grant uses
