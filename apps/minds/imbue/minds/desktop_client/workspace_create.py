@@ -151,7 +151,7 @@ def _run_tunnel_setup(
     if info.token is None:
         logger.warning("Tunnel created for {} but no token returned", agent_id)
         return
-    inject_tunnel_token_into_agent(agent_id, info.token.get_secret_value())
+    inject_tunnel_token_into_agent(agent_id, info.token.get_secret_value(), imbue_cloud_cli.mngr_caller)
     logger.debug("Injected tunnel token into agent {}", agent_id)
 
 
