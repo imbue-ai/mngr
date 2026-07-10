@@ -109,6 +109,12 @@ The desktop app bundles platform-specific binaries so users need zero prerequisi
 
 Each is placed in the `resources/` directory (outside the asar archive) and added to `PATH` in the child process environment. `restic` and `qemu-img` are additionally passed by explicit absolute path (`MINDS_RESTIC_BINARY`, `MINDS_QEMU_IMG_BINARY`) so resolution never depends on `PATH` ordering.
 
+### How the shipped binaries are chosen
+
+`scripts/build.js` (`pnpm build`, the first half of `pnpm dist`) is the only stage whose output reaches the app. It runs on whichever machine invokes `pnpm dist` -- in CI, the arm64 `minds-runner` -- and downloads for its own `process.arch`. ToDesktop then packages the uploaded `resources/` into `Contents/Resources` via `extraResources`, which is what `paths.getResourcesDir()` resolves to (`process.resourcesPath`) in a packaged app.
+
+The `todesktop:beforeInstall` hook (`scripts/download-binaries.js`) also downloads binaries, but its output never reaches the app. ToDesktop runs it against `app-wrapper/app/`, so the packager folds those files into `app.asar`, which nothing reads at runtime; a packaged app therefore carries a second, dead copy of `resources/`. The hook still gates the build: a download failure inside it aborts `pnpm dist`. Its only remaining purpose is that failure mode, and the `resources/` tree it writes is dead weight.
+
 ### Producing and hosting the qemu-img payload
 
 `qemu-img` is the one bundled binary with no upstream download, so its payload is built from source and hosted on a GitHub release. This is a rare, maintenance-time step -- only when bumping `QEMU_IMG_VERSION` (in `scripts/download-binaries.js`) or a pinned dependency.
@@ -121,7 +127,23 @@ For each target arch, on a matching macOS host:
 2. Upload every arch's tarball as an asset on a GitHub release tagged `qemu-img-v<ver>` in `imbue-ai/mngr` (the base URL is `QEMU_PAYLOAD_BASE_URL` in `scripts/download-binaries.js`).
 3. Paste each printed SHA into `EXPECTED_SHA256`.
 
-macOS `aarch64` and `x86_64` payloads must be produced on their respective host arches. ToDesktop builds both mac arches; only the aarch64 payload is published (no Intel build host), so `download-binaries.js` explicitly skips qemu-img on darwin-x86_64 -- harmless today because no pre-baked x86_64 image is published either (an Intel app's prefetch reports VERSION_UNAVAILABLE and builds in-VM). Ship an Intel payload + image together to serve that fast path. Linux payloads come from `scripts/build-qemu-payload-linux.sh` (Docker + Alpine): Linux has no static-libc limitation, so QEMU's own `--static` against Alpine's musl produces a fully static ELF that runs on any distro -- one script run per arch, either arch buildable from any host via Docker binfmt emulation. ToDesktop's Linux builder runs the same `beforeInstall` hook even though no Linux app ships, so the linux assets must exist for `pnpm dist` to pass. Until an arch's tarball is uploaded and its SHA pinned, a build for that arch aborts loudly in `verifyChecksum`.
+macOS `aarch64` and `x86_64` payloads must be produced on their respective host arches. Only the aarch64 payload is published. ToDesktop's macOS build agent is itself x86_64, so the `beforeInstall` hook resolves `darwin-x86_64` on *every* mac build regardless of target arch; without an explicit skip in `download-binaries.js`, the hook's 404 on the unpublished Intel payload fails all mac builds, arm64 included. The skip costs nothing, because the hook's downloads never reach the app.
+
+Linux payloads come from `scripts/build-qemu-payload-linux.sh` (Docker + Alpine): Linux has no static-libc limitation, so QEMU's own `--static` against Alpine's musl produces a fully static ELF that runs on any distro -- one script run per arch, either arch buildable from any host via Docker binfmt emulation. ToDesktop's Linux builder runs the same `beforeInstall` hook even though no Linux app ships, so the linux assets must exist for `pnpm dist` to pass. Until an arch's tarball is uploaded and its SHA pinned, a build for that arch aborts loudly in `verifyChecksum`.
+
+### macOS Intel (x86_64) is not supported
+
+ToDesktop publishes `arm64`, `x64`, and `universal` mac artifacts, but only the arm64 one works, and only it is fetched and verified by `.github/workflows/minds-launch-to-msg.yml`. In the published x64 app, `Contents/MacOS/Minds` is x86_64 while the bundled `uv`, `restic`, and `limactl` are arm64, so it cannot launch a VM.
+
+The cause is structural, not a missing payload. `build.js` stages binaries for the arch of the machine it runs on, and all three mac artifacts are packaged from that one upload. The `beforeInstall` hook is the only stage that runs per-agent, and it is useless for this: its output lands in `app.asar`, and its agent is x86_64 anyway, so honoring it would put Intel binaries in the arm64 app.
+
+Supporting Intel needs all of:
+
+- `build.js` staging both arches (it downloads per-arch already; nothing forces it to fetch only its own), plus a per-arch `extraResources` mapping or `lipo`-merged universal binaries. `git` is already universal, since `xcrun --find git` returns Apple's fat binary.
+
+- A `darwin-x86_64` `qemu-img` payload, published and SHA-pinned.
+
+- A pre-baked x86_64 Lima image. Without one an Intel app's prefetch reports `VERSION_UNAVAILABLE` and builds in-VM, so the fast path stays dark even with `qemu-img` present.
 
 To exercise a packaged or clean-`pnpm start` build locally before the release exists, stage the payload straight into the resources dir instead of downloading it: `scripts/build-qemu-payload.sh apps/minds/resources` writes `resources/qemu/bin/qemu-img` in place, which `ensure-binaries.js` then treats as already present.
 
