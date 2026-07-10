@@ -1,4 +1,4 @@
-{#def report_unexpected_errors=false, include_error_logs=false, services_overview=[], file_sharing_grants=[], workspace_op_groups=[], permissions_unavailable=false #}
+{#def report_unexpected_errors=false, include_error_logs=false, services_overview=[], file_sharing_grants=[], workspace_delegation_grants=[], permissions_unavailable=false #}
 {#
   App-level settings page, reachable from the floating sidebar's "Settings" entry.
 
@@ -226,36 +226,24 @@
       });
     });
 
-    // Cross-workspace management revocation. The target scope (shared vs a
-    // specific target workspace) is carried by the panel; ``""`` means shared.
-    document.querySelectorAll('.revoke-ws-btn').forEach(function (btn) {
+    // Cross-workspace management revocation: one verb, for one granting
+    // workspace, across every target it covers. The granting workspace is
+    // carried by the enclosing group; the verb by the row.
+    document.querySelectorAll('.revoke-verb-btn').forEach(function (btn) {
       btn.addEventListener('click', function () {
-        var panel = btn.closest('[data-workspace-target]');
-        var card = btn.closest('[data-workspace-agent-id]');
-        var targetId = panel.getAttribute('data-workspace-target');
-        var targetLabel = panel.getAttribute('data-workspace-target-label');
-        var workspaceName = card.getAttribute('data-workspace-name');
+        var group = btn.closest('[data-workspace-agent-id]');
+        var row = btn.closest('[data-verb-permission]');
+        var workspaceName = group.getAttribute('data-workspace-name');
+        var verbLabel = row.getAttribute('data-verb-label');
         openRevokeDialog(
-          'Revoke workspace access?',
-          'This removes ' + workspaceName + "'s workspace-management access for " + targetLabel + '. The agent can request it again later.',
+          'Revoke ' + verbLabel + ' access?',
+          'This removes ' + workspaceName + "'s " + verbLabel + ' access to other workspaces. The agent can request it again later.',
           {
             url: '/settings/permissions/workspace/revoke',
-            body: { workspace_agent_id: card.getAttribute('data-workspace-agent-id'), target_workspace_id: targetId || null },
-          }
-        );
-      });
-    });
-
-    document.querySelectorAll('.remove-all-ws-btn').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        var panel = btn.closest('[data-workspace-target]');
-        var targetLabel = panel.getAttribute('data-workspace-target-label');
-        openRevokeDialog(
-          'Remove all workspace access?',
-          'This removes workspace-management access for ' + targetLabel + ' from every workspace. Agents can request it again later.',
-          {
-            url: '/settings/permissions/workspace/revoke-all',
-            body: { target_workspace_id: panel.getAttribute('data-workspace-target') || null },
+            body: {
+              workspace_agent_id: group.getAttribute('data-workspace-agent-id'),
+              verb: row.getAttribute('data-verb-permission'),
+            },
           }
         );
       });
@@ -419,38 +407,27 @@
               Workspace delegation can't be loaded right now.
               Try again in a moment.
             </Notice>
-          {% elif workspace_op_groups %}
+          {% elif workspace_delegation_grants %}
+            {# Grouped by the *granting* workspace; one row per verb naming the
+               target(s) it covers, each independently revocable. #}
             <div class="flex flex-col gap-8">
-              {% for group in workspace_op_groups %}
-                {% set ws_count = group.cards | length %}
-                <div data-workspace-target="{{ group.target_workspace_id }}" data-workspace-target-label="{{ group.target_name }}">
-                  <div class="flex items-center justify-between gap-3 mb-3">
-                    <h3 class="type-heading text-primary">
-                      {{ "All workspaces" if group.is_shared else group.target_name }}
-                      <span class="type-helper text-tertiary font-normal">&middot; {{ ws_count }} workspace{{ '' if ws_count == 1 else 's' }}</span>
-                    </h3>
-                    <Button variant="ghost" size="md" class="remove-all-ws-btn">Revoke all</Button>
-                  </div>
-                  <div class="grid grid-cols-2 gap-3">
-                    {% for card in group.cards %}
-                      <div class="minds-card p-4 flex flex-col gap-3"
-                           data-workspace-agent-id="{{ card.workspace_agent_id }}"
-                           data-workspace-name="{{ card.workspace_name }}">
-                        <div class="flex items-center gap-2">
-                          <span class="w-2.5 h-2.5 rounded-full shrink-0" style="background-color: {{ card.color }}"></span>
-                          <span class="type-body font-semibold text-primary truncate">{{ card.workspace_name }}</span>
+              {% for grant in workspace_delegation_grants %}
+                <div data-workspace-agent-id="{{ grant.workspace_agent_id }}" data-workspace-name="{{ grant.workspace_name }}">
+                  <h3 class="type-heading text-primary flex items-center gap-2 mb-1">
+                    <span class="w-2.5 h-2.5 rounded-full shrink-0" style="background-color: {{ grant.color }}"></span>
+                    <span class="truncate">{{ grant.workspace_name }}</span>
+                  </h3>
+                  <p class="type-helper text-tertiary mb-2">Allowed</p>
+                  <div class="flex flex-col">
+                    {% for verb in grant.verbs %}
+                      <div class="flex items-center justify-between gap-3 py-1.5 border-b border-subtle"
+                           data-verb-permission="{{ verb.verb_permission }}" data-verb-label="{{ verb.label }}">
+                        <div class="flex items-center gap-2 min-w-0 flex-wrap">
+                          <code class="code-pill" data-tooltip="{{ verb.description }}">{{ verb.label }}</code>
+                          <span class="type-helper text-tertiary">on:</span>
+                          <span class="type-body text-secondary truncate">{{ "All workspaces" if verb.is_all_workspaces else verb.target_names | join(", ") }}</span>
                         </div>
-                        <div>
-                          <p class="type-helper text-tertiary mb-1">Allowed</p>
-                          <div class="flex flex-wrap gap-1">
-                            {% for perm in card.permissions %}
-                              <code class="code-pill"{% if perm.description %} data-tooltip="{{ perm.description }}"{% endif %}>{{ perm.label }}</code>
-                            {% endfor %}
-                          </div>
-                        </div>
-                        <div class="mt-auto">
-                          <Button variant="secondary" size="md" class="revoke-ws-btn">Revoke</Button>
-                        </div>
+                        <Button variant="ghost" size="md" class="revoke-verb-btn shrink-0 !text-important hover:!bg-[var(--c-important-surface)]">Revoke</Button>
                       </div>
                     {% endfor %}
                   </div>

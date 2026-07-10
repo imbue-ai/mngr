@@ -67,8 +67,7 @@ from imbue.minds.desktop_client.latchkey.permission_overview import revoke_file_
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_file_sharing_for_workspace
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_for_all_workspaces
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_for_workspace
-from imbue.minds.desktop_client.latchkey.permission_overview import revoke_workspace_ops_for_all_workspaces
-from imbue.minds.desktop_client.latchkey.permission_overview import revoke_workspace_ops_for_workspace
+from imbue.minds.desktop_client.latchkey.permission_overview import revoke_workspace_verb_for_workspace
 from imbue.minds.desktop_client.mind_liveness import compute_mind_liveness_by_agent_id
 from imbue.minds.desktop_client.mind_liveness import get_shutdown_capable_workspace_agent_ids
 from imbue.minds.desktop_client.minds_config import MindsConfig
@@ -1768,7 +1767,7 @@ def _handle_settings_page() -> Response:
 
     services_overview: list[object] = []
     file_sharing_grants: list[object] = []
-    workspace_op_groups: list[object] = []
+    workspace_delegation_grants: list[object] = []
     permissions_unavailable = False
     handler = _find_predefined_permission_handler()
     if handler is not None:
@@ -1788,7 +1787,7 @@ def _handle_settings_page() -> Response:
                     latchkey=handler.latchkey,
                 )
             )
-            workspace_op_groups = list(
+            workspace_delegation_grants = list(
                 build_workspace_overview(
                     backend_resolver=get_state().backend_resolver,
                     gateway_client=handler.gateway_client,
@@ -1804,7 +1803,7 @@ def _handle_settings_page() -> Response:
         include_error_logs=include_error_logs,
         services_overview=services_overview,
         file_sharing_grants=file_sharing_grants,
-        workspace_op_groups=workspace_op_groups,
+        workspace_delegation_grants=workspace_delegation_grants,
         permissions_unavailable=permissions_unavailable,
     )
     return make_html_response(content=html)
@@ -1942,49 +1941,28 @@ def _handle_revoke_file_sharing_for_all_workspaces() -> Response:
     )
 
 
-def _handle_revoke_workspace_ops_for_workspace() -> Response:
-    """Revoke a workspace's cross-workspace-management verbs for one target scope.
+def _handle_revoke_workspace_delegation_verb() -> Response:
+    """Revoke one cross-workspace-management verb for one granting workspace.
 
     Route: POST /settings/permissions/workspace/revoke. Body:
-    ``{"workspace_agent_id": "...", "target_workspace_id": "..."|null}`` where a
-    null/absent ``target_workspace_id`` means the shared (all-workspaces) grants.
+    ``{"workspace_agent_id": "...", "verb": "minds-workspaces-<verb>"}``. Removes
+    that verb across every target it was granted on for the given workspace.
     """
     prelude = _revoke_prelude()
     if isinstance(prelude, Response):
         return prelude
     body, handler = prelude
     workspace_agent_id = str(body.get("workspace_agent_id", ""))
-    if not workspace_agent_id:
-        return _json_error("workspace_agent_id is required.", status_code=400)
-    raw_target = body.get("target_workspace_id")
+    verb = str(body.get("verb", ""))
+    if not workspace_agent_id or not verb:
+        return _json_error("workspace_agent_id and verb are required.", status_code=400)
     return _apply_revoke(
-        revoke_workspace_ops_for_workspace,
+        revoke_workspace_verb_for_workspace,
         backend_resolver=get_state().backend_resolver,
         gateway_client=handler.gateway_client,
         latchkey=handler.latchkey,
         workspace_agent_id=workspace_agent_id,
-        target_workspace_id=str(raw_target) if raw_target else None,
-    )
-
-
-def _handle_revoke_workspace_ops_for_all_workspaces() -> Response:
-    """Revoke a target scope's cross-workspace verbs across every active workspace.
-
-    Route: POST /settings/permissions/workspace/revoke-all. Body:
-    ``{"target_workspace_id": "..."|null}`` where a null/absent value means the
-    shared (all-workspaces) grants.
-    """
-    prelude = _revoke_prelude()
-    if isinstance(prelude, Response):
-        return prelude
-    body, handler = prelude
-    raw_target = body.get("target_workspace_id")
-    return _apply_revoke(
-        revoke_workspace_ops_for_all_workspaces,
-        backend_resolver=get_state().backend_resolver,
-        gateway_client=handler.gateway_client,
-        latchkey=handler.latchkey,
-        target_workspace_id=str(raw_target) if raw_target else None,
+        verb_permission=verb,
     )
 
 
@@ -2631,12 +2609,7 @@ def create_desktop_client(
     )
     app.add_url_rule(
         "/settings/permissions/workspace/revoke",
-        view_func=_handle_revoke_workspace_ops_for_workspace,
-        methods=["POST"],
-    )
-    app.add_url_rule(
-        "/settings/permissions/workspace/revoke-all",
-        view_func=_handle_revoke_workspace_ops_for_all_workspaces,
+        view_func=_handle_revoke_workspace_delegation_verb,
         methods=["POST"],
     )
     app.add_url_rule("/accounts/set-default", view_func=_handle_set_default_account, methods=["POST"])

@@ -15,8 +15,7 @@ from imbue.minds.desktop_client.latchkey.permission_overview import revoke_file_
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_file_sharing_for_workspace
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_for_all_workspaces
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_for_workspace
-from imbue.minds.desktop_client.latchkey.permission_overview import revoke_workspace_ops_for_all_workspaces
-from imbue.minds.desktop_client.latchkey.permission_overview import revoke_workspace_ops_for_workspace
+from imbue.minds.desktop_client.latchkey.permission_overview import revoke_workspace_verb_for_workspace
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -294,7 +293,7 @@ def _workspace_rule(names: tuple[str, ...]) -> dict[str, list[str]]:
     return {"latchkey-self": [_BASELINE_SELF_PERM, *names]}
 
 
-def test_build_workspace_overview_groups_shared_and_per_target(tmp_path: Path) -> None:
+def test_build_workspace_overview_groups_by_granting_workspace(tmp_path: Path) -> None:
     latchkey = _latchkey(tmp_path)
     agent, host = str(AgentId()), HostId()
     target = str(AgentId())
@@ -305,25 +304,50 @@ def test_build_workspace_overview_groups_shared_and_per_target(tmp_path: Path) -
             _workspace_rule(
                 (
                     "minds-workspaces-read",
-                    "minds-workspaces-create",
-                    f"minds-workspaces-recover-{target}",
                     f"minds-workspaces-backups-export-{target}",
                 )
             ),
         ),
     )
-    resolver = _resolver({agent: host}, {agent: "Ops Bot"})
+    # The resolver also knows the target's display name (it is not a granting
+    # workspace, so it is not in the active set -- only named for resolution).
+    resolver = _resolver({agent: host}, {agent: "Ops Bot", target: "KarelTreti"})
 
     overview = build_workspace_overview(resolver, build_fake_gateway_client(), latchkey)
 
-    # Shared group first, then the per-target group.
-    assert [g.is_shared for g in overview] == [True, False]
-    shared, per_target = overview
-    assert shared.target_workspace_id == ""
-    assert {p.label for p in shared.cards[0].permissions} == {"read", "create"}
-    assert per_target.target_workspace_id == target
-    # ``backups-export`` keeps its internal hyphen in the short label.
-    assert {p.label for p in per_target.cards[0].permissions} == {"recover", "backups-export"}
+    assert len(overview) == 1
+    grant = overview[0]
+    assert grant.workspace_name == "Ops Bot"
+    verbs = {verb.label: verb for verb in grant.verbs}
+    assert set(verbs) == {"read", "backups-export"}
+    # ``read`` is non-targeted -> all workspaces, no specific targets.
+    assert verbs["read"].is_all_workspaces is True
+    assert verbs["read"].target_names == ()
+    # ``backups-export`` (hyphenated) is pinned to the specific target.
+    assert verbs["backups-export"].is_all_workspaces is False
+    assert verbs["backups-export"].target_names == ("KarelTreti",)
+    # Verbs are in catalog order (read before backups-export).
+    assert [verb.label for verb in grant.verbs] == ["read", "backups-export"]
+
+
+def test_build_workspace_overview_broad_grant_subsumes_specific_targets(tmp_path: Path) -> None:
+    latchkey = _latchkey(tmp_path)
+    agent, host = str(AgentId()), HostId()
+    target = str(AgentId())
+    # ``destroy`` granted both broadly and on a specific target: the broad grant
+    # wins the display (all workspaces), no per-target names shown.
+    _seed_host(
+        latchkey,
+        host,
+        (_workspace_rule(("minds-workspaces-destroy", f"minds-workspaces-destroy-{target}")),),
+    )
+    resolver = _resolver({agent: host}, {agent: "Ops Bot"})
+
+    grant = build_workspace_overview(resolver, build_fake_gateway_client(), latchkey)[0]
+    (verb,) = grant.verbs
+    assert verb.label == "destroy"
+    assert verb.is_all_workspaces is True
+    assert verb.target_names == ()
 
 
 def test_build_workspace_overview_ignores_non_workspace_permissions(tmp_path: Path) -> None:
@@ -338,67 +362,57 @@ def test_build_workspace_overview_ignores_non_workspace_permissions(tmp_path: Pa
     assert build_workspace_overview(resolver, build_fake_gateway_client(), latchkey) == ()
 
 
-def test_revoke_workspace_ops_shared_keeps_per_target_and_baseline(tmp_path: Path) -> None:
+def test_revoke_workspace_verb_removes_verb_across_targets_keeps_others(tmp_path: Path) -> None:
     latchkey = _latchkey(tmp_path)
     gateway = build_fake_gateway_client()
     agent, host = str(AgentId()), HostId()
-    target = str(AgentId())
+    target_a, target_b = str(AgentId()), str(AgentId())
     _seed_host(
         latchkey,
         host,
-        (_workspace_rule(("minds-workspaces-read", f"minds-workspaces-ssh-{target}")),),
+        (
+            _workspace_rule(
+                (
+                    "minds-workspaces-read",
+                    f"minds-workspaces-ssh-{target_a}",
+                    f"minds-workspaces-ssh-{target_b}",
+                )
+            ),
+        ),
     )
     resolver = _resolver({agent: host}, {agent: "Ops Bot"})
 
-    # Revoke the shared scope only (target_workspace_id=None).
-    revoke_workspace_ops_for_workspace(resolver, gateway, latchkey, agent, None)
+    # Revoking ``ssh`` removes it for every target, but keeps ``read`` + baseline.
+    revoke_workspace_verb_for_workspace(resolver, gateway, latchkey, agent, "minds-workspaces-ssh")
 
     remaining = gateway.get_permission_rules(permissions_path_for_host(latchkey.plugin_data_dir, host))[
         "latchkey-self"
     ]
-    assert "minds-workspaces-read" not in remaining
-    assert f"minds-workspaces-ssh-{target}" in remaining
+    assert f"minds-workspaces-ssh-{target_a}" not in remaining
+    assert f"minds-workspaces-ssh-{target_b}" not in remaining
+    assert "minds-workspaces-read" in remaining
     assert _BASELINE_SELF_PERM in remaining
 
 
-def test_revoke_workspace_ops_per_target_keeps_shared(tmp_path: Path) -> None:
+def test_revoke_workspace_verb_unknown_verb_raises(tmp_path: Path) -> None:
     latchkey = _latchkey(tmp_path)
-    gateway = build_fake_gateway_client()
     agent, host = str(AgentId()), HostId()
-    target = str(AgentId())
-    _seed_host(
-        latchkey,
-        host,
-        (_workspace_rule(("minds-workspaces-read", f"minds-workspaces-ssh-{target}")),),
-    )
     resolver = _resolver({agent: host}, {agent: "Ops Bot"})
 
-    revoke_workspace_ops_for_workspace(resolver, gateway, latchkey, agent, target)
-
-    remaining = gateway.get_permission_rules(permissions_path_for_host(latchkey.plugin_data_dir, host))[
-        "latchkey-self"
-    ]
-    assert f"minds-workspaces-ssh-{target}" not in remaining
-    assert "minds-workspaces-read" in remaining
+    with pytest.raises(PermissionOverviewError, match="Unknown workspace verb"):
+        revoke_workspace_verb_for_workspace(
+            resolver, build_fake_gateway_client(), latchkey, agent, "minds-workspaces-nope"
+        )
 
 
-def test_revoke_workspace_ops_for_all_workspaces(tmp_path: Path) -> None:
+def test_revoke_workspace_verb_unresolvable_workspace_raises(tmp_path: Path) -> None:
     latchkey = _latchkey(tmp_path)
-    gateway = build_fake_gateway_client()
-    agent_a, host_a = str(AgentId()), HostId()
-    agent_b, host_b = str(AgentId()), HostId()
-    _seed_host(latchkey, host_a, (_workspace_rule(("minds-workspaces-create",)),))
-    _seed_host(latchkey, host_b, (_workspace_rule(("minds-workspaces-read",)),))
-    resolver = _resolver({agent_a: host_a, agent_b: host_b}, {agent_a: "A", agent_b: "B"})
+    resolver = _resolver({}, {})
 
-    processed = revoke_workspace_ops_for_all_workspaces(resolver, gateway, latchkey, None)
-
-    assert processed == 2
-    for host in (host_a, host_b):
-        remaining = gateway.get_permission_rules(permissions_path_for_host(latchkey.plugin_data_dir, host))[
-            "latchkey-self"
-        ]
-        assert remaining == (_BASELINE_SELF_PERM,)
+    with pytest.raises(PermissionOverviewError, match="Could not resolve host"):
+        revoke_workspace_verb_for_workspace(
+            resolver, build_fake_gateway_client(), latchkey, str(AgentId()), "minds-workspaces-read"
+        )
 
 
 # -- Round-trip guardrails -----------------------------------------------------
@@ -458,5 +472,10 @@ def test_workspace_parser_round_trips_canonical_gateway_names(tmp_path: Path) ->
 
     overview = build_workspace_overview(resolver, build_fake_gateway_client(), latchkey)
 
-    verbs_by_target = {group.target_workspace_id: {p.label for p in group.cards[0].permissions} for group in overview}
-    assert verbs_by_target == {"": {"read", "destroy"}, target: {"recover", "backups-export"}}
+    assert len(overview) == 1
+    verbs = {verb.label: verb for verb in overview[0].verbs}
+    # Non-targeted / broadly-granted verbs read as all-workspaces; the per-target
+    # ones (including the hyphenated ``backups-export``) carry the target name.
+    assert verbs["read"].is_all_workspaces and verbs["destroy"].is_all_workspaces
+    assert verbs["recover"].target_names == (target,)
+    assert verbs["backups-export"].target_names == (target,)

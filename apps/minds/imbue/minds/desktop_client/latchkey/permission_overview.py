@@ -385,35 +385,34 @@ def revoke_file_sharing_for_all_workspaces(
 # -- Cross-workspace management ("workspace") grants ---------------------------
 
 
-class WorkspaceOpGrantCard(FrozenModel):
-    """One granting workspace's cross-workspace verbs within a single target group.
+class WorkspaceDelegationVerb(FrozenModel):
+    """One cross-workspace verb a granting workspace holds, and the target(s) it covers."""
 
-    ``workspace_agent_id`` / ``workspace_name`` identify the *granting* workspace
-    (the agent that holds the permission); the target it acts on is carried by the
-    enclosing :class:`WorkspaceOpTargetGroup`. ``permissions`` are the granted
-    verb chips (short verb label + description tooltip), in catalog order.
+    verb_permission: str = Field(
+        description="Detent verb schema name (e.g. ``minds-workspaces-destroy``); revoke key."
+    )
+    label: str = Field(description="Short verb label shown in the chip (e.g. ``destroy``, ``backups-export``).")
+    description: str = Field(description="Plain-English summary of the verb, shown as a tooltip.")
+    is_all_workspaces: bool = Field(description="Whether the verb is granted across all workspaces.")
+    target_names: tuple[str, ...] = Field(
+        default=(),
+        description="Specific target workspace names the verb is scoped to (empty when ``is_all_workspaces``).",
+    )
+
+
+class WorkspaceDelegationGrant(FrozenModel):
+    """The cross-workspace-management verbs one granting workspace holds.
+
+    The settings page groups the ``minds-workspaces`` grants by *granting*
+    workspace (the agent that holds the permission) and lists one row per verb,
+    each naming the target(s) it covers -- a flatter hierarchy than a card grid.
     """
 
     workspace_agent_id: str = Field(description="Granting workspace agent id (used to resolve the host on revoke).")
-    workspace_name: str = Field(description="Granting workspace display name shown as the card header.")
-    host_id: str = Field(description="Host the grant lives on.")
-    color: str = Field(description="Granting workspace accent color hex (``#rrggbb``).")
-    permissions: tuple[GrantedPermission, ...] = Field(description="Granted verb chips, in catalog order.")
-
-
-class WorkspaceOpTargetGroup(FrozenModel):
-    """All granting workspaces that hold cross-workspace verbs for a single target.
-
-    A group is either the *shared* group (verbs that apply to every workspace --
-    ``read`` / ``create`` and any all-workspaces grant of a targeted verb;
-    ``is_shared`` True, ``target_workspace_id`` empty) or a per-target group
-    (verbs pinned to one target workspace; ``is_shared`` False).
-    """
-
-    target_workspace_id: str = Field(description="Target workspace agent id, or empty string for the shared group.")
-    target_name: str = Field(description="Human-readable target label (``all workspaces`` or the target's name).")
-    is_shared: bool = Field(description="Whether this is the all-workspaces group.")
-    cards: tuple[WorkspaceOpGrantCard, ...] = Field(description="One card per granting workspace in this group.")
+    workspace_name: str = Field(description="Granting workspace display name shown as the group heading.")
+    host_id: str = Field(description="Host the grants live on.")
+    color: str = Field(description="Granting workspace accent color hex (``#rrggbb``) for the heading dot.")
+    verbs: tuple[WorkspaceDelegationVerb, ...] = Field(description="Granted verbs, in catalog order.")
 
 
 def _parse_workspace_permission(permission_name: str) -> tuple[str, str | None] | None:
@@ -439,20 +438,6 @@ def _parse_workspace_permission(permission_name: str) -> tuple[str, str | None] 
     return None
 
 
-def _workspace_verb_chips(verb_permissions: set[str]) -> tuple[GrantedPermission, ...]:
-    """Build verb chips (short label + description tooltip) in catalog order."""
-    chips: list[GrantedPermission] = []
-    for verb in WORKSPACE_VERBS:
-        if verb.permission in verb_permissions:
-            chips.append(
-                GrantedPermission(
-                    label=verb.permission.removeprefix(_WORKSPACE_PERMISSION_PREFIX),
-                    description=verb.description,
-                )
-            )
-    return tuple(chips)
-
-
 def _resolve_target_workspace_name(backend_resolver: BackendResolverInterface, target_workspace_id: str) -> str:
     """Resolve a target workspace agent id to a display name, falling back to the raw id."""
     try:
@@ -466,149 +451,105 @@ def _resolve_target_workspace_name(backend_resolver: BackendResolverInterface, t
     return info.agent_name if info is not None else target_workspace_id
 
 
-def _build_workspace_op_group(
-    target: str | None,
-    per_agent: dict[str, set[str]],
-    host_by_agent: dict[str, _WorkspaceHost],
-    backend_resolver: BackendResolverInterface,
-) -> WorkspaceOpTargetGroup:
-    """Assemble one target group's cards from its granting-agent -> verbs mapping.
-
-    ``target`` is ``None`` for the shared (all-workspaces) group; otherwise the
-    target workspace agent id. Cards are sorted by granting-workspace name.
-    """
-    cards = [
-        WorkspaceOpGrantCard(
-            workspace_agent_id=host_by_agent[agent_id].agent_id,
-            workspace_name=host_by_agent[agent_id].workspace_name,
-            host_id=str(host_by_agent[agent_id].host_id),
-            color=host_by_agent[agent_id].color,
-            permissions=_workspace_verb_chips(verb_permissions),
-        )
-        for agent_id, verb_permissions in per_agent.items()
-    ]
-    cards.sort(key=lambda card: card.workspace_name.lower())
-    return WorkspaceOpTargetGroup(
-        target_workspace_id="" if target is None else target,
-        target_name="all workspaces" if target is None else _resolve_target_workspace_name(backend_resolver, target),
-        is_shared=target is None,
-        cards=tuple(cards),
-    )
-
-
-def _workspace_permission_targets(permission_name: str, target_workspace_id: str | None) -> bool:
-    """Whether ``permission_name`` is a workspace verb scoped to ``target_workspace_id``.
-
-    ``target_workspace_id`` is ``None`` for the shared (all-workspaces) grants.
-    Non-workspace permissions never match.
-    """
-    parsed = _parse_workspace_permission(permission_name)
-    return parsed is not None and parsed[1] == target_workspace_id
-
-
 def build_workspace_overview(
     backend_resolver: BackendResolverInterface,
     gateway_client: LatchkeyGatewayClient,
     latchkey: Latchkey,
-) -> tuple[WorkspaceOpTargetGroup, ...]:
-    """Assemble the cross-workspace-management grant overview, grouped by target.
+) -> tuple[WorkspaceDelegationGrant, ...]:
+    """Assemble the cross-workspace-management overview, grouped by granting workspace.
 
     Reads each active workspace host's permissions file once, pulls the
     ``minds-workspaces-*`` verbs out of the shared ``latchkey-self`` rule, and
-    groups them first by *target* (the shared/all-workspaces bucket, then one
-    bucket per specific target workspace) and within each target by *granting*
-    workspace. Only targets with at least one grant are returned; the shared
-    group is listed first, then per-target groups sorted by target name. Raises
+    groups them by the *granting* workspace (the agent that holds the grant). For
+    each granting workspace, one entry per verb records whether it is granted for
+    all workspaces and, otherwise, the specific target workspace names. Only
+    workspaces with at least one verb are returned, sorted by name. Raises
     :class:`LatchkeyGatewayClientError` on a read failure (see
     :func:`build_permission_overview`).
     """
     plugin_data_dir = latchkey.plugin_data_dir
-    hosts = _list_active_workspace_hosts(backend_resolver)
-    # target key (None == shared) -> granting agent id -> set of verb permissions.
-    verbs_by_target: dict[str | None, dict[str, set[str]]] = {}
-    host_by_agent: dict[str, _WorkspaceHost] = {}
-    for host in hosts:
-        host_by_agent[host.agent_id] = host
+    grants: list[WorkspaceDelegationGrant] = []
+    for host in _list_active_workspace_hosts(backend_resolver):
         permissions = gateway_client.get_permission_rules(
             permissions_path_for_host(plugin_data_dir, host.host_id)
         ).get(_SELF_SCOPE, ())
+        # verb permission -> the targets it is granted on (``None`` == all workspaces).
+        targets_by_verb: dict[str, set[str | None]] = {}
         for permission_name in permissions:
             parsed = _parse_workspace_permission(permission_name)
             if parsed is None:
                 continue
             verb_permission, target = parsed
-            verbs_by_target.setdefault(target, {}).setdefault(host.agent_id, set()).add(verb_permission)
+            targets_by_verb.setdefault(verb_permission, set()).add(target)
+        if not targets_by_verb:
+            continue
+        verbs: list[WorkspaceDelegationVerb] = []
+        for verb in WORKSPACE_VERBS:
+            targets = targets_by_verb.get(verb.permission)
+            if targets is None:
+                continue
+            is_all_workspaces = None in targets
+            # A broad grant subsumes any specific ones, so only list specific
+            # target names when the verb is not granted across all workspaces.
+            target_names: tuple[str, ...] = ()
+            if not is_all_workspaces:
+                target_names = tuple(
+                    sorted(
+                        (_resolve_target_workspace_name(backend_resolver, target) for target in targets if target),
+                        key=str.lower,
+                    )
+                )
+            verbs.append(
+                WorkspaceDelegationVerb(
+                    verb_permission=verb.permission,
+                    label=verb.permission.removeprefix(_WORKSPACE_PERMISSION_PREFIX),
+                    description=verb.description,
+                    is_all_workspaces=is_all_workspaces,
+                    target_names=target_names,
+                )
+            )
+        grants.append(
+            WorkspaceDelegationGrant(
+                workspace_agent_id=host.agent_id,
+                workspace_name=host.workspace_name,
+                host_id=str(host.host_id),
+                color=host.color,
+                verbs=tuple(verbs),
+            )
+        )
+    return tuple(sorted(grants, key=lambda grant: grant.workspace_name.lower()))
 
-    groups: list[WorkspaceOpTargetGroup] = []
-    if None in verbs_by_target:
-        groups.append(_build_workspace_op_group(None, verbs_by_target[None], host_by_agent, backend_resolver))
-    target_groups = [
-        _build_workspace_op_group(target, per_agent, host_by_agent, backend_resolver)
-        for target, per_agent in verbs_by_target.items()
-        if target is not None
-    ]
-    target_groups.sort(key=lambda group: group.target_name.lower())
-    groups.extend(target_groups)
-    return tuple(groups)
+
+def _workspace_permission_has_verb(permission_name: str, verb_permission: str) -> bool:
+    """Whether ``permission_name`` is a grant of ``verb_permission`` (any target)."""
+    parsed = _parse_workspace_permission(permission_name)
+    return parsed is not None and parsed[0] == verb_permission
 
 
-def _revoke_workspace_ops_at_path(
-    gateway_client: LatchkeyGatewayClient,
-    permissions_file_path: Path,
-    target_workspace_id: str | None,
-) -> None:
-    """Remove the ``minds-workspaces-*`` permissions for one target scope from the host file.
-
-    ``target_workspace_id`` is ``None`` for the shared (all-workspaces) grants or a
-    target agent id for a per-target group. Only the matching workspace verbs are
-    stripped from the ``latchkey-self`` rule; unrelated permissions are preserved.
-    """
-    permissions = gateway_client.get_permission_rules(permissions_file_path).get(_SELF_SCOPE, ())
-    kept = tuple(name for name in permissions if not _workspace_permission_targets(name, target_workspace_id))
-    if len(kept) == len(permissions):
-        return
-    gateway_client.set_permission_rule(permissions_file_path, _SELF_SCOPE, kept)
-
-
-def revoke_workspace_ops_for_workspace(
+def revoke_workspace_verb_for_workspace(
     backend_resolver: BackendResolverInterface,
     gateway_client: LatchkeyGatewayClient,
     latchkey: Latchkey,
     workspace_agent_id: str,
-    target_workspace_id: str | None,
+    verb_permission: str,
 ) -> None:
-    """Remove one granting workspace's cross-workspace verbs for a single target scope.
+    """Remove one cross-workspace verb (across every target) for one granting workspace.
 
-    ``target_workspace_id`` is ``None`` for the shared group. Raises
-    :class:`PermissionOverviewError` for an unresolvable granting workspace.
+    Raises :class:`PermissionOverviewError` for an unknown verb or an unresolvable
+    granting workspace. Unrelated ``latchkey-self`` permissions are preserved.
     """
+    if verb_permission not in _WORKSPACE_VERB_BY_PERMISSION:
+        raise PermissionOverviewError(f"Unknown workspace verb '{verb_permission}'.")
     host_id = _resolve_host_id(backend_resolver, workspace_agent_id)
     if host_id is None:
         raise PermissionOverviewError(
             f"Could not resolve host for workspace '{workspace_agent_id}'; cannot revoke.",
         )
-    _revoke_workspace_ops_at_path(
-        gateway_client, permissions_path_for_host(latchkey.plugin_data_dir, host_id), target_workspace_id
-    )
-
-
-def revoke_workspace_ops_for_all_workspaces(
-    backend_resolver: BackendResolverInterface,
-    gateway_client: LatchkeyGatewayClient,
-    latchkey: Latchkey,
-    target_workspace_id: str | None,
-) -> int:
-    """Remove a target scope's cross-workspace verbs from every active workspace host.
-
-    ``target_workspace_id`` is ``None`` for the shared group. Returns hosts processed.
-    """
-    plugin_data_dir = latchkey.plugin_data_dir
-    hosts = _list_active_workspace_hosts(backend_resolver)
-    for host in hosts:
-        _revoke_workspace_ops_at_path(
-            gateway_client, permissions_path_for_host(plugin_data_dir, host.host_id), target_workspace_id
-        )
-    return len(hosts)
+    path = permissions_path_for_host(latchkey.plugin_data_dir, host_id)
+    permissions = gateway_client.get_permission_rules(path).get(_SELF_SCOPE, ())
+    kept = tuple(name for name in permissions if not _workspace_permission_has_verb(name, verb_permission))
+    if len(kept) != len(permissions):
+        gateway_client.set_permission_rule(path, _SELF_SCOPE, kept)
 
 
 def _resolve_host_id(

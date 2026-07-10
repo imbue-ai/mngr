@@ -333,7 +333,7 @@ def _seed_workspace_ops(tmp_path: Path, host: HostId, names: tuple[str, ...]) ->
     return path
 
 
-def test_settings_page_lists_workspace_ops_grouped_by_target(tmp_path: Path) -> None:
+def test_settings_page_lists_workspace_delegation_by_granting_workspace(tmp_path: Path) -> None:
     agent, host = str(AgentId()), HostId()
     target = str(AgentId())
     _seed_workspace_ops(tmp_path, host, ("minds-workspaces-read", f"minds-workspaces-ssh-{target}"))
@@ -344,16 +344,19 @@ def test_settings_page_lists_workspace_ops_grouped_by_target(tmp_path: Path) -> 
 
     assert response.status_code == 200
     body = response.text
-    # The category is now its own nav item / panel; the shared group heading is
-    # "All workspaces".
     assert "Workspace delegation" in body
-    assert "All workspaces" in body
-    assert 'data-workspace-target=""' in body
-    assert f'data-workspace-target="{target}"' in body
+    # Grouped by the granting workspace (its name is the group heading).
+    assert "Ops Bot" in body
+    # One row per verb, each with its own revoke, keyed by the verb schema name.
     assert ">read</code>" in body and ">ssh</code>" in body
+    assert 'data-verb-permission="minds-workspaces-read"' in body
+    assert 'data-verb-permission="minds-workspaces-ssh"' in body
+    # ``read`` is all-workspaces; ``ssh`` names the specific target.
+    assert "All workspaces" in body
+    assert target in body
 
 
-def test_revoke_workspace_ops_shared_keeps_per_target(tmp_path: Path) -> None:
+def test_revoke_workspace_delegation_verb_keeps_other_verbs(tmp_path: Path) -> None:
     agent, host = str(AgentId()), HostId()
     target = str(AgentId())
     path = _seed_workspace_ops(tmp_path, host, ("minds-workspaces-read", f"minds-workspaces-ssh-{target}"))
@@ -362,25 +365,7 @@ def test_revoke_workspace_ops_shared_keeps_per_target(tmp_path: Path) -> None:
 
     response = client.post(
         "/settings/permissions/workspace/revoke",
-        json={"workspace_agent_id": agent, "target_workspace_id": None},
-    )
-
-    assert response.status_code == 200
-    remaining = handler.gateway_client.get_permission_rules(path)["latchkey-self"]
-    assert "minds-workspaces-read" not in remaining
-    assert f"minds-workspaces-ssh-{target}" in remaining
-
-
-def test_revoke_workspace_ops_per_target(tmp_path: Path) -> None:
-    agent, host = str(AgentId()), HostId()
-    target = str(AgentId())
-    path = _seed_workspace_ops(tmp_path, host, ("minds-workspaces-read", f"minds-workspaces-ssh-{target}"))
-    handler = _build_handler(tmp_path)
-    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "Ops Bot"})
-
-    response = client.post(
-        "/settings/permissions/workspace/revoke",
-        json={"workspace_agent_id": agent, "target_workspace_id": target},
+        json={"workspace_agent_id": agent, "verb": "minds-workspaces-ssh"},
     )
 
     assert response.status_code == 200
@@ -389,24 +374,26 @@ def test_revoke_workspace_ops_per_target(tmp_path: Path) -> None:
     assert "minds-workspaces-read" in remaining
 
 
-def test_revoke_workspace_ops_all_shared(tmp_path: Path) -> None:
+def test_revoke_workspace_delegation_unknown_verb_returns_400(tmp_path: Path) -> None:
     agent, host = str(AgentId()), HostId()
-    path = _seed_workspace_ops(tmp_path, host, ("minds-workspaces-create",))
+    _seed_workspace_ops(tmp_path, host, ("minds-workspaces-read",))
     handler = _build_handler(tmp_path)
     client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "Ops Bot"})
 
-    response = client.post("/settings/permissions/workspace/revoke-all", json={"target_workspace_id": None})
+    response = client.post(
+        "/settings/permissions/workspace/revoke",
+        json={"workspace_agent_id": agent, "verb": "minds-workspaces-nope"},
+    )
 
-    assert response.status_code == 200
-    assert handler.gateway_client.get_permission_rules(path)["latchkey-self"] == (_BASELINE_SELF_PERM,)
+    assert response.status_code == 400
 
 
-def test_revoke_workspace_ops_missing_workspace_returns_400(tmp_path: Path) -> None:
+def test_revoke_workspace_delegation_missing_fields_returns_400(tmp_path: Path) -> None:
     agent, host = str(AgentId()), HostId()
     handler = _build_handler(tmp_path)
     client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "Ops Bot"})
 
-    response = client.post("/settings/permissions/workspace/revoke", json={"target_workspace_id": None})
+    response = client.post("/settings/permissions/workspace/revoke", json={"workspace_agent_id": agent})
 
     assert response.status_code == 400
 
