@@ -36,4 +36,19 @@ ANTHROPIC_API_KEY=sk-ant-... \
   uv run --package mngr-minds-eval mngr-minds-eval launch-workspaces --eval-set smoke-test
 ```
 
-`self-check` runs the offline asserts (persona loader, trial expansion, slug, launch payload).
+## retrieve-test-results
+
+For every `EVAL-<set>-CASE-<persona>` workspace, read the in-sandbox `/mngr/eval_state.json` and,
+for finished cases, pull the Claude transcript. Uses `mngr rsync` (state file) + `mngr transcript`
+(conversation) -- the SFTP/rsync-backed transports, not the unreliable `mngr exec`.
+
+```
+uv run --package mngr-minds-eval mngr-minds-eval retrieve-test-results --eval-set smoke-test -o ./results
+```
+
+Per case it reports: **unreachable** (machine not accessible), **no_state** (test not started),
+**ongoing** (+ waits-processed count), or **finished** → writes `<persona>.jsonl`. Also writes
+`summary.json`. Non-Modal providers are disabled for the mngr calls (only Modal works in the box).
+
+`self-check` runs the offline asserts (persona loader, trial expansion, slug, launch payload,
+name matcher, error classifier).

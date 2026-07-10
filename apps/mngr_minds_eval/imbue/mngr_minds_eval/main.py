@@ -205,6 +205,129 @@ def launch_workspaces(eval_set: str, *, clones_dir: Path, api_key: str) -> list[
     return results
 
 
+# --- retrieve-test-results -------------------------------------------------------------------
+
+# mngr `list`/`rsync`/`transcript` probe every enabled provider; only Modal works in the box, so
+# a single unreachable provider errors the whole call. Disable the rest for our mngr subprocesses.
+_NON_MODAL_PROVIDERS = ("DOCKER", "AZURE", "AWS", "VULTR", "LIMA", "IMBUE_CLOUD", "GCP", "OVH")
+# The in-sandbox chat_watcher writes this (under MNGR_HOST_DIR, above the agent's repo).
+_EVAL_STATE_REMOTE_PATH = "/mngr/eval_state.json"
+_UNREACHABLE_HINTS = ("connection", "timed out", "timeout", "unreachable", "refused",
+                      "could not resolve", "no route", "kex_exchange", "ssh:", "closed by remote")
+_ABSENT_HINTS = ("no such file", "link_stat", "failed to open", "change_dir")
+
+
+def _mngr_env() -> dict:
+    env = dict(os.environ)
+    for provider in _NON_MODAL_PROVIDERS:
+        env["MNGR__PROVIDERS__{}__IS_ENABLED".format(provider)] = "false"
+    return env
+
+
+def _run_mngr(args: list[str], env: dict, timeout: float = 300.0) -> subprocess.CompletedProcess:
+    # Use mngr's SFTP/rsync-backed transport (rsync, transcript) -- NOT `mngr exec`, whose
+    # paramiko env-prefix returns empty output for file reads.
+    return subprocess.run(
+        ["uv", "run", "mngr", *args], cwd="/work/mngr", env=env,
+        capture_output=True, text=True, timeout=timeout,
+    )
+
+
+def _classify_error(text: str) -> str:
+    low = text.lower()
+    if any(h in low for h in _ABSENT_HINTS):
+        return "absent"
+    if any(h in low for h in _UNREACHABLE_HINTS):
+        return "unreachable"
+    return "error"
+
+
+def _persona_from_name(name: str, eval_set: str) -> str | None:
+    prefix = "EVAL-{}-CASE-".format(eval_set)
+    return name[len(prefix):] if name.startswith(prefix) else None
+
+
+def _list_eval_workspaces(eval_set: str) -> list[tuple[str, str]]:
+    data = _get_json("{}/api/v1/workspaces".format(_api_base()))
+    out = []
+    for w in data.get("workspaces", []):
+        persona = _persona_from_name(w.get("name") or "", eval_set)
+        if persona and w.get("agent_id"):
+            out.append((persona, w["agent_id"]))
+    return out
+
+
+def retrieve_test_results(eval_set: str, out_dir: Path) -> list[dict]:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    env = _mngr_env()
+    workspaces = _list_eval_workspaces(eval_set)
+    if not workspaces:
+        print("no workspaces named EVAL-{}-CASE-* -- nothing to retrieve".format(eval_set))
+        return []
+
+    print(">> retrieving {} case(s) for eval set {!r} -> {}".format(len(workspaces), eval_set, out_dir), flush=True)
+    results = []
+    seen: set[str] = set()
+    for persona, agent_id in sorted(workspaces):
+        record: dict = {"persona": persona, "agent_id": agent_id}
+
+        # 1. read the state file via rsync (reliable file transport).
+        state_local = out_dir / ".{}.state.json".format(agent_id)
+        proc = _run_mngr(["rsync", "{}:{}".format(agent_id, _EVAL_STATE_REMOTE_PATH), str(state_local)], env)
+        if proc.returncode != 0:
+            kind = _classify_error(proc.stderr or proc.stdout)
+            record["status"] = {"unreachable": "unreachable", "absent": "no_state"}.get(kind, "error")
+            if kind == "unreachable":
+                print("  [ERR ] {}: machine not accessible".format(persona), flush=True)
+            elif kind == "absent":
+                print("  [WAIT] {}: no eval_state.json yet (test not started?)".format(persona), flush=True)
+            else:
+                record["error"] = (proc.stderr or "").strip()[:300]
+                print("  [ERR ] {}: {}".format(persona, record["error"]), flush=True)
+            results.append(record)
+            continue
+
+        try:
+            state = json.loads(state_local.read_text())
+        except (ValueError, OSError) as exc:
+            record["status"] = "error"
+            record["error"] = str(exc)
+            print("  [ERR ] {}: unreadable state file ({})".format(persona, exc), flush=True)
+            results.append(record)
+            continue
+        finally:
+            state_local.unlink(missing_ok=True)
+
+        waits = state.get("waits_processed_count")
+        record["waits_processed_count"] = waits
+        if state.get("test_state") != "finished":
+            record["status"] = "ongoing"
+            print("  [ONGO] {}: ongoing, {} wait(s) processed".format(persona, waits), flush=True)
+            results.append(record)
+            continue
+
+        # 2. finished -> pull the Claude transcript.
+        stem = persona if persona not in seen else "{}.{}".format(persona, agent_id[:8])
+        seen.add(persona)
+        transcript_path = out_dir / "{}.jsonl".format(stem)
+        tproc = _run_mngr(["transcript", agent_id, "--format", "jsonl"], env)
+        if tproc.returncode != 0:
+            record["status"] = "finished_no_transcript"
+            record["error"] = (tproc.stderr or "").strip()[:300]
+            print("  [ERR ] {}: finished ({} waits) but transcript failed: {}".format(persona, waits, record["error"]), flush=True)
+        else:
+            transcript_path.write_text(tproc.stdout)
+            record["status"] = "finished"
+            record["transcript"] = str(transcript_path)
+            print("  [DONE] {}: finished ({} waits) -> {}".format(persona, waits, transcript_path.name), flush=True)
+        results.append(record)
+
+    (out_dir / "summary.json").write_text(json.dumps({"eval_set": eval_set, "results": results}, indent=2))
+    done = sum(1 for r in results if r["status"] == "finished")
+    print(">> {} finished / {} total; summary -> {}".format(done, len(results), out_dir / "summary.json"), flush=True)
+    return results
+
+
 # --- self-check + CLI ------------------------------------------------------------------------
 
 
@@ -226,6 +349,12 @@ def self_check() -> None:
     assert pay["ai_provider"] == "API_KEY" and pay["backup_provider"] == "CONFIGURE_LATER", pay
     assert pay["git_url"] == "/work/clones/algorithms-student", pay
     assert pay["host_name"] == "EVAL-smoke-CASE-algorithms-student" and pay["anthropic_api_key"] == "sk-ant-K", pay
+
+    assert _persona_from_name("EVAL-smoke-CASE-founder", "smoke") == "founder"
+    assert _persona_from_name("EVAL-other-CASE-x", "smoke") is None
+    assert _classify_error("rsync: link_stat /mngr/eval_state.json failed: No such file or directory") == "absent"
+    assert _classify_error("ssh: connect to host h port 22: Connection refused") == "unreachable"
+    assert _classify_error("some other failure") == "error"
     print("self-check OK")
 
 
@@ -246,6 +375,10 @@ def main() -> None:
     lw.add_argument("--clones-dir", type=Path, default=DEFAULT_CLONES_DIR)
     lw.add_argument("--api-key", default=os.environ.get("ANTHROPIC_API_KEY", ""),
                     help="Anthropic API key (defaults to $ANTHROPIC_API_KEY)")
+
+    rt = sub.add_parser("retrieve-test-results", help="pull each case's state + Claude transcript")
+    rt.add_argument("--eval-set", required=True, help="eval set name (matches EVAL-<set>-CASE-*)")
+    rt.add_argument("-o", "--out-dir", type=Path, required=True, help="directory for transcripts + summary.json")
 
     sub.add_parser("self-check", help="run offline asserts and exit")
 
@@ -269,6 +402,10 @@ def main() -> None:
         if not args.api_key:
             parser.error("set ANTHROPIC_API_KEY (or --api-key) -- workspaces launch with ai_provider=API_KEY")
         launch_workspaces(args.eval_set, clones_dir=args.clones_dir, api_key=args.api_key)
+        return
+    if args.command == "retrieve-test-results":
+        retrieve_test_results(args.eval_set, args.out_dir)
+        return
 
 
 if __name__ == "__main__":
