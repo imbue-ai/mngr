@@ -42,7 +42,6 @@ from imbue.minds.lima_image.primitives import get_current_image_arch
 from imbue.minds.lima_image.primitives import lima_provider_image_url_setting_key
 from imbue.minds.lima_image.progress import FileLimaImageProgressSink
 from imbue.minds.lima_image.qemu_converter import QemuImageFormatConverter
-from imbue.minds.lima_image.qemu_converter import resolve_qemu_img_binary
 
 # Set to a truthy value to disable downloading/using the pre-baked image entirely
 # (forces build-in-VM). Used by tests / dev iteration.
@@ -308,8 +307,6 @@ def make_lima_image_prefetcher(
         fetcher=HttpxManifestFetcher(),
         verifier=PythonMinisignSignatureVerifier(),
         chunk_store=DesyncImageChunkStore(concurrency_group=concurrency_group),
-        converter=QemuImageFormatConverter(
-            qemu_img_binary=resolve_qemu_img_binary(), concurrency_group=concurrency_group
-        ),
+        converter=QemuImageFormatConverter(concurrency_group=concurrency_group),
         progress_sink=FileLimaImageProgressSink(state_file=LimaImageCacheLayout(cache_dir=cache_dir).state_file),
     )
