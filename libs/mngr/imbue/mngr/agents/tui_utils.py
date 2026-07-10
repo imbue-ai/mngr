@@ -306,12 +306,13 @@ def _build_signal_only_command(full_timeout: float, wait_channel: str, tmux_targ
     registered by the time the hook can fire. Exit 0 = signalled, non-zero =
     deadline reached or tmux failed.
 
-    macOS ships no ``timeout`` binary, so the deadline is a ``sleep``-then-``kill``
-    watchdog. ``$waiter`` is the tmux client itself, so the kill reaps it. A
-    killed ``tmux wait-for`` exits 0, so the deadline is recorded in ``$tmo``
-    before the kill, and the wait status separates a signal from an outright
-    tmux failure. Background jobs redirect stdout, which they would otherwise
-    hold open until they exit, stalling the caller for the full deadline.
+    This runs on the agent's host, Linux or macOS, so the deadline cannot use
+    ``timeout``; it is a ``sleep``-then-``kill`` watchdog instead. ``$waiter`` is
+    the tmux client itself, so the kill reaps it. A killed ``tmux wait-for`` exits
+    0, so the watchdog records the deadline in ``$tmo`` before killing, and the
+    wait status then separates a signal from an outright tmux failure. Background
+    jobs redirect stdout, which they would otherwise hold open until they exit,
+    stalling the caller for the full deadline.
     """
     script = (
         'tmo="$(mktemp)" || exit 1; '
@@ -342,12 +343,11 @@ def _build_signal_or_marker_command(
     acceptance marker until either confirms or the deadline passes. Exit 0 =
     confirmed, non-zero = timeout.
 
-    macOS ships no ``timeout`` binary, so the hook waiter is bounded by a
-    ``sleep``-then-``kill`` watchdog. ``$waiter`` is the tmux client itself, so
-    the loop reads a fired hook as the client having exited (``kill -0``) with a
-    zero wait status and no ``$tmo`` deadline marker. A waiter that is gone
-    without confirming leaves the marker as the only thing that still can, so
-    the loop keeps polling it.
+    Like the signal-only path, the waiter is bounded by a ``sleep``-then-``kill``
+    watchdog so it runs on Linux and macOS alike. ``$waiter`` is the tmux client,
+    so a fired hook shows up as the client having exited (``kill -0``) with a zero
+    wait status and no ``$tmo`` marker; once the waiter is gone without confirming,
+    only the acceptance marker can, so the loop keeps polling it.
 
     ``accept_marker_command`` is the agent-supplied shell snippet that prints the
     agent's latest acceptance-marker token (empty if none yet). A baseline is

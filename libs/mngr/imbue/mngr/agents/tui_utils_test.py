@@ -275,8 +275,8 @@ _TARGET = TmuxWindowTarget(session_name="sess", window=0)
 def test_submission_commands_invoke_no_gnu_only_binary(command: str) -> None:
     """Both builders run on the agent's host, which for a local agent is the user's machine.
 
-    macOS ships a BSD userland with no ``timeout``, so the deadline has to be a
-    hand-rolled watchdog.
+    That host may be Linux or macOS, so the deadline is a hand-rolled watchdog
+    rather than ``timeout``.
     """
     assert "timeout" not in command
 
@@ -377,3 +377,51 @@ def test_submission_command_fails_when_tmux_itself_fails(command: str, tmp_path:
     """
     result = _run_with_failing_tmux(command, tmp_path)
     assert result.returncode != 0, f"reported success though tmux failed: {result.stdout!r}"
+
+
+def _run_built_command_against_real_tmux(
+    command: str, *, fire_signal_after_seconds: float | None
+) -> subprocess.CompletedProcess[str]:
+    """Run a built submission command against the test's isolated tmux server.
+
+    The autouse tmux-isolation fixture already points ``TMUX_TMPDIR`` at a private
+    server, so the bare ``tmux`` calls here and in the script never reach a real
+    one. Creates the send-keys target session, optionally fires the hook after a
+    delay, and returns the finished process.
+    """
+    subprocess.run(
+        ["tmux", "new-session", "-d", "-s", _TARGET.session_name, "bash"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    firing: subprocess.Popen[bytes] | None = None
+    if fire_signal_after_seconds is not None:
+        firing = subprocess.Popen(f"sleep {fire_signal_after_seconds} && tmux wait-for -S chan", shell=True)
+    try:
+        return subprocess.run(command, shell=True, capture_output=True, text=True, timeout=30)
+    finally:
+        if firing is not None:
+            firing.wait(timeout=10)
+        subprocess.run(
+            ["tmux", "kill-session", "-t", f"={_TARGET.session_name}"],
+            capture_output=True,
+            timeout=10,
+        )
+
+
+@pytest.mark.tmux
+def test_signal_only_script_exits_zero_when_the_hook_fires() -> None:
+    """The generated script confirms (exit 0) once the hook fires its wait-for channel."""
+    command = _build_signal_only_command(5.0, "chan", _TARGET)
+    result = _run_built_command_against_real_tmux(command, fire_signal_after_seconds=0.3)
+    assert result.returncode == 0, f"script did not confirm the fired hook: {result.stderr!r}"
+
+
+@pytest.mark.tmux
+def test_signal_only_script_exits_nonzero_at_the_deadline() -> None:
+    """With no hook, the generated script fails once the sleep-then-kill deadline passes."""
+    command = _build_signal_only_command(0.5, "chan", _TARGET)
+    result = _run_built_command_against_real_tmux(command, fire_signal_after_seconds=None)
+    assert result.returncode != 0, f"script reported success though no hook fired: {result.stdout!r}"
