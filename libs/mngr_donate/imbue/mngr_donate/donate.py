@@ -90,7 +90,8 @@ OAUTH_KEYCHAIN_SERVICE = "mngr-donate-oauth"
 # `mngr donate --start` installs a scheduler that re-runs `mngr donate` on this
 # interval; each firing re-checks spare capacity and does another batch, so the
 # schedule -- not any one tick -- is what drains all the spare quota. macOS uses a
-# launchd LaunchAgent (see build_launchd_plist); other platforms use crontab.
+# launchd LaunchAgent (see build_launchd_plist); other platforms have no built-in
+# scheduler here (see _require_macos) and must schedule `mngr donate` themselves.
 DEFAULT_INTERVAL_MINUTES = 10
 # The LaunchAgent's label, and thus its plist filename in ~/Library/LaunchAgents.
 LAUNCHD_LABEL = "com.imbue.mngr.donate"
@@ -572,7 +573,7 @@ def _run_and_tee(argv: tuple[str, ...], log_path: Path, env: dict[str, str] | No
     """
     with open(log_path, "w", encoding="utf-8") as log_file:
         # Header only in the file (not stdout) so it timestamps the per-run log
-        # without double-stamping cron.log, which already gets the tick line above.
+        # without double-stamping schedule.log, which already gets the tick line above.
         log_file.write(f"===== donate launch {time.strftime('%Y-%m-%d %H:%M:%S')} =====\n")
         log_file.flush()
         process = subprocess.Popen(
@@ -683,7 +684,7 @@ def donate(ctx: click.Context, **kwargs: Any) -> None:
         command_class=DonateCliOptions,
     )
 
-    # --start / --stop manage the crontab schedule and exit; they don't do a tick,
+    # --start / --stop manage the launchd schedule and exit; they don't do a tick,
     # so they run before (and independently of) the spare-capacity check.
     if opts.start and opts.stop:
         raise MngrError("Pass only one of --start / --stop.")
@@ -697,7 +698,7 @@ def donate(ctx: click.Context, **kwargs: Any) -> None:
 
     plugin_config = mngr_ctx.get_plugin_config("usage", UsagePluginConfig)
     now = int(time.time())
-    # Stamp every tick up front so an accumulating log (esp. cron.log) shows when
+    # Stamp every tick up front so an accumulating log (esp. schedule.log) shows when
     # each run fired and what it decided -- printed for all branches (skip / no
     # data / launch) since it lands before the capacity check.
     emit_info(
