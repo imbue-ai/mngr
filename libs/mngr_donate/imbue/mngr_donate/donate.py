@@ -348,9 +348,7 @@ def _install_launchd(plist: str, interval_minutes: int) -> None:
 
 def _uninstall_launchd() -> bool:
     """Boot out the LaunchAgent and delete its plist. Returns whether it existed."""
-    subprocess.run(
-        ("launchctl", "bootout", f"gui/{os.getuid()}/{LAUNCHD_LABEL}"), check=False, capture_output=True
-    )
+    subprocess.run(("launchctl", "bootout", f"gui/{os.getuid()}/{LAUNCHD_LABEL}"), check=False, capture_output=True)
     plist_path = _launchd_plist_path()
     existed = plist_path.exists()
     plist_path.unlink(missing_ok=True)
@@ -378,7 +376,13 @@ def _install_schedule(skill: str, agent_name: str, interval_minutes: int) -> str
     _require_macos()
     log_path = str(_schedule_log_path())
     plist = build_launchd_plist(
-        _current_mngr_path(), os.getcwd(), skill, agent_name, log_path, os.environ.get("PATH", ""), interval_minutes * 60
+        _current_mngr_path(),
+        os.getcwd(),
+        skill,
+        agent_name,
+        log_path,
+        os.environ.get("PATH", ""),
+        interval_minutes * 60,
     )
     _install_launchd(plist, interval_minutes)
     return (
@@ -392,7 +396,11 @@ def _remove_schedule() -> str:
     """Remove the donate LaunchAgent; returns a status message."""
     _require_macos()
     removed = _uninstall_launchd()
-    return "Unscheduled donate (removed the launchd agent)." if removed else "No scheduled donate found; nothing to remove."
+    return (
+        "Unscheduled donate (removed the launchd agent)."
+        if removed
+        else "No scheduled donate found; nothing to remove."
+    )
 
 
 def _clear_stale_worktree(agent_name: str) -> None:
@@ -407,9 +415,7 @@ def _clear_stale_worktree(agent_name: str) -> None:
     steps are swallowed: a missing worktree/branch is the normal, healthy case.
     """
     branch = f"mngr/{agent_name}"
-    listing = subprocess.run(
-        ("git", "worktree", "list", "--porcelain"), check=False, capture_output=True, text=True
-    )
+    listing = subprocess.run(("git", "worktree", "list", "--porcelain"), check=False, capture_output=True, text=True)
     worktree_path: str | None = None
     current_path: str | None = None
     for line in listing.stdout.splitlines():
@@ -421,9 +427,7 @@ def _clear_stale_worktree(agent_name: str) -> None:
         else:
             continue
     if worktree_path is not None:
-        subprocess.run(
-            ("git", "worktree", "remove", "--force", worktree_path), check=False, capture_output=True
-        )
+        subprocess.run(("git", "worktree", "remove", "--force", worktree_path), check=False, capture_output=True)
     subprocess.run(("git", "worktree", "prune"), check=False, capture_output=True)
     subprocess.run(("git", "branch", "-D", branch), check=False, capture_output=True)
 
@@ -465,7 +469,9 @@ def prepare_skill_dir(skill_name: str, skill_repo: str, skill_ref: str) -> Path:
     """
     cache = _donate_skill_dir(skill_name)
     if (cache / ".git").is_dir():
-        subprocess.run(("git", "-C", str(cache), "fetch", "--quiet", "--tags", "origin"), check=False, capture_output=True)
+        subprocess.run(
+            ("git", "-C", str(cache), "fetch", "--quiet", "--tags", "origin"), check=False, capture_output=True
+        )
     else:
         shutil.rmtree(cache, ignore_errors=True)
         subprocess.run(("git", "clone", "--quiet", skill_repo, str(cache)), check=False, capture_output=True)
@@ -509,9 +515,7 @@ def _run_and_tee(argv: tuple[str, ...], log_path: Path) -> int:
         # without double-stamping cron.log, which already gets the tick line above.
         log_file.write(f"===== donate launch {time.strftime('%Y-%m-%d %H:%M:%S')} =====\n")
         log_file.flush()
-        process = subprocess.Popen(
-            list(argv), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
-        )
+        process = subprocess.Popen(list(argv), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
         assert process.stdout is not None
         for line in process.stdout:
             sys.stdout.write(line)
@@ -634,7 +638,9 @@ def donate(ctx: click.Context, **kwargs: Any) -> None:
     # Stamp every tick up front so an accumulating log (esp. cron.log) shows when
     # each run fired and what it decided -- printed for all branches (skip / no
     # data / launch) since it lands before the capacity check.
-    emit_info(f"===== donate tick {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(now))} =====", output_opts.output_format)
+    emit_info(
+        f"===== donate tick {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(now))} =====", output_opts.output_format
+    )
     snapshots = gather_usage_snapshots(
         mngr_ctx,
         include_filters=(),

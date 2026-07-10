@@ -163,7 +163,13 @@ def test_build_donation_message_points_the_agent_at_the_skill_dir() -> None:
 
 def test_build_launchd_plist_embeds_program_env_and_interval() -> None:
     plist = build_launchd_plist(
-        "/venv/bin/mngr", "/repo", "document-review", "donate-extra-quota-bio", "/logs/schedule.log", "/usr/bin:/bin", 600
+        "/venv/bin/mngr",
+        "/repo",
+        "document-review",
+        "donate-extra-quota-bio",
+        "/logs/schedule.log",
+        "/usr/bin:/bin",
+        600,
     )
     # Runs mngr donate directly (no shell), in the repo, with the given PATH + interval.
     assert "<string>/venv/bin/mngr</string>" in plist

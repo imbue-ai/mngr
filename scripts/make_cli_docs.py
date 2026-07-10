@@ -74,6 +74,7 @@ SECONDARY_COMMANDS = {
     "chat",
     "cleanup",
     "config",
+    "donate",
     "event",
     "file",
     "forward",
