@@ -20,7 +20,7 @@ from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.restic_cli import parse_restic_timestamp
-from imbue.minds.utils.mngr_caller import get_default_mngr_caller
+from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.mngr.primitives import AgentId
 
 # Field separator used in the ``git log`` format string; a tab cannot appear in
@@ -97,6 +97,7 @@ def parse_upgrade_merges(stdout: str) -> tuple[UpgradeMerge, ...]:
 def read_workspace_git_version(
     *,
     agent_id: AgentId,
+    mngr_caller: MngrCaller,
 ) -> WorkspaceGitVersion:
     """Read current version + upgrade history from a workspace's git via ``mngr exec``.
 
@@ -104,8 +105,8 @@ def read_workspace_git_version(
     logged at debug and yields the empty/None defaults rather than raising, so
     the version route can always at least report ``original_minds_version``.
     """
-    current_version = _exec_git_describe(agent_id=agent_id)
-    merges = _exec_git_merges(agent_id=agent_id)
+    current_version = _exec_git_describe(agent_id=agent_id, mngr_caller=mngr_caller)
+    merges = _exec_git_merges(agent_id=agent_id, mngr_caller=mngr_caller)
     return WorkspaceGitVersion(current_minds_version=current_version, upgrade_merges=merges)
 
 
@@ -113,14 +114,15 @@ def _exec_git_in_workspace(
     *,
     agent_id: AgentId,
     git_args: tuple[str, ...],
+    mngr_caller: MngrCaller,
 ) -> str | None:
     """Run a git command inside the workspace via ``mngr exec``; return stdout or None on failure.
 
-    Runs through the shared warm-process :class:`~imbue.minds.utils.mngr_caller.MngrCaller`,
-    which surfaces a launch/exec failure as a non-zero ``returncode`` (rather than raising),
-    so the best-effort None fallback covers every failure mode.
+    Runs through the shared warm-process ``mngr_caller``, which surfaces a
+    launch/exec failure as a non-zero ``returncode`` (rather than raising), so
+    the best-effort None fallback covers every failure mode.
     """
-    result = get_default_mngr_caller().call(
+    result = mngr_caller.call(
         ["exec", str(agent_id), "--", *git_args],
         timeout=_GIT_EXEC_TIMEOUT_SECONDS,
     )
@@ -136,11 +138,11 @@ def _exec_git_in_workspace(
     return result.stdout
 
 
-def _exec_git_describe(*, agent_id: AgentId) -> str | None:
-    stdout = _exec_git_in_workspace(agent_id=agent_id, git_args=_GIT_DESCRIBE_ARGS)
+def _exec_git_describe(*, agent_id: AgentId, mngr_caller: MngrCaller) -> str | None:
+    stdout = _exec_git_in_workspace(agent_id=agent_id, git_args=_GIT_DESCRIBE_ARGS, mngr_caller=mngr_caller)
     return parse_git_describe(stdout) if stdout is not None else None
 
 
-def _exec_git_merges(*, agent_id: AgentId) -> tuple[UpgradeMerge, ...]:
-    stdout = _exec_git_in_workspace(agent_id=agent_id, git_args=_GIT_MERGES_ARGS)
+def _exec_git_merges(*, agent_id: AgentId, mngr_caller: MngrCaller) -> tuple[UpgradeMerge, ...]:
+    stdout = _exec_git_in_workspace(agent_id=agent_id, git_args=_GIT_MERGES_ARGS, mngr_caller=mngr_caller)
     return parse_upgrade_merges(stdout) if stdout is not None else ()

@@ -18,6 +18,7 @@ from flask import abort
 from flask import request
 from loguru import logger
 from pydantic import Field
+from pydantic import SecretStr
 from werkzeug.exceptions import HTTPException
 from werkzeug.middleware.dispatcher import DispatcherMiddleware
 
@@ -40,7 +41,10 @@ from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.backup_password_rotation import rotate_backup_master_password
+from imbue.minds.desktop_client.backup_password_store import ensure_backup_password_hash
 from imbue.minds.desktop_client.backup_password_store import has_saved_backup_password
+from imbue.minds.desktop_client.backup_password_store import is_master_password_set
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
@@ -417,6 +421,61 @@ def _handle_error_reporting_settings() -> Response:
     return make_response(status_code=200, content='{"ok": true}', media_type="application/json")
 
 
+def _handle_backup_password_change() -> Response:
+    """Rotate the shared backup master password (POST /_chrome/backup-password).
+
+    Deliberately a desktop-only cookie-auth route (not part of /api/v1): agents
+    must never be able to rotate the master password. The rotation is
+    synchronous -- it rekeys every existing backed-up workspace's repository --
+    and the response carries per-workspace results for the Settings page to
+    render inline.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
+    body = request.get_json(silent=True, force=True)
+    if not isinstance(body, dict):
+        return make_response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
+    paths: WorkspacePaths | None = get_state().api_v1_paths
+    if paths is None:
+        return make_response(
+            status_code=503,
+            content='{"error": "Backup management is unavailable in this configuration"}',
+            media_type="application/json",
+        )
+    # Wrapped in SecretStr immediately; the plaintext must never reach a log.
+    new_password = SecretStr(str(body.get("new_password") or ""))
+    confirmation = SecretStr(str(body.get("new_password_confirm") or ""))
+    if new_password.get_secret_value() != confirmation.get_secret_value():
+        return make_response(
+            status_code=400, content='{"error": "The two passwords do not match."}', media_type="application/json"
+        )
+    result = rotate_backup_master_password(
+        paths=paths,
+        resolver=get_state().backend_resolver,
+        new_password=new_password,
+        is_save_password=bool(body.get("save_password", False)),
+        parent_cg=get_state().root_concurrency_group,
+    )
+    return make_response(
+        status_code=200,
+        content=json.dumps(
+            {
+                "ok": result.is_all_ok,
+                "results": [
+                    {
+                        "agent_id": entry.agent_id,
+                        "workspace_name": entry.workspace_name,
+                        "is_ok": entry.is_ok,
+                        "error": entry.error,
+                    }
+                    for entry in result.results
+                ],
+            }
+        ),
+        media_type="application/json",
+    )
+
+
 def _sync_latchkey_forward_sentry_consent(minds_config: MindsConfig) -> None:
     """Rewrite the detached ``mngr latchkey forward`` daemon's live consent file after a consent change.
 
@@ -662,6 +721,7 @@ def _handle_landing_page() -> Response:
     accounts = session_store.list_accounts() if session_store else []
     default_account_id = minds_config.get_default_account_id() if minds_config else None
     is_backup_password_saved = has_saved_backup_password(agent_creator.paths) if agent_creator is not None else False
+    is_backup_password_set = is_master_password_set(agent_creator.paths) if agent_creator is not None else False
     region_options, region_selected = _build_region_form_context(minds_config, geo_cache)
     html = render_create_form(
         git_url=git_url,
@@ -669,6 +729,7 @@ def _handle_landing_page() -> Response:
         accounts=accounts,
         default_account_id=default_account_id or "",
         has_saved_backup_password=is_backup_password_saved,
+        is_master_password_set=is_backup_password_set,
         region_options_by_launch_mode=region_options,
         region_selected_by_launch_mode=region_selected,
         # A deep-link that pre-fills a repo/branch wants those advanced fields
@@ -749,6 +810,7 @@ def _handle_create_page() -> Response:
     accounts = session_store.list_accounts() if session_store else []
     default_account_id = minds_config.get_default_account_id() if minds_config else None
     is_backup_password_saved = has_saved_backup_password(agent_creator.paths) if agent_creator is not None else False
+    is_backup_password_set = is_master_password_set(agent_creator.paths) if agent_creator is not None else False
     region_options, region_selected = _build_region_form_context(minds_config, geo_cache)
     html = render_create_form(
         git_url=git_url,
@@ -756,6 +818,7 @@ def _handle_create_page() -> Response:
         accounts=accounts,
         default_account_id=default_account_id or "",
         has_saved_backup_password=is_backup_password_saved,
+        is_master_password_set=is_backup_password_set,
         region_options_by_launch_mode=region_options,
         region_selected_by_launch_mode=region_selected,
         # A deep-link that pre-fills a repo/branch wants those advanced fields
@@ -1613,9 +1676,11 @@ def _handle_settings_page() -> Response:
     minds_config: MindsConfig | None = get_state().minds_config
     report_unexpected_errors = minds_config.get_report_unexpected_errors() if minds_config else False
     include_error_logs = minds_config.get_include_error_logs() if minds_config else False
+    paths: WorkspacePaths | None = get_state().api_v1_paths
     html = render_settings_page(
         report_unexpected_errors=report_unexpected_errors,
         include_error_logs=include_error_logs,
+        has_saved_backup_password=has_saved_backup_password(paths) if paths is not None else False,
     )
     return make_html_response(content=html)
 
@@ -1700,6 +1765,13 @@ def _handle_workspace_settings(
     errored_provider_names = {str(name) for name in backend_resolver.get_provider_errors()}
     is_stale = _is_workspace_provider_errored(info, errored_provider_names)
 
+    # The backup section's configure form needs to know whether a shared
+    # master password is already saved (it then never re-prompts) and whether
+    # an account is associated (imbue_cloud backups require one).
+    paths = get_state().api_v1_paths
+    is_backup_password_saved = has_saved_backup_password(paths) if paths is not None else False
+    is_backup_password_set = is_master_password_set(paths) if paths is not None else False
+
     html = render_workspace_settings(
         agent_id=agent_id,
         ws_name=ws_name,
@@ -1709,6 +1781,9 @@ def _handle_workspace_settings(
         is_leased_imbue_cloud=is_leased_imbue_cloud,
         current_color=current_color,
         is_stale=is_stale,
+        has_saved_backup_password=is_backup_password_saved,
+        is_master_password_set=is_backup_password_set,
+        has_account=current_account is not None,
     )
     return make_html_response(content=html)
 
@@ -2158,6 +2233,12 @@ def create_desktop_client(
         logger.warning("Missing static/app.min.css. Run `just minds-css` from the repo root to build it.")
     app = Flask(__name__, static_folder=str(_static_dir), static_url_path="/_static")
 
+    # The backup master-password hash must always exist (initially the hash of
+    # the empty password, or of a pre-hash install's saved plaintext) so every
+    # backup flow can validate against it.
+    if paths is not None:
+        ensure_backup_password_hash(paths)
+
     @app.errorhandler(Exception)
     def _unhandled_exception_handler(exc: Exception) -> Response | HTTPException:
         # Let werkzeug's HTTP exceptions (404, 405, abort(401), ...) keep their
@@ -2235,6 +2316,7 @@ def create_desktop_client(
     app.add_url_rule("/consent", view_func=_handle_consent_page)
     app.add_url_rule("/consent", view_func=_handle_consent_submit, methods=["POST"])
     app.add_url_rule("/_chrome/error-reporting", view_func=_handle_error_reporting_settings, methods=["POST"])
+    app.add_url_rule("/_chrome/backup-password", view_func=_handle_backup_password_change, methods=["POST"])
     app.add_url_rule("/help", view_func=_handle_help_page)
     app.add_url_rule("/help/report", view_func=_handle_help_report, methods=["POST"])
     app.add_url_rule("/help/assist", view_func=_handle_help_assist, methods=["POST"])

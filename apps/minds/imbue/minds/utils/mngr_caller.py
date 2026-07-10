@@ -58,6 +58,7 @@ from pydantic import PrivateAttr
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.local_process import RunningProcess
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.minds.errors import MindError
 from imbue.mngr.errors import MngrError
 
 # Module path of the warm-server entry point, launched as ``python -m <module>``.
@@ -71,6 +72,15 @@ _TERMINATE_FORCE_KILL_SECONDS: Final[float] = 5.0
 
 # Sentinel returncode used when a call is terminated for exceeding its timeout.
 _TIMEOUT_RETURNCODE: Final[int] = -1
+
+
+class MngrCallerNotInitializedError(MindError, RuntimeError):
+    """Raised when :meth:`MngrCaller.call` is used before :meth:`MngrCaller.initialize`.
+
+    The caller has no owned concurrency group: one must be supplied from the
+    outside via :meth:`MngrCaller.initialize` (done once at startup) before any
+    call can spawn a warm process.
+    """
 
 
 class MngrCallResult(MutableModel):
@@ -193,6 +203,10 @@ class MngrCaller(MutableModel):
 
     A single instance should be shared process-wide; use
     :func:`get_default_mngr_caller` to obtain the shared instance.
+
+    :meth:`initialize` must be called (with an externally-owned concurrency
+    group) once at startup before any :meth:`call`; a call on an uninitialized
+    caller raises :class:`MngrCallerNotInitializedError`.
     """
 
     default_timeout_seconds: float = Field(
@@ -203,25 +217,27 @@ class MngrCaller(MutableModel):
     # ``ConcurrencyGroup``/``RunningProcess``/locks are not pydantic-native; hold
     # them as private runtime state and allow arbitrary types through.
     _concurrency_group: ConcurrencyGroup | None = PrivateAttr(default=None)
-    _owned_concurrency_group: ConcurrencyGroup | None = PrivateAttr(default=None)
     _warm_process: _WarmMngrProcess | None = PrivateAttr(default=None)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
-    _is_prewarm_started: bool = PrivateAttr(default=False)
+    _is_initialized: bool = PrivateAttr(default=False)
 
     model_config = {"arbitrary_types_allowed": True, "frozen": False, "extra": "forbid"}
 
-    def prewarm(self, concurrency_group: ConcurrencyGroup) -> None:
-        """Spawn the first warm process in the background so the first real call is fast.
+    def initialize(self, concurrency_group: ConcurrencyGroup) -> None:
+        """Adopt an externally-owned concurrency group and pre-warm the first process.
 
-        Non-blocking and idempotent: records the concurrency group used to manage
-        warm processes and dispatches a tracked thread that spawns the first warm
-        process (which pays mngr's import cost off the request path). Intended to
-        be invoked once at startup.
+        Must be called once, at startup, before any :meth:`call` (a call before
+        this raises :class:`MngrCallerNotInitializedError`). The concurrency group
+        is supplied from the outside and owns the lifetime of every warm process.
+
+        Non-blocking and idempotent: records the group and dispatches a tracked
+        thread that spawns the first warm process (which pays mngr's import cost
+        off the request path).
         """
         with self._lock:
-            if self._is_prewarm_started:
+            if self._is_initialized:
                 return
-            self._is_prewarm_started = True
+            self._is_initialized = True
             self._concurrency_group = concurrency_group
         concurrency_group.start_new_thread(
             self._ensure_warm_process_exists,
@@ -233,20 +249,18 @@ class MngrCaller(MutableModel):
         )
 
     def _get_concurrency_group(self) -> ConcurrencyGroup:
-        """Return the concurrency group used to spawn warm processes.
+        """Return the externally-owned concurrency group recorded by :meth:`initialize`.
 
-        Uses the group recorded by :meth:`prewarm` when present; otherwise lazily
-        creates and enters an owned group (torn down by :meth:`stop`). The owned
-        group keeps standalone use (e.g. ``MngrCaller().call(...)``) self-managing.
+        Raises :class:`MngrCallerNotInitializedError` when :meth:`initialize` has
+        not been called: the caller never creates its own group, so calls are
+        refused until one is supplied from the outside.
         """
         with self._lock:
-            if self._concurrency_group is not None:
-                return self._concurrency_group
-            if self._owned_concurrency_group is None:
-                owned_group = ConcurrencyGroup(name="mngr-caller")
-                owned_group.__enter__()
-                self._owned_concurrency_group = owned_group
-            return self._owned_concurrency_group
+            if self._concurrency_group is None:
+                raise MngrCallerNotInitializedError(
+                    "MngrCaller.call() requires initialize(concurrency_group) to be called first"
+                )
+            return self._concurrency_group
 
     def _spawn_warm_process(self) -> _WarmMngrProcess:
         """Launch a fresh warm ``mngr`` process connected by an anonymous socketpair.
@@ -359,21 +373,21 @@ class MngrCaller(MutableModel):
             warm_process.terminate()
 
     def stop(self) -> None:
-        """Terminate the idle warm process and release all resources.
+        """Terminate the idle warm process and reset to the uninitialized state.
 
-        Safe to call when nothing was started. Production relies on the
-        concurrency group passed to :meth:`prewarm` for shutdown cleanup; this is
-        primarily for standalone/test use of an owned concurrency group.
+        Safe to call when nothing was started. The concurrency group is owned by
+        the caller of :meth:`initialize`, so this only terminates the idle warm
+        process (the group's own teardown reaps anything still tracked) and
+        clears the recorded group, so a later :meth:`call` again requires
+        :meth:`initialize`.
         """
         with self._lock:
             idle_process = self._warm_process
             self._warm_process = None
-            owned_group = self._owned_concurrency_group
-            self._owned_concurrency_group = None
+            self._concurrency_group = None
+            self._is_initialized = False
         if idle_process is not None:
             idle_process.terminate()
-        if owned_group is not None:
-            owned_group.__exit__(None, None, None)
 
 
 _DEFAULT_CALLER_HOLDER: dict[str, MngrCaller | None] = {"caller": None}
@@ -384,8 +398,8 @@ def get_default_mngr_caller() -> MngrCaller:
     """Return the shared, process-wide :class:`MngrCaller` singleton.
 
     Constructing it is cheap and does not spawn any warm process; call
-    :meth:`MngrCaller.prewarm` (once, at startup) to spawn the first warm process
-    ahead of the first real invocation.
+    :meth:`MngrCaller.initialize` (once, at startup) to adopt a concurrency group
+    and spawn the first warm process ahead of the first real invocation.
     """
     with _DEFAULT_CALLER_LOCK:
         if _DEFAULT_CALLER_HOLDER["caller"] is None:

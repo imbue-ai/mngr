@@ -90,6 +90,15 @@ def test_check_deps_install_interactive_flag(cli_runner: CliRunner) -> None:
     assert "System dependencies" in result.output
 
 
+# The check flow probes every dependency and (on macOS) spawns a `bash -c`
+# subprocess for the bash-version check; under a fully loaded xdist run that
+# spawn can take several seconds, intermittently tripping the global 10s
+# pytest timeout (observed locally on a full libs/mngr run). The subprocess
+# probe is the point of the flow, so bump the per-test timeout and let offload
+# retry via @pytest.mark.flaky if a slow sandbox slips further. Matches the
+# precedent on test_destroy_single_agent.
+@pytest.mark.flaky
+@pytest.mark.timeout(30)
 def test_check_deps_scope_and_install_are_independent(cli_runner: CliRunner) -> None:
     """--scope and --install can be combined freely (they are orthogonal)."""
     result = cli_runner.invoke(check_deps, ["--scope", "core", "--install", "auto"])
