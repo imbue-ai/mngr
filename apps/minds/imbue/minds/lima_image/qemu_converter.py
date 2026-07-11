@@ -14,7 +14,7 @@ from imbue.minds.lima_image.interfaces import ImageFormatConverterInterface
 QEMU_CONVERT_TIMEOUT_SECONDS: Final[float] = 1800.0
 
 
-def resolve_qemu_img_binary() -> str:
+def _get_qemu_img_binary() -> str:
     """Resolve the qemu-img path.
 
     Prefers ``MINDS_QEMU_IMG_BINARY`` -- the bundled binary that ships in
@@ -30,7 +30,7 @@ class QemuImageFormatConverter(ImageFormatConverterInterface):
     """Converts between raw and qcow2 via the ``qemu-img`` CLI."""
 
     qemu_img_binary: str = Field(
-        default_factory=resolve_qemu_img_binary, frozen=True, description="Path/name of the qemu-img executable"
+        default_factory=_get_qemu_img_binary, frozen=True, description="Path/name of the qemu-img executable"
     )
     concurrency_group: ConcurrencyGroup = Field(
         frozen=True, description="Concurrency group used to run the qemu-img subprocess"
