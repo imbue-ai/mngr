@@ -76,6 +76,16 @@ _DEFAULT_LISTEN_HOST: Final[str] = "127.0.0.1"
 _GATEWAY_BIND_TIMEOUT_SECONDS: Final[float] = 10.0
 _GATEWAY_BIND_POLL_INTERVAL_SECONDS: Final[float] = 0.05
 
+# Maximum request body size the gateway accepts, passed as ``--max-body-size``
+# to every gateway spawn (here and in :mod:`imbue.mngr_latchkey.remote_gateway`).
+# The upstream default is 10 MiB, which is fine for API calls but not for git:
+# the gateway natively proxies GitHub's git smart-HTTP endpoints
+# (``/gateway/https://github.com/...``, ``github-git`` scope), and a push's
+# packfile scales with repo history (a minds template push is ~30 MiB today).
+# The gateway buffers each request body in memory, so this caps transient
+# per-request memory; it costs nothing until a request is actually that large.
+GATEWAY_MAX_BODY_SIZE_BYTES: Final[int] = 512 * 1024 * 1024
+
 # Services-info / create-jwt are normally instant but can stall on slow keychains.
 # The auth-browser flow waits on a real human and is intentionally untimed.
 _SERVICES_INFO_TIMEOUT_SECONDS: Final[float] = 15.0
@@ -1208,7 +1218,7 @@ class Latchkey(MutableModel):
         ):
             try:
                 process = concurrency_group.run_process_in_background(
-                    command=[self.latchkey_binary, "gateway"],
+                    command=[self.latchkey_binary, "gateway", "--max-body-size", str(GATEWAY_MAX_BODY_SIZE_BYTES)],
                     env=env,
                     on_output=_log_gateway_output_line,
                 )

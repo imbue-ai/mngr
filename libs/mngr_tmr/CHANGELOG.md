@@ -6,6 +6,11 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `--name <slug>` flag gives a run its own variant prefix on agent, branch, and host names (e.g. `tmr-mngr/<run>/*` vs `tmr-minds/<run>/*`), so two suites' branches and PRs stay separate. Distinct from `--run-name` (which identifies a single run within a variant); validated as a slug since it becomes a branch/agent/host name segment. The reintegrate hint in the HTML report carries `--name` for non-default variants so the suggested command resolves the same run.
+- Added: `--mapper-prompt` / `--reducer-prompt` flags to point a variant at its own Jinja prompt templates. An override template may `{% extends %}` or `{% include %}` the packaged `mapper.j2` / `reducer.j2` by name to reuse the shared body.
+
 ### Changed
 
 - Changed: TMR is now generic over any release test rather than specific to the mngr e2e tutorial tests. Each test's docstring is the scope contract: the mapper makes the test verify exactly what its docstring describes and treats the docstring as read-only (an outdated `Tutorial block:` section may be corrected along with `mega_tutorial.sh` as a `FIX_TUTORIAL` change). The mapper and reducer prompts no longer re-derive scope from the tutorial or assume e2e-only conventions, and the e2e-only `--mngr-e2e-run-name` flag is now injected only for e2e tests.
