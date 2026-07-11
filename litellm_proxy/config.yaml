@@ -5,6 +5,16 @@
 # model_prices_and_context_window map) so cost tracking is correct even on
 # litellm versions whose bundled price map predates a model.
 model_list:
+  # Fable (Mythos-class tier above Opus).
+  - model_name: claude-fable-5
+    litellm_params:
+      model: anthropic/claude-fable-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+      input_cost_per_token: 0.00001
+      output_cost_per_token: 0.00005
+      cache_creation_input_token_cost: 0.0000125
+      cache_read_input_token_cost: 0.000001
+
   # Current Opus line.
   - model_name: claude-opus-4-8
     litellm_params:
