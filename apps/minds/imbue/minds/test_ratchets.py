@@ -361,10 +361,11 @@ def test_prevent_if_elif_without_else() -> None:
 
 
 def test_prevent_inline_functions() -> None:
-    # Two that remain: ``record_loss`` in the ported Sentry HTTP transport's
-    # ``_send_request`` (closes over the envelope being sent), and
-    # ``_run_check_into_results`` in api_v1.py (a thread target that closes over
-    # the list it appends its check result to).
+    # All of the remaining inline functions are closures under ``desktop_client/``
+    # that capture the local state they were defined next to: the SSE generator and
+    # its watch callbacks plus the unhandled-exception hook in app.py, a thread
+    # target in api_v1.py, the signal handler in server.py, and the WSGI app in
+    # webdav.py.
     rc.check_inline_functions(_DIR, snapshot(9))
 
 
