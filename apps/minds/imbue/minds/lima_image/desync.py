@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from typing import Final
 
@@ -19,10 +20,23 @@ DESYNC_EXTRACT_TIMEOUT_SECONDS: Final[float] = 3600.0
 DESYNC_ERROR_RETRY_COUNT: Final[int] = 5
 
 
+def _get_desync_binary() -> str:
+    """Resolve the desync path.
+
+    Prefers ``MINDS_DESYNC_BINARY`` -- the bundled binary that ships in
+    ``resources/desync/desync``. Electron's backend.js sets it in both dev and
+    packaged mode whenever that binary is staged; tests get it from the session
+    conftest. Falls back to ``"desync"`` (PATH lookup) when unset.
+    """
+    return os.environ.get("MINDS_DESYNC_BINARY") or "desync"
+
+
 class DesyncImageChunkStore(ImageChunkStoreInterface):
     """Assembles raw images via the ``desync`` CLI from an HTTP(S) chunk store."""
 
-    desync_binary: str = Field(default="desync", frozen=True, description="Path/name of the desync executable")
+    desync_binary: str = Field(
+        default_factory=_get_desync_binary, frozen=True, description="Path/name of the desync executable"
+    )
     concurrency_group: ConcurrencyGroup = Field(
         frozen=True, description="Concurrency group used to run the desync subprocess"
     )

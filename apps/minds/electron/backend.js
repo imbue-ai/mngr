@@ -220,13 +220,20 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
       const bundledClientConfig = paths.getBundledClientConfigPath();
       const configFileArgs = bundledClientConfig ? ['--config-file', bundledClientConfig] : [];
 
-      // No qemu-img payload is published for darwin-x86_64, so download-binaries.js
-      // skips it there and nothing is staged. Only advertise the bundled binary
-      // when it actually exists -- otherwise MINDS_QEMU_IMG_BINARY would name a
-      // missing file and the converter would exec that instead of falling back
-      // to a qemu-img on PATH.
+      // The pre-baked-image tools (issue #2306): desync fetches the image, qemu-img
+      // converts it. Neither is staged on every target -- download-binaries.js skips
+      // both on win32, and qemu-img additionally on darwin-x86_64, where no payload
+      // is published. Only advertise a bundled binary when it actually exists --
+      // otherwise the env var would name a missing file and the tool would exec that
+      // instead of falling back to a PATH lookup.
+      const desyncPath = paths.getDesyncPath();
+      const hasBundledDesync = fs.existsSync(desyncPath);
       const qemuImgPath = paths.getQemuImgPath();
       const hasBundledQemuImg = fs.existsSync(qemuImgPath);
+      const limaImageToolEnv = {
+        ...(hasBundledDesync ? { MINDS_DESYNC_BINARY: desyncPath } : {}),
+        ...(hasBundledQemuImg ? { MINDS_QEMU_IMG_BINARY: qemuImgPath } : {}),
+      };
 
       if (paths.isDev()) {
         // Dev mode: use system uv with the monorepo workspace venv
@@ -250,10 +257,12 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           MNGR_PREFIX: mngrPrefix,
           MINDS_LATCHKEY_BINARY: paths.getLatchkeyPath(),
           MINDS_LATCHKEY_DIRECTORY: paths.getLatchkeyDirectory(),
-          // The prestart hook (ensure-binaries.js) stages resources/qemu/ before
-          // the dev app launches, so point the converter at the bundled binary
-          // rather than depending on a Homebrew qemu on the dev's PATH.
-          ...(hasBundledQemuImg ? { MINDS_QEMU_IMG_BINARY: qemuImgPath } : {}),
+          // The prestart hook (ensure-binaries.js) stages resources/desync/ and
+          // resources/qemu/ before the dev app launches. Dev mode inherits the
+          // developer's PATH untouched, so the bundled binaries are only reachable
+          // by absolute path -- without these the fast-create path would need a
+          // system-wide desync and a Homebrew qemu.
+          ...limaImageToolEnv,
           MINDS_RELEASE_ID: releaseId,
           MINDS_GIT_SHA: gitSha,
         };
@@ -315,7 +324,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           MINDS_LATCHKEY_BINARY: paths.getLatchkeyPath(),
           MINDS_LATCHKEY_DIRECTORY: paths.getLatchkeyDirectory(),
           MINDS_RESTIC_BINARY: paths.getResticPath(),
-          ...(hasBundledQemuImg ? { MINDS_QEMU_IMG_BINARY: qemuImgPath } : {}),
+          ...limaImageToolEnv,
           // Tell the packaged latchkey shim which Electron binary to use as Node.
           MINDS_ELECTRON_EXEC_PATH: process.execPath,
           // Set VIRTUAL_ENV to the per-user venv so `uv run --active` uses

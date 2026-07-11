@@ -107,7 +107,7 @@ The desktop app bundles platform-specific binaries so users need zero prerequisi
 - **desync**: Content-defined-chunking client that fetches the pre-baked Lima image (issue #2306). Downloaded from GitHub releases. macOS/Linux only.
 - **qemu-img**: Converts the pre-baked Lima image `raw`<->`qcow2` (issue #2306). Needed on **every** platform including Apple Silicon -- the conversion is orthogonal to the VM backend. No upstream release exists, so we build our own from pinned sources (modeled on `containers/podman-machine-qemu`): a tools-only QEMU build with every optional feature disabled, glib and its deps (libffi, libintl, pcre2) linked **statically**, leaving a single binary that links only always-present system libraries. Produced by `scripts/build-qemu-payload.sh` and hosted as a GitHub release asset. macOS/Linux only.
 
-Each is placed in the `resources/` directory (outside the asar archive) and added to `PATH` in the child process environment. `restic` and `qemu-img` are additionally passed by explicit absolute path (`MINDS_RESTIC_BINARY`, `MINDS_QEMU_IMG_BINARY`) so resolution never depends on `PATH` ordering.
+Each is placed in the `resources/` directory (outside the asar archive) and added to `PATH` in the child process environment. `restic`, `desync`, and `qemu-img` are additionally passed by explicit absolute path (`MINDS_RESTIC_BINARY`, `MINDS_DESYNC_BINARY`, `MINDS_QEMU_IMG_BINARY`) so resolution never depends on `PATH` ordering -- and so dev mode, whose child process inherits the developer's `PATH` untouched, reaches the bundled binaries at all.
 
 ### How the shipped binaries are chosen
 
