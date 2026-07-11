@@ -52,11 +52,11 @@ def _uv_mock(log_file: Path, *, mngr_already_installed: bool) -> str:
     )
 
 
-def _mngr_mock(log_file: Path, *, fail_subcommands: tuple[str, ...] = ()) -> str:
+def _mngr_mock(log_file: Path, *, fail_subcommands: tuple[str, ...]) -> str:
     """Bash mock of `mngr` that logs every invocation.
 
-    By default every subcommand exits 0. Pass `fail_subcommands` to force
-    specific first-arg subcommands (e.g. "dependencies") to exit 1.
+    Every subcommand exits 0 except those in `fail_subcommands`, which are forced
+    to exit 1 (e.g. "dependencies"). Pass an empty tuple to make them all succeed.
     """
     fail_cases = "".join(f'    "{cmd}") exit 1 ;;\n' for cmd in fail_subcommands)
     return textwrap.dedent(
@@ -70,7 +70,7 @@ def _mngr_mock(log_file: Path, *, fail_subcommands: tuple[str, ...] = ()) -> str
     )
 
 
-def _curl_mock(log_file: Path, *, succeeds: bool = True) -> str:
+def _curl_mock(log_file: Path, *, succeeds: bool) -> str:
     """Bash mock of `curl` that logs its invocation and (when succeeding) writes the -o file.
 
     install.sh fetches the constraints file with `curl -fsSL <url> -o <file>`; this writes a
@@ -126,9 +126,9 @@ def _setup_and_run(
     tmp_path: Path,
     *,
     mngr_already_installed: bool,
-    include_mngr_mock: bool = True,
-    fail_subcommands: tuple[str, ...] = (),
-    curl_succeeds: bool = True,
+    include_mngr_mock: bool,
+    fail_subcommands: tuple[str, ...],
+    curl_succeeds: bool,
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     """Write the uv/mngr/curl mocks onto a synthetic PATH, run install.sh, and return the
     completed process together with the text of the call log.
@@ -154,7 +154,9 @@ def _setup_and_run(
 @pytest.mark.timeout(30)
 def test_install_sh_upgrades_when_mngr_already_installed(tmp_path: Path) -> None:
     """When uv reports imbue-mngr already installed, run `uv tool upgrade` (not install)."""
-    result, calls = _setup_and_run(tmp_path, mngr_already_installed=True)
+    result, calls = _setup_and_run(
+        tmp_path, mngr_already_installed=True, include_mngr_mock=True, fail_subcommands=(), curl_succeeds=True
+    )
 
     assert result.returncode == 0, f"install.sh failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     assert "uv tool list" in calls
@@ -171,7 +173,9 @@ def test_install_sh_upgrades_when_mngr_already_installed(tmp_path: Path) -> None
 @pytest.mark.timeout(30)
 def test_install_sh_installs_when_mngr_not_present(tmp_path: Path) -> None:
     """When uv reports no imbue-mngr, run `uv tool install` (not upgrade)."""
-    result, calls = _setup_and_run(tmp_path, mngr_already_installed=False)
+    result, calls = _setup_and_run(
+        tmp_path, mngr_already_installed=False, include_mngr_mock=True, fail_subcommands=(), curl_succeeds=True
+    )
 
     assert result.returncode == 0, f"install.sh failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     # The constraints file is fetched, then a fresh constrained install is run (not upgrade).
@@ -196,7 +200,9 @@ def test_install_sh_errors_when_mngr_not_on_path_after_install(tmp_path: Path) -
     """
     # uv mock present, but no mngr binary on PATH -- simulates a successful
     # install whose bin dir is not on the user's PATH.
-    result, calls = _setup_and_run(tmp_path, mngr_already_installed=False, include_mngr_mock=False)
+    result, calls = _setup_and_run(
+        tmp_path, mngr_already_installed=False, include_mngr_mock=False, fail_subcommands=(), curl_succeeds=True
+    )
 
     assert result.returncode != 0
     assert "uv tool install imbue-mngr" in calls
@@ -213,7 +219,13 @@ def test_install_sh_continues_when_dependencies_fail(tmp_path: Path) -> None:
     The `|| warn` pattern in install.sh exists so a single broken system
     dependency does not stop the rest of the installer.
     """
-    result, calls = _setup_and_run(tmp_path, mngr_already_installed=True, fail_subcommands=("dependencies",))
+    result, calls = _setup_and_run(
+        tmp_path,
+        mngr_already_installed=True,
+        include_mngr_mock=True,
+        fail_subcommands=("dependencies",),
+        curl_succeeds=True,
+    )
 
     assert result.returncode == 0, f"install.sh failed unexpectedly\nstderr:\n{result.stderr}"
     assert "mngr dependencies --install interactive --scope core" in calls
@@ -226,7 +238,9 @@ def test_install_sh_continues_when_dependencies_fail(tmp_path: Path) -> None:
 @pytest.mark.timeout(30)
 def test_install_sh_continues_when_extras_fail(tmp_path: Path) -> None:
     """A failure in `mngr extras -i` must not abort the script."""
-    result, calls = _setup_and_run(tmp_path, mngr_already_installed=True, fail_subcommands=("extras",))
+    result, calls = _setup_and_run(
+        tmp_path, mngr_already_installed=True, include_mngr_mock=True, fail_subcommands=("extras",), curl_succeeds=True
+    )
 
     assert result.returncode == 0, f"install.sh failed unexpectedly\nstderr:\n{result.stderr}"
     assert "mngr extras -i" in calls
@@ -243,7 +257,9 @@ def test_install_sh_continues_when_extras_fail(tmp_path: Path) -> None:
 @pytest.mark.timeout(30)
 def test_install_sh_continues_when_config_wizard_fails(tmp_path: Path) -> None:
     """A failure in `mngr config wizard` (step 5) must not abort the script."""
-    result, calls = _setup_and_run(tmp_path, mngr_already_installed=True, fail_subcommands=("config",))
+    result, calls = _setup_and_run(
+        tmp_path, mngr_already_installed=True, include_mngr_mock=True, fail_subcommands=("config",), curl_succeeds=True
+    )
 
     assert result.returncode == 0, f"install.sh failed unexpectedly\nstderr:\n{result.stderr}"
     assert "mngr config wizard" in calls
@@ -260,7 +276,9 @@ def test_install_sh_aborts_when_constraints_fetch_fails(tmp_path: Path) -> None:
     cannot be fetched, `set -euo pipefail` + `curl -f` abort the script rather than silently
     installing an unpinned mngr.
     """
-    result, calls = _setup_and_run(tmp_path, mngr_already_installed=False, curl_succeeds=False)
+    result, calls = _setup_and_run(
+        tmp_path, mngr_already_installed=False, include_mngr_mock=True, fail_subcommands=(), curl_succeeds=False
+    )
 
     assert result.returncode != 0, f"expected abort on failed fetch\nstdout:\n{result.stdout}"
     assert "curl" in calls

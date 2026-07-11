@@ -209,22 +209,13 @@ def _append_constraints_arg(command: tuple[str, ...], constraint_path: Path) -> 
     return (*command, "--constraints", str(constraint_path))
 
 
-def with_shipped_constraints(
-    command: tuple[str, ...],
-    resolve: Callable[[str], Path | None] = resolve_shipped_path,
-) -> tuple[str, ...]:
-    """Append ``--constraints <shipped constraints.txt>`` to a ``uv tool install`` command, aborting if it is missing.
+def _constraints_arg_or_abort(command: tuple[str, ...], constraint_path: Path | None) -> tuple[str, ...]:
+    """Append the shipped constraints file to ``command``, or abort if it could not be resolved.
 
-    A single lockfile-derived constraints file -- the whole third-party dependency tree from the
-    workspace lock, not a per-plugin file -- ships inside the wheel (force-included at
-    ``imbue/mngr/constraints.txt``) and is committed in the source tree, so it is present in every
-    real install. It pins that tree to the versions CI tested, so any ``uv tool install`` mngr runs
-    (adding a plugin, or re-resolving the surviving tree when removing one) cannot pull an untested
-    (potentially breaking) release. Its absence is not a per-plugin problem but a sign the mngr
-    installation itself is broken, so this aborts with a clear error rather than silently resolving
-    unpinned.
+    A missing file is not a per-plugin problem but a sign the mngr installation itself is broken
+    (the single, whole-tree constraints file is force-included in the wheel and committed in the
+    source tree), so pinning aborts rather than silently resolving unpinned.
     """
-    constraint_path = resolve(_CONSTRAINTS_FILENAME)
     if constraint_path is None:
         raise AbortError(
             f"mngr's bundled {_CONSTRAINTS_FILENAME} could not be found in this installation. "
@@ -232,6 +223,20 @@ def with_shipped_constraints(
             "'uv tool install imbue-mngr') and try again."
         )
     return _append_constraints_arg(command, constraint_path)
+
+
+def with_shipped_constraints(command: tuple[str, ...]) -> tuple[str, ...]:
+    """Append ``--constraints <shipped constraints.txt>`` to a ``uv tool install`` command, aborting if it is missing.
+
+    A single lockfile-derived constraints file -- the whole third-party dependency tree from the
+    workspace lock, not a per-plugin file -- ships inside the wheel (force-included at
+    ``imbue/mngr/constraints.txt``) and is committed in the source tree, so it is present in every
+    real install. It pins that tree to the versions CI tested, so any ``uv tool install`` mngr runs
+    (adding a plugin, or re-resolving the surviving tree when removing one) cannot pull an untested
+    (potentially breaking) release. Its absence signals a broken mngr installation, so this aborts
+    with a clear error rather than silently resolving unpinned.
+    """
+    return _constraints_arg_or_abort(command, resolve_shipped_path(_CONSTRAINTS_FILENAME))
 
 
 @pure

@@ -8,6 +8,7 @@ from imbue.mngr.uv_tool import ToolReceipt
 from imbue.mngr.uv_tool import ToolRequirement
 from imbue.mngr.uv_tool import _append_constraints_arg
 from imbue.mngr.uv_tool import _build_uv_tool_install_command
+from imbue.mngr.uv_tool import _constraints_arg_or_abort
 from imbue.mngr.uv_tool import _requirement_to_with_arg
 from imbue.mngr.uv_tool import build_base_specifier
 from imbue.mngr.uv_tool import build_uv_tool_install_add
@@ -546,12 +547,12 @@ def test_with_shipped_constraints_appends_shipped_file() -> None:
     assert result[-1].endswith("constraints.txt")
 
 
-def test_with_shipped_constraints_aborts_when_missing() -> None:
+def test_constraints_arg_or_abort_aborts_when_missing() -> None:
     """A missing constraints file means the mngr install itself is broken, so pinning aborts
     loudly (for add and remove alike) rather than silently resolving unpinned."""
     command = ("uv", "tool", "install", "imbue-mngr", "--reinstall")
     with pytest.raises(AbortError):
-        with_shipped_constraints(command, resolve=lambda _name: None)
+        _constraints_arg_or_abort(command, None)
 
 
 def test_constraints_file_is_force_included_in_wheel() -> None:
