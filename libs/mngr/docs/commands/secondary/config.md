@@ -45,12 +45,6 @@ mngr config [OPTIONS] COMMAND [ARGS]...
 | `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths; append __extend to the leaf key to extend list/dict/set fields) [repeatable] | None |
 | `-h`, `--help` | boolean | Show this message and exit. | `False` |
 
-## Other Options
-
-| Name | Type | Description | Default |
-| ---- | ---- | ----------- | ------- |
-| `--scope` | choice (`user` &#x7C; `project` &#x7C; `local`) | Config scope: user (~/.mngr/profiles/<profile_id>/), project (.mngr/), or local (.mngr/settings.local.toml) | None |
-
 ## mngr config list
 
 List all configuration values.
