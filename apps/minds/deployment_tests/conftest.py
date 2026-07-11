@@ -3,7 +3,7 @@
 Five fixtures, mirroring the spec:
 
 * ``shared_env(role)`` -- a pre-stood-up ci env reachable by URL.
-* ``default_workspace_template_template_ref`` -- worktree path + (future) pushed ``ci-...`` branch
+* ``default_workspace_template_ref`` -- worktree path + (future) pushed ``ci-...`` branch
   ref for the DEFAULT_WORKSPACE_TEMPLATE content under test.
 * ``verified_user`` -- function-scoped, pre-verified user created via the
   shared env's SuperTokens admin API and deleted in teardown.
@@ -93,7 +93,7 @@ def deployment_envs_config() -> DeploymentEnvsConfig:
 
 
 @pytest.fixture(scope="session")
-def default_workspace_template_template_ref(
+def default_workspace_template_ref(
     deployment_envs_config: DeploymentEnvsConfig,
 ) -> DefaultWorkspaceTemplateRef:
     """Return the default workspace template ref the orchestrator prepared for this run.

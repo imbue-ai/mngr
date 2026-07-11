@@ -39,7 +39,7 @@ create a workspace through the Electron dev shell".
   Cluster URL is in `vault-setup.md`.
 - [ ] `modal` CLI installed.
 - [ ] `psql` available locally (for the optional sanity check in step 5).
-- [ ] Logged in to `gh` (for default-workspace-template-template clone during the pool bake).
+- [ ] Logged in to `gh` (for default-workspace-template clone during the pool bake).
 - [ ] Repo checkout with this branch (`mngr/minds-staging`) on disk; all
   subsequent `uv run` commands run from the monorepo root.
 

@@ -261,6 +261,47 @@ def _duplication_cleanup_rules(forms: NameForms) -> tuple[Replacement, ...]:
         rules.append(
             Replacement(label=pascal_doubled, pattern=re.escape(pascal_doubled), new_text=forms.abbreviation_pascal)
         )
+        # Identifier tail duplication: fct_template_ref -> default_workspace_template_template_ref
+        # -> default_workspace_template_ref (and the kebab equivalent in prose/paths).
+        snake_doubled = f"{forms.abbreviation_snake}_{last_word}"
+        rules.append(
+            Replacement(label=snake_doubled, pattern=re.escape(snake_doubled), new_text=forms.abbreviation_snake)
+        )
+        kebab_doubled = f"{forms.abbreviation_kebab}-{last_word}"
+        rules.append(
+            Replacement(label=kebab_doubled, pattern=re.escape(kebab_doubled), new_text=forms.abbreviation_kebab)
+        )
+        kebab_spaced = f"{forms.abbreviation_kebab} {last_word}"
+        rules.append(
+            Replacement(
+                label=kebab_spaced, pattern=re.escape(kebab_spaced) + r"\b(?!-)", new_text=forms.abbreviation_kebab
+            )
+        )
+    # A parenthetical that used to define the abbreviation now repeats the name:
+    # "default-workspace-template (DEFAULT_WORKSPACE_TEMPLATE)" -> the name alone.
+    redundant_parenthetical = f"{forms.kebab} ({forms.abbreviation_snake_upper})"
+    rules.append(
+        Replacement(label=redundant_parenthetical, pattern=re.escape(redundant_parenthetical), new_text=forms.kebab)
+    )
+    # Cross-case first-word duplication in prose: "the default DEFAULT_WORKSPACE_TEMPLATE repo"
+    # and "Default default-workspace-template repo" read as stutters; use the spoken form.
+    name_words = forms.snake.split("_")
+    if len(name_words) > 1:
+        spoken_tail = " ".join(name_words[1:])
+        rules.append(
+            Replacement(
+                label=f"{first} {forms.snake_upper}",
+                pattern=re.escape(f"{first} {forms.snake_upper}") + r"(?![A-Za-z0-9_])",
+                new_text=f"{first} {spoken_tail}",
+            )
+        )
+        rules.append(
+            Replacement(
+                label=f"{first.capitalize()} {forms.kebab}",
+                pattern=re.escape(f"{first.capitalize()} {forms.kebab}") + r"(?![A-Za-z0-9-])",
+                new_text=f"{first.capitalize()} {spoken_tail}",
+            )
+        )
     return tuple(rules)
 
 
@@ -318,14 +359,23 @@ def build_replacements(forms: NameForms) -> tuple[Replacement, ...]:
         )
         for old, new, hyphen_adjacent in abbreviation_triples
     )
-    # CamelCase-embedded abbreviation (`FctTemplateRef`): the generic boundary
-    # rules skip it because the next character is a letter.
-    camel_rule = Replacement(
-        label="Fct (CamelCase)",
-        pattern=_ABBREVIATION_PREFIX + r"Fct(?=[A-Z])",
-        new_text=forms.abbreviation_pascal,
+    # CamelCase-embedded abbreviation (`FctTemplateRef`, `fctWorktree`): the
+    # generic boundary rules skip these because the next character is a letter.
+    abbreviation_words = forms.abbreviation_snake.split("_")
+    camel_lower = abbreviation_words[0] + "".join(word.capitalize() for word in abbreviation_words[1:])
+    camel_rules = (
+        Replacement(
+            label="Fct (CamelCase)",
+            pattern=_ABBREVIATION_PREFIX + r"Fct(?=[A-Z])",
+            new_text=forms.abbreviation_pascal,
+        ),
+        Replacement(
+            label="fct (camelCase)",
+            pattern=_ABBREVIATION_PREFIX + r"fct(?=[A-Z])",
+            new_text=camel_lower,
+        ),
     )
-    abbreviation_rules = abbreviation_rules + (camel_rule,)
+    abbreviation_rules = abbreviation_rules + camel_rules
     return literal_rules + abbreviation_rules + _duplication_cleanup_rules(forms) + _article_agreement_rules(forms)
 
 
@@ -374,9 +424,17 @@ def skip_reason(rel_path: Path) -> str | None:
     return None
 
 
+_COMMAND_TIMEOUT_SECONDS: Final[float] = 600.0
+
+
 def _run(command: tuple[str, ...], cwd: Path | None = None) -> str:
-    """Run an external command; raises ExternalCommandError on a nonzero exit."""
-    completed = subprocess.run(command, cwd=cwd, capture_output=True, text=True)
+    """Run an external command; raises ExternalCommandError on a nonzero exit, a missing binary, or a hang."""
+    try:
+        completed = subprocess.run(command, cwd=cwd, capture_output=True, text=True, timeout=_COMMAND_TIMEOUT_SECONDS)
+    except FileNotFoundError as e:
+        raise ExternalCommandError(f"{command[0]} is not on PATH") from e
+    except subprocess.TimeoutExpired as e:
+        raise ExternalCommandError(f"{' '.join(command)} timed out after {_COMMAND_TIMEOUT_SECONDS}s") from e
     if completed.returncode != 0:
         raise ExternalCommandError(f"{' '.join(command)} failed: {completed.stderr.strip()}")
     return completed.stdout
@@ -485,6 +543,12 @@ def apply_plan(plan: RepoPlan) -> None:
     """
     for rewrite in plan.rewrites:
         (plan.repo_root / rewrite.rel_path).write_bytes(rewrite.new_text.encode("utf-8"))
+    # Symlink targets are fixed before path renames so a link that is both
+    # renamed and retargeted is still at its old path when we rewrite it.
+    for symlink in plan.symlinks:
+        absolute = plan.repo_root / symlink.rel_path
+        absolute.unlink()
+        absolute.symlink_to(symlink.new_target)
     for rename in plan.renames:
         if rename.target_exists:
             if rename.target_identical:
@@ -496,10 +560,6 @@ def apply_plan(plan: RepoPlan) -> None:
                 )
             continue
         _run(("git", "-C", str(plan.repo_root), "mv", str(rename.old_rel_path), str(rename.new_rel_path)))
-    for symlink in plan.symlinks:
-        absolute = plan.repo_root / symlink.rel_path
-        absolute.unlink()
-        absolute.symlink_to(symlink.new_target)
 
 
 def find_leftovers(repo_root: Path) -> tuple[Leftover, ...]:

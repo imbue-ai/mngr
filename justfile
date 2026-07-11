@@ -331,6 +331,10 @@ sync-vendor-mngr default_workspace_template="":
     if [ -z "$default_workspace_template" ] && [ -f apps/minds/.env ]; then set -a; . ./apps/minds/.env; set +a; fi
     if [ -z "$default_workspace_template" ]; then default_workspace_template="${DEFAULT_WORKSPACE_TEMPLATE_DIR:-}"; fi
     if [ -z "$default_workspace_template" ]; then
+        if [ -n "${DEFAULT_WORKSPACE_TEMPLATE_DIR:-}" ]; then
+            echo "error: DEFAULT_WORKSPACE_TEMPLATE_DIR is the pre-rename variable name; rename it to DEFAULT_WORKSPACE_TEMPLATE_DIR (same value) in apps/minds/.env or your shell." >&2
+            exit 2
+        fi
         echo "error: no default-workspace-template path. Set DEFAULT_WORKSPACE_TEMPLATE_DIR in apps/minds/.env, or pass it:" >&2
         echo "  echo 'DEFAULT_WORKSPACE_TEMPLATE_DIR=/path/to/default-workspace-template' >> apps/minds/.env   # gitignored" >&2
         echo "  just sync-vendor-mngr /path/to/default-workspace-template" >&2
@@ -1014,10 +1018,10 @@ list-servers:
     uv run minds server list
 
 # (Re-)prep a bare-metal box for slice baking: qemu/lima/tooling + image staging +
-# the per-box DEFAULT_WORKSPACE_TEMPLATE image cache dir. Pool SSH key + DSN come from the activated
-# tier's Vault entry / env secrets, so no manual exports. Idempotent -- also how a
-# box prepped before 2026-06-27 gets the DEFAULT_WORKSPACE_TEMPLATE cache dir that production
-# --from-tag bakes require.
+# the per-box default-workspace-template image cache dir. Pool SSH key + DSN come from
+# the activated tier's Vault entry / env secrets, so no manual exports. Idempotent.
+# The cache-lock path also `mkdir -p`s the cache dir on demand, so boxes prepped
+# under the old dir name do not need a re-prep for production --from-tag bakes.
 #
 #   just prep-server <bare-metal-server-id>
 prep-server server_id *extra_args:

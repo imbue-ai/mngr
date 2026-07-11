@@ -1,8 +1,9 @@
-import subprocess
 from pathlib import Path
 
 import pytest
 
+from imbue.mngr.utils.testing import init_git_repo
+from imbue.mngr.utils.testing import run_git_command
 from scripts.rename_template_repo import InvalidNewNameError
 from scripts.rename_template_repo import apply_plan
 from scripts.rename_template_repo import build_replacements
@@ -104,6 +105,8 @@ def test_rewrite_text_representative_lines() -> None:
         ),
         ("fct: FctTemplateRef,", "workspace_template: WorkspaceTemplateRef,"),
         ("raise FctWorktreeMissingError(path)", "raise WorkspaceTemplateWorktreeMissingError(path)"),
+        ("def fct_template_ref(x):", "def workspace_template_ref(x):"),
+        ("fctWorktree = 1", "workspaceTemplateWorktree = 1"),
     )
     for old_line, expected in cases:
         new_line, count = rewrite_text(old_line, replacements)
@@ -117,6 +120,23 @@ def test_rewrite_text_leaves_lookalike_words_alone() -> None:
         new_line, count = rewrite_text(line, replacements)
         assert new_line == line
         assert count == 0
+
+
+def test_full_name_as_abbreviation_cleanups() -> None:
+    replacements = build_replacements(derive_name_forms("default-workspace-template"))
+    cases = (
+        ("def fct_template_ref(x):", "def default_workspace_template_ref(x):"),
+        ("a forever-claude-template (FCT) working tree", "a default-workspace-template working tree"),
+        ("the default FCT repo URL", "the default workspace template repo URL"),
+        ("Default forever-claude-template repo URL", "Default workspace template repo URL"),
+        ("fork the forever-claude-template template as", "fork the default-workspace-template as"),
+        ("avoid default-workspace-template-template skew", "avoid default-workspace-template skew"),
+        ("fct: FctTemplateRef,", "default_workspace_template: DefaultWorkspaceTemplateRef,"),
+        ('f"fct:{tag}"', 'f"default_workspace_template:{tag}"'),
+    )
+    for old_line, expected in cases:
+        new_line, _ = rewrite_text(old_line, replacements)
+        assert new_line == expected
 
 
 def test_single_word_name_degrades_to_uniform_token() -> None:
@@ -139,13 +159,13 @@ def test_skip_reason() -> None:
 
 
 def _make_git_repo(root: Path) -> None:
-    subprocess.run(("git", "init", "-q"), cwd=root, check=True)
+    init_git_repo(root, initial_commit=False)
     (root / "README.md").write_text("# forever-claude-template\n\nThe FCT template.\n")
     (root / "src").mkdir()
     (root / "src" / "fct_worktree.py").write_text("FCT_DIR = 'x'\n")
     (root / "changelog").mkdir()
     (root / "changelog" / "entry.md").write_text("renamed forever-claude-template\n")
-    subprocess.run(("git", "add", "-A"), cwd=root, check=True)
+    run_git_command(root, "add", "-A")
 
 
 def test_end_to_end_apply_is_idempotent_and_checkable(tmp_path: Path) -> None:
@@ -174,7 +194,7 @@ def test_end_to_end_apply_is_idempotent_and_checkable(tmp_path: Path) -> None:
 def test_find_leftovers_reports_live_references(tmp_path: Path) -> None:
     _make_git_repo(tmp_path)
     (tmp_path / "src" / "types.py").write_text("class FctTemplateRef: ...\n")
-    subprocess.run(("git", "add", "-A"), cwd=tmp_path, check=True)
+    run_git_command(tmp_path, "add", "-A")
     leftovers = find_leftovers(tmp_path)
     assert {leftover.rel_path for leftover in leftovers} == {
         Path("README.md"),
@@ -186,7 +206,7 @@ def test_find_leftovers_reports_live_references(tmp_path: Path) -> None:
 def test_reintroduced_old_file_dropped_when_identical(tmp_path: Path) -> None:
     _make_git_repo(tmp_path)
     (tmp_path / "src" / "default_workspace_template_worktree.py").write_text("DEFAULT_WORKSPACE_TEMPLATE_DIR = 'x'\n")
-    subprocess.run(("git", "add", "-A"), cwd=tmp_path, check=True)
+    run_git_command(tmp_path, "add", "-A")
     replacements = build_replacements(derive_name_forms("default-workspace-template"))
 
     plan = plan_repo(tmp_path, replacements, include_diffs=False)
@@ -203,7 +223,7 @@ def test_reintroduced_old_file_dropped_when_identical(tmp_path: Path) -> None:
 def test_reintroduced_old_file_kept_when_different(tmp_path: Path) -> None:
     _make_git_repo(tmp_path)
     (tmp_path / "src" / "default_workspace_template_worktree.py").write_text("something_else = True\n")
-    subprocess.run(("git", "add", "-A"), cwd=tmp_path, check=True)
+    run_git_command(tmp_path, "add", "-A")
     replacements = build_replacements(derive_name_forms("default-workspace-template"))
 
     plan = plan_repo(tmp_path, replacements, include_diffs=False)
@@ -215,10 +235,24 @@ def test_reintroduced_old_file_kept_when_different(tmp_path: Path) -> None:
     assert (tmp_path / "src" / "default_workspace_template_worktree.py").read_text() == "something_else = True\n"
 
 
+def test_symlink_that_is_both_renamed_and_retargeted(tmp_path: Path) -> None:
+    _make_git_repo(tmp_path)
+    (tmp_path / "fct_link").symlink_to("src/fct_worktree.py")
+    run_git_command(tmp_path, "add", "-A")
+    replacements = build_replacements(derive_name_forms("default-workspace-template"))
+
+    plan = plan_repo(tmp_path, replacements, include_diffs=False)
+    apply_plan(plan)
+
+    link = tmp_path / "default_workspace_template_link"
+    assert str(link.readlink()) == "src/default_workspace_template_worktree.py"
+    assert not (tmp_path / "fct_link").exists()
+
+
 def test_symlink_target_rewritten(tmp_path: Path) -> None:
     _make_git_repo(tmp_path)
     (tmp_path / "seed_link").symlink_to("src/fct_worktree.py")
-    subprocess.run(("git", "add", "-A"), cwd=tmp_path, check=True)
+    run_git_command(tmp_path, "add", "-A")
     replacements = build_replacements(derive_name_forms("default-workspace-template"))
 
     plan = plan_repo(tmp_path, replacements, include_diffs=False)

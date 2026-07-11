@@ -96,7 +96,7 @@ def test_wait_for_deferred_install_is_best_effort_on_transport_error() -> None:
     wait_for_deferred_install(runner, _baked(), host_name="slice-x", timeout_seconds=5)
 
 
-def test_build_pool_create_command_targets_the_given_provider_with_default_workspace_template_templates() -> None:
+def test_build_pool_create_command_targets_the_given_provider_with_default_workspace_templates() -> None:
     command = build_pool_create_command(
         provider_instance="imbue_cloud_slice",
         host_name="slice-abc",

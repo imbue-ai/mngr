@@ -260,7 +260,7 @@ def _push_default_workspace_template_test_branch(*, run_id: RunId) -> str:
     branch_name = f"ci-{run_id}"
     logger.warning(
         "DEFAULT_WORKSPACE_TEMPLATE branch push to {!r} is stubbed out -- the push flow is documented in the spec but "
-        "not yet wired up. Tests today use the local worktree path via the default_workspace_template_template_ref fixture.",
+        "not yet wired up. Tests today use the local worktree path via the default_workspace_template_ref fixture.",
         branch_name,
     )
     _append_ledger_entry(

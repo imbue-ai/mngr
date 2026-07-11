@@ -1,7 +1,7 @@
 ---
 name: new-default-workspace-template-clone
 argument-hint: <repo-name> [parent-dir]
-description: Create a new PRIVATE GitHub repo that is a full-history copy of imbue-ai/default-workspace-template's current main branch, clone it to <parent-dir>/<repo-name> (default $HOME/project), and push. Use when the user asks to "spin up a new default-workspace-template clone", "fork the default-workspace-template template as a private repo", "make me a new private copy of default-workspace-template", or similar.
+description: Create a new PRIVATE GitHub repo that is a full-history copy of imbue-ai/default-workspace-template's current main branch, clone it to <parent-dir>/<repo-name> (default $HOME/project), and push. Use when the user asks to "spin up a new default-workspace-template clone", "fork the default-workspace-template as a private repo", "make me a new private copy of default-workspace-template", or similar.
 ---
 
 # Create a new private copy of default-workspace-template

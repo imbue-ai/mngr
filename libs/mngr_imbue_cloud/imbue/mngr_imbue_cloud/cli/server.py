@@ -1397,13 +1397,13 @@ def allocate_slices(
             sync_mngr_into_template(mngr_source_to_vendor, workspace_dir)
 
         pool_public_key = _derive_public_key(private_key_path)
-        # Enable the per-box DEFAULT_WORKSPACE_TEMPLATE image cache only for production (--from-tag) bakes, whose
+        # Enable the per-box default-workspace-template image cache only for production (--from-tag) bakes, whose
         # content is an immutable tag: the first slice builds + seeds a box-local tar
-        # (tagged default_workspace_template:<tag>), the rest docker-load it. Dev (--workspace-dir) bakes have
+        # (tagged default-workspace-template:<tag>), the rest docker-load it. Dev (--workspace-dir) bakes have
         # mutable content under a branch label, so they always build (default_workspace_template_cache_tag=None).
         repo_branch_or_tag = lease_attributes.get("repo_branch_or_tag")
         default_workspace_template_cache_tag = (
-            f"default_workspace_template:{repo_branch_or_tag}" if (is_from_tag and repo_branch_or_tag) else None
+            f"default-workspace-template:{repo_branch_or_tag}" if (is_from_tag and repo_branch_or_tag) else None
         )
         # One worker per slice, capped at ``max_concurrency`` at once by the shared
         # fan-out: each bake blocks on the semaphore before its ``mngr create``, so

@@ -1,4 +1,4 @@
-"""Provider-generic baking of a default-workspace-template (DEFAULT_WORKSPACE_TEMPLATE) pool host.
+"""Provider-generic baking of a default-workspace-template pool host.
 
 This is the single place that knows how to turn a *provisioned host* (an OVH VPS,
 or a lima "slice" on a bare-metal box) into a ready-to-lease pool host: run
@@ -401,7 +401,7 @@ def finalize_baked_pool_host(
     If no sentinel appears within the timeout the bootstrap never created a chat
     agent (e.g. inference creds absent), so there is nothing to tear down and this
     returns. When the sentinel *is* present the destroy must succeed: a destroy
-    error almost always signals a vendored-mngr / default-workspace-template-template skew, and shipping a
+    error almost always signals a vendored-mngr / default-workspace-template skew, and shipping a
     pool host whose bootstrap state we don't understand has bitten us before, so we
     raise rather than land a half-known host in the pool.
     """

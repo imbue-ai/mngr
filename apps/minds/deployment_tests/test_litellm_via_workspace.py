@@ -39,7 +39,7 @@ pytestmark = [pytest.mark.release, pytest.mark.minds_services]
 def test_litellm_spend_tracking_via_local_workspace(
     shared_env: Callable[[str], SharedEnvHandle],
     verified_user: VerifiedUserHandle,
-    default_workspace_template_template_ref: DefaultWorkspaceTemplateRef,
+    default_workspace_template_ref: DefaultWorkspaceTemplateRef,
 ) -> None:
     """Drive a real local DEFAULT_WORKSPACE_TEMPLATE workspace + assert spend lands in Neon ``litellm_cost``.
 
@@ -54,7 +54,7 @@ def test_litellm_spend_tracking_via_local_workspace(
     0. **Wait for env ready.** ``wait_for_env_ready(shared_env("default"))``.
     1. Drive the in-process desktop client (same shape as
        ``test_realistic_signup_verify_signin_create_tunnel_signout``)
-       to create a workspace from ``default_workspace_template_template_ref.as_mngr_template_arg()``
+       to create a workspace from ``default_workspace_template_ref.as_mngr_template_arg()``
        configured with ``AIProvider.IMBUE_CLOUD`` so the agent's LLM
        calls flow through the shared env's ``litellm_proxy_url``.
     2. Wait for the workspace's chat agent to come up.
@@ -71,5 +71,5 @@ def test_litellm_spend_tracking_via_local_workspace(
     enable Docker-in-Docker (mirroring ``offload-modal-acceptance.toml``).
     """
     wait_for_env_ready(shared_env("default"))
-    _ = (verified_user, default_workspace_template_template_ref)
+    _ = (verified_user, default_workspace_template_ref)
     raise AssertionError("not implemented yet -- see skip reason")

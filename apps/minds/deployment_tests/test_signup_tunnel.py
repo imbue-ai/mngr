@@ -40,7 +40,7 @@ pytestmark = [pytest.mark.release, pytest.mark.minds_services]
 def test_realistic_signup_verify_signin_create_tunnel_signout(
     shared_env: Callable[[str], SharedEnvHandle],
     signup_email: MailtmInbox,
-    default_workspace_template_template_ref: DefaultWorkspaceTemplateRef,
+    default_workspace_template_ref: DefaultWorkspaceTemplateRef,
 ) -> None:
     """End-to-end first-time-user flow against the ``default`` shared env.
 
@@ -69,7 +69,7 @@ def test_realistic_signup_verify_signin_create_tunnel_signout(
     4. **Workspace creation.** Use the in-process desktop client (same
        ``create_desktop_client(...)`` pattern as the existing
        ``test_desktop_client_e2e.py``) to create a workspace from
-       ``default_workspace_template_template_ref.as_mngr_template_arg()``. Wait for the
+       ``default_workspace_template_ref.as_mngr_template_arg()``. Wait for the
        workspace to reach a running state.
     5. **Forward the system-interface.** Drive the desktop client's
        "forward system-interface" action for the workspace -- this is
@@ -83,5 +83,5 @@ def test_realistic_signup_verify_signin_create_tunnel_signout(
        requests with the same session token return 401.
     """
     wait_for_env_ready(shared_env("default"))
-    _ = (signup_email, default_workspace_template_template_ref)
+    _ = (signup_email, default_workspace_template_ref)
     raise AssertionError("not implemented yet -- see skip reason")

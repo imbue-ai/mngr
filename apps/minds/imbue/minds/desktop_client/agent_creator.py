@@ -1279,7 +1279,7 @@ class AgentCreator(MutableModel):
         frozen=True,
         description=(
             "Pre-baked Lima image create gate (issue 2306). When set and the create matches the "
-            "default workspace (Lima + default DEFAULT_WORKSPACE_TEMPLATE repo + current release tag), the create gates on "
+            "default workspace (Lima + default workspace template repo + current release tag), the create gates on "
             "the verified image and points Lima at it; None disables the path."
         ),
     )
@@ -1735,7 +1735,7 @@ class AgentCreator(MutableModel):
                 log_queue.put("[minds] Creating workspace '{}' (mode: {})...".format(host_name, launch_mode.value))
 
                 # Pre-baked Lima image gate (issue 2306): for the default
-                # workspace (Lima + default DEFAULT_WORKSPACE_TEMPLATE repo + current release tag) wait on
+                # workspace (Lima + default workspace template repo + current release tag) wait on
                 # the prefetched, verified image and point Lima at it. Returns None
                 # (build in-VM) for any non-default create or unpublished version;
                 # raises a retryable error if a published image can't be readied.

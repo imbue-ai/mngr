@@ -1,4 +1,4 @@
-"""Materialize a paired default-workspace-template (DEFAULT_WORKSPACE_TEMPLATE) working tree for tests.
+"""Materialize a paired default-workspace-template working tree for tests.
 
 Workspace-creation tests (the minds snapshot bake + resume, the create+chat
 acceptance test, the full-flow harness) build their Docker workspace from a DEFAULT_WORKSPACE_TEMPLATE
