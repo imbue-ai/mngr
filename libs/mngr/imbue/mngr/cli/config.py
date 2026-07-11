@@ -610,8 +610,7 @@ def _apply_config_value(
 
     The single validate-then-save write path shared by ``mngr config set`` and
     the ``mngr config wizard`` steps, so every write is checked against the
-    config schema (rejecting e.g. an invalid docker isolation combination) rather
-    than only failing on the next load.
+    config schema rather than only failing on the next load.
     """
     doc = load_config_file_tomlkit(config_path)
     set_nested_value(doc, key, value)
