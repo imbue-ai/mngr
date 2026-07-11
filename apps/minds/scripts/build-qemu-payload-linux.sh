@@ -34,8 +34,12 @@ case "$ARCH" in
   *) echo "unsupported arch $ARCH (use x86_64 or aarch64)" >&2; exit 1 ;;
 esac
 
+# Absolutized because it is consumed from other working directories: docker reads
+# a `-v` source without a leading path component as a *named volume* rather than a
+# bind mount, and the tarball step reads "$OUT_DIR/manifest.txt" from inside "$STAGE".
 OUT_DIR="${2:-$(mktemp -d "${TMPDIR:-/tmp}/minds-qemu-linux.XXXXXX")}"
 mkdir -p "$OUT_DIR"
+OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 
 if ! docker ps >/dev/null 2>&1; then
   echo "build-qemu-payload-linux.sh: Docker daemon not reachable." >&2
