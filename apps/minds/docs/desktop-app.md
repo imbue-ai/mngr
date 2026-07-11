@@ -131,6 +131,8 @@ macOS `aarch64` and `x86_64` payloads must be produced on their respective host 
 
 Linux payloads come from `scripts/build-qemu-payload-linux.sh` (Docker + Alpine): Linux has no static-libc limitation, so QEMU's own `--static` against Alpine's musl produces a fully static ELF that runs on any distro -- one script run per arch, either arch buildable from any host via Docker binfmt emulation. ToDesktop's Linux builder runs the same `beforeInstall` hook even though no Linux app ships, so the linux assets must exist for `pnpm dist` to pass. Until an arch's tarball is uploaded and its SHA pinned, a build for that arch aborts loudly in `verifyChecksum`.
 
+To try a payload that is not published yet, stage it straight into the resources dir instead of downloading it: from `apps/minds/`, `scripts/build-qemu-payload.sh resources` writes `resources/qemu/bin/qemu-img` in place, and `pnpm start`'s `ensure-binaries.js` hook then treats it as already present. This only works for `pnpm start`: `pnpm dist` runs `build.js`, which wipes `resources/` and re-downloads every binary, so a packaged build needs the tarball uploaded and its SHA pinned first.
+
 ### macOS Intel (x86_64) is not supported
 
 ToDesktop publishes `arm64`, `x64`, and `universal` mac artifacts, but only the arm64 one works, and only it is fetched and verified by `.github/workflows/minds-launch-to-msg.yml`. In the published x64 app, `Contents/MacOS/Minds` is x86_64 while the bundled `uv`, `restic`, and `limactl` are arm64, so it cannot launch a VM.
@@ -144,8 +146,6 @@ Supporting Intel needs all of:
 - A `darwin-x86_64` `qemu-img` payload, published and SHA-pinned.
 
 - A pre-baked x86_64 Lima image. Without one an Intel app's prefetch reports `VERSION_UNAVAILABLE` and builds in-VM, so the fast path stays dark even with `qemu-img` present.
-
-To exercise a packaged or clean-`pnpm start` build locally before the release exists, stage the payload straight into the resources dir instead of downloading it: `scripts/build-qemu-payload.sh apps/minds/resources` writes `resources/qemu/bin/qemu-img` in place, which `ensure-binaries.js` then treats as already present.
 
 ## Data directory
 
