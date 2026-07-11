@@ -4,9 +4,12 @@
 # Baking *with* Lima (rather than a separate Packer/QEMU pipeline) means the image
 # is produced by the same virtualizer that consumes it -- `vz` on Apple Silicon,
 # accelerated QEMU on Linux -- so the artifact is guaranteed Lima-bootable and the
-# macOS build host needs no extra QEMU/Packer toolchain. Emits both a qcow2 (the
-# Lima format) and a raw image (what scripts/lima_image/publish.py chunks -- qcow2
-# metadata churn would amplify desync deltas, so we chunk raw).
+# macOS build host needs no extra QEMU/Packer toolchain.
+#
+# The raw image is the deliverable: it is what scripts/lima_image/publish.py chunks
+# (qcow2 metadata churn would amplify desync deltas) and what Lima boots. The qcow2
+# is the flatten step's intermediate, kept as an artifact for boot-testing a bake
+# locally.
 #
 # Run one arch per native host (amd64 on a Linux/KVM host, arm64 on an
 # Apple-Silicon Mac). Then publish with scripts/lima_image/publish.py.
