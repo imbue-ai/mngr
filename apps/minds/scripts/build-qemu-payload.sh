@@ -56,10 +56,16 @@ case "$(uname -m)" in
 esac
 NCORES="$(sysctl -n hw.ncpu)"
 
+# Both are absolutized because they are consumed from other working directories:
+# the tarball step reads "$OUT_DIR/manifest.txt" from inside "$STAGE", and $PREFIX
+# (under $WORK_DIR) goes into CFLAGS/LDFLAGS/PKG_CONFIG_PATH for builds that run
+# from inside each source tree.
 OUT_DIR="${1:-$(mktemp -d "${TMPDIR:-/tmp}/minds-qemu-payload.XXXXXX")}"
 mkdir -p "$OUT_DIR"
+OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 WORK_DIR="${QEMU_PAYLOAD_WORK_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/minds-qemu-work.XXXXXX")}"
 mkdir -p "$WORK_DIR"
+WORK_DIR="$(cd "$WORK_DIR" && pwd)"
 PREFIX="$WORK_DIR/prefix"
 mkdir -p "$PREFIX"
 
