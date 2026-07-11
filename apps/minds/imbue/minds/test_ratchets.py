@@ -361,8 +361,10 @@ def test_prevent_if_elif_without_else() -> None:
 
 
 def test_prevent_inline_functions() -> None:
-    # The most recent addition is ``_run_check_into_results`` in api_v1.py: a
-    # thread target that closes over the list it appends its check result to.
+    # Two that remain: ``record_loss`` in the ported Sentry HTTP transport's
+    # ``_send_request`` (closes over the envelope being sent), and
+    # ``_run_check_into_results`` in api_v1.py (a thread target that closes over
+    # the list it appends its check result to).
     rc.check_inline_functions(_DIR, snapshot(9))
 
 

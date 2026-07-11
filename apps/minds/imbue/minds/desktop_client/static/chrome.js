@@ -411,8 +411,11 @@
   }
 
   document.getElementById('requests-toggle').onclick = function () {
+    // ``keep_open=1`` marks this as an intentional open of the whole inbox,
+    // so resolving a request advances to the next pending one rather than
+    // dismissing the window (notification-driven opens omit it and close).
     if (isElectron) window.minds.toggleInbox();
-    else navigateContent('/inbox');
+    else navigateContent('/inbox?keep_open=1');
   };
 
   // Get-help opens the help modal (report a bug). Pass the currently-displayed
