@@ -30,6 +30,7 @@ from imbue.minds.lima_image.data_types import LimaImageSource
 from imbue.minds.lima_image.data_types import ROOT_MANIFEST_SCHEMA_VERSION
 from imbue.minds.lima_image.data_types import RootManifest
 from imbue.minds.lima_image.desync import DesyncImageChunkStore
+from imbue.minds.lima_image.desync import _get_desync_binary
 from imbue.minds.lima_image.ensure import ensure_current_lima_image
 from imbue.minds.lima_image.manifest_fetcher import HttpxManifestFetcher
 from imbue.minds.lima_image.minisign_verify import PythonMinisignSignatureVerifier
@@ -38,13 +39,21 @@ from imbue.minds.lima_image.primitives import MindsImageVersion
 from imbue.minds.lima_image.primitives import Sha256Hex
 from imbue.minds.lima_image.progress import FileLimaImageProgressSink
 from imbue.minds.lima_image.qemu_converter import QemuImageFormatConverter
+from imbue.minds.lima_image.qemu_converter import _get_qemu_img_binary
 
-_REQUIRED_BINARIES = ("desync", "minisign", "qemu-img")
+# Resolved exactly as the runtime resolves them, so a dev tree whose ``resources/``
+# is staged exercises the binaries that actually ship (the session conftest points
+# MINDS_DESYNC_BINARY / MINDS_QEMU_IMG_BINARY at them) and needs neither on PATH.
+# minisign has no bundled counterpart: it signs the fixture manifest here, which is
+# the publisher's job, not the app's -- the app verifies with PythonMinisignSignatureVerifier.
+_DESYNC = _get_desync_binary()
+_QEMU_IMG = _get_qemu_img_binary()
+_REQUIRED_BINARIES = (_DESYNC, "minisign", _QEMU_IMG)
 _ARCH = ImageArch.X86_64
 
 pytestmark = pytest.mark.skipif(
     any(shutil.which(name) is None for name in _REQUIRED_BINARIES),
-    reason=f"requires {', '.join(_REQUIRED_BINARIES)} on PATH",
+    reason=f"requires {', '.join(_REQUIRED_BINARIES)}",
 )
 
 
@@ -66,7 +75,7 @@ def _publish_image(origin_dir: Path, version: MindsImageVersion, raw_image: Path
     index_path = origin_dir / "indexes" / str(version) / f"{_ARCH.value}.caibx"
     index_path.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
-        ["desync", "make", "-s", str(store_dir), str(index_path), str(raw_image)],
+        [_DESYNC, "make", "-s", str(store_dir), str(index_path), str(raw_image)],
         check=True,
         capture_output=True,
     )
@@ -169,7 +178,7 @@ def test_base_download_and_upgrade_end_to_end(
     assert result_v1.status is LimaImagePrefetchStatus.READY
     assert result_v1.qcow2_path is not None and result_v1.qcow2_path.exists()
     info = subprocess.run(
-        ["qemu-img", "info", "--output=json", str(result_v1.qcow2_path)], check=True, capture_output=True, text=True
+        [_QEMU_IMG, "info", "--output=json", str(result_v1.qcow2_path)], check=True, capture_output=True, text=True
     )
     assert '"format": "qcow2"' in info.stdout
 
