@@ -9,7 +9,10 @@
 # Unlike macOS (no static libc), Linux allows -static, so QEMU's own
 # --static flag does the whole job against Alpine's static musl/glib/pcre2
 # packages. The QEMU source tarball is the same SHA256-pinned one the macOS
-# producer uses; the static dependencies come from the pinned Alpine image.
+# producer uses, and the base image is pinned by digest, but `apk` resolves
+# the static libraries against the live Alpine branch, so their versions
+# float and the payload is not bit-reproducible: re-pin the printed tarball
+# SHA in download-binaries.js after every rebuild.
 #
 # Requires a running Docker daemon. Builds one arch per invocation; the
 # non-native arch runs under Docker's binfmt emulation (slower but correct).
@@ -20,7 +23,9 @@ set -euo pipefail
 
 QEMU_VERSION="10.2.2"
 QEMU_SHA256="784b296ff29c1417aa72323abcb2d2ea9ab9771724f577dcd785c3b04f21e176"
-ALPINE_IMAGE="alpine:3.21"
+# Digest of the alpine:3.21 multi-arch index, so `docker run --platform` still
+# resolves both arches from it.
+ALPINE_IMAGE="alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d"
 
 ARCH="${1:?usage: build-qemu-payload-linux.sh <x86_64|aarch64> [OUTPUT_DIR]}"
 case "$ARCH" in
