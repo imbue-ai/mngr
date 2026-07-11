@@ -1,14 +1,14 @@
-"""Provider-generic baking of a forever-claude-template (FCT) pool host.
+"""Provider-generic baking of a default-workspace-template (DEFAULT_WORKSPACE_TEMPLATE) pool host.
 
 This is the single place that knows how to turn a *provisioned host* (an OVH VPS,
 or a lima "slice" on a bare-metal box) into a ready-to-lease pool host: run
-``mngr create`` against it with the FCT bake templates, stop the services agent,
+``mngr create`` against it with the DEFAULT_WORKSPACE_TEMPLATE bake templates, stop the services agent,
 harden the container sshd, and tear down the bootstrap-created chat agent. It is
 deliberately **provider-agnostic and OVH-free**: the only provider name it sees
 is the opaque string on the ``mngr create`` address, and any provider-specific
 steps (OVH ufw / management-key install; the slice carve) are injected by the
 caller (``cli/admin.py`` for OVH, ``cli/server.py`` for slices) -- so OVH
-ordering logic and FCT bake logic never mix in one module.
+ordering logic and DEFAULT_WORKSPACE_TEMPLATE bake logic never mix in one module.
 
 The bake resolves every host detail it returns from ``mngr create --format
 json`` (agent id, host id, the agent SSH endpoint + on-disk key, and -- when the
@@ -42,16 +42,16 @@ from imbue.imbue_common.frozen_model import FrozenModel
 # after a per-bake UUID instead of ``system-services``.
 BAKED_SERVICES_AGENT_NAME: Final[str] = "system-services"
 
-# The FCT create templates the container bake stacks: ``main`` (shared agent
+# The DEFAULT_WORKSPACE_TEMPLATE create templates the container bake stacks: ``main`` (shared agent
 # config) + ``pool_host`` (build the container from the workspace Dockerfile + run
-# fct-seed + runsc hardening). ``pool_host`` is provider-agnostic -- it carries
-# only the FCT build recipe, not a provider -- so the same template bakes OVH
+# default-workspace-template-seed + runsc hardening). ``pool_host`` is provider-agnostic -- it carries
+# only the DEFAULT_WORKSPACE_TEMPLATE build recipe, not a provider -- so the same template bakes OVH
 # VPSes and lima slices alike; the provider is selected entirely by the create
 # address (``@host.ovh`` vs ``@host.imbue_cloud_slice``), matching how the
 # ``aws`` / ``imbue_cloud`` templates already work.
-FCT_BAKE_TEMPLATES: Final[tuple[str, ...]] = ("main", "pool_host")
+DEFAULT_WORKSPACE_TEMPLATE_BAKE_TEMPLATES: Final[tuple[str, ...]] = ("main", "pool_host")
 
-# Path inside the pool host's container of the FCT bootstrap's initial-chat
+# Path inside the pool host's container of the DEFAULT_WORKSPACE_TEMPLATE bootstrap's initial-chat
 # sentinel. The bootstrap writes it after creating the chat agent on first boot;
 # removing it (after destroying that chat agent) makes the user's first lease +
 # start re-create the chat agent under the user's own workspace name.
@@ -62,13 +62,13 @@ INITIAL_CHAT_SENTINEL_PATH: Final[str] = "/code/runtime/initial_chat_created"
 _MNGR_CREATE_TIMEOUT_SECONDS: Final[int] = 1800
 
 # Manual rsync excludes layered on top of ``--filter=:- .gitignore`` for the
-# monorepo -> FCT vendor/mngr sync. The filter handles ``__pycache__`` / ``.venv``
+# monorepo -> DEFAULT_WORKSPACE_TEMPLATE vendor/mngr sync. The filter handles ``__pycache__`` / ``.venv``
 # / etc.; these two are NOT in .gitignore: ``.git`` (git's internal dir) and
 # ``uv.lock`` (committed at the mngr root, but each install context regenerates
 # its own).
 _VENDOR_RSYNC_MANUAL_EXCLUDES: Final[tuple[str, ...]] = (".git", "uv.lock")
 _GITIGNORE_RSYNC_FILTER: Final[str] = ":- .gitignore"
-# How long to wait (inside the container) for the FCT bootstrap to write its
+# How long to wait (inside the container) for the DEFAULT_WORKSPACE_TEMPLATE bootstrap to write its
 # initial-chat sentinel before giving up on the chat-agent teardown. The
 # bootstrap may never create a chat agent (e.g. inference creds absent), in which
 # case there is nothing to tear down and the bake proceeds.
@@ -76,7 +76,7 @@ _SENTINEL_WAIT_TIMEOUT_SECONDS: Final[int] = 480
 # Exit code GNU ``timeout`` returns when it kills the wrapped command on timeout.
 _COMMAND_TIMEOUT_EXIT_CODE: Final[int] = 124
 
-# The FCT ``deferred-install`` service writes this marker on success; the bake waits
+# The DEFAULT_WORKSPACE_TEMPLATE ``deferred-install`` service writes this marker on success; the bake waits
 # for it (see ``wait_for_deferred_install``) before stopping the services agent.
 _DEFERRED_INSTALL_MARKER: Final[str] = "/var/lib/minds/deferred-install/done.playwright"
 # Cap on how long the bake blocks for the deferred install (heavy apt + browser
@@ -89,7 +89,7 @@ class PoolBakeError(RuntimeError):
 
 
 class BakedPoolHost(FrozenModel):
-    """The host details a successful FCT bake resolves (from ``mngr create --format json``).
+    """The host details a successful DEFAULT_WORKSPACE_TEMPLATE bake resolves (from ``mngr create --format json``).
 
     ``ssh_host`` / ``ssh_port`` / ``ssh_key_path`` are the *agent* (container) SSH
     endpoint. ``outer_ssh_port`` is the provider's separate outer/management sshd
@@ -163,12 +163,12 @@ def run_mngr_command(
 
 
 def sync_mngr_into_template(mngr_source: Path, workspace_dir: Path) -> None:
-    """Rsync the mngr monorepo into the FCT workspace's ``vendor/mngr/`` directory.
+    """Rsync the mngr monorepo into the DEFAULT_WORKSPACE_TEMPLATE workspace's ``vendor/mngr/`` directory.
 
-    The FCT Dockerfile COPYs ``vendor/mngr`` and builds the container's mngr from
+    The DEFAULT_WORKSPACE_TEMPLATE Dockerfile COPYs ``vendor/mngr`` and builds the container's mngr from
     it, so this populates it (gitignore-filtered) before the bake -- making the
     baked container's mngr match the operator's checkout. Used identically by the
-    OVH and slice bakes (both bake the same FCT image).
+    OVH and slice bakes (both bake the same DEFAULT_WORKSPACE_TEMPLATE image).
     """
     vendor_mngr = workspace_dir / "vendor" / "mngr"
     vendor_mngr.mkdir(parents=True, exist_ok=True)
@@ -201,10 +201,10 @@ def build_pool_create_command(
     attributes_json: str,
     extra_args: Sequence[str] = (),
 ) -> list[str]:
-    """Render the ``mngr create`` argv for an FCT pool-host bake.
+    """Render the ``mngr create`` argv for a DEFAULT_WORKSPACE_TEMPLATE pool-host bake.
 
     Common across OVH + slices: a new host running the ``system-services`` agent,
-    baked with the FCT templates, emitting ``--format json`` so the caller can
+    baked with the DEFAULT_WORKSPACE_TEMPLATE templates, emitting ``--format json`` so the caller can
     resolve host details without a ``mngr list`` round-trip. Provider-specific
     args (OVH ``-b --ovh-datacenter=...`` / recycle; slice ``-S`` sizing + box
     config) are appended verbatim via ``extra_args``.
@@ -218,7 +218,7 @@ def build_pool_create_command(
         "--idle-mode",
         "disabled",
     ]
-    for template in FCT_BAKE_TEMPLATES:
+    for template in DEFAULT_WORKSPACE_TEMPLATE_BAKE_TEMPLATES:
         command.extend(["--template", template])
     command.extend(
         [
@@ -282,7 +282,7 @@ def parse_baked_host(stdout: str, *, host_name: str) -> BakedPoolHost:
 # create-reported forwarded port. The runner receives the :class:`BakedPoolHost`
 # (so the slice transport can read that endpoint) plus a label + timeout, and is
 # expected to execute the command via a login shell (so ``uv``/``mngr`` are on
-# PATH inside the FCT container).
+# PATH inside the DEFAULT_WORKSPACE_TEMPLATE container).
 ContainerCommandRunner = Callable[[BakedPoolHost, str, str, float], tuple[int | None, str, str]]
 
 
@@ -296,9 +296,9 @@ def bake_pool_host(
     extra_create_env: Mapping[str, str] | None = None,
     mngr_create_timeout_seconds: int = _MNGR_CREATE_TIMEOUT_SECONDS,
 ) -> BakedPoolHost:
-    """Run ``mngr create`` for one FCT pool host and return its resolved details.
+    """Run ``mngr create`` for one DEFAULT_WORKSPACE_TEMPLATE pool host and return its resolved details.
 
-    Shared by OVH + slices: builds the FCT create command (templates + labels +
+    Shared by OVH + slices: builds the DEFAULT_WORKSPACE_TEMPLATE create command (templates + labels +
     ``--format json``), runs it (with the provider-specific ``extra_create_args`` /
     ``extra_create_env``), and parses the create JSON into a :class:`BakedPoolHost`.
     The provider-specific post-create work -- stopping the services agent (OVH),
@@ -342,7 +342,7 @@ def wait_for_deferred_install(
     host_name: str,
     timeout_seconds: int = _DEFERRED_INSTALL_WAIT_TIMEOUT_SECONDS,
 ) -> None:
-    """Wait for the FCT ``deferred-install`` service to finish before the caller stops the services agent.
+    """Wait for the DEFAULT_WORKSPACE_TEMPLATE ``deferred-install`` service to finish before the caller stops the services agent.
 
     The deferred-install service kicks off a heavy apt + Playwright/Chromium install at agent boot.
     Stopping the services agent mid-apt kills it, leaving dpkg half-unpacked (reinst-required) -- so the
@@ -384,7 +384,7 @@ def finalize_baked_pool_host(
     host_name: str,
     sentinel_timeout_seconds: int = _SENTINEL_WAIT_TIMEOUT_SECONDS,
 ) -> None:
-    """Harden the container sshd and tear down the FCT bootstrap chat agent (shared FCT post-bake).
+    """Harden the container sshd and tear down the DEFAULT_WORKSPACE_TEMPLATE bootstrap chat agent (shared DEFAULT_WORKSPACE_TEMPLATE post-bake).
 
     Runs entirely *inside* the baked container via the caller-supplied
     ``run_in_container`` transport, so it works for both an OVH VPS (``mngr exec``)
@@ -393,7 +393,7 @@ def finalize_baked_pool_host(
     1. Bump the container sshd's pre-auth limits (best-effort): the default
        ``MaxStartups=10:30:100`` caps the pre-auth queue tightly and the lease +
        claim flow plus parallel ``mngr observe`` discovery routinely exceeds it.
-    2. Wait for the FCT bootstrap's initial-chat sentinel, then destroy the
+    2. Wait for the DEFAULT_WORKSPACE_TEMPLATE bootstrap's initial-chat sentinel, then destroy the
        bootstrap-created chat agent (named after the bake host) and remove the
        sentinel -- so the user's first lease re-creates the chat agent under their
        own workspace name.
@@ -401,7 +401,7 @@ def finalize_baked_pool_host(
     If no sentinel appears within the timeout the bootstrap never created a chat
     agent (e.g. inference creds absent), so there is nothing to tear down and this
     returns. When the sentinel *is* present the destroy must succeed: a destroy
-    error almost always signals a vendored-mngr / FCT-template skew, and shipping a
+    error almost always signals a vendored-mngr / default-workspace-template-template skew, and shipping a
     pool host whose bootstrap state we don't understand has bitten us before, so we
     raise rather than land a half-known host in the pool.
     """
@@ -437,7 +437,7 @@ def finalize_baked_pool_host(
 
     logger.info("  Destroying bootstrap-created chat agent: {}", host_name)
     # Use the canonical in-container mngr invocation (uv run mngr in /mngr/code),
-    # which works regardless of transport / login PATH in the FCT image.
+    # which works regardless of transport / login PATH in the DEFAULT_WORKSPACE_TEMPLATE image.
     destroy_command = f"cd /mngr/code && uv run mngr destroy {shlex.quote(host_name)} --force"
     destroy_rc, _destroy_out, destroy_err = run_in_container(baked, "chat-destroy", destroy_command, 120.0)
     if destroy_rc != 0:

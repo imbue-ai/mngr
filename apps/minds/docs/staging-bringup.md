@@ -39,7 +39,7 @@ create a workspace through the Electron dev shell".
   Cluster URL is in `vault-setup.md`.
 - [ ] `modal` CLI installed.
 - [ ] `psql` available locally (for the optional sanity check in step 5).
-- [ ] Logged in to `gh` (for FCT-template clone during the pool bake).
+- [ ] Logged in to `gh` (for default-workspace-template-template clone during the pool bake).
 - [ ] Repo checkout with this branch (`mngr/minds-staging`) on disk; all
   subsequent `uv run` commands run from the monorepo root.
 
@@ -371,7 +371,7 @@ The terminal should print a `login_url`. Open it in a browser.
   Verify the redirect lands you back on the desktop client with a
   signed session cookie.
 - [ ] Create a workspace from a template repo URL (e.g.
-  `https://github.com/imbue-ai/forever-claude-template`). Watch the
+  `https://github.com/imbue-ai/default-workspace-template`). Watch the
   `/creating/<agent-id>` page; expect it to flip to `DONE` and
   redirect to the agent.
 - [ ] The agent's dockview UI loads and the `web` service is

@@ -4,7 +4,7 @@ import pytest
 
 from imbue.mngr_imbue_cloud.bake.pool_bake import BAKED_SERVICES_AGENT_NAME
 from imbue.mngr_imbue_cloud.bake.pool_bake import BakedPoolHost
-from imbue.mngr_imbue_cloud.bake.pool_bake import FCT_BAKE_TEMPLATES
+from imbue.mngr_imbue_cloud.bake.pool_bake import DEFAULT_WORKSPACE_TEMPLATE_BAKE_TEMPLATES
 from imbue.mngr_imbue_cloud.bake.pool_bake import PoolBakeError
 from imbue.mngr_imbue_cloud.bake.pool_bake import build_pool_create_command
 from imbue.mngr_imbue_cloud.bake.pool_bake import finalize_baked_pool_host
@@ -96,7 +96,7 @@ def test_wait_for_deferred_install_is_best_effort_on_transport_error() -> None:
     wait_for_deferred_install(runner, _baked(), host_name="slice-x", timeout_seconds=5)
 
 
-def test_build_pool_create_command_targets_the_given_provider_with_fct_templates() -> None:
+def test_build_pool_create_command_targets_the_given_provider_with_default_workspace_template_templates() -> None:
     command = build_pool_create_command(
         provider_instance="imbue_cloud_slice",
         host_name="slice-abc",
@@ -105,8 +105,8 @@ def test_build_pool_create_command_targets_the_given_provider_with_fct_templates
     )
     # Address carries the constant services agent name + per-bake host + provider.
     assert command[1] == f"{BAKED_SERVICES_AGENT_NAME}@slice-abc.imbue_cloud_slice"
-    # Both FCT bake templates are stacked, and the result is machine-readable.
-    for template in FCT_BAKE_TEMPLATES:
+    # Both DEFAULT_WORKSPACE_TEMPLATE bake templates are stacked, and the result is machine-readable.
+    for template in DEFAULT_WORKSPACE_TEMPLATE_BAKE_TEMPLATES:
         assert template in command
     assert "--format" in command and "json" in command
     # The pool attributes ride along as a label, and extra args are appended verbatim.

@@ -1,10 +1,10 @@
 ---
-name: new-forever-claude-clone
+name: new-default-workspace-template-clone
 argument-hint: <repo-name> [parent-dir]
-description: Create a new PRIVATE GitHub repo that is a full-history copy of imbue-ai/forever-claude-template's current main branch, clone it to <parent-dir>/<repo-name> (default $HOME/project), and push. Use when the user asks to "spin up a new forever-claude clone", "fork the forever-claude template as a private repo", "make me a new private copy of forever-claude-template", or similar.
+description: Create a new PRIVATE GitHub repo that is a full-history copy of imbue-ai/default-workspace-template's current main branch, clone it to <parent-dir>/<repo-name> (default $HOME/project), and push. Use when the user asks to "spin up a new default-workspace-template clone", "fork the default-workspace-template template as a private repo", "make me a new private copy of default-workspace-template", or similar.
 ---
 
-# Create a new private copy of forever-claude-template
+# Create a new private copy of default-workspace-template
 
 This skill is a thin wrapper around the `create-new-mind-repo` recipe in `~/project/mngr/justfile`. The recipe owns all the real logic (preflight checks, cloning, repo creation, push, PAT URL printing). Your job is to parse the user's args, invoke the recipe, and relay its output.
 
@@ -31,7 +31,7 @@ just create-new-mind-repo "$REPO"            # default parent
 just create-new-mind-repo "$REPO" "$PARENT_DIR"  # custom parent
 ```
 
-The recipe handles every preflight check (gh auth, FCT presence, target dir free, target repo not yet on GitHub), the clone, the remote rewire, `gh repo create --private --push`, and prints a pre-filled fine-grained PAT URL at the end.
+The recipe handles every preflight check (gh auth, DEFAULT_WORKSPACE_TEMPLATE presence, target dir free, target repo not yet on GitHub), the clone, the remote rewire, `gh repo create --private --push`, and prints a pre-filled fine-grained PAT URL at the end.
 
 ## Report
 
@@ -44,6 +44,6 @@ Relay the recipe's output to the user. Specifically:
 ## Things not to do
 
 - Do not reimplement the steps inline. If the recipe is missing or broken, fix the recipe (`~/project/mngr/justfile`) rather than working around it from the skill.
-- Do not push to or modify `imbue-ai/forever-claude-template` -- the recipe only reads from it.
+- Do not push to or modify `imbue-ai/default-workspace-template` -- the recipe only reads from it.
 - Do not create the repo under an owner the user did not name. The recipe always uses the gh-authenticated user; if the user wanted an org repo, stop and ask -- this skill currently only handles personal repos.
 - Do not try to mint a PAT via any API. Just relay the URL the recipe prints.

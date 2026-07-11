@@ -106,7 +106,7 @@ class LimaBoxImageCache(BoxImageCacheInterface):
             raise BoxImageCacheError(f"unexpected df output for {self.cache_dir}: {out.strip()!r}") from exc
         if available_bytes < required_bytes:
             raise BoxImageCacheError(
-                f"insufficient disk on box for the FCT image tar: need {required_bytes} bytes, "
+                f"insufficient disk on box for the DEFAULT_WORKSPACE_TEMPLATE image tar: need {required_bytes} bytes, "
                 f"have {available_bytes} free in {self.cache_dir}"
             )
 

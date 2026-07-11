@@ -1247,7 +1247,7 @@ def run_e2e() -> int:
                 )
 
                 # === Iter 10 Phase C: kick the agent to re-request ===
-                # The latchkey skill (FCT) says to re-POST /permission-requests
+                # The latchkey skill (DEFAULT_WORKSPACE_TEMPLATE) says to re-POST /permission-requests
                 # when a previous request was denied. The kick gives Claude
                 # the explicit user-side signal; without a follow-up the
                 # agent's slack tool sits on its polling loop until the
