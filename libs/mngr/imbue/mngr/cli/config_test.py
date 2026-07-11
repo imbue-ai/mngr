@@ -1,6 +1,7 @@
 """Unit tests for config CLI command helper functions."""
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 import pluggy
@@ -8,6 +9,7 @@ import pytest
 import tomlkit
 from click.testing import CliRunner
 
+from imbue.mngr.cli.config import _apply_config_value
 from imbue.mngr.cli.config import _emit_all_paths
 from imbue.mngr.cli.config import _emit_config_list
 from imbue.mngr.cli.config import _emit_config_set_result
@@ -29,7 +31,9 @@ from imbue.mngr.cli.config import _wizard_docker_volume_isolation
 from imbue.mngr.cli.config import config
 from imbue.mngr.config.data_types import ConfigScope
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.config.loader import parse_config
 from imbue.mngr.errors import ConfigKeyNotFoundError
+from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.utils.toml_config import load_config_file_tomlkit
 from imbue.mngr.utils.toml_config import save_config_file
@@ -719,8 +723,53 @@ def test_emit_all_paths_human_with_error(capsys: pytest.CaptureFixture[str]) -> 
 
 
 # =============================================================================
+# Shared validated write path (_apply_config_value)
+# =============================================================================
+
+
+def test_apply_config_value_writes_valid_value(tmp_path: Path) -> None:
+    """A valid key/value is written to the file through the shared writer."""
+    config_path = tmp_path / "settings.toml"
+    base = parse_config({}, frozenset())
+    _apply_config_value(config_path, "commands.create.type", "command", base_config=base, disabled_plugins=frozenset())
+    assert _get_default_agent_type(load_config_file_tomlkit(config_path).unwrap()) == "command"
+
+
+def test_apply_config_value_rejects_invalid_config_before_writing(tmp_path: Path) -> None:
+    """An invalid resulting config is rejected up front, and nothing is persisted.
+
+    This is what routing the wizard through the same path as `config set` buys:
+    a bad value fails at write time instead of silently breaking the next load.
+    """
+    config_path = tmp_path / "settings.toml"
+    base = parse_config({}, frozenset())
+    with pytest.raises(ConfigParseError):
+        _apply_config_value(
+            config_path, "this_is_not_a_real_config_key", "x", base_config=base, disabled_plugins=frozenset()
+        )
+    assert not config_path.exists()
+
+
+# =============================================================================
 # config wizard: Claude config dir isolation step
 # =============================================================================
+
+
+def _writing_apply(config_path: Path) -> Callable[[str, object], None]:
+    """A wizard ``apply_fn`` that writes to ``config_path`` without validation.
+
+    Stands in for the real validated writer (``_apply_config_value``) in the
+    wizard-step unit tests, which exercise prompt/skip logic rather than schema
+    validation (validation is covered by the ``config set`` tests and the
+    ``_apply_config_value`` tests directly).
+    """
+
+    def apply(key: str, value: object) -> None:
+        doc = load_config_file_tomlkit(config_path)
+        set_nested_value(doc, key, value)
+        save_config_file(config_path, doc)
+
+    return apply
 
 
 def _read_isolation_value(config_path: Path) -> object:
@@ -744,6 +793,7 @@ def test_wizard_isolation_writes_false_when_user_picks_share(tmp_path: Path) -> 
 
     _wizard_claude_config_isolation(
         config_path,
+        _writing_apply(config_path),
         is_claude_registered_fn=lambda: True,
         is_interactive_fn=lambda: True,
         prompt_fn=lambda: False,
@@ -758,6 +808,7 @@ def test_wizard_isolation_writes_true_when_user_picks_isolate(tmp_path: Path) ->
 
     _wizard_claude_config_isolation(
         config_path,
+        _writing_apply(config_path),
         is_claude_registered_fn=lambda: True,
         is_interactive_fn=lambda: True,
         prompt_fn=lambda: True,
@@ -772,6 +823,7 @@ def test_wizard_isolation_skips_when_claude_not_registered(tmp_path: Path) -> No
 
     _wizard_claude_config_isolation(
         config_path,
+        _writing_apply(config_path),
         is_claude_registered_fn=lambda: False,
         is_interactive_fn=lambda: True,
         prompt_fn=lambda: pytest.fail("prompt must not be called when claude is unregistered"),
@@ -789,6 +841,7 @@ def test_wizard_isolation_skips_when_already_set(tmp_path: Path) -> None:
 
     _wizard_claude_config_isolation(
         config_path,
+        _writing_apply(config_path),
         is_claude_registered_fn=lambda: True,
         is_interactive_fn=lambda: True,
         prompt_fn=lambda: pytest.fail("prompt must not be called when the setting already exists"),
@@ -803,6 +856,7 @@ def test_wizard_isolation_writes_nothing_when_cancelled(tmp_path: Path) -> None:
 
     _wizard_claude_config_isolation(
         config_path,
+        _writing_apply(config_path),
         is_claude_registered_fn=lambda: True,
         is_interactive_fn=lambda: True,
         prompt_fn=lambda: None,
@@ -817,6 +871,7 @@ def test_wizard_isolation_non_interactive_prints_hint_without_writing(tmp_path: 
 
     _wizard_claude_config_isolation(
         config_path,
+        _writing_apply(config_path),
         is_claude_registered_fn=lambda: True,
         is_interactive_fn=lambda: False,
         prompt_fn=lambda: pytest.fail("prompt must not be called without an interactive terminal"),
@@ -859,6 +914,7 @@ def test_wizard_default_agent_type_writes_picked_value(tmp_path: Path) -> None:
 
     _wizard_default_agent_type(
         config_path,
+        _writing_apply(config_path),
         list_choices_fn=lambda _raw: ["claude", "command"],
         is_interactive_fn=lambda: True,
         prompt_fn=lambda _available: "claude",
@@ -876,6 +932,7 @@ def test_wizard_default_agent_type_skips_when_already_set(tmp_path: Path) -> Non
 
     _wizard_default_agent_type(
         config_path,
+        _writing_apply(config_path),
         list_choices_fn=lambda _raw: ["claude", "command"],
         is_interactive_fn=lambda: True,
         prompt_fn=lambda _available: pytest.fail("prompt must not be called when already set"),
@@ -890,6 +947,7 @@ def test_wizard_default_agent_type_skips_when_no_choices(tmp_path: Path) -> None
 
     _wizard_default_agent_type(
         config_path,
+        _writing_apply(config_path),
         list_choices_fn=lambda _raw: [],
         is_interactive_fn=lambda: True,
         prompt_fn=lambda _available: pytest.fail("prompt must not be called when no types are registered"),
@@ -904,6 +962,7 @@ def test_wizard_default_agent_type_skip_choice_writes_nothing(tmp_path: Path) ->
 
     _wizard_default_agent_type(
         config_path,
+        _writing_apply(config_path),
         list_choices_fn=lambda _raw: ["claude", "command"],
         is_interactive_fn=lambda: True,
         prompt_fn=lambda _available: None,
@@ -918,6 +977,7 @@ def test_wizard_default_agent_type_non_interactive_prints_hint_without_writing(t
 
     _wizard_default_agent_type(
         config_path,
+        _writing_apply(config_path),
         list_choices_fn=lambda _raw: ["claude"],
         is_interactive_fn=lambda: False,
         prompt_fn=lambda _available: pytest.fail("prompt must not be called without an interactive terminal"),
@@ -953,6 +1013,7 @@ def test_wizard_docker_isolation_writes_true_when_user_picks_isolate(tmp_path: P
 
     _wizard_docker_volume_isolation(
         config_path,
+        _writing_apply(config_path),
         is_interactive_fn=lambda: True,
         prompt_fn=lambda: True,
     )
@@ -966,6 +1027,7 @@ def test_wizard_docker_isolation_writes_false_when_user_picks_share(tmp_path: Pa
 
     _wizard_docker_volume_isolation(
         config_path,
+        _writing_apply(config_path),
         is_interactive_fn=lambda: True,
         prompt_fn=lambda: False,
     )
@@ -982,6 +1044,7 @@ def test_wizard_docker_isolation_skips_when_already_set(tmp_path: Path) -> None:
 
     _wizard_docker_volume_isolation(
         config_path,
+        _writing_apply(config_path),
         is_interactive_fn=lambda: True,
         prompt_fn=lambda: pytest.fail("prompt must not be called when the setting already exists"),
     )
@@ -995,6 +1058,7 @@ def test_wizard_docker_isolation_writes_nothing_when_cancelled(tmp_path: Path) -
 
     _wizard_docker_volume_isolation(
         config_path,
+        _writing_apply(config_path),
         is_interactive_fn=lambda: True,
         prompt_fn=lambda: None,
     )
@@ -1008,6 +1072,7 @@ def test_wizard_docker_isolation_non_interactive_prints_hint_without_writing(tmp
 
     _wizard_docker_volume_isolation(
         config_path,
+        _writing_apply(config_path),
         is_interactive_fn=lambda: False,
         prompt_fn=lambda: pytest.fail("prompt must not be called without an interactive terminal"),
     )

@@ -575,19 +575,12 @@ def _config_set_impl(ctx: click.Context, key: str, value: str, **kwargs: Any) ->
     scope = ConfigScope((opts.scope or "project").upper())
     config_path = get_config_path(scope, root_name, mngr_ctx.profile_dir, mngr_ctx.concurrency_group)
 
-    # Load existing config
-    doc = load_config_file_tomlkit(config_path)
-
-    # Parse and set the value
+    # Parse the raw CLI string, then set + validate + save through the shared
+    # write path (also used by the config wizard steps).
     parsed_value = parse_scalar_value(value)
-    set_nested_value(doc, key, parsed_value)
-
-    # Validate the resulting config (resolving any ``__extend`` keys already in
-    # the file against the merged context) before saving.
-    _validate_doc_after_set(doc, mngr_ctx.config, disabled_plugins=mngr_ctx.config.disabled_plugins)
-
-    # Save the config
-    save_config_file(config_path, doc)
+    _apply_config_value(
+        config_path, key, parsed_value, base_config=mngr_ctx.config, disabled_plugins=mngr_ctx.config.disabled_plugins
+    )
 
     _emit_config_set_result(key, parsed_value, scope, config_path, output_opts)
 
@@ -602,6 +595,27 @@ def _validate_doc_after_set(doc: Any, base_config: MngrConfig, *, disabled_plugi
     raw = dict(doc.unwrap())
     resolved = resolve_extends(base_config, raw)
     parse_config(resolved, disabled_plugins=disabled_plugins)
+
+
+def _apply_config_value(
+    config_path: Path,
+    key: str,
+    value: Any,
+    *,
+    base_config: MngrConfig,
+    disabled_plugins: frozenset[str],
+) -> None:
+    """Set a single key in a config file, validating the result before saving.
+
+    The single validate-then-save write path shared by ``mngr config set`` and
+    the ``mngr config wizard`` steps, so every write is checked against the
+    config schema (rejecting e.g. an invalid docker isolation combination) rather
+    than only failing on the next load.
+    """
+    doc = load_config_file_tomlkit(config_path)
+    set_nested_value(doc, key, value)
+    _validate_doc_after_set(doc, base_config, disabled_plugins=disabled_plugins)
+    save_config_file(config_path, doc)
 
 
 def _config_merge_op_impl(ctx: click.Context, key: str, value: str, *, op: str, **kwargs: Any) -> None:
@@ -1159,11 +1173,19 @@ def _config_wizard_impl(ctx: click.Context, **kwargs: Any) -> None:
     root_name = os.environ.get("MNGR_ROOT_NAME", "mngr")
     config_path = get_config_path(ConfigScope.USER, root_name, mngr_ctx.profile_dir, mngr_ctx.concurrency_group)
 
+    # Every wizard write goes through the same validate-then-save path as
+    # ``mngr config set`` (bound here to the user-scope file and this run's
+    # config context), so the wizard can never persist an invalid setting.
+    def apply(key: str, value: Any) -> None:
+        _apply_config_value(
+            config_path, key, value, base_config=mngr_ctx.config, disabled_plugins=mngr_ctx.config.disabled_plugins
+        )
+
     write_human_line("mngr config wizard")
     write_human_line("")
-    _wizard_default_agent_type(config_path)
-    _wizard_claude_config_isolation(config_path)
-    _wizard_docker_volume_isolation(config_path)
+    _wizard_default_agent_type(config_path, apply)
+    _wizard_claude_config_isolation(config_path, apply)
+    _wizard_docker_volume_isolation(config_path, apply)
 
 
 # -- Default agent type step --
@@ -1215,6 +1237,7 @@ def _prompt_default_agent_type_choice(available: list[str]) -> str | None:
 
 def _wizard_default_agent_type(
     config_path: Path,
+    apply_fn: Callable[[str, Any], None],
     *,
     # Dependencies are exposed as keyword arguments so tests can substitute
     # in-memory fakes without monkeypatching module-level callables.
@@ -1224,8 +1247,9 @@ def _wizard_default_agent_type(
 ) -> None:
     """Prompt for the default agent type for ``mngr create``.
 
-    Writes ``commands.create.type`` to the user-scope config. Skips silently if a
-    default is already set there, or if no agent types are registered yet.
+    Writes ``commands.create.type`` via ``apply_fn`` (the shared validated write
+    path). Skips silently if a default is already set, or no agent types are
+    registered yet.
     """
     existing = _load_config_file(config_path)
     current = _get_default_agent_type(existing)
@@ -1251,9 +1275,7 @@ def _wizard_default_agent_type(
         write_human_line("Skipping default agent type.")
         return
 
-    doc = load_config_file_tomlkit(config_path)
-    set_nested_value(doc, "commands.create.type", chosen)
-    save_config_file(config_path, doc)
+    apply_fn("commands.create.type", chosen)
     write_human_line("Set commands.create.type = '{}' in {}", chosen, config_path)
 
 
@@ -1302,6 +1324,7 @@ def _prompt_claude_isolation_choice() -> bool | None:
 
 def _wizard_claude_config_isolation(
     config_path: Path,
+    apply_fn: Callable[[str, Any], None],
     *,
     # Dependencies are exposed as keyword arguments so tests can substitute
     # in-memory fakes without monkeypatching module-level callables (mirrors
@@ -1314,8 +1337,8 @@ def _wizard_claude_config_isolation(
 
     Only runs when the ``claude`` agent type is registered (the mngr Claude
     plugin is installed); config-dir isolation is meaningless otherwise. Writes
-    ``agent_types.claude.isolate_local_config_dir`` to the user-scope config.
-    Skips silently if the setting is already present in that file.
+    ``agent_types.claude.isolate_local_config_dir`` via ``apply_fn`` (the shared
+    validated write path). Skips silently if the setting is already present.
     """
     if not is_claude_registered_fn():
         return
@@ -1341,9 +1364,7 @@ def _wizard_claude_config_isolation(
         write_human_line("Skipping Claude config dir isolation.")
         return
 
-    doc = load_config_file_tomlkit(config_path)
-    set_nested_value(doc, "agent_types.claude.isolate_local_config_dir", choice)
-    save_config_file(config_path, doc)
+    apply_fn("agent_types.claude.isolate_local_config_dir", choice)
     write_human_line("Set agent_types.claude.isolate_local_config_dir = {} in {}", str(choice).lower(), config_path)
 
 
@@ -1386,6 +1407,7 @@ def _prompt_docker_isolation_choice() -> bool | None:
 
 def _wizard_docker_volume_isolation(
     config_path: Path,
+    apply_fn: Callable[[str, Any], None],
     *,
     # Dependencies are exposed as keyword arguments so tests can substitute
     # in-memory fakes without monkeypatching module-level callables.
@@ -1394,11 +1416,14 @@ def _wizard_docker_volume_isolation(
 ) -> None:
     """Prompt whether to isolate host volumes for docker hosts.
 
-    Writes ``providers.docker.isolate_host_volumes`` to the user-scope config,
-    opting into the forthcoming default (each host container sees only its own
-    host_dir sub-folder) before it flips and silencing the one-shot deprecation
-    warning a fresh install otherwise hits the first time it uses docker. Skips
-    silently if the setting is already present in that file.
+    Writes ``providers.docker.isolate_host_volumes`` via ``apply_fn`` (the shared
+    validated write path), opting into the forthcoming default (each host
+    container sees only its own host_dir sub-folder) before it flips and
+    silencing the one-shot deprecation warning a fresh install otherwise hits the
+    first time it uses docker. Because the write is validated, an invalid
+    combination (e.g. isolation with ``is_host_volume_created = false``) is
+    rejected up front rather than breaking the next load. Skips silently if the
+    setting is already present.
     """
     existing = _load_config_file(config_path)
     current = _get_existing_docker_isolation_setting(existing)
@@ -1421,9 +1446,7 @@ def _wizard_docker_volume_isolation(
         write_human_line("Skipping docker host-volume isolation.")
         return
 
-    doc = load_config_file_tomlkit(config_path)
-    set_nested_value(doc, "providers.docker.isolate_host_volumes", choice)
-    save_config_file(config_path, doc)
+    apply_fn("providers.docker.isolate_host_volumes", choice)
     write_human_line("Set providers.docker.isolate_host_volumes = {} in {}", str(choice).lower(), config_path)
 
 
