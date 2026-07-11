@@ -73,8 +73,10 @@ docker run --rm --platform "$DOCKER_PLATFORM" -v "$OUT_DIR:/out" "$ALPINE_IMAGE"
 STAGE="$OUT_DIR/qemu"
 rm -rf "$STAGE"
 mkdir -p "$STAGE/bin"
+# The container installs the binary 0755; no host-side chmod, which the invoking
+# user is not permitted to do -- with a rootful Docker daemon the bind-mounted
+# payload is owned by root.
 mv "$OUT_DIR/qemu-img" "$STAGE/bin/qemu-img"
-chmod 0755 "$STAGE/bin/qemu-img"
 
 TARBALL="$OUT_DIR/qemu-img-${QEMU_VERSION}-linux-${ARCH}.tar.gz"
 echo "==> Writing $TARBALL"
