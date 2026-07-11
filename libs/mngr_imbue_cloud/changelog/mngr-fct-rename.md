@@ -1,0 +1,3 @@
+The forever-claude-template repo is being renamed to default-workspace-template (with the `fct`/`FCT` shorthand expanded to `default_workspace_template`/`DEFAULT_WORKSPACE_TEMPLATE` forms).
+
+The per-box template image cache tag prefix changes from `fct:` to `default-workspace-template:`, and the per-box cache dir from `.cache/mngr-slice-fct` to `.cache/mngr-slice-default-workspace-template`. The cache build lock now `mkdir -p`s the cache dir on demand, so boxes prepped under the old dir name keep working: their first production `--from-tag` bake rebuilds the image once (instead of loading the old cached tar) and re-seeds the cache under the new name.

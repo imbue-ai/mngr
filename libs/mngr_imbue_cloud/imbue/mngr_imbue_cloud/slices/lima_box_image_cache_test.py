@@ -9,8 +9,8 @@ from imbue.mngr_imbue_cloud.slices.box_image_cache import TransferKey
 from imbue.mngr_imbue_cloud.slices.lima_box_image_cache import LimaBoxImageCache
 from imbue.mngr_imbue_cloud.slices.lima_slice_client import LimaSliceVpsClient
 
-_CACHE_DIR = "/home/limahost/.cache/mngr-slice-fct"
-_TAG = "fct:minds-v0.3.2"
+_CACHE_DIR = "/home/limahost/.cache/mngr-slice-default-workspace-template"
+_TAG = "default-workspace-template:minds-v0.3.2"
 _KEY = TransferKey(private_key_path_on_box=f"{_CACHE_DIR}/.transfer-abc", public_key="ssh-ed25519 AAA")
 
 
@@ -87,7 +87,7 @@ def test_save_image_renders_atomic_save_and_prune() -> None:
     client, cache = _build(lambda cmd: (0, "", ""))
     cache.save_image_from_slice(_TAG, vm_ssh_port=2200, transfer_key=_KEY)
     save_cmd = next(c for c in client.recorded if "docker save" in c)
-    assert "docker save fct:minds-v0.3.2" in save_cmd
+    assert "docker save default-workspace-template:minds-v0.3.2" in save_cmd
     assert "-p 2200 root@127.0.0.1" in save_cmd
     assert ".tar.tmp" in save_cmd and "mv" in save_cmd
     # The save also prunes every other tag's tar.

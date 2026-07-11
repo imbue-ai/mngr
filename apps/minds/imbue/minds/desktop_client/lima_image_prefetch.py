@@ -85,7 +85,7 @@ def should_use_prebaked_lima_image(
 ) -> bool:
     """Decide whether this create should use the pre-baked image.
 
-    True only for the *default* workspace: a Lima create of the default FCT repo
+    True only for the *default* workspace: a Lima create of the default workspace template repo
     at the current release tag, with a configured source, not in the dev loop, and
     not disabled by the kill switch. Anything else falls back to build-in-VM.
     """
@@ -257,7 +257,7 @@ class LimaImageCreateGate(FrozenModel):
 
     prefetcher: LimaImagePrefetcher = Field(description="The background image prefetcher")
     current_release_tag: str = Field(description="Release tag the baked image is keyed to (FALLBACK_BRANCH)")
-    default_repo_url: str = Field(description="Default forever-claude-template repo URL")
+    default_repo_url: str = Field(description="Default workspace template repo URL")
     is_dev_loop: bool = Field(description="Whether the operator opted into local-worktree dev defaults")
 
     def resolve_qcow2_for_create(

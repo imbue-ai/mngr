@@ -6,7 +6,7 @@ Run via::
 
 where ``<snapshot-image-id>`` is the Modal image id printed by
 ``scripts/snapshot_minds_e2e_state.py``. That script captures a Modal
-sandbox in which the FCT workspace's ``system_interface`` UI has
+sandbox in which the DEFAULT_WORKSPACE_TEMPLATE workspace's ``system_interface`` UI has
 rendered, then ``docker stop``s the workspace containers so the
 filesystem snapshot represents a deterministic stopped state.
 
@@ -60,7 +60,7 @@ from imbue.minds.desktop_client.e2e_workspace_runner import create_workspace_via
 from imbue.minds.desktop_client.e2e_workspace_runner import destroy_agent_best_effort
 from imbue.minds.desktop_client.e2e_workspace_runner import ensure_minds_env_defaults
 from imbue.minds.desktop_client.e2e_workspace_runner import find_free_port
-from imbue.minds.desktop_client.e2e_workspace_runner import resolve_fct_path
+from imbue.minds.desktop_client.e2e_workspace_runner import resolve_default_workspace_template_path
 from imbue.minds.desktop_client.recovery_probe import PROBE_SENTINEL
 from imbue.minds.desktop_client.recovery_probe import build_probe_shell_command
 from imbue.minds.desktop_client.restic_cli import ResticNotInstalledError
@@ -295,7 +295,7 @@ def _ensure_dockerd_after_snapshot_resume() -> None:
 @pytest.mark.docker
 @pytest.mark.timeout(60)
 def test_workspace_docker_container_is_present_and_stopped() -> None:
-    """The snapshot captured a stopped FCT workspace Docker container.
+    """The snapshot captured a stopped DEFAULT_WORKSPACE_TEMPLATE workspace Docker container.
 
     Asserts:
     - dockerd sees at least one container (``docker ps -a`` non-empty)
@@ -475,7 +475,7 @@ def _opt_into_pytest_config_guard(settings_path: Path) -> None:
 
     mngr's config guard refuses to run under ``PYTEST_CURRENT_TEST`` unless every
     config file it loads opts in. This writes the file in place with no restore,
-    so ``settings_path`` must live under a throwaway tree (``tmp_path`` or an FCT
+    so ``settings_path`` must live under a throwaway tree (``tmp_path`` or a DEFAULT_WORKSPACE_TEMPLATE
     clone) -- never a real checkout.
     """
     doc = tomlkit.parse(settings_path.read_text()) if settings_path.exists() else tomlkit.document()
@@ -505,9 +505,9 @@ def _isolated_host_config_root(scratch_dir: Path) -> Path:
 
 
 def _prepare_electron_workspace_inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
-    """Set the minds env + provider overrides and materialize the throwaway FCT + host config.
+    """Set the minds env + provider overrides and materialize the throwaway DEFAULT_WORKSPACE_TEMPLATE + host config.
 
-    Returns ``(fct_path, host_config_root)`` for ``create_workspace_via_electron``.
+    Returns ``(default_workspace_template_path, host_config_root)`` for ``create_workspace_via_electron``.
     """
     configure_logging()
     # Route env-var defaults through monkeypatch so injected MINDS_ROOT_NAME /
@@ -516,19 +516,19 @@ def _prepare_electron_workspace_inputs(tmp_path: Path, monkeypatch: pytest.Monke
     ensure_minds_env_defaults(setenv=monkeypatch.setenv)
     # No Modal creds here, so silence the Electron-spawned mngr's Modal discovery.
     monkeypatch.setenv("MNGR__PROVIDERS__MODAL__IS_ENABLED", "false")
-    # FCT pins docker_runtime = "runsc" (gVisor), absent in CI / the sandbox;
-    # override to the default runtime (FCT names this exact escape-hatch env var).
+    # DEFAULT_WORKSPACE_TEMPLATE pins docker_runtime = "runsc" (gVisor), absent in CI / the sandbox;
+    # override to the default runtime (DEFAULT_WORKSPACE_TEMPLATE names this exact escape-hatch env var).
     monkeypatch.setenv("MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME", "runc")
     # The Electron-spawned mngr loads two project-config trees under
     # PYTEST_CURRENT_TEST: the host-side config (a throwaway opted-in copy built
-    # here) and the FCT worktree. The FCT worktree is materialized ahead of time
-    # by ``materialize_paired_fct_worktree`` (baked into the snapshot image in
+    # here) and the DEFAULT_WORKSPACE_TEMPLATE worktree. The DEFAULT_WORKSPACE_TEMPLATE worktree is materialized ahead of time
+    # by ``materialize_paired_default_workspace_template_worktree`` (baked into the snapshot image in
     # CI, or created by the local test recipe) with its pytest opt-in already
     # committed, so this only resolves it -- and errors loudly if the materialize
     # step never ran.
-    fct_path = resolve_fct_path()
+    default_workspace_template_path = resolve_default_workspace_template_path()
     host_config_root = _isolated_host_config_root(tmp_path)
-    return fct_path, host_config_root
+    return default_workspace_template_path, host_config_root
 
 
 @pytest.mark.minds_snapshot_resume
@@ -543,7 +543,7 @@ def test_create_apikey_workspace_and_chat_via_electron(
     """Drive Electron to create a manual-API-key Docker workspace, then chat with it.
 
     The product-level round-trip: pick the ``api_key`` AI provider, type a raw
-    Anthropic key, create a local Docker workspace from FCT, and assert the agent
+    Anthropic key, create a local Docker workspace from DEFAULT_WORKSPACE_TEMPLATE, and assert the agent
     in the workspace's ``system_interface`` answers a chat message (echoes a
     unique token) -- end-to-end through the real Electron app and the desktop
     client proxy.
@@ -561,7 +561,7 @@ def test_create_apikey_workspace_and_chat_via_electron(
     if not anthropic_api_key:
         pytest.skip("ANTHROPIC_API_KEY is required for the manual-key workspace chat round-trip")
 
-    fct_path, host_config_root = _prepare_electron_workspace_inputs(tmp_path, monkeypatch)
+    default_workspace_template_path, host_config_root = _prepare_electron_workspace_inputs(tmp_path, monkeypatch)
 
     workspace_name = f"forever-{get_short_random_string()}"
     token = get_short_random_string()
@@ -576,7 +576,7 @@ def test_create_apikey_workspace_and_chat_via_electron(
 
     try:
         create_workspace_via_electron(
-            fct_path,
+            default_workspace_template_path,
             workspace_name,
             debug_port,
             host_config_dir=host_config_root,
@@ -706,7 +706,7 @@ def test_backup_update_gate_blocks_on_live_chat_and_stop_chats_clears_it(
 # -- Backup service: check / update / converge against the resumed workspace --
 #
 # These replace the old test_backup_service_release.py release tests (which
-# ran against a fake FCT-shaped repo with a stub supervisorctl). Here
+# ran against a fake default-workspace-template-shaped repo with a stub supervisorctl). Here
 # everything is real: the baked workspace's git history (shared with the
 # official template repo on GitHub, so the check's `official`-remote tag
 # fetch runs for real), the actual supervisord + host-backup program inside

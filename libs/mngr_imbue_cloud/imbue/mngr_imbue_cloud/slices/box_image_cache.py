@@ -24,13 +24,13 @@ class TransferKey(FrozenModel):
 
 
 def box_image_tar_name(image_tag: str) -> str:
-    """Filesystem-safe tar filename for an image ref (``fct:minds-v0.3.2`` -> ``fct-minds-v0.3.2.tar``)."""
+    """Filesystem-safe tar filename for an image ref (``default-workspace-template:minds-v0.3.2`` -> ``default-workspace-template-minds-v0.3.2.tar``)."""
     safe = re.sub(r"[^A-Za-z0-9._-]+", "-", image_tag).strip("-")
     return f"{safe}.tar"
 
 
 class BoxImageCacheInterface(MutableModel, ABC):
-    """Manages the single cached FCT image tar a bare-metal box keeps to skip per-slice image builds."""
+    """Manages the single cached DEFAULT_WORKSPACE_TEMPLATE image tar a bare-metal box keeps to skip per-slice image builds."""
 
     @abstractmethod
     def has_tar(self, image_tag: str) -> bool:
