@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
-# Bake the forever-claude-template toolchain into a Lima VM (issue 2306).
+# Bake the default-workspace-template toolchain into a Lima VM (issue 2306).
 # Runs as root inside the VM (invoked by build-lima-image.sh via `limactl shell`).
 #
-# Runs the exact FCT build scripts the Lima provider runs at create time, so at
+# Runs the exact DEFAULT_WORKSPACE_TEMPLATE build scripts the Lima provider runs at create time, so at
 # create time the provisioning `command -v ... || install` guards short-circuit
 # and the per-create workspace build hits warm caches. Finishes with cheap
 # reproducibility cleanups so consecutive releases produce small desync deltas.
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
-: "${FCT_REPO_URL:?FCT_REPO_URL is required}"
-: "${FCT_REF:?FCT_REF is required}"
+: "${DEFAULT_WORKSPACE_TEMPLATE_REPO_URL:?DEFAULT_WORKSPACE_TEMPLATE_REPO_URL is required}"
+: "${DEFAULT_WORKSPACE_TEMPLATE_REF:?DEFAULT_WORKSPACE_TEMPLATE_REF is required}"
 # Pin mtimes for the cleanup pass (reproducibility helps upgrade deltas, not the
 # first full download). Fixed instant; not "now", which would differ every build.
 export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-1700000000}"
 # setup_system.sh installs uv into /root/.local/bin. install_dependencies.sh and
 # build_workspace.sh add it to PATH themselves, but deferred_install.sh (Playwright)
 # does not -- without this it fails with "uv: command not found" and Chromium never
-# gets baked. Put it on PATH for the whole bake so every FCT script finds uv.
+# gets baked. Put it on PATH for the whole bake so every DEFAULT_WORKSPACE_TEMPLATE script finds uv.
 export PATH="/root/.local/bin:$PATH"
 
 REPO_ROOT=/mngr/code
@@ -29,14 +29,14 @@ apt-get install -y --no-install-recommends ca-certificates git btrfs-progs
 # (chmod 777). Bake it so the first boot has it already.
 mkdir -p /code && chmod 777 /code
 
-echo "==> Cloning forever-claude-template ${FCT_REF} into ${REPO_ROOT}"
+echo "==> Cloning default-workspace-template ${DEFAULT_WORKSPACE_TEMPLATE_REF} into ${REPO_ROOT}"
 mkdir -p "$(dirname "$REPO_ROOT")"
 rm -rf "$REPO_ROOT"
-git clone --depth 1 --branch "$FCT_REF" "$FCT_REPO_URL" "$REPO_ROOT"
+git clone --depth 1 --branch "$DEFAULT_WORKSPACE_TEMPLATE_REF" "$DEFAULT_WORKSPACE_TEMPLATE_REPO_URL" "$REPO_ROOT"
 git config --global --add safe.directory "$REPO_ROOT"
 
-echo "==> Running the FCT toolchain build (setup_system -> install_dependencies -> build_workspace)"
-# These are the exact scripts the Lima create template runs (FCT
+echo "==> Running the DEFAULT_WORKSPACE_TEMPLATE toolchain build (setup_system -> install_dependencies -> build_workspace)"
+# These are the exact scripts the Lima create template runs (DEFAULT_WORKSPACE_TEMPLATE
 # .mngr/settings.toml [create_templates.lima] extra_provision_command), so baking
 # them makes the create-time run idempotent + fast.
 bash "$REPO_ROOT/scripts/setup_system.sh"
@@ -76,4 +76,4 @@ else
 fi
 sync
 
-echo "==> Bake complete for ${FCT_REF}"
+echo "==> Bake complete for ${DEFAULT_WORKSPACE_TEMPLATE_REF}"

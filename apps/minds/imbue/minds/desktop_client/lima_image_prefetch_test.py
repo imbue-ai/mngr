@@ -31,7 +31,7 @@ from imbue.minds.lima_image.primitives import ImageArch
 from imbue.minds.lima_image.primitives import MindsImageVersion
 from imbue.minds.lima_image.primitives import Sha256Hex
 
-_DEFAULT_REPO = "https://github.com/imbue-ai/forever-claude-template.git"
+_DEFAULT_REPO = "https://github.com/imbue-ai/default-workspace-template.git"
 _TAG = "minds-v0.3.4"
 _SOURCE = LimaImageSource(base_url="https://cdn.example/lima", public_key="RWkey")
 

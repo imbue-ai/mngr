@@ -15,8 +15,8 @@
 # Apple-Silicon Mac). Then publish with scripts/lima_image/publish.py.
 #
 # Usage:
-#   ./scripts/build-lima-image.sh --fct-ref minds-v0.3.4 [--arch amd64|arm64]
-#                                 [--fct-repo URL] [--cpus N] [--memory GiB]
+#   ./scripts/build-lima-image.sh --default-workspace-template-ref minds-v0.3.4 [--arch amd64|arm64]
+#                                 [--default-workspace-template-repo URL] [--cpus N] [--memory GiB]
 #                                 [--disk GiB] [--keep]
 set -euo pipefail
 
@@ -24,8 +24,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LIMA_IMAGE_DIR="$SCRIPT_DIR/lima_image"
 
 ARCH=""
-FCT_REF=""
-FCT_REPO="https://github.com/imbue-ai/forever-claude-template.git"
+DEFAULT_WORKSPACE_TEMPLATE_REF=""
+DEFAULT_WORKSPACE_TEMPLATE_REPO="https://github.com/imbue-ai/default-workspace-template.git"
 CPUS=4
 MEMORY=8
 # Must not exceed the disk size the FCT lima create template passes
@@ -38,8 +38,8 @@ KEEP=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --arch) ARCH="$2"; shift 2 ;;
-    --fct-ref) FCT_REF="$2"; shift 2 ;;
-    --fct-repo) FCT_REPO="$2"; shift 2 ;;
+    --default-workspace-template-ref) DEFAULT_WORKSPACE_TEMPLATE_REF="$2"; shift 2 ;;
+    --default-workspace-template-repo) DEFAULT_WORKSPACE_TEMPLATE_REPO="$2"; shift 2 ;;
     --cpus) CPUS="$2"; shift 2 ;;
     --memory) MEMORY="$2"; shift 2 ;;
     --disk) DISK="$2"; shift 2 ;;
@@ -48,8 +48,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [ -z "$FCT_REF" ]; then
-  echo "ERROR: --fct-ref <minds-v...> is required" >&2
+if [ -z "$DEFAULT_WORKSPACE_TEMPLATE_REF" ]; then
+  echo "ERROR: --default-workspace-template-ref <minds-v...> is required" >&2
   exit 1
 fi
 if [ -z "$ARCH" ]; then
@@ -88,7 +88,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "Building Lima image: arch=$ARCH instance=$INSTANCE fct_ref=$FCT_REF"
+echo "Building Lima image: arch=$ARCH instance=$INSTANCE default_workspace_template_ref=$DEFAULT_WORKSPACE_TEMPLATE_REF"
 
 # Start from a clean slate.
 limactl delete -f "$INSTANCE" >/dev/null 2>&1 || true
@@ -132,9 +132,9 @@ rm -f "$TMP_YAML"; TMP_YAML=""
 echo "==> Copying the bake provisioner into the VM"
 limactl copy "$LIMA_IMAGE_DIR/bake_provision.sh" "$INSTANCE:/tmp/bake_provision.sh"
 
-echo "==> Running the FCT toolchain bake inside the VM (this is the long pole)"
+echo "==> Running the DEFAULT_WORKSPACE_TEMPLATE toolchain bake inside the VM (this is the long pole)"
 limactl shell --workdir / "$INSTANCE" sudo env \
-  FCT_REPO_URL="$FCT_REPO" FCT_REF="$FCT_REF" bash /tmp/bake_provision.sh
+  DEFAULT_WORKSPACE_TEMPLATE_REPO_URL="$DEFAULT_WORKSPACE_TEMPLATE_REPO" DEFAULT_WORKSPACE_TEMPLATE_REF="$DEFAULT_WORKSPACE_TEMPLATE_REF" bash /tmp/bake_provision.sh
 
 echo "==> Stopping the VM for a consistent disk"
 limactl stop "$INSTANCE"
@@ -166,5 +166,5 @@ echo "  raw:   $RAW_OUT"
 echo ""
 echo "Publish with:"
 echo "  uv run python scripts/lima_image/publish.py \\"
-echo "    --version $FCT_REF --arch $ARCH_TAG --raw-image $RAW_OUT \\"
+echo "    --version $DEFAULT_WORKSPACE_TEMPLATE_REF --arch $ARCH_TAG --raw-image $RAW_OUT \\"
 echo "    --bucket <r2-bucket> --secret-key-file <minisign.key> --uploader s3"

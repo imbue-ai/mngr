@@ -23,9 +23,9 @@ in a runsc container (the isolation boundary the latchkey gateway sits outside
 of, via the provider-agnostic ``mngr_latchkey`` flow exercised by the
 deployment-test orchestrator). The full ``mngr create
 system-services@<host>.aws-<region> --template main --template aws`` command
-shape minds builds, and the FCT ``[create_templates.aws]`` block, are covered by
+shape minds builds, and the DEFAULT_WORKSPACE_TEMPLATE ``[create_templates.aws]`` block, are covered by
 the unit tests in ``agent_creator_test.py`` and the template repo; running the
-heavy FCT Docker build here would only re-test provider-agnostic machinery.
+heavy DEFAULT_WORKSPACE_TEMPLATE Docker build here would only re-test provider-agnostic machinery.
 """
 
 import os

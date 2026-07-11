@@ -26,11 +26,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MNGR_REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
-TEMPLATE_DIR="${MNGR_REPO_ROOT}/.external_worktrees/forever-claude-template"
+TEMPLATE_DIR="${MNGR_REPO_ROOT}/.external_worktrees/default-workspace-template"
 
 if [[ ! -d "${TEMPLATE_DIR}" ]]; then
     echo "ERROR: Template directory not found: ${TEMPLATE_DIR}" >&2
-    echo "       Create it with: cd ~/project/forever-claude-template && git worktree add ${TEMPLATE_DIR} -b <branch> main" >&2
+    echo "       Create it with: cd ~/project/default-workspace-template && git worktree add ${TEMPLATE_DIR} -b <branch> main" >&2
     exit 1
 fi
 
@@ -143,7 +143,7 @@ fi
 #   - .git: gitignore never lists it (git's internal dir).
 #   - uv.lock: committed at the mngr root on purpose, but each install
 #     context regenerates its own.
-# Both rsync sources (mngr monorepo for step 1, FCT template for step 2/3)
+# Both rsync sources (mngr monorepo for step 1, default workspace template for step 2/3)
 # carry their own .gitignore at the root, so the same filter applies cleanly
 # to all three rsync calls below.
 # ---------------------------------------------------------------------------
