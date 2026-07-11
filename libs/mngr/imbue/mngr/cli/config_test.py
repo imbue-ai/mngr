@@ -17,10 +17,15 @@ from imbue.mngr.cli.config import _emit_key_not_found
 from imbue.mngr.cli.config import _emit_single_path
 from imbue.mngr.cli.config import _flatten_config
 from imbue.mngr.cli.config import _format_value_for_display
+from imbue.mngr.cli.config import _get_default_agent_type
+from imbue.mngr.cli.config import _get_existing_docker_isolation_setting
 from imbue.mngr.cli.config import _get_existing_isolation_setting
 from imbue.mngr.cli.config import _get_nested_value
+from imbue.mngr.cli.config import _list_wizard_agent_type_choices
 from imbue.mngr.cli.config import _unset_nested_value
 from imbue.mngr.cli.config import _wizard_claude_config_isolation
+from imbue.mngr.cli.config import _wizard_default_agent_type
+from imbue.mngr.cli.config import _wizard_docker_volume_isolation
 from imbue.mngr.cli.config import config
 from imbue.mngr.config.data_types import ConfigScope
 from imbue.mngr.config.data_types import OutputOptions
@@ -818,3 +823,193 @@ def test_wizard_isolation_non_interactive_prints_hint_without_writing(tmp_path: 
     )
 
     assert _read_isolation_value(config_path) is None
+
+
+# =============================================================================
+# config wizard: default agent type step
+# =============================================================================
+
+
+def _read_default_agent_type(config_path: Path) -> object:
+    """Read commands.create.type back from a TOML file."""
+    return _get_default_agent_type(load_config_file_tomlkit(config_path).unwrap())
+
+
+def test_get_default_agent_type_reads_value() -> None:
+    assert _get_default_agent_type({"commands": {"create": {"type": "claude"}}}) == "claude"
+
+
+def test_get_default_agent_type_returns_none_when_absent() -> None:
+    assert _get_default_agent_type({}) is None
+    assert _get_default_agent_type({"commands": {}}) is None
+    assert _get_default_agent_type({"commands": {"create": {}}}) is None
+
+
+def test_list_wizard_agent_type_choices_unions_user_config_types() -> None:
+    """User-config [agent_types.X] names are unioned with the plugin-registered list."""
+    result = _list_wizard_agent_type_choices({"agent_types": {"my-custom": {"parent_type": "command"}}})
+    # The registered builtins vary, but the custom type must be present and the list sorted.
+    assert "my-custom" in result
+    assert result == sorted(result)
+
+
+def test_wizard_default_agent_type_writes_picked_value(tmp_path: Path) -> None:
+    """Picking a type writes commands.create.type."""
+    config_path = tmp_path / "settings.toml"
+
+    _wizard_default_agent_type(
+        config_path,
+        list_choices_fn=lambda _raw: ["claude", "command"],
+        is_interactive_fn=lambda: True,
+        prompt_fn=lambda _available: "claude",
+    )
+
+    assert _read_default_agent_type(config_path) == "claude"
+
+
+def test_wizard_default_agent_type_skips_when_already_set(tmp_path: Path) -> None:
+    """An already-set default is left untouched and the prompt is not shown."""
+    config_path = tmp_path / "settings.toml"
+    doc = load_config_file_tomlkit(config_path)
+    set_nested_value(doc, "commands.create.type", "command")
+    save_config_file(config_path, doc)
+
+    _wizard_default_agent_type(
+        config_path,
+        list_choices_fn=lambda _raw: ["claude", "command"],
+        is_interactive_fn=lambda: True,
+        prompt_fn=lambda _available: pytest.fail("prompt must not be called when already set"),
+    )
+
+    assert _read_default_agent_type(config_path) == "command"
+
+
+def test_wizard_default_agent_type_skips_when_no_choices(tmp_path: Path) -> None:
+    """With no registered agent types, the step writes nothing without prompting."""
+    config_path = tmp_path / "settings.toml"
+
+    _wizard_default_agent_type(
+        config_path,
+        list_choices_fn=lambda _raw: [],
+        is_interactive_fn=lambda: True,
+        prompt_fn=lambda _available: pytest.fail("prompt must not be called when no types are registered"),
+    )
+
+    assert not config_path.exists()
+
+
+def test_wizard_default_agent_type_skip_choice_writes_nothing(tmp_path: Path) -> None:
+    """Picking "keep no default" (prompt returns None) leaves the setting unset."""
+    config_path = tmp_path / "settings.toml"
+
+    _wizard_default_agent_type(
+        config_path,
+        list_choices_fn=lambda _raw: ["claude", "command"],
+        is_interactive_fn=lambda: True,
+        prompt_fn=lambda _available: None,
+    )
+
+    assert _read_default_agent_type(config_path) is None
+
+
+def test_wizard_default_agent_type_non_interactive_prints_hint_without_writing(tmp_path: Path) -> None:
+    """With no interactive terminal, the step prints guidance but writes nothing."""
+    config_path = tmp_path / "settings.toml"
+
+    _wizard_default_agent_type(
+        config_path,
+        list_choices_fn=lambda _raw: ["claude"],
+        is_interactive_fn=lambda: False,
+        prompt_fn=lambda _available: pytest.fail("prompt must not be called without an interactive terminal"),
+    )
+
+    assert _read_default_agent_type(config_path) is None
+
+
+# =============================================================================
+# config wizard: docker host-volume isolation step
+# =============================================================================
+
+
+def _read_docker_isolation_value(config_path: Path) -> object:
+    """Read providers.docker.isolate_host_volumes back from a TOML file."""
+    return _get_existing_docker_isolation_setting(load_config_file_tomlkit(config_path).unwrap())
+
+
+def test_get_existing_docker_isolation_setting_reads_value() -> None:
+    raw = {"providers": {"docker": {"isolate_host_volumes": True}}}
+    assert _get_existing_docker_isolation_setting(raw) is True
+
+
+def test_get_existing_docker_isolation_setting_returns_none_when_absent() -> None:
+    assert _get_existing_docker_isolation_setting({}) is None
+    assert _get_existing_docker_isolation_setting({"providers": {"docker": {}}}) is None
+    assert _get_existing_docker_isolation_setting({"providers": {}}) is None
+
+
+def test_wizard_docker_isolation_writes_true_when_user_picks_isolate(tmp_path: Path) -> None:
+    """Picking "isolate" (prompt returns True) writes isolate_host_volumes = true."""
+    config_path = tmp_path / "settings.toml"
+
+    _wizard_docker_volume_isolation(
+        config_path,
+        is_interactive_fn=lambda: True,
+        prompt_fn=lambda: True,
+    )
+
+    assert _read_docker_isolation_value(config_path) is True
+
+
+def test_wizard_docker_isolation_writes_false_when_user_picks_share(tmp_path: Path) -> None:
+    """Picking "share" (prompt returns False) writes isolate_host_volumes = false."""
+    config_path = tmp_path / "settings.toml"
+
+    _wizard_docker_volume_isolation(
+        config_path,
+        is_interactive_fn=lambda: True,
+        prompt_fn=lambda: False,
+    )
+
+    assert _read_docker_isolation_value(config_path) is False
+
+
+def test_wizard_docker_isolation_skips_when_already_set(tmp_path: Path) -> None:
+    """An already-configured value is left untouched and the prompt is not shown."""
+    config_path = tmp_path / "settings.toml"
+    doc = load_config_file_tomlkit(config_path)
+    set_nested_value(doc, "providers.docker.isolate_host_volumes", False)
+    save_config_file(config_path, doc)
+
+    _wizard_docker_volume_isolation(
+        config_path,
+        is_interactive_fn=lambda: True,
+        prompt_fn=lambda: pytest.fail("prompt must not be called when the setting already exists"),
+    )
+
+    assert _read_docker_isolation_value(config_path) is False
+
+
+def test_wizard_docker_isolation_writes_nothing_when_cancelled(tmp_path: Path) -> None:
+    """Cancelling the picker (prompt returns None) leaves the setting unset."""
+    config_path = tmp_path / "settings.toml"
+
+    _wizard_docker_volume_isolation(
+        config_path,
+        is_interactive_fn=lambda: True,
+        prompt_fn=lambda: None,
+    )
+
+    assert _read_docker_isolation_value(config_path) is None
+
+
+def test_wizard_docker_isolation_non_interactive_prints_hint_without_writing(tmp_path: Path) -> None:
+    """With no interactive terminal, the step prints guidance but writes nothing."""
+    config_path = tmp_path / "settings.toml"
+
+    _wizard_docker_volume_isolation(
+        config_path,
+        is_interactive_fn=lambda: False,
+        prompt_fn=lambda: pytest.fail("prompt must not be called without an interactive terminal"),
+    )
+
+    assert _read_docker_isolation_value(config_path) is None

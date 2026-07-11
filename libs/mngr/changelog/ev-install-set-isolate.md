@@ -1,5 +1,7 @@
-The `mngr extras config` walk-through (and `mngr extras -i`) now seeds the recommended docker host-volume isolation setting.
+`mngr config wizard` now covers two more common user-scope settings.
 
-When the default docker provider does not already configure `isolate_host_volumes`, the interactive walk-through writes `providers.docker.isolate_host_volumes = true` to your user-scope config -- creating the config file if you have none yet. This opts new installs into the forthcoming default (each host container sees only its own `host_dir` sub-folder) and silences the one-shot deprecation warning that fresh installs otherwise hit the first time they use docker. It prints how to switch back to the legacy shared-volume behavior (`mngr config set providers.docker.isolate_host_volumes false --scope user`) if you prefer it.
+- Docker host-volume isolation: the wizard asks whether each docker host should see only its own `host_dir` sub-folder (the recommended, forthcoming default; requires Docker Engine >= 25.0) or keep the legacy shared state volume, writing `providers.docker.isolate_host_volumes`. Opting in silences the one-shot deprecation warning that a fresh install otherwise hits the first time it uses docker.
 
-With `-y` or without an interactive terminal, it prints the suggested `mngr config set` command instead of writing. `mngr extras` status now reports whether docker isolation is configured.
+- Default agent type: the "pick a default agent type for `mngr create`" step moved here from `mngr extras`. Because the wizard runs as its own step in the installer (after plugins are installed), it now sees freshly-installed plugin agent types instead of only those registered at startup.
+
+Each step short-circuits when its setting is already configured, so re-running the wizard only fills gaps. `mngr extras` no longer has a `config` subcommand or a default-agent-type step; user-scope config setup lives entirely in `mngr config wizard`.

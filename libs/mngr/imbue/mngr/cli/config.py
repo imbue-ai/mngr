@@ -1161,7 +1161,103 @@ def _config_wizard_impl(ctx: click.Context, **kwargs: Any) -> None:
 
     write_human_line("mngr config wizard")
     write_human_line("")
+    _wizard_default_agent_type(config_path)
     _wizard_claude_config_isolation(config_path)
+    _wizard_docker_volume_isolation(config_path)
+
+
+# -- Default agent type step --
+
+
+def _get_default_agent_type(raw: dict[str, Any]) -> str | None:
+    """Return the user-config default for [commands.create] type, or None."""
+    commands = raw.get("commands")
+    if not isinstance(commands, dict):
+        return None
+    create = commands.get("create")
+    if not isinstance(create, dict):
+        return None
+    value = create.get("type")
+    return str(value) if value is not None else None
+
+
+def _list_wizard_agent_type_choices(raw: dict[str, Any]) -> list[str]:
+    """Available agent type names: plugin-registered plus user-config [agent_types.X].
+
+    Mirrors ``list_available_agent_types`` but reads the raw user config to avoid
+    loading a full ``MngrConfig``. Because the wizard runs as its own process
+    (after the installer's extras step), plugins installed during that step are
+    already registered here, so freshly-installed agent types show up.
+    """
+    custom: list[str] = []
+    raw_agent_types = raw.get("agent_types")
+    if isinstance(raw_agent_types, dict):
+        custom = [str(k) for k in raw_agent_types.keys()]
+    return sorted(set(list_registered_agent_types() + custom))
+
+
+def _prompt_default_agent_type_choice(available: list[str]) -> str | None:
+    """Show a picker of agent types plus a "Keep no default" sentinel.
+
+    Returns the chosen type, or None to keep no default (sentinel row or
+    cancel). Caller must check ``has_interactive_terminal()`` first.
+    """
+    options = [*available, "Keep no default"]
+    idx = run_single_select_picker(
+        options=options,
+        title="mngr config wizard",
+        header_text="Pick a default agent type for 'mngr create':",
+    )
+    if idx is None or idx == len(available):
+        return None
+    return available[idx]
+
+
+def _wizard_default_agent_type(
+    config_path: Path,
+    *,
+    # Dependencies are exposed as keyword arguments so tests can substitute
+    # in-memory fakes without monkeypatching module-level callables.
+    list_choices_fn: Callable[[dict[str, Any]], list[str]] = _list_wizard_agent_type_choices,
+    is_interactive_fn: Callable[[], bool] = has_interactive_terminal,
+    prompt_fn: Callable[[list[str]], str | None] = _prompt_default_agent_type_choice,
+) -> None:
+    """Prompt for the default agent type for ``mngr create``.
+
+    Writes ``commands.create.type`` to the user-scope config. Skips silently if a
+    default is already set there, or if no agent types are registered yet.
+    """
+    existing = _load_config_file(config_path)
+    current = _get_default_agent_type(existing)
+    if current is not None:
+        write_human_line(
+            "Default agent type for 'mngr create' is already set to '{}' in {}; skipping.", current, config_path
+        )
+        return
+
+    available = list_choices_fn(existing)
+    if not available:
+        write_human_line("No agent types are registered yet; skipping default agent type.")
+        return
+
+    if not is_interactive_fn():
+        write_human_line("No interactive terminal; skipping default agent type setup.")
+        write_human_line("To set it later, run:")
+        write_human_line("    mngr config set commands.create.type <name> --scope user")
+        return
+
+    chosen = prompt_fn(available)
+    if chosen is None:
+        write_human_line("Skipping default agent type.")
+        return
+
+    doc = load_config_file_tomlkit(config_path)
+    set_nested_value(doc, "commands.create.type", chosen)
+    save_config_file(config_path, doc)
+    write_human_line("Set commands.create.type = '{}' in {}", chosen, config_path)
+
+
+# -- Claude config dir isolation step --
 
 
 def _is_claude_agent_type_registered() -> bool:
@@ -1249,6 +1345,86 @@ def _wizard_claude_config_isolation(
     set_nested_value(doc, "agent_types.claude.isolate_local_config_dir", choice)
     save_config_file(config_path, doc)
     write_human_line("Set agent_types.claude.isolate_local_config_dir = {} in {}", str(choice).lower(), config_path)
+
+
+# -- Docker host-volume isolation step --
+
+
+def _get_existing_docker_isolation_setting(raw: dict[str, Any]) -> bool | None:
+    """Return the user-config providers.docker.isolate_host_volumes, or None."""
+    providers = raw.get("providers")
+    if not isinstance(providers, dict):
+        return None
+    docker = providers.get("docker")
+    if not isinstance(docker, dict):
+        return None
+    value = docker.get("isolate_host_volumes")
+    return value if isinstance(value, bool) else None
+
+
+def _prompt_docker_isolation_choice() -> bool | None:
+    """Show a 2-option picker. Returns True to isolate, False to share, None if cancelled.
+
+    Caller must check ``has_interactive_terminal()`` first.
+    """
+    options = [
+        "Yes -- give each docker host its own host_dir sub-folder "
+        "(recommended, the forthcoming default; requires Docker Engine >= 25.0)",
+        "No -- keep the legacy behavior where all hosts share one state volume",
+    ]
+    # Default the highlighted option to the recommended "Yes" (isolate).
+    idx = run_single_select_picker(
+        options=options,
+        title="mngr config wizard",
+        header_text="Isolate host volumes for docker hosts?",
+        initial_focus=0,
+    )
+    if idx is None:
+        return None
+    return idx == 0
+
+
+def _wizard_docker_volume_isolation(
+    config_path: Path,
+    *,
+    # Dependencies are exposed as keyword arguments so tests can substitute
+    # in-memory fakes without monkeypatching module-level callables.
+    is_interactive_fn: Callable[[], bool] = has_interactive_terminal,
+    prompt_fn: Callable[[], bool | None] = _prompt_docker_isolation_choice,
+) -> None:
+    """Prompt whether to isolate host volumes for docker hosts.
+
+    Writes ``providers.docker.isolate_host_volumes`` to the user-scope config,
+    opting into the forthcoming default (each host container sees only its own
+    host_dir sub-folder) before it flips and silencing the one-shot deprecation
+    warning a fresh install otherwise hits the first time it uses docker. Skips
+    silently if the setting is already present in that file.
+    """
+    existing = _load_config_file(config_path)
+    current = _get_existing_docker_isolation_setting(existing)
+    if current is not None:
+        write_human_line(
+            "Docker host-volume isolation is already set to {} in {}; skipping.",
+            str(current).lower(),
+            config_path,
+        )
+        return
+
+    if not is_interactive_fn():
+        write_human_line("No interactive terminal; skipping docker host-volume isolation setup.")
+        write_human_line("To set it later, run:")
+        write_human_line("    mngr config set providers.docker.isolate_host_volumes <true|false> --scope user")
+        return
+
+    choice = prompt_fn()
+    if choice is None:
+        write_human_line("Skipping docker host-volume isolation.")
+        return
+
+    doc = load_config_file_tomlkit(config_path)
+    set_nested_value(doc, "providers.docker.isolate_host_volumes", choice)
+    save_config_file(config_path, doc)
+    write_human_line("Set providers.docker.isolate_host_volumes = {} in {}", str(choice).lower(), config_path)
 
 
 # Register help metadata for git-style help formatting
@@ -1468,10 +1644,16 @@ configured, so re-running only prompts for what is still unset. Run
 automatically by the installer.
 
 Steps:
+  Default agent type           The default agent type for `mngr create`
+                               (skipped when no agent types are registered yet).
   Claude config dir isolation  Whether each local Claude agent gets its own
                                config dir (mngr leaves your default Claude
                                config untouched) or shares your default config
-                               (needed for Claude subscriptions on macOS).""",
+                               (needed for Claude subscriptions on macOS).
+  Docker host-volume isolation Whether each docker host sees only its own
+                               host_dir sub-folder (the recommended, forthcoming
+                               default; requires Docker Engine >= 25.0) or shares
+                               one state volume.""",
     examples=(("Run the configuration wizard", "mngr config wizard"),),
     see_also=(("config set", "Set a configuration value directly"),),
 ).register()
