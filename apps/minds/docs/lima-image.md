@@ -8,7 +8,7 @@ Building that toolchain *inside* the VM takes 10-20 minutes, and every user on e
 
 So we build it once, freeze the VM's disk into a file, publish that file, and let each user download the finished disk and boot it. That frozen disk is the **pre-baked image**, and this document is how it is produced, published, fetched, and booted (issue #2306).
 
-Measured on the real 20 GiB image (`minds-v0.3.6`, aarch64): Lima reaches `READY` from the pre-baked image in **7.5 seconds**, against 10-20 minutes to build the same toolchain in-VM. The guest arrives with `uv`, `claude`, Python 3.12, the FCT checkout at the release tag, its `.venv`, and a ~1 GB pre-warmed uv cache already in place.
+Measured on the real 20 GiB image (`minds-v0.3.6`, aarch64): Lima reaches `READY` from the pre-baked image in **7.5 seconds**, against 10-20 minutes to build the same toolchain in-VM. The guest arrives with `uv`, `claude`, Python 3.12, the default-workspace-template checkout at the release tag, its `.venv`, and a ~1 GB pre-warmed uv cache already in place.
 
 Three consequences follow from the idea, and they account for nearly all the code:
 
@@ -59,7 +59,7 @@ An earlier design converted the assembled raw to qcow2 with a bundled `qemu-img`
 ## Publishing (operator, once per release)
 
 ```bash
-./scripts/build-lima-image.sh --fct-ref "$VERSION"
+./scripts/build-lima-image.sh --default-workspace-template-ref "$VERSION"
 ```
 
 Boots a Lima VM, installs the toolchain inside it, shuts it down, and flattens the VM's disk into an image. This runs on a maintainer's machine, where a Homebrew `qemu-img` is available -- it is a bake-time tool and never ships.

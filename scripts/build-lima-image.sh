@@ -28,7 +28,7 @@ DEFAULT_WORKSPACE_TEMPLATE_REF=""
 DEFAULT_WORKSPACE_TEMPLATE_REPO="https://github.com/imbue-ai/default-workspace-template.git"
 CPUS=4
 MEMORY=8
-# Must not exceed the disk size the FCT lima create template passes
+# Must not exceed the disk size the default-workspace-template lima create template passes
 # (start_arg --disk=20): Lima grows a smaller image up to the instance size
 # but fatals on shrink ("disk shrinking is not supported"), so a bigger baked
 # image breaks every default fast-path create.
