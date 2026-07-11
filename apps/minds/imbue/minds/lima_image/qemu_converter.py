@@ -18,10 +18,10 @@ def resolve_qemu_img_binary() -> str:
     """Resolve the qemu-img path.
 
     Prefers ``MINDS_QEMU_IMG_BINARY`` -- the bundled binary that ships in
-    ``resources/qemu/bin/qemu-img``. Electron's backend.js sets it in the
-    packaged app; tests get it from the session conftest. Falls back to
-    ``"qemu-img"`` (PATH lookup) when unset, so a dev machine with a
-    Homebrew qemu still works.
+    ``resources/qemu/bin/qemu-img``. Electron's backend.js sets it in both dev
+    and packaged mode whenever that payload is staged; tests get it from the
+    session conftest. Falls back to ``"qemu-img"`` (PATH lookup) when unset, so
+    a dev machine with a Homebrew qemu still works.
     """
     return os.environ.get("MINDS_QEMU_IMG_BINARY") or "qemu-img"
 
