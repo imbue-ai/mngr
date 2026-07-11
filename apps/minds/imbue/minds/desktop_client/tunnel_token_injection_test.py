@@ -1,6 +1,6 @@
 """Unit tests for the Cloudflare tunnel token file path.
 
-The path here must match the file the FCT cloudflare-tunnel runner watches
+The path here must match the file the DEFAULT_WORKSPACE_TEMPLATE cloudflare-tunnel runner watches
 (``libs/cloudflare_tunnel/.../runner.py``: ``runtime/secrets/cloudflare_tunnel.env``).
 Pinning it on both sides catches an accidental divergence of the contract.
 """

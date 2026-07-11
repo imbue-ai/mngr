@@ -7,11 +7,14 @@ from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.primitives import PositiveFloat
+from imbue.mngr.api.discovery_events import HostSSHInfoEvent
 from imbue.mngr.api.discovery_events import ProviderDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import get_discovery_events_path
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
 from imbue.mngr.api.provider_discovery_stream import _ProviderDiscoveryPoller
 from imbue.mngr.api.provider_discovery_stream import _discover_one_provider
+from imbue.mngr.api.provider_discovery_stream import _emit_startup_snapshot_for_skipped_provider
+from imbue.mngr.api.providers import SkippedProviderConstruction
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.interfaces.data_types import BoundedProviderDiscoveryResult
@@ -26,6 +29,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.providers.mock_provider_test import MockProviderInstance
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.thread_cleanup import _MngrExecutor
@@ -38,6 +42,7 @@ class _ControllableProvider(MockProviderInstance):
     discovery_call_count: int = 0
     should_raise: bool = False
     result_agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] | None = None
+    result_host_ssh_infos: list[tuple[HostId, SSHInfo]] | None = None
 
     _release_gate: threading.Event = PrivateAttr(default_factory=threading.Event)
 
@@ -53,7 +58,10 @@ class _ControllableProvider(MockProviderInstance):
         self._release_gate.wait()
         if self.should_raise:
             raise RuntimeError("provider exploded during discovery")
-        return bounded_result_from_agents_by_host(dict(self.result_agents_by_host or {}))
+        return bounded_result_from_agents_by_host(
+            dict(self.result_agents_by_host or {}),
+            host_ssh_infos=self.result_host_ssh_infos or (),
+        )
 
     def release(self) -> None:
         self._release_gate.set()
@@ -129,6 +137,124 @@ def _read_snapshots(temp_mngr_ctx: MngrContext) -> list[ProviderDiscoverySnapsho
         if isinstance(parsed, ProviderDiscoverySnapshotEvent):
             snapshots.append(parsed)
     return snapshots
+
+
+def _read_host_ssh_info_events(temp_mngr_ctx: MngrContext) -> list[HostSSHInfoEvent]:
+    events_path = get_discovery_events_path(temp_mngr_ctx.config)
+    if not events_path.exists():
+        return []
+    events: list[HostSSHInfoEvent] = []
+    for line in events_path.read_text().splitlines():
+        parsed = parse_discovery_event_line(line)
+        if isinstance(parsed, HostSSHInfoEvent):
+            events.append(parsed)
+    return events
+
+
+def test_startup_snapshot_for_unavailable_provider_carries_error_and_config(temp_mngr_ctx: MngrContext) -> None:
+    """A provider skipped as unavailable/unauthorized at stream startup gets one snapshot
+    carrying its construction error plus its config, so consumers (e.g. the minds providers
+    panel) see its state from the stream without a full ``mngr list``."""
+    skipped = SkippedProviderConstruction(
+        provider_name=ProviderInstanceName("vultr"),
+        error_type_name="ProviderNotAuthorizedError",
+        error_message="Vultr API key not configured",
+        is_empty=False,
+    )
+
+    _emit_startup_snapshot_for_skipped_provider(temp_mngr_ctx, skipped)
+
+    snapshots = _read_snapshots(temp_mngr_ctx)
+    assert len(snapshots) == 1
+    snapshot = snapshots[0]
+    assert snapshot.provider_name == ProviderInstanceName("vultr")
+    assert snapshot.error is not None
+    assert snapshot.error.type_name == "ProviderNotAuthorizedError"
+    assert snapshot.error.message == "Vultr API key not configured"
+    assert snapshot.agents == ()
+    assert snapshot.hosts == ()
+    assert snapshot.provider is not None
+    assert snapshot.provider.provider_name == ProviderInstanceName("vultr")
+
+
+def test_startup_snapshot_for_empty_provider_is_clean(temp_mngr_ctx: MngrContext) -> None:
+    """A provider skipped as known-empty (e.g. Modal with no per-user environment) gets a
+    clean zero-agent snapshot: it is a healthy state, not an error."""
+    skipped = SkippedProviderConstruction(
+        provider_name=ProviderInstanceName("modal"),
+        error_type_name="ProviderEmptyError",
+        error_message="Modal environment does not exist yet",
+        is_empty=True,
+    )
+
+    _emit_startup_snapshot_for_skipped_provider(temp_mngr_ctx, skipped)
+
+    snapshots = _read_snapshots(temp_mngr_ctx)
+    assert len(snapshots) == 1
+    snapshot = snapshots[0]
+    assert snapshot.provider_name == ProviderInstanceName("modal")
+    assert snapshot.error is None
+    assert snapshot.agents == ()
+    assert snapshot.hosts == ()
+    assert snapshot.provider is not None
+
+
+def test_poller_emits_host_ssh_info_events_from_discovery_result(
+    temp_host_dir: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A successful poll re-emits each host's SSH endpoint from the result's ``host_ssh_infos``
+    as a HOST_SSH_INFO event, so a tunnel consumer (the minds forward) can reach the host from
+    the streaming path alone -- without waiting for an occasional full ``mngr list``."""
+    provider = _make_controllable_provider(temp_host_dir, temp_mngr_ctx, is_released=True)
+    host = DiscoveredHost(
+        host_id=HostId.generate(),
+        host_name=HostName("remote-host"),
+        provider_name=provider.name,
+        host_state=HostState.RUNNING,
+    )
+    agent = DiscoveredAgent(
+        host_id=host.host_id,
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("a1"),
+        provider_name=provider.name,
+        certified_data={},
+    )
+    ssh_info = SSHInfo(
+        user="root",
+        host="203.0.113.7",
+        port=22013,
+        key_path=temp_host_dir / "keys" / "id_ed25519",
+        command="ssh -i /keys/id_ed25519 -p 22013 root@203.0.113.7",
+    )
+    provider.result_agents_by_host = {host: [agent]}
+    provider.result_host_ssh_infos = [(host.host_id, ssh_info)]
+
+    poller = _ProviderDiscoveryPoller(provider=provider, mngr_ctx=temp_mngr_ctx, config=_generous_config())
+    with mngr_executor(parent_cg=temp_mngr_ctx.concurrency_group, name="test-discover", max_workers=1) as executor:
+        poller.poll_and_emit(lambda: _submit_discovery(executor, provider, temp_mngr_ctx, poller))
+
+    ssh_events = _read_host_ssh_info_events(temp_mngr_ctx)
+    assert len(ssh_events) == 1
+    assert ssh_events[0].host_id == host.host_id
+    assert ssh_events[0].ssh == ssh_info
+
+
+def test_poller_emits_no_host_ssh_info_when_result_has_none(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
+    """A provider that surfaces no SSH info (e.g. local hosts) emits no HOST_SSH_INFO events."""
+    provider = _make_controllable_provider(temp_host_dir, temp_mngr_ctx, is_released=True)
+    host = DiscoveredHost(
+        host_id=HostId.generate(),
+        host_name=HostName("local-host"),
+        provider_name=provider.name,
+        host_state=HostState.RUNNING,
+    )
+    provider.result_agents_by_host = {host: []}
+
+    poller = _ProviderDiscoveryPoller(provider=provider, mngr_ctx=temp_mngr_ctx, config=_generous_config())
+    with mngr_executor(parent_cg=temp_mngr_ctx.concurrency_group, name="test-discover", max_workers=1) as executor:
+        poller.poll_and_emit(lambda: _submit_discovery(executor, provider, temp_mngr_ctx, poller))
+
+    assert _read_host_ssh_info_events(temp_mngr_ctx) == []
 
 
 def test_poller_emits_success_snapshot(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:

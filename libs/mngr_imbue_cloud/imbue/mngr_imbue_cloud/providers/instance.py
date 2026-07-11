@@ -176,8 +176,8 @@ def _rewrite_container_host_name(
 
     The pool host's ``/mngr/data.json`` was written at bake time with the
     bake's per-bake unique placeholder host name (``pool-<hex>-host``).
-    The FCT bootstrap reads that file to decide what to name the initial
-    chat agent (see ``forever-claude-template/libs/bootstrap/src/bootstrap/
+    The DEFAULT_WORKSPACE_TEMPLATE bootstrap reads that file to decide what to name the initial
+    chat agent (see ``default-workspace-template/libs/bootstrap/src/bootstrap/
     manager.py:_read_host_name``). Without this rewrite, every lease would
     end up with a chat agent named after the bake's placeholder instead
     of the user's chosen workspace name.
@@ -461,7 +461,19 @@ class ImbueCloudProvider(BaseProviderInstance):
         no per-host reads to de-duplicate across polls.
         """
         agents_by_host = self.discover_hosts_and_agents(cg=cg, include_destroyed=include_destroyed)
-        return bounded_result_from_agents_by_host(agents_by_host)
+        # Attach each discovered host's SSH endpoint (built from its lease) so the streaming
+        # discovery poller re-emits it as a HOST_SSH_INFO event. The lightweight streaming path
+        # does not otherwise surface SSH info, so without this a consumer that tunnels to the
+        # host (the minds system_interface forward) is starved of the endpoint and can only get
+        # it from an occasional full ``mngr list``. The leases are already cached from the
+        # discovery pass above, so this is a cheap lookup, not a second connector round-trip.
+        discovered_host_ids = {host.host_id for host in agents_by_host}
+        host_ssh_infos = [
+            (HostId(lease.host_id), self._build_lease_ssh_info(HostId(lease.host_id), lease))
+            for lease in self._list_leased_hosts_cached()
+            if HostId(lease.host_id) in discovered_host_ids
+        ]
+        return bounded_result_from_agents_by_host(agents_by_host, host_ssh_infos=host_ssh_infos)
 
     def discover_hosts_and_agents(
         self,
@@ -522,12 +534,19 @@ class ImbueCloudProvider(BaseProviderInstance):
                 agent_name_str = data.get("name")
                 if not agent_id_str or not agent_name_str:
                     continue
+                # Carry the raw per-agent data (its labels, type, work_dir, etc.) as
+                # certified_data, exactly the same ``agent_raw["data"]`` the rich
+                # ``get_host_and_agent_details`` path reads. Without it these streaming
+                # refs are label-less, so any consumer that filters on labels -- e.g. the
+                # minds system_interface forward's ``--agent-include
+                # has(agent.labels.is_primary)`` -- silently drops every imbue_cloud agent.
                 agent_refs.append(
                     DiscoveredAgent(
                         agent_id=AgentId(agent_id_str),
                         agent_name=AgentName(agent_name_str),
                         host_id=host_id,
                         provider_name=self.name,
+                        certified_data=data,
                     )
                 )
             # If the outer-SSH discovery returned no agents (e.g. container
@@ -1185,7 +1204,7 @@ class ImbueCloudProvider(BaseProviderInstance):
                 lease_result.container_host_public_key,
             )
             # The pool host's ``/mngr/data.json`` was baked with a placeholder
-            # host name; rewrite it to the user-supplied name so the FCT
+            # host name; rewrite it to the user-supplied name so the DEFAULT_WORKSPACE_TEMPLATE
             # bootstrap inherits the user's chosen workspace name.
             _rewrite_container_host_name(
                 vps_address=lease_result.vps_address,
@@ -1318,7 +1337,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         passthrough_build_args: tuple[str, ...],
         # the rebuilt container's (freshly-generated) host public key, to pin
     ) -> str:
-        """Tear down the leased VPS's baked container and rebuild it from the FCT Dockerfile.
+        """Tear down the leased VPS's baked container and rebuild it from the DEFAULT_WORKSPACE_TEMPLATE Dockerfile.
 
         Delegates both teardown and rebuild to the single canonical
         ``mngr_vps`` setup path, run over the root SSH the lease granted.

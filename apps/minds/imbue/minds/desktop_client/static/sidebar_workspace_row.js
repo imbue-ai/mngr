@@ -19,7 +19,7 @@
 //   var btn = window.mindsSidebarRow.buildIconButton(title, pathSvg,
 //                                                    dataAttr, agentId, sizeClass);
 //
-// ``workspace`` is { id, name, accent?, is_stale? }. ``withOpenNew`` adds
+// ``workspace`` is { id, name, accent?, is_stale?, backup_warning? }. ``withOpenNew`` adds
 // the "open in new window" arrow (Electron only -- browser mode has no
 // multi-window concept and passes false). Both action icons are always
 // visible. ``isCurrent`` marks the row selected (highlighted background).
@@ -83,6 +83,20 @@
     label.className = 'flex-1 whitespace-nowrap overflow-hidden text-ellipsis';
     label.textContent = workspace.name || workspace.id;
     row.appendChild(label);
+
+    // Backup-service problem detected for this workspace (outdated code,
+    // drifted credentials, service down, unconfigured, or unverifiable):
+    // one warning badge style for all causes; the tooltip carries the
+    // distinction. Fed by the shared /_static/backup_health.js cache.
+    var backupWarning = workspace.backup_warning ||
+      (window.mindsBackupHealth ? window.mindsBackupHealth.get(workspace.id) : null);
+    if (backupWarning) {
+      row.classList.add('has-backup-warning');
+      var backupDot = document.createElement('span');
+      backupDot.className = 'sidebar-backup-dot inline-block w-1.5 h-1.5 rounded-full bg-warning shrink-0';
+      backupDot.title = backupWarning;
+      row.appendChild(backupDot);
+    }
 
     // Retained-but-unverified workspace (its provider's last discovery poll
     // errored): show an amber dot. The row stays fully clickable.

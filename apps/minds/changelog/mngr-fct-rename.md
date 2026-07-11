@@ -1,0 +1,3 @@
+The forever-claude-template repo is being renamed to default-workspace-template (with the `fct`/`FCT` shorthand expanded to `default_workspace_template`/`DEFAULT_WORKSPACE_TEMPLATE` forms).
+
+The default template git URL constant is now `DEFAULT_WORKSPACE_TEMPLATE_GIT_URL`, the `fct_worktree` module is renamed to `default_workspace_template_worktree` (`FctWorktreeError` becomes `DefaultWorkspaceTemplateWorktreeError`, `FctTemplateRef` becomes `DefaultWorkspaceTemplateRef`), and the `FCT_DIR` env var read by `just sync-vendor-mngr` is now `DEFAULT_WORKSPACE_TEMPLATE_DIR` (the recipe errors with a rename hint when only the old var is set). Docs and skills reference the new repo name.

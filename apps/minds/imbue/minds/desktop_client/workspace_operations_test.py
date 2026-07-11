@@ -77,3 +77,73 @@ def test_start_again_replaces_the_prior_record() -> None:
     assert record is not None
     assert record.status == WorkspaceOperationStatus.RUNNING
     assert record.error is None
+
+
+def test_start_if_idle_claims_only_while_no_operation_is_running() -> None:
+    registry = InMemoryWorkspaceOperationRegistry()
+    agent_id = AgentId()
+
+    # First claim wins; a second claim while RUNNING is refused and does not
+    # replace the record.
+    assert registry.start_if_idle(agent_id, WorkspaceOperationKind.BACKUP_UPDATE, now=_now()) is True
+    assert registry.start_if_idle(agent_id, WorkspaceOperationKind.BACKUP_CONFIGURE, now=_now()) is False
+    record = registry.get(agent_id)
+    assert record is not None
+    assert record.kind == WorkspaceOperationKind.BACKUP_UPDATE
+
+    # A finished (DONE or FAILED) record no longer blocks a fresh claim.
+    registry.complete(agent_id)
+    assert registry.start_if_idle(agent_id, WorkspaceOperationKind.BACKUP_CONFIGURE, now=_now()) is True
+    registry.fail(agent_id, "boom")
+    assert registry.start_if_idle(agent_id, WorkspaceOperationKind.BACKUP_UPDATE, now=_now()) is True
+
+
+def test_request_cancel_flags_a_running_operation() -> None:
+    registry = InMemoryWorkspaceOperationRegistry()
+    agent_id = AgentId()
+    registry.start(agent_id, WorkspaceOperationKind.BACKUP_UPDATE, now=_now())
+    assert registry.is_cancel_requested(agent_id) is False
+
+    assert registry.request_cancel(agent_id) is True
+
+    assert registry.is_cancel_requested(agent_id) is True
+    # wait_for_cancel returns immediately once a cancel is pending.
+    assert registry.wait_for_cancel(agent_id, timeout_seconds=5.0) is True
+
+
+def test_request_cancel_is_refused_without_a_running_operation() -> None:
+    registry = InMemoryWorkspaceOperationRegistry()
+    agent_id = AgentId()
+
+    # No operation at all.
+    assert registry.request_cancel(agent_id) is False
+    assert registry.is_cancel_requested(agent_id) is False
+
+    # A finished operation cannot be cancelled either.
+    registry.start(agent_id, WorkspaceOperationKind.BACKUP_UPDATE, now=_now())
+    registry.complete(agent_id)
+    assert registry.request_cancel(agent_id) is False
+    assert registry.is_cancel_requested(agent_id) is False
+
+
+def test_wait_for_cancel_times_out_without_a_cancel_request() -> None:
+    registry = InMemoryWorkspaceOperationRegistry()
+    agent_id = AgentId()
+
+    # No operation: nothing to wait on.
+    assert registry.wait_for_cancel(agent_id, timeout_seconds=0.01) is False
+
+    registry.start(agent_id, WorkspaceOperationKind.BACKUP_UPDATE, now=_now())
+    assert registry.wait_for_cancel(agent_id, timeout_seconds=0.01) is False
+
+
+def test_start_clears_a_prior_cancel_request() -> None:
+    registry = InMemoryWorkspaceOperationRegistry()
+    agent_id = AgentId()
+    registry.start(agent_id, WorkspaceOperationKind.BACKUP_UPDATE, now=_now())
+    assert registry.request_cancel(agent_id) is True
+    registry.fail(agent_id, "cancelled")
+
+    registry.start(agent_id, WorkspaceOperationKind.BACKUP_UPDATE, now=_now())
+
+    assert registry.is_cancel_requested(agent_id) is False

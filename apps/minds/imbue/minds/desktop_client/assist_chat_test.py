@@ -1,7 +1,10 @@
 import shlex
 
 from imbue.minds.desktop_client.assist_chat import ASSIST_CHAT_LABEL
+from imbue.minds.desktop_client.assist_chat import AssistSupport
 from imbue.minds.desktop_client.assist_chat import build_assist_chat_mngr_args
+from imbue.minds.desktop_client.assist_chat import build_assist_support_probe_args
+from imbue.minds.desktop_client.assist_chat import check_assist_support
 from imbue.minds.desktop_client.assist_chat import generate_assist_chat_name
 from imbue.minds.desktop_client.assist_chat import spawn_assist_chat
 from imbue.minds.utils.mngr_caller import MngrCallResult
@@ -87,3 +90,34 @@ def test_spawn_assist_chat_returns_false_on_nonzero_exit() -> None:
         chat_name="assist-x",
     )
     assert succeeded is False
+
+
+def test_build_assist_support_probe_args_targets_workspace_and_checks_the_skill_file() -> None:
+    agent_id = AgentId.generate()
+    args = build_assist_support_probe_args(agent_id)
+    assert args[:3] == ["exec", "--agent", str(agent_id)]
+    assert len(args) == 4
+    # The probe checks the DEFAULT_WORKSPACE_TEMPLATE /assist skill path and echoes a present/absent sentinel.
+    assert ".agents/skills/assist/SKILL.md" in args[3]
+    assert "MNGR_ASSIST_SKILL_PRESENT" in args[3]
+    assert "MNGR_ASSIST_SKILL_ABSENT" in args[3]
+
+
+def test_check_assist_support_reports_supported_when_the_skill_is_present() -> None:
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout="MNGR_ASSIST_SKILL_PRESENT\n"))
+    agent_id = AgentId.generate()
+    assert check_assist_support(caller, agent_id) is AssistSupport.SUPPORTED
+    # One probe call, and it is exactly the args the builder assembles.
+    assert caller.calls == [build_assist_support_probe_args(agent_id)]
+
+
+def test_check_assist_support_reports_unsupported_on_old_workspace() -> None:
+    # A reachable workspace whose (older) template lacks the skill: absent sentinel on a clean exit.
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout="MNGR_ASSIST_SKILL_ABSENT\n"))
+    assert check_assist_support(caller, AgentId.generate()) is AssistSupport.UNSUPPORTED
+
+
+def test_check_assist_support_reports_unreachable_when_probe_yields_no_sentinel() -> None:
+    # No sentinel in stdout (e.g. the exec failed / host down) must not be mistaken for "absent".
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=1, stderr="connection refused"))
+    assert check_assist_support(caller, AgentId.generate()) is AssistSupport.UNREACHABLE

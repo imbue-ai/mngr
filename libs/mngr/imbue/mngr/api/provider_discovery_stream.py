@@ -13,11 +13,13 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import DiscoveryError
+from imbue.mngr.api.discovery_events import emit_host_ssh_info
 from imbue.mngr.api.discovery_events import get_discovery_events_path
 from imbue.mngr.api.discovery_events import make_discovered_provider
 from imbue.mngr.api.discovery_events import tail_discovery_events_from_offset
 from imbue.mngr.api.discovery_events import write_provider_discovery_snapshot
-from imbue.mngr.api.providers import get_all_provider_instances
+from imbue.mngr.api.providers import SkippedProviderConstruction
+from imbue.mngr.api.providers import get_all_provider_instances_and_skipped
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import MngrError
@@ -25,6 +27,7 @@ from imbue.mngr.errors import ProviderError
 from imbue.mngr.interfaces.data_types import BoundedProviderDiscoveryResult
 from imbue.mngr.interfaces.provider_instance import HostDiscoveryReadRegistry
 from imbue.mngr.primitives import ProviderBackendName
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
 from imbue.mngr.utils.thread_cleanup import mngr_executor
@@ -34,16 +37,55 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _resolve_provider_config(provider: BaseProviderInstance, mngr_ctx: MngrContext) -> ProviderInstanceConfig:
+def _resolve_provider_config(provider_name: ProviderInstanceName, mngr_ctx: MngrContext) -> ProviderInstanceConfig:
     """Return the configured block for a provider, or a default block for implicit-default instances.
 
     Mirrors the default-config fallback used by the listing path: an implicit-default
     provider (no explicit ``[providers.<name>]`` block) uses its name as the backend.
+    Resolvable from config alone, so it also works for providers whose instance
+    construction was skipped (unauthorized/unavailable/empty).
     """
-    explicit = mngr_ctx.config.providers.get(provider.name)
+    explicit = mngr_ctx.config.providers.get(provider_name)
     if explicit is not None:
         return explicit
-    return ProviderInstanceConfig(backend=ProviderBackendName(str(provider.name)))
+    return ProviderInstanceConfig(backend=ProviderBackendName(str(provider_name)))
+
+
+def _emit_startup_snapshot_for_skipped_provider(
+    mngr_ctx: MngrContext,
+    skipped: SkippedProviderConstruction,
+) -> None:
+    """Write one per-provider snapshot for a provider whose construction was skipped at stream startup.
+
+    Skipped providers get no poller (their construction failed or they are
+    known-empty), so without this the stream would never mention them and
+    consumers (e.g. the minds providers panel) would only learn their state
+    from a full ``mngr list`` side effect. An unavailable/unauthorized provider
+    carries its construction error; a known-empty provider gets a clean
+    zero-agent snapshot. Emitted once per stream startup: the provider is not
+    re-polled, so its state is authoritatively "as of startup" until the
+    process restarts (e.g. after the user fixes credentials).
+    """
+    started_at = _utc_now()
+    provider_config = _resolve_provider_config(skipped.provider_name, mngr_ctx)
+    if skipped.is_empty:
+        error = None
+    else:
+        error = DiscoveryError(
+            type_name=skipped.error_type_name,
+            message=skipped.error_message,
+            provider_name=skipped.provider_name,
+        )
+    write_provider_discovery_snapshot(
+        mngr_ctx.config,
+        provider_name=skipped.provider_name,
+        agents=(),
+        hosts=(),
+        discovery_started_at=started_at,
+        discovery_finished_at=_utc_now(),
+        provider=make_discovered_provider(skipped.provider_name, provider_config),
+        error=error,
+    )
 
 
 def _discover_one_provider(
@@ -60,6 +102,16 @@ def _discover_one_provider(
     stalling the whole provider's snapshot. ``registry`` carries in-flight per-host
     reads across polls so a wedged host is not re-read on every poll.
     """
+    # Each poll is its own discovery cycle, so clear the provider's per-cycle caches
+    # first. A provider instance is built once at stream startup and reused for every
+    # poll; without this reset its per-cycle caches (e.g. imbue_cloud's leased-hosts
+    # list, which is even cached when empty) become process-lifetime caches, so any
+    # change after startup -- a host leased later, a host destroyed -- is never seen.
+    # Every on-demand discovery path (mngr list, the snapshot side-effect) already
+    # passes reset_caches=True for exactly this reason; the streaming poller must match.
+    # The cross-poll wedged-host registry is a separate object and is intentionally
+    # left untouched.
+    provider.reset_caches()
     return provider.discover_hosts_and_agents_within_timeouts(
         cg=mngr_ctx.concurrency_group,
         host_discovery_timeout_seconds=host_discovery_timeout_seconds,
@@ -164,6 +216,13 @@ class _ProviderDiscoveryPoller(MutableModel):
             unknown_host_ids=result.unknown_host_ids,
             unknown_agent_ids=result.unknown_agent_ids,
         )
+        # Re-emit each host's SSH endpoint so consumers that tunnel to the host (the minds
+        # system_interface forward) get it from the streaming path. Only a full ``mngr list``
+        # emits these otherwise, which the running app never does periodically, so without this
+        # a forward that loses a host's SSH info (e.g. after the host briefly left discovery)
+        # never regains it and refuses to dial the host's loopback-registered service URL.
+        for host_id, ssh_info in result.host_ssh_infos:
+            emit_host_ssh_info(self.mngr_ctx.config, host_id, ssh_info)
 
     def _emit_error_snapshot(self, started_at: datetime, exc: BaseException) -> None:
         cause = exc.__cause__ if isinstance(exc, ProviderError) and exc.__cause__ is not None else exc
@@ -281,12 +340,17 @@ def run_per_provider_discovery_stream(
     )
     tail.start()
 
-    providers = get_all_provider_instances(mngr_ctx, None)
+    providers, skipped_providers = get_all_provider_instances_and_skipped(mngr_ctx, None)
+    # Providers whose construction was skipped (unauthorized/unavailable/empty) get
+    # no poller, so emit one startup snapshot each -- consumers then see their state
+    # from this stream instead of only from a full `mngr list` side effect.
+    for skipped_provider in skipped_providers:
+        _emit_startup_snapshot_for_skipped_provider(mngr_ctx, skipped_provider)
     pollers = [
         _ProviderDiscoveryPoller(
             provider=provider,
             mngr_ctx=mngr_ctx,
-            config=_resolve_provider_config(provider, mngr_ctx),
+            config=_resolve_provider_config(provider.name, mngr_ctx),
         )
         for provider in providers
     ]

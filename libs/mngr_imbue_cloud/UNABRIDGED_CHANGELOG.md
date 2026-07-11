@@ -4,6 +4,44 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-09
+
+`mngr imbue_cloud admin server order` now takes a `--dry-run` flag: it builds and prices a non-committal OVH cart, prints the real price preview plus the derived server specs and slice count, then deletes the cart without ordering. No charge, no interactive prompt, and no DB write, so it can be used to confirm price/specs before committing to an order. `--dry-run` takes precedence over `--yes`, so `--dry-run --yes` never charges.
+
+- Changed: `mngr imbue_cloud admin pool destroy` now accepts multiple pool-host ids and destroys them concurrently (bounded by a new `--max-concurrency` flag, default 8), regardless of which bare-metal box each slice is on. It keeps going through all ids on failure and emits a per-host outcome report (`{requested, destroyed, skipped, failed, hosts: [...]}`), exiting non-zero only when a VM teardown actually failed.
+
+- Changed: `admin pool destroy` now closes the destroy-vs-lease race: each row is atomically claimed (flipped to status `removing` in a committed transaction, from an eligible status set) before any teardown, so the connector's `/hosts/lease` can never hand a mid-destroy host to a user. A row that got leased first is skipped and reported as `skipped_leased`; a failed teardown leaves the row `removing` (unleasable) so re-running the same command retries it, and ids whose rows are already gone report `already_gone` (success).
+
+- Changed: destroying `available` (and stale `removing`) rows no longer requires `--force` -- the old `status != 'released'` guard was vestigial since nothing writes `released` anymore. `--force` now specifically means "also destroy rows that are currently leased" (and funnels through the same atomic claim, so the user's later release lands as an idempotent no-op).
+
+- Changed: `--skip-vps-cancel` is replaced by `--drop-row-only` (clean break). The default teardown already tolerates a VM that is merely absent; the flag exists only for rows whose bare-metal box record is gone or whose machine is permanently dead, and it also goes through the atomic claim.
+
+- Changed: `admin pool teardown-slices` claims each row as `removing` before teardown, tears the slice VMs down through the same parallel helper (with its own `--max-concurrency`, default 8), and now also includes rows already stranded in `removing` (e.g. by a crashed connector release), so an env destroy never leaks their VMs or rows. It emits the same unified outcome report.
+
+- Changed: DB-side slot accounting now counts `removing` rows as still occupying their box slot (their VM may still be tearing down), so `admin server list` capacity numbers stay truthful while destroys run.
+
+- Changed: the bake and destroy fan-outs now share one bounded parallel helper (`run_outcome_workers_in_bounded_threads`), and their per-item outcomes and summary reports are typed FrozenModels (`SliceBakeOutcome`/`SliceBakeReport`, `PoolHostDestroyOutcome`/`PoolHostDestroyReport`) with `LowerCaseStrEnum` statuses instead of stringly-typed dicts. The emitted JSON wire format is unchanged (lowercase statuses, absent fields omitted).
+
+## 2026-07-07
+
+Fixed two ways imbue_cloud's streaming (per-provider) discovery underfed consumers, leaving a cloud workspace stuck loading in the minds app.
+
+- `discover_hosts_and_agents` read each agent's raw data but only kept its id and name, so the `DiscoveredAgent` it emitted had no `certified_data` and therefore no labels -- even though the same raw data (and its labels) is what the richer `get_host_and_agent_details` path reads. Any consumer that filters agents by label got nothing back: most visibly, the minds system_interface forward runs with `--agent-include has(agent.labels.is_primary)`, so every streaming snapshot silently filtered out the workspace's primary agent. The streaming refs now carry the raw per-agent data as `certified_data`, matching the rich path, so labels flow through.
+
+- The streaming discovery result now includes each discovered host's SSH endpoint (built from its lease, pointing at the container's inner sshd), so the discovery poller can re-emit `HOST_SSH_INFO` events. Without this the forward could not learn the host's SSH endpoint from the streaming path and refused to dial the host's loopback-registered service URL.
+
+## 2026-07-06
+
+Updated the per-host-bounded discovery override to accept the new cross-poll read registry parameter (unused by this batch provider, which reads all hosts in one bounded pass). No behavioral change for this provider.
+
+Updated the Imbue Cloud provider for mngr's new per-provider discovery: it now implements the bounded `discover_hosts_and_agents_within_timeouts` discovery entry point. Because Imbue Cloud discovery reads all leased hosts and their agents in one batched pass, individual host reads are not separately bounded -- the provider is still bounded by the provider-level discovery error timeout, and no host is marked UNKNOWN by this path.
+
+`ImbueCloudProvider.rename_host` is now implemented: a leased host can be renamed by updating its mutable `host_name` via the connector. The lease's `host_db_id` remains the durable identity, so a rename never touches the VPS or container and works whether or not the container is running.
+
+The pre-baked pool host is no longer stamped with a `workspace=<name>` label at bake time; workspace identity lives on the host name and host id, not on a label.
+
+Integrates the "simple names" work: `ImbueCloudProvider.rename_host` is now implemented (a leased host is renamed by updating its mutable `host_name` via the connector, without touching the VPS or container, whether or not it is running), and pre-baked pool hosts are no longer stamped with a `workspace=<name>` label -- workspace identity lives on the host name and host id.
+
 ## 2026-07-01
 
 Removed the legacy OVH-VPS pool-host backend from `mngr imbue_cloud admin pool`. Pool hosts are now exclusively bare-metal slices (lima VMs carved on our bare-metal boxes).
