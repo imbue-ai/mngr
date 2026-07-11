@@ -139,9 +139,18 @@ def test_render_fragment_shows_verbs_rationale_and_target_choice(tmp_path: Path)
     assert "All workspaces" in body
     assert "Approve" in body and "Deny" in body
     assert "<html" not in body
+    # Targeted request: both the general and the workspace-specific groups show,
+    # and the general (non-targeted) read verb still appears alongside the
+    # targeted destroy verb. The workspace-specific group shows the plain hint,
+    # not the broad-scope caution (which is reserved for target-less requests).
+    assert "General permissions" in body
+    assert "Workspace-specific permissions" in body
+    assert PERM_WORKSPACES_READ in body
+    assert "These act on individual workspaces." in body
+    assert "c-warning-surface" not in body
 
 
-def test_render_fragment_without_target_omits_target_choice(tmp_path: Path) -> None:
+def test_render_fragment_without_target_offers_broad_only(tmp_path: Path) -> None:
     handler, _sender = _make_handler(tmp_path, lambda r: httpx.Response(204))
     event = create_latchkey_workspace_permission_request_event(
         agent_id=str(AgentId()),
@@ -154,8 +163,19 @@ def test_render_fragment_without_target_omits_target_choice(tmp_path: Path) -> N
         backend_resolver=_NamingBackendResolver(url_by_agent_and_service={}),
         mngr_forward_origin="",
     )
-    assert 'type="radio"' not in body
+    # No target named: both groups still show (the workspace-specific verbs can
+    # be granted), but the only possible scope is broad, so there is a single
+    # pre-selected "All workspaces" radio and no per-workspace ("selected")
+    # option. The broad-scope caution is shown in place of the plain hint.
+    assert "General permissions" in body
+    assert "Workspace-specific permissions" in body
+    assert PERM_WORKSPACES_READ in body
+    assert PERM_WORKSPACES_DESTROY in body
     assert 'name="target_scope" value="all"' in body
+    assert 'value="selected"' not in body
+    assert "c-warning-surface" in body
+    assert "all workspaces" in body
+    assert "These act on individual workspaces." not in body
 
 
 # -- apply_grant_request --

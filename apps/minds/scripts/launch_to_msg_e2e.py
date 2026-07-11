@@ -63,7 +63,6 @@ Files land in /tmp/launch-to-msg-screenshots/ and the workflow
 publishes them to the ci-screenshots branch.
 """
 
-import asyncio
 import contextlib
 import http.server
 import json
@@ -88,9 +87,10 @@ from loguru import logger
 # Attach via CDP instead: launch minds.app ourselves with
 # `--remote-debugging-port=<N>` so its Chromium DevTools endpoint is reachable,
 # then `chromium.connect_over_cdp()`. Same API for pages, locators, etc.
-from playwright.async_api import BrowserContext
-from playwright.async_api import Page
-from playwright.async_api import async_playwright
+from playwright.sync_api import BrowserContext
+from playwright.sync_api import Frame
+from playwright.sync_api import Page
+from playwright.sync_api import sync_playwright
 from pydantic import BaseModel
 from pydantic import ConfigDict
 from pydantic import Field
@@ -254,7 +254,7 @@ def snap(name: str) -> None:
         err.unlink()
 
 
-async def snap_page(page: Page, name: str) -> None:
+def snap_page(page: Page, name: str) -> None:
     """Both Playwright per-page shot AND macOS desktop shot.
 
     Raise this page's BrowserWindow to the top of the macOS z-order
@@ -265,15 +265,15 @@ async def snap_page(page: Page, name: str) -> None:
     that would update WindowServer focus).
     """
     try:
-        await page.set_viewport_size({"width": 1280, "height": 800})
+        page.set_viewport_size({"width": 1280, "height": 800})
     except Exception:
         pass
     try:
-        await page.bring_to_front()
+        page.bring_to_front()
     except Exception as e:
         logger.warning("  bring_to_front[{}] failed: {}", name, e)
     try:
-        await page.screenshot(path=str(SCREENSHOT_DIR / f"{_safe_snap_name(name)}.win.png"), full_page=True)
+        page.screenshot(path=str(SCREENSHOT_DIR / f"{_safe_snap_name(name)}.win.png"), full_page=True)
     except Exception as e:
         logger.warning("  page-shot[{}] failed: {}", name, e)
     snap(name)
@@ -596,6 +596,11 @@ def mint_one_time_code() -> str:
     return code
 
 
+def _sleep(seconds: float) -> None:
+    """Block for ``seconds`` (``time.sleep`` is ratcheted)."""
+    threading.Event().wait(timeout=seconds)
+
+
 def _free_port() -> int:
     """Reserve an ephemeral port for minds.app's CDP endpoint."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -603,7 +608,7 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-async def _wait_cdp(port: int, timeout: float = 60.0) -> str:
+def _wait_cdp(port: int, timeout: float = 60.0) -> str:
     """Wait until http://127.0.0.1:<port>/json/version is reachable."""
     deadline = time.time() + timeout
     last_err: Exception | None = None
@@ -614,7 +619,7 @@ async def _wait_cdp(port: int, timeout: float = 60.0) -> str:
                     return f"http://127.0.0.1:{port}"
         except Exception as e:
             last_err = e
-        await asyncio.sleep(0.5)
+        _sleep(0.5)
     raise E2EFailure(f"CDP not reachable on :{port} after {timeout}s: {last_err}")
 
 
@@ -622,7 +627,7 @@ def all_pages(ctx: BrowserContext) -> list[Page]:
     return list(ctx.pages)
 
 
-async def find_chat_window(ctx: BrowserContext) -> Page | None:
+def find_chat_window(ctx: BrowserContext) -> Page | None:
     """Find the WebContentsView whose URL matches the chat URL (agent-*localhost)."""
 
     pat = re.compile(r"agent-[a-f0-9]+\.localhost")
@@ -631,6 +636,57 @@ async def find_chat_window(ctx: BrowserContext) -> Page | None:
             if pat.search(w.url):
                 return w
     return None
+
+
+def find_inbox_frame(ctx: BrowserContext) -> tuple[Page, Frame] | None:
+    """Locate the open inbox: the (owner page, frame at /inbox) pair, or None.
+
+    The inbox renders as an iframe inside the warm overlay host
+    (``/_chrome/overlay``): ``openModal`` sends ``show-modal`` to overlay.js,
+    which mounts a modal iframe at ``/inbox`` -- the modal view's own URL
+    never changes. A page's main frame is included in ``page.frames``, so a
+    window navigated directly to ``/inbox`` also matches.
+    """
+    for w in all_pages(ctx):
+        with contextlib.suppress(Exception):
+            for f in w.frames:
+                if "/inbox" in f.url:
+                    return (w, f)
+    return None
+
+
+def pick_backend_page(ctx: BrowserContext, origin: str, timeout: float = 30.0) -> Page:
+    """Return the content page (the backend page NOT under ``/_chrome``).
+
+    An Electron window is several WebContentsViews -- chrome shell
+    (``/_chrome``), modal overlay (``/_chrome/overlay``), and the content view
+    (the landing page, e.g. ``/welcome``) -- and CDP's page ordering follows
+    attach timing, so ``ctx.pages[0]`` is a coin flip. Only the content view
+    is safe to drive end to end: driving the overlay breaks screenshots and
+    navigation (main.js keeps it collapsed and reloads it), and driving the
+    chrome shell navigates it off ``/_chrome``, killing the requests SSE
+    consumer that powers the inbox badge / auto-open, so the slack permission
+    flow never surfaces a Deny button. main.js points the content view at the
+    backend landing page once the backend is ready, which is what this
+    selector keys on: the loopback page on the backend port (pages use
+    ``localhost`` while ``wait_backend_url`` reports ``127.0.0.1``) whose path
+    is not under ``/_chrome``.
+    """
+    backend_port = urllib.parse.urlsplit(origin).port
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        for p in all_pages(ctx):
+            with contextlib.suppress(Exception):
+                parts = urllib.parse.urlsplit(p.url)
+                if (
+                    parts.hostname in ("localhost", "127.0.0.1")
+                    and parts.port == backend_port
+                    and not parts.path.startswith("/_chrome")
+                ):
+                    return p
+        _sleep(0.5)
+    urls = [p.url for p in all_pages(ctx)]
+    raise E2EFailure(f"no content page on backend origin {origin} after {timeout}s; page URLs: {urls}")
 
 
 # --- per-workspace helpers ---
@@ -677,7 +733,7 @@ class _WorkspaceResult(BaseModel):
     total_create_s: float = 0.0
 
 
-async def _create_workspace_and_first_message(
+def _create_workspace_and_first_message(
     ctx: BrowserContext,
     win: Page,
     *,
@@ -705,30 +761,30 @@ async def _create_workspace_and_first_message(
     `label` appears in log lines so two sequential workspaces are
     distinguishable in CI logs (e.g. "w1" vs "w2").
     """
-    await win.goto(origin + "/create")
-    await win.wait_for_selector("#create-form", timeout=10_000)
+    win.goto(origin + "/create")
+    win.wait_for_selector("#create-form", timeout=10_000)
     # Signed out (no Imbue account): pick the "local" preset first so the AI /
     # backup providers are the non-cloud set. Otherwise the form defaults to the
     # Imbue Cloud providers, and submitting a cloud provider with no account
     # opens the sign-in modal instead of creating. The explicit launch_mode /
     # ai_provider selections below override the preset's compute / AI choices.
-    await win.click('[data-preset="local"]')
-    await win.click("#toggle-advanced")
-    await win.wait_for_selector("#advanced-view:not(.hidden)", timeout=5_000)
-    await win.select_option("#launch_mode", value="LIMA")
-    await win.select_option("#ai_provider", value=ai_provider)
+    win.click('[data-preset="local"]')
+    win.click("#toggle-advanced")
+    win.wait_for_selector("#advanced-view:not(.hidden)", timeout=5_000)
+    win.select_option("#launch_mode", value="LIMA")
+    win.select_option("#ai_provider", value=ai_provider)
     if ai_provider == "API_KEY":
-        await win.wait_for_selector("#api-key-row:not(.hidden)", timeout=5_000)
-        await win.fill("#anthropic_api_key", anthropic_key)
-    await win.fill("#host_name", host_name)
-    async with win.expect_navigation(url=re.compile(r"/creating/[a-z0-9-]+")):
-        await win.click("#create-submit")
+        win.wait_for_selector("#api-key-row:not(.hidden)", timeout=5_000)
+        win.fill("#anthropic_api_key", anthropic_key)
+    win.fill("#host_name", host_name)
+    with win.expect_navigation(url=re.compile(r"/creating/[a-z0-9-]+")):
+        win.click("#create-submit")
     with contextlib.suppress(Exception):
-        await win.wait_for_function(
+        win.wait_for_function(
             "document.body.innerText.includes('Setting up your workspace')",
             timeout=15_000,
         )
-    await snap_page(win, snaps.submitted)
+    snap_page(win, snaps.submitted)
     m = re.search(r"/creating/([a-z0-9-]+)", win.url)
     if not m:
         raise E2EFailure(f"[{label}] expected /creating/<id> after submit, got url={win.url}")
@@ -744,7 +800,7 @@ async def _create_workspace_and_first_message(
     navigated_to_workspace = False
     chat_url_re = re.compile(r"agent-[a-f0-9]+\.localhost")
     while time.time() < deadline and not done:
-        stat = await win.evaluate(
+        stat = win.evaluate(
             """async (id) => {
                 const r = await fetch('/api/v1/workspaces/operations/create/' + id);
                 return {status: r.status, body: await r.text()};
@@ -806,8 +862,8 @@ async def _create_workspace_and_first_message(
             and not any(SCREENSHOT_DIR.glob(f"{snaps.creating_mid}.*"))
             and time.monotonic() - phase_started_at >= 60
         ):
-            await snap_page(win, snaps.creating_mid)
-        await asyncio.sleep(5)
+            snap_page(win, snaps.creating_mid)
+        _sleep(5)
     total_create_s = sum(phase_durations.values())
     logger.info("[{}] creation phase timings: {} (total={:.1f}s)", label, phase_durations, total_create_s)
     if not done:
@@ -826,36 +882,36 @@ async def _create_workspace_and_first_message(
     else:
         target = done_redirect_url if done_redirect_url.startswith("http") else origin + done_redirect_url
         logger.info("[{}] creation DONE; navigating directly to {}", label, target)
-        await win.goto(target)
+        win.goto(target)
     chat_wait_seconds = 180
     chat_deadline = time.time() + chat_wait_seconds
     while time.time() < chat_deadline and not chat_url_re.search(win.url):
-        await asyncio.sleep(0.5)
+        _sleep(0.5)
     if not chat_url_re.search(win.url):
         for p in all_pages(ctx):
             with contextlib.suppress(Exception):
-                await snap_page(p, f"99-{label}-no-chat-{p.url.split('/')[-1] or 'root'}")
+                snap_page(p, f"99-{label}-no-chat-{p.url.split('/')[-1] or 'root'}")
         raise E2EFailure(
             f"[{label}] goto({target}) didn't redirect to chat URL within {chat_wait_seconds}s (win.url={win.url})"
         )
     logger.info("[{}] agent DONE; chat URL={}", label, win.url)
-    await snap_page(win, snaps.done)
+    snap_page(win, snaps.done)
 
-    inp = await win.wait_for_selector('textarea, [contenteditable="true"]', timeout=180_000)
-    await inp.fill(FIRST_PROMPT)
-    await inp.press("Enter")
+    inp = win.wait_for_selector('textarea, [contenteditable="true"]', timeout=180_000)
+    inp.fill(FIRST_PROMPT)
+    inp.press("Enter")
     with contextlib.suppress(Exception):
-        await win.wait_for_function(
+        win.wait_for_function(
             _wait_for_chat_text_js(f"document.body.innerText.includes({FIRST_PROMPT!r})"),
             timeout=10_000,
         )
-    await snap_page(win, snaps.msg_sent)
-    await win.wait_for_function(
+    snap_page(win, snaps.msg_sent)
+    win.wait_for_function(
         _wait_for_chat_text_js(f"(document.body.innerText.toLowerCase().match(/{FIRST_EXPECT}/g) || []).length >= 2"),
         timeout=REPLY_TIMEOUT * 1000,
     )
-    await asyncio.sleep(1)
-    await snap_page(win, snaps.msg_reply)
+    _sleep(1)
+    snap_page(win, snaps.msg_reply)
 
     return _WorkspaceResult(
         chat_url=win.url,
@@ -865,7 +921,7 @@ async def _create_workspace_and_first_message(
     )
 
 
-async def _send_followup_and_verify(
+def _send_followup_and_verify(
     win: Page,
     *,
     chat_url: str,
@@ -884,22 +940,22 @@ async def _send_followup_and_verify(
     earlier turns).
     """
     logger.info("[{}] navigating back to {}", label, chat_url)
-    await win.goto(chat_url)
-    inp = await win.wait_for_selector('textarea, [contenteditable="true"]', timeout=30_000)
-    await inp.fill(prompt)
-    await inp.press("Enter")
+    win.goto(chat_url)
+    inp = win.wait_for_selector('textarea, [contenteditable="true"]', timeout=30_000)
+    inp.fill(prompt)
+    inp.press("Enter")
     with contextlib.suppress(Exception):
-        await win.wait_for_function(
+        win.wait_for_function(
             _wait_for_chat_text_js(f"document.body.innerText.includes({prompt!r})"),
             timeout=10_000,
         )
-    await snap_page(win, snap_sent)
-    await win.wait_for_function(
+    snap_page(win, snap_sent)
+    win.wait_for_function(
         _wait_for_chat_text_js(f"(document.body.innerText.toLowerCase().match(/{expect_token}/g) || []).length >= 2"),
         timeout=REPLY_TIMEOUT * 1000,
     )
-    await asyncio.sleep(1)
-    await snap_page(win, snap_reply)
+    _sleep(1)
+    snap_page(win, snap_reply)
     logger.info("[{}] follow-up reply confirmed", label)
 
 
@@ -972,7 +1028,7 @@ def pre_run_sweep() -> None:
         latchkey_clear_slack()
 
 
-async def amain() -> int:
+def run_e2e() -> int:
     # Idempotent reset before any state mutation. Anything we leak (socat
     # holding :443, /etc/hosts entry, orphan Minds.app/mngr children,
     # latchkey creds, /tmp scratch dirs) is reverted here on the *next*
@@ -1021,42 +1077,41 @@ async def amain() -> int:
         stderr=subprocess.STDOUT,
     )
 
-    async with async_playwright() as pw:
+    with sync_playwright() as pw:
         # Wait for CDP endpoint to be reachable
-        cdp_url = await _wait_cdp(cdp_port)
+        cdp_url = _wait_cdp(cdp_port)
         logger.info("attaching via CDP at {}", cdp_url)
-        browser = await pw.chromium.connect_over_cdp(cdp_url, timeout=60_000)
+        browser = pw.chromium.connect_over_cdp(cdp_url, timeout=60_000)
         # Single Electron context wraps all WebContentsViews as pages.
-        ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
+        ctx = browser.contexts[0] if browser.contexts else browser.new_context()
         # Wait for first page (chrome shell or splash) to materialise.
         for _ in range(60):
             if ctx.pages:
                 break
-            await asyncio.sleep(0.5)
+            _sleep(0.5)
         if not ctx.pages:
             raise E2EFailure("no Electron windows after 30s")
         win = ctx.pages[0]
-        await snap_page(win, "00-app-launched")
+        snap_page(win, "00-app-launched")
 
         # 2. Wait for backend, auth via OTC
-        base = await asyncio.get_event_loop().run_in_executor(None, wait_backend_url)
+        base = wait_backend_url()
         launch_to_ready_s = time.monotonic() - launch_start_s
         logger.info("backend up at {} (launch->ready={:.1f}s)", base, launch_to_ready_s)
         logger.info("[ci-metric] launch_to_ready_s={:.1f}", launch_to_ready_s)
-        code = await asyncio.get_event_loop().run_in_executor(None, mint_one_time_code)
-        # ``win`` here is ``ctx.pages[0]``, which can be the file:// splash
-        # depending on Electron startup order. ``location.origin`` on the
-        # splash returns ``"file://"``, so navigation to ``origin + "/..."``
-        # would resolve to ``file:///...`` and fail. Use the known backend
-        # base URL instead; ``win.goto`` happily redirects any window
-        # (splash or http-served) to it.
+        code = mint_one_time_code()
+        # Re-pick ``win`` now that the backend is up: only the chrome-shell
+        # view is safe to drive (see pick_backend_page), and it is only on the
+        # backend origin after main.js's "Backend ready" load.
         origin = base
-        await win.goto(origin + "/authenticate?one_time_code=" + code)
-        await snap_page(win, "01-after-auth")
+        win = pick_backend_page(ctx, origin)
+        logger.info("driving page {} (pages: {})", win.url, [p.url for p in all_pages(ctx)])
+        win.goto(origin + "/authenticate?one_time_code=" + code)
+        snap_page(win, "01-after-auth")
 
         # 3. Navigate to home; UI now reflects authenticated state
-        await win.goto(origin + "/")
-        await snap_page(win, "02-home-after-auth")
+        win.goto(origin + "/")
+        snap_page(win, "02-home-after-auth")
 
         # The post-login "Help improve Minds" error-reporting consent screen
         # (Consent.jinja, shown while error_reporting_consent_given is False --
@@ -1065,10 +1120,10 @@ async def amain() -> int:
         # POST /consent + reload then proceeds home, so the create flow and the
         # later both-tiles home assertion see the home page, not the consent.
         with contextlib.suppress(Exception):
-            consent_btn = await win.wait_for_selector("#consent-continue", timeout=8_000)
+            consent_btn = win.wait_for_selector("#consent-continue", timeout=8_000)
             if consent_btn is not None:
-                await consent_btn.click()
-                await win.wait_for_selector("#consent-continue", state="detached", timeout=15_000)
+                consent_btn.click()
+                win.wait_for_selector("#consent-continue", state="detached", timeout=15_000)
                 logger.info("dismissed error-reporting consent screen")
 
         # 4-6. Create agent via UI click and drive to first message. Mirrors
@@ -1090,7 +1145,7 @@ async def amain() -> int:
 
         w1_result: _WorkspaceResult | None = None
         if not SKIP_FIRST_MESSAGE:
-            w1_result = await _create_workspace_and_first_message(
+            w1_result = _create_workspace_and_first_message(
                 ctx,
                 win,
                 origin=origin,
@@ -1112,11 +1167,11 @@ async def amain() -> int:
             # stream and re-render history -- losing the pong reply would
             # break the user's trust in the workspace as a persistent place.
             logger.info("=== iter 15: reload W1 chat, verify history persists ===")
-            await win.reload(wait_until="domcontentloaded")
-            await asyncio.sleep(2)
+            win.reload(wait_until="domcontentloaded")
+            _sleep(2)
             with contextlib.suppress(Exception):
-                await win.evaluate(f"() => {{ {_SCROLL_CHAT_TO_TAIL_JS} }}")
-            body_after_reload = await win.evaluate("document.body.innerText")
+                win.evaluate(f"() => {{ {_SCROLL_CHAT_TO_TAIL_JS} }}")
+            body_after_reload = win.evaluate("document.body.innerText")
             pong_count = body_after_reload.lower().count(FIRST_EXPECT.lower())
             if pong_count < 2:
                 raise E2EFailure(
@@ -1124,7 +1179,7 @@ async def amain() -> int:
                     f"expected >=2 occurrences of {FIRST_EXPECT!r}, got {pong_count} "
                     f"(body len={len(body_after_reload)})"
                 )
-            await snap_page(win, "06b-w1-chat-after-reload")
+            snap_page(win, "06b-w1-chat-after-reload")
             logger.info("[reload] PASS: W1 chat history survives reload ({} 'pong' hits)", pong_count)
 
         if not SKIP_SLACK_FLOW:
@@ -1139,10 +1194,10 @@ async def amain() -> int:
             try:
                 latchkey_set_slack()
                 # 8. Send slack prompt
-                inp = await win.wait_for_selector('textarea, [contenteditable="true"]', timeout=180_000)
-                await inp.fill(SLACK_PROMPT)
-                await inp.press("Enter")
-                await snap_page(win, "07-slack-prompt-sent")
+                inp = win.wait_for_selector('textarea, [contenteditable="true"]', timeout=180_000)
+                inp.fill(SLACK_PROMPT)
+                inp.press("Enter")
+                snap_page(win, "07-slack-prompt-sent")
 
                 # === Iter 10 Phase A: drive the FIRST permission request to DENY ===
                 # Real users sometimes click Deny by accident or change their
@@ -1152,13 +1207,13 @@ async def amain() -> int:
                 deny_clicked = {}
                 deny_deadline = time.time() + DRIVE_SLACK_TIMEOUT
                 while time.time() < deny_deadline:
-                    chat_now = await find_chat_window(ctx)
+                    chat_now = find_chat_window(ctx)
                     if chat_now is not None:
                         win = chat_now
                     if deny_stage >= 3:
                         logger.info("[deny-phase] PASS: Deny click landed")
                         break
-                    await _advance_approval(
+                    _advance_approval(
                         ctx,
                         win,
                         deny_stage,
@@ -1172,9 +1227,9 @@ async def amain() -> int:
                         ),
                     )
                     deny_stage = deny_clicked.get("stage", deny_stage)
-                    await asyncio.sleep(2)
+                    _sleep(2)
                 else:
-                    await snap_page(win, "99-TIMEOUT-no-deny-click")
+                    snap_page(win, "99-TIMEOUT-no-deny-click")
                     raise E2EFailure(
                         f"[deny-phase] Deny click did not land after {DRIVE_SLACK_TIMEOUT}s (stage={deny_stage})"
                     )
@@ -1198,16 +1253,16 @@ async def amain() -> int:
                 # agent's slack tool sits on its polling loop until the
                 # request times out instead of self-triggering a re-ask.
                 logger.info("=== Phase C: kick agent to re-request after deny ===")
-                target = (await find_chat_window(ctx)) or win
+                target = (find_chat_window(ctx)) or win
                 retry_msg = (
                     "I just denied that request by mistake -- please send a fresh "
                     "Slack permission request via the latchkey skill (POST to "
                     "/permission-requests). Then wait for me to approve it."
                 )
-                retry_inp = await target.wait_for_selector('textarea, [contenteditable="true"]', timeout=10_000)
-                await retry_inp.fill(retry_msg)
-                await retry_inp.press("Enter")
-                await snap_page(target, "07e-retry-after-deny-sent")
+                retry_inp = target.wait_for_selector('textarea, [contenteditable="true"]', timeout=10_000)
+                retry_inp.fill(retry_msg)
+                retry_inp.press("Enter")
+                snap_page(target, "07e-retry-after-deny-sent")
 
                 # === Iter 10 Phase D: wait for Claude to submit a NEW request ===
                 # Poll the latchkey dir directly. If a new file appears,
@@ -1227,12 +1282,12 @@ async def amain() -> int:
                                 new_file = f
                                 break
                         logger.info("[retry-phase] new pending file appeared: {}", new_file.name if new_file else "?")
-                        await snap_page(target, "07f-new-request-appeared")
+                        snap_page(target, "07f-new-request-appeared")
                         break
-                    await asyncio.sleep(3)
+                    _sleep(3)
                 else:
-                    await snap_page(target, "99-TIMEOUT-no-retry-request")
-                    chat_body = await target.evaluate("document.body.innerText")
+                    snap_page(target, "99-TIMEOUT-no-retry-request")
+                    chat_body = target.evaluate("document.body.innerText")
                     raise E2EFailure(
                         f"[retry-phase] no new permission request file in "
                         f"{PERMISSION_REQUESTS_DIR} after 120s. Claude did not re-submit "
@@ -1255,21 +1310,21 @@ async def amain() -> int:
                     "07j-approve-stage2-post",
                 )
                 while time.time() < deadline:
-                    chat_now = await find_chat_window(ctx)
+                    chat_now = find_chat_window(ctx)
                     if chat_now is not None:
                         win = chat_now
                     # Scroll the transcript to the live tail before reading it.
                     with contextlib.suppress(Exception):
-                        await win.evaluate(f"() => {{ {_SCROLL_CHAT_TO_TAIL_JS} }}")
+                        win.evaluate(f"() => {{ {_SCROLL_CHAT_TO_TAIL_JS} }}")
                     # Check for canned body in chat (PASS).
-                    body = await win.evaluate("document.body.innerText")
+                    body = win.evaluate("document.body.innerText")
                     if CANNED_BODY.lower() in body.lower() and approval_stage >= 3:
                         logger.info("PASS: canned body in reply")
-                        await snap_page(win, "08-PASS-canned-body")
+                        snap_page(win, "08-PASS-canned-body")
                         break
 
                     if approval_stage < 3:
-                        await _advance_approval(
+                        _advance_approval(
                             ctx,
                             win,
                             approval_stage,
@@ -1291,9 +1346,9 @@ async def amain() -> int:
                                 if "/requests/" not in p.url or p.url in approved_request_urls:
                                     continue
                                 btn = p.locator('button:has-text("Approve")').first
-                                if await btn.count() > 0 and await btn.is_visible():
+                                if btn.count() > 0 and btn.is_visible():
                                     logger.info("auto-approving follow-up request at {}", p.url)
-                                    await btn.click()
+                                    btn.click()
                                     approved_request_urls.add(p.url)
 
                         # Periodic kick: Claude often sits parked after a
@@ -1306,7 +1361,7 @@ async def amain() -> int:
                         KICK_INTERVAL = 30
                         now = time.monotonic()
                         if now - first_approve_at >= KICK_DELAY and now - last_kick_at >= KICK_INTERVAL:
-                            target = await find_chat_window(ctx)
+                            target = find_chat_window(ctx)
                             if target is not None:
                                 kick_msg = (
                                     "Slack permission is now granted -- please retry the "
@@ -1314,24 +1369,22 @@ async def amain() -> int:
                                     "back to me here in chat."
                                 )
                                 try:
-                                    inp = await target.wait_for_selector(
-                                        'textarea, [contenteditable="true"]', timeout=5_000
-                                    )
-                                    await inp.fill(kick_msg)
-                                    await inp.press("Enter")
+                                    inp = target.wait_for_selector('textarea, [contenteditable="true"]', timeout=5_000)
+                                    inp.fill(kick_msg)
+                                    inp.press("Enter")
                                     logger.info("sent post-approval kick (target={})", target.url)
                                     last_kick_at = now
                                 except Exception as exc:
                                     logger.warning("kick attempt failed on chat {}: {}", target.url, exc)
 
-                    await asyncio.sleep(2)
+                    _sleep(2)
                 else:
-                    await snap_page(win, "99-TIMEOUT-no-canned-body")
+                    snap_page(win, "99-TIMEOUT-no-canned-body")
                     # Dump every page's URL + first 200 chars of body so we
                     # can tell whether the chat panel was alive somewhere.
                     for p in all_pages(ctx):
                         with contextlib.suppress(Exception):
-                            preview = (await p.evaluate("document.body.innerText"))[:200].replace("\n", " ")
+                            preview = (p.evaluate("document.body.innerText"))[:200].replace("\n", " ")
                             logger.error("  page url={} body=...{!r}", p.url, preview)
                     raise E2EFailure(
                         f"canned body not in chat after {DRIVE_SLACK_TIMEOUT}s (approval_stage={approval_stage})"
@@ -1356,7 +1409,7 @@ async def amain() -> int:
                 raise E2EFailure("WORKSPACE_COUNT>=2 but W1 was skipped; cross-workspace check is meaningless")
             w1_chat_url = w1_result.chat_url
             logger.info("=== workspace 2 create + first message (host={}) ===", HOST_NAME_2)
-            w2_result = await _create_workspace_and_first_message(
+            w2_result = _create_workspace_and_first_message(
                 ctx,
                 win,
                 origin=origin,
@@ -1375,7 +1428,7 @@ async def amain() -> int:
             w2_chat_url = w2_result.chat_url
 
             logger.info("=== cross-workspace: ping W1 chat ({}) ===", w1_chat_url)
-            await _send_followup_and_verify(
+            _send_followup_and_verify(
                 win,
                 chat_url=w1_chat_url,
                 prompt=FOLLOWUP_W1_PROMPT,
@@ -1385,7 +1438,7 @@ async def amain() -> int:
                 label="w1-followup",
             )
             logger.info("=== cross-workspace: ping W2 chat ({}) ===", w2_chat_url)
-            await _send_followup_and_verify(
+            _send_followup_and_verify(
                 win,
                 chat_url=w2_chat_url,
                 prompt=FOLLOWUP_W2_PROMPT,
@@ -1400,13 +1453,13 @@ async def amain() -> int:
             # so they would still pass even if a regression hid one tile from
             # the landing page; this catches that.
             logger.info("=== home page: verify both workspace tiles render ===")
-            await win.goto(origin + "/")
-            await win.wait_for_function(
+            win.goto(origin + "/")
+            win.wait_for_function(
                 f"document.body.innerText.includes({HOST_NAME!r}) && "
                 f"document.body.innerText.includes({HOST_NAME_2!r})",
                 timeout=30_000,
             )
-            await snap_page(win, "17-home-both-tiles")
+            snap_page(win, "17-home-both-tiles")
             logger.info("home page shows both tiles: {} and {}", HOST_NAME, HOST_NAME_2)
 
             # Iter 13 (click tile to navigate): real users open chat by
@@ -1426,24 +1479,24 @@ async def amain() -> int:
             # selector would match W2's tile first. Quoted text= is
             # exact-string (case-insensitive) and picks the right tile.
             w1_tile_locator = win.locator(f'text="{HOST_NAME}"').first
-            await w1_tile_locator.wait_for(state="visible", timeout=10_000)
-            await w1_tile_locator.click()
+            w1_tile_locator.wait_for(state="visible", timeout=10_000)
+            w1_tile_locator.click()
             w1_url_re = re.compile(re.escape(w1_agent_host) + r"\.localhost")
-            await win.wait_for_url(w1_url_re, timeout=30_000)
-            await snap_page(win, "17b-w1-via-tile-click")
+            win.wait_for_url(w1_url_re, timeout=30_000)
+            snap_page(win, "17b-w1-via-tile-click")
             if w1_agent_host not in win.url:
                 raise E2EFailure(f"[tile-click] expected W1 agent host {w1_agent_host!r} in URL, got {win.url!r}")
             logger.info("[tile-click] PASS: W1 tile click landed at {}", win.url)
-            await win.goto(origin + "/")
+            win.goto(origin + "/")
 
             # Iter 16 (/accounts smoke): users click the account icon in
             # the header to manage accounts. Smoke-test that the page
             # renders without a 500/404. We don't drive any signin here.
             logger.info("=== iter 16: /accounts smoke ===")
-            await win.goto(origin + "/accounts")
-            await win.wait_for_load_state("domcontentloaded", timeout=10_000)
-            await snap_page(win, "17c-accounts-page")
-            accounts_body = (await win.evaluate("document.body.innerText")).lower()
+            win.goto(origin + "/accounts")
+            win.wait_for_load_state("domcontentloaded", timeout=10_000)
+            snap_page(win, "17c-accounts-page")
+            accounts_body = (win.evaluate("document.body.innerText")).lower()
             if "account" not in accounts_body:
                 raise E2EFailure(f"[accounts] /accounts body looks empty: {accounts_body[:200]!r}")
             logger.info("[accounts] PASS: /accounts renders")
@@ -1453,17 +1506,17 @@ async def amain() -> int:
             # page read-only and assert the danger-zone button renders.
             # Catches regressions specific to W1's settings rendering.
             logger.info("=== iter 17: W1 settings page renders ===")
-            await win.goto(origin + f"/workspace/{w1_agent_host}/settings")
-            await win.wait_for_selector("#destroy-btn", state="visible", timeout=15_000)
-            await snap_page(win, "17d-w1-settings-page")
-            w1_settings_body = await win.evaluate("document.body.innerText")
+            win.goto(origin + f"/workspace/{w1_agent_host}/settings")
+            win.wait_for_selector("#destroy-btn", state="visible", timeout=15_000)
+            snap_page(win, "17d-w1-settings-page")
+            w1_settings_body = win.evaluate("document.body.innerText")
             if HOST_NAME not in w1_settings_body:
                 raise E2EFailure(
                     f"[w1-settings] W1 settings page missing HOST_NAME {HOST_NAME!r}; "
                     f"body head={w1_settings_body[:200]!r}"
                 )
             logger.info("[w1-settings] PASS: W1 settings page renders with {} present", HOST_NAME)
-            await win.goto(origin + "/")
+            win.goto(origin + "/")
 
             # 18-22. Destroy W2 via the UI (gear icon -> WorkspaceSettings ->
             # destroy-btn -> destroy-confirm-btn), poll status to completion,
@@ -1483,9 +1536,9 @@ async def amain() -> int:
             # icon links to the same URL via window.location -- skipping the
             # tile click avoids racing the landing page's reactive re-renders
             # while still exercising the same destroy code path.
-            await win.goto(origin + f"/workspace/{w2_agent_id}/settings")
-            await win.wait_for_selector("#destroy-btn", state="visible", timeout=30_000)
-            await snap_page(win, "18-w2-settings-page")
+            win.goto(origin + f"/workspace/{w2_agent_id}/settings")
+            win.wait_for_selector("#destroy-btn", state="visible", timeout=30_000)
+            snap_page(win, "18-w2-settings-page")
 
             # Iter 14 (Back to workspaces link): real users navigate back from
             # settings via the top-level link without ever opening the
@@ -1493,34 +1546,34 @@ async def amain() -> int:
             # workspaces`` (a left-arrow glyph + the phrase), so an exact
             # text= match for the phrase alone won't find it. Match by
             # href= on the wrapping Link instead.
-            await win.click('a[href="/"]:has-text("Back to workspaces")')
-            await win.wait_for_url(origin + "/", timeout=10_000)
-            await snap_page(win, "18a-back-to-workspaces-from-settings")
-            await win.goto(origin + f"/workspace/{w2_agent_id}/settings")
-            await win.wait_for_selector("#destroy-btn", state="visible", timeout=30_000)
+            win.click('a[href="/"]:has-text("Back to workspaces")')
+            win.wait_for_url(origin + "/", timeout=10_000)
+            snap_page(win, "18a-back-to-workspaces-from-settings")
+            win.goto(origin + f"/workspace/{w2_agent_id}/settings")
+            win.wait_for_selector("#destroy-btn", state="visible", timeout=30_000)
 
             # Iter 12 (Cancel modal): real users click Destroy by accident or
             # change their mind. Verify the Cancel button dismisses the modal
             # without firing any destroy call, leaving W2 alive.
-            await win.click("#destroy-btn")
-            await win.wait_for_selector("#destroy-confirm-btn", state="visible", timeout=5_000)
-            await snap_page(win, "18b-w2-destroy-modal-opened")
-            await win.click("#destroy-cancel-btn")
-            await win.wait_for_selector("#destroy-confirm-btn", state="hidden", timeout=5_000)
-            await snap_page(win, "18b2-w2-cancelled-modal-dismissed")
+            win.click("#destroy-btn")
+            win.wait_for_selector("#destroy-confirm-btn", state="visible", timeout=5_000)
+            snap_page(win, "18b-w2-destroy-modal-opened")
+            win.click("#destroy-cancel-btn")
+            win.wait_for_selector("#destroy-confirm-btn", state="hidden", timeout=5_000)
+            snap_page(win, "18b2-w2-cancelled-modal-dismissed")
             # The settings page should still render the destroy button
             # (proof we didn't navigate away and the page is responsive).
-            await win.wait_for_selector("#destroy-btn", state="visible", timeout=5_000)
+            win.wait_for_selector("#destroy-btn", state="visible", timeout=5_000)
 
             # Now do the real destroy: reopen modal, click Confirm.
-            await win.click("#destroy-btn")
-            await win.wait_for_selector("#destroy-confirm-btn", state="visible", timeout=5_000)
-            await snap_page(win, "18b3-w2-destroy-modal-reopened")
-            await win.click("#destroy-confirm-btn")
+            win.click("#destroy-btn")
+            win.wait_for_selector("#destroy-confirm-btn", state="visible", timeout=5_000)
+            snap_page(win, "18b3-w2-destroy-modal-reopened")
+            win.click("#destroy-confirm-btn")
             # The confirm handler POSTs /api/v1/workspaces/<id>/destroy then
             # redirects to /; wait for the navigation, then snap the in-flight state.
-            await win.wait_for_url(origin + "/", timeout=30_000)
-            await snap_page(win, "18c-w2-destroy-initiated")
+            win.wait_for_url(origin + "/", timeout=30_000)
+            snap_page(win, "18c-w2-destroy-initiated")
 
             # Poll /api/v1/workspaces/operations/destroy/<id> until the host is actually gone
             # (status 'DONE', or 404 once the record is cleaned up). Lima VM
@@ -1539,7 +1592,7 @@ async def amain() -> int:
             destroy_deadline = time.time() + 240
             last_body: dict[str, Any] = {}
             while time.time() < destroy_deadline:
-                resp = await win.evaluate(
+                resp = win.evaluate(
                     """async (aid) => {
                         const r = await fetch('/api/v1/workspaces/operations/destroy/' + aid);
                         return {status: r.status, body: await r.text()};
@@ -1555,23 +1608,23 @@ async def amain() -> int:
                 if state == "DONE":
                     logger.info("[w2-destroy] DONE")
                     break
-                await asyncio.sleep(3)
+                _sleep(3)
             else:
                 raise E2EFailure(f"[w2-destroy] host still active after 240s (last={last_body})")
-            await snap_page(win, "19-w2-destroy-done")
+            snap_page(win, "19-w2-destroy-done")
 
             logger.info("=== home page after W2 destroyed ===")
-            await win.goto(origin + "/")
-            await win.wait_for_function(
+            win.goto(origin + "/")
+            win.wait_for_function(
                 f"document.body.innerText.includes({HOST_NAME!r}) && "
                 f"!document.body.innerText.includes({HOST_NAME_2!r})",
                 timeout=60_000,
             )
-            await snap_page(win, "20-home-only-w1")
+            snap_page(win, "20-home-only-w1")
             logger.info("home page after destroy shows only W1: {}", HOST_NAME)
 
             logger.info("=== W1 still alive after W2 destroyed ===")
-            await _send_followup_and_verify(
+            _send_followup_and_verify(
                 win,
                 chat_url=w1_chat_url,
                 prompt="Reply with exactly the four characters: bink",
@@ -1668,7 +1721,7 @@ async def amain() -> int:
             logger.info("=== iter 9: quit + relaunch ===")
             events_offset_pre_relaunch = EVENTS_LOG.stat().st_size if EVENTS_LOG.exists() else 0
 
-            await browser.close()
+            browser.close()
             minds_proc.terminate()
             # The new "quitting" takeover (Electron app shows a quitting page
             # and animates through backend teardown before exit) makes a
@@ -1694,7 +1747,7 @@ async def amain() -> int:
             _kill_pgrep("mngr latchkey forward", "orphan mngr latchkey forward")
             _kill_pgrep("latchkey gateway", "orphan latchkey gateway")
             _kill_pgrep("mngr observe", "orphan mngr observe")
-            await asyncio.sleep(10)
+            _sleep(10)
 
             cdp_port2 = _free_port()
             logger.info("relaunching {} --remote-debugging-port={}", MINDS_APP_PATH, cdp_port2)
@@ -1705,28 +1758,30 @@ async def amain() -> int:
                 stderr=subprocess.STDOUT,
             )
 
-            cdp_url2 = await _wait_cdp(cdp_port2)
-            browser = await pw.chromium.connect_over_cdp(cdp_url2, timeout=60_000)
-            ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
+            cdp_url2 = _wait_cdp(cdp_port2)
+            browser = pw.chromium.connect_over_cdp(cdp_url2, timeout=60_000)
+            ctx = browser.contexts[0] if browser.contexts else browser.new_context()
             for _ in range(60):
                 if ctx.pages:
                     break
-                await asyncio.sleep(0.5)
+                _sleep(0.5)
             if not ctx.pages:
                 raise E2EFailure("[relaunch] no Electron windows 30s after relaunch")
             win = ctx.pages[0]
-            await snap_page(win, "23-after-relaunch")
+            snap_page(win, "23-after-relaunch")
 
-            base2 = await asyncio.get_event_loop().run_in_executor(None, wait_backend_url, events_offset_pre_relaunch)
+            base2 = wait_backend_url(events_offset_pre_relaunch)
             logger.info("[relaunch] new backend up at {}", base2)
-            code2 = await asyncio.get_event_loop().run_in_executor(None, mint_one_time_code)
+            code2 = mint_one_time_code()
             origin = base2
-            await win.goto(origin + "/authenticate?one_time_code=" + code2)
-            await snap_page(win, "24-after-relaunch-auth")
+            win = pick_backend_page(ctx, origin)
+            logger.info("[relaunch] driving page {} (pages: {})", win.url, [p.url for p in all_pages(ctx)])
+            win.goto(origin + "/authenticate?one_time_code=" + code2)
+            snap_page(win, "24-after-relaunch-auth")
 
-            await win.goto(origin + "/")
-            await snap_page(win, "25-home-after-relaunch")
-            home_html = await win.content()
+            win.goto(origin + "/")
+            snap_page(win, "25-home-after-relaunch")
+            home_html = win.content()
             if HOST_NAME not in home_html:
                 raise E2EFailure(f"[relaunch] home page after relaunch missing W1 tile {HOST_NAME!r}")
 
@@ -1735,7 +1790,7 @@ async def amain() -> int:
             # the chat URL self-heals via the /goto/<agent_id>/ bridge
             # the bare-origin handler mints, so this navigation should
             # succeed on the first try.
-            await _send_followup_and_verify(
+            _send_followup_and_verify(
                 win,
                 chat_url=w1_result.chat_url,
                 prompt="Reply with exactly the four characters: bump",
@@ -1754,7 +1809,7 @@ async def amain() -> int:
             with contextlib.suppress(Exception):
                 timings_artifact.write_text(json.dumps(all_timings, indent=2))
 
-        await browser.close()
+        browser.close()
         minds_proc.terminate()
         with contextlib.suppress(Exception):
             minds_proc.wait(timeout=10)
@@ -1778,7 +1833,7 @@ def _list_permission_request_files() -> list[Path]:
     return sorted(p for p in PERMISSION_REQUESTS_DIR.iterdir() if p.suffix == ".json")
 
 
-async def _advance_approval(
+def _advance_approval(
     ctx: BrowserContext,
     win: Page,
     stage: int,
@@ -1802,31 +1857,28 @@ async def _advance_approval(
     if decision not in ("approve", "deny"):
         raise E2EFailure(f"_advance_approval: decision must be approve|deny, got {decision!r}")
     snap_stage0, snap_stage1, snap_stage2_pre, snap_stage2_post = snap_prefix_pair
-    # The "permission panel" was refactored into an inbox modal whose
-    # WebContentsView serves /inbox; the master/detail split lives in
-    # one page (left list = .inbox-card, right detail loads via
+    # The inbox renders as a modal iframe at /inbox inside the warm overlay
+    # host (see find_inbox_frame); the master/detail split lives in that one
+    # document (left list = .inbox-card, right detail loads via
     # /inbox/detail/<id> fragment and contains the Approve/Deny form).
-    # Stage 0 waits for /inbox (it auto-opens on new pending requests by
-    # default, see MindsConfig.get_auto_open_requests_panel). Stage 1
-    # clicks the inbox card for the slack request to load the detail
-    # fragment. Stage 2 clicks Approve / Deny within the same page.
+    # Stage 0 waits for the /inbox frame (it auto-opens on new pending
+    # requests by default, see MindsConfig.get_auto_open_requests_panel).
+    # Stage 1 clicks the inbox card for the slack request to load the detail
+    # fragment. Stage 2 clicks Approve / Deny within the same frame.
     if stage == 0:
-        # Check if the inbox modal already auto-opened.
-        panel = None
-        for w in all_pages(ctx):
-            with contextlib.suppress(Exception):
-                if "/inbox" in w.url:
-                    panel = w
-                    break
-        if panel is not None:
+        # Check if the inbox modal already auto-opened (an /inbox iframe in
+        # the overlay host; see find_inbox_frame).
+        found = find_inbox_frame(ctx)
+        if found is not None:
+            owner, _ = found
             logger.info("inbox modal auto-opened; advancing to stage 1")
             state["stage"] = 1
-            await snap_page(panel, snap_stage0)
+            snap_page(owner, snap_stage0)
             return
         # Wait for the agent to emit its request signal first. Case-fold
         # because Claude rephrases the message each run (eg "Waiting"
         # vs "awaiting" vs "wait for").
-        body = (await win.evaluate("document.body.innerText")).lower()
+        body = (win.evaluate("document.body.innerText")).lower()
         # "approval" catches "Waiting for your approval", "awaiting", etc.
         if not any(
             s in body
@@ -1846,10 +1898,10 @@ async def _advance_approval(
         for w in all_pages(ctx):
             try:
                 btn = w.locator('button[aria-label="Inbox"], button[title="Inbox"]')
-                if await btn.count() > 0 and await btn.first.is_visible():
+                if btn.count() > 0 and btn.first.is_visible():
                     logger.info("clicking Inbox titlebar trigger")
-                    await snap_page(w, snap_stage0)
-                    await btn.first.click()
+                    snap_page(w, snap_stage0)
+                    btn.first.click()
                     state["stage"] = 1
                     return
             except Exception:
@@ -1857,14 +1909,10 @@ async def _advance_approval(
 
     # Stage 1: click the slack entry in the inbox left list.
     elif stage == 1:
-        panel = None
-        for w in all_pages(ctx):
-            with contextlib.suppress(Exception):
-                if "/inbox" in w.url:
-                    panel = w
-                    break
-        if panel is None:
+        found = find_inbox_frame(ctx)
+        if found is None:
             return
+        owner, panel = found
         # Prefer the slack-named .inbox-card; fall back to the first
         # selectable card if there's only one pending request.
         for sel in (
@@ -1874,10 +1922,10 @@ async def _advance_approval(
         ):
             try:
                 loc = panel.locator(sel).first
-                if await loc.count() > 0 and await loc.is_visible():
+                if loc.count() > 0 and loc.is_visible():
                     logger.info("clicking inbox card via {!r}", sel)
-                    await snap_page(panel, snap_stage1)
-                    await loc.click()
+                    snap_page(owner, snap_stage1)
+                    loc.click()
                     state["stage"] = 2
                     return
             except Exception:
@@ -1892,59 +1940,61 @@ async def _advance_approval(
             )
         else:
             button_selectors = ('button:has-text("Deny")',)
-        for w in all_pages(ctx):
-            try:
-                if "/inbox" not in w.url:
-                    continue
-                btn = None
-                for bsel in button_selectors:
-                    candidate = w.locator(bsel).first
-                    if await candidate.count() > 0 and await candidate.is_visible():
-                        btn = candidate
-                        break
-                if btn is None:
-                    continue
-                logger.info("clicking {} button on inbox detail", decision)
-                await snap_page(w, snap_stage2_pre)
-                await btn.click()
-                state["stage"] = 3
-                # Snap a beat later. For approve the inbox shows the
-                # browser-launch / success notice; for deny the inbox
-                # closes back to the chat window.
-                await asyncio.sleep(2)
-                snap_target = w
-                if decision == "deny":
-                    chat_after = await find_chat_window(ctx)
-                    if chat_after is not None:
-                        snap_target = chat_after
-                with contextlib.suppress(Exception):
-                    await snap_page(snap_target, snap_stage2_post)
-                if decision == "approve":
-                    # Surface latchkey-side authorisation failures
-                    # immediately rather than waiting DRIVE_SLACK_TIMEOUT
-                    # seconds for a timeout. The post-approve page renders
-                    # the error banner verbatim; parse the visible text
-                    # and raise so CI fails on the actual signal, not a
-                    # timeout that happens to coincide.
-                    with contextlib.suppress(Exception):
-                        body_text = await w.evaluate("document.body.innerText")
-                        if "Authorization failed" in body_text or "No browser configured" in body_text:
-                            raise E2EFailure(
-                                f"{snap_stage2_post} shows authorization failure: "
-                                + body_text.replace("\n", " | ")[:400]
-                            )
-                # Kicks are sent from the main poll loop after a
-                # KICK_DELAY settle period; see slack-flow loop.
+        found = find_inbox_frame(ctx)
+        if found is None:
+            return
+        owner, panel = found
+        try:
+            btn = None
+            for bsel in button_selectors:
+                candidate = panel.locator(bsel).first
+                if candidate.count() > 0 and candidate.is_visible():
+                    btn = candidate
+                    break
+            if btn is None:
                 return
-            except Exception:
-                pass
+            logger.info("clicking {} button on inbox detail", decision)
+            snap_page(owner, snap_stage2_pre)
+            btn.click()
+            state["stage"] = 3
+            # Snap a beat later. For approve the inbox shows the
+            # browser-launch / success notice; for deny the inbox
+            # closes back to the chat window.
+            _sleep(2)
+            snap_target = owner
+            if decision == "deny":
+                chat_after = find_chat_window(ctx)
+                if chat_after is not None:
+                    snap_target = chat_after
+            with contextlib.suppress(Exception):
+                snap_page(snap_target, snap_stage2_post)
+            if decision == "approve":
+                # Surface latchkey-side authorisation failures
+                # immediately rather than waiting DRIVE_SLACK_TIMEOUT
+                # seconds for a timeout. The post-approve page renders
+                # the error banner verbatim; parse the visible text
+                # and raise so CI fails on the actual signal, not a
+                # timeout that happens to coincide.
+                with contextlib.suppress(Exception):
+                    body_text = panel.evaluate("document.body.innerText")
+                    if "Authorization failed" in body_text or "No browser configured" in body_text:
+                        raise E2EFailure(
+                            f"{snap_stage2_post} shows authorization failure: " + body_text.replace("\n", " | ")[:400]
+                        )
+            # Kicks are sent from the main poll loop after a
+            # KICK_DELAY settle period; see slack-flow loop.
+            return
+        except E2EFailure:
+            raise
+        except Exception:
+            pass
 
 
 def main() -> int:
     logger.remove()
     logger.add(sys.stderr, level="INFO", format="<level>[{level: <7}]</level> {message}")
     try:
-        return asyncio.run(amain())
+        return run_e2e()
     except KeyboardInterrupt:
         return 130
     except Exception:

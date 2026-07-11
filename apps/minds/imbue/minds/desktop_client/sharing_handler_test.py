@@ -3,7 +3,6 @@ from pathlib import Path
 import pytest
 from pydantic import Field
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
@@ -115,7 +114,6 @@ def test_disable_sharing_is_idempotent_when_service_already_absent(tmp_path: Pat
     # (which would 502 on the connector's 404).
     agent_id = AgentId()
     cli = _DisableStubCli(
-        parent_concurrency_group=ConcurrencyGroup(name="disable-test"),
         connector_url=FAKE_CONNECTOR_URL,
         stub_tunnel=TunnelInfo(tunnel_name="u--abcd1234efgh5678", tunnel_id="t1", services=()),
     )

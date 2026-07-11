@@ -959,7 +959,7 @@ create-new-mind-repo repo_name parent_dir="$HOME/project":
 #   eval "$(uv run minds env activate <name>)"
 #
 # Pool hosts are baked as bare-metal SLICES (recipes below). List them with
-# `just list-pool-hosts` and remove them with `just destroy-pool-host`.
+# `just list-pool-hosts` and remove them with `just destroy-pool-hosts`.
 
 # === minds bare-metal SLICES (carved on a pre-registered bare-metal box) ===
 #
@@ -1008,6 +1008,21 @@ add-paid-email email:
 list-pool-hosts:
     uv run minds pool list
 
+# List bare-metal servers (per-server + fleet slot accounting) for the activated
+# minds env (read-only; DSN resolved from the env, no manual exports).
+list-servers:
+    uv run minds server list
+
+# (Re-)prep a bare-metal box for slice baking: qemu/lima/tooling + image staging +
+# the per-box FCT image cache dir. Pool SSH key + DSN come from the activated
+# tier's Vault entry / env secrets, so no manual exports. Idempotent -- also how a
+# box prepped before 2026-06-27 gets the FCT cache dir that production
+# --from-tag bakes require.
+#
+#   just prep-server <bare-metal-server-id>
+prep-server server_id *extra_args:
+    uv run minds server prep --server-id "{{server_id}}" {{extra_args}}
+
 # One-time host-key backfill for the activated minds env. Keyscans every
 # pre-existing pool host + bare-metal box whose recorded sshd host key columns
 # are still null and records them, so rows baked before host-key pinning become
@@ -1021,18 +1036,20 @@ list-pool-hosts:
 backfill-pool-host-keys:
     uv run minds pool backfill-host-keys
 
-# Destroy a single pool host: destroy its slice lima VM (freeing the box slot),
-# then drop its pool_hosts row. Find the id with `just list-pool-hosts`. Extra
-# flags forward to `minds pool destroy` (e.g. --force to drop a non-released row,
-# --skip-vps-cancel if the slice VM is already gone).
+# Destroy pool hosts in parallel: atomically claim each row (so a user cannot lease
+# it mid-destroy), destroy its slice lima VM (freeing the box slot), then drop the
+# row. Find the ids with `just list-pool-hosts`. Extra flags forward to
+# `minds pool destroy` (e.g. --force to also destroy a leased row, --drop-row-only
+# for rows whose box record is gone or whose machine is permanently dead).
 #
-#   just destroy-pool-host <pool-host-id>
+#   just destroy-pool-hosts <pool-host-id> [<pool-host-id> ...]
 #
 # Note: the steady-state teardown is automatic -- the connector destroys a host's
 # slice VM when its lease ends. `minds env destroy` tears down a whole env's
-# unleased slices. This recipe is the manual single-host escape hatch.
-destroy-pool-host pool_host_id *extra_args:
-    uv run minds pool destroy "{{pool_host_id}}" {{extra_args}}
+# unleased slices. This recipe is the manual escape hatch (e.g. retiring the old
+# `available` rows after baking a new pool generation).
+destroy-pool-hosts *args:
+    uv run minds pool destroy {{args}}
 
 # Args forward as-is, e.g. `just release patch`, `just release patch --dry-run
 # --minor mngr`, or `just release --watch`. See scripts/release.py's header for

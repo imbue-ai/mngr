@@ -224,11 +224,12 @@
   //
   // SSE pushes ``system_interface_status`` events whenever an agent transitions
   // between healthy / stuck / restarting. When the currently-displayed agent
-  // goes STUCK we navigate the content view to the recovery page; the recovery
-  // page's own SSE subscription redirects back to ``return_to`` once the agent
-  // is healthy again. We redirect at most once per stuck episode (per agent),
-  // cleared by a subsequent ``healthy`` event, so the recovery page itself
-  // doesn't get clobbered on repeat STUCK transitions while the user is on it.
+  // goes STUCK we navigate the content view to the recovery page; that page then
+  // polls its own recovery route (a cheap liveness poll) and gets 302'd back to
+  // ``return_to`` once the agent is healthy again. We redirect at most once per
+  // stuck episode (per agent), cleared by a subsequent ``healthy`` event, so the
+  // recovery page itself doesn't get clobbered on repeat STUCK transitions while
+  // the user is on it.
   var systemInterfaceStatusByAgent = {};
   var redirectedAgents = {};
 
@@ -410,8 +411,11 @@
   }
 
   document.getElementById('requests-toggle').onclick = function () {
+    // ``keep_open=1`` marks this as an intentional open of the whole inbox,
+    // so resolving a request advances to the next pending one rather than
+    // dismissing the window (notification-driven opens omit it and close).
     if (isElectron) window.minds.toggleInbox();
-    else navigateContent('/inbox');
+    else navigateContent('/inbox?keep_open=1');
   };
 
   // Get-help opens the help modal (report a bug). Pass the currently-displayed
@@ -471,6 +475,12 @@
 
   // -- SSE-driven sidebar (browser mode only) -------------------------------
   var lastWorkspaces = [];
+
+  // Repaint rows when the shared backup-health cache updates so the backup
+  // warning badge appears/disappears without a workspace-list event.
+  if (window.mindsBackupHealth) {
+    window.mindsBackupHealth.onUpdate(function () { renderWorkspaces(lastWorkspaces); });
+  }
 
   function renderWorkspaces(workspaces) {
     var container = document.getElementById('sidebar-workspaces');
