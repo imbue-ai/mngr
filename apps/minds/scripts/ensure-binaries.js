@@ -24,11 +24,18 @@ const REQUIRED = [
   path.join(RESOURCES, 'uv', 'uv'),
   path.join(RESOURCES, 'git', 'bin', 'git'),
   path.join(RESOURCES, 'lima', 'bin', 'limactl'),
-  path.join(RESOURCES, 'desync', 'desync'),
 ];
-// downloadQemuImg skips darwin-x86_64 (no payload published), so requiring it
-// there would re-trigger the full download on every start.
-if (!(process.platform === 'darwin' && process.arch === 'x64')) {
+
+// Requiring a path the downloader deliberately skips would leave it missing forever
+// and re-trigger the full download on every start, so mirror the skips exactly:
+// downloadDesync and downloadQemuImg both bail on win32 (no Lima launch mode), and
+// downloadQemuImg additionally bails on darwin-x86_64 (no payload published).
+const IS_WIN32 = process.platform === 'win32';
+const IS_DARWIN_X64 = process.platform === 'darwin' && process.arch === 'x64';
+if (!IS_WIN32) {
+  REQUIRED.push(path.join(RESOURCES, 'desync', 'desync'));
+}
+if (!IS_WIN32 && !IS_DARWIN_X64) {
   REQUIRED.push(path.join(RESOURCES, 'qemu', 'bin', 'qemu-img'));
 }
 
