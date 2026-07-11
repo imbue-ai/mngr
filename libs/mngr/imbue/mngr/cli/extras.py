@@ -526,18 +526,27 @@ _DEFAULT_DOCKER_PROVIDER: Final[str] = "docker"
 
 
 def _is_docker_isolation_configured(raw: dict[str, Any]) -> bool:
-    """Return True if the default docker provider already sets isolate_host_volumes."""
+    """Return True when the walk-through should leave docker isolation alone.
+
+    That is the case when the default docker provider already sets
+    ``isolate_host_volumes``, or when it explicitly disables
+    ``is_host_volume_created``: isolation requires a host volume, so seeding the
+    recommended ``isolate_host_volumes = true`` there would produce a config the
+    validator rejects (see DockerProviderConfig._validate_isolation_requires_volume).
+    """
     providers = raw.get("providers")
     if not isinstance(providers, dict):
         return False
     block = providers.get(_DEFAULT_DOCKER_PROVIDER)
     if not isinstance(block, dict):
         return False
-    return "isolate_host_volumes" in block
+    if "isolate_host_volumes" in block:
+        return True
+    return block.get("is_host_volume_created") is False
 
 
 def _docker_isolation_status() -> bool:
-    """Return whether the user config already pins the default docker isolation."""
+    """Return whether the walk-through should leave the default docker isolation alone."""
     return _is_docker_isolation_configured(_read_user_config_raw())
 
 

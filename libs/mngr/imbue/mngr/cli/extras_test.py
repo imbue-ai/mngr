@@ -567,9 +567,14 @@ def test_install_default_agent_type_skip_writes_nothing() -> None:
 
 
 def test_is_docker_isolation_configured_detects_setting() -> None:
-    """True only when the default docker provider block sets isolate_host_volumes."""
+    """True when the default docker provider block already sets isolate_host_volumes."""
     assert _is_docker_isolation_configured({"providers": {"docker": {"isolate_host_volumes": True}}}) is True
     assert _is_docker_isolation_configured({"providers": {"docker": {"isolate_host_volumes": False}}}) is True
+
+
+def test_is_docker_isolation_configured_true_when_host_volume_disabled() -> None:
+    """Skip seeding when the host volume is off: isolate=true would be an invalid config."""
+    assert _is_docker_isolation_configured({"providers": {"docker": {"is_host_volume_created": False}}}) is True
 
 
 def test_is_docker_isolation_configured_false_when_unset_or_missing() -> None:
@@ -577,6 +582,7 @@ def test_is_docker_isolation_configured_false_when_unset_or_missing() -> None:
     assert _is_docker_isolation_configured({}) is False
     assert _is_docker_isolation_configured({"providers": {"docker": {}}}) is False
     assert _is_docker_isolation_configured({"providers": {"docker": {"host": ""}}}) is False
+    assert _is_docker_isolation_configured({"providers": {"docker": {"is_host_volume_created": True}}}) is False
     assert _is_docker_isolation_configured({"providers": []}) is False
 
 
