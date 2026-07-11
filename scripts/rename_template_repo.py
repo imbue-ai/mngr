@@ -401,13 +401,30 @@ def _substitute(text: str, rule: Replacement) -> tuple[str, int]:
     return re.subn(rule.pattern, _pick, text)
 
 
+# Lines carrying this marker are deliberate old-name references (legacy-var
+# guards, migration hints) that must survive rewrites and --check.
+_KEEP_MARKER: Final[str] = "rename:keep"
+
+
 def rewrite_text(text: str, replacements: tuple[Replacement, ...]) -> tuple[str, int]:
-    """Apply every rule to the text; returns the new text and the total replacement count."""
+    """Apply every rule to the text; returns the new text and the total replacement count.
+
+    Lines containing the keep marker are left untouched.
+    """
+    lines = text.splitlines(keepends=True)
+    if not lines:
+        lines = [text]
     total = 0
-    for rule in replacements:
-        text, count = _substitute(text, rule)
-        total += count
-    return text, total
+    rewritten: list[str] = []
+    for line in lines:
+        if _KEEP_MARKER in line:
+            rewritten.append(line)
+            continue
+        for rule in replacements:
+            line, count = _substitute(line, rule)
+            total += count
+        rewritten.append(line)
+    return "".join(rewritten), total
 
 
 def skip_reason(rel_path: Path) -> str | None:
@@ -579,6 +596,8 @@ def find_leftovers(repo_root: Path) -> tuple[Leftover, ...]:
         except UnicodeDecodeError:
             continue
         for line_number, line in enumerate(text.splitlines(), start=1):
+            if _KEEP_MARKER in line:
+                continue
             if pattern.search(line):
                 leftovers.append(Leftover(rel_path=rel_path, line_number=line_number, line_text=line.strip()))
     return tuple(leftovers)

@@ -331,8 +331,9 @@ sync-vendor-mngr default_workspace_template="":
     if [ -z "$default_workspace_template" ] && [ -f apps/minds/.env ]; then set -a; . ./apps/minds/.env; set +a; fi
     if [ -z "$default_workspace_template" ]; then default_workspace_template="${DEFAULT_WORKSPACE_TEMPLATE_DIR:-}"; fi
     if [ -z "$default_workspace_template" ]; then
-        if [ -n "${DEFAULT_WORKSPACE_TEMPLATE_DIR:-}" ]; then
-            echo "error: DEFAULT_WORKSPACE_TEMPLATE_DIR is the pre-rename variable name; rename it to DEFAULT_WORKSPACE_TEMPLATE_DIR (same value) in apps/minds/.env or your shell." >&2
+        if [ -n "${FCT_DIR:-}" ]; then  # rename:keep -- legacy-var guard
+            echo "error: FCT_DIR is the pre-rename variable name; rename it to DEFAULT_WORKSPACE_TEMPLATE_DIR (same value)," >&2  # rename:keep
+            echo "or migrate all local state at once: scripts/migrate_state_fct_to_default_workspace_template.sh --dry-run" >&2  # rename:keep
             exit 2
         fi
         echo "error: no default-workspace-template path. Set DEFAULT_WORKSPACE_TEMPLATE_DIR in apps/minds/.env, or pass it:" >&2

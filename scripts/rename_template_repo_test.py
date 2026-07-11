@@ -114,6 +114,19 @@ def test_rewrite_text_representative_lines() -> None:
         assert count > 0
 
 
+def test_keep_marker_lines_survive_rewrite_and_check(tmp_path: Path) -> None:
+    replacements = build_replacements(derive_name_forms("default-workspace-template"))
+    text = 'if [ -n "${FCT_DIR:-}" ]; then  # rename:keep\nFCT_DIR=x\n'
+    new_text, count = rewrite_text(text, replacements)
+    assert new_text == 'if [ -n "${FCT_DIR:-}" ]; then  # rename:keep\nDEFAULT_WORKSPACE_TEMPLATE_DIR=x\n'
+    assert count == 1
+
+    _make_git_repo(tmp_path)
+    (tmp_path / "guard.sh").write_text('check "${FCT_DIR:-}"  # rename:keep\n')
+    run_git_command(tmp_path, "add", "guard.sh")
+    assert all(leftover.rel_path != Path("guard.sh") for leftover in find_leftovers(tmp_path))
+
+
 def test_rewrite_text_leaves_lookalike_words_alone() -> None:
     replacements = build_replacements(derive_name_forms("default-workspace-template", "workspace template"))
     for line in ("no defects here", "fctl is not the abbreviation", "affctx"):
