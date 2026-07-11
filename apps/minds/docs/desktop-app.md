@@ -108,7 +108,7 @@ The desktop app bundles platform-specific binaries so users need zero prerequisi
 
 Each is placed in the `resources/` directory (outside the asar archive). The packaged app prepends the `uv`, `git`, `lima`, and `desync` directories to the backend child process's `PATH`. `restic` and `desync` are also named by explicit absolute path (`MINDS_RESTIC_BINARY`, `MINDS_DESYNC_BINARY`), so their resolution never depends on `PATH` ordering; `restic` is reached *only* that way, its directory never being on `PATH`. Dev mode inherits the developer's `PATH` untouched and prepends nothing, so the only bundled binary it reaches is the one named by absolute path: it sets `MINDS_DESYNC_BINARY` (without which the fast-create path would need a system-wide `desync`), and resolves everything else, `restic` included, from `PATH`.
 
-There is deliberately no bundled `qemu-img`. The pre-baked image is published, downloaded, and consumed as a **raw** image end to end, so nothing converts it. See "Why the image is raw" below.
+There is deliberately no bundled `qemu-img`. The pre-baked image is published, downloaded, and consumed as a **raw** image end to end, so nothing converts it. See [lima-image.md](./lima-image.md) for the whole pipeline, and "Why the image is raw" below.
 
 ### How the shipped binaries are chosen
 
