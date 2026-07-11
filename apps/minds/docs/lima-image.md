@@ -6,7 +6,9 @@ Creating an agent needs an isolated Linux machine with a full toolchain: a pinne
 
 Building that toolchain *inside* the VM takes 10-20 minutes, and every user on every machine independently re-derives the same identical result.
 
-So we build it once, freeze the VM's disk into a file, publish that file, and let each user download the finished disk and boot it. Roughly 15 minutes becomes roughly 2. That frozen disk is the **pre-baked image**, and this document is how it is produced, published, fetched, and booted (issue #2306).
+So we build it once, freeze the VM's disk into a file, publish that file, and let each user download the finished disk and boot it. That frozen disk is the **pre-baked image**, and this document is how it is produced, published, fetched, and booted (issue #2306).
+
+Measured on the real 20 GiB image (`minds-v0.3.6`, aarch64): Lima reaches `READY` from the pre-baked image in **7.5 seconds**, against 10-20 minutes to build the same toolchain in-VM. The guest arrives with `uv`, `claude`, Python 3.12, the FCT checkout at the release tag, its `.venv`, and a ~1 GB pre-warmed uv cache already in place.
 
 Three consequences follow from the idea, and they account for nearly all the code:
 
@@ -50,6 +52,8 @@ On the real 20 GiB image, the sparse raw occupies **4.9 GiB** on disk against **
 
 Raw is also what desync chunks (qcow2's metadata churn would wreck chunk dedup) and what the signed manifest hashes, so the bytes the signature covers are exactly the bytes Lima boots.
 
+The apparent size is not what anyone downloads. desync stores chunks compressed, so the 20 GiB image (4.9 GiB of real data) becomes a **1.7 GiB** chunk store -- that is the cost of a first install. An upgrade transfers only the chunks that changed, seeded from the image already on disk.
+
 An earlier design converted the assembled raw to qcow2 with a bundled `qemu-img`, which Lima then converted straight back to raw. The app bundles no `qemu-img`.
 
 ## Publishing (operator, once per release)
@@ -67,7 +71,18 @@ uv run python scripts/lima_image/publish.py --version "$VERSION" --arch aarch64 
 
 This chunks the raw image into a content-addressed store, merges this arch's entry into the release's root manifest, signs the manifest with minisign, and uploads chunks + index + manifest + signature to R2. Chunks are content-addressed, so re-publishing a near-identical image uploads only what changed.
 
-The signing **private key never leaves the operator's machine** and is never in CI. See [release.md](./release.md) for the full runbook, including the one-time per-tier setup.
+### Key custody
+
+The minisign **private key is the trust anchor for code execution**: the app verifies the signature and then boots the image as a VM. Whoever holds that key can hand every user an image the app will run.
+
+So, per [release.md](./release.md)'s one-time tier setup, which is the authoritative runbook:
+
+- **One keypair per tier.** A leaked dev key must not be able to sign something a production app will execute.
+- The private key lives **in a password manager or on the operator's machine -- never in the repo, never in CI**, and there is no reason to make it machine-readable: `publish.py` takes it as a local `--secret-key-file`, used by a human a few times a year.
+- Only the **public** half and the base URL are committed, into the tier's `client.toml`. Both are public values.
+- Generate it unencrypted (`minisign -G -W`), which is what `publish.py` needs for non-interactive signing.
+
+Cloudflare credentials come from the tier's existing Vault `cloudflare` token. For production, prefer a **custom CDN domain over `r2.dev`**, which is rate-limited and not intended for production traffic.
 
 ## Consuming (the app, on each user's Mac)
 
@@ -100,6 +115,27 @@ which lands in the Lima YAML as `images: - location: <path>`.
 - the branch/tag equal to the **current release tag** (the image is baked per release tag).
 
 Anything else falls back to building in-VM, which is correct: the baked image would not be what was asked for.
+
+## Verifying the whole chain without a CDN
+
+The publish and consume halves can be exercised end to end against a local HTTP origin, with the real `desync` and the real signature verification -- no R2, no ToDesktop, no config change. This is how to check the pipeline after touching any of it:
+
+1. Flatten a baked image to raw, and `desync make` it into a chunk store + index (what `publish.py` uploads).
+2. Write a `RootManifest` naming the raw image's SHA-256, and sign it with `minisign -S`.
+3. Serve that directory over `http://127.0.0.1`, and call `ensure_current_lima_image()` against it with `HttpxManifestFetcher` / `PythonMinisignSignatureVerifier` / `DesyncImageChunkStore`.
+4. Assert `READY`, and that the delivered file's SHA-256 equals the published one.
+5. Point `limactl` at the delivered `image.raw` and boot it.
+
+`test_lima_image_e2e.py` does exactly this with a small fixture image on every test run. The same recipe works unchanged against a real multi-GB baked image, which is the useful thing to do before a release: it proves everything except the CDN hosting itself, and the CDN is only serving the same bytes.
+
+When driving the client outside the Electron app, set `MINDS_DESYNC_BINARY` to the bundled `desync` -- that is what `backend.js` does. Without it the client falls back to a bare `desync` PATH lookup and fails on a machine that has no system-wide desync.
+
+## Failure modes worth knowing
+
+- **The feature is off unless the tier configures it.** With `lima_image_base_url` or the public key unset, `make_lima_image_source()` returns `None` and every create silently builds in-VM. This is the default, and it is why the fast path can appear "broken" when it is simply not switched on.
+- **No published image for this release+arch** reports `VERSION_UNAVAILABLE` and builds in-VM. Publishing for a tag the shipped binary does not request (it requests `FALLBACK_BRANCH`) has the same effect as not publishing at all.
+- **A non-default workspace never uses the image**, by design -- a custom repo or branch would not match the baked toolchain.
+- **A published-but-unfetchable image is a hard, retryable error**, not a silent fallback: a tampered or truncated download must not quietly become a slow build.
 
 ## Configuring a tier
 
