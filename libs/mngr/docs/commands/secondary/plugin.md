@@ -19,7 +19,7 @@ Alias: plug
 **Usage:**
 
 ```text
-mngr plugin [OPTIONS] [COMMAND] [ARGS]...
+mngr plugin [OPTIONS] COMMAND [ARGS]...
 ```
 **Options:**
 

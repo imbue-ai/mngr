@@ -123,10 +123,11 @@ def test_plugin_without_subcommand_shows_help(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that invoking plugin with no subcommand shows help text.
+    """Invoking plugin with no subcommand is a usage error that shows help.
 
-    Help output goes through show_help_with_pager, which writes to stdout
-    in non-interactive mode (as used by CliRunner).
+    ``plugin`` requires a subcommand (it is not ``invoke_without_command``), so
+    click renders the usage/help listing and exits with the standard usage-error
+    code, exactly like every other required-subcommand group.
     """
     result = cli_runner.invoke(
         plugin,
@@ -135,7 +136,7 @@ def test_plugin_without_subcommand_shows_help(
         catch_exceptions=False,
     )
 
-    assert result.exit_code == 0
+    assert result.exit_code == 2
     assert "list" in result.output.lower()
 
 
