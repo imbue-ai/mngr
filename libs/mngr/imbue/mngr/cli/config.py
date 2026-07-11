@@ -4,6 +4,7 @@ import subprocess
 import tomllib
 from collections.abc import Callable
 from collections.abc import MutableMapping
+from functools import partial
 from pathlib import Path
 from typing import Any
 from typing import assert_never
@@ -1176,10 +1177,12 @@ def _config_wizard_impl(ctx: click.Context, **kwargs: Any) -> None:
     # Every wizard write goes through the same validate-then-save path as
     # ``mngr config set`` (bound here to the user-scope file and this run's
     # config context), so the wizard can never persist an invalid setting.
-    def apply(key: str, value: Any) -> None:
-        _apply_config_value(
-            config_path, key, value, base_config=mngr_ctx.config, disabled_plugins=mngr_ctx.config.disabled_plugins
-        )
+    apply: Callable[[str, Any], None] = partial(
+        _apply_config_value,
+        config_path,
+        base_config=mngr_ctx.config,
+        disabled_plugins=mngr_ctx.config.disabled_plugins,
+    )
 
     write_human_line("mngr config wizard")
     write_human_line("")
