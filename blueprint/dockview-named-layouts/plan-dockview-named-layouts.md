@@ -22,17 +22,18 @@
 - The selection persists per browser in localStorage; every subsequent connect restores that layout (falling back as above if it was deleted).
 - Every dockview change auto-persists (existing 1.5 s debounce) to the client's active layout. Switching layouts (load, save-as, delete-fallback) flushes any pending autosave of the old layout first, so no changes are lost.
 - The "+" menu (both the group-header button and the empty-state overlay) gains a divider and three items at the bottom:
-  - "Save layout...": dialog with the list of existing layouts and a free-text name field, prefilled with the active layout's name (one-click save-over-current). Saving under a new name creates it and switches the client's active layout to it.
+  - "Save layout...": dialog with the list of existing layouts and a free-text name field, prefilled with the active layout's name (one-click save-over-current). Uniform rule: after any save, the client is on the layout it saved to — saving under a new name creates it and switches, and overwriting a different existing layout switches too.
   - "Load layout...": dialog listing all layouts; selecting one applies it and makes it the autosave target.
   - "Delete layout...": dialog listing all layouts; the only guard is that the last remaining layout cannot be deleted.
   - All three dialogs mark the client's active layout with "(current)".
 - Live cross-client sync: when a client saves a layout, other connected clients with that same layout active re-apply it. When a layout is deleted, clients with it active automatically switch to the first remaining layout and show a brief notice.
+- Echo suppression for live sync (both guards): the save broadcast carries the saving client's id and receivers suppress the autosave that their re-apply would trigger, and clients additionally skip saving/broadcasting when the serialized layout is unchanged from what the server last sent them (content-hash guard).
 
 ### Event recording (agent context)
 
 - A workspace-level append-only events file lives next to the layouts (e.g. `workspace_layout/events/client_activity/events.jsonl`), following the repo's standard event envelope (timestamp, type, event_id, source). No rotation in v1.
-- Every message sent through the UI appends a message event: message text, time, target agent, client id (uuid minted per browser in localStorage), and the client's active layout at send time.
-- Every layout switch appends a switch event (client id, old/new layout), regardless of initiator — user action, agent-driven `layout.py load`, or delete-fallback.
+- Every message sent through the UI appends a message event: message text (truncated at write time, e.g. first ~500 chars — full transcripts live elsewhere), time, target agent, client id (uuid minted per browser in localStorage), device kind from the UA (mobile/desktop), and the client's active layout at send time.
+- Every layout switch appends a switch event (client id, device kind, old/new layout), regardless of initiator — user action, agent-driven `layout.py load`, or delete-fallback.
 - Messages sent outside the UI (e.g. directly in tmux) have no metadata; the skill instructs the agent to fall back to the last active layout, mutate all layouts, or ask the user.
 
 ### Agent-facing layout ops (`scripts/layout.py`)
@@ -40,7 +41,7 @@
 - Mutating ops (`open`, `split`, `close`, `move`, `rename`, `focus`, `maximize`, `restore`, `replace-url`) require an explicit `--layout <name>`; omitting it is an error, and the skill instructs the agent to always pass it. The op broadcasts only to connected clients whose active layout matches; if none, it fails with a clear error the agent can relay (no server-side JSON mutation).
 - If multiple clients share the target layout, all of them apply the op (they converge via autosave + live sync).
 - Read-only `inspect` / `list` / `where` accept `--layout` and read that named layout's persisted file directly (works with no client connected). Default resolution when omitted: the last active layout.
-- New `layout.py load <name>`: switches the requesting client (resolved from message metadata; falls back to all clients when the requester is unknown) onto that layout, so the agent can then mutate it.
+- New `layout.py load <name>`: switches the requesting client (resolved from message metadata; falls back to all clients when the requester is unknown) onto that layout, so the agent can then mutate it. An optional `--client <id>` targets a specific client explicitly (the agent can pick one after consulting `context`).
 - New `layout.py context`: prints, per known client — client id, device kind from the UA (mobile/desktop), current layout, last-seen time, and the last ~5 messages (long messages truncated) — so the agent can figure out which client/layout a request refers to.
 - The `manage-layout` skill is updated to document layout targeting, `context`, `load`, the `--layout` requirement, and the no-metadata fallback guidance.
 
@@ -52,7 +53,7 @@ All changes land in the `default-workspace-template` repo (worked on via an `.ex
   - Replace the single-file GET/POST `/api/layout` with named-layout endpoints: list layouts (slug, display name, current-content flag), get/save a named layout, delete a named layout (guarding the last one), all rooted in the existing `workspace_layout/` dir.
   - Slug validation/derivation from display names; reject slug conflicts on save.
   - Legacy `layout.json` migration to `desktop` on first access.
-  - Track last-active layout and connected clients' active layouts (clients report their client id + active layout on WS connect and on switch).
+  - Track last-active layout and connected clients' active layouts via an in-memory registry keyed by WS connection: each client sends `{client_id, active_layout}` on WS open and on every switch, and its entry dies with the connection ("connected" = WS open).
   - Append message events (in the message-send endpoint) and layout-switch events to the workspace-level `events.jsonl` per the standard envelope.
   - WS broadcasts for live sync: "layout saved" (clients on it re-apply) and "layout deleted" (clients on it switch + notice), plus the agent-driven "load layout" op routed to the requesting client.
 
@@ -60,7 +61,7 @@ All changes land in the `default-workspace-template` repo (worked on via an `.ex
   - Mutating ops carry the target layout and are delivered only to matching clients; error when no client has the layout active.
   - `inspect`/`list` resolve a named layout file (defaulting to last active).
   - New `context` op assembled from `events.jsonl` (per-client recent messages, current layout, device kind, last-seen).
-  - New `load` op (switch requesting client, fall back to all clients).
+  - New `load` op (switch requesting client, explicit `--client <id>` override, fall back to all clients).
 
 - **Frontend (`frontend/src/views/DockviewWorkspace.ts` + new dialog view(s), `models/AgentManager.ts`, `views/MessageInput.ts` or message-send path)**
   - Client id (uuid) + active layout name in localStorage; UA-based first-time default with fall-back to first existing layout.
