@@ -114,7 +114,7 @@ def _model_entry(model_name: str, pricing: dict[str, float]) -> dict[str, object
 
 LITELLM_CONFIG = {
     "model_list": [
-        # Fable (Mythos-class tier above Opus).
+        # Fable line.
         _model_entry("claude-fable-5", _FABLE_PRICING),
         # Current Opus line.
         _model_entry("claude-opus-4-8", _OPUS_PRICING),

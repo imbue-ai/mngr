@@ -5,7 +5,7 @@
 # model_prices_and_context_window map) so cost tracking is correct even on
 # litellm versions whose bundled price map predates a model.
 model_list:
-  # Fable (Mythos-class tier above Opus).
+  # Fable line.
   - model_name: claude-fable-5
     litellm_params:
       model: anthropic/claude-fable-5
