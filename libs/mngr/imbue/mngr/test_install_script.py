@@ -70,6 +70,37 @@ def _mngr_mock(log_file: Path, *, fail_subcommands: tuple[str, ...] = ()) -> str
     )
 
 
+def _curl_mock(log_file: Path, *, succeeds: bool = True) -> str:
+    """Bash mock of `curl` that logs its invocation and (when succeeding) writes the -o file.
+
+    install.sh fetches the constraints file with `curl -fsSL <url> -o <file>`; this writes a
+    placeholder to that path so the subsequent `uv tool install --constraints <file>` has a
+    file to read. Pass `succeeds=False` to simulate a failed fetch (non-zero exit, no file).
+    """
+    body = (
+        'out=""\n'
+        'while [ "$#" -gt 0 ]; do\n'
+        '    case "$1" in\n'
+        '        -o) out="$2"; shift 2 ;;\n'
+        "        *) shift ;;\n"
+        "    esac\n"
+        "done\n"
+        '[ -n "$out" ] && printf "# test constraints\\n" > "$out"\n'
+        "exit 0\n"
+        if succeeds
+        else "exit 22\n"
+    )
+    return (
+        textwrap.dedent(
+            f"""\
+        #!/usr/bin/env bash
+        echo "curl $*" >> "{log_file}"
+        """
+        )
+        + body
+    )
+
+
 def _make_env(bin_dir: Path, home: Path) -> dict[str, str]:
     # /usr/bin and /bin cover grep / printf on both macOS and Linux. We
     # deliberately do NOT inherit the parent PATH so that the test only
@@ -102,13 +133,18 @@ def test_install_sh_upgrades_when_mngr_already_installed(tmp_path: Path) -> None
     write_executable_script(bin_dir / "uv", _uv_mock(log_file, mngr_already_installed=True))
     write_executable_script(bin_dir / "mngr", _mngr_mock(log_file))
 
+    write_executable_script(bin_dir / "curl", _curl_mock(log_file))
+
     result = _run_install_sh(env=_make_env(bin_dir, tmp_path), cwd=tmp_path)
 
     assert result.returncode == 0, f"install.sh failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     calls = log_file.read_text()
     assert "uv tool list" in calls
+    # The constraints file is fetched before installing.
+    assert "curl" in calls and "constraints.txt" in calls
     assert "uv tool upgrade imbue-mngr" in calls
-    assert "uv tool install imbue-mngr" not in calls
+    # Upgrade preserves plugins; the constrained install afterward re-pins the resolved deps.
+    assert "uv tool install imbue-mngr --constraints" in calls
     assert "mngr dependencies --install interactive --scope core" in calls
     assert "mngr extras -i" in calls
     assert "mngr config wizard" in calls
@@ -125,11 +161,15 @@ def test_install_sh_installs_when_mngr_not_present(tmp_path: Path) -> None:
     write_executable_script(bin_dir / "uv", _uv_mock(log_file, mngr_already_installed=False))
     write_executable_script(bin_dir / "mngr", _mngr_mock(log_file))
 
+    write_executable_script(bin_dir / "curl", _curl_mock(log_file))
+
     result = _run_install_sh(env=_make_env(bin_dir, tmp_path), cwd=tmp_path)
 
     assert result.returncode == 0, f"install.sh failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     calls = log_file.read_text()
-    assert "uv tool install imbue-mngr" in calls
+    # The constraints file is fetched, then a fresh constrained install is run (not upgrade).
+    assert "curl" in calls and "constraints.txt" in calls
+    assert "uv tool install imbue-mngr --constraints" in calls
     assert "uv tool upgrade imbue-mngr" not in calls
     assert "mngr dependencies --install interactive --scope core" in calls
     assert "mngr extras -i" in calls
@@ -155,6 +195,8 @@ def test_install_sh_errors_when_mngr_not_on_path_after_install(tmp_path: Path) -
     # uv mock present, but no mngr binary on PATH -- simulates a successful
     # install whose bin dir is not on the user's PATH.
     write_executable_script(bin_dir / "uv", _uv_mock(log_file, mngr_already_installed=False))
+
+    write_executable_script(bin_dir / "curl", _curl_mock(log_file))
 
     result = _run_install_sh(env=_make_env(bin_dir, tmp_path), cwd=tmp_path)
 
@@ -182,6 +224,8 @@ def test_install_sh_continues_when_dependencies_fail(tmp_path: Path) -> None:
     write_executable_script(bin_dir / "uv", _uv_mock(log_file, mngr_already_installed=True))
     write_executable_script(bin_dir / "mngr", _mngr_mock(log_file, fail_subcommands=("dependencies",)))
 
+    write_executable_script(bin_dir / "curl", _curl_mock(log_file))
+
     result = _run_install_sh(env=_make_env(bin_dir, tmp_path), cwd=tmp_path)
 
     assert result.returncode == 0, f"install.sh failed unexpectedly\nstderr:\n{result.stderr}"
@@ -203,6 +247,8 @@ def test_install_sh_continues_when_extras_fail(tmp_path: Path) -> None:
 
     write_executable_script(bin_dir / "uv", _uv_mock(log_file, mngr_already_installed=True))
     write_executable_script(bin_dir / "mngr", _mngr_mock(log_file, fail_subcommands=("extras",)))
+
+    write_executable_script(bin_dir / "curl", _curl_mock(log_file))
 
     result = _run_install_sh(env=_make_env(bin_dir, tmp_path), cwd=tmp_path)
 
@@ -230,6 +276,8 @@ def test_install_sh_continues_when_config_wizard_fails(tmp_path: Path) -> None:
     write_executable_script(bin_dir / "uv", _uv_mock(log_file, mngr_already_installed=True))
     write_executable_script(bin_dir / "mngr", _mngr_mock(log_file, fail_subcommands=("config",)))
 
+    write_executable_script(bin_dir / "curl", _curl_mock(log_file))
+
     result = _run_install_sh(env=_make_env(bin_dir, tmp_path), cwd=tmp_path)
 
     assert result.returncode == 0, f"install.sh failed unexpectedly\nstderr:\n{result.stderr}"
@@ -238,3 +286,29 @@ def test_install_sh_continues_when_config_wizard_fails(tmp_path: Path) -> None:
     # Pin the assertion to the step-5 warning text from install.sh.
     assert "Configuration wizard did not complete" in result.stderr
     assert "Get started with: mngr --help" in result.stdout
+
+
+@pytest.mark.timeout(30)
+def test_install_sh_aborts_when_constraints_fetch_fails(tmp_path: Path) -> None:
+    """A failed constraints fetch aborts the installer before mngr is installed.
+
+    Pinning to the tested versions is required, not best-effort: if the constraints file
+    cannot be fetched, `set -euo pipefail` + `curl -f` abort the script rather than silently
+    installing an unpinned mngr.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log_file = tmp_path / "calls.log"
+    log_file.touch()
+
+    write_executable_script(bin_dir / "uv", _uv_mock(log_file, mngr_already_installed=False))
+    write_executable_script(bin_dir / "mngr", _mngr_mock(log_file))
+    write_executable_script(bin_dir / "curl", _curl_mock(log_file, succeeds=False))
+
+    result = _run_install_sh(env=_make_env(bin_dir, tmp_path), cwd=tmp_path)
+
+    assert result.returncode != 0, f"expected abort on failed fetch\nstdout:\n{result.stdout}"
+    calls = log_file.read_text()
+    assert "curl" in calls
+    # mngr must NOT have been installed when the constraints could not be fetched.
+    assert "uv tool install imbue-mngr" not in calls

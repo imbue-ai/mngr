@@ -46,6 +46,7 @@ from imbue.mngr.utils.toml_config import set_plugin_enabled
 from imbue.mngr.uv_tool import build_uv_tool_install_add_many
 from imbue.mngr.uv_tool import read_receipt
 from imbue.mngr.uv_tool import require_uv_tool_receipt
+from imbue.mngr.uv_tool import with_shipped_constraints
 
 
 class _WizardState(MutableModel):
@@ -356,7 +357,7 @@ def install_wizard_impl() -> None:
         write_human_line("No plugins selected.")
         return
 
-    command = build_uv_tool_install_add_many(receipt, selected)
+    command = with_shipped_constraints(build_uv_tool_install_add_many(receipt, selected))
 
     write_human_line("Installing plugins: {}", ", ".join(selected))
     with ConcurrencyGroup(name="install-wizard") as cg:

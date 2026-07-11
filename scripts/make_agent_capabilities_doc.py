@@ -460,9 +460,32 @@ def generate_capability_matrix_doc(
     return "\n".join([_GENERATED_DOC_HEADER, matrix, "", "## Capabilities", "", *description_lines, ""])
 
 
+# The exact command a developer runs to regenerate every generated artifact.
+REGEN_COMMAND: Final[str] = "just regenerate"
+
+
 def doc_path() -> Path:
     """Path to the committed matrix doc, relative to the repo root (scripts/'s parent)."""
     return Path(__file__).resolve().parents[1] / "libs" / "mngr" / "docs" / "concepts" / "agent_capabilities.md"
+
+
+# repo_root is accepted for a uniform generator interface (see scripts/regen.py); the doc
+# path is resolved from this file's location, which is the repo root, so it is unused here.
+def collect_generated_files(repo_root: Path) -> dict[Path, str]:
+    """Return the generated capability-matrix doc mapped to its expected content."""
+    pm = build_loaded_plugin_manager()
+    infos = build_agent_class_infos(pm)
+    return {doc_path(): generate_capability_matrix_doc(AGENT_CAPABILITIES, infos)}
+
+
+def _find_stale_files(generated: dict[Path, str]) -> list[Path]:
+    """Return the generated files whose on-disk content differs from what we'd write."""
+    stale: list[Path] = []
+    for path, content in generated.items():
+        existing_content = path.read_text() if path.exists() else None
+        if content != existing_content:
+            stale.append(path)
+    return stale
 
 
 def main() -> None:
@@ -477,23 +500,23 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    pm = build_loaded_plugin_manager()
-    infos = build_agent_class_infos(pm)
-    generated = generate_capability_matrix_doc(AGENT_CAPABILITIES, infos)
-    path = doc_path()
+    repo_root = Path(__file__).resolve().parents[1]
+    generated = collect_generated_files(repo_root)
+    stale = _find_stale_files(generated)
 
     if args.check:
-        current = path.read_text() if path.exists() else ""
-        if current != generated:
+        if stale:
             print(
-                f"{path} is stale relative to the agent capability registry; "
-                "regenerate with `just regenerate-agent-capabilities-doc`.",
+                "The agent capability matrix doc is stale relative to the agent capability registry.",
                 file=sys.stderr,
             )
+            print(f"\nRun this to regenerate it:\n  {REGEN_COMMAND}", file=sys.stderr)
             sys.exit(1)
         return
 
-    path.write_text(generated)
+    for path, content in generated.items():
+        path.write_text(content)
+        print(f"Updated: {path}")
 
 
 if __name__ == "__main__":

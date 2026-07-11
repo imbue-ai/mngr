@@ -190,6 +190,10 @@ test-integration:
 test-quick args="":
   uv run pytest {{_parallel}} {{_skip_acceptance_and_release}} --no-cov {{args}}
 
+# Regenerate every code-derived artifact (CLI docs, agent capability matrix doc, constraints file).
+regenerate:
+  uv run python scripts/regen.py
+
 # Regenerate the code-derived agent capability matrix doc (libs/mngr/docs/concepts/agent_capabilities.md)
 regenerate-agent-capabilities-doc:
   uv run python scripts/make_agent_capabilities_doc.py

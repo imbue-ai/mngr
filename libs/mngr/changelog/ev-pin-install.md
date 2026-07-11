@@ -1,0 +1,3 @@
+`mngr plugin add` (and the interactive plugin-install wizard) now pin dependency resolution to the versions mngr was tested with, using a lockfile-derived constraints file shipped inside the wheel. Previously a plugin install did a fresh, unpinned PyPI resolution, so a newly published transitive dependency could be pulled into a version mngr had never been tested against and break the CLI on the next run.
+
+The constraints file (`libs/mngr/constraints.txt`) is generated from the workspace lockfile and force-included into the published wheel at `imbue/mngr/constraints.txt`; when present it is passed to `uv tool install --constraints`. In a source checkout that has not generated it, pinning is skipped (best-effort).

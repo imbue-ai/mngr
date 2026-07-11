@@ -22,6 +22,9 @@ from pydantic import Field
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.cli.output_helpers import AbortError
+from imbue.mngr.utils.paths import resolve_shipped_path
+
+_CONSTRAINTS_FILENAME: Final[str] = "constraints.txt"
 
 _RECEIPT_FILENAME: Final[str] = "uv-receipt.toml"
 
@@ -194,6 +197,30 @@ def _build_uv_tool_install_command(
         flag, value = _requirement_to_with_arg(requirement)
         cmd.extend([flag, value])
     return tuple(cmd)
+
+
+@pure
+def _append_constraints_arg(command: tuple[str, ...], constraint_path: Path | None) -> tuple[str, ...]:
+    """Append ``--constraints <path>`` to a command, or return it unchanged when path is None.
+
+    ``uv`` accepts the option after the positional and ``--with`` args, so appending keeps the
+    ``@pure`` command builders unaware of install-time constraints.
+    """
+    if constraint_path is None:
+        return command
+    return (*command, "--constraints", str(constraint_path))
+
+
+def with_shipped_constraints(command: tuple[str, ...]) -> tuple[str, ...]:
+    """Append ``--constraints <shipped constraints.txt>`` to a ``uv tool install`` command.
+
+    The lockfile-derived constraints file ships inside the wheel (force-included at
+    ``imbue/mngr/constraints.txt``); it pins the whole third-party dependency tree to the
+    versions CI tested, so a fresh PyPI resolution during ``mngr plugin add`` cannot pull an
+    untested (potentially breaking) release. When the file is absent (a source checkout that
+    never ran ``just regenerate``) the command is returned unchanged -- pinning is best-effort.
+    """
+    return _append_constraints_arg(command, resolve_shipped_path(_CONSTRAINTS_FILENAME))
 
 
 @pure

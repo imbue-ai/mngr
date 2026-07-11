@@ -8,6 +8,7 @@
 # What this script does:
 #   1. Installs uv (https://docs.astral.sh/uv/) if not already present
 #   2. Installs mngr via: uv tool install imbue-mngr
+#           (pinned to the tested dependency versions via a fetched constraints file)
 #   3. Runs: mngr dependencies --install interactive --scope core
 #           (interactively install system deps; only warns if a *core* dep is missing)
 #   4. Runs: mngr extras -i        (optional: plugins, shell completion,
@@ -45,12 +46,28 @@ fi
 
 # ── Step 2: Install mngr ─────────────────────────────────────────────────────
 
+# Pin the install to the versions this release was tested with. uv.lock and the
+# `exclude-newer` cutoff only constrain resolution inside a checkout -- they are not
+# consulted by `uv tool install` from PyPI -- so without this, a fresh resolution could
+# pull an untested (potentially broken) dependency release. The lockfile-derived
+# constraints file is served from the `release` branch, which CI fast-forwards to each
+# mngr release commit, so it matches the published package. Required, not best-effort:
+# a failed fetch aborts (set -euo pipefail + curl -f) rather than silently installing
+# unpinned; the installer already depends on GitHub for this very script.
+CONSTRAINTS_FILE="$(mktemp)"
+info "Fetching dependency constraints..."
+curl -fsSL "https://raw.githubusercontent.com/imbue-ai/mngr/release/libs/mngr/constraints.txt" -o "$CONSTRAINTS_FILE"
+
 if uv tool list 2>/dev/null | grep -q '^imbue-mngr '; then
     info "Upgrading mngr..."
+    # `uv tool upgrade` bumps mngr to the latest release and preserves installed plugins,
+    # but does not accept constraints; re-pin the resolved dependencies with a constrained
+    # `uv tool install` afterward (which also preserves plugins and keeps the upgraded version).
     uv tool upgrade imbue-mngr
+    uv tool install imbue-mngr --constraints "$CONSTRAINTS_FILE"
 else
     info "Installing mngr..."
-    uv tool install imbue-mngr
+    uv tool install imbue-mngr --constraints "$CONSTRAINTS_FILE"
 fi
 
 if ! command -v mngr &>/dev/null; then

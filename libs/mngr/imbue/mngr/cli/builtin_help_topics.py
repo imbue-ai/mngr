@@ -20,14 +20,20 @@ from imbue.mngr import hookimpl
 from imbue.mngr.cli.doc_links import imbue_mngr_doc_url
 from imbue.mngr.interfaces.help_topic import DocFile
 from imbue.mngr.interfaces.help_topic import TopicHelpPage
+from imbue.mngr.utils.paths import resolve_shipped_path
 
-# Docs root resolution. In a wheel the docs are force-included under the package
-# at imbue/mngr/docs (parents[1]); in a source/editable checkout they live at
-# libs/mngr/docs (parents[3]) -- the top-level docs/ tree is not otherwise
-# shipped (see CLAUDE.md). Prefer the packaged copy, else the source tree.
-_PACKAGED_DOCS_ROOT = Path(__file__).resolve().parents[1] / "docs"
-_SOURCE_DOCS_ROOT = Path(__file__).resolve().parents[3] / "docs"
-_DOCS_ROOT = _PACKAGED_DOCS_ROOT if _PACKAGED_DOCS_ROOT.is_dir() else _SOURCE_DOCS_ROOT
+
+def _resolve_docs_root() -> Path:
+    """Resolve the docs root: force-included under the package in a wheel, or in the
+    source tree in a checkout (see resolve_shipped_path). Docs are always shipped, so
+    this resolves in every real install.
+    """
+    docs_root = resolve_shipped_path("docs")
+    assert docs_root is not None, "mngr docs must be shipped in the package or present in the source checkout"
+    return docs_root
+
+
+_DOCS_ROOT = _resolve_docs_root()
 
 
 def _doc_topic(

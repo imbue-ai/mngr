@@ -1,6 +1,7 @@
 import sys
-import tomllib
-from datetime import date
+from datetime import datetime
+from datetime import timedelta
+from datetime import timezone
 from pathlib import Path
 
 import pytest
@@ -16,7 +17,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
 from scripts.release import _gate_release_on_pending_changelog_entries  # noqa: E402
 from scripts.release import _pluralize_entry  # noqa: E402
 from scripts.release import _realign_dep_string  # noqa: E402
-from scripts.release import update_exclude_newer  # noqa: E402
+from scripts.release import _warn_if_exclude_newer_stale  # noqa: E402
 
 
 def _write_changelog_entry(tmp_path: Path, name: str, content: str = "- entry", project: str = "mngr") -> None:
@@ -116,11 +117,7 @@ def test_realign_dep_string_rejects_extras_and_markers() -> None:
 
 
 def _write_root_pyproject(tmp_path: Path, exclude_newer: str) -> Path:
-    """Write a minimal root pyproject.toml carrying a `[tool.uv] exclude-newer`.
-
-    Includes an unrelated key under [tool.uv] so the tests can assert that
-    update_exclude_newer rewrites only the cutoff and preserves the rest.
-    """
+    """Write a minimal root pyproject.toml carrying a `[tool.uv] exclude-newer` cutoff."""
     path = tmp_path / "pyproject.toml"
     path.write_text(
         f'[tool.uv]\nexclude-newer = "{exclude_newer}"\n\n[tool.uv.sources]\nimbue-common = {{ workspace = true }}\n'
@@ -128,31 +125,21 @@ def _write_root_pyproject(tmp_path: Path, exclude_newer: str) -> Path:
     return path
 
 
-def test_update_exclude_newer_advances_stale_cutoff(tmp_path: Path) -> None:
-    # A cutoff well older than two weeks before the release date is advanced to
-    # exactly (release_date - 2 weeks), and unrelated config is preserved.
-    path = _write_root_pyproject(tmp_path, "2026-01-01T00:00:00Z")
-    result = update_exclude_newer(path, date(2026, 5, 27))
-    assert result == "2026-05-13T00:00:00Z"
-    doc = tomllib.loads(path.read_text())
-    assert doc["tool"]["uv"]["exclude-newer"] == "2026-05-13T00:00:00Z"
-    assert doc["tool"]["uv"]["sources"]["imbue-common"] == {"workspace": True}
+def test_warn_if_exclude_newer_stale_warns_on_old_cutoff(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # A cutoff years in the past is well beyond the staleness threshold, so an advisory
+    # warning fires (advancing the cutoff is now a manual PR-to-main step).
+    path = _write_root_pyproject(tmp_path, "2020-01-01T00:00:00Z")
+    _warn_if_exclude_newer_stale(path)
+    output = capsys.readouterr().out
+    assert "exclude-newer cooldown cutoff is" in output
+    assert "in a PR to main" in output
 
 
-def test_update_exclude_newer_keeps_recent_cutoff(tmp_path: Path) -> None:
-    # A cutoff younger than the cooldown window (only 4 days before the release
-    # date) must be left untouched: advancing it would push it back and re-exclude
-    # whatever freshly-pinned dep it was set to admit.
-    path = _write_root_pyproject(tmp_path, "2026-05-23T00:00:00Z")
-    original = path.read_text()
-    result = update_exclude_newer(path, date(2026, 5, 27))
-    assert result is None
-    assert path.read_text() == original
-
-
-def test_update_exclude_newer_noop_at_window_boundary(tmp_path: Path) -> None:
-    # A cutoff exactly at (release_date - 2 weeks) is a no-op: max() ties to the
-    # current value, so no rewrite happens.
-    path = _write_root_pyproject(tmp_path, "2026-05-13T00:00:00Z")
-    result = update_exclude_newer(path, date(2026, 5, 27))
-    assert result is None
+def test_warn_if_exclude_newer_stale_silent_on_recent_cutoff(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A cutoff from yesterday is well within the threshold, so nothing is printed.
+    recent = datetime.now(timezone.utc) - timedelta(days=1)
+    path = _write_root_pyproject(tmp_path, recent.strftime("%Y-%m-%dT%H:%M:%SZ"))
+    _warn_if_exclude_newer_stale(path)
+    assert capsys.readouterr().out == ""

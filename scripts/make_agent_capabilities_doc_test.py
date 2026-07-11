@@ -23,8 +23,6 @@ from scripts.make_agent_capabilities_doc import CapabilityDetectionKind
 from scripts.make_agent_capabilities_doc import CapabilityScope
 from scripts.make_agent_capabilities_doc import build_agent_class_infos
 from scripts.make_agent_capabilities_doc import build_loaded_plugin_manager
-from scripts.make_agent_capabilities_doc import doc_path
-from scripts.make_agent_capabilities_doc import generate_capability_matrix_doc
 from scripts.make_agent_capabilities_doc import is_capability_applicable
 from scripts.make_agent_capabilities_doc import is_capability_present
 from scripts.make_agent_capabilities_doc import render_capability_matrix
@@ -384,12 +382,5 @@ def test_builder_detects_known_capabilities(loaded_plugin_manager: pluggy.Plugin
     assert "usage_tracking" not in _present_keys(infos, "antigravity")
 
 
-def test_capability_matrix_doc_is_current(loaded_plugin_manager: pluggy.PluginManager) -> None:
-    """The committed matrix doc must equal the matrix derived from the code (drift guard)."""
-    infos = build_agent_class_infos(loaded_plugin_manager)
-    generated = generate_capability_matrix_doc(AGENT_CAPABILITIES, infos)
-    path = doc_path()
-    assert path.read_text() == generated, (
-        f"{path} is stale relative to the agent capability registry; "
-        "regenerate with `just regenerate-agent-capabilities-doc`."
-    )
+# The doc's drift guard lives in scripts/regen_test.py::test_generated_artifacts_are_current,
+# which runs `scripts/regen.py --check` over every generated artifact (this doc included).

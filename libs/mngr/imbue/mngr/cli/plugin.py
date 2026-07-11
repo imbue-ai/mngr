@@ -46,6 +46,7 @@ from imbue.mngr.uv_tool import build_uv_tool_install_remove_multiple
 from imbue.mngr.uv_tool import has_mngr_entry_points
 from imbue.mngr.uv_tool import read_receipt
 from imbue.mngr.uv_tool import require_uv_tool_receipt
+from imbue.mngr.uv_tool import with_shipped_constraints
 
 # Default fields to display
 DEFAULT_FIELDS: Final[tuple[str, ...]] = ("name", "version", "description", "enabled")
@@ -610,8 +611,9 @@ def _plugin_add_impl(ctx: click.Context) -> None:
     if has_git_source:
         packages_before = _get_installed_package_names(mngr_ctx.concurrency_group)
 
-    # Build a single uv tool install command with all new requirements
-    command = build_uv_tool_install_add_requirements(receipt, new_requirements)
+    # Build a single uv tool install command with all new requirements, pinned to the
+    # lockfile-derived constraints so the plugin resolves against the versions CI tested.
+    command = with_shipped_constraints(build_uv_tool_install_add_requirements(receipt, new_requirements))
 
     all_specifiers = ", ".join(spec for spec, _, _ in source_info)
     with log_span("Installing plugin packages: {}", all_specifiers):
@@ -678,8 +680,9 @@ def _plugin_remove_impl(ctx: click.Context) -> None:
         if package_name not in extra_names:
             raise AbortError(f"Package '{package_name}' is not installed as a plugin")
 
-    # Build a single command that removes all requested packages
-    command = build_uv_tool_install_remove_multiple(receipt, set(package_names))
+    # Build a single command that removes all requested packages. A remove still re-resolves
+    # the surviving tree (--reinstall), so pin it to the shipped constraints too.
+    command = with_shipped_constraints(build_uv_tool_install_remove_multiple(receipt, set(package_names)))
 
     all_names = ", ".join(package_names)
     with log_span("Removing plugin packages: {}", all_names):

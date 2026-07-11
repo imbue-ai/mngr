@@ -1,3 +1,4 @@
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -5,6 +6,7 @@ import pytest
 from imbue.mngr.cli.output_helpers import AbortError
 from imbue.mngr.uv_tool import ToolReceipt
 from imbue.mngr.uv_tool import ToolRequirement
+from imbue.mngr.uv_tool import _append_constraints_arg
 from imbue.mngr.uv_tool import _build_uv_tool_install_command
 from imbue.mngr.uv_tool import _requirement_to_with_arg
 from imbue.mngr.uv_tool import build_base_specifier
@@ -20,6 +22,7 @@ from imbue.mngr.uv_tool import get_receipt_path
 from imbue.mngr.uv_tool import has_mngr_entry_points
 from imbue.mngr.uv_tool import read_receipt
 from imbue.mngr.uv_tool import require_uv_tool_receipt
+from imbue.mngr.uv_tool import with_shipped_constraints
 
 # =============================================================================
 # Tests for _requirement_to_with_arg
@@ -519,3 +522,46 @@ def test_get_installed_plugin_package_names_handles_malformed_receipt(tmp_path: 
     receipt_path.write_text("this is not valid toml = = =\n")
 
     assert get_installed_plugin_package_names(receipt_path) == []
+
+
+# =============================================================================
+# Tests for constraints appending
+# =============================================================================
+
+
+def test_append_constraints_arg_with_path() -> None:
+    """A constraint path is appended as a trailing --constraints option."""
+    command = ("uv", "tool", "install", "imbue-mngr", "--reinstall", "--with", "imbue-mngr-azure")
+    result = _append_constraints_arg(command, Path("/some/constraints.txt"))
+    assert result == (*command, "--constraints", "/some/constraints.txt")
+
+
+def test_append_constraints_arg_without_path_returns_unchanged() -> None:
+    """When no constraints file is available, the command is returned unchanged."""
+    command = ("uv", "tool", "install", "imbue-mngr", "--reinstall")
+    assert _append_constraints_arg(command, None) == command
+
+
+def test_with_shipped_constraints_appends_shipped_file() -> None:
+    """In a checkout the shipped constraints.txt resolves and is appended as --constraints."""
+    command = ("uv", "tool", "install", "imbue-mngr", "--reinstall")
+    result = with_shipped_constraints(command)
+    # The command is extended by exactly the constraints option pointing at constraints.txt.
+    assert result[: len(command)] == command
+    assert result[len(command)] == "--constraints"
+    assert result[-1].endswith("constraints.txt")
+
+
+def test_constraints_file_is_force_included_in_wheel() -> None:
+    """The lockfile-derived constraints file must be force-included into the wheel.
+
+    with_shipped_constraints (and scripts/install.sh) rely on it shipping at
+    imbue/mngr/constraints.txt; without the force-include a PyPI install would not carry it,
+    so `mngr plugin add` would resolve unpinned.
+    """
+    pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
+    force_include = tomllib.loads(pyproject.read_text())["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
+    assert force_include.get("constraints.txt") == "imbue/mngr/constraints.txt", (
+        "constraints.txt must be force-included to imbue/mngr/constraints.txt in "
+        "libs/mngr/pyproject.toml [tool.hatch.build.targets.wheel.force-include]"
+    )

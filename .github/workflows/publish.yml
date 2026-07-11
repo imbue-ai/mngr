@@ -68,3 +68,27 @@ jobs:
         with:
           packages-dir: dist/
           skip-existing: true
+
+  # Point the `release` branch at the just-published commit. The installer
+  # (scripts/install.sh) and the lockfile-derived constraints file are both served
+  # from `release`, so end users always fetch a matched, published pair (see
+  # README install instructions, which curl from `release`). This workflow triggers
+  # only on mngr `v*` tags (minds uses `minds-v*`), so `release` tracks mngr releases.
+  update-release-branch:
+    needs: publish
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Fast-forward the release branch to this mngr release
+        run: |
+          set -euo pipefail
+          # Non-fast-forward is rejected (releases advance linearly on main), which
+          # surfaces any unexpected divergence instead of silently overwriting it.
+          git push origin "${{ github.sha }}:refs/heads/release"
