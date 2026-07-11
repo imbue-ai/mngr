@@ -67,9 +67,11 @@ const EXPECTED_SHA256 = {
   'desync_1.0.3_darwin_amd64.tar.gz':   'ab029448074428dc757d2235109dd557e9f34e4865052432a6ea7c431f0a5a19',
   'desync_1.0.3_linux_amd64.tar.gz':    'ad4dd9e91b57eef8627d2038df09281d7f38dca02eeca0e66592b54087619953',
   'desync_1.0.3_linux_arm64.tar.gz':    '9008e297f527634efe94688f67c7a49a534c561bf43d223e50f64bec899c15ca',
-  // darwin-x86_64 is unpinned: ToDesktop's mac builder is arm64 and no Intel
-  // packaged build exists; producing one on an Intel Mac adds the pin. A build
-  // for an unpinned target aborts loudly in verifyChecksum. See docs/desktop-app.md.
+  // darwin-x86_64 is absent: no Intel payload is published, and downloadQemuImg
+  // skips that target rather than fetching it (ToDesktop's mac build agent is
+  // itself x86_64, so the beforeInstall hook resolves darwin-x86_64 on every mac
+  // build). A *linux* arch left unpinned here instead aborts loudly in
+  // verifyChecksum. See docs/desktop-app.md.
   'qemu-img-10.2.2-darwin-aarch64.tar.gz': 'e1abac7e272b1212b7123935012139aa6e65ceeb3d56b09c847d37f5ff8377cf',
   'qemu-img-10.2.2-linux-aarch64.tar.gz':  'a77b2222a7716079a8f446fb8376f7c860b6263a63baa905b9b440dd75ffefea',
   'qemu-img-10.2.2-linux-x86_64.tar.gz':   '475ae8d17593ba2beb95ba8cbc1eb815032a87699e5b86b7789811b5d42c2525',
