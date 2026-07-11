@@ -1297,7 +1297,7 @@ def test_custom_sdk_guard_end_to_end(
 
     def install() -> None:
         originals["send"] = FakeClient.send
-        FakeClient.send = guarded_send  # ty: ignore[invalid-assignment]
+        FakeClient.send = guarded_send
 
     def cleanup() -> None:
         if "send" in originals:

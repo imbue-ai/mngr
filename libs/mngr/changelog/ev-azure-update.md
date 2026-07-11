@@ -1,0 +1,1 @@
+Regenerate the `config`, `plugin`, and `usage` command reference docs to match the newer `click` release pulled in by the workspace dependency refresh (optional command groups now render as `[COMMAND]` in usage lines). No behavior change; internal type annotation touch-up in a create test to satisfy the updated type checker.

@@ -61,7 +61,10 @@ class ImbueCloudCliError(MindError):
     that only want the message can use the regular MindError signature.
     """
 
-    exit_code: int = 1
+    # click's ClickException declares exit_code as a ClassVar; we deliberately
+    # override it as a per-instance attribute so each raised error carries the
+    # wrapped subprocess's own exit code (set by the helpers that raise this).
+    exit_code: int = 1  # ty: ignore[invalid-attribute-override]
     stdout: str = ""
     stderr: str = ""
 

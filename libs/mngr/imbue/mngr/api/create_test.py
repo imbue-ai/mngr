@@ -1,6 +1,7 @@
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pydantic import Field
@@ -293,7 +294,7 @@ def test_create_new_host_retries_on_name_conflict(
     create_count = 0
     original_create_host = LocalProviderInstance.create_host
 
-    def create_host_that_conflicts_once(self: LocalProviderInstance, name: HostName, **kwargs: object) -> Host:
+    def create_host_that_conflicts_once(self: LocalProviderInstance, name: HostName, **kwargs: Any) -> Host:
         nonlocal create_count
         create_count += 1
         if create_count == 1:

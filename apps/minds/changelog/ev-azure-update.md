@@ -1,0 +1,1 @@
+Internal type-checker compatibility fix for the workspace dependency refresh: the newer `click` release annotates `ClickException.exit_code` as a `ClassVar`, so `ImbueCloudCliError`'s deliberate per-instance `exit_code` override is now marked as an intentional override. No behavior change.
