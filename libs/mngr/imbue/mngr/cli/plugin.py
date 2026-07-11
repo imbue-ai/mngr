@@ -339,8 +339,9 @@ def _emit_plugin_remove_result(
 @add_common_options
 @click.pass_context
 def plugin(ctx: click.Context, **kwargs: Any) -> None:
-    # A subcommand is required; click renders help (via no_args_is_help) when
-    # invoked bare, so this group callback has nothing to do itself.
+    # A subcommand is required; running this group bare prints its help/usage
+    # listing and exits with a usage error (like snapshot/git), so this group
+    # callback has nothing to do itself.
     pass
 
 
