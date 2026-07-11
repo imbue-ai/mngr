@@ -105,6 +105,7 @@ The desktop app bundles platform-specific binaries so users need zero prerequisi
 - **lima**: Required for the Lima launch mode (running agents in Linux VMs). Downloaded from GitHub releases during `pnpm build`. Self-contained on macOS Apple Silicon via Lima's `vz` backend; macOS Intel and Linux still run the VM itself via host QEMU.
 - **restic**: Per-workspace backup repositories. Downloaded from GitHub releases.
 - **desync**: Content-defined-chunking client that fetches the pre-baked Lima image (issue #2306). Downloaded from GitHub releases. macOS/Linux only.
+
 Each is placed in the `resources/` directory (outside the asar archive). The packaged app prepends the `uv`, `git`, `lima`, and `desync` directories to the backend child process's `PATH`. `restic` and `desync` are also named by explicit absolute path (`MINDS_RESTIC_BINARY`, `MINDS_DESYNC_BINARY`), so their resolution never depends on `PATH` ordering; `restic` is reached *only* that way, its directory never being on `PATH`. Dev mode inherits the developer's `PATH` untouched and prepends nothing, so the only bundled binary it reaches is the one named by absolute path: it sets `MINDS_DESYNC_BINARY` (without which the fast-create path would need a system-wide `desync`), and resolves everything else, `restic` included, from `PATH`.
 
 There is deliberately no bundled `qemu-img`. The pre-baked image is published, downloaded, and consumed as a **raw** image end to end, so nothing converts it. See "Why the image is raw" below.
