@@ -16,6 +16,7 @@ from loguru import logger
 from pydantic import BaseModel
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mngr.agents.agent_registry import list_available_agent_types
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
@@ -1185,7 +1186,7 @@ def _config_wizard_impl(ctx: click.Context, **kwargs: Any) -> None:
 
     write_human_line("mngr config wizard")
     write_human_line("")
-    _wizard_default_agent_type(config_path, apply)
+    _wizard_default_agent_type(config_path, apply, list_available_agent_types(mngr_ctx.config))
     _wizard_claude_config_isolation(config_path, apply)
     _wizard_docker_volume_isolation(config_path, apply)
 
@@ -1202,22 +1203,7 @@ def _get_default_agent_type(raw: dict[str, Any]) -> str | None:
     if not isinstance(create, dict):
         return None
     value = create.get("type")
-    return str(value) if value is not None else None
-
-
-def _list_wizard_agent_type_choices(raw: dict[str, Any]) -> list[str]:
-    """Available agent type names: plugin-registered plus user-config [agent_types.X].
-
-    Mirrors ``list_available_agent_types`` but reads the raw user config to avoid
-    loading a full ``MngrConfig``. Because the wizard runs as its own process
-    (after the installer's extras step), plugins installed during that step are
-    already registered here, so freshly-installed agent types show up.
-    """
-    custom: list[str] = []
-    raw_agent_types = raw.get("agent_types")
-    if isinstance(raw_agent_types, dict):
-        custom = [str(k) for k in raw_agent_types.keys()]
-    return sorted(set(list_registered_agent_types() + custom))
+    return value if isinstance(value, str) else None
 
 
 def _prompt_default_agent_type_choice(available: list[str]) -> str | None:
@@ -1240,28 +1226,32 @@ def _prompt_default_agent_type_choice(available: list[str]) -> str | None:
 def _wizard_default_agent_type(
     config_path: Path,
     apply_fn: Callable[[str, Any], None],
+    available: list[str],
     *,
     # Dependencies are exposed as keyword arguments so tests can substitute
     # in-memory fakes without monkeypatching module-level callables.
-    list_choices_fn: Callable[[dict[str, Any]], list[str]] = _list_wizard_agent_type_choices,
     is_interactive_fn: Callable[[], bool] = has_interactive_terminal,
     prompt_fn: Callable[[list[str]], str | None] = _prompt_default_agent_type_choice,
 ) -> None:
     """Prompt for the default agent type for ``mngr create``.
 
-    Writes ``commands.create.type`` via ``apply_fn`` (the shared validated write
-    path). Skips silently if a default is already set, or no agent types are
-    registered yet.
+    ``available`` is the caller-supplied list of selectable agent types (from
+    ``list_available_agent_types``). Writes ``commands.create.type`` via
+    ``apply_fn`` (the shared validated write path). Skips silently if a default is
+    already set in the user config, or no agent types are available.
     """
-    existing = _load_config_file(config_path)
-    current = _get_default_agent_type(existing)
+    # Read the raw user-scope file to detect whether the user has *explicitly*
+    # set a default -- that presence check is what decides whether to prompt, and
+    # the loaded (merged) config can't distinguish an explicit value from an
+    # inherited or built-in default. Not a re-parse for speed: it is the only way
+    # to see the user's own choice.
+    current = _get_default_agent_type(_load_config_file(config_path))
     if current is not None:
         write_human_line(
             "Default agent type for 'mngr create' is already set to '{}' in {}; skipping.", current, config_path
         )
         return
 
-    available = list_choices_fn(existing)
     if not available:
         write_human_line("No agent types are registered yet; skipping default agent type.")
         return

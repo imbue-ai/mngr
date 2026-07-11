@@ -23,7 +23,6 @@ from imbue.mngr.cli.config import _get_default_agent_type
 from imbue.mngr.cli.config import _get_existing_docker_isolation_setting
 from imbue.mngr.cli.config import _get_existing_isolation_setting
 from imbue.mngr.cli.config import _get_nested_value
-from imbue.mngr.cli.config import _list_wizard_agent_type_choices
 from imbue.mngr.cli.config import _unset_nested_value
 from imbue.mngr.cli.config import _wizard_claude_config_isolation
 from imbue.mngr.cli.config import _wizard_default_agent_type
@@ -900,14 +899,6 @@ def test_get_default_agent_type_returns_none_when_absent() -> None:
     assert _get_default_agent_type({"commands": {"create": {}}}) is None
 
 
-def test_list_wizard_agent_type_choices_unions_user_config_types() -> None:
-    """User-config [agent_types.X] names are unioned with the plugin-registered list."""
-    result = _list_wizard_agent_type_choices({"agent_types": {"my-custom": {"parent_type": "command"}}})
-    # The registered builtins vary, but the custom type must be present and the list sorted.
-    assert "my-custom" in result
-    assert result == sorted(result)
-
-
 def test_wizard_default_agent_type_writes_picked_value(tmp_path: Path) -> None:
     """Picking a type writes commands.create.type."""
     config_path = tmp_path / "settings.toml"
@@ -915,7 +906,7 @@ def test_wizard_default_agent_type_writes_picked_value(tmp_path: Path) -> None:
     _wizard_default_agent_type(
         config_path,
         _writing_apply(config_path),
-        list_choices_fn=lambda _raw: ["claude", "command"],
+        ["claude", "command"],
         is_interactive_fn=lambda: True,
         prompt_fn=lambda _available: "claude",
     )
@@ -933,7 +924,7 @@ def test_wizard_default_agent_type_skips_when_already_set(tmp_path: Path) -> Non
     _wizard_default_agent_type(
         config_path,
         _writing_apply(config_path),
-        list_choices_fn=lambda _raw: ["claude", "command"],
+        ["claude", "command"],
         is_interactive_fn=lambda: True,
         prompt_fn=lambda _available: pytest.fail("prompt must not be called when already set"),
     )
@@ -948,7 +939,7 @@ def test_wizard_default_agent_type_skips_when_no_choices(tmp_path: Path) -> None
     _wizard_default_agent_type(
         config_path,
         _writing_apply(config_path),
-        list_choices_fn=lambda _raw: [],
+        [],
         is_interactive_fn=lambda: True,
         prompt_fn=lambda _available: pytest.fail("prompt must not be called when no types are registered"),
     )
@@ -963,7 +954,7 @@ def test_wizard_default_agent_type_skip_choice_writes_nothing(tmp_path: Path) ->
     _wizard_default_agent_type(
         config_path,
         _writing_apply(config_path),
-        list_choices_fn=lambda _raw: ["claude", "command"],
+        ["claude", "command"],
         is_interactive_fn=lambda: True,
         prompt_fn=lambda _available: None,
     )
@@ -978,7 +969,7 @@ def test_wizard_default_agent_type_non_interactive_prints_hint_without_writing(t
     _wizard_default_agent_type(
         config_path,
         _writing_apply(config_path),
-        list_choices_fn=lambda _raw: ["claude"],
+        ["claude"],
         is_interactive_fn=lambda: False,
         prompt_fn=lambda _available: pytest.fail("prompt must not be called without an interactive terminal"),
     )
