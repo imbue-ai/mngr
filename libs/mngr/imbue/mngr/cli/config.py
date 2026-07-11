@@ -171,12 +171,16 @@ def _flatten_config(config: dict[str, Any], prefix: str = "") -> list[tuple[str,
 
 
 @click.group(name="config")
+@click.option(
+    "--scope",
+    type=click.Choice(["user", "project", "local"], case_sensitive=False),
+    help="Config scope: user (~/.mngr/profiles/<profile_id>/), project (.mngr/), or local (.mngr/settings.local.toml)",
+)
 @add_common_options
 @click.pass_context
 def config(ctx: click.Context, **kwargs: Any) -> None:
-    # A subcommand is required; click renders help when invoked bare, so this
-    # group callback (like snapshot's and git's) has nothing to do itself. Each
-    # subcommand declares and consumes its own --scope / common options.
+    # A subcommand is required; click renders help (via no_args_is_help) when
+    # invoked bare, so this group callback has nothing to do itself.
     pass
 
 
