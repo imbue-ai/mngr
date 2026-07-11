@@ -200,27 +200,38 @@ def _build_uv_tool_install_command(
 
 
 @pure
-def _append_constraints_arg(command: tuple[str, ...], constraint_path: Path | None) -> tuple[str, ...]:
-    """Append ``--constraints <path>`` to a command, or return it unchanged when path is None.
+def _append_constraints_arg(command: tuple[str, ...], constraint_path: Path) -> tuple[str, ...]:
+    """Append ``--constraints <path>`` to a finished uv command.
 
     ``uv`` accepts the option after the positional and ``--with`` args, so appending keeps the
     ``@pure`` command builders unaware of install-time constraints.
     """
-    if constraint_path is None:
-        return command
     return (*command, "--constraints", str(constraint_path))
 
 
-def with_shipped_constraints(command: tuple[str, ...]) -> tuple[str, ...]:
-    """Append ``--constraints <shipped constraints.txt>`` to a ``uv tool install`` command.
+def with_shipped_constraints(
+    command: tuple[str, ...],
+    resolve: Callable[[str], Path | None] = resolve_shipped_path,
+) -> tuple[str, ...]:
+    """Append ``--constraints <shipped constraints.txt>`` to a ``uv tool install`` command, aborting if it is missing.
 
-    The lockfile-derived constraints file ships inside the wheel (force-included at
-    ``imbue/mngr/constraints.txt``); it pins the whole third-party dependency tree to the
-    versions CI tested, so a fresh PyPI resolution during ``mngr plugin add`` cannot pull an
-    untested (potentially breaking) release. When the file is absent (a source checkout that
-    never ran ``just regenerate``) the command is returned unchanged -- pinning is best-effort.
+    A single lockfile-derived constraints file -- the whole third-party dependency tree from the
+    workspace lock, not a per-plugin file -- ships inside the wheel (force-included at
+    ``imbue/mngr/constraints.txt``) and is committed in the source tree, so it is present in every
+    real install. It pins that tree to the versions CI tested, so any ``uv tool install`` mngr runs
+    (adding a plugin, or re-resolving the surviving tree when removing one) cannot pull an untested
+    (potentially breaking) release. Its absence is not a per-plugin problem but a sign the mngr
+    installation itself is broken, so this aborts with a clear error rather than silently resolving
+    unpinned.
     """
-    return _append_constraints_arg(command, resolve_shipped_path(_CONSTRAINTS_FILENAME))
+    constraint_path = resolve(_CONSTRAINTS_FILENAME)
+    if constraint_path is None:
+        raise AbortError(
+            f"mngr's bundled {_CONSTRAINTS_FILENAME} could not be found in this installation. "
+            "This is a packaging bug -- reinstall mngr (e.g. via the install script or "
+            "'uv tool install imbue-mngr') and try again."
+        )
+    return _append_constraints_arg(command, constraint_path)
 
 
 @pure

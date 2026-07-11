@@ -536,12 +536,6 @@ def test_append_constraints_arg_with_path() -> None:
     assert result == (*command, "--constraints", "/some/constraints.txt")
 
 
-def test_append_constraints_arg_without_path_returns_unchanged() -> None:
-    """When no constraints file is available, the command is returned unchanged."""
-    command = ("uv", "tool", "install", "imbue-mngr", "--reinstall")
-    assert _append_constraints_arg(command, None) == command
-
-
 def test_with_shipped_constraints_appends_shipped_file() -> None:
     """In a checkout the shipped constraints.txt resolves and is appended as --constraints."""
     command = ("uv", "tool", "install", "imbue-mngr", "--reinstall")
@@ -552,10 +546,18 @@ def test_with_shipped_constraints_appends_shipped_file() -> None:
     assert result[-1].endswith("constraints.txt")
 
 
+def test_with_shipped_constraints_aborts_when_missing() -> None:
+    """A missing constraints file means the mngr install itself is broken, so pinning aborts
+    loudly (for add and remove alike) rather than silently resolving unpinned."""
+    command = ("uv", "tool", "install", "imbue-mngr", "--reinstall")
+    with pytest.raises(AbortError):
+        with_shipped_constraints(command, resolve=lambda _name: None)
+
+
 def test_constraints_file_is_force_included_in_wheel() -> None:
     """The lockfile-derived constraints file must be force-included into the wheel.
 
-    with_shipped_constraints (and scripts/install.sh) rely on it shipping at
+    The install/remove wrappers (and scripts/install.sh) rely on it shipping at
     imbue/mngr/constraints.txt; without the force-include a PyPI install would not carry it,
     so `mngr plugin add` would resolve unpinned.
     """

@@ -681,7 +681,8 @@ def _plugin_remove_impl(ctx: click.Context) -> None:
             raise AbortError(f"Package '{package_name}' is not installed as a plugin")
 
     # Build a single command that removes all requested packages. A remove still re-resolves
-    # the surviving tree (--reinstall), so pin it to the shipped constraints too.
+    # the surviving tree (--reinstall), so pin it to the shipped constraints too. A missing
+    # constraints file means the mngr install itself is broken (not this plugin), so this aborts.
     command = with_shipped_constraints(build_uv_tool_install_remove_multiple(receipt, set(package_names)))
 
     all_names = ", ".join(package_names)
