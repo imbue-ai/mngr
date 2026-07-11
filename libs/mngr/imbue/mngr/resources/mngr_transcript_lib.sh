@@ -39,7 +39,8 @@
 #
 # Limitations: matches the *first* such pair in the line. Agent-emitted JSONL
 # events keep correlation fields (uuid, id) at the top, so the first match is the
-# right one.
+# right one. FIELD is interpolated into this ERE literally (as printf's %s), so
+# callers must pass a regex-safe field name; the uuid/id callers do.
 _MNGR_TRANSCRIPT_FIELD_ERE='"%s"[[:space:]]*:[[:space:]]*"([^"]*)"'
 
 # Build _MNGR_TRANSCRIPT_ID_SET from every FIELD value in OUTPUT_FILE.
@@ -78,6 +79,8 @@ mngr_transcript_reconcile_offset() {
     local idx=0
     local found=0
     local line value
+    # read skips an unterminated final line, matching wc -l and the sed emit
+    # range, so a partially-written final record is deferred, not miscounted.
     while IFS= read -r line; do
         idx=$((idx + 1))
         if [[ "$line" =~ $pattern ]]; then
