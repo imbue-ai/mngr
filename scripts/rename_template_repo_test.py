@@ -102,6 +102,8 @@ def test_rewrite_text_representative_lines() -> None:
             "https://GitHub.com/Imbue-AI/Forever-Claude-Template.git",
             "https://GitHub.com/Imbue-AI/Default-Workspace-Template.git",
         ),
+        ("fct: FctTemplateRef,", "workspace_template: WorkspaceTemplateRef,"),
+        ("raise FctWorktreeMissingError(path)", "raise WorkspaceTemplateWorktreeMissingError(path)"),
     )
     for old_line, expected in cases:
         new_line, count = rewrite_text(old_line, replacements)
@@ -171,8 +173,14 @@ def test_end_to_end_apply_is_idempotent_and_checkable(tmp_path: Path) -> None:
 
 def test_find_leftovers_reports_live_references(tmp_path: Path) -> None:
     _make_git_repo(tmp_path)
+    (tmp_path / "src" / "types.py").write_text("class FctTemplateRef: ...\n")
+    subprocess.run(("git", "add", "-A"), cwd=tmp_path, check=True)
     leftovers = find_leftovers(tmp_path)
-    assert {leftover.rel_path for leftover in leftovers} == {Path("README.md"), Path("src/fct_worktree.py")}
+    assert {leftover.rel_path for leftover in leftovers} == {
+        Path("README.md"),
+        Path("src/fct_worktree.py"),
+        Path("src/types.py"),
+    }
 
 
 def test_reintroduced_old_file_dropped_when_identical(tmp_path: Path) -> None:

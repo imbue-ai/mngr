@@ -90,9 +90,19 @@ _SELF_PATHS: Final[frozenset[Path]] = frozenset(
 _ABBREVIATION_PREFIX: Final[str] = r"(?<![A-Za-z0-9])"
 _ABBREVIATION_SUFFIX: Final[str] = r"(?![A-Za-z0-9])"
 
-# Post-apply leftovers scan: any case of the old name or the old abbreviation.
+# Post-apply leftovers scan: any case of the old name or the old abbreviation,
+# including CamelCase-embedded forms (FctTemplateRef).
 _LEFTOVER_PATTERN: Final[str] = (
-    r"(?i)forever[-_ ]?claude|" + _ABBREVIATION_PREFIX + _OLD_ABBREVIATION + _ABBREVIATION_SUFFIX
+    r"(?i:forever[-_ ]?claude)"
+    + "|"
+    + _ABBREVIATION_PREFIX
+    + "(?i:"
+    + _OLD_ABBREVIATION
+    + ")"
+    + _ABBREVIATION_SUFFIX
+    + "|"
+    + _ABBREVIATION_PREFIX
+    + r"[Ff]ct(?=[A-Z])"
 )
 
 _VOWELS: Final[frozenset[str]] = frozenset("aeiou")
@@ -245,6 +255,12 @@ def _duplication_cleanup_rules(forms: NameForms) -> tuple[Replacement, ...]:
         last_word = spaced.rsplit(" ", 1)[-1]
         for old in (f"{forms.abbreviation_snake_upper} {last_word}", f"{forms.abbreviation_snake} {last_word}"):
             rules.append(Replacement(label=old, pattern=re.escape(old) + r"\b", new_text=spaced))
+        # CamelCase tail duplication: FctTemplateRef -> DefaultWorkspaceTemplateTemplateRef
+        # -> DefaultWorkspaceTemplateRef.
+        pascal_doubled = f"{forms.abbreviation_pascal}{last_word.capitalize()}"
+        rules.append(
+            Replacement(label=pascal_doubled, pattern=re.escape(pascal_doubled), new_text=forms.abbreviation_pascal)
+        )
     return tuple(rules)
 
 
@@ -302,6 +318,14 @@ def build_replacements(forms: NameForms) -> tuple[Replacement, ...]:
         )
         for old, new, hyphen_adjacent in abbreviation_triples
     )
+    # CamelCase-embedded abbreviation (`FctTemplateRef`): the generic boundary
+    # rules skip it because the next character is a letter.
+    camel_rule = Replacement(
+        label="Fct (CamelCase)",
+        pattern=_ABBREVIATION_PREFIX + r"Fct(?=[A-Z])",
+        new_text=forms.abbreviation_pascal,
+    )
+    abbreviation_rules = abbreviation_rules + (camel_rule,)
     return literal_rules + abbreviation_rules + _duplication_cleanup_rules(forms) + _article_agreement_rules(forms)
 
 
@@ -313,7 +337,12 @@ def _substitute(text: str, rule: Replacement) -> tuple[str, int]:
             return rule.new_text
         preceding = match.string[match.start() - 1] if match.start() > 0 else ""
         following = match.string[match.end()] if match.end() < len(match.string) else ""
-        if preceding == "-" or following in "-:":
+        if preceding == "-" or following == "-":
+            return rule.hyphen_adjacent_text
+        # `fct:<tag>` (docker image ref) is kebab, but `fct: Type` (a Python
+        # annotation) and a bare `fct:` key are identifiers.
+        after_colon = match.string[match.end() + 1] if match.end() + 1 < len(match.string) else ""
+        if following == ":" and after_colon.isalnum():
             return rule.hyphen_adjacent_text
         return rule.new_text
 
