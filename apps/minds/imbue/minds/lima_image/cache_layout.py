@@ -17,7 +17,7 @@ class LimaImageCurrentPointer(FrozenModel):
 
     minds_version: MindsImageVersion = Field(description="The release tag of the current image")
     arch: ImageArch = Field(description="The architecture of the current image")
-    qcow2_path: Path = Field(description="Absolute path to the current qcow2")
+    raw_path: Path = Field(description="Absolute path to the current raw image")
     index_path: Path = Field(description="Absolute path to the current image's desync index, kept for seeding")
 
 
@@ -41,7 +41,7 @@ class LimaImageCacheLayout(FrozenModel):
 
     @property
     def tmp_dir(self) -> Path:
-        """Scratch space for in-flight raw assembly / conversion."""
+        """Scratch space for in-flight raw assembly."""
         return self.cache_dir / "tmp"
 
     @property
@@ -51,8 +51,8 @@ class LimaImageCacheLayout(FrozenModel):
     def version_dir(self, minds_version: MindsImageVersion, arch: ImageArch) -> Path:
         return self.versions_dir / str(minds_version) / arch.value
 
-    def qcow2_path(self, minds_version: MindsImageVersion, arch: ImageArch) -> Path:
-        return self.version_dir(minds_version, arch) / "image.qcow2"
+    def raw_path(self, minds_version: MindsImageVersion, arch: ImageArch) -> Path:
+        return self.version_dir(minds_version, arch) / "image.raw"
 
     def index_path(self, minds_version: MindsImageVersion, arch: ImageArch) -> Path:
         return self.version_dir(minds_version, arch) / "image.caibx"

@@ -583,7 +583,7 @@ def _build_mngr_create_command(
     color: str | None = None,
     original_minds_version: str | None = None,
     original_branch: str | None = None,
-    prebaked_lima_image_qcow2_path: Path | None = None,
+    prebaked_lima_image_raw_path: Path | None = None,
 ) -> list[str]:
     """Build the ``mngr create`` command for a freshly-provisioned workspace.
 
@@ -748,12 +748,12 @@ def _build_mngr_create_command(
             mngr_command.extend(["--new-host", "--template", "main", "--template", "lima"])
             mngr_command.extend(_remote_host_env_flags())
             # When the caller resolved a ready pre-baked image (issue 2306),
-            # point Lima at the local qcow2 via the provider's existing per-arch
+            # point Lima at the local raw image via the provider's existing per-arch
             # image-url override, so the VM boots the baked toolchain instead of
             # building it. No provider code change is needed to consume it.
-            if prebaked_lima_image_qcow2_path is not None:
+            if prebaked_lima_image_raw_path is not None:
                 mngr_command.extend(
-                    prebaked_image_mngr_setting_args(get_current_image_arch(), prebaked_lima_image_qcow2_path)
+                    prebaked_image_mngr_setting_args(get_current_image_arch(), prebaked_lima_image_raw_path)
                 )
         case LaunchMode.VULTR:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "vultr"])
@@ -973,7 +973,7 @@ def run_mngr_create(
     color: str | None = None,
     original_minds_version: str | None = None,
     original_branch: str | None = None,
-    prebaked_lima_image_qcow2_path: Path | None = None,
+    prebaked_lima_image_raw_path: Path | None = None,
     *,
     parent_cg: ConcurrencyGroup | None = None,
 ) -> tuple[AgentId, HostId]:
@@ -1013,7 +1013,7 @@ def run_mngr_create(
         color=color,
         original_minds_version=original_minds_version,
         original_branch=original_branch,
-        prebaked_lima_image_qcow2_path=prebaked_lima_image_qcow2_path,
+        prebaked_lima_image_raw_path=prebaked_lima_image_raw_path,
     )
 
     # Build the subprocess env from the parent's env + any secrets we inject
@@ -1150,8 +1150,8 @@ class _MngrCreateAttemptParams(FrozenModel):
     color: str | None
     original_minds_version: str | None
     original_branch: str | None
-    # Resolved ready pre-baked Lima qcow2 path (issue 2306), or None to build in-VM.
-    prebaked_lima_image_qcow2_path: Path | None = None
+    # Resolved ready pre-baked Lima raw image path (issue 2306), or None to build in-VM.
+    prebaked_lima_image_raw_path: Path | None = None
 
 
 def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams) -> tuple[AgentId, HostId]:
@@ -1188,7 +1188,7 @@ def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams
         color=params.color,
         original_minds_version=params.original_minds_version,
         original_branch=params.original_branch,
-        prebaked_lima_image_qcow2_path=params.prebaked_lima_image_qcow2_path,
+        prebaked_lima_image_raw_path=params.prebaked_lima_image_raw_path,
         parent_cg=params.parent_cg,
     )
 
@@ -1739,11 +1739,11 @@ class AgentCreator(MutableModel):
                 # the prefetched, verified image and point Lima at it. Returns None
                 # (build in-VM) for any non-default create or unpublished version;
                 # raises a retryable error if a published image can't be readied.
-                prebaked_lima_image_qcow2_path: Path | None = None
+                prebaked_lima_image_raw_path: Path | None = None
                 if self.lima_image_gate is not None:
                     if launch_mode is LaunchMode.LIMA:
                         log_queue.put("[minds] Checking for a pre-baked Lima image...")
-                    prebaked_lima_image_qcow2_path = self.lima_image_gate.resolve_qcow2_for_create(
+                    prebaked_lima_image_raw_path = self.lima_image_gate.resolve_image_for_create(
                         is_lima_launch_mode=launch_mode is LaunchMode.LIMA,
                         repo_url=repo_source or "",
                         branch_or_tag=branch_or_tag,
@@ -1751,7 +1751,7 @@ class AgentCreator(MutableModel):
                         wait_timeout_seconds=_PREBAKED_IMAGE_WAIT_TIMEOUT_SECONDS,
                         poll_interval_seconds=_PREBAKED_IMAGE_POLL_INTERVAL_SECONDS,
                     )
-                    if prebaked_lima_image_qcow2_path is not None:
+                    if prebaked_lima_image_raw_path is not None:
                         log_queue.put("[minds] Using pre-baked Lima image (fast create).")
 
                 # ``fast_mode`` is the only knob that varies between the fast-
@@ -1774,7 +1774,7 @@ class AgentCreator(MutableModel):
                     color=color,
                     original_minds_version=original_minds_version or None,
                     original_branch=branch or None,
-                    prebaked_lima_image_qcow2_path=prebaked_lima_image_qcow2_path,
+                    prebaked_lima_image_raw_path=prebaked_lima_image_raw_path,
                 )
 
                 if launch_mode is LaunchMode.IMBUE_CLOUD:

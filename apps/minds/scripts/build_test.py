@@ -246,24 +246,21 @@ def test_bundled_limactl_is_signed_with_virtualization_entitlement() -> None:
     )
 
 
-def test_bundled_lima_image_tools_are_in_signing_list() -> None:
-    """Guard: the bundled desync and qemu-img must be signed by ToDesktop.
+def test_bundled_desync_is_in_signing_list() -> None:
+    """Guard: the bundled desync must be signed by ToDesktop.
 
-    Both are Mach-O binaries that ``build.js`` stages into ``resources/`` and
+    It is a Mach-O binary that ``build.js`` stages into ``resources/`` and
     ToDesktop packages into ``Contents/Resources``. Under the hardened runtime
     every shipped Mach-O must be code-signed with the app's Developer ID or
     notarization rejects the build -- and notarization only runs in the release
-    pipeline, so a missing entry surfaces there rather than in PR CI. If a
-    future change stages one of these without listing it here, the packaged app
-    breaks; this catches that at test time.
+    pipeline, so a missing entry surfaces there rather than in PR CI.
     """
     todesktop = _load_todesktop_config()
     additional = todesktop.get("mac", {}).get("additionalBinariesToSign", [])
-    for binary in ("resources/desync/desync", "resources/qemu/bin/qemu-img"):
-        assert binary in additional, (
-            f"todesktop.js mac.additionalBinariesToSign must include the bundled {binary} "
-            f"so ToDesktop signs it under the hardened runtime; got {additional}."
-        )
+    assert "resources/desync/desync" in additional, (
+        "todesktop.js mac.additionalBinariesToSign must include the bundled desync "
+        f"so ToDesktop signs it under the hardened runtime; got {additional}."
+    )
 
 
 def test_build_js_stages_every_runtime_binary() -> None:
@@ -293,7 +290,6 @@ def test_build_js_stages_every_runtime_binary() -> None:
         "downloadGit",
         "downloadRestic",
         "downloadDesync",
-        "downloadQemuImg",
     ):
         assert f"{downloader}(" in body, (
             f"build.js main() must call {downloader}(). build.js is the only stage "

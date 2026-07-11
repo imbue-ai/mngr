@@ -24,7 +24,6 @@ from imbue.minds.lima_image.data_types import LimaImageSource
 from imbue.minds.lima_image.data_types import ROOT_MANIFEST_SCHEMA_VERSION
 from imbue.minds.lima_image.data_types import RootManifest
 from imbue.minds.lima_image.mock_lima_image_test import AcceptingSignatureVerifier
-from imbue.minds.lima_image.mock_lima_image_test import CopyingImageFormatConverter
 from imbue.minds.lima_image.mock_lima_image_test import FixedRawChunkStore
 from imbue.minds.lima_image.mock_lima_image_test import InMemoryManifestFetcher
 from imbue.minds.lima_image.mock_lima_image_test import RecordingProgressSink
@@ -112,9 +111,9 @@ def test_make_source_requires_both_fields() -> None:
     assert source is not None and source.base_url == "https://cdn.example/lima"
 
 
-def test_setting_args_point_lima_at_local_qcow2() -> None:
-    args = prebaked_image_mngr_setting_args(ImageArch.X86_64, Path("/data/lima-images/img.qcow2"))
-    assert args == ["-S", "providers.lima.default_image_url_x86_64=/data/lima-images/img.qcow2"]
+def test_setting_args_point_lima_at_local_raw_image() -> None:
+    args = prebaked_image_mngr_setting_args(ImageArch.X86_64, Path("/data/lima-images/img.raw"))
+    assert args == ["-S", "providers.lima.default_image_url_x86_64=/data/lima-images/img.raw"]
 
 
 def _prefetcher(
@@ -131,7 +130,6 @@ def _prefetcher(
         fetcher=fetcher,
         verifier=AcceptingSignatureVerifier(),
         chunk_store=chunk_store,
-        converter=CopyingImageFormatConverter(),
         progress_sink=sink,
     )
 
@@ -173,7 +171,7 @@ def test_wait_until_terminal_returns_ready(tmp_path: Path) -> None:
             minds_version=MindsImageVersion(_TAG),
             arch=ImageArch.X86_64,
             updated_at=datetime.now(timezone.utc),
-            qcow2_path=tmp_path / "image.qcow2",
+            raw_path=tmp_path / "image.raw",
         )
     )
     state = prefetcher.wait_until_terminal(timeout_seconds=1.0, poll_interval_seconds=0.01)
@@ -201,7 +199,7 @@ def _resolve(
 
 
 def _seed(
-    sink: RecordingProgressSink, status: LimaImagePrefetchStatus, *, qcow2_path: Path | None, error: str | None
+    sink: RecordingProgressSink, status: LimaImagePrefetchStatus, *, raw_path: Path | None, error: str | None
 ) -> None:
     sink.write_state(
         LimaImagePrefetchState(
@@ -209,7 +207,7 @@ def _seed(
             minds_version=MindsImageVersion(_TAG),
             arch=ImageArch.X86_64,
             updated_at=datetime.now(timezone.utc),
-            qcow2_path=qcow2_path,
+            raw_path=raw_path,
             error=error,
         )
     )
@@ -222,29 +220,29 @@ def test_resolve_returns_none_without_prefetcher() -> None:
 def test_resolve_returns_none_when_gate_false(tmp_path: Path) -> None:
     sink = RecordingProgressSink()
     prefetcher = _prefetcher(InMemoryManifestFetcher(), FixedRawChunkStore(), sink, tmp_path)
-    _seed(sink, LimaImagePrefetchStatus.READY, qcow2_path=tmp_path / "i.qcow2", error=None)
+    _seed(sink, LimaImagePrefetchStatus.READY, raw_path=tmp_path / "i.raw", error=None)
     assert _resolve(prefetcher, branch_or_tag="main") is None
 
 
 def test_resolve_returns_path_when_ready(tmp_path: Path) -> None:
     sink = RecordingProgressSink()
     prefetcher = _prefetcher(InMemoryManifestFetcher(), FixedRawChunkStore(), sink, tmp_path)
-    qcow2 = tmp_path / "image.qcow2"
-    _seed(sink, LimaImagePrefetchStatus.READY, qcow2_path=qcow2, error=None)
-    assert _resolve(prefetcher) == qcow2
+    raw = tmp_path / "image.raw"
+    _seed(sink, LimaImagePrefetchStatus.READY, raw_path=raw, error=None)
+    assert _resolve(prefetcher) == raw
 
 
 def test_resolve_returns_none_when_version_unavailable(tmp_path: Path) -> None:
     sink = RecordingProgressSink()
     prefetcher = _prefetcher(InMemoryManifestFetcher(), FixedRawChunkStore(), sink, tmp_path)
-    _seed(sink, LimaImagePrefetchStatus.VERSION_UNAVAILABLE, qcow2_path=None, error=None)
+    _seed(sink, LimaImagePrefetchStatus.VERSION_UNAVAILABLE, raw_path=None, error=None)
     assert _resolve(prefetcher) is None
 
 
 def test_resolve_raises_when_failed(tmp_path: Path) -> None:
     sink = RecordingProgressSink()
     prefetcher = _prefetcher(InMemoryManifestFetcher(), FixedRawChunkStore(), sink, tmp_path)
-    _seed(sink, LimaImagePrefetchStatus.FAILED, qcow2_path=None, error="network down")
+    _seed(sink, LimaImagePrefetchStatus.FAILED, raw_path=None, error="network down")
     with pytest.raises(LimaImageDownloadError):
         _resolve(prefetcher)
 

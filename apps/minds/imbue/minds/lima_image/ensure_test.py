@@ -18,7 +18,6 @@ from imbue.minds.lima_image.data_types import ROOT_MANIFEST_SCHEMA_VERSION
 from imbue.minds.lima_image.data_types import RootManifest
 from imbue.minds.lima_image.ensure import ensure_current_lima_image
 from imbue.minds.lima_image.mock_lima_image_test import AcceptingSignatureVerifier
-from imbue.minds.lima_image.mock_lima_image_test import CopyingImageFormatConverter
 from imbue.minds.lima_image.mock_lima_image_test import FixedRawChunkStore
 from imbue.minds.lima_image.mock_lima_image_test import InMemoryManifestFetcher
 from imbue.minds.lima_image.mock_lima_image_test import RecordingProgressSink
@@ -89,7 +88,6 @@ def _run(
         fetcher=fetcher,
         verifier=verifier,
         chunk_store=chunk_store,
-        converter=CopyingImageFormatConverter(),
         progress_sink=sink,
     )
 
@@ -105,8 +103,8 @@ def test_base_download_assembles_verifies_and_installs(tmp_path: Path) -> None:
     result = _run(fetcher, chunk_store, AcceptingSignatureVerifier(), sink, version=version, cache_dir=tmp_path)
 
     assert result.status is LimaImagePrefetchStatus.READY
-    assert result.qcow2_path is not None
-    assert result.qcow2_path.read_bytes() == raw
+    assert result.raw_path is not None
+    assert result.raw_path.read_bytes() == raw
     layout = LimaImageCacheLayout(cache_dir=tmp_path)
     assert layout.current_pointer_file.exists()
     # Phases are reported in order and end READY.
@@ -114,7 +112,6 @@ def test_base_download_assembles_verifies_and_installs(tmp_path: Path) -> None:
     assert statuses[0] is LimaImagePrefetchStatus.FETCHING_MANIFEST
     assert LimaImagePrefetchStatus.DOWNLOADING in statuses
     assert LimaImagePrefetchStatus.VERIFYING in statuses
-    assert LimaImagePrefetchStatus.CONVERTING in statuses
     assert statuses[-1] is LimaImagePrefetchStatus.READY
 
 
@@ -238,7 +235,7 @@ def test_upgrade_seeds_from_prior_and_prunes_old_version(tmp_path: Path) -> None
     )
 
     assert result.status is LimaImagePrefetchStatus.READY
-    # Seeding fired for the v2 assembly (the prior qcow2 was offered as a seed).
+    # Seeding fired for the v2 assembly (the prior raw image was offered as a seed).
     assert f"{v2}-{_ARCH.value}.caibx" in chunk_store.seed_index_names_seen
     # Retention: the old version directory is gone, only v2 remains.
     layout = LimaImageCacheLayout(cache_dir=tmp_path)

@@ -220,19 +220,14 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
       const bundledClientConfig = paths.getBundledClientConfigPath();
       const configFileArgs = bundledClientConfig ? ['--config-file', bundledClientConfig] : [];
 
-      // The pre-baked-image tools (issue #2306): desync fetches the image, qemu-img
-      // converts it. Neither is staged on every target -- download-binaries.js skips
-      // both on win32, and qemu-img additionally on darwin-x86_64, where no payload
-      // is published. Only advertise a bundled binary when it actually exists --
-      // otherwise the env var would name a missing file and the tool would exec that
-      // instead of falling back to a PATH lookup.
+      // desync fetches the pre-baked Lima image (issue #2306). It is not staged on
+      // win32, so only advertise it when it actually exists -- otherwise the env var
+      // would name a missing file and desync would exec that instead of falling back
+      // to a PATH lookup.
       const desyncPath = paths.getDesyncPath();
       const hasBundledDesync = fs.existsSync(desyncPath);
-      const qemuImgPath = paths.getQemuImgPath();
-      const hasBundledQemuImg = fs.existsSync(qemuImgPath);
       const limaImageToolEnv = {
         ...(hasBundledDesync ? { MINDS_DESYNC_BINARY: desyncPath } : {}),
-        ...(hasBundledQemuImg ? { MINDS_QEMU_IMG_BINARY: qemuImgPath } : {}),
       };
 
       if (paths.isDev()) {
@@ -257,11 +252,10 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           MNGR_PREFIX: mngrPrefix,
           MINDS_LATCHKEY_BINARY: paths.getLatchkeyPath(),
           MINDS_LATCHKEY_DIRECTORY: paths.getLatchkeyDirectory(),
-          // The prestart hook (ensure-binaries.js) stages resources/desync/ and
-          // resources/qemu/ before the dev app launches. Dev mode inherits the
-          // developer's PATH untouched, so the bundled binaries are only reachable
-          // by absolute path -- without these the fast-create path would need a
-          // system-wide desync and a Homebrew qemu.
+          // The prestart hook (ensure-binaries.js) stages resources/desync/ before the
+          // dev app launches. Dev mode inherits the developer's PATH untouched, so the
+          // bundled binary is only reachable by absolute path -- without this the
+          // fast-create path would need a system-wide desync.
           ...limaImageToolEnv,
           MINDS_RELEASE_ID: releaseId,
           MINDS_GIT_SHA: gitSha,
@@ -274,9 +268,6 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
         const limaBinDir = paths.getLimaBinDir();
         const desyncBinDir = paths.getDesyncBinDir();
         const bundledBinDirs = [uvBinDir, gitBinDir, limaBinDir, desyncBinDir];
-        if (hasBundledQemuImg) {
-          bundledBinDirs.push(paths.getQemuImgBinDir());
-        }
         const uvCacheDir = paths.getUvCacheDir();
         const uvPythonDir = paths.getUvPythonDir();
         const pyprojectDir = paths.getPyprojectDir();

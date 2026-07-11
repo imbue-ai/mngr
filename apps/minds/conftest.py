@@ -47,16 +47,12 @@ if _BUNDLED_RESTIC.exists() and "MINDS_RESTIC_BINARY" not in os.environ:
     os.environ["MINDS_RESTIC_BINARY"] = str(_BUNDLED_RESTIC)
 
 # Likewise point the pre-baked-image tools at their bundled binaries so lima_image
-# tests need neither a system-wide desync nor a Homebrew qemu. Each is left unset
+# tests do not need a system-wide desync. It is left unset
 # when its binary isn't staged (``pnpm build`` / the download hasn't run), so the
 # caller falls back to a PATH lookup.
 _BUNDLED_DESYNC = Path(__file__).parent / "resources" / "desync" / "desync"
 if _BUNDLED_DESYNC.exists() and "MINDS_DESYNC_BINARY" not in os.environ:
     os.environ["MINDS_DESYNC_BINARY"] = str(_BUNDLED_DESYNC)
-
-_BUNDLED_QEMU_IMG = Path(__file__).parent / "resources" / "qemu" / "bin" / "qemu-img"
-if _BUNDLED_QEMU_IMG.exists() and "MINDS_QEMU_IMG_BINARY" not in os.environ:
-    os.environ["MINDS_QEMU_IMG_BINARY"] = str(_BUNDLED_QEMU_IMG)
 
 suppress_warnings()
 register_marker(

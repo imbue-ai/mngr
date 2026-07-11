@@ -105,9 +105,9 @@ The desktop app bundles platform-specific binaries so users need zero prerequisi
 - **lima**: Required for the Lima launch mode (running agents in Linux VMs). Downloaded from GitHub releases during `pnpm build`. Self-contained on macOS Apple Silicon via Lima's `vz` backend; macOS Intel and Linux still run the VM itself via host QEMU.
 - **restic**: Per-workspace backup repositories. Downloaded from GitHub releases.
 - **desync**: Content-defined-chunking client that fetches the pre-baked Lima image (issue #2306). Downloaded from GitHub releases. macOS/Linux only.
-- **qemu-img**: Converts the pre-baked Lima image `raw`<->`qcow2` (issue #2306). Needed on **every** platform including Apple Silicon -- the conversion is orthogonal to the VM backend. No upstream release exists, so we build our own from pinned sources (modeled on `containers/podman-machine-qemu`): a tools-only QEMU build with every optional feature disabled, glib and its deps (libffi, libintl, pcre2) linked **statically**, leaving a single binary that links only always-present system libraries. Produced by `scripts/build-qemu-payload.sh` and hosted as a GitHub release asset. macOS/Linux only.
+Each is placed in the `resources/` directory (outside the asar archive). The packaged app prepends the `uv`, `git`, `lima`, and `desync` directories to the backend child process's `PATH`. `restic` and `desync` are also named by explicit absolute path (`MINDS_RESTIC_BINARY`, `MINDS_DESYNC_BINARY`), so their resolution never depends on `PATH` ordering; `restic` is reached *only* that way, its directory never being on `PATH`. Dev mode inherits the developer's `PATH` untouched and prepends nothing, so the only bundled binary it reaches is the one named by absolute path: it sets `MINDS_DESYNC_BINARY` (without which the fast-create path would need a system-wide `desync`), and resolves everything else, `restic` included, from `PATH`.
 
-Each is placed in the `resources/` directory (outside the asar archive). The packaged app prepends the `uv`, `git`, `lima`, and `desync` directories -- plus `qemu-img`'s, when that binary is staged -- to the backend child process's `PATH`. `restic`, `desync`, and `qemu-img` are also named by explicit absolute path (`MINDS_RESTIC_BINARY`, `MINDS_DESYNC_BINARY`, `MINDS_QEMU_IMG_BINARY`), so their resolution never depends on `PATH` ordering; `restic` is reached *only* that way, its directory never being on `PATH`. Dev mode inherits the developer's `PATH` untouched and prepends nothing, so the only bundled binaries it reaches are the ones named by absolute path: it sets `MINDS_DESYNC_BINARY` and `MINDS_QEMU_IMG_BINARY` (without which the fast-create path would need a system-wide `desync` and a Homebrew `qemu`), and resolves everything else, `restic` included, from `PATH`.
+There is deliberately no bundled `qemu-img`. The pre-baked image is published, downloaded, and consumed as a **raw** image end to end, so nothing converts it. See "Why the image is raw" below.
 
 ### How the shipped binaries are chosen
 
@@ -115,37 +115,23 @@ Each is placed in the `resources/` directory (outside the asar archive). The pac
 
 The `todesktop:beforeInstall` hook (`scripts/download-binaries.js`) also downloads binaries, but its output never reaches the app. ToDesktop runs it against `app-wrapper/app/`, so the packager folds those files into `app.asar`, which nothing reads at runtime; a packaged app therefore carries a second, dead copy of `resources/`. The hook still gates the build: a download failure inside it aborts `pnpm dist`. Its only remaining purpose is that failure mode, and the `resources/` tree it writes is dead weight.
 
-### Producing and hosting the qemu-img payload
+### Why the image is raw
 
-`qemu-img` is the one bundled binary with no upstream download, so its payload is built from source and hosted on a GitHub release. This is a rare, maintenance-time step -- only when bumping `QEMU_IMG_VERSION` (in `scripts/download-binaries.js`) or a pinned dependency.
+Lima consumes the pre-baked image directly as raw, so the app ships no image-conversion tool.
 
-`scripts/build-qemu-payload.sh` (macOS; needs Xcode CLT + `brew install meson ninja pkg-config`) builds everything from SHA256-pinned source tarballs, following `containers/podman-machine-qemu`: libffi, libintl (gettext-runtime), pcre2, and glib are compiled as static libraries into a scratch prefix, then a tools-only QEMU is configured with `--without-default-features` so no optional dependency (gnutls/libssh/curl/zstd/...) is probed or linked. The result is a single `qemu-img` binary whose only runtime dependencies are `/usr/lib` + `/System` libraries present on every Mac -- nothing to relocate, one entry to sign. The script verifies that property with `otool -L`, smoke-tests a `raw`->`qcow2` conversion under a scrubbed environment, and writes a deterministic `qemu-img-<ver>-darwin-<arch>.tar.gz` (rebuilding from the same pins in the same work dir reproduces the SHA).
+`limactl` embeds `go-qcow2reader` and a pure-Go `nativeimgutil`. Its `proxyimgutil` prefers the `qemu-img` binary but falls back to the Go implementation when it is absent (`exec.ErrNotFound`), and `EnsureDisk` auto-detects the base disk's format (raw, qcow2, or asif). The `vz` driver's `diskImageFormat` defaults to **raw**, with a `convertRawToRaw` fast path. Verified by booting a Lima VM from a raw base disk with `qemu-img` absent from `PATH`: it reached `READY` with a working guest.
 
-For each target arch, on a matching macOS host:
+Raw is also what `desync` chunks, so publishing raw means the assembled bytes are the bytes Lima boots -- the manifest's SHA-256 covers exactly the image that runs. An earlier design converted the assembled raw to qcow2, which Lima then converted straight back to raw.
 
-1. Run `scripts/build-qemu-payload.sh`. It prints the `EXPECTED_SHA256` line to pin in `scripts/download-binaries.js`.
-2. Upload every arch's tarball as an asset on a GitHub release tagged `qemu-img-v<ver>` in `imbue-ai/mngr` (the base URL is `QEMU_PAYLOAD_BASE_URL` in `scripts/download-binaries.js`).
-3. Paste each printed SHA into `EXPECTED_SHA256`.
-
-macOS `aarch64` and `x86_64` payloads must be produced on their respective host arches. Only the aarch64 payload is published. ToDesktop's macOS build agent is itself x86_64, so the `beforeInstall` hook resolves `darwin-x86_64` on *every* mac build regardless of target arch; without an explicit skip in `download-binaries.js`, the hook's 404 on the unpublished Intel payload fails all mac builds, arm64 included. The skip costs nothing, because the hook's downloads never reach the app.
-
-Linux payloads come from `scripts/build-qemu-payload-linux.sh` (Docker + Alpine): Linux has no static-libc limitation, so QEMU's own `--static` against Alpine's musl produces a fully static ELF that runs on any distro -- one script run per arch, either arch buildable from any host via Docker binfmt emulation. ToDesktop's Linux builder runs the same `beforeInstall` hook even though no Linux app ships, so the linux assets must exist for `pnpm dist` to pass. Until an arch's tarball is uploaded and its SHA pinned, a build for that arch aborts loudly in `verifyChecksum`.
-
-To try a payload that is not published yet, stage it straight into the resources dir instead of downloading it: from `apps/minds/`, `scripts/build-qemu-payload.sh resources` writes `resources/qemu/bin/qemu-img` in place, and `pnpm start`'s `ensure-binaries.js` hook then treats it as already present. This only works for `pnpm start`: `pnpm dist` runs `build.js`, which wipes `resources/` and re-downloads every binary, so a packaged build needs the tarball uploaded and its SHA pinned first.
+Raw costs no extra disk. On the real 20 GiB image the sparse raw occupies **4.9 GiB** on disk versus **5.1 GiB** for the qcow2: qcow2's L1/L2 and refcount tables, plus its 64 KiB cluster granularity, cost more than the filesystem's 4 KiB-granular holes. Only the apparent size differs (`ls` reports 20 GiB, `du` reports what is allocated), so tools that do not understand sparse files will inflate it.
 
 ### macOS Intel (x86_64) is not supported
 
-ToDesktop publishes `arm64`, `x64`, and `universal` mac artifacts, but only the arm64 one works, and only it is fetched and verified by `.github/workflows/minds-launch-to-msg.yml`. In the published x64 app, `Contents/MacOS/Minds` is x86_64 while the bundled `uv`, `restic`, and `limactl` are arm64, so it cannot launch a VM.
+ToDesktop publishes `arm64`, `x64`, and `universal` mac artifacts, but only arm64 works, and only it is fetched and verified by `.github/workflows/minds-launch-to-msg.yml`. In the published x64 app, `Contents/MacOS/Minds` is x86_64 while the bundled `uv`, `restic`, and `limactl` are arm64, so it cannot launch a VM.
 
-The cause is structural, not a missing payload. `build.js` stages binaries for the arch of the machine it runs on, and all three mac artifacts are packaged from that one upload. The `beforeInstall` hook is the only stage that runs per-agent, and it is useless for this: its output lands in `app.asar`, and its agent is x86_64 anyway, so honoring it would put Intel binaries in the arm64 app.
+The cause is structural. `build.js` stages binaries for the arch of the machine it runs on, and all three mac artifacts are packaged from that one upload. The `beforeInstall` hook is the only stage that runs per-agent, and it is useless for this: its output lands in `app.asar`, and its agent is x86_64 anyway, so honoring it would put Intel binaries in the arm64 app.
 
-Supporting Intel needs all of:
-
-- `build.js` staging both arches (it downloads per-arch already; nothing forces it to fetch only its own), plus a per-arch `extraResources` mapping or `lipo`-merged universal binaries. `git` is already universal, since `xcrun --find git` returns Apple's fat binary.
-
-- A `darwin-x86_64` `qemu-img` payload, published and SHA-pinned.
-
-- A pre-baked x86_64 Lima image. Without one an Intel app's prefetch reports `VERSION_UNAVAILABLE` and builds in-VM, so the fast path stays dark even with `qemu-img` present.
+ToDesktop exposes no arch selection -- its config schema has no `mac.target`/`mac.arch`, and the CLI has no `--arch` -- so the x64 and universal artifacts cannot be turned off from this repo. Supporting Intel would need `build.js` to stage both arches (it already downloads per-arch; nothing forces it to fetch only its own) and either a per-arch `extraResources` mapping or `lipo`-merged universal binaries, plus a pre-baked x86_64 Lima image, without which an Intel app's prefetch reports `VERSION_UNAVAILABLE` and builds in-VM anyway. `git` is already universal, since `xcrun --find git` returns Apple's fat binary.
 
 ## Data directory
 
@@ -308,8 +294,6 @@ apps/minds/
       uv.lock               # Pinned lockfile for reproducible installs
   scripts/
     build.js                # Downloads runtime binaries, builds wheels, stages resources/
-    download-binaries.js    # Fetches uv/git/restic/desync/qemu-img (ToDesktop beforeInstall + dev)
-    build-qemu-payload.sh   # Maintainer tool: builds the static qemu-img release payload from pinned sources (macOS)
-    build-qemu-payload-linux.sh # Maintainer tool: builds the fully static Linux qemu-img payload via Docker+Alpine
+    download-binaries.js    # Fetches uv/git/restic/desync (ToDesktop beforeInstall + dev)
   resources/                # (gitignored) Built artifacts for packaging
 ```

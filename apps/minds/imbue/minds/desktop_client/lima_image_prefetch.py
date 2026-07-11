@@ -30,7 +30,6 @@ from imbue.minds.lima_image.data_types import LimaImageSource
 from imbue.minds.lima_image.desync import DesyncImageChunkStore
 from imbue.minds.lima_image.ensure import ensure_current_lima_image
 from imbue.minds.lima_image.interfaces import ImageChunkStoreInterface
-from imbue.minds.lima_image.interfaces import ImageFormatConverterInterface
 from imbue.minds.lima_image.interfaces import LimaImageProgressSinkInterface
 from imbue.minds.lima_image.interfaces import ManifestFetcherInterface
 from imbue.minds.lima_image.interfaces import SignatureVerifierInterface
@@ -41,7 +40,6 @@ from imbue.minds.lima_image.primitives import MindsImageVersion
 from imbue.minds.lima_image.primitives import get_current_image_arch
 from imbue.minds.lima_image.primitives import lima_provider_image_url_setting_key
 from imbue.minds.lima_image.progress import FileLimaImageProgressSink
-from imbue.minds.lima_image.qemu_converter import QemuImageFormatConverter
 
 # Set to a truthy value to disable downloading/using the pre-baked image entirely
 # (forces build-in-VM). Used by tests / dev iteration.
@@ -104,9 +102,9 @@ def should_use_prebaked_lima_image(
     return True
 
 
-def prebaked_image_mngr_setting_args(arch: ImageArch, qcow2_path: Path) -> list[str]:
+def prebaked_image_mngr_setting_args(arch: ImageArch, raw_path: Path) -> list[str]:
     """Return the ``-S providers.lima.default_image_url_<arch>=<path>`` args pointing Lima at the baked image."""
-    return ["-S", f"{lima_provider_image_url_setting_key(arch)}={qcow2_path}"]
+    return ["-S", f"{lima_provider_image_url_setting_key(arch)}={raw_path}"]
 
 
 class LimaImagePrefetcher(MutableModel):
@@ -123,7 +121,6 @@ class LimaImagePrefetcher(MutableModel):
     fetcher: ManifestFetcherInterface = Field(frozen=True, description="Manifest/index fetcher")
     verifier: SignatureVerifierInterface = Field(frozen=True, description="Manifest signature verifier")
     chunk_store: ImageChunkStoreInterface = Field(frozen=True, description="Chunk-store extractor")
-    converter: ImageFormatConverterInterface = Field(frozen=True, description="raw<->qcow2 converter")
     progress_sink: LimaImageProgressSinkInterface = Field(frozen=True, description="Progress state sink")
 
     def ensure_once(self) -> LimaImagePrefetchState:
@@ -137,7 +134,6 @@ class LimaImagePrefetcher(MutableModel):
                 fetcher=self.fetcher,
                 verifier=self.verifier,
                 chunk_store=self.chunk_store,
-                converter=self.converter,
                 progress_sink=self.progress_sink,
             )
         except LimaImageError as exc:
@@ -208,7 +204,7 @@ def resolve_ready_prebaked_lima_image(
     wait_timeout_seconds: float,
     poll_interval_seconds: float,
 ) -> Path | None:
-    """Resolve the baked qcow2 path to use for a create, or None to build in-VM.
+    """Resolve the baked raw image path to use for a create, or None to build in-VM.
 
     Returns None when the gate does not apply (non-default workspace, no prefetcher,
     kill switch, dev loop) or when no image is published for this release+arch
@@ -234,9 +230,9 @@ def resolve_ready_prebaked_lima_image(
         raise LimaImageDownloadError("Pre-baked Lima image is not ready yet; please retry.")
     match state.status:
         case LimaImagePrefetchStatus.READY:
-            if state.qcow2_path is None:
+            if state.raw_path is None:
                 raise LimaImageDownloadError("Pre-baked Lima image reported ready without a path; please retry.")
-            return state.qcow2_path
+            return state.raw_path
         case LimaImagePrefetchStatus.VERSION_UNAVAILABLE:
             logger.info("No pre-baked Lima image published for {}; building in-VM", current_release_tag)
             return None
@@ -260,7 +256,7 @@ class LimaImageCreateGate(FrozenModel):
     default_repo_url: str = Field(description="Default forever-claude-template repo URL")
     is_dev_loop: bool = Field(description="Whether the operator opted into local-worktree dev defaults")
 
-    def resolve_qcow2_for_create(
+    def resolve_image_for_create(
         self,
         *,
         is_lima_launch_mode: bool,
@@ -270,7 +266,7 @@ class LimaImageCreateGate(FrozenModel):
         wait_timeout_seconds: float,
         poll_interval_seconds: float,
     ) -> Path | None:
-        """Resolve the baked qcow2 path for a create (or None to build in-VM); raises on a published-but-unready image."""
+        """Resolve the baked image path for a create (or None to build in-VM); raises on a published-but-unready image."""
         return resolve_ready_prebaked_lima_image(
             prefetcher=self.prefetcher,
             is_lima_launch_mode=is_lima_launch_mode,
@@ -297,7 +293,7 @@ def make_lima_image_prefetcher(
     data_dir: Path,
     concurrency_group: ConcurrencyGroup,
 ) -> LimaImagePrefetcher:
-    """Build a prefetcher wired to the real desync/minisign/qemu-img/httpx implementations."""
+    """Build a prefetcher wired to the real desync/minisign/httpx implementations."""
     cache_dir = lima_image_cache_dir(data_dir)
     return LimaImagePrefetcher(
         source=source,
@@ -307,6 +303,5 @@ def make_lima_image_prefetcher(
         fetcher=HttpxManifestFetcher(),
         verifier=PythonMinisignSignatureVerifier(),
         chunk_store=DesyncImageChunkStore(concurrency_group=concurrency_group),
-        converter=QemuImageFormatConverter(concurrency_group=concurrency_group),
         progress_sink=FileLimaImageProgressSink(state_file=LimaImageCacheLayout(cache_dir=cache_dir).state_file),
     )

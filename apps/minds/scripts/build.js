@@ -1,7 +1,7 @@
 /**
  * Build script for Minds desktop app.
  *
- * Downloads platform-specific uv, git, Lima, restic, desync, and qemu-img
+ * Downloads platform-specific uv, git, Lima, restic, and desync
  * binaries, copies the standalone pyproject.toml + lockfile into the
  * resources directory for packaging.
  */
@@ -10,7 +10,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execSync, execFileSync } = require('child_process');
-const { downloadGit, downloadUv, downloadRestic, downloadDesync, downloadQemuImg, download } = require('./download-binaries.js');
+const { downloadGit, downloadUv, downloadRestic, downloadDesync, download } = require('./download-binaries.js');
 
 const ROOT = path.resolve(__dirname, '..');
 const RESOURCES_DIR = path.join(ROOT, 'resources');
@@ -606,7 +606,6 @@ async function main() {
     downloadGit(RESOURCES_DIR, { platform }),
     downloadRestic(RESOURCES_DIR, { platform, arch }),
     downloadDesync(RESOURCES_DIR, { platform, arch }),
-    downloadQemuImg(RESOURCES_DIR, { platform, arch }),
   ]);
 
   buildCss();

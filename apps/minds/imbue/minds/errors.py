@@ -122,7 +122,7 @@ class LimaImageVerificationError(LimaImageError):
 
 
 class LimaImageToolError(LimaImageError):
-    """Raised when a required external tool (desync, minisign, qemu-img) is missing or errors."""
+    """Raised when a required external tool (desync, minisign) is missing or errors."""
 
     ...
 
