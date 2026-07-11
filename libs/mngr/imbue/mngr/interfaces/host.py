@@ -431,12 +431,10 @@ class OuterHostInterface(HostFileReadInterface, HostFileWriteInterface, ABC):
     def get_directory_size(self, path: Path) -> SizeBytes:
         """Disk space used by ``path`` and its contents, or 0 if it is not a directory.
 
-        Runs POSIX ``du -sk`` on the host -- locally via subprocess, remotely over
-        SSH -- so callers (including plugins) don't have to branch on ``is_local``.
-        The trailing slash resolves a symlinked ``path`` to its target directory.
-        ``du`` still prints a correct total after skipping an unreadable entry, so
-        its non-zero exit in that case is tolerated. Totals are whole kibibytes,
-        since ``-k`` is the only block size POSIX defines.
+        Measured with POSIX ``du -sk``: totals are whole kibibytes, since ``-k`` is
+        the only block size POSIX defines. The trailing slash resolves a symlinked
+        ``path`` to its target directory, and ``du``'s non-zero exit after skipping
+        an unreadable entry is tolerated, since it still prints a correct total.
         """
         quoted_path = shlex.quote(f"{path}/")
         result = self.execute_idempotent_command(
