@@ -1,4 +1,4 @@
-"""End-to-end integration test of the lima image cache against the real desync / minisign / qemu-img binaries.
+"""End-to-end integration test of the lima image cache against the real desync / minisign binaries.
 
 Builds a fixture chunk store + signed manifest, serves it over a local HTTP
 server, and drives ``ensure_current_lima_image`` with the real implementations.
