@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import shlex
 from abc import ABC
 from abc import abstractmethod
@@ -46,9 +45,6 @@ from imbue.mngr.primitives import TmuxHeight
 from imbue.mngr.primitives import TmuxWidth
 from imbue.mngr.primitives import TmuxWindowSize
 from imbue.mngr.primitives import TransferMode
-
-# POSIX fixes st_blocks in 512-byte units regardless of the filesystem block size.
-_STAT_BLOCK_SIZE_BYTES: int = 512
 
 
 class HostInterface(MutableModel, ABC):
@@ -435,35 +431,13 @@ class OuterHostInterface(HostFileReadInterface, HostFileWriteInterface, ABC):
     def get_directory_size(self, path: Path) -> SizeBytes:
         """Disk space used by ``path`` and its contents, or 0 if it is not a directory.
 
-        Uses the local filesystem for local hosts and ``du -sk`` over SSH for
-        remote hosts. Implemented on the interface so callers (including plugins)
-        don't have to branch on ``is_local`` themselves.
-
-        Both branches report allocated blocks and charge a hard-linked inode once,
-        so a sparse file costs what it occupies rather than its apparent length.
-        Remote totals are whole kibibytes, since ``-k`` is the only ``du`` block
-        size POSIX defines. An unreadable entry is skipped rather than discarding
-        the total, which is also why ``du``'s non-zero exit for that case does
-        not: it still reports everything it reached.
+        Runs POSIX ``du -sk`` on the host -- locally via subprocess, remotely over
+        SSH -- so callers (including plugins) don't have to branch on ``is_local``.
+        The trailing slash resolves a symlinked ``path`` to its target directory.
+        ``du`` still prints a correct total after skipping an unreadable entry, so
+        its non-zero exit in that case is tolerated. Totals are whole kibibytes,
+        since ``-k`` is the only block size POSIX defines.
         """
-        if self.is_local:
-            total_blocks = 0
-            seen_inodes: set[tuple[int, int]] = set()
-            for dir_path, dir_names, file_names in os.walk(path):
-                entries = [dir_path]
-                entries.extend(os.path.join(dir_path, name) for name in (*dir_names, *file_names))
-                for entry in entries:
-                    try:
-                        entry_stat = os.lstat(entry)
-                    except OSError:
-                        continue
-                    inode = (entry_stat.st_dev, entry_stat.st_ino)
-                    if inode in seen_inodes:
-                        continue
-                    seen_inodes.add(inode)
-                    total_blocks += entry_stat.st_blocks
-            return SizeBytes(total_blocks * _STAT_BLOCK_SIZE_BYTES)
-        # The trailing slash makes `du` descend a symlinked directory, as os.walk does.
         quoted_path = shlex.quote(f"{path}/")
         result = self.execute_idempotent_command(
             f"test -d {quoted_path} && {{ du -sk {quoted_path} 2>/dev/null || true; }}",

@@ -2,6 +2,7 @@
 
 import io
 import json
+import os
 import subprocess
 import threading
 from collections.abc import Callable
@@ -3998,3 +3999,40 @@ def test_merge_agent_type_provisioning_combines_provisioning_and_env() -> None:
     result = _merge_agent_type_provisioning(agent_config, options)
     assert result.provisioning.extra_provision_commands == ("echo setup",)
     assert result.environment.env_vars == (EnvVar(key="KEY", value="val"),)
+
+
+def test_get_directory_size_charges_hardlinks_once_and_ignores_nested_symlinks(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """``du -sk`` sizing: a hard-linked inode counts once and a nested symlinked dir is not followed."""
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    tree = tmp_path / "tree"
+    (tree / "sub").mkdir(parents=True)
+    (tree / "a").write_bytes(b"\0" * 100 * 1024)
+    os.link(tree / "a", tree / "a_hardlink")
+    (tree / "sub" / "c").write_bytes(b"\0" * 50 * 1024)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "big").write_bytes(b"\0" * 400 * 1024)
+    (tree / "link_to_outside").symlink_to(outside)
+
+    size = host.get_directory_size(tree)
+
+    assert size % 1024 == 0
+    # ``a`` (100 KiB) + ``sub/c`` (50 KiB) + a little directory overhead. Counting
+    # ``a_hardlink`` a second time would reach ~250 KiB; following the nested
+    # symlink would add the 400 KiB behind it.
+    assert 150 * 1024 <= size < 250 * 1024, f"hard-link double-count or followed a nested symlink: {size}"
+
+
+def test_get_directory_size_is_zero_for_a_non_directory(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """A regular file or a missing path reports 0, not an error."""
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    a_file = tmp_path / "file"
+    a_file.write_text("x")
+    assert host.get_directory_size(a_file) == 0
+    assert host.get_directory_size(tmp_path / "does_not_exist") == 0
