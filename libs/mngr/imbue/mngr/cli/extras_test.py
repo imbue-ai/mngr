@@ -17,7 +17,9 @@ from imbue.mngr.cli.extras import _get_shell_rc
 from imbue.mngr.cli.extras import _install_claude_plugin
 from imbue.mngr.cli.extras import _install_completion
 from imbue.mngr.cli.extras import _install_default_agent_type
+from imbue.mngr.cli.extras import _install_isolate_host_volumes
 from imbue.mngr.cli.extras import _is_completion_configured
+from imbue.mngr.cli.extras import _is_docker_isolation_configured
 from imbue.mngr.cli.extras import _list_extras_agent_type_choices
 from imbue.mngr.cli.extras import _plugins_status
 from imbue.mngr.cli.extras import _print_extras_status
@@ -564,6 +566,75 @@ def test_install_default_agent_type_skip_writes_nothing() -> None:
     assert written == []
 
 
+def test_is_docker_isolation_configured_detects_setting() -> None:
+    """True only when the default docker provider block sets isolate_host_volumes."""
+    assert _is_docker_isolation_configured({"providers": {"docker": {"isolate_host_volumes": True}}}) is True
+    assert _is_docker_isolation_configured({"providers": {"docker": {"isolate_host_volumes": False}}}) is True
+
+
+def test_is_docker_isolation_configured_false_when_unset_or_missing() -> None:
+    """False when the docker block is absent, empty, or leaves isolation unset."""
+    assert _is_docker_isolation_configured({}) is False
+    assert _is_docker_isolation_configured({"providers": {"docker": {}}}) is False
+    assert _is_docker_isolation_configured({"providers": {"docker": {"host": ""}}}) is False
+    assert _is_docker_isolation_configured({"providers": []}) is False
+
+
+def test_install_isolate_host_volumes_already_configured() -> None:
+    """When already configured, returns True and writes nothing."""
+    written: list[bool] = []
+    result = _install_isolate_host_volumes(
+        auto=False,
+        status_fn=lambda: True,
+        is_interactive_fn=lambda: True,
+        write_fn=lambda value: written.append(value) or Path("/x"),
+    )
+    assert result is True
+    assert written == []
+
+
+def test_install_isolate_host_volumes_auto_prints_suggestion(capsys: pytest.CaptureFixture[str]) -> None:
+    """auto=True prints the suggested config-set command but writes nothing."""
+    written: list[bool] = []
+    result = _install_isolate_host_volumes(
+        auto=True,
+        status_fn=lambda: False,
+        is_interactive_fn=lambda: True,
+        write_fn=lambda value: written.append(value) or Path("/x"),
+    )
+    assert result is False
+    out = capsys.readouterr().out
+    assert "mngr config set providers.docker.isolate_host_volumes true --scope user" in out
+    assert written == []
+
+
+def test_install_isolate_host_volumes_no_tty_prints_suggestion(capsys: pytest.CaptureFixture[str]) -> None:
+    """Without an interactive terminal, falls back to the print-only behavior."""
+    written: list[bool] = []
+    result = _install_isolate_host_volumes(
+        auto=False,
+        status_fn=lambda: False,
+        is_interactive_fn=lambda: False,
+        write_fn=lambda value: written.append(value) or Path("/x"),
+    )
+    assert result is False
+    assert "mngr config set providers.docker.isolate_host_volumes true" in capsys.readouterr().out
+    assert written == []
+
+
+def test_install_isolate_host_volumes_writes_true_interactively() -> None:
+    """With a TTY and no existing setting, writes isolate_host_volumes=true."""
+    written: list[bool] = []
+    result = _install_isolate_host_volumes(
+        auto=False,
+        status_fn=lambda: False,
+        is_interactive_fn=lambda: True,
+        write_fn=lambda value: written.append(value) or Path("/x"),
+    )
+    assert result is True
+    assert written == [True]
+
+
 def test_extras_config_subcommand(cli_runner: CliRunner) -> None:
     """The 'extras config' subcommand should work."""
     result = cli_runner.invoke(extras, ["config"])
@@ -581,3 +652,10 @@ def test_extras_interactive_includes_default_type(cli_runner: CliRunner) -> None
     result = cli_runner.invoke(extras, ["-i"])
     assert result.exit_code == 0
     assert "Default Agent Type" in result.output
+
+
+def test_extras_interactive_includes_docker_isolation(cli_runner: CliRunner) -> None:
+    """Running 'mngr extras -i' walks through the docker host-volume isolation step."""
+    result = cli_runner.invoke(extras, ["-i"])
+    assert result.exit_code == 0
+    assert "Docker Volume Isolation" in result.output

@@ -514,6 +514,91 @@ def _install_default_agent_type(
     return True
 
 
+# -- Docker host-volume isolation extra --
+
+# The provider-instance name a bare ``docker`` provider resolves to (see
+# providers/registry.py resolve_backend_and_config): a fresh install with no
+# `[providers.docker]` block still uses this name via the bare-backend fallback,
+# which instantiates DockerProviderConfig with isolate_host_volumes unset and so
+# emits the one-shot default-flip deprecation warning. Seeding the block here
+# gives that provider the recommended value up front.
+_DEFAULT_DOCKER_PROVIDER: Final[str] = "docker"
+
+
+def _is_docker_isolation_configured(raw: dict[str, Any]) -> bool:
+    """Return True if the default docker provider already sets isolate_host_volumes."""
+    providers = raw.get("providers")
+    if not isinstance(providers, dict):
+        return False
+    block = providers.get(_DEFAULT_DOCKER_PROVIDER)
+    if not isinstance(block, dict):
+        return False
+    return "isolate_host_volumes" in block
+
+
+def _docker_isolation_status() -> bool:
+    """Return whether the user config already pins the default docker isolation."""
+    return _is_docker_isolation_configured(_read_user_config_raw())
+
+
+def _write_isolate_host_volumes(value: bool) -> Path:
+    """Write providers.docker.isolate_host_volumes to the user-scope settings.toml.
+
+    Returns the path written. Creates the profile directory (and the settings
+    file / provider block) if needed, so this works on a fresh installation with
+    no config at all.
+    """
+    profile_dir = get_or_create_profile_dir(read_default_host_dir())
+    config_path = get_user_config_path(profile_dir)
+    doc = load_config_file_tomlkit(config_path)
+    set_nested_value(doc, f"providers.{_DEFAULT_DOCKER_PROVIDER}.isolate_host_volumes", value)
+    save_config_file(config_path, doc)
+    return config_path
+
+
+def _install_isolate_host_volumes(
+    auto: bool,
+    *,
+    # Dependencies are exposed as keyword arguments so tests can substitute
+    # in-memory fakes without monkeypatching module-level callables.
+    status_fn: Callable[[], bool] = _docker_isolation_status,
+    is_interactive_fn: Callable[[], bool] = has_interactive_terminal,
+    write_fn: Callable[[bool], Path] = _write_isolate_host_volumes,
+) -> bool:
+    """Seed the recommended docker host-volume isolation setting for fresh installs.
+
+    When the user has not configured ``isolate_host_volumes`` for the default
+    docker provider, this writes ``providers.docker.isolate_host_volumes = true``
+    (creating the config file if there is none). That opts new installs into the
+    forthcoming default -- each host container sees only its own host_dir
+    sub-folder -- and silences the one-shot deprecation warning. There is a single
+    recommended value, so this does not prompt; it prints how to switch back to
+    the legacy shared-volume behavior.
+
+    Returns True if the setting is configured after this call (already-set or
+    newly-written), False when ``auto``/non-interactive mode only printed the
+    suggested command without writing.
+    """
+    if status_fn():
+        write_human_line("Docker host-volume isolation is already configured.")
+        return True
+
+    if auto or not is_interactive_fn():
+        write_human_line("To enable docker host-volume isolation (the recommended default), run:")
+        write_human_line(
+            "    mngr config set providers.{}.isolate_host_volumes true --scope user", _DEFAULT_DOCKER_PROVIDER
+        )
+        return False
+
+    config_path = write_fn(True)
+    write_human_line("Set providers.{}.isolate_host_volumes = true in {}", _DEFAULT_DOCKER_PROVIDER, config_path)
+    write_human_line("To use the legacy shared-volume behavior instead, run:")
+    write_human_line(
+        "    mngr config set providers.{}.isolate_host_volumes false --scope user", _DEFAULT_DOCKER_PROVIDER
+    )
+    return True
+
+
 # -- Status display --
 
 
@@ -554,12 +639,17 @@ def _print_extras_status(
         )
         write_human_line("  claude-plugin    {}", statuses)
 
-    # Default agent type (the only setting `extras config` walks through today)
+    # Config settings that `extras config` walks through
     current_default, _ = _default_agent_type_status()
     if current_default is not None:
         write_human_line("  default-type     {}", current_default)
     else:
         write_human_line("  default-type     not set")
+
+    if _docker_isolation_status():
+        write_human_line("  docker-isolation configured")
+    else:
+        write_human_line("  docker-isolation not configured")
 
     write_human_line("")
 
@@ -615,6 +705,11 @@ def extras(ctx: click.Context, **kwargs: Any) -> None:
     # one then or re-run `mngr extras config` later.
     _install_default_agent_type(auto=False)
 
+    write_human_line("")
+    write_human_line("--- Docker Volume Isolation ---")
+    write_human_line("")
+    _install_isolate_host_volumes(auto=False)
+
 
 @extras.command(name="plugins")
 @add_common_options
@@ -654,12 +749,13 @@ def extras_claude_plugin(ctx: click.Context, **kwargs: Any) -> None:
 @click.pass_context
 def extras_config(ctx: click.Context, **kwargs: Any) -> None:
     # Walks through user-scope config settings the installer would
-    # otherwise leave blank. Currently just the default agent type for
-    # `mngr create`; future config-related setup steps will be added
-    # here as additional walk steps. Each step short-circuits if the
+    # otherwise leave blank: the default agent type for `mngr create`
+    # and docker host-volume isolation. Each step short-circuits if the
     # corresponding setting is already configured, so re-running this
-    # subcommand only prompts for the gaps.
+    # subcommand only handles the gaps. Future config-related setup steps
+    # will be added here as additional walk steps.
     _install_default_agent_type(auto=kwargs["yes"])
+    _install_isolate_host_volumes(auto=kwargs["yes"])
 
 
 # Help metadata
@@ -737,14 +833,17 @@ leave blank. Each step short-circuits if the corresponding setting is
 already configured, so re-running this subcommand only prompts for the
 gaps.
 
-Currently this just covers the default agent type for `mngr create`.
-With an interactive terminal, presents an interactive picker of every
-available agent type plus an option to keep no default; writes the
-selection to `[commands.create] type` in your user-scope settings.toml.
+This covers the default agent type for `mngr create` and docker
+host-volume isolation. With an interactive terminal, presents an
+interactive picker of every available agent type plus an option to keep
+no default (written to `[commands.create] type`), then -- if the default
+docker provider does not already configure it -- writes the recommended
+`providers.docker.isolate_host_volumes = true` (creating the config file
+if there is none), opting new installs into the forthcoming default and
+silencing the deprecation warning.
 
 With `-y` or without an interactive terminal, prints the suggested
-`mngr config set commands.create.type <name> --scope user` command and
-the list of available agent types -- writes nothing.""",
+`mngr config set ... --scope user` commands -- writes nothing.""",
     examples=(
         ("Walk through user-scope config settings", "mngr extras config"),
         ("Print suggested config commands without prompting", "mngr extras config -y"),
