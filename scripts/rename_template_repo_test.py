@@ -98,6 +98,10 @@ def test_rewrite_text_representative_lines() -> None:
         ),
         ("the default forever-claude-template repo URL", "the default-workspace-template repo URL"),
         ("Forever Claude runtime state", "Default Workspace Template runtime state"),
+        (
+            "https://GitHub.com/Imbue-AI/Forever-Claude-Template.git",
+            "https://GitHub.com/Imbue-AI/Default-Workspace-Template.git",
+        ),
     )
     for old_line, expected in cases:
         new_line, count = rewrite_text(old_line, replacements)

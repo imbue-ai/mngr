@@ -72,7 +72,9 @@ _OLD_ABBREVIATION: Final[str] = "fct"
 # but never rewritten.
 _SKIPPED_TOP_LEVEL_DIRS: Final[frozenset[str]] = frozenset({"specs", "blueprint"})
 _SKIPPED_DIR_NAMES: Final[frozenset[str]] = frozenset({"changelog", "vendor"})
-_SKIPPED_FILE_NAMES: Final[frozenset[str]] = frozenset({"uv.lock"})
+# Lockfiles hold base64 hashes where blind replacement corrupts integrity
+# checks; regenerate them instead of rewriting.
+_SKIPPED_FILE_NAMES: Final[frozenset[str]] = frozenset({"uv.lock", "pnpm-lock.yaml", "package-lock.json"})
 
 # The tool itself necessarily contains the old tokens (they are its search patterns).
 _SELF_PATHS: Final[frozenset[Path]] = frozenset(
@@ -271,11 +273,13 @@ def _article_agreement_rules(forms: NameForms) -> tuple[Replacement, ...]:
 
 def build_replacements(forms: NameForms) -> tuple[Replacement, ...]:
     """Rewrite rules ordered longest-form-first so short forms only match what longer forms left behind."""
+    train = forms.title.replace(" ", "-")
     literal_pairs = (
         ("forever-claude-template", forms.kebab),
         ("forever_claude_template", forms.snake),
         ("FOREVER_CLAUDE_TEMPLATE", forms.snake_upper),
         ("Forever Claude Template", forms.title),
+        ("Forever-Claude-Template", train),
         ("ForeverClaudeTemplate", forms.pascal),
         ("forever-claude", forms.kebab),
         ("forever_claude", forms.snake),
