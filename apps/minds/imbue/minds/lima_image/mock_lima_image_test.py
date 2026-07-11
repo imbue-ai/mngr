@@ -59,6 +59,10 @@ class FixedRawChunkStore(ImageChunkStoreInterface):
     seed_index_names_seen: list[str] = Field(
         default_factory=list, description="Index names for which a seed blob was supplied (asserts seeding fired)"
     )
+    seed_blob_bytes_by_index_name: dict[str, bytes] = Field(
+        default_factory=dict,
+        description="Contents the seed blob had when it was read, keyed by the index file's name",
+    )
 
     def extract_image(
         self,
@@ -73,6 +77,8 @@ class FixedRawChunkStore(ImageChunkStoreInterface):
     ) -> None:
         if seed_index_file is not None and seed_blob_file is not None:
             self.seed_index_names_seen.append(index_file.name)
+            # Read it, as real desync does: the seed must still exist at this point.
+            self.seed_blob_bytes_by_index_name[index_file.name] = seed_blob_file.read_bytes()
         body = self.raw_bytes_by_index_name.get(index_file.name)
         if body is None:
             raise LimaImageDownloadError(f"No assembled bytes configured for index {index_file.name}")

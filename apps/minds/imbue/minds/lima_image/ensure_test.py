@@ -8,6 +8,7 @@ import pytest
 from imbue.imbue_common.primitives import NonNegativeInt
 from imbue.minds.errors import LimaImageVerificationError
 from imbue.minds.lima_image.cache_layout import LimaImageCacheLayout
+from imbue.minds.lima_image.cache_layout import LimaImageCurrentPointer
 from imbue.minds.lima_image.cache_layout import index_url
 from imbue.minds.lima_image.cache_layout import manifest_signature_url
 from imbue.minds.lima_image.cache_layout import manifest_url
@@ -224,9 +225,10 @@ def test_assembled_hash_mismatch_raises_verification_error(tmp_path: Path) -> No
 def test_upgrade_seeds_from_prior_and_prunes_old_version(tmp_path: Path) -> None:
     v1 = MindsImageVersion("minds-v9.9.7")
     v2 = MindsImageVersion("minds-v9.9.8")
+    raw_v1 = b"image-one" * 100
     fetcher = InMemoryManifestFetcher()
     chunk_store = FixedRawChunkStore()
-    _publish(fetcher, chunk_store, version=v1, raw_bytes=b"image-one" * 100)
+    _publish(fetcher, chunk_store, version=v1, raw_bytes=raw_v1)
     _publish(fetcher, chunk_store, version=v2, raw_bytes=b"image-two" * 100)
 
     _run(fetcher, chunk_store, AcceptingSignatureVerifier(), RecordingProgressSink(), version=v1, cache_dir=tmp_path)
@@ -235,9 +237,38 @@ def test_upgrade_seeds_from_prior_and_prunes_old_version(tmp_path: Path) -> None
     )
 
     assert result.status is LimaImagePrefetchStatus.READY
-    # Seeding fired for the v2 assembly (the prior raw image was offered as a seed).
-    assert f"{v2}-{_ARCH.value}.caibx" in chunk_store.seed_index_names_seen
+    # The v1 image is the seed *in place*: it must still be readable during the v2
+    # assembly, so it can only be pruned afterwards.
+    assert chunk_store.seed_blob_bytes_by_index_name[f"{v2}-{_ARCH.value}.caibx"] == raw_v1
     # Retention: the old version directory is gone, only v2 remains.
     layout = LimaImageCacheLayout(cache_dir=tmp_path)
     assert not layout.version_dir(v1, _ARCH).exists()
     assert layout.version_dir(v2, _ARCH).exists()
+
+
+def test_failed_upgrade_leaves_the_current_image_intact(tmp_path: Path) -> None:
+    v1 = MindsImageVersion("minds-v9.9.9")
+    v2 = MindsImageVersion("minds-v9.10.0")
+    raw_v1 = b"image-one" * 100
+    fetcher = InMemoryManifestFetcher()
+    chunk_store = FixedRawChunkStore()
+    _publish(fetcher, chunk_store, version=v1, raw_bytes=raw_v1)
+    _publish(fetcher, chunk_store, version=v2, raw_bytes=b"image-two" * 100)
+    _run(fetcher, chunk_store, AcceptingSignatureVerifier(), RecordingProgressSink(), version=v1, cache_dir=tmp_path)
+
+    # Corrupt v2's assembled bytes so the upgrade fails the post-extract hash check --
+    # the failure path that runs after v1 has been handed to the extractor as the seed.
+    chunk_store.raw_bytes_by_index_name[f"{v2}-{_ARCH.value}.caibx"] = b"corrupt"
+    with pytest.raises(LimaImageVerificationError):
+        _run(
+            fetcher, chunk_store, AcceptingSignatureVerifier(), RecordingProgressSink(), version=v2, cache_dir=tmp_path
+        )
+
+    # The seed was the live v1 image, so a failed upgrade must not have consumed it: v1 is
+    # still on disk, still current, and still the image a create would be pointed at.
+    layout = LimaImageCacheLayout(cache_dir=tmp_path)
+    assert layout.raw_path(v1, _ARCH).read_bytes() == raw_v1
+    assert layout.index_path(v1, _ARCH).exists()
+    pointer = LimaImageCurrentPointer.model_validate_json(layout.current_pointer_file.read_text())
+    assert pointer.minds_version == v1
+    assert pointer.raw_path == layout.raw_path(v1, _ARCH)
