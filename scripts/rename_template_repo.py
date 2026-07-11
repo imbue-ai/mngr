@@ -76,11 +76,13 @@ _SKIPPED_DIR_NAMES: Final[frozenset[str]] = frozenset({"changelog", "vendor"})
 # checks; regenerate them instead of rewriting.
 _SKIPPED_FILE_NAMES: Final[frozenset[str]] = frozenset({"uv.lock", "pnpm-lock.yaml", "package-lock.json"})
 
-# The tool itself necessarily contains the old tokens (they are its search patterns).
+# The tool and the state-migration script necessarily contain the old tokens
+# (they are their search patterns).
 _SELF_PATHS: Final[frozenset[Path]] = frozenset(
     {
         Path("scripts/rename_template_repo.py"),
         Path("scripts/rename_template_repo_test.py"),
+        Path("scripts/migrate_state_fct_to_default_workspace_template.sh"),
     }
 )
 
