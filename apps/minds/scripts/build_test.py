@@ -246,22 +246,24 @@ def test_bundled_limactl_is_signed_with_virtualization_entitlement() -> None:
     )
 
 
-def test_bundled_qemu_img_is_in_signing_list() -> None:
-    """Guard: the bundled qemu-img must be signed by ToDesktop.
+def test_bundled_lima_image_tools_are_in_signing_list() -> None:
+    """Guard: the bundled desync and qemu-img must be signed by ToDesktop.
 
-    qemu-img ships as a single static-deps binary (scripts/build-qemu-payload.sh
-    links glib and friends statically, leaving only system libraries). Under the
-    hardened runtime every shipped Mach-O must be code-signed with the app's
-    Developer ID or notarization rejects the build. If a future change stages
-    qemu-img without listing it here, the packaged app breaks; this catches
-    that at test time.
+    Both are Mach-O binaries that ``build.js`` stages into ``resources/`` and
+    ToDesktop packages into ``Contents/Resources``. Under the hardened runtime
+    every shipped Mach-O must be code-signed with the app's Developer ID or
+    notarization rejects the build -- and notarization only runs in the release
+    pipeline, so a missing entry surfaces there rather than in PR CI. If a
+    future change stages one of these without listing it here, the packaged app
+    breaks; this catches that at test time.
     """
     todesktop = _load_todesktop_config()
     additional = todesktop.get("mac", {}).get("additionalBinariesToSign", [])
-    assert "resources/qemu/bin/qemu-img" in additional, (
-        "todesktop.js mac.additionalBinariesToSign must include the bundled "
-        f"qemu-img so ToDesktop signs it under the hardened runtime; got {additional}."
-    )
+    for binary in ("resources/desync/desync", "resources/qemu/bin/qemu-img"):
+        assert binary in additional, (
+            f"todesktop.js mac.additionalBinariesToSign must include the bundled {binary} "
+            f"so ToDesktop signs it under the hardened runtime; got {additional}."
+        )
 
 
 def test_build_js_stages_every_runtime_binary() -> None:

@@ -14,6 +14,7 @@ module.exports = {
     additionalBinariesToSign: [
       'resources/lima/bin/limactl',
       'resources/restic/restic',
+      'resources/desync/desync',
       // The bundled qemu-img: a single static-deps binary (built by
       // scripts/build-qemu-payload.sh) linking only system libraries, so it
       // is the only Mach-O in resources/qemu/ to sign.
