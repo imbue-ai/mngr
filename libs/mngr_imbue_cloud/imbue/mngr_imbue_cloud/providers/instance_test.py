@@ -48,12 +48,12 @@ from imbue.mngr_vps.container_setup import RUNNING_CONTAINER_STATE
 def test_resolve_fast_path_attributes_canonicalizes_remote_url_and_keeps_branch() -> None:
     resolved = _resolve_fast_path_attributes(
         LeaseAttributes(
-            repo_url="git@github.com:imbue-ai/forever-claude-template.git",
+            repo_url="git@github.com:imbue-ai/default-workspace-template.git",
             repo_branch_or_tag="v0.3.0",
             cpus=4,
         )
     )
-    assert resolved.repo_url == "github.com/imbue-ai/forever-claude-template"
+    assert resolved.repo_url == "github.com/imbue-ai/default-workspace-template"
     assert resolved.repo_branch_or_tag == "v0.3.0"
     # Non-identity attributes are preserved.
     assert resolved.cpus == 4
@@ -63,7 +63,7 @@ def test_resolve_fast_path_attributes_canonicalizes_remote_url_and_keeps_branch(
     "attributes",
     [
         LeaseAttributes(repo_branch_or_tag="v0.3.0"),
-        LeaseAttributes(repo_url="https://github.com/imbue-ai/forever-claude-template"),
+        LeaseAttributes(repo_url="https://github.com/imbue-ai/default-workspace-template"),
         LeaseAttributes(),
     ],
 )
@@ -704,7 +704,7 @@ class _FastPathGuardProvider(ImbueCloudProvider):
 
 # Minimal build args that select the fast (adopt) path with a valid repo identity.
 _FAST_PATH_BUILD_ARGS: tuple[str, ...] = (
-    "repo_url=https://github.com/imbue-ai/forever-claude-template.git",
+    "repo_url=https://github.com/imbue-ai/default-workspace-template.git",
     "repo_branch_or_tag=minds-v0.3.2",
     "fast_mode=require",
 )

@@ -4,7 +4,7 @@ Key concepts in the minds system:
 
 - **workspace**: a persistent mngr agent created from a template repository via `mngr create`. All configuration lives in the template's `.mngr/settings.toml`. Each workspace is labeled with `workspace=<name>` for discovery.
 
-- **template repository**: a git repository (e.g. forever-claude-template) that defines a workspace's entire runtime: Dockerfile, services, skills, scripts, and mngr configuration.
+- **template repository**: a git repository (e.g. default-workspace-template) that defines a workspace's entire runtime: Dockerfile, services, skills, scripts, and mngr configuration.
 
 - **desktop client**: a local process (`minds run`) that handles authentication, agent creation, and reverse proxying. Multiplexes access to multiple workspaces through a single local endpoint.
 
