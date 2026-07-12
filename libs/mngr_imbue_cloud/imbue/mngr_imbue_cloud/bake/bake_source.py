@@ -32,8 +32,8 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudError
 from imbue.mngr_imbue_cloud.repo_identity import canonicalize_repo_source
 from imbue.mngr_imbue_cloud.repo_identity import resolve_repo_current_branch
 
-# The canonical FCT remote, the default repo a production ``--from-tag`` bake clones.
-DEFAULT_FCT_REPO_URL: Final[str] = "https://github.com/imbue-ai/forever-claude-template.git"
+# The canonical DEFAULT_WORKSPACE_TEMPLATE remote, the default repo a production ``--from-tag`` bake clones.
+DEFAULT_WORKSPACE_TEMPLATE_REPO_URL: Final[str] = "https://github.com/imbue-ai/default-workspace-template.git"
 # Identity keys the bake always derives; operators must not hand-pass them in --attributes.
 _IDENTITY_ATTRIBUTE_KEYS: Final[frozenset[str]] = frozenset({"repo_url", "repo_branch_or_tag"})
 _GIT_TIMEOUT_SECONDS: Final[float] = 300.0

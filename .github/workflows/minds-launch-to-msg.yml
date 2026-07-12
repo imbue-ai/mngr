@@ -13,21 +13,21 @@ on:
         required: false
         default: false
       template_ref:
-        description: "forever-claude-template commit the agent is created from: full 40-char SHA, branch, or tag. Empty -> `main`. Frozen to a SHA at run start, so the run is immune to the ref moving mid-run. A SHA must be reachable from some ref in the FCT repo. Runtime behavior is a function of (minds binary, FCT template); pin both for reproducible replays. SHA creates need a binary built from mngr 02bb71b44 (2026-06-11) or later."
+        description: "default-workspace-template commit the agent is created from: full 40-char SHA, branch, or tag. Empty -> `main`. Frozen to a SHA at run start, so the run is immune to the ref moving mid-run. A SHA must be reachable from some ref in the DEFAULT_WORKSPACE_TEMPLATE repo. Runtime behavior is a function of (minds binary, default workspace template); pin both for reproducible replays. SHA creates need a binary built from mngr 02bb71b44 (2026-06-11) or later."
         required: false
         default: ''
       template_url:
-        description: 'Override the FCT git URL (forks). Empty -> https://github.com/imbue-ai/forever-claude-template.'
+        description: 'Override the DEFAULT_WORKSPACE_TEMPLATE git URL (forks). Empty -> https://github.com/imbue-ai/default-workspace-template.'
         required: false
         default: ''
       force:
-        description: 'Bypass the skip-if-unchanged check. Schedule-triggered runs skip when the (mngr main HEAD, FCT main HEAD) pair matches the last green run; dispatch-triggered runs ignore the check entirely.'
+        description: 'Bypass the skip-if-unchanged check. Schedule-triggered runs skip when the (mngr main HEAD, DEFAULT_WORKSPACE_TEMPLATE main HEAD) pair matches the last green run; dispatch-triggered runs ignore the check entirely.'
         type: boolean
         required: false
         default: false
   # Twice-daily health check against both repos' main HEADs. Schedules only
   # fire from the default branch. `check_should_run` skips the expensive
-  # jobs when the (mngr, FCT) pair is unchanged since the last green run,
+  # jobs when the (mngr, DEFAULT_WORKSPACE_TEMPLATE) pair is unchanged since the last green run,
   # so the "nothing changed" cost is one free Linux job.
   schedule:
     - cron: '0 16 * * *'  # 09:00 PDT / 08:00 PST
@@ -48,8 +48,8 @@ permissions:
 
 jobs:
   # Free Linux job with two roles. (1) Freeze point: resolves the mngr and
-  # FCT inputs (branch / tag / SHA) to full SHAs exactly once; downstream
-  # jobs consume the `mngr_sha` / `fct_sha` outputs, never the raw inputs,
+  # DEFAULT_WORKSPACE_TEMPLATE inputs (branch / tag / SHA) to full SHAs exactly once; downstream
+  # jobs consume the `mngr_sha` / `default_workspace_template_sha` outputs, never the raw inputs,
   # so a moving ref like `main` cannot drift mid-run. (2) Skip decision: an
   # actions/cache entry keyed by the frozen pair means the last green run
   # already verified it, so the expensive jobs are skipped (`lookup-only`
@@ -60,11 +60,11 @@ jobs:
       should_run: ${{ steps.decide.outputs.should_run }}
       pair_key:   ${{ steps.compute.outputs.pair_key }}
       mngr_sha:   ${{ steps.compute.outputs.mngr_sha }}
-      fct_sha:    ${{ steps.compute.outputs.fct_sha }}
+      default_workspace_template_sha:    ${{ steps.compute.outputs.default_workspace_template_sha }}
       mngr_ref:   ${{ steps.compute.outputs.mngr_ref }}
-      fct_ref:    ${{ steps.compute.outputs.fct_ref }}
+      default_workspace_template_ref:    ${{ steps.compute.outputs.default_workspace_template_ref }}
     steps:
-      - name: compute (mngr, FCT) pair key
+      - name: compute (mngr, DEFAULT_WORKSPACE_TEMPLATE) pair key
         id: compute
         run: |
           set -euo pipefail
@@ -91,21 +91,21 @@ jobs:
           else
             MNGR_SHA=$(resolve_ref 'https://github.com/${{ github.repository }}.git' "$MNGR_REF")
           fi
-          FCT_REF='${{ inputs.template_ref }}'
-          [[ -z "$FCT_REF" ]] && FCT_REF='main'
-          FCT_REPO_URL='${{ inputs.template_url }}'
-          [[ -z "$FCT_REPO_URL" ]] && FCT_REPO_URL='https://github.com/imbue-ai/forever-claude-template'
-          FCT_SHA=$(resolve_ref "$FCT_REPO_URL" "$FCT_REF")
-          if [[ -z "$MNGR_SHA" || -z "$FCT_SHA" ]]; then
-            echo "::error::failed to resolve refs -- MNGR_SHA='$MNGR_SHA' FCT_SHA='$FCT_SHA'"
+          DEFAULT_WORKSPACE_TEMPLATE_REF='${{ inputs.template_ref }}'
+          [[ -z "$DEFAULT_WORKSPACE_TEMPLATE_REF" ]] && DEFAULT_WORKSPACE_TEMPLATE_REF='main'
+          DEFAULT_WORKSPACE_TEMPLATE_REPO_URL='${{ inputs.template_url }}'
+          [[ -z "$DEFAULT_WORKSPACE_TEMPLATE_REPO_URL" ]] && DEFAULT_WORKSPACE_TEMPLATE_REPO_URL='https://github.com/imbue-ai/default-workspace-template'
+          DEFAULT_WORKSPACE_TEMPLATE_SHA=$(resolve_ref "$DEFAULT_WORKSPACE_TEMPLATE_REPO_URL" "$DEFAULT_WORKSPACE_TEMPLATE_REF")
+          if [[ -z "$MNGR_SHA" || -z "$DEFAULT_WORKSPACE_TEMPLATE_SHA" ]]; then
+            echo "::error::failed to resolve refs -- MNGR_SHA='$MNGR_SHA' DEFAULT_WORKSPACE_TEMPLATE_SHA='$DEFAULT_WORKSPACE_TEMPLATE_SHA'"
             exit 1
           fi
-          PAIR_KEY=$(printf '%s:%s' "$MNGR_SHA" "$FCT_SHA" | shasum -a 256 | awk '{print $1}')
+          PAIR_KEY=$(printf '%s:%s' "$MNGR_SHA" "$DEFAULT_WORKSPACE_TEMPLATE_SHA" | shasum -a 256 | awk '{print $1}')
           {
             echo "mngr_sha=$MNGR_SHA"
-            echo "fct_sha=$FCT_SHA"
+            echo "default_workspace_template_sha=$DEFAULT_WORKSPACE_TEMPLATE_SHA"
             echo "mngr_ref=$MNGR_REF"
-            echo "fct_ref=$FCT_REF"
+            echo "default_workspace_template_ref=$DEFAULT_WORKSPACE_TEMPLATE_REF"
             echo "pair_key=$PAIR_KEY"
           } >> "$GITHUB_OUTPUT"
       - name: look up marker cache
@@ -117,7 +117,7 @@ jobs:
           path: /tmp/launch-to-msg-marker.txt
           # Embed both SHAs directly in the key so `gh cache list`
           # reveals the green pair without having to download the cache.
-          key: launch-to-msg-green-mngr-${{ steps.compute.outputs.mngr_sha }}-fct-${{ steps.compute.outputs.fct_sha }}
+          key: launch-to-msg-green-mngr-${{ steps.compute.outputs.mngr_sha }}-default-workspace-template-${{ steps.compute.outputs.default_workspace_template_sha }}
           lookup-only: true
       - name: decide
         id: decide
@@ -126,8 +126,8 @@ jobs:
           {
             echo "## Pair-key fingerprint"
             echo "- mngr: \`${{ steps.compute.outputs.mngr_ref }}\` (\`${{ steps.compute.outputs.mngr_sha }}\`)"
-            echo "- FCT:  \`${{ steps.compute.outputs.fct_ref }}\` (\`${{ steps.compute.outputs.fct_sha }}\`)"
-            echo "- cache key: \`launch-to-msg-green-mngr-${{ steps.compute.outputs.mngr_sha }}-fct-${{ steps.compute.outputs.fct_sha }}\`"
+            echo "- DEFAULT_WORKSPACE_TEMPLATE:  \`${{ steps.compute.outputs.default_workspace_template_ref }}\` (\`${{ steps.compute.outputs.default_workspace_template_sha }}\`)"
+            echo "- cache key: \`launch-to-msg-green-mngr-${{ steps.compute.outputs.mngr_sha }}-default-workspace-template-${{ steps.compute.outputs.default_workspace_template_sha }}\`"
             echo "- marker cache-hit: \`${{ steps.marker.outputs.cache-hit }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
           # Skip when the pair is already green unless force=true. Applies
@@ -557,24 +557,24 @@ jobs:
           MINDS_ELECTRON_EXEC_PATH=/Applications/Minds.app/Contents/MacOS/Minds \
             /Applications/Minds.app/Contents/Resources/latchkey/bin/latchkey ensure-browser
 
-      - name: report frozen FCT template pin
+      - name: report frozen default workspace template pin
         # Echo the SHA frozen in check_should_run so this job's log + summary
-        # name the exact FCT commit. Deliberately not re-resolved --
+        # name the exact DEFAULT_WORKSPACE_TEMPLATE commit. Deliberately not re-resolved --
         # re-resolving after the build is the drift window the freeze closes.
         env:
-          FCT_REPO_URL: ${{ inputs.template_url || 'https://github.com/imbue-ai/forever-claude-template' }}
-          FCT_REF:      ${{ needs.check_should_run.outputs.fct_ref }}
-          FCT_SHA:      ${{ needs.check_should_run.outputs.fct_sha }}
+          DEFAULT_WORKSPACE_TEMPLATE_REPO_URL: ${{ inputs.template_url || 'https://github.com/imbue-ai/default-workspace-template' }}
+          DEFAULT_WORKSPACE_TEMPLATE_REF:      ${{ needs.check_should_run.outputs.default_workspace_template_ref }}
+          DEFAULT_WORKSPACE_TEMPLATE_SHA:      ${{ needs.check_should_run.outputs.default_workspace_template_sha }}
         run: |
           set -euo pipefail
           {
-            echo "## FCT template"
+            echo "## default workspace template"
             echo ""
-            echo "- repo: \`$FCT_REPO_URL\`"
-            echo "- ref input: \`$FCT_REF\`"
-            echo "- frozen SHA: \`$FCT_SHA\`"
+            echo "- repo: \`$DEFAULT_WORKSPACE_TEMPLATE_REPO_URL\`"
+            echo "- ref input: \`$DEFAULT_WORKSPACE_TEMPLATE_REF\`"
+            echo "- frozen SHA: \`$DEFAULT_WORKSPACE_TEMPLATE_SHA\`"
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "FCT $FCT_REPO_URL @ $FCT_REF frozen at $FCT_SHA"
+          echo "DEFAULT_WORKSPACE_TEMPLATE $DEFAULT_WORKSPACE_TEMPLATE_REPO_URL @ $DEFAULT_WORKSPACE_TEMPLATE_REF frozen at $DEFAULT_WORKSPACE_TEMPLATE_SHA"
 
       - name: launch-to-msg + slack flow (Python)
         env:
@@ -582,14 +582,14 @@ jobs:
           # Drive a second workspace + cross-workspace follow-up pings in the
           # same run.
           WORKSPACE_COUNT:    "2"
-          # Pin agent creation to the frozen FCT SHA; without this, minds
+          # Pin agent creation to the frozen DEFAULT_WORKSPACE_TEMPLATE SHA; without this, minds
           # falls back to templates.py's FALLBACK_BRANCH. Honored only because
           # MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1 (templates._operator_workspace_default).
           # Passing the SHA (not the ref) keeps the tested commit byte-identical
           # to the pair key / green marker / slack message. The binary fetches
           # branch / tag / SHA uniformly (clone_git_repo; mngr 02bb71b44+).
           MINDS_USE_LOCAL_WORKSPACE_DEFAULTS: "1"
-          MINDS_WORKSPACE_BRANCH: ${{ needs.check_should_run.outputs.fct_sha }}
+          MINDS_WORKSPACE_BRANCH: ${{ needs.check_should_run.outputs.default_workspace_template_sha }}
         run: |
           # pipefail is REQUIRED: without it the pipeline exits with tee's
           # status (always 0) and a failing e2e is reported green.
@@ -899,7 +899,7 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
-  # Record the (mngr main HEAD, FCT main HEAD) pair we just verified
+  # Record the (mngr main HEAD, DEFAULT_WORKSPACE_TEMPLATE main HEAD) pair we just verified
   # green so the next run can skip if nothing has moved. Only runs when
   # BOTH downstream jobs succeeded -- a partial green doesn't move the
   # marker, so the next slot retries automatically.
@@ -912,13 +912,13 @@ jobs:
         env:
           PAIR_KEY: ${{ needs.check_should_run.outputs.pair_key }}
           MNGR_SHA: ${{ needs.check_should_run.outputs.mngr_sha }}
-          FCT_SHA:  ${{ needs.check_should_run.outputs.fct_sha }}
+          DEFAULT_WORKSPACE_TEMPLATE_SHA:  ${{ needs.check_should_run.outputs.default_workspace_template_sha }}
         run: |
           set -euo pipefail
           {
             echo "pair_key: $PAIR_KEY"
             echo "mngr: $MNGR_SHA"
-            echo "fct:  $FCT_SHA"
+            echo "default_workspace_template:  $DEFAULT_WORKSPACE_TEMPLATE_SHA"
             echo "saved_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
             echo "run_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           } | tee /tmp/launch-to-msg-marker.txt
@@ -926,14 +926,14 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: /tmp/launch-to-msg-marker.txt
-          key: launch-to-msg-green-mngr-${{ needs.check_should_run.outputs.mngr_sha }}-fct-${{ needs.check_should_run.outputs.fct_sha }}
+          key: launch-to-msg-green-mngr-${{ needs.check_should_run.outputs.mngr_sha }}-default-workspace-template-${{ needs.check_should_run.outputs.default_workspace_template_sha }}
       - name: emit summary
         run: |
           {
             echo "## Marker updated"
-            echo "- cache key: \`launch-to-msg-green-mngr-${{ needs.check_should_run.outputs.mngr_sha }}-fct-${{ needs.check_should_run.outputs.fct_sha }}\`"
+            echo "- cache key: \`launch-to-msg-green-mngr-${{ needs.check_should_run.outputs.mngr_sha }}-default-workspace-template-${{ needs.check_should_run.outputs.default_workspace_template_sha }}\`"
             echo "- mngr: \`${{ needs.check_should_run.outputs.mngr_sha }}\`"
-            echo "- FCT:  \`${{ needs.check_should_run.outputs.fct_sha }}\`"
+            echo "- DEFAULT_WORKSPACE_TEMPLATE:  \`${{ needs.check_should_run.outputs.default_workspace_template_sha }}\`"
             echo ""
             echo "Inspect green pairs (the Caches web UI cannot filter by key prefix):"
             echo ""
@@ -968,9 +968,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SHOULD_RUN: ${{ needs.check_should_run.outputs.should_run }}
           MNGR_SHA: ${{ needs.check_should_run.outputs.mngr_sha }}
-          FCT_SHA:  ${{ needs.check_should_run.outputs.fct_sha }}
+          DEFAULT_WORKSPACE_TEMPLATE_SHA:  ${{ needs.check_should_run.outputs.default_workspace_template_sha }}
           MNGR_REF: ${{ needs.check_should_run.outputs.mngr_ref }}
-          FCT_REF:  ${{ needs.check_should_run.outputs.fct_ref }}
+          DEFAULT_WORKSPACE_TEMPLATE_REF:  ${{ needs.check_should_run.outputs.default_workspace_template_ref }}
           BUILD_RESULT:         ${{ needs.build.result }}
           LAUNCH_TO_MSG_RESULT: ${{ needs.launch_to_msg.result }}
           MACOS_LAUNCH_RESULT:  ${{ needs.macos_launch.result }}
@@ -1042,7 +1042,7 @@ jobs:
             detail=""
           fi
           MNGR_SHORT="${MNGR_SHA:0:12}"
-          FCT_SHORT="${FCT_SHA:0:12}"
+          DEFAULT_WORKSPACE_TEMPLATE_SHORT="${DEFAULT_WORKSPACE_TEMPLATE_SHA:0:12}"
           # Format the e2e per-run metrics line. Each metric is the raw
           # float in seconds; only include the ones we actually got, so a
           # mid-W2 failure still shows launch->ready and w1.
@@ -1066,7 +1066,7 @@ jobs:
           done
           metrics_line=""
           [[ -n "$metrics_inner" ]] && metrics_line="[${metrics_inner}]"
-          # Build links line: `[todesktop(mac-arm64) | <run logs> | <mngr commit> | <fct commit>]`.
+          # Build links line: `[todesktop(mac-arm64) | <run logs> | <mngr commit> | <default_workspace_template commit>]`.
           # Dashboard + .dmg URLs are both derived from app_zip_url's
           # <APP_ID>/builds/<BID> segment.
           binary_link=""
@@ -1085,7 +1085,7 @@ jobs:
           fi
           links_inner+="${sep}<${RUN_URL}|run logs>"
           links_inner+=" | <https://github.com/imbue-ai/mngr/commit/${MNGR_SHA}|mngr commit>"
-          links_inner+=" | <https://github.com/imbue-ai/forever-claude-template/commit/${FCT_SHA}|fct commit>"
+          links_inner+=" | <https://github.com/imbue-ai/default-workspace-template/commit/${DEFAULT_WORKSPACE_TEMPLATE_SHA}|default_workspace_template commit>"
           links_line="[${links_inner}]"
           # Assemble: verdict line, refs line, metrics line (omitted when
           # empty), links line.
@@ -1095,9 +1095,9 @@ jobs:
           # just the commit when the input was already a raw 40-char SHA.
           mngr_label="\`${MNGR_SHORT}\`"
           [[ -n "$MNGR_REF" && ! "$MNGR_REF" =~ ^[0-9a-f]{40}$ ]] && mngr_label="\`${MNGR_REF}\` (\`${MNGR_SHORT}\`)"
-          fct_label="\`${FCT_SHORT}\`"
-          [[ -n "$FCT_REF" && ! "$FCT_REF" =~ ^[0-9a-f]{40}$ ]] && fct_label="\`${FCT_REF}\` (\`${FCT_SHORT}\`)"
-          line2="[_mngr_ ${mngr_label} | _FCT_ ${fct_label}]"
+          default_workspace_template_label="\`${DEFAULT_WORKSPACE_TEMPLATE_SHORT}\`"
+          [[ -n "$DEFAULT_WORKSPACE_TEMPLATE_REF" && ! "$DEFAULT_WORKSPACE_TEMPLATE_REF" =~ ^[0-9a-f]{40}$ ]] && default_workspace_template_label="\`${DEFAULT_WORKSPACE_TEMPLATE_REF}\` (\`${DEFAULT_WORKSPACE_TEMPLATE_SHORT}\`)"
+          line2="[_mngr_ ${mngr_label} | _DEFAULT_WORKSPACE_TEMPLATE_ ${default_workspace_template_label}]"
           if [[ -n "$metrics_line" ]]; then
             text=$(printf '%s\n%s\n%s\n%s' "$line1" "$line2" "$metrics_line" "$links_line")
           else

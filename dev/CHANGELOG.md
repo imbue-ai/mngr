@@ -4,6 +4,37 @@ A concise, human-friendly summary of changes for repo-level dev tooling: CI work
 
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
+## 2026-07-11
+
+### Added
+
+- Added: `scripts/rename_template_repo.py` — migration tool that renames the forever-claude-template repo to a new name. All case forms (kebab, snake, SNAKE_UPPER, Title, Pascal) are derived from `--new-name`; `--new-abbreviation` sets the shorthand that replaces `fct`/`FCT` (context-sensitive across snake, kebab, and CamelCase identifiers). Dry-run by default; `--apply` edits in place idempotently, `--check` verifies no live references remain (including CamelCase-embedded forms), `--show-diff` prints unified diffs. Historical records (changelog entries, `specs/`, `blueprint/`), vendored trees, and lockfiles are reported but never rewritten.
+- Added: `scripts/migrate_state_fct_to_default_workspace_template.sh` — developer-local state migration for the template rename (stale `.external_worktrees` removal, template checkout dir rename, git remote URLs, `apps/minds/.env` var rename, `__pycache__` sweep). Dry-run flag, idempotent; reports anything it is unsure about instead of touching it.
+
+### Changed
+
+- Changed: Repo-wide rename of forever-claude-template to default-workspace-template (justfile, CI workflows, scripts, Claude skills), applied mechanically by the new rename tool. The GitHub repo rename itself happens out of band.
+
+## 2026-07-10
+
+### Added
+
+- Added: `specs/discovery-log-cleanup.md` — plan for cleaning up discovery logging and provider treatment in the Minds app (once-per-process suppression of repeated provider-level discovery-error warnings in the three stream consumers, startup snapshots from `mngr observe --discovery-only` for skipped providers, always-write `[providers.aws-<region>]` blocks preserving `is_enabled`, and bouncing the observe child when the bootstrap's settings write changes the provider set).
+- Added: `blueprint/minds-inspirations/` — implementation plan and feature prompt for the minds "inspirations" feature. Inspirations let a running mind publish a clean, bootable snapshot of the apps it built to a new GitHub repo, and let another mind adapt one into itself. The plan records the design evolution: assembly delegated to a launch-task worker on an isolated worktree with a strict no-merge-back invariant, inline-chat confirmation, latchkey GitHub permissioning end-to-end (REST API calls via latchkey curl and the git push through the latchkey gateway's native git smart-HTTP proxying), a bespoke-thumbnail gate, and the incident fixes (destructive-merge data loss, `GH_TOKEN` shadowing, base-ref resolution on multi-root repos, welcome takeover). The implementation itself lives in `forever-claude-template` on the companion branch.
+
+## 2026-07-09
+
+### Added
+
+- Added: `just list-servers` and `just prep-server <server-id>` recipes wrapping the new env-aware `minds server {list,prep}` commands (DSN + pool SSH key resolved from the activated tier automatically). The `minds-justfile` skill doc was updated to match.
+- Added: `specs/backup-update-fixes/concise.md` and `specs/injected-backup-service/concise.md` — plans for the per-workspace backup health route (with master-password hash + rotation, fixed minimum backup version, `official` remote, snapshot-resume test rewrite) and the drift-detection + one-click converging update on running workspaces.
+
+### Changed
+
+- Changed: `destroy-pool-host` justfile recipe renamed to `destroy-pool-hosts` and now takes any number of pool-host ids (clean break, no alias). Forwards to `minds pool destroy`, which destroys all named slices in parallel after atomically claiming each row so a user lease cannot race the destroy. The `minds-justfile` skill doc was updated to match.
+- Changed: Pre-commit `regenerate-cli-docs` hook now also triggers on plugin CLI files (`libs/mngr_*/imbue/**/cli/*.py`), so editing a plugin's click commands can no longer leave the generated `libs/mngr/docs/commands/` reference stale until an unrelated PR trips the check.
+- Changed: `scripts/snapshot_minds_e2e_state.py`'s docs no longer hardcode stale snapshot image ids or describe the script as a one-off prototype — it is documented as the standing producer for the `build-minds-snapshot` CI stage, with instructions for minting an image id manually and running individual tests against it via `just test-offload-minds-snapshot <image-id> '--filter <test_name>'`.
+
 ## 2026-07-08
 
 ### Added

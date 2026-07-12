@@ -3,7 +3,7 @@
 When the user picks "have an agent help" in a loaded workspace, the desktop app
 runs ``mngr create`` *inside* that workspace's container (via ``mngr exec``) to
 spawn a new chat agent seeded with ``/assist <description>``. Running the create
-inside the container is what lets it resolve the FCT's ``chat`` create-template
+inside the container is what lets it resolve the DEFAULT_WORKSPACE_TEMPLATE's ``chat`` create-template
 and land in the right work dir -- exactly the way the workspace's own UI creates
 chats -- while keeping the coupling at the mngr CLI level (no call into the
 system-interface HTTP API). The new chat is tagged with the ``assist`` label so
@@ -30,7 +30,7 @@ from imbue.mngr.primitives import AgentId
 ASSIST_CHAT_LABEL: Final[str] = "assist"
 
 # Path (relative to the workspace's work_dir, where ``mngr exec`` runs) of the
-# FCT skill the /assist flow drives. Workspaces created from an FCT older than
+# DEFAULT_WORKSPACE_TEMPLATE skill the /assist flow drives. Workspaces created from a DEFAULT_WORKSPACE_TEMPLATE older than
 # the skill's introduction lack this file; sending them ``/assist <text>`` makes
 # Claude reject an unknown slash command, which never submits a prompt, so the
 # ``mngr create --message`` send hangs to its full timeout. We probe for the file

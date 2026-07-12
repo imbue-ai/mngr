@@ -18,8 +18,8 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
-from imbue.minds.desktop_client.backup_password_store import read_saved_backup_password
-from imbue.minds.desktop_client.backup_password_store import save_backup_password_if_absent
+from imbue.minds.desktop_client.backup_password_store import resolve_backup_password_for_use
+from imbue.minds.desktop_client.backup_password_store import save_backup_password
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.backup_provisioning import env_text_defines_restic_password
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
@@ -39,7 +39,6 @@ from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.tunnel_token_injection import inject_tunnel_token_into_agent
 from imbue.minds.errors import MindsConfigError
-from imbue.minds.primitives import BackupEncryptionMethod
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import LaunchMode
 from imbue.mngr.primitives import AgentId
@@ -152,7 +151,7 @@ def _run_tunnel_setup(
     if info.token is None:
         logger.warning("Tunnel created for {} but no token returned", agent_id)
         return
-    inject_tunnel_token_into_agent(agent_id, info.token.get_secret_value())
+    inject_tunnel_token_into_agent(agent_id, info.token.get_secret_value(), imbue_cloud_cli.mngr_caller)
     logger.debug("Injected tunnel token into agent {}", agent_id)
 
 
@@ -346,8 +345,7 @@ def build_on_created_callback(
 def build_backup_request_or_error(
     *,
     backup_provider: BackupProvider,
-    encryption_method: BackupEncryptionMethod,
-    typed_master_password: str,
+    typed_master_password: SecretStr,
     is_save_password: bool,
     api_key_env: str,
     account_email: str,
@@ -355,7 +353,11 @@ def build_backup_request_or_error(
 ) -> tuple[BackupSetupRequest | None, str | None]:
     """Resolve form backup inputs into a ``BackupSetupRequest`` or an error message.
 
-    Reads / first-time-saves the shared master password as a side effect.
+    The master password (validated against ``backup_password_hash``; blank
+    falls back to the saved plaintext copy, else means the empty password) is
+    required for any repo-initializing provider. ``is_save_password`` persists
+    the *typed* password as the plaintext convenience copy -- only after it
+    validated, so this can never establish or change the master password.
     Returns ``(request, None)`` on success or ``(None, message)`` for a
     validation error the caller should re-render on the form.
     """
@@ -373,19 +375,14 @@ def build_backup_request_or_error(
             "Don't set RESTIC_PASSWORD in the backup env -- minds assigns each workspace its own random "
             "repository password. Provide RESTIC_REPOSITORY and any backend credentials only."
         )
-    # The master password (or empty, for no_password) is used only to
-    # initialize the repo from the minds machine; it never enters the workspace.
-    master_password: SecretStr | None = None
-    if encryption_method is BackupEncryptionMethod.MASTER_PASSWORD:
-        saved_password = read_saved_backup_password(paths)
-        if saved_password is not None:
-            master_password = SecretStr(saved_password)
-        elif typed_master_password:
-            master_password = SecretStr(typed_master_password)
-            if is_save_password:
-                save_backup_password_if_absent(paths, typed_master_password)
-        else:
-            return None, "Enter a backup master password, or set the encryption method to 'no password'."
+    # The master password (possibly empty) is used only to initialize the repo
+    # from the minds machine; it never enters the workspace.
+    resolved_password, password_error = resolve_backup_password_for_use(paths, typed_master_password)
+    if resolved_password is None:
+        return None, password_error
+    if is_save_password and typed_master_password.get_secret_value():
+        save_backup_password(paths, typed_master_password)
+    master_password: SecretStr | None = resolved_password if resolved_password.get_secret_value() else None
     return (
         BackupSetupRequest(
             backup_provider=backup_provider,

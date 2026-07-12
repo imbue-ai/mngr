@@ -134,7 +134,7 @@ for the staging tier.
 ## Step 5: Bake one or more pool hosts
 
 Pool hosts are baked as bare-metal slices. A slice bake carves a lima VM on a
-`ready` bare-metal box, runs the FCT template's `mngr create --template main
+`ready` bare-metal box, runs the default workspace template's `mngr create --template main
 --template pool_host` to build + bake the agent state inside it, then writes a
 `pool_hosts` row.
 
@@ -155,14 +155,14 @@ just prep-server <bare-metal-server-id>            # re-run just the prep step
 ```
 
 `just prep-server <id>` (wrapping `mngr imbue_cloud admin server prep`) re-runs
-just the prep step (qemu/lima/tooling + image staging + the per-box FCT image
+just the prep step (qemu/lima/tooling + image staging + the per-box DEFAULT_WORKSPACE_TEMPLATE image
 cache dir). It SSHes the box with strict host-key pinning, so the box's sshd
 host key must already be recorded on its `bare_metal_servers` row -- which
 `server setup` does at OS reinstall, or `admin pool backfill-host-keys` captures
 once for a box installed out of band. `prep` fails closed (no trust-on-first-use)
 if no host key is recorded.
 
-Note: boxes prepped before 2026-06-27 lack the per-box FCT image cache directory
+Note: boxes prepped before 2026-06-27 lack the per-box DEFAULT_WORKSPACE_TEMPLATE image cache directory
 that production (`--from-tag`) bakes require -- re-run `just prep-server <id>`
 (idempotent) on such a box before baking on it.
 
@@ -191,10 +191,10 @@ datacenter code.
 
 The `--attributes` JSON only *labels* the row for lease matching -- it does NOT
 select the baked version. **The baked version comes entirely from the bake
-source:** `--from-tag <tag>` (production; clones the FCT remote at an exact tag)
+source:** `--from-tag <tag>` (production; clones the DEFAULT_WORKSPACE_TEMPLATE remote at an exact tag)
 or `--workspace-dir <dir>` (dev; a working tree, default
-`~/project/forever-claude-template`). The minds desktop client always sends
-`repo_branch_or_tag` in its lease request (the resolved FCT branch in dev, or the
+`~/project/default-workspace-template`). The minds desktop client always sends
+`repo_branch_or_tag` in its lease request (the resolved DEFAULT_WORKSPACE_TEMPLATE branch in dev, or the
 latest semver tag in production), so that key must be present on every row that
 should ever be leased. Other dimensions (`cpus`, `memory_gb`, `gpu_count`) can be
 set for a more constrained pool generation; they're only required on the row when
@@ -210,11 +210,11 @@ Call it directly only for non-minds / one-off baking outside an activated env.
 When a user creates an imbue_cloud workspace, minds makes up to two `mngr create` calls:
 
 1. **Fast path** (`fast_mode=require`): lease a pool host whose `attributes` exactly match (including `repo_branch_or_tag`) and adopt its pre-baked agent. This is fast because the host is fully baked.
-2. **Slow path** (`fast_mode=prevent`): if no exact match exists, the provider raises `FastPathUnavailableError`; minds automatically retries, this time leasing *any* available host (resource attributes only -- `repo_branch_or_tag` is dropped), destroying its baked container, and rebuilding it from the FCT `Dockerfile`. This is slower (a full container build) but works whenever the pool has any free host of the right size.
+2. **Slow path** (`fast_mode=prevent`): if no exact match exists, the provider raises `FastPathUnavailableError`; minds automatically retries, this time leasing *any* available host (resource attributes only -- `repo_branch_or_tag` is dropped), destroying its baked container, and rebuilding it from the DEFAULT_WORKSPACE_TEMPLATE `Dockerfile`. This is slower (a full container build) but works whenever the pool has any free host of the right size.
 
 So a pool whose rows are baked at an older `repo_branch_or_tag` no longer hard-fails newer workspace creations -- they fall back to the slow path. Keeping the pool baked at the current version is still worthwhile because it keeps creations on the fast path. Only when the pool is genuinely empty (no `available` rows) does creation fail, with `ImbueCloudLeaseUnavailableError`.
 
-To rsync the local mngr working tree into the FCT worktree's `vendor/mngr/`
+To rsync the local mngr working tree into the DEFAULT_WORKSPACE_TEMPLATE worktree's `vendor/mngr/`
 for the duration of the bake (dev-loop pattern; see
 `apps/minds/docs/vendor-mngr-sync.md` for the sync mechanisms), forward
 `--mngr-source <monorepo-root>` as an extra flag through the recipe. The bake
@@ -258,7 +258,7 @@ dead (the default path already tolerates a VM that is merely absent).
 
 ### Upgrading the pool
 
-To roll the pool to a new FCT version, bake the new generation first, then
+To roll the pool to a new DEFAULT_WORKSPACE_TEMPLATE version, bake the new generation first, then
 destroy the old `available` rows in one command:
 
 ```bash
@@ -278,13 +278,13 @@ During development, set `MINDS_WORKSPACE_BRANCH` to your branch name. The minds
 app uses that branch as the lease request's `repo_branch_or_tag`, so the pool
 host's `attributes.repo_branch_or_tag` must match. Bake against your dev env
 (the DSN auto-resolves from its `secrets.toml`, and `--mngr-source` rsyncs your
-live mngr tree into the FCT worktree's `vendor/mngr/` for the bake):
+live mngr tree into the DEFAULT_WORKSPACE_TEMPLATE worktree's `vendor/mngr/` for the bake):
 
 ```bash
 eval "$(uv run minds env activate dev-<your-user>)"
 just bake-slice-dev \
     US-WEST-OR \
-    "$PWD/.external_worktrees/forever-claude-template" \
+    "$PWD/.external_worktrees/default-workspace-template" \
     1 \
     --server-id <bare-metal-server-id> \
     --repo-branch-or-tag "$(git rev-parse --abbrev-ref HEAD)" \
