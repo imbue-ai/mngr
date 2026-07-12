@@ -48,6 +48,9 @@ KILL_SWITCH_ENV_VAR: Final[str] = "MINDS_DISABLE_LIMA_IMAGE_CACHE"
 # Subdirectory under the env data root holding the per-env image cache.
 LIMA_IMAGE_CACHE_DIRNAME: Final[str] = "lima-images"
 
+# The gate resolves the release tag against the remote; a hung remote must not stall a create.
+_LS_REMOTE_TIMEOUT_SECONDS: Final[float] = 30.0
+
 # Background auto-retry backoff bounds for a published-but-failing download.
 _RETRY_INITIAL_BACKOFF_SECONDS: Final[float] = 5.0
 _RETRY_MAX_BACKOFF_SECONDS: Final[float] = 120.0
@@ -56,6 +59,40 @@ _RETRY_MAX_BACKOFF_SECONDS: Final[float] = 120.0
 def is_lima_image_cache_disabled(environ: Mapping[str, str]) -> bool:
     """Return whether the kill-switch env var disables the pre-baked image path."""
     return environ.get(KILL_SWITCH_ENV_VAR, "").strip().lower() in ("1", "true", "yes")
+
+
+def baked_refs(current_release_tag: str, current_release_commit: str | None) -> frozenset[str]:
+    """The refs that name the content the image was baked from: the release tag, and its commit."""
+    if current_release_commit is None:
+        return frozenset({current_release_tag})
+    return frozenset({current_release_tag, current_release_commit})
+
+
+def resolve_release_tag_commit(*, repo_url: str, release_tag: str, concurrency_group: ConcurrencyGroup) -> str | None:
+    """Resolve ``release_tag`` to the commit it names, or None if it cannot be resolved.
+
+    An annotated tag's ``ls-remote`` output carries both the tag object and, on a
+    ``^{}`` line, the commit it peels to; the peeled commit is the one a create pins.
+    None is not an error: the gate simply keeps matching on the tag name alone.
+    """
+    peeled_ref = f"refs/tags/{release_tag}^{{}}"
+    cg = concurrency_group.make_concurrency_group(name="lima-image-resolve-release-tag")
+    with cg:
+        result = cg.run_process_to_completion(
+            command=["git", "ls-remote", repo_url, f"refs/tags/{release_tag}", peeled_ref],
+            is_checked_after=False,
+            timeout=_LS_REMOTE_TIMEOUT_SECONDS,
+        )
+    if result.returncode != 0:
+        logger.warning("Could not resolve {} in {}; SHA-pinned creates will build in-VM", release_tag, repo_url)
+        return None
+
+    commit_by_ref: dict[str, str] = {}
+    for line in result.stdout.strip().splitlines():
+        parts = line.split("\t", 1)
+        if len(parts) == 2:
+            commit_by_ref[parts[1].strip()] = parts[0].strip()
+    return commit_by_ref.get(peeled_ref) or commit_by_ref.get(f"refs/tags/{release_tag}")
 
 
 def make_lima_image_source(client_env_config: ClientEnvConfig | None) -> LimaImageSource | None:
@@ -80,12 +117,18 @@ def should_use_prebaked_lima_image(
     source: LimaImageSource | None,
     is_dev_loop: bool,
     environ: Mapping[str, str],
+    current_release_commit: str | None = None,
 ) -> bool:
     """Decide whether this create should use the pre-baked image.
 
     True only for the *default* workspace: a Lima create of the default workspace template repo
-    at the current release tag, with a configured source, not in the dev loop, and
-    not disabled by the kill switch. Anything else falls back to build-in-VM.
+    at the content the image was baked from, with a configured source, not in the dev loop,
+    and not disabled by the kill switch. Anything else falls back to build-in-VM.
+
+    The image is baked from a *commit*, so a create pinned to the release tag's commit SHA is
+    just as safe as one naming the tag, and ``current_release_commit`` (when resolved) admits it.
+    Requiring the tag's name would take the slow path for every SHA-pinned create -- which is
+    what CI does for reproducibility, so the fast path would go untested.
     """
     if not is_lima_launch_mode:
         return False
@@ -97,7 +140,7 @@ def should_use_prebaked_lima_image(
         return False
     if repo_url != default_repo_url:
         return False
-    if branch_or_tag != current_release_tag:
+    if branch_or_tag not in baked_refs(current_release_tag, current_release_commit):
         return False
     return True
 
@@ -203,6 +246,7 @@ def resolve_ready_prebaked_lima_image(
     environ: Mapping[str, str],
     wait_timeout_seconds: float,
     poll_interval_seconds: float,
+    current_release_commit: str | None = None,
 ) -> Path | None:
     """Resolve the baked raw image path to use for a create, or None to build in-VM.
 
@@ -219,6 +263,7 @@ def resolve_ready_prebaked_lima_image(
         repo_url=repo_url,
         branch_or_tag=branch_or_tag,
         current_release_tag=current_release_tag,
+        current_release_commit=current_release_commit,
         default_repo_url=default_repo_url,
         source=prefetcher.source,
         is_dev_loop=is_dev_loop,
@@ -255,6 +300,9 @@ class LimaImageCreateGate(FrozenModel):
     current_release_tag: str = Field(description="Release tag the baked image is keyed to (FALLBACK_BRANCH)")
     default_repo_url: str = Field(description="Default workspace template repo URL")
     is_dev_loop: bool = Field(description="Whether the operator opted into local-worktree dev defaults")
+    current_release_commit: str | None = Field(
+        default=None, description="Commit current_release_tag names, so a SHA-pinned create still matches"
+    )
 
     def resolve_image_for_create(
         self,
@@ -273,6 +321,7 @@ class LimaImageCreateGate(FrozenModel):
             repo_url=repo_url,
             branch_or_tag=branch_or_tag,
             current_release_tag=self.current_release_tag,
+            current_release_commit=self.current_release_commit,
             default_repo_url=self.default_repo_url,
             is_dev_loop=self.is_dev_loop,
             environ=environ,
