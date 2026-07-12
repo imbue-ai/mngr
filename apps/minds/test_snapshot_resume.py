@@ -519,7 +519,7 @@ def _prepare_electron_workspace_inputs(tmp_path: Path, monkeypatch: pytest.Monke
     # Pin the local-docker workspace to runc; gVisor (runsc) is absent in CI /
     # the sandbox. MINDS_DOCKER_RUNTIME_DEFAULT pins the create form / API default
     # to runc so minds never stacks the `docker_runsc` create-template -- the only
-    # way runsc gets selected, now that the pinned FCT `docker` template already
+    # way runsc gets selected, now that the pinned DEFAULT_WORKSPACE_TEMPLATE `docker` template already
     # defaults to runc. (A provider-config env var like
     # MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME cannot help: an explicitly stacked
     # template's docker_runtime outranks it.)

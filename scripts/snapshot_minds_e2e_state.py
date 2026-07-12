@@ -145,7 +145,7 @@ _IN_SANDBOX_RUNNER_PROGRAM: Final[str] = textwrap.dedent(
     # Modal VM is already the isolation boundary for this throwaway snapshot, so
     # gVisor buys nothing here. MINDS_DOCKER_RUNTIME_DEFAULT pins the create form
     # / API default to runc so minds never stacks the `docker_runsc`
-    # create-template -- the only way runsc gets selected, now that the pinned FCT
+    # create-template -- the only way runsc gets selected, now that the pinned DEFAULT_WORKSPACE_TEMPLATE
     # `docker` template already defaults to runc. (A provider-config env var like
     # MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME cannot help here: an explicitly
     # stacked template's docker_runtime outranks it.) Mirrors the pytest path in
