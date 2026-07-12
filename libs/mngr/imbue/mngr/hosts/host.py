@@ -3410,7 +3410,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         (a stop) or log and proceed (a (re)start).
 
         This is the single mechanism that guarantees a long-lived daemon launched under
-        an agent (e.g. the FCT bootstrap's ``supervisord`` and its children, like a ttyd
+        an agent (e.g. the DEFAULT_WORKSPACE_TEMPLATE bootstrap's ``supervisord`` and its children, like a ttyd
         bound to a fixed port) cannot outlive the agent: the env marker is inherited by
         every descendant and survives reparenting, so it catches orphans that a
         pane/process-tree walk would miss.

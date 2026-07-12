@@ -122,7 +122,7 @@ def server_prep(
     from the activated env and injecting the tier's POOL_SSH_PRIVATE_KEY from Vault
     (the prep authorizes that key on the box), mirroring ``minds pool create``.
     Idempotent -- also the way to bring a box prepped before 2026-06-27 up to date
-    (older preps lack the per-box FCT image cache dir that production ``--from-tag``
+    (older preps lack the per-box DEFAULT_WORKSPACE_TEMPLATE image cache dir that production ``--from-tag``
     bakes require).
     """
     env_name = require_activated_env_name()

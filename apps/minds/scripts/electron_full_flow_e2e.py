@@ -2,7 +2,7 @@
 
 Drives the real Electron app via Playwright (CDP) through the whole user
 journey the desktop client exists for, against a *local Docker* workspace
-created from the forever-claude-template:
+created from the default-workspace-template:
 
   1. create a Docker workspace (local compute) with Imbue-Cloud AI creds so
      the agent can actually answer,
@@ -33,12 +33,14 @@ import sys
 
 from loguru import logger
 
+from imbue.minds.desktop_client.default_workspace_template_worktree import (
+    materialize_paired_default_workspace_template_worktree,
+)
 from imbue.minds.desktop_client.e2e_workspace_runner import configure_logging
 from imbue.minds.desktop_client.e2e_workspace_runner import destroy_agent_best_effort
 from imbue.minds.desktop_client.e2e_workspace_runner import find_free_port
-from imbue.minds.desktop_client.e2e_workspace_runner import resolve_fct_path
+from imbue.minds.desktop_client.e2e_workspace_runner import resolve_default_workspace_template_path
 from imbue.minds.desktop_client.e2e_workspace_runner import run_full_workspace_flow
-from imbue.minds.desktop_client.fct_worktree import materialize_paired_fct_worktree
 from imbue.mngr.utils.testing import get_short_random_string
 
 
@@ -51,20 +53,25 @@ def main() -> None:
     os.environ["MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME"] = "runc"
     os.environ["MNGR__PROVIDERS__MODAL__IS_ENABLED"] = "false"
 
-    # Materialize the paired FCT worktree (clone paired branch or main + vendor
+    # Materialize the paired DEFAULT_WORKSPACE_TEMPLATE worktree (clone paired branch or main + vendor
     # this mngr checkout) if it is not already present, then resolve it. A
     # pre-existing operator worktree is left untouched.
-    materialize_paired_fct_worktree()
-    fct_path = resolve_fct_path()
+    materialize_paired_default_workspace_template_worktree()
+    default_workspace_template_path = resolve_default_workspace_template_path()
     workspace_name = f"flowtest-{get_short_random_string()}"
     token = f"flowtok-{get_short_random_string()}"
     debug_port = find_free_port()
-    logger.info("Workspace: {}; FCT: {}; CDP port: {}", workspace_name, fct_path, debug_port)
+    logger.info(
+        "Workspace: {}; DEFAULT_WORKSPACE_TEMPLATE: {}; CDP port: {}",
+        workspace_name,
+        default_workspace_template_path,
+        debug_port,
+    )
 
     results: dict[str, str] = {}
     agent_id: str | None = None
     try:
-        results, agent_id = run_full_workspace_flow(fct_path, workspace_name, token, debug_port)
+        results, agent_id = run_full_workspace_flow(default_workspace_template_path, workspace_name, token, debug_port)
     finally:
         # Always tear the host down even if a step failed. Destroy by the
         # canonical agent id when known -- destroying the host's last agent tears

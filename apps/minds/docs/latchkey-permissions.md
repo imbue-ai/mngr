@@ -286,5 +286,5 @@ Agents are expected to:
   the desktop with the decision and can decide whether to retry.
 
 The detection-and-wait logic for Claude Code lives in the
-`forever-claude-template` repository's latchkey skill, not in this
+`default-workspace-template` repository's latchkey skill, not in this
 monorepo.

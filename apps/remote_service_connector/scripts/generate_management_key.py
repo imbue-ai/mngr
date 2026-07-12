@@ -81,7 +81,7 @@ def generate_management_key(output_dir: str) -> None:
     logger.info("     uv run mngr imbue_cloud admin pool create \\")
     logger.info("       --count 3 \\")
     logger.info('       --attributes \'{"repo_branch_or_tag": "<branch-or-tag>"}\' \\')
-    logger.info("       --workspace-dir <path/to/forever-claude-template> \\")
+    logger.info("       --workspace-dir <path/to/default-workspace-template> \\")
     logger.info("       --management-public-key-file {} \\", public_key_path)
     logger.info("       --database-url $DATABASE_URL")
     logger.info("")
