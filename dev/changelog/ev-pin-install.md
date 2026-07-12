@@ -2,4 +2,6 @@ The installer (`scripts/install.sh`) now pins the mngr install to the dependency
 
 Added `just regenerate` (`scripts/regen.py`), a single umbrella that regenerates every code-derived artifact -- the CLI docs, the agent capability matrix doc, and the new constraints file -- with one drift-guard test that keeps them all in sync on every PR.
 
+The `publish.yml` job that fast-forwards the `release` branch now runs under a dedicated `release` deployment environment, so a repo admin can require a human approval before the install-governing branch moves (it already runs only after the `pypi`-gated publish succeeds).
+
 Releases no longer automatically advance the supply-chain `exclude-newer` cooldown cutoff. Advancing it is now ordinary dependency maintenance (edit the date and re-lock in a PR to main, which CI tests); `scripts/release.py` only warns, alongside its other advisory checks, when the cutoff has fallen well behind. This keeps the shipped constraints file provably identical to what CI tested.

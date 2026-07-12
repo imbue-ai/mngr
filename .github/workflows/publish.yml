@@ -78,6 +78,12 @@ jobs:
     needs: publish
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
+    # The `release` environment gates this promotion: because `release` now governs
+    # what every end user installs, configure it in repo settings with required
+    # reviewers so moving the branch needs a human approval (in addition to the
+    # `pypi` environment that already gates the upstream `publish` job). Until an
+    # admin adds reviewers, the environment exists but imposes no gate.
+    environment: release
     permissions:
       contents: write
 
