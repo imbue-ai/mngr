@@ -1349,7 +1349,8 @@ def _prompt_claude_isolation_choice() -> bool | None:
         "Yes -- give each agent its own Claude config (mngr won't touch your default Claude config)",
         "No -- share your default Claude config "
         "(mngr may write to it, but this is needed for Claude subscriptions on macOS to keep credentials working)",
-        "Leave unset for now (you can set it later with 'mngr config set')",
+        "Leave unset for now -- uses the default, which isolates each agent's config dir "
+        "(you can change it later with 'mngr config set')",
     ]
     # Default the highlighted option to "No" (share) -- the safer choice that keeps
     # Claude subscription credentials working on macOS.
@@ -1419,7 +1420,8 @@ def _prompt_docker_isolation_choice() -> bool | None:
         "Yes -- give each docker host its own host_dir sub-folder "
         "(recommended, the forthcoming default; requires Docker Engine >= 25.0)",
         "No -- keep the legacy behavior where all hosts share one state volume",
-        "Leave unset for now (keeps the legacy behavior, but the deprecation warning will persist)",
+        "Leave unset for now -- keeps the current default (legacy shared behavior) and the deprecation "
+        "warning; the default will change to isolation in a future release",
     ]
     # Default the highlighted option to the recommended "Yes" (isolate).
     idx = run_single_select_picker(
