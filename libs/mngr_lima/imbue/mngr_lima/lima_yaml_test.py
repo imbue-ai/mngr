@@ -105,6 +105,35 @@ def test_generate_default_lima_yaml_with_host_key_injects_block(tmp_path: Path) 
     assert "SSH_KEY_CHANGED=1" in script
 
 
+def test_provision_script_installs_host_key_before_apt(tmp_path: Path) -> None:
+    """Host-key trust must be established before the network-dependent apt
+    install: mngr pins the injected key and connects with strict host-key
+    checking, so a transient apt mirror failure (which aborts the `set -e`
+    script) must not be able to run *before* the key swap and leave the VM on
+    its default keys -- that surfaces as a baffling "host key does not match".
+    The package install is also wrapped in a retry to ride out mirror blips.
+    """
+    volume_path = tmp_path / "volume"
+    volume_path.mkdir()
+    fake_private = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC...\n-----END OPENSSH PRIVATE KEY-----\n"
+    fake_public = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPv... mngr-lima@host\n"
+    config = generate_default_lima_yaml(
+        volume_host_path=volume_path,
+        host_dir="/mngr",
+        host_private_key_pem=fake_private,
+        host_public_key_openssh=fake_public,
+    )
+    script = config["provision"][0]["script"]
+    # The host-key swap (and its sshd restart) must precede the apt install.
+    key_swap_index = script.index("/etc/ssh/ssh_host_ed25519_key")
+    apt_install_index = script.index("apt_get_retry install")
+    assert key_swap_index < apt_install_index
+    # apt is retried rather than run once, so a transient mirror failure does
+    # not abort provisioning on the first attempt.
+    assert "apt_get_retry update" in script
+    assert "apt_get_retry install" in script
+
+
 def test_write_lima_yaml(tmp_path: Path) -> None:
     config = {"images": [{"location": "test.qcow2", "arch": "x86_64"}]}
     output_path = tmp_path / "test.yaml"

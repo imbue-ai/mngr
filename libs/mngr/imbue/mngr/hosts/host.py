@@ -22,6 +22,7 @@ from typing import assert_never
 from uuid import uuid4
 
 from loguru import logger
+from paramiko import Channel
 from paramiko import SSHException
 from paramiko import Transport
 from pydantic import Field
@@ -454,6 +455,11 @@ _KILL_BENIGN_STDERR_SUBSTRINGS: Final[tuple[str, ...]] = ("no such process",)
 _DEFAULT_TMUX_WIDTH: Final[int] = 200
 _DEFAULT_TMUX_HEIGHT: Final[int] = 50
 
+# Resource script (shipped under mngr/resources/) that sends SIGWINCH to an agent's
+# pane processes so they repaint after a client attaches. Installed at host level and
+# invoked by the per-session tmux client-attached hook (see _build_start_agent_shell_command).
+_SIGWINCH_PANES_SCRIPT_NAME: Final[str] = "sigwinch_panes.sh"
+
 
 class Host(OuterHost, BaseHost, OnlineHostInterface):
     """Host implementation that proxies operations through a pyinfra connector.
@@ -703,14 +709,20 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         result = self.execute_idempotent_command(f"test -d '{str(path)}'")
         return result.success
 
-    def _list_directory(self, path: Path) -> list[str]:
-        """List files in a directory on the host."""
+    def _list_directory(self, path: Path, timeout_seconds: float | None = None) -> list[str]:
+        """List files in a directory on the host.
+
+        When ``timeout_seconds`` is set, the remote ``ls`` self-terminates on a
+        stall (surfacing as ``HostConnectionError`` after transient retries)
+        rather than blocking forever. Used by the per-host-bounded discovery read;
+        other callers leave it ``None`` (unbounded, prior behavior).
+        """
         if self.is_local:
             try:
                 return list(entry.name for entry in path.iterdir())
             except (FileNotFoundError, OSError):
                 return []
-        result = self.execute_idempotent_command(f"ls -1 '{str(path)}' 2>/dev/null")
+        result = self.execute_idempotent_command(f"ls -1 '{str(path)}' 2>/dev/null", timeout_seconds=timeout_seconds)
         if result.success and result.stdout.strip():
             return result.stdout.strip().split("\n")
         return []
@@ -858,25 +870,29 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         A long-lived exec channel opens the lock fd, waits for the lock, and then
         waits for stdin EOF. Closing the channel on exit sends that EOF, so the
         remote shell exits, the fd closes, and the lock releases.
+
+        Acquiring the channel retries transient SSH failures (rebuilding a dropped
+        connection) and, if they survive the retries, surfaces them as a
+        ``HostConnectionError`` instead of a raw paramiko ``SSHException``. This
+        keeps a single unreachable host from crashing a caller that operates on many
+        hosts at once (e.g. the mapreduce orchestrator launching one agent per task):
+        the failure is a structured ``MngrError`` it can catch and isolate per host.
         """
-        # Establish the SSH connection before grabbing the transport: it is opened
-        # lazily, and the lock can be the first thing to touch it (so the transport
-        # would otherwise be None). Mirrors every other transport user.
-        self._ensure_connected()
-        transport = self._get_paramiko_transport()
-        channel = transport.open_session()
-        is_lock_acquired = False
+        with (
+            self._notify_on_connection_error(),
+            self._translate_ssh_errors(
+                failed="Could not acquire host lock due to connection error",
+                closed="Connection was closed while acquiring host lock",
+            ),
+        ):
+            channel = self._open_remote_lock_channel(lock_file_path, timeout_seconds)
         try:
-            with log_span("acquiring host lock at {} (over SSH)", lock_file_path):
-                channel.exec_command(_build_remote_lock_command(lock_file_path, timeout_seconds))
-                _wait_for_remote_lock_acquired(channel)
-            is_lock_acquired = True
             yield
         except BaseException:
             # If an operation that held the lock fails, optionally keep the host
             # alive for debugging: launch a detached holder that re-grabs the flock
             # after our channel releases it (it blocks on flock until we release).
-            if is_lock_acquired and _is_retain_lock_for_debug_enabled():
+            if _is_retain_lock_for_debug_enabled():
                 logger.debug(
                     "Launching detached host-lock holder for debugging "
                     "(MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE=1)"
@@ -892,6 +908,52 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 logger.debug("Failed to send EOF when releasing remote host lock: {}", shutdown_error)
             channel.close()
             logger.trace("Released host lock (over SSH)")
+
+    @_retry_on_transient_ssh_error
+    def _open_remote_lock_channel(self, lock_file_path: Path, timeout_seconds: float | None) -> Channel:
+        """Open an SSH channel that holds the remote host flock, retrying transient SSH failures.
+
+        Returns only once the lock has actually been acquired; the caller owns the
+        returned channel and releases the lock by closing it.
+
+        Mirrors ``_run_shell_command_with_transient_retry``: a dropped connection
+        leaves a dead transport whose ``open_session`` raises ``SSHException("SSH
+        session not active")`` on every subsequent call, so on a transient SSH error
+        we disconnect -- forcing the next attempt to rebuild the connection from
+        scratch -- and re-raise for the retry decorator. Failures that survive the
+        retries are translated to ``HostConnectionError`` by the caller's
+        ``_translate_ssh_errors``.
+        """
+        # Establish the SSH connection before grabbing the transport: it is opened
+        # lazily, and the lock can be the first thing to touch it (so the transport
+        # would otherwise be None). Mirrors every other transport user.
+        self._ensure_connected()
+        transport = self._get_paramiko_transport()
+        try:
+            channel = transport.open_session()
+        except (OSError, EOFError, SSHException) as e:
+            if _is_transient_ssh_error(e):
+                logger.debug("Transient SSH error opening host-lock channel: {}, disconnecting for retry", e)
+                self.connector.host.disconnect()
+            raise
+        is_lock_acquired = False
+        try:
+            with log_span("acquiring host lock at {} (over SSH)", lock_file_path):
+                channel.exec_command(_build_remote_lock_command(lock_file_path, timeout_seconds))
+                _wait_for_remote_lock_acquired(channel)
+            is_lock_acquired = True
+        except (OSError, EOFError, SSHException) as e:
+            if _is_transient_ssh_error(e):
+                logger.debug("Transient SSH error acquiring host lock: {}, disconnecting for retry", e)
+                self.connector.host.disconnect()
+            raise
+        finally:
+            # Close the half-open channel on any failure (transient SSH error, a
+            # bounded-wait LockNotHeldError, flock missing, ...) so we never leak it.
+            # The retry decorator or the caller sees the original exception.
+            if not is_lock_acquired:
+                channel.close()
+        return channel
 
     def _launch_detached_lock_holder(self, lock_file_path: Path) -> None:
         """Launch a detached on-host process that holds the host-lock flock indefinitely.
@@ -1258,7 +1320,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         logger.trace("Loaded {} agent(s) from host {}", len(agents), self.id)
         return agents
 
-    def discover_agents(self) -> list[DiscoveredAgent]:
+    def discover_agents(self, timeout_seconds: float | None = None) -> list[DiscoveredAgent]:
         """Get lightweight references to all agents on this host.
 
         This method reads only the data.json files for each agent, avoiding the
@@ -1267,13 +1329,20 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
 
         Note that we override the base method in order to read more directly from the host,
         since that data is more likely to be up-to-date.
+
+        When ``timeout_seconds`` is set (the per-host-bounded discovery path), each
+        remote SSH read (the directory listing and every ``data.json`` read) is
+        bounded by that wall-clock so a wedged host self-terminates its reads
+        rather than leaving the discovery thread running forever. The bound is
+        per-command, so a host with N agents can take up to ~N x the timeout; the
+        outer per-host wall-clock wait remains the overall guarantee.
         """
         with log_span("Loading all agents from host {}", self.id):
             agents_dir = get_agents_root_dir(self.host_dir)
 
             with log_span("Listing agent dir for host {}", self.id):
                 try:
-                    dir_listing = self._list_directory(agents_dir)
+                    dir_listing = self._list_directory(agents_dir, timeout_seconds=timeout_seconds)
                 except FileNotFoundError:
                     logger.trace("Failed to find agents directory for host {}", self.id)
                     return []
@@ -1284,7 +1353,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                     agent_dir = agents_dir / dir_name
                     data_path = agent_dir / "data.json"
                     try:
-                        content = self.read_text_file(data_path)
+                        if timeout_seconds is not None:
+                            content = self.read_text_file_within_timeout(data_path, timeout_seconds)
+                        else:
+                            content = self.read_text_file(data_path)
                     except FileNotFoundError:
                         if not self._is_directory(agent_dir):
                             logger.warning("Could not load agent reference from {}", data_path)
@@ -2633,7 +2705,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
     )
 
     def _ensure_shared_shell_libs(self, agent: AgentInterface) -> None:
-        """Write the shared shell libraries to host-level and agent-level commands dirs.
+        """Write the shared shell libraries (and the SIGWINCH repaint script) to the host.
 
         These libraries are sourced by mngr bash scripts and must exist on both
         levels so host-level (``activity_watcher.sh``) and agent-level
@@ -2662,6 +2734,17 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             content_bytes = importlib.resources.files(mngr_resources).joinpath(name).read_text().encode()
             self.write_file(host_commands / name, content_bytes, mode="0755")
             self.write_file(agent_commands / name, content_bytes, mode="0755")
+
+        # Install the post-attach SIGWINCH repaint script at host level only. Unlike
+        # the libs above it is executed directly (by the per-session tmux
+        # client-attached hook), not sourced, and the hook references the host-level
+        # commands dir -- so no agent-level copy is needed.
+        install_packaged_script_on_host(
+            self,
+            module=mngr_resources,
+            filename=_SIGWINCH_PANES_SCRIPT_NAME,
+            dest=host_commands / _SIGWINCH_PANES_SCRIPT_NAME,
+        )
 
     def _execute_agent_file_transfers(
         self,
@@ -3327,7 +3410,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         (a stop) or log and proceed (a (re)start).
 
         This is the single mechanism that guarantees a long-lived daemon launched under
-        an agent (e.g. the FCT bootstrap's ``supervisord`` and its children, like a ttyd
+        an agent (e.g. the DEFAULT_WORKSPACE_TEMPLATE bootstrap's ``supervisord`` and its children, like a ttyd
         bound to a fixed port) cannot outlive the agent: the env marker is inherited by
         every descendant and survives reparenting, so it catches orphans that a
         pane/process-tree walk would miss.
@@ -3666,6 +3749,23 @@ def _build_start_agent_shell_command(
     )
     steps.append("bash -c " + shlex.quote(save_user_shell_script))
     steps.append(f"tmux set-option -t {quoted_exact_agent_window} default-command {shlex.quote(env_shell_cmd)}")
+
+    # Set a persistent client-attached hook that repaints the agent on every attach
+    # (a plain `tmux attach`, the ttyd terminal, a web-shell, or `mngr connect`) by
+    # sending SIGWINCH to the pane processes. It runs the shipped sigwinch_panes.sh
+    # (installed at host level during provisioning); keeping the pipeline in a script
+    # avoids nesting tmux format tokens (pane-pid/window-index lookups) inside the
+    # hook string, which tmux would otherwise expand. `run-shell -b` backgrounds it so
+    # the attach is never blocked, and the script delays before signaling so the window
+    # has resized to the new client first. This uses a distinct hook slot ([98]) from
+    # the onboarding hook ([99]) and, unlike that one-shot hook, is persistent (no
+    # `set-hook -u` self-removal).
+    sigwinch_script_path = host_dir / "commands" / _SIGWINCH_PANES_SCRIPT_NAME
+    sigwinch_inner_command = shlex.join(["bash", str(sigwinch_script_path), session_name, primary_window_name])
+    sigwinch_hook_value = f'run-shell -b "{sigwinch_inner_command}"'
+    steps.append(
+        f"tmux set-hook -t {quoted_exact_agent_window} client-attached[98] {shlex.quote(sigwinch_hook_value)}"
+    )
 
     # Set a one-shot client-attached hook that shows the onboarding popup
     # when the user first attaches to this tmux session. This must happen

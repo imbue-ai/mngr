@@ -29,7 +29,7 @@ Use the standard `mngr create` pipeline -- the provider leases a pool host and b
 
 ```bash
 mngr create my-agent@my-host.imbue_cloud_alice --new-host \
-    -b repo_url=https://github.com/imbue-ai/forever-claude-template \
+    -b repo_url=https://github.com/imbue-ai/default-workspace-template \
     -b repo_branch_or_tag=v1.2.3
 ```
 
@@ -42,7 +42,7 @@ The recognized build args (`repo_url`, `repo_branch_or_tag`, `cpus`, `memory_gb`
 - **`fast_mode=require`** (fast path) -- lease a pool host that exactly matches and adopt its pre-baked agent. Almost no client-side setup is needed. If no exact match is available, this raises `FastPathUnavailableError` rather than falling back.
 - **`fast_mode=prevent`** (slow path, the **default**) -- lease any adequately-sized available host, rebuild its container from your `Dockerfile`, and do full client-side setup, as if it were a fresh host.
 
-The slow path needs a usable build context: run `mngr create` from (or `--project` at) a forever-claude-template checkout whose `imbue_cloud` create template supplies the Dockerfile build args. The logs state which path was taken (`FAST PATH` vs `SLOW PATH`).
+The slow path needs a usable build context: run `mngr create` from (or `--project` at) a default-workspace-template checkout whose `imbue_cloud` create template supplies the Dockerfile build args. The logs state which path was taken (`FAST PATH` vs `SLOW PATH`).
 
 If a step fails after a successful lease, the lease is released back to the pool before the error propagates. When the pool is empty, even the slow-path lease returns `ImbueCloudLeaseUnavailableError`.
 

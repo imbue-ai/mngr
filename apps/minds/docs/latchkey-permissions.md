@@ -35,6 +35,16 @@ and how the agent receives the answer.
    button, a backdrop click, or Escape -- returns them to their work with
    no context lost. (Opened directly in a browser, with no modal host, the
    page degrades to a dimmed, centered card and dismissal navigates home.)
+
+   When the inbox was opened for a **single request** -- a notification
+   click, a workspace relay, or auto-open on a new request -- resolving
+   it via Approve/Deny dismisses the whole window. This is the default;
+   it prevents an unrelated, stale request from another agent suddenly
+   becoming visible after the user acts. Only when the user
+   **intentionally opens the whole inbox** via the Requests button (which
+   loads `/inbox?keep_open=1`) does resolving a request advance to the
+   next pending one instead of closing the window.
+
    The page renders a single-scope permission dialog:
    * The dialog header names the service plainly (no monospace pill) and
      attributes the agent's rationale prominently as
@@ -140,8 +150,8 @@ latchkey 2.8.0 features:
 ## Minds API access through the gateway
 
 Minds itself exposes a small REST API on the desktop-client bare
-origin (`/api/v1/...`: agent notifications, Telegram bot setup, the
-WebDAV file-sharing mount). Agents reach it through the same latchkey
+origin (`/api/v1/...`: agent notifications and the WebDAV
+file-sharing mount). Agents reach it through the same latchkey
 gateway they use for every other outbound HTTP call, via the bundled
 `minds-api-proxy` extension at `/minds-api-proxy/api/v1/...`. There is
 no per-agent reverse SSH tunnel for the Minds API anymore.
@@ -161,7 +171,7 @@ Per-agent isolation comes from the latchkey gateway's permissions
 file. The agent baseline grants every agent one shared call --
 `POST /minds-api-proxy/api/v1/agents/<...>/notifications` -- so any
 workspace the desktop client created can always notify the user. For
-the other routes (Telegram setup, future `/api/v1/agents/<id>/*` endpoints,
+the other routes (future `/api/v1/agents/<id>/*` endpoints,
 the WebDAV mount), agent creation installs a *per-agent* rule + inline
 schemas in the host's permissions file: the scope schema
 `minds-api-self-<agent_id>` mirrors `latchkey-self.invalid` and the
@@ -180,6 +190,62 @@ by an agent.
 
 `LATCHKEY_DIRECTORY` -- where credentials live -- stays shared across all
 agents on the same machine.
+
+## Cross-workspace management API permissions
+
+Minds exposes a cross-workspace management API (`/api/v1/workspaces/...`)
+that lets an agent in one workspace act on *other* workspaces -- listing,
+reading detail/version/backups, creating, destroying, starting/stopping,
+exporting and managing backups, establishing SSH access, updating settings,
+recovering (health check / restart), and managing service sharing. It is
+reached through the same `minds-api-proxy` extension and gated by a single
+`minds-workspaces` detent scope with one named permission per verb
+(`minds-workspaces-read`, `-create`, `-destroy`, `-lifecycle`,
+`-backups-export`, `-backups-manage`, `-ssh`, `-update`, `-recover`,
+`-sharing`). Nothing is
+pre-granted, so an agent's first cross-workspace call gets a 403 until the
+user approves; the scope and verb schemas are not part of the agent baseline
+at all -- they arrive, fully self-described, with the grant (see below).
+
+This surface has its own permission-request type, distinct from the
+`predefined` (service-catalog) and `file-sharing` types: an agent POSTs
+`type=workspace` to the gateway's `permission-requests` extension with the
+verbs it wants and -- for the verbs that act on a specific workspace -- the
+`target_workspace_id` it wants to act on. The desktop client surfaces a
+dialog with a checkbox per verb plus, when the request names a target
+workspace, an all-vs-selected choice.
+
+The verbs split on a **target axis**:
+
+* `read` and `create` are all-or-nothing: a grant applies to every
+  workspace (listing does not leak per-target data, and create takes no
+  target).
+* `destroy`, `lifecycle`, `backups-export`, `backups-manage`, `ssh`,
+  `update`, `recover`, and `sharing` are *target-scoped*.
+  A "selected" grant for one of these verbs mints a **uniquely-named
+  per-target permission schema** (`minds-workspaces-<verb>-<target_id>`)
+  whose path pins that single workspace; an "all workspaces" grant uses
+  the broad schema keyed by the plain verb name (with a `[^/]+` id
+  wildcard). Because each selected target is a distinct schema name,
+  successive grants *accumulate* targets through the gateway's ordinary
+  schema-by-name merge -- the same mechanism file-sharing uses for
+  per-path schemas -- with no `anyOf` and no special merge logic.
+
+The grant is applied exactly like file-sharing: the agent's request carries
+a precomputed `effect` (a self-contained patch of the scope schema + the
+verb schemas + the grant rule, computed in `permission_requests.mjs`'s
+`computeWorkspaceEffect`), and the desktop client approves it via
+`POST /permission-requests/approve/<id>`, which splices the effect into the
+requesting agent's per-host `latchkey_permissions.json` (reached through its
+opaque handle) and drops the pending record. The approve call sends an
+override body (`{permissions, target_workspace_id}`) so the gateway
+recomputes the effect from the user's dialog choices (the verb subset they
+ticked and the all-vs-selected target). The scope schema is emitted on every
+effect and merged by name, so a host file that has never seen the scope gets
+it with the first grant -- no baseline entry or startup migration required.
+The Python `mngr_latchkey.workspace_permissions` module holds only the
+dialog-facing verb metadata; the schema construction lives in the gateway
+extension.
 
 ## Service catalog
 
@@ -220,5 +286,5 @@ Agents are expected to:
   the desktop with the decision and can decide whether to retry.
 
 The detection-and-wait logic for Claude Code lives in the
-`forever-claude-template` repository's latchkey skill, not in this
+`default-workspace-template` repository's latchkey skill, not in this
 monorepo.

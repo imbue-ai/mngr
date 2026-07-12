@@ -13,6 +13,7 @@ from imbue.concurrency_group.local_process import RunningProcess
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import LogLevel
 from imbue.mngr.primitives import ProviderInstanceName
@@ -126,18 +127,35 @@ def check_lima_version(
         raise LimaVersionError(provider_name, installed_str, minimum_str)
 
 
-def lima_instance_name(host_name: HostName, prefix: str) -> str:
-    """Build the Lima instance name from a mngr host name.
+def lima_instance_name_from_host_id(host_id: HostId, prefix: str) -> str:
+    """Build the Lima instance name from a mngr host id.
 
-    The prefix is the mngr config prefix (default 'mngr-').
+    New VMs derive their instance name from the immutable host id (not the
+    mutable host name) so a host can be renamed without the limactl instance
+    name drifting from the host name -- limactl has no native rename. The
+    instance name is persisted on the host record and used for all lifecycle
+    operations, so existing legacy ``<prefix><host_name>`` instances keep
+    working unchanged (discovery reads the stored instance name, never parses
+    it). The prefix is the mngr config prefix (default 'mngr-').
+    """
+    return f"{prefix}{host_id}"
+
+
+def lima_instance_name(host_name: HostName, prefix: str) -> str:
+    """Build the legacy Lima instance name from a mngr host name.
+
+    Deprecated: new VMs use :func:`lima_instance_name_from_host_id`. Retained
+    because some already-created VMs were named under this scheme; their
+    instance name is persisted on the host record, so they continue to work.
     """
     return f"{prefix}{host_name}"
 
 
 def host_name_from_instance_name(instance_name: str, prefix: str) -> HostName | None:
-    """Extract the mngr host name from a Lima instance name.
+    """Extract the mngr host name from a legacy Lima instance name.
 
     Returns None if the instance name does not start with the prefix.
+    Deprecated alongside :func:`lima_instance_name`.
     """
     if not instance_name.startswith(prefix):
         return None

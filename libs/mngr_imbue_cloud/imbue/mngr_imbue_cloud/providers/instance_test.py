@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from collections.abc import Mapping
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 from typing import cast
 
 import httpx
@@ -13,8 +14,10 @@ import pytest
 from pydantic import Field
 from pydantic import SecretStr
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.hosts.host import Host
@@ -45,12 +48,12 @@ from imbue.mngr_vps.container_setup import RUNNING_CONTAINER_STATE
 def test_resolve_fast_path_attributes_canonicalizes_remote_url_and_keeps_branch() -> None:
     resolved = _resolve_fast_path_attributes(
         LeaseAttributes(
-            repo_url="git@github.com:imbue-ai/forever-claude-template.git",
+            repo_url="git@github.com:imbue-ai/default-workspace-template.git",
             repo_branch_or_tag="v0.3.0",
             cpus=4,
         )
     )
-    assert resolved.repo_url == "github.com/imbue-ai/forever-claude-template"
+    assert resolved.repo_url == "github.com/imbue-ai/default-workspace-template"
     assert resolved.repo_branch_or_tag == "v0.3.0"
     # Non-identity attributes are preserved.
     assert resolved.cpus == 4
@@ -60,7 +63,7 @@ def test_resolve_fast_path_attributes_canonicalizes_remote_url_and_keeps_branch(
     "attributes",
     [
         LeaseAttributes(repo_branch_or_tag="v0.3.0"),
-        LeaseAttributes(repo_url="https://github.com/imbue-ai/forever-claude-template"),
+        LeaseAttributes(repo_url="https://github.com/imbue-ai/default-workspace-template"),
         LeaseAttributes(),
     ],
 )
@@ -106,13 +109,13 @@ def test_build_offline_details_from_lease_preserves_host_and_failure_reason(tmp_
         container_ssh_port=2222,
         agent_id=str(agent_id),
         host_id=str(host_id),
-        host_name=str(host_id),
+        host_name="crashed-host",
         attributes={},
         leased_at="2025-01-01T00:00:00Z",
     )
     host_ref = DiscoveredHost(
         host_id=host_id,
-        host_name=HostName(str(host_id)),
+        host_name=HostName("crashed-host"),
         provider_name=provider_name,
         host_state=HostState.CRASHED,
     )
@@ -225,6 +228,42 @@ def test_release_lease_on_failure_does_not_release_on_success() -> None:
 
 
 # =============================================================================
+# rename_host -- the workspace-name refactor exposes host rename for imbue_cloud.
+# The lease's host_db_id is the durable identity; only the friendly host_name
+# changes (via the connector), so a rename never touches the VPS/container.
+# =============================================================================
+
+
+class _RecordingRenameClient:
+    """Stub connector client that records rename_host calls."""
+
+    def __init__(self) -> None:
+        self.rename_calls: list[tuple[str, str]] = []
+
+    def rename_host(self, access_token: SecretStr, host_db_id: str, host_name: str) -> None:
+        self.rename_calls.append((host_db_id, host_name))
+
+
+class _NoLeaseRenameProvider(ImbueCloudProvider):
+    """Provider stub whose lease lookup always misses, to exercise the not-found guard."""
+
+    def _find_leased(self, host_id: HostId) -> LeasedHostInfo | None:
+        return None
+
+
+def test_rename_host_raises_when_lease_not_found() -> None:
+    """rename_host raises HostNotFoundError when the host has no lease (before any connector call)."""
+    client = _RecordingRenameClient()
+    provider = _NoLeaseRenameProvider.model_construct(
+        name=ProviderInstanceName("imbue-cloud-test"),
+        client=client,
+    )
+    with pytest.raises(HostNotFoundError):
+        provider.rename_host(HostId.generate(), HostName("new-name"))
+    assert client.rename_calls == []
+
+
+# =============================================================================
 # Restart routing + re-bootstrap: a stopped leased container must (1) resolve
 # via get_host to an OFFLINE host so ensure_host_started routes ``mngr start``
 # through start_host, and (2) have start_host relaunch the container's sshd over
@@ -321,7 +360,7 @@ def _make_lease(host_id: HostId) -> LeasedHostInfo:
         container_ssh_port=2222,
         agent_id=str(AgentId.generate()),
         host_id=str(host_id),
-        host_name=str(host_id),
+        host_name="leased-host",
         attributes={},
         leased_at="2025-01-01T00:00:00Z",
     )
@@ -488,6 +527,109 @@ def test_list_leased_hosts_preserves_auth_error() -> None:
         provider._list_leased_hosts_cached()
 
 
+class _HostSshInfoProvider(ImbueCloudProvider):
+    """Provider stub that returns a fixed discovered host, isolating the ``host_ssh_infos``
+    attachment in ``discover_hosts_and_agents_within_timeouts`` from the outer-SSH machinery."""
+
+    _lease: LeasedHostInfo | None = None
+    _discovered_host: DiscoveredHost | None = None
+
+    def _list_leased_hosts_cached(self) -> list[LeasedHostInfo]:
+        return [self._lease] if self._lease is not None else []
+
+    def _host_keypair_paths(self, host_id: HostId) -> tuple[Path, Path]:
+        return Path("/tmp/imbue-cloud-test-keys/ssh_key"), Path("/tmp/imbue-cloud-test-keys/ssh_key.pub")
+
+    def discover_hosts_and_agents(
+        self, cg: ConcurrencyGroup, include_destroyed: bool = False
+    ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
+        assert self._discovered_host is not None
+        return {self._discovered_host: []}
+
+
+def test_discover_within_timeouts_attaches_lease_ssh_info(temp_mngr_ctx: MngrContext) -> None:
+    """The streaming discovery result carries each discovered host's SSH endpoint (built from
+    its lease, pointing at the container's inner sshd), so the poller can emit HOST_SSH_INFO."""
+    host_id = HostId.generate()
+    lease = _make_lease(host_id)
+    discovered_host = DiscoveredHost(
+        host_id=host_id,
+        host_name=HostName(lease.host_name),
+        provider_name=ProviderInstanceName("imbue-cloud-test"),
+        host_state=HostState.RUNNING,
+    )
+    provider = _HostSshInfoProvider.model_construct(
+        name=ProviderInstanceName("imbue-cloud-test"),
+        mngr_ctx=temp_mngr_ctx,
+        _lease=lease,
+        _discovered_host=discovered_host,
+    )
+
+    result = provider.discover_hosts_and_agents_within_timeouts(
+        cg=temp_mngr_ctx.concurrency_group,
+        host_discovery_timeout_seconds=30.0,
+        agent_discovery_timeout_seconds=30.0,
+    )
+
+    assert len(result.host_ssh_infos) == 1
+    emitted_host_id, ssh_info = result.host_ssh_infos[0]
+    assert emitted_host_id == host_id
+    # The endpoint targets the container's inner sshd (container_ssh_port), not the outer VPS port.
+    assert ssh_info.host == lease.vps_address
+    assert ssh_info.port == lease.container_ssh_port
+    assert ssh_info.user == lease.ssh_user
+
+
+class _CannedListingProvider(ImbueCloudProvider):
+    """Provider stub that feeds ``discover_hosts_and_agents`` a canned outer-listing ``raw`` dict,
+    isolating the streaming ref-building loop from the real outer-SSH machinery."""
+
+    _lease: LeasedHostInfo | None = None
+    _raw: Mapping[str, Any] | None = None
+
+    def _list_leased_hosts_cached(self) -> list[LeasedHostInfo]:
+        return [self._lease] if self._lease is not None else []
+
+    def _collect_listing_raw_via_outer(self, lease: LeasedHostInfo) -> tuple[dict[str, Any] | None, str | None, bool]:
+        assert self._raw is not None
+        return dict(self._raw), None, False
+
+
+def test_discover_hosts_and_agents_carries_agent_labels_as_certified_data(temp_mngr_ctx: MngrContext) -> None:
+    """Streaming discovery refs must carry each agent's ``data`` as ``certified_data`` so label
+    filters (e.g. the minds forward's ``has(agent.labels.is_primary)``) see the labels. Without it
+    the refs are label-less and every imbue_cloud agent is silently dropped by such a filter."""
+    host_id = HostId.generate()
+    lease = _make_lease(host_id)
+    agent_id = str(AgentId.generate())
+    agent_data = {
+        "id": agent_id,
+        "name": "primary-agent",
+        "labels": {"is_primary": "true", "team": "minds"},
+        "type": "codex",
+    }
+    raw = {
+        "container_state": RUNNING_CONTAINER_STATE,
+        "certified_data": {"image": "some-image"},
+        "agents": [{"data": agent_data}],
+    }
+    provider = _CannedListingProvider.model_construct(
+        name=ProviderInstanceName("imbue-cloud-test"),
+        mngr_ctx=temp_mngr_ctx,
+        _lease=lease,
+        _raw=raw,
+    )
+
+    agents_by_host = provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group)
+
+    all_agents = [agent for agents in agents_by_host.values() for agent in agents]
+    assert len(all_agents) == 1
+    discovered_agent = all_agents[0]
+    assert discovered_agent.certified_data == agent_data
+    # The label filter the minds forward applies reads through the ``labels`` property.
+    assert discovered_agent.labels["is_primary"] == "true"
+
+
 def test_ensure_host_key_pinned_does_not_clobber_a_recorded_key(temp_mngr_ctx: MngrContext) -> None:
     """A slow-path rebuilt container key (authoritatively recorded) must survive a later
     add-if-absent ensure from the connector's stale initial key."""
@@ -562,7 +704,7 @@ class _FastPathGuardProvider(ImbueCloudProvider):
 
 # Minimal build args that select the fast (adopt) path with a valid repo identity.
 _FAST_PATH_BUILD_ARGS: tuple[str, ...] = (
-    "repo_url=https://github.com/imbue-ai/forever-claude-template.git",
+    "repo_url=https://github.com/imbue-ai/default-workspace-template.git",
     "repo_branch_or_tag=minds-v0.3.2",
     "fast_mode=require",
 )

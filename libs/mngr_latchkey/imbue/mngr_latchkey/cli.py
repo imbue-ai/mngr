@@ -24,6 +24,7 @@ surfaced as a non-zero exit (no ``--allow-degraded`` mode).
 import os
 import signal
 import threading
+from collections.abc import Callable
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -36,6 +37,7 @@ from pydantic import ConfigDict
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.sentry.core import flush_sentry_on_shutdown
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
@@ -59,6 +61,7 @@ from imbue.mngr_latchkey.discovery import LatchkeyDestructionHandler
 from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
 from imbue.mngr_latchkey.discovery_stream import DiscoveryStreamConsumer
 from imbue.mngr_latchkey.forward_supervisor import is_forward_info_alive
+from imbue.mngr_latchkey.sentry import setup_forward_sentry
 from imbue.mngr_latchkey.store import LatchkeyForwardInfo
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import delete_forward_info
@@ -494,6 +497,50 @@ def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
     # dropping the gateway or any reverse tunnels.
     latchkey = _build_initialized_latchkey(mngr_ctx, opts.latchkey_directory, opts.latchkey_binary)
 
+    # Initialize Sentry for this long-running daemon now that ``setup_command_context``
+    # has wired up the loguru sinks and the latchkey paths are known. Off unless opted
+    # in via ``MNGR_LATCHKEY_SENTRY_*`` env vars (published by the minds desktop client,
+    # derived from its own Sentry settings). The daemon's structured + raw logs live
+    # flat in the plugin data dir, so that is the folder Sentry attaches log files from.
+    setup_forward_sentry(log_folder=latchkey.plugin_data_dir)
+
+    # Run the supervisor body inside a single error-reporting boundary (logs unhandled errors through
+    # loguru so they reach Sentry with the daemon's logs attached, then flushes on every exit path).
+    _run_forward_with_error_reporting(lambda: _run_forward_supervisor(mngr_ctx=mngr_ctx, opts=opts, latchkey=latchkey))
+
+
+def _run_forward_with_error_reporting(run_supervisor: Callable[[], None]) -> None:
+    """Run the supervisor body, reporting an unhandled error to Sentry with logs, and always flushing.
+
+    A long-running daemon's unhandled exception would otherwise reach Sentry only via the SDK's
+    excepthook integration, which bypasses our loguru handler -- so the report would carry no logs.
+    Logging it through loguru here routes it through the loguru -> Sentry handler (which attaches the
+    daemon's logs + traceback), then we re-raise so the CLI still exits non-zero. ``click``
+    control-flow exceptions are expected exits, not faults, so they are surfaced without becoming
+    Sentry events. The ``finally`` flushes late-captured events and their pending S3 attachment
+    uploads once, on every exit path; it is a no-op when Sentry was never set up.
+    """
+    try:
+        run_supervisor()
+    except (click.ClickException, click.Abort):
+        raise
+    except Exception as e:
+        logger.opt(exception=e).error("mngr latchkey forward exited with an unhandled error")
+        raise
+    finally:
+        flush_sentry_on_shutdown()
+
+
+def _run_forward_supervisor(
+    mngr_ctx: MngrContext,
+    opts: _ForwardCliOptions,
+    latchkey: Latchkey,
+) -> None:
+    """Run the shared gateway + reverse-tunnel supervisor until shutdown is signalled.
+
+    Extracted from :func:`_forward_command` so the latter can wrap it in a single error-logging +
+    Sentry-flush boundary; see that function for why an unhandled error is logged through loguru.
+    """
     # Refuse to start if another forward is already alive for this
     # latchkey directory; two forwards would fight over the same
     # reverse tunnels and produce a confusing stream of failures.
@@ -650,6 +697,11 @@ def _run_sighup_bounce_watcher(
     signal-handler context (which must stay minimal and re-entrant-safe). The
     loop exits once ``shutdown_event`` is set (checked after each wake), so it
     does not outlive the forward command.
+
+    A single bounce failing never tears the watcher down: any error from
+    ``bounce_observe`` is logged and the loop continues, so a later SIGHUP can
+    still refresh providers. A watcher that died on one bad bounce would make
+    every subsequent provider toggle a silent no-op for this supervisor's life.
     """
     while not shutdown_event.is_set():
         bounce_event.wait()
@@ -658,8 +710,14 @@ def _run_sighup_bounce_watcher(
             return
         try:
             consumer.bounce_observe()
-        except (OSError, RuntimeError) as e:
-            logger.warning("SIGHUP observe bounce failed: {}", e)
+        except Exception as e:
+            # This watcher is a long-lived daemon thread: it must outlive any
+            # single bounce's failure. ``bounce_observe`` already handles the
+            # concurrency-group teardown/respawn errors it expects, but a
+            # genuinely unexpected error here must only skip this one bounce --
+            # never kill the thread, which would silently turn every later
+            # SIGHUP provider refresh into a no-op for this supervisor's life.
+            logger.opt(exception=e).error("SIGHUP observe bounce failed; continuing to watch for further bounces")
 
 
 def _install_signal_handlers(shutdown_event: threading.Event, bounce_event: threading.Event) -> None:

@@ -120,6 +120,9 @@ def _shutdown_desktop_client(state: DesktopClientState, is_externally_managed_cl
     # its reader thread unblocks from its iter_lines read.
     if state.permission_requests_consumer is not None:
         state.permission_requests_consumer.stop()
+    # Tear down any hub-brokered cross-workspace SSH tunnels (paramiko reverse
+    # forwards + their connections) so their threads don't outlive the app.
+    state.ssh_tunnel_manager.cleanup()
     # Terminate the idle pre-warmed mngr process so it doesn't wait out the
     # full shutdown timeout blocked reading its socket for the next request.
     get_default_mngr_caller().stop()

@@ -412,6 +412,14 @@ def test_provider_release_trip1(
     azure_release_subscription_id: str,
     _azure_release_test_network_prepared: None,
 ) -> None:
+    """Azure passes the shared Trip 1 lifecycle arc for each isolation mode.
+
+    Drives the full create -> discover -> exec -> stop/start -> sketchy-kill -> gc trip
+    (``run_provider_release_trip1``) against a real Azure VM in both the container and bare
+    (``isolation="NONE"``) shapes. Each step asserts the VM was actually provisioned, is
+    discoverable by tag, survives a stop/start with its marker file intact, and is cleaned up
+    -- a no-op or broken provider would fail create, discovery, or the marker read-back.
+    """
     run_provider_release_trip1(
         _AzureReleaseProfile(azure_release_client, isolation, azure_release_subscription_id),
         tmp_path,
@@ -429,6 +437,13 @@ def test_provider_release_trip2(
     azure_release_subscription_id: str,
     _azure_release_test_network_prepared: None,
 ) -> None:
+    """Azure passes the shared Trip 2 idle auto-shutdown contract for each isolation mode.
+
+    Drives ``run_provider_release_trip2``: a host created with an idle timeout must self-stop
+    into Azure's resumable deallocated state (confirmed by polling the Compute API until billing
+    compute halts), and a marker written before shutdown must survive ``mngr start`` with the
+    host running again. A provider that never deallocated, or lost the marker on resume, fails.
+    """
     run_provider_release_trip2(
         _AzureReleaseProfile(azure_release_client, isolation, azure_release_subscription_id),
         tmp_path,
@@ -446,6 +461,15 @@ def test_provider_release_trip3(
     azure_release_subscription_id: str,
     _azure_release_test_network_prepared: None,
 ) -> None:
+    """Azure passes the shared Trip 3 snapshot-portability contract for each isolation mode.
+
+    Drives ``run_provider_release_trip3``: in the container shape the snapshot is non-portable
+    (``docker commit`` dies with the VPS disk), so the trip asserts the snapshot record is gone
+    after destroy; in the bare shape the snapshot must outlive ``mngr destroy`` and seed a fresh
+    ``mngr create --snapshot`` that restores the captured filesystem. The capability booleans on
+    ``_AzureReleaseProfile`` select which branch runs, so the test flips loudly if either
+    behavior changes.
+    """
     run_provider_release_trip3(
         _AzureReleaseProfile(azure_release_client, isolation, azure_release_subscription_id),
         tmp_path,
@@ -459,6 +483,15 @@ def test_provider_release_trip4(
     azure_release_client: AzureVpsClient,
     azure_release_subscription_id: str,
 ) -> None:
+    """Azure passes the shared Trip 4 error-classification contract (no host provisioned).
+
+    Drives ``run_provider_release_trip4``: with credentials made unresolvable, ``mngr create``
+    must fail with Azure's curated ``ProviderUnavailableError`` help (pointing at ``az login`` /
+    subscription setup, per ``has_curated_unavailable_help``), and a build arg using the dropped
+    ``--vps-*`` prefix must fail synchronously with the migration hint before any network call.
+    Pure CLI exercise -- it never boots a VM, so a broken error path (wrong class, missing hint)
+    is what fails, not a provisioning issue.
+    """
     # No-boot CLI error-classification trip: not parametrized over isolation (the error paths are
     # isolation-agnostic) and no ``rsync`` mark (it never provisions a host). No network-prepare
     # dependency either -- nothing is created.
@@ -486,6 +519,12 @@ def azure_release_client(azure_release_subscription_id: str) -> AzureVpsClient:
 
 
 def test_api_client_list_instances_does_not_error(azure_release_client: AzureVpsClient) -> None:
+    """``AzureVpsClient.list_instances`` makes a real read-only Compute API call and returns a list.
+
+    A live smoke test of the listing path against the configured resource group: it returns a
+    ``list`` (possibly empty) rather than raising, proving credentials, subscription, and the
+    list query wiring all work end to end. A broken client would raise here instead.
+    """
     instances = azure_release_client.list_instances()
     assert isinstance(instances, list)
 

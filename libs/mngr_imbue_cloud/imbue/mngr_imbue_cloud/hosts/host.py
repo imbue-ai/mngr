@@ -131,7 +131,7 @@ class ImbueCloudHost(Host):
         When the pre-baked agent's ``data.json`` is still present on the
         leased container (the common case, right after a fresh lease), we
         skip the file transfer and return the recorded ``work_dir`` -- the
-        FCT template baked it (``target_path = "/code/"`` for the vultr
+        default workspace template baked it (``target_path = "/code/"`` for the vultr
         template, etc.) and we just trust whatever was written.
 
         Otherwise, fall through to mngr's standard ``create_agent_work_dir``
@@ -218,9 +218,8 @@ class ImbueCloudHost(Host):
         )
 
         # Merge labels: bake's defaults + minds' user-supplied (latter wins).
-        # Minds passes ``--label workspace=<host_name>`` so the workspace
-        # identity is propagated via the caller's labels; we don't re-derive
-        # it from any agent name.
+        # The workspace identity lives on the host name (and the host id), not
+        # on a label; we don't re-derive it from any agent name.
         merged_labels: dict[str, str] = dict(existing.get("labels") or {})
         merged_labels.update(options.label_options.labels)
 
@@ -259,7 +258,7 @@ class ImbueCloudHost(Host):
         """Minimal provisioning when the pool host is already provisioned, full otherwise.
 
         When the pre-baked agent's ``data.json`` is still on disk, the
-        container has all the packages and file transfers the FCT template
+        container has all the packages and file transfers the default workspace template
         installed and we only need to (a) write the agent env file (so
         ``MNGR_AGENT_NAME`` / ``--env`` overrides land) and (b) patch the
         claude config when ``ANTHROPIC_API_KEY`` is set anywhere in env

@@ -251,36 +251,39 @@ def test_cli_docs_are_up_to_date() -> None:
 def test_prevent_bash_without_strict_mode() -> None:
     """Ensure all bash scripts in the repo use 'set -euo pipefail' for strict error handling.
 
-    Snapshot accommodates two kinds of committed exception:
+    The secret-file templates at ``.minds/template/*.sh`` are excluded entirely
+    by ``find_bash_scripts_without_strict_mode`` (not merely accommodated in the
+    count): they are shell-sourceable env declarations (commented ``export KEY=``
+    files consumed by ``scripts/push_vault_from_file.py`` and ``minds env
+    deploy`` when seeding HCP Vault / Modal secrets), not executable scripts, so
+    ``set -euo pipefail`` is meaningless for them and would only leak strict mode
+    into whatever shell sources them.
 
-    - The secret-file templates at ``.minds/template/*.sh``. Those files are
-      shell-sourceable env declarations (consumed by
-      ``scripts/push_vault_from_file.py`` when seeding HCP Vault), not
-      executable scripts -- adding ``set -euo pipefail`` to them would leak
-      strict mode into whatever shell sources them.
-    - The minds verify scripts ``apps/minds/scripts/first-message-verify.sh``
-      and ``apps/minds/scripts/launch-and-verify.sh``, which use
-      ``set -uo pipefail`` (omitting ``-e``) on purpose: they handle errors
-      explicitly (a ``fail`` helper, ``PIPESTATUS``, polling loops that depend
-      on commands exiting non-zero while they retry, and diagnostic blocks on
-      failure). ``-e`` would abort that handling instead of running it. The
-      sibling non-verify scripts in the same directory do use ``set -euo
-      pipefail``, so this omission is a deliberate, matched choice rather than
-      an oversight.
+    The snapshot below is an upper bound on the remaining committed scripts that
+    trip the ratchet. Most fall into two groups:
 
-    - The merged agent-plugin ports' shell resources under
-      ``libs/mngr_{codex,opencode,antigravity}/.../resources/`` (lifecycle-marker,
-      hook, and launch scripts), brought in by merging the codex/opencode/antigravity
-      plugin ports. Marker/hook scripts routinely omit ``-e`` on purpose -- they test
-      for files that may be absent and act on non-zero exits, which ``-e`` would abort
-      -- so tightening any that do not need the exemption is left to those plugins.
+    - Scripts that deliberately use ``set -uo pipefail`` (omitting ``-e``) because
+      a single non-zero exit must not abort a best-effort sweep -- e.g.
+      ``apps/minds/scripts/mac-runner-reset.sh`` (host cleanup that must not abort
+      on one failed step) and ``libs/mngr/imbue/mngr/resources/sigwinch_panes.sh``
+      (a per-session tmux repaint that signals every pane's children and must not
+      abort when one pane's signal fails).
 
-    The count is enumerated against the full local checkout. In offload
-    sandboxes the count is lower because ``.dockerignore`` omits some of these
-    tracked paths from the build context, so they are absent on disk there.
+    - Marker/hook/launch and transcript-library resources under the merged
+      ``libs/mngr{,_codex,_opencode,_antigravity}/.../resources/`` plugin ports,
+      which routinely omit ``-e`` because they probe for files that may be absent
+      and act on non-zero exits, which ``-e`` would abort. Hardening any that do
+      not need the exemption is left to those plugins.
+
+    ``find_bash_scripts_without_strict_mode`` counts only tracked ``*.sh`` files
+    present on disk, so the effective count can differ between a full local
+    checkout and an offload sandbox whose thin-diff image omits some tracked
+    paths; the snapshot is pinned to the highest observed count. Adding
+    ``sigwinch_panes.sh`` alongside the per-session SIGWINCH client-attached hook
+    raised that count from 11 to 12.
     """
     violations = find_bash_scripts_without_strict_mode(_REPO_ROOT)
-    assert len(violations) <= snapshot(17), "Bash scripts missing 'set -euo pipefail':\n" + "\n".join(
+    assert len(violations) <= snapshot(12), "Bash scripts missing 'set -euo pipefail':\n" + "\n".join(
         f"  - {v}" for v in violations
     )
 

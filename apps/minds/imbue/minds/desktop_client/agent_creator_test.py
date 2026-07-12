@@ -42,6 +42,7 @@ from imbue.minds.desktop_client.agent_creator import checkout_branch
 from imbue.minds.desktop_client.agent_creator import clone_git_repo
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
+from imbue.minds.desktop_client.agent_creator import provider_instance_name_for_launch
 from imbue.minds.desktop_client.agent_creator import run_mngr_aws_prepare
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
@@ -59,9 +60,11 @@ from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
 from imbue.minds.primitives import LaunchMode
+from imbue.minds.utils.secret_redaction import redact_secret_env_assignments
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
+from imbue.mngr_latchkey.agent_setup import SECRET_LATCHKEY_ENV_VAR_NAMES
 
 
 def test_extract_repo_name_strips_dot_git_and_trailing_slash() -> None:
@@ -178,8 +181,43 @@ def test_build_mngr_create_command_lifts_latchkey_env_to_host_env_flags() -> Non
             )
 
 
+def test_create_command_secrets_are_masked_for_logging() -> None:
+    """The command ``run_mngr_create`` renders into the ``Running:`` log line masks the
+    latchkey gateway password and permissions-override JWT while keeping the flag, the
+    variable names, and the non-secret gateway URL / counting flag intact.
+
+    This mirrors exactly what the log site does: build the real command, then run it
+    through :func:`redact_secret_env_assignments` with the latchkey secret-name set
+    before joining it for the log.
+    """
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.DOCKER,
+        host_name=HostName("hello"),
+        latchkey_env={
+            "LATCHKEY_GATEWAY": "http://127.0.0.1:1989",
+            "LATCHKEY_GATEWAY_PASSWORD": "sup3rs3cret",
+            "LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE": "eyJhbGc.fake.jwt",
+            "LATCHKEY_DISABLE_COUNTING": "1",
+        },
+    )
+
+    loggable = redact_secret_env_assignments(command, secret_env_var_names=SECRET_LATCHKEY_ENV_VAR_NAMES)
+    rendered = " ".join(loggable)
+
+    # The two secrets must not survive into the log rendering.
+    assert "sup3rs3cret" not in rendered
+    assert "eyJhbGc.fake.jwt" not in rendered
+    assert "LATCHKEY_GATEWAY_PASSWORD=***" in loggable
+    assert "LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE=***" in loggable
+    # The non-secret wiring stays legible so the log remains diagnostic.
+    assert "LATCHKEY_GATEWAY=http://127.0.0.1:1989" in loggable
+    assert "LATCHKEY_DISABLE_COUNTING=1" in loggable
+    # The real command handed to the subprocess is untouched.
+    assert "LATCHKEY_GATEWAY_PASSWORD=sup3rs3cret" in command
+
+
 def test_build_mngr_create_command_attaches_color_label_when_provided() -> None:
-    """The onboarding picker passes a hex through; the command builder
+    """The create form's color picker passes a hex through; the command builder
     lifts it into a --label color=<hex> flag alongside the existing
     workspace / is_primary / user_created labels so the workspace ships
     with its color from create time onward (no post-create write needed)."""
@@ -201,6 +239,70 @@ def test_build_mngr_create_command_omits_color_label_when_unset() -> None:
     )
     joined = " ".join(command)
     assert "color=" not in joined
+
+
+def test_build_mngr_create_command_points_lima_at_prebaked_image_when_provided() -> None:
+    """A resolved pre-baked image path is lifted into a ``-S providers.lima.default_image_url_*`` override."""
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.LIMA,
+        host_name=HostName("hello"),
+        prebaked_lima_image_qcow2_path=Path("/data/lima-images/image.qcow2"),
+    )
+    joined = " ".join(command)
+    assert "-S providers.lima.default_image_url_" in joined
+    assert "/data/lima-images/image.qcow2" in joined
+
+
+def test_build_mngr_create_command_omits_prebaked_image_override_when_unset() -> None:
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.LIMA,
+        host_name=HostName("hello"),
+    )
+    assert "default_image_url" not in " ".join(command)
+
+
+def test_build_mngr_create_command_stamps_original_minds_version_label() -> None:
+    """The resolved template ref is stamped as an immutable
+    ``original_minds_version`` label so the version API can report what
+    version the workspace was created at even when it is offline."""
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.DOCKER,
+        host_name=HostName("hello"),
+        original_minds_version="minds-v0.3.3",
+    )
+    joined = " ".join(command)
+    assert "--label original_minds_version=minds-v0.3.3" in joined
+
+
+def test_build_mngr_create_command_omits_version_label_when_unset() -> None:
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.DOCKER,
+        host_name=HostName("hello"),
+    )
+    joined = " ".join(command)
+    assert "original_minds_version=" not in joined
+
+
+def test_build_mngr_create_command_stamps_original_branch_label() -> None:
+    """The create-time branch/tag is stamped as an immutable ``original_branch``
+    label so the workspace detail API can report which branch it was created
+    from even when the workspace is offline."""
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.DOCKER,
+        host_name=HostName("hello"),
+        original_branch="feature/my-branch",
+    )
+    joined = " ".join(command)
+    assert "--label original_branch=feature/my-branch" in joined
+
+
+def test_build_mngr_create_command_omits_branch_label_when_unset() -> None:
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.DOCKER,
+        host_name=HostName("hello"),
+    )
+    joined = " ".join(command)
+    assert "original_branch=" not in joined
 
 
 def test_build_mngr_create_command_does_not_inject_minds_api_key() -> None:
@@ -261,6 +363,24 @@ def test_build_mngr_create_command_forwards_region_for_imbue_cloud() -> None:
     assert "region=US-WEST-OR" in command
 
 
+def test_build_mngr_create_command_modal_targets_modal_provider() -> None:
+    """Modal addresses the ``modal`` provider instance (local-token mode)."""
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.MODAL,
+        host_name=HostName("hello"),
+    )
+    # Exact list-element match so it can't be confused with ``modal_proxied``.
+    assert "system-services@hello.modal" in command
+    assert "system-services@hello.modal_proxied" not in command
+    # Same remote shape as vultr/aws: new host + main + modal templates.
+    assert "--new-host" in command
+    assert command.count("--template") == 2
+    assert "modal" in command
+    assert "main" in command
+    # No --reuse (that is only for imbue_cloud pool adoption).
+    assert "--reuse" not in command
+
+
 def test_build_mngr_create_command_forwards_region_for_vultr() -> None:
     command = _build_mngr_create_command(
         launch_mode=LaunchMode.VULTR,
@@ -299,6 +419,52 @@ def test_build_mngr_create_command_aws_requires_region() -> None:
             launch_mode=LaunchMode.AWS,
             host_name=HostName("hello"),
         )
+
+
+def test_provider_instance_name_for_launch_local_backends() -> None:
+    """The single-instance local/VPS backends map to their bare provider name."""
+    assert provider_instance_name_for_launch(LaunchMode.DOCKER) == "docker"
+    assert provider_instance_name_for_launch(LaunchMode.LIMA) == "lima"
+    assert provider_instance_name_for_launch(LaunchMode.VULTR) == "vultr"
+
+
+def test_provider_instance_name_for_launch_aws_is_per_region() -> None:
+    """AWS is region-locked per provider instance (``aws-<region>``)."""
+    assert provider_instance_name_for_launch(LaunchMode.AWS, region="us-west-2") == "aws-us-west-2"
+
+
+def test_provider_instance_name_for_launch_aws_requires_region() -> None:
+    with pytest.raises(MngrCommandError, match="AWS mode requires a region"):
+        provider_instance_name_for_launch(LaunchMode.AWS)
+
+
+def test_provider_instance_name_for_launch_imbue_cloud_is_per_account() -> None:
+    """Imbue Cloud is per-account; the slug mirrors the registered provider block."""
+    assert (
+        provider_instance_name_for_launch(LaunchMode.IMBUE_CLOUD, imbue_cloud_account="Alice@Imbue.com")
+        == "imbue_cloud_alice-imbue-com"
+    )
+
+
+def test_provider_instance_name_for_launch_imbue_cloud_requires_account() -> None:
+    with pytest.raises(MngrCommandError, match="IMBUE_CLOUD mode requires imbue_cloud_account"):
+        provider_instance_name_for_launch(LaunchMode.IMBUE_CLOUD)
+
+
+def test_provider_instance_name_matches_create_address() -> None:
+    """The create address suffix must equal the helper's instance name.
+
+    The availability check scopes "taken" to ``provider_instance_name_for_launch``,
+    so it has to be exactly the provider the create address selects -- otherwise
+    the live check and the create-time conflict check would disagree.
+    """
+    instance = provider_instance_name_for_launch(LaunchMode.IMBUE_CLOUD, imbue_cloud_account="alice@imbue.com")
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.IMBUE_CLOUD,
+        host_name=HostName("hello"),
+        imbue_cloud_account="alice@imbue.com",
+    )
+    assert f"system-services@hello.{instance}" in command
 
 
 def test_run_mngr_aws_prepare_requires_region() -> None:
@@ -365,7 +531,7 @@ def test_build_mngr_create_command_non_imbue_cloud_passes_new_host_without_reuse
     assert "--update" not in command
     assert "--template" in command
     assert "main" in command
-    # The /welcome message now lives in forever-claude-template's
+    # The /welcome message now lives in default-workspace-template's
     # [create_templates.main] section, so the explicit --message arg is gone.
     assert "--message" not in command
     # minds no longer pre-generates an agent id; mngr generates one and we
@@ -382,7 +548,7 @@ def test_build_mngr_create_command_imbue_cloud_targets_account_provider() -> Non
         launch_mode=LaunchMode.IMBUE_CLOUD,
         host_name=HostName("hello"),
         imbue_cloud_account="alice@imbue.com",
-        imbue_cloud_repo_url="https://github.com/imbue-ai/forever-claude-template",
+        imbue_cloud_repo_url="https://github.com/imbue-ai/default-workspace-template",
         imbue_cloud_branch_or_tag="v1.2.3",
     )
     joined = " ".join(command)
@@ -403,9 +569,9 @@ def test_build_mngr_create_command_imbue_cloud_targets_account_provider() -> Non
     assert "--update" not in command
     # Lease attributes flow through --build-arg.
     assert "-b" in command
-    assert "repo_url=https://github.com/imbue-ai/forever-claude-template" in command
+    assert "repo_url=https://github.com/imbue-ai/default-workspace-template" in command
     assert "repo_branch_or_tag=v1.2.3" in command
-    # No secret env vars in argv: forwarding is declared by the FCT
+    # No secret env vars in argv: forwarding is declared by the DEFAULT_WORKSPACE_TEMPLATE
     # ``imbue_cloud`` template's own ``pass_host_env`` and the values live
     # in the subprocess env ``run_mngr_create`` populates.
     assert "ANTHROPIC_API_KEY" not in joined
@@ -425,7 +591,7 @@ def test_build_mngr_create_command_imbue_cloud_targets_account_provider() -> Non
 
 
 def test_build_mngr_create_command_never_inlines_secret_env_flags() -> None:
-    """Secret forwarding lives in FCT, not minds. The command line never carries
+    """Secret forwarding lives in DEFAULT_WORKSPACE_TEMPLATE, not minds. The command line never carries
     ``--pass-(host-)env`` flags or secret values for any compute mode."""
     for mode, account in (
         (LaunchMode.DOCKER, None),
@@ -442,7 +608,7 @@ def test_build_mngr_create_command_never_inlines_secret_env_flags() -> None:
         assert "--pass-env" not in command, f"{mode} should not inline --pass-env"
         # IMBUE_CLOUD compute *does* still get _remote_host_env_flags() which
         # uses --pass-host-env MNGR_PREFIX -- that one is unrelated to the
-        # secrets we moved into FCT, so we only forbid the secret names here.
+        # secrets we moved into DEFAULT_WORKSPACE_TEMPLATE, so we only forbid the secret names here.
         assert "ANTHROPIC_API_KEY" not in joined, f"{mode} leaked ANTHROPIC_API_KEY"
         assert "ANTHROPIC_BASE_URL" not in joined, f"{mode} leaked ANTHROPIC_BASE_URL"
         assert "GH_TOKEN" not in joined, f"{mode} leaked GH_TOKEN"
@@ -1077,7 +1243,6 @@ def test_start_creation_imbue_cloud_ai_with_local_compute_mints_litellm_key(tmp_
     provider is not IMBUE_CLOUD. The actual ``mngr create`` invocation will fail (no
     real binary / no real repo) but the key-mint must happen first."""
     cli = _RecordingImbueCloudCli(
-        parent_concurrency_group=ConcurrencyGroup(name="recording-cli"),
         connector_url=FAKE_CONNECTOR_URL,
     )
     creator = _make_creator_with_cli(tmp_path, cli)
@@ -1093,7 +1258,9 @@ def test_start_creation_imbue_cloud_ai_with_local_compute_mints_litellm_key(tmp_
 
     assert len(cli.create_calls) == 1
     assert cli.create_calls[0]["account"] == "alice@imbue.com"
-    assert cli.create_calls[0]["metadata"] == {"host_name": "my-workspace"}
+    # The LiteLLM key no longer carries host_name metadata (the host name is
+    # mutable and the key is minted before the host exists).
+    assert cli.create_calls[0]["metadata"] is None
 
 
 # Deterministic sync test, but the setup spins up fresh ConcurrencyGroups and a
@@ -1103,7 +1270,6 @@ def test_start_creation_api_key_ai_does_not_mint_litellm_key(tmp_path: Path) -> 
     """The API_KEY branch uses the user-supplied key directly and must never call
     ``create_litellm_key``."""
     cli = _RecordingImbueCloudCli(
-        parent_concurrency_group=ConcurrencyGroup(name="recording-cli"),
         connector_url=FAKE_CONNECTOR_URL,
     )
     creator = _make_creator_with_cli(tmp_path, cli)
@@ -1128,7 +1294,6 @@ def test_start_creation_subscription_ai_does_not_mint_litellm_key(tmp_path: Path
     """The SUBSCRIPTION branch injects no Anthropic creds and must never call
     ``create_litellm_key``."""
     cli = _RecordingImbueCloudCli(
-        parent_concurrency_group=ConcurrencyGroup(name="recording-cli"),
         connector_url=FAKE_CONNECTOR_URL,
     )
     creator = _make_creator_with_cli(tmp_path, cli)
@@ -1152,7 +1317,6 @@ def test_start_creation_api_key_ai_without_key_fails_with_clear_message(tmp_path
     """The API_KEY branch must reject an empty key with a specific error rather than
     silently falling through to mngr create with no key set."""
     cli = _RecordingImbueCloudCli(
-        parent_concurrency_group=ConcurrencyGroup(name="recording-cli"),
         connector_url=FAKE_CONNECTOR_URL,
     )
     creator = _make_creator_with_cli(tmp_path, cli)
@@ -1422,7 +1586,6 @@ def test_concurrent_same_repo_creations_serialize_on_clone_path(tmp_path: Path) 
     clone_target = Path(tempfile.gettempdir()) / "minds-clone-{}".format(extract_repo_name(repo_source))
 
     cli = _BlockingImbueCloudCli(
-        parent_concurrency_group=ConcurrencyGroup(name="blocking-cli"),
         connector_url=FAKE_CONNECTOR_URL,
     )
     creator = _make_creator_with_cli(tmp_path, cli)

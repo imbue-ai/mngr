@@ -8,7 +8,7 @@
  *       with the fields:
  *         - ``agent_id``   (string, required)
  *         - ``rationale``  (string, required)
- *         - ``type``       (one of "predefined" | "file-sharing")
+ *         - ``type``       (one of "predefined" | "file-sharing" | "workspace")
  *         - ``payload``    (object whose shape depends on ``type``)
  *       For ``type=="predefined"`` the payload is
  *         ``{scope: <string>, permissions: [<string>, ...]}``,
@@ -26,6 +26,20 @@
  *       contain any ``..`` segments (rejected as a path-traversal
  *       attempt). ``~user`` notation for another user's home is
  *       rejected.
+ *       For ``type=="workspace"`` the payload is
+ *         ``{permissions: [<verb>, ...], target_workspace_id: <id>|null}``;
+ *       each verb must be one of the ``minds-workspaces`` verb schema
+ *       names (read / create / destroy / lifecycle / backups-export /
+ *       ssh / update / recover / sharing) and ``target_workspace_id``
+ *       (the workspace the targeted
+ *       verbs act on) is optional and, when present, must be a valid
+ *       agent id. The effect is a self-contained patch (scope + verb
+ *       schemas + rule) applied via ``/approve`` like file-sharing;
+ *       each selected target becomes a uniquely-named verb schema, so
+ *       repeated grants accumulate targets through the schema-by-name
+ *       merge (no ``anyOf``). The approve override body
+ *       (``{permissions, target_workspace_id}``) recomputes the effect
+ *       from the user's dialog choices (verb subset + all-vs-selected).
  *
  *       The extension also stores, alongside the user-supplied fields:
  *         - ``request_id`` (server-generated, UUIDv4 hex)
@@ -131,7 +145,115 @@ const VALID_AGENT_ID_PATTERN = /^agent-[0-9a-fA-F]{32}$/;
 // path via the Minds API proxy.
 const REQUEST_TYPE_PREDEFINED = 'predefined';
 const REQUEST_TYPE_FILE_SHARING = 'file-sharing';
-const VALID_REQUEST_TYPES = new Set([REQUEST_TYPE_PREDEFINED, REQUEST_TYPE_FILE_SHARING]);
+// ``workspace`` grants access to the minds cross-workspace management API
+// (``/api/v1/workspaces/...``) by unioning per-verb permissions onto the
+// pre-existing ``latchkey-self`` scope (like file-sharing and accounts; no
+// dedicated scope is minted). The payload names the verbs the agent wants and,
+// for verbs that act on a specific workspace, the target workspace id. The grant
+// effect is computed here and applied via ``/approve`` like file-sharing.
+const REQUEST_TYPE_WORKSPACE = 'workspace';
+// ``accounts`` grants the agent read access to ``GET /api/v1/accounts`` (the list
+// of signed-in accounts, so it can discover an account id/email to associate a
+// workspace with). It is all-or-nothing with no parameters; like file-sharing it
+// mints a single fixed permission under the pre-existing ``latchkey-self`` scope
+// (no new detent scope), but unlike file-sharing the permission's path is fixed
+// rather than per-file. It is deliberately NOT in the agent baseline, so it must
+// be granted on request.
+const REQUEST_TYPE_ACCOUNTS = 'accounts';
+const VALID_REQUEST_TYPES = new Set([
+  REQUEST_TYPE_PREDEFINED,
+  REQUEST_TYPE_FILE_SHARING,
+  REQUEST_TYPE_WORKSPACE,
+  REQUEST_TYPE_ACCOUNTS,
+]);
+
+// The ``minds-workspaces`` verb catalog is a *shared* definition file read by
+// both this gateway extension and the Python desktop side
+// (``imbue.mngr_latchkey.workspace_permissions``), so the two cannot drift. It
+// is shipped next to this extension and copied into the gateway's extension
+// directory at spawn time (alongside ``services.json``), so ``import.meta.url``
+// resolves it. We read it once at module load -- it is static package data, and
+// a package upgrade rematerializes it and restarts the gateway.
+const WORKSPACE_PERMISSIONS_FILE = 'workspace_permissions.json';
+const WORKSPACE_PERMISSIONS_PATH = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  WORKSPACE_PERMISSIONS_FILE,
+);
+
+// The "any workspace" id wildcard used when a targeted verb is granted broadly.
+const MINDS_WORKSPACES_ANY_SEGMENT = '[^/]+';
+
+/**
+ * Load + validate the shared ``minds-workspaces`` verb catalog. Returns the
+ * derived constants the rest of the module needs. A structural problem is a
+ * deployment bug and throws at module load (the extension fails to load loudly).
+ */
+function loadWorkspacePermissions() {
+  const raw = readFileSync(WORKSPACE_PERMISSIONS_PATH, 'utf-8');
+  const parsed = JSON.parse(raw);
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`${WORKSPACE_PERMISSIONS_FILE} top-level value must be a JSON object.`);
+  }
+  const { path_prefix: pathPrefix, verbs } = parsed;
+  if (typeof pathPrefix !== 'string' || pathPrefix.length === 0) {
+    throw new Error(`${WORKSPACE_PERMISSIONS_FILE}: 'path_prefix' must be a non-empty string.`);
+  }
+  if (!Array.isArray(verbs) || verbs.length === 0) {
+    throw new Error(`${WORKSPACE_PERMISSIONS_FILE}: 'verbs' must be a non-empty array.`);
+  }
+  const verbDefs = {};
+  for (const verb of verbs) {
+    if (typeof verb !== 'object' || verb === null || typeof verb.permission !== 'string') {
+      throw new Error(`${WORKSPACE_PERMISSIONS_FILE}: each verb must be an object with a string 'permission'.`);
+    }
+    const path = verb.path;
+    if (typeof path !== 'object' || path === null || typeof path.kind !== 'string') {
+      throw new Error(`${WORKSPACE_PERMISSIONS_FILE}: verb '${verb.permission}' needs a 'path.kind'.`);
+    }
+    if (path.kind === 'targeted' && typeof path.suffix !== 'string') {
+      throw new Error(`${WORKSPACE_PERMISSIONS_FILE}: targeted verb '${verb.permission}' needs a 'path.suffix'.`);
+    }
+    // ``method`` may be a single HTTP method string or a non-empty array of
+    // method strings (a verb that matches more than one method).
+    const isStringMethod = typeof verb.method === 'string' && verb.method.length > 0;
+    const isArrayMethod =
+      Array.isArray(verb.method) &&
+      verb.method.length > 0 &&
+      verb.method.every((m) => typeof m === 'string' && m.length > 0);
+    if (!isStringMethod && !isArrayMethod) {
+      throw new Error(
+        `${WORKSPACE_PERMISSIONS_FILE}: verb '${verb.permission}' needs a 'method' that is a `
+        + `non-empty string or a non-empty array of strings.`,
+      );
+    }
+    verbDefs[verb.permission] = {
+      method: verb.method,
+      kind: path.kind,
+      suffix: path.suffix,
+      isTargeted: path.kind === 'targeted',
+    };
+  }
+  return {
+    pathPrefix,
+    scopePattern: `^${pathPrefix}(/|$)`,
+    verbDefs,
+  };
+}
+
+const WORKSPACE_PERMISSIONS = loadWorkspacePermissions();
+const MINDS_WORKSPACES_PATH_PREFIX = WORKSPACE_PERMISSIONS.pathPrefix;
+const MINDS_WORKSPACES_SCOPE_PATTERN = WORKSPACE_PERMISSIONS.scopePattern;
+const WORKSPACE_VERB_DEFS = WORKSPACE_PERMISSIONS.verbDefs;
+const VALID_WORKSPACE_VERBS = new Set(Object.keys(WORKSPACE_VERB_DEFS));
+
+// The cross-workspace verbs attach as permissions on the pre-existing domain-only
+// ``latchkey-self`` scope from the agent baseline -- exactly like file-sharing and
+// accounts -- rather than minting a second same-domain scope. Each verb permission
+// schema pins the full ``/minds-api-proxy/api/v1/workspaces...`` path, so the scope
+// only needs to gate the gateway-self domain (which ``latchkey-self`` already does).
+// Keeping a single gateway-self scope means rule order is irrelevant: detent takes
+// the first rule whose scope matches as authoritative, and there is only ever one.
+const WORKSPACE_GRANT_SCOPE_NAME = 'latchkey-self';
 
 // Detent's catch-all permission schema. The ``services.json``
 // catalog never lists it explicitly (every scope implicitly
@@ -160,6 +282,14 @@ const ALWAYS_AVAILABLE_PERMISSION = 'any';
 const FILE_SHARING_PROXY_PATH_PREFIX = '/minds-api-proxy/api/v1/files';
 const FILE_SHARING_SCOPE_NAME = 'latchkey-self';
 const FILE_SHARING_PERMISSION_PREFIX = 'minds-file-server-';
+
+// The accounts read grant. Like file-sharing it activates a fixed permission
+// under the pre-existing ``latchkey-self`` scope (so no scope schema is minted),
+// but the permission's path is fixed (the accounts list endpoint) and there is a
+// single permission name (no per-resource suffix, no access mode).
+const ACCOUNTS_PROXY_PATH_PREFIX = '/minds-api-proxy/api/v1/accounts';
+const ACCOUNTS_SCOPE_NAME = 'latchkey-self';
+const ACCOUNTS_PERMISSION_NAME = 'minds-accounts-read';
 
 // Access modes the agent can request for a file. ``READ`` grants the
 // non-mutating WebDAV verbs only; ``WRITE`` is a superset that also
@@ -641,6 +771,82 @@ function validateFileSharingPayload(payload) {
 }
 
 /**
+ * Validate the payload for an ``accounts`` permission request. The accounts read
+ * grant is all-or-nothing with no parameters, so the payload must be an empty
+ * JSON object; any field is rejected. A parameter-free payload is also what keeps
+ * the persisted-request payload shape distinct from the other request types on
+ * the Python side.
+ */
+function validateAccountsPayload(payload) {
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
+    throw new InvalidRequestBodyError("'payload' must be a JSON object for type 'accounts'.");
+  }
+  ensureNoExtraneousFields('payload ', [], payload);
+  return {};
+}
+
+/**
+ * Validate a ``{permissions, target_workspace_id}`` object for a ``workspace``
+ * request, shared by the create payload and the approve override body.
+ *
+ * ``permissions`` is a non-empty array of ``minds-workspaces`` verb names
+ * (each validated against the hard-coded verb set). ``target_workspace_id``
+ * is the workspace the targeted verbs (destroy / lifecycle / backups-export /
+ * ssh / update / recover / sharing) act on; it is optional -- absent or
+ * ``null`` denotes a request that
+ * only concerns the non-targeted verbs (read / create) or, on approval, an
+ * "all workspaces" grant. When present it must be a valid agent id.
+ *
+ * ``objectLabel``, ``fieldPrefix``, and ``extraneousLabel`` shape the error
+ * messages so a create-payload problem reads as ``payload.'permissions'...``
+ * and an approve-override problem as ``approve body 'permissions'...``.
+ */
+function validateWorkspaceVerbsAndTarget(obj, objectLabel, fieldPrefix, extraneousLabel) {
+  if (typeof obj !== 'object' || obj === null || Array.isArray(obj)) {
+    throw new InvalidRequestBodyError(`${objectLabel} must be a JSON object.`);
+  }
+  ensureStringArray(fieldPrefix, 'permissions', obj.permissions);
+  if (obj.permissions.length === 0) {
+    throw new InvalidRequestBodyError(`${fieldPrefix}'permissions' must list at least one verb.`);
+  }
+  const unknown = obj.permissions.filter((permission) => !VALID_WORKSPACE_VERBS.has(permission));
+  if (unknown.length > 0) {
+    throw new InvalidRequestBodyError(
+      `${fieldPrefix}'permissions' contains unknown minds-workspaces verb(s): ${unknown
+        .map((name) => `'${name}'`)
+        .join(', ')}.`,
+    );
+  }
+  // ``target_workspace_id`` is optional. Absent or an explicit JSON ``null``
+  // both normalize to ``null`` (no specific target).
+  let targetWorkspaceId = null;
+  if (obj.target_workspace_id !== undefined && obj.target_workspace_id !== null) {
+    if (typeof obj.target_workspace_id !== 'string' || obj.target_workspace_id.length === 0) {
+      throw new InvalidRequestBodyError(
+        `${fieldPrefix}'target_workspace_id' must be a non-empty string, null, or omitted.`,
+      );
+    }
+    if (!VALID_AGENT_ID_PATTERN.test(obj.target_workspace_id)) {
+      throw new InvalidRequestBodyError(
+        `${fieldPrefix}'target_workspace_id' must be a valid workspace (agent) id; got `
+        + `'${obj.target_workspace_id}'.`,
+      );
+    }
+    targetWorkspaceId = obj.target_workspace_id;
+  }
+  ensureNoExtraneousFields(extraneousLabel, ['permissions', 'target_workspace_id'], obj);
+  return { permissions: [...obj.permissions], target_workspace_id: targetWorkspaceId };
+}
+
+/**
+ * Validate the payload object for a ``workspace`` permission request.
+ * Returns the canonical payload shape (``{permissions, target_workspace_id}``).
+ */
+function validateWorkspacePayload(payload) {
+  return validateWorkspaceVerbsAndTarget(payload, "'payload'", 'payload.', 'payload ');
+}
+
+/**
  * Parse the POST /permission-requests body. The body must contain
  * ``agent_id``, ``rationale``, ``type``, and ``payload``; the payload
  * shape depends on the request type. Any other top-level field
@@ -691,6 +897,12 @@ async function parsePermissionRequestBody(request) {
     case REQUEST_TYPE_FILE_SHARING:
       payload = validateFileSharingPayload(parsed.payload);
       break;
+    case REQUEST_TYPE_WORKSPACE:
+      payload = validateWorkspacePayload(parsed.payload);
+      break;
+    case REQUEST_TYPE_ACCOUNTS:
+      payload = validateAccountsPayload(parsed.payload);
+      break;
     default:
       // Unreachable because VALID_REQUEST_TYPES has already gated the
       // value; the default branch satisfies linting.
@@ -726,6 +938,10 @@ function computeEffect(type, payload) {
       };
     case REQUEST_TYPE_FILE_SHARING:
       return computeFileSharingEffect(payload.path, payload.access);
+    case REQUEST_TYPE_WORKSPACE:
+      return computeWorkspaceEffect(payload.permissions, payload.target_workspace_id);
+    case REQUEST_TYPE_ACCOUNTS:
+      return computeAccountsEffect();
     default:
       // Already validated by parsePermissionRequestBody; this branch
       // exists only to satisfy the type system / linters.
@@ -875,6 +1091,135 @@ function computeFileSharingEffect(filePath, access) {
     // and the merge logic in ``handleApproveRequest`` unions the new
     // permission name into that scope's existing permission list.
     rules: [{ [FILE_SHARING_SCOPE_NAME]: [permissionSchemaName] }],
+  };
+}
+
+/**
+ * Compute the ``effect`` for an ``accounts`` request: a single fixed permission
+ * (``minds-accounts-read``) matching ``GET`` on the accounts list endpoint,
+ * attached to the pre-existing ``latchkey-self`` scope. Like file-sharing, no
+ * scope schema is minted (the baseline already declares ``latchkey-self``); the
+ * merge in ``handleApproveRequest`` unions the permission name into that scope.
+ * Unlike file-sharing, the path is fixed and there is no access mode, so the
+ * effect takes no arguments.
+ */
+function computeAccountsEffect() {
+  return {
+    schemas: {
+      [ACCOUNTS_PERMISSION_NAME]: {
+        properties: {
+          method: { const: 'GET' },
+          path: { type: 'string', pattern: `^${ACCOUNTS_PROXY_PATH_PREFIX}(/|$)` },
+        },
+        required: ['method', 'path'],
+      },
+    },
+    rules: [{ [ACCOUNTS_SCOPE_NAME]: [ACCOUNTS_PERMISSION_NAME] }],
+  };
+}
+
+/**
+ * Build the JSON-Schema ``method`` property for a verb. A single method string
+ * becomes ``{const: <method>}``; an array of methods becomes ``{enum: [...]}``
+ * so a verb that matches more than one HTTP method admits any of them.
+ */
+function workspaceMethodSchema(method) {
+  return Array.isArray(method) ? { enum: [...method] } : { const: method };
+}
+
+/**
+ * Build a targeted verb's permission schema for one id segment. ``idSegment``
+ * is either the ``[^/]+`` wildcard (an "all workspaces" grant) or a single
+ * regex-escaped workspace id (a "selected" grant).
+ */
+function workspaceTargetedVerbSchema(def, idSegment) {
+  return {
+    properties: {
+      method: workspaceMethodSchema(def.method),
+      path: {
+        type: 'string',
+        pattern: `^${MINDS_WORKSPACES_PATH_PREFIX}/${idSegment}${def.suffix}`,
+      },
+    },
+    required: ['method', 'path'],
+  };
+}
+
+/**
+ * Build the path schema for a non-targeted verb from its ``kind``: ``tree``
+ * (read) matches any path under the workspaces tree; ``collection`` (create)
+ * is the exact collection root.
+ */
+function workspaceNonTargetedPathSchema(def) {
+  if (def.kind === 'collection') {
+    return { const: MINDS_WORKSPACES_PATH_PREFIX };
+  }
+  // ``tree`` (and any future non-targeted kind) matches the whole workspaces
+  // subtree via the scope pattern.
+  return { type: 'string', pattern: MINDS_WORKSPACES_SCOPE_PATTERN };
+}
+
+/**
+ * Build a non-targeted verb's permission schema (read / create).
+ */
+function workspaceNonTargetedVerbSchema(def) {
+  return {
+    properties: {
+      method: workspaceMethodSchema(def.method),
+      path: workspaceNonTargetedPathSchema(def),
+    },
+    required: ['method', 'path'],
+  };
+}
+
+/**
+ * Compute the ``effect`` for a ``workspace`` request: a self-contained patch
+ * (the per-verb permission schemas + a grant rule attaching those permissions
+ * to the ``latchkey-self`` scope) that approving the request splices into the
+ * target permissions.json, exactly like the file-sharing effect.
+ *
+ * For each requested verb:
+ *  * non-targeted verbs (read / create) emit a broad schema keyed by the verb
+ *    name;
+ *  * targeted verbs (destroy / lifecycle / backups-export / ssh / update /
+ *    recover / sharing) emit, when
+ *    ``targetWorkspaceId`` is ``null`` (an "all workspaces" grant), a broad
+ *    schema keyed by the verb name; otherwise a per-target schema keyed
+ *    ``<verb>-<target_id>`` whose path pins the single workspace id.
+ *
+ * Each new selected target is a distinct, uniquely-named schema, so the
+ * approve handler's schema-by-name merge accumulates targets without an
+ * ``anyOf`` (re-approving the same target is an idempotent overwrite). No scope
+ * schema is emitted: the verbs attach to the domain-only ``latchkey-self`` scope
+ * the agent baseline already declares (like file-sharing and accounts), so a
+ * host file that has never seen a workspace grant gets the permissions unioned
+ * onto that scope with the first grant -- no scope schema, no rule ordering, and
+ * no baseline entry required.
+ */
+function computeWorkspaceEffect(permissions, targetWorkspaceId) {
+  const schemas = {};
+  const grantedNames = [];
+  for (const verb of permissions) {
+    const def = WORKSPACE_VERB_DEFS[verb];
+    if (def === undefined) {
+      // Already validated upstream; defensive only.
+      throw new InvalidRequestBodyError(`unknown minds-workspaces verb '${verb}'.`);
+    }
+    if (!def.isTargeted) {
+      schemas[verb] = workspaceNonTargetedVerbSchema(def);
+      grantedNames.push(verb);
+    } else if (targetWorkspaceId === null) {
+      schemas[verb] = workspaceTargetedVerbSchema(def, MINDS_WORKSPACES_ANY_SEGMENT);
+      grantedNames.push(verb);
+    } else {
+      const name = `${verb}-${targetWorkspaceId}`;
+      schemas[name] = workspaceTargetedVerbSchema(def, escapeForRegex(targetWorkspaceId));
+      grantedNames.push(name);
+    }
+  }
+  return {
+    schemas,
+    rules: [{ [WORKSPACE_GRANT_SCOPE_NAME]: grantedNames }],
   };
 }
 
@@ -1368,18 +1713,19 @@ function mergeSchemas(existingSchemas, effectSchemas) {
 
 /**
  * Parse the optional JSON body of a ``POST /permission-requests/approve/<id>``
- * call. The desktop client sends a body only when the user edited the
- * shared path in the approval dialog before approving; the body then
- * carries a single ``path`` field with the (possibly new) absolute
- * filesystem path the grant should target. An empty body (the common
- * case -- the user approved the request as-is) yields ``null``.
+ * call into a raw override object (or ``null`` for no override).
  *
- * The override path is validated here with the same traversal-rejection
- * rules that guard request *creation* (``validateAbsoluteFileSharingPath``),
- * so a user-edited path is held to exactly the same security bar as an
- * agent-supplied one. Any field other than ``path`` is rejected so the
- * server stays the single source of truth on identity, target, and
- * access mode.
+ * An empty body, or a literal JSON ``null`` (which some HTTP clients serialize
+ * for an absent payload), yields ``null`` -- the common case where the user
+ * approved the request as-is. A non-empty body must be a JSON object; its
+ * per-type validation (which fields are allowed, and how they are checked) is
+ * deferred to :func:`resolveEffectForApproval`, which knows the request's type.
+ *
+ * The override mechanism lets the user adjust the grant at approval time: a
+ * ``file-sharing`` request carries ``{path}`` (the user-edited share path); a
+ * ``workspace`` request carries ``{permissions, target_workspace_id}`` (the
+ * verbs the user ticked and whether the targeted verbs apply to one workspace
+ * or all).
  */
 async function parseApproveOverrideBody(request) {
   const raw = await readRequestBody(request);
@@ -1393,49 +1739,64 @@ async function parseApproveOverrideBody(request) {
     const message = error instanceof Error ? error.message : String(error);
     throw new InvalidRequestBodyError(`approve body is not valid JSON: ${message}`);
   }
-  // A literal JSON ``null`` body means "no override", same as an empty
-  // body -- some HTTP clients serialize an absent payload that way.
   if (parsed === null) {
     return null;
   }
   if (typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new InvalidRequestBodyError('approve body must be a JSON object.');
   }
-  ensureNoExtraneousFields('approve body ', ['path'], parsed);
-  if (parsed.path === undefined) {
-    return null;
-  }
-  // Expand ``~`` and canonicalize the user-edited path the same way a
-  // request-creation path is handled, then carry the absolute form.
-  const path = validateAbsoluteFileSharingPath(parsed.path);
-  return { path };
+  return parsed;
 }
 
 /**
  * Resolve the effect that approving ``requestRecord`` should splice in.
  *
- * With no override this is just the precomputed ``requestRecord.effect``.
- * When the user edited the shared path in the dialog (``override`` is
- * non-null), the effect is recomputed for the new path so the grant
- * targets exactly what the user chose -- but only for ``file-sharing``
- * requests, which are the only kind whose effect is path-derived. A
- * path override on any other request type is a programming error in the
+ * With no override (``null`` or an empty object) this is just the precomputed
+ * ``requestRecord.effect``. Otherwise the effect is recomputed from the user's
+ * approval-time choices, dispatched on the request type:
+ *
+ *  * ``file-sharing``: ``{path}`` -- the user-edited share path, re-validated
+ *    with the same traversal-rejection rules as request creation. The access
+ *    mode is fixed at creation and is not user-editable.
+ *  * ``workspace``: ``{permissions, target_workspace_id}`` -- the verbs the
+ *    user ticked and the target (a specific workspace id for a "selected"
+ *    grant, or ``null`` for an "all workspaces" grant).
+ *
+ * A body override on any other request type is a programming error in the
  * caller and is rejected.
  */
 function resolveEffectForApproval(requestRecord, override) {
-  if (override === null) {
+  if (override === null || Object.keys(override).length === 0) {
     return requestRecord.effect;
   }
-  if (requestRecord.request_type !== REQUEST_TYPE_FILE_SHARING) {
-    throw new InvalidRequestBodyError(
-      `a 'path' override is only valid for '${REQUEST_TYPE_FILE_SHARING}' requests; `
-      + `request ${requestRecord.request_id} is '${requestRecord.request_type}'.`,
-    );
+  switch (requestRecord.request_type) {
+    case REQUEST_TYPE_FILE_SHARING: {
+      ensureNoExtraneousFields('approve body ', ['path'], override);
+      if (override.path === undefined) {
+        return requestRecord.effect;
+      }
+      // Expand ``~`` and canonicalize the user-edited path the same way a
+      // request-creation path is handled, then recompute. The access mode is
+      // fixed at creation and is not user-editable.
+      const path = validateAbsoluteFileSharingPath(override.path);
+      return computeFileSharingEffect(path, requestRecord.payload.access);
+    }
+    case REQUEST_TYPE_WORKSPACE: {
+      const { permissions, target_workspace_id } = validateWorkspaceVerbsAndTarget(
+        override,
+        'approve body',
+        'approve body ',
+        'approve body ',
+      );
+      return computeWorkspaceEffect(permissions, target_workspace_id);
+    }
+    default:
+      throw new InvalidRequestBodyError(
+        `a body override is only valid for '${REQUEST_TYPE_FILE_SHARING}' or `
+        + `'${REQUEST_TYPE_WORKSPACE}' requests; request ${requestRecord.request_id} is `
+        + `'${requestRecord.request_type}'.`,
+      );
   }
-  // The access mode is fixed at request-creation time and is not
-  // user-editable: the user may narrow/redirect *where* the grant
-  // applies, but not escalate read-only to read-write.
-  return computeFileSharingEffect(override.path, requestRecord.payload.access);
 }
 
 function handleApproveRequest(response, rawRequestId, override = null) {

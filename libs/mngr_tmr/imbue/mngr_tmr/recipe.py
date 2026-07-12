@@ -8,13 +8,14 @@ that interprets each mapper's outcome JSON. The framework
 extraction, and CLI plumbing.
 """
 
+import re
 from collections.abc import Sequence
 from pathlib import Path
-from typing import ClassVar
 from typing import assert_never
 
 from loguru import logger
 from pydantic import Field
+from pydantic import field_validator
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -36,9 +37,26 @@ from imbue.mngr_tmr.report_upload import maybe_upload_report
 
 _BRANCH_BUNDLE_NAME = "branch.bundle"
 
+_DEFAULT_RECIPE_NAME = "tmr"
+
+# The recipe name becomes a segment of git branch names (``<name>/<run>/<slug>``)
+# and agent/host names (``<name>-<run>-<slug>``), so it must be a conservative
+# slug: an alphanumeric start followed by alphanumerics, dashes, or underscores.
+_RECIPE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+
 
 class CollectTestsError(MngrError, RuntimeError):
     """Raised when pytest test collection fails."""
+
+    ...
+
+
+class InvalidRecipeNameError(MngrError, ValueError):
+    """Raised when a recipe/variant name is not a safe branch/agent name segment.
+
+    Inherits from ``ValueError`` so pydantic wraps it into a ``ValidationError``
+    when raised from the ``name`` field validator.
+    """
 
     ...
 
@@ -138,12 +156,37 @@ class TestMapReduceRecipe(MapReduceRecipe, FrozenModel):
     ``on_reducer_finalized``.
     """
 
-    name: ClassVar[str] = "tmr"
+    # The "Test" prefix is historical (test map-reduce), not a pytest test
+    # class; tell pytest not to try to collect it.
+    __test__ = False
 
+    name: str = Field(
+        default=_DEFAULT_RECIPE_NAME,
+        description="Variant name; prefixes this run's agent/branch/host names so distinct suites "
+        "(e.g. tmr-mngr vs tmr-minds) stay separable and reviewable on their own.",
+    )
     pytest_args: tuple[str, ...] = Field(default=(), description="Positional pytest paths/patterns")
     testing_flags: tuple[str, ...] = Field(
         default=(), description="Flags shared between pytest discovery and individual mapper runs"
     )
+    mapper_prompt_path: Path | None = Field(
+        default=None,
+        description="Optional override template for the mapper prompt (falls back to the packaged mapper.j2)",
+    )
+    reducer_prompt_path: Path | None = Field(
+        default=None,
+        description="Optional override template for the reducer prompt (falls back to the packaged reducer.j2)",
+    )
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str) -> str:
+        if not _RECIPE_NAME_PATTERN.match(value):
+            raise InvalidRecipeNameError(
+                f"Invalid recipe name {value!r}: must start with an alphanumeric and contain only "
+                "alphanumerics, dashes, or underscores (it becomes a branch/agent/host name segment)."
+            )
+        return value
 
     def discover(self, ctx: MapReduceContext) -> list[MapReduceTask]:
         raw_ids = collect_tests(
@@ -162,14 +205,19 @@ class TestMapReduceRecipe(MapReduceRecipe, FrozenModel):
         ]
 
     def build_mapper_prompt(self, ctx: MapReduceContext, task: MapReduceTask) -> str:
-        # Append the e2e run-name flag so each agent's per-try artifacts land
-        # under .test_output/e2e/tmr_<run>_try_N/ rather than colliding with
-        # ad-hoc local pytest runs.
-        flags = self.testing_flags + ("--mngr-e2e-run-name", f"{self.name}_{ctx.run_name}")
-        return build_test_agent_prompt(task.id, flags)
+        # The e2e run-name flag (which lands per-try artifacts under
+        # .test_output/e2e/tmr_<run>_try_N/) is registered only by the mngr e2e
+        # conftest, so it is valid only for e2e tests. Other release tests (e.g.
+        # install/docker/cli, or the per-provider packages) would error on an
+        # unrecognized argument, so only e2e tests get it.
+        is_e2e = "/e2e/" in task.id
+        e2e_run_name = f"{self.name}_{ctx.run_name}" if is_e2e else None
+        return build_test_agent_prompt(
+            task.id, self.testing_flags, e2e_run_name, template_path=self.mapper_prompt_path
+        )
 
     def build_reducer_prompt(self, ctx: MapReduceContext) -> str:
-        return build_integrator_prompt()
+        return build_integrator_prompt(template_path=self.reducer_prompt_path)
 
     def on_mapper_finalized(self, ctx: MapReduceContext, agent_dir: Path, info: MapperInfo) -> None:
         bundle = agent_dir / _BRANCH_BUNDLE_NAME
@@ -198,6 +246,7 @@ class TestMapReduceRecipe(MapReduceRecipe, FrozenModel):
         applied = _reducer_branch_applied(ctx, reducer)
         run_commands = _build_run_commands(
             ctx.run_name,
+            recipe_name=self.name,
             integrated_branch=reducer.branch_name if applied and reducer is not None else None,
         )
         report_path = generate_html_report(
@@ -212,11 +261,18 @@ class TestMapReduceRecipe(MapReduceRecipe, FrozenModel):
         return report_path
 
 
-def _build_run_commands(run_name: str, integrated_branch: str | None = None) -> list[tuple[str, str]]:
-    """Build a list of (label, command) pairs for the run."""
+def _build_run_commands(
+    run_name: str, recipe_name: str = _DEFAULT_RECIPE_NAME, integrated_branch: str | None = None
+) -> list[tuple[str, str]]:
+    """Build a list of (label, command) pairs for the run.
+
+    ``recipe_name`` is threaded into the reintegrate hint (as ``--name``) for
+    non-default variants so it resolves the run's output dir consistently.
+    """
+    name_flag = "" if recipe_name == _DEFAULT_RECIPE_NAME else f"--name {recipe_name} "
     commands = [
         ("List agents from this run", f"mngr ls --include 'labels.mapreduce_run_name == \"{run_name}\"'"),
-        ("Reintegrate", f"mngr tmr --reintegrate --run-name {run_name}"),
+        ("Reintegrate", f"mngr tmr {name_flag}--reintegrate --run-name {run_name}"),
     ]
     if integrated_branch is not None:
         commands.append(("Push integrated branch", f"git push origin {integrated_branch}"))

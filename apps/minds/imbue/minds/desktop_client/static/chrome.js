@@ -140,6 +140,16 @@
   // must never write to ``currentTitleAgentId`` or trigger recovery, or a
   // stuck agent in another window will hijack this window's content view.
   var currentTitleAgentId = null;
+  // Whether the displayed workspace's content is actually reachable (a real
+  // workspace) rather than the "Loading workspace" proxy loader that
+  // mngr_forward serves at the workspace URL while the backend is unreachable.
+  // Pushed by main.js over ``current-workspace-changed`` (from the content
+  // view's HTTP status) so the get-help modal keeps "have an agent help"
+  // disabled while a workspace is loading/stuck -- a state the health-tracker
+  // ``systemInterfaceStatusByAgent`` signal doesn't cover during startup. In
+  // browser mode there is no such signal (the content frame is cross-origin), so
+  // it defaults to true there, leaving that mode's behavior unchanged.
+  var currentWorkspaceContentReady = !isElectron;
   // Per-agent {accent} map populated from each SSE ``workspaces`` payload.
   // ``applyTitleAccent`` reads from this cache so accent application is
   // synchronous.
@@ -214,11 +224,12 @@
   //
   // SSE pushes ``system_interface_status`` events whenever an agent transitions
   // between healthy / stuck / restarting. When the currently-displayed agent
-  // goes STUCK we navigate the content view to the recovery page; the recovery
-  // page's own SSE subscription redirects back to ``return_to`` once the agent
-  // is healthy again. We redirect at most once per stuck episode (per agent),
-  // cleared by a subsequent ``healthy`` event, so the recovery page itself
-  // doesn't get clobbered on repeat STUCK transitions while the user is on it.
+  // goes STUCK we navigate the content view to the recovery page; that page then
+  // polls its own recovery route (a cheap liveness poll) and gets 302'd back to
+  // ``return_to`` once the agent is healthy again. We redirect at most once per
+  // stuck episode (per agent), cleared by a subsequent ``healthy`` event, so the
+  // recovery page itself doesn't get clobbered on repeat STUCK transitions while
+  // the user is on it.
   var systemInterfaceStatusByAgent = {};
   var redirectedAgents = {};
 
@@ -277,6 +288,10 @@
     });
   }
 
+  // Custom titlebar tooltips: the titlebar buttons carry ``data-tooltip``
+  // labels and are wired by the shared /_static/tooltip_triggers.js (included
+  // by Chrome.jinja), which is the same script the overlay's modal pages use.
+
   // -- Title + URL tracking -------------------------------------------------
   function refreshAuthStatus() {
     fetch('/auth/api/status').then(function (r) { return r.json(); }).then(updateAuthUI).catch(function () {});
@@ -311,7 +326,8 @@
     // while the content view is ACTUALLY displaying that workspace, and null on
     // every other screen (including the workspace's own settings / sharing
     // screens). It drives the recovery-redirect lock ONLY -- not the accent.
-    window.minds.onCurrentWorkspaceChanged(function (agentId) {
+    window.minds.onCurrentWorkspaceChanged(function (agentId, contentReady) {
+      currentWorkspaceContentReady = !!contentReady;
       setDisplayedWorkspaceAgentId(agentId || null);
     });
     // The titlebar accent is a pure function of the current screen, pushed by
@@ -383,6 +399,8 @@
   if (!isElectron) {
     var newWsBtn = document.getElementById('sidebar-new-workspace');
     if (newWsBtn) newWsBtn.onclick = function () { navigateContent('/create'); closeSidebar(); };
+    var settingsBtn = document.getElementById('sidebar-settings');
+    if (settingsBtn) settingsBtn.onclick = function () { navigateContent('/settings'); closeSidebar(); };
     var accountBtn = document.getElementById('sidebar-account');
     if (accountBtn) {
       accountBtn.onclick = function () {
@@ -393,8 +411,32 @@
   }
 
   document.getElementById('requests-toggle').onclick = function () {
+    // ``keep_open=1`` marks this as an intentional open of the whole inbox,
+    // so resolving a request advances to the next pending one rather than
+    // dismissing the window (notification-driven opens omit it and close).
     if (isElectron) window.minds.toggleInbox();
-    else navigateContent('/inbox');
+    else navigateContent('/inbox?keep_open=1');
+  };
+
+  // Get-help opens the help modal (report a bug). Pass the currently-displayed
+  // workspace id along so the report can scope workspace context; in Electron the
+  // modal is the shared overlay view, in browser mode it loads into the content frame.
+  document.getElementById('help-toggle').onclick = function () {
+    var aid = currentTitleAgentId || '';
+    // Agent-help spawns an /assist chat *inside* the displayed workspace, so it is only usable when
+    // that workspace is actually reachable: on a loading/stuck workspace the new chat couldn't be
+    // seen or reached (and the spawn would fail). Gate the option on BOTH signals -- a truthy
+    // systemInterfaceStatusByAgent entry means stuck/restarting, and currentWorkspaceContentReady is
+    // false while the content view shows the "Loading workspace" proxy loader (which the stuck signal
+    // doesn't cover during startup) -- while still passing the workspace id so a bug report stays
+    // scoped to it even when it's down.
+    var assistAvailable = !!aid && !systemInterfaceStatusByAgent[aid] && currentWorkspaceContentReady;
+    if (isElectron) {
+      window.minds.toggleHelp(aid, assistAvailable);
+    } else {
+      var helpQuery = aid ? '?workspace=' + encodeURIComponent(aid) + (assistAvailable ? '&assist=1' : '') : '';
+      navigateContent('/help' + helpQuery);
+    }
   };
 
   // -- Open a permission request from workspace content (browser mode) -------
@@ -413,15 +455,32 @@
       if (!frame || e.source !== frame.contentWindow) return;
       var data = e.data;
       if (!data || typeof data !== 'object') return;
-      if (data.type !== 'minds:open-request-modal') return;
-      var requestId = data.requestId;
-      if (typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(requestId)) return;
-      navigateContent('/inbox?selected=' + encodeURIComponent(requestId));
+      if (data.type === 'minds:open-request-modal') {
+        var requestId = data.requestId;
+        if (typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(requestId)) return;
+        navigateContent('/inbox?selected=' + encodeURIComponent(requestId));
+        return;
+      }
+      // Error pages (e.g. the recovery page) ask to open the get-help / report-a-bug
+      // modal. There's no overlay in browser mode, so navigate the content frame to
+      // /help, scoped to the workspace when the page supplied a valid agent id.
+      if (data.type === 'minds:open-help') {
+        var agentId = data.agentId;
+        var scoped = typeof agentId === 'string' && /^agent-[a-f0-9]{1,64}$/i.test(agentId) ? agentId : '';
+        navigateContent('/help' + (scoped ? '?workspace=' + encodeURIComponent(scoped) : ''));
+        return;
+      }
     });
   }
 
   // -- SSE-driven sidebar (browser mode only) -------------------------------
   var lastWorkspaces = [];
+
+  // Repaint rows when the shared backup-health cache updates so the backup
+  // warning badge appears/disappears without a workspace-list event.
+  if (window.mindsBackupHealth) {
+    window.mindsBackupHealth.onUpdate(function () { renderWorkspaces(lastWorkspaces); });
+  }
 
   function renderWorkspaces(workspaces) {
     var container = document.getElementById('sidebar-workspaces');

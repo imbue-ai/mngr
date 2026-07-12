@@ -1,8 +1,9 @@
 """Tests for ``mngr message`` variants from the tutorial.
 
-Each test corresponds 1:1 to a tutorial script block. Where the block addresses
-fictional agent names (agent-1, agent-2, ...), the test creates real agents
-with those names first so the message command has somewhere to land.
+Each test carries its tutorial script block verbatim in its docstring under a
+``Tutorial block:`` section. Where the block addresses fictional agent names
+(agent-1, agent-2, ...), the test creates real agents with those names first so
+the message command has somewhere to land.
 """
 
 import pytest
@@ -25,10 +26,14 @@ def _create_sleep_agents(e2e: E2eSession, names_and_sleeps: list[tuple[str, int]
 @pytest.mark.release
 @pytest.mark.tmux
 def test_message_one_agent(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # send a message to a specific agent
         mngr message my-task -m "Please also add unit tests for the new function"
-    """)
+
+    Scope: `mngr message <name>` delivers a message to the single named agent --
+    the command reports the specific recipient ("Message sent to: my-task") and a
+    count of exactly one successful delivery, not the empty-target no-op.
+    """
     _create_sleep_agents(e2e, [("my-task", 100300)])
     result = e2e.run(
         'mngr message my-task -m "Please also add unit tests for the new function"',
@@ -44,13 +49,15 @@ def test_message_one_agent(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_message_nonexistent_agent(e2e: E2eSession) -> None:
-    # Unhappy path for the same tutorial block: messaging an agent that does not
-    # exist is a no-op, not an error. A positional name becomes a name/id filter
-    # that matches nothing, so no delivery happens and the command still exits 0.
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # send a message to a specific agent
         mngr message my-task -m "Please also add unit tests for the new function"
-    """)
+
+    Scope: the unhappy path of the same block. A positional name that matches no
+    agent becomes a name/id filter matching nothing, so messaging it is a no-op,
+    not an error: the command exits 0, reports "No agents found to send message
+    to", and never prints a "Message sent to:" line.
+    """
     result = e2e.run(
         'mngr message no-such-agent -m "Please also add unit tests for the new function"',
         comment="send a message to a specific agent",
@@ -65,10 +72,14 @@ def test_message_nonexistent_agent(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(180)
 def test_message_short_form(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # short form
         mngr msg my-task -m "Check the CI results and fix any failures"
-    """)
+
+    Scope: `mngr msg` is the short alias of `mngr message` and delivers to the
+    single named agent -- the output reports "Message sent to: my-task" and a
+    count of exactly one successful delivery, not the empty-target no-op.
+    """
     _create_sleep_agents(e2e, [("my-task", 100301)])
     result = e2e.run(
         'mngr msg my-task -m "Check the CI results and fix any failures"',
@@ -87,10 +98,15 @@ def test_message_short_form(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_message_multiple_agents_by_name(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # send the same message to multiple agents by name
         mngr msg agent-1 agent-2 agent-3 -m "Wrap up and commit your changes"
-    """)
+
+    Scope: multiple positional names broadcast the same message to each named
+    agent -- all three recipients get a "Message sent to:" line and the aggregate
+    count is exactly 3, so a bug that parsed only the first name or dropped a
+    target would fail.
+    """
     _create_sleep_agents(e2e, [("agent-1", 100302), ("agent-2", 100303), ("agent-3", 100304)])
     result = e2e.run(
         'mngr msg agent-1 agent-2 agent-3 -m "Wrap up and commit your changes"',
@@ -112,10 +128,15 @@ def test_message_multiple_agents_by_name(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_message_all(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # send a message to every agent by piping their ids from `mngr list`
         mngr list --ids | mngr msg - -m "Stop what you are doing and commit your current progress"
-    """)
+
+    Scope: `mngr list --ids | mngr msg -` broadcasts to every listed agent by
+    piping their ids on stdin (`-` reads the targets from stdin) -- the running
+    agent actually receives the message ("Message sent to: my-task", one
+    successful delivery), not a silent no-op.
+    """
     _create_sleep_agents(e2e, [("my-task", 100305)])
     result = e2e.run(
         'mngr list --ids | mngr msg - -m "Stop what you are doing and commit your current progress"',
@@ -140,10 +161,16 @@ def test_message_all(e2e: E2eSession) -> None:
 # filesystems. Give the pipeline generous headroom.
 @pytest.mark.timeout(90)
 def test_message_filtered_via_stdin(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # send a message to agents matching a filter
         mngr list --include 'host.provider == "modal"' --ids | mngr msg - -m "Almost out of budget, please finish up"
-    """)
+
+    Scope: the no-op half of the filtered-broadcast block. `mngr list --include`
+    with a filter that matches no agents emits an empty id list, so piping it into
+    `mngr msg -` exits 0 without claiming any message was delivered (no
+    "Successfully sent message"). The test filters on the modal provider, which
+    has no agents in the test env.
+    """
     # No modal agents exist in the test env, so the filtered id list is empty
     # and the message becomes a no-op. First confirm the filter half really does
     # produce an empty id list -- otherwise the no-op path would not be the one
@@ -177,10 +204,17 @@ def test_message_filtered_via_stdin(e2e: E2eSession) -> None:
 # instead -- the stdin-piping mechanism being illustrated is identical.
 @pytest.mark.timeout(180)
 def test_message_filtered_via_stdin_delivers_to_matching_agents(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # send a message to agents matching a filter
         mngr list --include 'host.provider == "modal"' --ids | mngr msg - -m "Almost out of budget, please finish up"
-    """)
+
+    Scope: the delivery half of the filtered-broadcast block. When `mngr list
+    --include` matches real agents, their ids are piped into `mngr msg -` and the
+    message is actually delivered to each matching agent (a "Message sent to:"
+    line per agent plus "Successfully sent message"). The block's example filters
+    on the modal provider; this test filters on the local provider instead, since
+    creating modal agents is slow and the stdin-piping mechanism is identical.
+    """
     _create_sleep_agents(e2e, [("filter-target-1", 100307), ("filter-target-2", 100308)])
 
     # The filter half must list exactly the two agents we just created (they run
@@ -213,7 +247,7 @@ def test_message_filtered_via_stdin_delivers_to_matching_agents(e2e: E2eSession)
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_message_on_error_continue(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # control error handling when messaging multiple agents
         # your choices are:
         #   "continue", which means try all agents once, or
@@ -221,7 +255,11 @@ def test_message_on_error_continue(e2e: E2eSession) -> None:
         # note that "abort" is kind of dangerous--you could easily have agents left in a strange state
         # thus the default is "continue"
         mngr list --ids | mngr msg - -m "Status update please" --on-error continue
-    """)
+
+    Scope: `--on-error continue` makes a piped broadcast attempt every agent
+    rather than aborting on the first failure -- the pipeline delivers to the
+    listed agent and the command exits 0.
+    """
     _create_sleep_agents(e2e, [("my-task", 100306)])
     expect(
         e2e.run(

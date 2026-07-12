@@ -4,6 +4,24 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-09
+
+- Added: `LowerCaseStrEnum` in `imbue.imbue_common.enums` -- the lowercase sibling of `UpperCaseStrEnum`, for enums whose values are an externally visible, already-lowercase wire format (first used by the pool bake / destroy outcome statuses in `mngr_imbue_cloud`).
+
+## 2026-07-06
+
+Added a shared Sentry error-reporting library under `imbue.imbue_common.sentry`, so multiple Imbue Python processes can report errors without duplicating the machinery. It packages the generic pieces that previously lived in the minds backend: the loguru-to-Sentry event/breadcrumb handlers, the unsigned-S3 attachment uploader, the per-exception rate limiter, the oversized-event (HTTP 413) transport, the `before_send` chain (including the automatic-reporting consent gate and interrupt/clean-shutdown filtering), manual bug-report submission, and a parameterized `setup_sentry`.
+
+The library is intentionally agnostic about *which* Sentry project/environment/bucket a process uses: `setup_sentry` takes a concrete `dsn`, `environment_name`, and optional `s3_attachment_bucket` (plus a `service_name`, the Sentry integrations, and a set of `LogAttachmentGroup`s describing which log files to attach). Project-specific config (the DSNs, the deploy-environment model, and the environment-to-bucket mapping) lives with each consuming project, not here. This pulls in `sentry-sdk`, `boto3`, and `traceback-with-variables` as dependencies of `imbue-common`.
+
+## 2026-07-01
+
+Added the shared `PREVENT_ASYNC_AWAIT` ratchet rule (in `common_ratchets.py`) and the `check_async_await` wrapper (in `standard_ratchet_checks.py`). This powers a new per-project `test_prevent_async_await` ratchet across the whole monorepo that freezes `async def` / `await` usage and prevents new async code from being added. We strongly prefer synchronous code: it is far easier to debug, and our software is intentionally low-scale, so async provides no benefit.
+
+## 2026-06-26
+
+`find_bash_scripts_without_strict_mode` (the helper behind the repo-wide bash strict-mode ratchet) now skips `*.sh` files under `.minds/template/`. Those are declarative secret-schema templates -- commented `export KEY=` files sourced by the deploy tooling (`scripts/push_vault_from_file.py`, `minds env deploy`) and copied per-tier, never executed standalone -- so `set -euo pipefail` is meaningless for them and they are not the class of runnable script the ratchet guards. This also removes a local-vs-CI count skew, since those templates were already absent from the offload build context.
+
 ## 2026-06-24
 
 Updated the `PREVENT_HARDCODED_CLAUDE_DIR` ratchet's guidance text to reference

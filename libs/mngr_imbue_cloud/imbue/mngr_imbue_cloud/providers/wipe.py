@@ -35,8 +35,7 @@ def build_pool_host_wipe_script(host_id: HostId) -> str:
     * Everything docker still knows about (``system prune -a -f --volumes``).
     * Everything under ``/root`` and ``/tmp`` except
       ``/root/.ssh/authorized_keys`` (preserves the static pool-management
-      key the connector / cleanup_released_hosts.py needs for any
-      post-release SSH-driven maintenance).
+      key the connector needs for any post-release SSH-driven maintenance).
 
     Pure function so unit tests can assert the exact command shape
     without standing up an SSH transport.
@@ -72,7 +71,7 @@ def build_pool_host_wipe_script(host_id: HostId) -> str:
         "docker system prune -a -f --volumes >/dev/null 2>&1\n"
         # Wipe /root content except .ssh/authorized_keys -- preserves the
         # pool-management public key the connector relies on if it needs
-        # to reach the host again before cleanup_released_hosts.py runs.
+        # to reach the host again before it destroys the slice's VM.
         "find /root -mindepth 1 -maxdepth 1 -not -name .ssh -exec rm -rf {} + 2>/dev/null\n"
         "find /root/.ssh -mindepth 1 -not -name authorized_keys -exec rm -rf {} + 2>/dev/null\n"
         # Wipe /tmp entirely.

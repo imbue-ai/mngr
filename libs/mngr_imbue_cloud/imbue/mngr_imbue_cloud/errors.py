@@ -95,6 +95,10 @@ class SliceReserveOutputError(BareMetalProvisioningError):
     """Raised when the on-box slice reservation script produces no/garbled port output."""
 
 
+class BoxImageCacheError(ImbueCloudError):
+    """Raised when a box-local cached-default-workspace-template-image operation (lock, save, load, disk) fails."""
+
+
 class InvalidBuildArgError(ImbueCloudError, ValueError):
     """Raised when a recognized imbue_cloud build arg has a malformed value."""
 

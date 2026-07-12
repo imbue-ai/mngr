@@ -99,7 +99,14 @@ class TestVultrProviderLifecycle:
 
     @pytest.mark.rsync
     def test_create_exec_and_destroy(self, vultr_test_settings_dir: Path) -> None:
-        """Create a host, run a command on it, then destroy it."""
+        """Provisioning a real Vultr VPS yields an agent that is fully usable end to end.
+
+        Asserts that ``create`` succeeds, that a subsequent ``exec`` actually runs a
+        command on the remote VPS (the unique marker ``hello-from-vultr`` appears in
+        stdout), that the provisioned host_dir ``/mngr`` exists on the box, and that
+        ``list`` reports the agent under the ``vultr`` provider. Each assertion fails
+        if provisioning, remote exec, or registration silently no-ops.
+        """
         agent_name = f"test-vultr-{int(time.time()) % 100000}"
 
         # Create (uses rsync to upload the build context to the VPS)
@@ -139,7 +146,13 @@ class TestVultrProviderLifecycle:
 
     @pytest.mark.rsync
     def test_create_stop_start_destroy(self, vultr_test_settings_dir: Path) -> None:
-        """Test the full stop/start lifecycle."""
+        """A Vultr agent survives a stop/start cycle and is runnable again afterward.
+
+        Asserts that ``stop`` then ``start`` both succeed on a real VPS-backed agent
+        and that a post-restart ``exec`` returns its unique marker
+        ``alive-after-restart`` from the box, proving the restart actually brought the
+        agent back to a usable running state rather than leaving it stopped or broken.
+        """
         agent_name = f"test-vultr-ss-{int(time.time()) % 100000}"
 
         result = _run_mngr(
@@ -179,7 +192,13 @@ class TestVultrProviderLifecycle:
 
     @pytest.mark.rsync
     def test_ssh_connectivity(self, vultr_test_settings_dir: Path) -> None:
-        """Verify we can SSH into the container directly."""
+        """The provisioned Vultr container runs the expected OS with a live sshd.
+
+        Asserts that ``exec`` (which reaches the box over SSH) reports a Debian-based
+        ``/etc/os-release`` and that at least one ``sshd`` process is running inside
+        the container. Both checks fail if the container is the wrong image or if the
+        SSH daemon backing remote exec is not actually up.
+        """
         agent_name = f"test-vultr-ssh-{int(time.time()) % 100000}"
 
         result = _run_mngr(
@@ -221,6 +240,11 @@ class TestVultrApiClient:
     """Tests for the Vultr API client with real API calls."""
 
     def test_list_instances_does_not_error(self, vultr_release_client: VultrVpsClient) -> None:
-        """Verify the API client can list instances without error."""
+        """The client authenticates to the real Vultr API and returns a parsed list.
+
+        Asserts that ``list_instances`` against the live API returns a ``list``,
+        proving the API key is accepted and the response is parsed into the expected
+        shape. Fails if the request errors out or the client returns a non-list.
+        """
         instances = vultr_release_client.list_instances()
         assert isinstance(instances, list)

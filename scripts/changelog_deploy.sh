@@ -26,10 +26,13 @@ set -euo pipefail
 #   ./scripts/changelog_deploy.sh
 #
 # Secrets are read from Vault at deploy time and baked into the schedule via
-# the --pass-env flags below. Run `vault login -method=oidc` first:
-#   secrets/mngr/dev/github    key GH_TOKEN          - token for bot@imbue.com.
-#   secrets/mngr/dev/anthropic key ANTHROPIC_API_KEY - claude key for the cron
-#                                                       container.
+# the --pass-env flags below. Run `vault login -method=oidc` first. Each path
+# stores the actual value in a `value` field (our standard secret layout):
+#   secrets/mngr/dev/GH_TOKEN          - bot@imbue.com token for opening the
+#                                        changelog PR. Lives under the dev
+#                                        (developer-direct-access) path.
+#   secrets/mngr/ci/ANTHROPIC_API_KEY  - claude key for the cron container;
+#                                        shared with the mngr CI workflows.
 #
 # Optional environment:
 #   CHANGELOG_VERIFY             - Verification mode (default: "none"). Set to
@@ -67,6 +70,17 @@ export MNGR_ROOT_NAME="mngr-changelog-schedule"
 unset MNGR_HOST_DIR
 unset MNGR_PREFIX
 
+# Pin the mngr user_id (and thus the Modal environment name,
+# {MNGR_ROOT_NAME}-{user_id}) to the committed constant so this redeploy targets
+# the live production environment no matter which machine runs it. Without this,
+# mngr falls back to a *random* per-profile user_id, so a redeploy from a fresh
+# checkout would silently fork the schedule into a new, empty environment. Read
+# from the shared source of truth so it can't drift from the trigger recipe.
+# (If a stale changelog profile on this machine already holds a *different*
+# user_id, mngr fails loudly on the mismatch; delete ~/.mngr-changelog-schedule
+# to let it regenerate against the pinned value.)
+export MNGR_USER_ID=$(uv run python "${REPO_ROOT}/scripts/changelog_schedule_utils.py" --print-user-id)
+
 # Pull the agent's credentials from Vault and export them so the --pass-env
 # flags below bake them into the schedule. Requires a valid `vault login
 # -method=oidc`. VAULT_ADDR / VAULT_NAMESPACE default to the imbue HCP cluster
@@ -78,21 +92,22 @@ if ! command -v vault >/dev/null 2>&1; then
     exit 1
 fi
 
-# Echo the value of the split-layout secret at secrets/<$1>/<$2>, or exit
-# non-zero. Secrets use the split layout: each key is its own leaf at
-# `<service>/<KEY>` holding a single `value` field. pipefail propagates a
+# Echo the `value` field of the secret at secrets/<$1>, or exit non-zero. In our
+# Vault schema the secret name is the last component of the path and the actual
+# value lives in a single `value` field alongside optional metadata like `owner`
+# (see docs/secret_organization.md in the vault repo). pipefail propagates a
 # failed `vault kv get` (e.g. not logged in); `jq -e` with the `// "" | select`
 # guard exits non-zero when the value is absent or empty. The value is never printed.
 read_vault_secret() {
-    vault kv get -format=json -mount=secrets "$1/$2" | jq -er '.data.data.value // "" | select(. != "")'
+    vault kv get -format=json -mount=secrets "$1" | jq -er '.data.data.value // "" | select(. != "")'
 }
 
-if ! GH_TOKEN=$(read_vault_secret mngr/dev/github GH_TOKEN); then
-    echo "Error: could not read GH_TOKEN from secrets/mngr/dev/github/GH_TOKEN. Run 'vault login -method=oidc' and confirm the entry exists." >&2
+if ! GH_TOKEN=$(read_vault_secret mngr/dev/GH_TOKEN); then
+    echo "Error: could not read GH_TOKEN from secrets/mngr/dev/GH_TOKEN. Run 'vault login -method=oidc' and confirm the entry exists." >&2
     exit 1
 fi
-if ! ANTHROPIC_API_KEY=$(read_vault_secret mngr/dev/anthropic ANTHROPIC_API_KEY); then
-    echo "Error: could not read ANTHROPIC_API_KEY from secrets/mngr/dev/anthropic/ANTHROPIC_API_KEY. Run 'vault login -method=oidc' and confirm the entry exists." >&2
+if ! ANTHROPIC_API_KEY=$(read_vault_secret mngr/ci/ANTHROPIC_API_KEY); then
+    echo "Error: could not read ANTHROPIC_API_KEY from secrets/mngr/ci/ANTHROPIC_API_KEY. Run 'vault login -method=oidc' and confirm the entry exists." >&2
     exit 1
 fi
 export GH_TOKEN ANTHROPIC_API_KEY

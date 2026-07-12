@@ -410,6 +410,43 @@ class DockerRuntimeNotRegisteredError(HostCreationError):
         )
 
 
+class DockerGvisorEphemeralRootfsError(HostCreationError):
+    """Raised when a configured gVisor (`runsc`) Docker runtime lacks `--overlay2=none`.
+
+    gVisor's default root overlay (`--overlay2=root:self`) keeps each container's root
+    filesystem in a per-sandbox overlay that is discarded whenever the container stops,
+    so mngr's SSH provisioning (the injected host key, `authorized_keys`, and the
+    self-healing-entrypoint marker) is lost the first time the container restarts --
+    leaving the host running but unreachable. Registering the runtime with
+    `--overlay2=none` writes the root layer through to the persistent Docker layer.
+    """
+
+    def __init__(self, provider_name: ProviderInstanceName, runtime_name: str) -> None:
+        self.runtime_name = runtime_name
+        super().__init__(
+            provider_name,
+            f"Docker runtime '{runtime_name}' (gVisor) for provider '{provider_name}' is registered "
+            f"without '--overlay2=none', so each container's root filesystem is ephemeral: gVisor's "
+            f"default overlay ('--overlay2=root:self') discards all root-filesystem writes when the "
+            f"container stops, so mngr's SSH provisioning is lost on the first restart and the host "
+            f"becomes unreachable.",
+        )
+        self.user_help_text = (
+            f"Fix this in one of two ways:\n"
+            f"  1. Run containers under the standard runtime instead of gVisor -- set docker_runtime to 'runc':\n"
+            f"       mngr config set --scope user providers.{provider_name}.docker_runtime runc\n"
+            f"     (or per-invocation: MNGR__PROVIDERS__{provider_name.upper()}__DOCKER_RUNTIME=runc)\n"
+            f"  2. Re-register the gVisor runtime so writes persist, then restart Docker:\n"
+            f"       sudo runsc install -- --overlay2=none\n"
+            f"       sudo systemctl restart docker\n"
+            f"     With option 2, if the container runs supervisord (or anything that installs a unix\n"
+            f"     socket via a hard link under /run), ALSO mount /run as a tmpfs -- e.g. set\n"
+            f'     default_start_args=["--tmpfs", "/run"] on this provider. --overlay2=none puts /run\n'
+            f"     on gVisor's gofer filesystem, where os.link() of a socket fails (EOPNOTSUPP), so\n"
+            f"     supervisord wedges and never starts its services without a tmpfs /run."
+        )
+
+
 class HostNameConflictError(ProviderError):
     """A host with this name already exists."""
 
@@ -481,13 +518,20 @@ class LocalHostNotDestroyableError(ProviderError):
         super().__init__(provider_name, "Cannot destroy the local host - it is your local computer")
 
 
+# Marker substring embedded in HostShutdownNotSupportedError's message. Exported as
+# an importable constant so out-of-process callers -- notably minds, which runs mngr
+# as a subprocess and only sees (exit_code, stderr), not the exception object -- can
+# match on this one shared source of truth instead of duplicating the literal.
+HOST_SHUTDOWN_NOT_SUPPORTED_MESSAGE: Final[str] = "does not support stopping hosts"
+
+
 class HostShutdownNotSupportedError(ProviderError):
     """Provider does not support stopping hosts."""
 
     user_help_text = "Stop the agent without --stop-host, or use a provider that supports stopping hosts."
 
     def __init__(self, provider_name: ProviderInstanceName) -> None:
-        super().__init__(provider_name, f"Provider {provider_name} does not support stopping hosts")
+        super().__init__(provider_name, f"Provider {provider_name} {HOST_SHUTDOWN_NOT_SUPPORTED_MESSAGE}")
 
 
 class PluginSpecifierError(MngrError, ValueError):
@@ -563,6 +607,15 @@ class InvalidKeyPathError(ConfigError, ValueError):
 
 class DockerConfigValidationError(ConfigError, ValueError):
     """Raised when Docker provider config fields are mutually inconsistent."""
+
+
+class ProviderTimeoutConfigError(ConfigError, ValueError):
+    """Raised when a provider's discovery timeout fields are mis-ordered.
+
+    The per-host and per-agent discovery timeouts must be below the provider
+    error timeout, otherwise a single slow host could never surface as UNKNOWN
+    before its whole provider is declared errored.
+    """
 
 
 class UnknownAgentTypeError(ConfigError):

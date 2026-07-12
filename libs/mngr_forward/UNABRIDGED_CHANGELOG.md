@@ -4,6 +4,32 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-10
+
+The forward stream manager no longer logs a "Discovery error from ..." warning on every poll cycle for a provider stuck on the same failure (e.g. missing credentials): provider-level discovery errors are now logged once per process via the shared `DiscoveryErrorLogSuppressor`, with an info-level recovery line (and re-armed suppression) when the provider's discovery next succeeds. Host- and agent-attributed discovery errors keep logging on every occurrence.
+
+## 2026-07-06
+
+The "Loading workspace" proxy loader now re-attempts the workspace by polling in the background and reloading once it answers, instead of full-reloading itself every second via a `<meta http-equiv="refresh">`. The old full reload stole OS focus from any other view layered over the loader (in the minds app, the bug-report modal), which made the modal's text field impossible to type into -- the focus was cleared every second. Polling leaves the loader (and any overlay focused above it) untouched while waiting, and also keeps the spinner from visibly jumping on each tick.
+
+Changed: `mngr forward` now consumes the new per-provider discovery model. The plugin's stream manager feeds every parsed discovery event into the shared, span-aware `DiscoveryStateAggregator` and reacts to the returned membership delta (newly present agents get a tunnel + `mngr event` stream, newly absent agents are torn down). Handling of the legacy global `FullDiscoverySnapshotEvent` (`DISCOVERY_FULL`) has been removed; the plugin now routes `ProviderDiscoverySnapshotEvent` (`DISCOVERY_PROVIDER`) plus the incremental agent/host events. Retain-on-provider-error semantics are unchanged, now provided by the aggregator's per-provider scoping.
+
+Fixed a span-awareness gap: the periodic snapshot's per-agent events-stream retry no longer respawns a stream for an agent destroyed during that snapshot's discovery span (the retry is now restricted to agents the aggregator still tracks).
+
+Updated the `mngr forward` help example for filtering by label to use `has(agent.labels.is_primary)` instead of the removed `workspace` label, matching the new workspace-discovery filter.
+
+Integrates the "simple names" work: the `mngr forward` label-filter help example now uses `has(agent.labels.is_primary)` instead of the removed `workspace` label, matching the new workspace-discovery filter.
+
+## 2026-07-01
+
+Added a new async/await ratchet (`test_prevent_async_await`) that freezes the current amount of `async def` / `await` usage in this project and fails if new async code is added. We strongly prefer synchronous code: it is far easier to debug, and our software is intentionally low-scale, so async provides no benefit. Existing usage is grandfathered in at its current count; the count can only decrease.
+
+## 2026-06-28
+
+Respawns a dead per-agent events stream instead of skipping it forever, fixing a case where the forward got permanently stuck serving the "Loading workspace" / 503 page after an agent's host restarted.
+
+Each tracked agent has a long-lived `mngr event <id> services requests --follow` child whose output is the only thing that populates the resolver's per-agent service map; with the service-forwarding strategy, `resolve` returns None (a 503) until that map contains the requested service URL. When the agent's host restarts (e.g. after a reboot), the `--follow` connection breaks and the child exits non-zero, but the old `_start_events_stream` guard skipped any agent already present in `_events_processes` -- including the now-dead entry -- so the stream was never respawned, the service map stayed empty, and the proxy returned 503 indefinitely even though discovery (including fresh SSH info) had fully recovered. `_start_events_stream` now treats a dead entry as absent: it drops the exited child, logs the respawn, and starts a fresh stream. Respawns ride the periodic discovery snapshot, which rate-limits them to the snapshot cadence, and already-known services are preserved across the respawn.
+
 ## 2026-06-23
 
 The websocket forward path now emits a `system_interface_backend_failure` envelope when the backend connection fails (unresolved target, SSH-tunnel setup failure, refused host-loopback dial, or a connect-time backend-websocket failure), matching what the HTTP/SSE paths already did. Previously only HTTP failures emitted this envelope, so a consumer like minds could go blind to a dead system interface whose only live channel was a websocket: an already-loaded SPA whose backend died would silently retry its websocket forever, never enrolling the agent as a recovery probe suspect, so the recovery redirect never fired and the user was stranded on a frozen workspace. The websocket path now feeds the same recovery signal as HTTP.

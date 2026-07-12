@@ -11,6 +11,15 @@ from imbue.skitwright.expect import expect
 @pytest.mark.release
 @pytest.mark.tmux
 def test_create_with_template(e2e: E2eSession) -> None:
+    """Creating with a ``--template`` applies that template's settings to the agent.
+
+    Defines a template that sets ``transfer = "none"`` and creates an agent with it,
+    then verifies the template actually took effect: the agent's ``work_dir`` contains
+    no ``worktrees`` segment (in-place, not a worktree-based transfer), and the agent's
+    real runtime cwd (via ``mngr exec ... pwd``) is that same in-place ``work_dir``.
+    Both checks would fail if the template were ignored and the default worktree
+    transfer were used instead.
+    """
     # Write a template that sets transfer=none (so agent runs in-place)
     cfg = ".$MNGR_ROOT_NAME/settings.local.toml"
     expect(
@@ -55,9 +64,12 @@ def test_create_with_template(e2e: E2eSession) -> None:
 def test_create_with_nonexistent_template(e2e: E2eSession) -> None:
     """Unhappy path: creating with an unknown template fails with a helpful error.
 
-    Shares the templates tutorial block with ``test_create_with_template``: it
-    defines one real template so the error path can report the set of available
-    templates, then references a template name that was never configured.
+    Defines one real template, then runs ``create`` against a template name that was
+    never configured. Verifies the command fails, that its stderr names the missing
+    template, says it was "not found", and lists the one configured template (so the
+    user can fix the typo), and that no agent with the requested name was created.
+    A no-op error path that silently created the agent or omitted these details would
+    fail these assertions.
     """
     # Write a real template so there is at least one available template to report.
     cfg = ".$MNGR_ROOT_NAME/settings.local.toml"

@@ -4,6 +4,7 @@ import pytest
 
 from imbue.mngr_imbue_cloud.errors import BareMetalConfigError
 from imbue.mngr_imbue_cloud.errors import BareMetalProvisioningError
+from imbue.mngr_imbue_cloud.slices.ordering import _ReinstallStartAttempt
 from imbue.mngr_imbue_cloud.slices.ordering import _looks_like_service_name
 from imbue.mngr_imbue_cloud.slices.ordering import build_box_host_key_postinstall_script
 from imbue.mngr_imbue_cloud.slices.ordering import derive_server_specs
@@ -12,6 +13,7 @@ from imbue.mngr_imbue_cloud.slices.ordering import select_eco_option_codes
 from imbue.mngr_imbue_cloud.slices.ordering import start_os_reinstall
 from imbue.mngr_imbue_cloud.slices.ordering import summarize_checkout_prices
 from imbue.mngr_ovh.client import OvhVpsClient
+from imbue.mngr_vps.errors import VpsApiError
 
 
 def _eco_options() -> list[dict]:
@@ -267,3 +269,48 @@ def test_start_os_reinstall_injects_a_known_host_key_and_returns_its_public_half
     assert customizations["sshKey"] == "ssh-ed25519 AAAAclient"
     assert customizations["postInstallationScript"]
     assert result.box_host_public_key.startswith("ssh-ed25519 ")
+
+
+class _RaisingReinstallClient:
+    """Fake OVH client whose reinstall POST always raises a scripted ``VpsApiError``."""
+
+    def __init__(self, error: VpsApiError) -> None:
+        self._error = error
+        self.call_count = 0
+
+    def call_api(self, method: str, path: str, **body: object) -> dict:
+        self.call_count += 1
+        raise self._error
+
+
+def _reinstall_attempt(client: object) -> _ReinstallStartAttempt:
+    return _ReinstallStartAttempt(
+        client=client,
+        service_name="ns1.example",
+        os_template="debian12_64",
+        customizations={"sshKey": "ssh-ed25519 AAAAclient", "postInstallationScript": "x"},
+    )
+
+
+def test_reinstall_start_attempt_wraps_task_on_success() -> None:
+    # A successful POST is wrapped in a one-tuple so poll_for_value stops retrying.
+    assert _reinstall_attempt(_FakeReinstallClient())() == ({"taskId": 4242},)
+
+
+def test_reinstall_start_attempt_retries_on_transient_compatibility_error() -> None:
+    # OVH's transient OS-compatibility-lookup failure signals a retry (None), not an error.
+    transient = VpsApiError(
+        0,
+        "OVH API POST /dedicated/server/ns1.example/reinstall returned error: "
+        "Error while retrieving compatibility details for operating system debian12_64",
+    )
+    client = _RaisingReinstallClient(transient)
+    assert _reinstall_attempt(client)() is None
+    assert client.call_count == 1
+
+
+def test_reinstall_start_attempt_propagates_non_transient_error() -> None:
+    # Any other OVH error is not swallowed -- it propagates so setup fails loudly.
+    fatal = VpsApiError(404, "OVH API POST /dedicated/server/ns1.example/reinstall returned error: not found")
+    with pytest.raises(VpsApiError):
+        _reinstall_attempt(_RaisingReinstallClient(fatal))()

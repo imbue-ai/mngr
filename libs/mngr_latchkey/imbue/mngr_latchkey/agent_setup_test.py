@@ -22,6 +22,7 @@ from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY_PASSWORD
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY_SECONDARY
+from imbue.mngr_latchkey.agent_setup import SECRET_LATCHKEY_ENV_VAR_NAMES
 from imbue.mngr_latchkey.agent_setup import _build_allowed_agent_anyof_entry
 from imbue.mngr_latchkey.agent_setup import _extract_agent_id_from_anyof_entry
 from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
@@ -41,6 +42,21 @@ from imbue.mngr_latchkey.testing import make_full_fake_latchkey
 
 def _full_fake(tmp_path: Path) -> FakeLatchkey:
     return make_full_fake_latchkey(tmp_path)
+
+
+def test_secret_latchkey_env_var_names_are_exactly_password_and_jwt() -> None:
+    """The secret-name set names the two credential-bearing wiring vars and nothing else.
+
+    Callers that render a command carrying the latchkey wiring as ``--host-env
+    NAME=VALUE`` flags mask exactly these values before logging; the gateway URLs
+    and the disable-counting flag are not secret and must stay out of the set.
+    """
+    assert SECRET_LATCHKEY_ENV_VAR_NAMES == frozenset(
+        {ENV_LATCHKEY_GATEWAY_PASSWORD, ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE}
+    )
+    assert ENV_LATCHKEY_GATEWAY not in SECRET_LATCHKEY_ENV_VAR_NAMES
+    assert ENV_LATCHKEY_GATEWAY_SECONDARY not in SECRET_LATCHKEY_ENV_VAR_NAMES
+    assert ENV_LATCHKEY_DISABLE_COUNTING not in SECRET_LATCHKEY_ENV_VAR_NAMES
 
 
 # -- prepare_agent_latchkey ---------------------------------------------------
@@ -86,9 +102,13 @@ def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
     assert setup.opaque_permissions_path is not None
     assert setup.opaque_permissions_path.parent == opaque_permissions_dir(fake.plugin_data_dir)
     on_disk = json.loads(setup.opaque_permissions_path.read_text())
-    # Two rules now ship in the baseline:
+    # Three rules now ship in the baseline:
     #
-    # 1. ``minds-api-proxy-unauthorized`` (first): scope matches any
+    # 0. ``minds-api-proxy-report`` (first): a POST to the per-agent
+    #    ``/report`` path is allowed for ANY agent, with no per-agent
+    #    registration. It must come before the unauthorized gate because
+    #    detent stops at the first matching scope.
+    # 1. ``minds-api-proxy-unauthorized``: scope matches any
     #    ``/minds-api-proxy/api/v1/agents/<id>/...`` request whose <id>
     #    is NOT in the allowed list (encoded as ``not + anyOf`` on the
     #    path schema; initially empty -- no agent allowed). Detent
@@ -100,6 +120,7 @@ def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
     #    Authorized agents (those past Rule 1's ``not + anyOf``) hit
     #    this rule and are let through by the generic permission.
     assert on_disk["rules"] == [
+        {"minds-api-proxy-report": ["minds-api-proxy-report-allow"]},
         {"minds-api-proxy-per-agent-unauthorized": []},
         {
             "latchkey-self": [
@@ -107,10 +128,28 @@ def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
                 "latchkey-self-read-self-permissions",
                 "latchkey-self-read-available-permissions",
                 "minds-api-proxy-per-agent",
+                "minds-api-schema-read",
             ],
         },
     ]
     schemas = on_disk["schemas"]
+    # The report scope + permission both pin to a POST on the per-agent
+    # ``/report`` path, so any agent's bug-report escalation is let through
+    # without registration while every other agent-scoped path still falls
+    # to the unauthorized gate.
+    report_scope = schemas["minds-api-proxy-report"]["properties"]
+    assert report_scope["domain"] == {"const": "latchkey-self.invalid"}
+    assert report_scope["method"] == {"const": "POST"}
+    assert report_scope["path"] == {
+        "type": "string",
+        "pattern": r"^/minds-api-proxy/api/v1/agents/[^/]+/report$",
+    }
+    report_perm = schemas["minds-api-proxy-report-allow"]["properties"]
+    assert report_perm["method"] == {"const": "POST"}
+    assert report_perm["path"] == {
+        "type": "string",
+        "pattern": r"^/minds-api-proxy/api/v1/agents/[^/]+/report$",
+    }
     # The minds-api-proxy-unauthorized scope:
     #   * ``domain`` constrained to the gateway-self host,
     #   * ``path`` must match the proxy-prefix pattern AND not match
@@ -142,6 +181,14 @@ def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
     assert available_path_schema == {
         "type": "string",
         "pattern": r"^/permissions/available/[a-z0-9][a-z0-9-]*$",
+    }
+    # Every agent may read the (non-agent-scoped) API schema document by default:
+    # a GET pinned to the proxy's inbound /api/schema path. It rides the
+    # domain-only latchkey-self scope (above), so no per-agent registration is
+    # needed -- a brand-new workspace can fetch it immediately.
+    assert schemas["minds-api-schema-read"]["properties"] == {
+        "method": {"const": "GET"},
+        "path": {"const": "/minds-api-proxy/api/schema"},
     }
 
 
@@ -432,11 +479,11 @@ def test_register_agent_for_host_preserves_other_grants(tmp_path: Path) -> None:
     path = permissions_path_for_host(tmp_path, host_id)
     config = json.loads(path.read_text())
     rule_keys = [next(iter(rule.keys())) for rule in config["rules"]]
-    # The minds-api-proxy-unauthorized rule must come first so detent
-    # stops at it for an unauthorized agent_id (rejecting with the
-    # empty permission list) rather than falling through to the
-    # latchkey-self baseline rule.
-    assert rule_keys == ["minds-api-proxy-per-agent-unauthorized", "latchkey-self"]
+    # The always-allowed report rule comes first, then the
+    # minds-api-proxy-unauthorized gate (so detent stops at it for an
+    # unauthorized agent_id, rejecting with the empty permission list
+    # rather than falling through to the latchkey-self baseline rule).
+    assert rule_keys == ["minds-api-proxy-report", "minds-api-proxy-per-agent-unauthorized", "latchkey-self"]
 
 
 def test_register_agent_for_host_raises_when_anyof_was_hand_edited(tmp_path: Path) -> None:
@@ -454,3 +501,10 @@ def test_register_agent_for_host_raises_when_anyof_was_hand_edited(tmp_path: Pat
     path.write_text(json.dumps(config))
     with pytest.raises(LatchkeyStoreError):
         register_agent_for_host(tmp_path, host_id, agent_id)
+
+
+# The ``minds-workspaces`` cross-workspace API scope is no longer part of the
+# agent baseline: its scope + per-verb schemas are self-contained in the
+# ``workspace`` permission request's effect and spliced in on approval (see
+# ``permission_requests.mjs`` and its end-to-end tests). Nothing about it lives
+# in ``agent_setup`` anymore.

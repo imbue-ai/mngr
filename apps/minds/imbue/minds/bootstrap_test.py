@@ -391,46 +391,27 @@ def test_ensure_mngr_settings_writes_default_imbue_cloud_disabled(
     assert parsed["plugins"]["recursive"]["enabled"] is False
 
 
-def test_ensure_mngr_settings_writes_default_aws_disabled_without_credentials(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """The region-less default ``[providers.aws]`` instance must be suppressed even with no AWS creds.
-
-    Otherwise ``get_all_provider_instances`` auto-creates it and its discovery
-    fails every ``mngr list`` cycle ("credentials not configured"), logging a
-    spurious warning. This is the no-credentials case, where no per-region
-    ``aws-<region>`` blocks are written, so the default would be the only AWS
-    provider present.
-    """
-    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
-    monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
-    monkeypatch.delenv("AWS_PROFILE", raising=False)
-    _ensure_mngr_settings("minds-dev-tname")
-    parsed = tomllib.loads(settings_path.read_text())
-    assert parsed["providers"]["aws"] == {"backend": "aws", "is_enabled": False}
-    assert not [name for name in parsed["providers"] if name.startswith("aws-")]
-
-
 def test_ensure_mngr_settings_keeps_default_aws_disabled_alongside_region_blocks(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The default ``[providers.aws]`` stays suppressed even when per-region blocks are written."""
+    """The region-less default ``[providers.aws]`` stays suppressed alongside the per-region blocks.
+
+    Otherwise ``get_all_provider_instances`` auto-creates it and its discovery
+    fails every ``mngr list`` cycle ("credentials not configured" -- it has no
+    default_region); the usable providers are the per-region blocks.
+    """
     settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
-    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIATEST")
-    monkeypatch.delenv("AWS_PROFILE", raising=False)
     _ensure_mngr_settings("minds-dev-tname")
     parsed = tomllib.loads(settings_path.read_text())
     assert parsed["providers"]["aws"] == {"backend": "aws", "is_enabled": False}
     assert [name for name in parsed["providers"] if name.startswith("aws-")]
 
 
-def test_ensure_mngr_settings_writes_aws_blocks_when_credentials_present(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """One ``[providers.aws-<region>]`` block is written per configured region when AWS creds exist."""
+def test_ensure_mngr_settings_always_writes_aws_region_blocks(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """One ``[providers.aws-<region>]`` block is written per configured region, with no
+    AWS-credentials gate: a credential-less region errors visibly in discovery (and
+    the providers panel) instead of being silently absent."""
     settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
-    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIATEST")
-    monkeypatch.delenv("AWS_PROFILE", raising=False)
     _ensure_mngr_settings("minds-dev-tname")
     parsed = tomllib.loads(settings_path.read_text())
     providers = parsed["providers"]
@@ -442,40 +423,114 @@ def test_ensure_mngr_settings_writes_aws_blocks_when_credentials_present(
             "default_instance_type": "t3.large",
             "install_gvisor_runtime": True,
             "docker_runtime": "runsc",
+            "default_start_args": ["--tmpfs", "/run"],
         }
 
 
-def test_ensure_mngr_settings_omits_aws_blocks_when_no_credentials(
+def test_ensure_mngr_settings_removes_unconfigured_aws_region_blocks(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """No AWS provider blocks are written when no AWS credentials are configured.
-
-    Writing dead blocks would make ``mngr list`` fan out to AWS providers that
-    can't authenticate, logging a provider-unavailable error per region.
-    """
+    """A stale ``aws-<region>`` block for a region no longer in ``CONFIGURED_AWS_REGIONS``
+    is pruned on the next rewrite."""
     settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
-    monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
-    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    settings_path.write_text('[providers.aws-eu-central-9]\nbackend = "aws"\ndefault_region = "eu-central-9"\n')
     _ensure_mngr_settings("minds-dev-tname")
     parsed = tomllib.loads(settings_path.read_text())
-    assert not [name for name in parsed["providers"] if name.startswith("aws-")]
+    assert "aws-eu-central-9" not in parsed["providers"]
+    for region in CONFIGURED_AWS_REGIONS:
+        assert f"aws-{region}" in parsed["providers"]
 
 
-def test_ensure_mngr_settings_removes_stale_aws_blocks_when_credentials_removed(
+def test_ensure_mngr_settings_preserves_aws_region_is_enabled_on_rewrite(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Stale ``aws-<region>`` blocks are pruned once AWS credentials are no longer present."""
+    """A panel-toggled ``is_enabled = false`` on an ``aws-<region>`` block survives the
+    rewrite that re-pins the minds-controlled fields."""
     settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
-    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIATEST")
-    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    _ensure_mngr_settings("minds-dev-tname")
+    set_provider_is_enabled(f"aws-{CONFIGURED_AWS_REGIONS[0]}", False, root_name="minds-dev-tname")
+
+    # Force the rewrite path: a stale extra aws-* block makes the desired-shape
+    # check fail, so the blocks are deleted and re-pinned.
+    doc = tomllib.loads(settings_path.read_text())
+    assert doc["providers"][f"aws-{CONFIGURED_AWS_REGIONS[0]}"]["is_enabled"] is False
+    with settings_path.open("a") as f:
+        f.write('\n[providers.aws-eu-central-9]\nbackend = "aws"\n')
+
     _ensure_mngr_settings("minds-dev-tname")
     parsed = tomllib.loads(settings_path.read_text())
-    assert [name for name in parsed["providers"] if name.startswith("aws-")]
+    assert "aws-eu-central-9" not in parsed["providers"]
+    disabled_block = parsed["providers"][f"aws-{CONFIGURED_AWS_REGIONS[0]}"]
+    assert disabled_block["is_enabled"] is False
+    assert disabled_block["backend"] == "aws"
+    assert disabled_block["default_instance_type"] == "t3.large"
+    for region in CONFIGURED_AWS_REGIONS[1:]:
+        assert "is_enabled" not in parsed["providers"][f"aws-{region}"]
 
-    monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
+
+def test_ensure_mngr_settings_returns_whether_file_was_modified(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The first write returns True (callers should bounce ``mngr observe``);
+    a repeat call on an already-shaped file returns False."""
+    stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    assert _ensure_mngr_settings("minds-dev-tname") is True
+    assert _ensure_mngr_settings("minds-dev-tname") is False
+
+
+def test_ensure_mngr_settings_leaves_panel_disabled_modal_alone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A panel-toggled ``is_enabled = false`` on ``[providers.modal]`` is a valid desired
+    shape: it neither triggers a rewrite nor gets reset back to enabled."""
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
     _ensure_mngr_settings("minds-dev-tname")
-    parsed_after = tomllib.loads(settings_path.read_text())
-    assert not [name for name in parsed_after["providers"] if name.startswith("aws-")]
+    set_provider_is_enabled("modal", False, root_name="minds-dev-tname")
+
+    assert _ensure_mngr_settings("minds-dev-tname") is False
+    parsed = tomllib.loads(settings_path.read_text())
+    assert parsed["providers"]["modal"]["is_enabled"] is False
+    assert parsed["providers"]["modal"]["mode"] == "DIRECT"
+    assert parsed["providers"]["modal"]["is_persistent"] is True
+
+
+def test_ensure_mngr_settings_preserves_modal_is_enabled_on_rewrite(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """When something else forces a rewrite, a panel-toggled modal Disable is carried
+    over while the minds-controlled fields are re-pinned."""
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    _ensure_mngr_settings("minds-dev-tname")
+    set_provider_is_enabled("modal", False, root_name="minds-dev-tname")
+
+    # Force the rewrite path: a stale extra aws-* block makes the desired-shape
+    # check fail, so every minds-controlled block is re-pinned.
+    with settings_path.open("a") as f:
+        f.write('\n[providers.aws-eu-central-9]\nbackend = "aws"\n')
+
+    assert _ensure_mngr_settings("minds-dev-tname") is True
+    parsed = tomllib.loads(settings_path.read_text())
+    modal_block = parsed["providers"]["modal"]
+    assert modal_block["is_enabled"] is False
+    assert modal_block["mode"] == "DIRECT"
+    assert modal_block["is_persistent"] is True
+
+
+def test_ensure_mngr_settings_pins_modal_fields_around_legacy_panel_only_block(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A legacy ``[providers.modal]`` holding only a panel-written ``is_enabled = false``
+    (from before the Modal-Direct block existed) gets the pinned fields added while the
+    user's Disable is preserved."""
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    settings_path.write_text("[providers.modal]\nis_enabled = false\n")
+
+    assert _ensure_mngr_settings("minds-dev-tname") is True
+    parsed = tomllib.loads(settings_path.read_text())
+    modal_block = parsed["providers"]["modal"]
+    assert modal_block["is_enabled"] is False
+    assert modal_block["mode"] == "DIRECT"
+    assert modal_block["is_persistent"] is True
 
 
 def test_set_imbue_cloud_provider_for_account_also_writes_default_disabled_block(
@@ -537,8 +592,9 @@ def test_set_imbue_cloud_provider_for_account_repairs_missing_default_block_on_r
         root_name="minds-staging",
     )
     # The per-account write itself is a no-op (existing block already matches),
-    # but the file is still modified because the suppression block lands.
-    assert changed is False
+    # but the file is still modified because the suppression block lands -- and
+    # that modification is reported so the caller bounces ``mngr observe``.
+    assert changed is True
     parsed = tomllib.loads(settings_path.read_text())
     assert parsed["providers"]["imbue_cloud"] == {"backend": "imbue_cloud", "is_enabled": False}
     assert parsed["plugins"]["recursive"]["enabled"] is False

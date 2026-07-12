@@ -1,8 +1,8 @@
 // Electron sidebar page: loaded into the shared modal WebContentsView when
 // the user opens the sidebar. Renders the floating menu (workspace list +
-// "New workspace" + "Manage account(s)"). Clicks + context menus go through
-// window.minds IPC. In browser mode the chrome.js embedded sidebar handles
-// the same job inline instead.
+// "New workspace" + "Settings" + "Manage account(s)"). Clicks + context menus
+// go through window.minds IPC. In browser mode the chrome.js embedded sidebar
+// handles the same job inline instead.
 (function () {
   var isElectron = !!window.minds;
   var currentWorkspaceId = null;
@@ -90,6 +90,10 @@
       navigate('/create');
       return;
     }
+    if (e.target.closest('#sidebar-settings')) {
+      navigate('/settings');
+      return;
+    }
     if (e.target.closest('#sidebar-account')) {
       navigate(signedIn ? '/accounts' : '/auth/login');
       return;
@@ -123,6 +127,12 @@
     if (e.target.closest('#sidebar-menu')) return;
     dismissModal();
   });
+
+  // Repaint rows when the shared backup-health cache updates so the backup
+  // warning badge appears/disappears without a workspace-list event.
+  if (window.mindsBackupHealth) {
+    window.mindsBackupHealth.onUpdate(function () { renderWorkspaces(lastWorkspaces); });
+  }
 
   if (isElectron && window.minds.onCurrentWorkspaceChanged) {
     window.minds.onCurrentWorkspaceChanged(function (agentId) {

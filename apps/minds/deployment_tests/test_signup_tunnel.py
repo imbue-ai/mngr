@@ -17,24 +17,30 @@ from collections.abc import Callable
 import pytest
 
 from imbue.minds.deployment_tests._mailtm import MailtmInbox
-from imbue.minds.deployment_tests.data_types import FctTemplateRef
+from imbue.minds.deployment_tests.data_types import DefaultWorkspaceTemplateRef
 from imbue.minds.deployment_tests.data_types import SharedEnvHandle
 from imbue.minds.deployment_tests.helpers import wait_for_env_ready
 
-pytestmark = pytest.mark.minds_services
+pytestmark = [pytest.mark.release, pytest.mark.minds_services]
 
 
+# NOT YET WORKING. Wired into the per-run CI env flow (fixtures + minds_services
+# marker) but the body is still a stub: it must be debugged and implemented
+# before it can pass. Remaining work: a mail.tm-backed signup driver, a
+# one-time-code sign-in driver, an in-process desktop-client workspace +
+# system-interface forwarding driver, and a Cloudflare-tunnel-list assertion
+# helper. Tracked as a Phase 2 follow-up; see specs/minds-deployment-tests.md.
 @pytest.mark.skip(
     reason=(
-        "Pending: mail.tm-backed signup driver, one-time-code sign-in driver, in-process "
-        "desktop client workspace + system-interface forwarding driver, Cloudflare-list "
-        "assertion helper. See specs/minds-deployment-tests.md > Initial test inventory."
+        "NOT YET WORKING -- wired into the per-run CI env flow but the body is a stub; needs "
+        "signup + one-time-code + workspace/tunnel drivers before it will pass. Phase 2 "
+        "follow-up; see specs/minds-deployment-tests.md."
     )
 )
 def test_realistic_signup_verify_signin_create_tunnel_signout(
     shared_env: Callable[[str], SharedEnvHandle],
     signup_email: MailtmInbox,
-    fct_template_ref: FctTemplateRef,
+    default_workspace_template_ref: DefaultWorkspaceTemplateRef,
 ) -> None:
     """End-to-end first-time-user flow against the ``default`` shared env.
 
@@ -63,7 +69,7 @@ def test_realistic_signup_verify_signin_create_tunnel_signout(
     4. **Workspace creation.** Use the in-process desktop client (same
        ``create_desktop_client(...)`` pattern as the existing
        ``test_desktop_client_e2e.py``) to create a workspace from
-       ``fct_template_ref.as_mngr_template_arg()``. Wait for the
+       ``default_workspace_template_ref.as_mngr_template_arg()``. Wait for the
        workspace to reach a running state.
     5. **Forward the system-interface.** Drive the desktop client's
        "forward system-interface" action for the workspace -- this is
@@ -77,5 +83,5 @@ def test_realistic_signup_verify_signin_create_tunnel_signout(
        requests with the same session token return 401.
     """
     wait_for_env_ready(shared_env("default"))
-    _ = (signup_email, fct_template_ref)
+    _ = (signup_email, default_workspace_template_ref)
     raise AssertionError("not implemented yet -- see skip reason")

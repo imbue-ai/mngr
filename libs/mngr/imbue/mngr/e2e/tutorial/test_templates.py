@@ -35,7 +35,7 @@ def _write_with_tests_template(e2e: E2eSession) -> None:
 @pytest.mark.modal
 @pytest.mark.tmux
 def test_templates_setup_via_config_edit(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # templates are defined in your config (user, project, or local scope).
         # here's how to set one up using the config command:
         mngr config edit --scope project
@@ -47,7 +47,13 @@ def test_templates_setup_via_config_edit(e2e: E2eSession) -> None:
         #   agent_args = ["--dangerously-skip-permissions"]
         # then use the template when creating agents:
         mngr create my-task --template modal-big
-    """)
+
+    Scope: the full template setup flow. `mngr config edit --scope project`
+    succeeds and creates the project config file, into which a
+    [create_templates.modal-big] section is added (simulating the in-editor
+    edit); a subsequent `mngr create --template modal-big` then resolves and
+    applies that newly defined template and succeeds.
+    """
     expect(
         e2e.run(
             "EDITOR=/bin/true mngr config edit --scope project",
@@ -79,10 +85,15 @@ def test_templates_setup_via_config_edit(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 def test_create_template_short_form(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # short form
         mngr create my-task -t modal-big
-    """)
+
+    Scope: `-t` is the short form of `--template`. Creating with `-t modal-big`
+    resolves and applies the modal-big template (substituted with transfer=none
+    for this local test), so the agent runs in-place -- its work directory is the
+    session cwd rather than a generated worktree, confirmed via `mngr exec pwd`.
+    """
     _write_modal_big_template(e2e)
     expect(
         e2e.run(
@@ -113,10 +124,14 @@ def test_create_template_short_form(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_create_stack_templates(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # stack multiple templates (later templates override earlier ones)
         mngr create my-task --template modal-big --template with-tests
-    """)
+
+    Scope: the happy path of stacking templates. With both modal-big and
+    with-tests defined in config, passing `--template` twice resolves and applies
+    both templates and the create succeeds.
+    """
     _write_modal_big_template(e2e)
     _write_with_tests_template(e2e)
     expect(
@@ -130,17 +145,16 @@ def test_create_stack_templates(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.timeout(60)
 def test_create_stack_templates_with_unknown_template_fails(e2e: E2eSession) -> None:
-    """Stacking an undefined template name fails fast with a clear error.
-
-    This exercises the same --template stacking block as the happy-path test,
-    but on the unhappy path: a name that is not defined in any config scope is
-    rejected during template resolution (before any agent/host is created), so
-    no tmux or remote provider is touched.
-    """
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # stack multiple templates (later templates override earlier ones)
         mngr create my-task --template modal-big --template with-tests
-    """)
+
+    Scope: the unhappy path of the same --template stacking block. When one
+    stacked name is not defined in any config scope, create fails fast during
+    template resolution (before any agent/host is created, so no tmux or remote
+    provider is touched); stderr names the offending template and says it was
+    not found, rather than silently falling back to only the defined templates.
+    """
     _write_modal_big_template(e2e)
     result = e2e.run(
         "mngr create my-task --template modal-big --template does-not-exist --type command --no-ensure-clean --no-connect -- sleep 100943",

@@ -1,54 +1,52 @@
 from pathlib import Path
 
 import pytest
-import sentry_sdk
-from loguru import logger
-from sentry_sdk import Client
-from sentry_sdk import isolation_scope
-from sentry_sdk.envelope import Envelope
-from sentry_sdk.transport import Transport
-from sentry_sdk.types import Event
-from sentry_sdk.types import Hint
 
+from imbue.imbue_common.sentry.core import ErrorAttachmentsS3Uploader
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
-from imbue.minds.utils.sentry.core import ErrorAttachmentsS3Uploader
-from imbue.minds.utils.sentry.core import MINDS_SENTRY_ENABLED_ENV_VAR
+from imbue.minds.utils.sentry.core import PRODUCTION_UPLOADS_BUCKET
 from imbue.minds.utils.sentry.core import SENTRY_DSN_DEV
 from imbue.minds.utils.sentry.core import SENTRY_DSN_PRODUCTION
 from imbue.minds.utils.sentry.core import SENTRY_DSN_STAGING
+from imbue.minds.utils.sentry.core import STAGING_UPLOADS_BUCKET
 from imbue.minds.utils.sentry.core import SentryDeployEnvironment
+from imbue.minds.utils.sentry.core import _MINDS_LOG_ATTACHMENT_GROUPS
+from imbue.minds.utils.sentry.core import _S3_ATTACHMENT_BUCKET_BY_ENVIRONMENT
 from imbue.minds.utils.sentry.core import _SENTRY_DSN_BY_ENVIRONMENT
-from imbue.minds.utils.sentry.core import _before_send_wrapper
-from imbue.minds.utils.sentry.core import is_sentry_enabled
+from imbue.minds.utils.sentry.core import latchkey_forward_sentry_consent_path
+from imbue.minds.utils.sentry.core import resolve_latchkey_forward_sentry_env
 from imbue.minds.utils.sentry.core import resolve_sentry_environment
-from imbue.minds.utils.sentry.loguru_handler import should_record_sentry_event
+from imbue.minds.utils.sentry.core import sentry_deploy_environment_from_minds_env_name
+from imbue.minds.utils.sentry.core import write_latchkey_forward_sentry_consent
+from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_CONSENT_FILE_ENV_VAR
+from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_DSN_ENV_VAR
+from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_ENVIRONMENT_ENV_VAR
+from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_S3_BUCKET_ENV_VAR
+from imbue.mngr_latchkey.sentry import read_forward_sentry_consent
+from imbue.mngr_latchkey.sentry import resolve_forward_sentry_config
 
 
-def test_from_minds_env_name_maps_production_and_staging() -> None:
-    assert SentryDeployEnvironment.from_minds_env_name("production") is SentryDeployEnvironment.PRODUCTION
-    assert SentryDeployEnvironment.from_minds_env_name("staging") is SentryDeployEnvironment.STAGING
+def test_sentry_environment_from_minds_env_name_maps_production_and_staging() -> None:
+    assert sentry_deploy_environment_from_minds_env_name("production") is SentryDeployEnvironment.PRODUCTION
+    assert sentry_deploy_environment_from_minds_env_name("staging") is SentryDeployEnvironment.STAGING
 
 
 @pytest.mark.parametrize("env_name", ["dev-josh-1", "ci-ephemeral", "", "Production", "STAGING", None])
-def test_from_minds_env_name_defaults_to_development(env_name: str | None) -> None:
-    assert SentryDeployEnvironment.from_minds_env_name(env_name) is SentryDeployEnvironment.DEVELOPMENT
+def test_sentry_environment_from_minds_env_name_defaults_to_development(env_name: str | None) -> None:
+    assert sentry_deploy_environment_from_minds_env_name(env_name) is SentryDeployEnvironment.DEVELOPMENT
 
 
-@pytest.mark.parametrize("raw_value", ["1", "true", "TRUE", "yes", " Yes "])
-def test_is_sentry_enabled_accepts_truthy_values(monkeypatch: pytest.MonkeyPatch, raw_value: str) -> None:
-    monkeypatch.setenv(MINDS_SENTRY_ENABLED_ENV_VAR, raw_value)
-    assert is_sentry_enabled() is True
+def test_dsn_map_pairs_each_environment_with_a_distinct_dsn() -> None:
+    assert _SENTRY_DSN_BY_ENVIRONMENT[SentryDeployEnvironment.PRODUCTION] == SENTRY_DSN_PRODUCTION
+    assert _SENTRY_DSN_BY_ENVIRONMENT[SentryDeployEnvironment.STAGING] == SENTRY_DSN_STAGING
+    assert _SENTRY_DSN_BY_ENVIRONMENT[SentryDeployEnvironment.DEVELOPMENT] == SENTRY_DSN_DEV
+    assert len({SENTRY_DSN_PRODUCTION, SENTRY_DSN_STAGING, SENTRY_DSN_DEV}) == 3
 
 
-@pytest.mark.parametrize("raw_value", ["0", "false", "no", ""])
-def test_is_sentry_enabled_rejects_other_values(monkeypatch: pytest.MonkeyPatch, raw_value: str) -> None:
-    monkeypatch.setenv(MINDS_SENTRY_ENABLED_ENV_VAR, raw_value)
-    assert is_sentry_enabled() is False
-
-
-def test_is_sentry_enabled_defaults_to_false_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv(MINDS_SENTRY_ENABLED_ENV_VAR, raising=False)
-    assert is_sentry_enabled() is False
+def test_s3_bucket_map_only_production_and_staging_have_buckets() -> None:
+    assert _S3_ATTACHMENT_BUCKET_BY_ENVIRONMENT[SentryDeployEnvironment.PRODUCTION] == PRODUCTION_UPLOADS_BUCKET
+    assert _S3_ATTACHMENT_BUCKET_BY_ENVIRONMENT[SentryDeployEnvironment.STAGING] == STAGING_UPLOADS_BUCKET
+    assert _S3_ATTACHMENT_BUCKET_BY_ENVIRONMENT[SentryDeployEnvironment.DEVELOPMENT] is None
 
 
 @pytest.mark.parametrize(
@@ -71,11 +69,47 @@ def test_resolve_sentry_environment_defaults_to_development_when_unactivated(mon
     assert resolve_sentry_environment() is SentryDeployEnvironment.DEVELOPMENT
 
 
-def test_dsn_map_pairs_each_environment_with_a_distinct_dsn() -> None:
-    assert _SENTRY_DSN_BY_ENVIRONMENT[SentryDeployEnvironment.PRODUCTION] == SENTRY_DSN_PRODUCTION
-    assert _SENTRY_DSN_BY_ENVIRONMENT[SentryDeployEnvironment.STAGING] == SENTRY_DSN_STAGING
-    assert _SENTRY_DSN_BY_ENVIRONMENT[SentryDeployEnvironment.DEVELOPMENT] == SENTRY_DSN_DEV
-    assert len({SENTRY_DSN_PRODUCTION, SENTRY_DSN_STAGING, SENTRY_DSN_DEV}) == 3
+def test_resolve_latchkey_forward_sentry_env_round_trips_into_forward_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The env vars minds publishes for the daemon must be consumable by the daemon's own resolver,
+    # yielding minds' resolved DSN + environment + bucket + consent-file path. Verified end-to-end here
+    # so the two sides (publisher and consumer) cannot drift apart. The bucket is always published (it
+    # is infrastructure, decoupled from consent); consent lives in the file.
+    monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, "minds-staging")
+    consent_path = latchkey_forward_sentry_consent_path(tmp_path)
+    published_env = resolve_latchkey_forward_sentry_env(consent_file_path=consent_path)
+    assert published_env[MNGR_LATCHKEY_SENTRY_DSN_ENV_VAR] == SENTRY_DSN_STAGING
+    assert published_env[MNGR_LATCHKEY_SENTRY_ENVIRONMENT_ENV_VAR] == SentryDeployEnvironment.STAGING.value
+    assert published_env[MNGR_LATCHKEY_SENTRY_S3_BUCKET_ENV_VAR] == STAGING_UPLOADS_BUCKET
+    assert published_env[MNGR_LATCHKEY_SENTRY_CONSENT_FILE_ENV_VAR] == str(consent_path)
+
+    for env_var_name, value in published_env.items():
+        monkeypatch.setenv(env_var_name, value)
+    forward_config = resolve_forward_sentry_config()
+    assert forward_config is not None
+    assert forward_config.dsn == SENTRY_DSN_STAGING
+    assert forward_config.environment_name == SentryDeployEnvironment.STAGING.value
+    assert forward_config.s3_attachment_bucket == STAGING_UPLOADS_BUCKET
+    assert forward_config.consent_file_path == consent_path
+
+
+def test_consent_file_round_trips_minds_settings_to_the_daemon_reader(tmp_path: Path) -> None:
+    # What minds writes (from its consent settings) must be exactly what the daemon's live reader sees,
+    # and rewriting it must change the next read -- this is the mechanism that propagates a grant/revoke
+    # to the running daemon without respawning it.
+    consent_path = latchkey_forward_sentry_consent_path(tmp_path)
+    write_latchkey_forward_sentry_consent(consent_path, is_error_reporting_enabled=True, is_log_inclusion_enabled=True)
+    granted = read_forward_sentry_consent(consent_path)
+    assert granted.report_unexpected_errors is True
+    assert granted.include_error_logs is True
+
+    write_latchkey_forward_sentry_consent(
+        consent_path, is_error_reporting_enabled=False, is_log_inclusion_enabled=False
+    )
+    revoked = read_forward_sentry_consent(consent_path)
+    assert revoked.report_unexpected_errors is False
+    assert revoked.include_error_logs is False
 
 
 def test_collect_external_attachments_classifies_flat_minds_log_layout(tmp_path: Path) -> None:
@@ -89,7 +123,7 @@ def test_collect_external_attachments_classifies_flat_minds_log_layout(tmp_path:
     (logs_folder / "minds-events.jsonl.20250101120000123456").write_text("rotated\n")
     (logs_folder / "minds.log").write_text("electron\n")
 
-    uploader = ErrorAttachmentsS3Uploader()
+    uploader = ErrorAttachmentsS3Uploader(log_attachment_groups=_MINDS_LOG_ATTACHMENT_GROUPS)
     try:
         raise ValueError("boom")
     except ValueError as exception:
@@ -101,79 +135,3 @@ def test_collect_external_attachments_classifies_flat_minds_log_layout(tmp_path:
     assert len(groups["electron_logs"]) == 1
     # one callback per upload: traceback + the three log files.
     assert len(callbacks) == 4
-
-
-def test_before_send_wrapper_logs_failure_locally_without_recursing_into_sentry() -> None:
-    # When a before_send callback raises, the wrapper must surface the failure in the local app log
-    # but must NOT let that log line become another Sentry event (which would re-enter this same
-    # hook and recurse). The SentryEventHandler is modeled here by a sink guarded by the real filter.
-    local_messages: list[str] = []
-    sentry_messages: list[str] = []
-
-    def boom(event: Event, hint: Hint) -> Event:
-        raise ValueError("before_send boom")
-
-    local_sink_id = logger.add(lambda message: local_messages.append(message.record["message"]), level=0)
-    sentry_sink_id = logger.add(
-        lambda message: sentry_messages.append(message.record["message"]),
-        level=0,
-        filter=should_record_sentry_event,
-    )
-    try:
-        with pytest.raises(ValueError, match="before_send boom"):
-            _before_send_wrapper({}, {}, [boom])
-        # a normal error (no skip marker) must still flow to the Sentry-event sink: the filter only
-        # suppresses records explicitly marked with _SKIP_SENTRY_EVENT_EXTRA_KEY.
-        logger.error("ordinary error that should reach sentry")
-    finally:
-        logger.remove(local_sink_id)
-        logger.remove(sentry_sink_id)
-
-    assert any("before_send hook" in message for message in local_messages)
-    assert not any("before_send hook" in message for message in sentry_messages)
-    assert any("ordinary error" in message for message in sentry_messages)
-
-
-def test_before_send_failure_reporting_does_not_recurse() -> None:
-    # Reporting a before_send failure goes through capture_event, which re-runs the before_send chain.
-    # A deterministically broken callback would otherwise recurse forever. The reentrancy guard must
-    # bound this: the callback runs once for the original event and once for the minimal report event,
-    # but the guard prevents the report from triggering yet another report.
-    call_count = 0
-
-    def always_broken(event: Event, hint: Hint) -> Event:
-        nonlocal call_count
-        call_count += 1
-        raise ValueError("always broken before_send")
-
-    class _NoOpTransport(Transport):
-        def capture_envelope(self, envelope: Envelope) -> None:
-            pass
-
-    def before_send(event: Event, hint: Hint) -> Event | None:
-        return _before_send_wrapper(event, hint, [always_broken])
-
-    client = Client(
-        dsn="https://public@example.com/1",
-        before_send=before_send,
-        transport=_NoOpTransport(),
-        default_integrations=False,
-        auto_enabling_integrations=False,
-    )
-    with isolation_scope() as scope:
-        scope.set_client(client)
-        # must terminate (no RecursionError) thanks to the guard.
-        sentry_sdk.capture_event({"message": "trigger"})
-
-    assert call_count == 2
-
-
-def test_collect_external_attachments_without_logs_folder_only_uploads_traceback() -> None:
-    uploader = ErrorAttachmentsS3Uploader()
-    try:
-        raise ValueError("boom")
-    except ValueError as exception:
-        groups, callbacks = uploader.collect_external_attachments(exception=exception, logs_folder=None)
-
-    assert set(groups) == {""}
-    assert len(callbacks) == 1

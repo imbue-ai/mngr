@@ -1,4 +1,4 @@
-{#def cards, selected_id="", detail_html="", is_empty=False, auto_open=True #}
+{#def cards, selected_id="", detail_html="", is_empty=False, auto_open=True, keep_open=False #}
 {#
   Inbox modal page. Hosts:
     - Transparent body + dim backdrop (so the desktop client modal view
@@ -14,6 +14,10 @@
   fragment, or an empty placeholder). ``is_empty`` is True when there
   are no pending requests and the layout collapses to a centered
   message. ``auto_open`` is the initial state of the auto-open checkbox.
+  ``keep_open`` is True only when the user intentionally opened the whole
+  inbox (via the Requests button); when False, resolving a request via
+  Approve/Deny dismisses the whole window rather than advancing to the
+  next pending request (which could be an unrelated stale request).
 #}
 {% set _head %}
   <style>
@@ -96,6 +100,12 @@
 {% set _scripts %}
 <script>
   (function () {
+    // Whether the user intentionally opened the whole inbox (Requests
+    // button) vs. landed on a single request (notification click,
+    // workspace relay, or auto-open on a new request). When false,
+    // resolving a request dismisses the whole window rather than
+    // advancing to the next pending request -- see advanceAfterResolution.
+    var keepInboxOpen = {% if keep_open %}true{% else %}false{% endif %};
     var inboxBody = document.getElementById("inbox-body");
     var inboxList = document.getElementById("inbox-list");
     var inboxDetail = document.getElementById("inbox-detail");
@@ -359,7 +369,9 @@
 
     function updateUrl(id) {
       try {
-        var target = id ? "/inbox?selected=" + encodeURIComponent(id) : "/inbox";
+        // Preserve keep_open so a reload keeps the whole-inbox semantics.
+        var suffix = keepInboxOpen ? (id ? "&keep_open=1" : "?keep_open=1") : "";
+        var target = id ? "/inbox?selected=" + encodeURIComponent(id) + suffix : "/inbox" + suffix;
         history.replaceState(null, "", target);
       } catch (e) { /* noop in restricted contexts */ }
     }
@@ -371,6 +383,16 @@
     }
 
     async function advanceAfterResolution(resolvedId) {
+      if (!keepInboxOpen) {
+        // The inbox was opened for a single request rather than as the
+        // whole inbox, so resolving it dismisses the window instead of
+        // advancing to the next pending request. This avoids surprising
+        // the user with an unrelated stale request suddenly appearing
+        // after they approve/deny. Any in-flight deny POST carries
+        // keepalive:true, so it still completes after the window closes.
+        closeInbox();
+        return;
+      }
       var nextId = findNextPendingId(resolvedId);
       await fetchListFragment();
       if (nextId) {
@@ -416,13 +438,38 @@
       }
     }
 
-    async function submitGrant(form, resolvedId) {
+    // Toggle the "an approval is running in the background" state. While
+    // busy, BOTH buttons are disabled and the Approve label is swapped for
+    // a spinner + "Approving...", so the user always has a clear signal
+    // that work is underway (a browser sign-in, a follow-up grant, or any
+    // other step that runs until the approval succeeds or fails) and
+    // cannot double-submit or deny mid-flight. When cleared, Deny is
+    // re-enabled, the spinner hidden, the label restored, and Approve's
+    // availability is recomputed from the checkbox state.
+    function setApproveBusy(isBusy) {
       var approveBtn = document.getElementById("permissions-approve-btn");
+      var denyBtn = document.getElementById("permissions-deny-btn");
+      var spinner = document.getElementById("permissions-approve-spinner");
+      var label = document.getElementById("permissions-approve-label");
+      if (isBusy) {
+        if (approveBtn) approveBtn.disabled = true;
+        if (denyBtn) denyBtn.disabled = true;
+        if (spinner) spinner.classList.remove("hidden");
+        if (label) label.textContent = "Approving\u2026";
+      } else {
+        if (denyBtn) denyBtn.disabled = false;
+        if (spinner) spinner.classList.add("hidden");
+        if (label) label.textContent = "Approve";
+        updateApproveState();
+      }
+    }
+
+    async function submitGrant(form, resolvedId) {
       var errorBox = document.getElementById("permissions-error");
       var errorMsg = document.getElementById("permissions-error-message");
       var manualBox = document.getElementById("permissions-manual-credentials");
       var progress = document.getElementById("permissions-progress");
-      if (approveBtn) approveBtn.disabled = true;
+      setApproveBusy(true);
       if (errorBox) errorBox.classList.add("hidden");
       if (manualBox) manualBox.classList.add("hidden");
       if (progress) {
@@ -456,7 +503,7 @@
             manualBox.classList.remove("hidden");
             scrollDetailIntoView(manualBox);
           }
-          updateApproveState();
+          setApproveBusy(false);
           return;
         }
         // FAILED: the approval did not complete (e.g. the browser sign-in
@@ -470,7 +517,7 @@
             errorBox.classList.remove("hidden");
             scrollDetailIntoView(errorBox);
           }
-          if (approveBtn) approveBtn.disabled = false;
+          setApproveBusy(false);
           return;
         }
         if (errorMsg) errorMsg.textContent = data.message || "Authorization failed.";
@@ -478,7 +525,7 @@
           errorBox.classList.remove("hidden");
           scrollDetailIntoView(errorBox);
         }
-        if (approveBtn) approveBtn.disabled = false;
+        setApproveBusy(false);
       } catch (err) {
         if (progress) progress.classList.add("hidden");
         if (errorMsg) errorMsg.textContent = err && err.message ? err.message : String(err);
@@ -486,7 +533,7 @@
           errorBox.classList.remove("hidden");
           scrollDetailIntoView(errorBox);
         }
-        if (approveBtn) approveBtn.disabled = false;
+        setApproveBusy(false);
       }
     }
 
@@ -503,8 +550,12 @@
         var card = inboxList.querySelector('.inbox-card[data-request-id="' + resolvedId + '"]');
         if (card) card.classList.add("is-denying");
       }
+      // Disable both buttons so the resolving card can't be re-actioned
+      // while the deny POST is in flight and the inbox advances.
       var approveBtn = document.getElementById("permissions-approve-btn");
       if (approveBtn) approveBtn.disabled = true;
+      var denyBtn = document.getElementById("permissions-deny-btn");
+      if (denyBtn) denyBtn.disabled = true;
       var denyUrl = form.action.replace(/\/grant\b/, "/deny");
       // Fire-and-forget so the user doesn't wait for mngr message round trips,
       // and so the next-item swap can start immediately. keepalive lets the
@@ -602,7 +653,7 @@
            style="-webkit-app-region: drag;">
         <div></div>
         <h1 class="type-section text-primary text-center">Requests</h1>
-        <button type="button" aria-label="Close"
+        <button type="button" aria-label="Close" data-tooltip="Close"
                 id="inbox-close-btn"
                 onclick="closeInbox()"
                 style="-webkit-app-region: no-drag;"
