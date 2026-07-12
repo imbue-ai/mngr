@@ -157,9 +157,8 @@ def test_create_plugin_manager_broken_entry_point_only_crashes_full_load(
 
     This is the core guarantee behind ``mngr plugin remove`` / ``mngr plugin disable``: those
     commands build the manager with load_entry_points=False (see get_or_create_plugin_manager),
-    so a plugin whose import blows up (e.g. a provider whose dependency is missing or was
-    renamed) cannot brick them, while every other command (load_entry_points=True) still fails
-    loudly rather than running in a degraded state.
+    so a plugin with a missing dependency cannot brick them, while every other command
+    (load_entry_points=True) still fails loudly rather than running in a degraded state.
     """
     (project_config_dir / "settings.toml").write_text("is_allowed_in_pytest = true\n")
 
