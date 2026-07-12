@@ -405,7 +405,6 @@ class _AgentWatcher(FrozenModel):
     model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
 
     pid: int = Field(description="PID the watcher is bound to")
-    host_id: str = Field(description="Host id to enqueue for re-probe when the process exits")
     stop_event: threading.Event = Field(description="Set to ask the watcher thread to stop")
     thread: threading.Thread = Field(description="The running watcher thread")
 
@@ -914,9 +913,7 @@ class AgentObserver(MutableModel):
                 on_failure=self._on_watcher_failure,
                 is_checked=False,
             )
-            self._watchers[agent_id_str] = _AgentWatcher(
-                pid=pid, host_id=host_id_str, stop_event=stop_event, thread=thread
-            )
+            self._watchers[agent_id_str] = _AgentWatcher(pid=pid, stop_event=stop_event, thread=thread)
 
     def _watch_pid(
         self,
