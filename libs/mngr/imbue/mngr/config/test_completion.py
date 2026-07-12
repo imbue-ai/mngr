@@ -332,8 +332,7 @@ def test_command_defaults_keys_are_schema_discoverable(
     # The group itself owns no per-command param bucket (only its subcommands do),
     # so no ``commands.snapshot.<param>`` param keys are fabricated.
     assert not any(
-        key.startswith("commands.snapshot.") and not key.endswith(".default_subcommand")
-        for key in cache.config_keys
+        key.startswith("commands.snapshot.") and not key.endswith(".default_subcommand") for key in cache.config_keys
     )
     # And the group-level ``config`` / ``plugin`` buckets, whose derived
     # ``<group>_<sub>`` names are absent from the registry, contribute no params.

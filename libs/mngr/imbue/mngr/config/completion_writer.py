@@ -666,9 +666,7 @@ def _build_dynamic_completions(
         cli_group.commands.get("create"),
         {"agent_type_names": agent_type_names, "template_names": template_names, "provider_names": provider_names},
     )
-    template_keys, template_choices = _create_template_schema_completions(
-        config, dynamic_values, create_param_choices
-    )
+    template_keys, template_choices = _create_template_schema_completions(config, dynamic_values, create_param_choices)
     pre_command_script_keys = [
         f"pre_command_scripts.{name}"
         for name in sorted(command_name_set | {str(k) for k in config.pre_command_scripts.keys()})
