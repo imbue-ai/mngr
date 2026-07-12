@@ -163,14 +163,17 @@ def test_create_plugin_manager_broken_entry_point_only_crashes_full_load(
     """
     (project_config_dir / "settings.toml").write_text("is_allowed_in_pytest = true\n")
 
-    # Register a fake "mngr" entry point whose module raises on import. syspath_prepend makes
-    # importlib.metadata discover the .dist-info and makes the (broken) module importable;
-    # both are undone on test teardown.
+    # Register a fake "mngr" entry point whose module raises on import.
     (tmp_path / "broken_ep_mod.py").write_text('raise ImportError("simulated broken plugin")\n')
     dist_info = tmp_path / "imbue_mngr_brokentest-0.0.0.dist-info"
     dist_info.mkdir()
     (dist_info / "METADATA").write_text("Metadata-Version: 2.1\nName: imbue-mngr-brokentest\nVersion: 0.0.0\n")
     (dist_info / "entry_points.txt").write_text("[mngr]\nbrokentest = broken_ep_mod\n")
+    # syspath_prepend is required: pluggy's load_setuptools_entrypoints discovers plugins by
+    # scanning importlib.metadata.distributions() over sys.path, so the fake .dist-info must be
+    # on sys.path to be found (and its module importable). This is the only way to exercise the
+    # real entry-point load with a broken import -- a pm.register() fake never imports anything.
+    # It is a pytest built-in (not setattr, so no ratchet) and is undone on teardown.
     monkeypatch.syspath_prepend(str(tmp_path))
 
     # Recovery load (what plugin remove / disable use) survives: the broken entry point is
