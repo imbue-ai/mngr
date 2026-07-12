@@ -589,7 +589,10 @@ jobs:
           # to the pair key / green marker / slack message. The binary fetches
           # branch / tag / SHA uniformly (clone_git_repo; mngr 02bb71b44+).
           MINDS_USE_LOCAL_WORKSPACE_DEFAULTS: "1"
-          MINDS_WORKSPACE_BRANCH: ${{ needs.check_should_run.outputs.default_workspace_template_sha }}
+          # TEST BUILD ONLY (DO NOT MERGE): the pre-baked-image gate fires only when
+          # the workspace ref equals the release tag, so the usual frozen-SHA pin
+          # would take the slow path and this run would prove nothing.
+          MINDS_WORKSPACE_BRANCH: "minds-v0.3.6"
         run: |
           # pipefail is REQUIRED: without it the pipeline exits with tee's
           # status (always 0) and a failing e2e is reported green.
