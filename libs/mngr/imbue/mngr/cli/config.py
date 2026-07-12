@@ -1346,8 +1346,9 @@ def _prompt_claude_isolation_choice() -> bool | None:
     ``has_interactive_terminal()`` first.
     """
     options = [
-        "Yes -- each agent gets its own config dir (mngr never touches your default)",
-        "No -- share your default config (needed for Claude subscriptions on macOS)",
+        "Yes -- each agent gets its own config dir (mngr won't touch your default Claude config)",
+        "No -- share your default Claude config "
+        "(mngr writes to it; needed for credentials with Claude subscriptions on macOS)",
         "Leave unset -- use the default (isolate); set later with 'mngr config set'",
     ]
     # Default the highlighted option to "No" (share) -- the safer choice that keeps
@@ -1417,7 +1418,7 @@ def _prompt_docker_isolation_choice() -> bool | None:
     options = [
         "Yes -- each host sees only its own host_dir (recommended; needs Docker Engine 25.0+)",
         "No -- all hosts share one state volume (legacy)",
-        "Leave unset -- stays shared + warning for now; default flips to isolate later",
+        "Leave unset -- stays shared + warning for now; default will flip to 'isolate' later",
     ]
     # Default the highlighted option to the recommended "Yes" (isolate).
     idx = run_single_select_picker(
