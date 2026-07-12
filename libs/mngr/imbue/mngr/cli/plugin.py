@@ -822,7 +822,7 @@ def _emit_plugin_toggle_result(
 CommandHelpMetadata(
     key="plugin",
     one_line_description="Manage available and active plugins",
-    synopsis="mngr [plugin|plug] [list|add|remove|enable|disable|...] [ARGS]...",
+    synopsis="mngr [plugin|plug] [list|add|remove|enable|disable|...] [ARGS]... [OPTIONS]",
     description="""Install, remove, view, enable, and disable plugins registered with mngr.
 Plugins provide agent types, provider backends, CLI commands, and lifecycle hooks.""",
     aliases=("plug",),
