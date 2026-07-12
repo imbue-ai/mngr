@@ -1844,7 +1844,7 @@ def test_parse_target_host_threads_post_host_create_commands(
     opts = default_create_cli_opts.model_copy_update(
         to_update(
             default_create_cli_opts.field_ref().post_host_create_command,
-            ("/usr/local/bin/fct-seed", "echo second"),
+            ("/usr/local/bin/default-workspace-template-seed", "echo second"),
         ),
     )
     lifecycle = HostLifecycleOptions()
@@ -1858,7 +1858,7 @@ def test_parse_target_host_threads_post_host_create_commands(
 
     assert isinstance(result, NewHostOptions)
     assert result.provisioning.post_host_create_commands == (
-        CommandString("/usr/local/bin/fct-seed"),
+        CommandString("/usr/local/bin/default-workspace-template-seed"),
         CommandString("echo second"),
     )
 

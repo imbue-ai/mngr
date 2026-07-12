@@ -1,8 +1,8 @@
 """Verify the release Dockerfile's CLAUDE_CODE_VERSION matches the pin in
-forever-claude-template's .mngr/settings.toml.
+default-workspace-template's .mngr/settings.toml.
 
 The release sandbox installs claude at image-build time using the Dockerfile's
-`ARG CLAUDE_CODE_VERSION`. Agents spawned from forever-claude-template have
+`ARG CLAUDE_CODE_VERSION`. Agents spawned from default-workspace-template have
 their claude agent config pinned via `[agent_types.claude].version` in that
 repo's `.mngr/settings.toml`. If the two drift, provisioning fails with
 "Claude version mismatch: installed version is X, but agent config pins
@@ -24,7 +24,7 @@ from loguru import logger
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 _DOCKERFILE_PATH = _REPO_ROOT / "libs" / "mngr" / "imbue" / "mngr" / "resources" / "Dockerfile"
-_TEMPLATE_OWNER_REPO = "imbue-ai/forever-claude-template"
+_TEMPLATE_OWNER_REPO = "imbue-ai/default-workspace-template"
 _TEMPLATE_SETTINGS_PATH = ".mngr/settings.toml"
 _TEMPLATE_CONTENTS_URL = f"https://api.github.com/repos/{_TEMPLATE_OWNER_REPO}/contents/{_TEMPLATE_SETTINGS_PATH}"
 
@@ -40,15 +40,15 @@ def _parse_dockerfile_claude_version(dockerfile_text: str) -> str:
     version = match.group(1)
     assert version, (
         "Dockerfile `ARG CLAUDE_CODE_VERSION` default is empty; pin it to match "
-        "forever-claude-template's `[agent_types.claude].version`."
+        "default-workspace-template's `[agent_types.claude].version`."
     )
     return version
 
 
 def _fetch_template_claude_version() -> str | None:
-    """Fetch forever-claude-template's pinned claude version via the GitHub contents API.
+    """Fetch default-workspace-template's pinned claude version via the GitHub contents API.
 
-    forever-claude-template is public so no auth token is needed. Returns
+    default-workspace-template is public so no auth token is needed. Returns
     the version string on success, or None on any fetch / parse failure
     so the caller can surface a single "fetch or parse failed" assertion.
     """
@@ -102,9 +102,9 @@ def _fetch_template_claude_version() -> str | None:
 
 
 @pytest.mark.release
-def test_claude_code_version_matches_forever_claude_template_pin() -> None:
+def test_claude_code_version_matches_default_workspace_template_pin() -> None:
     """The Dockerfile's CLAUDE_CODE_VERSION default must match the pin in
-    forever-claude-template/.mngr/settings.toml [agent_types.claude].version.
+    default-workspace-template/.mngr/settings.toml [agent_types.claude].version.
 
     A mismatch causes the minds desktop-client e2e tests to fail during agent
     provisioning with "Claude version mismatch".
@@ -116,7 +116,7 @@ def test_claude_code_version_matches_forever_claude_template_pin() -> None:
     )
     assert dockerfile_version == template_version, (
         f"Dockerfile CLAUDE_CODE_VERSION={dockerfile_version!r} does not match "
-        f"forever-claude-template's agent_types.claude.version={template_version!r}. "
+        f"default-workspace-template's agent_types.claude.version={template_version!r}. "
         f"Bump one of them to match the other. See "
         f"{_DOCKERFILE_PATH} and "
         f"https://github.com/{_TEMPLATE_OWNER_REPO}/blob/main/{_TEMPLATE_SETTINGS_PATH}"

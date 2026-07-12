@@ -4,6 +4,24 @@ A concise, human-friendly summary of changes for repo-level dev tooling: CI work
 
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
+## 2026-07-11
+
+### Added
+
+- Added: `scripts/rename_template_repo.py` — migration tool that renames the forever-claude-template repo to a new name. All case forms (kebab, snake, SNAKE_UPPER, Title, Pascal) are derived from `--new-name`; `--new-abbreviation` sets the shorthand that replaces `fct`/`FCT` (context-sensitive across snake, kebab, and CamelCase identifiers). Dry-run by default; `--apply` edits in place idempotently, `--check` verifies no live references remain (including CamelCase-embedded forms), `--show-diff` prints unified diffs. Historical records (changelog entries, `specs/`, `blueprint/`), vendored trees, and lockfiles are reported but never rewritten.
+- Added: `scripts/migrate_state_fct_to_default_workspace_template.sh` — developer-local state migration for the template rename (stale `.external_worktrees` removal, template checkout dir rename, git remote URLs, `apps/minds/.env` var rename, `__pycache__` sweep). Dry-run flag, idempotent; reports anything it is unsure about instead of touching it.
+
+### Changed
+
+- Changed: Repo-wide rename of forever-claude-template to default-workspace-template (justfile, CI workflows, scripts, Claude skills), applied mechanically by the new rename tool. The GitHub repo rename itself happens out of band.
+
+## 2026-07-10
+
+### Added
+
+- Added: `specs/discovery-log-cleanup.md` — plan for cleaning up discovery logging and provider treatment in the Minds app (once-per-process suppression of repeated provider-level discovery-error warnings in the three stream consumers, startup snapshots from `mngr observe --discovery-only` for skipped providers, always-write `[providers.aws-<region>]` blocks preserving `is_enabled`, and bouncing the observe child when the bootstrap's settings write changes the provider set).
+- Added: `blueprint/minds-inspirations/` — implementation plan and feature prompt for the minds "inspirations" feature. Inspirations let a running mind publish a clean, bootable snapshot of the apps it built to a new GitHub repo, and let another mind adapt one into itself. The plan records the design evolution: assembly delegated to a launch-task worker on an isolated worktree with a strict no-merge-back invariant, inline-chat confirmation, latchkey GitHub permissioning end-to-end (REST API calls via latchkey curl and the git push through the latchkey gateway's native git smart-HTTP proxying), a bespoke-thumbnail gate, and the incident fixes (destructive-merge data loss, `GH_TOKEN` shadowing, base-ref resolution on multi-root repos, welcome takeover). The implementation itself lives in `forever-claude-template` on the companion branch.
+
 ## 2026-07-09
 
 ### Added

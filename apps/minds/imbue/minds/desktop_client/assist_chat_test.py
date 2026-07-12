@@ -97,7 +97,7 @@ def test_build_assist_support_probe_args_targets_workspace_and_checks_the_skill_
     args = build_assist_support_probe_args(agent_id)
     assert args[:3] == ["exec", "--agent", str(agent_id)]
     assert len(args) == 4
-    # The probe checks the FCT /assist skill path and echoes a present/absent sentinel.
+    # The probe checks the DEFAULT_WORKSPACE_TEMPLATE /assist skill path and echoes a present/absent sentinel.
     assert ".agents/skills/assist/SKILL.md" in args[3]
     assert "MNGR_ASSIST_SKILL_PRESENT" in args[3]
     assert "MNGR_ASSIST_SKILL_ABSENT" in args[3]
