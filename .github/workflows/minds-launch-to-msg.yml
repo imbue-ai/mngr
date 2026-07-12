@@ -585,14 +585,13 @@ jobs:
           # Drive a second workspace + cross-workspace follow-up pings in the
           # same run.
           WORKSPACE_COUNT:    "2"
-          # Pin agent creation to the frozen DEFAULT_WORKSPACE_TEMPLATE SHA; without this, minds
-          # falls back to templates.py's FALLBACK_BRANCH. Honored only because
-          # MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1 (templates._operator_workspace_default).
-          # Passing the SHA (not the ref) keeps the tested commit byte-identical
-          # to the pair key / green marker / slack message. The binary fetches
-          # branch / tag / SHA uniformly (clone_git_repo; mngr 02bb71b44+).
-          MINDS_USE_LOCAL_WORKSPACE_DEFAULTS: "1"
-          MINDS_WORKSPACE_BRANCH: ${{ needs.check_should_run.outputs.default_workspace_template_sha }}
+          # TEST BUILD ONLY (DO NOT MERGE): the usual pin sets
+          # MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1, which IS the dev-loop signal, and the
+          # pre-baked-image gate disables itself in the dev loop
+          # (should_use_prebaked_lima_image: if is_dev_loop -> False). With it set, this
+          # run builds the toolchain in-VM and proves nothing about the fast path -- it
+          # goes green having tested the slow path. Drop the pin so the app uses its own
+          # defaults, exactly as a real user does: the default repo at FALLBACK_BRANCH.
         run: |
           # pipefail is REQUIRED: without it the pipeline exits with tee's
           # status (always 0) and a failing e2e is reported green.
