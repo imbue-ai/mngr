@@ -8,6 +8,7 @@
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
+const { pipeline } = require('stream');
 
 // 100MB, matching the jsonl sink so all of minds' logs behave consistently.
 const DEFAULT_MAX_SIZE_BYTES = 100 * 1024 * 1024;
@@ -73,20 +74,17 @@ function pruneRotated(dir, baseName, maxRotatedCount) {
  */
 function compressRotatedFile(rawPath, dir, baseName, maxRotatedCount) {
   const gzPath = rawPath + ROTATED_SUFFIX;
-  const source = fs.createReadStream(rawPath);
-  const gzip = zlib.createGzip();
-  const dest = fs.createWriteStream(gzPath);
-  const onError = (err) => {
-    console.warn(`[log-rotation] failed to gzip ${rawPath}: ${err && err.message}`);
-  };
-  source.on('error', onError);
-  gzip.on('error', onError);
-  dest.on('error', onError);
-  dest.on('finish', () => {
+  // pipeline (unlike a bare .pipe() chain) destroys every stream -- freeing the
+  // read + write file descriptors -- on both success and error, so a gzip failure
+  // can't leak fds over the long-lived main process's many rotations.
+  pipeline(fs.createReadStream(rawPath), zlib.createGzip(), fs.createWriteStream(gzPath), (err) => {
+    if (err) {
+      console.warn(`[log-rotation] failed to gzip ${rawPath}: ${err && err.message}`);
+      return;
+    }
     fs.unlink(rawPath, () => {});
     pruneRotated(dir, baseName, maxRotatedCount);
   });
-  source.pipe(gzip).pipe(dest);
 }
 
 /**
