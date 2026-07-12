@@ -246,6 +246,52 @@ def test_gc_machines_deletes_old_destroyed_host_with_agents(
     assert gc_mock_provider.deleted_hosts == [host.id]
 
 
+def test_gc_machines_records_leaked_resource_but_continues_when_delete_host_raises(
+    temp_host_dir: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A leaked resource during offline-host deletion is recorded but does not abort the sweep.
+
+    delete_host raises a CleanupFailedGroup when a resource was left behind (e.g. a docker build
+    image still referenced by an orphaned container); it keeps the host record so the next sweep
+    can retry. GC records the leak in result.failures and continues the sweep, but does NOT count
+    the host as deleted (nor emit a destroyed event), rather than letting one host's leak propagate
+    and abort the whole sweep.
+    """
+
+    class _LeakyDeleteProvider(MockProviderInstance):
+        def delete_host(self, host: HostInterface) -> None:
+            self.deleted_hosts.append(host.id)
+            raise CleanupFailedGroup.from_failures(
+                [
+                    CleanupFailure(
+                        category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                        message="build image could not be removed",
+                        host_id=host.id,
+                    )
+                ]
+            )
+
+    provider = _LeakyDeleteProvider(
+        name=ProviderInstanceName("test-provider-leaky-delete"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+    )
+    host = _make_offline_host(provider, temp_mngr_ctx, days_old=14)
+    provider.mock_hosts = [host]
+
+    result = _run_gc_machines(provider)
+
+    # delete_host was attempted...
+    assert provider.deleted_hosts == [host.id]
+    # ...but it raised, so the host is NOT counted as deleted (the record is kept for retry)...
+    assert len(result.machines_deleted) == 0
+    # ...and the leak is recorded as a structured failure (preserving the category and host_id
+    # from delete_host) rather than swallowed or allowed to abort the sweep.
+    assert len(result.failures) == 1
+    assert result.failures[0].category == CleanupFailureCategory.HOST_RESOURCE_REMAINS
+    assert result.failures[0].host_id == host.id
+
+
 # =========================================================================
 # _handle_error tests
 # =========================================================================
@@ -2297,7 +2343,7 @@ class _RemoteHost(Host):
     def is_local(self) -> bool:
         return False
 
-    def discover_agents(self) -> list[DiscoveredAgent]:
+    def discover_agents(self, timeout_seconds: float | None = None) -> list[DiscoveredAgent]:
         return []
 
     def get_certified_data(self) -> CertifiedHostData:
@@ -2320,14 +2366,14 @@ class _RemoteHost(Host):
 class _RemoteAuthErrorOnDiscoverHost(_RemoteHost):
     """Remote host where discover_agents raises HostAuthenticationError."""
 
-    def discover_agents(self) -> list[DiscoveredAgent]:
+    def discover_agents(self, timeout_seconds: float | None = None) -> list[DiscoveredAgent]:
         raise HostAuthenticationError("simulated auth failure from test")
 
 
 class _RemoteConnectionErrorOnDiscoverHost(_RemoteHost):
     """Remote host where discover_agents raises HostConnectionError."""
 
-    def discover_agents(self) -> list[DiscoveredAgent]:
+    def discover_agents(self, timeout_seconds: float | None = None) -> list[DiscoveredAgent]:
         raise HostConnectionError("simulated connection failure from test")
 
 

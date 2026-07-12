@@ -13,6 +13,7 @@ import hashlib
 import json
 import subprocess
 import sys
+import threading
 from collections.abc import Iterator
 from datetime import datetime
 from datetime import timezone
@@ -20,10 +21,15 @@ from pathlib import Path
 from typing import Final
 from uuid import uuid4
 
+import click
 import pluggy
 import pytest
 from click.testing import CliRunner
+from loguru import logger
+from pydantic import PrivateAttr
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import PluginConfig
@@ -33,10 +39,13 @@ from imbue.mngr_latchkey.cli import ENV_LATCHKEY_BINARY
 from imbue.mngr_latchkey.cli import ENV_LATCHKEY_DIRECTORY
 from imbue.mngr_latchkey.cli import _DEFAULT_LATCHKEY_DIRECTORY
 from imbue.mngr_latchkey.cli import _resolve_latchkey_settings
+from imbue.mngr_latchkey.cli import _run_forward_with_error_reporting
+from imbue.mngr_latchkey.cli import _run_sighup_bounce_watcher
 from imbue.mngr_latchkey.cli import latchkey
 from imbue.mngr_latchkey.config import LatchkeyPluginConfig
 from imbue.mngr_latchkey.core import LATCHKEY_BINARY
 from imbue.mngr_latchkey.core import LATCHKEY_MIN_VERSION
+from imbue.mngr_latchkey.discovery_stream import DiscoveryStreamConsumer
 from imbue.mngr_latchkey.store import LatchkeyForwardInfo
 from imbue.mngr_latchkey.store import load_forward_info
 from imbue.mngr_latchkey.store import permissions_path_for_host
@@ -624,3 +633,119 @@ def test_help_text_lists_subcommands(cli_runner: CliRunner) -> None:
         "gateway-info",
     ):
         assert subcommand in result.output
+
+
+def _raise_value_error() -> None:
+    raise ValueError("kaboom")
+
+
+def _raise_click_exception() -> None:
+    raise click.ClickException("expected user-facing failure")
+
+
+def _return_normally() -> None:
+    return None
+
+
+def test_run_forward_with_error_reporting_logs_unexpected_error_and_reraises() -> None:
+    # An unexpected exception must be logged through loguru (so it reaches Sentry via our handler,
+    # which attaches the daemon's logs) and then re-raised so the CLI still exits non-zero.
+    captured: list[tuple[str, str]] = []
+    sink_id = logger.add(lambda m: captured.append((m.record["level"].name, m.record["message"])), level=0)
+    try:
+        with pytest.raises(ValueError, match="kaboom"):
+            _run_forward_with_error_reporting(_raise_value_error)
+    finally:
+        logger.remove(sink_id)
+    assert any(level == "ERROR" and "unhandled error" in message for level, message in captured)
+
+
+def test_run_forward_with_error_reporting_does_not_log_click_exceptions() -> None:
+    # ``click`` control-flow exceptions are expected user-facing exits, not faults; they must be
+    # re-raised for click to render but must not be turned into Sentry error events.
+    captured: list[str] = []
+    sink_id = logger.add(lambda m: captured.append(m.record["message"]), level=0)
+    try:
+        with pytest.raises(click.ClickException):
+            _run_forward_with_error_reporting(_raise_click_exception)
+    finally:
+        logger.remove(sink_id)
+    assert not any("unhandled error" in message for message in captured)
+
+
+def test_run_forward_with_error_reporting_does_not_log_on_clean_return() -> None:
+    captured: list[str] = []
+    sink_id = logger.add(lambda m: captured.append(m.record["message"]), level=0)
+    try:
+        _run_forward_with_error_reporting(_return_normally)
+    finally:
+        logger.remove(sink_id)
+    assert not any("unhandled error" in message for message in captured)
+
+
+# -- SIGHUP bounce watcher --------------------------------------------------
+
+
+class _FlakyBounceConsumer(DiscoveryStreamConsumer):
+    """``DiscoveryStreamConsumer`` whose ``bounce_observe`` fails once, then succeeds.
+
+    The first bounce raises a ``ConcurrencyExceptionGroup`` -- the exact type
+    the watcher's old ``(OSError, RuntimeError)`` guard let through, killing the
+    thread. Subsequent bounces succeed, so the test can prove the watcher
+    survived the first failure by observing that it still services a later one.
+    """
+
+    _bounce_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    _bounce_count: int = PrivateAttr(default=0)
+    _first_bounce_attempted: threading.Event = PrivateAttr(default_factory=threading.Event)
+    _second_bounce_done: threading.Event = PrivateAttr(default_factory=threading.Event)
+
+    def bounce_observe(self) -> None:
+        with self._bounce_lock:
+            self._bounce_count += 1
+            count = self._bounce_count
+        if count == 1:
+            self._first_bounce_attempted.set()
+            raise ConcurrencyExceptionGroup("observe child failing", [RuntimeError("simulated observe failure")])
+        self._second_bounce_done.set()
+
+    @property
+    def first_bounce_attempted(self) -> threading.Event:
+        return self._first_bounce_attempted
+
+    @property
+    def second_bounce_done(self) -> threading.Event:
+        return self._second_bounce_done
+
+
+def test_sighup_bounce_watcher_survives_unexpected_bounce_error() -> None:
+    """An unexpected error from one bounce must not tear down the long-lived watcher.
+
+    Regression guard: a wedged observe child can make ``bounce_observe`` raise a
+    ``ConcurrencyExceptionGroup``. If that escaped the watcher loop the thread
+    would die and every later SIGHUP provider refresh would silently no-op for
+    the supervisor's whole life. The watcher must log and keep serving bounces.
+    """
+    consumer = _FlakyBounceConsumer(concurrency_group=ConcurrencyGroup(name=f"test-{uuid4().hex}"))
+    shutdown_event = threading.Event()
+    bounce_event = threading.Event()
+    watcher = threading.Thread(
+        target=_run_sighup_bounce_watcher,
+        args=(bounce_event, shutdown_event, consumer),
+        name="test-sighup-bounce-watcher",
+        daemon=True,
+    )
+    watcher.start()
+    try:
+        # First bounce raises inside the watcher; wait until it has been
+        # attempted so the second request can't race ahead of the failure.
+        bounce_event.set()
+        assert consumer.first_bounce_attempted.wait(timeout=5.0)
+        # The second bounce only runs if the watcher outlived the first error.
+        bounce_event.set()
+        assert consumer.second_bounce_done.wait(timeout=5.0)
+    finally:
+        shutdown_event.set()
+        bounce_event.set()
+        watcher.join(timeout=5.0)
+    assert not watcher.is_alive()

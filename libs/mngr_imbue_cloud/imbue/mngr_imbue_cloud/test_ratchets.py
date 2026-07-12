@@ -30,7 +30,7 @@ def test_prevent_while_true() -> None:
 
 
 def test_prevent_time_sleep() -> None:
-    rc.check_time_sleep(_DIR, snapshot(1))
+    rc.check_time_sleep(_DIR, snapshot(2))
 
 
 def test_prevent_global_keyword() -> None:
@@ -126,6 +126,10 @@ def test_prevent_exit_stack() -> None:
     rc.check_exit_stack(_DIR, snapshot(0))
 
 
+def test_prevent_async_await() -> None:
+    rc.check_async_await(_DIR, snapshot(7))
+
+
 # --- Hardcoded paths ---
 
 
@@ -214,7 +218,7 @@ def test_prevent_unittest_mock_imports() -> None:
 
 
 def test_prevent_monkeypatch_setattr() -> None:
-    rc.check_monkeypatch_setattr(_DIR, snapshot(5))
+    rc.check_monkeypatch_setattr(_DIR, snapshot(8))
 
 
 def test_prevent_test_container_classes() -> None:

@@ -38,6 +38,10 @@ class FinishedProcess(FrozenModel):
     command: tuple[str, ...]
     is_timed_out: bool = False
     is_output_already_logged: bool
+    # Optional log-safe label for the command (see ``RunningProcess.name``),
+    # propagated onto any ProcessError this raises so ``.check()`` failures keep
+    # secret argument values out of the rendered message.
+    display_name: str | None = None
 
     def check(self) -> Self:
         from imbue.concurrency_group.errors import ProcessError
@@ -48,6 +52,7 @@ class FinishedProcess(FrozenModel):
                 stdout=self.stdout,
                 stderr=self.stderr,
                 is_output_already_logged=self.is_output_already_logged,
+                display_name=self.display_name,
             )
         if self.returncode != 0:
             raise ProcessError(
@@ -56,6 +61,7 @@ class FinishedProcess(FrozenModel):
                 stdout=self.stdout,
                 stderr=self.stderr,
                 is_output_already_logged=self.is_output_already_logged,
+                display_name=self.display_name,
             )
         return self
 
@@ -204,11 +210,16 @@ def run_local_command_modern_version(
     # Open file descriptors to keep open in (and inherit into) the spawned child, by their fd numbers.
     pass_fds: Sequence[int] = (),
     on_initialization_complete: Callable[[BaseException | None], None] = lambda success: None,
+    name: str | None = None,
 ) -> FinishedProcess:
     """
     Run a subprocess command and return the result.
 
     This function handles reading stdout/stderr in real-time while monitoring for shutdown events.
+
+    ``name`` is an optional log-safe label for the command (see ``RunningProcess.name``); it is
+    carried onto the returned ``FinishedProcess`` and any error raised so secret argument values
+    stay out of rendered messages.
     """
     try:
         shutdown_event = shutdown_event or Event()
@@ -231,6 +242,7 @@ def run_local_command_modern_version(
                 stderr=str(e),
                 # Popen failed, so no output was ever streamed regardless of trace_output.
                 is_output_already_logged=False,
+                display_name=name,
             ) from e
 
         on_initialization_complete(None)
@@ -291,6 +303,7 @@ def run_local_command_modern_version(
             command=tuple(command),
             is_timed_out=_is_timeout(timeout_time),
             is_output_already_logged=trace_output,
+            display_name=name,
         )
         if is_checked:
             result.check()

@@ -1,38 +1,35 @@
 #!/usr/bin/env python3
 """Snapshot a Modal sandbox that already has a minds workspace + Docker
-container provisioned, so future test runs can boot from that state nearly
-instantly via offload's ``--override-image-id`` flag (offload v0.9.7+).
+container provisioned, so test runs can boot from that state nearly
+instantly via offload's ``--override-image-id`` flag.
 
-Verified end-to-end against Modal on 2026-05-27. The most recently
-verified snapshot id is ``im-01KSMZYQ5X1MKME78EQYRNW6CT`` (the earlier
-``im-01KSK6YY0V97VGXJZMCB4S9D12`` works equivalently but lacks the
-``/app -> /code/mngr`` symlink the snapshot script now layers in --
-offload's ``--override-image-id`` path hardcodes ``workdir="/app"``
-on the resumed sandbox, so the symlink is what lets ``uv run pytest``
-find the project from offload's chosen workdir).
+This is the standing producer for the ``minds_snapshot_resume`` test stage:
+the ``build-minds-snapshot`` CI job runs it on every PR to mint a fresh
+snapshot image, and ``test-minds-snapshot`` then fans the
+``minds_snapshot_resume`` suite (``apps/minds/test_snapshot_resume.py``)
+out against it. See ``apps/minds/docs/testing-overview.md`` (section on the
+modal-snapshot stage) for the full picture.
 
-End-to-end:
-``just test-offload-minds-snapshot im-01KSMZYQ5X1MKME78EQYRNW6CT`` runs
-the ``minds_snapshot_resume`` test suite (today: one sanity test in
-``apps/minds/test_snapshot_resume.py``) against the snapshot in ~17-20s
-wall clock per run, 4/4 successive runs green.
+To run the suite yourself:
 
-A couple of vm_runtime sandboxes did fail intermittently with
-exit_code=137 + missing junit.xml during early testing on
-2026-05-27, before vm_runtime went generally available. If you hit
-a transient failure like that, just retry; if it turns into a
-pattern, capture the failing batch's verbose offload log and check
-the modal_sandbox.py exec path before assuming offload's at fault.
+1. Mint a snapshot image id (multi-minute; needs Modal credentials):
+       uv run python scripts/snapshot_minds_e2e_state.py
+   The image id (``im-...``) is printed at the end. CI mints its own per
+   run, so ids are throwaway -- never hardcode one.
+2. Run the whole suite, or a single test, against it:
+       just test-offload-minds-snapshot <image-id>
+       just test-offload-minds-snapshot <image-id> '--filter <test_name>'
 
-vm_runtime is now generally available on Modal, so no profile-level
-preview opt-in is required.
+The ``/app -> /code/mngr`` symlink layered in below matters: offload's
+``--override-image-id`` path hardcodes ``workdir="/app"`` on the resumed
+sandbox, and the symlink is what lets ``uv run pytest`` find the project
+from offload's chosen workdir.
 
-This is a one-off demonstration script for the test-efficiency groundwork.
 The flow is:
 
-1. Build a Modal image that mirrors what the ``test-docker-electron`` CI
-   runner sets up: Python + uv + Docker-in-Docker + Node + pnpm + xvfb +
-   Playwright, plus the local mngr repo source.
+1. Build a Modal image with the full Electron e2e toolchain: Python + uv +
+   Docker-in-Docker + Node + pnpm + xvfb + Playwright, plus the local mngr
+   repo source.
 2. Create a Modal sandbox with ``experimental_options={"vm_runtime": True}``
    -- Modal's true-VM runtime. We need this specifically because
    Docker-in-sandbox state (everything in ``/var/lib/docker``, including
@@ -42,7 +39,7 @@ The flow is:
    ``imbue.minds.desktop_client.e2e_workspace_runner.create_workspace_via_electron``
    directly (no pytest). The runner is the shared driver behind the
    minds Electron e2e test -- driving the Electron UI to create a
-   forever-claude-template workspace -- but we call it WITHOUT the
+   default-workspace-template workspace -- but we call it WITHOUT the
    ``mngr destroy`` cleanup the pytest test wraps it with, so the agent
    and its Docker container survive into the snapshot.
 4. Call ``sandbox.snapshot_filesystem()`` to capture the resulting state
@@ -60,8 +57,8 @@ Usage:
 
 The script intentionally lives outside the regular test suite -- it's
 expensive (multi-minute), it requires Modal credentials, and it produces a
-snapshot ID that downstream tests then reference rather than something CI
-would re-derive on every run.
+snapshot ID that the test stage then references (CI re-derives one per run;
+operators mint one manually for local iteration).
 """
 
 import argparse
@@ -80,6 +77,12 @@ import modal
 import modal.exception
 from modal.stream_type import StreamType
 
+# Lightweight (loguru + stdlib only, no playwright) so importing it on the CI
+# runner does not require the Electron toolchain.
+from imbue.minds.desktop_client.default_workspace_template_worktree import (
+    materialize_paired_default_workspace_template_worktree,
+)
+
 _REPO_ROOT: Final[Path] = Path(__file__).resolve().parent.parent
 
 _DEFAULT_APP_NAME: Final[str] = "mngr-minds-e2e-snapshot"
@@ -90,11 +93,10 @@ _RUNC_VERSION: Final[str] = "v1.3.0"
 # apps/minds pins an EXACT Node + pnpm version (engines in package.json with
 # engine-strict=true in its .npmrc), so the image must install those exact
 # versions or `pnpm install --frozen-lockfile` aborts with an engine error.
-# Keep these in sync with apps/minds/.nvmrc, apps/minds/package.json engines,
-# and the test-docker-electron job in .github/workflows/ci.yml.
+# Keep these in sync with apps/minds/.nvmrc and apps/minds/package.json engines.
 _NODE_VERSION: Final[str] = "24.15.0"
 _PNPM_VERSION: Final[str] = "10.33.4"
-_CLAUDE_CODE_VERSION: Final[str] = "2.1.141"
+_CLAUDE_CODE_VERSION: Final[str] = "2.1.160"
 
 # In-sandbox entrypoint that invokes the shared e2e workspace runner the
 # pytest test also uses, but without the test's mngr-destroy cleanup. The
@@ -104,8 +106,8 @@ _CLAUDE_CODE_VERSION: Final[str] = "2.1.141"
 # Two notes on why this is a python -c string instead of a checked-in
 # helper script:
 # - Keeping the entrypoint adjacent to the snapshot script makes it
-#   obvious that this is a one-off operator tool and that any cleanup
-#   skip here is *intentional*.
+#   obvious that the cleanup skip here is *intentional* (the snapshot
+#   must capture the live workspace).
 # - The mngr clone inside the sandbox already has the runner under
 #   ``imbue.minds.desktop_client.e2e_workspace_runner`` (installed via
 #   the image's ``uv sync --all-packages``), so a single import is all
@@ -122,7 +124,7 @@ _IN_SANDBOX_RUNNER_PROGRAM: Final[str] = textwrap.dedent(
         create_workspace_via_electron,
         ensure_minds_env_defaults,
         find_free_port,
-        resolve_fct_path,
+        resolve_default_workspace_template_path,
     )
     from imbue.mngr.utils.testing import get_short_random_string
 
@@ -137,54 +139,57 @@ _IN_SANDBOX_RUNNER_PROGRAM: Final[str] = textwrap.dedent(
     # Snapshot builds are test infrastructure, not a real install, so they
     # must not count toward Latchkey's usage.
     _write_to_os_environ("LATCHKEY_DISABLE_COUNTING", "1")
-    # FCT's [providers.docker] block sets docker_runtime = "runsc" to harden
+    # DEFAULT_WORKSPACE_TEMPLATE's [providers.docker] block sets docker_runtime = "runsc" to harden
     # the agent container with gVisor, but the dockerd inside this Modal
     # vm_runtime sandbox only has the default runc registered, so
     # `docker run --runtime runsc` fails with "unknown or invalid runtime
     # name: runsc". Force runc here -- the Modal VM is already the isolation
     # boundary for this throwaway snapshot. Mirrors the same override the
-    # pytest path applies in apps/minds/test_desktop_client_e2e.py.
+    # pytest path applies in
+    # apps/minds/test_snapshot_resume.py::test_create_apikey_workspace_and_chat_via_electron.
     _write_to_os_environ("MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME", "runc")
-    with tempfile.TemporaryDirectory(prefix="snapshot-fct-") as scratch:
-        fct_path = resolve_fct_path(Path(scratch))
-        workspace_name = f"forever-{get_short_random_string()}"
-        debug_port = find_free_port()
-        print(f"[snapshot] workspace={workspace_name} debug_port={debug_port}", flush=True)
-        create_workspace_via_electron(fct_path, workspace_name, debug_port)
-        # IMPORTANT: do NOT call destroy_agent_best_effort here. The whole
-        # point of this script is to leave the workspace agent + Docker
-        # container's on-disk state (volumes, /code, /worktree, the
-        # bootstrap-written runtime/, etc.) captured by snapshot_filesystem.
-        # But we DO want the container itself stopped cleanly before the
-        # snapshot fires, so its filesystem state is consistent (no
-        # half-written sqlite WALs, no inflight tmux pty writes, etc.)
-        # and so a sandbox booted from the snapshot can `docker start`
-        # the container deterministically rather than inheriting a
-        # mid-flight running state.
-        #
-        # `docker stop` sends SIGTERM, waits up to `--time`, then SIGKILL.
-        # The FCT container runs tini as PID 1, which propagates SIGTERM
-        # to the bootstrap/services/agent processes inside. 60s grace is
-        # generous enough for the bootstrap to flush its event log and
-        # close the chat agent's claude session cleanly.
-        running = subprocess.run(
-            ["docker", "ps", "--format", "{{.Names}}"],
+    # The paired DEFAULT_WORKSPACE_TEMPLATE worktree was materialized on the runner and baked into the
+    # image at ``.external_worktrees/default-workspace-template``; resolve it
+    # (errors loudly if the bake did not stage it).
+    default_workspace_template_path = resolve_default_workspace_template_path()
+    workspace_name = f"forever-{get_short_random_string()}"
+    debug_port = find_free_port()
+    print(f"[snapshot] workspace={workspace_name} debug_port={debug_port}", flush=True)
+    create_workspace_via_electron(default_workspace_template_path, workspace_name, debug_port)
+    # IMPORTANT: do NOT call destroy_agent_best_effort here. The whole
+    # point of this script is to leave the workspace agent + Docker
+    # container's on-disk state (volumes, /code, /worktree, the
+    # bootstrap-written runtime/, etc.) captured by snapshot_filesystem.
+    # But we DO want the container itself stopped cleanly before the
+    # snapshot fires, so its filesystem state is consistent (no
+    # half-written sqlite WALs, no inflight tmux pty writes, etc.)
+    # and so a sandbox booted from the snapshot can `docker start`
+    # the container deterministically rather than inheriting a
+    # mid-flight running state.
+    #
+    # `docker stop` sends SIGTERM, waits up to `--time`, then SIGKILL.
+    # The DEFAULT_WORKSPACE_TEMPLATE container runs tini as PID 1, which propagates SIGTERM
+    # to the bootstrap/services/agent processes inside. 60s grace is
+    # generous enough for the bootstrap to flush its event log and
+    # close the chat agent's claude session cleanly.
+    running = subprocess.run(
+        ["docker", "ps", "--format", "{{.Names}}"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    ).stdout.split()
+    for name in running:
+        print(f"[snapshot] stopping container {name!r}", flush=True)
+        subprocess.run(
+            ["docker", "stop", "--time", "60", name],
             check=True,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        ).stdout.split()
-        for name in running:
-            print(f"[snapshot] stopping container {name!r}", flush=True)
-            subprocess.run(
-                ["docker", "stop", "--time", "60", name],
-                check=True,
-                timeout=120,
-            )
-        print(
-            f"[snapshot] workspace agent {workspace_name!r} container stopped; ready for snapshot",
-            flush=True,
+            timeout=120,
         )
+    print(
+        f"[snapshot] workspace agent {workspace_name!r} container stopped; ready for snapshot",
+        flush=True,
+    )
     """
 ).strip()
 
@@ -204,13 +209,13 @@ _IN_SANDBOX_RUNNER_PROGRAM: Final[str] = textwrap.dedent(
 #   test-results, .test_output)
 # - .git: worktree ``.git`` is a tiny ``gitdir: <path>`` file pointing at
 #   the main repo's .git/worktrees/<id>/ -- that path does not exist
-#   inside the sandbox, so no in-sandbox git command would work even if
-#   we did upload it. The runner's ``_current_mngr_branch`` tolerates a
-#   missing / unusable .git and returns None, routing
-#   ``resolve_fct_path`` through the documented "fall back to FCT main"
-#   path.
-# - .external_worktrees can hold large FCT working trees; we prefer the
-#   sandbox to clone FCT fresh from the public remote.
+#   inside the sandbox, so no in-sandbox git command would work. That is
+#   why the paired DEFAULT_WORKSPACE_TEMPLATE worktree is materialized on the runner (where git
+#   works) and baked in via a separate upload, not cloned in-sandbox.
+# - .external_worktrees can hold large DEFAULT_WORKSPACE_TEMPLATE working trees and is where the
+#   materialized worktree lands; the main rsync excludes it and the worktree
+#   is baked in through its own ``add_local_dir`` layer (see
+#   ``_build_snapshot_image``).
 _STAGING_RSYNC_EXCLUDES: Final[tuple[str, ...]] = (
     ".venv",
     "node_modules",
@@ -252,8 +257,16 @@ def _stage_repo_to_temp_dir(staging_dir: Path) -> Path:
     return target
 
 
-def _build_snapshot_image(staged_repo: Path) -> modal.Image:
+def _build_snapshot_image(staged_repo: Path, default_workspace_template_worktree: Path | None) -> modal.Image:
     """Return a Modal image with every dep the minds Electron e2e test needs.
+
+    ``default_workspace_template_worktree``, when provided, is the paired DEFAULT_WORKSPACE_TEMPLATE working tree materialized
+    on the runner (paired branch + vendored mngr under test). It is baked into
+    the image at ``/code/mngr/.external_worktrees/default-workspace-template`` via a
+    separate upload layer -- the main staged-repo rsync deliberately excludes
+    ``.external_worktrees`` -- so the in-sandbox ``resolve_default_workspace_template_path`` finds it and
+    the workspace container runs the paired DEFAULT_WORKSPACE_TEMPLATE + mngr rather than the released
+    tag. ``None`` (``--skip-workspace-creation``) skips the extra upload.
 
     Built inline (not via ``modal.Image.from_dockerfile``) so this script
     stays self-contained -- ``Dockerfile.release`` is a generated artifact
@@ -266,11 +279,11 @@ def _build_snapshot_image(staged_repo: Path) -> modal.Image:
     live working tree) is what keeps Modal's "modified during build"
     check from aborting the run.
     """
-    return (
+    image = (
         modal.Image.debian_slim(python_version="3.12")
         # System deps -- superset of the base mngr Dockerfile, plus the extras
-        # the test-docker-electron CI job installs: xvfb (display server for
-        # Electron) and the iptables/iproute2 needed by Docker-in-Docker.
+        # the Electron e2e test needs: xvfb (display server for Electron) and
+        # the iptables/iproute2 needed by Docker-in-Docker.
         #
         # The lib* entries are Electron's runtime GUI dependency set on
         # Debian. GitHub-hosted ubuntu-latest runners have these
@@ -388,7 +401,7 @@ def _build_snapshot_image(staged_repo: Path) -> modal.Image:
         # app.min.css 404s in the renderer -- and since the onboarding driver
         # detects a screen advancing via `wait_for_selector(state="hidden")` and
         # the `.hidden` rule lives in that stylesheet, a missing stylesheet makes
-        # every onboarding screen look stuck. Mirrors the test-docker-electron job.
+        # every onboarding screen look stuck. Mirrors the Electron e2e test setup.
         #
         # The /app -> /code/mngr symlink (independent) works around offload
         # v0.9.7's create_from_image hardcoding workdir="/app": our project is at
@@ -402,6 +415,16 @@ def _build_snapshot_image(staged_repo: Path) -> modal.Image:
             "ln -s /code/mngr /app",
         )
     )
+    if default_workspace_template_worktree is not None:
+        # Separate upload layer for the paired DEFAULT_WORKSPACE_TEMPLATE worktree (the main staged-repo
+        # rsync excludes .external_worktrees). Placed last: no earlier build step
+        # depends on it, and the in-sandbox resolve_default_workspace_template_path reads it at runtime.
+        image = image.add_local_dir(
+            str(default_workspace_template_worktree),
+            "/code/mngr/.external_worktrees/default-workspace-template",
+            copy=True,
+        )
+    return image
 
 
 def _exec_in_sandbox(
@@ -585,7 +608,17 @@ def main() -> None:
                     staging_dir = Path(staging_dir_str)
                     staged_repo = _stage_repo_to_temp_dir(staging_dir)
 
-                    image = _build_snapshot_image(staged_repo)
+                    # Materialize the paired DEFAULT_WORKSPACE_TEMPLATE worktree HERE on the runner
+                    # (git + GITHUB_HEAD_REF work) into a scratch dir, then bake
+                    # it into the image. Skipped when no workspace is created.
+                    default_workspace_template_worktree = (
+                        None
+                        if args.skip_workspace_creation
+                        else materialize_paired_default_workspace_template_worktree(
+                            staging_dir / "default_workspace_template_worktree"
+                        )
+                    )
+                    image = _build_snapshot_image(staged_repo, default_workspace_template_worktree)
                     app = modal.App.lookup(args.app_name, create_if_missing=True)
 
                     print(f"Creating sandbox in app {args.app_name!r} with vm_runtime=True", flush=True)
@@ -593,7 +626,7 @@ def main() -> None:
                         image=image,
                         app=app,
                         timeout=_SANDBOX_TIMEOUT_SECONDS,
-                        # 4 CPUs. We tried 8 to speed the in-sandbox FCT docker
+                        # 4 CPUs. We tried 8 to speed the in-sandbox DEFAULT_WORKSPACE_TEMPLATE docker
                         # build (the create-workspace phase, the biggest chunk of
                         # wall-clock), but it did not help -- that build is
                         # network/IO-bound (downloading apt/uv/npm packages), not
@@ -628,9 +661,9 @@ def _run_sandbox_workflow(sandbox: modal.Sandbox, args: argparse.Namespace) -> N
                 flush=True,
             )
         else:
-            # This phase contains the local docker FCT container build, so its
+            # This phase contains the local docker DEFAULT_WORKSPACE_TEMPLATE container build, so its
             # duration is the headline number in the per-phase timing summary.
-            with _timed_phase("create workspace (incl. FCT container build)"):
+            with _timed_phase("create workspace (incl. DEFAULT_WORKSPACE_TEMPLATE container build)"):
                 _create_workspace_in_sandbox(sandbox)
         with _timed_phase("snapshot filesystem"):
             snapshot_image_id = _snapshot_sandbox(sandbox)

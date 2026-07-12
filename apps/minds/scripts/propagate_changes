@@ -15,7 +15,6 @@
 #
 # Agent name resolution (first non-empty wins):
 #   --agent NAME  (CLI flag)
-#   MINDS_WORKSPACE_NAME  (env var)
 #   auto-discovery: if exactly one agent is present under MNGR_HOST_DIR, use it
 #
 
@@ -27,11 +26,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MNGR_REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
-TEMPLATE_DIR="${MNGR_REPO_ROOT}/.external_worktrees/forever-claude-template"
+TEMPLATE_DIR="${MNGR_REPO_ROOT}/.external_worktrees/default-workspace-template"
 
 if [[ ! -d "${TEMPLATE_DIR}" ]]; then
     echo "ERROR: Template directory not found: ${TEMPLATE_DIR}" >&2
-    echo "       Create it with: cd ~/project/forever-claude-template && git worktree add ${TEMPLATE_DIR} -b <branch> main" >&2
+    echo "       Create it with: cd ~/project/default-workspace-template && git worktree add ${TEMPLATE_DIR} -b <branch> main" >&2
     exit 1
 fi
 
@@ -97,14 +96,12 @@ list_mngr_agent_names() {
 
 if [[ -n "${AGENT_NAME_ARG}" ]]; then
     AGENT_NAME="${AGENT_NAME_ARG}"
-elif [[ -n "${MINDS_WORKSPACE_NAME:-}" ]]; then
-    AGENT_NAME="${MINDS_WORKSPACE_NAME}"
 else
-    echo "[auto] No --agent flag or MINDS_WORKSPACE_NAME set; discovering agents..."
+    echo "[auto] No --agent flag set; discovering agents..."
     CANDIDATES=$(list_mngr_agent_names)
     CANDIDATE_COUNT=$(printf '%s\n' "${CANDIDATES}" | grep -c . || true)
     if [[ "${CANDIDATE_COUNT}" -eq 0 ]]; then
-        echo "ERROR: No mngr agents found. Specify one with --agent NAME or set MINDS_WORKSPACE_NAME." >&2
+        echo "ERROR: No mngr agents found. Specify one with --agent NAME." >&2
         exit 1
     elif [[ "${CANDIDATE_COUNT}" -eq 1 ]]; then
         AGENT_NAME="${CANDIDATES}"
@@ -115,7 +112,6 @@ else
         exit 1
     fi
 fi
-export MINDS_WORKSPACE_NAME="${AGENT_NAME}"
 
 # Validate: need either SSH details or a local target
 if [[ -n "${SSH_HOST}" ]]; then
@@ -147,7 +143,7 @@ fi
 #   - .git: gitignore never lists it (git's internal dir).
 #   - uv.lock: committed at the mngr root on purpose, but each install
 #     context regenerates its own.
-# Both rsync sources (mngr monorepo for step 1, FCT template for step 2/3)
+# Both rsync sources (mngr monorepo for step 1, default workspace template for step 2/3)
 # carry their own .gitignore at the root, so the same filter applies cleanly
 # to all three rsync calls below.
 # ---------------------------------------------------------------------------
@@ -266,7 +262,6 @@ electron_start() {
     done
 
     export MINDS_WORKSPACE_GIT_URL="${TEMPLATE_DIR}"
-    export MINDS_WORKSPACE_NAME="${AGENT_NAME}"
 
     # Select apps/minds's pinned Node (.nvmrc) so the restarted client passes
     # npm's engine-strict check; the detached Popen below inherits this PATH.

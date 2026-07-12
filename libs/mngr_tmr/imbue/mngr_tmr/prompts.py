@@ -7,8 +7,13 @@ and the small bits of variable interpolation (outcome filenames, the
 publish-outputs bash, etc.) flow through here.
 """
 
+from pathlib import Path
+
+from jinja2 import ChoiceLoader
 from jinja2 import Environment
+from jinja2 import FileSystemLoader
 from jinja2 import PackageLoader
+from jinja2 import Template
 
 from imbue.mngr_mapreduce.archive import ARCHIVE_FILENAME
 from imbue.mngr_mapreduce.archive import ARCHIVE_SUBDIR
@@ -25,6 +30,33 @@ _jinja_env = Environment(
     loader=PackageLoader("imbue.mngr_tmr", "prompt_assets"),
     autoescape=False,
 )
+
+# Default template names within ``prompt_assets`` (also the fallback names an
+# override template can ``{% extends %}`` or ``{% include %}``).
+_MAPPER_TEMPLATE = "mapper.j2"
+_REDUCER_TEMPLATE = "reducer.j2"
+
+
+def _resolve_template(default_name: str, template_path: Path | None) -> Template:
+    """Return the Jinja template to render.
+
+    When ``template_path`` is None, use the packaged template named
+    ``default_name``. Otherwise load the override file, backing it with a
+    ``ChoiceLoader`` so the override may still ``{% extends %}`` or
+    ``{% include %}`` the packaged templates by their default names.
+    """
+    if template_path is None:
+        return _jinja_env.get_template(default_name)
+    override_env = Environment(
+        loader=ChoiceLoader(
+            [
+                FileSystemLoader(str(template_path.parent)),
+                PackageLoader("imbue.mngr_tmr", "prompt_assets"),
+            ]
+        ),
+        autoescape=False,
+    )
+    return override_env.get_template(template_path.name)
 
 
 # Bash that packages ``.test_output`` into the outputs archive. The agent
@@ -60,26 +92,31 @@ mv "$TARBALL.tmp" "$TARBALL"
 def build_test_agent_prompt(
     test_node_id: str,
     pytest_flags: tuple[str, ...],
+    e2e_run_name: str | None = None,
+    template_path: Path | None = None,
 ) -> str:
     """Build the prompt/initial message for a test-running agent.
 
-    Human-sanctioned: prompt is currently specific to mngr's E2E tutorial tests.
-    This should be made generic in the future, but is acceptable for now.
+    The prompt is generic: the test's docstring is the scope contract. When the
+    test is an mngr e2e test, ``e2e_run_name`` is the base run name that gates the
+    e2e-specific multi-run artifact-naming guidance (and is None otherwise).
+    ``template_path`` overrides the packaged mapper template when provided.
     """
     flags_str = " ".join(pytest_flags)
     run_cmd = f"pytest {test_node_id}"
     if flags_str:
         run_cmd += f" {flags_str}"
 
-    template = _jinja_env.get_template("mapper.j2")
+    template = _resolve_template(_MAPPER_TEMPLATE, template_path)
     return template.render(
         run_cmd=run_cmd,
         outcome_filename=TESTING_AGENT_OUTCOME_FILENAME,
         publish_snippet=_PUBLISH_OUTPUTS_SNIPPET,
+        e2e_run_name=e2e_run_name,
     )
 
 
-def build_integrator_prompt() -> str:
+def build_integrator_prompt(template_path: Path | None = None) -> str:
     """Build the integrator's initial message.
 
     The orchestrator has rsynced the per-test-agent output directories under
@@ -89,7 +126,7 @@ def build_integrator_prompt() -> str:
     subdirectories, apply the "should pull" predicate to filter qualifying
     agents, fetch the qualifying bundles into local branches, then cherry-pick.
     """
-    template = _jinja_env.get_template("reducer.j2")
+    template = _resolve_template(_REDUCER_TEMPLATE, template_path)
     return template.render(
         inputs_dirname=REDUCER_INPUTS_DIRNAME,
         mapper_outcome_filename=TESTING_AGENT_OUTCOME_FILENAME,

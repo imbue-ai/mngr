@@ -30,6 +30,31 @@ def test_run_background_simple_command() -> None:
     assert stderr == ""
 
 
+def test_thread_name_defaults_to_command() -> None:
+    """Without a ``name``, the reader thread is named after the joined command (prior behavior)."""
+    process = run_background(["echo", "hello"])
+    try:
+        assert process._get_name() == "RunningProcess: echo hello"
+    finally:
+        process.wait_and_read(timeout=5.0)
+
+
+def test_thread_name_uses_supplied_name_and_keeps_command_secret() -> None:
+    """A supplied ``name`` becomes the thread name, so a secret-bearing command never
+    reaches the thread name (the field recorded in JSONL logs)."""
+    process = run_background(
+        ["echo", "--token=s3cr3t-value"],
+        name="echo --token=***",
+    )
+    try:
+        assert process._get_name() == "echo --token=***"
+        assert process._thread is not None
+        assert process._thread.name == "echo --token=***"
+        assert "s3cr3t-value" not in process._get_name()
+    finally:
+        process.wait_and_read(timeout=5.0)
+
+
 def test_run_background_passes_file_descriptors_to_child() -> None:
     """``pass_fds`` keeps the given fd open in the exec'd child so it can write through it."""
     read_fd, write_fd = os.pipe()
@@ -224,6 +249,40 @@ def test_run_background_non_zero_exit_with_checked_output() -> None:
     assert process.returncode == 42
     assert stdout == ""
     assert stderr.strip() == "error message"
+
+
+def test_process_error_message_uses_name_and_hides_secret_command() -> None:
+    """When a ``name`` is supplied, a failing command's ProcessError renders the name --
+    not the raw argv -- so secret argument values never reach the error message, while
+    ``.command`` keeps the real argv for programmatic use."""
+    process = run_background(
+        ["sh", "-c", "exit 7", "--token=s3cr3t-value"],
+        is_checked=True,
+        name="sh -c <redacted> --token=***",
+    )
+    with pytest.raises(ProcessError) as exc_info:
+        process.wait()
+
+    assert "s3cr3t-value" not in str(exc_info.value)
+    assert exc_info.value.display_command == "sh -c <redacted> --token=***"
+    # The real argv is preserved on the attribute (only the rendering is masked).
+    assert exc_info.value.command == ("sh", "-c", "exit 7", "--token=s3cr3t-value")
+
+
+def test_timeout_error_uses_name_and_hides_secret_command() -> None:
+    """A supplied ``name`` is what the stdlib TimeoutExpired renders, so a slow
+    secret-bearing command does not leak its argv into the timeout message."""
+    process = run_background(
+        ["bash", "-c", "sleep " + LONG_SLEEP_SECONDS, "--token=s3cr3t-value"],
+        name="bash -c <redacted> --token=***",
+    )
+    try:
+        with pytest.raises(TimeoutExpired) as exc_info:
+            process.wait(timeout=0.2)
+        assert "s3cr3t-value" not in str(exc_info.value)
+        assert exc_info.value.cmd == "bash -c <redacted> --token=***"
+    finally:
+        process.terminate(force_kill_seconds=1.0)
 
 
 def test_run_background_command_not_found() -> None:

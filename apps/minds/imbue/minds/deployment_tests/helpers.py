@@ -11,12 +11,14 @@ import os
 import re
 import subprocess
 import time
+from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
 from typing import Final
 
 import httpx
 from loguru import logger
+from pydantic import AnyUrl
 from pydantic import SecretStr
 
 from imbue.imbue_common.primitives import NonEmptyStr
@@ -28,10 +30,13 @@ from imbue.minds.cli._activated_env import MODAL_PROFILE_ENV_VAR
 from imbue.minds.cli._activated_env import modal_profile_for_tier_or_none
 from imbue.minds.cli._activated_env import tier_for_env_name
 from imbue.minds.deployment_tests.data_types import SharedEnvHandle
+from imbue.minds.deployment_tests.primitives import SharedEnvRole
 from imbue.minds.envs.paths import client_config_file
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.envs.vault_reader import VaultPath
+from imbue.minds.envs.vault_reader import delete_vault_kv
 from imbue.minds.envs.vault_reader import read_vault_kv
+from imbue.minds.envs.vault_reader import write_vault_kv
 from imbue.minds.errors import MindError
 
 _SUPERTOKENS_TENANT_ID: Final[str] = "public"
@@ -41,6 +46,138 @@ _ENV_READY_POLL_INTERVAL_SECONDS: Final[float] = 1.0
 _MODAL_ENV_LIST_TIMEOUT_SECONDS: Final[float] = 30.0
 _NEON_PROBE_TIMEOUT_SECONDS: Final[float] = 30.0
 _SUPERTOKENS_PROBE_TIMEOUT_SECONDS: Final[float] = 30.0
+
+# Per-env dynamic-secret handoff. A freshly-deployed ci env mints its own
+# SuperTokens app + Neon project, so those secrets are not static Vault
+# values -- the env-build step writes them to a per-env Vault path that the
+# (possibly separate-machine) test runner + destroy/sweep jobs read back. The
+# path is keyed by the env name (not a run id) so that any job that knows the
+# env -- including the leaked-env sweep, which discovers envs by Modal
+# enumeration and never sees the original run -- can reconstruct the secrets.
+# It stays under ``.../runs/`` so the existing ``minds/ci/runs/*`` Vault policy
+# covers it without a terraform change.
+RUN_SECRETS_VAULT_ROOT: Final[str] = "secrets/minds/ci/runs"
+# The four per-env secret keys the ``shared_env`` fixture hands to a test
+# (matches the leaf names written into ``~/.minds-<env>/secrets.toml``).
+SHARED_ENV_SECRET_KEYS: Final[tuple[str, ...]] = (
+    "SUPERTOKENS_CONNECTION_URI",
+    "SUPERTOKENS_API_KEY",
+    "NEON_HOST_POOL_DSN",
+    "NEON_LITELLM_DSN",
+)
+# Static Vault path holding the fixed CI test-user credentials (an
+# ``@imbue.com`` email, paid out of the box via the ci tier's seeded
+# ``paid_domains``). Created during env-build, logged in by the test.
+CI_PAID_ACCOUNTS_VAULT_PATH: Final[VaultPath] = VaultPath("secrets/minds/ci/paid-accounts")
+CI_TEST_USER_EMAIL_KEY: Final[str] = "CI_TEST_USER_EMAIL"
+CI_TEST_USER_PASSWORD_KEY: Final[str] = "CI_TEST_USER_PASSWORD"
+
+
+def env_secrets_vault_path(*, env_name: DevEnvName, role: SharedEnvRole) -> VaultPath:
+    """Vault directory holding one env's per-env secrets for ``role``.
+
+    Keyed by the env name so every job that knows the env (build, test,
+    destroy, sweep) resolves the same path without needing the originating run.
+    """
+    return VaultPath(f"{RUN_SECRETS_VAULT_ROOT}/{env_name}/shared-{role}")
+
+
+def publish_shared_env_secrets(*, env_name: DevEnvName, role: SharedEnvRole, secrets: Mapping[str, str]) -> None:
+    """Write a freshly-deployed env's per-env secrets to its per-env Vault path."""
+    write_vault_kv(env_secrets_vault_path(env_name=env_name, role=role), dict(secrets))
+
+
+def read_shared_env_secrets(*, env_name: DevEnvName, role: SharedEnvRole) -> dict[str, str]:
+    """Read back the per-env secrets a prior :func:`publish_shared_env_secrets` wrote."""
+    return read_vault_kv(env_secrets_vault_path(env_name=env_name, role=role))
+
+
+def delete_shared_env_secrets(*, env_name: DevEnvName, role: SharedEnvRole) -> None:
+    """Delete an env's per-env secrets from Vault. Idempotent against already-gone."""
+    delete_vault_kv(env_secrets_vault_path(env_name=env_name, role=role))
+
+
+def read_ci_test_user_credentials() -> tuple[NonEmptyStr, SecretStr]:
+    """Read the fixed ``(email, password)`` for the CI test user from Vault."""
+    kv = read_vault_kv(CI_PAID_ACCOUNTS_VAULT_PATH)
+    email = kv.get(CI_TEST_USER_EMAIL_KEY)
+    password = kv.get(CI_TEST_USER_PASSWORD_KEY)
+    if not email or not password:
+        raise MindError(
+            f"Vault path {CI_PAID_ACCOUNTS_VAULT_PATH!r} is missing "
+            f"{CI_TEST_USER_EMAIL_KEY}/{CI_TEST_USER_PASSWORD_KEY}; populate them per the Phase 0 runbook."
+        )
+    return NonEmptyStr(email), SecretStr(password)
+
+
+def create_verified_user_via_admin_api(
+    *,
+    connection_uri: SecretStr,
+    api_key: SecretStr,
+    connector_url: AnyUrl,
+    email: NonEmptyStr,
+    password: SecretStr,
+) -> tuple[NonEmptyStr, SecretStr]:
+    """Create a user via the SuperTokens admin API, mark email verified, sign in.
+
+    Three HTTP round-trips against the SuperTokens core (auth'd with the
+    ``api-key`` header) plus one signin call against the deployed
+    connector to mint a real session JWT:
+
+    1. ``POST <core>/<tenant>/recipe/signup`` -- creates the emailpassword user.
+    2. ``POST <core>/<tenant>/recipe/user/email/verify/token`` -- mints a verify token.
+    3. ``POST <core>/<tenant>/recipe/user/email/verify`` -- consumes it (the
+       connector's email-verification gate is ``REQUIRED``).
+    4. ``POST <connector_url>/auth/signin`` -- signs in to receive a session JWT.
+
+    Returns ``(user_id, access_token)``.
+    """
+    headers = {"api-key": api_key.get_secret_value(), "rid": "emailpassword"}
+    base = str(connection_uri.get_secret_value()).rstrip("/")
+    with httpx.Client(timeout=_SUPERTOKENS_ADMIN_TIMEOUT_SECONDS) as client:
+        signup = client.post(
+            f"{base}/{_SUPERTOKENS_TENANT_ID}/recipe/signup",
+            headers=headers,
+            json={"email": str(email), "password": password.get_secret_value()},
+        )
+        signup.raise_for_status()
+        signup_json = signup.json()
+        if signup_json.get("status") != "OK":
+            raise MindError(f"SuperTokens admin signup for {email!r} returned non-OK: {signup_json!r}")
+        user_id = NonEmptyStr(signup_json["recipeUserId"])
+
+        verify_headers = {"api-key": api_key.get_secret_value(), "rid": "emailverification"}
+        token_resp = client.post(
+            f"{base}/{_SUPERTOKENS_TENANT_ID}/recipe/user/email/verify/token",
+            headers=verify_headers,
+            json={"userId": str(user_id), "email": str(email)},
+        )
+        token_resp.raise_for_status()
+        token_json = token_resp.json()
+        if token_json.get("status") != "OK":
+            raise MindError(f"SuperTokens admin verify-token mint for {email!r} returned non-OK: {token_json!r}")
+        verification_token = token_json["token"]
+
+        verify_resp = client.post(
+            f"{base}/{_SUPERTOKENS_TENANT_ID}/recipe/user/email/verify",
+            headers=verify_headers,
+            json={"method": "token", "token": verification_token},
+        )
+        verify_resp.raise_for_status()
+        verify_json = verify_resp.json()
+        if verify_json.get("status") != "OK":
+            raise MindError(f"SuperTokens admin email-verify for {email!r} returned non-OK: {verify_json!r}")
+
+        signin_resp = client.post(
+            f"{str(connector_url).rstrip('/')}/auth/signin",
+            json={"email": str(email), "password": password.get_secret_value()},
+        )
+        signin_resp.raise_for_status()
+        signin_json = signin_resp.json()
+        if signin_json.get("status") != "OK":
+            raise MindError(f"Connector /auth/signin for {email!r} returned non-OK: {signin_json!r}")
+        access_token = signin_json["tokens"]["access_token"]
+        return user_id, SecretStr(access_token)
 
 
 def build_minds_env_subprocess_env(name: DevEnvName) -> dict[str, str]:

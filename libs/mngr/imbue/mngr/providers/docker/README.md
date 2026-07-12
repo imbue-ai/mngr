@@ -51,7 +51,7 @@ The state container is created lazily by `ensure_state_container()` in `volume.p
 The `host_state/` directory contains `HostRecord` JSON files. Each record stores everything needed to reconnect to a host:
 
 - `certified_host_data`: the canonical host metadata (name, tags, snapshots, failure reason, timestamps, idle config)
-- `ssh_host`, `ssh_port`, `ssh_host_public_key`: SSH connection info
+- `ssh_host`, `ssh_port`, `ssh_host_public_key`: SSH connection info. `ssh_port` is the port as last observed from docker (exposed in code as `HostRecord.last_discovered_ssh_port`; the JSON key is kept stable for older clients) -- it can go stale across a daemon restart and is reconciled against the container's live port mapping on connect/discovery
 - `config`: `ContainerConfig` (start_args, image) for replay on snapshot restore
 - `container_id`: Docker container ID
 

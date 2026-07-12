@@ -48,6 +48,7 @@ from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.cleanup_failures import collect_cleanup_failures
 from imbue.mngr.interfaces.cleanup_failures import collecting_cleanup_failures
 from imbue.mngr.interfaces.data_types import AgentDetails
+from imbue.mngr.interfaces.data_types import BoundedProviderDiscoveryResult
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import CleanupFailureCategory
@@ -62,6 +63,9 @@ from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.host import OuterHostInterface
+from imbue.mngr.interfaces.provider_instance import HostDiscoveryReadRegistry
+from imbue.mngr.interfaces.provider_instance import bounded_result_from_agents_by_host
+from imbue.mngr.interfaces.provider_instance import collect_cached_host_ssh_infos
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -823,6 +827,7 @@ class VpsProvider(BaseProviderInstance):
         lifecycle: HostLifecycleOptions | None,
         known_hosts: Sequence[str] | None,
         authorized_keys: Sequence[str] | None,
+        allow_local_image: bool = False,
     ) -> Host:
         """Build the container and finalize host state on an already-reachable VPS.
 
@@ -853,6 +858,7 @@ class VpsProvider(BaseProviderInstance):
                 base_image=base_image,
                 effective_start_args=effective_start_args,
                 docker_build_args=parsed.docker_build_args,
+                allow_local_image=allow_local_image,
                 git_depth=parsed.git_depth,
                 tags=tags,
                 known_hosts=known_hosts,
@@ -1574,6 +1580,29 @@ class VpsProvider(BaseProviderInstance):
                 self._create_offline_host(record)
 
         return discovered
+
+    def discover_hosts_and_agents_within_timeouts(
+        self,
+        cg: ConcurrencyGroup,
+        host_discovery_timeout_seconds: float,
+        agent_discovery_timeout_seconds: float,
+        include_destroyed: bool = False,
+        registry: HostDiscoveryReadRegistry | None = None,
+    ) -> BoundedProviderDiscoveryResult:
+        """Delegate to the batch discovery path; bounded only by the provider-level error timeout.
+
+        VPS discovery reads all host records (and their live agents) in one batched
+        pass, so individual host reads cannot be bounded; nothing is marked UNKNOWN
+        here. Subclasses that override ``discover_hosts_and_agents`` (e.g. the
+        offline-capable provider) are honored via ``self`` dispatch. ``registry`` is
+        accepted for interface compatibility but unused: this path spawns no per-host
+        reads to de-duplicate across polls.
+        """
+        agents_by_host = self.discover_hosts_and_agents(cg=cg, include_destroyed=include_destroyed)
+        # Surface each running host's SSH endpoint (read from the host object the batch discovery
+        # just cached) so the streaming poller re-emits it as HOST_SSH_INFO for tunneling consumers.
+        host_ssh_infos = collect_cached_host_ssh_infos(self, agents_by_host.keys())
+        return bounded_result_from_agents_by_host(agents_by_host, host_ssh_infos=host_ssh_infos)
 
     def discover_hosts_and_agents(
         self,

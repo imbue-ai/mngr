@@ -4,6 +4,26 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-10
+
+Fixed a Lima workspace-creation failure that surfaced as a confusing `SSH host key error (Host key for 127.0.0.1 does not match.)`.
+
+The VM provisioning script installed the pre-trusted SSH host key *after* a network-dependent `apt-get install`, all under `set -e`. A transient Debian mirror hiccup (`apt-get` failing to fetch package indexes) would abort the whole script before the host key was installed, so the VM kept its default host key while mngr had already pinned the key it expected -- causing a strict host-key-check mismatch on connect.
+
+The host-key swap (and sshd tuning) now runs first, before any package fetch, so SSH host-key trust no longer depends on the network. The package install is additionally wrapped in a retry loop to ride out transient apt mirror failures; if it still fails, the error now surfaces clearly on an SSH-reachable host instead of as a host-key mismatch.
+
+## 2026-07-06
+
+Lima hosts can now be renamed. `LimaProviderInstance.rename_host` updates the logical host name on the host record (a local, offline-writable store), so it works whether or not the VM is running.
+
+New Lima VMs now derive their limactl instance name from the immutable host id (`<prefix><host_id>`) rather than the host name, so a rename never leaves the VM's instance name out of sync with the host name (limactl has no native rename). Existing VMs created under the old `<prefix><host_name>` scheme keep working unchanged, since discovery reads the host name and instance name from the persisted record rather than parsing the instance name.
+
+Integrates the "simple names" work: Lima hosts can now be renamed (`LimaProviderInstance.rename_host` updates the offline-writable host record), and new Lima VMs derive their limactl instance name from the immutable host id (`<prefix><host_id>`) so a rename never desyncs the instance name from the host name. Existing VMs created under the old scheme keep working.
+
+## 2026-07-01
+
+Added a new async/await ratchet (`test_prevent_async_await`) that freezes the current amount of `async def` / `await` usage in this project and fails if new async code is added. We strongly prefer synchronous code: it is far easier to debug, and our software is intentionally low-scale, so async provides no benefit. Existing usage is grandfathered in at its current count; the count can only decrease.
+
 ## 2026-06-22
 
 Add `flock` (the `util-linux` package) to the Lima VM provisioning script's required-package check.

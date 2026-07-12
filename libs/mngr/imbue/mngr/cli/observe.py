@@ -4,11 +4,11 @@ from typing import Any
 import click
 from loguru import logger
 
-from imbue.mngr.api.discovery_events import run_discovery_stream
 from imbue.mngr.api.observe import AgentObserver
 from imbue.mngr.api.observe import acquire_observe_lock
 from imbue.mngr.api.observe import get_default_events_base_dir
 from imbue.mngr.api.observe import release_observe_lock
+from imbue.mngr.api.provider_discovery_stream import run_per_provider_discovery_stream
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
@@ -38,8 +38,8 @@ class ObserveCliOptions(CommonCliOptions):
     "--discovery-only",
     is_flag=True,
     help="Stream only discovery events as JSONL (hosts and agents discovered/destroyed). "
-    "Outputs a full snapshot, then tails the event file for updates. "
-    "Periodically re-polls to catch any missed changes. "
+    "Polls each provider independently on its own loop, emitting a per-provider snapshot "
+    "as each finishes, then tails the event file for updates. "
     "Does not start activity streams or emit agent state events.",
 )
 @click.option(
@@ -73,7 +73,7 @@ def observe(ctx: click.Context, **kwargs: Any) -> None:
         )
 
     if opts.discovery_only:
-        run_discovery_stream(mngr_ctx=mngr_ctx)
+        run_per_provider_discovery_stream(mngr_ctx=mngr_ctx)
         return
 
     events_base_dir = opts.events_dir

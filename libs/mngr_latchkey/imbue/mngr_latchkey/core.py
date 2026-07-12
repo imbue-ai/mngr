@@ -50,6 +50,7 @@ from imbue.mngr_latchkey._spawn import spawn_detached_latchkey_ensure_browser
 from imbue.mngr_latchkey.encryption_key import LatchkeyEncryptionKeyPermissionError
 from imbue.mngr_latchkey.encryption_key import inject_encryption_key_into_env
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
+from imbue.mngr_latchkey.migrations.runner import run_data_format_migrations
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import default_permissions_path
 from imbue.mngr_latchkey.store import ensure_admin_permissions_file
@@ -74,6 +75,16 @@ _DEFAULT_LISTEN_HOST: Final[str] = "127.0.0.1"
 # liveness probe would fail and trigger a spurious second spawn.
 _GATEWAY_BIND_TIMEOUT_SECONDS: Final[float] = 10.0
 _GATEWAY_BIND_POLL_INTERVAL_SECONDS: Final[float] = 0.05
+
+# Maximum request body size the gateway accepts, passed as ``--max-body-size``
+# to every gateway spawn (here and in :mod:`imbue.mngr_latchkey.remote_gateway`).
+# The upstream default is 10 MiB, which is fine for API calls but not for git:
+# the gateway natively proxies GitHub's git smart-HTTP endpoints
+# (``/gateway/https://github.com/...``, ``github-git`` scope), and a push's
+# packfile scales with repo history (a minds template push is ~30 MiB today).
+# The gateway buffers each request body in memory, so this caps transient
+# per-request memory; it costs nothing until a request is actually that large.
+GATEWAY_MAX_BODY_SIZE_BYTES: Final[int] = 512 * 1024 * 1024
 
 # Services-info / create-jwt are normally instant but can stall on slow keychains.
 # The auth-browser flow waits on a real human and is intentionally untimed.
@@ -541,6 +552,12 @@ class Latchkey(MutableModel):
         immediately, before any agent has had a chance to be told to
         use the gateway.
 
+        Also reconciles the plugin's on-disk data format: any
+        outstanding :class:`DataFormatMigration` steps between the
+        version recorded under :attr:`plugin_data_dir` and the version
+        the installed code targets are applied here (cheap in the
+        steady state -- one small file read when already current).
+
         There is intentionally **no** cross-process gateway-record
         reconciliation: the new ``mngr latchkey forward`` /
         :class:`LatchkeyForwardSupervisor` design guarantees at most
@@ -560,6 +577,7 @@ class Latchkey(MutableModel):
                 (non-zero exit, unparseable output, spawn error).
         """
         self._check_minimum_version()
+        run_data_format_migrations(self.plugin_data_dir)
         with self._lock:
             self._is_initialized = True
 
@@ -1200,7 +1218,7 @@ class Latchkey(MutableModel):
         ):
             try:
                 process = concurrency_group.run_process_in_background(
-                    command=[self.latchkey_binary, "gateway"],
+                    command=[self.latchkey_binary, "gateway", "--max-body-size", str(GATEWAY_MAX_BODY_SIZE_BYTES)],
                     env=env,
                     on_output=_log_gateway_output_line,
                 )

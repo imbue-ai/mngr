@@ -242,7 +242,13 @@ def test_mngr_create_stop_start_destroy_lifecycle(
     temp_source_dir: Path,
     docker_subprocess_env: dict[str, str],
 ) -> None:
-    """Full lifecycle test: create, stop, start, destroy via CLI."""
+    """End-to-end CLI lifecycle: `mngr create`, `stop`, `start`, `destroy` each exit 0 in sequence on Docker.
+
+    Drives the real CLI through the full host lifecycle and asserts the return
+    code of every step. A regression in any single subcommand -- e.g. `start`
+    failing to bring the stopped container back up, or `destroy` not tearing it
+    down -- fails the corresponding return-code assertion.
+    """
     agent_name = f"test-docker-lifecycle-{get_short_random_string()}"
 
     # Create

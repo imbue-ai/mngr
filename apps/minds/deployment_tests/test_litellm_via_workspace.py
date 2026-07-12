@@ -1,8 +1,8 @@
-"""``minds_services`` test: real-LLM-call-through-litellm via a local Docker FCT workspace.
+"""``minds_services`` test: real-LLM-call-through-litellm via a local Docker DEFAULT_WORKSPACE_TEMPLATE workspace.
 
 The "but does this actually work" test for imbue_cloud LLM key minting
 + litellm proxy routing + Neon spend tracking. Drives a real local
-Docker container running the FCT template with the ``imbue_cloud``
+Docker container running the default workspace template with the ``imbue_cloud``
 AI-key option, sends a real chat message via ``mngr message``, asserts
 the message was processed AND that the spend landed in Neon.
 
@@ -15,28 +15,33 @@ from collections.abc import Callable
 
 import pytest
 
-from imbue.minds.deployment_tests.data_types import FctTemplateRef
+from imbue.minds.deployment_tests.data_types import DefaultWorkspaceTemplateRef
 from imbue.minds.deployment_tests.data_types import SharedEnvHandle
 from imbue.minds.deployment_tests.data_types import VerifiedUserHandle
 from imbue.minds.deployment_tests.helpers import wait_for_env_ready
 
-pytestmark = pytest.mark.minds_services
+pytestmark = [pytest.mark.release, pytest.mark.minds_services]
 
 
+# NOT YET WORKING. This test is wired into the per-run CI env flow (correct
+# fixtures + minds_services marker) but its body is still a stub: it must be
+# debugged and implemented before it can pass. Remaining work: a desktop-client
+# workspace-create driver, a Neon litellm_cost DSN query helper, and a Docker
+# daemon (operator-side today; Docker-in-Docker in a future offload services
+# config). Tracked as a Phase 2 follow-up; see specs/minds-deployment-tests.md.
 @pytest.mark.skip(
     reason=(
-        "Pending: desktop-client workspace-create driver, Neon DSN query helper, "
-        "verified_user fixture provisioning. Also requires a Docker daemon (operator-side "
-        "today; Docker-in-Docker in the future offload services config). See "
-        "specs/minds-deployment-tests.md."
+        "NOT YET WORKING -- wired into the per-run CI env flow but the body is a stub; needs "
+        "a workspace-create driver + Neon DSN query helper + Docker daemon before it will pass. "
+        "Phase 2 follow-up; see specs/minds-deployment-tests.md."
     )
 )
 def test_litellm_spend_tracking_via_local_workspace(
     shared_env: Callable[[str], SharedEnvHandle],
     verified_user: VerifiedUserHandle,
-    fct_template_ref: FctTemplateRef,
+    default_workspace_template_ref: DefaultWorkspaceTemplateRef,
 ) -> None:
-    """Drive a real local FCT workspace + assert spend lands in Neon ``litellm_cost``.
+    """Drive a real local DEFAULT_WORKSPACE_TEMPLATE workspace + assert spend lands in Neon ``litellm_cost``.
 
     Defensive preamble (do this before any other step in every test
     body in this suite): wait for the env to be reachable so cold-boot
@@ -49,7 +54,7 @@ def test_litellm_spend_tracking_via_local_workspace(
     0. **Wait for env ready.** ``wait_for_env_ready(shared_env("default"))``.
     1. Drive the in-process desktop client (same shape as
        ``test_realistic_signup_verify_signin_create_tunnel_signout``)
-       to create a workspace from ``fct_template_ref.as_mngr_template_arg()``
+       to create a workspace from ``default_workspace_template_ref.as_mngr_template_arg()``
        configured with ``AIProvider.IMBUE_CLOUD`` so the agent's LLM
        calls flow through the shared env's ``litellm_proxy_url``.
     2. Wait for the workspace's chat agent to come up.
@@ -66,5 +71,5 @@ def test_litellm_spend_tracking_via_local_workspace(
     enable Docker-in-Docker (mirroring ``offload-modal-acceptance.toml``).
     """
     wait_for_env_ready(shared_env("default"))
-    _ = (verified_user, fct_template_ref)
+    _ = (verified_user, default_workspace_template_ref)
     raise AssertionError("not implemented yet -- see skip reason")

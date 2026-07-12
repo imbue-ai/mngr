@@ -10,8 +10,15 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 - Added: `mngr forward --on-error {abort,continue}` flag (default `abort`). Under `continue`, the `--no-observe` startup snapshot tolerates an unauthenticated/unreachable provider (runs `mngr list --on-error continue` and forwards the agents the healthy providers reported instead of failing to start).
 
+### Changed
+
+- Changed: The forward stream manager now logs provider-level discovery errors once per process via the shared `DiscoveryErrorLogSuppressor` (with an info-level recovery line when discovery next succeeds), instead of one warning per poll cycle. Host- and agent-attributed discovery errors keep logging on every occurrence.
+- Changed: `mngr forward` consumes mngr's new per-provider discovery model — the stream manager feeds every parsed discovery event into the shared span-aware `DiscoveryStateAggregator` and reacts to the returned membership delta (newly-present agents get a tunnel + `mngr event` stream, newly-absent agents are torn down). The plugin routes `ProviderDiscoverySnapshotEvent` (`DISCOVERY_PROVIDER`) plus incremental agent/host events; handling of the legacy global `FullDiscoverySnapshotEvent` (`DISCOVERY_FULL`) has been removed. Retain-on-provider-error semantics are unchanged, now provided by the aggregator's per-provider scoping.
+
 ### Fixed
 
+- Fixed: "Loading workspace" proxy loader now re-attempts the workspace by polling in the background and reloading once it answers, instead of full-reloading itself every second via a `<meta http-equiv="refresh">`. The old full reload stole OS focus from any other view layered over the loader (in the minds app, the bug-report modal), which made the modal's text field impossible to type into — the focus was cleared every second. Polling leaves the loader (and any overlay focused above it) untouched while waiting, and also keeps the spinner from visibly jumping on each tick.
+- Fixed: Forward respawns a dead per-agent events stream instead of skipping it forever. After an agent's host restarted, the `mngr event --follow` child exited and `_start_events_stream`'s guard skipped the dead entry, so the service map stayed empty and the proxy returned 503 indefinitely even though discovery (including fresh SSH info) had fully recovered. The guard now treats a dead entry as absent: it drops the exited child, logs the respawn, and starts a fresh stream; respawns ride the periodic discovery snapshot, and already-known services are preserved across the respawn.
 - Fixed: The websocket forward path now emits a `system_interface_backend_failure` envelope when the backend connection fails (unresolved target, SSH-tunnel setup failure, refused host-loopback dial, or a connect-time backend-websocket failure), matching the HTTP/SSE paths. Previously a consumer like minds could go blind to a dead system interface whose only live channel was a websocket — the user was stranded on a frozen workspace because the recovery redirect never fired.
 
 ## [v0.1.6] - 2026-06-18

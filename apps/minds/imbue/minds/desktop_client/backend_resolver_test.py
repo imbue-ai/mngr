@@ -12,6 +12,7 @@ from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import ServiceLogParseError
 from imbue.minds.desktop_client.backend_resolver import ServiceLogRecord
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
+from imbue.minds.desktop_client.backend_resolver import WORKSPACE_DISPLAY_NAME_LABEL
 from imbue.minds.desktop_client.backend_resolver import parse_agent_ids_from_json
 from imbue.minds.desktop_client.backend_resolver import parse_agents_from_json
 from imbue.minds.desktop_client.backend_resolver import parse_service_log_records
@@ -659,6 +660,68 @@ def test_last_good_topology_falls_back_when_discovery_loses_the_host(tmp_path: P
     assert resolver.get_system_services_agent_id(workspace_agent) == services_agent
 
 
+def _primary_system_services_agent(host_id: HostId, agent_id: AgentId) -> DiscoveredAgent:
+    """A minds primary workspace agent: the system-services agent, which carries the workspace labels.
+
+    In minds the user-facing workspace agent IS the host's system-services
+    agent -- it has both the ``workspace`` + ``is_primary`` labels (the live
+    filter) and the constant system-services name (the last-good filter).
+    """
+    return DiscoveredAgent(
+        host_id=host_id,
+        agent_id=agent_id,
+        agent_name=AgentName("system-services"),
+        provider_name=ProviderInstanceName("docker"),
+        certified_data={"labels": {"workspace": "true", "is_primary": "true"}},
+    )
+
+
+def test_list_restorable_workspace_ids_keeps_workspace_after_discovery_loss(tmp_path: Path) -> None:
+    """A workspace absent from the live snapshot is still restorable via the last-good topology.
+
+    The cold-start race: a slow provider hasn't re-listed the workspace yet, so
+    the live list is empty -- but the restore view must still recognize it so its
+    window is not dropped.
+    """
+    topology_path = tmp_path / "last_good_agent_topology.json"
+    host = HostId.generate()
+    agent = AgentId.generate()
+    resolver = MngrCliBackendResolver(last_good_agents_path=topology_path)
+    resolver.update_agents(
+        ParsedAgentsResult(agent_ids=(agent,), discovered_agents=(_primary_system_services_agent(host, agent),))
+    )
+    assert resolver.list_active_workspace_ids() == (agent,)
+    assert resolver.list_restorable_workspace_ids() == (agent,)
+
+    # Discovery loses the host (empty snapshot); live drops it, last-good keeps it.
+    resolver.update_agents(ParsedAgentsResult())
+    assert resolver.list_active_workspace_ids() == ()
+    assert resolver.list_restorable_workspace_ids() == (agent,)
+
+
+def test_list_restorable_workspace_ids_unions_live_and_last_good(tmp_path: Path) -> None:
+    """The restorable set is the union of last-good and a freshly-discovered (not-yet-remembered) workspace."""
+    topology_path = tmp_path / "last_good_agent_topology.json"
+    remembered_host, remembered_agent = HostId.generate(), AgentId.generate()
+    fresh_host, fresh_agent = HostId.generate(), AgentId.generate()
+    resolver = MngrCliBackendResolver(last_good_agents_path=topology_path)
+    # A complete enumeration of the remembered workspace lands in last-good.
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(remembered_agent,),
+            discovered_agents=(_primary_system_services_agent(remembered_host, remembered_agent),),
+        )
+    )
+    # A later snapshot lists only a different, fresh workspace (remembered one absent live).
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(fresh_agent,),
+            discovered_agents=(_primary_system_services_agent(fresh_host, fresh_agent),),
+        )
+    )
+    assert set(resolver.list_restorable_workspace_ids()) == {remembered_agent, fresh_agent}
+
+
 def test_last_good_topology_preserves_other_host_on_partial_discovery_loss() -> None:
     """A snapshot missing one host must not erase that host's remembered pairing.
 
@@ -986,3 +1049,77 @@ def test_backend_resolver_interface_default_get_agent_display_info_returns_none_
 
     resolver = MinimalResolver()
     assert resolver.get_agent_display_info(_AGENT_A) is None
+
+
+# -- workspace name override (optimistic rename) tests ----------------
+#
+# A UI rename writes the new name via ``mngr label`` / ``mngr rename``, but
+# the settings page reads the name from the discovery-fed cache, which lags.
+# ``set_workspace_name_override`` masks that lag until discovery re-reads the
+# renamed labels; these tests cover a display-only rename and a slug rename.
+
+
+def test_workspace_name_override_masks_stale_discovery_then_is_swept() -> None:
+    """A display-only rename override wins over the stale label, then is dropped once discovery agrees."""
+    resolver = MngrCliBackendResolver()
+    host = HostId.generate()
+    agent = AgentId.generate()
+
+    def _snapshot(display_name: str) -> ParsedAgentsResult:
+        return ParsedAgentsResult(
+            agent_ids=(agent,),
+            discovered_agents=(
+                _workspace_agent(host, agent, extra_labels={WORKSPACE_DISPLAY_NAME_LABEL: display_name}),
+            ),
+        )
+
+    resolver.update_agents(_snapshot("old-name"))
+    assert resolver.get_workspace_name(agent) == "old-name"
+
+    # The optimistic override wins immediately, before discovery re-reads the label.
+    resolver.set_workspace_name_override(agent, "New Name", None)
+    assert resolver.get_workspace_name(agent) == "New Name"
+
+    # A still-stale snapshot (label not yet updated) does not clobber the override.
+    resolver.update_agents(_snapshot("old-name"))
+    assert resolver.get_workspace_name(agent) == "New Name"
+
+    # Once discovery reports the new name, the override is swept: a later snapshot
+    # with a different name is reflected directly (proving no override lingers).
+    resolver.update_agents(_snapshot("New Name"))
+    resolver.update_agents(_snapshot("Another Name"))
+    assert resolver.get_workspace_name(agent) == "Another Name"
+
+
+def test_workspace_name_override_covers_host_name_on_slug_rename() -> None:
+    """A slug-changing rename optimistically overrides both the display name and the host name."""
+    resolver = MngrCliBackendResolver()
+    host = HostId.generate()
+    agent = AgentId.generate()
+
+    def _snapshot(display_name: str, slug: str) -> ParsedAgentsResult:
+        return ParsedAgentsResult(
+            agent_ids=(agent,),
+            discovered_agents=(
+                _workspace_agent(host, agent, extra_labels={WORKSPACE_DISPLAY_NAME_LABEL: display_name}),
+            ),
+            host_name_by_host_id={str(host): slug},
+        )
+
+    resolver.update_agents(_snapshot("Old Name", "old-slug"))
+    assert resolver.get_workspace_name(agent) == "Old Name"
+    assert resolver.get_host_name(agent) == "old-slug"
+
+    resolver.set_workspace_name_override(agent, "New Name", "new-slug")
+    assert resolver.get_workspace_name(agent) == "New Name"
+    assert resolver.get_host_name(agent) == "new-slug"
+
+    # A stale snapshot clobbers neither field.
+    resolver.update_agents(_snapshot("Old Name", "old-slug"))
+    assert resolver.get_host_name(agent) == "new-slug"
+
+    # Discovery agreeing on both fields sweeps the override; a later change flows through.
+    resolver.update_agents(_snapshot("New Name", "new-slug"))
+    resolver.update_agents(_snapshot("Other Name", "other-slug"))
+    assert resolver.get_workspace_name(agent) == "Other Name"
+    assert resolver.get_host_name(agent) == "other-slug"

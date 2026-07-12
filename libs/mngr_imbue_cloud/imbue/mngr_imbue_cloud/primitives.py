@@ -3,6 +3,7 @@ from enum import auto
 from typing import Final
 from typing import Self
 
+from imbue.imbue_common.enums import LowerCaseStrEnum
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.primitives import NonEmptyStr
 
@@ -48,27 +49,6 @@ class BareMetalServerDbId(NonEmptyStr):
     """Database id of a bare_metal_servers row (server-side UUID)."""
 
 
-# Wire / DB values for pool_hosts.backend_kind. Kept lowercase to match the
-# connector's existing lowercase column conventions (status = available/leased/...).
-BACKEND_KIND_OVH_VPS: Final[str] = "ovh_vps"
-BACKEND_KIND_SLICE: Final[str] = "slice"
-_BACKEND_KINDS: Final[frozenset[str]] = frozenset({BACKEND_KIND_OVH_VPS, BACKEND_KIND_SLICE})
-
-
-class InvalidBackendKind(ValueError):
-    """Raised when a pool-host backend_kind is not a recognized value."""
-
-
-class BackendKind(NonEmptyStr):
-    """How a pool host's underlying machine is provided: 'ovh_vps' or 'slice'."""
-
-    def __new__(cls, value: str) -> Self:
-        normalized = value.strip().lower()
-        if normalized not in _BACKEND_KINDS:
-            raise InvalidBackendKind(f"backend_kind must be one of {sorted(_BACKEND_KINDS)}, got '{value}'")
-        return super().__new__(cls, normalized)
-
-
 # Wire / DB values for bare_metal_servers.status, in lifecycle order. The box
 # advances ORDERED -> DELIVERED -> INSTALLING -> READY (or -> FAILED from any
 # non-terminal state); the admin command moves it forward one step per run.
@@ -110,6 +90,27 @@ class ImbueCloudKeyType(UpperCaseStrEnum):
     LITELLM = auto()
 
 
+class PoolHostDestroyOutcomeStatus(LowerCaseStrEnum):
+    """Per-host outcome of an admin pool destroy, as emitted in the JSON report.
+
+    Lowercase wire values (``destroyed`` / ``skipped_leased`` / ``already_gone`` /
+    ``failed``) -- the format operators and scripts read from ``admin pool destroy``
+    and ``teardown-slices``.
+    """
+
+    DESTROYED = auto()
+    SKIPPED_LEASED = auto()
+    ALREADY_GONE = auto()
+    FAILED = auto()
+
+
+class SliceBakeOutcomeStatus(LowerCaseStrEnum):
+    """Per-slice outcome of an admin pool create (bake), as emitted in the JSON report."""
+
+    SUCCEEDED = auto()
+    FAILED = auto()
+
+
 class FastMode(UpperCaseStrEnum):
     """Whether ``mngr create`` on imbue_cloud may take the fast (adopt) path.
 
@@ -135,7 +136,7 @@ DEFAULT_FAST_MODE: Final[FastMode] = FastMode.PREVENT
 
 # Docker ``--start-arg`` flags that the pre-baked pool-host container is already
 # created with -- these are the ``docker run`` flags the ``pool_host`` create
-# template applies at bake time (see forever-claude-template's
+# template applies at bake time (see default-workspace-template's
 # ``.mngr/settings.toml``). On the fast (adopt) path the container is reused
 # as-is, so a create that requests any of these is asking for state the running
 # container already has: harmless and consistent rather than a conflict. This is

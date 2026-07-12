@@ -4,6 +4,254 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-11
+
+Rename the forever-claude-template repo to default-workspace-template across the monorepo (justfile, CI workflows, scripts, and Claude skills), applied mechanically by the new rename tool below. The GitHub repo rename itself happens out of band and must precede merging this PR.
+
+Add `scripts/rename_template_repo.py`, a migration tool that renames the forever-claude-template repo to a new name given on the command line. All case forms (kebab, snake, SNAKE_UPPER, Title, Pascal) are derived from the `--new-name` input; `--new-abbreviation` sets the shorthand that replaces `fct`/`FCT`, applied context-sensitively (snake_case next to `_` and for bare identifiers, kebab-case next to `-` or `:` when followed by a tag, CamelCase inside identifiers like `FctTemplateRef`). A cleanup pass collapses word duplication the rename introduces (e.g. `DEFAULT_DEFAULT_...` and "the WORKSPACE_TEMPLATE template") and fixes a/an article agreement.
+
+Dry-run by default; `--apply` edits in place and is idempotent, `--check` verifies no live references remain (including CamelCase-embedded forms), `--show-diff` prints unified diffs. Renames whose target already exists (an old-name file reintroduced by merging a pre-rename branch) drop the old file when contents match and warn otherwise; symlink targets embedding the old name are rewritten. Historical records (changelog entries, consolidated CHANGELOG files, `specs/`, `blueprint/`), vendored trees, and lockfiles (`uv.lock`, `pnpm-lock.yaml`, `package-lock.json`) are reported but never rewritten.
+
+Add `scripts/migrate_state_fct_to_default_workspace_template.sh`: developer-local state migration (stale `.external_worktrees` removal, template checkout dir rename, git remote URLs, `apps/minds/.env` var rename, `__pycache__` sweep). Dry-run flag, idempotent, reports anything it is unsure about instead of touching it.
+
+## 2026-07-10
+
+Added `specs/discovery-log-cleanup.md`: a plan for cleaning up discovery logging and provider treatment in the Minds app. It covers once-per-process suppression of repeated provider-level discovery-error warnings in the three stream consumers, startup snapshots from `mngr observe --discovery-only` for providers skipped as unauthorized/unavailable/empty, always writing the `[providers.aws-<region>]` blocks regardless of AWS credentials (preserving `is_enabled`), and bouncing the observe child when the bootstrap's settings write changes the provider set.
+
+Added the planning documents for the minds "inspirations" feature under
+blueprint/minds-inspirations/: the implementation plan and a concise feature
+prompt. Inspirations let a running mind publish a clean, bootable snapshot of
+the apps it built to a new GitHub repo, and let another mind adapt one into
+itself. The plan records the full design evolution from live testing: assembly
+delegated to a launch-task worker on an isolated worktree with a strict
+no-merge-back invariant, inline-chat confirmation, latchkey GitHub
+permissioning end-to-end -- REST API calls via latchkey curl and the git push
+through the latchkey gateway's native git smart-HTTP proxying (the earlier
+system_interface popups, gh device flow, and interim GH_TOKEN-authenticated
+push were all removed) -- a bespoke-thumbnail gate, and the incident fixes
+(destructive-merge data loss, GH_TOKEN shadowing, base-ref resolution on
+multi-root repos, welcome takeover).
+The implementation itself lives in the forever-claude-template repo on the
+companion branch of the same name.
+
+## 2026-07-09
+
+# Backup-update-fixes spec and snapshot-script docs
+
+- Added `specs/backup-update-fixes/concise.md`, the plan for the per-workspace backup health route, the master-password hash + rotation flow, the fixed minimum backup version, the `official` remote, and the snapshot-resume test rewrite.
+
+- `scripts/snapshot_minds_e2e_state.py`'s docs no longer hardcode stale snapshot image ids or describe the script as a one-off prototype: it is documented as the standing producer for the `build-minds-snapshot` CI stage, with instructions for minting an image id manually and running individual tests against it via `just test-offload-minds-snapshot <image-id> '--filter <test_name>'`.
+
+Added `specs/injected-backup-service/concise.md`: a spec for making the minds backup service (FCT `host_backup`) idempotently configurable on running workspaces, with drift detection against the synced `minds-v*` release tags, a warning badge plus one-click converging update in the desktop app, and reusable machinery for post-creation backup settings changes (enable later, change destination).
+
+- Changed: the `destroy-pool-host` justfile recipe is renamed to `destroy-pool-hosts` and now takes any number of pool-host ids (clean break, no alias). It forwards to `minds pool destroy`, which destroys all named slices in parallel after atomically claiming each row so a user lease cannot race the destroy. The `minds-justfile` skill doc was updated to match.
+
+- Changed: the pre-commit `regenerate-cli-docs` hook now also triggers on plugin CLI files (`libs/mngr_*/imbue/**/cli/*.py`), so editing a plugin's click commands can no longer leave the generated `libs/mngr/docs/commands/` reference stale until an unrelated PR trips the check.
+
+- Added: `just list-servers` and `just prep-server <server-id>` recipes wrapping the new env-aware `minds server {list,prep}` commands (DSN + pool SSH key resolved from the activated tier automatically). The `minds-justfile` skill doc was updated to match.
+
+## 2026-07-08
+
+# launch-to-msg CI: freeze (mngr, FCT) inputs to SHAs at run start
+
+The `minds-launch-to-msg.yml` inputs (`commit_sha` for mngr, `template_ref` for forever-claude-template) now accept a full 40-char SHA, branch, or tag, and are resolved to full SHAs exactly once, in `check_should_run`, at run start. Every downstream job consumes the frozen SHAs instead of re-resolving the raw inputs:
+
+- The `build` job checks out and fingerprints the frozen mngr SHA (previously it re-resolved the input ref at checkout time, after the skip-check had already fingerprinted a possibly different commit).
+
+- Agent creation uses the frozen FCT SHA (`MINDS_WORKSPACE_BRANCH` now gets the SHA, not the ref name). Previously the raw ref was re-resolved at clone time, ~15-45 min after the pair-key fingerprint, so a `template_ref=main` run could test a different FCT commit than the one recorded in the green marker and slack message. The stale comment claiming the binary rejects SHAs predated mngr `02bb71b44`, which made `clone_git_repo` fetch branch / tag / SHA uniformly.
+
+- The `launch_to_msg` job's FCT resolve step no longer re-resolves; it reports the frozen pin.
+
+The slack message and step summaries keep the `ref (sha)` format; those SHAs are now guaranteed to be exactly what was built and run. Caveats documented in the input descriptions: SHAs must be full 40-hex and reachable from some ref, and FCT-SHA creates need a binary built from mngr `02bb71b44` (2026-06-11) or later.
+
+Also cleaned up the workflow file (net -135 lines): compressed history-narrating comments to current-state facts, deduplicated the mngr/FCT ref resolution into a single `resolve_ref` function, looped the ToDesktop secrets check, and replaced the hardcoded screenshot-prefix list in the summary manifest with a sorted glob (unknown prefixes now appear instead of being silently dropped).
+
+The TMR workflow (`.github/workflows/tmr.yml`) now accepts `name`, `mapper_prompt`, and `reducer_prompt` inputs, so a dispatch can run a named TMR variant (e.g. `tmr-minds` over `apps/minds`) with its own branch/agent prefix and optional prompt-template overrides.
+
+Added `just tmr-mngr` and `just tmr-minds` recipes as the canonical per-suite flag sets for `mngr tmr` (the workflow inputs mirror them). The minds recipe targets the `apps/minds` tree with the minds-tailored mapper prompt and defaults to the plain `@release` tests; the capability suites (snapshot/deployment/services) are documented as extra args needing their own secrets and setup.
+
+Split the daily scheduled TMR run into two independent per-variant wrappers: `tmr-mngr-scheduled.yml` (renamed from the old single `tmr-scheduled.yml`, at 08:00 UTC) and the new `tmr-minds-scheduled.yml` (09:00 UTC). Each has its own gate label (`tmr-mngr-periodic` / `tmr-minds-periodic`), concurrency group, and periodic PR, so the two suites schedule and review independently. The gate policy (auto-close a periodic PR older than 4 days, else skip) is now a shared reusable workflow, `tmr-gate.yml`, and `tmr.yml` gained a `periodic_label` input to route each variant's PR to its own gate.
+
+## 2026-07-07
+
+Migrated the GitHub Actions workflows off GitHub-stored secrets and onto HashiCorp Vault (via the `imbue-ai/use-vault-secrets` OIDC action), so CI credentials are managed centrally in Vault instead of the repo's Actions settings.
+
+- CI test/TMR jobs (`ci.yml`, `vet.yml`, `release-tests.yml`, `tmr.yml`, `tmr-reintegrate.yml`) now fetch the Anthropic key, imbue Modal workspace token (both id and secret), and the TMR S3 credentials from Vault under `mngr/ci/*`, using a new repo-bound `mngr_ci_gh` role. The `MODAL_TOKEN_ID` repo variable and the `ANTHROPIC_API_KEY` / `MODAL_TOKEN_SECRET` / `AWS_*` Actions secrets are no longer used.
+
+- The minds CI-env jobs in `ci.yml` now read the minds-dev Modal token from Vault (`minds/ci/MODAL_TOKEN_ID` + `MODAL_TOKEN_SECRET`) via their existing Vault login, replacing the `MINDS_DEV_MODAL_TOKEN_*` variable/secret.
+
+- The `minds-launch-to-msg.yml` build job fetches its ToDesktop signing credentials from a separate, environment-gated minds release path (`minds/release/*`, role `minds_release_gh`, GitHub Environment `minds-release`); its launch and Slack-notify jobs read the Anthropic key and Slack webhook from the monorepo-wide `mngr/ci/*` CI-tooling bucket.
+
+- The automatic per-run `GITHUB_TOKEN` (used for same-repo `git push` / `gh` calls and check-run reporting) is intentionally left as-is -- it is not a stored secret and cannot meaningfully live in Vault.
+
+- `scripts/changelog_deploy.sh` now reads its bot token from `secrets/mngr/dev/GH_TOKEN` (the developer-direct-access path) and its Anthropic key from the shared `secrets/mngr/ci/ANTHROPIC_API_KEY`, replacing the old `mngr/dev/github` and `mngr/dev/anthropic` paths.
+
+The Vault roles/policies backing these paths are defined in the separate `imbue-ai/vault` Terraform repo. Note: the self-hosted macOS `minds-runner` must have `curl` and `jq` on PATH for the Vault action to run.
+
+## 2026-07-06
+
+Added the design plan for the minds overlay-surface and custom-tooltips work under `blueprint/overlay-surface-tooltips/`.
+
+Exclude `/imbue_common/sentry` from coverage.
+
+Recorded the follow-up spec for bounding per-host discovery reads as implemented (`blueprint/per-provider-discovery/spec-bounded-per-host-discovery.md`).
+
+Raised the repo-wide bash strict-mode ratchet (`test_meta_ratchets.py::test_prevent_bash_without_strict_mode`) from 11 to 12 to account for `libs/mngr/imbue/mngr/resources/sigwinch_panes.sh`, a best-effort tmux repaint sweep that deliberately uses `set -uo pipefail` (omitting `-e`). The script landed after the snapshot was last pinned, so the ratchet was already over its bound on `main`; this unblocks CI. Also refreshed the test's docstring, which had grown stale (it referenced minds verify scripts that no longer exist and a local/CI count divergence that no longer holds).
+
+Added a design/plan document (`blueprint/per-provider-discovery/`) for making mngr's provider discovery per-provider so a single hung or slow provider can no longer block discovery of all providers.
+
+- Added `blueprint/persistent-terminals/plan-persistent-terminals.md`, the
+  design plan for the minds in-memory persistent terminals feature (the
+  implementation itself lives in the forever-claude-template repo; see the
+  `minds` changelog for the linked doc).
+
+Added an implementation plan (`specs/sigwinch-attach-hook/spec.md`) for moving the post-attach SIGWINCH repaint nudge from the `mngr connect` path into a persistent tmux `client-attached` hook, so the agent repaints cleanly on every attach (plain `tmux attach`, ttyd terminal, web-shell, `mngr connect`). See issue #2322.
+
+Added the implementation plan for simplifying workspace names (`blueprint/simplify-workspace-names/`): one canonical home per datum (immutable `host_id`, mutable normalized `host_name`, arbitrary human-readable name as a `workspace_display_name` label), renamable workspaces, host rename for more providers, and removal of the duplicative `workspace` label.
+
+The minds snapshot bake (`scripts/snapshot_minds_e2e_state.py`) now materializes a paired forever-claude-template working tree on the runner (the FCT branch matching the current mngr branch, else `main`, with this mngr checkout vendored into `vendor/mngr`) and bakes it into the snapshot image via a separate upload, so workspace-creation tests run coordinated mngr+FCT changes together instead of the released FCT tag. Added a `blueprint/paired-fct-workspace-tests/` plan for the change and taught `just minds-test-electron` to materialize the worktree before running the local Electron test.
+
+Integrates the "simple names" work at the repo root: the minds snapshot bake (`scripts/snapshot_minds_e2e_state.py`) materializes a paired forever-claude-template working tree (the FCT branch matching the current mngr branch, else `main`, with this mngr checkout vendored into `vendor/mngr`) and bakes it into the snapshot image, and `just minds-test-electron` materializes that worktree before the local Electron test -- so workspace-creation tests exercise coordinated mngr+FCT changes together instead of the released FCT tag.
+
+## 2026-07-01
+
+Split the mngr and minds release test suites cleanly.
+
+Renamed the two jobs in `.github/workflows/release-tests.yml` to make it explicit they cover the *mngr* release suite: `test-docker-release` -> `test-mngr-release-docker` and `test-release` -> `test-mngr-release`. Both jobs now exclude the whole `apps/minds` tree by path (`--ignore apps/minds`) instead of enumerating minds markers, so the mngr release run never touches minds tests.
+
+Folded all minds `@release` tests into the minds release job (`test-minds-release` in `ci.yml`): in addition to the `minds_deployment` group, it now installs Chromium and runs the plain minds `@release` tests (`-m 'release and not minds_deployment and not minds_services and not minds_snapshot_resume'`). This keeps the two release procedures separate (mngr = `v*` tag / dispatch; minds = manual `run_minds_release_tests` dispatch). Updated the stale `test-docker-release` reference in `offload-modal-release.toml`.
+
+Bumped the pinned Claude Code CLI version from `2.1.141` to `2.1.160` (matching forever-claude-template) in the release-tests workflow, the `tmr-setup` action, and the minds snapshot build script, so they stay aligned with the release Dockerfile pin.
+
+Cleaned up dev-level files for the OVH-VPS removal.
+
+- Removed `--backend slice` from the `bake-slice-{dev,prod}` justfile recipes (the flag no longer exists) and reframed the pool recipe comments to slice-only. The `destroy-pool-host` note still correctly states that `minds env destroy` tears down a whole env's unleased slices.
+
+- Deleted the unused `scripts/remove_old_flat_vault_secrets.py`.
+
+- Deleted obsolete specs/blueprints that only described the removed behavior: `specs/swap-pool-to-ovh/`, `blueprint/deprecate-ovh-vps/`, and `blueprint/disable-ovh-qemu-backups/`.
+
+Added a design doc (`blueprint/ratchet-async-await/`) describing the new monorepo-wide async/await ratchet that freezes and gradually reduces `async def` / `await` usage.
+
+## 2026-06-30
+
+Updated the minds error-reporting / get-help design doc (`blueprint/minds-error-reporting-help/`) to record the phase-3 design: the in-workspace agent-help flow escalates by opening a pre-filled report modal for human review rather than submitting or raising an inbox permission request, the outer app spawns the `/assist` chat via `mngr create` against the workspace's container host, and `/update-self` gains a recognizable merge-commit convention.
+
+Added the operator-run build + publish pipeline for the pre-baked Lima VM image (issue #2306). These scripts run locally on the release operator's machines (not in CI), so the R2 credentials and the minisign signing key never touch GitHub.
+
+- Replaced the stale Packer/QEMU image pipeline with a Lima-based bake (`scripts/build-lima-image.sh` + `scripts/lima_image/bake_provision.sh`; removed `scripts/packer/`). Baking with Lima means the image is produced by the same virtualizer that consumes it (`vz` on Apple Silicon, accelerated QEMU on Linux), so the artifact is guaranteed Lima-bootable and the macOS build host needs no separate QEMU/Packer toolchain. It boots the Debian 12 base (matching the Lima provider), runs the exact forever-claude-template build scripts (`setup_system`/`install_dependencies`/`build_workspace` + Playwright) to bake the toolchain, applies cheap reproducibility cleanups for small deltas, then flattens the Lima disk to a standalone qcow2 (Lima format) + raw (what gets chunked). Builds one arch per native host (amd64 on a KVM Linux host, arm64 on an Apple-Silicon Mac).
+
+- Added `scripts/lima_image/publish.py`: chunks the raw image with `desync`, signs the per-release root manifest with `minisign`, and uploads the new chunks + index + signed manifest to Cloudflare R2 (via the S3 API or the Cloudflare REST object API). Content-addressed chunks already present are skipped, so re-publishing a near-identical image only uploads the changed chunks.
+
+- Removed the obsolete `scripts/publish-lima-image.sh`.
+
+- Added the implementation spec under `blueprint/lima-image-cache/`.
+
+Fixed the scheduled TMR CI workflow, which had been failing at the `tmr-setup` step with `ImportError: cannot import name 'find_user_claude_config'`. The pre-trust step inlined a Python heredoc that imported `find_user_claude_config`, a function that was renamed to `find_user_config_in_isolated_mode`; the rename updated every call site except the one buried in the workflow's heredoc, which no grep or type checker could see.
+
+The `tmr-setup` action now invokes a real module (`scripts/pretrust_claude_checkout.py`) instead of an inline heredoc, so future renames of the claude-config API are caught by `ty` rather than only at CI runtime.
+
+Added the operator-run build + publish pipeline for the pre-baked Lima VM image (issue #2306). These scripts run locally on the release operator's machines (not in CI), so the R2 credentials and the minisign signing key never touch GitHub.
+
+- Replaced the stale Packer/QEMU image pipeline with a Lima-based bake (`scripts/build-lima-image.sh` + `scripts/lima_image/bake_provision.sh`; removed `scripts/packer/`). Baking with Lima means the image is produced by the same virtualizer that consumes it (`vz` on Apple Silicon, accelerated QEMU on Linux), so the artifact is guaranteed Lima-bootable and the macOS build host needs no separate QEMU/Packer toolchain. It boots the Debian 12 base (matching the Lima provider), runs the exact forever-claude-template build scripts (`setup_system`/`install_dependencies`/`build_workspace` + Playwright) to bake the toolchain, applies cheap reproducibility cleanups for small deltas, then flattens the Lima disk to a standalone qcow2 (Lima format) + raw (what gets chunked). Builds one arch per native host (amd64 on a KVM Linux host, arm64 on an Apple-Silicon Mac).
+
+- Added `scripts/lima_image/publish.py`: chunks the raw image with `desync`, signs the per-release root manifest with `minisign`, and uploads the new chunks + index + signed manifest to Cloudflare R2 (via the S3 API or the Cloudflare REST object API). Content-addressed chunks already present are skipped, so re-publishing a near-identical image only uploads the changed chunks.
+
+- Removed the obsolete `scripts/publish-lima-image.sh`.
+
+- Added the implementation spec under `blueprint/lima-image-cache/`.
+
+Raise the `minds-launch-to-msg.yml` build timeouts so a fresh ToDesktop bundle can finish. The `pnpm dist` step budget goes 45 -> 70 min and the build job budget 60 -> 85 min. A fresh dual-arch cloud build (serial sign + notarize x64 + arm64, plus a ~15-min final packaging phase) runs ~43 min even with a fast source download, and ~60+ min when ToDesktop's source-download phase stalls -- so the old 45-min step budget timed out mid-notarize on back-to-back scheduled runs, and because the workflow cancels the in-progress build on timeout, the SHA could never go green. The 70/85 split preserves the ~15-min margin the post-failure cancel step needs to tear an orphaned build down.
+
+Update the Slack notification's build link: the single `binary` link (which pointed at the ToDesktop dashboard) becomes `todesktop(mac-arm64)` -- `todesktop` links to the dashboard build page and `mac-arm64` links to the arm64 `.dmg` download.
+
+## 2026-06-29
+
+Added a blueprint planning document (`blueprint/hostname-live-validation/`) for live validation of the mind-creation Name field.
+
+## 2026-06-28
+
+Added an implementation plan for accelerating imbue_cloud slice bakes (build the FCT image once per box, docker-load it per slice) at `blueprint/accelerate-slice-bake/plan-accelerate-slice-bake.md`.
+
+Add a `just minds-test-electron-flow` recipe that drives the full minds Electron workspace lifecycle end-to-end under `xvfb` (create a local Docker workspace -> send a chat message and await the agent's reply -> open a terminal -> navigate home -> destroy via the v1 settings flow), complementing the create-only `just minds-test-electron` acceptance test.
+
+Also fix `just sync-vendor-mngr` to resolve the forever-claude-template path to an absolute path before use, so passing a relative path no longer breaks the recipe's second `cd`.
+
+Added a design/blueprint document at `blueprint/minds-workspace-api/plan-minds-workspace-api.md` capturing the plan for the versioned Minds workspace API (cross-workspace, backup, version, and SSH capabilities reachable by agents through the latchkey gateway).
+
+Updates `blueprint/minds-workspace-api/HANDOFF.md` for the SSH work: marks SSH access between workspaces (item #5) as done -- grant pruning plus refresh-not-stack are wired in (in `apps/minds`), and the remote->local SSH tunnel broker is now implemented. Corrects the earlier (incorrect) "blocker" note: a local Docker/Lima target uses an SSH connector, so the hub *can* resolve its `127.0.0.1:<published port>` endpoint and brokers a reverse tunnel into the calling workspace.
+
+Adds `openapi-spec-validator` to the root dev dependency group; it validates the minds `GET /api/schema` OpenAPI document in tests (test-only -- not shipped in the minds wheel).
+
+Adds `blueprint/minds-api-spectree/plan-minds-api-spectree.md`: the design + implementation-status doc for converting the minds `/api/v1` to spectree + pydantic validation (records what landed, the spectree-2.0.1 behaviors that shaped the approach, and the resolved design decisions).
+
+CI: the minds snapshot test pipeline now stands up a real per-run minds `ci-*` environment that the test stage exercises with live tests, and tears it down afterward.
+
+- New `build-minds-ci-env` job (parallel to `build-minds-snapshot`) deploys the per-run env via the deployment-tests orchestrator and publishes its per-run secrets to Vault.
+
+- `test-minds-snapshot` now depends on both build jobs and additionally runs the `minds_services` tests (login + mint LiteLLM key + live LLM call) on the runner against the per-run env.
+
+- New `destroy-minds-ci-env` job (`always()`) tears the per-run env down after the test stage; a new parallel `cleanup-minds-ci-envs` job sweeps leaked `ci-*` envs older than 1 hour as a backstop.
+
+- New Vault-OIDC auth in these jobs uses the `minds_ci_env_gh` / `minds_ci_test_gh` roles (env `minds-ci-env` / `minds-ci-test`); the ci-env jobs deploy to the minds-dev Modal workspace via `MINDS_DEV_MODAL_TOKEN_*`; the snapshot-test offload pin is unified to `0.9.10`.
+
+- New `workflow_dispatch` input `run_minds_release_tests` + `test-minds-release` job: the manual release tier that runs the heavy `minds_deployment` tests (deploy / rollback / round-trip), each minting + destroying its own ephemeral env.
+
+- Standing up a per-run `ci-*` env is now opt-in: `build-minds-ci-env`, `cleanup-minds-ci-envs`, `destroy-minds-ci-env`, and the `minds_services` step in `test-minds-snapshot` run ONLY on a `workflow_dispatch` with `run_minds_release_tests=true` (the same switch that gates `test-minds-release`). Normal pushes/PRs no longer create any ci env -- `test-minds-snapshot` still runs the `minds_snapshot_resume` tests (which need only the built snapshot image), via `always()` + a `build-minds-snapshot` success gate so the opt-in (skipped) ci-env build does not skip the whole job.
+
+- Removed the dedicated `test-docker-electron` CI job and consolidated all Electron e2e coverage into the `test-minds-snapshot` stage. The Electron create+chat test now carries the `minds_snapshot_resume` mark and runs in the snapshot offload sandbox, reusing the snapshot image's already-baked Electron/Playwright/Xvfb toolchain instead of a separate job that cold-installed Node/pnpm/Electron/xvfb on every push. The `test-docker` filter dropped its `not minds_electron` exclusion (the marker is gone), and `just minds-test-electron` now runs the consolidated test locally.
+
+Adds the minds workspace-API blueprint plan and handoff doc under `blueprint/minds-workspace-api/`, and updates root `justfile` recipes supporting the minds app and workspace-API development workflow.
+
+Updates those blueprint docs to match the shipped permission design: the cross-workspace permissions use a `minds-workspaces` scope whose schemas (including per-target ones) arrive with each grant and merge by name, rather than the originally-planned per-host `anyOf` allowlist synced at startup. The plan carries a superseded-notice pointing at `apps/minds/docs/latchkey-permissions.md`, and the handoff now reflects current status (telegram/per-target/create-parity done; SSH remote→local broker outstanding; old UI routes still in use enumerated).
+
+Adds a new plan, `blueprint/minds-api-route-consolidation/plan-minds-api-route-consolidation.md`, for consolidating the leftover desktop-client UI routes onto a single, consistently-authed `/api/v1` surface (workspace/desktop/provider vocabulary, three new per-target `minds-workspaces` verbs, unified auth, and the browser create-flow repoint).
+
+Pin the changelog-consolidation schedule's mngr `user_id` to a committed constant (`USER_ID` in `scripts/changelog_schedule_utils.py`, exposed via `--print-user-id`). `changelog_deploy.sh` and the `changelog-trigger` justfile recipe now export it as `MNGR_USER_ID`, so deploys and on-demand triggers always target the same Modal environment (`mngr-changelog-schedule-<user_id>`) regardless of which machine runs them. Previously the environment name depended on a random per-profile `user_id`, so redeploying from a fresh checkout would silently fork the schedule into a new, empty environment instead of replacing the live one.
+
+`just minds-start` no longer takes an `agent_name` argument or sets `MINDS_WORKSPACE_NAME`. Its parameters are now `branch` and `fct` (positional, in that order): `just minds-start my-branch`, or `just minds-start "" .external_worktrees/my-fct-worktree`. The workspace always gets an automatic `mind-N` name unless you type one into the create form's advanced "Name" field -- type a name there if you want a predictable handle for `just propagate-changes <name>` / `just forward-system-interface <name>`.
+
+## 2026-06-26
+
+Changed: Bumped the offload CI pin in `.github/workflows/ci.yml` from `0.9.9` to `0.9.10` (cargo cache key, version check, and `cargo install` invocation updated to match).
+
+`scripts/tutorial_matcher.py` now reads the tutorial block from each test
+function's docstring (under a `Tutorial block:` section) instead of from a
+`write_tutorial_block(...)` call, matching the new docstring-anchored scheme for
+TMR. Added `specs/docstring-anchored-tmr.md` describing the overall change.
+
+The `sync-tutorial-to-e2e-tests` skill now emits the docstring format (verbatim
+`Tutorial block:` section plus a `Scope:` section) and crystallizes the implicit
+requirements of each block's commands into the scope, rather than calling
+`write_tutorial_block`.
+
+The TMR workflow (`.github/workflows/tmr.yml`, including the daily scheduled run)
+now defaults to all of mngr's release tests (`libs/mngr` with
+`-m "release and not docker and not docker_sdk"`) rather than only the e2e
+tutorial subset. Docker-marked release tests are excluded because they need a
+real Docker daemon and run on a GitHub runner in `release-tests.yml`, not on the
+Modal hosts TMR provisions.
+
+Added a fast, realistic minds-workspace **snapshot test suite** that runs in GitHub CI, and reconciled it with the latest `main`. This consolidates the work from #2226 (wire the snapshot suite into CI) and #2275 (CI secrets via Vault); see those PRs for the development history.
+
+Wired the suite into CI as two jobs: `build-minds-snapshot` builds a fresh Modal `vm_runtime` snapshot image (Docker-in-Docker + a real Electron-created forever-claude-template workspace, `docker stop`ped for a clean, deterministic state) once per run and exposes its image id; the dependent `test-minds-snapshot` job boots straight from that image via offload's `--override-image-id` and runs the `minds_snapshot_resume` suite. Both run on every PR (blocking), skip fork PRs, and have a one-click `DISABLE_MINDS_SNAPSHOT_CI` repo-variable kill switch.
+
+`scripts/snapshot_minds_e2e_state.py` builds the outer image, drives the shared Electron create-flow runner (no pytest, no agent destroy), `docker stop`s the workspace container, snapshots the filesystem, and prints a per-phase timing summary (`PHASE_TIMING ...`). It pins the exact Node (24.15.0) / pnpm (10.33.4) / claude-code versions minds requires, builds the Tailwind stylesheet (`pnpm run build:css`) so the onboarding flow is not silently stuck on a missing `.hidden` rule, forces `docker_runtime=runc` in the sandbox, runs `uv sync` and `pnpm install` concurrently behind a cached pre-repo Playwright layer, and supports `--image-id-output <path>` to hand the image id to the test job without scraping stdout.
+
+CI secrets now use the public `imbue-ai/use-vault-secrets` action (pinned by SHA); only `test-minds-snapshot` needs a secret (`ANTHROPIC_API_KEY` from Vault via OIDC). depot.dev was evaluated for the inner FCT container build and removed: for this ephemeral build-then-run-locally flow it measured ~2.5 min slower (it must export and re-download the whole image into the sandbox daemon), so the build uses the local docker builder.
+
+`offload-modal-minds-snapshot.toml` boots from the snapshot image and runs a single non-retrying group (a real failure should surface, not be masked), with `cpu_cores=4` / `memory_gb=8` and `vm_runtime=true` to match what produced the image so the resumed Docker-in-Docker state has the headroom to come back up. `scripts/cleanup_modal_snapshot_images.py` reclaims the snapshot images (Modal has no list-images API): it keeps a durable ledger in a Modal `Dict` with `record` / `delete` / `sweep --max-age-hours` modes, wired so the build job records each image, the test job deletes it on a fully successful run, and the periodic `cleanup-modal-environments` job sweeps leaked images as a safety net. `justfile` gains `test-offload-minds-snapshot <image-id>` and scopes the `minds_snapshot_resume` mark out of the other offload configs.
+
+The repo-wide bash strict-mode ratchet (`test_meta_ratchets.py::test_prevent_bash_without_strict_mode`) now relies on `find_bash_scripts_without_strict_mode` skipping `.minds/template/` (those are declarative secret-schema templates, not runnable scripts). The recorded snapshot is lowered from 17 to 11, pinned to the offload-CI count (the local checkout sees 10; CI counts one extra, `mac-runner-reset.sh`, only because its thin-diff image serves a stale base-image copy predating that file's own strict-mode line).
+
+`scripts/remove_old_flat_vault_secrets.py` now treats a soft-deleted Vault secret (one whose latest version has a `deletion_time`, so `vault kv get` returns a null `data.data` rather than exit-2) as absent and skips it, instead of crashing the run.
+
+Add a blueprint plan (`blueprint/minds-google-oauth-fallback/`) for the Minds Google OAuth fallback: inserting a Minds-owned Google OAuth attempt between the credential-validity check and the self-setup browser flow, gated to `google-` services. Planning artifact only, no code changes.
+
+`minds-launch-to-msg.yml`: the `macos_launch` job now checks out the trigger ref for the e2e harness (playwright spec + fixtures), matching `launch_to_msg`, instead of pinning the checkout to `commit_sha`. Previously the binary *and* the test harness were both pinned to `commit_sha`, so harness fixes on the dispatched branch were never exercised by `macos_launch` while `launch_to_msg` did pick them up — the two jobs silently tested different code. The binary under test is still pinned to `commit_sha` via the build artifact.
+
+`minds-launch-to-msg.yml`: the post-test cleanup step no longer swallows the reset script's exit code with `|| true`. The reset script now verifies the runner reached a clean state (no leaked Lima VM / `~/.minds` / app) after its best-effort cleanup and exits non-zero otherwise, so a cleanup failure that would silently rot the self-hosted runner now fails the job.
+
 ## 2026-06-25
 
 Bumped the offload CI pin in `.github/workflows/ci.yml` from `0.9.7` to `0.9.9` (the latest release), updating the cargo cache key, the version check, and the `cargo install` invocation.

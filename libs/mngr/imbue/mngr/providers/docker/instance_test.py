@@ -3,11 +3,14 @@ import json
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from typing import cast
 
 import docker
 import docker.errors
 import docker.models.containers
 import pytest
+import requests
+import requests.exceptions
 
 from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.errors import ProcessTimeoutError
@@ -17,16 +20,21 @@ from imbue.mngr.errors import DockerBuildTimeoutError
 from imbue.mngr.errors import DockerRuntimeNotRegisteredError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import OfflineHostWithVolume
+from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.host import HostFileReadInterface
 from imbue.mngr.interfaces.host import HostFileWriteInterface
 from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.docker.config import DockerProviderConfig
+from imbue.mngr.providers.docker.host_store import DockerHostStore
 from imbue.mngr.providers.docker.host_store import HostRecord
 from imbue.mngr.providers.docker.instance import CONTAINER_SSH_PORT
 from imbue.mngr.providers.docker.instance import DockerProviderInstance
@@ -36,6 +44,7 @@ from imbue.mngr.providers.docker.instance import LABEL_PROVIDER
 from imbue.mngr.providers.docker.instance import LABEL_TAGS
 from imbue.mngr.providers.docker.instance import _get_docker_context_host
 from imbue.mngr.providers.docker.instance import _get_ssh_host_from_docker_config
+from imbue.mngr.providers.docker.instance import _is_gvisor_runtime_rootfs_ephemeral
 from imbue.mngr.providers.docker.instance import build_container_labels
 from imbue.mngr.providers.docker.instance import parse_container_labels
 from imbue.mngr.providers.docker.instance import verify_engine_version_supports_volume_subpath
@@ -43,9 +52,53 @@ from imbue.mngr.providers.docker.testing import make_docker_provider
 from imbue.mngr.providers.docker.testing import make_docker_provider_with_local_volume
 from imbue.mngr.providers.docker.testing import make_offline_docker_provider
 from imbue.mngr.providers.docker.testing import write_fake_docker_context
+from imbue.mngr.providers.docker.volume import STATE_CONTAINER_TYPE_LABEL
+from imbue.mngr.providers.docker.volume import STATE_CONTAINER_TYPE_VALUE
+from imbue.mngr.providers.local.volume import LocalVolume
+from imbue.mngr.utils.testing import capture_loguru
 
 HOST_ID_A = "host-00000000000000000000000000000001"
 HOST_ID_B = "host-00000000000000000000000000000002"
+
+
+class _FakeContainer:
+    """Minimal stand-in for a docker SDK container: just the attributes
+    ``_raise_if_state_container_stopped`` reads (``labels`` + ``status``)."""
+
+    def __init__(self, labels: dict[str, str], status: str) -> None:
+        self.labels = labels
+        self.status = status
+
+
+def _fake_containers(*containers: _FakeContainer) -> list[docker.models.containers.Container]:
+    # The helper only reads ``.labels`` / ``.status``, so the duck-typed fakes
+    # stand in for real SDK containers; cast to satisfy the static type.
+    return cast(list[docker.models.containers.Container], list(containers))
+
+
+def test_raise_if_state_container_stopped_raises_when_present_but_stopped(temp_mngr_ctx: MngrContext) -> None:
+    # A stopped state container means host records are unreachable. Discovery
+    # must treat this as ProviderUnavailableError (so the retain-on-error path
+    # keeps last-known hosts) rather than silently reporting zero hosts.
+    provider = make_docker_provider(temp_mngr_ctx)
+    containers = _fake_containers(_FakeContainer({STATE_CONTAINER_TYPE_LABEL: STATE_CONTAINER_TYPE_VALUE}, "exited"))
+    with pytest.raises(ProviderUnavailableError):
+        provider._raise_if_state_container_stopped(containers)
+
+
+def test_raise_if_state_container_stopped_ok_when_running(temp_mngr_ctx: MngrContext) -> None:
+    provider = make_docker_provider(temp_mngr_ctx)
+    containers = _fake_containers(_FakeContainer({STATE_CONTAINER_TYPE_LABEL: STATE_CONTAINER_TYPE_VALUE}, "running"))
+    # A running state container is the normal case -- must not raise.
+    provider._raise_if_state_container_stopped(containers)
+
+
+def test_raise_if_state_container_stopped_noop_when_absent(temp_mngr_ctx: MngrContext) -> None:
+    # No state container in the list (e.g. a never-created / removed env): leave
+    # the genuinely-empty case alone -- only present-but-stopped raises.
+    provider = make_docker_provider(temp_mngr_ctx)
+    provider._raise_if_state_container_stopped(_fake_containers(_FakeContainer({LABEL_HOST_ID: HOST_ID_A}, "running")))
+    provider._raise_if_state_container_stopped(_fake_containers())
 
 
 # =========================================================================
@@ -771,6 +824,115 @@ def test_discover_hosts_propagates_api_error_without_marking_unavailable(
 
 
 # =========================================================================
+# Connection-Error Fallback State (running container, dead inner sshd)
+# =========================================================================
+
+
+class _FakeStatusContainer:
+    """Minimal stand-in for a docker container with a settable status."""
+
+    def __init__(self, status: str) -> None:
+        self.status = status
+
+    def reload(self) -> None:
+        """No-op: the fake container's status does not change on reload."""
+
+
+class _ContainersReturning:
+    """Stand-in for ``client.containers`` whose ``list`` returns fixed containers."""
+
+    def __init__(self, containers: list[_FakeStatusContainer]) -> None:
+        self._containers = containers
+
+    def list(self, **kwargs: object) -> list[_FakeStatusContainer]:
+        return list(self._containers)
+
+
+class _FakeDockerClientReturningContainers:
+    """Already-constructed docker client whose container listing returns fixed containers.
+
+    Lets tests exercise the daemon-backed container-status check without a real
+    daemon (the daemon is ground truth for container lifecycle and is reachable
+    without inner SSH).
+    """
+
+    def __init__(self, containers: list[_FakeStatusContainer]) -> None:
+        self.containers = _ContainersReturning(containers)
+
+
+def _docker_provider_with_containers(
+    temp_mngr_ctx: MngrContext, containers: list[_FakeStatusContainer]
+) -> DockerProviderInstance:
+    provider = make_docker_provider(temp_mngr_ctx)
+    provider.__dict__["_docker_client"] = _FakeDockerClientReturningContainers(containers)
+    return provider
+
+
+def test_connection_error_fallback_state_running_container_is_unauthenticated(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A running container whose inner sshd died reports UNAUTHENTICATED, not CRASHED.
+
+    When agent enumeration fails with a connection error but the docker daemon
+    still reports the container as running, the host is up -- we just can't get
+    inside it -- so the fallback must report a non-offline state (mirroring
+    mngr_imbue_cloud). Reporting CRASHED here makes minds' recovery flow skip
+    the stop step of a host restart and then fail to start the live container.
+    """
+    provider = _docker_provider_with_containers(temp_mngr_ctx, [_FakeStatusContainer("running")])
+    assert provider.get_connection_error_fallback_state(HostId(HOST_ID_A)) == HostState.UNAUTHENTICATED
+
+
+def test_connection_error_fallback_state_stopped_container_returns_none(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A genuinely stopped container yields None so the default offline-state derivation stands."""
+    provider = _docker_provider_with_containers(temp_mngr_ctx, [_FakeStatusContainer("exited")])
+    assert provider.get_connection_error_fallback_state(HostId(HOST_ID_A)) is None
+
+
+def test_connection_error_fallback_state_no_container_returns_none(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """With no container for the host, None is returned so the default derivation stands."""
+    provider = _docker_provider_with_containers(temp_mngr_ctx, [])
+    assert provider.get_connection_error_fallback_state(HostId(HOST_ID_A)) is None
+
+
+@pytest.mark.allow_warnings(match=r"Could not read docker container state for host .* during fallback")
+def test_connection_error_fallback_state_daemon_unreachable_returns_none(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A daemon that drops during the out-of-band check yields None, not an exception.
+
+    This hook runs inside the offline fallback, which must degrade gracefully:
+    if the daemon goes away in the window after host enumeration, the fallback
+    must keep the default offline-state derivation rather than propagate and
+    make the whole host vanish from the listing.
+    """
+    provider = make_docker_provider(temp_mngr_ctx)
+    provider.__dict__["_docker_client"] = _FakeDockerClient(docker.errors.APIError("boom"))
+    assert provider.get_connection_error_fallback_state(HostId(HOST_ID_A)) is None
+
+
+@pytest.mark.allow_warnings(match=r"Could not read docker container state for host .* during fallback")
+def test_connection_error_fallback_state_daemon_transport_drop_returns_none(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A transport-level daemon drop during the out-of-band check yields None, not an exception.
+
+    A socket-level drop surfaces as a ``requests.exceptions.ConnectionError`` rather
+    than a ``docker.errors.DockerException`` (the docker SDK propagates the underlying
+    transport error). The hook must treat it the same as any other daemon-unreachable
+    condition and degrade to the default offline-state derivation, rather than letting
+    it escape and break the offline fallback for the host.
+    """
+    provider = make_docker_provider(temp_mngr_ctx)
+    provider.__dict__["_docker_client"] = _FakeDockerClient(requests.exceptions.ConnectionError("socket gone"))
+    assert provider.get_connection_error_fallback_state(HostId(HOST_ID_A)) is None
+
+
+# =========================================================================
 # Build Timeout
 # =========================================================================
 
@@ -823,3 +985,472 @@ def test_docker_build_timeout_error_help_text_mentions_config_setting() -> None:
     assert error.user_help_text is not None
     assert "build_timeout_seconds" in error.user_help_text
     assert "my-docker" in error.user_help_text
+
+
+# =========================================================================
+# Build-image removal during destroy / GC
+# =========================================================================
+
+
+class _BuildRemovalImages:
+    """Minimal stand-in for ``docker_client.images`` for build-image removal."""
+
+    def __init__(self, *, present: bool, remove_error: Exception | None = None) -> None:
+        self._present = present
+        self._remove_error = remove_error
+        self.remove_calls: list[dict] = []
+
+    def list(self, name: str | None = None) -> list[object]:
+        return [object()] if self._present else []
+
+    def remove(self, tag: str, force: bool = False) -> None:
+        self.remove_calls.append({"tag": tag, "force": force})
+        if self._remove_error is not None:
+            raise self._remove_error
+
+
+class _BuildRemovalDockerClient:
+    def __init__(self, images: _BuildRemovalImages) -> None:
+        self.images = images
+
+
+def test_remove_build_image_force_untags_present_image(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+    """_remove_build_image drops mngr's tag with force=True.
+
+    Callers remove the host's container first, so force deletes the now-
+    unreferenced image; force also lets mngr relinquish its tag when something
+    unexpected still references the image, rather than failing with a 409.
+    """
+    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
+    fake_images = _BuildRemovalImages(present=True)
+    provider.__dict__["_docker_client"] = _BuildRemovalDockerClient(fake_images)
+
+    provider._remove_build_image(HostId(HOST_ID_A))
+
+    expected_tag = DockerProviderInstance._build_image_tag(HostId(HOST_ID_A))
+    assert fake_images.remove_calls == [{"tag": expected_tag, "force": True}]
+
+
+def test_remove_build_image_noops_when_absent(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+    """_remove_build_image does nothing when the build image is not present."""
+    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
+    fake_images = _BuildRemovalImages(present=False)
+    provider.__dict__["_docker_client"] = _BuildRemovalDockerClient(fake_images)
+
+    provider._remove_build_image(HostId(HOST_ID_A))
+
+    assert fake_images.remove_calls == []
+
+
+def _image_in_use_conflict() -> docker.errors.APIError:
+    """The 409 Docker raises when a build image's last tag is removed while a container holds it."""
+    response = requests.Response()
+    response.status_code = 409
+    return docker.errors.APIError(
+        "409 Client Error: Conflict (must be forced) - container is using its referenced image",
+        response=response,
+    )
+
+
+class _LeakedContainer:
+    """A container in `_LeakedContainerDaemon`, referencing one host's build image."""
+
+    def __init__(self, daemon: "_LeakedContainerDaemon", host_id: HostId, remove_error: Exception | None) -> None:
+        self._daemon = daemon
+        self.id = f"container-{host_id}"
+        self.host_id = host_id
+        self.status = "exited"
+        self._remove_error = remove_error
+
+    def reload(self) -> None:
+        if self not in self._daemon.containers_present:
+            raise docker.errors.NotFound(f"container {self.id} gone")
+
+    def stop(self, timeout: int | None = None) -> None:
+        pass
+
+    def remove(self, force: bool = False) -> None:
+        if self._remove_error is not None:
+            raise self._remove_error
+        if self in self._daemon.containers_present:
+            self._daemon.containers_present.remove(self)
+
+
+class _LeakedContainerContainers:
+    def __init__(self, daemon: "_LeakedContainerDaemon") -> None:
+        self._daemon = daemon
+
+    def list(self, all: bool = False, filters: dict | None = None) -> list[_LeakedContainer]:
+        wanted_host_id: str | None = None
+        for label in (filters or {}).get("label", []):
+            if label.startswith(f"{LABEL_HOST_ID}="):
+                wanted_host_id = label.split("=", 1)[1]
+        return [c for c in self._daemon.containers_present if wanted_host_id in (None, str(c.host_id))]
+
+
+class _LeakedContainerImages:
+    def __init__(self, daemon: "_LeakedContainerDaemon") -> None:
+        self._daemon = daemon
+
+    def list(self, name: str | None = None) -> list[object]:
+        return [object()] if name in self._daemon.image_tags else []
+
+    def remove(self, tag: str, force: bool = False) -> None:
+        if tag not in self._daemon.image_tags:
+            raise docker.errors.NotFound(f"image {tag} not found")
+        referenced = any(
+            DockerProviderInstance._build_image_tag(c.host_id) == tag for c in self._daemon.containers_present
+        )
+        if referenced and not force:
+            raise _image_in_use_conflict()
+        self._daemon.image_tags.discard(tag)
+
+
+class _LeakedContainerDaemon:
+    """Stateful fake Docker client modeling the leaked-container/build-image conflict.
+
+    The build image ``mngr-build-<host_id>`` is "in use" -- its unforced removal
+    raises Docker's 409 conflict -- while a container for that host_id exists.
+    force=True drops the tag regardless, and removing the container clears the
+    conflict, mirroring real Docker semantics.
+    """
+
+    def __init__(self) -> None:
+        self.image_tags: set[str] = set()
+        self.containers_present: list[_LeakedContainer] = []
+        self.images = _LeakedContainerImages(self)
+        self.containers = _LeakedContainerContainers(self)
+
+    def add_host_with_leaked_container(self, host_id: HostId, remove_error: Exception | None = None) -> None:
+        self.image_tags.add(DockerProviderInstance._build_image_tag(host_id))
+        self.containers_present.append(_LeakedContainer(self, host_id, remove_error))
+
+
+def _write_destroyed_host_record(provider: DockerProviderInstance, host_id: str) -> OfflineHost:
+    record = HostRecord(
+        certified_host_data=CertifiedHostData(
+            host_id=host_id,
+            host_name="h",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+    )
+    provider._host_store.write_host_record(record)
+    return provider._create_host_from_host_record(record)
+
+
+def test_delete_host_destroys_leaked_container_then_removes_build_image(
+    temp_mngr_ctx: MngrContext, tmp_path: Path
+) -> None:
+    """delete_host clears a leaked container so no trace of the host remains.
+
+    A container left over from an earlier failed destroy still references the
+    build image. delete_host re-runs destroy_host, which removes that container
+    before its build image, leaving no container, no image, and no host record
+    -- rather than force-untagging the image and leaking the container.
+    """
+    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
+    daemon = _LeakedContainerDaemon()
+    daemon.add_host_with_leaked_container(HostId(HOST_ID_A))
+    provider.__dict__["_docker_client"] = daemon
+    host = _write_destroyed_host_record(provider, HOST_ID_A)
+
+    provider.delete_host(host)
+
+    assert daemon.containers_present == []
+    assert daemon.image_tags == set()
+    assert provider._host_store.read_host_record(HostId(HOST_ID_A), use_cache=False) is None
+
+
+@pytest.mark.allow_warnings(match=r"Failed to remove container for host")
+def test_delete_host_records_leak_when_container_removal_stays_stuck(
+    temp_mngr_ctx: MngrContext, tmp_path: Path
+) -> None:
+    """A container that cannot be removed is surfaced as a leak, not a crash.
+
+    When destroy_host still cannot remove the conflicting container, that
+    container is recorded as a CleanupFailedGroup leak (which GC aggregates and
+    continues past). The build image tag is force-dropped regardless -- mngr
+    relinquishes its claim -- but the host record is kept (not forgotten) so the
+    next sweep can retry the leftover.
+    """
+    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
+    daemon = _LeakedContainerDaemon()
+    daemon.add_host_with_leaked_container(HostId(HOST_ID_A), remove_error=docker.errors.APIError("stuck"))
+    provider.__dict__["_docker_client"] = daemon
+    host = _write_destroyed_host_record(provider, HOST_ID_A)
+
+    with pytest.raises(CleanupFailedGroup) as exc_info:
+        provider.delete_host(host)
+
+    assert any(f.category == CleanupFailureCategory.HOST_RESOURCE_REMAINS for f in exc_info.value.failures)
+    # The stuck container is reported as a leak and remains, but mngr force-drops
+    # its build image tag regardless...
+    assert daemon.containers_present != []
+    assert daemon.image_tags == set()
+    # ...and the host record is KEPT (not forgotten) so the next sweep can retry the leak.
+    assert provider._host_store.read_host_record(HostId(HOST_ID_A), use_cache=False) is not None
+
+
+class _RemoveDirectoryFailingVolume(LocalVolume):
+    """LocalVolume whose remove_directory always fails (mirrors DockerVolume's `rm -rf` failure)."""
+
+    def remove_directory(self, path: str) -> None:
+        raise MngrError(f"failed to remove directory {path}")
+
+
+@pytest.mark.allow_warnings(match=r"Failed to remove host volume for host")
+def test_delete_host_records_volume_removal_failure_as_leak(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+    """A host volume that cannot be removed is recorded as a leak, not dismissed.
+
+    remove_directory is idempotent on a missing path, so an exception means the
+    volume data still exists and could not be removed -- a leftover resource,
+    not a benign "no volume" case. delete_host must record it as a
+    CleanupFailedGroup and keep the host record for the next sweep to retry.
+    """
+    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
+    provider.__dict__["_state_volume"] = _RemoveDirectoryFailingVolume(root_path=tmp_path)
+    provider.__dict__["_docker_client"] = _LeakedContainerDaemon()
+    host = _write_destroyed_host_record(provider, HOST_ID_A)
+
+    with pytest.raises(CleanupFailedGroup) as exc_info:
+        provider.delete_host(host)
+
+    assert any("host volume" in f.message for f in exc_info.value.failures)
+    # The host record is kept on failure so the next sweep can retry.
+    assert provider._host_store.read_host_record(HostId(HOST_ID_A), use_cache=False) is not None
+
+
+def test_gvisor_runsc_without_overlay_none_is_ephemeral() -> None:
+    """A runsc runtime registered without --overlay2=none has an ephemeral root fs."""
+    runtimes = {"runsc": {"path": "/usr/bin/runsc"}}
+    assert _is_gvisor_runtime_rootfs_ephemeral("runsc", runtimes) is True
+
+
+def test_gvisor_runsc_with_other_args_but_not_overlay_none_is_ephemeral() -> None:
+    """Other runtimeArgs do not make the root fs persistent -- only --overlay2=none does."""
+    runtimes = {"runsc": {"path": "/usr/bin/runsc", "runtimeArgs": ["--network=none"]}}
+    assert _is_gvisor_runtime_rootfs_ephemeral("runsc", runtimes) is True
+
+
+def test_gvisor_runsc_with_overlay_none_is_persistent() -> None:
+    """--overlay2=none writes the root layer through to the persistent Docker layer."""
+    runtimes = {"runsc": {"path": "/usr/bin/runsc", "runtimeArgs": ["--overlay2=none"]}}
+    assert _is_gvisor_runtime_rootfs_ephemeral("runsc", runtimes) is False
+
+
+def test_non_gvisor_runtime_is_not_treated_as_ephemeral() -> None:
+    """A non-runsc runtime's overlay semantics are unknown, so it is never flagged."""
+    runtimes = {"runc": {"path": "runc"}}
+    assert _is_gvisor_runtime_rootfs_ephemeral("runc", runtimes) is False
+
+
+def test_unregistered_runtime_is_not_treated_as_ephemeral() -> None:
+    """A runtime absent from the daemon config is left to Docker's own unknown-runtime error."""
+    assert _is_gvisor_runtime_rootfs_ephemeral("runsc", {}) is False
+
+
+# =========================================================================
+# Recorded SSH Port Reconciliation (stale after Docker daemon restart)
+# =========================================================================
+
+# Ports from the real-world reproduction: a host reboot left the record at
+# 52918 while docker reported 49315.
+_RECORDED_STALE_SSH_PORT = 52918
+_LIVE_SSH_PORT = 49315
+
+_RECONCILE_HOST_PUBLIC_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIRecordedHostKeyForPortReconcileTests"
+
+
+class _FakePortedContainer:
+    """Duck-typed stand-in for a running docker SDK container as read by
+    ``_create_host_from_container``: labels for identity plus the live
+    published-port mapping consumed by ``_read_container_ssh_port``."""
+
+    def __init__(self, host_id: str, ssh_host_port: int) -> None:
+        self.labels = build_container_labels(HostId(host_id), HostName("port-heal-host"), "test-docker", None)
+        self.status = "running"
+        self.id = f"fake-container-{host_id}"
+        self.short_id = self.id[:10]
+        self.ports = {f"{CONTAINER_SSH_PORT}/tcp": [{"HostIp": "0.0.0.0", "HostPort": str(ssh_host_port)}]}
+
+    def reload(self) -> None:
+        """No-op: the fake's attributes are fixed."""
+
+
+def _as_sdk_container(container: _FakePortedContainer) -> docker.models.containers.Container:
+    # The provider only reads duck-typed attributes; cast satisfies the static type.
+    return cast(docker.models.containers.Container, container)
+
+
+def _write_host_record_with_ssh_port(
+    provider: DockerProviderInstance,
+    host_id: str,
+    ssh_port: int,
+) -> HostRecord:
+    now = datetime.now(timezone.utc)
+    record = HostRecord(
+        certified_host_data=CertifiedHostData(
+            host_id=host_id,
+            host_name="port-heal-host",
+            created_at=now,
+            updated_at=now,
+        ),
+        ssh_host="127.0.0.1",
+        last_discovered_ssh_port=ssh_port,
+        ssh_host_public_key=_RECONCILE_HOST_PUBLIC_KEY,
+    )
+    provider._host_store.write_host_record(record)
+    return record
+
+
+class _WriteCountingHostStore(DockerHostStore):
+    """DockerHostStore that counts record writes, so tests can assert the
+    happy path (recorded port already matches) performs no redundant rewrite."""
+
+    write_call_count: int = 0
+
+    def write_host_record(self, host_record: HostRecord) -> None:
+        self.write_call_count += 1
+        super().write_host_record(host_record)
+
+
+def _connector_ssh_port(host: Host) -> int | None:
+    return host.connector.host.data.get("ssh_port")
+
+
+def test_create_host_from_container_heals_stale_recorded_ssh_port(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """A record holding a dead port is healed from the container's live mapping.
+
+    Docker does not preserve randomly-published host ports across a daemon
+    restart, so the port persisted at create time can go stale. The connection
+    must target the live port and the record must be rewritten with it, so
+    workspaces reconnect after a reboot instead of dialing the dead port forever.
+    """
+    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
+    _write_host_record_with_ssh_port(provider, HOST_ID_A, _RECORDED_STALE_SSH_PORT)
+    container = _as_sdk_container(_FakePortedContainer(HOST_ID_A, _LIVE_SSH_PORT))
+
+    with capture_loguru(level="INFO") as log_output:
+        host = provider._create_host_from_container(container)
+
+    assert host is not None
+    assert _connector_ssh_port(host) == _LIVE_SSH_PORT
+
+    stored_record = provider._host_store.read_host_record(HostId(HOST_ID_A), use_cache=False)
+    assert stored_record is not None
+    assert stored_record.last_discovered_ssh_port == _LIVE_SSH_PORT
+
+    assert f"changed from {_RECORDED_STALE_SSH_PORT} to {_LIVE_SSH_PORT}" in log_output.getvalue()
+
+
+def test_create_host_from_container_matching_port_is_not_rewritten(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """When the recorded port matches the live mapping, nothing is rewritten or logged.
+
+    The reconciliation must stay free on the happy path: no record write and no
+    port-change log line -- and a cached Host with the matching port is reused
+    as-is (preserving its SSH connection).
+    """
+    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
+    counting_store = _WriteCountingHostStore(volume=LocalVolume(root_path=tmp_path))
+    provider.__dict__["_host_store"] = counting_store
+    _write_host_record_with_ssh_port(provider, HOST_ID_A, _LIVE_SSH_PORT)
+    container = _as_sdk_container(_FakePortedContainer(HOST_ID_A, _LIVE_SSH_PORT))
+
+    cached_host = provider._create_host_from_container(container)
+    assert cached_host is not None
+    provider._host_by_id_cache[HostId(HOST_ID_A)] = cached_host
+    write_count_before = counting_store.write_call_count
+
+    with capture_loguru(level="INFO") as log_output:
+        host = provider._create_host_from_container(container)
+
+    assert host is cached_host
+    assert counting_store.write_call_count == write_count_before
+    assert "changed from" not in log_output.getvalue()
+
+
+def test_port_reconciliation_replaces_stale_known_hosts_entry_for_new_port(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """A stale known_hosts key on the host's new port is replaced, not fatal.
+
+    After a reboot, a container's new port may previously have belonged to a
+    different container, leaving a known_hosts entry for [host]:port that does
+    not match this host's key. Connection setup must replace that entry with
+    the host's recorded public key so host-key verification succeeds.
+    """
+    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
+    _write_host_record_with_ssh_port(provider, HOST_ID_A, _RECORDED_STALE_SSH_PORT)
+    stale_entry = f"[127.0.0.1]:{_LIVE_SSH_PORT} ssh-ed25519 AAAAStaleKeyLeftByAnotherContainer"
+    provider._known_hosts_path.parent.mkdir(parents=True, exist_ok=True)
+    provider._known_hosts_path.write_text(f"{stale_entry}\n")
+    container = _as_sdk_container(_FakePortedContainer(HOST_ID_A, _LIVE_SSH_PORT))
+
+    host = provider._create_host_from_container(container)
+
+    assert host is not None
+    known_hosts_content = provider._known_hosts_path.read_text()
+    assert stale_entry not in known_hosts_content
+    assert f"[127.0.0.1]:{_LIVE_SSH_PORT} {_RECONCILE_HOST_PUBLIC_KEY}" in known_hosts_content
+
+
+def test_port_reconciliation_invalidates_cached_host_with_stale_port(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """A cached Host still holding the old port is replaced by one on the live port.
+
+    Without this, the provider keeps handing back the cached connector that
+    dials the dead port even after the record is healed.
+    """
+    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
+    _write_host_record_with_ssh_port(provider, HOST_ID_A, _RECORDED_STALE_SSH_PORT)
+    stale_container = _as_sdk_container(_FakePortedContainer(HOST_ID_A, _RECORDED_STALE_SSH_PORT))
+    stale_host = provider._create_host_from_container(stale_container)
+    assert stale_host is not None
+    provider._host_by_id_cache[HostId(HOST_ID_A)] = stale_host
+
+    live_container = _as_sdk_container(_FakePortedContainer(HOST_ID_A, _LIVE_SSH_PORT))
+    healed_host = provider._create_host_from_container(live_container)
+
+    assert healed_host is not None
+    assert healed_host is not stale_host
+    assert _connector_ssh_port(healed_host) == _LIVE_SSH_PORT
+
+
+def test_port_reconciliation_keeps_recorded_port_when_live_mapping_unreadable(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """An unreadable live port mapping keeps the recorded port and record intact.
+
+    Reconciliation is best-effort healing: a container whose port mapping
+    cannot be read (e.g. it stopped in the window since the caller's status
+    check) must not break paths that previously worked, so the connection
+    falls back to the recorded port, the record is not rewritten, and a
+    warning is logged.
+    """
+    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
+    _write_host_record_with_ssh_port(provider, HOST_ID_A, _RECORDED_STALE_SSH_PORT)
+    container_without_mapping = _FakePortedContainer(HOST_ID_A, _LIVE_SSH_PORT)
+    container_without_mapping.ports = {}
+
+    with capture_loguru() as log_output:
+        host = provider._create_host_from_container(_as_sdk_container(container_without_mapping))
+
+    assert host is not None
+    assert _connector_ssh_port(host) == _RECORDED_STALE_SSH_PORT
+
+    stored_record = provider._host_store.read_host_record(HostId(HOST_ID_A), use_cache=False)
+    assert stored_record is not None
+    assert stored_record.last_discovered_ssh_port == _RECORDED_STALE_SSH_PORT
+
+    assert "Could not read live SSH port" in log_output.getvalue()

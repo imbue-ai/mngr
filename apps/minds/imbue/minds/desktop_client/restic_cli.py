@@ -24,6 +24,7 @@ from typing import NoReturn
 from typing import TypeVar
 
 from loguru import logger
+from pydantic import Field
 from tenacity import RetryCallState
 from tenacity import Retrying
 from tenacity import retry_if_exception_type
@@ -32,6 +33,7 @@ from tenacity import wait_fixed
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.errors import BackupProvisioningError
 
 _T = TypeVar("_T")
@@ -229,8 +231,22 @@ def _add_password_key_once(
     new_password: str,
     parent_cg: ConcurrencyGroup | None,
 ) -> None:
-    """Run a single ``restic key add`` attempt, authenticating with ``existing_password``."""
+    """Run a single ``restic key add`` attempt, authenticating with ``existing_password``.
+
+    An empty ``new_password`` adds the empty-password key via
+    ``--new-insecure-no-password`` (restic rejects an empty password file).
+    """
     env, flags = _env_and_flags(repository, backend_env, existing_password)
+    if not new_password:
+        result = _run_restic(
+            [*flags, "key", "add", "--new-insecure-no-password"],
+            env_overrides=env,
+            parent_cg=parent_cg,
+            timeout_seconds=_DEFAULT_TIMEOUT_SECONDS,
+        )
+        if result.returncode != 0:
+            _raise_restic_failure("restic key add", result.returncode, result.stderr)
+        return
     with TemporaryDirectory() as temp_dir:
         new_password_file = Path(temp_dir) / "new_password"
         # 0600 temp file so the random key isn't briefly world-readable on disk.
@@ -270,6 +286,67 @@ def add_password_key(
             parent_cg=parent_cg,
         )
     )
+
+
+class ResticKey(FrozenModel):
+    """One repository key as reported by ``restic key list --json``."""
+
+    key_id: str = Field(description="The key's id (hex prefix restic accepts for key remove)")
+    is_current: bool = Field(description="Whether this is the key the listing authenticated with")
+
+
+def list_keys(
+    *,
+    repository: str,
+    backend_env: Mapping[str, str],
+    password: str | None,
+    parent_cg: ConcurrencyGroup | None = None,
+    timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
+) -> tuple[ResticKey, ...]:
+    """List the repository's keys, marking the one used to authenticate."""
+    env, flags = _env_and_flags(repository, backend_env, password)
+    result = _run_restic(
+        [*flags, "--no-lock", "key", "list", "--json"],
+        env_overrides=env,
+        parent_cg=parent_cg,
+        timeout_seconds=timeout_seconds,
+    )
+    if result.returncode != 0:
+        raise BackupProvisioningError(f"restic key list failed (exit {result.returncode}): {result.stderr.strip()}")
+    try:
+        raw = json.loads(result.stdout or "[]")
+    except ValueError as e:
+        raise BackupProvisioningError(f"restic key list returned non-JSON output: {e}") from e
+    if not isinstance(raw, list):
+        raise BackupProvisioningError(f"restic key list returned a non-list JSON payload: {type(raw).__name__}")
+    keys: list[ResticKey] = []
+    for entry in raw:
+        if not isinstance(entry, dict) or not entry.get("id"):
+            logger.warning("Skipping malformed restic key entry: {!r}", entry)
+            continue
+        keys.append(ResticKey(key_id=str(entry["id"]), is_current=bool(entry.get("current"))))
+    return tuple(keys)
+
+
+def remove_key(
+    *,
+    repository: str,
+    backend_env: Mapping[str, str],
+    password: str | None,
+    key_id: str,
+    parent_cg: ConcurrencyGroup | None = None,
+    timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
+) -> None:
+    """Remove one key from the repository (restic refuses to remove the current key)."""
+    env, flags = _env_and_flags(repository, backend_env, password)
+    result = _run_restic(
+        [*flags, "key", "remove", key_id],
+        env_overrides=env,
+        parent_cg=parent_cg,
+        timeout_seconds=timeout_seconds,
+    )
+    if result.returncode != 0:
+        raise BackupProvisioningError(f"restic key remove failed (exit {result.returncode}): {result.stderr.strip()}")
 
 
 def restore_snapshot(
@@ -330,35 +407,83 @@ def parse_restic_timestamp(raw: str) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def get_latest_snapshot_time(
+class ResticSnapshot(FrozenModel):
+    """A single snapshot as reported by ``restic snapshots --json``."""
+
+    snapshot_id: str = Field(description="Full snapshot id (hex)")
+    short_id: str = Field(description="Abbreviated snapshot id restic also accepts when addressing the snapshot")
+    time: datetime = Field(description="When the snapshot was created (UTC)")
+    paths: tuple[str, ...] = Field(default=(), description="Absolute paths captured in the snapshot")
+    hostname: str = Field(default="", description="Hostname recorded in the snapshot")
+    tags: tuple[str, ...] = Field(default=(), description="Tags recorded on the snapshot")
+    total_size_bytes: int | None = Field(
+        default=None,
+        description="Total size in bytes when restic reports a snapshot summary, else None",
+    )
+
+
+def parse_restic_snapshots(stdout: str) -> tuple[ResticSnapshot, ...]:
+    """Parse ``restic snapshots --json`` stdout into typed snapshots (restic's order: oldest first).
+
+    Entries missing a usable id or a parseable time are skipped with a warning
+    rather than aborting the whole listing, so one malformed record can't hide
+    every other snapshot. Raises ``BackupProvisioningError`` only when the
+    overall payload is not a JSON list.
+    """
+    try:
+        raw = json.loads(stdout or "[]")
+    except ValueError as e:
+        raise BackupProvisioningError(f"restic snapshots returned non-JSON output: {e}") from e
+    if not isinstance(raw, list):
+        raise BackupProvisioningError(f"restic snapshots returned a non-list JSON payload: {type(raw).__name__}")
+
+    snapshots: list[ResticSnapshot] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            logger.warning("Skipping non-object restic snapshot entry: {!r}", entry)
+            continue
+        snapshot_id = entry.get("id")
+        snapshot_time = parse_restic_timestamp(str(entry.get("time", "")))
+        if not snapshot_id or snapshot_time is None:
+            logger.warning("Skipping restic snapshot entry missing id/time: {!r}", entry)
+            continue
+        raw_paths = entry.get("paths")
+        raw_tags = entry.get("tags")
+        summary = entry.get("summary")
+        total_size = summary.get("total_size") if isinstance(summary, dict) else None
+        snapshots.append(
+            ResticSnapshot(
+                snapshot_id=str(snapshot_id),
+                short_id=str(entry.get("short_id") or str(snapshot_id)[:8]),
+                time=snapshot_time,
+                paths=tuple(str(path) for path in raw_paths) if isinstance(raw_paths, list) else (),
+                hostname=str(entry.get("hostname", "")),
+                tags=tuple(str(tag) for tag in raw_tags) if isinstance(raw_tags, list) else (),
+                total_size_bytes=int(total_size) if isinstance(total_size, int) else None,
+            )
+        )
+    return tuple(snapshots)
+
+
+def list_snapshots(
     *,
     repository: str,
     backend_env: Mapping[str, str],
     password: str | None,
     parent_cg: ConcurrencyGroup | None = None,
     timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
-) -> datetime | None:
-    """Return the time of the most recent snapshot, or None if there are none."""
+) -> tuple[ResticSnapshot, ...]:
+    """List every snapshot in the repository (restic's order: oldest first)."""
     env, flags = _env_and_flags(repository, backend_env, password)
     result = _run_restic(
-        [*flags, "--no-lock", "snapshots", "--latest", "1", "--json"],
+        [*flags, "--no-lock", "snapshots", "--json"],
         env_overrides=env,
         parent_cg=parent_cg,
         timeout_seconds=timeout_seconds,
     )
     if result.returncode != 0:
         raise BackupProvisioningError(f"restic snapshots failed (exit {result.returncode}): {result.stderr.strip()}")
-    try:
-        snapshots = json.loads(result.stdout or "[]")
-    except ValueError as e:
-        raise BackupProvisioningError(f"restic snapshots returned non-JSON output: {e}") from e
-    times = [
-        parse_restic_timestamp(str(snapshot["time"]))
-        for snapshot in snapshots
-        if isinstance(snapshot, dict) and snapshot.get("time")
-    ]
-    real_times = [time for time in times if time is not None]
-    return max(real_times) if real_times else None
+    return parse_restic_snapshots(result.stdout or "[]")
 
 
 def is_backup_in_progress(
