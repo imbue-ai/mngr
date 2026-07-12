@@ -16,8 +16,8 @@ from imbue.mngr_imbue_cloud.bake.bake_source import merge_bake_identity_attribut
 from imbue.mngr_imbue_cloud.bake.bake_source import resolved_bake_source
 from imbue.mngr_imbue_cloud.errors import RepoIdentityError
 
-_ORIGIN_URL: str = "git@github.com:imbue-ai/forever-claude-template.git"
-_CANONICAL: str = "github.com/imbue-ai/forever-claude-template"
+_ORIGIN_URL: str = "git@github.com:imbue-ai/default-workspace-template.git"
+_CANONICAL: str = "github.com/imbue-ai/default-workspace-template"
 
 
 def _init_repo(repo_dir: Path, *, origin_url: str | None = None, branch: str = "main") -> None:
@@ -70,7 +70,7 @@ def test_resolved_bake_source_requires_exactly_one_selector_both(tmp_path: Path)
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="git required")
 def test_resolved_bake_source_workspace_dir_derives_origin_and_branch(tmp_path: Path) -> None:
-    repo_dir = tmp_path / "fct"
+    repo_dir = tmp_path / "default_workspace_template"
     _init_repo(repo_dir, origin_url=_ORIGIN_URL, branch="josh/ovh-exploration")
     with resolved_bake_source(
         from_tag=None, workspace_dir=str(repo_dir), repo_url="ignored", repo_branch_or_tag_override=None
@@ -84,24 +84,24 @@ def test_resolved_bake_source_workspace_dir_derives_origin_and_branch(tmp_path: 
 def test_resolved_bake_source_workspace_dir_relative_path_is_canonicalized(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A relative --workspace-dir (e.g. ``fct``, not ``./fct``) still canonicalizes via origin.
+    """A relative --workspace-dir (e.g. ``default_workspace_template``, not ``./default_workspace_template``) still canonicalizes via origin.
 
     Regression: the local-vs-URL heuristic keys on a leading / ./ ../ ~, so a bare
     relative path was misread as a URL and stamped verbatim. Resolving to absolute
     first fixes it.
     """
-    repo_dir = tmp_path / "fct"
+    repo_dir = tmp_path / "default_workspace_template"
     _init_repo(repo_dir, origin_url=_ORIGIN_URL, branch="main")
     monkeypatch.chdir(tmp_path)
     with resolved_bake_source(
-        from_tag=None, workspace_dir="fct", repo_url="ignored", repo_branch_or_tag_override=None
+        from_tag=None, workspace_dir="default_workspace_template", repo_url="ignored", repo_branch_or_tag_override=None
     ) as source:
         assert source.repo_url == _CANONICAL
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="git required")
 def test_resolved_bake_source_workspace_dir_branch_override_wins(tmp_path: Path) -> None:
-    repo_dir = tmp_path / "fct"
+    repo_dir = tmp_path / "default_workspace_template"
     _init_repo(repo_dir, origin_url=_ORIGIN_URL, branch="some-branch")
     with resolved_bake_source(
         from_tag=None, workspace_dir=str(repo_dir), repo_url="ignored", repo_branch_or_tag_override="v9.9.9"
@@ -111,7 +111,7 @@ def test_resolved_bake_source_workspace_dir_branch_override_wins(tmp_path: Path)
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="git required")
 def test_resolved_bake_source_workspace_dir_without_origin_raises(tmp_path: Path) -> None:
-    repo_dir = tmp_path / "fct"
+    repo_dir = tmp_path / "default_workspace_template"
     _init_repo(repo_dir, origin_url=None)
     with pytest.raises(RepoIdentityError):
         with resolved_bake_source(
