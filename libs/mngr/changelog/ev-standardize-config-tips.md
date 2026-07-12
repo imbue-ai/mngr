@@ -5,3 +5,5 @@ A new shared helper (`imbue.mngr.remediations`) renders these hints in one canon
 Provider-disable hints now recommend `--scope local` rather than `--scope user`. Because config precedence is user < project < local, a `--scope user` suggestion was silently overridden (and thus ineffective) whenever the provider was enabled at the project or local layer; writing to the local scope always takes effect.
 
 Updated the affected messages in `mngr create --template`, the custom-agent-type "no command" error, and the provider-unavailable / not-authorized errors.
+
+The "agent type has no command to run" error's example now uses the agent type you actually ran (`mngr create foo --type <your-type> -- ...`) instead of always suggesting `--type command`.

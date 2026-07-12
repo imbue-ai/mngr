@@ -792,7 +792,8 @@ def apply_create_template(
             else:
                 raise UserInputError(
                     f"Template '{template_name}' not found. No templates are configured. "
-                    f"Define one with e.g. `{format_config_set('create_templates.<name>.options.<param>', '<value>')}`"
+                    f"Define it with e.g. "
+                    f"`{format_config_set(f'create_templates.{template_name}.options.<param>', '<value>')}`"
                 )
 
         template = config.create_templates[template_key]

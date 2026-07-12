@@ -117,7 +117,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
             raise UserInputError(
                 f"Agent type '{self.agent_type}' has no command to run. "
                 f"Pass a shell command after `--` "
-                f"(e.g. `mngr create foo --type command -- sleep 99999`), "
+                f"(e.g. `mngr create foo --type {self.agent_type} -- sleep 99999`), "
                 f"or set a command on a custom agent type with `{set_command_hint}`."
             )
 
