@@ -9,6 +9,8 @@ from imbue.mngr.uv_tool import ToolRequirement
 from imbue.mngr.uv_tool import _append_constraints_arg
 from imbue.mngr.uv_tool import _build_uv_tool_install_command
 from imbue.mngr.uv_tool import _constraints_arg_or_abort
+from imbue.mngr.uv_tool import _plugin_package_names_from_receipt
+from imbue.mngr.uv_tool import _read_receipt_or_none
 from imbue.mngr.uv_tool import _requirement_to_with_arg
 from imbue.mngr.uv_tool import build_base_specifier
 from imbue.mngr.uv_tool import build_uv_tool_install_add
@@ -478,51 +480,49 @@ def test_get_installed_plugin_package_names_returns_empty_in_dev_mode() -> None:
     assert get_installed_plugin_package_names() == []
 
 
-def test_get_installed_plugin_package_names_sorted_and_deduped(tmp_path: Path) -> None:
+def test_plugin_package_names_from_receipt_sorted_and_deduped() -> None:
     """Returns the receipt extras' package names, sorted and deduplicated."""
-    receipt_path = tmp_path / "uv-receipt.toml"
-    receipt_path.write_text(
-        "[tool]\nrequirements = [\n"
-        '  { name = "imbue-mngr" },\n'
-        '  { name = "imbue-mngr-modal" },\n'
-        '  { name = "imbue-mngr-claude" },\n'
-        '  { name = "imbue-mngr-modal" },\n'
-        "]\n"
+    receipt = ToolReceipt(
+        base=ToolRequirement(name="imbue-mngr"),
+        extras=[
+            ToolRequirement(name="imbue-mngr-modal"),
+            ToolRequirement(name="imbue-mngr-claude"),
+            ToolRequirement(name="imbue-mngr-modal"),
+        ],
     )
 
-    # Inject a deterministic plugin predicate so the test does not depend on
-    # which packages happen to be installed in the test environment.
-    result = get_installed_plugin_package_names(receipt_path, is_plugin_package=lambda name: True)
+    # A deterministic plugin predicate keeps the test independent of which
+    # packages happen to be installed in the test environment.
+    result = _plugin_package_names_from_receipt(receipt, lambda name: True)
     assert result == ["imbue-mngr-claude", "imbue-mngr-modal"]
 
 
-def test_get_installed_plugin_package_names_filters_non_plugin_extras(tmp_path: Path) -> None:
+def test_plugin_package_names_from_receipt_filters_non_plugin_extras() -> None:
     """Non-plugin extras (libraries with no mngr entry points) are excluded."""
-    receipt_path = tmp_path / "uv-receipt.toml"
     # Mirrors a real editable dev install: plugins plus workspace libraries.
-    receipt_path.write_text(
-        "[tool]\nrequirements = [\n"
-        '  { name = "imbue-mngr" },\n'
-        '  { name = "concurrency-group" },\n'
-        '  { name = "imbue-common" },\n'
-        '  { name = "modal-proxy" },\n'
-        '  { name = "imbue-mngr-modal" },\n'
-        '  { name = "imbue-mngr-claude" },\n'
-        "]\n"
+    receipt = ToolReceipt(
+        base=ToolRequirement(name="imbue-mngr"),
+        extras=[
+            ToolRequirement(name="concurrency-group"),
+            ToolRequirement(name="imbue-common"),
+            ToolRequirement(name="modal-proxy"),
+            ToolRequirement(name="imbue-mngr-modal"),
+            ToolRequirement(name="imbue-mngr-claude"),
+        ],
     )
 
     is_plugin = {"imbue-mngr-modal", "imbue-mngr-claude"}.__contains__
-    result = get_installed_plugin_package_names(receipt_path, is_plugin_package=is_plugin)
+    result = _plugin_package_names_from_receipt(receipt, is_plugin)
     assert result == ["imbue-mngr-claude", "imbue-mngr-modal"]
 
 
 @pytest.mark.allow_warnings(match=r"Could not read uv-tool receipt")
-def test_get_installed_plugin_package_names_handles_malformed_receipt(tmp_path: Path) -> None:
-    """Best-effort: a garbled receipt yields an empty list (and warns) rather than raising."""
+def test_read_receipt_or_none_returns_none_for_malformed_receipt(tmp_path: Path) -> None:
+    """Best-effort: a garbled receipt yields None (and warns) rather than raising."""
     receipt_path = tmp_path / "uv-receipt.toml"
     receipt_path.write_text("this is not valid toml = = =\n")
 
-    assert get_installed_plugin_package_names(receipt_path) == []
+    assert _read_receipt_or_none(receipt_path) is None
 
 
 # =============================================================================
