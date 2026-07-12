@@ -569,7 +569,7 @@ _IMBUE_CLOUD_BACKEND_NAME: Final[str] = "imbue_cloud"
 
 # Runtime knobs written into each per-account ``[providers.imbue_cloud_<slug>]``
 # block so the imbue_cloud slow (rebuild) path runs the agent container under
-# gVisor with the runsc hardening args. These mirror the forever-claude-template
+# gVisor with the runsc hardening args. These mirror the default-workspace-template
 # ``[providers.ovh]`` bake settings; ``ImbueCloudProviderConfig`` (which extends
 # ``VpsProviderConfig``) forwards them onto the delegated vps_docker
 # provider, and ``install_gvisor_runtime`` also drives the slow path's SSH
@@ -583,7 +583,7 @@ _IMBUE_CLOUD_DEFAULT_START_ARGS: Final[tuple[str, ...]] = ("--workdir=/", "--sec
 # ``[providers.aws-<region>]`` block. The AWS provider is region-locked per
 # instance (EC2's API is per-region), so minds writes one block per
 # ``CONFIGURED_AWS_REGIONS`` entry and the create address selects the right one.
-# The gVisor/runsc settings mirror the forever-claude-template ``[providers.ovh]``
+# The gVisor/runsc settings mirror the default-workspace-template ``[providers.ovh]``
 # / ``[providers.vultr]`` bake settings so the EC2 outer host runs the agent in a
 # runsc-hardened container; the matching ``docker run`` start args live in the
 # template ``[create_templates.aws]``.
@@ -624,7 +624,7 @@ def _build_modal_provider_block(is_enabled: bool) -> Table:
 
 
 # EC2 instance size for minds AWS workspaces. The mngr_aws default (t3.small,
-# 2 GB) is too small for the full forever-claude-template build (uv sync + npm
+# 2 GB) is too small for the full default-workspace-template build (uv sync + npm
 # ci/build OOMs/thrashes on 2 GB); minds workspaces default to t3.large (8 GB).
 _AWS_DEFAULT_INSTANCE_TYPE: Final[str] = "t3.large"
 # Mount /run as a tmpfs in the AWS workspace container. mngr_aws leaves the

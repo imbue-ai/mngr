@@ -520,7 +520,7 @@ jobs:
       - name: Build and snapshot the minds e2e Modal image
         id: snapshot
         # The script builds the vm_runtime image, drives the real Electron
-        # workspace-creation flow inside it (building the FCT agent container
+        # workspace-creation flow inside it (building the DEFAULT_WORKSPACE_TEMPLATE agent container
         # with the local docker builder), docker-stops the container for a clean
         # state, snapshots the filesystem, and writes the bare image id to the
         # --image-id-output file for this job's output. It prints a per-phase

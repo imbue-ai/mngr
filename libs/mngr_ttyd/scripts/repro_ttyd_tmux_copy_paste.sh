@@ -5,7 +5,7 @@
 # --------------------
 # In a real minds workspace, ttyd serves a browser terminal that attaches to an
 # agent's tmux *session* (a different session than ttyd itself lives in), and the
-# forever-claude-template writes a `~/.tmux.conf` containing:
+# default-workspace-template writes a `~/.tmux.conf` containing:
 #
 #     set -g alternate-screen off
 #     set -g mouse on
@@ -42,7 +42,7 @@ set -euo pipefail
 # tmux `mouse` setting. `on` reproduces the bug; `off` restores browser-native
 # selection and wheel scroll (at the cost of mouse support inside TUIs).
 MOUSE="${MOUSE:-on}"
-# tmux `alternate-screen` setting, matching the forever-claude-template default.
+# tmux `alternate-screen` setting, matching the default-workspace-template default.
 ALTSCREEN="${ALTSCREEN:-off}"
 # Space-separated list of ttyd `-t key=value` client options. These map to
 # xterm.js terminal options plus a few ttyd extras (disableLeaveAlert,
@@ -103,11 +103,11 @@ trap _kill_tmux_server EXIT INT TERM
 
 # --- Build the isolated tmux config -----------------------------------------
 # We write a dedicated config file and pass it with `-f` rather than touching
-# ~/.tmux.conf, but the contents mirror what the forever-claude-template writes.
+# ~/.tmux.conf, but the contents mirror what the default-workspace-template writes.
 _CONF_FILE="$(mktemp -t mngr_repro_tmux_conf.XXXXXX)"
 trap 'rm -f "$_CONF_FILE"; _kill_tmux_server' EXIT INT TERM
 cat >"$_CONF_FILE" <<EOF
-# Auto-generated repro config -- mirrors forever-claude-template/.mngr/settings.toml
+# Auto-generated repro config -- mirrors default-workspace-template/.mngr/settings.toml
 set -g alternate-screen $ALTSCREEN
 set -g mouse $MOUSE
 EOF

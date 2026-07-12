@@ -573,7 +573,7 @@ def test_build_mngr_create_command_non_imbue_cloud_passes_new_host_without_reuse
     assert "--update" not in command
     assert "--template" in command
     assert "main" in command
-    # The /welcome message now lives in forever-claude-template's
+    # The /welcome message now lives in default-workspace-template's
     # [create_templates.main] section, so the explicit --message arg is gone.
     assert "--message" not in command
     # minds no longer pre-generates an agent id; mngr generates one and we
@@ -590,7 +590,7 @@ def test_build_mngr_create_command_imbue_cloud_targets_account_provider() -> Non
         launch_mode=LaunchMode.IMBUE_CLOUD,
         host_name=HostName("hello"),
         imbue_cloud_account="alice@imbue.com",
-        imbue_cloud_repo_url="https://github.com/imbue-ai/forever-claude-template",
+        imbue_cloud_repo_url="https://github.com/imbue-ai/default-workspace-template",
         imbue_cloud_branch_or_tag="v1.2.3",
     )
     joined = " ".join(command)
@@ -611,9 +611,9 @@ def test_build_mngr_create_command_imbue_cloud_targets_account_provider() -> Non
     assert "--update" not in command
     # Lease attributes flow through --build-arg.
     assert "-b" in command
-    assert "repo_url=https://github.com/imbue-ai/forever-claude-template" in command
+    assert "repo_url=https://github.com/imbue-ai/default-workspace-template" in command
     assert "repo_branch_or_tag=v1.2.3" in command
-    # No secret env vars in argv: forwarding is declared by the FCT
+    # No secret env vars in argv: forwarding is declared by the DEFAULT_WORKSPACE_TEMPLATE
     # ``imbue_cloud`` template's own ``pass_host_env`` and the values live
     # in the subprocess env ``run_mngr_create`` populates.
     assert "ANTHROPIC_API_KEY" not in joined
@@ -633,7 +633,7 @@ def test_build_mngr_create_command_imbue_cloud_targets_account_provider() -> Non
 
 
 def test_build_mngr_create_command_never_inlines_secret_env_flags() -> None:
-    """Secret forwarding lives in FCT, not minds. The command line never carries
+    """Secret forwarding lives in DEFAULT_WORKSPACE_TEMPLATE, not minds. The command line never carries
     ``--pass-(host-)env`` flags or secret values for any compute mode."""
     for mode, account in (
         (LaunchMode.DOCKER, None),
@@ -650,7 +650,7 @@ def test_build_mngr_create_command_never_inlines_secret_env_flags() -> None:
         assert "--pass-env" not in command, f"{mode} should not inline --pass-env"
         # IMBUE_CLOUD compute *does* still get _remote_host_env_flags() which
         # uses --pass-host-env MNGR_PREFIX -- that one is unrelated to the
-        # secrets we moved into FCT, so we only forbid the secret names here.
+        # secrets we moved into DEFAULT_WORKSPACE_TEMPLATE, so we only forbid the secret names here.
         assert "ANTHROPIC_API_KEY" not in joined, f"{mode} leaked ANTHROPIC_API_KEY"
         assert "ANTHROPIC_BASE_URL" not in joined, f"{mode} leaked ANTHROPIC_BASE_URL"
         assert "GH_TOKEN" not in joined, f"{mode} leaked GH_TOKEN"

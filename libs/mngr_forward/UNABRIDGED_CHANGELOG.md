@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-10
+
+The forward stream manager no longer logs a "Discovery error from ..." warning on every poll cycle for a provider stuck on the same failure (e.g. missing credentials): provider-level discovery errors are now logged once per process via the shared `DiscoveryErrorLogSuppressor`, with an info-level recovery line (and re-armed suppression) when the provider's discovery next succeeds. Host- and agent-attributed discovery errors keep logging on every occurrence.
+
 ## 2026-07-06
 
 The "Loading workspace" proxy loader now re-attempts the workspace by polling in the background and reloading once it answers, instead of full-reloading itself every second via a `<meta http-equiv="refresh">`. The old full reload stole OS focus from any other view layered over the loader (in the minds app, the bug-report modal), which made the modal's text field impossible to type into -- the focus was cleared every second. Polling leaves the loader (and any overlay focused above it) untouched while waiting, and also keeps the spinner from visibly jumping on each tick.

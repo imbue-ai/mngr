@@ -55,10 +55,10 @@ The `shared_env` / `ci_test_user` fixtures resolve their secrets from injected e
 
 - `vault login` so `minds env deploy` and the fixtures can read tier secrets.
 - A minds-dev Modal profile (`~/.modal.toml [minds-dev]`) for the deploy/destroy steps.
-- For the (currently skipped) workspace/signup tests only: a `git worktree` of `forever-claude-template` at `<monorepo>/.external_worktrees/forever-claude-template/` and a running Docker daemon. A missing FCT worktree is now a warning (no current test needs it), not a hard failure.
+- For the (currently skipped) workspace/signup tests only: a `git worktree` of `default-workspace-template` at `<monorepo>/.external_worktrees/default-workspace-template/` and a running Docker daemon. A missing DEFAULT_WORKSPACE_TEMPLATE worktree is now a warning (no current test needs it), not a hard failure.
 
 ## Status
 
 - `test_logged_in_smoke` (`minds_services`) and `test_ci_env_litellm` (`minds_services`: login → mint LiteLLM key → live LLM call) run in the release tier (opt-in) and pass in CI.
 - `test_deploy_new_version`, `test_deploy_rollback`, and `test_deploy_round_trip` (`minds_deployment`) run in the release tier and pass. (`test_deploy_rollback` originally surfaced a real `minds env recover` gap -- rolled-back apps' broken containers weren't terminated because the Modal app-id lookup missed the `Description` field -- which this work fixed.)
-- `test_litellm_via_workspace` and `test_signup_tunnel` are wired into the flow but **`@pytest.mark.skip`ped**: their bodies are still stubs and need debugging/implementation (real FCT Docker workspace creation, Cloudflare tunnels, the mail.tm signup flow) before they will pass. Each carries an explicit skip note.
+- `test_litellm_via_workspace` and `test_signup_tunnel` are wired into the flow but **`@pytest.mark.skip`ped**: their bodies are still stubs and need debugging/implementation (real DEFAULT_WORKSPACE_TEMPLATE Docker workspace creation, Cloudflare tunnels, the mail.tm signup flow) before they will pass. Each carries an explicit skip note.
