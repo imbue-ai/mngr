@@ -102,12 +102,18 @@ class S3ObjectStore(ObjectStore):
 class CloudflareApiObjectStore(ObjectStore):
     """Cloudflare REST object API using an account API token (no S3 keys needed)."""
 
-    def __init__(self, account_id: str, api_token: str, bucket: str) -> None:
+    def __init__(self, account_id: str, api_token: str, bucket: str, client: httpx.Client | None = None) -> None:
         self._base = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/r2/buckets/{bucket}/objects"
+        # One client for the whole publish: a store upload is thousands of small
+        # requests to one host, so the pooled connection matters.
+        self._client = client if client is not None else httpx.Client()
         self._headers = {"Authorization": f"Bearer {api_token}"}
 
     def exists(self, key: str) -> bool:
-        response = httpx.head(f"{self._base}/{key}", headers=self._headers, timeout=30.0)
+        # GET, not HEAD: the Cloudflare object API answers HEAD with 405. Chunk
+        # bodies are small (desync's default average chunk is 64KiB), so reading one
+        # back to test presence is cheap.
+        response = self._client.get(f"{self._base}/{key}", headers=self._headers, timeout=30.0)
         if response.status_code == httpx.codes.NOT_FOUND:
             return False
         # Fail loud on auth/5xx rather than treating them as "absent", which would
@@ -116,7 +122,7 @@ class CloudflareApiObjectStore(ObjectStore):
         return True
 
     def put(self, key: str, data: bytes, content_type: str) -> None:
-        response = httpx.put(
+        response = self._client.put(
             f"{self._base}/{key}",
             headers={**self._headers, "Content-Type": content_type},
             content=data,
@@ -125,7 +131,7 @@ class CloudflareApiObjectStore(ObjectStore):
         response.raise_for_status()
 
     def get_optional(self, key: str) -> bytes | None:
-        response = httpx.get(f"{self._base}/{key}", headers=self._headers, timeout=60.0)
+        response = self._client.get(f"{self._base}/{key}", headers=self._headers, timeout=60.0)
         if response.status_code == httpx.codes.NOT_FOUND:
             return None
         response.raise_for_status()
