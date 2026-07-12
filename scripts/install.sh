@@ -48,6 +48,8 @@ fi
 
 # Install mngr with the exact dependency versions this release was tested with.
 CONSTRAINTS_FILE="$(mktemp)"
+# Remove the temp constraints file on every exit path (success, error, or set -e abort).
+trap 'rm -f "$CONSTRAINTS_FILE"' EXIT
 info "Fetching dependency constraints..."
 curl -fsSL "https://raw.githubusercontent.com/imbue-ai/mngr/release/libs/mngr/constraints.txt" -o "$CONSTRAINTS_FILE"
 
