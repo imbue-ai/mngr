@@ -946,3 +946,36 @@ def test_first_discovery_with_no_cache_falls_back_to_bare_lease_stub(temp_mngr_c
     assert len(agents) == 1
     assert str(agents[0].agent_id) == lease.agent_id
     assert "stale" not in agents[0].certified_data
+
+
+def test_reattached_identity_flows_through_to_agent_details(temp_mngr_ctx: MngrContext) -> None:
+    """The full round trip: a successful pass persists identity, an unreachable pass re-attaches it,
+    and ``get_host_and_agent_details`` shapes the re-attached refs into AgentDetails that still carry
+    the workspace name and ``is_primary`` label -- the end-to-end path that keeps a transiently
+    unreachable workspace in the sidebar instead of collapsing it to a husk."""
+    host_id = HostId.generate()
+    lease = _make_lease(host_id)
+    primary = _agent_data("primary-agent", {"is_primary": "true"}, "codex")
+    provider = _make_sequenced_provider(
+        lease,
+        [
+            (_raw_with_agents([primary]), None, False),
+            (None, "outer SSH unreachable: connection timed out", False),
+        ],
+        temp_mngr_ctx,
+    )
+
+    # First pass persists the agent's identity; the second (unreachable) pass re-attaches it.
+    provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group)
+    host_ref, agent_refs = _only_entry(provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group))
+    assert host_ref.host_state == HostState.UNKNOWN
+
+    # The rich-details path shapes the re-attached refs into AgentDetails without any change of its
+    # own -- the cached name and labels flow straight through, and the host stays truthfully UNKNOWN.
+    host_details, agent_details_list = provider.get_host_and_agent_details(host_ref, agent_refs)
+    assert host_details.state == HostState.UNKNOWN
+    assert host_details.failure_reason is not None
+    assert len(agent_details_list) == 1
+    agent_details = agent_details_list[0]
+    assert str(agent_details.name) == "primary-agent"
+    assert agent_details.labels["is_primary"] == "true"
