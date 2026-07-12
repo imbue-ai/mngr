@@ -131,7 +131,8 @@ def test_upload_store_propagates_a_failed_chunk(tmp_path: Path) -> None:
 
     class _FailingStore(_RecordingStore):
         def put(self, key: str, data: bytes, content_type: str) -> None:
-            raise httpx.HTTPStatusError("boom", request=None, response=None)  # type: ignore[arg-type]
+            request = httpx.Request("PUT", "https://r2.example/chunk")
+            raise httpx.HTTPStatusError("boom", request=request, response=httpx.Response(500, request=request))
 
     with pytest.raises(httpx.HTTPStatusError):
         _upload_store(tmp_path / "store", _FailingStore(present=set()))
