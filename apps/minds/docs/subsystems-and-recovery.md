@@ -8,7 +8,7 @@ shell** supervises the one **Python desktop client** (`minds run`), which
 supervises the host-side **mngr processes** (a `mngr forward`
 discovery-consumer/proxy subprocess and a detached `mngr latchkey forward`
 supervisor that survives minds restarts), which front the **agent containers**
-(supervisord-managed services from the external forever-claude-template repo).
+(supervisord-managed services from the external default-workspace-template repo).
 
 One cross-cutting note for the per-subsystem timeout callouts below: on Apple
 Silicon Macs the monotonic clock advances *during* sleep, so every
@@ -149,7 +149,7 @@ timeout, even a crash of the worker thread itself -- converges on a visible
 loop keeps polling regardless, so a spontaneous recovery flips the workspace
 back to HEALTHY on its own. The one unconfirmed edge: with no plugin route to
 probe through, a cleanly-dispatched restart is reported done without
-verification. Container-internal supervision (supervisord inside the FCT
+verification. Container-internal supervision (supervisord inside the default-workspace-template
 container) is the invisible first line of defense below all of this; minds
 sees it only through this page's diagnostics.
 

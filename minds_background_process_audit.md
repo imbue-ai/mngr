@@ -14,7 +14,7 @@ The system is best understood as **three concentric rings**:
    proxy subprocess, the detached `mngr latchkey forward` supervisor, and a dozen
    background threads (health, permissions, discovery, SSH tunnels, warm pool).
 3. **Ring 2 -- agent-container services** (defined in the external
-   forever-claude-template repo, supervised by `supervisord`): the producers whose
+   default-workspace-template repo, supervised by `supervisord`): the producers whose
    outputs Ring 1 consumes (service events, discovery snapshots, the
    system_interface HTTP server).
 
@@ -154,7 +154,7 @@ Two `SSHTunnelManager` instances exist (one inside minds' `mngr forward`, one in
 ## Ring 2 -- agent-container services (producers consumed by the host)
 
 These run **inside each agent's Docker container**, declared as `[program:*]` in the
-FCT `supervisord.conf` (**external repo -- not in this monorepo**). Listed here
+default-workspace-template `supervisord.conf` (**external repo -- not in this monorepo**). Listed here
 because the host *relies on* their outputs.
 
 | Container service | Output it produces | How the host consumes it (this repo) |
