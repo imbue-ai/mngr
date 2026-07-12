@@ -602,12 +602,12 @@ def wait_backend_url(since_offset: int = 0) -> str:
             with EVENTS_LOG.open("rb") as f:
                 f.seek(since_offset)
                 data = f.read().decode("utf-8", errors="replace")
-            for line in data.splitlines():
-                m = pattern.search(line)
-                if m:
-                    url = m.group(1).replace("localhost", "127.0.0.1")
-                    base = url.split("/login")[0]
-                    return base
+            # Take the LAST match, not the first: a data root that already holds an
+            # earlier run's log would otherwise hand back that run's dead port.
+            matches = [m for line in data.splitlines() if (m := pattern.search(line))]
+            if matches:
+                url = matches[-1].group(1).replace("localhost", "127.0.0.1")
+                return url.split("/login")[0]
         time.sleep(2)
     raise E2EFailure(f"no backend login URL after {LAUNCH_BACKEND_TIMEOUT}s (since_offset={since_offset})")
 
