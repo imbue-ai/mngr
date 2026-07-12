@@ -29,7 +29,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
-from imbue.minds.desktop_client.agent_creator import ClonePathSerializer
+from imbue.minds.desktop_client.agent_creator import _ClonePathSerializer
 from imbue.minds.desktop_client.agent_creator import _CreateEventCapture
 from imbue.minds.desktop_client.agent_creator import _build_mngr_create_command
 from imbue.minds.desktop_client.agent_creator import _is_git_worktree
@@ -1395,7 +1395,7 @@ def test_resolve_workspace_source_missing_local_path_raises() -> None:
 
 
 # ---------------------------------------------------------------------------
-# ClonePathSerializer
+# _ClonePathSerializer
 #
 # The lock primitive behind the same-repo serialization fix: one lock per clone
 # path, vended lazily, so same-path work runs sequentially while different paths
@@ -1405,7 +1405,7 @@ def test_resolve_workspace_source_missing_local_path_raises() -> None:
 
 def test_clone_path_serializer_serializes_same_clone_path(tmp_path: Path) -> None:
     """Two operations holding the same clone path never overlap; the second waits."""
-    serializer = ClonePathSerializer()
+    serializer = _ClonePathSerializer()
     path = tmp_path / "minds-clone-same"
     count_lock = threading.Lock()
     concurrent = 0
@@ -1457,7 +1457,7 @@ def test_clone_path_serializer_serializes_same_clone_path(tmp_path: Path) -> Non
 
 def test_clone_path_serializer_runs_distinct_clone_paths_concurrently(tmp_path: Path) -> None:
     """Different clone paths get different locks, so they run concurrently."""
-    serializer = ClonePathSerializer()
+    serializer = _ClonePathSerializer()
     barrier = threading.Barrier(2, timeout=5.0)
     reached_lock = threading.Lock()
     reached: list[bool] = []
@@ -1485,7 +1485,7 @@ def test_clone_path_serializer_runs_distinct_clone_paths_concurrently(tmp_path: 
 
 def test_clone_path_serializer_none_runs_without_serialization() -> None:
     """``None`` (a creation that owns no shared clone dir) is never serialized."""
-    serializer = ClonePathSerializer()
+    serializer = _ClonePathSerializer()
     barrier = threading.Barrier(2, timeout=5.0)
     reached_lock = threading.Lock()
     reached: list[bool] = []

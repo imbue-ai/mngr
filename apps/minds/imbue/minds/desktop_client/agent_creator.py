@@ -631,7 +631,7 @@ def _materialize_workspace_dir(
     return clone_target
 
 
-class ClonePathSerializer(MutableModel):
+class _ClonePathSerializer(MutableModel):
     """Serializes creations that share a fixed clone directory.
 
     minds clones each template repo into a stable, repo-name-keyed temp dir
@@ -1552,7 +1552,7 @@ class AgentCreator(MutableModel):
     # dir so the second's rmtree can't delete the dir out from under the first's
     # still-running ``mngr create`` (the rsync 3.4.2 getcwd abort). Keyed per
     # clone path, so different repos still create concurrently.
-    _clone_serializer: ClonePathSerializer = PrivateAttr(default_factory=ClonePathSerializer)
+    _clone_serializer: _ClonePathSerializer = PrivateAttr(default_factory=_ClonePathSerializer)
 
     def start_creation(
         self,
