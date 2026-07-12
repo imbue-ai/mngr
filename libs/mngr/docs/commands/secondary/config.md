@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr [config|cfg] <subcommand> [OPTIONS]
+mngr [config|cfg] COMMAND [ARGS]...
 ```
 
 Manage mngr configuration.

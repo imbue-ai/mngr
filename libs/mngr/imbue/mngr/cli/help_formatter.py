@@ -16,6 +16,8 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.cli.common_opts import COMMON_OPTIONS_GROUP_NAME
 from imbue.mngr.cli.common_opts import find_option_group
 from imbue.mngr.config.data_types import MngrConfig
+from imbue.mngr.utils.click_utils import detect_alias_to_canonical
+from imbue.mngr.utils.click_utils import detect_aliases_by_command
 from imbue.mngr.utils.interactive_subprocess import popen_interactive_subprocess
 
 
@@ -324,6 +326,12 @@ def _write_git_style_help(
             wrapped = _wrap_text(paragraph.strip(), width - 7, "       ", None)
             output.write(f"{wrapped}\n\n")
 
+    # COMMANDS section (only for groups with visible subcommands).
+    # Placed before OPTIONS so the subcommand list -- the most important thing
+    # for discovering what a group can do -- is surfaced high, above the long
+    # shared-options list.
+    _write_commands_section(output, ctx, command, width)
+
     # OPTIONS section
     output.write(f"{_format_section_title('Options')}\n")
     _write_options_section(output, ctx, command, width)
@@ -355,6 +363,71 @@ def _write_git_style_help(
         for description, example in metadata.examples:
             output.write(f"       {description}\n")
             output.write(f"           $ {example}\n\n")
+
+
+def _write_commands_section(
+    output: StringIO,
+    ctx: click.Context,
+    command: click.Command,
+    width: int,
+) -> None:
+    """Write the COMMANDS section listing a group's subcommands.
+
+    Does nothing unless ``command`` is a group with at least one visible
+    subcommand.  Each subcommand is shown with its aliases inline and its
+    one-line description (from the git-style help metadata when registered,
+    otherwise click's short help), so the git-style page is as discoverable
+    as click's stock command listing.
+    """
+    if not isinstance(command, click.Group):
+        return
+
+    alias_to_canonical = detect_alias_to_canonical(command)
+    aliases_by_command = detect_aliases_by_command(command)
+
+    # The metadata registry is keyed by canonical dot-path (e.g. "snapshot.create"),
+    # so build the parent's key once and prefix each subcommand name with it.
+    parent_key = _build_help_key(ctx)
+
+    rows: list[tuple[str, str]] = []
+    for subcommand_name in command.list_commands(ctx):
+        # Skip alias entries -- they are shown inline with their canonical command.
+        if subcommand_name in alias_to_canonical:
+            continue
+        subcommand = command.get_command(ctx, subcommand_name)
+        if subcommand is None or subcommand.hidden:
+            continue
+
+        child_key = f"{parent_key}.{subcommand_name}" if parent_key else subcommand_name
+        metadata = _help_metadata_registry.get(child_key)
+        if metadata is not None:
+            description = metadata.one_line_description
+        else:
+            description = subcommand.get_short_help_str(limit=width)
+
+        aliases = aliases_by_command.get(subcommand_name, [])
+        display_name = ", ".join([subcommand_name] + aliases) if aliases else subcommand_name
+        rows.append((display_name, description))
+
+    if not rows:
+        return
+
+    output.write(f"{_format_section_title('Commands')}\n")
+    # Align descriptions in a column just past the widest name, but cap the
+    # column so one long name doesn't push every description off the page.
+    name_column = min(max(len(name) for name, _ in rows), 24)
+    for name, description in rows:
+        prefix = f"       {name}"
+        if len(name) <= name_column:
+            prefix = prefix.ljust(7 + name_column + 3)
+            wrapped = _wrap_text(description, width, prefix, " " * len(prefix))
+            output.write(f"{wrapped}\n")
+        else:
+            # Name is wider than the column -- put the description on its own line.
+            output.write(f"{prefix}\n")
+            wrapped = _wrap_text(description, width, " " * (7 + name_column + 3), None)
+            output.write(f"{wrapped}\n")
+    output.write("\n")
 
 
 def _write_options_section(

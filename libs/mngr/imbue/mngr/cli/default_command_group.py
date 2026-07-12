@@ -2,6 +2,8 @@ from typing import Any
 
 import click
 
+from imbue.mngr.cli.help_formatter import show_help_with_pager
+from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.pre_readers import read_default_command
 from imbue.mngr.plugin_catalog import get_install_hint_for_cli_command
 
@@ -40,9 +42,32 @@ class DefaultCommandGroup(click.Group):
         return super().make_context(info_name, args, parent=parent, **extra)
 
     def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
-        if not args and self._default_command and not ctx.resilient_parsing:
-            args = [self._default_command]
+        if not args and not ctx.resilient_parsing:
+            if self._default_command:
+                args = [self._default_command]
+            else:
+                self._show_bare_help_and_exit(ctx)
         return super().parse_args(ctx, args)
+
+    def _show_bare_help_and_exit(self, ctx: click.Context) -> None:
+        """Render the git-style help page (to stdout, paged) and exit 2.
+
+        A bare group invocation with no default subcommand is a usage error --
+        a required subcommand is missing -- so we render the same rich,
+        pageable help page that ``--help`` shows and exit with code 2, rather
+        than falling through to click's stock ``no_args_is_help`` path (which
+        prints plain usage to stderr).  Centralizing this here means every
+        derived group (the top-level ``mngr`` group, ``snapshot``, ``git``,
+        ``config``, ``plugin``) gets identical bare-invocation behavior.
+        """
+        # ``ctx.obj`` may be a MngrContext or a PluginManager depending on how
+        # far parsing has progressed; only the former carries pager config.
+        config: MngrConfig | None = None
+        obj = ctx.obj
+        if obj is not None and hasattr(obj, "config"):
+            config = obj.config
+        show_help_with_pager(ctx, self, config)
+        ctx.exit(2)
 
     def resolve_command(
         self, ctx: click.Context, args: list[str]

@@ -124,6 +124,72 @@ def test_format_git_style_help_with_metadata() -> None:
         assert "mngr test --name foo" in help_text
 
 
+def test_format_git_style_help_group_lists_commands() -> None:
+    """A group's git-style help includes a COMMANDS section listing its subcommands."""
+
+    # Use subcommand names that do NOT collide with any command in the global
+    # help-metadata registry (e.g. "create"/"list"): a standalone context has no
+    # parent, so the COMMANDS lookup keys on the bare subcommand name, which would
+    # otherwise resolve to the real top-level command's registered description.
+    @click.group()
+    def grp() -> None:
+        pass
+
+    @grp.command(name="frobnicate", help="Frobnicate a thing")
+    def frobnicate_cmd() -> None:
+        pass
+
+    @grp.command(name="twiddle", help="Twiddle the knobs")
+    def twiddle_cmd() -> None:
+        pass
+
+    # Register 'tw' as an alias of the twiddle command.
+    grp.add_command(twiddle_cmd, name="tw")
+
+    metadata = CommandHelpMetadata(
+        key="grp",
+        one_line_description="A group of things",
+        synopsis="mngr grp COMMAND [ARGS]...",
+        description="Does group things.",
+    )
+
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        ctx = click.Context(grp)
+        help_text = format_git_style_help(ctx, grp, metadata)
+
+    assert "COMMANDS" in help_text
+    assert "Frobnicate a thing" in help_text
+    assert "Twiddle the knobs" in help_text
+    # The alias is shown inline with its canonical command, not as a separate row.
+    assert "twiddle, tw" in help_text
+    # COMMANDS is surfaced above the (long) shared OPTIONS list.
+    assert help_text.index("COMMANDS") < help_text.index("OPTIONS")
+
+
+def test_format_git_style_help_non_group_has_no_commands_section() -> None:
+    """A leaf command (not a group) must not emit a COMMANDS section."""
+
+    @click.command()
+    @click.option("--name", help="The name to use")
+    def leaf_cmd(name: str | None) -> None:
+        pass
+
+    metadata = CommandHelpMetadata(
+        key="leaf",
+        one_line_description="A leaf command",
+        synopsis="mngr leaf [OPTIONS]",
+        description="Does a leaf thing.",
+    )
+
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        ctx = click.Context(leaf_cmd)
+        help_text = format_git_style_help(ctx, leaf_cmd, metadata)
+
+    assert "COMMANDS" not in help_text
+
+
 def test_format_git_style_help_without_metadata() -> None:
     """Test that standard click help is used when no metadata is available."""
 

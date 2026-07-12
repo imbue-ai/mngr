@@ -125,9 +125,9 @@ def test_plugin_without_subcommand_shows_help(
 ) -> None:
     """Invoking plugin with no subcommand is a usage error that shows help.
 
-    ``plugin`` requires a subcommand (it is not ``invoke_without_command``), so
-    click renders the usage/help listing and exits with the standard usage-error
-    code, exactly like every other required-subcommand group.
+    ``plugin`` requires a subcommand (it is a ``DefaultCommandGroup`` with no
+    default), so the group renders its help listing and exits with the
+    usage-error code (2), exactly like every other required-subcommand group.
     """
     result = cli_runner.invoke(
         plugin,

@@ -47,11 +47,16 @@ def _make_test_group(
 
 
 def test_bare_invocation_shows_help_by_default() -> None:
-    """Running the group with no args and no default command should show help."""
+    """Running the group with no args and no default command shows help and exits 2.
+
+    A missing required subcommand is a usage error, so the exit code is 2 and
+    the group callback never runs (nothing is recorded).
+    """
     record: dict[str, str | None] = {}
     group = _make_test_group(record)
     runner = CliRunner()
     result = runner.invoke(group, [])
+    assert result.exit_code == 2
     assert "Commands:" in result.output or "Usage:" in result.output
     assert "command" not in record
 
@@ -138,8 +143,9 @@ def test_mngr_bare_invocation_shows_help(
     plugin_manager: pluggy.PluginManager,
     temp_git_repo_cwd: Path,
 ) -> None:
-    """Running `mngr` with no args should show help (no default command)."""
+    """Running `mngr` with no args should show help and exit 2 (no default command)."""
     result = cli_runner.invoke(cli, [], obj=plugin_manager)
+    assert result.exit_code == 2
     assert "Commands:" in result.output or "Usage:" in result.output
 
 
@@ -158,8 +164,9 @@ def test_mngr_snapshot_bare_shows_help(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Running `mngr snapshot` with no args should show help (no default command)."""
+    """Running `mngr snapshot` with no args should show help and exit 2 (no default command)."""
     result = cli_runner.invoke(snapshot, [], obj=plugin_manager)
+    assert result.exit_code == 2
     assert "Commands:" in result.output or "Usage:" in result.output
 
 
@@ -242,6 +249,7 @@ def test_config_key_disabled_shows_help(
     group = _make_config_key_group(record, config_key="testgrp")
     runner = CliRunner()
     result = runner.invoke(group, [])
+    assert result.exit_code == 2
     assert "Commands:" in result.output or "Usage:" in result.output
     assert "command" not in record
 
