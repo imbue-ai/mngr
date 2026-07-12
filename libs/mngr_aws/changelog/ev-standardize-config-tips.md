@@ -1,0 +1,1 @@
+The AWS "could not be reached" error's provider-disable hint now recommends `--scope local` (which always takes effect regardless of which config layer enabled the provider) rather than `--scope user`.

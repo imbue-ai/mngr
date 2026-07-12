@@ -1,0 +1,1 @@
+The Claude subscription-credential isolation warning now renders its `mngr config set` suggestion with the `--scope user` flag in the canonical position (immediately after `set`), matching the standardized remediation-hint format used elsewhere.

@@ -57,6 +57,7 @@ from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import OutputFormat
+from imbue.mngr.remediations import format_disable_provider
 from imbue.mngr.utils.cel_utils import compile_cel_sort_keys
 from imbue.mngr.utils.cel_utils import evaluate_cel_sort_key
 from imbue.mngr.utils.terminal import ANSI_DIM_GRAY
@@ -839,7 +840,7 @@ def _format_provider_error_line(error: ProviderErrorInfo) -> str:
     line = f"{error.provider_name}: {reason}"
     if error.short_remediation:
         line = f"{line} — {error.short_remediation}"
-    return f"{line} (disable: mngr config set --scope user providers.{error.provider_name}.is_enabled false)"
+    return f"{line} (disable: {format_disable_provider(error.provider_name)})"
 
 
 @pure

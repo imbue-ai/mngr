@@ -89,6 +89,7 @@ from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import TransferMode
 from imbue.mngr.primitives import WaitingReason
+from imbue.mngr.remediations import format_config_set
 from imbue.mngr.utils.git_utils import find_git_source_path
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_claude import hookimpl
@@ -1925,7 +1926,7 @@ class ClaudeCoreAgent(
             "isolation is enabled. Isolated agents use a separate keychain entry whose copy of your "
             "subscription credentials goes stale as the tokens refresh, so this agent will likely hit "
             "authentication errors later. To share your default Claude config (and credentials) instead, run:\n"
-            "    mngr config set agent_types.claude.isolate_local_config_dir false --scope user"
+            f"    {format_config_set('agent_types.claude.isolate_local_config_dir', 'false', scope='user')}"
         )
 
     def provision(

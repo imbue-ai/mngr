@@ -22,6 +22,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.remediations import format_config_set
 from imbue.mngr_ovh import hookimpl
 from imbue.mngr_ovh.bootstrap import bootstrap_root_authorized_keys_via_user
 from imbue.mngr_ovh.bootstrap import pin_host_key_via_tofu
@@ -645,7 +646,10 @@ class OvhProviderBackend(ProviderBackendInterface):
             raise ProviderNotAuthorizedError(
                 name,
                 reason="OVH credentials not configured",
-                short_remediation="set OVH_* env vars, configure ~/.ovh.conf, or set credentials in [providers.<name>]",
+                short_remediation=(
+                    "set OVH_* env vars, configure ~/.ovh.conf, or run "
+                    f"`{format_config_set(f'providers.{name}.<key>', '<value>')}`"
+                ),
             )
         return OvhProvider(
             name=name,

@@ -1,0 +1,1 @@
+Azure "could not be reached" and "no subscription resolved" errors now suggest a runnable `mngr config set providers.<name>.subscription_id <id>` command instead of telling you to hand-edit the `[providers.azure]` block in `settings.toml`. The provider-disable hint now recommends `--scope local` (which always takes effect) rather than `--scope user`.

@@ -10,6 +10,7 @@ from loguru import logger
 from pydantic import Field
 
 from imbue.mngr.primitives import ProviderBackendName
+from imbue.mngr.remediations import format_config_set
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr_azure.errors import AzureSubscriptionError
 from imbue.mngr_azure.state_bucket import BlobStateBucket
@@ -244,7 +245,7 @@ class AzureProviderConfig(PublicIpVpsProviderConfig):
         raise AzureSubscriptionError(
             "No Azure subscription resolved. Set one of:\n"
             "  - run `az login` (optionally `az account set --subscription <id>`) to use the active subscription;\n"
-            "  - `mngr config set providers.azure.subscription_id <id>`;\n"
+            f"  - `{format_config_set('providers.azure.subscription_id', '<id>')}`;\n"
             "  - the AZURE_SUBSCRIPTION_ID environment variable."
         )
 

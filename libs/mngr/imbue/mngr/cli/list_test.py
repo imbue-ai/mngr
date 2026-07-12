@@ -1786,7 +1786,7 @@ def test_format_provider_error_line_includes_reason_remediation_and_disable_hint
     line = _format_provider_error_line(error)
     assert line == (
         "aws: AWS credentials not configured — run `aws configure` "
-        "(disable: mngr config set --scope user providers.aws.is_enabled false)"
+        "(disable: mngr config set --scope local providers.aws.is_enabled false)"
     )
 
 

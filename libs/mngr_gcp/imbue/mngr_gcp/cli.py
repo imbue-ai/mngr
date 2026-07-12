@@ -31,6 +31,7 @@ from imbue.mngr.cli.output_helpers import emit_operator_result
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import OutputFormat
+from imbue.mngr.remediations import format_config_set
 from imbue.mngr_gcp.client import FirewallPrepareResult
 from imbue.mngr_gcp.client import GcpVpsClient
 from imbue.mngr_gcp.config import GcpProviderConfig
@@ -130,9 +131,9 @@ def _build_operator_client(
     resolved_project = project_id or base.project_id or adc_project
     if not resolved_project:
         raise GcpProjectError(
-            "No GCP project resolved. Pass --project, set project_id on the selected "
-            "[providers.<name>] block (or run 'mngr config set providers.gcp.project_id "
-            "<your-project>'), set the GOOGLE_CLOUD_PROJECT environment variable, or run "
+            "No GCP project resolved. Pass --project, run "
+            f"`{format_config_set('providers.gcp.project_id', '<your-project>')}`, "
+            "set the GOOGLE_CLOUD_PROJECT environment variable, or run "
             "'gcloud config set project <your-project>' (the active gcloud project is used "
             "automatically when Application Default Credentials are present)."
         )

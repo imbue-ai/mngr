@@ -19,6 +19,7 @@ from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import PluginName
+from imbue.mngr.remediations import format_config_set
 from imbue.mngr_notifications.config import NotificationsPluginConfig
 from imbue.mngr_notifications.notification_verifier import DEFAULT_VERIFY_TIMEOUT
 from imbue.mngr_notifications.notification_verifier import VerifyNotificationResult
@@ -147,7 +148,10 @@ def notify(ctx: click.Context, **kwargs: object) -> None:
     else:
         write_human_line("No terminal configured -- notifications will not have click-to-connect.")
         write_human_line(
-            "Set plugins.notifications.terminal_app, custom_terminal_command, or notification_only in settings.toml."
+            "Enable it by running one of:\n"
+            f"  {format_config_set('plugins.notifications.terminal_app', '<app>')}\n"
+            f"  {format_config_set('plugins.notifications.custom_terminal_command', '<command>')}\n"
+            f"  {format_config_set('plugins.notifications.notification_only', 'true')}"
         )
 
     notifier = get_notifier()

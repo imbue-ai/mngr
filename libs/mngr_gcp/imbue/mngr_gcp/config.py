@@ -9,6 +9,7 @@ from pydantic import Field
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.mngr.primitives import ProviderBackendName
+from imbue.mngr.remediations import format_config_set
 from imbue.mngr_gcp.errors import GcpCredentialsError
 from imbue.mngr_gcp.errors import GcpProjectError
 from imbue.mngr_gcp.errors import GcpZoneRegionMismatchError
@@ -248,7 +249,7 @@ class GcpProviderConfig(OfflineCapableVpsProviderConfig):
         if not project_id:
             raise GcpProjectError(
                 "No GCP project_id configured and none was resolved from the environment. Run "
-                "'mngr config set providers.gcp.project_id <your-project>', set the "
+                f"`{format_config_set('providers.gcp.project_id', '<your-project>')}`, set the "
                 "GOOGLE_CLOUD_PROJECT environment variable, or run 'gcloud config set project "
                 "<your-project>' (the active gcloud project is used automatically when Application "
                 "Default Credentials are present)."

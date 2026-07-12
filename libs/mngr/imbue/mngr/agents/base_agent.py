@@ -41,6 +41,7 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.remediations import format_config_set
 from imbue.mngr.utils.env_utils import parse_env_file
 
 _CAPTURE_PANE_TIMEOUT_SECONDS: Final[float] = 10.0
@@ -112,11 +113,12 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         parts.extend(quote_agent_args(agent_args))
 
         if not parts:
+            set_command_hint = format_config_set(f"agent_types.{self.agent_type}.command", "'<command>'")
             raise UserInputError(
                 f"Agent type '{self.agent_type}' has no command to run. "
                 f"Pass a shell command after `--` "
                 f"(e.g. `mngr create foo --type command -- sleep 99999`), "
-                f"or set `command = '...'` on a custom `[agent_types.X]` in your config."
+                f"or set a command on a custom agent type with `{set_command_hint}`."
             )
 
         command = CommandString(" ".join(parts))

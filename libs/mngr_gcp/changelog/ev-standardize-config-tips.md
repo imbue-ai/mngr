@@ -1,0 +1,1 @@
+GCP "could not be reached" / "no project resolved" errors (and the no-project-id info log) now suggest a runnable `mngr config set providers.<name>.project_id <id>` command instead of telling you to hand-edit the `[providers.gcp]` block in `settings.toml`. The provider-disable hint now recommends `--scope local` (which always takes effect) rather than `--scope user`.

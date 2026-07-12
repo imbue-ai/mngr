@@ -1,0 +1,1 @@
+The Modal "not authorized" error's provider-disable hint is now rendered through the shared remediation helper. It continues to recommend `--scope local`, which is now the standardized scope for all provider-disable hints across providers.

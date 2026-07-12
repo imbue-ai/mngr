@@ -32,6 +32,7 @@ from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.deploy_utils import collect_provider_profile_files
+from imbue.mngr.remediations import format_disable_provider
 from imbue.mngr.utils.env_utils import TEST_ENV_PATTERN
 from imbue.mngr_modal import hookimpl
 from imbue.mngr_modal.config import ModalMode
@@ -587,7 +588,7 @@ Supported build arguments for the modal provider:
                 user_help_text=(
                     "Modal is not authorized: run `modal token new` to authenticate (or set "
                     "MODAL_TOKEN_ID / MODAL_TOKEN_SECRET), or disable this provider with "
-                    f"`mngr config set --scope local providers.{name}.is_enabled false`."
+                    f"`{format_disable_provider(name)}`."
                 ),
             ) from e
         except ModalProxyNotFoundError as e:

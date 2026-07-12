@@ -28,6 +28,8 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.ssh_utils import wait_for_expected_host_key
+from imbue.mngr.remediations import format_config_set
+from imbue.mngr.remediations import format_disable_provider
 from imbue.mngr_gcp import hookimpl
 from imbue.mngr_gcp.cli import gcp_cli_group
 from imbue.mngr_gcp.client import GcpVpsClient
@@ -100,9 +102,9 @@ def _gcp_not_authorized_error(
         "GCP could not be reached. Check, in order:\n"
         "  - credentials: run `gcloud auth application-default login` (or set "
         "GOOGLE_APPLICATION_CREDENTIALS to a service-account key);\n"
-        "  - project: set `project_id` in [providers.gcp], or run `gcloud config set project <id>`;\n"
+        f"  - project: run `{format_config_set(f'providers.{name}.project_id', '<id>')}`, or run `gcloud config set project <id>`;\n"
         "  - one-time setup: run `mngr gcp prepare` if you have not yet.\n"
-        f"Or disable the provider: mngr config set --scope user providers.{name}.is_enabled false"
+        f"Or disable the provider: {format_disable_provider(name)}"
     )
     return ProviderNotAuthorizedError(
         name,
@@ -222,8 +224,9 @@ class GcpProvider(OfflineCapableVpsProvider):
             logger.info(
                 "No GCP project_id configured; creating instances in project {!r} resolved from "
                 "Application Default Credentials (gcloud config / GOOGLE_CLOUD_PROJECT). Run "
-                "'mngr config set providers.gcp.project_id <your-project>' to pin it explicitly.",
+                "'{}' to pin it explicitly.",
                 self.gcp_client.project_id,
+                format_config_set("providers.gcp.project_id", "<your-project>"),
             )
         if "PYTEST_CURRENT_TEST" in os.environ:
             seconds = self._get_effective_auto_shutdown_seconds()

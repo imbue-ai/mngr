@@ -37,6 +37,7 @@ from imbue.mngr.errors import ParseSpecError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.primitives import LogLevel
 from imbue.mngr.primitives import OutputFormat
+from imbue.mngr.remediations import format_config_set
 from imbue.mngr.utils.logging import LoggingConfig
 from imbue.mngr.utils.logging import setup_logging
 from imbue.mngr.utils.thread_cleanup import mngr_executor
@@ -791,7 +792,7 @@ def apply_create_template(
             else:
                 raise UserInputError(
                     f"Template '{template_name}' not found. No templates are configured. "
-                    "Add templates to your settings.toml under [create_templates.<name>]"
+                    f"Define one with e.g. `{format_config_set('create_templates.<name>.options.<param>', '<value>')}`"
                 )
 
         template = config.create_templates[template_key]

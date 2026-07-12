@@ -21,6 +21,7 @@ from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.remediations import format_disable_provider
 from imbue.mngr_aws import hookimpl
 from imbue.mngr_aws.cli import aws_cli_group
 from imbue.mngr_aws.client import AwsVpsClient
@@ -363,7 +364,7 @@ def _aws_not_authorized_error(
         "  - credentials: run `aws configure` (or set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY, "
         "or AWS_PROFILE);\n"
         "  - one-time setup: run `mngr aws prepare` if you have not yet.\n"
-        f"Or disable the provider: mngr config set --scope user providers.{name}.is_enabled false"
+        f"Or disable the provider: {format_disable_provider(name)}"
     )
     return ProviderNotAuthorizedError(
         name, reason=reason, short_remediation=short_remediation, user_help_text=help_text

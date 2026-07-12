@@ -27,6 +27,8 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.remediations import format_config_set
+from imbue.mngr.remediations import format_disable_provider
 from imbue.mngr_azure import hookimpl
 from imbue.mngr_azure.cli import azure_cli_group
 from imbue.mngr_azure.client import AzureVpsClient
@@ -153,12 +155,12 @@ def _azure_not_authorized_error(
     """
     help_text = (
         "Azure could not be reached. Check, in order:\n"
-        "  - subscription: set AZURE_SUBSCRIPTION_ID, set `subscription_id` in [providers.azure], "
+        f"  - subscription: set AZURE_SUBSCRIPTION_ID, run `{format_config_set(f'providers.{name}.subscription_id', '<id>')}`, "
         "or run `az account set --subscription <id>`;\n"
         "  - credentials: run `az login` (or set AZURE_CLIENT_ID / AZURE_TENANT_ID / "
         "AZURE_CLIENT_SECRET for a service principal);\n"
         "  - one-time setup: run `mngr azure prepare` if you have not yet.\n"
-        f"Or disable the provider: mngr config set --scope user providers.{name}.is_enabled false"
+        f"Or disable the provider: {format_disable_provider(name)}"
     )
     return ProviderNotAuthorizedError(
         name,

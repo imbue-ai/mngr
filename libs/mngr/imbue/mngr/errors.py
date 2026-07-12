@@ -19,6 +19,7 @@ from imbue.mngr.primitives import ImageReference
 from imbue.mngr.primitives import PluginKind
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
+from imbue.mngr.remediations import format_disable_provider
 
 
 class MngrError(ClickException):
@@ -267,7 +268,7 @@ class ProviderUnavailableError(ProviderError):
         # the user is not told to "start Docker" for an auth problem.
         self.user_help_text = user_help_text or (
             f"Ensure the provider backend is running (e.g. start Docker), or disable the provider:\n"
-            f"  mngr config set --scope user providers.{provider_name}.is_enabled false"
+            f"  {format_disable_provider(provider_name)}"
         )
 
 
@@ -333,7 +334,7 @@ class ProviderNotAuthorizedError(ProviderUnavailableError):
     ) -> None:
         default_help = (
             f"To disable this provider, run:\n"
-            f"  mngr config set --scope user providers.{provider_name}.is_enabled false\n"
+            f"  {format_disable_provider(provider_name)}\n"
             f"Or disable the provider backend entirely by removing it from enabled_backends in your config."
         )
         super().__init__(

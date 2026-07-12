@@ -1,0 +1,1 @@
+The OVH "credentials not configured" hint now suggests a runnable `mngr config set providers.<name>.<key> <value>` command instead of telling you to set credentials in the `[providers.<name>]` block of `settings.toml`.
