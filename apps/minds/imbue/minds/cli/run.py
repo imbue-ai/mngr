@@ -82,7 +82,7 @@ from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.system_interface_health import should_enroll_suspect_for_backend_failure
-from imbue.minds.desktop_client.templates import DEFAULT_FOREVER_CLAUDE_GIT_URL
+from imbue.minds.desktop_client.templates import DEFAULT_WORKSPACE_TEMPLATE_GIT_URL
 from imbue.minds.desktop_client.templates import FALLBACK_BRANCH
 from imbue.minds.desktop_client.templates import is_local_workspace_defaults_opt_in
 from imbue.minds.envs.docker_cleanup import DockerCleanupError
@@ -397,7 +397,7 @@ def run(
     # are needed here.
     # `mngr forward` and every other laptop-side mngr invocation (including the
     # bundled mngr CLI when run from a Terminal under this MNGR_HOST_DIR) starts
-    # with cwd=$HOME, so the FCT workspace's `[agent_types.main]` block in
+    # with cwd=$HOME, so the DEFAULT_WORKSPACE_TEMPLATE workspace's `[agent_types.main]` block in
     # `/code/.mngr/settings.toml` inside the lima VM is invisible to them.
     # Seed the mapping into user-scope settings.toml here so subsequent mngr
     # subprocesses resolve `type=main` -> ClaudeAgent without depending on cwd.
@@ -494,7 +494,7 @@ def run(
         lima_image_gate = LimaImageCreateGate(
             prefetcher=lima_image_prefetcher,
             current_release_tag=FALLBACK_BRANCH,
-            default_repo_url=DEFAULT_FOREVER_CLAUDE_GIT_URL,
+            default_repo_url=DEFAULT_WORKSPACE_TEMPLATE_GIT_URL,
             is_dev_loop=is_local_workspace_defaults_opt_in(),
         )
         logger.info("  lima image prefetch: started ({})", FALLBACK_BRANCH)

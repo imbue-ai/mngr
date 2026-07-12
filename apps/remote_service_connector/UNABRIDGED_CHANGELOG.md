@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-11
+
+The forever-claude-template repo is being renamed to default-workspace-template (with the `fct`/`FCT` shorthand expanded to `default_workspace_template`/`DEFAULT_WORKSPACE_TEMPLATE` forms).
+
+References in this project (comments, identifiers, docs) are mechanically updated by `scripts/rename_template_repo.py`.
+
 ## 2026-07-06
 
 Added a `POST /hosts/{host_db_id}/rename` endpoint that updates a leased host's mutable `host_name` column. Ownership is enforced (a host leased by another user returns 403; a missing or not-leased host returns 404) and the new name is validated against mngr's SafeName regex. This backs the new workspace-rename flow; the host's durable identity (its lease id) is unchanged.

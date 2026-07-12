@@ -41,7 +41,7 @@ UPDATE_RESULT_MARKER: Final[str] = "MINDS_BACKUP_UPDATE_JSON:"
 # ``upstream`` remote name stays reserved for the update-self machinery. Tests
 # override it via the scripts' ``--official-url`` argument. Must stay equal to
 # the default baked into ``_SCRIPT_PREAMBLE`` (asserted by a unit test).
-OFFICIAL_REMOTE_URL: Final[str] = "https://github.com/imbue-ai/forever-claude-template.git"
+OFFICIAL_REMOTE_URL: Final[str] = "https://github.com/imbue-ai/default-workspace-template.git"
 
 # Shared helper functions textually prepended to each script body. Kept as one
 # plain string (not f-string) so braces inside the python source need no
@@ -56,7 +56,7 @@ import sys as _sys
 import time as _time
 
 OFFICIAL_REMOTE_NAME = "official"
-DEFAULT_OFFICIAL_REMOTE_URL = "https://github.com/imbue-ai/forever-claude-template.git"
+DEFAULT_OFFICIAL_REMOTE_URL = "https://github.com/imbue-ai/default-workspace-template.git"
 BACKUP_CODE_PATH = "libs/host_backup"
 RESTIC_ENV_PATH = "runtime/secrets/restic.env"
 GIT_IDENTITY = ["-c", "user.name=minds-backup-update", "-c", "user.email=backup-update@minds.local"]
