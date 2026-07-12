@@ -1252,7 +1252,7 @@ def _wizard_claude_config_isolation(
 CommandHelpMetadata(
     key="config",
     one_line_description="Manage mngr configuration",
-    synopsis="mngr [config|cfg] COMMAND [ARGS]...",
+    synopsis="mngr [config|cfg] [list|get|set|...] [ARGS]...",
     description="""View, edit, and modify mngr configuration settings at the user, project, or
 local level. Much like a simpler version of `git config`, this command allows
 you to manage configuration settings at different scopes.

@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr [plugin|plug] COMMAND [ARGS]...
+mngr [plugin|plug] [list|add|remove|...] [ARGS]...
 ```
 
 Manage available and active plugins.
