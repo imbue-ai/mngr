@@ -432,6 +432,7 @@ def _provider_schema_completions(
 def _create_template_schema_completions(
     config: MngrConfig,
     dynamic_values: dict[str, list[str]],
+    create_param_choices: dict[str, list[str]],
 ) -> tuple[list[str], dict[str, list[str]]]:
     """Build ``create_templates.<name>.*`` keys/choices for configured templates.
 
@@ -442,6 +443,11 @@ def _create_template_schema_completions(
     transparently unwrapped, user-facing key -- rather than only the params
     already present (and rather than the internal ``.options.<param>`` shape the
     instance dump would produce, which does not round-trip through ``config set``).
+
+    Value choices come from ``create_param_choices`` -- the ``create`` command's own
+    option choices, static and dynamic -- so a template option completes to the same
+    values ``mngr create --<opt>`` does (e.g. ``type`` -> agent type names). Fields
+    with no create-option choice fall back to what the annotation alone constrains.
     """
     keys: list[str] = []
     choices: dict[str, list[str]] = {}
@@ -449,7 +455,9 @@ def _create_template_schema_completions(
         for field_name, field_info in CreateCliOptions.model_fields.items():
             key = f"create_templates.{name}.{field_name}"
             keys.append(key)
-            value_choices = _value_choices_for_annotation(field_info.annotation, dynamic_values)
+            value_choices = create_param_choices.get(field_name)
+            if value_choices is None:
+                value_choices = _value_choices_for_annotation(field_info.annotation, dynamic_values)
             if value_choices is not None:
                 choices[key] = value_choices
     return keys, choices
@@ -466,6 +474,38 @@ def _option_value_choices(option: click.Option) -> list[str] | None:
     if option.is_flag:
         return ["true", "false"]
     return None
+
+
+def _create_command_param_choices(
+    create_cmd: click.Command | None,
+    dynamic_choice_values: dict[str, list[str]],
+) -> dict[str, list[str]]:
+    """Map each ``create`` option's param name to its value choices (static + dynamic).
+
+    A create template's options are exactly the ``create`` command's options (a
+    template is validated against ``CreateCliOptions``), so a template option should
+    complete to the same values ``mngr create --<opt>`` does. Static choices come
+    from the option itself (booleans, ``click.Choice``); dynamic choices come from
+    ``_DYNAMIC_CHOICE_OPTIONS`` (e.g. ``--type`` -> agent type names, ``--provider``
+    -> provider names), looked up in ``dynamic_choice_values``. Returns an empty map
+    when the ``create`` command is absent (e.g. disabled).
+    """
+    if create_cmd is None:
+        return {}
+    choices: dict[str, list[str]] = {}
+    for param in create_cmd.params:
+        if not isinstance(param, click.Option) or not param.name:
+            continue
+        static_choices = _option_value_choices(param)
+        if static_choices is not None:
+            choices[param.name] = static_choices
+            continue
+        for opt in param.opts:
+            data_key = _DYNAMIC_CHOICE_OPTIONS.get(f"create.{opt}")
+            if data_key is not None and data_key in dynamic_choice_values:
+                choices[param.name] = dynamic_choice_values[data_key]
+                break
+    return choices
 
 
 def _iter_leaf_commands(cli_group: click.Group) -> Iterator[tuple[str | None, str, click.Command]]:
@@ -607,7 +647,15 @@ def _build_dynamic_completions(
     command_keys, command_choices = _command_defaults_completions(
         cli_group, config, command_name_set, default_subcommand_choices, dynamic_values
     )
-    template_keys, template_choices = _create_template_schema_completions(config, dynamic_values)
+    # A create template's option values complete like ``mngr create --<opt>``, so
+    # reuse the create command's own choices (incl. the dynamic ``--type`` etc.).
+    create_param_choices = _create_command_param_choices(
+        cli_group.commands.get("create"),
+        {"agent_type_names": agent_type_names, "template_names": template_names, "provider_names": provider_names},
+    )
+    template_keys, template_choices = _create_template_schema_completions(
+        config, dynamic_values, create_param_choices
+    )
     pre_command_script_keys = [
         f"pre_command_scripts.{name}"
         for name in sorted(command_name_set | {str(k) for k in config.pre_command_scripts.keys()})

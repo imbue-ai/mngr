@@ -453,6 +453,12 @@ def test_configured_command_and_template_params_use_unwrapped_keys(
     # An unset template option is still discoverable from CreateCliOptions.
     assert "create_templates.dev.target_path" in cache.config_keys
 
+    # A template option completes to the same values as the create command's
+    # option: ``type`` -> agent type names (a builtin like ``command``).
+    type_choices = cache.config_value_choices.get("create_templates.dev.type")
+    assert type_choices is not None
+    assert "command" in type_choices
+
     # The internal wrapper segments must never appear.
     assert not any(".defaults." in key for key in cache.config_keys)
     assert not any(".options." in key for key in cache.config_keys)
