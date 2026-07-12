@@ -245,7 +245,7 @@ class AzureProviderConfig(PublicIpVpsProviderConfig):
         raise AzureSubscriptionError(
             "No Azure subscription resolved. Set one of:\n"
             "  - run `az login` (optionally `az account set --subscription <id>`) to use the active subscription;\n"
-            f"  - `{format_config_set('providers.azure.subscription_id', '<id>')}`;\n"
+            f"  - `{format_config_set('providers.azure.subscription_id', '<id>', scope=None)}`;\n"
             "  - the AZURE_SUBSCRIPTION_ID environment variable."
         )
 

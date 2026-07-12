@@ -132,7 +132,7 @@ def _build_operator_client(
     if not resolved_project:
         raise GcpProjectError(
             "No GCP project resolved. Pass --project, run "
-            f"`{format_config_set('providers.gcp.project_id', '<your-project>')}`, "
+            f"`{format_config_set('providers.gcp.project_id', '<your-project>', scope=None)}`, "
             "set the GOOGLE_CLOUD_PROJECT environment variable, or run "
             "'gcloud config set project <your-project>' (the active gcloud project is used "
             "automatically when Application Default Credentials are present)."

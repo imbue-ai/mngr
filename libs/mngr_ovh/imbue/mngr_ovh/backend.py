@@ -647,8 +647,9 @@ class OvhProviderBackend(ProviderBackendInterface):
                 name,
                 reason="OVH credentials not configured",
                 short_remediation=(
-                    "set OVH_* env vars, configure ~/.ovh.conf, or run "
-                    f"`{format_config_set(f'providers.{name}.<key>', '<value>')}`"
+                    "set OVH_* env vars, configure ~/.ovh.conf, or set application_key / "
+                    "application_secret / consumer_key, e.g. "
+                    f"`{format_config_set(f'providers.{name}.application_key', '<value>', scope=None)}`"
                 ),
             )
         return OvhProvider(

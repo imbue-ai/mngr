@@ -12,31 +12,33 @@ impossible: there is exactly one place that decides the flag order and the
 recommended scope.
 """
 
-from typing import Literal
-
-# The scope names accepted by ``mngr config set/unset --scope`` (CLI spelling).
-ConfigScopeName = Literal["user", "project", "local"]
+from imbue.mngr.primitives import ConfigScope
 
 
-def format_config_set(key: str, value: str, *, scope: ConfigScopeName | None = None) -> str:
+def _scope_flag(scope: ConfigScope | None) -> str:
+    """Render the ``--scope <scope> `` prefix (trailing space included), or ``""``.
+
+    ``--scope`` is placed immediately after the subcommand -- the one canonical
+    flag position -- so it is shared by both ``set`` and ``unset``.
+    """
+    return f"--scope {scope.name.lower()} " if scope is not None else ""
+
+
+def format_config_set(key: str, value: str, *, scope: ConfigScope | None) -> str:
     """Return a runnable ``mngr config set`` command setting ``key`` to ``value``.
 
-    When ``scope`` is given it is rendered as ``--scope <scope>`` immediately
-    after ``set`` -- the one canonical flag position. When ``None`` no
-    ``--scope`` flag is emitted and ``mngr config set`` writes to its default
-    (project) scope.
+    Pass ``scope=None`` to omit the ``--scope`` flag (``mngr config set`` then
+    writes to its default, project, scope).
     """
-    scope_flag = f"--scope {scope} " if scope is not None else ""
-    return f"mngr config set {scope_flag}{key} {value}"
+    return f"mngr config set {_scope_flag(scope)}{key} {value}"
 
 
-def format_config_unset(key: str, *, scope: ConfigScopeName | None = None) -> str:
+def format_config_unset(key: str, *, scope: ConfigScope | None) -> str:
     """Return a runnable ``mngr config unset`` command clearing ``key``.
 
-    ``scope`` follows the same rules as :func:`format_config_set`.
+    Pass ``scope=None`` to omit the ``--scope`` flag.
     """
-    scope_flag = f"--scope {scope} " if scope is not None else ""
-    return f"mngr config unset {scope_flag}{key}"
+    return f"mngr config unset {_scope_flag(scope)}{key}"
 
 
 def format_disable_provider(provider_name: str) -> str:
@@ -49,4 +51,4 @@ def format_disable_provider(provider_name: str) -> str:
     and therefore ineffective -- whenever the provider is enabled at the
     project or local layer.
     """
-    return format_config_set(f"providers.{provider_name}.is_enabled", "false", scope="local")
+    return format_config_set(f"providers.{provider_name}.is_enabled", "false", scope=ConfigScope.LOCAL)

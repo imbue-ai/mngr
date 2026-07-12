@@ -113,7 +113,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         parts.extend(quote_agent_args(agent_args))
 
         if not parts:
-            set_command_hint = format_config_set(f"agent_types.{self.agent_type}.command", "'<command>'")
+            set_command_hint = format_config_set(f"agent_types.{self.agent_type}.command", "'<command>'", scope=None)
             raise UserInputError(
                 f"Agent type '{self.agent_type}' has no command to run. "
                 f"Pass a shell command after `--` "

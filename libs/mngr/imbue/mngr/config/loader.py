@@ -26,7 +26,6 @@ from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import CommandDefaults
-from imbue.mngr.config.data_types import ConfigScope
 from imbue.mngr.config.data_types import CreateCliOptions
 from imbue.mngr.config.data_types import CreateTemplate
 from imbue.mngr.config.data_types import CreateTemplateName
@@ -54,6 +53,7 @@ from imbue.mngr.errors import UnknownBackendError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.plugin_catalog import get_plugin_install_hint
 from imbue.mngr.primitives import AgentTypeName
+from imbue.mngr.primitives import ConfigScope
 from imbue.mngr.primitives import PluginKind
 from imbue.mngr.primitives import PluginName
 from imbue.mngr.primitives import ProviderInstanceName

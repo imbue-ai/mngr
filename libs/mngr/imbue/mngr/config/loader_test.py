@@ -19,7 +19,6 @@ from imbue.mngr.config.agent_config_registry import register_agent_config
 from imbue.mngr.config.agent_config_registry import reset_agent_config_registry
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import CommandDefaults
-from imbue.mngr.config.data_types import ConfigScope
 from imbue.mngr.config.data_types import CreateTemplateName
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import PluginConfig
@@ -52,6 +51,7 @@ from imbue.mngr.config.pre_readers import OPT_IN_PLUGINS
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.plugins import hookspecs
 from imbue.mngr.primitives import AgentTypeName
+from imbue.mngr.primitives import ConfigScope
 from imbue.mngr.primitives import LogLevel
 from imbue.mngr.primitives import PluginName
 from imbue.mngr.primitives import ProviderBackendName

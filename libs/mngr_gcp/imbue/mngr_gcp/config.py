@@ -249,7 +249,7 @@ class GcpProviderConfig(OfflineCapableVpsProviderConfig):
         if not project_id:
             raise GcpProjectError(
                 "No GCP project_id configured and none was resolved from the environment. Run "
-                f"`{format_config_set('providers.gcp.project_id', '<your-project>')}`, set the "
+                f"`{format_config_set('providers.gcp.project_id', '<your-project>', scope=None)}`, set the "
                 "GOOGLE_CLOUD_PROJECT environment variable, or run 'gcloud config set project "
                 "<your-project>' (the active gcloud project is used automatically when Application "
                 "Default Credentials are present)."

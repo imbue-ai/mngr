@@ -102,7 +102,7 @@ def _gcp_not_authorized_error(
         "GCP could not be reached. Check, in order:\n"
         "  - credentials: run `gcloud auth application-default login` (or set "
         "GOOGLE_APPLICATION_CREDENTIALS to a service-account key);\n"
-        f"  - project: run `{format_config_set(f'providers.{name}.project_id', '<id>')}`, or run `gcloud config set project <id>`;\n"
+        f"  - project: run `{format_config_set(f'providers.{name}.project_id', '<id>', scope=None)}`, or run `gcloud config set project <id>`;\n"
         "  - one-time setup: run `mngr gcp prepare` if you have not yet.\n"
         f"Or disable the provider: {format_disable_provider(name)}"
     )
@@ -226,7 +226,7 @@ class GcpProvider(OfflineCapableVpsProvider):
                 "Application Default Credentials (gcloud config / GOOGLE_CLOUD_PROJECT). Run "
                 "'{}' to pin it explicitly.",
                 self.gcp_client.project_id,
-                format_config_set("providers.gcp.project_id", "<your-project>"),
+                format_config_set("providers.gcp.project_id", "<your-project>", scope=None),
             )
         if "PYTEST_CURRENT_TEST" in os.environ:
             seconds = self._get_effective_auto_shutdown_seconds()

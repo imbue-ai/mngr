@@ -31,12 +31,12 @@ from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.cli.plugin_install_wizard import install_wizard
 from imbue.mngr.config.data_types import CommonCliOptions
-from imbue.mngr.config.data_types import ConfigScope
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.config.provider_config_registry import list_registered_provider_backend_names
 from imbue.mngr.errors import PluginSpecifierError
+from imbue.mngr.primitives import ConfigScope
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import PluginName
 from imbue.mngr.utils.toml_config import set_plugin_enabled

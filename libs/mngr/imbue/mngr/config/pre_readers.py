@@ -7,9 +7,9 @@ from typing import Final
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
-from imbue.mngr.config.data_types import ConfigScope
 from imbue.mngr.config.host_dir import read_default_host_dir
 from imbue.mngr.errors import ConfigParseError
+from imbue.mngr.primitives import ConfigScope
 from imbue.mngr.utils.git_utils import find_git_worktree_root
 
 # Filenames of the per-scope settings files, relative to their containing

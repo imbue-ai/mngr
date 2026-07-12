@@ -28,7 +28,6 @@ from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.cli.urwid_picker import run_single_select_picker
 from imbue.mngr.cli.urwid_utils import has_interactive_terminal
 from imbue.mngr.config.data_types import CommonCliOptions
-from imbue.mngr.config.data_types import ConfigScope
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.config.external_settings import MNGR_MERGE_KEY
@@ -42,6 +41,7 @@ from imbue.mngr.config.pre_readers import get_user_config_path
 from imbue.mngr.config.pre_readers import resolve_project_config_dir
 from imbue.mngr.errors import ConfigKeyNotFoundError
 from imbue.mngr.errors import ConfigNotFoundError
+from imbue.mngr.primitives import ConfigScope
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr.utils.interactive_subprocess import run_interactive_subprocess

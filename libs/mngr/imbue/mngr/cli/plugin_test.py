@@ -31,7 +31,6 @@ from imbue.mngr.cli.plugin import _project_to_provider_entries
 from imbue.mngr.cli.plugin import _read_package_name_from_pyproject
 from imbue.mngr.cli.plugin import _validate_plugin_name_is_known
 from imbue.mngr.config.data_types import AgentTypeConfig
-from imbue.mngr.config.data_types import ConfigScope
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
@@ -42,6 +41,7 @@ from imbue.mngr.config.provider_config_registry import reset_provider_config_reg
 from imbue.mngr.errors import PluginSpecifierError
 from imbue.mngr.plugins import hookspecs
 from imbue.mngr.primitives import AgentTypeName
+from imbue.mngr.primitives import ConfigScope
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import PluginName
 

@@ -155,7 +155,7 @@ def _azure_not_authorized_error(
     """
     help_text = (
         "Azure could not be reached. Check, in order:\n"
-        f"  - subscription: set AZURE_SUBSCRIPTION_ID, run `{format_config_set(f'providers.{name}.subscription_id', '<id>')}`, "
+        f"  - subscription: set AZURE_SUBSCRIPTION_ID, run `{format_config_set(f'providers.{name}.subscription_id', '<id>', scope=None)}`, "
         "or run `az account set --subscription <id>`;\n"
         "  - credentials: run `az login` (or set AZURE_CLIENT_ID / AZURE_TENANT_ID / "
         "AZURE_CLIENT_SECRET for a service principal);\n"

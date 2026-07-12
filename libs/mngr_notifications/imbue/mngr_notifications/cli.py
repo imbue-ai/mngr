@@ -149,9 +149,9 @@ def notify(ctx: click.Context, **kwargs: object) -> None:
         write_human_line("No terminal configured -- notifications will not have click-to-connect.")
         write_human_line(
             "Enable it by running one of:\n"
-            f"  {format_config_set('plugins.notifications.terminal_app', '<app>')}\n"
-            f"  {format_config_set('plugins.notifications.custom_terminal_command', '<command>')}\n"
-            f"  {format_config_set('plugins.notifications.notification_only', 'true')}"
+            f"  {format_config_set('plugins.notifications.terminal_app', '<app>', scope=None)}\n"
+            f"  {format_config_set('plugins.notifications.custom_terminal_command', '<command>', scope=None)}\n"
+            f"  {format_config_set('plugins.notifications.notification_only', 'true', scope=None)}"
         )
 
     notifier = get_notifier()
