@@ -340,9 +340,9 @@ def _emit_plugin_remove_result(
 @add_common_options
 @click.pass_context
 def plugin(ctx: click.Context, **kwargs: Any) -> None:
-    # A subcommand is required; DefaultCommandGroup renders the git-style help
-    # page and exits with a usage error when the group is invoked bare (like
-    # snapshot/git), so this group callback has nothing to do itself.
+    # A subcommand is required; running this group bare prints its help/usage
+    # listing and exits with a usage error (like snapshot/git), so this group
+    # callback has nothing to do itself.
     pass
 
 
