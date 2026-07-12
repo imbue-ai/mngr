@@ -111,7 +111,35 @@ class E2EFailure(Exception):
 # --- knobs (override via env) ---
 
 MINDS_APP_PATH = Path(os.environ.get("MINDS_APP_PATH", "/Applications/Minds.app/Contents/MacOS/Minds"))
-MINDS_HOME = Path(os.environ.get("HOME", "/Users/macrunner")) / ".minds"
+
+
+def _bundled_root_name() -> str:
+    """The MINDS_ROOT_NAME baked into the app under test, which names its data root.
+
+    A staging / dev build writes to ``~/.minds-<env>``, not ``~/.minds``. Reading the
+    build's own root_name keeps this harness pointed at the app's real data root
+    instead of a stale one left behind by some other build.
+    """
+    override = os.environ.get("MINDS_ROOT_NAME")
+    if override:
+        return override
+    root_name_file = (
+        MINDS_APP_PATH.parent.parent
+        / "Resources"
+        / "pyproject"
+        / "imbue"
+        / "minds"
+        / "config"
+        / "envs"
+        / "_bundled"
+        / "root_name"
+    )
+    if root_name_file.exists():
+        return root_name_file.read_text().strip()
+    return "minds"
+
+
+MINDS_HOME = Path(os.environ.get("HOME", "/Users/macrunner")) / f".{_bundled_root_name()}"
 EVENTS_LOG = MINDS_HOME / "logs" / "minds-events.jsonl"
 ONE_TIME_CODES = MINDS_HOME / "auth" / "one_time_codes.json"
 SCREENSHOT_DIR = Path(os.environ.get("LAUNCH_TO_MSG_SHOTS_DIR", "/tmp/launch-to-msg-screenshots"))
