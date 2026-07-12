@@ -46,6 +46,7 @@ from imbue.mngr.errors import ConfigKeyNotFoundError
 from imbue.mngr.errors import ConfigNotFoundError
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.providers.docker.config import DockerProviderConfig
 from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr.utils.interactive_subprocess import run_interactive_subprocess
 from imbue.mngr.utils.model_schema import render_annotation
@@ -1196,8 +1197,9 @@ def _config_wizard_impl(ctx: click.Context, **kwargs: Any) -> None:
     current_agent_type = raw_agent_type if isinstance(raw_agent_type, str) else None
 
     docker_provider = config.providers.get(ProviderInstanceName("docker"))
-    raw_docker_isolation = getattr(docker_provider, "isolate_host_volumes", None)
-    current_docker_isolation = raw_docker_isolation if isinstance(raw_docker_isolation, bool) else None
+    current_docker_isolation = (
+        docker_provider.isolate_host_volumes if isinstance(docker_provider, DockerProviderConfig) else None
+    )
 
     # Claude's isolate_local_config_dir has a non-None default, so the merged config
     # can't reveal whether the user *chose* it. Read explicit presence from the raw
@@ -1245,7 +1247,9 @@ def _write_user_scope_setting(config_path: Path, base_config: MngrConfig, key: s
     ``mngr config set`` -- so an invalid setting fails up front instead of breaking
     the next config load.
     """
-    _apply_config_value(config_path, key, value, base_config=base_config, disabled_plugins=base_config.disabled_plugins)
+    _apply_config_value(
+        config_path, key, value, base_config=base_config, disabled_plugins=base_config.disabled_plugins
+    )
     write_human_line("Set {} = {} in {}", key, _render_setting_value(value), config_path)
 
 
@@ -1317,9 +1321,7 @@ def _is_claude_agent_type_registered() -> bool:
     return "claude" in list_registered_agent_types()
 
 
-def _read_explicit_setting_across_scopes(
-    dotted_key: str, profile_dir: Path, project_config_dir: Path | None
-) -> Any:
+def _read_explicit_setting_across_scopes(dotted_key: str, profile_dir: Path, project_config_dir: Path | None) -> Any:
     """Return the explicitly-configured value of ``dotted_key`` across all config
     file scopes (user/project/local, highest precedence wins), or None if unset.
 
