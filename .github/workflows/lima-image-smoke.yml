@@ -1,0 +1,76 @@
+# TEST BUILD ONLY (DO NOT MERGE). Boots the pre-baked Lima image on the mac
+# runner and reports why, isolating the image from the whole desktop app: the
+# launch-to-msg e2e showed Lima loading the image and then hanging forever on
+# "Waiting for the essential requirement 1 of 3: ssh", but mngr tears the VM down
+# on failure, so the guest-side reason never survives.
+name: lima-image-smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_path:
+        description: 'Raw image to boot'
+        required: false
+        default: '/Users/macrunner/.minds-dev-weishi/lima-images/versions/minds-v0.3.6/AARCH64/image.raw'
+
+jobs:
+  smoke:
+    runs-on: [self-hosted, macOS, minds-runner]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: image present + intact?
+        env:
+          IMAGE: ${{ inputs.image_path }}
+        run: |
+          set -x
+          ls -la "$IMAGE" || { echo "IMAGE ABSENT"; exit 1; }
+          du -sh "$IMAGE"
+          echo "sha256 (expect f54a77efde6eb47318c201c56f54c8e6da5bd3d0dd4820c725bf98ee1ad27bde):"
+          shasum -a 256 "$IMAGE" | cut -d' ' -f1
+          cat "$HOME/.minds-dev-weishi/lima-images/state.json" || true
+
+      - name: boot it
+        env:
+          IMAGE: ${{ inputs.image_path }}
+        run: |
+          set -x
+          LIMACTL=$(ls /Applications/Minds.app/Contents/Resources/lima/bin/limactl 2>/dev/null || command -v limactl)
+          "$LIMACTL" --version
+          export LIMA_HOME=/tmp/lima-smoke
+          rm -rf "$LIMA_HOME"; mkdir -p "$LIMA_HOME"
+          cat > /tmp/smoke.yaml <<EOF
+          images:
+            - location: "$IMAGE"
+              arch: "aarch64"
+          cpus: 4
+          memory: "8GiB"
+          disk: "20GiB"
+          mounts: []
+          ssh:
+            loadDotSSHPubKeys: false
+          EOF
+          # Never let a hung boot eat the whole job; the point is the serial log.
+          set +e
+          "$LIMACTL" start --name=smoke --tty=false /tmp/smoke.yaml
+          echo "limactl start exit=$?"
+          set -e
+
+      - name: what the guest actually did
+        if: always()
+        run: |
+          export LIMA_HOME=/tmp/lima-smoke
+          echo "=== instance dir ==="
+          ls -la "$LIMA_HOME/smoke/" || true
+          echo "=== serial log (guest console: why sshd never came up) ==="
+          tail -120 "$LIMA_HOME/smoke/serialv.log" 2>/dev/null || tail -120 "$LIMA_HOME/smoke/serial.log" 2>/dev/null || echo "(no serial log)"
+          echo "=== ha.stderr ==="
+          tail -40 "$LIMA_HOME/smoke/ha.stderr.log" 2>/dev/null || true
+
+      - name: teardown
+        if: always()
+        run: |
+          export LIMA_HOME=/tmp/lima-smoke
+          LIMACTL=$(ls /Applications/Minds.app/Contents/Resources/lima/bin/limactl 2>/dev/null || command -v limactl)
+          "$LIMACTL" delete -f smoke 2>/dev/null || true
