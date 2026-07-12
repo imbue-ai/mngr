@@ -1,0 +1,1 @@
+Update the `scripts/qi/fd_leak/` FD-leak repro scripts to pass `load_entry_points=True` to `create_plugin_manager`, which now requires that argument. Keeps their behavior unchanged (all providers loaded) and keeps the repo-wide type check green.

@@ -46,7 +46,7 @@ def main() -> None:
 
     cg = ConcurrencyGroup(name="repro")
     with cg:
-        pm = create_plugin_manager()
+        pm = create_plugin_manager(load_entry_points=True)
         mngr_ctx = load_config(pm, cg)
 
         print("\n--- Test 1: discover both providers in parallel (via ConcurrencyGroupExecutor) ---")
