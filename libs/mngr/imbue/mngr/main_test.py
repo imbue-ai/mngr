@@ -153,18 +153,22 @@ def test_create_plugin_manager_broken_entry_point_only_crashes_full_load(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A plugin whose import raises crashes a full load but not a recovery load.
+    """A plugin whose import fails crashes a full load but not a recovery load.
 
     This is the core guarantee behind ``mngr plugin remove`` / ``mngr plugin disable``: those
     commands build the manager with load_entry_points=False (see get_or_create_plugin_manager),
-    so a plugin whose import blows up (e.g. a provider whose dependency shipped a breaking
-    release) cannot brick them, while every other command (load_entry_points=True) still fails
+    so a plugin whose import blows up (e.g. a provider whose dependency is missing or was
+    renamed) cannot brick them, while every other command (load_entry_points=True) still fails
     loudly rather than running in a degraded state.
     """
     (project_config_dir / "settings.toml").write_text("is_allowed_in_pytest = true\n")
 
-    # Register a fake "mngr" entry point whose module raises on import.
-    (tmp_path / "broken_ep_mod.py").write_text('raise ImportError("simulated broken plugin")\n')
+    # Register a fake "mngr" entry point whose module imports a nonexistent dependency, so
+    # loading it raises ModuleNotFoundError -- exactly how a real plugin breaks when a
+    # dependency is missing or was renamed. The sentinel name lets us assert the failure is
+    # ours (via ModuleNotFoundError.name) without matching on the message text.
+    missing_dep = "mngr_missing_dependency_for_broken_plugin_test"
+    (tmp_path / "broken_ep_mod.py").write_text(f"import {missing_dep}\n")
     dist_info = tmp_path / "imbue_mngr_brokentest-0.0.0.dist-info"
     dist_info.mkdir()
     (dist_info / "METADATA").write_text("Metadata-Version: 2.1\nName: imbue-mngr-brokentest\nVersion: 0.0.0\n")
@@ -182,7 +186,8 @@ def test_create_plugin_manager_broken_entry_point_only_crashes_full_load(
     assert not recovery_pm.has_plugin("brokentest")
     assert recovery_pm.get_plugin("builtin_help_topics") is not None
 
-    # Full load (what every other command uses) crashes on the broken import. The match=
-    # ensures it fails on *our* broken plugin, not some unrelated load error.
-    with pytest.raises(ImportError, match="simulated broken plugin"):
+    # Full load (what every other command uses) crashes on the broken import. Asserting on
+    # ModuleNotFoundError.name confirms it failed on *our* plugin, not some unrelated error.
+    with pytest.raises(ModuleNotFoundError) as excinfo:
         create_plugin_manager(load_entry_points=True)
+    assert excinfo.value.name == missing_dep
