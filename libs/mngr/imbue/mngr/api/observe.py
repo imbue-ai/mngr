@@ -903,11 +903,16 @@ class AgentObserver(MutableModel):
                 self._activity_queue.put(host_id_str)
                 return
             stop_event = threading.Event()
+            # is_checked=False so a single watcher's failure is isolated (logged via
+            # on_failure) instead of being re-raised at the next strand start / group
+            # exit, which would poison the whole ConcurrencyGroup and stop all
+            # observation -- see _on_watcher_failure for the intended isolation.
             thread = self._concurrency_group.start_new_thread(
                 target=lambda: self._watch_pid(agent_id_str, host_id_str, process, pid, stop_event),
                 daemon=True,
                 name=f"observe-pid-watch-{agent_id_str[:8]}",
                 on_failure=self._on_watcher_failure,
+                is_checked=False,
             )
             self._watchers[agent_id_str] = _AgentWatcher(
                 pid=pid, host_id=host_id_str, stop_event=stop_event, thread=thread
