@@ -11,3 +11,9 @@ Publishing a real image then showed that the Cloudflare REST object backend cann
 `scripts/lima_image/setup_tier.py` is new: the one-time provisioning of an environment's image hosting, which was previously a sequence of hand-run `curl` calls against the Cloudflare API. It is idempotent, supports `--dry-run`, and does three things -- creates the `minds-lima-images-<env>` bucket, attaches the required custom domain, and mints an R2 token **scoped to that single bucket** whose S3 credentials are what the publish step actually uses. The account-wide Cloudflare token is only used to provision; the credential a publisher holds is `AccessDenied` against every other environment's bucket.
 
 It takes a full environment name rather than a tier (`production`, `staging`, `dev-weishi`), so each developer gets an isolated bucket and hostname and cannot overwrite another developer's published image, or production's.
+
+Two fixes to `apps/minds/scripts/launch_to_msg_e2e.py`, both of which made the harness unusable against any build that is not a production one:
+
+`MINDS_HOME` was hardcoded to `~/.minds`. A staging or dev build writes to `~/.minds-<env>`, so the harness watched a data root the app under test never touched, never saw the backend's login URL, and failed with `no backend login URL after 120s` -- while the app had in fact started correctly. It now derives the root from the build's own bundled `root_name` (with an env override), so it follows whichever app it was pointed at; production builds bundle `minds` and are unaffected.
+
+The login URL was scraped as the *first* match in the events log rather than the newest, so re-running against an existing data root handed back a previous run's dead port. CI never hit this because its runner is reset between runs, but it made local repro impossible -- which is precisely when the harness is most useful.
