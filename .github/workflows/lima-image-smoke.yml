@@ -14,6 +14,7 @@ on:
 
 env:
   IMAGE_PATH: /Users/macrunner/.minds-dev-weishi/lima-images/versions/minds-v0.3.6/AARCH64/image.raw
+  APP_ZIP_URL: https://dl.todesktop.com/26032588hqdzk/builds/260712n14umyzyq/mac/zip/arm64
 
 jobs:
   smoke:
@@ -33,12 +34,22 @@ jobs:
           shasum -a 256 "$IMAGE" | cut -d' ' -f1
           cat "$HOME/.minds-dev-weishi/lima-images/state.json" || true
 
+      - name: fetch limactl from the app bundle
+        run: |
+          set -euxo pipefail
+          # limactl is not on the runner PATH and /Applications/Minds.app only exists
+          # while the e2e job holds it, so take the same bundled binary the app uses.
+          rm -rf /tmp/smoke-app && mkdir -p /tmp/smoke-app
+          curl -sL -o /tmp/smoke-app/minds.zip "$APP_ZIP_URL"
+          unzip -q /tmp/smoke-app/minds.zip -d /tmp/smoke-app
+          /tmp/smoke-app/Minds.app/Contents/Resources/lima/bin/limactl --version
+
       - name: boot it
         env:
           IMAGE: ${{ env.IMAGE_PATH }}
         run: |
           set -x
-          LIMACTL=$(ls /Applications/Minds.app/Contents/Resources/lima/bin/limactl 2>/dev/null || command -v limactl)
+          LIMACTL=/tmp/smoke-app/Minds.app/Contents/Resources/lima/bin/limactl
           "$LIMACTL" --version
           export LIMA_HOME=/tmp/lima-smoke
           rm -rf "$LIMA_HOME"; mkdir -p "$LIMA_HOME"
@@ -74,5 +85,4 @@ jobs:
         if: always()
         run: |
           export LIMA_HOME=/tmp/lima-smoke
-          LIMACTL=$(ls /Applications/Minds.app/Contents/Resources/lima/bin/limactl 2>/dev/null || command -v limactl)
-          "$LIMACTL" delete -f smoke 2>/dev/null || true
+          /tmp/smoke-app/Minds.app/Contents/Resources/lima/bin/limactl delete -f smoke 2>/dev/null || true
