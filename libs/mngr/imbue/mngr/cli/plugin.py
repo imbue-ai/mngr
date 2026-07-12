@@ -611,8 +611,7 @@ def _plugin_add_impl(ctx: click.Context) -> None:
     if has_git_source:
         packages_before = _get_installed_package_names(mngr_ctx.concurrency_group)
 
-    # Build a single uv tool install command with all new requirements, pinned to the
-    # lockfile-derived constraints so the plugin resolves against the versions CI tested.
+    # Pin the resolved plugin tree to the lockfile-derived constraints (the versions CI tested).
     command = with_shipped_constraints(build_uv_tool_install_add_requirements(receipt, new_requirements))
 
     all_specifiers = ", ".join(spec for spec, _, _ in source_info)
@@ -639,7 +638,6 @@ def _plugin_add_impl(ctx: click.Context) -> None:
             for spec, url, is_git in source_info
         ]
 
-    # Report results for each source
     for specifier, resolved_package_name, _ in source_info:
         has_entry_points = has_mngr_entry_points(resolved_package_name)
         _emit_plugin_add_result(specifier, resolved_package_name, has_entry_points, output_opts)
@@ -660,7 +658,6 @@ def _plugin_remove_impl(ctx: click.Context) -> None:
     receipt_path = require_uv_tool_receipt()
     receipt = read_receipt(receipt_path)
 
-    # Resolve package names for all sources
     package_names: list[str] = []
     for source in sources:
         match source:
@@ -674,15 +671,12 @@ def _plugin_remove_impl(ctx: click.Context) -> None:
             case _ as unreachable:
                 assert_never(unreachable)
 
-    # Verify all packages are actually dependencies before trying to remove
     extra_names = {r.name for r in receipt.extras}
     for package_name in package_names:
         if package_name not in extra_names:
             raise AbortError(f"Package '{package_name}' is not installed as a plugin")
 
-    # Build a single command that removes all requested packages. A remove still re-resolves
-    # the surviving tree (--reinstall), so pin it to the shipped constraints too. A missing
-    # constraints file means the mngr install itself is broken (not this plugin), so this aborts.
+    # A remove re-resolves the surviving tree, so pin it to the shipped constraints too.
     command = with_shipped_constraints(build_uv_tool_install_remove_multiple(receipt, set(package_names)))
 
     all_names = ", ".join(package_names)

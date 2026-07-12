@@ -22,7 +22,6 @@ from pydantic import Field
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.cli.output_helpers import AbortError
-from imbue.mngr.utils.paths import resolve_shipped_path
 
 _CONSTRAINTS_FILENAME: Final[str] = "constraints.txt"
 
@@ -202,6 +201,28 @@ def _build_uv_tool_install_command(
     return tuple(cmd)
 
 
+# A file shipped with mngr lives in one of two places depending on how mngr was installed.
+# In a wheel it is force-included under the package at ``imbue/mngr/<relative_path>`` (this file's
+# parent); in a source/editable checkout the same file lives at ``libs/mngr/<relative_path>``
+# (``parents[2]``) because the top-level ``libs/mngr`` tree is not otherwise packaged (see CLAUDE.md).
+_SHIPPED_PACKAGE_ROOT: Final = Path(__file__).resolve().parent
+_SHIPPED_SOURCE_ROOT: Final = Path(__file__).resolve().parents[2]
+
+
+def _resolve_shipped_path(relative_path: str) -> Path | None:
+    """Resolve a file shipped with mngr, preferring the packaged copy over the source tree.
+
+    Returns None when the file exists in neither location.
+    """
+    packaged_path = _SHIPPED_PACKAGE_ROOT / relative_path
+    if packaged_path.exists():
+        return packaged_path
+    source_path = _SHIPPED_SOURCE_ROOT / relative_path
+    if source_path.exists():
+        return source_path
+    return None
+
+
 @pure
 def _append_constraints_arg(command: tuple[str, ...], constraint_path: Path) -> tuple[str, ...]:
     """Append ``--constraints <path>`` to a finished uv command.
@@ -239,7 +260,7 @@ def with_shipped_constraints(command: tuple[str, ...]) -> tuple[str, ...]:
     (potentially breaking) release. Its absence signals a broken mngr installation, so this aborts
     with a clear error rather than silently resolving unpinned.
     """
-    return _constraints_arg_or_abort(command, resolve_shipped_path(_CONSTRAINTS_FILENAME))
+    return _constraints_arg_or_abort(command, _resolve_shipped_path(_CONSTRAINTS_FILENAME))
 
 
 @pure

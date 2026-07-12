@@ -12,6 +12,7 @@ from imbue.mngr.uv_tool import _constraints_arg_or_abort
 from imbue.mngr.uv_tool import _plugin_package_names_from_receipt
 from imbue.mngr.uv_tool import _read_receipt_or_none
 from imbue.mngr.uv_tool import _requirement_to_with_arg
+from imbue.mngr.uv_tool import _resolve_shipped_path
 from imbue.mngr.uv_tool import build_base_specifier
 from imbue.mngr.uv_tool import build_uv_tool_install_add
 from imbue.mngr.uv_tool import build_uv_tool_install_add_git
@@ -523,6 +524,29 @@ def test_read_receipt_or_none_returns_none_for_malformed_receipt(tmp_path: Path)
     receipt_path.write_text("this is not valid toml = = =\n")
 
     assert _read_receipt_or_none(receipt_path) is None
+
+
+# =============================================================================
+# Tests for _resolve_shipped_path
+# =============================================================================
+
+
+def test_resolve_shipped_path_returns_packaged_copy() -> None:
+    # main.py lives under the package dir (imbue/mngr) in every install, so it resolves there.
+    resolved = _resolve_shipped_path("main.py")
+    assert resolved is not None
+    assert resolved.parts[-2:] == ("mngr", "main.py")
+
+
+def test_resolve_shipped_path_falls_back_to_source_tree() -> None:
+    # constraints.txt is force-included into the wheel but in a checkout only exists under libs/mngr.
+    resolved = _resolve_shipped_path("constraints.txt")
+    assert resolved is not None
+    assert resolved.parts[-3:] == ("libs", "mngr", "constraints.txt")
+
+
+def test_resolve_shipped_path_returns_none_when_absent() -> None:
+    assert _resolve_shipped_path("this_file_does_not_exist.xyz") is None
 
 
 # =============================================================================
