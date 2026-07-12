@@ -1196,6 +1196,13 @@ def _config_wizard_impl(ctx: click.Context, **kwargs: Any) -> None:
     raw_agent_type = create_defaults.defaults.get("type") if create_defaults is not None else None
     current_agent_type = raw_agent_type if isinstance(raw_agent_type, str) else None
 
+    # ``config.providers`` only holds instances a config file explicitly declares, so
+    # the isinstance check is False in exactly two states, both of which correctly mean
+    # "not pinned -> prompt": (1) no ``[providers.docker]`` block anywhere, so ``get``
+    # returns None -- the fresh-install case, where docker is served by the bare-backend
+    # fallback that never lands in ``config.providers``; and (2) an instance *named*
+    # "docker" declared with a non-docker ``backend`` (a different config class), where
+    # ``isolate_host_volumes`` doesn't apply anyway.
     docker_provider = config.providers.get(ProviderInstanceName("docker"))
     current_docker_isolation = (
         docker_provider.isolate_host_volumes if isinstance(docker_provider, DockerProviderConfig) else None
