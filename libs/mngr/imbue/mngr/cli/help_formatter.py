@@ -418,6 +418,12 @@ def _write_commands_section(
     name_column = min(max(len(name) for name, _ in rows), 24)
     for name, description in rows:
         prefix = f"       {name}"
+        if not description:
+            # No description available -- show the bare name so the command is
+            # never dropped (``_wrap_text`` emits nothing for empty text, which
+            # would otherwise swallow the name it carries as the indent).
+            output.write(f"{prefix}\n")
+            continue
         if len(name) <= name_column:
             prefix = prefix.ljust(7 + name_column + 3)
             wrapped = _wrap_text(description, width, prefix, " " * len(prefix))

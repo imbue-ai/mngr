@@ -167,6 +167,34 @@ def test_format_git_style_help_group_lists_commands() -> None:
     assert help_text.index("COMMANDS") < help_text.index("OPTIONS")
 
 
+def test_format_git_style_help_group_lists_command_without_help() -> None:
+    """A subcommand with no help/short-help still appears in COMMANDS (its name is not dropped)."""
+
+    @click.group()
+    def grp() -> None:
+        pass
+
+    # No ``help=``/``short_help=`` -> click's get_short_help_str returns "".
+    @grp.command(name="frobnicate")
+    def frobnicate_cmd() -> None:
+        pass
+
+    metadata = CommandHelpMetadata(
+        key="grp",
+        one_line_description="A group of things",
+        synopsis="mngr grp COMMAND [ARGS]...",
+        description="Does group things.",
+    )
+
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        ctx = click.Context(grp)
+        help_text = format_git_style_help(ctx, grp, metadata)
+
+    assert "COMMANDS" in help_text
+    assert "frobnicate" in help_text
+
+
 def test_format_git_style_help_non_group_has_no_commands_section() -> None:
     """A leaf command (not a group) must not emit a COMMANDS section."""
 
