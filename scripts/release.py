@@ -403,10 +403,8 @@ def update_internal_dep_pins(all_versions: dict[str, str]) -> list[str]:
     return modified
 
 
-# Warn (do not gate) once the supply-chain cooldown cutoff falls this far behind today.
-# Advancing the cutoff is ordinary dependency maintenance now -- edit [tool.uv] exclude-newer
-# and re-lock in a PR to main, where CI tests the result -- rather than an automatic release
-# step, so shipped constraints.txt is always exactly what CI tested (release cannot change it).
+# How far the [tool.uv] exclude-newer cooldown cutoff may fall behind today before the release
+# advisory warns to advance it.
 _EXCLUDE_NEWER_STALE_THRESHOLD: Final[timedelta] = 2 * DEPENDENCY_COOLDOWN
 
 
@@ -422,6 +420,10 @@ def _warn_if_exclude_newer_stale(pyproject_path: Path) -> None:
             f"({current_cutoff.isoformat()}); dependencies will not pick up newer releases."
         )
         print("  Advance it by editing [tool.uv] exclude-newer and running `uv lock` in a PR to main.")
+        print(
+            "  Do not set the cutoff newer than 2 weeks before today without a specific reason: the "
+            "cooldown gives malicious or compromised releases time to be detected and yanked."
+        )
 
 
 def _warn_if_release_tests_not_green(local_sha: str) -> None:

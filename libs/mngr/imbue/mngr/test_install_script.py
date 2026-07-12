@@ -25,14 +25,20 @@ _INSTALL_SH = _REPO_ROOT / "scripts" / "install.sh"
 _BASH = shutil.which("bash") or "/bin/bash"
 
 
-def _uv_mock(log_file: Path, *, mngr_already_installed: bool) -> str:
+def _uv_mock(log_file: Path, *, mngr_already_installed: bool, installed_plugins: tuple[str, ...]) -> str:
     """Bash mock of `uv` that logs every invocation to `log_file`.
 
     Supports the subset of commands install.sh actually calls:
-    `uv --version`, `uv tool list`, `uv tool install`, `uv tool upgrade`,
-    `uv tool dir --bin`. Anything else returns 0 with no output.
+    `uv --version`, `uv tool list [--show-with]`, `uv tool install`, `uv tool upgrade`,
+    `uv tool dir --bin`. Anything else returns 0 with no output. When mngr is reported
+    installed, `installed_plugins` render as uv's `[with: a, b]` suffix so the upgrade
+    path can discover and re-list them.
     """
-    list_output = "imbue-mngr v1.0.0 (/some/path)" if mngr_already_installed else ""
+    if mngr_already_installed:
+        with_suffix = f" [with: {', '.join(installed_plugins)}]" if installed_plugins else ""
+        list_output = f"imbue-mngr v1.0.0{with_suffix}"
+    else:
+        list_output = ""
     return textwrap.dedent(
         f"""\
         #!/usr/bin/env bash
@@ -129,20 +135,25 @@ def _setup_and_run(
     include_mngr_mock: bool,
     fail_subcommands: tuple[str, ...],
     curl_succeeds: bool,
+    installed_plugins: tuple[str, ...],
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     """Write the uv/mngr/curl mocks onto a synthetic PATH, run install.sh, and return the
     completed process together with the text of the call log.
 
     ``include_mngr_mock=False`` leaves ``mngr`` off PATH, simulating a successful install whose
     bin dir is not on the user's PATH. ``fail_subcommands`` forces those ``mngr`` subcommands to
-    exit 1; ``curl_succeeds=False`` simulates a failed constraints fetch.
+    exit 1; ``curl_succeeds=False`` simulates a failed constraints fetch; ``installed_plugins``
+    are reported by ``uv tool list --show-with`` (only meaningful when already installed).
     """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     log_file = tmp_path / "calls.log"
     log_file.touch()
 
-    write_executable_script(bin_dir / "uv", _uv_mock(log_file, mngr_already_installed=mngr_already_installed))
+    write_executable_script(
+        bin_dir / "uv",
+        _uv_mock(log_file, mngr_already_installed=mngr_already_installed, installed_plugins=installed_plugins),
+    )
     if include_mngr_mock:
         write_executable_script(bin_dir / "mngr", _mngr_mock(log_file, fail_subcommands=fail_subcommands))
     write_executable_script(bin_dir / "curl", _curl_mock(log_file, succeeds=curl_succeeds))
@@ -155,7 +166,12 @@ def _setup_and_run(
 def test_install_sh_upgrades_when_mngr_already_installed(tmp_path: Path) -> None:
     """When uv reports imbue-mngr already installed, run `uv tool upgrade` (not install)."""
     result, calls = _setup_and_run(
-        tmp_path, mngr_already_installed=True, include_mngr_mock=True, fail_subcommands=(), curl_succeeds=True
+        tmp_path,
+        mngr_already_installed=True,
+        include_mngr_mock=True,
+        fail_subcommands=(),
+        curl_succeeds=True,
+        installed_plugins=(),
     )
 
     assert result.returncode == 0, f"install.sh failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
@@ -163,7 +179,7 @@ def test_install_sh_upgrades_when_mngr_already_installed(tmp_path: Path) -> None
     # The constraints file is fetched before installing.
     assert "curl" in calls and "constraints.txt" in calls
     assert "uv tool upgrade imbue-mngr" in calls
-    # Upgrade preserves plugins; the constrained install afterward re-pins the resolved deps.
+    # A constrained install runs after the upgrade to re-pin the resolved deps.
     assert "uv tool install imbue-mngr --constraints" in calls
     assert "mngr dependencies --install interactive --scope core" in calls
     assert "mngr extras -i" in calls
@@ -174,7 +190,12 @@ def test_install_sh_upgrades_when_mngr_already_installed(tmp_path: Path) -> None
 def test_install_sh_installs_when_mngr_not_present(tmp_path: Path) -> None:
     """When uv reports no imbue-mngr, run `uv tool install` (not upgrade)."""
     result, calls = _setup_and_run(
-        tmp_path, mngr_already_installed=False, include_mngr_mock=True, fail_subcommands=(), curl_succeeds=True
+        tmp_path,
+        mngr_already_installed=False,
+        include_mngr_mock=True,
+        fail_subcommands=(),
+        curl_succeeds=True,
+        installed_plugins=(),
     )
 
     assert result.returncode == 0, f"install.sh failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
@@ -201,7 +222,12 @@ def test_install_sh_errors_when_mngr_not_on_path_after_install(tmp_path: Path) -
     # uv mock present, but no mngr binary on PATH -- simulates a successful
     # install whose bin dir is not on the user's PATH.
     result, calls = _setup_and_run(
-        tmp_path, mngr_already_installed=False, include_mngr_mock=False, fail_subcommands=(), curl_succeeds=True
+        tmp_path,
+        mngr_already_installed=False,
+        include_mngr_mock=False,
+        fail_subcommands=(),
+        curl_succeeds=True,
+        installed_plugins=(),
     )
 
     assert result.returncode != 0
@@ -225,6 +251,7 @@ def test_install_sh_continues_when_dependencies_fail(tmp_path: Path) -> None:
         include_mngr_mock=True,
         fail_subcommands=("dependencies",),
         curl_succeeds=True,
+        installed_plugins=(),
     )
 
     assert result.returncode == 0, f"install.sh failed unexpectedly\nstderr:\n{result.stderr}"
@@ -239,7 +266,12 @@ def test_install_sh_continues_when_dependencies_fail(tmp_path: Path) -> None:
 def test_install_sh_continues_when_extras_fail(tmp_path: Path) -> None:
     """A failure in `mngr extras -i` must not abort the script."""
     result, calls = _setup_and_run(
-        tmp_path, mngr_already_installed=True, include_mngr_mock=True, fail_subcommands=("extras",), curl_succeeds=True
+        tmp_path,
+        mngr_already_installed=True,
+        include_mngr_mock=True,
+        fail_subcommands=("extras",),
+        curl_succeeds=True,
+        installed_plugins=(),
     )
 
     assert result.returncode == 0, f"install.sh failed unexpectedly\nstderr:\n{result.stderr}"
@@ -258,7 +290,12 @@ def test_install_sh_continues_when_extras_fail(tmp_path: Path) -> None:
 def test_install_sh_continues_when_config_wizard_fails(tmp_path: Path) -> None:
     """A failure in `mngr config wizard` (step 5) must not abort the script."""
     result, calls = _setup_and_run(
-        tmp_path, mngr_already_installed=True, include_mngr_mock=True, fail_subcommands=("config",), curl_succeeds=True
+        tmp_path,
+        mngr_already_installed=True,
+        include_mngr_mock=True,
+        fail_subcommands=("config",),
+        curl_succeeds=True,
+        installed_plugins=(),
     )
 
     assert result.returncode == 0, f"install.sh failed unexpectedly\nstderr:\n{result.stderr}"
@@ -277,10 +314,34 @@ def test_install_sh_aborts_when_constraints_fetch_fails(tmp_path: Path) -> None:
     installing an unpinned mngr.
     """
     result, calls = _setup_and_run(
-        tmp_path, mngr_already_installed=False, include_mngr_mock=True, fail_subcommands=(), curl_succeeds=False
+        tmp_path,
+        mngr_already_installed=False,
+        include_mngr_mock=True,
+        fail_subcommands=(),
+        curl_succeeds=False,
+        installed_plugins=(),
     )
 
     assert result.returncode != 0, f"expected abort on failed fetch\nstdout:\n{result.stdout}"
     assert "curl" in calls
     # mngr must NOT have been installed when the constraints could not be fetched.
     assert "uv tool install imbue-mngr" not in calls
+
+
+@pytest.mark.timeout(30)
+def test_install_sh_relists_plugins_on_upgrade(tmp_path: Path) -> None:
+    """The constrained reinstall after `uv tool upgrade` must re-list existing plugins as
+    ``--with`` so they survive -- a bare ``uv tool install imbue-mngr`` drops them."""
+    result, calls = _setup_and_run(
+        tmp_path,
+        mngr_already_installed=True,
+        include_mngr_mock=True,
+        fail_subcommands=(),
+        curl_succeeds=True,
+        installed_plugins=("imbue-mngr-modal", "imbue-mngr-claude"),
+    )
+
+    assert result.returncode == 0, f"install.sh failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert "uv tool upgrade imbue-mngr" in calls
+    # The constrained install must carry the existing plugins, or the upgrade would drop them.
+    assert "uv tool install imbue-mngr --with imbue-mngr-modal --with imbue-mngr-claude --constraints" in calls

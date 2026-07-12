@@ -133,6 +133,8 @@ def test_warn_if_exclude_newer_stale_warns_on_old_cutoff(tmp_path: Path, capsys:
     output = capsys.readouterr().out
     assert "exclude-newer cooldown cutoff is" in output
     assert "in a PR to main" in output
+    # The advisory must steer the cutoff no newer than the 2-week cooldown (supply-chain guard).
+    assert "2 weeks before today" in output
 
 
 def test_warn_if_exclude_newer_stale_silent_on_recent_cutoff(
