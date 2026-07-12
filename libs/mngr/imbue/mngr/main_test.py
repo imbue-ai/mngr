@@ -163,9 +163,7 @@ def test_create_plugin_manager_broken_entry_point_only_crashes_full_load(
     (project_config_dir / "settings.toml").write_text("is_allowed_in_pytest = true\n")
 
     # Register a fake "mngr" entry point whose module imports a nonexistent dependency, so
-    # loading it raises ModuleNotFoundError -- exactly how a real plugin breaks when a
-    # dependency is missing or was renamed. The sentinel name lets us assert the failure is
-    # ours (via ModuleNotFoundError.name) without matching on the message text.
+    # loading it raises ModuleNotFoundError.
     missing_dep = "mngr_missing_dependency_for_broken_plugin_test"
     (tmp_path / "broken_ep_mod.py").write_text(f"import {missing_dep}\n")
     dist_info = tmp_path / "imbue_mngr_brokentest-0.0.0.dist-info"
