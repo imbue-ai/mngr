@@ -746,7 +746,9 @@ def plugin_disable(ctx: click.Context, **kwargs: Any) -> None:
 
 def _plugin_enable_impl(ctx: click.Context, **kwargs: Any) -> None:
     """Implementation of plugin enable command."""
-    _plugin_set_enabled_impl(ctx, is_enabled=True)
+    # ``enable`` is not a recovery command: it loads plugins normally (and fails loudly if
+    # one is broken). Only ``disable`` -- see _plugin_disable_impl -- runs in recovery mode.
+    _plugin_set_enabled_impl(ctx, is_enabled=True, is_recovery=False)
 
 
 def _plugin_disable_impl(ctx: click.Context, **kwargs: Any) -> None:
@@ -757,7 +759,7 @@ def _plugin_disable_impl(ctx: click.Context, **kwargs: Any) -> None:
     _plugin_set_enabled_impl(ctx, is_enabled=False, is_recovery=True)
 
 
-def _plugin_set_enabled_impl(ctx: click.Context, *, is_enabled: bool, is_recovery: bool = False) -> None:
+def _plugin_set_enabled_impl(ctx: click.Context, *, is_enabled: bool, is_recovery: bool) -> None:
     """Shared implementation for plugin enable/disable commands.
 
     When ``is_recovery`` is True the command runs without third-party plugin entry points

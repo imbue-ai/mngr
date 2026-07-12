@@ -304,7 +304,7 @@ def load_plugin_hookspecs(pm: pluggy.PluginManager) -> None:
             pm.add_hookspecs(hookspec_module)
 
 
-def create_plugin_manager(load_entry_points: bool | None = None) -> pluggy.PluginManager:
+def create_plugin_manager(load_entry_points: bool) -> pluggy.PluginManager:
     """
     Initializes the plugin manager and loads all plugin registries.
 
@@ -317,17 +317,13 @@ def create_plugin_manager(load_entry_points: bool | None = None) -> pluggy.Plugi
     every provider regardless of local configuration.
 
     ``load_entry_points`` controls whether third-party plugin entry points are
-    imported. When left as None it is derived from the current invocation: it is
-    False for the ``mngr plugin remove`` / ``mngr plugin disable`` recovery
-    commands (see _is_plugin_recovery_invocation) so a plugin that fails to import
-    cannot brick the very command used to remove or disable it, and True for every
-    other command. Pass it explicitly to override the derivation (used by tests).
+    imported. Pass False for the ``mngr plugin remove`` / ``mngr plugin disable``
+    recovery commands so a plugin that fails to import cannot brick the very
+    command used to remove or disable it (the CLI derives this via
+    get_or_create_plugin_manager); pass True everywhere else.
 
     This should only really be called once from the main command (or during testing).
     """
-    if load_entry_points is None:
-        load_entry_points = not _is_plugin_recovery_invocation(sys.argv)
-
     # Create plugin manager and load registries first (needed for config parsing)
     pm = pluggy.PluginManager("mngr")
     pm.add_hookspecs(hookspecs)
@@ -373,9 +369,16 @@ def get_or_create_plugin_manager() -> pluggy.PluginManager:
     This is used during CLI initialization to apply plugin-registered options
     to commands before argument parsing happens. The singleton ensures that
     plugins are only loaded once even if this is called multiple times.
+
+    Third-party entry points are skipped for the ``mngr plugin remove`` /
+    ``mngr plugin disable`` recovery commands (detected from sys.argv, since the
+    singleton is first built at import time before Click parses arguments) so a
+    plugin that fails to import cannot brick the command used to remove or
+    disable it. See _is_plugin_recovery_invocation.
     """
     if _plugin_manager_container["pm"] is None:
-        _plugin_manager_container["pm"] = create_plugin_manager()
+        load_entry_points = not _is_plugin_recovery_invocation(sys.argv)
+        _plugin_manager_container["pm"] = create_plugin_manager(load_entry_points=load_entry_points)
     return _plugin_manager_container["pm"]
 
 

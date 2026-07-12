@@ -35,7 +35,7 @@ def test_create_plugin_manager_blocks_disabled_plugins(
         "is_allowed_in_pytest = true\n\n[plugins.modal]\nenabled = false\n"
     )
 
-    pm = create_plugin_manager()
+    pm = create_plugin_manager(load_entry_points=True)
 
     assert pm.is_blocked("modal")
 
@@ -51,7 +51,7 @@ def test_create_plugin_manager_skips_blocking_when_load_all_plugins_set(
     )
     monkeypatch.setenv("MNGR_LOAD_ALL_PLUGINS", "1")
 
-    pm = create_plugin_manager()
+    pm = create_plugin_manager(load_entry_points=True)
 
     assert not pm.is_blocked("modal")
 

@@ -63,7 +63,7 @@ def _build_provider(profile_dir: Path) -> tuple[LimaProviderInstance, Concurrenc
         # ~10-15 min; the default 600s is for KVM-accelerated boots.
         vm_start_timeout_seconds=1500.0,
     )
-    pm = create_plugin_manager()
+    pm = create_plugin_manager(load_entry_points=True)
     mngr_config = MngrConfig.model_construct(
         prefix="mngr-",
         default_host_dir=Path("/mngr"),
