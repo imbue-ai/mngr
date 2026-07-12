@@ -104,7 +104,6 @@ def test_recovery_invocation_constants_match_click_tree() -> None:
 
 
 def test_create_plugin_manager_skips_entry_points_in_recovery(
-    project_config_dir: Path,
     temp_git_repo_cwd: Path,
 ) -> None:
     """With load_entry_points=False, no third-party setuptools entry point is imported.
@@ -113,8 +112,6 @@ def test_create_plugin_manager_skips_entry_points_in_recovery(
     `plugin remove` / `plugin disable` run even when one of those entry points fails to
     import. mngr's own built-ins (registered directly, not via entry points) still load.
     """
-    (project_config_dir / "settings.toml").write_text("is_allowed_in_pytest = true\n")
-
     pm = create_plugin_manager(load_entry_points=False)
 
     entry_point_names = {ep.name for ep in importlib.metadata.entry_points(group="mngr")}
@@ -148,7 +145,6 @@ def test_create_plugin_manager_blocks_disabled_plugins_even_in_recovery(
 
 
 def test_create_plugin_manager_broken_entry_point_only_crashes_full_load(
-    project_config_dir: Path,
     temp_git_repo_cwd: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -160,8 +156,6 @@ def test_create_plugin_manager_broken_entry_point_only_crashes_full_load(
     so a plugin with a missing dependency cannot brick them, while every other command
     (load_entry_points=True) still fails loudly rather than running in a degraded state.
     """
-    (project_config_dir / "settings.toml").write_text("is_allowed_in_pytest = true\n")
-
     # Register a fake "mngr" entry point whose module imports a nonexistent dependency, so
     # loading it raises ModuleNotFoundError.
     missing_dep = "mngr_missing_dependency_for_broken_plugin_test"
