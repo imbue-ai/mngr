@@ -210,9 +210,11 @@ _SHIPPED_SOURCE_ROOT: Final = Path(__file__).resolve().parents[2]
 
 
 def _resolve_shipped_path(relative_path: str) -> Path | None:
-    """Resolve a file shipped with mngr, preferring the packaged copy over the source tree.
+    """Resolve a file shipped with mngr: the packaged copy (a wheel) or the source-checkout copy.
 
-    Returns None when the file exists in neither location.
+    Only one of the two locations exists in any given install -- a wheel force-includes the file
+    under ``imbue/mngr``, while a source/editable checkout keeps it under ``libs/mngr`` -- so this
+    checks the packaged location first, then the source tree, and returns None if neither has it.
     """
     packaged_path = _SHIPPED_PACKAGE_ROOT / relative_path
     if packaged_path.exists():

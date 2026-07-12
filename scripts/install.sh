@@ -53,22 +53,19 @@ trap 'rm -f "$CONSTRAINTS_FILE"' EXIT
 info "Fetching dependency constraints..."
 curl -fsSL "https://raw.githubusercontent.com/imbue-ai/mngr/release/libs/mngr/constraints.txt" -o "$CONSTRAINTS_FILE"
 
-if uv tool list 2>/dev/null | grep -q '^imbue-mngr '; then
-    info "Upgrading mngr..."
-    # `uv tool upgrade` gets the latest mngr and keeps plugins but ignores constraints. Re-pin
-    # with a constrained `uv tool install`, re-listing existing plugins as `--with` so they are
-    # not dropped -- a bare `uv tool install imbue-mngr` resets the tool to just its base package.
-    uv tool upgrade imbue-mngr
-    plugins="$(uv tool list --show-with 2>/dev/null | sed -n 's/^imbue-mngr .*\[with: \([^]]*\)\].*/\1/p' | tr ',' ' ' || true)"
-    with_args=""
-    for plugin in $plugins; do
-        with_args="$with_args --with $plugin"
-    done
-    uv tool install imbue-mngr $with_args --constraints "$CONSTRAINTS_FILE"
-else
-    info "Installing mngr..."
-    uv tool install imbue-mngr --constraints "$CONSTRAINTS_FILE"
-fi
+info "Installing mngr..."
+# Install or upgrade mngr to the latest release and pin its dependencies in a single constrained
+# `uv tool install`. Existing plugins are re-listed as `--with` so an upgrade keeps them (a bare
+# `uv tool install imbue-mngr` would reset the tool to just its base package). Doing this in one
+# constrained resolution -- rather than an `uv tool upgrade` first, which ignores constraints and
+# would briefly install the newest unpinned dependencies from PyPI before a second command could
+# downgrade them -- means dependencies are never resolved unpinned, even transiently.
+plugins="$(uv tool list --show-with 2>/dev/null | sed -n 's/^imbue-mngr .*\[with: \([^]]*\)\].*/\1/p' | tr ',' ' ' || true)"
+with_args=""
+for plugin in $plugins; do
+    with_args="$with_args --with $plugin"
+done
+uv tool install imbue-mngr@latest $with_args --constraints "$CONSTRAINTS_FILE"
 
 if ! command -v mngr &>/dev/null; then
     TOOL_BIN="$(uv tool dir --bin)"

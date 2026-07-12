@@ -2,9 +2,9 @@
 
 These tests run the install.sh shell script end-to-end against mocked uv and
 mngr binaries placed on a synthetic PATH. They verify the script's control
-flow -- install vs upgrade branch, the PATH-not-set error, and the
-continue-on-failure behaviour of steps 3 and 4 -- without requiring a real
-PyPI package or installed system dependencies.
+flow -- the single constrained install (with plugin re-listing on upgrade), the
+PATH-not-set error, and the continue-on-failure behaviour of steps 3 and 4 --
+without requiring a real PyPI package or installed system dependencies.
 """
 
 import shutil
@@ -29,10 +29,9 @@ def _uv_mock(log_file: Path, *, mngr_already_installed: bool, installed_plugins:
     """Bash mock of `uv` that logs every invocation to `log_file`.
 
     Supports the subset of commands install.sh actually calls:
-    `uv --version`, `uv tool list [--show-with]`, `uv tool install`, `uv tool upgrade`,
-    `uv tool dir --bin`. Anything else returns 0 with no output. When mngr is reported
-    installed, `installed_plugins` render as uv's `[with: a, b]` suffix so the upgrade
-    path can discover and re-list them.
+    `uv --version`, `uv tool list [--show-with]`, `uv tool install`, `uv tool dir --bin`.
+    Anything else returns 0 with no output. When mngr is reported installed,
+    `installed_plugins` render as uv's `[with: a, b]` suffix so install.sh can re-list them.
     """
     if mngr_already_installed:
         with_suffix = f" [with: {', '.join(installed_plugins)}]" if installed_plugins else ""
@@ -163,8 +162,10 @@ def _setup_and_run(
 
 
 @pytest.mark.timeout(30)
-def test_install_sh_upgrades_when_mngr_already_installed(tmp_path: Path) -> None:
-    """When uv reports imbue-mngr already installed, run `uv tool upgrade` (not install)."""
+def test_install_sh_installs_at_latest_without_unconstrained_upgrade(tmp_path: Path) -> None:
+    """Already-installed mngr is upgraded and re-pinned by a single constrained
+    `uv tool install imbue-mngr@latest` -- never a separate unconstrained `uv tool upgrade`,
+    which would briefly resolve dependencies unpinned (bypassing the tested-versions pin)."""
     result, calls = _setup_and_run(
         tmp_path,
         mngr_already_installed=True,
@@ -175,12 +176,10 @@ def test_install_sh_upgrades_when_mngr_already_installed(tmp_path: Path) -> None
     )
 
     assert result.returncode == 0, f"install.sh failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    assert "uv tool list" in calls
-    # The constraints file is fetched before installing.
     assert "curl" in calls and "constraints.txt" in calls
-    assert "uv tool upgrade imbue-mngr" in calls
-    # A constrained install runs after the upgrade to re-pin the resolved deps.
-    assert "uv tool install imbue-mngr --constraints" in calls
+    assert "uv tool install imbue-mngr@latest --constraints" in calls
+    # A separate `uv tool upgrade` bypasses the constraints, so it must not be used.
+    assert "uv tool upgrade" not in calls
     assert "mngr dependencies --install interactive --scope core" in calls
     assert "mngr extras -i" in calls
     assert "mngr config wizard" in calls
@@ -199,10 +198,10 @@ def test_install_sh_installs_when_mngr_not_present(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0, f"install.sh failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    # The constraints file is fetched, then a fresh constrained install is run (not upgrade).
+    # The constraints file is fetched, then a single constrained @latest install runs.
     assert "curl" in calls and "constraints.txt" in calls
-    assert "uv tool install imbue-mngr --constraints" in calls
-    assert "uv tool upgrade imbue-mngr" not in calls
+    assert "uv tool install imbue-mngr@latest --constraints" in calls
+    assert "uv tool upgrade" not in calls
     assert "mngr dependencies --install interactive --scope core" in calls
     assert "mngr extras -i" in calls
     assert "mngr config wizard" in calls
@@ -329,9 +328,9 @@ def test_install_sh_aborts_when_constraints_fetch_fails(tmp_path: Path) -> None:
 
 
 @pytest.mark.timeout(30)
-def test_install_sh_relists_plugins_on_upgrade(tmp_path: Path) -> None:
-    """The constrained reinstall after `uv tool upgrade` must re-list existing plugins as
-    ``--with`` so they survive -- a bare ``uv tool install imbue-mngr`` drops them."""
+def test_install_sh_relists_plugins_when_already_installed(tmp_path: Path) -> None:
+    """An upgrade re-lists existing plugins as ``--with`` in the single constrained install so they
+    survive -- a bare ``uv tool install imbue-mngr`` would reset the tool to just its base package."""
     result, calls = _setup_and_run(
         tmp_path,
         mngr_already_installed=True,
@@ -342,6 +341,6 @@ def test_install_sh_relists_plugins_on_upgrade(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0, f"install.sh failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    assert "uv tool upgrade imbue-mngr" in calls
+    assert "uv tool upgrade" not in calls
     # The constrained install must carry the existing plugins, or the upgrade would drop them.
-    assert "uv tool install imbue-mngr --with imbue-mngr-modal --with imbue-mngr-claude --constraints" in calls
+    assert "uv tool install imbue-mngr@latest --with imbue-mngr-modal --with imbue-mngr-claude --constraints" in calls
