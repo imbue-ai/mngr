@@ -4,6 +4,7 @@ import click
 
 from imbue.mngr.cli.help_formatter import show_help_with_pager
 from imbue.mngr.config.data_types import MngrConfig
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.pre_readers import read_default_command
 from imbue.mngr.plugin_catalog import get_install_hint_for_cli_command
 
@@ -62,10 +63,11 @@ class DefaultCommandGroup(click.Group):
         """
         # ``ctx.obj`` may be a MngrContext or a PluginManager depending on how
         # far parsing has progressed; only the former carries pager config.
-        config: MngrConfig | None = None
         obj = ctx.obj
-        if obj is not None and hasattr(obj, "config"):
-            config = obj.config
+        if isinstance(obj, MngrContext):
+            config: MngrConfig | None = obj.config
+        else:
+            config = None
         show_help_with_pager(ctx, self, config)
         ctx.exit(2)
 
