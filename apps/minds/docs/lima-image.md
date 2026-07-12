@@ -82,7 +82,10 @@ So, per [release.md](./release.md)'s one-time tier setup, which is the authorita
 - Only the **public** half and the base URL are committed, into the tier's `client.toml`. Both are public values.
 - Generate it unencrypted (`minisign -G -W`), which is what `publish.py` needs for non-interactive signing.
 
-Cloudflare credentials come from the tier's existing Vault `cloudflare` token. For production, prefer a **custom CDN domain over `r2.dev`**, which is rate-limited and not intended for production traffic.
+Two infrastructure facts are load-bearing, and both were learned by publishing a real image rather than by reading Cloudflare's docs:
+
+- **Upload over the S3 API, never the REST object API.** `api.cloudflare.com` allows 1200 requests per 5 minutes globally, and one image is ~65,000 chunks. A publish cannot fit in that budget; it dies partway through with `429`. R2's S3 API has no such ceiling and sustains ~12,000 objects/minute.
+- **Serve from a custom domain, never `r2.dev`.** The same arithmetic bites on the way back down: a client extract fetches ~65,000 chunks, and the managed `r2.dev` origin is rate-limited, so the extract fails with `unexpected status code 429` and the image never assembles. A custom domain goes through Cloudflare's CDN and is not throttled. This applies to *every* tier, dev included -- it is not a production-only refinement.
 
 ## Consuming (the app, on each user's Mac)
 

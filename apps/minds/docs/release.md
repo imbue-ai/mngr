@@ -169,7 +169,9 @@ The bake runs *with Lima itself* (the image is built by the same virtualizer tha
    ```bash
    minisign -G -p minds-lima-<tier>.pub -s minds-lima-<tier>.key   # protect the .key
    ```
-2. **Create the R2 bucket** (convention: `minds-lima-images-<tier>`, e.g. `minds-lima-images-production`) and enable a public origin. For dev/test the managed `r2.dev` domain is fine; for **production prefer a custom CDN domain** (`r2.dev` is rate-limited and not meant for production traffic). Either way, note the public base URL (e.g. `https://lima-images.minds.example`).
+2. **Create the R2 bucket** (convention: `minds-lima-images-<tier>`, e.g. `minds-lima-images-production`) and attach a **custom domain** to it (e.g. `lima-images.<tier-domain>`), then note that base URL.
+
+   A custom domain is **required, in every tier including dev** — not a production nicety. The managed `r2.dev` origin is rate-limited, and a client extract pulls ~65,000 chunks: against `r2.dev` this reliably fails partway with `unexpected status code 429`, so the image never assembles and the fast path is dead. A custom domain is served through Cloudflare's CDN and is not throttled this way. Attach one with `POST /accounts/<account>/r2/buckets/<bucket>/domains/custom` (`{"domain": ..., "zoneId": ..., "enabled": true}`), and check the hostname is not behind a Cloudflare Access policy, which would answer the client with `401`.
 3. **Commit the public values** into the tier's `config/envs/<tier>/client.toml`:
    ```toml
    lima_image_base_url = "https://lima-images.minds.example"          # the public CDN/r2.dev base
