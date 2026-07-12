@@ -344,6 +344,29 @@ def _is_container_namespace_key(key: str) -> bool:
     return key.split(".", 1)[0] in _CONTAINER_NAMESPACES
 
 
+def _collect_model_field_completions(
+    config_class: type[BaseModel],
+    prefix: tuple[str, ...],
+    dynamic_values: dict[str, list[str]],
+) -> tuple[list[str], dict[str, list[str]]]:
+    """Walk one config model's schema into completion keys and constrained-value choices.
+
+    Returns ``(keys, choices)``: one key per settable leaf field (dotted, under
+    ``prefix``), plus a value-choices entry for each field whose annotation
+    constrains its value (bool, enum, or a dynamic-source type). Shared by the
+    ``agent_types`` / ``plugins`` / ``providers`` namespace builders, which differ
+    only in how they resolve each entry's config class.
+    """
+    keys: list[str] = []
+    choices: dict[str, list[str]] = {}
+    for path, annotation, _description in walk_model_fields(config_class, prefix=prefix, recurse_optional=True):
+        keys.append(path)
+        value_choices = _value_choices_for_annotation(annotation, dynamic_values)
+        if value_choices is not None:
+            choices[path] = value_choices
+    return keys, choices
+
+
 def _agent_type_schema_completions(
     agent_type_names: list[str],
     config: MngrConfig,
@@ -366,13 +389,9 @@ def _agent_type_schema_completions(
     for name in agent_type_names:
         existing = config.agent_types.get(AgentTypeName(name))
         config_class = type(existing) if existing is not None else get_agent_config_class(name)
-        for path, annotation, _description in walk_model_fields(
-            config_class, prefix=("agent_types", name), recurse_optional=True
-        ):
-            keys.append(path)
-            value_choices = _value_choices_for_annotation(annotation, dynamic_values)
-            if value_choices is not None:
-                choices[path] = value_choices
+        sub_keys, sub_choices = _collect_model_field_completions(config_class, ("agent_types", name), dynamic_values)
+        keys.extend(sub_keys)
+        choices.update(sub_choices)
     return keys, choices
 
 
@@ -394,13 +413,9 @@ def _plugin_schema_completions(
     for name in names:
         existing = config.plugins.get(PluginName(name))
         config_class = type(existing) if existing is not None else PluginConfig
-        for path, annotation, _description in walk_model_fields(
-            config_class, prefix=("plugins", name), recurse_optional=True
-        ):
-            keys.append(path)
-            value_choices = _value_choices_for_annotation(annotation, dynamic_values)
-            if value_choices is not None:
-                choices[path] = value_choices
+        sub_keys, sub_choices = _collect_model_field_completions(config_class, ("plugins", name), dynamic_values)
+        keys.extend(sub_keys)
+        choices.update(sub_choices)
     return keys, choices
 
 
@@ -419,13 +434,11 @@ def _provider_schema_completions(
     keys: list[str] = []
     choices: dict[str, list[str]] = {}
     for name, instance in config.providers.items():
-        for path, annotation, _description in walk_model_fields(
-            type(instance), prefix=("providers", str(name)), recurse_optional=True
-        ):
-            keys.append(path)
-            value_choices = _value_choices_for_annotation(annotation, dynamic_values)
-            if value_choices is not None:
-                choices[path] = value_choices
+        sub_keys, sub_choices = _collect_model_field_completions(
+            type(instance), ("providers", str(name)), dynamic_values
+        )
+        keys.extend(sub_keys)
+        choices.update(sub_choices)
     return keys, choices
 
 
