@@ -162,8 +162,11 @@ jobs:
     timeout-minutes: 85
     env:
       # Resolved relative to pnpm's CWD (apps/minds), not the repo root.
-      MINDS_CLIENT_CONFIG_BUNDLE: imbue/minds/config/envs/production/client.toml
-      MINDS_ROOT_NAME_BUNDLE: minds
+      # TEST BUILD ONLY (DO NOT MERGE): build against the dev environment, so the
+      # pre-baked Lima image path can be proven end to end without creating agents
+      # or hosts in production. Restore production/client.toml + minds before merge.
+      MINDS_CLIENT_CONFIG_BUNDLE: imbue/minds/config/envs/dev-weishi/client.toml
+      MINDS_ROOT_NAME_BUNDLE: minds-dev-weishi
     outputs:
       app_zip_url: ${{ steps.existing.outputs.url || steps.parse.outputs.url }}
       build_id:    ${{ steps.existing.outputs.build_id || steps.parse.outputs.build_id }}
@@ -589,10 +592,7 @@ jobs:
           # to the pair key / green marker / slack message. The binary fetches
           # branch / tag / SHA uniformly (clone_git_repo; mngr 02bb71b44+).
           MINDS_USE_LOCAL_WORKSPACE_DEFAULTS: "1"
-          # TEST BUILD ONLY (DO NOT MERGE): the pre-baked-image gate fires only when
-          # the workspace ref equals the release tag, so the usual frozen-SHA pin
-          # would take the slow path and this run would prove nothing.
-          MINDS_WORKSPACE_BRANCH: "minds-v0.3.6"
+          MINDS_WORKSPACE_BRANCH: ${{ needs.check_should_run.outputs.default_workspace_template_sha }}
         run: |
           # pipefail is REQUIRED: without it the pipeline exits with tee's
           # status (always 0) and a failing e2e is reported green.

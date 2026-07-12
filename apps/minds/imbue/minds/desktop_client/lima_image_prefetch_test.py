@@ -33,6 +33,7 @@ from imbue.minds.lima_image.primitives import Sha256Hex
 
 _DEFAULT_REPO = "https://github.com/imbue-ai/default-workspace-template.git"
 _TAG = "minds-v0.3.4"
+_COMMIT = "a" * 40
 _SOURCE = LimaImageSource(base_url="https://cdn.example/lima", public_key="RWkey")
 
 
@@ -44,12 +45,14 @@ def _gate(
     source: LimaImageSource | None = _SOURCE,
     is_dev_loop: bool = False,
     environ: Mapping[str, str] | None = None,
+    current_release_commit: str | None = None,
 ) -> bool:
     return should_use_prebaked_lima_image(
         is_lima_launch_mode=is_lima_launch_mode,
         repo_url=repo_url,
         branch_or_tag=branch_or_tag,
         current_release_tag=_TAG,
+        current_release_commit=current_release_commit,
         default_repo_url=_DEFAULT_REPO,
         source=source,
         is_dev_loop=is_dev_loop,
@@ -80,6 +83,24 @@ def test_gate_false_for_non_default_repo() -> None:
 def test_gate_false_for_non_release_branch() -> None:
     assert _gate(branch_or_tag="main") is False
     assert _gate(branch_or_tag=None) is False
+
+
+def test_gate_true_for_the_release_tags_own_commit() -> None:
+    # CI pins the workspace to a SHA for reproducibility. The image is baked from a
+    # commit, so the tag's commit is the same content as the tag: requiring the tag's
+    # *name* would send every SHA-pinned create down the slow path, leaving the fast
+    # path untested by the very run that is supposed to exercise it.
+    assert _gate(branch_or_tag=_COMMIT, current_release_commit=_COMMIT) is True
+
+
+def test_gate_false_for_a_commit_that_is_not_the_release_tags() -> None:
+    assert _gate(branch_or_tag="b" * 40, current_release_commit=_COMMIT) is False
+
+
+def test_gate_false_for_a_sha_when_the_tag_could_not_be_resolved() -> None:
+    # An unresolvable tag must not open the gate to arbitrary SHAs; it just means
+    # SHA-pinned creates build in-VM, which is the safe direction.
+    assert _gate(branch_or_tag=_COMMIT, current_release_commit=None) is False
 
 
 def test_gate_false_when_kill_switch_set() -> None:

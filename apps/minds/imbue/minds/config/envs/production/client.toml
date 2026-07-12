@@ -7,15 +7,3 @@
 
 connector_url = "https://minds-production--rsc-production-api.modal.run"
 litellm_proxy_url = "https://minds-production--llm-production-proxy.modal.run"
-
-# TEST BUILD ONLY -- DO NOT MERGE THIS BRANCH.
-#
-# Points the pre-baked Lima image (issue 2306) at a *dev* bucket signed by a
-# *dev* minisign key, so a ToDesktop build can exercise the fast path before the
-# production bucket exists. A ToDesktop build is only a downloadable artifact;
-# shipping to users is a separate manual Release click, which must not be done
-# for a build made from this branch. Production must point at a production
-# bucket signed by a production key: the public key here is the trust anchor for
-# code the app boots as a VM.
-lima_image_base_url = "https://lima-images-dev-weishi.minds-dev.com"
-lima_image_minisign_public_key = "RWTH1GecM8oIhjTwYE+o4cODZGT5S6uhQ/Ou/qekJrO/VMiAMDHRZYl/"

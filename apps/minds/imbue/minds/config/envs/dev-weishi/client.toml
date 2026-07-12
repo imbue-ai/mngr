@@ -1,0 +1,12 @@
+# Dev tier client config for the fast-Lima test build (issue 2306).
+#
+# TEST BUILD ONLY -- DO NOT MERGE. Exists so a ToDesktop build can be produced
+# against the dev environment, exercising the pre-baked Lima image path end to
+# end without touching production infrastructure. Both lima_image values are
+# public: a CDN URL and the public half of the dev signing key.
+
+connector_url = "https://minds-dev-dev-weishi--rsc-dev-api.modal.run/"
+litellm_proxy_url = "https://minds-dev-dev-weishi--llm-dev-proxy.modal.run/"
+
+lima_image_base_url = "https://lima-images-dev-weishi.minds-dev.com"
+lima_image_minisign_public_key = "RWTH1GecM8oIhjTwYE+o4cODZGT5S6uhQ/Ou/qekJrO/VMiAMDHRZYl/"

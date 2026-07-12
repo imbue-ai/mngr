@@ -69,6 +69,7 @@ from imbue.minds.desktop_client.lima_image_prefetch import LimaImageCreateGate
 from imbue.minds.desktop_client.lima_image_prefetch import is_lima_image_cache_disabled
 from imbue.minds.desktop_client.lima_image_prefetch import make_lima_image_prefetcher
 from imbue.minds.desktop_client.lima_image_prefetch import make_lima_image_source
+from imbue.minds.desktop_client.lima_image_prefetch import resolve_release_tag_commit
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.request_events import LatchkeyFileSharingPermissionRequestEvent
@@ -487,9 +488,16 @@ def run(
             # (gated creates fall back / surface a retryable error on their own).
             is_checked=False,
         )
+        # A create may pin the release tag's commit rather than name the tag (CI does,
+        # for reproducibility). Resolve it once so those creates still take the fast path.
         lima_image_gate = LimaImageCreateGate(
             prefetcher=lima_image_prefetcher,
             current_release_tag=FALLBACK_BRANCH,
+            current_release_commit=resolve_release_tag_commit(
+                repo_url=DEFAULT_WORKSPACE_TEMPLATE_GIT_URL,
+                release_tag=FALLBACK_BRANCH,
+                concurrency_group=root_concurrency_group,
+            ),
             default_repo_url=DEFAULT_WORKSPACE_TEMPLATE_GIT_URL,
             is_dev_loop=is_local_workspace_defaults_opt_in(),
         )
