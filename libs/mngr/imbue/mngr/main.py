@@ -1,7 +1,9 @@
 import bdb
 import os
 import sys
+from collections.abc import Sequence
 from typing import Any
+from typing import Final
 
 import click
 import pluggy
@@ -65,6 +67,41 @@ from imbue.mngr.utils.env_utils import parse_bool_env
 # Module-level container for the plugin manager singleton, created lazily.
 # Using a dict avoids the need for the 'global' keyword while still allowing module-level state.
 _plugin_manager_container: dict[str, pluggy.PluginManager | None] = {"pm": None}
+
+
+# Names (canonical + aliases) under which the `mngr plugin` group is reachable, and the
+# subcommands of that group that must keep working even when a third-party plugin fails to
+# import. `plugin remove` / `plugin disable` are the escape hatches a user runs to recover
+# from a broken plugin, so for those invocations we deliberately skip loading setuptools
+# entry points (see create_plugin_manager): a broken plugin must not be able to brick the
+# very command that removes or disables it. Every OTHER command still loads all plugins and
+# fails loudly if one is broken -- mngr does not run in a degraded state.
+#
+# These are hardcoded because the decision must be made from sys.argv at import time, before
+# Click parses arguments. test_recovery_invocation_constants_match_click_tree keeps them in
+# sync with the real `plugin` command tree so the sets cannot silently drift.
+_PLUGIN_GROUP_INVOCATION_NAMES: Final[frozenset[str]] = frozenset({"plugin", "plug"})
+_PLUGIN_RECOVERY_SUBCOMMANDS: Final[frozenset[str]] = frozenset({"remove", "disable"})
+
+
+def _is_plugin_recovery_invocation(argv: Sequence[str]) -> bool:
+    """Return True iff ``argv`` invokes ``mngr plugin remove`` or ``mngr plugin disable``.
+
+    ``argv`` is sys.argv-style (``argv[0]`` is the program name). The top-level mngr group
+    takes no value-consuming options before the subcommand -- only the eager ``--version`` /
+    ``--help`` flags, which exit before any command runs -- so ``argv[1]`` is reliably the
+    subcommand token and ``argv[2]`` its subcommand. That makes a simple token match both
+    sufficient and safe from false positives: no other top-level command is named ``plugin``
+    (or ``plug``), and the non-recovery ``plugin`` subcommands (``list``/``add``/``enable``)
+    do not match, so they still trigger a full plugin load.
+
+    A false negative (e.g. an unusual abbreviation that dodges the match) merely falls back to
+    the normal load path -- i.e. the pre-existing crash on a broken plugin -- so erring toward
+    not matching is safe.
+    """
+    return (
+        len(argv) >= 3 and argv[1] in _PLUGIN_GROUP_INVOCATION_NAMES and argv[2] in _PLUGIN_RECOVERY_SUBCOMMANDS
+    )
 
 
 def _call_on_error_hook(ctx: click.Context, error: BaseException) -> None:
@@ -267,7 +304,7 @@ def load_plugin_hookspecs(pm: pluggy.PluginManager) -> None:
             pm.add_hookspecs(hookspec_module)
 
 
-def create_plugin_manager() -> pluggy.PluginManager:
+def create_plugin_manager(load_entry_points: bool | None = None) -> pluggy.PluginManager:
     """
     Initializes the plugin manager and loads all plugin registries.
 
@@ -279,8 +316,18 @@ def create_plugin_manager() -> pluggy.PluginManager:
     config-based blocking so that tooling (e.g. doc generation) can load
     every provider regardless of local configuration.
 
+    ``load_entry_points`` controls whether third-party plugin entry points are
+    imported. When left as None it is derived from the current invocation: it is
+    False for the ``mngr plugin remove`` / ``mngr plugin disable`` recovery
+    commands (see _is_plugin_recovery_invocation) so a plugin that fails to import
+    cannot brick the very command used to remove or disable it, and True for every
+    other command. Pass it explicitly to override the derivation (used by tests).
+
     This should only really be called once from the main command (or during testing).
     """
+    if load_entry_points is None:
+        load_entry_points = not _is_plugin_recovery_invocation(sys.argv)
+
     # Create plugin manager and load registries first (needed for config parsing)
     pm = pluggy.PluginManager("mngr")
     pm.add_hookspecs(hookspecs)
@@ -289,12 +336,20 @@ def create_plugin_manager() -> pluggy.PluginManager:
     # load_setuptools_entrypoints so disabled plugins are never registered.
     # MNGR_LOAD_ALL_PLUGINS overrides this so that tooling (e.g. doc generation)
     # can produce output that reflects all providers regardless of local config.
+    # This runs even for the recovery commands (which skip the load below): it does
+    # not import anything, and it marks the disabled names as blocked so the strict
+    # re-block in load_config does not trip on a name that is neither registered
+    # (nothing was loaded) nor blocked.
     if not parse_bool_env(os.environ.get("MNGR_LOAD_ALL_PLUGINS", "")):
         block_disabled_plugins(pm, read_disabled_plugins())
 
     # Automatically discover and load plugins registered via setuptools entry points.
     # External packages can register hooks by adding an entry point for the "mngr" group.
-    pm.load_setuptools_entrypoints("mngr")
+    # Skipped for the recovery commands (load_entry_points=False) so a broken plugin cannot
+    # crash them; in that case the manager holds only mngr's built-ins, which is all those
+    # commands need.
+    if load_entry_points:
+        pm.load_setuptools_entrypoints("mngr")
 
     # Allow plugins to register their own hookspec modules (for plugin-specific hooks).
     load_plugin_hookspecs(pm)

@@ -645,10 +645,17 @@ def _plugin_add_impl(ctx: click.Context) -> None:
 
 def _plugin_remove_impl(ctx: click.Context) -> None:
     """Implementation of plugin remove command."""
+    # ``plugin remove`` is a recovery command: it runs without loading third-party plugin
+    # entry points (see create_plugin_manager) so a plugin that fails to import cannot brick
+    # it. That means the plugin being removed is not registered, so its ``[providers.<x>]``
+    # block would look like an unknown backend. Parse leniently (as ``plugin add`` does) so a
+    # config that references the plugin being removed does not turn recovery into a new error.
     mngr_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,
         command_name="plugin",
         command_class=PluginCliOptions,
+        strict=False,
+        silent_unknown_fields=True,
     )
 
     # Validate arguments before checking uv tool receipt so users get clear
@@ -744,22 +751,35 @@ def _plugin_enable_impl(ctx: click.Context, **kwargs: Any) -> None:
 
 def _plugin_disable_impl(ctx: click.Context, **kwargs: Any) -> None:
     """Implementation of plugin disable command."""
-    _plugin_set_enabled_impl(ctx, is_enabled=False)
+    # ``disable`` is a recovery command: create_plugin_manager skips loading third-party
+    # entry points for it so a plugin that fails to import cannot brick the command used to
+    # disable it. ``enable`` is not a recovery command and loads plugins normally.
+    _plugin_set_enabled_impl(ctx, is_enabled=False, is_recovery=True)
 
 
-def _plugin_set_enabled_impl(ctx: click.Context, *, is_enabled: bool) -> None:
-    """Shared implementation for plugin enable/disable commands."""
+def _plugin_set_enabled_impl(ctx: click.Context, *, is_enabled: bool, is_recovery: bool = False) -> None:
+    """Shared implementation for plugin enable/disable commands.
+
+    When ``is_recovery`` is True the command runs without third-party plugin entry points
+    loaded (see _plugin_disable_impl). Config is then parsed leniently -- the plugin being
+    disabled is not registered, so its ``[providers.<x>]`` block would otherwise error as an
+    unknown backend -- and the soft name check is skipped, since with nothing loaded it could
+    only ever emit a misleading "not registered" warning.
+    """
     mngr_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,
         command_name="plugin",
         command_class=PluginCliOptions,
+        strict=False if is_recovery else None,
+        silent_unknown_fields=is_recovery,
     )
 
     name = opts.name
     if name is None:
         raise AbortError("Plugin name is required")
 
-    _validate_plugin_name_is_known(name, mngr_ctx)
+    if not is_recovery:
+        _validate_plugin_name_is_known(name, mngr_ctx)
 
     root_name = os.environ.get("MNGR_ROOT_NAME", "mngr")
     scope = ConfigScope((opts.scope or "project").upper())

@@ -190,6 +190,61 @@ def test_plugin_disable_writes_enabled_false_to_project_toml(
     assert "enabled = false" in content
 
 
+def test_plugin_disable_unknown_plugin_does_not_warn(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    temp_git_repo_cwd: Path,
+    mngr_test_root_name: str,
+) -> None:
+    """disable is a recovery command, so it skips the soft "not registered" name check.
+
+    Unlike enable (see test_plugin_enable_unknown_plugin_warns_but_succeeds), disable runs
+    without third-party plugins loaded, so that check could only ever misfire -- it is
+    skipped, and disable still writes the config.
+    """
+    result = cli_runner.invoke(
+        plugin,
+        ["disable", "definitely-not-a-real-plugin"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert "not currently registered" not in result.output
+    config_path = temp_git_repo_cwd / f".{mngr_test_root_name}" / "settings.toml"
+    assert "enabled = false" in config_path.read_text()
+
+
+def test_plugin_disable_succeeds_with_unknown_backend_in_config(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    temp_git_repo_cwd: Path,
+    mngr_test_root_name: str,
+) -> None:
+    """disable parses config leniently so a provider block for the not-loaded plugin is OK.
+
+    A recovery run imports no third-party plugins, so a ``[providers.<x>]`` block whose
+    backend is provided by an unloaded plugin looks like an unknown backend. Under the
+    default strict parse that raises ConfigParseError; disable must instead tolerate it so
+    that a config referencing the plugin being disabled does not block the disable.
+    """
+    config_dir = temp_git_repo_cwd / f".{mngr_test_root_name}"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "settings.toml").write_text(
+        'is_allowed_in_pytest = true\n\n[providers.fakeprovider]\nbackend = "fakebackend"\n'
+    )
+
+    result = cli_runner.invoke(
+        plugin,
+        ["disable", "fakebackend"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert "enabled = false" in (config_dir / "settings.toml").read_text()
+
+
 def test_plugin_enable_json_format_returns_valid_json(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,

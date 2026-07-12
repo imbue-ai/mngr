@@ -1,10 +1,15 @@
 """Unit tests for create_plugin_manager."""
 
+import importlib.metadata
 import os
 from pathlib import Path
 
 import pytest
 
+from imbue.mngr.main import _PLUGIN_GROUP_INVOCATION_NAMES
+from imbue.mngr.main import _PLUGIN_RECOVERY_SUBCOMMANDS
+from imbue.mngr.main import _is_plugin_recovery_invocation
+from imbue.mngr.main import cli
 from imbue.mngr.main import create_plugin_manager
 from imbue.mngr.utils.env_utils import parse_bool_env
 
@@ -49,3 +54,95 @@ def test_create_plugin_manager_skips_blocking_when_load_all_plugins_set(
     pm = create_plugin_manager()
 
     assert not pm.is_blocked("modal")
+
+
+@pytest.mark.parametrize(
+    "argv, expected",
+    [
+        (["mngr", "plugin", "remove", "imbue-mngr-fake"], True),
+        (["mngr", "plugin", "disable", "fake"], True),
+        (["mngr", "plug", "remove", "imbue-mngr-fake"], True),
+        (["mngr", "plug", "disable", "fake"], True),
+        (["mngr", "plugin", "disable"], True),
+        # Non-recovery plugin subcommands must still load plugins (fail loudly if broken).
+        (["mngr", "plugin", "list"], False),
+        (["mngr", "plugin", "add", "imbue-mngr-fake"], False),
+        (["mngr", "plugin", "enable", "fake"], False),
+        # Unrelated commands, bare group, and too-short argv.
+        (["mngr", "create", "remove"], False),
+        (["mngr", "remove"], False),
+        (["mngr", "plugin"], False),
+        (["mngr"], False),
+        ([], False),
+    ],
+)
+def test_is_plugin_recovery_invocation(argv: list[str], expected: bool) -> None:
+    """Only `plugin remove` / `plugin disable` (and the `plug` alias) are recovery invocations."""
+    assert _is_plugin_recovery_invocation(argv) is expected
+
+
+def test_recovery_invocation_constants_match_click_tree() -> None:
+    """The hardcoded recovery-detection sets must stay in sync with the real command tree.
+
+    The detection in _is_plugin_recovery_invocation is hardcoded because it runs from
+    sys.argv before Click parses arguments. This test fails if the `plugin` group's names
+    (canonical + aliases) or its subcommands drift away from those hardcoded sets, so the
+    fast-path cannot silently diverge from what Click actually dispatches.
+    """
+    plugin_group = cli.commands["plugin"]
+
+    reachable_names = frozenset(name for name, command in cli.commands.items() if command is plugin_group)
+    assert reachable_names == _PLUGIN_GROUP_INVOCATION_NAMES, (
+        f"The `plugin` group is reachable as {sorted(reachable_names)}, but recovery detection "
+        f"matches {sorted(_PLUGIN_GROUP_INVOCATION_NAMES)}. Update _PLUGIN_GROUP_INVOCATION_NAMES."
+    )
+
+    subcommand_names = frozenset(plugin_group.commands.keys())
+    assert _PLUGIN_RECOVERY_SUBCOMMANDS <= subcommand_names, (
+        f"Recovery subcommands {sorted(_PLUGIN_RECOVERY_SUBCOMMANDS)} are not all real `mngr plugin` "
+        f"subcommands {sorted(subcommand_names)}. Update _PLUGIN_RECOVERY_SUBCOMMANDS."
+    )
+
+
+def test_create_plugin_manager_skips_entry_points_in_recovery(
+    project_config_dir: Path,
+    temp_git_repo_cwd: Path,
+) -> None:
+    """With load_entry_points=False, no third-party setuptools entry point is imported.
+
+    All provider/agent plugins come from setuptools entry points; skipping them is what lets
+    `plugin remove` / `plugin disable` run even when one of those entry points fails to
+    import. mngr's own built-ins (registered directly, not via entry points) still load.
+    """
+    (project_config_dir / "settings.toml").write_text("is_allowed_in_pytest = true\n")
+
+    pm = create_plugin_manager(load_entry_points=False)
+
+    entry_point_names = {ep.name for ep in importlib.metadata.entry_points(group="mngr")}
+    # list_name_plugin() includes blocked names with a None plugin object, so filter to
+    # names that were actually registered.
+    registered_names = {name for name, plugin in pm.list_name_plugin() if plugin is not None}
+    assert registered_names.isdisjoint(entry_point_names), (
+        f"recovery mode registered entry-point plugins: {sorted(registered_names & entry_point_names)}"
+    )
+    # A built-in is still registered, so recovery is not a completely empty manager.
+    assert pm.get_plugin("builtin_help_topics") is not None
+
+
+def test_create_plugin_manager_blocks_disabled_plugins_even_in_recovery(
+    project_config_dir: Path,
+    temp_git_repo_cwd: Path,
+) -> None:
+    """Blocking of config-disabled plugins still runs when entry points are skipped.
+
+    Blocking imports nothing, and it marks disabled names as blocked so the strict re-block
+    in load_config does not trip on a name that is neither registered (nothing was loaded in
+    recovery mode) nor blocked.
+    """
+    (project_config_dir / "settings.toml").write_text(
+        "is_allowed_in_pytest = true\n\n[plugins.modal]\nenabled = false\n"
+    )
+
+    pm = create_plugin_manager(load_entry_points=False)
+
+    assert pm.is_blocked("modal")
