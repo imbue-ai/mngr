@@ -7,7 +7,7 @@
   to create a local Docker workspace.
 
 - Under the hood, selecting runsc stacks a new `docker_runsc` create-template
-  overlay (in forever-claude-template) on top of the shared `docker` template,
+  overlay (in default-workspace-template) on top of the shared `docker` template,
   so the gVisor choice is the only difference between the two runtimes and the
   runc path -- the default -- is now what runs on macOS.
 
