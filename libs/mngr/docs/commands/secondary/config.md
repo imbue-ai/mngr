@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr [config|cfg] [list|get|set|...] [ARGS]...
+mngr [config|cfg] [get|set|unset|list|...] [ARGS]...
 ```
 
 Manage mngr configuration.
