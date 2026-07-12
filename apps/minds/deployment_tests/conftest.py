@@ -3,8 +3,8 @@
 Five fixtures, mirroring the spec:
 
 * ``shared_env(role)`` -- a pre-stood-up ci env reachable by URL.
-* ``fct_template_ref`` -- worktree path + (future) pushed ``ci-...`` branch
-  ref for the FCT content under test.
+* ``default_workspace_template_ref`` -- worktree path + (future) pushed ``ci-...`` branch
+  ref for the DEFAULT_WORKSPACE_TEMPLATE content under test.
 * ``verified_user`` -- function-scoped, pre-verified user created via the
   shared env's SuperTokens admin API and deleted in teardown.
 * ``ephemeral_env`` -- function-scoped, mints a fresh ``ci-...`` env
@@ -40,9 +40,9 @@ from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.minds.config.loader import load_client_config
 from imbue.minds.deployment_tests._mailtm import MailtmInbox
 from imbue.minds.deployment_tests._mailtm import make_signup_address
+from imbue.minds.deployment_tests.data_types import DefaultWorkspaceTemplateRef
 from imbue.minds.deployment_tests.data_types import DeploymentEnvsConfig
 from imbue.minds.deployment_tests.data_types import EphemeralEnvHandle
-from imbue.minds.deployment_tests.data_types import FctTemplateRef
 from imbue.minds.deployment_tests.data_types import SharedEnvHandle
 from imbue.minds.deployment_tests.data_types import VerifiedUserHandle
 from imbue.minds.deployment_tests.helpers import CI_TEST_USER_EMAIL_KEY
@@ -93,8 +93,10 @@ def deployment_envs_config() -> DeploymentEnvsConfig:
 
 
 @pytest.fixture(scope="session")
-def fct_template_ref(deployment_envs_config: DeploymentEnvsConfig) -> FctTemplateRef:
-    """Return the FCT template ref the orchestrator prepared for this run.
+def default_workspace_template_ref(
+    deployment_envs_config: DeploymentEnvsConfig,
+) -> DefaultWorkspaceTemplateRef:
+    """Return the default workspace template ref the orchestrator prepared for this run.
 
     Today the orchestrator populates ``worktree_path`` so tests pass a
     local-disk path to ``mngr create --template <path>``. When this moves
@@ -102,7 +104,7 @@ def fct_template_ref(deployment_envs_config: DeploymentEnvsConfig) -> FctTemplat
     instead -- the fixture is the abstraction boundary, test code does
     not change.
     """
-    return deployment_envs_config.fct
+    return deployment_envs_config.default_workspace_template
 
 
 @pytest.fixture

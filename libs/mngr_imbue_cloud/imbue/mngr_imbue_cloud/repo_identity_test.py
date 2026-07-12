@@ -15,21 +15,21 @@ from imbue.mngr_imbue_cloud.repo_identity import normalize_repo_url
 from imbue.mngr_imbue_cloud.repo_identity import resolve_repo_current_branch
 from imbue.mngr_imbue_cloud.repo_identity import resolve_repo_origin_url
 
-_CANONICAL: str = "github.com/imbue-ai/forever-claude-template"
+_CANONICAL: str = "github.com/imbue-ai/default-workspace-template"
 
 
 @pytest.mark.parametrize(
     "raw_url",
     [
-        "https://github.com/imbue-ai/forever-claude-template.git",
-        "https://github.com/imbue-ai/forever-claude-template",
-        "https://github.com/imbue-ai/forever-claude-template/",
-        "git@github.com:imbue-ai/forever-claude-template.git",
-        "git@github.com:imbue-ai/forever-claude-template",
-        "ssh://git@github.com/imbue-ai/forever-claude-template.git",
-        "git://github.com/imbue-ai/forever-claude-template.git",
-        "https://GitHub.com/imbue-ai/forever-claude-template.git",
-        "https://user:secret@github.com/imbue-ai/forever-claude-template.git",
+        "https://github.com/imbue-ai/default-workspace-template.git",
+        "https://github.com/imbue-ai/default-workspace-template",
+        "https://github.com/imbue-ai/default-workspace-template/",
+        "git@github.com:imbue-ai/default-workspace-template.git",
+        "git@github.com:imbue-ai/default-workspace-template",
+        "ssh://git@github.com/imbue-ai/default-workspace-template.git",
+        "git://github.com/imbue-ai/default-workspace-template.git",
+        "https://GitHub.com/imbue-ai/default-workspace-template.git",
+        "https://user:secret@github.com/imbue-ai/default-workspace-template.git",
     ],
 )
 def test_normalize_repo_url_collapses_equivalent_forms_to_one_key(raw_url: str) -> None:
@@ -38,8 +38,8 @@ def test_normalize_repo_url_collapses_equivalent_forms_to_one_key(raw_url: str) 
 
 def test_normalize_repo_url_preserves_org_repo_case_but_lowercases_host() -> None:
     assert (
-        normalize_repo_url("https://GitHub.com/Imbue-AI/Forever-Claude-Template.git")
-        == "github.com/Imbue-AI/Forever-Claude-Template"
+        normalize_repo_url("https://GitHub.com/Imbue-AI/Default-Workspace-Template.git")
+        == "github.com/Imbue-AI/Default-Workspace-Template"
     )
 
 
@@ -52,13 +52,13 @@ def test_normalize_repo_url_rejects_inputs_without_host_and_path(bad: str) -> No
 @pytest.mark.parametrize(
     "value,expected",
     [
-        ("/home/user/project/fct", True),
-        ("./fct", True),
-        ("../fct", True),
-        ("~/project/fct", True),
-        ("https://github.com/imbue-ai/forever-claude-template.git", False),
-        ("git@github.com:imbue-ai/forever-claude-template.git", False),
-        ("ssh://git@github.com/imbue-ai/forever-claude-template", False),
+        ("/home/user/project/default_workspace_template", True),
+        ("./default_workspace_template", True),
+        ("../default_workspace_template", True),
+        ("~/project/default_workspace_template", True),
+        ("https://github.com/imbue-ai/default-workspace-template.git", False),
+        ("git@github.com:imbue-ai/default-workspace-template.git", False),
+        ("ssh://git@github.com/imbue-ai/default-workspace-template", False),
     ],
 )
 def test_is_local_repo_source_distinguishes_paths_from_urls(value: str, expected: bool) -> None:
@@ -79,14 +79,16 @@ def _init_repo_with_origin(repo_dir: Path, origin_url: str, *, branch: str = "ma
 @pytest.mark.skipif(shutil.which("git") is None, reason="git required")
 def test_canonicalize_repo_source_resolves_local_path_to_origin(tmp_path: Path) -> None:
     repo_dir = tmp_path / "clone"
-    _init_repo_with_origin(repo_dir, "git@github.com:imbue-ai/forever-claude-template.git")
+    _init_repo_with_origin(repo_dir, "git@github.com:imbue-ai/default-workspace-template.git")
     assert canonicalize_repo_source(str(repo_dir)) == _CANONICAL
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="git required")
 def test_resolve_repo_current_branch_returns_checked_out_branch(tmp_path: Path) -> None:
     repo_dir = tmp_path / "clone"
-    _init_repo_with_origin(repo_dir, "git@github.com:imbue-ai/forever-claude-template.git", branch="josh/exploration")
+    _init_repo_with_origin(
+        repo_dir, "git@github.com:imbue-ai/default-workspace-template.git", branch="josh/exploration"
+    )
     assert resolve_repo_current_branch(repo_dir) == "josh/exploration"
 
 
@@ -102,4 +104,4 @@ def test_resolve_repo_origin_url_raises_without_origin(tmp_path: Path) -> None:
 @pytest.mark.skipif(shutil.which("git") is None, reason="git required")
 def test_canonicalize_repo_source_remote_url_does_not_touch_filesystem() -> None:
     # A remote URL is normalized directly (no git invocation / path resolution).
-    assert canonicalize_repo_source("https://github.com/imbue-ai/forever-claude-template") == _CANONICAL
+    assert canonicalize_repo_source("https://github.com/imbue-ai/default-workspace-template") == _CANONICAL

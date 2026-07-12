@@ -43,7 +43,7 @@ DISK_RESERVE_FRACTION: Final[float] = 0.10
 
 # Each slice VM has TWO disks whose sizes must sum to the slice's disk budget (no
 # disk overcommit, just like RAM): a fixed boot disk holding the guest OS + Docker
-# (the FCT image + build cache + container layers -- ~11GiB observed, sized with
+# (the DEFAULT_WORKSPACE_TEMPLATE image + build cache + container layers -- ~11GiB observed, sized with
 # headroom for build spikes) and a btrfs data disk (the rest of the budget) mounted
 # at the host_dir for the agent's per-host volume. lima would otherwise default the
 # boot disk to 100GiB, which (unaccounted) would massively overcommit the box.
@@ -74,12 +74,12 @@ DEFAULT_SLICE_PORT_RANGE_END: Final[int] = 32000
 # slice provider so they always agree.
 _SLICE_BASE_IMAGE_RELPATH: Final[str] = ".cache/mngr-slice-base/debian-base.qcow2"
 
-# Box dir holding the per-box cached FCT image tar (a ``docker save`` of the built
+# Box dir holding the per-box cached DEFAULT_WORKSPACE_TEMPLATE image tar (a ``docker save`` of the built
 # image), so slices on the box ``docker load`` it instead of each rebuilding from
 # the Dockerfile. Under the lima service user's home (the box has no Docker, only a
 # tar file); created once at ``server prep``. Shared by the prep script and the box
 # image cache so they always agree.
-_SLICE_FCT_CACHE_RELDIR: Final[str] = ".cache/mngr-slice-fct"
+_SLICE_DEFAULT_WORKSPACE_TEMPLATE_CACHE_RELDIR: Final[str] = ".cache/mngr-slice-default-workspace-template"
 
 
 def slice_base_image_path(lima_service_user: str) -> str:
@@ -87,9 +87,9 @@ def slice_base_image_path(lima_service_user: str) -> str:
     return f"/home/{lima_service_user}/{_SLICE_BASE_IMAGE_RELPATH}"
 
 
-def box_fct_cache_dir(lima_service_user: str) -> str:
-    """Absolute path of the box dir holding the cached FCT image tar for ``lima_service_user``."""
-    return f"/home/{lima_service_user}/{_SLICE_FCT_CACHE_RELDIR}"
+def box_default_workspace_template_cache_dir(lima_service_user: str) -> str:
+    """Absolute path of the box dir holding the cached DEFAULT_WORKSPACE_TEMPLATE image tar for ``lima_service_user``."""
+    return f"/home/{lima_service_user}/{_SLICE_DEFAULT_WORKSPACE_TEMPLATE_CACHE_RELDIR}"
 
 
 def slice_base_image_file_url(lima_service_user: str) -> str:
