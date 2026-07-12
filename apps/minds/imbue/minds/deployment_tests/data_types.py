@@ -33,8 +33,8 @@ class SharedEnvUrls(FrozenModel):
     litellm_proxy_url: AnyUrl = Field(description="Base URL of the deployed ``litellm`` proxy for this env.")
 
 
-class FctTemplateRef(FrozenModel):
-    """How the test should reach the forever-claude-template content under test.
+class DefaultWorkspaceTemplateRef(FrozenModel):
+    """How the test should reach the default-workspace-template content under test.
 
     Today (local pytest): ``worktree_path`` is set, ``test_branch`` /
     ``test_remote`` may or may not be populated (the orchestrator can do
@@ -50,17 +50,17 @@ class FctTemplateRef(FrozenModel):
     worktree_path: Path | None = Field(
         default=None,
         description=(
-            "Absolute path to ``<monorepo>/.external_worktrees/forever-claude-template/``. "
+            "Absolute path to ``<monorepo>/.external_worktrees/default-workspace-template/``. "
             "Set when running locally; ``None`` when running in offload sandboxes."
         ),
     )
     test_branch: NonEmptyStr | None = Field(
         default=None,
-        description="Name of the ``ci-<timestamp>`` branch the orchestrator pushed to the FCT remote.",
+        description="Name of the ``ci-<timestamp>`` branch the orchestrator pushed to the DEFAULT_WORKSPACE_TEMPLATE remote.",
     )
     test_remote: NonEmptyStr | None = Field(
         default=None,
-        description="URL of the FCT remote the test branch was pushed to.",
+        description="URL of the DEFAULT_WORKSPACE_TEMPLATE remote the test branch was pushed to.",
     )
 
     def as_mngr_template_arg(self) -> str:
@@ -74,7 +74,7 @@ class FctTemplateRef(FrozenModel):
         if self.worktree_path is not None:
             return str(self.worktree_path)
         assert self.test_branch is not None and self.test_remote is not None, (
-            "FctTemplateRef has neither a local worktree path nor a pushed branch ref; "
+            "DefaultWorkspaceTemplateRef has neither a local worktree path nor a pushed branch ref; "
             "the orchestrator should always populate at least one."
         )
         return f"{self.test_remote}#{self.test_branch}"
@@ -91,8 +91,8 @@ class DeploymentEnvsConfig(FrozenModel):
     shared_envs: dict[SharedEnvRole, SharedEnvUrls] = Field(
         description="Role -> shared env URLs. Empty when the orchestrator was invoked in a mode that needs no shared env."
     )
-    fct: FctTemplateRef = Field(
-        description="How tests can reach the forever-claude-template content the orchestrator prepared."
+    default_workspace_template: DefaultWorkspaceTemplateRef = Field(
+        description="How tests can reach the default-workspace-template content the orchestrator prepared."
     )
     run_id: RunId = Field(description="The run id stamped into every CI-created resource this run.")
 

@@ -4,6 +4,7 @@ from pathlib import Path
 import docker.errors
 import pytest
 
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
@@ -128,6 +129,39 @@ def test_start_host_on_running_host_returns_same_host(docker_provider: DockerPro
     host = docker_provider.create_host(HostName("test-already-running"))
     restarted = docker_provider.start_host(host.id)
     assert isinstance(restarted, Host)
+
+
+@pytest.mark.docker
+@pytest.mark.docker_sdk
+def test_get_host_heals_stale_recorded_ssh_port(docker_provider: DockerProviderInstance) -> None:
+    """A stale recorded ssh_port (as left by a Docker daemon restart) is healed on connect.
+
+    Docker does not preserve randomly-published host ports across a daemon
+    restart, while the host record persists the port resolved at create time.
+    The stale record is simulated deterministically (rewriting it with a dead
+    port) instead of restarting the daemon; the container keeps running on its
+    real port, exactly like a container whose port was reshuffled by a reboot.
+    """
+    host = docker_provider.create_host(HostName("test-stale-port"))
+    record = docker_provider._host_store.read_host_record(host.id, use_cache=False)
+    assert record is not None
+    live_port = record.last_discovered_ssh_port
+    assert live_port is not None
+
+    stale_record = record.model_copy_update(to_update(record.field_ref().last_discovered_ssh_port, live_port + 1))
+    docker_provider._host_store.write_host_record(stale_record)
+    # Drop all cached handles: after a reboot, a fresh process starts with none.
+    docker_provider.on_connection_error(host.id)
+
+    healed_host = docker_provider.get_host(host.id)
+    assert isinstance(healed_host, Host)
+    result = healed_host.execute_idempotent_command("echo ok")
+    assert result.success
+    assert "ok" in result.stdout
+
+    healed_record = docker_provider._host_store.read_host_record(host.id, use_cache=False)
+    assert healed_record is not None
+    assert healed_record.last_discovered_ssh_port == live_port
 
 
 @pytest.mark.docker

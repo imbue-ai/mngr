@@ -16,13 +16,13 @@ from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
 from imbue.mngr_imbue_cloud.errors import BoxImageCacheError
 from imbue.mngr_imbue_cloud.providers.slice_provider import SliceVpsDockerProvider
+from imbue.mngr_imbue_cloud.providers.slice_provider import _DEFAULT_WORKSPACE_TEMPLATE_BUILD_CODE_DIR
 from imbue.mngr_imbue_cloud.providers.slice_provider import _DEFERRED_INSTALL_MARKER
-from imbue.mngr_imbue_cloud.providers.slice_provider import _FCT_BUILD_CODE_DIR
 from imbue.mngr_imbue_cloud.providers.slice_provider import _PLAYWRIGHT_CTX_DIR
 from imbue.mngr_imbue_cloud.slices.box_image_cache import BoxImageCacheInterface
 from imbue.mngr_imbue_cloud.slices.mock_box_image_cache_test import MockBoxImageCache
 
-_TAG = "fct:minds-v0.3.2"
+_TAG = "default-workspace-template:minds-v0.3.2"
 
 
 class _OrchestrationProvider(SliceVpsDockerProvider):
@@ -146,13 +146,13 @@ def test_build_playwright_derived_image_renders_marker_and_build_command() -> No
     encoded = stage_command.split("echo ")[1].split(" | base64 -d")[0].strip().strip("'")
     dockerfile = base64.b64decode(encoded).decode()
     assert dockerfile.startswith("FROM mngr-build-xyz")
-    # Must invoke playwright via ``python -m`` (not the ``playwright`` console script): the FCT
+    # Must invoke playwright via ``python -m`` (not the ``playwright`` console script): the DEFAULT_WORKSPACE_TEMPLATE
     # venv is built at /mngr/code and ``mv``\\d to /docker_build_code, so the script's hardcoded
     # shebang is broken here -- only the interpreter (reached via ``python -m``) is relocatable.
     assert "uv run python -m playwright install --with-deps chromium" in dockerfile
     assert _DEFERRED_INSTALL_MARKER in dockerfile
-    # Guards the FCT build-code path so a relocated layout fails fast with a clear message.
-    assert f"test -d {_FCT_BUILD_CODE_DIR}" in dockerfile
+    # Guards the DEFAULT_WORKSPACE_TEMPLATE build-code path so a relocated layout fails fast with a clear message.
+    assert f"test -d {_DEFAULT_WORKSPACE_TEMPLATE_BUILD_CODE_DIR}" in dockerfile
     # The RUN body must be valid shell -- catches f-string brace-escaping bugs in the guard.
     run_body = next(line for line in dockerfile.splitlines() if line.startswith("RUN "))[len("RUN ") :]
     syntax_check = subprocess.run(["bash", "-n", "-c", run_body], capture_output=True, text=True)

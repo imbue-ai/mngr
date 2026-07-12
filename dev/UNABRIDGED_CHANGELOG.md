@@ -4,6 +4,52 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-11
+
+Rename the forever-claude-template repo to default-workspace-template across the monorepo (justfile, CI workflows, scripts, and Claude skills), applied mechanically by the new rename tool below. The GitHub repo rename itself happens out of band and must precede merging this PR.
+
+Add `scripts/rename_template_repo.py`, a migration tool that renames the forever-claude-template repo to a new name given on the command line. All case forms (kebab, snake, SNAKE_UPPER, Title, Pascal) are derived from the `--new-name` input; `--new-abbreviation` sets the shorthand that replaces `fct`/`FCT`, applied context-sensitively (snake_case next to `_` and for bare identifiers, kebab-case next to `-` or `:` when followed by a tag, CamelCase inside identifiers like `FctTemplateRef`). A cleanup pass collapses word duplication the rename introduces (e.g. `DEFAULT_DEFAULT_...` and "the WORKSPACE_TEMPLATE template") and fixes a/an article agreement.
+
+Dry-run by default; `--apply` edits in place and is idempotent, `--check` verifies no live references remain (including CamelCase-embedded forms), `--show-diff` prints unified diffs. Renames whose target already exists (an old-name file reintroduced by merging a pre-rename branch) drop the old file when contents match and warn otherwise; symlink targets embedding the old name are rewritten. Historical records (changelog entries, consolidated CHANGELOG files, `specs/`, `blueprint/`), vendored trees, and lockfiles (`uv.lock`, `pnpm-lock.yaml`, `package-lock.json`) are reported but never rewritten.
+
+Add `scripts/migrate_state_fct_to_default_workspace_template.sh`: developer-local state migration (stale `.external_worktrees` removal, template checkout dir rename, git remote URLs, `apps/minds/.env` var rename, `__pycache__` sweep). Dry-run flag, idempotent, reports anything it is unsure about instead of touching it.
+
+## 2026-07-10
+
+Added `specs/discovery-log-cleanup.md`: a plan for cleaning up discovery logging and provider treatment in the Minds app. It covers once-per-process suppression of repeated provider-level discovery-error warnings in the three stream consumers, startup snapshots from `mngr observe --discovery-only` for providers skipped as unauthorized/unavailable/empty, always writing the `[providers.aws-<region>]` blocks regardless of AWS credentials (preserving `is_enabled`), and bouncing the observe child when the bootstrap's settings write changes the provider set.
+
+Added the planning documents for the minds "inspirations" feature under
+blueprint/minds-inspirations/: the implementation plan and a concise feature
+prompt. Inspirations let a running mind publish a clean, bootable snapshot of
+the apps it built to a new GitHub repo, and let another mind adapt one into
+itself. The plan records the full design evolution from live testing: assembly
+delegated to a launch-task worker on an isolated worktree with a strict
+no-merge-back invariant, inline-chat confirmation, latchkey GitHub
+permissioning end-to-end -- REST API calls via latchkey curl and the git push
+through the latchkey gateway's native git smart-HTTP proxying (the earlier
+system_interface popups, gh device flow, and interim GH_TOKEN-authenticated
+push were all removed) -- a bespoke-thumbnail gate, and the incident fixes
+(destructive-merge data loss, GH_TOKEN shadowing, base-ref resolution on
+multi-root repos, welcome takeover).
+The implementation itself lives in the forever-claude-template repo on the
+companion branch of the same name.
+
+## 2026-07-09
+
+# Backup-update-fixes spec and snapshot-script docs
+
+- Added `specs/backup-update-fixes/concise.md`, the plan for the per-workspace backup health route, the master-password hash + rotation flow, the fixed minimum backup version, the `official` remote, and the snapshot-resume test rewrite.
+
+- `scripts/snapshot_minds_e2e_state.py`'s docs no longer hardcode stale snapshot image ids or describe the script as a one-off prototype: it is documented as the standing producer for the `build-minds-snapshot` CI stage, with instructions for minting an image id manually and running individual tests against it via `just test-offload-minds-snapshot <image-id> '--filter <test_name>'`.
+
+Added `specs/injected-backup-service/concise.md`: a spec for making the minds backup service (FCT `host_backup`) idempotently configurable on running workspaces, with drift detection against the synced `minds-v*` release tags, a warning badge plus one-click converging update in the desktop app, and reusable machinery for post-creation backup settings changes (enable later, change destination).
+
+- Changed: the `destroy-pool-host` justfile recipe is renamed to `destroy-pool-hosts` and now takes any number of pool-host ids (clean break, no alias). It forwards to `minds pool destroy`, which destroys all named slices in parallel after atomically claiming each row so a user lease cannot race the destroy. The `minds-justfile` skill doc was updated to match.
+
+- Changed: the pre-commit `regenerate-cli-docs` hook now also triggers on plugin CLI files (`libs/mngr_*/imbue/**/cli/*.py`), so editing a plugin's click commands can no longer leave the generated `libs/mngr/docs/commands/` reference stale until an unrelated PR trips the check.
+
+- Added: `just list-servers` and `just prep-server <server-id>` recipes wrapping the new env-aware `minds server {list,prep}` commands (DSN + pool SSH key resolved from the activated tier automatically). The `minds-justfile` skill doc was updated to match.
+
 ## 2026-07-08
 
 # launch-to-msg CI: freeze (mngr, FCT) inputs to SHAs at run start

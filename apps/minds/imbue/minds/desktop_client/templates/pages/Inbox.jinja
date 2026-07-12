@@ -1,4 +1,4 @@
-{#def cards, selected_id="", detail_html="", is_empty=False, auto_open=True #}
+{#def cards, selected_id="", detail_html="", is_empty=False, auto_open=True, keep_open=False #}
 {#
   Inbox modal page. Hosts:
     - Transparent body + dim backdrop (so the desktop client modal view
@@ -14,6 +14,10 @@
   fragment, or an empty placeholder). ``is_empty`` is True when there
   are no pending requests and the layout collapses to a centered
   message. ``auto_open`` is the initial state of the auto-open checkbox.
+  ``keep_open`` is True only when the user intentionally opened the whole
+  inbox (via the Requests button); when False, resolving a request via
+  Approve/Deny dismisses the whole window rather than advancing to the
+  next pending request (which could be an unrelated stale request).
 #}
 {% set _head %}
   <style>
@@ -96,6 +100,12 @@
 {% set _scripts %}
 <script>
   (function () {
+    // Whether the user intentionally opened the whole inbox (Requests
+    // button) vs. landed on a single request (notification click,
+    // workspace relay, or auto-open on a new request). When false,
+    // resolving a request dismisses the whole window rather than
+    // advancing to the next pending request -- see advanceAfterResolution.
+    var keepInboxOpen = {% if keep_open %}true{% else %}false{% endif %};
     var inboxBody = document.getElementById("inbox-body");
     var inboxList = document.getElementById("inbox-list");
     var inboxDetail = document.getElementById("inbox-detail");
@@ -359,7 +369,9 @@
 
     function updateUrl(id) {
       try {
-        var target = id ? "/inbox?selected=" + encodeURIComponent(id) : "/inbox";
+        // Preserve keep_open so a reload keeps the whole-inbox semantics.
+        var suffix = keepInboxOpen ? (id ? "&keep_open=1" : "?keep_open=1") : "";
+        var target = id ? "/inbox?selected=" + encodeURIComponent(id) + suffix : "/inbox" + suffix;
         history.replaceState(null, "", target);
       } catch (e) { /* noop in restricted contexts */ }
     }
@@ -371,6 +383,16 @@
     }
 
     async function advanceAfterResolution(resolvedId) {
+      if (!keepInboxOpen) {
+        // The inbox was opened for a single request rather than as the
+        // whole inbox, so resolving it dismisses the window instead of
+        // advancing to the next pending request. This avoids surprising
+        // the user with an unrelated stale request suddenly appearing
+        // after they approve/deny. Any in-flight deny POST carries
+        // keepalive:true, so it still completes after the window closes.
+        closeInbox();
+        return;
+      }
       var nextId = findNextPendingId(resolvedId);
       await fetchListFragment();
       if (nextId) {

@@ -40,6 +40,8 @@ class WorkspaceOperationKind(UpperCaseStrEnum):
     """Which kind of in-process workspace operation a record tracks."""
 
     RESTART = auto()
+    BACKUP_UPDATE = auto()
+    BACKUP_CONFIGURE = auto()
 
 
 class WorkspaceOperationStatus(UpperCaseStrEnum):
@@ -68,6 +70,15 @@ class WorkspaceOperationRegistryInterface(MutableModel, ABC):
         """Register a new RUNNING operation for ``agent_id``, replacing any prior record."""
 
     @abstractmethod
+    def start_if_idle(self, agent_id: AgentId, kind: WorkspaceOperationKind, now: datetime) -> bool:
+        """Atomically register a new RUNNING operation unless one is already RUNNING.
+
+        Returns whether this caller won the claim. Dispatch routes use this
+        (instead of a separate get + ``start``) so two concurrent requests
+        cannot both spawn a worker for the same workspace.
+        """
+
+    @abstractmethod
     def append_log(self, agent_id: AgentId, line: str) -> None:
         """Append a log line to the operation's stream (no-op if the operation is unknown)."""
 
@@ -87,6 +98,22 @@ class WorkspaceOperationRegistryInterface(MutableModel, ABC):
     def get_log_queue(self, agent_id: AgentId) -> "queue.Queue[str] | None":
         """Return the operation's log queue for streaming, or None if the operation is unknown."""
 
+    @abstractmethod
+    def request_cancel(self, agent_id: AgentId) -> bool:
+        """Ask the RUNNING operation for ``agent_id`` to stop; returns whether one was running."""
+
+    @abstractmethod
+    def is_cancel_requested(self, agent_id: AgentId) -> bool:
+        """Whether a cancel has been requested for the current operation of ``agent_id``."""
+
+    @abstractmethod
+    def wait_for_cancel(self, agent_id: AgentId, timeout_seconds: float) -> bool:
+        """Block up to ``timeout_seconds`` for a cancel request; returns whether one arrived.
+
+        Poll loops use this instead of a plain sleep so a cancel wakes them
+        immediately.
+        """
+
 
 class InMemoryWorkspaceOperationRegistry(WorkspaceOperationRegistryInterface):
     """Thread-safe in-memory implementation shared by request threads and operation workers."""
@@ -95,18 +122,32 @@ class InMemoryWorkspaceOperationRegistry(WorkspaceOperationRegistryInterface):
 
     record_by_agent_id: dict[AgentId, WorkspaceOperationRecord] = Field(default_factory=dict)
     log_queue_by_agent_id: dict[AgentId, "queue.Queue[str]"] = Field(default_factory=dict)
+    cancel_event_by_agent_id: dict[AgentId, SkipValidation[threading.Event]] = Field(default_factory=dict)
     lock: SkipValidation[threading.Lock] = Field(default_factory=threading.Lock)
 
     def start(self, agent_id: AgentId, kind: WorkspaceOperationKind, now: datetime) -> None:
         with self.lock:
-            self.record_by_agent_id[agent_id] = WorkspaceOperationRecord(
-                agent_id=agent_id,
-                kind=kind,
-                status=WorkspaceOperationStatus.RUNNING,
-                error=None,
-                started_at=now,
-            )
-            self.log_queue_by_agent_id[agent_id] = queue.Queue()
+            self._register_locked(agent_id, kind, now)
+
+    def start_if_idle(self, agent_id: AgentId, kind: WorkspaceOperationKind, now: datetime) -> bool:
+        with self.lock:
+            existing = self.record_by_agent_id.get(agent_id)
+            if existing is not None and existing.status == WorkspaceOperationStatus.RUNNING:
+                return False
+            self._register_locked(agent_id, kind, now)
+            return True
+
+    def _register_locked(self, agent_id: AgentId, kind: WorkspaceOperationKind, now: datetime) -> None:
+        """Register a fresh RUNNING record; the caller must hold ``self.lock``."""
+        self.record_by_agent_id[agent_id] = WorkspaceOperationRecord(
+            agent_id=agent_id,
+            kind=kind,
+            status=WorkspaceOperationStatus.RUNNING,
+            error=None,
+            started_at=now,
+        )
+        self.log_queue_by_agent_id[agent_id] = queue.Queue()
+        self.cancel_event_by_agent_id[agent_id] = threading.Event()
 
     def append_log(self, agent_id: AgentId, line: str) -> None:
         with self.lock:
@@ -139,3 +180,24 @@ class InMemoryWorkspaceOperationRegistry(WorkspaceOperationRegistryInterface):
     def get_log_queue(self, agent_id: AgentId) -> "queue.Queue[str] | None":
         with self.lock:
             return self.log_queue_by_agent_id.get(agent_id)
+
+    def request_cancel(self, agent_id: AgentId) -> bool:
+        with self.lock:
+            record = self.record_by_agent_id.get(agent_id)
+            cancel_event = self.cancel_event_by_agent_id.get(agent_id)
+        if record is None or record.status != WorkspaceOperationStatus.RUNNING or cancel_event is None:
+            return False
+        cancel_event.set()
+        return True
+
+    def is_cancel_requested(self, agent_id: AgentId) -> bool:
+        with self.lock:
+            cancel_event = self.cancel_event_by_agent_id.get(agent_id)
+        return cancel_event is not None and cancel_event.is_set()
+
+    def wait_for_cancel(self, agent_id: AgentId, timeout_seconds: float) -> bool:
+        with self.lock:
+            cancel_event = self.cancel_event_by_agent_id.get(agent_id)
+        if cancel_event is None:
+            return False
+        return cancel_event.wait(timeout_seconds)
