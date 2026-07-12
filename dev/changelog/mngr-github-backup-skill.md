@@ -1,0 +1,1 @@
+Added a blueprint plan (`blueprint/github-sync-skill/`) for replacing the default-workspace-template's always-on runtime-backup service with an opt-in `github-sync` skill: latchkey-authenticated pushes (no GH_TOKEN), a dedicated private GitHub repo as origin, a periodic runtime/ sync service, and a post-commit auto-push hook for all checkouts.
