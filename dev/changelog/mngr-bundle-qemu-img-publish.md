@@ -1,5 +1,7 @@
 `scripts/lima_image/publish.py`'s `--uploader cloudflare-api` backend could never upload anything: its `exists()` presence check sent `HEAD` to the Cloudflare R2 object API, which answers `HEAD` with `405 Method Not Allowed`, so the publish aborted on the very first chunk. It now probes with `GET` (chunk bodies are small, so reading one back is cheap).
 
-The object store also holds a single `httpx.Client` instead of calling the module-level helpers, which pools the connection across the thousands of small requests a store upload makes, and makes the store testable. `scripts/lima_image/publish_test.py` is new and pins the verb choice, so a regression to `HEAD` fails the suite rather than a release.
+Uploads also ran one chunk at a time. A 5 GB image chunks into roughly 65,000 objects, which at the observed serial rate is over 36 hours for a single publish. Uploads now fan out across a thread pool, and both the boto3 connection pool and the `httpx` connection limits are sized to admit the fan-out rather than throttling it back to a trickle.
 
-Found by publishing a real pre-baked image to a real R2 bucket.
+Finally, both object stores treated *every* error from the presence check as "object absent". Because the uploader uploads whatever it believes is absent, a token that cannot read the bucket made the store look merely empty: the publish would re-upload all 65,000 chunks on every run, silently destroying the skip-what-is-already-there property that makes a republish cheap, and burying the real permission error. Only a genuine `404` now means absent; anything else raises.
+
+`scripts/lima_image/publish_test.py` is new and pins each of these, so a regression fails the suite rather than a release. All three bugs were found by publishing a real pre-baked image to a real R2 bucket; the script had no tests before.

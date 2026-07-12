@@ -32,6 +32,8 @@ import sys
 import tempfile
 from abc import ABC
 from abc import abstractmethod
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import as_completed
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -48,6 +50,9 @@ _ROOT_MANIFEST_FILENAME = "root.json"
 _SIGNATURE_SUFFIX = ".minisig"
 _SCHEMA_VERSION = 1
 _VALID_ARCHES = ("aarch64", "x86_64")
+# A multi-GB image is tens of thousands of small objects; serial upload takes hours.
+_UPLOAD_CONCURRENCY = 64
+_UPLOAD_PROGRESS_INTERVAL = 2000
 
 
 class ObjectStore(ABC):
@@ -73,16 +78,27 @@ class S3ObjectStore(ObjectStore):
             endpoint_url=f"https://{account_id}.r2.cloudflarestorage.com",
             aws_access_key_id=access_key_id,
             aws_secret_access_key=secret_access_key,
-            config=Config(signature_version="s3v4", retries={"max_attempts": 5, "mode": "standard"}),
+            config=Config(
+                signature_version="s3v4",
+                retries={"max_attempts": 5, "mode": "standard"},
+                # botocore's default pool is 10, which would throttle the upload fan-out.
+                max_pool_connections=_UPLOAD_CONCURRENCY,
+            ),
             region_name="auto",
         )
 
     def exists(self, key: str) -> bool:
+        # Only a genuine 404 means absent. Catching every ClientError would read a
+        # 403 or a throttle as "not there", so a token that cannot HEAD would report
+        # an empty store and re-upload all 65k chunks on every publish, silently
+        # destroying the skip-what-is-present property that makes a republish cheap.
         try:
             self._client.head_object(Bucket=self._bucket, Key=key)
-            return True
-        except self._client.exceptions.ClientError:
-            return False
+        except self._client.exceptions.ClientError as error:
+            if error.response["ResponseMetadata"]["HTTPStatusCode"] == httpx.codes.NOT_FOUND:
+                return False
+            raise
+        return True
 
     def put(self, key: str, data: bytes, content_type: str) -> None:
         self._client.put_object(Bucket=self._bucket, Key=key, Body=data, ContentType=content_type)
@@ -105,8 +121,15 @@ class CloudflareApiObjectStore(ObjectStore):
     def __init__(self, account_id: str, api_token: str, bucket: str, client: httpx.Client | None = None) -> None:
         self._base = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/r2/buckets/{bucket}/objects"
         # One client for the whole publish: a store upload is thousands of small
-        # requests to one host, so the pooled connection matters.
-        self._client = client if client is not None else httpx.Client()
+        # requests to one host, so the pooled connections matter. The pool must admit
+        # the whole upload fan-out or the workers just queue behind httpx's default.
+        self._client = (
+            client
+            if client is not None
+            else httpx.Client(
+                limits=httpx.Limits(max_connections=_UPLOAD_CONCURRENCY, max_keepalive_connections=_UPLOAD_CONCURRENCY)
+            )
+        )
         self._headers = {"Authorization": f"Bearer {api_token}"}
 
     def exists(self, key: str) -> bool:
@@ -116,8 +139,8 @@ class CloudflareApiObjectStore(ObjectStore):
         response = self._client.get(f"{self._base}/{key}", headers=self._headers, timeout=30.0)
         if response.status_code == httpx.codes.NOT_FOUND:
             return False
-        # Fail loud on auth/5xx rather than treating them as "absent", which would
-        # skip a chunk that never gets uploaded.
+        # Fail loud on auth/5xx rather than reading them as "absent": that would hide a
+        # bad token behind a store that merely looks empty, and re-upload every chunk.
         response.raise_for_status()
         return True
 
@@ -155,17 +178,35 @@ def _chunk_image(raw_image: Path, work_dir: Path) -> tuple[Path, Path]:
     return store_dir, index_path
 
 
+def _upload_one_chunk(chunk_path: Path, store_dir: Path, store: ObjectStore) -> bool:
+    """Upload one chunk unless it is already present; return whether it was uploaded."""
+    key = f"{_STORE_PREFIX}/{chunk_path.relative_to(store_dir).as_posix()}"
+    if store.exists(key):
+        return False
+    store.put(key, chunk_path.read_bytes(), "application/octet-stream")
+    return True
+
+
 def _upload_store(store_dir: Path, store: ObjectStore) -> int:
-    """Upload chunk files that are not already present; return the count uploaded."""
+    """Upload chunk files that are not already present; return the count uploaded.
+
+    A multi-GB image chunks into tens of thousands of small objects, and each one
+    costs a round trip to probe plus another to upload. Serially that is hours;
+    the work is embarrassingly parallel, so fan it out. Any chunk that fails
+    propagates: a silently missing chunk publishes an image that cannot be
+    reassembled.
+    """
+    chunk_paths = [path for path in sorted(store_dir.rglob("*")) if path.is_file()]
     uploaded = 0
-    for chunk_path in sorted(store_dir.rglob("*")):
-        if not chunk_path.is_file():
-            continue
-        key = f"{_STORE_PREFIX}/{chunk_path.relative_to(store_dir).as_posix()}"
-        if store.exists(key):
-            continue
-        store.put(key, chunk_path.read_bytes(), "application/octet-stream")
-        uploaded += 1
+    done = 0
+    with ThreadPoolExecutor(max_workers=_UPLOAD_CONCURRENCY) as pool:
+        futures = {pool.submit(_upload_one_chunk, path, store_dir, store): path for path in chunk_paths}
+        for future in as_completed(futures):
+            if future.result():
+                uploaded += 1
+            done += 1
+            if done % _UPLOAD_PROGRESS_INTERVAL == 0 or done == len(chunk_paths):
+                print(f"  {done}/{len(chunk_paths)} chunks ({uploaded} uploaded, {done - uploaded} already present)")
     return uploaded
 
 
