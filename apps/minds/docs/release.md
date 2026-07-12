@@ -163,19 +163,30 @@ Optional but recommended once the tag exists: bake + publish the pre-baked Lima 
 
 The bake runs *with Lima itself* (the image is built by the same virtualizer that consumes it — `vz` on Apple Silicon, accelerated QEMU on Linux). What a desktop client uses is decided entirely by the per-tier `client.toml` (`lima_image_base_url` + `lima_image_minisign_public_key`); if those are unset, or no image is published for the tag/arch, the client **backs off to building in-VM** (so this whole step is safe to skip and safe to half-finish).
 
-#### One-time tier setup (do once per tier, not per release)
+#### One-time environment setup (do once per environment, not per release)
 
-1. **Generate the tier's minisign keypair** and store the secret key somewhere durable + private (a password manager / the operator's machine — never the repo, never CI):
+Setup is one script, `scripts/lima_image/setup_tier.py`. It is idempotent (re-running reports what exists and changes nothing) and takes a full environment name rather than a tier, so each dev gets their own bucket and cannot overwrite another dev's image or production's: `production`, `staging`, `dev-<name>`.
+
+1. **Provision the bucket, the custom domain, and a publish credential**, using the environment's existing Vault `cloudflare` entry:
    ```bash
-   minisign -G -p minds-lima-<tier>.pub -s minds-lima-<tier>.key   # protect the .key
+   export VAULT_ADDR=https://vault-cluster-public-vault-df29b16f.9b573ab7.z1.hashicorp.cloud:8200 VAULT_NAMESPACE=admin
+   for key in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_ZONE_ID CLOUDFLARE_DOMAIN; do
+     export $key=$(vault kv get -mount=secrets -field=value minds/<tier>/cloudflare/$key)
+   done
+   uv run python scripts/lima_image/setup_tier.py --env production --dry-run   # review, then drop --dry-run
    ```
-2. **Create the R2 bucket** (convention: `minds-lima-images-<tier>`, e.g. `minds-lima-images-production`) and attach a **custom domain** to it (e.g. `lima-images.<tier-domain>`), then note that base URL.
+   It creates `minds-lima-images-<env>`, attaches `lima-images-<env>.<domain>`, and mints an R2 token **scoped to that one bucket**, printing the `R2_*` credentials the publish step needs. The account-wide token above is only used to provision; whoever publishes only ever holds the bucket-scoped credential, which is `AccessDenied` against every other bucket.
 
-   A custom domain is **required, in every tier including dev** — not a production nicety. The managed `r2.dev` origin is rate-limited, and a client extract pulls ~65,000 chunks: against `r2.dev` this reliably fails partway with `unexpected status code 429`, so the image never assembles and the fast path is dead. A custom domain is served through Cloudflare's CDN and is not throttled this way. Attach one with `POST /accounts/<account>/r2/buckets/<bucket>/domains/custom` (`{"domain": ..., "zoneId": ..., "enabled": true}`), and check the hostname is not behind a Cloudflare Access policy, which would answer the client with `401`.
-3. **Commit the public values** into the tier's `config/envs/<tier>/client.toml`:
+   The custom domain is **required, in every environment including dev** — not a production nicety. The managed `r2.dev` origin is rate-limited, and a client extract pulls ~65,000 chunks: against `r2.dev` this reliably fails partway with `unexpected status code 429`, so the image never assembles and the fast path is dead. A custom domain is served through Cloudflare's CDN and is not throttled this way. Check the hostname is not behind a Cloudflare Access policy, which would answer the client with `401`.
+
+2. **Generate the environment's minisign keypair** and store the secret key somewhere durable + private (a password manager / the operator's machine — never the repo, never CI). It is the trust anchor for code the app executes as a VM:
+   ```bash
+   minisign -G -W -p minds-lima-<env>.pub -s minds-lima-<env>.key   # -W: unencrypted, for non-interactive signing
+   ```
+3. **Commit the public values** into the tier's `config/envs/<tier>/client.toml` (the script prints them):
    ```toml
-   lima_image_base_url = "https://lima-images.minds.example"          # the public CDN/r2.dev base
-   lima_image_minisign_public_key = "RW...."                          # contents of minds-lima-<tier>.pub line 2
+   lima_image_base_url = "https://lima-images-production.minds.example"
+   lima_image_minisign_public_key = "RW...."                          # contents of minds-lima-<env>.pub line 2
    ```
    These are public (a URL + a public key), so they belong in the committed `client.toml` next to the other URLs. A dev env can set the same two keys in `~/.minds-<name>/client.toml` (the `minds env deploy` writer round-trips them when present on the `ClientEnvConfig`).
 
@@ -183,15 +194,12 @@ The bake runs *with Lima itself* (the image is built by the same virtualizer tha
 
 Build one arch per native host (amd64 on a KVM Linux host, arm64 on an Apple-Silicon Mac), then publish each into the tier bucket.
 
-Credentials must be **R2 S3 keys** (`R2_ACCOUNT_ID` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY`). Cloudflare's REST object API is not a usable alternative for this: it falls under the global `api.cloudflare.com` limit of 1200 requests per 5 minutes, and one image is roughly 65,000 chunks, so a publish cannot finish within that budget and starts returning `429` partway through. The S3 API is not rate-limited this way.
-
-If you hold only the tier's Vault `cloudflare` account token, you can derive S3 keys from it instead of minting new ones: for an account-owned R2 token the **access key id is the token's id** and the **secret is the SHA-256 of the token value**.
+Credentials are the three `R2_*` values `setup_tier.py` printed. Cloudflare's REST object API is not a usable alternative: it falls under the global `api.cloudflare.com` limit of 1200 requests per 5 minutes, and one image is roughly 65,000 chunks, so a publish cannot finish within that budget and starts returning `429` partway through. The S3 API is not rate-limited this way.
 
 ```bash
-export VAULT_ADDR=https://vault-cluster-public-vault-df29b16f.9b573ab7.z1.hashicorp.cloud:8200 VAULT_NAMESPACE=admin
-export R2_ACCOUNT_ID=$(vault kv get -mount=secrets -field=value minds/production/cloudflare/CLOUDFLARE_ACCOUNT_ID)
-export R2_ACCESS_KEY_ID=...      # the R2 token's id
-export R2_SECRET_ACCESS_KEY=...  # sha256 of the R2 token's value
+export R2_ACCOUNT_ID=...         # printed by setup_tier.py
+export R2_ACCESS_KEY_ID=...      # bucket-scoped; cannot touch any other environment's bucket
+export R2_SECRET_ACCESS_KEY=...
 
 ./scripts/build-lima-image.sh --default-workspace-template-ref "$VERSION"     # emits qcow2 + raw under scripts/lima_image/output-<arch>/
 uv run python scripts/lima_image/publish.py \
