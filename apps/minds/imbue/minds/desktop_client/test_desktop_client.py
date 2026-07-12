@@ -1826,7 +1826,7 @@ def test_help_assist_requires_a_description(tmp_path: Path) -> None:
 
 
 def test_help_assist_refuses_a_workspace_without_the_assist_skill(tmp_path: Path) -> None:
-    """A workspace from an older FCT (no /assist skill) is refused up front (409) rather than spawning
+    """A workspace from an older DEFAULT_WORKSPACE_TEMPLATE (no /assist skill) is refused up front (409) rather than spawning
     a chat that would hang on the unknown ``/assist`` command -- and no ``mngr create`` is attempted."""
     caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout="MNGR_ASSIST_SKILL_ABSENT\n"))
     client, _ = _create_test_client_with_stores(tmp_path, mngr_caller=caller)

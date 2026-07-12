@@ -581,7 +581,7 @@ def _handle_help_assist() -> Response:
 
     Only valid when the help flow was opened from a loaded workspace: the body carries that
     workspace's agent id and the user's description. Before spawning, we probe the workspace for the
-    ``/assist`` skill and return 409 if it lacks it (an older FCT template) or 502 if the workspace is
+    ``/assist`` skill and return 409 if it lacks it (an older default workspace template) or 502 if the workspace is
     unreachable -- so we never spawn a chat that could only hang. Otherwise the desktop app runs
     ``mngr create`` inside that workspace's container (via ``mngr exec``) to spawn a new chat seeded
     with ``/assist <description>``; the system interface auto-opens its tab. The call blocks until
@@ -616,7 +616,7 @@ def _handle_help_assist() -> Response:
     mngr_caller = state.mngr_caller or get_default_mngr_caller()
 
     # Refuse before spawning if this workspace can't actually host an /assist chat.
-    # Workspaces created from an FCT predating the /assist skill would otherwise accept
+    # Workspaces created from a DEFAULT_WORKSPACE_TEMPLATE predating the /assist skill would otherwise accept
     # the ``mngr create`` but hang on the ``/assist`` message (an unknown slash command
     # never submits a prompt, so the send blocks to its full timeout) and leave a
     # half-created chat behind. The probe is a quick filesystem check inside the

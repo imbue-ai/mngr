@@ -33,7 +33,7 @@ Then visit the login URL printed in the terminal to create your first agent.
    - A servers page showing local and global URLs per agent
    - Toggle controls for enabling/disabling global Cloudflare forwarding
 
-2. **Agents** are created from template repositories (like [forever-claude-template](https://github.com/imbue-ai/forever-claude-template)) using `mngr create`. The template's `.mngr/settings.toml` drives all configuration.
+2. **Agents** are created from template repositories (like [default-workspace-template](https://github.com/imbue-ai/default-workspace-template)) using `mngr create`. The template's `.mngr/settings.toml` drives all configuration.
 
 3. Inside each minds container, the "primary" agent (`system-services`) runs only the bootstrap and background services -- its window-0 command is `sleep infinity && claude`, so claude never actually starts (the trailing `&& claude` is unreachable; it exists only so `assemble_command` keeps producing a claude-shaped invocation). The user's actual chat agent is a separate `mngr` agent created by the bootstrap on first boot (named after the host) and shares the services agent's `CLAUDE_CONFIG_DIR` so auth, plugins, marketplaces, and sessions are configured once and inherited by every other agent. Destroying chat agents no longer affects services; the services agent is hidden from the UI agent list (it carries `is_primary=true`) and protected against direct destroy.
 

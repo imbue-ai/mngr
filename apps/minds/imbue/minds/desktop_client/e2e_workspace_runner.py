@@ -45,8 +45,8 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
 from imbue.minds.config.loader import repo_tier_client_config_path
-from imbue.minds.desktop_client.fct_worktree import FCT_EXTERNAL_WORKTREE
-from imbue.minds.desktop_client.fct_worktree import current_worktree_branch
+from imbue.minds.desktop_client.default_workspace_template_worktree import DEFAULT_WORKSPACE_TEMPLATE_EXTERNAL_WORKTREE
+from imbue.minds.desktop_client.default_workspace_template_worktree import current_worktree_branch
 
 # This file lives at apps/minds/imbue/minds/desktop_client/e2e_workspace_runner.py,
 # so parents[5] hops up over desktop_client, minds, imbue, minds, apps to the repo
@@ -103,7 +103,7 @@ _SYSTEM_INTERFACE_TIMEOUT_SECONDS: Final[int] = 180
 _CREATE_OUTCOME_POLL_INTERVAL_MS: Final[int] = 500
 
 # Pre-tested CSS selector against the system_interface frontend at
-# .external_worktrees/forever-claude-template/apps/system_interface/.
+# .external_worktrees/default-workspace-template/apps/system_interface/.
 # `.dockview-workspace` is the wrapper div the DockviewWorkspace mithril
 # component mounts on first render.
 _DOCKVIEW_WORKSPACE_SELECTOR: Final[str] = "div.dockview-workspace"
@@ -139,22 +139,25 @@ def find_free_port() -> int:
         return s.getsockname()[1]
 
 
-def resolve_fct_path() -> Path:
-    """Return the FCT working tree that workspace-creation tests build from.
+def resolve_default_workspace_template_path() -> Path:
+    """Return the DEFAULT_WORKSPACE_TEMPLATE working tree that workspace-creation tests build from.
 
     The tree is produced ahead of time by
-    :func:`imbue.minds.desktop_client.fct_worktree.materialize_paired_fct_worktree`
+    :func:`imbue.minds.desktop_client.default_workspace_template_worktree.materialize_paired_default_workspace_template_worktree`
     -- on the CI runner before the snapshot image is staged, or by the local
-    test recipe -- and either lives at ``.external_worktrees/forever-claude-template``
+    test recipe -- and either lives at ``.external_worktrees/default-workspace-template``
     or is baked into the snapshot image there. Consumers only *use* it; an absent
     worktree means the materialize step did not run, which is a setup error we
-    surface loudly rather than silently cloning the released FCT tag.
+    surface loudly rather than silently cloning the released DEFAULT_WORKSPACE_TEMPLATE tag.
     """
-    if FCT_EXTERNAL_WORKTREE.is_dir() and (FCT_EXTERNAL_WORKTREE / ".git").exists():
-        logger.info("Using FCT worktree at {}", FCT_EXTERNAL_WORKTREE)
-        return FCT_EXTERNAL_WORKTREE
+    if (
+        DEFAULT_WORKSPACE_TEMPLATE_EXTERNAL_WORKTREE.is_dir()
+        and (DEFAULT_WORKSPACE_TEMPLATE_EXTERNAL_WORKTREE / ".git").exists()
+    ):
+        logger.info("Using DEFAULT_WORKSPACE_TEMPLATE worktree at {}", DEFAULT_WORKSPACE_TEMPLATE_EXTERNAL_WORKTREE)
+        return DEFAULT_WORKSPACE_TEMPLATE_EXTERNAL_WORKTREE
     raise WorkspaceFlowError(
-        f"No FCT worktree at {FCT_EXTERNAL_WORKTREE}. Run materialize_paired_fct_worktree() first "
+        f"No DEFAULT_WORKSPACE_TEMPLATE worktree at {DEFAULT_WORKSPACE_TEMPLATE_EXTERNAL_WORKTREE}. Run materialize_paired_default_workspace_template_worktree() first "
         "(the CI snapshot bake materializes it before staging; local runs go through the test recipe)."
     )
 
@@ -172,7 +175,7 @@ def ensure_minds_env_defaults(setenv: Callable[[str, str], None]) -> None:
     setter that writes to ``os.environ`` directly. Both options share
     the validation / logging logic below.
 
-    Also points the create form at the present paired FCT worktree (the same
+    Also points the create form at the present paired DEFAULT_WORKSPACE_TEMPLATE worktree (the same
     ``MINDS_WORKSPACE_*`` env vars ``just minds-start`` sets), so ``mngr create``
     builds from that worktree's branch with the vendored mngr under test rather
     than the released ``FALLBACK_BRANCH`` tag. That step runs regardless of the
@@ -199,7 +202,7 @@ def ensure_minds_env_defaults(setenv: Callable[[str, str], None]) -> None:
 
 
 def _ensure_paired_workspace_env(setenv: Callable[[str, str], None]) -> None:
-    """Point the create form at the present FCT worktree on its own branch.
+    """Point the create form at the present DEFAULT_WORKSPACE_TEMPLATE worktree on its own branch.
 
     When the materialized worktree exists, set the ``just minds-start`` env vars
     so ``mngr create`` builds from that worktree's branch (not the released
@@ -207,27 +210,30 @@ def _ensure_paired_workspace_env(setenv: Callable[[str, str], None]) -> None:
     worktree is absent (the consumer surfaces that) or when a var is already set
     (an explicit override wins).
     """
-    if not (FCT_EXTERNAL_WORKTREE.is_dir() and (FCT_EXTERNAL_WORKTREE / ".git").exists()):
+    if not (
+        DEFAULT_WORKSPACE_TEMPLATE_EXTERNAL_WORKTREE.is_dir()
+        and (DEFAULT_WORKSPACE_TEMPLATE_EXTERNAL_WORKTREE / ".git").exists()
+    ):
         return
     if not os.environ.get("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS"):
         setenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", "1")
     if not os.environ.get("MINDS_WORKSPACE_GIT_URL"):
-        setenv("MINDS_WORKSPACE_GIT_URL", str(FCT_EXTERNAL_WORKTREE))
+        setenv("MINDS_WORKSPACE_GIT_URL", str(DEFAULT_WORKSPACE_TEMPLATE_EXTERNAL_WORKTREE))
     if not os.environ.get("MINDS_WORKSPACE_BRANCH"):
-        branch = current_worktree_branch(FCT_EXTERNAL_WORKTREE)
+        branch = current_worktree_branch(DEFAULT_WORKSPACE_TEMPLATE_EXTERNAL_WORKTREE)
         if branch is not None:
             setenv("MINDS_WORKSPACE_BRANCH", branch)
         else:
             logger.warning(
-                "FCT worktree at {} has no resolvable branch; leaving MINDS_WORKSPACE_BRANCH unset",
-                FCT_EXTERNAL_WORKTREE,
+                "DEFAULT_WORKSPACE_TEMPLATE worktree at {} has no resolvable branch; leaving MINDS_WORKSPACE_BRANCH unset",
+                DEFAULT_WORKSPACE_TEMPLATE_EXTERNAL_WORKTREE,
             )
 
 
 def _build_electron_env(workspace_git_url: Path) -> dict[str, str]:
     """Return the env vars the Electron child process should inherit.
 
-    Mirrors ``just minds-start``: passes the FCT path through the
+    Mirrors ``just minds-start``: passes the DEFAULT_WORKSPACE_TEMPLATE path through the
     ``MINDS_WORKSPACE_GIT_URL`` prefill var (honored only when the explicit
     opt-in ``MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1`` is also set -- see
     ``_operator_workspace_default`` in templates.py), and scrubs any
@@ -243,11 +249,11 @@ def _build_electron_env(workspace_git_url: Path) -> dict[str, str]:
     # Opt into the local-worktree create-form defaults (see just minds-start).
     env["MINDS_USE_LOCAL_WORKSPACE_DEFAULTS"] = "1"
     # Pin MNGR_ROOT_NAME back to "mngr" for the Electron child so the
-    # spawned `mngr create` subprocess finds FCT's .mngr/settings.toml
+    # spawned `mngr create` subprocess finds DEFAULT_WORKSPACE_TEMPLATE's .mngr/settings.toml
     # (which defines the `main` + `docker` create templates). The minds
     # project conftest sets MNGR_ROOT_NAME=mngr-test-<timestamp> for test
     # isolation, but that would make mngr look for
-    # .mngr-test-<timestamp>/settings.toml inside the FCT clone -- a file
+    # .mngr-test-<timestamp>/settings.toml inside the DEFAULT_WORKSPACE_TEMPLATE clone -- a file
     # that does not exist, causing mngr to abort with
     # `Template 'main' not found. No templates are configured`. MNGR_PREFIX
     # (the tmux session prefix) stays test-isolated so the spawned tmux
@@ -607,7 +613,7 @@ def _wait_for_workspace_ready_or_failure(page: Page, timeout_seconds: int) -> No
 
 def _drive_create_flow(
     page: Page,
-    fct_path: Path,
+    default_workspace_template_path: Path,
     workspace_name: str,
     launch_mode: str = "DOCKER",
     account_label: str | None = None,
@@ -659,7 +665,7 @@ def _drive_create_flow(
     page.wait_for_selector("#git_url:visible", timeout=5_000)
 
     _ensure_field_value(page, "#host_name", workspace_name)
-    _ensure_field_value(page, "#git_url", str(fct_path))
+    _ensure_field_value(page, "#git_url", str(default_workspace_template_path))
     # Optionally select an AI-provider account (by visible label) before
     # picking the compute mode -- some modes/tiers require a real account.
     if account_label is not None:
@@ -730,7 +736,7 @@ def _attach_renderer_diagnostics(page: Page) -> None:
 
 
 def _attempt_create_workspace_via_electron(
-    fct_path: Path,
+    default_workspace_template_path: Path,
     workspace_name: str,
     debug_port: int,
     host_config_dir: Path | None,
@@ -752,7 +758,7 @@ def _attempt_create_workspace_via_electron(
     unchanged -- they are real failures, not launch flakes, so they are not
     retried.
     """
-    with _launched_electron(fct_path, debug_port, host_config_dir):
+    with _launched_electron(default_workspace_template_path, debug_port, host_config_dir):
         with sync_playwright() as playwright:
             try:
                 _wait_for_cdp(debug_port, _CDP_READY_TIMEOUT_SECONDS)
@@ -775,7 +781,7 @@ def _attempt_create_workspace_via_electron(
                 _attach_renderer_diagnostics(page)
                 _drive_create_flow(
                     page,
-                    fct_path,
+                    default_workspace_template_path,
                     workspace_name,
                     launch_mode=launch_mode,
                     account_label=account_label,
@@ -789,7 +795,7 @@ def _attempt_create_workspace_via_electron(
 
 
 def create_workspace_via_electron(
-    fct_path: Path,
+    default_workspace_template_path: Path,
     workspace_name: str,
     debug_port: int,
     host_config_dir: Path | None = None,
@@ -799,7 +805,7 @@ def create_workspace_via_electron(
     anthropic_api_key: str | None = None,
     on_workspace_ready: Callable[[Page], None] | None = None,
 ) -> None:
-    """Drive Electron to create a workspace from ``fct_path``.
+    """Drive Electron to create a workspace from ``default_workspace_template_path``.
 
     ``launch_mode`` selects the compute provider in the create form (DOCKER,
     LIMA, AWS, ...). ``account_label`` optionally selects an AI-provider account
@@ -824,8 +830,8 @@ def create_workspace_via_electron(
     so a genuine creation failure fails the test immediately.
 
     Caller contract:
-    - ``fct_path`` must be a populated FCT working tree (use
-      :func:`resolve_fct_path`).
+    - ``default_workspace_template_path`` must be a populated DEFAULT_WORKSPACE_TEMPLATE working tree (use
+      :func:`resolve_default_workspace_template_path`).
     - ``workspace_name`` must be unique within the current mngr install.
     - ``debug_port`` must be an unused TCP port (use :func:`find_free_port`).
     - ``MINDS_ROOT_NAME`` must already be set in ``os.environ`` (call
@@ -840,7 +846,7 @@ def create_workspace_via_electron(
         attempt_port = debug_port if attempt == 1 else find_free_port()
         try:
             _attempt_create_workspace_via_electron(
-                fct_path,
+                default_workspace_template_path,
                 workspace_name,
                 attempt_port,
                 host_config_dir,
@@ -877,7 +883,7 @@ def create_workspace_via_electron(
 _FLOW_SHOT_DIR: Final[Path] = Path("/tmp/minds-electron-flow")
 _CHAT_INPUT_SELECTOR: Final[str] = "textarea.message-input-textbox"
 _TERMINAL_IFRAME_SELECTOR: Final[str] = 'iframe[src*="/service/terminal/"]'
-# The FCT bootstrap creates the initial chat agent asynchronously after the
+# The DEFAULT_WORKSPACE_TEMPLATE bootstrap creates the initial chat agent asynchronously after the
 # dockview first renders (it shows "Waiting for initial chat agent..." until
 # then), so the chat input can take a while to appear on a fresh first boot.
 _CHAT_INPUT_TIMEOUT_SECONDS: Final[int] = 240
@@ -922,7 +928,9 @@ def _pick_chrome_page(browser: Browser, timeout_seconds: int) -> Page:
     raise WorkspaceFlowError(f"No /_chrome page within {timeout_seconds}s; observed: {observed}")
 
 
-def drive_create_docker_imbue_workspace(page: Page, fct_path: Path, workspace_name: str) -> None:
+def drive_create_docker_imbue_workspace(
+    page: Page, default_workspace_template_path: Path, workspace_name: str
+) -> None:
     """Fill + submit the create form for a local-Docker workspace with Imbue-Cloud AI.
 
     Local Docker compute keeps the workspace on this machine; Imbue-Cloud AI
@@ -941,7 +949,7 @@ def drive_create_docker_imbue_workspace(page: Page, fct_path: Path, workspace_na
     page.wait_for_selector("#git_url:visible", timeout=5_000)
 
     _ensure_field_value(page, "#host_name", workspace_name)
-    _ensure_field_value(page, "#git_url", str(fct_path))
+    _ensure_field_value(page, "#git_url", str(default_workspace_template_path))
 
     # An account must be selected for Imbue-Cloud AI. The form pre-selects the
     # env's default account; if it is empty, pick the first real account (which
@@ -1178,7 +1186,7 @@ def _run_flow_step(results: dict[str, str], name: str, page: Page, action: Calla
 
 
 def run_full_workspace_flow(
-    fct_path: Path, workspace_name: str, token: str, debug_port: int
+    default_workspace_template_path: Path, workspace_name: str, token: str, debug_port: int
 ) -> tuple[dict[str, str], str | None]:
     """Drive create -> message -> terminal -> home -> destroy; return per-step results + agent id.
 
@@ -1192,7 +1200,7 @@ def run_full_workspace_flow(
     """
     results: dict[str, str] = {}
     agent_id: str | None = None
-    with _launched_electron(fct_path, debug_port, host_config_dir=None):
+    with _launched_electron(default_workspace_template_path, debug_port, host_config_dir=None):
         with sync_playwright() as playwright:
             _wait_for_cdp(debug_port, _CDP_READY_TIMEOUT_SECONDS)
             browser = playwright.chromium.connect_over_cdp(
@@ -1203,7 +1211,7 @@ def run_full_workspace_flow(
                 backend_origin = _backend_origin_from_page(content_page)
 
                 logger.info("=== STEP 1: create local Docker workspace ===")
-                drive_create_docker_imbue_workspace(content_page, fct_path, workspace_name)
+                drive_create_docker_imbue_workspace(content_page, default_workspace_template_path, workspace_name)
                 results["STEP 1 create"] = "PASS"
                 agent_id = _agent_id_from_subdomain(content_page.url)
                 logger.info("Workspace agent id (from subdomain): {}", agent_id)
