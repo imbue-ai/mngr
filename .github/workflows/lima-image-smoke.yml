@@ -5,13 +5,15 @@
 # on failure, so the guest-side reason never survives.
 name: lima-image-smoke
 
+# workflow_dispatch would require this file on the default branch, which it must
+# never reach; push on this throwaway branch is the only way to run it.
 on:
-  workflow_dispatch:
-    inputs:
-      image_path:
-        description: 'Raw image to boot'
-        required: false
-        default: '/Users/macrunner/.minds-dev-weishi/lima-images/versions/minds-v0.3.6/AARCH64/image.raw'
+  push:
+    branches: [mngr/lima-dev-bucket-testbuild]
+    paths: ['.github/workflows/lima-image-smoke.yml']
+
+env:
+  IMAGE_PATH: /Users/macrunner/.minds-dev-weishi/lima-images/versions/minds-v0.3.6/AARCH64/image.raw
 
 jobs:
   smoke:
@@ -22,7 +24,7 @@ jobs:
 
       - name: image present + intact?
         env:
-          IMAGE: ${{ inputs.image_path }}
+          IMAGE: ${{ env.IMAGE_PATH }}
         run: |
           set -x
           ls -la "$IMAGE" || { echo "IMAGE ABSENT"; exit 1; }
@@ -33,7 +35,7 @@ jobs:
 
       - name: boot it
         env:
-          IMAGE: ${{ inputs.image_path }}
+          IMAGE: ${{ env.IMAGE_PATH }}
         run: |
           set -x
           LIMACTL=$(ls /Applications/Minds.app/Contents/Resources/lima/bin/limactl 2>/dev/null || command -v limactl)
