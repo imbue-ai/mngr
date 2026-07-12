@@ -69,17 +69,10 @@ from imbue.mngr.utils.env_utils import parse_bool_env
 _plugin_manager_container: dict[str, pluggy.PluginManager | None] = {"pm": None}
 
 
-# Names (canonical + aliases) under which the `mngr plugin` group is reachable, and the
-# subcommands of that group that must keep working even when a third-party plugin fails to
-# import. `plugin remove` / `plugin disable` are the escape hatches a user runs to recover
-# from a broken plugin, so for those invocations we deliberately skip loading setuptools
-# entry points (see create_plugin_manager): a broken plugin must not be able to brick the
-# very command that removes or disables it. Every OTHER command still loads all plugins and
-# fails loudly if one is broken -- mngr does not run in a degraded state.
-#
-# These are hardcoded because the decision must be made from sys.argv at import time, before
-# Click parses arguments. test_recovery_invocation_constants_match_click_tree keeps them in
-# sync with the real `plugin` command tree so the sets cannot silently drift.
+# The `mngr plugin` group's names (canonical + aliases) and the subcommands that must keep
+# working when a third-party plugin fails to import (see _is_plugin_recovery_invocation).
+# Hardcoded because the decision is made from sys.argv at import time, before Click parses
+# args; test_recovery_invocation_constants_match_click_tree keeps them in sync with the tree.
 _PLUGIN_GROUP_INVOCATION_NAMES: Final[frozenset[str]] = frozenset({"plugin", "plug"})
 _PLUGIN_RECOVERY_SUBCOMMANDS: Final[frozenset[str]] = frozenset({"remove", "disable"})
 
@@ -99,9 +92,7 @@ def _is_plugin_recovery_invocation(argv: Sequence[str]) -> bool:
     the normal load path -- i.e. the pre-existing crash on a broken plugin -- so erring toward
     not matching is safe.
     """
-    return (
-        len(argv) >= 3 and argv[1] in _PLUGIN_GROUP_INVOCATION_NAMES and argv[2] in _PLUGIN_RECOVERY_SUBCOMMANDS
-    )
+    return len(argv) >= 3 and argv[1] in _PLUGIN_GROUP_INVOCATION_NAMES and argv[2] in _PLUGIN_RECOVERY_SUBCOMMANDS
 
 
 def _call_on_error_hook(ctx: click.Context, error: BaseException) -> None:

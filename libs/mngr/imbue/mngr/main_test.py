@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from imbue.mngr.cli.plugin import plugin as plugin_group
 from imbue.mngr.main import _PLUGIN_GROUP_INVOCATION_NAMES
 from imbue.mngr.main import _PLUGIN_RECOVERY_SUBCOMMANDS
 from imbue.mngr.main import _is_plugin_recovery_invocation
@@ -89,8 +90,6 @@ def test_recovery_invocation_constants_match_click_tree() -> None:
     (canonical + aliases) or its subcommands drift away from those hardcoded sets, so the
     fast-path cannot silently diverge from what Click actually dispatches.
     """
-    plugin_group = cli.commands["plugin"]
-
     reachable_names = frozenset(name for name, command in cli.commands.items() if command is plugin_group)
     assert reachable_names == _PLUGIN_GROUP_INVOCATION_NAMES, (
         f"The `plugin` group is reachable as {sorted(reachable_names)}, but recovery detection "
