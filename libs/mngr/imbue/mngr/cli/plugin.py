@@ -24,7 +24,6 @@ from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.config import get_config_path
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
-from imbue.mngr.cli.help_formatter import show_help_with_pager
 from imbue.mngr.cli.output_helpers import AbortError
 from imbue.mngr.cli.output_helpers import emit_format_template_lines
 from imbue.mngr.cli.output_helpers import write_human_line
@@ -336,12 +335,14 @@ def _emit_plugin_remove_result(
             assert_never(unreachable)
 
 
-@click.group(name="plugin", invoke_without_command=True)
+@click.group(name="plugin")
 @add_common_options
 @click.pass_context
 def plugin(ctx: click.Context, **kwargs: Any) -> None:
-    if ctx.invoked_subcommand is None:
-        show_help_with_pager(ctx, ctx.command, None)
+    # A subcommand is required; running this group bare prints its help/usage
+    # listing and exits with a usage error (like snapshot/git), so this group
+    # callback has nothing to do itself.
+    pass
 
 
 @plugin.command(name="list")

@@ -1,0 +1,1 @@
+Internal type-checker compatibility fixes for the workspace dependency refresh: the OSC 8 hyperlink canvas wrapper's `coords`/`translate_coords` now return `Mapping` (matching urwid's read-only coords) and its `content` signature matches urwid's `int` column/row parameters. No behavior change.

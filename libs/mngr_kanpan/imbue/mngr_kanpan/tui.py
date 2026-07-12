@@ -3,6 +3,7 @@ import subprocess
 import time
 from collections.abc import Callable
 from collections.abc import Hashable
+from collections.abc import Mapping
 from collections.abc import Sequence
 from concurrent.futures import Future
 from concurrent.futures import ThreadPoolExecutor
@@ -239,7 +240,7 @@ class _HyperlinkCanvas(MutableModel):
         return self._widget_info
 
     @property
-    def coords(self) -> dict[str, Any]:
+    def coords(self) -> Mapping[str, Any]:
         return self.inner.coords
 
     @property
@@ -263,12 +264,10 @@ class _HyperlinkCanvas(MutableModel):
     def cols(self) -> int:
         return self.inner.cols()
 
-    def translate_coords(self, dx: int, dy: int) -> dict[str, Any]:
+    def translate_coords(self, dx: int, dy: int) -> Mapping[str, Any]:
         return self.inner.translate_coords(dx, dy)
 
-    def content(
-        self, trim_left: int = 0, trim_top: int = 0, cols: int | None = 0, rows: int | None = 0, attr: Any = None
-    ) -> Any:
+    def content(self, trim_left: int = 0, trim_top: int = 0, cols: int = 0, rows: int = 0, attr: Any = None) -> Any:
         osc_open = f"\033]8;;{self.url}\033\\".encode()
         osc_close = b"\033]8;;\033\\"
         return _osc8_wrap_content(self.inner.content(trim_left, trim_top, cols, rows, attr), osc_open, osc_close)

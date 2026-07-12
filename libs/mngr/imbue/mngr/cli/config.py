@@ -20,7 +20,6 @@ from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
-from imbue.mngr.cli.help_formatter import show_help_with_pager
 from imbue.mngr.cli.output_helpers import AbortError
 from imbue.mngr.cli.output_helpers import emit_format_template_lines
 from imbue.mngr.cli.output_helpers import write_human_line
@@ -171,7 +170,7 @@ def _flatten_config(config: dict[str, Any], prefix: str = "") -> list[tuple[str,
     return result
 
 
-@click.group(name="config", invoke_without_command=True)
+@click.group(name="config")
 @click.option(
     "--scope",
     type=click.Choice(["user", "project", "local"], case_sensitive=False),
@@ -180,13 +179,10 @@ def _flatten_config(config: dict[str, Any], prefix: str = "") -> list[tuple[str,
 @add_common_options
 @click.pass_context
 def config(ctx: click.Context, **kwargs: Any) -> None:
-    if ctx.invoked_subcommand is None:
-        mngr_ctx, _, _ = setup_command_context(
-            ctx=ctx,
-            command_name="config",
-            command_class=ConfigCliOptions,
-        )
-        show_help_with_pager(ctx, ctx.command, mngr_ctx.config)
+    # A subcommand is required; running this group bare prints its help/usage
+    # listing and exits with a usage error (like snapshot/git), so this group
+    # callback has nothing to do itself.
+    pass
 
 
 @config.command(name="list")

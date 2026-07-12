@@ -1,4 +1,6 @@
 from collections.abc import Generator
+from collections.abc import Mapping
+from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -25,6 +27,7 @@ from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import CleanupFailureCategory
+from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.host import AgentLabelOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostEnvironmentOptions
@@ -39,8 +42,10 @@ from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostNameStyle
+from imbue.mngr.primitives import ImageReference
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import TransferMode
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
@@ -293,12 +298,34 @@ def test_create_new_host_retries_on_name_conflict(
     create_count = 0
     original_create_host = LocalProviderInstance.create_host
 
-    def create_host_that_conflicts_once(self: LocalProviderInstance, name: HostName, **kwargs: object) -> Host:
+    def create_host_that_conflicts_once(
+        self: LocalProviderInstance,
+        name: HostName,
+        image: ImageReference | None = None,
+        tags: Mapping[str, str] | None = None,
+        build_args: Sequence[str] | None = None,
+        start_args: Sequence[str] | None = None,
+        lifecycle: HostLifecycleOptions | None = None,
+        known_hosts: Sequence[str] | None = None,
+        authorized_keys: Sequence[str] | None = None,
+        snapshot: SnapshotName | None = None,
+    ) -> Host:
         nonlocal create_count
         create_count += 1
         if create_count == 1:
             raise HostNameConflictError(self.name, name)
-        return original_create_host(self, name=name, **kwargs)
+        return original_create_host(
+            self,
+            name=name,
+            image=image,
+            tags=tags,
+            build_args=build_args,
+            start_args=start_args,
+            lifecycle=lifecycle,
+            known_hosts=known_hosts,
+            authorized_keys=authorized_keys,
+            snapshot=snapshot,
+        )
 
     test_provider_cls = type(
         "_ConflictTestProvider",

@@ -25,7 +25,7 @@ from azure.mgmt.compute import ComputeManagementClient
 from azure.mgmt.compute import models as compute_models
 from azure.mgmt.network import NetworkManagementClient
 from azure.mgmt.network import models as network_models
-from azure.mgmt.resource import ResourceManagementClient
+from azure.mgmt.resource.resources import ResourceManagementClient
 from azure.mgmt.resource.resources.models import ResourceGroup
 from loguru import logger
 from pydantic import ConfigDict

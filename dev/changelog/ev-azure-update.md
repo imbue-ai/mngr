@@ -1,0 +1,1 @@
+Advance the `exclude-newer` supply-chain cooldown in the root `pyproject.toml` from 2026-06-04 to 2026-06-27 (two weeks before the current date) so the workspace can resolve `azure-mgmt-resource` 26.0.0. This normally advances automatically at release time; it was stale because the last release predated the 26.0.0 dependency. Re-resolves `uv.lock` accordingly.

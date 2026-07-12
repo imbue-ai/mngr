@@ -48,7 +48,7 @@ Per-source aggregation:
 **Usage:**
 
 ```text
-mngr usage [OPTIONS] COMMAND [ARGS]...
+mngr usage [OPTIONS] [COMMAND] [ARGS]...
 ```
 **Options:**
 
