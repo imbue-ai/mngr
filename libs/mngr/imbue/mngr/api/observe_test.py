@@ -1,11 +1,13 @@
 import json
 import queue
 import subprocess
+import threading
 import time
 from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -1270,3 +1272,20 @@ def test_pid_watcher_enqueues_host_when_watched_process_dies(temp_mngr_ctx: Mngr
             proc.wait(timeout=1.0)
         except (subprocess.TimeoutExpired, ChildProcessError):
             pass
+
+
+def test_watch_pid_treats_wait_oserror_as_exit_and_enqueues(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
+    """A bare OSError from process.wait() is treated as exit (re-probe), not a crash.
+
+    psutil.Process.wait() can surface a plain OSError (not a psutil.Error) from its
+    os.pidfd_open/kqueue/poll backend; _watch_pid must handle it like any other exit
+    and enqueue a re-probe rather than let it escape and kill the watcher thread.
+    """
+    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    process = MagicMock()
+    process.wait.side_effect = OSError("simulated pidfd_open failure")
+
+    # Runs inline here: it must return normally (no OSError escaping) and enqueue the host.
+    observer._watch_pid("agent-1", "host-9", process, 4321, threading.Event())
+
+    assert observer._activity_queue.get_nowait() == "host-9"

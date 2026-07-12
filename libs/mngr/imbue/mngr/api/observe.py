@@ -938,7 +938,10 @@ class AgentObserver(MutableModel):
                 process.wait(timeout=_WATCH_POLL_SECONDS)
             except psutil.TimeoutExpired:
                 continue
-            except psutil.Error as e:
+            except (psutil.Error, OSError) as e:
+                # psutil.Process.wait() can surface a bare OSError (not a psutil.Error)
+                # when its underlying os.pidfd_open/kqueue/poll fails; treat any such
+                # failure the same as an exit and re-probe rather than crash the watcher.
                 logger.debug("PID watch for agent {} (pid {}) errored, treating as exit: {}", agent_id_str, pid, e)
             # Reached once the process has exited (wait returned) or errored out.
             logger.debug(
