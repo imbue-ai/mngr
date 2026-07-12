@@ -449,6 +449,14 @@ jobs:
             exit 1
           fi
 
+      - name: TEST BUILD ONLY (DO NOT MERGE) -- drop the stale dev data root
+        # mac-runner-reset.sh only ever wipes ~/.minds, so this test build's root
+        # (~/.minds-dev-weishi) survives every run, cached Lima image included. The
+        # fixed image was republished under the same version, and the client
+        # short-circuits on version+arch alone (lima_image/ensure.py), so without
+        # this the runner would keep booting the stale, unbootable copy.
+        run: rm -rf "$HOME/.minds-dev-weishi"
+
       - name: reset to clean state and install fresh app
         run: bash apps/minds/scripts/mac-runner-reset.sh "${{ steps.url.outputs.url }}"
 
