@@ -13,12 +13,17 @@ For each (version, arch) it:
   3. signs the manifest with ``minisign`` (detached), and
   4. uploads the new chunks + index + manifest + signature to R2.
 
-Upload backends:
-  * ``s3`` (default, recommended for production): boto3 against R2's S3 API.
-    Reads ``R2_ACCOUNT_ID`` / ``R2_ACCESS_KEY_ID`` / ``R2_SECRET_ACCESS_KEY``.
-  * ``cloudflare-api``: the Cloudflare REST object API using
-    ``CLOUDFLARE_API_TOKEN`` + ``CLOUDFLARE_ACCOUNT_ID``. Handy when you only
-    have an account API token (no S3 keys).
+Uploads go to R2's S3 API via boto3, reading ``R2_ACCOUNT_ID`` /
+``R2_ACCESS_KEY_ID`` / ``R2_SECRET_ACCESS_KEY``.
+
+Cloudflare's REST object API is deliberately not an option here. It is governed
+by the global api.cloudflare.com rate limit of 1200 requests per 5 minutes, and
+a single image is ~65,000 chunks: even uploading flat out, one publish cannot
+finish inside that budget and starts returning 429 partway through. The S3 API
+has no such limit. If you only hold an account API token, derive S3 credentials
+from it rather than reaching for the REST API -- for an account-owned R2 token,
+the access key id is the token's id and the secret is the SHA-256 of the token
+value.
 
 Content-addressed chunks are skipped when already present, so re-publishing a
 near-identical image only uploads the changed chunks.
@@ -36,11 +41,11 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import as_completed
 from datetime import datetime
 from datetime import timezone
+from http import HTTPStatus
 from pathlib import Path
 
 import boto3
 import click
-import httpx
 from botocore.client import Config
 
 _MANIFEST_PREFIX = "manifests"
@@ -95,7 +100,7 @@ class S3ObjectStore(ObjectStore):
         try:
             self._client.head_object(Bucket=self._bucket, Key=key)
         except self._client.exceptions.ClientError as error:
-            if error.response["ResponseMetadata"]["HTTPStatusCode"] == httpx.codes.NOT_FOUND:
+            if error.response["ResponseMetadata"]["HTTPStatusCode"] == HTTPStatus.NOT_FOUND:
                 return False
             raise
         return True
@@ -113,52 +118,6 @@ class S3ObjectStore(ObjectStore):
         except self._client.exceptions.NoSuchKey:
             return None
         return response["Body"].read()
-
-
-class CloudflareApiObjectStore(ObjectStore):
-    """Cloudflare REST object API using an account API token (no S3 keys needed)."""
-
-    def __init__(self, account_id: str, api_token: str, bucket: str, client: httpx.Client | None = None) -> None:
-        self._base = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/r2/buckets/{bucket}/objects"
-        # One client for the whole publish: a store upload is thousands of small
-        # requests to one host, so the pooled connections matter. The pool must admit
-        # the whole upload fan-out or the workers just queue behind httpx's default.
-        self._client = (
-            client
-            if client is not None
-            else httpx.Client(
-                limits=httpx.Limits(max_connections=_UPLOAD_CONCURRENCY, max_keepalive_connections=_UPLOAD_CONCURRENCY)
-            )
-        )
-        self._headers = {"Authorization": f"Bearer {api_token}"}
-
-    def exists(self, key: str) -> bool:
-        # GET, not HEAD: the Cloudflare object API answers HEAD with 405. Chunk
-        # bodies are small (desync's default average chunk is 64KiB), so reading one
-        # back to test presence is cheap.
-        response = self._client.get(f"{self._base}/{key}", headers=self._headers, timeout=30.0)
-        if response.status_code == httpx.codes.NOT_FOUND:
-            return False
-        # Fail loud on auth/5xx rather than reading them as "absent": that would hide a
-        # bad token behind a store that merely looks empty, and re-upload every chunk.
-        response.raise_for_status()
-        return True
-
-    def put(self, key: str, data: bytes, content_type: str) -> None:
-        response = self._client.put(
-            f"{self._base}/{key}",
-            headers={**self._headers, "Content-Type": content_type},
-            content=data,
-            timeout=120.0,
-        )
-        response.raise_for_status()
-
-    def get_optional(self, key: str) -> bytes | None:
-        response = self._client.get(f"{self._base}/{key}", headers=self._headers, timeout=60.0)
-        if response.status_code == httpx.codes.NOT_FOUND:
-            return None
-        response.raise_for_status()
-        return response.content
 
 
 def _sha256_file(path: Path) -> str:
@@ -241,18 +200,11 @@ def _sign_manifest(manifest_bytes: bytes, secret_key_file: Path) -> bytes:
         return signature_path.read_bytes()
 
 
-def _build_store(uploader: str, bucket: str) -> ObjectStore:
-    if uploader == "s3":
-        account_id = os.environ["R2_ACCOUNT_ID"]
-        return S3ObjectStore(
-            account_id=account_id,
-            access_key_id=os.environ["R2_ACCESS_KEY_ID"],
-            secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
-            bucket=bucket,
-        )
-    return CloudflareApiObjectStore(
-        account_id=os.environ["CLOUDFLARE_ACCOUNT_ID"],
-        api_token=os.environ["CLOUDFLARE_API_TOKEN"],
+def _build_store(bucket: str) -> ObjectStore:
+    return S3ObjectStore(
+        account_id=os.environ["R2_ACCOUNT_ID"],
+        access_key_id=os.environ["R2_ACCESS_KEY_ID"],
+        secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
         bucket=bucket,
     )
 
@@ -268,12 +220,9 @@ def _build_store(uploader: str, bucket: str) -> ObjectStore:
     type=click.Path(exists=True, path_type=Path),
     help="minisign secret key (use an unencrypted -W key for non-interactive signing)",
 )
-@click.option("--uploader", type=click.Choice(["s3", "cloudflare-api"]), default="s3", help="Upload backend")
 @click.option("--work-dir", type=click.Path(path_type=Path), default=None, help="Scratch dir for chunking")
-def main(
-    version: str, arch: str, raw_image: Path, bucket: str, secret_key_file: Path, uploader: str, work_dir: Path | None
-) -> None:
-    store = _build_store(uploader, bucket)
+def main(version: str, arch: str, raw_image: Path, bucket: str, secret_key_file: Path, work_dir: Path | None) -> None:
+    store = _build_store(bucket)
     with tempfile.TemporaryDirectory() as default_work:
         resolved_work_dir = work_dir if work_dir is not None else Path(default_work)
         resolved_work_dir.mkdir(parents=True, exist_ok=True)

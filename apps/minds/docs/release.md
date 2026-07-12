@@ -179,20 +179,24 @@ The bake runs *with Lima itself* (the image is built by the same virtualizer tha
 
 #### Per-release publish
 
-Build one arch per native host (amd64 on a KVM Linux host, arm64 on an Apple-Silicon Mac), then publish each into the tier bucket. Credentials: the simplest path reuses the tier's existing Vault `cloudflare` account token (it already has `Workers R2 Storage: Edit`) with `--uploader cloudflare-api`; alternatively mint dedicated R2 S3 keys and use `--uploader s3` with `R2_ACCOUNT_ID`/`R2_ACCESS_KEY_ID`/`R2_SECRET_ACCESS_KEY`.
+Build one arch per native host (amd64 on a KVM Linux host, arm64 on an Apple-Silicon Mac), then publish each into the tier bucket.
+
+Credentials must be **R2 S3 keys** (`R2_ACCOUNT_ID` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY`). Cloudflare's REST object API is not a usable alternative for this: it falls under the global `api.cloudflare.com` limit of 1200 requests per 5 minutes, and one image is roughly 65,000 chunks, so a publish cannot finish within that budget and starts returning `429` partway through. The S3 API is not rate-limited this way.
+
+If you hold only the tier's Vault `cloudflare` account token, you can derive S3 keys from it instead of minting new ones: for an account-owned R2 token the **access key id is the token's id** and the **secret is the SHA-256 of the token value**.
 
 ```bash
 export VAULT_ADDR=https://vault-cluster-public-vault-df29b16f.9b573ab7.z1.hashicorp.cloud:8200 VAULT_NAMESPACE=admin
-export CLOUDFLARE_API_TOKEN=$(vault kv get -mount=secrets -field=value minds/production/cloudflare/CLOUDFLARE_API_TOKEN)
-export CLOUDFLARE_ACCOUNT_ID=$(vault kv get -mount=secrets -field=value minds/production/cloudflare/CLOUDFLARE_ACCOUNT_ID)
+export R2_ACCOUNT_ID=$(vault kv get -mount=secrets -field=value minds/production/cloudflare/CLOUDFLARE_ACCOUNT_ID)
+export R2_ACCESS_KEY_ID=...      # the R2 token's id
+export R2_SECRET_ACCESS_KEY=...  # sha256 of the R2 token's value
 
 ./scripts/build-lima-image.sh --default-workspace-template-ref "$VERSION"     # emits qcow2 + raw under scripts/lima_image/output-<arch>/
 uv run python scripts/lima_image/publish.py \
   --version "$VERSION" --arch "$(uname -m | sed 's/arm64/aarch64/')" \
   --raw-image scripts/lima_image/output-*/mngr-lima-*.raw \
   --bucket minds-lima-images-production \
-  --secret-key-file /path/to/minds-lima-production.key \
-  --uploader cloudflare-api
+  --secret-key-file /path/to/minds-lima-production.key
 ```
 
 Notes:
