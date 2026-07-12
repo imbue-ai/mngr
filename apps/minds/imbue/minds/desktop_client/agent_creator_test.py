@@ -56,9 +56,11 @@ from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
 from imbue.minds.primitives import LaunchMode
+from imbue.minds.utils.secret_redaction import redact_secret_env_assignments
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
+from imbue.mngr_latchkey.agent_setup import SECRET_LATCHKEY_ENV_VAR_NAMES
 
 
 def test_extract_repo_name_strips_dot_git_and_trailing_slash() -> None:
@@ -173,6 +175,41 @@ def test_build_mngr_create_command_lifts_latchkey_env_to_host_env_flags() -> Non
             assert command[index - 1] == "--host-env", (
                 f"Latchkey arg {arg!r} should be passed via --host-env, got {command[index - 1]!r}"
             )
+
+
+def test_create_command_secrets_are_masked_for_logging() -> None:
+    """The command ``run_mngr_create`` renders into the ``Running:`` log line masks the
+    latchkey gateway password and permissions-override JWT while keeping the flag, the
+    variable names, and the non-secret gateway URL / counting flag intact.
+
+    This mirrors exactly what the log site does: build the real command, then run it
+    through :func:`redact_secret_env_assignments` with the latchkey secret-name set
+    before joining it for the log.
+    """
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.DOCKER,
+        host_name=HostName("hello"),
+        latchkey_env={
+            "LATCHKEY_GATEWAY": "http://127.0.0.1:1989",
+            "LATCHKEY_GATEWAY_PASSWORD": "sup3rs3cret",
+            "LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE": "eyJhbGc.fake.jwt",
+            "LATCHKEY_DISABLE_COUNTING": "1",
+        },
+    )
+
+    loggable = redact_secret_env_assignments(command, secret_env_var_names=SECRET_LATCHKEY_ENV_VAR_NAMES)
+    rendered = " ".join(loggable)
+
+    # The two secrets must not survive into the log rendering.
+    assert "sup3rs3cret" not in rendered
+    assert "eyJhbGc.fake.jwt" not in rendered
+    assert "LATCHKEY_GATEWAY_PASSWORD=***" in loggable
+    assert "LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE=***" in loggable
+    # The non-secret wiring stays legible so the log remains diagnostic.
+    assert "LATCHKEY_GATEWAY=http://127.0.0.1:1989" in loggable
+    assert "LATCHKEY_DISABLE_COUNTING=1" in loggable
+    # The real command handed to the subprocess is untouched.
+    assert "LATCHKEY_GATEWAY_PASSWORD=sup3rs3cret" in command
 
 
 def test_build_mngr_create_command_attaches_color_label_when_provided() -> None:
@@ -490,7 +527,7 @@ def test_build_mngr_create_command_non_imbue_cloud_passes_new_host_without_reuse
     assert "--update" not in command
     assert "--template" in command
     assert "main" in command
-    # The /welcome message now lives in forever-claude-template's
+    # The /welcome message now lives in default-workspace-template's
     # [create_templates.main] section, so the explicit --message arg is gone.
     assert "--message" not in command
     # minds no longer pre-generates an agent id; mngr generates one and we
@@ -507,7 +544,7 @@ def test_build_mngr_create_command_imbue_cloud_targets_account_provider() -> Non
         launch_mode=LaunchMode.IMBUE_CLOUD,
         host_name=HostName("hello"),
         imbue_cloud_account="alice@imbue.com",
-        imbue_cloud_repo_url="https://github.com/imbue-ai/forever-claude-template",
+        imbue_cloud_repo_url="https://github.com/imbue-ai/default-workspace-template",
         imbue_cloud_branch_or_tag="v1.2.3",
     )
     joined = " ".join(command)
@@ -528,9 +565,9 @@ def test_build_mngr_create_command_imbue_cloud_targets_account_provider() -> Non
     assert "--update" not in command
     # Lease attributes flow through --build-arg.
     assert "-b" in command
-    assert "repo_url=https://github.com/imbue-ai/forever-claude-template" in command
+    assert "repo_url=https://github.com/imbue-ai/default-workspace-template" in command
     assert "repo_branch_or_tag=v1.2.3" in command
-    # No secret env vars in argv: forwarding is declared by the FCT
+    # No secret env vars in argv: forwarding is declared by the DEFAULT_WORKSPACE_TEMPLATE
     # ``imbue_cloud`` template's own ``pass_host_env`` and the values live
     # in the subprocess env ``run_mngr_create`` populates.
     assert "ANTHROPIC_API_KEY" not in joined
@@ -550,7 +587,7 @@ def test_build_mngr_create_command_imbue_cloud_targets_account_provider() -> Non
 
 
 def test_build_mngr_create_command_never_inlines_secret_env_flags() -> None:
-    """Secret forwarding lives in FCT, not minds. The command line never carries
+    """Secret forwarding lives in DEFAULT_WORKSPACE_TEMPLATE, not minds. The command line never carries
     ``--pass-(host-)env`` flags or secret values for any compute mode."""
     for mode, account in (
         (LaunchMode.DOCKER, None),
@@ -567,7 +604,7 @@ def test_build_mngr_create_command_never_inlines_secret_env_flags() -> None:
         assert "--pass-env" not in command, f"{mode} should not inline --pass-env"
         # IMBUE_CLOUD compute *does* still get _remote_host_env_flags() which
         # uses --pass-host-env MNGR_PREFIX -- that one is unrelated to the
-        # secrets we moved into FCT, so we only forbid the secret names here.
+        # secrets we moved into DEFAULT_WORKSPACE_TEMPLATE, so we only forbid the secret names here.
         assert "ANTHROPIC_API_KEY" not in joined, f"{mode} leaked ANTHROPIC_API_KEY"
         assert "ANTHROPIC_BASE_URL" not in joined, f"{mode} leaked ANTHROPIC_BASE_URL"
         assert "GH_TOKEN" not in joined, f"{mode} leaked GH_TOKEN"
@@ -1202,7 +1239,6 @@ def test_start_creation_imbue_cloud_ai_with_local_compute_mints_litellm_key(tmp_
     provider is not IMBUE_CLOUD. The actual ``mngr create`` invocation will fail (no
     real binary / no real repo) but the key-mint must happen first."""
     cli = _RecordingImbueCloudCli(
-        parent_concurrency_group=ConcurrencyGroup(name="recording-cli"),
         connector_url=FAKE_CONNECTOR_URL,
     )
     creator = _make_creator_with_cli(tmp_path, cli)
@@ -1230,7 +1266,6 @@ def test_start_creation_api_key_ai_does_not_mint_litellm_key(tmp_path: Path) -> 
     """The API_KEY branch uses the user-supplied key directly and must never call
     ``create_litellm_key``."""
     cli = _RecordingImbueCloudCli(
-        parent_concurrency_group=ConcurrencyGroup(name="recording-cli"),
         connector_url=FAKE_CONNECTOR_URL,
     )
     creator = _make_creator_with_cli(tmp_path, cli)
@@ -1255,7 +1290,6 @@ def test_start_creation_subscription_ai_does_not_mint_litellm_key(tmp_path: Path
     """The SUBSCRIPTION branch injects no Anthropic creds and must never call
     ``create_litellm_key``."""
     cli = _RecordingImbueCloudCli(
-        parent_concurrency_group=ConcurrencyGroup(name="recording-cli"),
         connector_url=FAKE_CONNECTOR_URL,
     )
     creator = _make_creator_with_cli(tmp_path, cli)
@@ -1279,7 +1313,6 @@ def test_start_creation_api_key_ai_without_key_fails_with_clear_message(tmp_path
     """The API_KEY branch must reject an empty key with a specific error rather than
     silently falling through to mngr create with no key set."""
     cli = _RecordingImbueCloudCli(
-        parent_concurrency_group=ConcurrencyGroup(name="recording-cli"),
         connector_url=FAKE_CONNECTOR_URL,
     )
     creator = _make_creator_with_cli(tmp_path, cli)

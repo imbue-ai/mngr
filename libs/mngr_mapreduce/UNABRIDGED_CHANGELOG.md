@@ -2,6 +2,10 @@
 
 This file contains the full, verbatim per-PR entries for the `mngr_mapreduce` library. For the curated summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-08
+
+A map-reduce recipe's `name` (the identifier used to prefix agent, branch, and host names) is now a per-instance value rather than a class constant. This lets one recipe class serve multiple named variants of the same run (e.g. the `mngr tmr` command's new `--name` flag).
+
 ## 2026-07-01
 
 Added a new async/await ratchet (`test_prevent_async_await`) that freezes the current amount of `async def` / `await` usage in this project and fails if new async code is added. We strongly prefer synchronous code: it is far easier to debug, and our software is intentionally low-scale, so async provides no benefit. Existing usage is grandfathered in at its current count; the count can only decrease.

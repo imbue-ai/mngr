@@ -1,23 +1,32 @@
 import subprocess
+import threading
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from typing import Any
 
+import click
 import pytest
 from click.testing import CliRunner
 
 from imbue.mngr_imbue_cloud.cli.server import _box_ssh_host_key_options
+from imbue.mngr_imbue_cloud.cli.server import _destroy_one_pool_host
 from imbue.mngr_imbue_cloud.cli.server import _format_capacity_table
 from imbue.mngr_imbue_cloud.cli.server import _kill_bake_worker_processes
 from imbue.mngr_imbue_cloud.cli.server import _resolve_vendored_mngr_source
+from imbue.mngr_imbue_cloud.cli.server import build_pool_host_destroy_report
 from imbue.mngr_imbue_cloud.cli.server import build_registered_server
 from imbue.mngr_imbue_cloud.cli.server import compute_server_slice_sizing
+from imbue.mngr_imbue_cloud.cli.server import destroy_pool_hosts_in_parallel
+from imbue.mngr_imbue_cloud.cli.server import run_outcome_workers_in_bounded_threads
 from imbue.mngr_imbue_cloud.cli.server import server
 from imbue.mngr_imbue_cloud.cli.server import slice_advertised_attributes
 from imbue.mngr_imbue_cloud.data_types import BareMetalServer
+from imbue.mngr_imbue_cloud.data_types import PoolHostDestroyOutcome
 from imbue.mngr_imbue_cloud.errors import BareMetalProvisioningError
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerDbId
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerStatus
+from imbue.mngr_imbue_cloud.primitives import PoolHostDestroyOutcomeStatus
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_READY
 from imbue.mngr_imbue_cloud.slices.bare_metal import SLICE_BOOT_DISK_GIB
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_capacity
@@ -123,6 +132,15 @@ def test_server_group_help_lists_commands() -> None:
     assert "allocate-slice" not in result.output
 
 
+def test_order_command_exposes_dry_run_flag() -> None:
+    # `order --dry-run` is the no-charge price/spec preview the deployment playbook
+    # relies on; guard that the flag stays on the CLI surface with its no-charge contract.
+    result = CliRunner().invoke(server, ["order", "--help"])
+    assert result.exit_code == 0
+    assert "--dry-run" in result.output
+    assert "No charge" in result.output or "no charge" in result.output
+
+
 def test_kill_bake_worker_processes_terminates_a_child() -> None:
     # On a top-level kill the bake's in-flight `mngr create` workers must be reaped
     # so they don't keep carving VMs; this is the helper that does it. Spawn a child
@@ -163,3 +181,107 @@ def test_explicit_mngr_source_always_wins() -> None:
             mngr_source="/some/other/mngr", repo_root=Path("/monorepo"), is_from_tag=is_from_tag
         )
         assert resolved == Path("/some/other/mngr")
+
+
+def test_destroy_report_counts_already_gone_as_destroyed() -> None:
+    """Re-running the same id list after a partial failure must converge to success.
+
+    Ids whose rows are already gone report 'already_gone' and count as destroyed;
+    only genuine teardown failures make the report (and thus the command) fail.
+    """
+    report = build_pool_host_destroy_report(
+        [
+            PoolHostDestroyOutcome(pool_host_id="a", status=PoolHostDestroyOutcomeStatus.DESTROYED),
+            PoolHostDestroyOutcome(pool_host_id="b", status=PoolHostDestroyOutcomeStatus.ALREADY_GONE),
+            PoolHostDestroyOutcome(pool_host_id="c", status=PoolHostDestroyOutcomeStatus.SKIPPED_LEASED),
+            PoolHostDestroyOutcome(
+                pool_host_id="d", status=PoolHostDestroyOutcomeStatus.FAILED, detail="box unreachable"
+            ),
+        ]
+    )
+    assert report.requested == 4
+    assert report.destroyed == 2
+    assert report.skipped == 1
+    assert report.failed == 1
+    assert [host.pool_host_id for host in report.hosts] == ["a", "b", "c", "d"]
+    # The wire form the CLI emits keeps the documented lowercase statuses and omits
+    # absent details.
+    dumped = report.model_dump(mode="json", exclude_none=True)
+    assert dumped["hosts"][0] == {"pool_host_id": "a", "status": "destroyed"}
+    assert dumped["hosts"][3]["status"] == "failed"
+
+
+def test_destroy_report_for_no_hosts_is_all_zero() -> None:
+    report = build_pool_host_destroy_report([])
+    assert report.model_dump(mode="json", exclude_none=True) == {
+        "requested": 0,
+        "destroyed": 0,
+        "skipped": 0,
+        "failed": 0,
+        "hosts": [],
+    }
+
+
+def test_destroy_pool_hosts_in_parallel_rejects_nonpositive_concurrency() -> None:
+    with pytest.raises(click.UsageError):
+        destroy_pool_hosts_in_parallel(
+            pool_host_ids=["row-1"],
+            database_url="postgres://example",
+            eligible_statuses=("available",),
+            is_row_drop_only=False,
+            max_concurrency=0,
+        )
+
+
+def test_destroy_worker_turns_db_errors_into_failed_outcomes() -> None:
+    """A DB failure in one worker must become a per-host 'failed' outcome, not a raise.
+
+    ObservableThread.join() re-raises worker exceptions, so an uncaught psycopg2 error
+    in one thread would abort the whole batch mid-join, skip the outcome report, and
+    tear down the shared temp key dir under the sibling threads.
+    """
+    outcome = _destroy_one_pool_host(
+        pool_host_id="11111111-1111-1111-1111-111111111111",
+        # Port 1 on localhost refuses connections immediately -- a fast, deterministic
+        # psycopg2.OperationalError without any real DB.
+        database_url="postgresql://user@127.0.0.1:1/db",
+        private_key_path=None,
+        eligible_statuses=("available",),
+        is_row_drop_only=True,
+    )
+    assert outcome.status == PoolHostDestroyOutcomeStatus.FAILED
+    assert outcome.pool_host_id == "11111111-1111-1111-1111-111111111111"
+
+
+def test_bounded_fan_out_caps_concurrency_and_collects_all_outcomes() -> None:
+    """The shared fan-out runs at most max_concurrency workers at once and returns every outcome.
+
+    The Barrier(2) forces each admitted pair to overlap (so the cap is actually
+    exercised, not just scheduled around), and the counter asserts the semaphore
+    never admits more than the cap.
+    """
+    barrier = threading.Barrier(2)
+    concurrency_lock = threading.Lock()
+    concurrency_state = {"current": 0, "max": 0}
+
+    def worker(item: int) -> dict[str, Any]:
+        with concurrency_lock:
+            concurrency_state["current"] += 1
+            concurrency_state["max"] = max(concurrency_state["max"], concurrency_state["current"])
+        barrier.wait(timeout=30)
+        with concurrency_lock:
+            concurrency_state["current"] -= 1
+        return {"item": item, "status": "done"}
+
+    outcomes = run_outcome_workers_in_bounded_threads(
+        worker=worker,
+        worker_kwargs_list=[dict(item=idx) for idx in range(4)],
+        max_concurrency=2,
+        thread_name_prefix="fanout-test",
+        progress_noun="Fan-out test",
+        describe_outcome=lambda outcome: str(outcome["item"]),
+        interruption_exception_types=(),
+        on_join_interrupted=None,
+    )
+    assert sorted(outcome["item"] for outcome in outcomes) == [0, 1, 2, 3]
+    assert concurrency_state["max"] == 2

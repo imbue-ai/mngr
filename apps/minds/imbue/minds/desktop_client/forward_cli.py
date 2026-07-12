@@ -61,6 +61,7 @@ from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
 from imbue.mngr.api.discovery_events import ProviderDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
+from imbue.mngr.api.discovery_log_suppression import DiscoveryErrorLogSuppressor
 from imbue.mngr.primitives import AgentId
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
@@ -111,6 +112,10 @@ class EnvelopeStreamConsumer(MutableModel):
     # observe event is folded into it; its accumulated view is what we push into
     # the resolver and fan out as discovered/destroyed callbacks.
     _aggregator: DiscoveryStateAggregator = PrivateAttr(default_factory=DiscoveryStateAggregator)
+    # Deduplicates provider-level discovery-error warnings: a provider wedged on
+    # the same failure (e.g. missing credentials) logs once per process, not once
+    # per poll cycle. Clean snapshots feed it to re-arm on recovery.
+    _error_log_suppressor: DiscoveryErrorLogSuppressor = PrivateAttr(default_factory=DiscoveryErrorLogSuppressor)
     # SSH connection info keyed by host id. The aggregator does not model SSH info
     # (it carries no agent/host membership), so it is tracked here and joined onto
     # the agents on each host when building the resolver's view.
@@ -349,6 +354,9 @@ class EnvelopeStreamConsumer(MutableModel):
             self._record_host_ssh_info(event)
         delta = self._aggregator.apply_event(event)
         if isinstance(event, ProviderDiscoverySnapshotEvent):
+            # A clean snapshot re-arms the provider's error-log suppression (and
+            # logs a recovery line if its error was previously logged).
+            self._error_log_suppressor.record_provider_snapshot(event)
             # A per-provider snapshot is also a discovery event, so update_providers
             # bumps last_event_at; merge just this provider's state + freshness.
             self.resolver.update_providers(
@@ -375,9 +383,7 @@ class EnvelopeStreamConsumer(MutableModel):
         per-provider snapshot freshness is bumped solely by ``update_providers``.
         """
         if isinstance(event, DiscoveryErrorEvent):
-            logger.warning(
-                "Discovery error from {}: {} ({})", event.source_name, event.error_message, event.error_type
-            )
+            self._error_log_suppressor.log_discovery_error_event(event)
         self.resolver.record_discovery_event_received(datetime.now(timezone.utc))
 
     def _build_agents_result(self) -> ParsedAgentsResult:

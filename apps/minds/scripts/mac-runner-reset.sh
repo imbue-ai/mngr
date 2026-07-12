@@ -8,7 +8,7 @@
 # Under `set -e` a single unguarded failure (e.g. a `df`/`find` pipe, a
 # `defaults read`) aborts the script and SKIPS the remaining cleanup, leaking
 # Lima VMs / disk. So instead: run every step best-effort, then VERIFY the end
-# state (no surviving minds-e2e VMs, no ~/.minds, app removed) and exit
+# state (no surviving minds-host VMs / data disks, no ~/.minds, app removed) and exit
 # non-zero if the runner is not actually clean -- otherwise a leaked VM rots
 # the runner silently. Callers surface that exit code (the post-test cleanup
 # step no longer swallows it with `|| true`). The install block fails loud too.
@@ -42,25 +42,25 @@ if [[ -n "$LIMACTL" ]]; then
   "$LIMACTL" delete --all >/dev/null 2>&1 || true
 fi
 
-# Belt and suspenders for the CI runner: rm any minds-e2e* dirs still
-# under ~/.lima/. limactl on the GitHub Actions PATH isn't reliable and
-# the `command -v` guard above silently skips when missing, leaving
-# 6.4GB diffdisk + supporting files per past run pinned forever. On the
-# self-hosted mac runner this accumulated to 70 zombie VMs / 446GB
-# (verified 2026-06-06) before catching it.
+# Belt and suspenders for the CI runner: rm the Lima state minds e2e runs
+# leave under ~/.lima/. The pre-run reset installs the app only at the end,
+# so here the bundled limactl is absent and the guard above skipped -- this
+# fallback is then the ONLY cleanup that runs. It must match how minds names
+# its Lima state: instances are `minds-host-<host_id>` (~/.lima/minds-host-*),
+# and each mounts a data disk `mngr-<host_id>-data` (~/.lima/_disks/mngr-*-data).
+# limactl delete does NOT reap the detached data disk, so the disks leak even
+# when limactl runs; clean them here unconditionally. (Unchecked, this reached
+# 3 zombie VMs + 226 orphan data disks / 170GB on the self-hosted mac runner.)
 #
-# limactl delete differs from rm -rf in two ways: (1) it stops the VM's
-# hypervisor process first, (2) it deregisters from limactl's index.
-# The index is rebuilt by scanning ~/.lima/ each invocation, so (2) is
-# bookkeeping. The hypervisor stop matters for a LIVE VM. Preserve that
-# semantic without depending on limactl: for each minds-e2e* dir, check
-# ha.pid -- if the hypervisor is still alive, SIGTERM (then SIGKILL on
-# 2s grace) before rm -rf so we never orphan a running VM.
+# limactl delete differs from rm -rf in that it stops the VM's hypervisor
+# first. Preserve that: for each instance dir, if ha.pid names a live process,
+# SIGTERM (then SIGKILL on a 2s grace) before rm -rf so we never orphan a
+# running VM. Data disks are plain files -- no hypervisor to stop.
 if [[ -d "$HOME/.lima" ]]; then
-  zombie_count=$(find "$HOME/.lima" -maxdepth 1 -type d -name 'minds-e2e*' 2>/dev/null | wc -l | tr -d ' ')
-  if [[ "$zombie_count" -gt 0 ]]; then
-    log "cleaning $zombie_count minds-e2e* dir(s) under ~/.lima"
-    for vm_dir in "$HOME/.lima"/minds-e2e*; do
+  instance_count=$(find "$HOME/.lima" -maxdepth 1 -type d -name 'minds-host-*' 2>/dev/null | wc -l | tr -d ' ')
+  if [[ "$instance_count" -gt 0 ]]; then
+    log "cleaning $instance_count minds-host-* instance dir(s) under ~/.lima"
+    for vm_dir in "$HOME/.lima"/minds-host-*; do
       [[ -d "$vm_dir" ]] || continue
       pid_file="$vm_dir/ha.pid"
       if [[ -f "$pid_file" ]]; then
@@ -77,6 +77,11 @@ if [[ -d "$HOME/.lima" ]]; then
       fi
       rm -rf "$vm_dir" 2>/dev/null || true
     done
+  fi
+  disk_count=$(find "$HOME/.lima/_disks" -maxdepth 1 -type d -name 'mngr-*-data' 2>/dev/null | wc -l | tr -d ' ')
+  if [[ "$disk_count" -gt 0 ]]; then
+    log "cleaning $disk_count orphaned mngr-*-data disk(s) under ~/.lima/_disks"
+    rm -rf "$HOME/.lima/_disks"/mngr-*-data 2>/dev/null || true
   fi
 fi
 
@@ -124,9 +129,14 @@ URL="${1:-}"
 # goes red. A pure cleanup (no install URL) also expects the app to be gone;
 # when a URL is given the install below puts a fresh one back.
 cleanup_failed=0
-surviving_vms=$(find "$HOME/.lima" -maxdepth 1 -type d -name 'minds-e2e*' 2>/dev/null | wc -l | tr -d ' ')
+surviving_vms=$(find "$HOME/.lima" -maxdepth 1 -type d -name 'minds-host-*' 2>/dev/null | wc -l | tr -d ' ')
 if [[ "$surviving_vms" -gt 0 ]]; then
-  log "ERROR: $surviving_vms minds-e2e* VM dir(s) survived cleanup under ~/.lima"
+  log "ERROR: $surviving_vms minds-host-* VM dir(s) survived cleanup under ~/.lima"
+  cleanup_failed=1
+fi
+surviving_disks=$(find "$HOME/.lima/_disks" -maxdepth 1 -type d -name 'mngr-*-data' 2>/dev/null | wc -l | tr -d ' ')
+if [[ "$surviving_disks" -gt 0 ]]; then
+  log "ERROR: $surviving_disks mngr-*-data disk(s) survived cleanup under ~/.lima/_disks"
   cleanup_failed=1
 fi
 if [[ -e "$HOME/.minds" ]]; then

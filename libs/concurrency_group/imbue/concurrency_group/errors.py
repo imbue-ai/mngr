@@ -15,18 +15,29 @@ class ProcessError(ConcurrencyGroupError):
         returncode: int | None = None,
         is_output_already_logged: bool = False,
         message: str = "Command failed with non-zero exit code",
+        display_name: str | None = None,
     ) -> None:
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
         self.command = command
+        # A log-safe label for the command, supplied by the spawning
+        # ``RunningProcess``' ``name``. When set it is what appears in the
+        # rendered error message (and anywhere else callers render the failure),
+        # so secret argument values never surface; ``command`` still holds the
+        # real argv for programmatic use. Falls back to the joined command.
+        self.display_name = display_name
         self.is_output_already_logged = is_output_already_logged
         self.message = message
         super().__init__(self._format_message())
 
+    @property
+    def display_command(self) -> str:
+        """The log-safe rendering of the failed command (the ``name`` when supplied)."""
+        return self.display_name if self.display_name is not None else " ".join(self.command)
+
     def _format_message(self) -> str:
-        command_str = " ".join(self.command)
-        msg = f"{self.message} {self.returncode}. command=`{command_str}`"
+        msg = f"{self.message} {self.returncode}. command=`{self.display_command}`"
         if not self.is_output_already_logged:
             output = self.stdout + "\n" + self.stderr
             if len(output) > 8000:
@@ -47,6 +58,7 @@ class ProcessTimeoutError(ProcessError):
         stdout: str,
         stderr: str,
         is_output_already_logged: bool = False,
+        display_name: str | None = None,
     ) -> None:
         super().__init__(
             command,
@@ -55,6 +67,7 @@ class ProcessTimeoutError(ProcessError):
             None,
             is_output_already_logged=is_output_already_logged,
             message="Command timed out",
+            display_name=display_name,
         )
 
 
@@ -67,6 +80,7 @@ class ProcessSetupError(ProcessError):
         stdout: str,
         stderr: str,
         is_output_already_logged: bool = False,
+        display_name: str | None = None,
     ) -> None:
         super().__init__(
             command,
@@ -75,6 +89,7 @@ class ProcessSetupError(ProcessError):
             None,
             is_output_already_logged=is_output_already_logged,
             message="Command failed to start",
+            display_name=display_name,
         )
 
 
