@@ -705,6 +705,7 @@ class WorkspaceRecordStore(MutableModel):
         """
         with log_span("Reconciling workspace records"):
             legacy = self.read_legacy_associations()
+            is_legacy_fully_converted = True
             for user_id, account_email in accounts.items():
                 self.pull(user_id, account_email)
                 for agent_id in legacy.get(user_id, []):
@@ -712,13 +713,43 @@ class WorkspaceRecordStore(MutableModel):
                         record = self.build_record_from_resolver(user_id, agent_id, resolver)
                         if record is not None:
                             self.upsert_local_record(user_id, account_email, record)
+                        elif self._is_definitively_absent_from_discovery(agent_id, resolver):
+                            logger.info(
+                                "Legacy association for {} names a workspace that no longer exists; dropping it",
+                                agent_id,
+                            )
                         else:
-                            logger.debug("Legacy association for {} has no discovered workspace; skipping", agent_id)
+                            is_legacy_fully_converted = False
+                            logger.warning(
+                                "Legacy association for {} could not convert this pass (workspace not in "
+                                "discovery yet); keeping the legacy file for a retry",
+                                agent_id,
+                            )
                 self._refresh_local_metadata(user_id, account_email, resolver)
                 self._tombstone_definitively_absent(user_id, account_email, resolver)
                 self.push_dirty(user_id, account_email)
-            if legacy and accounts:
+            signed_out_user_ids = set(legacy) - set(accounts)
+            if signed_out_user_ids:
+                is_legacy_fully_converted = False
+                logger.info(
+                    "Keeping the legacy associations file: it has entries for {} account(s) not signed in here",
+                    len(signed_out_user_ids),
+                )
+            if legacy and accounts and is_legacy_fully_converted:
                 self._retire_legacy_associations()
+
+    def _is_definitively_absent_from_discovery(self, agent_id: str, resolver: BackendResolverInterface) -> bool:
+        """Whether a legacy-association workspace is provably gone from this device.
+
+        Mirrors the tombstone pass's caution: only a complete discovery
+        snapshot with no errored providers can prove absence -- a failed poll
+        proves nothing, so its associations must survive for a later pass.
+        """
+        if not resolver.has_completed_initial_discovery():
+            return False
+        if resolver.get_provider_errors():
+            return False
+        return str(agent_id) not in {str(aid) for aid in resolver.list_known_workspace_ids()}
 
     def _refresh_local_metadata(self, user_id: str, account_email: str, resolver: BackendResolverInterface) -> None:
         """Fold local metadata/secret changes into locally-discovered rows (queued push).

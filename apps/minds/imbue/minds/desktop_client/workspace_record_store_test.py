@@ -11,6 +11,7 @@ from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import make_agents_json
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
+from imbue.minds.desktop_client.conftest import seed_provider_snapshots
 from imbue.minds.desktop_client.dek_store import ensure_dek
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_DESTROYED
@@ -18,7 +19,9 @@ from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
 from imbue.minds.desktop_client.workspace_record_store import collect_ssh_key_material
 from imbue.minds.errors import WorkspaceSyncError
+from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import ProviderInstanceName
 
 _EMAIL = "alice@example.com"
 
@@ -290,6 +293,58 @@ def test_reconcile_migrates_legacy_associations_and_retires_the_file(paths: Work
     # A second reconcile is a no-op (idempotent).
     store.reconcile({user_id: _EMAIL}, resolver)
     assert len(cli.sync_records_by_email[_EMAIL]) == 1
+
+
+def test_reconcile_keeps_legacy_file_until_every_entry_converts(paths: WorkspacePaths) -> None:
+    """A failed poll proves nothing: a legacy association whose workspace was
+    not discoverable (its provider errored) must survive for a later pass
+    instead of being dropped when the file retires."""
+    cli = make_fake_imbue_cloud_cli()
+    store = _make_store(paths, cli)
+    user_id = _user_id()
+    agent_id = AgentId.generate()
+    legacy_path = paths.data_dir / "workspace_associations.json"
+    legacy_path.write_text(json.dumps({user_id: [str(agent_id)]}))
+    # Discovery completed, but a provider errored this poll, so absence from
+    # the known ids proves nothing about the workspace.
+    blocked_resolver = make_resolver_with_data(agents_json=json.dumps({"agents": []}))
+    errored_name = ProviderInstanceName("lima")
+    seed_provider_snapshots(
+        blocked_resolver,
+        error_by_provider_name={
+            errored_name: DiscoveryError(type_name="RuntimeError", message="poll failed", provider_name=errored_name)
+        },
+    )
+
+    store.reconcile({user_id: _EMAIL}, blocked_resolver)
+
+    assert store.associations_view() == {}
+    assert legacy_path.exists()
+
+    # The next clean pass discovers the workspace: it converts and the file retires.
+    healthy_resolver = make_resolver_with_data(agents_json=make_agents_json(agent_id, host_name="legacy-ws"))
+    store.reconcile({user_id: _EMAIL}, healthy_resolver)
+    assert store.associations_view() == {user_id: [str(agent_id)]}
+    assert not legacy_path.exists()
+    assert legacy_path.with_name(legacy_path.name + ".pre-sync").exists()
+
+
+def test_reconcile_keeps_legacy_file_for_signed_out_accounts(paths: WorkspacePaths) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    store = _make_store(paths, cli)
+    signed_in_user_id = _user_id()
+    signed_out_user_id = _user_id()
+    agent_id = AgentId.generate()
+    legacy_path = paths.data_dir / "workspace_associations.json"
+    legacy_path.write_text(json.dumps({signed_in_user_id: [str(agent_id)], signed_out_user_id: [_agent_id()]}))
+    resolver = make_resolver_with_data(agents_json=make_agents_json(agent_id, host_name="legacy-ws"))
+
+    store.reconcile({signed_in_user_id: _EMAIL}, resolver)
+
+    # The signed-in account's entry converted; the other account's entry
+    # waits (retiring now would drop it before that account can sign in).
+    assert store.associations_view() == {signed_in_user_id: [str(agent_id)]}
+    assert legacy_path.exists()
 
 
 def test_reconcile_does_not_churn_revisions_without_a_master_password(paths: WorkspacePaths) -> None:
