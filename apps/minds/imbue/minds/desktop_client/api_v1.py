@@ -496,6 +496,13 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
         elif instance_type not in allowed_instance_types:
             return _json_field_error(f"Unsupported instance type {instance_type!r}.", "instance_type")
     cloud_account = str(body.get("cloud_account", "")).strip()
+    if launch_mode in (LaunchMode.GCP, LaunchMode.AZURE) and not cloud_account:
+        # BYO-only modes: without an account the create would fail minutes
+        # later in the background thread with an opaque provider error.
+        return _json_field_error(
+            f"{launch_mode.value} requires a configured cloud account.", "cloud_account"
+        )
+    matching = None
     if cloud_account:
         # A bring-your-own account must exist and match the submitted launch
         # mode's backend, else the create would target a nonexistent provider.
@@ -580,16 +587,13 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
     # callback that injects the Cloudflare tunnel token + associates the account
     # and persists the chosen region -- exactly as the create form does.
     minds_config = get_state().minds_config
-    if launch_mode is LaunchMode.AZURE:
-        # An Azure account entry is pinned to one region for life (its resource
-        # group / vnet live there); the create form offers no region and any
-        # submitted value is ignored so the block's default_region always rules.
-        region = ""
-    elif launch_mode is LaunchMode.GCP:
-        # No ambient region machinery exists for this mode (BYO-only): honor a
-        # submitted zone from the form's curated list, else "" so the account
-        # block's pinned default_zone applies.
-        region = submitted_region if submitted_region in CONFIGURED_GCP_ZONES else ""
+    if matching is not None:
+        # A BYO account's placement (region, or GCE zone) is pinned per entry --
+        # AWS/GCP discovery clients are region/zone-bound and Azure's scaffolding
+        # is region-locked, so honoring a different submitted value would orphan
+        # the entry's existing workspaces. The pin always rules; the form shows
+        # it as a static note. A different placement = another account entry.
+        region = matching["region"]
     else:
         region = resolve_effective_region(
             launch_mode, submitted_region, minds_config, get_state().geo_location_cache

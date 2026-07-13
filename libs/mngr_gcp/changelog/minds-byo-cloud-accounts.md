@@ -1,0 +1,1 @@
+- `GcpProviderConfig` gained an optional `service_account_key_json` field (`SecretStr`): when set, credentials are built from the pasted service-account key directly (bypassing ADC) and the key's embedded `project_id` becomes the resolved-project fallback. Ambient ADC remains the unchanged default. Used by the Minds bring-your-own-account paste flow.
