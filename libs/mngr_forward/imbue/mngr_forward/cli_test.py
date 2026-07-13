@@ -5,16 +5,20 @@ by inspecting only the option-validation phase via direct calls to the
 helpers. End-to-end CLI invocation is exercised by the acceptance test.
 """
 
+import os
 import socket
+import ssl
 
 import click
 import pytest
+from hypercorn.config import Config
 
 from imbue.imbue_common.primitives import NonNegativeInt
 from imbue.imbue_common.primitives import PositiveInt
 from imbue.mngr_forward.cli import ForwardCliOptions
 from imbue.mngr_forward.cli import _DEFAULT_PORT
 from imbue.mngr_forward.cli import _bind_listen_socket
+from imbue.mngr_forward.cli import _build_hypercorn_config
 from imbue.mngr_forward.cli import _build_strategy
 from imbue.mngr_forward.cli import _filter_snapshot
 from imbue.mngr_forward.cli import _parse_reverse_specs
@@ -26,6 +30,7 @@ from imbue.mngr_forward.data_types import ForwardServiceStrategy
 from imbue.mngr_forward.primitives import ReverseTunnelSpec
 from imbue.mngr_forward.testing import TEST_AGENT_ID_1
 from imbue.mngr_forward.testing import TEST_AGENT_ID_2
+from imbue.mngr_forward.tls import InMemoryTLSConfig
 
 
 def _opts(**overrides: object) -> ForwardCliOptions:
@@ -158,6 +163,51 @@ def test_bind_listen_socket_falls_back_when_default_port_taken() -> None:
             assert bound_port not in (_DEFAULT_PORT, 0)
         finally:
             sock.close()
+
+
+def _fd_from_bind(config: Config) -> int:
+    """Parse the fd number out of a ``fd://<n>`` bind entry."""
+    assert len(config.bind) == 1
+    bind = config.bind[0]
+    assert bind.startswith("fd://")
+    return int(bind[len("fd://") :])
+
+
+def test_build_hypercorn_config_plain_http_when_flag_off() -> None:
+    """Flag off yields a plain ``Config`` with no TLS, handed the socket by fd."""
+    sock = _bind_listen_socket("127.0.0.1", None)
+    try:
+        config = _build_hypercorn_config(sock, use_http2=False)
+        dup_fd = _fd_from_bind(config)
+        try:
+            assert not isinstance(config, InMemoryTLSConfig)
+            assert config.ssl_enabled is False
+            assert config.graceful_timeout == 1.0
+            # The fd handed to hypercorn is a dup, not the original -- so
+            # hypercorn closing it on shutdown does not double-close the
+            # socket the caller's ``finally`` also closes.
+            assert dup_fd != sock.fileno()
+        finally:
+            os.close(dup_fd)
+    finally:
+        sock.close()
+
+
+def test_build_hypercorn_config_enables_tls_when_flag_on() -> None:
+    """Flag on yields an ``InMemoryTLSConfig`` whose context is a real SSLContext."""
+    sock = _bind_listen_socket("127.0.0.1", None)
+    try:
+        config = _build_hypercorn_config(sock, use_http2=True)
+        dup_fd = _fd_from_bind(config)
+        try:
+            assert isinstance(config, InMemoryTLSConfig)
+            assert config.ssl_enabled is True
+            assert isinstance(config.create_ssl_context(), ssl.SSLContext)
+            assert dup_fd != sock.fileno()
+        finally:
+            os.close(dup_fd)
+    finally:
+        sock.close()
 
 
 def test_filter_snapshot_supports_provider_name_filter() -> None:

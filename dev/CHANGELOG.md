@@ -4,6 +4,17 @@ A concise, human-friendly summary of changes for repo-level dev tooling: CI work
 
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
+## 2026-07-11
+
+### Added
+
+- Added: `scripts/rename_template_repo.py` — migration tool that renames the forever-claude-template repo to a new name. All case forms (kebab, snake, SNAKE_UPPER, Title, Pascal) are derived from `--new-name`; `--new-abbreviation` sets the shorthand that replaces `fct`/`FCT` (context-sensitive across snake, kebab, and CamelCase identifiers). Dry-run by default; `--apply` edits in place idempotently, `--check` verifies no live references remain (including CamelCase-embedded forms), `--show-diff` prints unified diffs. Historical records (changelog entries, `specs/`, `blueprint/`), vendored trees, and lockfiles are reported but never rewritten.
+- Added: `scripts/migrate_state_fct_to_default_workspace_template.sh` — developer-local state migration for the template rename (stale `.external_worktrees` removal, template checkout dir rename, git remote URLs, `apps/minds/.env` var rename, `__pycache__` sweep). Dry-run flag, idempotent; reports anything it is unsure about instead of touching it.
+
+### Changed
+
+- Changed: Repo-wide rename of forever-claude-template to default-workspace-template (justfile, CI workflows, scripts, Claude skills), applied mechanically by the new rename tool. The GitHub repo rename itself happens out of band.
+
 ## 2026-07-10
 
 ### Added

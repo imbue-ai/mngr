@@ -60,6 +60,8 @@ from imbue.minds.utils.secret_redaction import redact_secret_env_assignments
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
+from imbue.mngr_forward.tls import build_server_ssl_context
+from imbue.mngr_forward.tls import generate_self_signed_cert
 from imbue.mngr_latchkey.agent_setup import SECRET_LATCHKEY_ENV_VAR_NAMES
 
 
@@ -938,6 +940,13 @@ def _start_scripted_server(not_ready_count: int) -> tuple[HTTPServer, threading.
         {"not_ready_count": not_ready_count, "request_count": 0, "lock": threading.Lock()},
     )
     server = HTTPServer(("127.0.0.1", 0), handler_cls)
+    # The readiness probe dials the proxy over https (minds always runs it with
+    # HTTP/2), so the stand-in server must speak TLS to match -- otherwise the
+    # probe's TLS handshake fails against a plain-HTTP socket. Reuse the proxy's
+    # own self-signed cert helpers so the test exercises the real https path.
+    cert_pem, key_pem = generate_self_signed_cert()
+    ssl_context = build_server_ssl_context(cert_pem, key_pem)
+    server.socket = ssl_context.wrap_socket(server.socket, server_side=True)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     port = server.server_address[1]
@@ -1119,6 +1128,40 @@ def test_probe_workspace_through_plugin_surfaces_non_200_status() -> None:
         )
 
     assert status == 503
+
+
+def test_probe_workspace_uses_https_scheme() -> None:
+    """The loopback probe dials https, matching the TLS + HTTP/2 proxy.
+
+    The probe must hit the same transport the proxy speaks; a mismatch would
+    make every readiness probe fail the TLS handshake (or hit a closed http
+    port).
+    """
+    captured: list[httpx.Request] = []
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, text="ok")
+
+    with httpx.Client(transport=httpx.MockTransport(_capture)) as client:
+        probe_workspace_through_plugin(
+            mngr_forward_port=18999,
+            preauth_cookie="any-preauth",
+            agent_id=AgentId.generate(),
+            probe_timeout_seconds=0.5,
+            client=client,
+        )
+
+    assert captured[0].url.scheme == "https"
+    assert captured[0].url.host == "127.0.0.1"
+
+
+def test_build_redirect_url_uses_https_scheme(tmp_path) -> None:
+    """The /goto redirect URL the UI navigates to uses the proxy's https scheme."""
+    creator = _make_test_creator(tmp_path, mngr_forward_port=8421)
+    aid = AgentId.generate()
+    url = creator._build_redirect_url(aid)
+    assert url == f"https://localhost:8421/goto/{aid}/"
 
 
 def test_wait_for_workspace_ready_publishes_anyway_on_timeout(tmp_path) -> None:

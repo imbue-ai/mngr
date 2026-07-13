@@ -254,9 +254,11 @@ class HostState(UpperCaseStrEnum):
     FAILED = auto()
     DESTROYED = auto()
     UNAUTHENTICATED = auto()
-    # The provider that owns this host could not be accessed during the most recent discovery attempt,
-    # so the host's actual state is unknown. Distinct from None on HostDetails.state (which means
-    # "not observed / not applicable"). Emitted by AgentObserver when its provider errored.
+    # The host could not be observed during the most recent discovery attempt, so its actual state
+    # is unknown: either the provider that owns it could not be accessed (emitted by AgentObserver
+    # when its provider errored), or the provider was reachable but could not reach this specific
+    # host (e.g. imbue_cloud's lease-only fallback when a leased host's outer SSH is unreachable).
+    # Distinct from None on HostDetails.state (which means "not observed / not applicable").
     UNKNOWN = auto()
 
 
