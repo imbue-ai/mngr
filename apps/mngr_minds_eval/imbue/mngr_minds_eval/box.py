@@ -49,11 +49,13 @@ def port_of(container: str) -> str:
     return port
 
 
-def print_view_urls(container: str) -> None:
+def print_view_urls(container: str, *, wait: bool = True) -> None:
     """How to actually look at the workspaces: the box (Docker, on this machine) serves the Minds
     dashboard, and its mngr-forward proxy serves each Modal workspace's UI -- both on localhost.
-    The proxy has its own auth, so the one-time login URL must be visited once per box."""
+    The proxy has its own auth, so the one-time login URL must be visited once per box. Never prints
+    a silent nothing for the login line: if it can't find the URL, it says how to get it."""
     if not is_running(container):
+        print("  (box {} is not running)".format(container), flush=True)
         return
     ui = _run(["docker", "exec", container, "printenv", "MINDS_BARE_PORT"]).stdout.strip()
     forward = _run(["docker", "exec", container, "printenv", "MINDS_FORWARD_PORT"]).stdout.strip()
@@ -61,10 +63,13 @@ def print_view_urls(container: str) -> None:
         return
     print("\n  dashboard:       http://localhost:{}".format(ui), flush=True)
     if forward:
-        login = _forward_login(container, int(forward))
+        login = _forward_login(container, int(forward), tries=20 if wait else 1)
         if login:
             print("  workspace login: {}".format(login), flush=True)
             print("                   ^ visit once, then click the workspace in the dashboard", flush=True)
+        else:
+            print("  workspace login: not emitted yet -- re-fetch with:  minds-evals login --box {}".format(
+                container), flush=True)
 
 
 def built_ref(container: str) -> str:
@@ -156,16 +161,31 @@ def _await_ready(container: str, ui: int, tries: int = 100) -> None:
     raise BoxError("Minds did not come up -- docker logs {}".format(container))
 
 
-def _forward_login(container: str, forward: int) -> str:
-    """The mngr-forward one-time login URL (SKIP_AUTH covers the dashboard, not the proxy)."""
+def _forward_login(container: str, forward: int, tries: int = 20) -> str:
+    """The mngr-forward one-time login URL (SKIP_AUTH covers the dashboard, not the proxy).
+
+    Greps the box's full log history and returns the LATEST match, so it works whether the box just
+    booted (poll a bit) or has been up a while (found immediately). tries=1 for an instant lookup.
+    """
     import re
     import time
 
     pattern = re.compile(r"http://localhost:{}/login\?one_time_code=[A-Za-z0-9_-]+".format(forward))
-    for _ in range(20):
+    for attempt in range(tries):
         logs = _run(["docker", "logs", container])
         found = pattern.findall((logs.stdout or "") + (logs.stderr or ""))
         if found:
             return found[-1]
-        time.sleep(2)
+        if attempt < tries - 1:
+            time.sleep(2)
     return ""
+
+
+def login_url(container: str) -> str:
+    """Instant lookup of the box's current mngr-forward login URL (for the `login` subcommand)."""
+    if not is_running(container):
+        raise BoxError("box {} is not running".format(container))
+    forward = _run(["docker", "exec", container, "printenv", "MINDS_FORWARD_PORT"]).stdout.strip()
+    if not forward:
+        raise BoxError("box {} has no forward port".format(container))
+    return _forward_login(container, int(forward), tries=1)

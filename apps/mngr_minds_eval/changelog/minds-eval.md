@@ -19,3 +19,5 @@
 - Unified the CLI: `workspace` (create one ad-hoc workspace in a box) is now a `minds-evals` subcommand like the rest, and the last shell wrapper is gone. Everything is one Python CLI (`minds-evals launch|box|workspace|list-batches|inspect|restore`); the only remaining shell file is the Docker container entrypoint, which must be bash.
 
 - `launch` now takes `--fct-branch` / `--fct-repo` (the workspace-template each case is cloned from), instead of hardcoding the branch. Recorded in the batch config. Default remains the branch that carries the eval worker.
+
+- Login URL reliability: `print_view_urls` never prints a silent nothing for the workspace-login line (if it can't find the URL it tells you how to get it), and a new `minds-evals login --box <name>` (or `--mngr-branch`) fetches the dashboard + one-time login URL on demand, so you no longer have to dig through docker logs.

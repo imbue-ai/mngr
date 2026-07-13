@@ -134,6 +134,10 @@ def main() -> None:
     p_box.add_argument("--mngr-branch", required=True, help="mngr branch the box runs")
     p_box.add_argument("--box", default="", help="container name (default: minds-box-<mngr-branch>)")
 
+    p_login = sub.add_parser("login", help="print the box's dashboard + one-time workspace-login URL")
+    p_login.add_argument("--mngr-branch", default="", help="mngr branch (to derive the box name)")
+    p_login.add_argument("--box", default="", help="container name (default: minds-box-<mngr-branch>)")
+
     p_ws = sub.add_parser("workspace", help="create ONE workspace in a box (general utility, no eval)")
     p_ws.add_argument("--mngr-branch", required=True, help="mngr branch the box runs")
     p_ws.add_argument("--box", default="", help="container name (default: minds-box-<mngr-branch>)")
@@ -174,6 +178,11 @@ def main() -> None:
             parser.error("run `box` from the host, not inside a box")
         box_mod.ensure(_box_name(args), args.mngr_branch)
         box_mod.print_view_urls(_box_name(args))
+        return
+    if args.command == "login":
+        if not args.box and not args.mngr_branch:
+            parser.error("pass --box <name> or --mngr-branch <branch>")
+        box_mod.print_view_urls(args.box or _box_name(args), wait=False)
         return
     if args.command == "workspace":
         if not IN_BOX:
