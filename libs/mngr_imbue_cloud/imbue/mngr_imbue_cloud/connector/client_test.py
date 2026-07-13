@@ -555,31 +555,6 @@ def test_send_does_not_retry_http_status_errors(monkeypatch: pytest.MonkeyPatch)
 # -- Workspace sync methods --
 
 
-def _install_sync_transport(monkeypatch: pytest.MonkeyPatch, handler) -> ImbueCloudConnectorClient:
-    """Route every module-level httpx verb through a MockTransport running ``handler``."""
-    transport = httpx.MockTransport(handler)
-
-    def _get(*args, **kwargs):
-        with httpx.Client(transport=transport) as inner:
-            return inner.get(*args, **kwargs)
-
-    def _post(*args, **kwargs):
-        with httpx.Client(transport=transport) as inner:
-            return inner.post(*args, **kwargs)
-
-    def _put(*args, **kwargs):
-        with httpx.Client(transport=transport) as inner:
-            return inner.put(*args, **kwargs)
-
-    def _delete(*args, **kwargs):
-        with httpx.Client(transport=transport) as inner:
-            return inner.delete(*args, **kwargs)
-
-    for verb, replacement in (("get", _get), ("post", _post), ("put", _put), ("delete", _delete)):
-        monkeypatch.setattr(httpx, verb, replacement)
-    return ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"))
-
-
 def _sync_record_json(host_id: str = "host-1", revision: int = 1) -> dict[str, object]:
     return {
         "host_id": host_id,
@@ -605,7 +580,7 @@ def test_list_sync_records_parses_records(monkeypatch: pytest.MonkeyPatch) -> No
         assert request.headers["authorization"] == "Bearer tok"
         return httpx.Response(200, json={"records": [_sync_record_json()]})
 
-    client = _install_sync_transport(monkeypatch, handler)
+    client = _install_mock_httpx(monkeypatch, handler)
     records = client.list_sync_records(SecretStr("tok"))
     assert len(records) == 1
     assert records[0].host_id == "host-1"
@@ -620,7 +595,7 @@ def test_put_sync_record_returns_stored_row(monkeypatch: pytest.MonkeyPatch) -> 
         assert body["revision"] == 1
         return httpx.Response(200, json=_sync_record_json())
 
-    client = _install_sync_transport(monkeypatch, handler)
+    client = _install_mock_httpx(monkeypatch, handler)
     stored = client.put_sync_record(SecretStr("tok"), SyncWorkspaceRecord.model_validate(_sync_record_json()))
     assert stored.revision == 1
 
@@ -631,7 +606,7 @@ def test_put_sync_record_conflict_carries_stored_row(monkeypatch: pytest.MonkeyP
             409, json={"detail": {"message": "revision conflict", "stored": _sync_record_json(revision=4)}}
         )
 
-    client = _install_sync_transport(monkeypatch, handler)
+    client = _install_mock_httpx(monkeypatch, handler)
     with pytest.raises(ImbueCloudSyncConflictError) as exc_info:
         client.put_sync_record(SecretStr("tok"), SyncWorkspaceRecord.model_validate(_sync_record_json()))
     assert exc_info.value.stored_record is not None
@@ -642,7 +617,7 @@ def test_put_sync_record_agent_conflict_has_no_stored_row(monkeypatch: pytest.Mo
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(409, json={"detail": {"message": "another ACTIVE record already exists"}})
 
-    client = _install_sync_transport(monkeypatch, handler)
+    client = _install_mock_httpx(monkeypatch, handler)
     with pytest.raises(ImbueCloudSyncConflictError) as exc_info:
         client.put_sync_record(SecretStr("tok"), SyncWorkspaceRecord.model_validate(_sync_record_json()))
     assert exc_info.value.stored_record is None
@@ -653,7 +628,7 @@ def test_scrub_sync_secrets_returns_count(monkeypatch: pytest.MonkeyPatch) -> No
         assert request.url.path == "/sync/scrub-secrets"
         return httpx.Response(200, json={"scrubbed": 3})
 
-    client = _install_sync_transport(monkeypatch, handler)
+    client = _install_mock_httpx(monkeypatch, handler)
     assert client.scrub_sync_secrets(SecretStr("tok")) == 3
 
 
@@ -661,7 +636,7 @@ def test_get_key_bundle_returns_none_on_404(monkeypatch: pytest.MonkeyPatch) -> 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(404, json={"detail": "No key bundle stored for this account"})
 
-    client = _install_sync_transport(monkeypatch, handler)
+    client = _install_mock_httpx(monkeypatch, handler)
     assert client.get_key_bundle(SecretStr("tok")) is None
 
 
@@ -685,7 +660,7 @@ def test_key_bundle_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
             return httpx.Response(200, json=bundle_json)
         return httpx.Response(200, json={"status": "deleted"})
 
-    client = _install_sync_transport(monkeypatch, handler)
+    client = _install_mock_httpx(monkeypatch, handler)
     client.put_key_bundle(SecretStr("tok"), SyncKeyBundle.model_validate(bundle_json))
     fetched = client.get_key_bundle(SecretStr("tok"))
     assert fetched is not None
@@ -697,6 +672,6 @@ def test_sync_records_auth_error_raises(monkeypatch: pytest.MonkeyPatch) -> None
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(401, json={"detail": "Invalid token"})
 
-    client = _install_sync_transport(monkeypatch, handler)
+    client = _install_mock_httpx(monkeypatch, handler)
     with pytest.raises(ImbueCloudAuthError):
         client.list_sync_records(SecretStr("bad"))
