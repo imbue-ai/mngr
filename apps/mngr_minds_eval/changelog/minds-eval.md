@@ -35,3 +35,5 @@
 - The Modal environment (and box) for an eval run are now keyed on the eval NAME, not the mngr branch: `launch --name X` puts that run's sandboxes in `minds-<env>-X` under box `minds-box-X` (built from `--mngr-branch`), so a run's workspaces are findable and separable. `restore` reuses the batch's own name/branch; `clean-modal-workspaces --name X` targets that run's env. The general `box`/`workspace` utilities still key on the branch.
 
 - De-duplicated workspace creation: launch, workspace, and restore now share a single `minds_client.create_and_wait` (POST + poll) instead of three near-identical copies.
+
+- Removed the user-facing `self-check` subcommand; its asserts are now a real unit test (`main_test.py`). Clarified that `clean-modal-workspaces` is identified by `--name` alone (the Modal env); `--mngr-branch` is only a fallback to build a box when the eval's box isn't already running.

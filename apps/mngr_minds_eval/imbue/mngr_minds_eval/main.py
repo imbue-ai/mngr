@@ -81,39 +81,6 @@ def _check_aws() -> dict:
         sys.exit("error: {}".format(exc))
 
 
-def self_check() -> None:
-    from imbue.mngr_minds_eval.launch import build_create_payload, load_cases
-
-    env = {"AWS_ACCESS_KEY_ID": "AK", "AWS_SECRET_ACCESS_KEY": "SK", "AWS_DEFAULT_REGION": "us-east-1",
-           "MINDS_EVAL_BUCKET": "b"}
-    assert s3_store.batch_prefix("web1", "20260713-101500") == "web1_20260713-101500"
-    assert s3_store.split_batch("web1_20260713-101500") == ("web1", "20260713-101500")
-    assert s3_store.case_prefix("web1_S", "web1", "todo") == "web1_S/web1_todo"
-    assert s3_store.restic_repo_url(env, "web1_S/web1_todo") == \
-        "s3:s3.us-east-1.amazonaws.com/b/web1_S/web1_todo/restic"
-
-    payload = build_create_payload(Path("/work/clones/todo"), "EVAL-web1-CASE-todo", "sk-ant", "modal")
-    assert payload["launch_mode"] == "MODAL" and payload["ai_provider"] == "API_KEY"
-    assert payload["backup_provider"] == "CONFIGURE_LATER" and "backup_api_key_env" not in payload
-    assert payload["branch"] == "" and payload["git_url"] == "/work/clones/todo"
-
-    import json as _json
-    import tempfile
-
-    with tempfile.TemporaryDirectory() as tmp:
-        path = Path(tmp) / "p.json"
-        path.write_text(_json.dumps([{"id": "a", "persona": "p", "first_prompt": "go"}]))
-        cases = load_cases(path)
-        assert cases == [{"id": "a", "persona": "p", "first_prompt": "go"}], cases
-        path.write_text(_json.dumps([{"id": "a", "first_prompt": " "}]))
-        try:
-            load_cases(path)
-            raise AssertionError("expected ValueError on empty first_prompt")
-        except ValueError:
-            pass
-    print("self-check OK")
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(prog="minds-evals", description="Launch and inspect Minds eval batches.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -135,8 +102,9 @@ def main() -> None:
 
     p_clean = sub.add_parser("clean-modal-workspaces",
                              help="destroy ALL workspaces in an eval's Modal env (clean slate)")
-    p_clean.add_argument("--name", required=True, help="eval name (its box + Modal env)")
-    p_clean.add_argument("--mngr-branch", default="main", help="mngr branch to build the box if it isn't up")
+    p_clean.add_argument("--name", required=True, help="eval name -- identifies the Modal env (minds-<env>-<name>)")
+    p_clean.add_argument("--mngr-branch", default="main",
+                         help="only used to build a box if the eval's box isn't already running (any mngr works)")
     p_clean.add_argument("--box", default="", help="container name (default: minds-box-<name>)")
 
     p_ws = sub.add_parser("workspace", help="create ONE workspace in a box (general utility, no eval)")
@@ -165,13 +133,8 @@ def main() -> None:
     p_restore.add_argument("--restic-password", default=os.environ.get("RESTIC_PASSWORD", ""),
                            help="override; by default read from the batch config in S3")
 
-    sub.add_parser("self-check", help="offline asserts")
-
     args = parser.parse_args()
 
-    if args.command == "self-check":
-        self_check()
-        return
     # Box lifecycle (host-side): build/boot the box, then print how to view it. General utility --
     # spin up a Minds-on-a-branch to poke at, independent of any eval.
     if args.command == "box":
