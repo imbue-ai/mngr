@@ -42,6 +42,7 @@ from imbue.mngr_forward.primitives import ReverseTunnelSpec
 from imbue.mngr_forward.resolver import ForwardResolver
 from imbue.mngr_forward.reverse_handler import ReverseTunnelHandler
 from imbue.mngr_forward.server import create_forward_app
+from imbue.mngr_forward.service_map_cache import ServiceMapCache
 from imbue.mngr_forward.snapshot import mngr_list_snapshot
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_forward.stream_manager import ForwardStreamManager
@@ -49,6 +50,7 @@ from imbue.mngr_forward.stream_manager import ForwardStreamManager
 _DEFAULT_HOST: Final[str] = "127.0.0.1"
 _DEFAULT_PORT: Final[int] = 8421
 _OTP_LENGTH: Final[int] = 32
+_SERVICE_MAP_CACHE_FILENAME: Final[str] = "service_map.json"
 
 
 class ForwardCliOptions(CommonCliOptions):
@@ -260,8 +262,15 @@ def forward(ctx: click.Context, **kwargs: Any) -> None:
 
     envelope_writer = EnvelopeWriter()
 
+    plugin_state_dir = _resolve_plugin_state_dir(_resolve_mngr_host_dir(mngr_ctx))
+    service_map_cache = ServiceMapCache(cache_path=plugin_state_dir / _SERVICE_MAP_CACHE_FILENAME)
+
     strategy = _build_strategy(opts)
-    resolver = ForwardResolver(strategy=strategy, envelope_writer=envelope_writer)
+    resolver = ForwardResolver(
+        strategy=strategy,
+        envelope_writer=envelope_writer,
+        service_map_cache=service_map_cache,
+    )
     tunnel_manager = SSHTunnelManager()
 
     reverse_specs = _parse_reverse_specs(opts.reverse)
@@ -281,6 +290,12 @@ def forward(ctx: click.Context, **kwargs: Any) -> None:
         del kept  # used internally by the helper
         stream_manager: ForwardStreamManager | None = None
     else:
+        # Seed the resolver's service map from the previous run's cache so a
+        # restored window resolves as soon as discovery supplies membership +
+        # SSH info, instead of waiting on the slow per-agent event stream. The
+        # live stream still runs and overwrites the seed as it delivers; an
+        # empty/absent cache is a no-op (today's behavior).
+        resolver.seed_services(service_map_cache.load())
         discovery_events_path = get_discovery_events_path(mngr_ctx.config) if opts.observe_via_file else None
         stream_manager = ForwardStreamManager(
             resolver=resolver,
@@ -298,7 +313,6 @@ def forward(ctx: click.Context, **kwargs: Any) -> None:
     if reverse_specs:
         tunnel_manager.start_reverse_tunnel_health_check()
 
-    plugin_state_dir = _resolve_plugin_state_dir(_resolve_mngr_host_dir(mngr_ctx))
     auth_store = FileAuthStore(data_directory=plugin_state_dir)
 
     one_time_code = OneTimeCode(secrets.token_urlsafe(_OTP_LENGTH))
