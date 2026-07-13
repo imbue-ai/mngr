@@ -520,6 +520,7 @@ def test_amnesia_and_recover_full_lifecycle_via_electron(
     monkeypatch: pytest.MonkeyPatch,
     sync_e2e_env: SyncE2EEnv,
     sync_e2e_account: SyncE2EAccount,
+    snapshot_sandbox_dockerd: None,
     xvfb_display: str,
 ) -> None:
     """Total machine loss and recovery, end to end through the product.
@@ -590,6 +591,7 @@ def test_legacy_association_files_migrate_into_synced_records(
     monkeypatch: pytest.MonkeyPatch,
     sync_e2e_env: SyncE2EEnv,
     sync_e2e_account: SyncE2EAccount,
+    snapshot_sandbox_dockerd: None,
     xvfb_display: str,
 ) -> None:
     """A pre-sync install's local files convert into server records on first sign-in.
@@ -678,6 +680,7 @@ def test_master_password_lifecycle_rewraps_scrubs_and_restores(
     monkeypatch: pytest.MonkeyPatch,
     sync_e2e_env: SyncE2EEnv,
     sync_e2e_account: SyncE2EAccount,
+    snapshot_sandbox_dockerd: None,
     xvfb_display: str,
 ) -> None:
     """The master password's whole lifecycle against the real connector.

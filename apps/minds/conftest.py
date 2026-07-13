@@ -107,6 +107,44 @@ def mngr_test_prefix() -> str:
     return f"{generate_test_environment_name()}-"
 
 
+_SNAPSHOT_START_DOCKERD_SCRIPT = Path("/code/mngr/libs/mngr/imbue/mngr/resources/start-dockerd.sh")
+_SNAPSHOT_DOCKERD_STARTUP_TIMEOUT_SECONDS = 180
+
+
+@pytest.fixture(scope="session")
+def snapshot_sandbox_dockerd() -> None:
+    """Bring ``dockerd`` back up in a snapshot-resumed sandbox.
+
+    ``sandbox.snapshot_filesystem`` only captures the disk, not running
+    processes -- so a sandbox booted from the minds-workspace snapshot has
+    ``/var/lib/docker`` populated (with the stopped workspace container's
+    image layers + on-disk state) but no ``dockerd`` running. Re-run the same
+    script the snapshot itself used to bring dockerd up, so ``docker``
+    invocations in the requesting tests can talk to the daemon.
+
+    Shared by ``test_snapshot_resume.py`` (via its module-autouse wrapper) and
+    ``test_sync_e2e.py`` (requested explicitly). Mirrors
+    ``_ensure_dockerd_for_release`` in ``libs/mngr/imbue/mngr/conftest.py``
+    but for the snapshot's in-tree script location.
+    """
+    docker_info = subprocess.run(["docker", "info"], capture_output=True)
+    if docker_info.returncode == 0:
+        return
+
+    if not _SNAPSHOT_START_DOCKERD_SCRIPT.is_file():
+        raise FileNotFoundError(
+            f"start-dockerd.sh not found at {_SNAPSHOT_START_DOCKERD_SCRIPT}; this fixture is "
+            "only useful inside a sandbox booted from scripts/snapshot_minds_e2e_state.py."
+        )
+
+    subprocess.run(["chmod", "+x", str(_SNAPSHOT_START_DOCKERD_SCRIPT)], check=True, timeout=5)
+    subprocess.run(
+        [str(_SNAPSHOT_START_DOCKERD_SCRIPT)],
+        check=True,
+        timeout=_SNAPSHOT_DOCKERD_STARTUP_TIMEOUT_SECONDS,
+    )
+
+
 class _XvfbStartupError(RuntimeError):
     """Raised when the Xvfb display server fails to start for an Electron test."""
 
