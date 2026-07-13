@@ -331,7 +331,7 @@ def configure_backups_for_host(
         return
 
     with log_span("Configuring {} backups for agent {}", request.backup_provider.value, agent_id):
-        # restic must be available on the minds machine to init the repo + add the key.
+        # restic must be available on the minds machine to init the repo.
         restic_cli.ensure_restic_available()
 
         # Idempotent re-provision: the canonical env is the source of truth.
@@ -345,21 +345,13 @@ def configure_backups_for_host(
         repository, backend_env = _resolve_repository_and_backend_env(
             request, host_id, imbue_cloud_cli=imbue_cloud_cli
         )
-        master_password = request.master_password.get_secret_value() if request.master_password is not None else None
         workspace_password = generate_workspace_password()
 
-        # Initialize the repo with the master (or empty) password, then add the
-        # random per-workspace password as an additional key. The workspace only
-        # ever receives the random password.
+        # Initialize the repo with the workspace's own random password -- its
+        # single key. Cross-device and disaster-recovery access come from the
+        # synced (encrypted) canonical env, not from extra repo keys.
         restic_cli.init_repo(
-            repository=repository, backend_env=backend_env, password=master_password, parent_cg=parent_cg
-        )
-        restic_cli.add_password_key(
-            repository=repository,
-            backend_env=backend_env,
-            existing_password=master_password,
-            new_password=workspace_password,
-            parent_cg=parent_cg,
+            repository=repository, backend_env=backend_env, password=workspace_password, parent_cg=parent_cg
         )
 
         canonical_env = build_canonical_env_content(
