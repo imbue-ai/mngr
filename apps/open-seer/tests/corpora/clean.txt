@@ -1,11 +1,12 @@
-# Clean corpus for the open-seer Gitleaks gate (DESIGN.md §11).
+# Clean corpus for the open-seer secrets gate (DESIGN.md §11).
 # Ordinary code/diff text, deliberately salted with things that LOOK like
-# secrets or PII to a naive regex. Nothing in this file may be flagged by
-# gitleaks running with the repo's .gitleaks.toml.
+# secrets or PII to a naive regex. Nothing in this file may be flagged by any
+# of the gate's scanners (betterleaks with the repo's .betterleaks.toml,
+# trufflehog, kingfisher).
 
 # --- version strings are not IPs ---
 __version__ = "1.2.3"
-gitleaks_version = "8.30.1"
+betterleaks_version = "1.6.1"
 firmware version 10.1.2.3 shipped last week
 pip install urllib3==1.26.5.1
 kernel 5.15.0.101.98 (five components, never an IP)

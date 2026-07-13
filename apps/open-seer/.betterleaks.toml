@@ -1,46 +1,63 @@
-# Gitleaks config for the open-seer secrets/PII gate (DESIGN.md §7).
+# Betterleaks config for the open-seer secrets/PII gate (DESIGN.md §7).
 #
-# Run by every fixer over its squashed commit (and over PR body text) before a
-# PR goes up: stock secret rules plus custom PII rules for the things Sentry
+# Betterleaks is one of three scanners every fixer runs over its squashed
+# commit (and over PR body text) before a PR goes up — the other two,
+# TruffleHog and Kingfisher, run with their stock rules. This config extends
+# Betterleaks' stock secret rules with custom PII rules for the things Sentry
 # event data leaks that stock rules ignore — emails, IP literals, auth-header
-# values, and user IDs. A hit blocks the PR until the content is scrubbed.
+# values, and user IDs. A hit from any scanner blocks the PR until the
+# content is scrubbed.
 #
-# Tested offline by tests/test_gitleaks_gate.py against tests/corpora/.
+# Rule-level `filter` expressions (Expr) discard known-benign matches; if a
+# filter evaluates to true the finding is skipped.
+#
+# Tested offline by tests/test_secrets_gate.py against tests/corpora/.
 
 [extend]
 # Inherit the full stock ruleset (provider tokens, private keys, entropy
-# rules, ...). Custom rules below only add PII coverage on top.
+# rules, ...). Custom rules below only add coverage on top.
 useDefault = true
+
+# ---------------------------------------------------------------------------
+# AWS access key IDs. The stock Betterleaks rules only flag key IDs paired
+# with secret material, but a bare key ID in a diff still identifies an
+# account and often travels with its secret; Gitleaks flagged these and the
+# gate keeps that coverage.
+# ---------------------------------------------------------------------------
+[[rules]]
+id = "open-seer-aws-access-key-id"
+description = "AWS access key ID (bare key IDs are still account-identifying material)"
+regex = '''\b(?:AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16}\b'''
+keywords = ["akia", "asia", "abia", "acca"]
 
 # ---------------------------------------------------------------------------
 # Email addresses.
 # Requires a local part, "@", and a dotted TLD, so Python decorators
 # (@pytest.fixture), matrix-multiply "a @ b", and foo@bar (no TLD) don't fire.
-# Reserved/placeholder domains and git remotes are allowlisted — they are
+# Reserved/placeholder domains and git remotes are filtered out — they are
 # code, not PII.
 # ---------------------------------------------------------------------------
 [[rules]]
 id = "open-seer-pii-email"
 description = "Email address (possible end-user PII from Sentry event data)"
 regex = '''\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}\b'''
-
-[[rules.allowlists]]
-regexTarget = "secret"
-regexes = [
-    # RFC 2606 / documentation domains and reserved TLDs used as placeholders.
-    '''(?i)@(?:example|test)\.(?:com|org|net)$''',
-    '''(?i)\.(?:example|test|invalid|localhost)$''',
-    # Sender conventions that identify no one.
-    '''(?i)^(?:no-?reply|noreply|do-?not-?reply)@''',
-    # Git remote syntax (git@github.com:org/repo), not an email.
-    '''(?i)^git@''',
-]
+filter = '''
+filter.matchesAny(finding["secret"], [
+    // RFC 2606 / documentation domains and reserved TLDs used as placeholders.
+    `(?i)@(?:example|test)\.(?:com|org|net)$`,
+    `(?i)\.(?:example|test|invalid|localhost)$`,
+    // Sender conventions that identify no one.
+    `(?i)^(?:no-?reply|noreply|do-?not-?reply)@`,
+    // Git remote syntax (git@github.com:org/repo), not an email.
+    `(?i)^git@`,
+])
+'''
 
 # ---------------------------------------------------------------------------
 # IPv4 literals.
 # Octets are range-checked (0-255) so long version strings don't fire. The
 # non-identifying constants (0.0.0.0, loopback, broadcast, link-local) are
-# allowlisted, and lines that are clearly version/dependency-pin context
+# filtered out, and lines that are clearly version/dependency-pin context
 # ("version ...", "pkg==1.2.3.4") are excluded rather than fighting the
 # regex — a real client IP on a line containing "version" is the rare case
 # we accept missing.
@@ -49,27 +66,24 @@ regexes = [
 id = "open-seer-pii-ipv4"
 description = "IPv4 address literal (possible client/user IP from Sentry event data)"
 regex = '''\b(?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\b'''
-
-[[rules.allowlists]]
-regexTarget = "secret"
-regexes = [
-    # Bind-all, loopback, broadcast, link-local: identify no user.
-    '''^0\.0\.0\.0$''',
-    '''^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$''',
-    '''^255\.255\.255\.255$''',
-    '''^169\.254\.\d{1,3}\.\d{1,3}$''',
-]
-
-[[rules.allowlists]]
-regexTarget = "line"
-regexes = [
-    # Version/release context: "version 10.1.2.3", "Release 1.2.3.4", ...
-    '''(?i)\b(?:version|release|semver|build)\b''',
-    # Dependency pins: pkg==1.26.5.1, pkg@1.2.3.4.
-    '''[=@]=?\s*\d+\.\d+\.\d+\.\d+''',
-    # A fifth numeric component means version string, not an IP.
-    '''\d+\.\d+\.\d+\.\d+\.\d''',
-]
+filter = '''
+filter.matchesAny(finding["secret"], [
+    // Bind-all, loopback, broadcast, link-local: identify no user.
+    `^0\.0\.0\.0$`,
+    `^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$`,
+    `^255\.255\.255\.255$`,
+    `^169\.254\.\d{1,3}\.\d{1,3}$`,
+])
+||
+filter.matchesAny(finding["line"], [
+    // Version/release context: "version 10.1.2.3", "Release 1.2.3.4", ...
+    `(?i)\b(?:version|release|semver|build)\b`,
+    // Dependency pins: pkg==1.26.5.1, pkg@1.2.3.4.
+    `[=@]=?\s*\d+\.\d+\.\d+\.\d+`,
+    // A fifth numeric component means version string, not an IP.
+    `\d+\.\d+\.\d+\.\d+\.\d`,
+])
+'''
 
 # ---------------------------------------------------------------------------
 # IPv6 literals.
@@ -96,10 +110,9 @@ description = "Bearer token value (credential/session material from request head
 regex = '''(?i)\bbearer\s+([a-zA-Z0-9._~+/=\-]{16,})'''
 secretGroup = 1
 keywords = ["bearer"]
-
-[[rules.allowlists]]
-regexTarget = "secret"
-stopwords = ["redacted", "placeholder", "example", "changeme", "xxxx", "your-token", "your_token"]
+filter = '''
+filter.containsAny(lower(finding["secret"]), ["redacted", "placeholder", "example", "changeme", "xxxx", "your-token", "your_token"])
+'''
 
 # ---------------------------------------------------------------------------
 # Authorization header values with a non-Bearer scheme (Basic/Token/Digest)
@@ -112,15 +125,14 @@ description = "Authorization header value (credential material from request head
 regex = '''(?i)\b(?:proxy-)?authorization["']?\s*[:=]\s*["']?(?:basic|token|digest)?\s*([a-zA-Z0-9._~+/=\-]{16,})'''
 secretGroup = 1
 keywords = ["authorization"]
-
-[[rules.allowlists]]
-regexTarget = "secret"
-stopwords = ["redacted", "placeholder", "example", "changeme", "xxxx", "your-token", "your_token"]
+filter = '''
+filter.containsAny(lower(finding["secret"]), ["redacted", "placeholder", "example", "changeme", "xxxx", "your-token", "your_token"])
+'''
 
 # ---------------------------------------------------------------------------
 # Cookie / Set-Cookie header values. Requires a name=value pair with a
 # value of at least 8 chars, so "Cookie: see docs" can't fire; obvious
-# placeholders are stopworded so "Cookie: session=<omitted>" passes.
+# placeholders are filtered so "Cookie: session=<omitted>" passes.
 # ---------------------------------------------------------------------------
 [[rules]]
 id = "open-seer-pii-cookie-header"
@@ -128,10 +140,9 @@ description = "Cookie header value (session/tracking material from request heade
 regex = '''(?i)\b(?:set-cookie|cookie)["']?\s*[:=]\s*["']?([a-zA-Z0-9_\-]+=[^;\s"']{8,}[^\r\n"']*)'''
 secretGroup = 1
 keywords = ["cookie"]
-
-[[rules.allowlists]]
-regexTarget = "secret"
-stopwords = ["redacted", "placeholder", "example", "omitted", "xxxx"]
+filter = '''
+filter.containsAny(lower(finding["secret"]), ["redacted", "placeholder", "example", "omitted", "xxxx"])
+'''
 
 # ---------------------------------------------------------------------------
 # Generic user-id assignments: user_id=..., uid: ..., customer_id/account_id.
@@ -150,7 +161,7 @@ keywords = ["user_id", "userid", "user-id", "uid", "customer_id", "customer-id",
 # Credentials embedded in connection-string URLs (postgres://user:pass@host,
 # redis://:pass@host, ...). The stock rules miss these unless the password
 # happens to match an entropy rule. Env-var and format-string placeholders
-# are allowlisted — they are the *correct* way to write these lines.
+# are filtered out — they are the *correct* way to write these lines.
 # ---------------------------------------------------------------------------
 [[rules]]
 id = "open-seer-url-credentials"
@@ -158,13 +169,13 @@ description = "Password embedded in a connection-string URL"
 regex = '''(?i)\b[a-z][a-z0-9+.\-]*://[^\s/:@'"]{0,64}:([^\s@'"]{3,})@'''
 secretGroup = 1
 keywords = ["://"]
-
-[[rules.allowlists]]
-regexTarget = "secret"
-regexes = [
-    # ${DB_PASSWORD}, $DB_PASSWORD — env interpolation, not a literal secret.
-    '''^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$''',
-    # %s, {}, {password}, <password> — format placeholders.
-    '''^(?:%s|\{[a-zA-Z_]*\}|<[a-zA-Z_\- ]+>)$''',
-]
-stopwords = ["redacted", "placeholder", "example", "changeme", "xxxx"]
+filter = '''
+filter.matchesAny(finding["secret"], [
+    // ${DB_PASSWORD}, $DB_PASSWORD — env interpolation, not a literal secret.
+    `^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$`,
+    // %s, {}, {password}, <password> — format placeholders.
+    `^(?:%s|\{[a-zA-Z_]*\}|<[a-zA-Z_\- ]+>)$`,
+])
+||
+filter.containsAny(lower(finding["secret"]), ["redacted", "placeholder", "example", "changeme", "xxxx"])
+'''

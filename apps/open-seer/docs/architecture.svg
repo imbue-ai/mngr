@@ -29,7 +29,7 @@
 <line class="arr" x1="225" y1="318" x2="225" y2="364" marker-end="url(#arrow)"/>
 <rect x="40" y="368" width="370" height="100" rx="4" fill="none" stroke="#B4B2A9" stroke-width="0.75" stroke-dasharray="4 3"/>
 <text class="ts" x="225" y="388" text-anchor="middle">one per root cause · ≤10/sweep · SSH-able</text>
-<g class="c-purple"><rect class="shape" x="56" y="398" width="338" height="56" rx="4"/><text class="th" x="225" y="422" text-anchor="middle">Fixer agents · fresh image</text><text class="ts" x="225" y="440" text-anchor="middle">worktree · repro · fix · guardian · gitleaks</text></g>
+<g class="c-purple"><rect class="shape" x="56" y="398" width="338" height="56" rx="4"/><text class="th" x="225" y="422" text-anchor="middle">Fixer agents · fresh image</text><text class="ts" x="225" y="440" text-anchor="middle">worktree · repro · fix · guardian · secrets gate</text></g>
 <line class="arr" x1="410" y1="426" x2="436" y2="426" marker-end="url(#arrow)"/>
 <g class="c-teal"><rect class="shape" x="440" y="398" width="160" height="56" rx="4"/><text class="th" x="520" y="422" text-anchor="middle">Draft → ready PR</text><text class="ts" x="520" y="440" text-anchor="middle">single commit</text></g>
 <path class="leader" d="M 600 426 H 640 V 64 H 368" marker-end="url(#arrow)"/>

@@ -4,7 +4,9 @@
 
 FROM python:3.12-slim-bookworm
 
-ARG GITLEAKS_VERSION=8.30.1
+ARG BETTERLEAKS_VERSION=1.6.1
+ARG TRUFFLEHOG_VERSION=3.95.9
+ARG KINGFISHER_VERSION=1.106.0
 # mngr install spec. Default is the published package (the repo's own install
 # method: `uv tool install imbue-mngr`). Pin an unreleased branch/ref with:
 #   --build-arg MNGR_SPEC='git+https://github.com/imbue-ai/mngr@<ref>#subdirectory=libs/mngr'
@@ -32,11 +34,16 @@ RUN npm install -g @anthropic-ai/claude-code
 RUN claude plugin marketplace add imbue-ai/code-guardian \
     && claude plugin install imbue-code-guardian@imbue-code-guardian
 
-# gitleaks ships as a bare release binary — no apt package.
+# The secrets/PII gate scanners (betterleaks, trufflehog, kingfisher) all
+# ship as bare release binaries — no apt packages.
 RUN arch="$(dpkg --print-architecture)" \
-    && case "$arch" in amd64) gl_arch=x64 ;; arm64) gl_arch=arm64 ;; *) echo "unsupported arch: $arch" >&2; exit 1 ;; esac \
-    && curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_${gl_arch}.tar.gz" \
-        | tar -xz -C /usr/local/bin gitleaks
+    && case "$arch" in amd64) x_arch=x64 ;; arm64) x_arch=arm64 ;; *) echo "unsupported arch: $arch" >&2; exit 1 ;; esac \
+    && curl -fsSL "https://github.com/betterleaks/betterleaks/releases/download/v${BETTERLEAKS_VERSION}/betterleaks_${BETTERLEAKS_VERSION}_linux_${x_arch}.tar.gz" \
+        | tar -xz -C /usr/local/bin betterleaks \
+    && curl -fsSL "https://github.com/trufflesecurity/trufflehog/releases/download/v${TRUFFLEHOG_VERSION}/trufflehog_${TRUFFLEHOG_VERSION}_linux_${arch}.tar.gz" \
+        | tar -xz -C /usr/local/bin trufflehog \
+    && curl -fsSL "https://github.com/mongodb/kingfisher/releases/download/v${KINGFISHER_VERSION}/kingfisher-linux-${x_arch}.tgz" \
+        | tar -xz -C /usr/local/bin kingfisher
 
 # uv, then mngr as a uv tool (installs to /root/.local/bin).
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
@@ -59,7 +66,7 @@ RUN uv pip install --system -r pyproject.toml
 
 COPY .claude/skills ./.claude/skills
 COPY .github ./.github
-COPY .gitleaks.toml app.py ./
+COPY .betterleaks.toml app.py ./
 
 # Make /opt/open-seer a real git repo: `mngr create`'s default source is the
 # current git root, which is how the sweep carries the skills and the SSH key

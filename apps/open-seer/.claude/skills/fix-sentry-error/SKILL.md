@@ -5,7 +5,8 @@ description: >-
   to PR: ingest the issue and its recommended event, clone the target repo,
   reproduce at the erroring release SHA in an isolated worktree, check whether
   main already fixes it, fix minimally, port to main, pass imbue-code-guardian
-  (max 3 cycles), squash to one commit, gate with Gitleaks, open a draft PR and
+  (max 3 cycles), squash to one commit, gate with the secret scanners
+  (Betterleaks, TruffleHog, Kingfisher), open a draft PR and
   flip it ready, and mark the Sentry issue(s) resolved-by-commit. Use when
   invoked as /fix-sentry-error with a Sentry issue URL or short ID.
 ---
@@ -23,7 +24,7 @@ Sentry error issues. Your job ends in one of three states:
   Sentry issue (only guardian exhaustion lands here).
 
 Work through the numbered steps in order. Do not skip the check-main step and
-do not open a PR before the Gitleaks gate passes.
+do not open a PR before the secrets gate passes.
 
 ## Ground rules (read first)
 
@@ -41,7 +42,7 @@ do not open a PR before the Gitleaks gate passes.
   you fetch; that is the only production-derived data you touch, and it stays
   on this machine (§ Anonymization governs what leaves it).
 - **Anonymize everything you post** to GitHub or Sentry — see the
-  Anonymization rules at the end. The Gitleaks gate is the backstop, not the
+  Anonymization rules at the end. The secrets gate is the backstop, not the
   standard.
 - Required env (fail fast if missing): `SENTRY_AUTH_TOKEN`, `SENTRY_ORG`,
   `TARGET_REPO`, and `GITHUB_TOKEN` (unless `gh auth status` already passes).
@@ -301,7 +302,7 @@ diff, plans fixes, and applies them.
 - **Cycles exhausted with findings remaining** → record the remaining findings
   and continue; you will leave the PR in draft and escalate at step 11.
 
-## 9. Squash + Gitleaks gate
+## 9. Squash + secrets gate
 
 **Squash all work into ONE commit** so the fix is trivially cherry-pickable:
 
@@ -312,27 +313,36 @@ git reset --soft "$(git merge-base origin/main HEAD)"
 git commit -m "fix: <sanitized one-line summary> ($SHORT_ID)"
 ```
 
-**Gitleaks gate** — the config is the `.gitleaks.toml` at the root of the
-open-seer checkout on this image (the repo containing this skill file); it
-extends the stock secret rules with custom PII rules:
+**Secrets gate** — three scanners, and ALL of them must pass. Betterleaks
+runs with the `.betterleaks.toml` at the root of the open-seer checkout on
+this image (the repo containing this skill file), which extends its stock
+secret rules with custom PII rules; TruffleHog and Kingfisher run with their
+stock rules:
 
 ```bash
-GITLEAKS_CONFIG=<open-seer repo root>/.gitleaks.toml
+BETTERLEAKS_CONFIG=<open-seer repo root>/.betterleaks.toml
 
 # 1. Scan the squashed commit (the only commit past origin/main):
-gitleaks git --log-opts="origin/main..HEAD" -c "$GITLEAKS_CONFIG" \
+betterleaks git --log-opts="origin/main..HEAD" -c "$BETTERLEAKS_CONFIG" \
   --no-banner --redact "$WORK/wt-main"
+(cd "$WORK/wt-main" && trufflehog git "file://$PWD" --since-commit origin/main \
+  --branch HEAD --fail --no-verification --no-update)
+(cd "$WORK/wt-main" && kingfisher scan . --since-commit origin/main \
+  --no-validate --no-update-check)
 
 # 2. Write the PR body (per the template below) to $WORK/pr-body.md, then
 #    scan it BEFORE posting:
-gitleaks stdin -c "$GITLEAKS_CONFIG" --no-banner --redact < "$WORK/pr-body.md"
+betterleaks stdin -c "$BETTERLEAKS_CONFIG" --no-banner --redact < "$WORK/pr-body.md"
+trufflehog stdin --fail --no-verification --no-update < "$WORK/pr-body.md"
+kingfisher scan - --no-validate --no-update-check < "$WORK/pr-body.md"
 ```
 
-Exit code 0 = clean; exit code 1 = leaks found. **Any hit blocks you**: scrub
-the offending content (amend the commit / edit the body — remove the value,
-don't just mask part of it), re-run, and repeat until both scans exit 0. Never
-bypass with a baseline, `--enable-rule` narrowing, or `gitleaks:allow`
-comments.
+Exit code 0 = clean for every scanner; findings exit nonzero (Betterleaks 1,
+TruffleHog 183, Kingfisher 200). **Any hit from any scanner blocks you**:
+scrub the offending content (amend the commit / edit the body — remove the
+value, don't just mask part of it), re-run, and repeat until all six scans
+exit 0. Never bypass with a baseline, rule narrowing, ignore comments, or
+`--confidence`/allowlist loosening.
 
 ## 10. PR: draft → ready, close the Sentry loop
 
@@ -444,6 +454,6 @@ event data on this machine; **none of it leaves in raw form**:
 - Test fixtures and repro inputs committed in the fix must be synthetic
   (`user@example.com`, RFC 5737 IPs like `192.0.2.1`), never copied from the
   event.
-- The Gitleaks scans in step 9 are the enforcement backstop for the commit and
-  PR body; these rules also cover what Gitleaks can't scan — comments posted
-  via `gh` and Sentry notes — so apply them to those by hand.
+- The scanner runs in step 9 are the enforcement backstop for the commit and
+  PR body; these rules also cover what the scanners never see — comments
+  posted via `gh` and Sentry notes — so apply them to those by hand.
