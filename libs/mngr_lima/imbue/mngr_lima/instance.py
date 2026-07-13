@@ -14,7 +14,6 @@ from pydantic import PrivateAttr
 from pyinfra.api import Host as PyinfraHost
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.errors import HostNotFoundError
@@ -401,33 +400,37 @@ sudo poweroff
         """Best-effort teardown of a half-created Lima VM and its btrfs disk.
 
         Tolerates already-absent resources so it is safe to call from a `finally`
-        on any failure path. Also swallows concurrency-group ``ProcessError``s
-        (e.g. a limactl timeout) so a slow cleanup never masks the original
+        on any failure path. Also swallows any limactl failure (e.g. a timeout,
+        surfaced as LimaCommandError) so a slow cleanup never masks the original
         creation failure that triggered it.
         """
         try:
             limactl_delete(self.mngr_ctx.concurrency_group, instance_name, force=True)
-        except (LimaCommandError, OSError, ProcessError) as cleanup_err:
+        except (LimaCommandError, OSError) as cleanup_err:
             logger.debug("Failed to clean up Lima instance {} during error recovery: {}", instance_name, cleanup_err)
         if host_data_disk_name is not None:
             try:
                 limactl_disk_delete(self.mngr_ctx.concurrency_group, host_data_disk_name, force=True)
-            except (LimaCommandError, OSError, ProcessError) as cleanup_err:
+            except (LimaCommandError, OSError) as cleanup_err:
                 logger.debug(
                     "Failed to clean up Lima disk {} during error recovery: {}", host_data_disk_name, cleanup_err
                 )
 
     def _wait_for_cloud_init(self, instance_name: str) -> None:
-        """Wait for cloud-init to complete inside the VM."""
+        """Wait for cloud-init to complete inside the VM.
+
+        The command swallows its own failure (``|| true``) so a VM without
+        cloud-init is tolerated; a LimaCommandError here therefore means limactl
+        could not run the command at all (e.g. it cannot reach the instance),
+        which aborts creation via the caller's error handling.
+        """
         with log_span("Waiting for cloud-init to complete in {}", instance_name):
-            exit_code, stdout, stderr = limactl_shell(
+            limactl_shell(
                 self.mngr_ctx.concurrency_group,
                 instance_name,
                 "cloud-init status --wait 2>/dev/null || true",
                 timeout=CLOUD_INIT_TIMEOUT_SECONDS,
             )
-            if exit_code != 0:
-                logger.debug("cloud-init wait returned non-zero (may not be installed): {}", stderr)
 
     # =========================================================================
     # Run-as-root SSH helpers

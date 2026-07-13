@@ -77,11 +77,15 @@ class LimaInstanceNameTooLongError(MngrError):
 class LimaCommandError(MngrError):
     """Raised when a limactl command fails."""
 
-    def __init__(self, command: str, returncode: int | None, stderr: str) -> None:
+    def __init__(self, command: str, returncode: int | None, stderr: str, stdout: str = "") -> None:
         self.command = command
         self.returncode = returncode
         self.stderr = stderr
-        super().__init__(f"limactl {command} failed (exit code {returncode}): {stderr}")
+        self.stdout = stdout
+        message = f"limactl {command} failed (exit code {returncode}): {stderr}"
+        if stdout:
+            message += f"\nstdout: {stdout}"
+        super().__init__(message)
 
 
 class LimaHostCreationError(HostCreationError):
