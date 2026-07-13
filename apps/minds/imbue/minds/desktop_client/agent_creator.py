@@ -218,10 +218,11 @@ class CreationErrorKind(UpperCaseStrEnum):
     no kind and the UI shows just the error message.
     """
 
-    # The workspace source is a github.com URL and git hit an authentication
-    # challenge cloning it: the repo is private (or does not exist -- GitHub
+    # The clone of a github.com workspace source failed. By far the most
+    # common cause: the repo is private (or does not exist -- GitHub
     # deliberately answers both the same way, to avoid leaking which private
-    # repos exist) and none of this machine's git credentials can see it.
+    # repos exist) and none of this machine's git credentials can see it, so
+    # the creating page shows sign-in guidance alongside the raw error.
     GIT_AUTH_REQUIRED = auto()
 
 
@@ -309,47 +310,24 @@ def _is_github_https_url(repo_source: str) -> bool:
     return parts.hostname in ("github.com", "www.github.com")
 
 
-# Substrings of git's output that identify an authentication-shaped clone
-# failure. ``clone_git_repo`` runs every git command with GIT_TERMINAL_PROMPT=0,
-# so the no-usable-credentials case deterministically produces "could not read
-# Username ... terminal prompts disabled" instead of hanging on a prompt. The
-# other markers cover a credential helper supplying credentials that GitHub
-# rejects ("Authentication failed"), credentials that cannot see the repo
-# ("Repository not found" -- GitHub reports inaccessible and nonexistent repos
-# identically), and access blocked by a policy such as SAML SSO (403).
-_GIT_AUTH_OUTPUT_MARKERS: Final[tuple[str, ...]] = (
-    "could not read Username",
-    "could not read Password",
-    "terminal prompts disabled",
-    "Authentication failed",
-    "Repository not found",
-    "The requested URL returned error: 403",
-)
-
-
 def classify_creation_error(repo_source: str, error: Exception) -> CreationErrorKind | None:
     """Classify a creation failure into a ``CreationErrorKind``, when recognizable.
 
-    Currently recognizes exactly one case: the clone of a
-    ``https://github.com/...`` workspace source failed with an
-    authentication-shaped git error (see ``_GIT_AUTH_OUTPUT_MARKERS``) --
-    i.e. the repo is private (or does not exist) and this machine's git
-    credentials cannot see it. The creating page shows static sign-in
-    guidance for this kind. Every other failure returns ``None``.
-
-    Matching git's error text is the only option here (git has no structured
-    error output), but the no-credentials shape is under our control:
-    ``clone_git_repo`` disables terminal prompting, which makes git emit its
-    stable "could not read Username" error for any auth challenge.
+    Currently recognizes exactly one case: ANY failed clone of a
+    ``https://github.com/...`` workspace source. Deliberately no matching of
+    git's error text (git has no structured error output, and substring
+    matching is brittle across git versions and locales): a github.com clone
+    that failed at all is overwhelmingly an access problem -- the repo is
+    private (or does not exist) and this machine's git credentials cannot see
+    it -- and the creating page's guidance covers that case while the raw git
+    error stays visible right above it for anything rarer. Every other
+    failure returns ``None``.
     """
     if not isinstance(error, GitCloneError):
         return None
     if not _is_github_https_url(repo_source):
         return None
-    message = str(error)
-    if any(marker in message for marker in _GIT_AUTH_OUTPUT_MARKERS):
-        return CreationErrorKind.GIT_AUTH_REQUIRED
-    return None
+    return CreationErrorKind.GIT_AUTH_REQUIRED
 
 
 def _redact_url_credentials(url: str) -> str:
@@ -424,9 +402,9 @@ def _git_noninteractive_env() -> dict[str, str]:
     a dev shell the prompt would hang the creation thread forever. With
     ``GIT_TERMINAL_PROMPT=0``, cloning a repo this machine lacks credentials
     for fails fast with git's stable "could not read Username ... terminal
-    prompts disabled" error, which ``classify_creation_error`` recognizes.
-    Credential helpers (e.g. the macOS keychain) still work as usual -- only
-    interactive terminal prompting is disabled.
+    prompts disabled" error instead of hanging. Credential helpers (e.g. the
+    macOS keychain) still work as usual -- only interactive terminal
+    prompting is disabled.
 
     Deliberately a small per-file copy of the same one-line helper the default
     workspace template's ``bootstrap.manager`` and ``runtime_backup.runner``

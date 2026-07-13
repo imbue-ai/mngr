@@ -29,7 +29,6 @@ from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import CreationErrorKind
 from imbue.minds.desktop_client.agent_creator import _CreateEventCapture
-from imbue.minds.desktop_client.agent_creator import _GIT_AUTH_OUTPUT_MARKERS
 from imbue.minds.desktop_client.agent_creator import _build_mngr_create_command
 from imbue.minds.desktop_client.agent_creator import _is_git_worktree
 from imbue.minds.desktop_client.agent_creator import _is_github_https_url
@@ -139,50 +138,32 @@ def test_is_github_https_url_matches_only_github_http_urls() -> None:
     assert not _is_github_https_url("https://evil.example.com/github.com/acme/repo")
 
 
-def test_classify_creation_error_flags_prompt_disabled_github_clone_failure() -> None:
-    """The no-usable-credentials shape: clone_git_repo disables terminal
-    prompting, so git fails with its stable "could not read Username" error."""
-    error = GitCloneError(
-        "git clone failed:\nfatal: could not read Username for 'https://github.com': terminal prompts disabled"
-    )
-    kind = classify_creation_error("https://github.com/acme/private-repo.git", error)
-    assert kind is CreationErrorKind.GIT_AUTH_REQUIRED
-
-
-def test_classify_creation_error_flags_rejected_and_invisible_credentials() -> None:
-    """A credential helper supplying rejected credentials ("Authentication
-    failed") and credentials that cannot see the repo (GitHub's "Repository
-    not found") both classify as GIT_AUTH_REQUIRED."""
+def test_classify_creation_error_flags_any_failed_github_clone() -> None:
+    """ANY failed clone of a github.com source classifies -- no matching of
+    git's error text (deliberately: substring matching is brittle, and a
+    failed github clone is overwhelmingly an access problem the guidance
+    covers, while the raw error stays visible alongside it)."""
     url = "https://github.com/acme/private-repo.git"
-    rejected = GitCloneError(
-        "git clone failed:\nfatal: Authentication failed for 'https://github.com/acme/private-repo.git/'"
-    )
-    invisible = GitCloneError(
+    failures = (
+        "git clone failed:\nfatal: could not read Username for 'https://github.com': terminal prompts disabled",
+        "git clone failed:\nfatal: Authentication failed for 'https://github.com/acme/private-repo.git/'",
         "git fetch failed:\nremote: Repository not found.\n"
-        "fatal: repository 'https://github.com/acme/private-repo.git/' not found"
+        "fatal: repository 'https://github.com/acme/private-repo.git/' not found",
+        "git clone failed:\nfatal: unable to access 'https://github.com/acme/repo.git/': "
+        "Could not resolve host: github.com",
     )
-    assert classify_creation_error(url, rejected) is CreationErrorKind.GIT_AUTH_REQUIRED
-    assert classify_creation_error(url, invisible) is CreationErrorKind.GIT_AUTH_REQUIRED
+    for message in failures:
+        assert classify_creation_error(url, GitCloneError(message)) is CreationErrorKind.GIT_AUTH_REQUIRED, message
 
 
 def test_classify_creation_error_ignores_non_github_sources() -> None:
-    """The guidance recommends the GitHub CLI, so an auth failure against any
+    """The guidance recommends the GitHub CLI, so a clone failure against any
     other host (or a local path) must not classify."""
     error = GitCloneError(
         "git clone failed:\nfatal: Authentication failed for 'https://gitlab.example.com/acme/repo.git/'"
     )
     assert classify_creation_error("https://gitlab.example.com/acme/repo.git", error) is None
     assert classify_creation_error("/local/path/to/repo", error) is None
-
-
-def test_classify_creation_error_ignores_non_auth_clone_failures() -> None:
-    """A github URL whose clone failed for a non-auth reason (e.g. DNS) stays
-    unclassified -- the private-repo guidance would be wrong."""
-    error = GitCloneError(
-        "git clone failed:\nfatal: unable to access 'https://github.com/acme/repo.git/': "
-        "Could not resolve host: github.com"
-    )
-    assert classify_creation_error("https://github.com/acme/repo.git", error) is None
 
 
 def test_classify_creation_error_ignores_non_clone_errors() -> None:
@@ -894,7 +875,7 @@ def test_clone_git_repo_fails_fast_with_auth_shaped_error_when_remote_requires_a
     The exact message varies with the machine's credential setup (no helper:
     "could not read Username ... terminal prompts disabled"; a helper that
     supplies rejected credentials: "Authentication failed"), so the assertion
-    accepts any of the auth markers ``classify_creation_error`` recognizes.
+    accepts either shape.
     """
     server = HTTPServer(("127.0.0.1", 0), _AlwaysUnauthorizedHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -905,7 +886,7 @@ def test_clone_git_repo_fails_fast_with_auth_shaped_error_when_remote_requires_a
         with pytest.raises(GitCloneError) as exc_info:
             clone_git_repo(url, dest)
         message = str(exc_info.value)
-        assert any(marker in message for marker in _GIT_AUTH_OUTPUT_MARKERS), message
+        assert "terminal prompts disabled" in message or "Authentication failed" in message, message
     finally:
         server.shutdown()
         thread.join(timeout=5)
