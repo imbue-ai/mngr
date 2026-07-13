@@ -9,16 +9,12 @@ them from the preserved lockfiles on boot -- deterministic, a couple of minutes.
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import subprocess
-import tempfile
-import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 
+from imbue.mngr_minds_eval import minds_client
 from imbue.mngr_minds_eval import s3_store
 
 RESTORE_ROOT = Path("/work/restores")
@@ -33,17 +29,6 @@ def _restic_env(env: dict, repo_url: str, password: str) -> dict:
         "AWS_SECRET_ACCESS_KEY": env["AWS_SECRET_ACCESS_KEY"],
         "AWS_DEFAULT_REGION": env.get("AWS_DEFAULT_REGION", "us-east-1"),
     }
-
-
-def _post_json(url: str, payload: dict) -> tuple[int, dict]:
-    request = urllib.request.Request(
-        url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}, method="POST"
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            return response.status, json.loads(response.read().decode())
-    except urllib.error.HTTPError as exc:
-        return exc.code, {"error": exc.read().decode()[:400]}
 
 
 def restore(batch: str, case_name: str, message_index: int, *, port: str, restic_password: str = "") -> None:
@@ -94,33 +79,13 @@ def restore(batch: str, case_name: str, message_index: int, *, port: str, restic
     # sessions + events) over it so the workspace shows the conversation as it was, not a fresh agent.
     host_name = "RESTORE-{}-{}-{}".format(eval_name, case_name, message_index)
     print(">> creating modal workspace {} from {}".format(host_name, code_dir), flush=True)
-    status, body = _post_json("http://127.0.0.1:{}/api/v1/workspaces".format(port), {
-        "git_url": str(code_dir), "host_name": host_name, "branch": "",
-        "launch_mode": "MODAL", "ai_provider": "SUBSCRIPTION", "backup_provider": "CONFIGURE_LATER",
-    })
-    if status != 202:
-        raise SystemExit("create failed HTTP {}: {}".format(status, body))
-
-    operation_id = body["operation_id"]
-    deadline = time.time() + 1800.0
-    agent_id = None
-    while time.time() < deadline:
-        try:
-            with urllib.request.urlopen(
-                "http://127.0.0.1:{}/api/v1/workspaces/operations/create/{}".format(port, operation_id), timeout=30
-            ) as response:
-                info = json.loads(response.read().decode())
-        except (urllib.error.URLError, OSError):
-            time.sleep(5)
-            continue
-        if info.get("is_done"):
-            agent_id = info.get("agent_id")
-            break
-        if info.get("error"):
-            raise SystemExit("create failed: {}".format(info["error"]))
-        time.sleep(5)
-    if agent_id is None:
-        raise SystemExit("timed out waiting for the restored workspace")
+    try:
+        agent_id = minds_client.create_and_wait(port, {
+            "git_url": str(code_dir), "host_name": host_name, "branch": "",
+            "launch_mode": "MODAL", "ai_provider": "SUBSCRIPTION", "backup_provider": "CONFIGURE_LATER",
+        }, on_stage=lambda s: print("   ... {}".format(s), flush=True))
+    except minds_client.CreateError as exc:
+        raise SystemExit(str(exc))
 
     _seed_agent_state(agent_id, mngr_dir)
     print(">> restored workspace up: {} (agent {})".format(host_name, agent_id), flush=True)

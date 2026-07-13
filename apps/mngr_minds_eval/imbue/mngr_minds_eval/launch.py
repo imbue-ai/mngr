@@ -14,9 +14,9 @@ import subprocess
 import sys
 import time
 import urllib.error
-import urllib.request
 from pathlib import Path
 
+from imbue.mngr_minds_eval import minds_client
 from imbue.mngr_minds_eval import s3_store
 
 # The forever-claude-template (workspace template) each eval case is cloned from. The default
@@ -36,24 +36,10 @@ def _sh(*args: str) -> None:
     subprocess.run(args, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
 
 
-def _api_base(port: str) -> str:
-    return "http://127.0.0.1:{}".format(port)
-
-
-def _post_json(url: str, payload: dict) -> tuple[int, dict]:
-    request = urllib.request.Request(
-        url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}, method="POST"
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            return response.status, json.loads(response.read().decode())
-    except urllib.error.HTTPError as exc:
-        return exc.code, {"error": exc.read().decode()[:400]}
-
-
-def _get_json(url: str) -> dict:
-    with urllib.request.urlopen(url, timeout=30) as response:
-        return json.loads(response.read().decode())
+# create/poll and the HTTP helpers live in minds_client (shared with workspace + restore).
+_api_base = minds_client.api_base
+_post_json = minds_client.post_json
+_get_json = minds_client.get_json
 
 
 def load_cases(personas_path: Path) -> list[dict]:
@@ -189,25 +175,6 @@ def destroy_all_workspaces(port: str) -> None:
     print(">> done", flush=True)
 
 
-def _await_create(port: str, operation_id: str, timeout: float = 1800.0) -> dict:
-    deadline = time.time() + timeout
-    last_stage = ""
-    while time.time() < deadline:
-        try:
-            info = _get_json("{}/api/v1/workspaces/operations/create/{}".format(_api_base(port), operation_id))
-        except (urllib.error.URLError, OSError):
-            time.sleep(5)
-            continue
-        stage = info.get("status_text") or info.get("status") or ""
-        if stage and stage != last_stage:
-            print("     ... {}".format(stage), flush=True)
-            last_stage = stage
-        if info.get("is_done"):
-            return {"ok": True, "agent_id": info.get("agent_id")}
-        if info.get("error"):
-            return {"ok": False, "error": info.get("error")}
-        time.sleep(5)
-    return {"ok": False, "error": "timed out"}
 
 
 def launch_batch(
@@ -259,18 +226,16 @@ def launch_batch(
         destroy_existing_workspace(port, host_name)  # idempotent: re-run with the same --name works
         clone = _prepare_clone(case, case_config)
 
-        status, body = _post_json(
-            "{}/api/v1/workspaces".format(_api_base(port)),
-            build_create_payload(clone, host_name, anthropic_key, compute),
-        )
-        if status != 202:
-            print("     ERR create HTTP {}: {}".format(status, body), flush=True)
-            results.append({"case": case["id"], "ok": False, "error": str(body)[:200]})
-            continue
-        outcome = _await_create(port, body["operation_id"])
-        results.append({"case": case["id"], **outcome})
-        print("     {}".format("OK agent {}".format(outcome.get("agent_id")) if outcome["ok"]
-                               else "ERR {}".format(outcome.get("error"))), flush=True)
+        try:
+            agent_id = minds_client.create_and_wait(
+                port, build_create_payload(clone, host_name, anthropic_key, compute),
+                on_stage=lambda s: print("     ... {}".format(s), flush=True),
+            )
+            results.append({"case": case["id"], "ok": True, "agent_id": agent_id})
+            print("     OK agent {}".format(agent_id), flush=True)
+        except minds_client.CreateError as exc:
+            results.append({"case": case["id"], "ok": False, "error": str(exc)})
+            print("     ERR {}".format(exc), flush=True)
 
     ok = sum(1 for r in results if r.get("ok"))
     print("\n" + "=" * 66, flush=True)

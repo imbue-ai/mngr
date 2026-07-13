@@ -33,3 +33,5 @@
 - Added `minds-evals clean-modal-workspaces --mngr-branch X` to destroy all workspaces in a box (clean slate) -- each destroy tears down the Modal sandbox and removes its host record from the Modal environment.
 
 - The Modal environment (and box) for an eval run are now keyed on the eval NAME, not the mngr branch: `launch --name X` puts that run's sandboxes in `minds-<env>-X` under box `minds-box-X` (built from `--mngr-branch`), so a run's workspaces are findable and separable. `restore` reuses the batch's own name/branch; `clean-modal-workspaces --name X` targets that run's env. The general `box`/`workspace` utilities still key on the branch.
+
+- De-duplicated workspace creation: launch, workspace, and restore now share a single `minds_client.create_and_wait` (POST + poll) instead of three near-identical copies.
