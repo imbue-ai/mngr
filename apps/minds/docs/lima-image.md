@@ -6,7 +6,7 @@ Creating an agent needs an isolated Linux machine with a full toolchain: a pinne
 
 Building that toolchain *inside* the VM takes 10-20 minutes, and every user on every machine independently re-derives the same identical result.
 
-So we build it once, freeze the VM's disk into a file, publish that file, and let each user download the finished disk and boot it. That frozen disk is the **pre-baked image**, and this document is how it is produced, published, fetched, and booted (issue #2306).
+So we build it once, freeze the VM's disk into a file, publish that file, and let each user download the finished disk and boot it. That frozen disk is the **pre-baked image**, and this document is how it is produced, published, fetched, and booted.
 
 Measured on the real 20 GiB image (`minds-v0.3.6`, aarch64): Lima reaches `READY` from the pre-baked image in **7.5 seconds**, against 10-20 minutes to build the same toolchain in-VM. The guest arrives with `uv`, `claude`, Python 3.12, the default-workspace-template checkout at the release tag, its `.venv`, and a ~1 GB pre-warmed uv cache already in place.
 

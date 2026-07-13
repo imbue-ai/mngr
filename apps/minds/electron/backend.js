@@ -220,10 +220,8 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
       const bundledClientConfig = paths.getBundledClientConfigPath();
       const configFileArgs = bundledClientConfig ? ['--config-file', bundledClientConfig] : [];
 
-      // desync fetches the pre-baked Lima image (issue #2306). It is not staged on
-      // win32, so only advertise it when it actually exists -- otherwise the env var
-      // would name a missing file and desync would exec that instead of falling back
-      // to a PATH lookup.
+      // desync is not staged on win32, and naming a missing file here would make the
+      // backend exec that instead of falling back to a PATH lookup.
       const desyncPath = paths.getDesyncPath();
       const hasBundledDesync = fs.existsSync(desyncPath);
       const limaImageToolEnv = {

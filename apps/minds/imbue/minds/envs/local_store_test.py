@@ -56,7 +56,7 @@ def test_write_client_config_round_trip(_isolated_home: Path) -> None:
 
 
 def test_write_client_config_round_trips_lima_image_fields(_isolated_home: Path) -> None:
-    """When set, the optional pre-baked Lima image source (issue 2306) is written + reloaded."""
+    """When set, the optional pre-baked Lima image source is written + reloaded."""
     config = ClientEnvConfig(
         connector_url=AnyUrl("https://test-connector.modal.run"),
         litellm_proxy_url=AnyUrl("https://test-litellm.modal.run"),

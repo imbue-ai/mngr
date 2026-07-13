@@ -25,8 +25,8 @@ const UV_VERSION = '0.11.15';
 const GIT_FOR_WINDOWS_VERSION = '2.49.0';
 const GIT_FOR_WINDOWS_TAG = `v${GIT_FOR_WINDOWS_VERSION}.windows.1`;
 const RESTIC_VERSION = '0.18.1';
-// desync: content-defined-chunking client used to fetch the pre-baked Lima image
-// (issue #2306). Only bundled on macOS/Linux (the Lima launch mode's platforms).
+// desync: content-defined-chunking client used to fetch the pre-baked Lima image.
+// Only bundled on macOS/Linux (the Lima launch mode's platforms).
 const DESYNC_VERSION = '1.0.3';
 
 /**

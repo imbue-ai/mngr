@@ -157,7 +157,7 @@ gh workflow run minds-launch-to-msg.yml -R imbue-ai/mngr \
 
 **Green here concludes the release.** Note the build ID in the `build` summary.
 
-### 8b. Build + publish the pre-baked Lima image (issue 2306)
+### 8b. Build + publish the pre-baked Lima image
 
 Optional but recommended once the tag exists: bake + publish the pre-baked Lima VM image so local Lima creates of the default workspace boot the baked toolchain instead of building it in-VM. **Operator-run, not CI** — the R2 credentials and the minisign signing **private** key stay on your machine; only a public URL + public key are committed.
 

@@ -758,10 +758,8 @@ def _build_mngr_create_command(
         case LaunchMode.LIMA:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "lima"])
             mngr_command.extend(_remote_host_env_flags())
-            # When the caller resolved a ready pre-baked image (issue 2306),
-            # point Lima at the local raw image via the provider's existing per-arch
-            # image-url override, so the VM boots the baked toolchain instead of
-            # building it. No provider code change is needed to consume it.
+            # Point Lima at the baked raw image via the provider's existing per-arch
+            # image-url override, so the VM boots the baked toolchain instead of building it.
             if prebaked_lima_image_raw_path is not None:
                 mngr_command.extend(
                     prebaked_image_mngr_setting_args(get_current_image_arch(), prebaked_lima_image_raw_path)
@@ -1161,7 +1159,7 @@ class _MngrCreateAttemptParams(FrozenModel):
     color: str | None
     original_minds_version: str | None
     original_branch: str | None
-    # Resolved ready pre-baked Lima raw image path (issue 2306), or None to build in-VM.
+    # Resolved ready pre-baked Lima raw image path, or None to build in-VM.
     prebaked_lima_image_raw_path: Path | None = None
 
 
@@ -1289,9 +1287,9 @@ class AgentCreator(MutableModel):
         default=None,
         frozen=True,
         description=(
-            "Pre-baked Lima image create gate (issue 2306). When set and the create matches the "
-            "default workspace (Lima + default workspace template repo + current release tag), the create gates on "
-            "the verified image and points Lima at it; None disables the path."
+            "Pre-baked Lima image create gate. When set and the create matches the default "
+            "workspace (Lima + default workspace template repo + current release tag), the create "
+            "gates on the verified image and points Lima at it; None disables the path."
         ),
     )
     mngr_forward_port: int = Field(
@@ -1745,11 +1743,8 @@ class AgentCreator(MutableModel):
                 parsed_host = HostName(host_name)
                 log_queue.put("[minds] Creating workspace '{}' (mode: {})...".format(host_name, launch_mode.value))
 
-                # Pre-baked Lima image gate (issue 2306): for the default
-                # workspace (Lima + default workspace template repo + current release tag) wait on
-                # the prefetched, verified image and point Lima at it. Returns None
-                # (build in-VM) for any non-default create or unpublished version;
-                # raises a retryable error if a published image can't be readied.
+                # Returns None (build in-VM) for any non-default create or unpublished
+                # version; raises a retryable error if a published image can't be readied.
                 prebaked_lima_image_raw_path: Path | None = None
                 if self.lima_image_gate is not None:
                     if launch_mode is LaunchMode.LIMA:

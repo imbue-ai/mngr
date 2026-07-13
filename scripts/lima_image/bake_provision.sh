@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bake the default-workspace-template toolchain into a Lima VM (issue 2306).
+# Bake the default-workspace-template toolchain into a Lima VM.
 # Runs as root inside the VM (invoked by build-lima-image.sh via `limactl shell`).
 #
 # Runs the exact DEFAULT_WORKSPACE_TEMPLATE build scripts the Lima provider runs at create time, so at

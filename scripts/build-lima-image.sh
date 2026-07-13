@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build a pre-baked Lima VM image for one architecture, using Lima itself (issue 2306).
+# Build a pre-baked Lima VM image for one architecture, using Lima itself.
 #
 # Baking *with* Lima (rather than a separate Packer/QEMU pipeline) means the image
 # is produced by the same virtualizer that consumes it -- `vz` on Apple Silicon,

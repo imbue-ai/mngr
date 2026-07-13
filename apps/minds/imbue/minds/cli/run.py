@@ -467,10 +467,9 @@ def run(
     # readiness probe can use the same preauth cookie the plugin accepts and
     # Electron pre-sets, and after ``wait_for_listening`` so it has the
     # plugin's actual bound port.
-    # Start the pre-baked Lima image prefetch as early as possible (issue 2306):
-    # a background worker keeps the current release's verified image present so a
-    # later Lima create can boot it instead of building the toolchain in-VM. Only
-    # active when this env configures an image source and the kill switch is unset.
+    # A background worker keeps the current release's verified image present so a later
+    # Lima create can boot it instead of building the toolchain in-VM. Only active when
+    # this env configures an image source and the kill switch is unset.
     lima_image_source = make_lima_image_source(client_env_config)
     lima_image_gate: LimaImageCreateGate | None = None
     if lima_image_source is not None and not is_lima_image_cache_disabled(os.environ):

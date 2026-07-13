@@ -1,4 +1,4 @@
-"""Desktop-client glue for the pre-baked Lima image cache (issue 2306).
+"""Desktop-client glue for the pre-baked Lima image cache.
 
 Resolves the per-env image source from config, decides when a create should use
 the pre-baked image (the gate), and runs the background prefetch worker that
