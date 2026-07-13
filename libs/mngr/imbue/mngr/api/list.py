@@ -38,14 +38,16 @@ from imbue.mngr.errors import ProviderInstanceNotFoundError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
+from imbue.mngr.interfaces.data_types import AgentErrorInfo
+from imbue.mngr.interfaces.data_types import ErrorInfo
 from imbue.mngr.interfaces.data_types import HostDetails
+from imbue.mngr.interfaces.data_types import HostErrorInfo
+from imbue.mngr.interfaces.data_types import ProviderErrorInfo
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
-from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import ErrorBehavior
-from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.cel_utils import apply_compiled_cel_filters
@@ -106,88 +108,6 @@ def _is_dict_like(annotation: Any) -> bool:
 _AGENT_SCHEMALESS_PATHS: Final[tuple[tuple[str, ...], ...]] = tuple(_walk_dict_paths(AgentDetails))
 
 
-class ErrorInfo(FrozenModel):
-    """Information about an error encountered during listing.
-
-    This preserves the exception type and message instead of converting to a string immediately.
-    """
-
-    exception_type: str = Field(description="The type name of the exception (e.g., 'RuntimeError')")
-    message: str = Field(description="The error message")
-    # True when the underlying exception is a ProviderUnavailableError (which now
-    # includes ProviderNotAuthorizedError). Lets the CLI pick the granular
-    # provider-inaccessible exit code without re-parsing the message or type name.
-    is_provider_inaccessible: bool = Field(
-        default=False,
-        description="Whether this error means a provider was unreachable or unauthenticated",
-    )
-    # Verbose, multi-line remediation guidance (from MngrError.user_help_text), if any.
-    help_text: str | None = Field(default=None, description="Verbose remediation guidance for the user")
-
-    @classmethod
-    def build(cls, exception: BaseException) -> "ErrorInfo":
-        """Build an ErrorInfo from an exception."""
-        return cls(
-            exception_type=type(exception).__name__,
-            message=str(exception),
-            is_provider_inaccessible=isinstance(exception, ProviderUnavailableError),
-            help_text=exception.user_help_text if isinstance(exception, MngrError) else None,
-        )
-
-
-class ProviderErrorInfo(ErrorInfo):
-    """Error information with provider context."""
-
-    provider_name: ProviderInstanceName = Field(description="Name of the provider where the error occurred")
-    # Concise reason/remediation lifted from ProviderUnavailableError so callers can
-    # render a consistent one-line summary; None for non-provider-unavailable failures.
-    short_reason: str | None = Field(default=None, description="Concise reason the provider is unavailable")
-    short_remediation: str | None = Field(default=None, description="Concise next step the user can take")
-
-    @classmethod
-    def build_for_provider(cls, exception: BaseException, provider_name: ProviderInstanceName) -> "ProviderErrorInfo":
-        """Build a ProviderErrorInfo from an exception and provider name."""
-        return cls(
-            exception_type=type(exception).__name__,
-            message=str(exception),
-            provider_name=provider_name,
-            is_provider_inaccessible=isinstance(exception, ProviderUnavailableError),
-            help_text=exception.user_help_text if isinstance(exception, MngrError) else None,
-            short_reason=exception.short_reason if isinstance(exception, ProviderUnavailableError) else None,
-            short_remediation=exception.short_remediation if isinstance(exception, ProviderUnavailableError) else None,
-        )
-
-
-class HostErrorInfo(ErrorInfo):
-    """Error information with host context."""
-
-    host_id: HostId = Field(description="ID of the host where the error occurred")
-
-    @classmethod
-    def build_for_host(cls, exception: BaseException, host_id: HostId) -> "HostErrorInfo":
-        """Build a HostErrorInfo from an exception and host ID."""
-        return cls(
-            exception_type=type(exception).__name__,
-            message=str(exception),
-            host_id=host_id,
-        )
-
-
-class AgentErrorInfo(ErrorInfo):
-    """Error information with agent context."""
-
-    agent_id: AgentId = Field(description="ID of the agent where the error occurred")
-
-    @classmethod
-    def build_for_agent(cls, exception: BaseException, agent_id: AgentId) -> "AgentErrorInfo":
-        """Build an AgentErrorInfo from an exception and agent ID."""
-        return cls(
-            exception_type=type(exception).__name__,
-            message=str(exception),
-            agent_id=agent_id,
-        )
-
-
 class ListResult(MutableModel):
     """Result of listing agents."""
 
@@ -195,15 +115,36 @@ class ListResult(MutableModel):
     errors: list[ErrorInfo] = Field(default_factory=list, description="Errors encountered while listing")
 
 
+class _ErrorEmitter(FrozenModel):
+    """Provider-facing callable that records a per-resource ErrorInfo.
+
+    Appends to result.errors under results_lock and forwards to on_error
+    if provided.
+    """
+
+    result: ListResult
+    # threading.Lock is a factory, not a type, so pydantic can't type-check it.
+    results_lock: Any
+    on_error: Callable[[ErrorInfo], None] | None
+
+    def __call__(self, error_info: ErrorInfo) -> None:
+        with self.results_lock:
+            self.result.errors.append(error_info)
+        if self.on_error:
+            self.on_error(error_info)
+
+
 class _ListAgentsParams(FrozenModel):
     """Shared parameters for the internal agent listing pipeline."""
 
-    model_config = {"arbitrary_types_allowed": True}
     compiled_include_filters: list[Any]
     compiled_exclude_filters: list[Any]
     error_behavior: ErrorBehavior
     on_agent: Callable[[AgentDetails], None] | None
-    on_error: Callable[[ErrorInfo], None] | None
+    # Per-resource error emitter shared across all catch sites in this
+    # call. Records each ErrorInfo on result.errors under results_lock and
+    # forwards to the caller's on_error.
+    error_emitter: _ErrorEmitter
     field_generators: dict[str, dict[str, Callable[[AgentInterface, OnlineHostInterface], Any]]] = Field(
         default_factory=dict,
     )
@@ -249,9 +190,10 @@ def list_agents(
         with log_span("Compiling CEL filters", include_filters=include_filters, exclude_filters=exclude_filters):
             compiled_include_filters, compiled_exclude_filters = compile_cel_filters(include_filters, exclude_filters)
 
-    try:
-        results_lock = Lock()
+    results_lock = Lock()
+    error_emitter = _ErrorEmitter(result=result, results_lock=results_lock, on_error=on_error)
 
+    try:
         field_generators: dict[str, dict[str, Callable[[AgentInterface, OnlineHostInterface], Any]]] = {}
         for hook_result in mngr_ctx.pm.hook.agent_field_generators():
             if hook_result is not None:
@@ -269,7 +211,7 @@ def list_agents(
             compiled_exclude_filters=compiled_exclude_filters,
             error_behavior=error_behavior,
             on_agent=on_agent,
-            on_error=on_error,
+            error_emitter=error_emitter,
             field_generators=field_generators,
             offline_field_generators=offline_field_generators,
         )
@@ -301,9 +243,7 @@ def list_agents(
         if error_behavior == ErrorBehavior.ABORT:
             raise
         error_info = ErrorInfo.build(e)
-        result.errors.append(error_info)
-        if on_error:
-            on_error(error_info)
+        error_emitter(error_info)
 
     _maybe_write_provider_discovery_snapshots(
         mngr_ctx, result, provider_names, include_filters, exclude_filters, discovery_started_at
@@ -439,7 +379,6 @@ def _construct_and_discover_for_provider(
     provider_name: ProviderInstanceName,
     mngr_ctx: MngrContext,
     params: _ListAgentsParams,
-    result: ListResult,
     results_lock: Lock,
     reset_caches: bool,
     agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]],
@@ -455,7 +394,11 @@ def _construct_and_discover_for_provider(
         provider = get_provider_instance(provider_name, mngr_ctx)
         if reset_caches:
             provider.reset_caches()
-        provider_results = provider.discover_hosts_and_agents(cg=mngr_ctx.concurrency_group, include_destroyed=True)
+        provider_results = provider.discover_hosts_and_agents(
+            cg=mngr_ctx.concurrency_group,
+            include_destroyed=True,
+            on_error=params.error_emitter,
+        )
     except ProviderEmptyError as e:
         # Provider was reached and is known-empty (e.g. Modal env not yet
         # created). Always safe to silently skip in listing -- there is
@@ -491,10 +434,7 @@ def _construct_and_discover_for_provider(
             provider_name=str(provider_name),
         )
         error_info = ProviderErrorInfo.build_for_provider(e, provider_name)
-        with results_lock:
-            result.errors.append(error_info)
-        if params.on_error:
-            params.on_error(error_info)
+        params.error_emitter(error_info)
         return
 
     with providers_lock:
@@ -507,7 +447,6 @@ def _construct_and_discover_all_providers(
     mngr_ctx: MngrContext,
     provider_names: tuple[str, ...] | None,
     params: _ListAgentsParams,
-    result: ListResult,
     results_lock: Lock,
     reset_caches: bool,
 ) -> tuple[dict[DiscoveredHost, list[DiscoveredAgent]], list[ProviderInstanceInterface]]:
@@ -531,7 +470,6 @@ def _construct_and_discover_all_providers(
                     name,
                     mngr_ctx,
                     params,
-                    result,
                     results_lock,
                     reset_caches,
                     agents_by_host,
@@ -562,7 +500,6 @@ def _list_agents_batch(
         mngr_ctx=mngr_ctx,
         provider_names=provider_names,
         params=params,
-        result=result,
         results_lock=results_lock,
         reset_caches=reset_caches,
     )
@@ -584,10 +521,7 @@ def _list_agents_batch(
                 if params.error_behavior == ErrorBehavior.ABORT:
                     raise exception
                 error_info = ProviderErrorInfo.build_for_provider(exception, host_ref.provider_name)
-                with results_lock:
-                    result.errors.append(error_info)
-                if params.on_error:
-                    params.on_error(error_info)
+                params.error_emitter(error_info)
                 continue
 
             futures.append(
@@ -666,7 +600,9 @@ def _construct_discover_and_emit_for_provider(
             provider.reset_caches()
 
         # Phase 1: list hosts and get agent refs
-        provider_results = provider.discover_hosts_and_agents(cg=cg, include_destroyed=True)
+        provider_results = provider.discover_hosts_and_agents(
+            cg=cg, include_destroyed=True, on_error=params.error_emitter
+        )
 
         # Warn if any host names are duplicated within this provider
         warn_on_duplicate_host_names(provider_results)
@@ -718,18 +654,13 @@ def _construct_discover_and_emit_for_provider(
             provider_name=str(provider_name),
         )
         error_info = ProviderErrorInfo.build_for_provider(e, provider_name)
-        with results_lock:
-            result.errors.append(error_info)
-        if params.on_error:
-            params.on_error(error_info)
+        params.error_emitter(error_info)
 
 
 def _handle_listing_error(
     source: DiscoveredAgent | DiscoveredHost,
     exception: BaseException,
     params: _ListAgentsParams,
-    result: ListResult,
-    results_lock: Lock,
 ) -> None:
     """Handle an error during detail collection for an agent or host."""
     if params.error_behavior == ErrorBehavior.ABORT:
@@ -738,10 +669,7 @@ def _handle_listing_error(
         error_info = AgentErrorInfo.build_for_agent(exception, source.agent_id)
     else:
         error_info = HostErrorInfo.build_for_host(exception, source.host_id)
-    with results_lock:
-        result.errors.append(error_info)
-    if params.on_error:
-        params.on_error(error_info)
+    params.error_emitter(error_info)
 
 
 def _collect_and_emit_details_for_host(
@@ -757,7 +685,7 @@ def _collect_and_emit_details_for_host(
         agent_refs,
         field_generators=params.field_generators,
         offline_field_generators=params.offline_field_generators,
-        on_error=lambda source, exc: _handle_listing_error(source, exc, params, result, results_lock),
+        on_error=lambda source, exc: _handle_listing_error(source, exc, params),
     )
     for agent_details in agent_details_list:
         # Apply CEL filters if provided
@@ -807,10 +735,7 @@ def _process_host_with_error_handling(
             provider_name=str(provider.name),
         )
         error_info = HostErrorInfo.build_for_host(e, host_ref.host_id)
-        with results_lock:
-            result.errors.append(error_info)
-        if params.on_error:
-            params.on_error(error_info)
+        params.error_emitter(error_info)
 
 
 @pure

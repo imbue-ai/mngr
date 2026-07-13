@@ -24,6 +24,7 @@ from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import validate_and_create_discovered_agent
 from imbue.mngr.interfaces.cleanup_failures import collecting_cleanup_failures
+from imbue.mngr.interfaces.data_types import ErrorInfo
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OuterHostInterface
@@ -1017,6 +1018,7 @@ class OfflineCapableVpsProvider(VpsProvider):
         self,
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
+        on_error: Callable[[ErrorInfo], None] | None = None,
     ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
         """Augment the SSH-based base discovery with STOPPED instances it cannot reach.
 
@@ -1037,7 +1039,7 @@ class OfflineCapableVpsProvider(VpsProvider):
         list`` does no extra per-instance work and a running-but-transiently-
         unreachable instance is not misreported as STOPPED.
         """
-        result = super().discover_hosts_and_agents(cg, include_destroyed=include_destroyed)
+        result = super().discover_hosts_and_agents(cg, include_destroyed=include_destroyed, on_error=on_error)
         online_host_ids = {ref.host_id for ref in result}
         for instance in self._list_instances_cached():
             try:

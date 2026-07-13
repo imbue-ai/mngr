@@ -53,9 +53,11 @@ from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.data_types import CpuResources
+from imbue.mngr.interfaces.data_types import ErrorInfo
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
+from imbue.mngr.interfaces.data_types import ProviderErrorInfo
 from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import SnapshotRecord
@@ -1608,6 +1610,7 @@ class VpsProvider(BaseProviderInstance):
         self,
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
+        on_error: Callable[[ErrorInfo], None] | None = None,
     ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
         """Load hosts and agent references from each VPS, reading agents live.
 
@@ -1619,7 +1622,7 @@ class VpsProvider(BaseProviderInstance):
         placement's running state, so no separate inspect round-trip is needed.
         """
         with log_span("VPS discover_hosts_and_agents for provider={}", self.name):
-            discovery = self._discover_host_records_with_agents()
+            discovery = self._discover_host_records_with_agents(on_error=on_error)
         agent_data_by_host_id = discovery.live_agent_data_by_host_id
 
         result: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
@@ -1738,6 +1741,7 @@ class VpsProvider(BaseProviderInstance):
     def _read_records_from_vps(
         self,
         vps_ip: str,
+        on_error: Callable[[ErrorInfo], None] | None = None,
     ) -> _VpsDiscoveryData:
         """Read the (single) host record + live agent data from one VPS.
 
@@ -1816,9 +1820,14 @@ class VpsProvider(BaseProviderInstance):
                 )
             else:
                 logger.warning("Failed to read records from VPS {}: {}", vps_ip, e)
+            if on_error is not None:
+                on_error(ProviderErrorInfo.build_for_provider(e, self.name))
             return _VpsDiscoveryData(records=tuple(cached_records))
 
-    def _discover_host_records_with_agents(self) -> _VpsDiscoveryData:
+    def _discover_host_records_with_agents(
+        self,
+        on_error: Callable[[ErrorInfo], None] | None = None,
+    ) -> _VpsDiscoveryData:
         """Discover host records and live agent data from all VPSes for this provider.
 
         Calls ``_list_provider_vps_hostnames`` to enumerate VPSes
@@ -1845,7 +1854,7 @@ class VpsProvider(BaseProviderInstance):
                     name=f"{cg_name}_read_records",
                     max_workers=min(len(vps_ips), 32),
                 ) as executor:
-                    futures = [executor.submit(self._read_records_from_vps, ip) for ip in vps_ips]
+                    futures = [executor.submit(self._read_records_from_vps, ip, on_error) for ip in vps_ips]
 
                 for future in futures:
                     vps_data = future.result()

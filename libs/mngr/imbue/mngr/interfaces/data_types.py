@@ -23,7 +23,9 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.primitives import NonNegativeInt
 from imbue.mngr.errors import InvalidRelativePathError
+from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ParseSpecError
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentId
@@ -191,6 +193,88 @@ class CommandResult(FrozenModel):
     stdout: str = Field(description="Standard output from the command")
     stderr: str = Field(description="Standard error from the command")
     success: bool = Field(description="True if the command succeeded (had an expected exit code)")
+
+
+class ErrorInfo(FrozenModel):
+    """Information about an error encountered during listing.
+
+    Preserves the exception type and message instead of converting to a string immediately.
+    """
+
+    exception_type: str = Field(description="The type name of the exception (e.g., 'RuntimeError')")
+    message: str = Field(description="The error message")
+    # True when the underlying exception is a ProviderUnavailableError (which now
+    # includes ProviderNotAuthorizedError). Lets the CLI pick the granular
+    # provider-inaccessible exit code without re-parsing the message or type name.
+    is_provider_inaccessible: bool = Field(
+        default=False,
+        description="Whether this error means a provider was unreachable or unauthenticated",
+    )
+    # Verbose, multi-line remediation guidance (from MngrError.user_help_text), if any.
+    help_text: str | None = Field(default=None, description="Verbose remediation guidance for the user")
+
+    @classmethod
+    def build(cls, exception: BaseException) -> "ErrorInfo":
+        """Build an ErrorInfo from an exception."""
+        return cls(
+            exception_type=type(exception).__name__,
+            message=str(exception),
+            is_provider_inaccessible=isinstance(exception, ProviderUnavailableError),
+            help_text=exception.user_help_text if isinstance(exception, MngrError) else None,
+        )
+
+
+class ProviderErrorInfo(ErrorInfo):
+    """Error information with provider context."""
+
+    provider_name: ProviderInstanceName = Field(description="Name of the provider where the error occurred")
+    # Concise reason/remediation lifted from ProviderUnavailableError so callers can
+    # render a consistent one-line summary; None for non-provider-unavailable failures.
+    short_reason: str | None = Field(default=None, description="Concise reason the provider is unavailable")
+    short_remediation: str | None = Field(default=None, description="Concise next step the user can take")
+
+    @classmethod
+    def build_for_provider(cls, exception: BaseException, provider_name: ProviderInstanceName) -> "ProviderErrorInfo":
+        """Build a ProviderErrorInfo from an exception and provider name."""
+        return cls(
+            exception_type=type(exception).__name__,
+            message=str(exception),
+            provider_name=provider_name,
+            is_provider_inaccessible=isinstance(exception, ProviderUnavailableError),
+            help_text=exception.user_help_text if isinstance(exception, MngrError) else None,
+            short_reason=exception.short_reason if isinstance(exception, ProviderUnavailableError) else None,
+            short_remediation=exception.short_remediation if isinstance(exception, ProviderUnavailableError) else None,
+        )
+
+
+class HostErrorInfo(ErrorInfo):
+    """Error information with host context."""
+
+    host_id: HostId = Field(description="ID of the host where the error occurred")
+
+    @classmethod
+    def build_for_host(cls, exception: BaseException, host_id: HostId) -> "HostErrorInfo":
+        """Build a HostErrorInfo from an exception and host ID."""
+        return cls(
+            exception_type=type(exception).__name__,
+            message=str(exception),
+            host_id=host_id,
+        )
+
+
+class AgentErrorInfo(ErrorInfo):
+    """Error information with agent context."""
+
+    agent_id: AgentId = Field(description="ID of the agent where the error occurred")
+
+    @classmethod
+    def build_for_agent(cls, exception: BaseException, agent_id: AgentId) -> "AgentErrorInfo":
+        """Build an AgentErrorInfo from an exception and agent ID."""
+        return cls(
+            exception_type=type(exception).__name__,
+            message=str(exception),
+            agent_id=agent_id,
+        )
 
 
 class CleanupFailureCategory(UpperCaseStrEnum):

@@ -2,6 +2,7 @@
 
 import shutil
 import subprocess
+from collections.abc import Callable
 from collections.abc import Iterator
 from collections.abc import Mapping
 from contextlib import contextmanager
@@ -17,12 +18,16 @@ from pydantic import SecretStr
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import HostAuthenticationError
+from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import CommandResult
+from imbue.mngr.interfaces.data_types import ErrorInfo
+from imbue.mngr.interfaces.data_types import HostErrorInfo
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -541,7 +546,10 @@ class _HostSshInfoProvider(ImbueCloudProvider):
         return Path("/tmp/imbue-cloud-test-keys/ssh_key"), Path("/tmp/imbue-cloud-test-keys/ssh_key.pub")
 
     def discover_hosts_and_agents(
-        self, cg: ConcurrencyGroup, include_destroyed: bool = False
+        self,
+        cg: ConcurrencyGroup,
+        include_destroyed: bool = False,
+        on_error: Callable[[ErrorInfo], None] | None = None,
     ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
         assert self._discovered_host is not None
         return {self._discovered_host: []}
@@ -590,7 +598,11 @@ class _CannedListingProvider(ImbueCloudProvider):
     def _list_leased_hosts_cached(self) -> list[LeasedHostInfo]:
         return [self._lease] if self._lease is not None else []
 
-    def _collect_listing_raw_via_outer(self, lease: LeasedHostInfo) -> tuple[dict[str, Any] | None, str | None, bool]:
+    def _collect_listing_raw_via_outer(
+        self,
+        lease: LeasedHostInfo,
+        on_error: Callable[[ErrorInfo], None] | None = None,
+    ) -> tuple[dict[str, Any] | None, str | None, bool]:
         assert self._raw is not None
         return dict(self._raw), None, False
 
@@ -766,3 +778,102 @@ def test_fast_path_rejects_image_swap_and_names_only_the_image(temp_mngr_ctx: Mn
     assert "ghcr.io/example/custom:latest" in message
     assert "start args" not in message
     assert not provider._did_reach_fast_path
+
+
+# -- _collect_listing_raw_via_outer on_error tests --
+#
+# The catch site converts per-host outer-SSH failures (auth, connection,
+# non-zero listing script) into HostErrorInfo entries so `mngr list` exits
+# 1 instead of silently returning partial results. Tests inject the failure
+# at ``_ensure_outer_host_key_known`` which runs at the top of the try
+# block, so the raised exception is caught by the same handler that would
+# catch a real outer-SSH failure.
+
+
+class _OnErrorTestProvider(ImbueCloudProvider):
+    """Provider stub that injects a failure at the start of the outer-SSH path.
+
+    ``_ensure_outer_host_key_known`` is the first side-effecting call inside
+    ``_collect_listing_raw_via_outer``'s try block; raising here exercises
+    the same ``except HostAuthenticationError`` / ``except MngrError`` arms
+    that a real outer-SSH failure would hit.
+    """
+
+    _fail_with: Exception | None = None
+
+    def _ensure_outer_host_key_known(self, lease: LeasedHostInfo) -> None:
+        if self._fail_with is not None:
+            raise self._fail_with
+
+
+def test_collect_listing_raw_emits_host_error_info_on_auth_failure(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Outer-SSH authentication failure surfaces a HostErrorInfo with the host_id."""
+    host_id = HostId.generate()
+    lease = _make_lease(host_id)
+    provider = _OnErrorTestProvider.model_construct(
+        name=ProviderInstanceName("imbue-cloud-test"),
+        host_dir=Path("/tmp/imbue-cloud-test-host-dir"),
+        mngr_ctx=temp_mngr_ctx,
+        _fail_with=HostAuthenticationError("key rejected"),
+    )
+    captured: list[ErrorInfo] = []
+
+    raw, outer_error, is_auth_failure = provider._collect_listing_raw_via_outer(lease, captured.append)
+
+    assert raw is None
+    assert is_auth_failure is True
+    assert outer_error is not None and "authentication failed" in outer_error
+    assert len(captured) == 1
+    error = captured[0]
+    assert isinstance(error, HostErrorInfo)
+    assert error.host_id == host_id
+    assert error.exception_type == "HostAuthenticationError"
+    assert "key rejected" in error.message
+
+
+def test_collect_listing_raw_emits_host_error_info_on_connection_failure(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Outer-SSH unreachable surfaces a HostErrorInfo and marks is_auth_failure False."""
+    host_id = HostId.generate()
+    lease = _make_lease(host_id)
+    provider = _OnErrorTestProvider.model_construct(
+        name=ProviderInstanceName("imbue-cloud-test"),
+        host_dir=Path("/tmp/imbue-cloud-test-host-dir"),
+        mngr_ctx=temp_mngr_ctx,
+        _fail_with=HostConnectionError("network down"),
+    )
+    captured: list[ErrorInfo] = []
+
+    raw, outer_error, is_auth_failure = provider._collect_listing_raw_via_outer(lease, captured.append)
+
+    assert raw is None
+    assert is_auth_failure is False
+    assert outer_error is not None and "unreachable" in outer_error
+    assert len(captured) == 1
+    error = captured[0]
+    assert isinstance(error, HostErrorInfo)
+    assert error.host_id == host_id
+    assert error.exception_type == "HostConnectionError"
+
+
+def test_collect_listing_raw_with_none_on_error_swallows_failure(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """``on_error=None`` still returns the fallback tuple without raising."""
+    host_id = HostId.generate()
+    lease = _make_lease(host_id)
+    provider = _OnErrorTestProvider.model_construct(
+        name=ProviderInstanceName("imbue-cloud-test"),
+        host_dir=Path("/tmp/imbue-cloud-test-host-dir"),
+        mngr_ctx=temp_mngr_ctx,
+        _fail_with=HostConnectionError("network down"),
+    )
+
+    raw, outer_error, is_auth_failure = provider._collect_listing_raw_via_outer(lease, None)
+
+    assert raw is None
+    assert is_auth_failure is False
+    assert outer_error is not None
