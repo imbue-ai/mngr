@@ -16,6 +16,7 @@ from imbue.minds.bootstrap import is_minds_root_name_set_to_active_env
 from imbue.minds.bootstrap import resolve_minds_root_name
 from imbue.minds.build_info import resolve_git_sha
 from imbue.minds.build_info import resolve_release_id
+from imbue.mngr.utils.logging import SENTRY_IGNORED_STDLIB_LOGGER_PATTERNS
 from imbue.mngr_latchkey.sentry import ForwardSentryConsent
 from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_CONSENT_FILE_ENV_VAR
 from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_DSN_ENV_VAR
@@ -210,4 +211,8 @@ def setup_sentry(
         is_error_reporting_enabled=is_error_reporting_enabled,
         is_log_inclusion_enabled=is_log_inclusion_enabled,
         s3_attachment_bucket=_s3_attachment_bucket_for_environment(environment),
+        # paramiko/pyinfra log handled SSH connection-failure noise at ERROR via stdlib logging; the
+        # minds backend brokers cross-workspace reverse tunnels through the same paramiko machinery,
+        # so ignore those loggers to keep Sentry from flooding on already-handled failures.
+        ignored_loggers=SENTRY_IGNORED_STDLIB_LOGGER_PATTERNS,
     )
