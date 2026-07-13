@@ -173,9 +173,28 @@ def _write_sentinel_in_container(container_name: str, content: str) -> None:
     assert result.returncode == 0, f"Could not write the sentinel: {result.stderr}"
 
 
+def _kill_processes_referencing(unique_marker: str) -> None:
+    """Kill host-side processes whose command line names this test's private root.
+
+    A lost machine loses its processes too: stale ``mngr observe``/tmux
+    helpers from the pre-wipe app would otherwise survive holding paths under
+    the deleted root. The marker is the per-test random root name, so every
+    match is unambiguously ours; PIDs are collected first and killed exactly
+    (never a broad pkill pattern).
+    """
+    result = subprocess.run(["pgrep", "-af", unique_marker], capture_output=True, text=True, timeout=30)
+    for line in result.stdout.splitlines():
+        pid_text, _, command = line.partition(" ")
+        if not pid_text.isdigit() or unique_marker not in command:
+            continue
+        logger.info("Killing stale process {} from the wiped install: {}", pid_text, command[:160])
+        subprocess.run(["kill", pid_text], capture_output=True, text=True, timeout=10)
+
+
 def _wipe_local_install(runtime: _SyncE2ERuntime) -> None:
-    """Simulate total machine loss: no minds data, no mngr host dir, no containers."""
+    """Simulate total machine loss: no minds data, no mngr host dir, no processes, no containers."""
     logger.info("Wiping local install: {} and containers with prefix {}", runtime.data_root, runtime.mngr_prefix)
+    _kill_processes_referencing(runtime.root_name)
     shutil.rmtree(runtime.data_root, ignore_errors=True)
     container_ids = _run_docker(["ps", "-aq", "--filter", f"name={runtime.mngr_prefix}"]).split()
     if container_ids:
@@ -428,10 +447,27 @@ def _wait_for_backed_up_badge(page: Page, origin: str, agent_id: str) -> None:
         badge = _landing_backup_badge_text(page, agent_id)
         return True if badge is not None and badge.startswith("Backed up") else None
 
-    _wait_until(
-        f"the landing badge to report a completed backup for {agent_id}", _FIRST_BACKUP_TIMEOUT_SECONDS, backed_up
-    )
+    try:
+        _wait_until(
+            f"the landing badge to report a completed backup for {agent_id}",
+            _FIRST_BACKUP_TIMEOUT_SECONDS,
+            backed_up,
+        )
+    except AssertionError as e:
+        raise AssertionError(f"{e}; {_landing_state_snapshot(page)}") from None
     logger.info("Landing badge reports a completed backup for {}", agent_id)
+
+
+def _landing_state_snapshot(page: Page) -> str:
+    """Best-effort description of what the landing page currently shows (for failures)."""
+    try:
+        body_text = " ".join(page.inner_text("body").split())[:500]
+        agent_ids = page.eval_on_selector_all(
+            "[data-agent-id]", "els => els.map(e => e.getAttribute('data-agent-id'))"
+        )
+        return f"landing cards={agent_ids} body={body_text!r}"
+    except PlaywrightError as e:
+        return f"(snapshot unavailable: {e})"
 
 
 def _wait_for_unlock_banner(page: Page, origin: str) -> None:
@@ -439,7 +475,12 @@ def _wait_for_unlock_banner(page: Page, origin: str) -> None:
         page.goto(f"{origin}/", wait_until="domcontentloaded")
         return True if page.query_selector("#sync-unlock-banner") is not None else None
 
-    _wait_until("the sync unlock banner to appear on the landing page", _UNLOCK_BANNER_TIMEOUT_SECONDS, banner_present)
+    try:
+        _wait_until(
+            "the sync unlock banner to appear on the landing page", _UNLOCK_BANNER_TIMEOUT_SECONDS, banner_present
+        )
+    except AssertionError as e:
+        raise AssertionError(f"{e}; {_landing_state_snapshot(page)}") from None
 
 
 def _unlock_via_banner(page: Page, origin: str, password: str, expect_success: bool = True) -> None:
@@ -471,7 +512,10 @@ def _assert_remote_row_visible(page: Page, origin: str, agent_id: str) -> None:
         remove_button = card.query_selector("[data-remove-host-id]")
         return True if remove_button is not None else None
 
-    _wait_until(f"a remote-device landing row for {agent_id}", 120, remote_row)
+    try:
+        _wait_until(f"a remote-device landing row for {agent_id}", 120, remote_row)
+    except AssertionError as e:
+        raise AssertionError(f"{e}; {_landing_state_snapshot(page)}") from None
 
 
 def _download_backup_zip(page: Page, origin: str, agent_id: str, dest_dir: Path) -> Path:

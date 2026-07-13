@@ -194,6 +194,7 @@ def test_scheduler_pass_converts_legacy_state_and_tombstones_absent_rows(tmp_pat
     agent_id = AgentId.generate()
     host_id = HostId.generate()
     (paths.data_dir / "workspace_associations.json").write_text(json.dumps({_USER_ID: [str(agent_id)]}))
+    (paths.data_dir / "backup_password").write_text("legacy-pass\n")
     resolver = _resolver_with_workspace(agent_id, host_id, "legacy-ws")
     scheduler = WorkspaceSyncScheduler(record_store=store, session_store=session, resolver=resolver)
 
@@ -203,6 +204,9 @@ def test_scheduler_pass_converts_legacy_state_and_tombstones_absent_rows(tmp_pat
     assert store.associations_view() == {_USER_ID: [str(agent_id)]}
     assert not (paths.data_dir / "workspace_associations.json").exists()
     assert str(host_id) in cli.sync_records_by_email[_EMAIL]
+    # The carried-over legacy password's bundle must reach the connector too:
+    # without it no other device can ever unlock the synced secrets.
+    assert _EMAIL in cli.sync_bundle_by_email
 
     # The workspace disappears locally (definitively absent) -> tombstoned.
     empty_resolver = make_resolver_with_data(agents_json=json.dumps({"agents": []}))

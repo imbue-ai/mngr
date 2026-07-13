@@ -222,6 +222,11 @@ class WorkspaceRecordStore(MutableModel):
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _records_by_user_id: dict[str, dict[str, ReplicaRecord]] = PrivateAttr(default_factory=dict)
     _is_loaded: bool = PrivateAttr(default=False)
+    # Accounts whose server-side key bundle presence was confirmed this
+    # process run (see _ensure_bundle_uploaded). In-memory on purpose: one
+    # redundant GET per account per app launch is cheap, and no on-disk
+    # marker can go stale.
+    _bundle_confirmed_user_ids: set[str] = PrivateAttr(default_factory=set)
 
     # -- Replica persistence -------------------------------------------------
 
@@ -736,6 +741,7 @@ class WorkspaceRecordStore(MutableModel):
             legacy = self.read_legacy_associations()
             is_legacy_fully_converted = True
             for user_id, account_email in accounts.items():
+                self._ensure_bundle_uploaded(user_id, account_email)
                 self.pull(user_id, account_email)
                 for agent_id in legacy.get(user_id, []):
                     if self.find_active_record(agent_id) is None:
@@ -766,6 +772,32 @@ class WorkspaceRecordStore(MutableModel):
                 )
             if legacy and accounts and is_legacy_fully_converted:
                 self._retire_legacy_associations()
+
+    def _ensure_bundle_uploaded(self, user_id: str, account_email: str) -> None:
+        """Upload this device's key-bundle mirror when the server has none.
+
+        The settings password-change flow pushes bundles directly, but the
+        legacy one-shot conversion (and any crash between wrapping and
+        pushing) can leave a device holding a wrapped key the connector never
+        saw -- then no other device can ever unlock the synced secrets. Heal
+        that here: when a mirror exists and the server has NO bundle, push
+        the mirror. A server bundle that already exists always wins (it may
+        be newer, e.g. a password changed on another device while this one
+        was offline), so this can never clobber a rewrap.
+        """
+        if user_id in self._bundle_confirmed_user_ids or self.cli is None:
+            return
+        mirror = dek_store.read_bundle_mirror(self.paths, user_id)
+        if mirror is None:
+            return
+        try:
+            if self.cli.sync_bundle_pull(account_email) is None:
+                self.cli.sync_bundle_push(account_email, mirror)
+                logger.info("Uploaded the missing key bundle for account {}", user_id[:8])
+        except ImbueCloudCliError as e:
+            logger.warning("Could not verify/upload the key bundle for {}: {}", user_id[:8], e)
+            return
+        self._bundle_confirmed_user_ids.add(user_id)
 
     def _is_definitively_absent_from_discovery(self, agent_id: str, resolver: BackendResolverInterface) -> bool:
         """Whether a legacy-association workspace is provably gone from this device.
