@@ -14,4 +14,6 @@ Trusted local pages in the desktop client now render the app titlebar directly, 
 
 - Added a defense-in-depth guard so the content view can never navigate to a trusted minds page: an in-page attempt to load a bare backend-origin URL there is blocked (trusted pages only ever render on the chrome surface).
 
+- Opening a workspace from a trusted local page now always routes through the desktop shell so the workspace lands on the (caged) content surface: clicking a workspace row on the Landing page and the redirect when a new workspace finishes creating hand the `/goto/<agent>/` URL to the shell's navigate-content bridge (which also focuses an existing window already on that workspace) instead of navigating the page's own frame. Previously, because these pages now render on the chrome surface, that frame navigation loaded the workspace's (untrusted) agent content into the trusted chrome view. Added the symmetric guard so the chrome view can never navigate to agent content, mirroring the content-view guard above.
+
 - Simplified the desktop auth-cookie handling: sign-in now happens entirely on the trusted default session (login page + sign-in modal on the chrome/modal surfaces), so the old content-partition-to-default `minds_session` watcher was removed; the authenticated cookie is still pushed to the content partition so `/goto` forwarding stays authenticated.

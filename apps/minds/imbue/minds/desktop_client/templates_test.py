@@ -40,6 +40,11 @@ from imbue.mngr.primitives import AgentId
 # styleguide cross-checks these) plus the component CSS; compiled to app.min.css.
 _TOKENS_CSS_PATH = Path(_templates_module.__file__).resolve().parent / "static" / "app.css"
 
+# The creating page's client script; drives the progress bar and, on completion,
+# opens the ready workspace. Read directly so a regression test can assert it
+# routes the workspace open through the shell bridge, not a raw frame navigation.
+_CREATING_JS_PATH = Path(_templates_module.__file__).resolve().parent / "static" / "creating.js"
+
 _AGENT_A: AgentId = AgentId("agent-00000000000000000000000000000001")
 _AGENT_B: AgentId = AgentId("agent-00000000000000000000000000000002")
 
@@ -73,6 +78,36 @@ def test_render_landing_page_has_open_in_new_window_button_before_settings() -> 
     assert '<path d="M12.9331 10.3336' in html
     # It sits before the settings button within the row.
     assert html.index("window.landingOpenInNewWindow") < html.index(f"/workspace/{_AGENT_A}/settings")
+
+
+def test_landing_row_click_opens_workspace_via_shell_bridge_not_a_frame_navigation() -> None:
+    # Security regression: Landing is a trusted local page that renders in the
+    # chrome WebContentsView. Opening a workspace must hand the /goto/<agent>/ URL
+    # to the window.minds navigate-content bridge (which routes it to the caged
+    # content view and de-dupes to an existing window), NOT navigate the chrome
+    # view's own frame to it -- that would load untrusted agent content in the
+    # trusted chrome view (full window.minds bridge, default session). Only the
+    # plain-browser fallback (no window.minds) does a full-page navigation.
+    html = render_landing_page(accessible_agent_ids=(_AGENT_A,))
+    assert "window.minds.navigateContent(ret)" in html
+    # The bridge is the PRIMARY path: the workspace-open branch routes through the
+    # shell before the raw window.location fallback (which now survives only for a
+    # shell-less plain browser, in the guarded else). Asserting the else-if here
+    # locks in that the chrome-surface frame is never navigated to the agent URL.
+    assert "else if (window.minds && window.minds.navigateContent)" in html
+
+
+def test_creating_js_opens_ready_workspace_via_shell_bridge_not_a_frame_navigation() -> None:
+    # Same security invariant for the Creating page (also a trusted chrome-surface
+    # local page): on completion it opens the ready workspace's /goto/<agent>/ URL
+    # through the window.minds navigate-content bridge (-> caged content view), not
+    # by navigating its own (chrome) frame there. The browser fallback keeps the
+    # full-page window.location.href for a shell-less environment.
+    js = _CREATING_JS_PATH.read_text()
+    assert "window.minds.navigateContent(redirectUrl)" in js
+    # The completion path must not unconditionally frame-navigate to the agent URL;
+    # window.location.href = redirectUrl survives only inside the no-shell else.
+    assert "if (window.minds && window.minds.navigateContent)" in js
 
 
 def test_render_workspace_settings_data_agent_id_interpolates() -> None:

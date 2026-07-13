@@ -75,7 +75,14 @@
         // back to the loader instead of dispatching the restart.
         window.location = '/agents/' + encodeURIComponent(agentId)
           + '/recovery?return_to=' + encodeURIComponent(ret) + '&intent=restart';
+      } else if (window.minds && window.minds.navigateContent) {
+        // Trusted local page on the chrome surface: hand the workspace (agent)
+        // URL to the shell bridge so it opens in the caged content view (and
+        // focuses an existing window already on this workspace) instead of
+        // navigating the chrome view's OWN frame into untrusted agent content.
+        window.minds.navigateContent(ret);
       } else {
+        // Plain browser (no shell): full-page navigate to the workspace URL.
         window.location = ret;
       }
     };

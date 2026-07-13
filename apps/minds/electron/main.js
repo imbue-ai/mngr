@@ -623,6 +623,22 @@ function createBundle() {
   chromeView.webContents.on('did-navigate', (_e, url) => onChromeNavigate(url));
   chromeView.webContents.on('did-navigate-in-page', (_e, url) => onChromeNavigate(url));
 
+  // Defense in depth: the chrome view hosts ONLY trusted local pages served from
+  // the backend origin. It must never navigate to untrusted agent content -- an
+  // ``agent-<id>.localhost`` subdomain or the ``/goto/<id>/`` auth bridge -- which
+  // belongs on the content view (caged relay preload, workspace-content session).
+  // The trusted flow always hands agent URLs to navigateBundle via the
+  // navigate-content bridge (sidebar rows, Landing rows, the create-complete
+  // redirect), so a chrome-view attempt to reach one is a bug or a compromised
+  // trusted page; block it. Mirrors the content view's will-navigate guard, which
+  // blocks the opposite direction (trusted pages off the untrusted surface).
+  chromeView.webContents.on('will-navigate', (event, url) => {
+    if (selectSurfaceForUrl(url) === SURFACE_CONTENT) {
+      event.preventDefault();
+      console.warn('[chrome-guard] Blocked an agent-content navigation in the chrome view:', url);
+    }
+  });
+
   wireContentViewEvents(bundle, contentView);
   registerShortcutsFor(bundle, chromeView.webContents);
   registerShortcutsFor(bundle, contentView.webContents);
