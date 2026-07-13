@@ -912,6 +912,11 @@ def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, i
     # default-HEALTHY for never-probed workspaces (e.g. a host offline since
     # before this process started), which silently dropped the cold-boot those
     # workspaces needed.
+    # The services tier (an in-place stop+start of the system-services agent)
+    # is NOT a no-op against a self-recovered interface; losing the veto leaves
+    # its narrow race window (evidence gathered seconds earlier, cost bounded
+    # to a brief interface blip) unguarded. Accepted deliberately: that tier is
+    # slated for removal.
     # Serialize with the backup operations: ``registry.start`` below replaces
     # the workspace's record, so a RUNNING backup update/configure must be
     # rejected here (its worker's terminal complete/fail would corrupt the
