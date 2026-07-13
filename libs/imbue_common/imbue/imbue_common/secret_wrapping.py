@@ -49,7 +49,7 @@ class WrongPasswordOrCorruptDataError(SecretWrappingError, ValueError):
 
 
 class MalformedCiphertextError(SecretWrappingError, ValueError):
-    """Raised when a ciphertext blob is too short to even contain a nonce and tag."""
+    """Raised when a ciphertext blob is too short to even contain a nonce."""
 
     ...
 
