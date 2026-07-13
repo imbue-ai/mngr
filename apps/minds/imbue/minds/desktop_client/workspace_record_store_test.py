@@ -337,6 +337,32 @@ def test_reconcile_tombstones_definitively_absent_local_rows(paths: WorkspacePat
     assert store.list_records(user_id)[0].state == RECORD_STATE_DESTROYED
 
 
+def test_reconcile_does_not_tombstone_unenriched_create_seed_rows(paths: WorkspacePaths) -> None:
+    """A create-path seed row (empty provider_kind) must survive a reconcile
+    that runs before discovery has seen the new workspace -- 'absent from
+    discovery' says nothing about a host discovery never enumerated."""
+    cli = make_fake_imbue_cloud_cli()
+    store = _make_store(paths, cli)
+    user_id = _user_id()
+    seed = ReplicaRecord(
+        host_id="host-just-created",
+        agent_id=_agent_id(),
+        display_name="brand new",
+        provider_kind="",
+        hosting_device_id="device-test-1",
+        device_label="test-laptop",
+    )
+    store.upsert_local_record(user_id, _EMAIL, seed)
+    # Discovery completed but has not caught up to the new workspace yet.
+    resolver = make_resolver_with_data(agents_json=json.dumps({"agents": []}))
+
+    store.reconcile({user_id: _EMAIL}, resolver)
+
+    records = store.list_records(user_id)
+    assert len(records) == 1
+    assert records[0].state == RECORD_STATE_ACTIVE
+
+
 def test_reconcile_does_not_tombstone_other_device_rows(paths: WorkspacePaths) -> None:
     cli = make_fake_imbue_cloud_cli()
     store = _make_store(paths, cli)

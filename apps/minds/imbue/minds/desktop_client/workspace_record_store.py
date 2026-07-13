@@ -763,7 +763,10 @@ class WorkspaceRecordStore(MutableModel):
         did not error this poll, and the workspace is not among the known ids
         (which still include DESTROYED-but-lingering hosts, so the provider's
         grace window is honored). Cloud rows are skipped -- their lifecycle is
-        driven by lease state, and any device may see them.
+        driven by lease state, and any device may see them. Rows with an empty
+        provider_kind are skipped too: those are create-path seeds discovery
+        has never enriched, so "absent from discovery" says nothing about the
+        host (the create just finished and the next poll hasn't seen it yet).
         """
         if not resolver.has_completed_initial_discovery():
             return
@@ -771,6 +774,8 @@ class WorkspaceRecordStore(MutableModel):
         errored_providers = {str(name) for name in resolver.get_provider_errors()}
         for record in self.list_records(user_id):
             if record.state != RECORD_STATE_ACTIVE or record.hosting_device_id != self.device_id:
+                continue
+            if not record.provider_kind:
                 continue
             if record.agent_id in known_ids or record.provider_kind in errored_providers:
                 continue
