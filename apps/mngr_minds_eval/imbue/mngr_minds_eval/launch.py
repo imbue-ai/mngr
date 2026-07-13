@@ -13,8 +13,10 @@ import secrets
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from imbue.mngr_minds_eval import minds_client
@@ -38,7 +40,31 @@ def _sh(*args: str) -> None:
     subprocess.run(args, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
 
 
-# create/poll and the HTTP helpers live in minds_client (shared with workspace + restore).
+class _Live:
+    """Compact per-case status table that redraws in place (one line per case), so parallel progress
+    stays a fixed-height block instead of scrolling. Plain lines when stdout is not a tty."""
+
+    def __init__(self, case_ids: list[str]):
+        self._rows = {cid: "queued" for cid in case_ids}
+        self._lock = threading.Lock()
+        self._tty = sys.stdout.isatty()
+        self._drawn = 0
+
+    def set(self, case_id: str, status: str) -> None:
+        with self._lock:
+            self._rows[case_id] = status
+            if not self._tty:
+                print("  {:<24} {}".format(case_id[:24], status), flush=True)
+                return
+            if self._drawn:
+                sys.stdout.write("\033[{}A".format(self._drawn))
+            for cid, st in self._rows.items():
+                sys.stdout.write("\033[K  {:<24} {}\n".format(cid[:24], st))
+            self._drawn = len(self._rows)
+            sys.stdout.flush()
+
+
+# create/poll and the HTTP helpers live in minds_client (shared with workspace).
 _api_base = minds_client.api_base
 _post_json = minds_client.post_json
 _get_json = minds_client.get_json
@@ -107,12 +133,16 @@ def _list_workspaces(port: str) -> list[dict]:
     return [w for w in listing.get("workspaces", []) if w.get("agent_id")]
 
 
-def _destroy_and_wait(port: str, agent_id: str, label: str, timeout: float = 600.0) -> bool:
-    """POST destroy and poll until done. Returns True on confirmed teardown. Each destroy removes
-    the Modal sandbox AND its host record from the environment, so the host name frees up."""
+def _destroy_and_wait(port: str, agent_id: str, label: str, timeout: float = 600.0, quiet: bool = False) -> bool:
+    """POST destroy and poll until done. Returns True on confirmed teardown. Each destroy removes the
+    Modal sandbox AND its host record from the environment, so the host name frees up."""
+    def _say(msg: str) -> None:
+        if not quiet:
+            print(msg, flush=True)
+
     status, body = _post_json("{}/api/v1/workspaces/{}/destroy".format(_api_base(port), agent_id), {})
     if status != 202:
-        print("  [ERR ] {}: {}".format(label, str(body)[:150]), flush=True)
+        _say("  [ERR ] {}: {}".format(label, str(body)[:150]))
         return False
     operation_id = body.get("operation_id", agent_id)
     deadline = time.time() + timeout
@@ -123,16 +153,16 @@ def _destroy_and_wait(port: str, agent_id: str, label: str, timeout: float = 600
             time.sleep(4)
             continue
         if info.get("is_done"):
-            print("  [OK  ] destroyed {}".format(label), flush=True)
+            _say("  [OK  ] destroyed {}".format(label))
             return True
         time.sleep(4)
-    print("  [WARN] {} did not confirm destroy in time".format(label), flush=True)
+    _say("  [WARN] {} did not confirm destroy in time".format(label))
     return False
 
 
-def destroy_existing_workspace(port: str, host_name: str) -> None:
+def destroy_existing_workspace(port: str, host_name: str, quiet: bool = False) -> None:
     """Idempotent create: if a workspace with this host name already exists (a re-run with the same
-    --name, or an interrupted prior run), destroy it first -- the name is registered in the Modal
+    name, or an interrupted prior run), destroy it first -- the name is registered in the Modal
     environment and survives box restarts, so only an actual destroy clears it."""
     try:
         existing = _list_workspaces(port)
@@ -140,13 +170,11 @@ def destroy_existing_workspace(port: str, host_name: str) -> None:
         return
     match = next((w for w in existing if (w.get("name") or "").lower() == host_name.lower()), None)
     if match is not None:
-        print("     host name in use -- destroying existing {}".format(host_name), flush=True)
-        _destroy_and_wait(port, match["agent_id"], host_name)
+        _destroy_and_wait(port, match["agent_id"], host_name, quiet=quiet)
 
 
 def destroy_all_workspaces(port: str) -> None:
-    """Clean slate: destroy every workspace the box currently sees (for a per-eval box, that is that
-    eval's Modal env)."""
+    """Clean slate: destroy every workspace the box currently sees -- i.e. the branch's Modal env."""
     try:
         workspaces = _list_workspaces(port)
     except (urllib.error.URLError, OSError) as exc:
@@ -179,7 +207,7 @@ def launch_batch(*, config: dict, anthropic_key: str, port: str, stamp: str) -> 
 
     # Store the user's config verbatim + the fields launch adds: created_at, the batch restic
     # password (we own it -- we drive restic ourselves), and the exact mngr SHA this box is built at
-    # (stamped into the box env), so `restore` rebuilds the exact same mngr.
+    # (stamped into the box env) as provenance of exactly which mngr this batch ran on.
     restic_password = secrets.token_urlsafe(24)
     s3_store.put_json(client, bucket, "{}/{}".format(batch, s3_store.BATCH_CONFIG_NAME), {
         **config, "created_at": stamp, "restic_password": restic_password,
@@ -189,13 +217,13 @@ def launch_batch(*, config: dict, anthropic_key: str, port: str, stamp: str) -> 
     CLONES_DIR.mkdir(parents=True, exist_ok=True)
     _ensure_base(fct_repo, fct_branch)
 
-    results = []
-    for index, case in enumerate(cases, 1):
+    # Prepare every clone first (git clone + vendor mngr + slot test_case_metadata.json). Local and
+    # fast; kept serial for simple output. Everything the in-sandbox worker needs is in the metadata
+    # file (S3 target, restic repo/password, scoped AWS creds) -- so the worker doesn't depend on
+    # minds' backup provisioning (which doesn't land a restic.env in the sandbox).
+    prepared = []
+    for case in cases:
         case_pref = s3_store.case_prefix(batch, eval_name, case["id"])
-        host_name = "EVAL-{}-CASE-{}".format(eval_name, case["id"])
-        # Everything the in-sandbox worker needs is in test_case_metadata.json (committed into the
-        # clone): the S3 target, the restic repo/password, and the scoped AWS creds -- so the worker
-        # does not depend on minds' backup provisioning (which doesn't land a restic.env in the box).
         case_config = {
             "eval_name": eval_name, "case_name": case["id"], "persona": case["persona"],
             "first_prompt": case["first_prompt"], "num_turns": num_turns,
@@ -206,22 +234,45 @@ def launch_batch(*, config: dict, anthropic_key: str, port: str, stamp: str) -> 
             "aws_secret_access_key": env["AWS_SECRET_ACCESS_KEY"],
             "aws_region": env.get("AWS_DEFAULT_REGION", "us-east-1"),
         }
-        print("\n  [{}/{}] {}".format(index, len(cases), host_name), flush=True)
-        destroy_existing_workspace(port, host_name)  # idempotent: re-run with the same name works
-        clone = _prepare_clone(case, case_config)
+        print("  preparing clone: {}".format(case["id"]), flush=True)
+        prepared.append((case, _prepare_clone(case, case_config)))
 
+    live = _Live([case["id"] for case, _ in prepared])
+
+    def _create(case: dict, clone: Path) -> dict:
+        cid = case["id"]
+        host_name = "EVAL-{}-CASE-{}".format(eval_name, cid)
+        live.set(cid, "clearing old name")
+        destroy_existing_workspace(port, host_name, quiet=True)  # idempotent: re-run with same name works
         try:
-            # backup_provider=configure_later: the worker drives restic itself from the metadata file.
             agent_id = workspace.create_workspace(
                 port=port, fct_link=str(clone), name=host_name,
                 ai_provider="api_key", anthropic_key=anthropic_key, backup_provider="configure_later",
-                quiet=True,
+                on_stage=lambda s: live.set(cid, s),
             )
-            results.append({"case": case["id"], "ok": True, "agent_id": agent_id})
-            print("     OK agent {}".format(agent_id), flush=True)
+            live.set(cid, "OK -- agent {}".format(agent_id))
+            return {"case": cid, "ok": True, "agent_id": agent_id}
         except minds_client.CreateError as exc:
-            results.append({"case": case["id"], "ok": False, "error": str(exc)})
-            print("     ERR {}".format(exc), flush=True)
+            live.set(cid, "ERR -- {}".format(str(exc)[:60]))
+            return {"case": cid, "ok": False, "error": str(exc)}
+
+    # Concurrent creates race ONLY on the one-time creation of the Modal env. If the env already has
+    # a workspace it exists, so we fan out all at once. Otherwise prime one solo (that create makes
+    # the env), then fan the rest.
+    try:
+        env_exists = len(_list_workspaces(port)) > 0
+    except (urllib.error.URLError, OSError):
+        env_exists = False
+    to_create = list(prepared)
+    results = []
+    if not env_exists:
+        print("\n>> new Modal env -- priming 1 workspace, then fanning:", flush=True)
+        results.append(_create(*to_create.pop(0)))
+    else:
+        print("\n>> creating {} workspace(s) in parallel:".format(len(to_create)), flush=True)
+    if to_create:
+        with ThreadPoolExecutor(max_workers=min(8, len(to_create))) as pool:
+            results.extend(pool.map(lambda pair: _create(*pair), to_create))
 
     ok = sum(1 for r in results if r.get("ok"))
     print("\n" + "=" * 66, flush=True)

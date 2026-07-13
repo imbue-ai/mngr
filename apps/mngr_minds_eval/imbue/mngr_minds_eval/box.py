@@ -14,6 +14,9 @@ from pathlib import Path
 APP_DIR = Path(__file__).resolve().parents[2]  # apps/mngr_minds_eval
 MNGR_REPO = "https://github.com/imbue-ai/mngr.git"
 AWS_ENV = Path.home() / ".minds-eval" / "aws.env"
+# One fixed Modal env for ALL eval workspaces (any branch/SHA), so clean has a single place to wipe.
+# The box stays versioned (minds-box-<branch>-<sha>); only the env is shared.
+MODAL_ENV_USER_ID = "evaluator"
 
 
 class BoxError(RuntimeError):
@@ -50,7 +53,7 @@ def port_of(container: str) -> str:
     return port
 
 
-def print_view_urls(container: str, *, wait: bool = True) -> None:
+def print_view_urls(container: str) -> None:
     """How to actually look at the workspaces: the box (Docker, on this machine) serves the Minds
     dashboard, and its mngr-forward proxy serves each Modal workspace's UI -- both on localhost.
     The proxy has its own auth, so the one-time login URL must be visited once per box. Never prints
@@ -64,7 +67,7 @@ def print_view_urls(container: str, *, wait: bool = True) -> None:
         return
     print("\n  dashboard:       http://localhost:{}".format(ui), flush=True)
     if forward:
-        login = _forward_login(container, int(forward), tries=20 if wait else 1)
+        login = _forward_login(container, int(forward))
         if login:
             print("  workspace login: {}".format(login), flush=True)
             print("                   ^ visit once, then click the workspace in the dashboard", flush=True)
@@ -82,32 +85,29 @@ def container_name(mngr_branch: str, ref: str) -> str:
     return "minds-box-{}-{}".format(_slug(mngr_branch), ref[:12])
 
 
-def find_running(mngr_branch: str) -> str:
-    """Any running box for this branch, at any SHA -- for ops that only need the branch's Modal env
-    (e.g. clean), so they reuse an existing box instead of building a fresh tip box. '' if none."""
-    prefix = "minds-box-{}-".format(_slug(mngr_branch))
-    out = _run(["docker", "ps", "--filter", "name={}".format(prefix), "--format", "{{.Names}}"]).stdout
+def find_any_running() -> str:
+    """Any running eval box (any branch/SHA). All boxes share the one Modal env, so clean can use any
+    of them instead of building a fresh box. '' if none."""
+    out = _run(["docker", "ps", "--filter", "name=minds-box-", "--format", "{{.Names}}"]).stdout
     for line in out.splitlines():
-        if line.startswith(prefix):
+        if line.startswith("minds-box-"):
             return line.strip()
     return ""
 
 
-def resolve(mngr_branch: str, pinned_ref: str = "") -> tuple[str, str]:
-    """(container, ref) for a branch. pinned_ref (a full SHA) restores the exact mngr; otherwise the
-    branch's current remote tip."""
-    ref = pinned_ref or _remote_tip(mngr_branch)
+def resolve(mngr_branch: str) -> tuple[str, str]:
+    """(container, ref) for a branch's current remote tip."""
+    ref = _remote_tip(mngr_branch)
     return container_name(mngr_branch, ref), ref
 
 
-def ensure(mngr_branch: str, pinned_ref: str = "", minds_env: str = "staging") -> str:
-    """Build + boot the box for (branch, SHA); return its container name.
+def ensure(mngr_branch: str, minds_env: str = "staging") -> str:
+    """Build + boot the box for the branch's current tip; return its container name.
 
     The container name encodes the SHA, so if it is already running it is exactly the right mngr --
-    reuse it, no staleness check. The Modal env is the branch alone (minds-<env>-<branch>): stable
-    across mngr updates so `clean`/`list` can find a branch's workspaces regardless of which SHA
-    built the box. pinned_ref restores an exact commit (used by restore)."""
-    container, ref = resolve(mngr_branch, pinned_ref)
+    reuse it, no staleness check. All boxes point workspaces at one shared Modal env
+    (minds-<env>-evaluator), so clean has a single place to wipe."""
+    container, ref = resolve(mngr_branch)
     if is_running(container):
         port = port_of(container)
         print(">> reusing box {} @ mngr {} (dashboard http://localhost:{})".format(container, ref[:12], port), flush=True)
@@ -122,7 +122,7 @@ def ensure(mngr_branch: str, pinned_ref: str = "", minds_env: str = "staging") -
 
     ui, forward = _free_port(), _free_port()
     tag = "minds-box:{}-{}".format(_slug(mngr_branch), ref[:12])
-    modal_env = _slug(mngr_branch)  # env = branch (stable); the SHA lives on the box, not the env
+    modal_env = MODAL_ENV_USER_ID  # one shared env for all eval workspaces (the box carries the SHA)
 
     print(">> building {} from mngr {}@{}".format(tag, mngr_branch, ref[:12]), flush=True)
     build = subprocess.run(
@@ -198,13 +198,3 @@ def _forward_login(container: str, forward: int, tries: int = 20) -> str:
         if attempt < tries - 1:
             time.sleep(2)
     return ""
-
-
-def login_url(container: str) -> str:
-    """Instant lookup of the box's current mngr-forward login URL (for the `login` subcommand)."""
-    if not is_running(container):
-        raise BoxError("box {} is not running".format(container))
-    forward = _run(["docker", "exec", container, "printenv", "MINDS_FORWARD_PORT"]).stdout.strip()
-    if not forward:
-        raise BoxError("box {} has no forward port".format(container))
-    return _forward_login(container, int(forward), tries=1)

@@ -12,12 +12,11 @@ stay on and there is nothing to poll.
 - **The box** — a local Docker container running headless Minds, named `minds-box-<branch>-<sha>`.
   It is the mngr isolation and the thing that talks to Modal + serves you the UI on localhost. The
   container name encodes the exact mngr SHA, so a running box of that name *is* that mngr — reuse is
-  idempotent and never stale. All commands key the box on `--mngr-branch` (restore pins the batch's
-  recorded SHA, so it rebuilds the exact mngr).
+  idempotent and never stale. All commands key the box on `--mngr-branch`.
 - **Workspaces** — always Modal sandboxes. Never run in the box.
-- **Modal env** — the branch alone (`minds-staging-<branch>`), stable across mngr updates so
-  `clean`/`list` find a branch's workspaces regardless of which SHA built the box. S3 (keyed by eval
-  name) is the real result store; a run's sandboxes are told apart by host name + the S3 batch.
+- **Modal env** — one shared env `minds-staging-evaluator` for ALL eval workspaces (any branch/SHA),
+  so `clean` has a single place to wipe. The box stays versioned; only the env is shared. S3 (keyed
+  by eval name) is the real result store; sandboxes are told apart by host name + the S3 batch.
 
 ## Setup
 
@@ -33,11 +32,8 @@ ANTHROPIC_API_KEY=sk-ant-... minds-evals launch --config sample-eval-config.json
 minds-evals list-batches
 minds-evals inspect web1_20260713-101500
 
-# restore a case's per-turn snapshot into a fresh Modal workspace (viewing; subscription auth)
-minds-evals restore web1_20260713-101500 --case todo-app --message 2
-
 # destroy a branch's Modal workspaces (clean slate)
-minds-evals clean-modal-workspaces --mngr-branch minds-eval
+minds-evals clean-modal-workspaces
 
 # utilities
 minds-evals box --mngr-branch minds-eval
@@ -45,7 +41,7 @@ minds-evals make-modal-workspace --mngr-branch minds-eval \
     --fct-link https://github.com/imbue-ai/default-workspace-template.git --fct-branch main
 ```
 
-`launch`/`restore`/`make-modal-workspace`/`clean-modal-workspaces` build/boot the box if needed and
+`launch`/`make-modal-workspace`/`clean-modal-workspaces` build/boot the box if needed and
 re-run themselves inside it. `list-batches`/`inspect` only read S3 and run wherever you are. After a
 box-using command, the dashboard + one-time workspace-login URL are printed (open the login URL once
 per box, then click the workspace in the dashboard).
@@ -76,8 +72,8 @@ worker). `fct_branch` must carry the worker or the sandbox boots but never self-
 | 2 .. N-1 | `restic backup /mngr --tag post_message_<k>`, then send `OKAY` |
 | N | upload the full transcript, mark `finished`, exit |
 
-Each wait writes `state.json` (`waits_done` / `num_turns` / `ongoing`|`finished`).
-So `turns: 3` yields exactly one snapshot, `post_message_1` (restore with `--message 1`).
+Each wait writes `state.json` (`waits_done` / `num_turns` / `ongoing`|`finished`). Snapshots are
+captured to S3 per turn; spinning one back up as a live workspace (restore) is not implemented yet.
 
 ## S3 layout
 
@@ -95,10 +91,9 @@ So `turns: 3` yields exactly one snapshot, `post_message_1` (restore with `--mes
 ```
 main.py            argparse dispatch; re-invokes itself inside the box for box-using commands
 box.py             Docker box lifecycle (build/boot minds-box-<branch>-<sha>, idempotent reuse)
-minds_client.py    the Minds create API (POST + poll) -- shared by launch/workspace/restore
+minds_client.py    the Minds create API (POST + poll) -- shared by launch/workspace
 launch.py          batch: prep clone (+ vendor mngr + slot test_case_metadata.json) and create per case
 workspace.py       create one Modal workspace (build_payload + create_workspace) -- the one create path
-restore.py         restic restore -> fresh Modal workspace -> seed /mngr agent state
 status.py          list-batches / inspect (S3 reads only)
 s3_store.py        S3 layout, creds file, batch/case prefixes
 docker/            Dockerfile + entrypoint.sh (boots headless Minds in the box)
@@ -112,6 +107,6 @@ docker/            Dockerfile + entrypoint.sh (boots headless Minds in the box)
   land a `restic.env` inside a Modal sandbox.
 - The eval worker lives on the FCT `minds-eval-autosend` branch and **no-ops unless
   `scripts/test_case_metadata.json` is present**, so normal workspaces on that branch are unaffected.
-- Deps (`node_modules`, `.venv`) are excluded from snapshots; a restored workspace reinstalls them
-  from the preserved lockfiles on first boot.
+- Deps (`node_modules`, `.venv`) are excluded from snapshots; a future restore reinstalls them from
+  the preserved lockfiles (they're captured but there is no restore command yet).
 - The sandbox timeout is 3h (set in the FCT template); a run self-terminates by then.

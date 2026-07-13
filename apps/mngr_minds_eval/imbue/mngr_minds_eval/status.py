@@ -12,7 +12,7 @@ def list_batches() -> None:
     if not batches:
         print("no eval batches in s3://{}".format(env["MINDS_EVAL_BUCKET"]))
         return
-    print("{:<40} {:>6}  {}".format("BATCH (pass this to inspect/restore)", "CASES", "CREATED"))
+    print("{:<40} {:>6}  {}".format("BATCH (pass this to inspect)", "CASES", "CREATED"))
     for batch in batches:
         config = s3_store.get_json(client, env["MINDS_EVAL_BUCKET"], "{}/{}".format(batch, s3_store.BATCH_CONFIG_NAME))
         _, stamp = s3_store.split_batch(batch)

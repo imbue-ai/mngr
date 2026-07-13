@@ -1,4 +1,4 @@
-"""Thin client for the box-local Minds create API. Shared by launch / workspace / restore so the
+"""Thin client for the box-local Minds create API. Shared by launch / workspace so the
 POST-then-poll workspace-creation logic lives in exactly one place."""
 
 from __future__ import annotations
