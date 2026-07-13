@@ -28,9 +28,6 @@
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       color: #E9ECD9;
       user-select: none;
-      /* Keep the strip draggable so the window can still be moved while the bar is
-         crashed; the Reload button opts out below. */
-      -webkit-app-region: drag;
     }
     .bar {
       /* Matches TITLEBAR_HEIGHT in main.js -- the only visible slice of this view.
@@ -43,6 +40,14 @@
       gap: 12px;
       padding: 0 16px;
       font-size: 13px;
+      /* Only the visible titlebar strip is draggable -- NOT the whole body. The
+         chrome view is a full-window underlay, and macOS unions -webkit-app-region
+         across all views in a window, so a body-wide drag region would turn the
+         entire window (including the content view's crash-page Reload button, when
+         both crash at once) into a drag surface and swallow its clicks. Scoping drag
+         to this 38px strip (which never overlaps the content view) keeps the window
+         movable without capturing clicks meant for the content view below. */
+      -webkit-app-region: drag;
     }
     .msg { opacity: 0.9; white-space: nowrap; }
     button {
