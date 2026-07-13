@@ -430,10 +430,10 @@ def test_ensure_latchkey_gateway_running_registers_supervisord_program_on_outer_
 def test_ensure_latchkey_gateway_running_writes_secrets_to_0600_tmpfs_files(tmp_path: Path) -> None:
     outer = _outer(CommandResult(stdout="", stderr="", success=True))
     _ensure_latchkey_gateway_running(outer, tmp_path, "shared-password")
-    # Secrets go in tmpfs (RAM), never on the persistent disk beside the
-    # encrypted credential store; the wrapper stays on the normal disk.
-    key_file = _written_by_path(outer, "/dev/shm/mngr-latchkey/gateway_encryption_key")
-    password_file = _written_by_path(outer, "/dev/shm/mngr-latchkey/gateway_listen_password")
+    # Secrets go in a RAM-backed dir under /run, never on the persistent disk
+    # beside the encrypted credential store; the wrapper stays on the normal disk.
+    key_file = _written_by_path(outer, "/run/mngr-latchkey/gateway_encryption_key")
+    password_file = _written_by_path(outer, "/run/mngr-latchkey/gateway_listen_password")
     run_file = _written_by_path(outer, "/root/.latchkey/gateway_run.sh")
     # The password file's content is the literal secret; it is never written to
     # a command (see the wrapper test above).
@@ -460,16 +460,37 @@ def test_ensure_latchkey_gateway_running_injects_local_encryption_key(
     os.chmod(key_path, 0o600)
     outer = _outer(CommandResult(stdout="", stderr="", success=True))
     _ensure_latchkey_gateway_running(outer, tmp_path, "shared-password")
-    key_file = _written_by_path(outer, "/dev/shm/mngr-latchkey/gateway_encryption_key")
+    key_file = _written_by_path(outer, "/run/mngr-latchkey/gateway_encryption_key")
     assert key_file.content == b"my-test-key-abc123"
     # The key never appears in any recorded command string.
     assert all("my-test-key-abc123" not in r.command for r in _stub(outer).recorded)
 
 
-def test_ensure_latchkey_gateway_running_raises_on_failure(tmp_path: Path) -> None:
-    outer = _outer(CommandResult(stdout="", stderr="supervisorctl: command not found", success=False))
-    with pytest.raises(RemoteGatewayError, match="reload supervisor"):
+def test_ensure_latchkey_gateway_running_verifies_secrets_dir_is_ram_backed(tmp_path: Path) -> None:
+    outer = _outer(CommandResult(stdout="", stderr="", success=True))
+    _ensure_latchkey_gateway_running(outer, tmp_path, "shared-password")
+    # Before writing the key, provisioning creates the /run secrets dir (0700)
+    # and asserts its filesystem is RAM-backed (tmpfs/ramfs), refusing to
+    # persist the key to disk otherwise.
+    guard_commands = [
+        r.command for r in _stub(outer).recorded if "stat -f -c %T" in r.command and "/run/mngr-latchkey" in r.command
+    ]
+    assert len(guard_commands) == 1, guard_commands
+    guard = guard_commands[0]
+    assert "mkdir -p /run/mngr-latchkey" in guard
+    assert "chmod 700 /run/mngr-latchkey" in guard
+    assert '[ "$_fstype" != tmpfs ]' in guard
+    assert '[ "$_fstype" != ramfs ]' in guard
+
+
+def test_ensure_latchkey_gateway_running_raises_when_secrets_dir_not_ram_backed(tmp_path: Path) -> None:
+    # The first real command is the RAM-backed-dir guard; a failure there (e.g.
+    # /run is not a tmpfs) must abort before the key is ever written.
+    outer = _outer(CommandResult(stdout="", stderr="is on a ext4 filesystem", success=False))
+    with pytest.raises(RemoteGatewayError, match="RAM-backed secrets directory"):
         _ensure_latchkey_gateway_running(outer, tmp_path, "shared-password")
+    # Crucially, no secret file was written when the guard failed.
+    assert _stub(outer).written == []
 
 
 def _tunnel_conf(outer: OuterHostInterface) -> str:

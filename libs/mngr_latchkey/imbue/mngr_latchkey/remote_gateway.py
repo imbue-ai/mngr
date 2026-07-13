@@ -14,13 +14,15 @@ detected and torn down, letting ``supervisord`` restart it.
 
 Crash recovery deliberately stops short of surviving a full *reboot*: the
 gateway's secrets (the encryption key and the derived listen password) are
-kept in a tmpfs directory (``/dev/shm``), which is RAM-backed and so survives
+kept in a tmpfs directory under ``/run``, which is RAM-backed and so survives
 process crashes -- letting ``supervisord`` restart the gateway without a
 desktop round-trip -- but is wiped by a reboot. This is a deliberate choice to
 never persist the encryption key on the VPS disk beside the encrypted
 credential store (which would be equivalent to storing the credentials in
-plaintext from a disk-snapshot threat model). After a reboot the gateway stays
-down until the next provisioning pass re-writes the secrets.
+plaintext from a disk-snapshot threat model). Provisioning verifies the
+directory really is RAM-backed and refuses to proceed otherwise, so the key is
+never written to a disk filesystem by mistake. After a reboot the gateway
+stays down until the next provisioning pass re-writes the secrets.
 """
 
 import shlex
@@ -113,14 +115,22 @@ _REMOTE_TUNNEL_LOG_FILENAME: Final[str] = "tunnel.log"
 _GATEWAY_RUN_SCRIPT_FILENAME: Final[str] = "gateway_run.sh"
 
 # tmpfs (RAM-backed) directory holding the gateway's two secrets: the encryption
-# key and the derived listen password. ``/dev/shm`` is wiped on reboot, so the
-# key is never persisted to the VPS disk beside the encrypted credential store
-# (which would be equivalent to storing the credentials in plaintext against a
-# disk-snapshot threat model), yet it survives a process crash so supervisord
-# can restart the gateway without a desktop round-trip. The wrapper reads these
-# 0600 files into the environment and execs the gateway, so the secrets never
-# appear in the supervisord config or a process listing.
-_TMPFS_SECRETS_DIR: Final[Path] = Path("/dev/shm/mngr-latchkey")
+# key and the derived listen password. ``/run`` is the FHS location for runtime
+# state, is root-owned, and is a tmpfs under systemd (which we already require
+# for the supervisor service), so it is wiped on reboot -- the key is never
+# persisted to the VPS disk beside the encrypted credential store (which would
+# be equivalent to storing the credentials in plaintext against a disk-snapshot
+# threat model), yet it survives a process crash so supervisord can restart the
+# gateway without a desktop round-trip. Provisioning verifies this is really a
+# RAM-backed filesystem before writing to it (see
+# :func:`_ensure_ram_backed_secrets_dir`). The wrapper reads these 0600 files
+# into the environment and execs the gateway, so the secrets never appear in the
+# supervisord config or a process listing.
+_TMPFS_SECRETS_DIR: Final[Path] = Path("/run/mngr-latchkey")
+
+# Filesystem types (as reported by ``stat -f -c %T``) we accept as RAM-backed
+# for the secrets directory. Anything else means the key would land on disk.
+_RAM_BACKED_FILESYSTEM_TYPES: Final[frozenset[str]] = frozenset({"tmpfs", "ramfs"})
 _GATEWAY_ENCRYPTION_KEY_FILENAME: Final[str] = "gateway_encryption_key"
 _GATEWAY_PASSWORD_FILENAME: Final[str] = "gateway_listen_password"
 
@@ -500,6 +510,44 @@ def _reload_supervisor_programs(host: OuterHostInterface, host_name: str, progra
         )
 
 
+def _ensure_ram_backed_secrets_dir(host: OuterHostInterface, host_name: str) -> None:
+    """Create the tmpfs secrets directory (0700) and verify it is genuinely RAM-backed.
+
+    The gateway's encryption key must never land on a disk-backed filesystem, so
+    this creates :data:`_TMPFS_SECRETS_DIR` and checks (via ``stat -f``) that its
+    filesystem type is one of :data:`_RAM_BACKED_FILESYSTEM_TYPES`. If the
+    directory is not RAM-backed -- e.g. ``/run`` is unexpectedly not a tmpfs on
+    some host -- it refuses to proceed rather than silently persisting the key,
+    so the caller never writes the secret to disk. Raises
+    :class:`RemoteGatewayError` if creation or the verification fails.
+    """
+    secrets_dir_q = shlex.quote(str(_TMPFS_SECRETS_DIR))
+    # ``$_fstype`` must not be *any* of the accepted RAM-backed types.
+    not_ram_backed_condition = " && ".join(
+        f'[ "$_fstype" != {shlex.quote(fstype)} ]' for fstype in sorted(_RAM_BACKED_FILESYSTEM_TYPES)
+    )
+    script = "\n".join(
+        (
+            "set -e",
+            f"mkdir -p {secrets_dir_q}",
+            f"chmod 700 {secrets_dir_q}",
+            f'_fstype="$(stat -f -c %T {secrets_dir_q})"',
+            f"if {not_ram_backed_condition}; then",
+            f'  echo "refusing to store the latchkey encryption key: {_TMPFS_SECRETS_DIR} is on a '
+            '$_fstype filesystem, not RAM-backed (tmpfs/ramfs)" >&2',
+            "  exit 1",
+            "fi",
+        )
+    )
+    result = host.execute_idempotent_command(script, timeout_seconds=_REMOTE_COMMAND_TIMEOUT_SECONDS)
+    if not result.success:
+        raise RemoteGatewayError(
+            "Could not prepare a RAM-backed secrets directory ({}) on VPS {}: {}".format(
+                _TMPFS_SECRETS_DIR, host_name, result.stderr.strip() or result.stdout.strip()
+            )
+        )
+
+
 def _build_gateway_run_script(outer_port: int, key_file_path: Path, password_file_path: Path) -> str:
     """Build the wrapper script supervisord runs to launch ``latchkey gateway``.
 
@@ -599,6 +647,11 @@ def _ensure_latchkey_gateway_running(
     run_script_path = remote_dir / _GATEWAY_RUN_SCRIPT_FILENAME
     log_path = remote_dir / _REMOTE_GATEWAY_LOG_FILENAME
     conf_path = _SUPERVISOR_CONFD_DIR / _GATEWAY_CONF_FILENAME
+    host_name = host.get_name()
+
+    # Create + verify the RAM-backed secrets dir before writing the key, so we
+    # never persist it to a disk filesystem if tmpfs is unexpectedly absent.
+    _ensure_ram_backed_secrets_dir(host, host_name)
 
     # Write the two secrets (0600) into tmpfs and the wrapper that reads them.
     host.write_file(key_file_path, encryption_key.encode("utf-8"), mode=_REMOTE_FILE_MODE)
@@ -611,7 +664,6 @@ def _ensure_latchkey_gateway_running(
     conf = _build_supervisor_program_config(
         _GATEWAY_PROGRAM_NAME, command, str(log_path), _SUPERVISOR_GATEWAY_START_RETRIES
     )
-    host_name = host.get_name()
     with log_span("Ensuring latchkey gateway is running on VPS {} (port {})", host_name, OUTER_PORT):
         host.write_file(conf_path, conf.encode("utf-8"), mode=_REMOTE_FILE_MODE, is_atomic=True)
         _reload_supervisor_programs(host, host_name, _GATEWAY_PROGRAM_NAME)
