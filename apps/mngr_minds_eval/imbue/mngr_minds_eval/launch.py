@@ -8,6 +8,7 @@ upload state/transcript -- the run self-completes and everything is retrievable 
 from __future__ import annotations
 
 import json
+import secrets
 import shutil
 import subprocess
 import sys
@@ -70,27 +71,14 @@ def load_cases(personas_path: Path) -> list[dict]:
     return out
 
 
-def backup_env_block(env: dict, repo_url: str) -> str:
-    """The KEY=VALUE block the create form's api_key backup provider injects into restic.env.
-
-    NOT the password: minds assigns each workspace its own random repository password (and rejects a
-    caller-supplied one). The eval worker reads that generated password from restic.env inside the
-    sandbox and uploads it to the case's S3 prefix, so restore can decrypt the repo even after the
-    box and sandbox are gone.
-    """
-    return "\n".join([
-        "RESTIC_REPOSITORY={}".format(repo_url),
-        "AWS_ACCESS_KEY_ID={}".format(env["AWS_ACCESS_KEY_ID"]),
-        "AWS_SECRET_ACCESS_KEY={}".format(env["AWS_SECRET_ACCESS_KEY"]),
-        "AWS_DEFAULT_REGION={}".format(env.get("AWS_DEFAULT_REGION", "us-east-1")),
-    ])
-
-
-def build_create_payload(
-    clone_path: Path, host_name: str, anthropic_key: str, compute: str, backup_env: str
-) -> dict:
+def build_create_payload(clone_path: Path, host_name: str, anthropic_key: str, compute: str) -> dict:
     """Create-form fields. Empty branch: a local clone is already on the right commit, and passing
-    a branch trips mngr's checkout_branch(FETCH_HEAD) on the use-in-place path."""
+    a branch trips mngr's checkout_branch(FETCH_HEAD) on the use-in-place path.
+
+    backup_provider is configure_later: the eval worker drives restic itself (creds are slotted into
+    the clone's config.json), because minds' api_key backup provisioning does not reliably land a
+    restic.env inside a Modal sandbox.
+    """
     return {
         "git_url": str(clone_path),
         "host_name": host_name,
@@ -98,8 +86,7 @@ def build_create_payload(
         "launch_mode": compute.upper(),
         "ai_provider": "API_KEY",
         "anthropic_api_key": anthropic_key,
-        "backup_provider": "API_KEY",
-        "backup_api_key_env": backup_env,
+        "backup_provider": "CONFIGURE_LATER",
     }
 
 
@@ -203,13 +190,14 @@ def launch_batch(
     print("  cases: {}   turns: {}   compute: {}   bucket: {}".format(len(cases), num_turns, compute, bucket), flush=True)
     print("=" * 66, flush=True)
 
-    # mngr_branch is recorded so `restore` rebuilds the SAME box this batch ran on. The restic
-    # password is NOT set here: minds assigns each workspace its own (and rejects a caller-supplied
-    # one), and the worker uploads that generated password to the case prefix in S3 for restore.
+    # One restic password per batch, stored in the batch config so `restore` can decrypt the repos.
+    # We own it (we drive restic ourselves via config.json creds), so there's no minds involvement.
+    restic_password = secrets.token_urlsafe(24)
+    # mngr_branch is recorded so `restore` rebuilds the SAME box this batch ran on.
     s3_store.put_json(client, bucket, "{}/{}".format(batch, s3_store.BATCH_CONFIG_NAME), {
         "eval_name": eval_name, "created_at": stamp, "num_turns": num_turns,
         "compute": compute, "mngr_branch": mngr_branch, "fct_repo": fct_repo, "fct_branch": fct_branch,
-        "cases": cases,
+        "restic_password": restic_password, "cases": cases,
     })
 
     CLONES_DIR.mkdir(parents=True, exist_ok=True)
@@ -219,19 +207,26 @@ def launch_batch(
     for index, case in enumerate(cases, 1):
         case_pref = s3_store.case_prefix(batch, eval_name, case["id"])
         host_name = "EVAL-{}-CASE-{}".format(eval_name, case["id"])
+        # Everything the in-sandbox worker needs is in config.json (committed into the clone): the
+        # S3 target, the restic repo/password, and the scoped AWS creds. This is why the worker does
+        # not depend on minds' backup provisioning (which doesn't land a restic.env in the sandbox).
         case_config = {
             "eval_name": eval_name, "case_name": case["id"], "persona": case["persona"],
             "first_prompt": case["first_prompt"], "num_turns": num_turns,
             "s3_bucket": bucket, "s3_prefix": case_pref,
+            "restic_repository": s3_store.restic_repo_url(env, case_pref),
+            "restic_password": restic_password,
+            "aws_access_key_id": env["AWS_ACCESS_KEY_ID"],
+            "aws_secret_access_key": env["AWS_SECRET_ACCESS_KEY"],
+            "aws_region": env.get("AWS_DEFAULT_REGION", "us-east-1"),
         }
         print("\n  [{}/{}] {}".format(index, len(cases), host_name), flush=True)
         destroy_existing_workspace(port, host_name)  # idempotent: re-run with the same --name works
         clone = _prepare_clone(case, case_config)
 
-        backup_env = backup_env_block(env, s3_store.restic_repo_url(env, case_pref))
         status, body = _post_json(
             "{}/api/v1/workspaces".format(_api_base(port)),
-            build_create_payload(clone, host_name, anthropic_key, compute, backup_env),
+            build_create_payload(clone, host_name, anthropic_key, compute),
         )
         if status != 202:
             print("     ERR create HTTP {}: {}".format(status, body), flush=True)

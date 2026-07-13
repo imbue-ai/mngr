@@ -25,3 +25,7 @@
 - Idempotent launch: if a workspace with a case's host name already exists (a re-run with the same --name, or an interrupted prior run), it is destroyed before re-creating, instead of failing with "Host name already exists". mngr registers the name in the Modal environment, so it survived box restarts before.
 
 - Fixed the workspace-login URL not being detected on mngr versions where the forward proxy runs with --use-http2 (it emits an https:// login URL); the matcher now accepts http or https.
+
+- Fixed the eval worker crashing with NoCredentialsError: creds are now slotted into each clone's config.json (backup_provider=configure_later; the worker drives restic itself), instead of relying on minds' api_key backup provider, which does not land a restic.env inside a Modal sandbox.
+
+- Removed the `login` subcommand (the login URL is printed by box/launch/restore). `list-batches` now prints the full batch folder name to pass to inspect/restore.

@@ -68,8 +68,8 @@ def print_view_urls(container: str, *, wait: bool = True) -> None:
             print("  workspace login: {}".format(login), flush=True)
             print("                   ^ visit once, then click the workspace in the dashboard", flush=True)
         else:
-            print("  workspace login: not emitted yet -- re-fetch with:  minds-evals login --box {}".format(
-                container), flush=True)
+            print("  workspace login: not emitted yet -- re-run  minds-evals box  once the proxy is up "
+                  "(or: docker logs {} | grep login)".format(container), flush=True)
 
 
 def built_ref(container: str) -> str:

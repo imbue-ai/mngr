@@ -79,7 +79,7 @@ def _check_aws() -> dict:
 
 
 def self_check() -> None:
-    from imbue.mngr_minds_eval.launch import backup_env_block, build_create_payload, load_cases
+    from imbue.mngr_minds_eval.launch import build_create_payload, load_cases
 
     env = {"AWS_ACCESS_KEY_ID": "AK", "AWS_SECRET_ACCESS_KEY": "SK", "AWS_DEFAULT_REGION": "us-east-1",
            "MINDS_EVAL_BUCKET": "b"}
@@ -89,13 +89,9 @@ def self_check() -> None:
     assert s3_store.restic_repo_url(env, "web1_S/web1_todo") == \
         "s3:s3.us-east-1.amazonaws.com/b/web1_S/web1_todo/restic"
 
-    block = backup_env_block(env, "s3:repo")
-    assert "RESTIC_REPOSITORY=s3:repo" in block and "RESTIC_PASSWORD" not in block  # minds sets it
-    assert "AWS_ACCESS_KEY_ID=AK" in block and "AWS_SECRET_ACCESS_KEY=SK" in block
-
-    payload = build_create_payload(Path("/work/clones/todo"), "EVAL-web1-CASE-todo", "sk-ant", "modal", block)
+    payload = build_create_payload(Path("/work/clones/todo"), "EVAL-web1-CASE-todo", "sk-ant", "modal")
     assert payload["launch_mode"] == "MODAL" and payload["ai_provider"] == "API_KEY"
-    assert payload["backup_provider"] == "API_KEY" and payload["backup_api_key_env"] == block
+    assert payload["backup_provider"] == "CONFIGURE_LATER" and "backup_api_key_env" not in payload
     assert payload["branch"] == "" and payload["git_url"] == "/work/clones/todo"
 
     import json as _json
@@ -133,10 +129,6 @@ def main() -> None:
     p_box = sub.add_parser("box", help="build/boot a Minds box for an mngr branch (general utility)")
     p_box.add_argument("--mngr-branch", required=True, help="mngr branch the box runs")
     p_box.add_argument("--box", default="", help="container name (default: minds-box-<mngr-branch>)")
-
-    p_login = sub.add_parser("login", help="print the box's dashboard + one-time workspace-login URL")
-    p_login.add_argument("--mngr-branch", default="", help="mngr branch (to derive the box name)")
-    p_login.add_argument("--box", default="", help="container name (default: minds-box-<mngr-branch>)")
 
     p_ws = sub.add_parser("workspace", help="create ONE workspace in a box (general utility, no eval)")
     p_ws.add_argument("--mngr-branch", required=True, help="mngr branch the box runs")
@@ -178,11 +170,6 @@ def main() -> None:
             parser.error("run `box` from the host, not inside a box")
         box_mod.ensure(_box_name(args), args.mngr_branch)
         box_mod.print_view_urls(_box_name(args))
-        return
-    if args.command == "login":
-        if not args.box and not args.mngr_branch:
-            parser.error("pass --box <name> or --mngr-branch <branch>")
-        box_mod.print_view_urls(args.box or _box_name(args), wait=False)
         return
     if args.command == "workspace":
         if not IN_BOX:
