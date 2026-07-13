@@ -133,6 +133,40 @@ def _prepare_clone(case: dict, case_config: dict) -> Path:
     return clone
 
 
+def destroy_existing_workspace(port: str, host_name: str, timeout: float = 600.0) -> None:
+    """Idempotent create: if a workspace with this host name already exists (a re-run with the same
+    --name, or an interrupted prior run), destroy it first. mngr registers the host name in the
+    Modal environment, so it survives box restarts -- only an actual destroy clears it."""
+    try:
+        listing = _get_json("{}/api/v1/workspaces".format(_api_base(port)))
+    except (urllib.error.URLError, OSError):
+        return
+    target = host_name.lower()
+    match = next((w for w in listing.get("workspaces", [])
+                  if (w.get("name") or "").lower() == target and w.get("agent_id")), None)
+    if match is None:
+        return
+    agent_id = match["agent_id"]
+    print("     host name in use -- destroying existing {} ({})".format(host_name, agent_id), flush=True)
+    status, body = _post_json("{}/api/v1/workspaces/{}/destroy".format(_api_base(port), agent_id), {})
+    if status != 202:
+        print("     WARN: could not start destroy ({}): {}".format(status, body), flush=True)
+        return
+    operation_id = body.get("operation_id", agent_id)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            info = _get_json("{}/api/v1/workspaces/operations/destroy/{}".format(_api_base(port), operation_id))
+        except (urllib.error.URLError, OSError):
+            time.sleep(4)
+            continue
+        if info.get("is_done"):
+            print("     destroyed {}".format(host_name), flush=True)
+            return
+        time.sleep(4)
+    print("     WARN: destroy of {} did not confirm in time; create may still collide".format(host_name), flush=True)
+
+
 def _await_create(port: str, operation_id: str, timeout: float = 1800.0) -> dict:
     deadline = time.time() + timeout
     last_stage = ""
@@ -191,6 +225,7 @@ def launch_batch(
             "s3_bucket": bucket, "s3_prefix": case_pref,
         }
         print("\n  [{}/{}] {}".format(index, len(cases), host_name), flush=True)
+        destroy_existing_workspace(port, host_name)  # idempotent: re-run with the same --name works
         clone = _prepare_clone(case, case_config)
 
         backup_env = backup_env_block(env, s3_store.restic_repo_url(env, case_pref))

@@ -21,3 +21,5 @@
 - `launch` now takes `--fct-branch` / `--fct-repo` (the workspace-template each case is cloned from), instead of hardcoding the branch. Recorded in the batch config. Default remains the branch that carries the eval worker.
 
 - Login URL reliability: `print_view_urls` never prints a silent nothing for the workspace-login line (if it can't find the URL it tells you how to get it), and a new `minds-evals login --box <name>` (or `--mngr-branch`) fetches the dashboard + one-time login URL on demand, so you no longer have to dig through docker logs.
+
+- Idempotent launch: if a workspace with a case's host name already exists (a re-run with the same --name, or an interrupted prior run), it is destroyed before re-creating, instead of failing with "Host name already exists". mngr registers the name in the Modal environment, so it survived box restarts before.
