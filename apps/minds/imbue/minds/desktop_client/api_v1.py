@@ -408,6 +408,22 @@ def _check_backup_service_safely(
         return backup_verification.BackupServiceCheck(state=backup_verification.BackupServiceCheckState.UNKNOWN)
 
 
+def _materialize_env_from_record_if_missing(paths: WorkspacePaths, parsed_id: AgentId) -> None:
+    """Best-effort: write the backup env from the workspace's synced record.
+
+    Lets backup status / export work for workspaces this device never
+    provisioned (hosted on another device, or destroyed elsewhere), provided
+    the account is unlocked here. A miss is fine -- the caller degrades to
+    the ordinary not-configured behavior.
+    """
+    session_store = get_state().session_store
+    if session_store is None or session_store.record_store is None:
+        return
+    if has_canonical_env(paths, parsed_id):
+        return
+    session_store.record_store.materialize_env_from_record(str(parsed_id))
+
+
 @require_api_or_cookie_auth
 @API_SPEC.validate(resp=json_response_model(WorkspaceBackupsResponse))
 def _handle_workspace_backups(agent_id: str) -> WorkspaceBackupsResponse | Response:
@@ -424,6 +440,7 @@ def _handle_workspace_backups(agent_id: str) -> WorkspaceBackupsResponse | Respo
     paths: WorkspacePaths | None = state.api_v1_paths
     if paths is None:
         return _json_error("Backups are not configured", 501)
+    _materialize_env_from_record_if_missing(paths, parsed_id)
 
     check_results: list[backup_verification.BackupServiceCheck] = []
     resolver = state.backend_resolver
@@ -475,6 +492,7 @@ def _handle_workspace_backup_export(agent_id: str, snapshot_id: str) -> Response
     paths: WorkspacePaths | None = get_state().api_v1_paths
     if paths is None:
         return _json_error("Backups are not configured", 501)
+    _materialize_env_from_record_if_missing(paths, parsed_id)
     backend_resolver = get_state().backend_resolver
     info = backend_resolver.get_agent_display_info(parsed_id)
     host_id = info.host_id if info is not None else str(parsed_id)

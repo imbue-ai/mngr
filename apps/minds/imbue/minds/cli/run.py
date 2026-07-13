@@ -80,6 +80,7 @@ from imbue.minds.desktop_client.server import desktop_client_runtime
 from imbue.minds.desktop_client.server import serve_desktop_client
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
+from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.system_interface_health import should_enroll_suspect_for_backend_failure
 from imbue.minds.desktop_client.templates import DEFAULT_WORKSPACE_TEMPLATE_GIT_URL
@@ -396,6 +397,12 @@ def run(
     session_store = MultiAccountSessionStore(
         data_dir=data_directory, cli=imbue_cloud_cli, record_store=workspace_record_store
     )
+    sync_scheduler = WorkspaceSyncScheduler(
+        record_store=workspace_record_store,
+        session_store=session_store,
+        resolver=backend_resolver,
+    )
+    sync_scheduler.start(root_concurrency_group)
     response_events = load_response_events(data_directory)
     request_inbox = RequestInbox()
     for resp in response_events:
@@ -575,6 +582,7 @@ def run(
         minds_api_key=minds_api_key,
         latchkey_forward_supervisor=latchkey_forward_supervisor,
         discovery_health_watchdog=discovery_health_watchdog,
+        sync_scheduler=sync_scheduler,
     )
 
     # Background loop driving the discovery-pipeline watchdog: polls snapshot

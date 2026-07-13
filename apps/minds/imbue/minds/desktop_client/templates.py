@@ -25,7 +25,9 @@ from flask import has_app_context
 from jinja2 import Environment
 from jinja2 import select_autoescape
 from jinjax import Catalog
+from pydantic import Field
 
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
 from imbue.minds.desktop_client.state import get_state
@@ -214,6 +216,16 @@ CATALOG: Final[Catalog] = _build_catalog()
 
 
 @pure
+class RemoteWorkspaceTile(FrozenModel):
+    """A workspace known only from another device's synced record, for the landing list."""
+
+    agent_id: str = Field(description="The workspace agent id (drives backup status/download)")
+    name: str = Field(description="Display name from the record")
+    accent: str = Field(description="Accent color hex")
+    location: str = Field(description="Where it lives (the other device's label, or a provider name)")
+    host_id: str = Field(description="The record's host id (drives remove-from-list)")
+
+
 def render_landing_page(
     accessible_agent_ids: Sequence[AgentId],
     mngr_forward_origin: str = "",
@@ -224,6 +236,8 @@ def render_landing_page(
     shutdown_capable_agent_ids: Sequence[AgentId] | None = None,
     mind_liveness_by_agent_id: dict[str, str] | None = None,
     agent_providers: dict[str, str] | None = None,
+    remote_workspaces: Sequence[RemoteWorkspaceTile] | None = None,
+    locked_account_emails: Sequence[str] | None = None,
 ) -> str:
     """Render the landing page listing accessible workspaces.
 
@@ -261,6 +275,8 @@ def render_landing_page(
     shutdown_capable_agent_id_strings = [str(aid) for aid in (shutdown_capable_agent_ids or ())]
     return CATALOG.render(
         "pages.Landing",
+        remote_workspaces=list(remote_workspaces or []),
+        locked_account_emails=list(locked_account_emails or []),
         agent_ids=accessible_agent_ids,
         agent_accents=effective_accents,
         mngr_forward_origin=mngr_forward_origin,

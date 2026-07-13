@@ -225,6 +225,7 @@ def _store_session_from_auth_result(
     """
     assert result.user is not None, "AuthResult missing user"
     session_store.invalidate_identity_cache()
+    _kick_sync_scheduler()
     minds_config: MindsConfig | None = get_state().minds_config
     if minds_config is not None and minds_config.get_default_account_id() is None:
         minds_config.set_default_account_id(result.user.user_id)
@@ -395,6 +396,7 @@ def signout_user_via_plugin(user_id: str) -> None:
     else:
         logger.warning("No mirrored account for user {}; skipping plugin signout", user_id[:8])
     session_store.invalidate_identity_cache()
+    _kick_sync_scheduler()
     if signed_out_email and unset_imbue_cloud_provider_for_account(signed_out_email):
         _bounce_forward_observe()
 
@@ -572,6 +574,7 @@ def _run_oauth_subprocess(
         return
 
     session_store.invalidate_identity_cache()
+    _kick_sync_scheduler()
     if minds_config is not None and minds_config.get_default_account_id() is None:
         minds_config.set_default_account_id(str(result.user_id))
 
@@ -742,6 +745,13 @@ def _handle_settings_page() -> Response:
             user_id_prefix=str(user_info.user_id_prefix),
         )
     )
+
+
+def _kick_sync_scheduler() -> None:
+    """Request an immediate workspace-record sync pass after an auth change."""
+    scheduler = get_state().sync_scheduler
+    if scheduler is not None:
+        scheduler.kick()
 
 
 def create_supertokens_blueprint() -> Blueprint:

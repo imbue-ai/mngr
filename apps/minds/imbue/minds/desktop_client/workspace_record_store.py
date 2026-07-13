@@ -22,11 +22,13 @@ import threading
 import tomllib
 from base64 import b64decode
 from base64 import b64encode
+from collections.abc import Sequence
 from pathlib import Path
 
 from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
+from pydantic import SecretStr
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
@@ -39,6 +41,7 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client import dek_store
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backup_env_store import read_canonical_env
+from imbue.minds.desktop_client.backup_env_store import write_canonical_env
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudSyncConflictCliError
@@ -396,13 +399,23 @@ class WorkspaceRecordStore(MutableModel):
         """
         if self.cli is None:
             raise WorkspaceSyncError("workspace sync is not configured (no imbue_cloud CLI)")
+        # The metadata-only tier: while the account has no (non-empty) master
+        # password, its secrets never leave this machine -- the wire copy is
+        # stripped, while the local replica keeps them for this device's use.
+        is_password_set = dek_store.is_master_password_set_for_account(self.paths, user_id)
+        wire = record.to_wire(record.revision + 1)
+        if not is_password_set:
+            wire["encrypted_secrets"] = None
         try:
-            stored = self.cli.sync_record_push(account_email, record.to_wire(record.revision + 1))
+            stored = self.cli.sync_record_push(account_email, wire)
         except ImbueCloudSyncConflictCliError as conflict:
             if conflict.stored_record is None:
                 raise
             server_revision = int(str(conflict.stored_record.get("revision", 0)))
-            stored = self.cli.sync_record_push(account_email, record.to_wire(server_revision + 1))
+            rebased = record.to_wire(server_revision + 1)
+            if not is_password_set:
+                rebased["encrypted_secrets"] = None
+            stored = self.cli.sync_record_push(account_email, rebased)
         acked = record.model_copy_update(
             to_update(record.field_ref().revision, int(str(stored.get("revision", record.revision + 1)))),
             to_update(record.field_ref().is_dirty, False),
@@ -551,6 +564,80 @@ class WorkspaceRecordStore(MutableModel):
                 to_update(record.field_ref().is_dirty, True),
             )
             self.upsert_local_record(user_id, account_email, updated)
+
+    def materialize_env_from_record(self, agent_id: str) -> bool:
+        """Write ``backup_envs/<agent_id>.env`` from the record's synced secrets, if possible.
+
+        Covers backup status/export for workspaces this device never
+        provisioned (hosted on another device, or destroyed elsewhere).
+        Returns True when an env file now exists (either it already did, or
+        it was just materialized); False when there is no record, no synced
+        secrets, or the account is locked on this device.
+        """
+        if read_canonical_env(self.paths, AgentId(agent_id)) is not None:
+            return True
+        found = self._find_record_any_state(agent_id)
+        if found is None:
+            return False
+        user_id, record = found
+        payload = self.decrypt_record_secrets(user_id, record)
+        if payload is None or payload.restic_env is None:
+            return False
+        write_canonical_env(self.paths, AgentId(agent_id), payload.restic_env)
+        logger.info("Materialized the backup env for {} from its synced workspace record", agent_id)
+        return True
+
+    def _find_record_any_state(self, agent_id: str) -> tuple[str, ReplicaRecord] | None:
+        """Like :meth:`find_active_record` but tombstoned records count too (backup access)."""
+        fallback: tuple[str, ReplicaRecord] | None = None
+        for user_id, records in self.list_all_records().items():
+            for record in records:
+                if record.agent_id != str(agent_id):
+                    continue
+                if record.state == RECORD_STATE_ACTIVE:
+                    return user_id, record
+                fallback = (user_id, record)
+        return fallback
+
+    def locked_account_user_ids(self, signed_in_user_ids: Sequence[str]) -> list[str]:
+        """Signed-in accounts whose secrets exist server-side but whose DEK is absent here.
+
+        These are the accounts the unlock banner prompts for: a bundle exists
+        (a non-empty master password was set somewhere) but this device has
+        no DEK file yet.
+        """
+        locked: list[str] = []
+        for user_id in signed_in_user_ids:
+            if dek_store.is_account_unlocked(self.paths, user_id):
+                continue
+            if dek_store.read_bundle_mirror(self.paths, user_id) is not None:
+                locked.append(user_id)
+                continue
+            has_secretful_record = any(record.encrypted_secrets is not None for record in self.list_records(user_id))
+            if has_secretful_record:
+                locked.append(user_id)
+        return locked
+
+    def unlock_account(self, user_id: str, account_email: str, password: SecretStr) -> bool:
+        """New-device unlock: fetch the bundle, unwrap with ``password``, install the DEK.
+
+        Returns False (without raising) when the password is wrong or no
+        bundle exists anywhere; True when the account is now unlocked.
+        """
+        bundle = dek_store.read_bundle_mirror(self.paths, user_id)
+        if bundle is None and self.cli is not None:
+            try:
+                bundle = self.cli.sync_bundle_pull(account_email)
+            except ImbueCloudCliError as e:
+                logger.warning("Could not fetch the key bundle for {}: {}", account_email, e)
+                return False
+        if bundle is None:
+            return False
+        try:
+            dek_store.unlock_account_with_bundle(self.paths, user_id, bundle, password)
+        except SecretWrappingError:
+            return False
+        return True
 
     # -- Legacy conversion + reconcile ----------------------------------------
 

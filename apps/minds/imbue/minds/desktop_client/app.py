@@ -99,8 +99,10 @@ from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.state import set_state
 from imbue.minds.desktop_client.supertokens_routes import create_supertokens_blueprint
 from imbue.minds.desktop_client.supertokens_routes import signout_user_via_plugin
+from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.templates import RemoteWorkspaceTile
 from imbue.minds.desktop_client.templates import render_accounts_page
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
@@ -127,6 +129,7 @@ from imbue.minds.desktop_client.webdav import create_webdav_app
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import pick_unused_create_color
 from imbue.minds.desktop_client.workspace_create import default_region_for_provider_with_config
+from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
 from imbue.minds.errors import InvalidJsonBodyError
 from imbue.minds.errors import SyncCryptoError
@@ -527,6 +530,94 @@ def _handle_backup_password_change() -> Response:
     )
 
 
+def _handle_sync_unlock() -> Response:
+    """Unlock synced secrets on this device (POST /_chrome/sync-unlock).
+
+    Tries the typed master password against every locked signed-in account's
+    key bundle (fetched from the connector when no local mirror exists);
+    whichever accounts it unwraps get their DEK installed. Reports which
+    accounts remain locked -- they may need an older password.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
+    body = request.get_json(silent=True, force=True)
+    if not isinstance(body, dict):
+        return make_response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
+    session_store = get_state().session_store
+    if session_store is None or session_store.record_store is None:
+        return make_response(
+            status_code=503, content='{"error": "Sync is unavailable"}', media_type="application/json"
+        )
+    password = SecretStr(str(body.get("password") or ""))
+    record_store = session_store.record_store
+    accounts = session_store.list_accounts()
+    locked_user_ids = record_store.locked_account_user_ids([str(account.user_id) for account in accounts])
+    unlocked: list[str] = []
+    still_locked: list[str] = []
+    for account in accounts:
+        if str(account.user_id) not in locked_user_ids:
+            continue
+        if record_store.unlock_account(str(account.user_id), str(account.email), password):
+            unlocked.append(str(account.email))
+        else:
+            still_locked.append(str(account.email))
+    scheduler = get_state().sync_scheduler
+    if unlocked and scheduler is not None:
+        scheduler.kick()
+    if not unlocked and still_locked:
+        return make_response(
+            status_code=200,
+            content=json.dumps(
+                {
+                    "ok": False,
+                    "unlocked": unlocked,
+                    "still_locked": still_locked,
+                    "error": "That password did not unlock any account.",
+                }
+            ),
+            media_type="application/json",
+        )
+    return make_response(
+        status_code=200,
+        content=json.dumps({"ok": True, "unlocked": unlocked, "still_locked": still_locked}),
+        media_type="application/json",
+    )
+
+
+def _handle_remove_workspace_record() -> Response:
+    """Remove a synced workspace record outright (POST /_chrome/workspaces/remove-record).
+
+    The manual escape hatch for stale/confusing rows on the landing list.
+    Requires connectivity (the record lives on the connector).
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
+    body = request.get_json(silent=True, force=True)
+    if not isinstance(body, dict) or not str(body.get("host_id") or ""):
+        return make_response(
+            status_code=400, content='{"error": "host_id is required"}', media_type="application/json"
+        )
+    host_id = str(body["host_id"])
+    session_store = get_state().session_store
+    if session_store is None or session_store.record_store is None:
+        return make_response(
+            status_code=503, content='{"error": "Sync is unavailable"}', media_type="application/json"
+        )
+    record_store = session_store.record_store
+    for account in session_store.list_accounts():
+        owns_host = any(record.host_id == host_id for record in record_store.list_records(str(account.user_id)))
+        if not owns_host:
+            continue
+        try:
+            record_store.remove_record_or_raise(str(account.user_id), str(account.email), host_id)
+        except WorkspaceSyncError as exc:
+            return make_response(
+                status_code=502, content=json.dumps({"error": str(exc)}), media_type="application/json"
+            )
+        return make_response(status_code=200, content='{"ok": true}', media_type="application/json")
+    return make_response(status_code=404, content='{"error": "No such record"}', media_type="application/json")
+
+
 def _sync_latchkey_forward_sentry_consent(minds_config: MindsConfig) -> None:
     """Rewrite the detached ``mngr latchkey forward`` daemon's live consent file after a consent change.
 
@@ -702,6 +793,53 @@ def _handle_welcome_page() -> Response:
     return make_html_response(content=html)
 
 
+def _collect_remote_workspace_tiles(
+    backend_resolver: BackendResolverInterface,
+    session_store: MultiAccountSessionStore | None,
+) -> list[RemoteWorkspaceTile]:
+    """Workspaces known only from synced records (not in local discovery), for the landing list."""
+    if session_store is None or session_store.record_store is None:
+        return []
+    local_ids = {str(aid) for aid in backend_resolver.list_known_workspace_ids()}
+    tiles: list[RemoteWorkspaceTile] = []
+    seen_agent_ids: set[str] = set()
+    for account in session_store.list_accounts():
+        for record in session_store.record_store.list_records(str(account.user_id)):
+            is_remote_active = (
+                record.state == RECORD_STATE_ACTIVE
+                and record.agent_id not in local_ids
+                and record.agent_id not in seen_agent_ids
+            )
+            if not is_remote_active:
+                continue
+            seen_agent_ids.add(record.agent_id)
+            location = record.device_label or record.provider_kind or "another device"
+            tiles.append(
+                RemoteWorkspaceTile(
+                    agent_id=record.agent_id,
+                    name=record.display_name or record.agent_id,
+                    accent=record.color or DEFAULT_WORKSPACE_COLOR,
+                    location=location,
+                    host_id=record.host_id,
+                )
+            )
+    return tiles
+
+
+def _collect_locked_account_emails(session_store: MultiAccountSessionStore | None) -> list[str]:
+    """Emails of signed-in accounts whose synced secrets exist but whose key is absent here."""
+    if session_store is None or session_store.record_store is None:
+        return []
+    paths = get_state().api_v1_paths
+    if paths is None:
+        return []
+    accounts = session_store.list_accounts()
+    locked_user_ids = set(
+        session_store.record_store.locked_account_user_ids([str(account.user_id) for account in accounts])
+    )
+    return [str(account.email) for account in accounts if str(account.user_id) in locked_user_ids]
+
+
 def _handle_landing_page() -> Response:
     if not _is_request_authenticated():
         html = render_login_page()
@@ -719,8 +857,10 @@ def _handle_landing_page() -> Response:
     paths: WorkspacePaths | None = get_state().api_v1_paths
     landing_session_store: MultiAccountSessionStore | None = get_state().session_store
     destroying_status_by_agent_id = _resolve_destroying_for_landing(paths, backend_resolver, landing_session_store)
+    remote_workspaces = _collect_remote_workspace_tiles(backend_resolver, landing_session_store)
+    locked_account_emails = _collect_locked_account_emails(landing_session_store)
 
-    if all_agent_ids:
+    if all_agent_ids or remote_workspaces:
         agent_names: dict[str, str] = {}
         agent_accents: dict[str, str] = {}
         agent_providers: dict[str, str] = {}
@@ -748,6 +888,8 @@ def _handle_landing_page() -> Response:
             shutdown_capable_agent_ids=shutdown_capable_agent_ids,
             mind_liveness_by_agent_id=mind_liveness_by_agent_id,
             agent_providers=agent_providers,
+            remote_workspaces=remote_workspaces,
+            locked_account_emails=locked_account_emails,
         )
         return make_html_response(content=html)
 
@@ -1513,6 +1655,21 @@ def _build_workspace_list(
             if account is not None:
                 entry["account"] = account.email
         workspaces.append(entry)
+    # Append workspaces known only from synced records (hosted on another
+    # device). They render greyed and non-navigable; ``location`` names where
+    # they live.
+    for tile in _collect_remote_workspace_tiles(backend_resolver, session_store):
+        remote_entry: dict[str, str] = {
+            "id": tile.agent_id,
+            "name": tile.name,
+            "accent": tile.accent,
+            "is_remote": "true",
+            "location": tile.location,
+        }
+        owner = session_store.get_account_for_workspace(tile.agent_id) if session_store is not None else None
+        if owner is not None:
+            remote_entry["account"] = owner.email
+        workspaces.append(remote_entry)
     return workspaces
 
 
@@ -2454,6 +2611,7 @@ def create_desktop_client(
     latchkey_forward_supervisor: LatchkeyForwardSupervisor | None = None,
     discovery_health_watchdog: DiscoveryHealthWatchdog | None = None,
     mngr_caller: MngrCaller | None = None,
+    sync_scheduler: WorkspaceSyncScheduler | None = None,
 ) -> Flask:
     """Create the bare-origin minds Flask application.
 
@@ -2523,6 +2681,7 @@ def create_desktop_client(
         latchkey_forward_supervisor=latchkey_forward_supervisor,
         discovery_health_watchdog=discovery_health_watchdog,
         mngr_caller=mngr_caller,
+        sync_scheduler=sync_scheduler,
     )
     set_state(app, state)
 
@@ -2565,6 +2724,8 @@ def create_desktop_client(
     app.add_url_rule("/consent", view_func=_handle_consent_submit, methods=["POST"])
     app.add_url_rule("/_chrome/error-reporting", view_func=_handle_error_reporting_settings, methods=["POST"])
     app.add_url_rule("/_chrome/backup-password", view_func=_handle_backup_password_change, methods=["POST"])
+    app.add_url_rule("/_chrome/sync-unlock", view_func=_handle_sync_unlock, methods=["POST"])
+    app.add_url_rule("/_chrome/workspaces/remove-record", view_func=_handle_remove_workspace_record, methods=["POST"])
     app.add_url_rule("/help", view_func=_handle_help_page)
     app.add_url_rule("/help/report", view_func=_handle_help_report, methods=["POST"])
     app.add_url_rule("/help/assist", view_func=_handle_help_assist, methods=["POST"])
