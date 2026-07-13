@@ -23,7 +23,7 @@
   hidden via JS; the content is a separate WebContentsView and window.minds
   exposes IPC adapters. ``head`` / ``scripts`` let a page append its own head
   tags / script tags after the shell's own (workspace_accent.js,
-  sidebar_workspace_row.js, chrome.js).
+  backup_health.js, sidebar_workspace_row.js, chrome.js).
 #}
 {% set _is_mac = is_mac if is_mac is not none else chrome_is_mac() %}
 {% set _mngr_forward_origin = mngr_forward_origin if mngr_forward_origin is not none else chrome_mngr_forward_origin() %}
@@ -62,6 +62,7 @@
 {% set _body_attrs %}data-is-mac="{{ 'true' if _is_mac else 'false' }}" data-is-authenticated="{{ 'true' if is_authenticated else 'false' }}" data-mngr-forward-origin="{{ _mngr_forward_origin }}"{% endset %}
 {% set _scripts %}
 <script src="/_static/workspace_accent.js" defer></script>
+<script src="/_static/backup_health.js" defer></script>
 <script src="/_static/sidebar_workspace_row.js" defer></script>
 <script src="/_static/chrome.js" defer></script>
 {%- if scripts %}
