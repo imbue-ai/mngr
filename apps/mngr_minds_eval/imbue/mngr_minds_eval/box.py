@@ -170,7 +170,8 @@ def _forward_login(container: str, forward: int, tries: int = 20) -> str:
     import re
     import time
 
-    pattern = re.compile(r"http://localhost:{}/login\?one_time_code=[A-Za-z0-9_-]+".format(forward))
+    # Scheme varies by mngr version: plain http, or https when the proxy runs with --use-http2.
+    pattern = re.compile(r"https?://localhost:{}/login\?one_time_code=[A-Za-z0-9_-]+".format(forward))
     for attempt in range(tries):
         logs = _run(["docker", "logs", container])
         found = pattern.findall((logs.stdout or "") + (logs.stderr or ""))
