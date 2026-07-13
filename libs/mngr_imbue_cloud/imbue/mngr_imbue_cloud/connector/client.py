@@ -774,6 +774,17 @@ class ImbueCloudConnectorClient(MutableModel):
         stored = detail.get("stored")
         return stored if isinstance(stored, dict) else None
 
+    def delete_sync_record(self, access_token: SecretStr, host_id: str) -> None:
+        """Remove one workspace record outright (disassociation; idempotent)."""
+        response = self._send(
+            "DELETE",
+            self._url(f"/sync/records/{host_id}"),
+            exc_cls=ImbueCloudSyncError,
+            headers=self._bearer(access_token),
+            timeout=self.timeout_seconds,
+        )
+        self._check(response, ImbueCloudSyncError)
+
     def scrub_sync_secrets(self, access_token: SecretStr) -> int:
         """Strip encrypted_secrets from all the account's records; returns how many were scrubbed."""
         response = self._send(

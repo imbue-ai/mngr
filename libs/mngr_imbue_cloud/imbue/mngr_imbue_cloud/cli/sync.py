@@ -8,6 +8,7 @@ the plugin never encrypts, decrypts, or interprets the secret payloads.
 
 import json
 import sys
+from pathlib import Path
 
 import click
 from loguru import logger
@@ -24,16 +25,28 @@ from imbue.mngr_imbue_cloud.data_types import SyncWorkspaceRecord
 from imbue.mngr_imbue_cloud.errors import ImbueCloudSyncConflictError
 
 
-def _read_json_stdin(model_name: str) -> dict[str, object]:
-    """Parse one JSON object from stdin, failing with a structured error otherwise."""
-    raw = sys.stdin.read()
+def _read_json_payload(model_name: str, input_file: str | None) -> dict[str, object]:
+    """Parse one JSON object from ``--input-file`` (preferred) or stdin.
+
+    minds passes a 0600 temp file so the payload never rides a command line;
+    stdin remains for direct human/scripted invocations.
+    """
+    if input_file is not None:
+        try:
+            raw = Path(input_file).read_text()
+        except OSError as exc:
+            fail_with_json(
+                f"could not read --input-file for {model_name}: {exc}", error_class="UsageError", exit_code=2
+            )
+    else:
+        raw = sys.stdin.read()
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError as exc:
-        logger.warning("Rejecting non-JSON stdin for {}: {}", model_name, exc)
-        fail_with_json(f"stdin is not valid JSON for {model_name}: {exc}", error_class="UsageError", exit_code=2)
+        logger.warning("Rejecting non-JSON input for {}: {}", model_name, exc)
+        fail_with_json(f"input is not valid JSON for {model_name}: {exc}", error_class="UsageError", exit_code=2)
     if not isinstance(parsed, dict):
-        fail_with_json(f"stdin must be a JSON object for {model_name}", error_class="UsageError", exit_code=2)
+        fail_with_json(f"input must be a JSON object for {model_name}", error_class="UsageError", exit_code=2)
     return parsed
 
 
@@ -64,14 +77,15 @@ def pull_records(account: str | None, connector_url: str | None) -> None:
 @records.command(name="push")
 @click.option("--account", default=None, help="Account email (defaults to the active account)")
 @click.option("--connector-url", default=None, help="Override connector URL")
+@click.option("--input-file", default=None, help="Read the record JSON from this file instead of stdin")
 @handle_imbue_cloud_errors
-def push_record(account: str | None, connector_url: str | None) -> None:
-    """Push one workspace record (JSON on stdin, CAS on revision). Emits the stored record.
+def push_record(account: str | None, connector_url: str | None, input_file: str | None) -> None:
+    """Push one workspace record (JSON on stdin or --input-file, CAS on revision). Emits the stored record.
 
     On a revision conflict the JSON error body carries the server's current
     row under ``stored`` so the caller can merge and retry.
     """
-    payload = _read_json_stdin("a workspace record")
+    payload = _read_json_payload("a workspace record", input_file)
     try:
         record = SyncWorkspaceRecord.model_validate(payload)
     except ValueError as exc:
@@ -85,6 +99,21 @@ def push_record(account: str | None, connector_url: str | None) -> None:
     except ImbueCloudSyncConflictError as exc:
         fail_with_json(str(exc), error_class=type(exc).__name__, stored=exc.stored_record)
     emit_json(stored.model_dump(mode="json"))
+
+
+@records.command(name="delete")
+@click.argument("host_id")
+@click.option("--account", default=None, help="Account email (defaults to the active account)")
+@click.option("--connector-url", default=None, help="Override connector URL")
+@handle_imbue_cloud_errors
+def delete_record(host_id: str, account: str | None, connector_url: str | None) -> None:
+    """Remove one workspace record outright (disassociation; idempotent)."""
+    client = make_connector_client(connector_url)
+    store = make_session_store()
+    parsed_account = resolve_account_or_active(store, account)
+    token = get_active_token(store, client, parsed_account)
+    client.delete_sync_record(token, host_id)
+    emit_json({"status": "deleted", "host_id": host_id})
 
 
 @sync.command(name="scrub-secrets")
@@ -123,10 +152,11 @@ def pull_bundle(account: str | None, connector_url: str | None) -> None:
 @bundle.command(name="push")
 @click.option("--account", default=None, help="Account email (defaults to the active account)")
 @click.option("--connector-url", default=None, help="Override connector URL")
+@click.option("--input-file", default=None, help="Read the bundle JSON from this file instead of stdin")
 @handle_imbue_cloud_errors
-def push_bundle(account: str | None, connector_url: str | None) -> None:
-    """Store (replace) the account's key bundle (JSON on stdin)."""
-    payload = _read_json_stdin("a key bundle")
+def push_bundle(account: str | None, connector_url: str | None, input_file: str | None) -> None:
+    """Store (replace) the account's key bundle (JSON on stdin or --input-file)."""
+    payload = _read_json_payload("a key bundle", input_file)
     try:
         parsed_bundle = SyncKeyBundle.model_validate(payload)
     except ValueError as exc:

@@ -2867,3 +2867,15 @@ def test_key_bundle_rejects_oversized_wrapped_dek(monkeypatch: pytest.MonkeyPatc
         "key_epoch": 1,
     }
     assert client.put("/sync/bundle", json=body, headers=_admin_headers()).status_code == 400
+
+
+def test_delete_workspace_record_removes_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, store, _caller = _make_sync_test_client(monkeypatch)
+    client.put("/sync/records/host-aaa111", json=_sync_record_body(), headers=_admin_headers())
+
+    resp = client.delete("/sync/records/host-aaa111", headers=_admin_headers())
+    assert resp.status_code == 200
+    assert client.get("/sync/records", headers=_admin_headers()).json()["records"] == []
+    # Idempotent: deleting again still succeeds.
+    assert client.delete("/sync/records/host-aaa111", headers=_admin_headers()).status_code == 200
+    assert len(store.records_by_key) == 0

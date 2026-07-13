@@ -3627,6 +3627,7 @@ class SyncStore(Protocol):
 
     def list_records(self, user_id: str) -> list[dict[str, Any]]: ...
     def put_record(self, user_id: str, record: dict[str, Any]) -> dict[str, Any]: ...
+    def delete_record(self, user_id: str, host_id: str) -> None: ...
     def scrub_secrets(self, user_id: str) -> int: ...
     def get_bundle(self, user_id: str) -> dict[str, Any] | None: ...
     def put_bundle(self, user_id: str, bundle: dict[str, Any]) -> None: ...
@@ -3732,6 +3733,18 @@ class PostgresSyncStore:
         if written is None:
             raise SyncRevisionConflictError(record)
         return _workspace_record_row_to_dict(written)
+
+    def delete_record(self, user_id: str, host_id: str) -> None:
+        conn = _get_pool_db_connection()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM workspace_records WHERE user_id = %s AND host_id = %s",
+                        (user_id, host_id),
+                    )
+        finally:
+            conn.close()
 
     def scrub_secrets(self, user_id: str) -> int:
         conn = _get_pool_db_connection()
@@ -3865,6 +3878,15 @@ def put_workspace_record_endpoint(request: Request, host_id: str, body: Workspac
         except SyncActiveAgentConflictError as exc:
             raise HTTPException(status_code=409, detail={"message": str(exc)}) from exc
         return WorkspaceRecordModel(**stored).model_dump()
+
+
+@web_app.delete("/sync/records/{host_id}")
+def delete_workspace_record_endpoint(request: Request, host_id: str) -> dict[str, str]:
+    """Remove one workspace record outright (disassociation; idempotent)."""
+    with handle_endpoint_errors():
+        user_id = _sync_caller_user_id(request)
+        get_sync_store().delete_record(user_id, host_id)
+        return {"status": "deleted"}
 
 
 @web_app.post("/sync/scrub-secrets")

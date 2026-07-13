@@ -1434,6 +1434,9 @@ class InMemorySyncStore:
         self.records_by_key[key] = stored
         return self._encode_secrets(stored)
 
+    def delete_record(self, user_id: str, host_id: str) -> None:
+        self.records_by_key.pop((user_id, host_id), None)
+
     def scrub_secrets(self, user_id: str) -> int:
         scrubbed = 0
         for (uid, _), record in self.records_by_key.items():

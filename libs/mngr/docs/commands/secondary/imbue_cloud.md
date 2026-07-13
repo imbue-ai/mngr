@@ -671,6 +671,23 @@ mngr imbue_cloud sync records push [OPTIONS]
 | ---- | ---- | ----------- | ------- |
 | `--account` | text | Account email (defaults to the active account) | None |
 | `--connector-url` | text | Override connector URL | None |
+| `--input-file` | text | Read the record JSON from this file instead of stdin | None |
+
+## mngr imbue_cloud sync records delete
+
+**Usage:**
+
+```text
+mngr imbue_cloud sync records delete [OPTIONS] HOST_ID
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
 
 ## mngr imbue_cloud sync scrub-secrets
 
@@ -729,6 +746,7 @@ mngr imbue_cloud sync bundle push [OPTIONS]
 | ---- | ---- | ----------- | ------- |
 | `--account` | text | Account email (defaults to the active account) | None |
 | `--connector-url` | text | Override connector URL | None |
+| `--input-file` | text | Read the bundle JSON from this file instead of stdin | None |
 
 ## mngr imbue_cloud sync bundle delete
 
