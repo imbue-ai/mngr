@@ -1408,7 +1408,8 @@ class AgentCreator(MutableModel):
 
         When ``on_created`` is provided, it is called with the canonical
         ``AgentId`` and ``HostId`` once ``mngr create`` returns (immediately
-        before the status flips to ``DONE``). Both ids are parsed from the
+        after the status flips to ``DONE``, so consumers can rely on the
+        published canonical id). Both ids are parsed from the
         inner ``mngr create``'s JSONL ``"event": "created"`` line, not
         pre-generated; for imbue_cloud agents they are the leased pool
         host's pre-baked ids.
