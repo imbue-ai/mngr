@@ -212,10 +212,6 @@ def _build_catalog() -> Catalog:
 CATALOG: Final[Catalog] = _build_catalog()
 
 
-# -- Page renderers --
-
-
-@pure
 class RemoteWorkspaceTile(FrozenModel):
     """A workspace known only from another device's synced record, for the landing list."""
 
@@ -226,6 +222,10 @@ class RemoteWorkspaceTile(FrozenModel):
     host_id: str = Field(description="The record's host id (drives remove-from-list)")
 
 
+# -- Page renderers --
+
+
+@pure
 def render_landing_page(
     accessible_agent_ids: Sequence[AgentId],
     mngr_forward_origin: str = "",
