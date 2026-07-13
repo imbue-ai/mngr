@@ -1,8 +1,8 @@
 {
+  "offload-modal-acceptance.toml": {
+    "image_id": "im-FSLEG8FGFnsL1lCzn5zRxF"
+  },
   "offload-modal.toml": {
     "image_id": "im-77uWUZvLLPCnemJhPEFRzJ"
-  },
-  "offload-modal-acceptance.toml": {
-    "image_id": "im-TbyyzZ6Rxcu1Sd6bzjGZYR"
   }
 }
