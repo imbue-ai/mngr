@@ -18,6 +18,8 @@ from imbue.minds.desktop_client.backend_resolver import parse_agents_from_json
 from imbue.minds.desktop_client.backend_resolver import parse_service_log_records
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthAccount
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudSyncConflictCliError
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.primitives import ServiceName
@@ -78,6 +80,71 @@ class FakeImbueCloudCli(ImbueCloudCli):
 
     def remove_account(self, user_id: str) -> None:
         self.accounts_to_return = [a for a in self.accounts_to_return if a.user_id != user_id]
+
+    # -- In-memory workspace-sync backend (mirrors the connector's semantics) --
+
+    sync_records_by_email: dict[str, dict[str, dict[str, object]]] = Field(
+        default_factory=dict, description="email -> host_id -> wire record (the fake server state)"
+    )
+    sync_bundle_by_email: dict[str, dict[str, object]] = Field(
+        default_factory=dict, description="email -> key bundle (the fake server state)"
+    )
+    is_sync_offline: bool = Field(default=False, description="When True, every sync call raises (connector down)")
+
+    def _check_sync_online(self, command_repr: str) -> None:
+        if self.is_sync_offline:
+            raise ImbueCloudCliError(f"{command_repr}: connector unreachable (fake offline)")
+
+    def sync_records_pull(self, account: str) -> list[dict[str, object]]:
+        self._check_sync_online("sync records pull")
+        return [dict(record) for record in self.sync_records_by_email.get(account, {}).values()]
+
+    def sync_record_push(self, account: str, record: Mapping[str, object]) -> dict[str, object]:
+        self._check_sync_online("sync records push")
+        by_host = self.sync_records_by_email.setdefault(account, {})
+        host_id = str(record["host_id"])
+        existing = by_host.get(host_id)
+        pushed_revision = int(str(record["revision"]))
+        if existing is not None and pushed_revision != int(str(existing["revision"])) + 1:
+            conflict = ImbueCloudSyncConflictCliError("sync records push: revision conflict")
+            conflict.stored_record = dict(existing)
+            raise conflict
+        if str(record.get("state")) == "active":
+            for other_host_id, other in by_host.items():
+                is_other = other_host_id != host_id
+                if is_other and other.get("agent_id") == record.get("agent_id") and other.get("state") == "active":
+                    agent_conflict = ImbueCloudSyncConflictCliError("sync records push: active agent conflict")
+                    agent_conflict.stored_record = None
+                    raise agent_conflict
+        stored = dict(record)
+        by_host[host_id] = stored
+        return dict(stored)
+
+    def sync_record_delete(self, account: str, host_id: str) -> None:
+        self._check_sync_online("sync records delete")
+        self.sync_records_by_email.get(account, {}).pop(host_id, None)
+
+    def sync_scrub_secrets(self, account: str) -> int:
+        self._check_sync_online("sync scrub-secrets")
+        scrubbed = 0
+        for record in self.sync_records_by_email.get(account, {}).values():
+            if record.get("encrypted_secrets") is not None:
+                record["encrypted_secrets"] = None
+                scrubbed += 1
+        return scrubbed
+
+    def sync_bundle_pull(self, account: str) -> dict[str, object] | None:
+        self._check_sync_online("sync bundle pull")
+        bundle = self.sync_bundle_by_email.get(account)
+        return dict(bundle) if bundle is not None else None
+
+    def sync_bundle_push(self, account: str, bundle: Mapping[str, object]) -> None:
+        self._check_sync_online("sync bundle push")
+        self.sync_bundle_by_email[account] = dict(bundle)
+
+    def sync_bundle_delete(self, account: str) -> None:
+        self._check_sync_online("sync bundle delete")
+        self.sync_bundle_by_email.pop(account, None)
 
 
 def make_fake_imbue_cloud_cli() -> FakeImbueCloudCli:

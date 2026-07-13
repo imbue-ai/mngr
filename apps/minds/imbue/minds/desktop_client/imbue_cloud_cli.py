@@ -16,6 +16,8 @@ parses those into typed pydantic objects.
 """
 
 import json as _json
+import os
+import tempfile
 import time
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -68,6 +70,16 @@ class ImbueCloudCliError(MindError):
 
 class ImbueCloudUnavailableError(ImbueCloudCliError):
     """Subclass of CliError indicating the connector returned 503 (no matching pool host)."""
+
+
+class ImbueCloudSyncConflictCliError(ImbueCloudCliError):
+    """A record push hit a 409 (revision CAS or active-agent conflict).
+
+    ``stored_record`` carries the server's current row when the conflict was a
+    revision CAS failure, so the caller can rebase and retry; None otherwise.
+    """
+
+    stored_record: dict[str, Any] | None = None
 
 
 class ImbueCloudAuthSession(FrozenModel):
@@ -630,6 +642,97 @@ class ImbueCloudCli(MutableModel):
         result = self._run(args, cg_name="imbue-cloud-bucket-keys-create", timeout_seconds=_KEY_OP_TIMEOUT_SECONDS)
         body = self._expect_success(result, "bucket keys create")
         return R2BucketKeyMaterial.model_validate(body)
+
+    # ------------------------------------------------------------------
+    # Workspace sync (records + key bundle)
+    # ------------------------------------------------------------------
+
+    def sync_records_pull(self, account: str) -> list[dict[str, Any]]:
+        result = self._run(["sync", "records", "pull", "--account", account], cg_name="imbue-cloud-sync-records-pull")
+        body = self._expect_success(result, "sync records pull")
+        records = body.get("records", []) if isinstance(body, dict) else []
+        return [entry for entry in records if isinstance(entry, dict)]
+
+    def sync_record_push(self, account: str, record: Mapping[str, Any]) -> dict[str, Any]:
+        """Push one record; returns the stored row. Raises ImbueCloudSyncConflictCliError on a 409.
+
+        The record JSON travels via a 0600 temp file (--input-file) so secret
+        payloads never ride a command line or a log.
+        """
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            _json.dump(dict(record), handle)
+            input_path = handle.name
+        try:
+            result = self._run(
+                ["sync", "records", "push", "--account", account, "--input-file", input_path],
+                cg_name="imbue-cloud-sync-record-push",
+            )
+        finally:
+            Path(input_path).unlink(missing_ok=True)
+        if result.returncode != 0 and "ImbueCloudSyncConflictError" in result.stderr:
+            conflict = ImbueCloudSyncConflictCliError("sync records push: revision/agent conflict")
+            conflict.exit_code = result.returncode if result.returncode is not None else 1
+            conflict.stdout = result.stdout
+            conflict.stderr = result.stderr
+            conflict.stored_record = _parse_conflict_stored(result.stderr)
+            raise conflict
+        body = self._expect_success(result, "sync records push")
+        return body if isinstance(body, dict) else {}
+
+    def sync_record_delete(self, account: str, host_id: str) -> None:
+        result = self._run(
+            ["sync", "records", "delete", host_id, "--account", account],
+            cg_name="imbue-cloud-sync-record-delete",
+        )
+        self._expect_success(result, "sync records delete")
+
+    def sync_scrub_secrets(self, account: str) -> int:
+        result = self._run(["sync", "scrub-secrets", "--account", account], cg_name="imbue-cloud-sync-scrub")
+        body = self._expect_success(result, "sync scrub-secrets")
+        return int(body.get("scrubbed", 0)) if isinstance(body, dict) else 0
+
+    def sync_bundle_pull(self, account: str) -> dict[str, Any] | None:
+        result = self._run(["sync", "bundle", "pull", "--account", account], cg_name="imbue-cloud-sync-bundle-pull")
+        body = self._expect_success(result, "sync bundle pull")
+        bundle = body.get("bundle") if isinstance(body, dict) else None
+        return bundle if isinstance(bundle, dict) else None
+
+    def sync_bundle_push(self, account: str, bundle: Mapping[str, Any]) -> None:
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            _json.dump(dict(bundle), handle)
+            input_path = handle.name
+        try:
+            result = self._run(
+                ["sync", "bundle", "push", "--account", account, "--input-file", input_path],
+                cg_name="imbue-cloud-sync-bundle-push",
+            )
+        finally:
+            Path(input_path).unlink(missing_ok=True)
+        self._expect_success(result, "sync bundle push")
+
+    def sync_bundle_delete(self, account: str) -> None:
+        result = self._run(
+            ["sync", "bundle", "delete", "--account", account], cg_name="imbue-cloud-sync-bundle-delete"
+        )
+        self._expect_success(result, "sync bundle delete")
+
+
+def _parse_conflict_stored(stderr: str) -> dict[str, Any] | None:
+    """Extract the ``stored`` row from a sync-push conflict's JSON error body, if present."""
+    for line in stderr.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("{"):
+            continue
+        try:
+            parsed = _json.loads(stderr[stderr.index(stripped) :])
+        except _json.JSONDecodeError as exc:
+            logger.warning("Could not parse the sync-conflict error body as JSON: {}", exc)
+            return None
+        stored = parsed.get("stored") if isinstance(parsed, dict) else None
+        return stored if isinstance(stored, dict) else None
+    return None
 
 
 def _parse_stdout_json(stdout: str, command_repr: str) -> Any:
