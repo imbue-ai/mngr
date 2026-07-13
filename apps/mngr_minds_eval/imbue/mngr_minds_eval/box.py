@@ -82,6 +82,17 @@ def container_name(mngr_branch: str, ref: str) -> str:
     return "minds-box-{}-{}".format(_slug(mngr_branch), ref[:12])
 
 
+def find_running(mngr_branch: str) -> str:
+    """Any running box for this branch, at any SHA -- for ops that only need the branch's Modal env
+    (e.g. clean), so they reuse an existing box instead of building a fresh tip box. '' if none."""
+    prefix = "minds-box-{}-".format(_slug(mngr_branch))
+    out = _run(["docker", "ps", "--filter", "name={}".format(prefix), "--format", "{{.Names}}"]).stdout
+    for line in out.splitlines():
+        if line.startswith(prefix):
+            return line.strip()
+    return ""
+
+
 def resolve(mngr_branch: str, pinned_ref: str = "") -> tuple[str, str]:
     """(container, ref) for a branch. pinned_ref (a full SHA) restores the exact mngr; otherwise the
     branch's current remote tip."""

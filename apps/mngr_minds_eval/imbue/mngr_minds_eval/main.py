@@ -55,12 +55,9 @@ def _check_aws() -> dict:
         sys.exit("error: {}".format(exc))
 
 
-def _exec_in_box(mngr_branch: str, argv: list[str], *, pinned_ref: str = "",
-                 upload: tuple[Path, str] | None = None) -> None:
-    """Host side: ensure the box for (branch, SHA), then run this same command inside it, then print
-    how to view the workspaces. upload = (local_path, box_path) copies a file in and rewrites its arg
-    (used for the eval config)."""
-    container = box_mod.ensure(mngr_branch, pinned_ref)
+def _run_in_container(container: str, argv: list[str], *, upload: tuple[Path, str] | None = None) -> None:
+    """Run this same command inside an already-resolved box, then print how to view the workspaces.
+    upload = (local_path, box_path) copies a file in and rewrites its arg (the eval config)."""
     if upload is not None:
         local, box_path = upload
         subprocess.run(["docker", "cp", str(local), "{}:{}".format(container, box_path)], check=True)
@@ -137,14 +134,17 @@ def main() -> None:
         return
 
     if args.command == "clean-modal-workspaces":
+        # Clean only needs the branch's Modal env, which any box for the branch can reach -- so reuse
+        # a running box at any SHA, and only build a fresh tip box if none is up.
         if not IN_BOX:
-            _exec_in_box(args.mngr_branch, sys.argv[1:])
+            _run_in_container(box_mod.find_running(args.mngr_branch) or box_mod.ensure(args.mngr_branch),
+                              sys.argv[1:])
         launch_mod.destroy_all_workspaces(_port())
         return
 
     if args.command == "make-modal-workspace":
         if not IN_BOX:
-            _exec_in_box(args.mngr_branch, sys.argv[1:])
+            _run_in_container(box_mod.ensure(args.mngr_branch), sys.argv[1:])
         try:
             workspace_mod.create_workspace(
                 port=_port(), fct_link=args.fct_link, fct_branch=args.fct_branch, name=args.name,
@@ -161,7 +161,8 @@ def main() -> None:
         if not args.anthropic_key:
             parser.error("set ANTHROPIC_API_KEY (or --anthropic-key)")
         if not IN_BOX:
-            _exec_in_box(config["mngr_branch"], sys.argv[1:], upload=(args.config, _CONFIG_IN_BOX))
+            _run_in_container(box_mod.ensure(config["mngr_branch"]), sys.argv[1:],
+                              upload=(args.config, _CONFIG_IN_BOX))
         launch_mod.launch_batch(config=config, anthropic_key=args.anthropic_key, port=_port(), stamp=_utc_stamp())
         return
 
@@ -178,7 +179,7 @@ def main() -> None:
             if not mngr_branch:
                 sys.exit("batch {} does not record its mngr branch".format(args.batch))
             print(">> restoring on mngr {!r} @ {}".format(mngr_branch, (config.get("mngr_sha") or "tip")[:12]), flush=True)
-            _exec_in_box(mngr_branch, sys.argv[1:], pinned_ref=config.get("mngr_sha", ""))
+            _run_in_container(box_mod.ensure(mngr_branch, config.get("mngr_sha", "")), sys.argv[1:])
         restore_mod.restore(args.batch, args.case, args.message, port=_port(), restic_password=args.restic_password)
 
 
