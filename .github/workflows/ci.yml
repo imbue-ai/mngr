@@ -815,8 +815,11 @@ jobs:
       # as MINDS_SYNC_E2E_* so the just recipe forwards them into the sandbox
       # (the tests skip when the vars are absent). Secret values are masked by
       # the use-vault-secrets action even though offload --trace echoes args.
+      # `!cancelled()` keeps the artifact available to the later
+      # minds_services step even when an unrelated earlier step failed
+      # (matching that step's own `!cancelled()` gate).
       - name: Download deployment env config for the sync e2e tests
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_minds_release_tests }}
+        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.run_minds_release_tests }}
         uses: actions/download-artifact@v7
         with:
           name: minds-ci-env-config
