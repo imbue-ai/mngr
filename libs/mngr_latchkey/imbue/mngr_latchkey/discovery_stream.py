@@ -46,6 +46,7 @@ from imbue.mngr.api.discovery_events import HostDestroyedEvent
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
 from imbue.mngr.api.discovery_events import ProviderDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
+from imbue.mngr.api.discovery_log_suppression import DiscoveryErrorLogSuppressor
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
@@ -134,6 +135,10 @@ class DiscoveryStreamConsumer(MutableModel):
     # arrives after the agents were discovered.
     _ssh_by_host_id: dict[str, RemoteSSHInfo] = PrivateAttr(default_factory=dict)
     _process: RunningProcess | None = PrivateAttr(default=None)
+    # Deduplicates provider-level discovery-error warnings: a provider wedged on
+    # the same failure (e.g. missing credentials) logs once per process, not once
+    # per poll cycle. Clean snapshots feed it below to re-arm on recovery.
+    _error_log_suppressor: DiscoveryErrorLogSuppressor = PrivateAttr(default_factory=DiscoveryErrorLogSuppressor)
 
     def add_on_agent_discovered_callback(self, callback: OnAgentDiscoveredCallback) -> None:
         """Register a callback fired for every agent discovered (or re-fired on late SSH info)."""
@@ -244,6 +249,9 @@ class DiscoveryStreamConsumer(MutableModel):
             self._safely_call_destroyed(AgentId(aid_str))
 
         if isinstance(event, ProviderDiscoverySnapshotEvent):
+            # A clean snapshot re-arms the provider's error-log suppression (and
+            # logs a recovery line if its error was previously logged).
+            self._error_log_suppressor.record_provider_snapshot(event)
             # Fire discovered only for snapshot agents the aggregator actually kept.
             # It is span-aware: an agent whose own destroy/state-change event landed
             # during this snapshot's discovery span is deliberately not re-added, so
@@ -261,12 +269,7 @@ class DiscoveryStreamConsumer(MutableModel):
             with self._lock:
                 self._ssh_by_host_id.pop(str(event.host_id), None)
         elif isinstance(event, DiscoveryErrorEvent):
-            logger.warning(
-                "Discovery error from {}: {} ({})",
-                event.source_name,
-                event.error_message,
-                event.error_type,
-            )
+            self._error_log_suppressor.log_discovery_error_event(event)
         else:
             # Remaining event types (AgentDestroyedEvent, HostDiscoveryEvent, and
             # the ignored legacy FullDiscoverySnapshotEvent) need no extra work

@@ -20,6 +20,7 @@ from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import CredentialStatus
+from imbue.mngr_latchkey.core import GATEWAY_MAX_BODY_SIZE_BYTES
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.encryption_key import LatchkeyEncryptionKeyPermissionError
@@ -98,6 +99,15 @@ _REMOTE_TUNNEL_PID_FILENAME: Final[str] = "tunnel.pid"
 # outer-host -> container SSH used by the reverse tunnel. Lives under the
 # remote ``$HOME/.latchkey`` directory; the matching ``.pub`` sits beside it.
 _CONTAINER_TUNNEL_KEY_FILENAME: Final[str] = "container_tunnel_key"
+
+# How long, after backgrounding the reverse tunnel, to confirm the ``ssh -R``
+# process is still alive before declaring the launch a success. A wrong/refused
+# target port or a failed forward bind kills ``ssh`` within milliseconds (it
+# runs under ``ExitOnForwardFailure=yes``), so a few seconds is ample to catch a
+# broken tunnel while never tripping on a healthy one (which stays up for the
+# agent's lifetime). Without this, a failed tunnel would be cached as a
+# successful provision and never retried.
+_TUNNEL_LIVENESS_CHECK_SECONDS: Final[int] = 5
 
 # Docker label key every mngr container carries, valued with the host id. Used
 # to locate an agent's container on the VPS by host id. Must match the
@@ -350,7 +360,12 @@ def sync_permissions(host: OuterHostInterface, latchkey_directory: Path, host_id
         host.write_file(remote_path, content.encode("utf-8"), mode=_REMOTE_FILE_MODE, is_atomic=True)
 
 
-def _pidfile_guarded_launch_script(pid_filename: str, cmdline_marker: str, launch_command: str) -> str:
+def _pidfile_guarded_launch_script(
+    pid_filename: str,
+    cmdline_marker: str,
+    launch_command: str,
+    liveness_check_seconds: int = 0,
+) -> str:
     """Build an idempotent background launch keyed off a PID file under ``$HOME/.latchkey``.
 
     Skips the launch when the PID recorded in ``$HOME/.latchkey/<pid_filename>``
@@ -365,7 +380,25 @@ def _pidfile_guarded_launch_script(pid_filename: str, cmdline_marker: str, launc
     running this very script and wrongly conclude the process is already up.
     Inspecting one specific PID cannot self-match, and ``kill -0`` / ``/proc``
     need no ``procps``.
+
+    When ``liveness_check_seconds`` is positive, after backgrounding the process
+    the script polls ``kill -0`` once per second for that many seconds and exits
+    non-zero if it dies in that window. A backgrounded launch otherwise reports
+    success the instant ``&`` returns, so a process that fails almost immediately
+    (e.g. an ``ssh -R`` that cannot reach the target, or whose forward bind fails
+    under ``ExitOnForwardFailure``) would look like a successful launch; this
+    turns that into a visible failure for the caller.
     """
+    liveness_check_lines: tuple[str, ...] = ()
+    if liveness_check_seconds > 0:
+        liveness_check_lines = (
+            f"_remaining={liveness_check_seconds}",
+            'while [ "$_remaining" -gt 0 ]; do',
+            '  kill -0 "$(cat "$_pidfile")" 2>/dev/null || { echo "launched process exited early" >&2; exit 1; }',
+            "  sleep 1",
+            "  _remaining=$((_remaining - 1))",
+            "done",
+        )
     return "\n".join(
         (
             "set -e",
@@ -377,6 +410,7 @@ def _pidfile_guarded_launch_script(pid_filename: str, cmdline_marker: str, launc
             "fi",
             f"{launch_command} &",
             'echo $! > "$_pidfile"',
+            *liveness_check_lines,
             "exit 0",
         )
     )
@@ -424,7 +458,7 @@ def _build_gateway_start_script(outer_port: int, key_file_path: Path, password_f
     launch_command = (
         f"LATCHKEY_GATEWAY_PORT={outer_port} LATCHKEY_GATEWAY_LISTEN_HOST=127.0.0.1 "
         f"LATCHKEY_DISABLE_COUNTING=1 LATCHKEY_DISABLE_CREDENTIALS_REFRESH=1 "
-        f"nohup latchkey gateway "
+        f"nohup latchkey gateway --max-body-size {GATEWAY_MAX_BODY_SIZE_BYTES} "
         f'</dev/null >"$HOME/.latchkey/{_REMOTE_GATEWAY_LOG_FILENAME}" 2>&1'
     )
     guarded = _pidfile_guarded_launch_script(
@@ -519,7 +553,10 @@ def _build_reverse_tunnel_script(
     :func:`_pidfile_guarded_launch_script`). The tunnel is detached via ``nohup``
     (not ``ssh -f``, whose self-backgrounding fork would leave us no stable PID
     to track), logging to ``$HOME/.latchkey/tunnel.log``; reconnect/lifecycle
-    handling is intentionally out of scope. Host-key verification is disabled
+    handling is intentionally out of scope. After launch the guard confirms the
+    ``ssh`` process survives a short window (see ``liveness_check_seconds``) so a
+    tunnel that fails to connect or bind its forward surfaces as a failed launch
+    rather than a silently-cached success. Host-key verification is disabled
     because the target is our own freshly created container reached over VPS
     loopback (a hardened version would pin the container host key).
     """
@@ -536,6 +573,7 @@ def _build_reverse_tunnel_script(
         pid_filename=_REMOTE_TUNNEL_PID_FILENAME,
         cmdline_marker=forward_spec,
         launch_command=launch_command,
+        liveness_check_seconds=_TUNNEL_LIVENESS_CHECK_SECONDS,
     )
 
 

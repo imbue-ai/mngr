@@ -76,6 +76,16 @@ _DEFAULT_LISTEN_HOST: Final[str] = "127.0.0.1"
 _GATEWAY_BIND_TIMEOUT_SECONDS: Final[float] = 10.0
 _GATEWAY_BIND_POLL_INTERVAL_SECONDS: Final[float] = 0.05
 
+# Maximum request body size the gateway accepts, passed as ``--max-body-size``
+# to every gateway spawn (here and in :mod:`imbue.mngr_latchkey.remote_gateway`).
+# The upstream default is 10 MiB, which is fine for API calls but not for git:
+# the gateway natively proxies GitHub's git smart-HTTP endpoints
+# (``/gateway/https://github.com/...``, ``github-git`` scope), and a push's
+# packfile scales with repo history (a minds template push is ~30 MiB today).
+# The gateway buffers each request body in memory, so this caps transient
+# per-request memory; it costs nothing until a request is actually that large.
+GATEWAY_MAX_BODY_SIZE_BYTES: Final[int] = 512 * 1024 * 1024
+
 # Services-info / create-jwt are normally instant but can stall on slow keychains.
 # The auth-browser flow waits on a real human and is intentionally untimed.
 _SERVICES_INFO_TIMEOUT_SECONDS: Final[float] = 15.0
@@ -589,22 +599,26 @@ class Latchkey(MutableModel):
         Pair the returned port with :attr:`listen_host` to build the
         gateway URL (``http://<listen_host>:<port>``).
         """
-        # Fast path: already running.
+        # Fast path: already running and its subprocess is still alive.
         with self._lock:
             self._require_initialized_locked()
             running = self._running_gateway
-            if running is not None:
-                return running.port
+        if running is not None and running.process.poll() is None:
+            return running.port
         plugin_dir = self.plugin_data_dir
-        # Slow path: serialize spawning. Double-check after acquiring
-        # the spawn lock so a concurrent caller that already spawned
-        # is observed before we duplicate the work.
+        # Slow path: serialize spawning. Double-check after acquiring the spawn
+        # lock so a concurrent caller that already (re)spawned is observed before
+        # we duplicate the work. A dead cached gateway (its subprocess exited --
+        # e.g. it crashed mid-session) is respawned here rather than returning its
+        # stale port; its previously-bound port is reused so agent reverse tunnels
+        # and the published ``gateway_port`` stay valid across the restart.
         with self._spawn_lock:
             with self._lock:
                 running = self._running_gateway
-                if running is not None:
-                    return running.port
-            port, process = self._spawn_gateway(concurrency_group, plugin_dir)
+            if running is not None and running.process.poll() is None:
+                return running.port
+            preferred_port = running.port if running is not None else None
+            port, process = self._spawn_gateway(concurrency_group, plugin_dir, preferred_port=preferred_port)
             with self._lock:
                 self._running_gateway = _RunningGateway(port=port, process=process)
         return port
@@ -642,9 +656,15 @@ class Latchkey(MutableModel):
 
     @property
     def is_gateway_running(self) -> bool:
-        """Whether this :class:`Latchkey` has spawned a gateway and not yet stopped it."""
+        """Whether this :class:`Latchkey` has a spawned gateway whose subprocess is still alive.
+
+        Checks actual subprocess liveness (via ``poll()``), not merely the presence
+        of a tracked record, so a gateway that exited unexpectedly reads as
+        not-running and the supervisor's gateway health check can respawn it.
+        """
         with self._lock:
-            return self._running_gateway is not None
+            running = self._running_gateway
+        return running is not None and running.process.poll() is None
 
     # -- Password / JWT derivation ------------------------------------------
 
@@ -1148,6 +1168,11 @@ class Latchkey(MutableModel):
         self,
         concurrency_group: ConcurrencyGroup,
         plugin_dir: Path,
+        # When set, bind the gateway to this exact port instead of allocating a
+        # fresh one -- used when respawning a crashed gateway so its port (and
+        # thus every agent reverse tunnel plus the published ``gateway_port``) is
+        # preserved across the restart.
+        preferred_port: int | None,
     ) -> tuple[int, RunningProcess]:
         """Spawn a fresh ``latchkey gateway`` and return its listen port + :class:`RunningProcess`.
 
@@ -1190,7 +1215,9 @@ class Latchkey(MutableModel):
         # so a package upgrade overrides any stale on-disk copy.
         _materialize_bundled_extensions(self.latchkey_directory)
 
-        port = _allocate_free_port(self.listen_host)
+        # Reuse the previously-bound port when respawning a dead gateway; otherwise
+        # allocate a fresh free port for the first spawn.
+        port = preferred_port if preferred_port is not None else _allocate_free_port(self.listen_host)
         env = _build_gateway_env(
             listen_host=self.listen_host,
             listen_port=port,
@@ -1208,9 +1235,16 @@ class Latchkey(MutableModel):
         ):
             try:
                 process = concurrency_group.run_process_in_background(
-                    command=[self.latchkey_binary, "gateway"],
+                    command=[self.latchkey_binary, "gateway", "--max-body-size", str(GATEWAY_MAX_BODY_SIZE_BYTES)],
                     env=env,
                     on_output=_log_gateway_output_line,
+                    # The supervisor's own gateway health check owns respawning a dead
+                    # gateway, so this is not a group-checked strand: were it checked, a
+                    # mid-session crash (non-zero exit) would make every subsequent
+                    # concurrency-group call -- including the ``run_process_in_background``
+                    # of the respawn itself -- raise on the failed strand, blocking the
+                    # very restart we want.
+                    is_checked_by_group=False,
                 )
             except (ConcurrencyExceptionGroup, OSError) as e:
                 raise LatchkeyError(f"Failed to spawn shared Latchkey gateway: {e}") from e

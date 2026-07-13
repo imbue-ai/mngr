@@ -136,7 +136,7 @@ DEFAULT_FAST_MODE: Final[FastMode] = FastMode.PREVENT
 
 # Docker ``--start-arg`` flags that the pre-baked pool-host container is already
 # created with -- these are the ``docker run`` flags the ``pool_host`` create
-# template applies at bake time (see forever-claude-template's
+# template applies at bake time (see default-workspace-template's
 # ``.mngr/settings.toml``). On the fast (adopt) path the container is reused
 # as-is, so a create that requests any of these is asking for state the running
 # container already has: harmless and consistent rather than a conflict. This is

@@ -11,7 +11,6 @@ from pydantic import AnyUrl
 from pydantic import Field
 from pydantic import SecretStr
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.desktop_client.backup_env_store import parse_restic_env
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.backup_provisioning import _create_or_reuse_bucket
@@ -73,7 +72,6 @@ class _FakeImbueCloudCli(ImbueCloudCli):
 
 def _make_cli(*, create_error_stderr: str | None = None) -> _FakeImbueCloudCli:
     return _FakeImbueCloudCli(
-        parent_concurrency_group=ConcurrencyGroup(name="test-backup-cli"),
         connector_url=AnyUrl("http://connector.example"),
         create_error_stderr=create_error_stderr,
     )

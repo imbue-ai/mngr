@@ -1,27 +1,60 @@
+import os
 from collections.abc import Iterator
+from multiprocessing.connection import Pipe
+from pathlib import Path
+from uuid import uuid4
 
+import click
 import pytest
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.mngr_caller import MngrCaller
+from imbue.minds.utils.mngr_caller import MngrCallerNotInitializedError
 from imbue.minds.utils.mngr_caller import _coerce_exit_code
+from imbue.minds.utils.mngr_caller import _execute_mngr_cli
+from imbue.minds.utils.mngr_caller import _serve_one_request
 from imbue.mngr.utils.polling import wait_for
+
+
+def _make_cwd_capturing_command(captured: list[str]) -> click.Command:
+    """Build a tiny stand-in CLI that records the process working directory.
+
+    The directory is captured into ``captured`` (rather than printed) so the test
+    can assert on the cwd the CLI actually ran in.
+    """
+
+    @click.command()
+    def _command() -> None:
+        captured.append(os.getcwd())
+
+    return _command
 
 
 @pytest.fixture()
 def mngr_caller() -> Iterator[MngrCaller]:
-    """A standalone caller whose warm processes are torn down after the test.
+    """An initialized caller whose warm processes are torn down after the test.
 
-    A real :meth:`MngrCaller.call` leaves an idle warm process waiting on a
-    socket for the next call. ``stop`` terminates it (and tears down the owned
-    concurrency group + socket directory) so the per-session leak checker does
-    not flag the lingering subprocess.
+    :meth:`MngrCaller.initialize` adopts an externally-owned concurrency group
+    (required before any call). A real :meth:`MngrCaller.call` leaves an idle
+    warm process waiting on a socket for the next call; ``stop`` terminates it
+    and the concurrency group's own teardown reaps anything still tracked, so
+    the per-session leak checker does not flag a lingering subprocess.
     """
     caller = MngrCaller()
-    try:
-        yield caller
-    finally:
-        caller.stop()
+    with ConcurrencyGroup(name="test-mngr-caller") as concurrency_group:
+        caller.initialize(concurrency_group)
+        try:
+            yield caller
+        finally:
+            caller.stop()
+
+
+def test_call_before_initialize_raises() -> None:
+    """A call on an uninitialized caller is refused rather than spawning a process."""
+    caller = MngrCaller()
+    with pytest.raises(MngrCallerNotInitializedError):
+        caller.call(["--version"], timeout=1.0)
 
 
 def test_coerce_exit_code_none_is_success() -> None:
@@ -43,6 +76,32 @@ def test_call_result_defaults() -> None:
     assert result.stdout == ""
     assert result.stderr == ""
     assert result.is_timed_out is False
+
+
+def test_execute_mngr_cli_changes_to_requested_cwd(tmp_path: Path) -> None:
+    """A non-None ``cwd`` makes the CLI run from that directory.
+
+    ``_execute_mngr_cli`` runs in the throwaway warm process, so ``os.chdir`` is
+    safe there; the test restores its own cwd afterwards.
+    """
+    captured_cwd: list[str] = []
+    original_cwd = Path.cwd()
+    try:
+        returncode, _stdout, _stderr = _execute_mngr_cli(_make_cwd_capturing_command(captured_cwd), (), {}, tmp_path)
+    finally:
+        os.chdir(original_cwd)
+    assert returncode == 0
+    assert Path(captured_cwd[0]).resolve() == tmp_path.resolve()
+
+
+def test_execute_mngr_cli_keeps_cwd_when_none() -> None:
+    """A ``None`` ``cwd`` leaves the working directory untouched."""
+    captured_cwd: list[str] = []
+    original_cwd = Path.cwd()
+    returncode, _stdout, _stderr = _execute_mngr_cli(_make_cwd_capturing_command(captured_cwd), (), {}, None)
+    assert returncode == 0
+    assert Path(captured_cwd[0]).resolve() == original_cwd.resolve()
+    assert Path.cwd() == original_cwd
 
 
 # These tests spawn a real warm ``mngr`` process (a fresh interpreter that
@@ -101,6 +160,45 @@ def test_call_times_out_and_reports_timed_out(mngr_caller: MngrCaller) -> None:
     result = mngr_caller.call(["--version"], timeout=0.0)
     assert result.is_timed_out is True
     assert result.returncode != 0
+
+
+def test_serve_one_request_arms_parent_death_watcher() -> None:
+    """The warm-server serve path must start a parent-death watcher.
+
+    This is what protects a warm process that is orphaned *while busy*: once a
+    request is read the socket is no longer watched for EOF, so only the
+    parent-death watcher can dismiss it if the parent dies. The watcher must be
+    armed before the (blocking) ``recv``, so we assert the thread exists while
+    the serve is still blocked waiting for a request, then release it via EOF.
+
+    The watcher's actual firing-on-parent-death behavior is covered by
+    ``parent_process_test.py``; here we only verify it is wired in.
+    """
+    parent_connection, child_connection = Pipe(duplex=True)
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as concurrency_group:
+        # No request is ever sent, so the stand-in command is never invoked; the
+        # serve blocks in ``recv`` until we close the parent end below.
+        serve_thread = concurrency_group.start_new_thread(
+            target=_serve_one_request,
+            args=(child_connection, click.Command(name="noop"), concurrency_group),
+            name="serve-one-request",
+            is_checked=False,
+        )
+        try:
+            wait_for(
+                lambda: any(t.thread.name == "parent-death-watcher" for t in concurrency_group._threads),
+                timeout=10.0,
+                poll_interval=0.05,
+                error_message="serve did not arm a parent-death watcher",
+            )
+            watchers = [t for t in concurrency_group._threads if t.thread.name == "parent-death-watcher"]
+            assert len(watchers) == 1
+            assert watchers[0].thread.is_alive()
+        finally:
+            # Closing the parent end makes the blocked ``recv`` see EOF so the
+            # serve returns and both threads can be joined on group exit.
+            parent_connection.close()
+            serve_thread.join(timeout=10.0)
 
 
 @pytest.mark.flaky

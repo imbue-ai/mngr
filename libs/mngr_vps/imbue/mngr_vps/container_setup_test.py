@@ -36,13 +36,13 @@ class _ImageInspectOuter(MutableModel):
 
 
 def test_image_exists_true_when_inspect_succeeds() -> None:
-    outer = cast(OuterHostInterface, _ImageInspectOuter(present_image="fct:minds-v9.9.9"))
-    assert image_exists(outer, "fct:minds-v9.9.9") is True
+    outer = cast(OuterHostInterface, _ImageInspectOuter(present_image="default-workspace-template:minds-v9.9.9"))
+    assert image_exists(outer, "default-workspace-template:minds-v9.9.9") is True
 
 
 def test_image_exists_false_when_inspect_fails() -> None:
-    outer = cast(OuterHostInterface, _ImageInspectOuter(present_image="fct:minds-v9.9.9"))
-    assert image_exists(outer, "fct:absent-tag") is False
+    outer = cast(OuterHostInterface, _ImageInspectOuter(present_image="default-workspace-template:minds-v9.9.9"))
+    assert image_exists(outer, "default-workspace-template:absent-tag") is False
 
 
 def test_clone_build_context_returns_none_for_non_git_context(tmp_path: Path) -> None:

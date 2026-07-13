@@ -33,6 +33,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ImageReference
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr_imbue_cloud.config import ImbueCloudProviderConfig
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
 from imbue.mngr_imbue_cloud.data_types import LeasedHostInfo
 from imbue.mngr_imbue_cloud.errors import FastPathUnavailableError
@@ -48,12 +49,12 @@ from imbue.mngr_vps.container_setup import RUNNING_CONTAINER_STATE
 def test_resolve_fast_path_attributes_canonicalizes_remote_url_and_keeps_branch() -> None:
     resolved = _resolve_fast_path_attributes(
         LeaseAttributes(
-            repo_url="git@github.com:imbue-ai/forever-claude-template.git",
+            repo_url="git@github.com:imbue-ai/default-workspace-template.git",
             repo_branch_or_tag="v0.3.0",
             cpus=4,
         )
     )
-    assert resolved.repo_url == "github.com/imbue-ai/forever-claude-template"
+    assert resolved.repo_url == "github.com/imbue-ai/default-workspace-template"
     assert resolved.repo_branch_or_tag == "v0.3.0"
     # Non-identity attributes are preserved.
     assert resolved.cpus == 4
@@ -63,7 +64,7 @@ def test_resolve_fast_path_attributes_canonicalizes_remote_url_and_keeps_branch(
     "attributes",
     [
         LeaseAttributes(repo_branch_or_tag="v0.3.0"),
-        LeaseAttributes(repo_url="https://github.com/imbue-ai/forever-claude-template"),
+        LeaseAttributes(repo_url="https://github.com/imbue-ai/default-workspace-template"),
         LeaseAttributes(),
     ],
 )
@@ -391,6 +392,23 @@ def _index_of(commands: list[str], substring: str) -> int:
     raise AssertionError(f"no recorded command contains {substring!r}; recorded={commands}")
 
 
+def test_get_container_loopback_ssh_port_returns_in_vm_publish_port_not_lease_connect_port() -> None:
+    """The reverse-tunnel publish port must be the fixed in-VM port, not the box-forwarded connect port.
+
+    The VPS-resident latchkey gateway reverse-tunnels into the container from the
+    *outer host's* loopback, where the container's sshd is published on the fixed
+    ``config.container_ssh_port`` -- not on the lease's ``container_ssh_port``,
+    which for a slice is a distinct box-forwarded port a remote client uses.
+    """
+    config = ImbueCloudProviderConfig.model_construct(container_ssh_port=2222)
+    provider = ImbueCloudProvider.model_construct(name=ProviderInstanceName("imbue-cloud-test"), config=config)
+    # A slice's external/connect port differs from the in-VM publish port; the
+    # provider must surface the publish port regardless.
+    slice_connect_port = 22005
+    assert slice_connect_port != config.container_ssh_port
+    assert provider.get_container_loopback_ssh_port(HostId.generate()) == config.container_ssh_port
+
+
 def test_get_host_returns_offline_host_when_container_stopped(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
     """A stopped leased container must resolve to an OFFLINE host.
 
@@ -704,7 +722,7 @@ class _FastPathGuardProvider(ImbueCloudProvider):
 
 # Minimal build args that select the fast (adopt) path with a valid repo identity.
 _FAST_PATH_BUILD_ARGS: tuple[str, ...] = (
-    "repo_url=https://github.com/imbue-ai/forever-claude-template.git",
+    "repo_url=https://github.com/imbue-ai/default-workspace-template.git",
     "repo_branch_or_tag=minds-v0.3.2",
     "fast_mode=require",
 )
