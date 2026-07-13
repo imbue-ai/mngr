@@ -270,7 +270,14 @@ def _create_unassociated_workspace(runtime: _SyncE2ERuntime) -> str:
 
 
 def _sign_in_via_ui(page: Page, email: str, password: str) -> str:
-    """Sign in through the real /auth/login form; returns the backend origin."""
+    """Sign in through the real /auth/login form; returns the backend origin.
+
+    Success is gated on the signed-in session (the account listed on
+    /accounts), NOT on a URL change: Electron's managed content view can
+    swallow auth.js's post-success ``window.location`` redirect (the same
+    interception ``_destroy_via_settings`` documents), while the sign-in
+    itself completes server-side.
+    """
     origin = _backend_origin_from_page(page)
     page.goto(f"{origin}/auth/login", wait_until="domcontentloaded")
     page.wait_for_selector("#signin-email", state="visible", timeout=30_000)
@@ -278,19 +285,23 @@ def _sign_in_via_ui(page: Page, email: str, password: str) -> str:
     page.fill("#signin-password", password)
     page.click("#signin-btn")
 
-    def landed() -> bool:
-        url = page.url
-        return "/auth/" not in url and ("/post-login" not in url)
-
-    deadline = time.monotonic() + _SIGN_IN_TIMEOUT_SECONDS
-    while time.monotonic() < deadline:
-        if landed():
-            logger.info("Signed in as {}; landed at {}", email, page.url)
-            return origin
-        threading.Event().wait(timeout=1.0)
-    raise AssertionError(
-        f"Sign-in for {email} did not leave the auth flow within {_SIGN_IN_TIMEOUT_SECONDS}s ({page.url})"
+    # auth.js re-enables the button once the /auth/api/signin fetch resolved
+    # (both on success and on error), so this bounds the request itself.
+    page.wait_for_function(
+        "() => { const btn = document.getElementById('signin-btn'); return btn && !btn.disabled; }",
+        timeout=_SIGN_IN_TIMEOUT_SECONDS * 1000,
     )
+    error_element = page.query_selector("#signin-error")
+    if error_element is not None and "hidden" not in (error_element.get_attribute("class") or "").split():
+        raise AssertionError(f"Sign-in for {email} failed: {error_element.inner_text().strip()!r}")
+
+    def account_listed() -> bool | None:
+        page.goto(f"{origin}/accounts", wait_until="domcontentloaded")
+        return True if email in page.inner_text("body") else None
+
+    _wait_until(f"the signed-in account {email} to appear on /accounts", _SIGN_IN_TIMEOUT_SECONDS, account_listed)
+    logger.info("Signed in as {}", email)
+    return origin
 
 
 def _associate_workspace_via_ui(page: Page, origin: str, agent_id: str, email: str) -> None:
