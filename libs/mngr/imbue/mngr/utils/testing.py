@@ -941,6 +941,7 @@ def make_test_agent_details(
     ssh: SSHInfo | None = None,
     host_state: HostState = HostState.RUNNING,
     main_pid: int | None = None,
+    is_local: bool = True,
 ) -> AgentDetails:
     """Create a real AgentDetails for testing.
 
@@ -951,6 +952,7 @@ def make_test_agent_details(
         id=host_id or HostId.generate(),
         name="test-host",
         provider_name=provider_name or ProviderInstanceName("local"),
+        is_local=is_local,
         snapshots=snapshots or [],
         state=host_state,
         plugin=host_plugin or {},

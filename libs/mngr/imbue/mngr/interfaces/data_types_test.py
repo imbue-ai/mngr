@@ -145,6 +145,7 @@ def test_host_details_minimal_creation() -> None:
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
+        is_local=True,
     )
     assert host_details.name == "test-host"
     assert host_details.provider_name == ProviderInstanceName("local")
@@ -175,6 +176,7 @@ def test_host_details_with_extended_fields() -> None:
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("docker"),
+        is_local=False,
         state=HostState.RUNNING,
         image="ubuntu:22.04",
         tags={"env": "production", "team": "infra"},
@@ -213,6 +215,7 @@ def test_host_details_serialization_with_extended_fields() -> None:
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("modal"),
+        is_local=False,
         state=HostState.RUNNING,
         image="custom-image:v1",
         tags={"key": "value"},

@@ -184,7 +184,14 @@ def _agent_details_from_preserved(data: dict[str, Any], meta: dict[str, Any]) ->
             provider_name=provider_name,
             certified_data=data,
         )
-        host_details = HostDetails(id=host_id, name=str(meta["host_name"]), provider_name=provider_name)
+        # Preserved meta does not record locality; match the --local filter's
+        # convention of treating the provider instance named "local" as local.
+        host_details = HostDetails(
+            id=host_id,
+            name=str(meta["host_name"]),
+            provider_name=provider_name,
+            is_local=provider_name == ProviderInstanceName("local"),
+        )
     except (KeyError, ValueError, ValidationError) as e:
         logger.debug("Could not reconstruct AgentDetails from preserved data.json: {}", e)
         return None

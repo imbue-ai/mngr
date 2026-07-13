@@ -27,6 +27,7 @@ def make_host_details(provider_name: str = "local") -> HostDetails:
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName(provider_name),
+        is_local=provider_name == "local",
     )
 
 

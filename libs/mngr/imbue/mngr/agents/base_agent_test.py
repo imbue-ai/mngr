@@ -116,7 +116,7 @@ def test_lifecycle_state_running_when_expected_process_exists(
 
 
 @pytest.mark.tmux
-def test_lifecycle_state_and_main_pid_returns_live_process_pid(
+def test_probe_lifecycle_returns_live_process_pid(
     local_provider: LocalProviderInstance,
     temp_work_dir: Path,
 ) -> None:
@@ -125,14 +125,14 @@ def test_lifecycle_state_and_main_pid_returns_live_process_pid(
 
     try:
         wait_for(
-            lambda: test_agent.get_lifecycle_state_and_main_pid()[1] is not None,
+            lambda: test_agent.probe_lifecycle().main_pid is not None,
             error_message="Expected the agent's main process PID to be discovered",
         )
-        state, main_pid = test_agent.get_lifecycle_state_and_main_pid()
-        assert state == AgentLifecycleState.RUNNING
-        assert main_pid is not None
+        probe = test_agent.probe_lifecycle()
+        assert probe.state == AgentLifecycleState.RUNNING
+        assert probe.main_pid is not None
         # The PID is a live process whose name matches the expected process (sleep).
-        process = psutil.Process(main_pid)
+        process = psutil.Process(probe.main_pid)
         assert process.is_running()
         assert process.name() == test_agent.get_expected_process_name()
     finally:

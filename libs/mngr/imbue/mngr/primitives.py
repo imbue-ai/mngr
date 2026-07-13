@@ -280,6 +280,20 @@ class AgentLifecycleState(UpperCaseStrEnum):
     UNKNOWN = auto()
 
 
+class LifecycleProbeResult(FrozenModel):
+    """Agent lifecycle state plus the agent's main process PID, from a single probe."""
+
+    state: AgentLifecycleState = Field(description="Agent lifecycle state")
+    main_pid: int | None = Field(
+        default=None,
+        description=(
+            "PID of the agent's running main process (e.g. claude) in its host's PID "
+            "namespace, populated when the agent is RUNNING or WAITING. Only watchable "
+            "in-process (e.g. via psutil) when the probed host is the local machine."
+        ),
+    )
+
+
 class WaitingReason(UpperCaseStrEnum):
     """Why an agent in the WAITING lifecycle state is waiting.
 

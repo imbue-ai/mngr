@@ -57,7 +57,7 @@ from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import compute_idle_seconds
-from imbue.mngr.hosts.common import determine_lifecycle_state
+from imbue.mngr.hosts.common import determine_lifecycle_probe_result
 from imbue.mngr.hosts.common import resolve_expected_process_name
 from imbue.mngr.hosts.common import timestamp_to_datetime
 from imbue.mngr.hosts.host import Host
@@ -839,6 +839,7 @@ class ImbueCloudProvider(BaseProviderInstance):
             id=host_ref.host_id,
             name=str(host_ref.host_name),
             provider_name=host_ref.provider_name,
+            is_local=False,
             state=host_ref.host_state or HostState.UNKNOWN,
             ssh=ssh_info,
             failure_reason=failure_message,
@@ -901,6 +902,7 @@ class ImbueCloudProvider(BaseProviderInstance):
             id=host_ref.host_id,
             name=HostName(host_name_str),
             provider_name=host_ref.provider_name,
+            is_local=False,
             state=host_state,
             image=image,
             tags=tags,
@@ -958,7 +960,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         idle_seconds = compute_idle_seconds(user_activity, agent_activity, ssh_activity)
         expected_process_name = resolve_expected_process_name(agent_type, command, self.mngr_ctx.config)
         is_type_known = check_agent_type_known(agent_type, self.mngr_ctx.config)
-        state = determine_lifecycle_state(
+        lifecycle = determine_lifecycle_probe_result(
             tmux_info=agent_raw.get("tmux_info"),
             is_active=agent_raw.get("is_active", False),
             expected_process_name=expected_process_name,
@@ -977,7 +979,8 @@ class ImbueCloudProvider(BaseProviderInstance):
             initial_branch=agent_data.get("created_branch_name"),
             create_time=create_time,
             start_on_boot=agent_data.get("start_on_boot", False),
-            state=state,
+            state=lifecycle.state,
+            main_pid=lifecycle.main_pid,
             url=agent_raw.get("url"),
             start_time=start_time,
             runtime_seconds=runtime_seconds,

@@ -144,6 +144,7 @@ def _build_host_details_from_host(
         id=host.id,
         name=host_name,
         provider_name=host_ref.provider_name,
+        is_local=host.is_local,
         state=host.get_state() if not is_authentication_failure else HostState.UNAUTHENTICATED,
         image=certified_data.image,
         tags={**certified_data.user_tags},
@@ -217,16 +218,7 @@ def _build_agent_details_from_online_agent(
     # Compute plugin-specific fields from field generators
     plugin_data = _compute_plugin_fields(field_generators, agent, host)
 
-    # Surface the agent's main process PID only for local hosts: it is watchable
-    # (e.g. by the observer's PID-watch) only when the process runs on the same
-    # machine as the reader. For a remote host the PID lives in the remote
-    # namespace and is meaningless here, so we do not carry it. Both branches make
-    # a single lifecycle probe.
-    if host.is_local:
-        state, main_pid = agent.get_lifecycle_state_and_main_pid()
-    else:
-        state = agent.get_lifecycle_state()
-        main_pid = None
+    lifecycle = agent.probe_lifecycle()
 
     return AgentDetails(
         id=agent.id,
@@ -237,8 +229,8 @@ def _build_agent_details_from_online_agent(
         initial_branch=agent.get_created_branch_name(),
         create_time=agent.create_time,
         start_on_boot=agent.get_is_start_on_boot(),
-        state=state,
-        main_pid=main_pid,
+        state=lifecycle.state,
+        main_pid=lifecycle.main_pid,
         url=agent.get_reported_url(),
         start_time=start_time,
         runtime_seconds=runtime_seconds,

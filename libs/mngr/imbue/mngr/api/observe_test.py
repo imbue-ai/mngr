@@ -1238,6 +1238,36 @@ def test_reconcile_watcher_opens_replaces_and_closes(temp_mngr_ctx: MngrContext,
             proc.wait()
 
 
+def test_reconcile_watcher_skips_remote_agents(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
+    """A remote agent is never watched, even though it carries a main_pid.
+
+    The PID is in the remote host's namespace; watching it here would bind to an
+    unrelated same-numbered local process. A remote sighting also closes any
+    watcher left over from when the agent was local.
+    """
+    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    proc = _spawn_sleeper()
+    try:
+        with observer._concurrency_group:
+            local_agent = make_test_agent_details(name="roaming", main_pid=proc.pid)
+            remote_host = local_agent.host.model_copy_update(to_update(local_agent.host.field_ref().is_local, False))
+            remote_agent = local_agent.model_copy_update(to_update(local_agent.field_ref().host, remote_host))
+            agent_id_str = str(local_agent.id)
+
+            # A remote agent carrying a main_pid does not open a watcher.
+            observer._reconcile_watcher_for_agent(remote_agent)
+            assert agent_id_str not in observer._watchers
+
+            # A remote sighting closes a watcher opened while the agent was local.
+            observer._reconcile_watcher_for_agent(local_agent)
+            assert agent_id_str in observer._watchers
+            observer._reconcile_watcher_for_agent(remote_agent)
+            assert agent_id_str not in observer._watchers
+    finally:
+        proc.terminate()
+        proc.wait()
+
+
 def test_pid_watcher_enqueues_host_when_watched_process_dies(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
     """Killing a watched local agent's process enqueues its host, driving the re-probe that emits death."""
     observer = _make_observer(temp_mngr_ctx, noop_binary)

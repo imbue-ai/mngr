@@ -865,12 +865,13 @@ class AgentObserver(MutableModel):
     def _reconcile_watcher_for_agent(self, agent: AgentDetails) -> None:
         """Open, replace, or close the PID watcher for one agent from its probed details.
 
-        Only local-provider agents carry a ``main_pid`` (populated on the probe),
-        so this watches exactly those. A missing ``main_pid`` (remote agent, or a
-        local agent that is no longer running) closes any existing watcher.
+        Only local agents are watched: a remote agent's ``main_pid`` is a PID in
+        the remote host's namespace, so watching it here would watch an unrelated
+        same-numbered local process. A remote agent, or a local agent with no
+        ``main_pid`` (no longer running), closes any existing watcher.
         """
         agent_id_str = str(agent.id)
-        if agent.main_pid is None:
+        if not agent.host.is_local or agent.main_pid is None:
             self._close_watcher(agent_id_str)
             return
         self._open_or_replace_watcher(agent_id_str, str(agent.host.id), agent.main_pid)

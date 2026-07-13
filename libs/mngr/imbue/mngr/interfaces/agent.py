@@ -29,6 +29,7 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import LifecycleProbeResult
 
 # this is the only place where it is acceptable to use the TYPE_CHECKING flag
 if TYPE_CHECKING:
@@ -149,16 +150,16 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         """Return the lifecycle state of this agent."""
         ...
 
-    def get_lifecycle_state_and_main_pid(self) -> tuple[AgentLifecycleState, int | None]:
+    def probe_lifecycle(self) -> LifecycleProbeResult:
         """Return the lifecycle state and the agent's main process PID (None if unavailable).
 
         Default implementation returns the lifecycle state with no PID;
         implementations that can cheaply surface the running process's PID from
-        the same probe (e.g. BaseAgent) override this. The PID is only meaningful
-        to a watcher on the same machine as the process, so callers must gate its
-        use on the host being local.
+        the same probe (e.g. BaseAgent) override this. The PID is in the agent
+        host's PID namespace, so it is only watchable in-process when that host
+        is the local machine.
         """
-        return self.get_lifecycle_state(), None
+        return LifecycleProbeResult(state=self.get_lifecycle_state())
 
     @abstractmethod
     def get_initial_message(self) -> str | None:
