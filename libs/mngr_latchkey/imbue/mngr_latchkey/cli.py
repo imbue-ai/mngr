@@ -656,7 +656,7 @@ def _run_forward_supervisor(
         try:
             latchkey.stop_gateway()
         except LatchkeyError as e:
-            logger.warning("Failed to stop shared Latchkey gateway during shutdown: {}", e)
+            logger.opt(exception=e).error("Failed to stop shared Latchkey gateway during shutdown.")
         delete_forward_info(latchkey.plugin_data_dir)
 
 
@@ -763,17 +763,17 @@ def _run_gateway_health_check_loop(
             return
         if latchkey.is_gateway_running:
             continue
-        logger.warning("Shared Latchkey gateway subprocess is not running; respawning it.")
+        logger.info("Shared Latchkey gateway subprocess is not running; respawning it.")
         try:
             gateway_port = latchkey.start_gateway(concurrency_group)
         except LatchkeyError as e:
-            logger.warning("Failed to respawn shared Latchkey gateway; will retry on the next check: {}", e)
+            logger.opt(exception=e).error("Failed to respawn shared Latchkey gateway; will retry on the next check.")
             continue
         logger.info("Respawned shared Latchkey gateway at http://{}:{}", latchkey.listen_host, gateway_port)
         try:
             update_forward_info_gateway_port(latchkey.plugin_data_dir, gateway_port)
         except LatchkeyStoreError as e:
-            logger.warning("Failed to publish respawned gateway port: {}", e)
+            logger.opt(exception=e).error("Failed to publish respawned gateway port.")
 
 
 def _install_signal_handlers(shutdown_event: threading.Event, bounce_event: threading.Event) -> None:
