@@ -6,9 +6,9 @@ description: >-
   reproduce at the erroring release SHA in an isolated worktree, check whether
   main already fixes it, fix minimally, port to main, pass imbue-code-guardian
   (max 3 cycles), squash to one commit, gate with the secret scanners
-  (Betterleaks, TruffleHog, Kingfisher), open a draft PR and
-  flip it ready, and mark the Sentry issue(s) resolved-by-commit. Use when
-  invoked as /fix-sentry-error with a Sentry issue URL or short ID.
+  (Betterleaks, TruffleHog, Kingfisher), open a draft PR, triage its CI
+  checks, flip it ready, and mark the Sentry issue(s) resolved-by-commit. Use
+  when invoked as /fix-sentry-error with a Sentry issue URL or short ID.
 ---
 
 # /fix-sentry-error — fixer agent contract
@@ -21,7 +21,7 @@ Sentry error issues. Your job ends in one of three states:
 - **Fixed** → one squashed commit on `open-seer/<sentry-short-id>-<slug>`, a
   PR flipped ready, Sentry resolved-by-commit, PR link commented on the issue.
 - **Escalated** → draft PR + "needs human" comment on both the PR and the
-  Sentry issue (only guardian exhaustion lands here).
+  Sentry issue (only guardian or CI-fix exhaustion lands here).
 
 Work through the numbered steps in order. Do not skip the check-main step and
 do not open a PR before the secrets gate passes.
@@ -393,6 +393,34 @@ For an **unverified/hypothesis fix**, the label must be prominent: put
 This does not keep the PR in draft — done = ready for review; verification
 status is information for the reviewer, not a gate.
 
+**CI triage** — the draft PR triggers the target repo's checks; wait for them
+and triage every failure before flipping ready:
+
+```bash
+gh pr checks "$BRANCH" --repo "$TARGET_REPO" --watch --interval 30
+```
+
+Classify each failing check by reading its log (`gh run view --job <job-id>
+--log --repo "$TARGET_REPO"`), then act:
+
+- **Caused by your diff** — the failure exercises code or tests your commit
+  touched, and the same check passes on the base branch: fix it. Amend the
+  squashed commit (keep it ONE commit), re-run the full secrets gate from
+  step 9 on the amended commit, force-push the branch, and wait for checks
+  again. **Max 3 fix→wait cycles**; exhaustion escalates exactly like
+  guardian exhaustion (step 11).
+- **Pre-existing or infrastructure** — the check dies during setup before
+  your code runs, or fails identically on the base branch (typical on a
+  mirror repo: secret-manager/OIDC logins whose trust is bound to the
+  canonical repo only, so e.g. Vault-gated jobs can never pass there): do
+  NOT try to fix it and do not let it block flip-ready. Instead record it on
+  the PR — name the failing checks, quote the one-line root cause from the
+  log, and state that they fail identically without your change (cite the
+  base-branch run that proves it).
+- Never re-run a failed check blindly hoping for green, and never dismiss a
+  failure as "infrastructure" without a log line or a base-branch run that
+  proves your diff is not the cause.
+
 **On guardian pass** (including unverified fixes):
 
 1. Flip the PR ready:
@@ -419,10 +447,11 @@ status is information for the reviewer, not a gate.
      -d "$(jq -n --arg t "open-seer fix PR: $PR_URL — <root-cause fix | defensive band-aid>, <verified by reproduction | unverified (hypothesis)>." '{text: $t}')"
    ```
 
-## 11. Escalation: guardian exhausted
+## 11. Escalation: guardian or CI-fix cycles exhausted
 
-Only guardian exhaustion keeps a PR in draft. If step 8 ended its 3rd cycle
-with findings remaining:
+Only exhaustion keeps a PR in draft: guardian findings remaining after step
+8's 3rd cycle, or a diff-caused CI failure still red after step 10's 3rd
+fix→wait cycle. In either case:
 
 1. Leave the PR in **draft** (never `gh pr ready`).
 2. Comment **"needs human"** on the PR with the remaining findings:
