@@ -471,11 +471,24 @@ def _build_supervisor_program_config(program_name: str, command: str, log_path: 
     state). ``stopasgroup``/``killasgroup`` ensure a stop/restart tears down the
     whole process group (any ssh or child), and supervisord size-rotates the
     combined stdout+stderr into ``log_path``.
+
+    ``command`` must already be shell-quoted by the caller (e.g. via
+    ``shlex.quote`` on any token with spaces): supervisord shell-splits it with
+    ``shlex.split``, which round-trips ``shlex.quote``'s output. Separately,
+    supervisord expands ``%(...)s`` sequences in *every* config value before
+    that split, so a literal ``%`` in the command or log path must be doubled to
+    ``%%`` or the config fails to parse (``shlex.quote`` does not do this -- it
+    treats ``%`` as safe). We double it here so an exotic path can never break
+    config loading.
     """
+    # supervisord runs %(...)s interpolation on each value; escape literal
+    # percent signs so they survive to the shell-split argv unchanged.
+    escaped_command = command.replace("%", "%%")
+    escaped_log_path = log_path.replace("%", "%%")
     return "\n".join(
         (
             f"[program:{program_name}]",
-            f"command={command}",
+            f"command={escaped_command}",
             "user=root",
             "autostart=true",
             "autorestart=true",
@@ -483,7 +496,7 @@ def _build_supervisor_program_config(program_name: str, command: str, log_path: 
             f"startretries={start_retries}",
             "stopasgroup=true",
             "killasgroup=true",
-            f"stdout_logfile={log_path}",
+            f"stdout_logfile={escaped_log_path}",
             f"stdout_logfile_maxbytes={_SUPERVISOR_LOG_MAX_BYTES}",
             f"stdout_logfile_backups={_SUPERVISOR_LOG_BACKUPS}",
             "redirect_stderr=true",

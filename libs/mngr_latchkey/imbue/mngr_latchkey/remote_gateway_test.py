@@ -20,6 +20,7 @@ from imbue.mngr_latchkey.remote_gateway import OUTER_PORT
 from imbue.mngr_latchkey.remote_gateway import RemoteGatewayError
 from imbue.mngr_latchkey.remote_gateway import _GATEWAY_PROGRAM_NAME
 from imbue.mngr_latchkey.remote_gateway import _TUNNEL_PROGRAM_NAME
+from imbue.mngr_latchkey.remote_gateway import _build_supervisor_program_config
 from imbue.mngr_latchkey.remote_gateway import _ensure_container_tunnel_keypair
 from imbue.mngr_latchkey.remote_gateway import _ensure_latchkey_gateway_reachable_from_container
 from imbue.mngr_latchkey.remote_gateway import _ensure_latchkey_gateway_running
@@ -386,6 +387,22 @@ def _gateway_conf(outer: OuterHostInterface) -> str:
 
 def _reload_commands(outer: OuterHostInterface) -> list[str]:
     return [r.command for r in _stub(outer).recorded if "supervisorctl" in r.command]
+
+
+def test_build_supervisor_program_config_escapes_percent_for_supervisord_interpolation() -> None:
+    # supervisord expands %(...)s in every value before shell-splitting the
+    # command, so a literal % (here in an exotic path) must be doubled to %%,
+    # otherwise supervisord fails to parse the config.
+    conf = _build_supervisor_program_config(
+        "latchkey-gateway",
+        "/bin/sh '/tmp/50%off/gateway_run.sh'",
+        "/tmp/50%off/gateway.log",
+        3,
+    )
+    assert "command=/bin/sh '/tmp/50%%off/gateway_run.sh'" in conf
+    assert "stdout_logfile=/tmp/50%%off/gateway.log" in conf
+    # No lone (un-doubled) percent survives, which would break config parsing.
+    assert conf.count("%") == conf.count("%%") * 2
 
 
 def test_ensure_latchkey_gateway_running_registers_supervisord_program_on_outer_port_loopback(
