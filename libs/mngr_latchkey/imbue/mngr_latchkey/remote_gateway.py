@@ -126,6 +126,13 @@ _GATEWAY_RUN_SCRIPT_FILENAME: Final[str] = "gateway_run.sh"
 # :func:`_ensure_ram_backed_secrets_dir`). The wrapper reads these 0600 files
 # into the environment and execs the gateway, so the secrets never appear in the
 # supervisord config or a process listing.
+#
+# Deliberately not ``/tmp``: unlike ``/run``, ``/tmp`` is not reliably a tmpfs
+# (on many distros, incl. common Debian/Ubuntu VPS images, it is a normal
+# directory on the root disk and is cleaned by age rather than wiped on boot),
+# so the key could land on -- and survive on -- persistent disk. ``/tmp`` is
+# also world-writable (1777), exposing the classic hostile-symlink attack that a
+# root-owned ``/run`` avoids.
 _TMPFS_SECRETS_DIR: Final[Path] = Path("/run/mngr-latchkey")
 
 # Filesystem types (as reported by ``stat -f -c %T``) we accept as RAM-backed
