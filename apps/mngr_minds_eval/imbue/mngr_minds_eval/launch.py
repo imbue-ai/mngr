@@ -154,6 +154,41 @@ def destroy_existing_workspace(port: str, host_name: str, timeout: float = 600.0
     print("     WARN: destroy of {} did not confirm in time; create may still collide".format(host_name), flush=True)
 
 
+def destroy_all_workspaces(port: str) -> None:
+    """Clean slate: destroy every workspace the box currently sees. Each destroy tears down the
+    Modal sandbox AND removes the host record from the Modal environment, so names free up."""
+    try:
+        listing = _get_json("{}/api/v1/workspaces".format(_api_base(port)))
+    except (urllib.error.URLError, OSError) as exc:
+        raise SystemExit("could not list workspaces: {}".format(exc))
+    workspaces = [w for w in listing.get("workspaces", []) if w.get("agent_id")]
+    if not workspaces:
+        print(">> no workspaces to destroy", flush=True)
+        return
+    print(">> destroying {} workspace(s) ...".format(len(workspaces)), flush=True)
+    for w in workspaces:
+        name, agent_id = w.get("name") or w["agent_id"], w["agent_id"]
+        status, body = _post_json("{}/api/v1/workspaces/{}/destroy".format(_api_base(port), agent_id), {})
+        if status != 202:
+            print("  [ERR ] {}: {}".format(name, str(body)[:150]), flush=True)
+            continue
+        operation_id = body.get("operation_id", agent_id)
+        deadline = time.time() + 600.0
+        while time.time() < deadline:
+            try:
+                info = _get_json("{}/api/v1/workspaces/operations/destroy/{}".format(_api_base(port), operation_id))
+            except (urllib.error.URLError, OSError):
+                time.sleep(4)
+                continue
+            if info.get("is_done"):
+                print("  [OK  ] destroyed {}".format(name), flush=True)
+                break
+            time.sleep(4)
+        else:
+            print("  [WARN] {} did not confirm destroy in time".format(name), flush=True)
+    print(">> done", flush=True)
+
+
 def _await_create(port: str, operation_id: str, timeout: float = 1800.0) -> dict:
     deadline = time.time() + timeout
     last_stage = ""

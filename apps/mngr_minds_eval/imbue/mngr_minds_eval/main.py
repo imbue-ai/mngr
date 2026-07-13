@@ -130,6 +130,10 @@ def main() -> None:
     p_box.add_argument("--mngr-branch", required=True, help="mngr branch the box runs")
     p_box.add_argument("--box", default="", help="container name (default: minds-box-<mngr-branch>)")
 
+    p_nuke = sub.add_parser("nuke", help="destroy ALL workspaces in a box (clean slate)")
+    p_nuke.add_argument("--mngr-branch", required=True, help="mngr branch (to derive the box name)")
+    p_nuke.add_argument("--box", default="", help="container name (default: minds-box-<mngr-branch>)")
+
     p_ws = sub.add_parser("workspace", help="create ONE workspace in a box (general utility, no eval)")
     p_ws.add_argument("--mngr-branch", required=True, help="mngr branch the box runs")
     p_ws.add_argument("--box", default="", help="container name (default: minds-box-<mngr-branch>)")
@@ -170,6 +174,11 @@ def main() -> None:
             parser.error("run `box` from the host, not inside a box")
         box_mod.ensure(_box_name(args), args.mngr_branch)
         box_mod.print_view_urls(_box_name(args))
+        return
+    if args.command == "nuke":
+        if not IN_BOX:
+            _exec_in_box(_box_name(args), args.mngr_branch, sys.argv[1:], None)
+        launch_mod.destroy_all_workspaces(_port())
         return
     if args.command == "workspace":
         if not IN_BOX:

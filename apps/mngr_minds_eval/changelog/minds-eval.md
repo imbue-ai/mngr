@@ -29,3 +29,5 @@
 - Fixed the eval worker crashing with NoCredentialsError: creds are now slotted into each clone's config.json (backup_provider=configure_later; the worker drives restic itself), instead of relying on minds' api_key backup provider, which does not land a restic.env inside a Modal sandbox.
 
 - Removed the `login` subcommand (the login URL is printed by box/launch/restore). `list-batches` now prints the full batch folder name to pass to inspect/restore.
+
+- Added `minds-evals nuke --mngr-branch X` to destroy all workspaces in a box (clean slate) -- each destroy tears down the Modal sandbox and removes its host record from the Modal environment.
