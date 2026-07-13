@@ -7,8 +7,8 @@ immediately whenever :meth:`WorkspaceSyncScheduler.kick` is called (sign-in /
 sign-out, password changes). The legacy password-file conversion runs at the
 start of every pass (a no-op once converted).
 
-One daemon thread; every pass is wrapped so a connector outage or a
-mid-refactor exception can never kill the loop.
+One daemon thread; every pass is wrapped so an expected failure (a connector
+outage, or any sync / crypto / file error) can never kill the loop.
 """
 
 import threading
