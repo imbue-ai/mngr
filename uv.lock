@@ -53,6 +53,7 @@ members = [
     "minds",
     "modal-litellm",
     "modal-proxy",
+    "open-seer",
     "overlay",
     "remote-service-connector",
     "resource-guards",
@@ -3692,6 +3693,28 @@ sdist = { url = "https://files.pythonhosted.org/packages/0b/5f/19930f824ffeb0ad4
 wheels = [
     { url = "https://files.pythonhosted.org/packages/be/9c/92789c596b8df838baa98fa71844d84283302f7604ed565dafe5a6b5041a/oauthlib-3.3.1-py3-none-any.whl", hash = "sha256:88119c938d2b8fb88561af5f6ee0eec8cc8d552b7bb1f712743136eb7523b7a1", size = 160065, upload-time = "2025-06-19T22:48:06.508Z" },
 ]
+
+[[package]]
+name = "open-seer"
+version = "0.1.0"
+source = { virtual = "apps/open-seer" }
+dependencies = [
+    { name = "modal" },
+    { name = "requests" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "modal" },
+    { name = "pytest", marker = "extra == 'dev'" },
+    { name = "requests" },
+]
+provides-extras = ["dev"]
 
 [[package]]
 name = "openai"
