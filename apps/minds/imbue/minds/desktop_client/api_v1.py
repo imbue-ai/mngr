@@ -908,15 +908,14 @@ def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, i
     # (``host_already_stopped`` skips the stop step), and ``mngr start`` targets
     # only STOPPED agents and starts the host idempotently -- against a
     # self-recovered workspace the whole restart degrades to a no-op. A veto
-    # keyed on tracker health was tried here and misfired: the tracker reports
+    # keyed on tracker health would misfire here: the tracker reports
     # default-HEALTHY for never-probed workspaces (e.g. a host offline since
-    # before this process started), which silently dropped the cold-boot those
-    # workspaces needed.
+    # before this process started), so it would silently drop the cold-boot
+    # those workspaces need.
     # The services tier (an in-place stop+start of the system-services agent)
-    # is NOT a no-op against a self-recovered interface; losing the veto leaves
-    # its narrow race window (evidence gathered seconds earlier, cost bounded
-    # to a brief interface blip) unguarded. Accepted deliberately: that tier is
-    # slated for removal.
+    # is NOT a no-op against a self-recovered interface; its narrow race window
+    # (evidence gathered seconds earlier, cost bounded to a brief interface
+    # blip) is deliberately left unguarded: that tier is slated for removal.
     # Serialize with the backup operations: ``registry.start`` below replaces
     # the workspace's record, so a RUNNING backup update/configure must be
     # rejected here (its worker's terminal complete/fail would corrupt the
