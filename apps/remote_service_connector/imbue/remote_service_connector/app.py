@@ -3519,8 +3519,9 @@ def delete_bucket_key_endpoint(request: Request, access_key_id: str) -> dict[str
 # Hard cap on the client-encrypted secrets blob (decoded bytes). Generous for
 # an SSH key + known_hosts + a restic env, tight enough to keep rows small.
 _MAX_ENCRYPTED_SECRETS_BYTES = 256 * 1024
-# Cap for the wrapped DEK blob (a 32-byte key + nonce + tag, so 4 KiB is ample).
-_MAX_WRAPPED_DEK_BYTES = 4096
+# Cap for each binary key-bundle field (the wrapped DEK -- a 32-byte key +
+# nonce + tag -- and the argon2id salt), so 4 KiB is ample for either.
+_MAX_KEY_BUNDLE_FIELD_BYTES = 4096
 _MAX_SYNC_TEXT_FIELD_LENGTH = 512
 
 
@@ -3942,8 +3943,10 @@ def put_key_bundle_endpoint(request: Request, body: AccountKeyBundleModel) -> di
     with handle_endpoint_errors():
         user_id = _sync_caller_user_id(request)
         bundle = body.model_dump()
-        bundle["kdf_salt"] = _decode_size_capped_base64("kdf_salt", body.kdf_salt, _MAX_WRAPPED_DEK_BYTES)
-        bundle["wrapped_dek"] = _decode_size_capped_base64("wrapped_dek", body.wrapped_dek, _MAX_WRAPPED_DEK_BYTES)
+        bundle["kdf_salt"] = _decode_size_capped_base64("kdf_salt", body.kdf_salt, _MAX_KEY_BUNDLE_FIELD_BYTES)
+        bundle["wrapped_dek"] = _decode_size_capped_base64(
+            "wrapped_dek", body.wrapped_dek, _MAX_KEY_BUNDLE_FIELD_BYTES
+        )
         get_sync_store().put_bundle(user_id, bundle)
         return {"status": "ok"}
 
