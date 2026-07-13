@@ -30,4 +30,4 @@
 
 - Removed the `login` subcommand (the login URL is printed by box/launch/restore). `list-batches` now prints the full batch folder name to pass to inspect/restore.
 
-- Added `minds-evals nuke --mngr-branch X` to destroy all workspaces in a box (clean slate) -- each destroy tears down the Modal sandbox and removes its host record from the Modal environment.
+- Added `minds-evals clean-modal-workspaces --mngr-branch X` to destroy all workspaces in a box (clean slate) -- each destroy tears down the Modal sandbox and removes its host record from the Modal environment.
