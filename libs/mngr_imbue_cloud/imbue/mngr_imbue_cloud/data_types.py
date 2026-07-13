@@ -387,9 +387,9 @@ class SyncWorkspaceRecord(FrozenModel):
     """Wire form of one synced workspace record (transport-only; the plugin never decrypts).
 
     Mirrors the connector's ``WorkspaceRecordModel``: plaintext metadata plus
-    the base64 of the client-side-encrypted secrets blob. ``state`` and
-    ``backup_kind`` are passed through as their lowercase wire strings --
-    the producing (minds) and validating (connector) ends own the vocabularies.
+    the base64 of the client-side-encrypted secrets blob. ``state`` is passed
+    through as its lowercase wire string -- the producing (minds) and
+    validating (connector) ends own the vocabulary.
     """
 
     host_id: str = Field(description="Host the workspace is on (PK with the account)")
@@ -403,7 +403,6 @@ class SyncWorkspaceRecord(FrozenModel):
     device_label: str = Field(default="", description="Human-readable device name")
     state: str = Field(description="Lifecycle state: 'active' or 'destroyed' (tombstone)")
     restored_from_host_id: str | None = Field(default=None, description="Lineage link for restored workspaces")
-    backup_kind: str = Field(description="How the backup repo is reached: 'imbue_r2', 'api_key', or 'none'")
     encrypted_secrets: str | None = Field(
         default=None, description="Base64 of the client-encrypted secrets blob (opaque here)"
     )

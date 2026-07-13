@@ -45,7 +45,7 @@ Status: **Implemented** (branch `mngr/account-association`). Written as a bluepr
 
 ### `apps/remote_service_connector`
 - `migrations/013_workspace_sync.sql`:
-  - `workspace_records`: `user_id`, `host_id` (PK pair), `agent_id`, `display_name`, `color` (nullable), `provider_kind`, `hosting_device_id` (nullable; null for cloud rows), `device_label`, `state` (`active`/`destroyed`), `restored_from_host_id` (nullable), `backup_kind` (`imbue_r2`/`api_key`/`none`), `encrypted_secrets` (BYTEA, nullable, size-capped), `revision` (int), `created_at`, `updated_at`. Partial unique index on `(user_id, agent_id) WHERE state = 'active'`.
+  - `workspace_records`: `user_id`, `host_id` (PK pair), `agent_id`, `display_name`, `color` (nullable), `provider_kind`, `hosting_device_id` (nullable; null for cloud rows), `device_label`, `state` (`active`/`destroyed`), `restored_from_host_id` (nullable), `encrypted_secrets` (BYTEA, nullable, size-capped), `revision` (int), `created_at`, `updated_at`. Partial unique index on `(user_id, agent_id) WHERE state = 'active'`.
   - `account_key_bundles`: `user_id` (PK), `kdf_salt`, `kdf_time_cost`, `kdf_memory_kib`, `kdf_parallelism`, `wrapped_dek`, `key_epoch`, `updated_at`.
 - New endpoints in `app.py` (SuperTokens admin auth via `authenticate_request`/`require_admin`; **not** paid-gated; `handle_endpoint_errors` wrapping):
   - `GET /sync/records` — all of the caller's records.

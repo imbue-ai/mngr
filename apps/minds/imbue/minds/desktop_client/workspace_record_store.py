@@ -83,7 +83,6 @@ class ReplicaRecord(FrozenModel):
     device_label: str = Field(default="", description="Human-readable device name")
     state: str = Field(default=RECORD_STATE_ACTIVE, description="'active' or 'destroyed'")
     restored_from_host_id: str | None = Field(default=None, description="Lineage link for restorations")
-    backup_kind: str = Field(default="none", description="'imbue_r2', 'api_key', or 'none'")
     encrypted_secrets: str | None = Field(default=None, description="Base64 AEAD blob under the account DEK")
     revision: int = Field(default=0, description="Last server-acknowledged revision (0 = never pushed)")
     is_dirty: bool = Field(default=False, description="Local changes not yet pushed")
@@ -100,7 +99,6 @@ class ReplicaRecord(FrozenModel):
             "device_label": self.device_label,
             "state": self.state,
             "restored_from_host_id": self.restored_from_host_id,
-            "backup_kind": self.backup_kind,
             "encrypted_secrets": self.encrypted_secrets,
             "revision": push_revision,
         }
@@ -120,7 +118,6 @@ def replica_record_from_wire(wire: dict[str, object]) -> ReplicaRecord:
         restored_from_host_id=(
             str(wire["restored_from_host_id"]) if wire.get("restored_from_host_id") is not None else None
         ),
-        backup_kind=str(wire.get("backup_kind", "none")),
         encrypted_secrets=(str(wire["encrypted_secrets"]) if wire.get("encrypted_secrets") is not None else None),
         revision=int(str(wire.get("revision", 0))),
         is_dirty=False,
@@ -376,7 +373,6 @@ class WorkspaceRecordStore(MutableModel):
         color = resolver.get_workspace_color(AgentId(agent_id))
         is_cloud_row = provider_kind.startswith(_CLOUD_PROVIDER_PREFIX)
         encrypted = self.build_encrypted_secrets(user_id, agent_id, provider_kind, info.host_id)
-        restic_env_exists = read_canonical_env(self.paths, AgentId(agent_id)) is not None
         return ReplicaRecord(
             host_id=info.host_id,
             agent_id=str(agent_id),
@@ -386,7 +382,6 @@ class WorkspaceRecordStore(MutableModel):
             hosting_device_id=None if is_cloud_row else self.device_id,
             device_label=self.device_label,
             state=state,
-            backup_kind="imbue_r2" if restic_env_exists else "none",
             encrypted_secrets=encrypted,
             revision=0,
             is_dirty=True,
@@ -818,7 +813,6 @@ class WorkspaceRecordStore(MutableModel):
                     and rebuilt.encrypted_secrets is not None
                     and record.encrypted_secrets is None
                 )
-                or rebuilt.backup_kind != record.backup_kind
             )
             if not is_changed:
                 continue
@@ -827,7 +821,6 @@ class WorkspaceRecordStore(MutableModel):
                 to_update(record.field_ref().color, rebuilt.color),
                 to_update(record.field_ref().provider_kind, rebuilt.provider_kind),
                 to_update(record.field_ref().hosting_device_id, rebuilt.hosting_device_id),
-                to_update(record.field_ref().backup_kind, rebuilt.backup_kind),
                 to_update(
                     record.field_ref().encrypted_secrets,
                     rebuilt.encrypted_secrets if rebuilt.encrypted_secrets is not None else record.encrypted_secrets,

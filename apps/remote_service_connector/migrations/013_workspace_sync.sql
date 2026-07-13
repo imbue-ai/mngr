@@ -30,7 +30,6 @@ CREATE TABLE IF NOT EXISTS workspace_records (
     device_label TEXT NOT NULL DEFAULT '',
     state TEXT NOT NULL CHECK (state IN ('active', 'destroyed')),
     restored_from_host_id TEXT,
-    backup_kind TEXT NOT NULL CHECK (backup_kind IN ('imbue_r2', 'api_key', 'none')),
     encrypted_secrets BYTEA,
     revision INTEGER NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),

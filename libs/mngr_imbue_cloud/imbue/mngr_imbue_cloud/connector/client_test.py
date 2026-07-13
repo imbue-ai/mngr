@@ -566,7 +566,6 @@ def _sync_record_json(host_id: str = "host-1", revision: int = 1) -> dict[str, o
         "device_label": "laptop",
         "state": "active",
         "restored_from_host_id": None,
-        "backup_kind": "none",
         "encrypted_secrets": None,
         "revision": revision,
         "created_at": "2026-01-01T00:00:00+00:00",

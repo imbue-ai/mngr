@@ -255,7 +255,6 @@ def test_build_record_includes_encrypted_restic_env(paths: WorkspacePaths) -> No
     record = store.build_record_from_resolver(user_id, str(agent_id), resolver)
 
     assert record is not None
-    assert record.backup_kind == "imbue_r2"
     assert record.encrypted_secrets is not None
     payload = store.decrypt_record_secrets(user_id, record)
     assert payload is not None
@@ -272,7 +271,6 @@ def test_build_record_without_dek_has_no_secrets(paths: WorkspacePaths) -> None:
 
     assert record is not None
     assert record.encrypted_secrets is None
-    assert record.backup_kind == "imbue_r2"
 
 
 def test_reconcile_migrates_legacy_associations_and_retires_the_file(paths: WorkspacePaths) -> None:

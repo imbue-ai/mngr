@@ -3532,14 +3532,6 @@ class WorkspaceRecordState(str, Enum):
     DESTROYED = "destroyed"
 
 
-class WorkspaceBackupKind(str, Enum):
-    """How a synced workspace's backup repository is reached (lowercase wire/DB values)."""
-
-    IMBUE_R2 = "imbue_r2"
-    API_KEY = "api_key"
-    NONE = "none"
-
-
 class WorkspaceRecordModel(BaseModel):
     """Wire form of one synced workspace record (also the PUT body)."""
 
@@ -3563,7 +3555,6 @@ class WorkspaceRecordModel(BaseModel):
     restored_from_host_id: str | None = Field(
         default=None, max_length=_MAX_SYNC_TEXT_FIELD_LENGTH, description="Lineage link for restored workspaces"
     )
-    backup_kind: WorkspaceBackupKind = Field(description="How the backup repo is reached")
     encrypted_secrets: str | None = Field(
         default=None, description="Base64 of the client-encrypted secrets blob (opaque to the server)"
     )
@@ -3602,7 +3593,7 @@ class SyncStoreConsistencyError(RuntimeError):
 
 _WORKSPACE_RECORD_COLUMNS = (
     "host_id, agent_id, display_name, color, provider_kind, hosting_device_id, device_label, "
-    "state, restored_from_host_id, backup_kind, encrypted_secrets, revision, created_at, updated_at"
+    "state, restored_from_host_id, encrypted_secrets, revision, created_at, updated_at"
 )
 
 # Must match the index name in migrations/013_workspace_sync.sql; used to tell
@@ -3611,7 +3602,7 @@ _ONE_ACTIVE_PER_AGENT_INDEX_NAME = "workspace_records_one_active_per_agent_idx"
 
 
 def _workspace_record_row_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
-    encrypted_secrets = row[10]
+    encrypted_secrets = row[9]
     return {
         "host_id": row[0],
         "agent_id": row[1],
@@ -3622,13 +3613,12 @@ def _workspace_record_row_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
         "device_label": row[6],
         "state": row[7],
         "restored_from_host_id": row[8],
-        "backup_kind": row[9],
         "encrypted_secrets": (
             base64.b64encode(bytes(encrypted_secrets)).decode("ascii") if encrypted_secrets is not None else None
         ),
-        "revision": row[11],
-        "created_at": str(row[12]) if row[12] is not None else "",
-        "updated_at": str(row[13]) if row[13] is not None else "",
+        "revision": row[10],
+        "created_at": str(row[11]) if row[11] is not None else "",
+        "updated_at": str(row[12]) if row[12] is not None else "",
     }
 
 
@@ -3697,8 +3687,8 @@ class PostgresSyncStore:
                             cur.execute(
                                 "INSERT INTO workspace_records (user_id, host_id, agent_id, display_name, color, "
                                 "provider_kind, hosting_device_id, device_label, state, restored_from_host_id, "
-                                "backup_kind, encrypted_secrets, revision) "
-                                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                                "encrypted_secrets, revision) "
+                                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
                                 f"RETURNING {_WORKSPACE_RECORD_COLUMNS}",
                                 (
                                     user_id,
@@ -3711,7 +3701,6 @@ class PostgresSyncStore:
                                     record["device_label"],
                                     record["state"],
                                     record["restored_from_host_id"],
-                                    record["backup_kind"],
                                     encrypted_bytes,
                                     record["revision"],
                                 ),
@@ -3723,7 +3712,7 @@ class PostgresSyncStore:
                             cur.execute(
                                 "UPDATE workspace_records SET agent_id = %s, display_name = %s, color = %s, "
                                 "provider_kind = %s, hosting_device_id = %s, device_label = %s, state = %s, "
-                                "restored_from_host_id = %s, backup_kind = %s, encrypted_secrets = %s, "
+                                "restored_from_host_id = %s, encrypted_secrets = %s, "
                                 "revision = %s, updated_at = NOW() "
                                 "WHERE user_id = %s AND host_id = %s "
                                 f"RETURNING {_WORKSPACE_RECORD_COLUMNS}",
@@ -3736,7 +3725,6 @@ class PostgresSyncStore:
                                     record["device_label"],
                                     record["state"],
                                     record["restored_from_host_id"],
-                                    record["backup_kind"],
                                     encrypted_bytes,
                                     record["revision"],
                                     user_id,

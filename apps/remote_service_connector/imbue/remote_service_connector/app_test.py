@@ -2698,7 +2698,6 @@ def _sync_record_body(
         "device_label": "joshs-laptop",
         "state": state,
         "restored_from_host_id": None,
-        "backup_kind": "imbue_r2",
         "encrypted_secrets": encrypted_secrets,
         "revision": revision,
     }
@@ -2929,7 +2928,6 @@ def _store_record(
         "device_label": "laptop",
         "state": state,
         "restored_from_host_id": None,
-        "backup_kind": "imbue_r2",
         "encrypted_secrets": encrypted_secrets,
         "revision": revision,
     }
