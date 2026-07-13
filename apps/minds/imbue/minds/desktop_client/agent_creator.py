@@ -428,7 +428,7 @@ def _git_noninteractive_env() -> dict[str, str]:
     Credential helpers (e.g. the macOS keychain) still work as usual -- only
     interactive terminal prompting is disabled.
 
-    Deliberately a small per-file copy of the same one-line helper the FCT's
+    Deliberately a small per-file copy of the same one-line helper the DEFAULT_WORKSPACE_TEMPLATE's
     ``bootstrap.manager`` and ``runtime_backup.runner`` carry (same name, same
     body), rather than a shared cross-package import.
     """
