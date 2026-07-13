@@ -387,11 +387,19 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 # credentials/permissions in sync from now on.
                 with self._remote_hosts_lock:
                     self._remote_host_provider_by_id[str(host_id)] = provider_name
+                # The reverse tunnel runs *on the outer host*, so it needs the
+                # port the container's sshd is published on from the outer host's
+                # own loopback -- not ``ssh_info.port``, which is how a remote
+                # client reaches the container (a box-forwarded port for slices).
+                # Providers whose topology splits publish from connect surface the
+                # loopback port here; otherwise the two coincide and we fall back.
+                loopback_ssh_port = provider.get_container_loopback_ssh_port(host_id)
+                container_ssh_port = loopback_ssh_port if loopback_ssh_port is not None else ssh_info.port
                 provision_remote_gateway(
                     outer,
                     host_id=host_id,
                     container_ssh_user=ssh_info.user,
-                    container_ssh_port=ssh_info.port,
+                    container_ssh_port=container_ssh_port,
                     latchkey_directory=self.latchkey.latchkey_directory,
                     gateway_password=self.latchkey.derive_gateway_password(),
                 )
