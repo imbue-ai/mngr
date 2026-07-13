@@ -753,7 +753,21 @@ jobs:
       # The Anthropic key (for live checks) is always needed; masked in the logs
       # and forwarded into the offload sandbox by the just recipe below. Read via
       # the minds-scoped minds_ci_test_gh role.
+      # HCP Vault's performance replicas intermittently 412 ("required index
+      # state not present"); one spaced retry absorbs the burst.
       - name: Fetch Anthropic key from Vault
+        id: anthropic_key_fetch
+        continue-on-error: true
+        uses: imbue-ai/use-vault-secrets@main
+        with:
+          role: minds_ci_test_gh
+          secrets: |
+            minds/ci/litellm/ANTHROPIC_API_KEY
+      - name: Pause before the Vault retry
+        if: ${{ steps.anthropic_key_fetch.outcome == 'failure' }}
+        run: sleep 15
+      - name: Fetch Anthropic key from Vault (retry)
+        if: ${{ steps.anthropic_key_fetch.outcome == 'failure' }}
         uses: imbue-ai/use-vault-secrets@main
         with:
           role: minds_ci_test_gh
@@ -836,7 +850,20 @@ jobs:
             echo "litellm_url=$(jq -er '.shared_envs.default.litellm_proxy_url' "$CONFIG")"
           } >> "$GITHUB_OUTPUT"
       - name: Fetch sync e2e env secrets from Vault
+        id: sync_e2e_secrets
+        continue-on-error: true
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_minds_release_tests }}
+        uses: imbue-ai/use-vault-secrets@main
+        with:
+          role: minds_ci_test_gh
+          secrets: |
+            minds/ci/runs/${{ steps.sync_e2e_env.outputs.env_name }}/shared-default/SUPERTOKENS_CONNECTION_URI
+            minds/ci/runs/${{ steps.sync_e2e_env.outputs.env_name }}/shared-default/SUPERTOKENS_API_KEY
+      - name: Pause before the sync e2e Vault retry
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_minds_release_tests && steps.sync_e2e_secrets.outcome == 'failure' }}
+        run: sleep 15
+      - name: Fetch sync e2e env secrets from Vault (retry)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_minds_release_tests && steps.sync_e2e_secrets.outcome == 'failure' }}
         uses: imbue-ai/use-vault-secrets@main
         with:
           role: minds_ci_test_gh
@@ -847,6 +874,7 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_minds_release_tests }}
         run: |
           set -euo pipefail
+          test -n "${SUPERTOKENS_CONNECTION_URI:-}" || { echo "Vault secrets missing after retry" >&2; exit 1; }
           {
             echo "MINDS_SYNC_E2E_CONNECTOR_URL=${{ steps.sync_e2e_env.outputs.connector_url }}"
             echo "MINDS_SYNC_E2E_LITELLM_URL=${{ steps.sync_e2e_env.outputs.litellm_url }}"
