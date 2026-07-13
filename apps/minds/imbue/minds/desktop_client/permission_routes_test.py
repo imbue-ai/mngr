@@ -393,6 +393,55 @@ def test_inbox_page_renders_as_modal(tmp_path: Path) -> None:
     assert 'e.key === "Escape"' in body
 
 
+def test_inbox_page_closes_after_resolution_by_default(tmp_path: Path) -> None:
+    """Without ``keep_open=1`` the page dismisses the window after Approve/Deny.
+
+    A single-request open (notification click, workspace relay, or auto-open
+    on a new request) sets ``keepInboxOpen = false`` so resolving the request
+    closes the whole window rather than advancing to an unrelated stale
+    request that could surprise the user.
+    """
+    agent_id = AgentId()
+    request = create_latchkey_predefined_permission_request_event(
+        agent_id=str(agent_id),
+        scope="slack-api",
+        permissions=("slack-read-all",),
+        rationale="reason",
+    )
+    inbox = RequestInbox().add_request(request)
+    handler = _make_recording_handler(tmp_path)
+    client = _build_authenticated_client(tmp_path, handler, inbox)
+
+    response = client.get("/inbox")
+
+    assert response.status_code == 200
+    assert "var keepInboxOpen = false;" in response.text
+
+
+def test_inbox_page_stays_open_when_intentionally_opened(tmp_path: Path) -> None:
+    """``keep_open=1`` (the Requests button) keeps the window open after resolution.
+
+    When the user intentionally opens the whole inbox, ``keepInboxOpen`` is
+    true so resolving a request advances to the next pending one instead of
+    dismissing the window.
+    """
+    agent_id = AgentId()
+    request = create_latchkey_predefined_permission_request_event(
+        agent_id=str(agent_id),
+        scope="slack-api",
+        permissions=("slack-read-all",),
+        rationale="reason",
+    )
+    inbox = RequestInbox().add_request(request)
+    handler = _make_recording_handler(tmp_path)
+    client = _build_authenticated_client(tmp_path, handler, inbox)
+
+    response = client.get("/inbox?keep_open=1")
+
+    assert response.status_code == 200
+    assert "var keepInboxOpen = true;" in response.text
+
+
 def test_inbox_page_hides_requests_whose_host_cannot_be_resolved(tmp_path: Path) -> None:
     """A pending request from an agent the resolver no longer knows is hidden.
 

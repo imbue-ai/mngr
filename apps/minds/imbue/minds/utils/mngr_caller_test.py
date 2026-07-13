@@ -1,6 +1,8 @@
 import os
 from collections.abc import Iterator
+from multiprocessing.connection import Pipe
 from pathlib import Path
+from uuid import uuid4
 
 import click
 import pytest
@@ -11,6 +13,7 @@ from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.mngr_caller import MngrCallerNotInitializedError
 from imbue.minds.utils.mngr_caller import _coerce_exit_code
 from imbue.minds.utils.mngr_caller import _execute_mngr_cli
+from imbue.minds.utils.mngr_caller import _serve_one_request
 from imbue.mngr.utils.polling import wait_for
 
 
@@ -157,6 +160,45 @@ def test_call_times_out_and_reports_timed_out(mngr_caller: MngrCaller) -> None:
     result = mngr_caller.call(["--version"], timeout=0.0)
     assert result.is_timed_out is True
     assert result.returncode != 0
+
+
+def test_serve_one_request_arms_parent_death_watcher() -> None:
+    """The warm-server serve path must start a parent-death watcher.
+
+    This is what protects a warm process that is orphaned *while busy*: once a
+    request is read the socket is no longer watched for EOF, so only the
+    parent-death watcher can dismiss it if the parent dies. The watcher must be
+    armed before the (blocking) ``recv``, so we assert the thread exists while
+    the serve is still blocked waiting for a request, then release it via EOF.
+
+    The watcher's actual firing-on-parent-death behavior is covered by
+    ``parent_process_test.py``; here we only verify it is wired in.
+    """
+    parent_connection, child_connection = Pipe(duplex=True)
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as concurrency_group:
+        # No request is ever sent, so the stand-in command is never invoked; the
+        # serve blocks in ``recv`` until we close the parent end below.
+        serve_thread = concurrency_group.start_new_thread(
+            target=_serve_one_request,
+            args=(child_connection, click.Command(name="noop"), concurrency_group),
+            name="serve-one-request",
+            is_checked=False,
+        )
+        try:
+            wait_for(
+                lambda: any(t.thread.name == "parent-death-watcher" for t in concurrency_group._threads),
+                timeout=10.0,
+                poll_interval=0.05,
+                error_message="serve did not arm a parent-death watcher",
+            )
+            watchers = [t for t in concurrency_group._threads if t.thread.name == "parent-death-watcher"]
+            assert len(watchers) == 1
+            assert watchers[0].thread.is_alive()
+        finally:
+            # Closing the parent end makes the blocked ``recv`` see EOF so the
+            # serve returns and both threads can be joined on group exit.
+            parent_connection.close()
+            serve_thread.join(timeout=10.0)
 
 
 @pytest.mark.flaky

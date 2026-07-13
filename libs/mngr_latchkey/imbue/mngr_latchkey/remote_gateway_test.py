@@ -11,6 +11,7 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
+from imbue.mngr_latchkey.core import GATEWAY_MAX_BODY_SIZE_BYTES
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.encryption_key import encryption_key_path
 from imbue.mngr_latchkey.remote_gateway import INNER_PORT
@@ -403,8 +404,9 @@ def test_ensure_latchkey_gateway_running_registers_supervisord_program_on_outer_
     # user's OAuth token: it runs on a synced copy and the desktop-side
     # latchkey remains the single owner of credential refresh.
     assert "export LATCHKEY_DISABLE_CREDENTIALS_REFRESH=1" in run_script
-    # exec so supervisord tracks the gateway PID directly, not a wrapping shell.
-    assert "exec latchkey gateway" in run_script
+    # exec so supervisord tracks the gateway PID directly, not a wrapping shell,
+    # with the same body-size limit the desktop-side gateway uses.
+    assert f"exec latchkey gateway --max-body-size {GATEWAY_MAX_BODY_SIZE_BYTES}" in run_script
     # The encryption key and listen password are read from 0600 files into the
     # environment (not interpolated), so the literal secret never appears.
     assert 'LATCHKEY_ENCRYPTION_KEY="$(cat ' in run_script

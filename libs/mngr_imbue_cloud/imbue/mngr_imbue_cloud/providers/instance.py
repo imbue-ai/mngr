@@ -176,8 +176,8 @@ def _rewrite_container_host_name(
 
     The pool host's ``/mngr/data.json`` was written at bake time with the
     bake's per-bake unique placeholder host name (``pool-<hex>-host``).
-    The FCT bootstrap reads that file to decide what to name the initial
-    chat agent (see ``forever-claude-template/libs/bootstrap/src/bootstrap/
+    The DEFAULT_WORKSPACE_TEMPLATE bootstrap reads that file to decide what to name the initial
+    chat agent (see ``default-workspace-template/libs/bootstrap/src/bootstrap/
     manager.py:_read_host_name``). Without this rewrite, every lease would
     end up with a chat agent named after the bake's placeholder instead
     of the user's chosen workspace name.
@@ -1204,7 +1204,7 @@ class ImbueCloudProvider(BaseProviderInstance):
                 lease_result.container_host_public_key,
             )
             # The pool host's ``/mngr/data.json`` was baked with a placeholder
-            # host name; rewrite it to the user-supplied name so the FCT
+            # host name; rewrite it to the user-supplied name so the DEFAULT_WORKSPACE_TEMPLATE
             # bootstrap inherits the user's chosen workspace name.
             _rewrite_container_host_name(
                 vps_address=lease_result.vps_address,
@@ -1337,7 +1337,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         passthrough_build_args: tuple[str, ...],
         # the rebuilt container's (freshly-generated) host public key, to pin
     ) -> str:
-        """Tear down the leased VPS's baked container and rebuild it from the FCT Dockerfile.
+        """Tear down the leased VPS's baked container and rebuild it from the DEFAULT_WORKSPACE_TEMPLATE Dockerfile.
 
         Delegates both teardown and rebuild to the single canonical
         ``mngr_vps`` setup path, run over the root SSH the lease granted.

@@ -38,6 +38,7 @@ from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import CredentialStatus
+from imbue.mngr_latchkey.core import GATEWAY_MAX_BODY_SIZE_BYTES
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.encryption_key import LatchkeyEncryptionKeyPermissionError
@@ -584,7 +585,8 @@ def _build_gateway_run_script(outer_port: int, key_file_path: Path, password_fil
     ``LATCHKEY_DISABLE_CREDENTIALS_REFRESH=1`` is set so the VPS gateway never
     refreshes OAuth credentials. The credentials here are a synced *copy* of the
     desktop's store (see :func:`sync_credentials`); the desktop-side latchkey is
-    the single owner of credential refresh.
+    the single owner of credential refresh. ``--max-body-size`` matches the
+    limit the desktop-side gateway uses (:data:`GATEWAY_MAX_BODY_SIZE_BYTES`).
     """
     key_q = shlex.quote(str(key_file_path))
     password_q = shlex.quote(str(password_file_path))
@@ -612,7 +614,7 @@ def _build_gateway_run_script(outer_port: int, key_file_path: Path, password_fil
             "export LATCHKEY_GATEWAY_LISTEN_HOST=127.0.0.1",
             "export LATCHKEY_DISABLE_COUNTING=1",
             "export LATCHKEY_DISABLE_CREDENTIALS_REFRESH=1",
-            "exec latchkey gateway",
+            f"exec latchkey gateway --max-body-size {GATEWAY_MAX_BODY_SIZE_BYTES}",
             "",
         )
     )
