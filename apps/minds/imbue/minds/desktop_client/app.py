@@ -511,8 +511,22 @@ def _handle_backup_password_change() -> Response:
         )
     record_store = session_store.record_store
     resolver = get_state().backend_resolver
+    # Accounts that are locked on this device must unlock first: rewrapping
+    # here would mint a fresh DEK and overwrite the server bundle that wraps
+    # the account's real one, orphaning every already-synced secret.
+    locked_user_ids = set(record_store.locked_account_user_ids([str(account.user_id) for account in accounts]))
     results: list[dict[str, object]] = []
     for account in accounts:
+        if str(account.user_id) in locked_user_ids:
+            results.append(
+                {
+                    "account": str(account.email),
+                    "is_ok": False,
+                    "error": "This account's synced secrets are locked on this device; "
+                    "unlock them with the current master password first.",
+                }
+            )
+            continue
         try:
             bundle = set_master_password_for_account(paths, str(account.user_id), new_password)
             if bundle is not None:

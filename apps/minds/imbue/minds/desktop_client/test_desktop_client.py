@@ -1804,6 +1804,51 @@ def test_backup_password_change_may_return_to_the_empty_password(tmp_path: Path)
     assert "a@b.com" not in cli.sync_bundle_by_email
 
 
+def test_backup_password_change_refuses_accounts_locked_on_this_device(tmp_path: Path) -> None:
+    """Rewrapping a locked account would mint a fresh DEK and overwrite the
+    server bundle wrapping the real one, orphaning every synced secret -- the
+    change endpoint must report a failure and touch nothing instead."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    # Another device set a password and synced a secrets-carrying record; this
+    # device has no DEK for the account (it is locked here).
+    other_device = WorkspacePaths(data_dir=tmp_path / "other-device")
+    bundle = set_master_password_for_account(other_device, "user-1", SecretStr("hunter2"))
+    assert bundle is not None
+    cli.sync_bundle_push("a@b.com", bundle)
+    remote = ReplicaRecord(
+        host_id="host-remote-1",
+        agent_id=str(AgentId.generate()),
+        display_name="remote-ws",
+        provider_kind="lima",
+        hosting_device_id="device-other",
+        device_label="other-device",
+        encrypted_secrets="b3BhcXVl",
+    )
+    cli.sync_records_by_email["a@b.com"] = {"host-remote-1": remote.to_wire(1)}
+
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
+    _authenticate_client(client, auth_store)
+    session_store = get_state(client.application).session_store
+    assert session_store is not None and session_store.record_store is not None
+    session_store.record_store.pull("user-1", "a@b.com")
+    bundle_before = dict(cli.sync_bundle_by_email["a@b.com"])
+
+    response = client.post(
+        "/_chrome/backup-password", json={"new_password": "new-pass", "new_password_confirm": "new-pass"}
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["ok"] is False
+    assert body["results"] == [{"account": "a@b.com", "is_ok": False, "error": body["results"][0]["error"]}]
+    assert "locked" in body["results"][0]["error"]
+    # The server bundle (wrapping the real DEK) is untouched and no divergent
+    # local DEK was minted.
+    assert cli.sync_bundle_by_email["a@b.com"] == bundle_before
+    assert not is_account_unlocked(WorkspacePaths(data_dir=tmp_path), "user-1")
+
+
 # -- get-help / report-a-bug tests --
 
 
