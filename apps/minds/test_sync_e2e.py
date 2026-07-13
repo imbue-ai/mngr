@@ -534,6 +534,10 @@ def test_amnesia_and_recover_full_lifecycle_via_electron(
     byte-for-byte through R2.
     """
     runtime = _prepare_runtime(tmp_path, monkeypatch, sync_e2e_env)
+    # The landing badge's status listing and the backup export both run restic
+    # from the sandbox host (not the workspace container), and the snapshot
+    # image carries no restic binary.
+    _ensure_restic_on_sandbox_host(tmp_path, monkeypatch)
     master_password = f"master-{get_short_random_string()}"
     sentinel_content = f"sync-e2e sentinel {get_short_random_string()}\n"
 
