@@ -594,16 +594,18 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
     if instance_type:
         allowed_instance_types = _INSTANCE_TYPES_BY_LAUNCH_MODE.get(launch_mode)
         if allowed_instance_types is None:
+            # This mode has no machine-size knob; drop a stray submitted value.
             instance_type = ""
         elif instance_type not in allowed_instance_types:
             return _json_field_error(f"Unsupported instance type {instance_type!r}.", "instance_type")
+        else:
+            # A known size for a sized mode: passes through to the create command.
+            pass
     cloud_account = str(body.get("cloud_account", "")).strip()
     if launch_mode in (LaunchMode.GCP, LaunchMode.AZURE) and not cloud_account:
         # BYO-only modes: without an account the create would fail minutes
         # later in the background thread with an opaque provider error.
-        return _json_field_error(
-            f"{launch_mode.value} requires a configured cloud account.", "cloud_account"
-        )
+        return _json_field_error(f"{launch_mode.value} requires a configured cloud account.", "cloud_account")
     matching = None
     if cloud_account:
         # A bring-your-own account must exist and match the submitted launch
@@ -697,9 +699,7 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
         # it as a static note. A different placement = another account entry.
         region = matching["region"]
     else:
-        region = resolve_effective_region(
-            launch_mode, submitted_region, minds_config, get_state().geo_location_cache
-        )
+        region = resolve_effective_region(launch_mode, submitted_region, minds_config, get_state().geo_location_cache)
     on_created = build_create_on_created_callback(account_id, minds_config, launch_mode, region)
 
     creation_id = agent_creator.start_creation(
@@ -1911,14 +1911,13 @@ def _handle_create_cloud_account() -> CloudAccountPrepareResponse | Response:
     elif backend == "gcp":
         key_json = str(body.get("gcp_service_account_key_json", "")).strip()
         if not key_json:
-            return _json_field_error(
-                "The service-account key JSON is required.", "gcp_service_account_key_json"
-            )
+            return _json_field_error("The service-account key JSON is required.", "gcp_service_account_key_json")
         # Cheap structural check so an obviously-wrong paste (an API key, an
         # OAuth client blob) fails here rather than mid-prepare.
         try:
             key_info = json.loads(key_json)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
+            logger.warning("Rejected pasted GCP key: not valid JSON: {}", e)
             return _json_field_error(
                 "That is not valid JSON. Paste the full contents of the downloaded key file.",
                 "gcp_service_account_key_json",

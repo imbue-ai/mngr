@@ -1070,9 +1070,14 @@ def list_cloud_account_providers(*, root_name: str | None = None) -> list[dict[s
         return []
     aliases = _read_cloud_account_aliases(root_name)
     accounts: list[dict[str, str]] = []
-    for name, block in sorted(providers.items()):
-        if not name.startswith(_BYO_PROVIDER_NAME_PREFIX) or not isinstance(block, dict):
+    for raw_name, raw_block in sorted(providers.items()):
+        # ``isinstance(providers, dict)`` narrows only to dict[object, object];
+        # re-establish str keys / dict blocks for the type checker (tomllib
+        # guarantees str keys at runtime).
+        name = str(raw_name)
+        if not name.startswith(_BYO_PROVIDER_NAME_PREFIX) or not isinstance(raw_block, dict):
             continue
+        block: dict[str, object] = {str(key): value for key, value in raw_block.items()}
         accounts.append(
             {
                 "name": name,
@@ -1100,7 +1105,8 @@ def _cloud_account_identifier(block: Mapping[str, object]) -> str:
     if backend == "gcp":
         try:
             key_info = json.loads(str(block.get("service_account_key_json", "")))
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
+            logger.warning("Cloud account block holds unparseable service_account_key_json: {}", e)
             return ""
         return str(key_info.get("client_email", "")) if isinstance(key_info, dict) else ""
     if backend == "azure":

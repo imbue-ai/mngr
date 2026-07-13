@@ -1861,6 +1861,11 @@ class AgentCreator(MutableModel):
                         on_output=emit_log,
                         parent_cg=self.root_concurrency_group,
                     )
+                else:
+                    # Every other mode (docker / lima / vultr / imbue_cloud /
+                    # modal) has no per-account prepare step: their providers
+                    # need no pre-created cloud scaffolding before `mngr create`.
+                    pass
 
                 parsed_host = HostName(host_name)
                 log_queue.put("[minds] Creating workspace '{}' (mode: {})...".format(host_name, launch_mode.value))
