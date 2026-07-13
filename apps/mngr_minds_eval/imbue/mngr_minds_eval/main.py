@@ -127,6 +127,10 @@ def main() -> None:
     p_launch.add_argument("--box", default="", help="container name (default: minds-box-<mngr-branch>)")
     p_launch.add_argument("--anthropic-key", default=os.environ.get("ANTHROPIC_API_KEY", ""))
 
+    p_box = sub.add_parser("box", help="build/boot a Minds box for an mngr branch (general utility)")
+    p_box.add_argument("--mngr-branch", required=True, help="mngr branch the box runs")
+    p_box.add_argument("--box", default="", help="container name (default: minds-box-<mngr-branch>)")
+
     sub.add_parser("list-batches", help="list eval batches in S3")
 
     p_inspect = sub.add_parser("inspect", help="per-case status of a batch (from S3)")
@@ -149,6 +153,15 @@ def main() -> None:
     if args.command == "self-check":
         self_check()
         return
+    # Box lifecycle (host-side): build/boot the box, then print how to view it. General utility --
+    # spin up a Minds-on-a-branch to poke at, independent of any eval.
+    if args.command == "box":
+        if IN_BOX:
+            parser.error("run `box` from the host, not inside a box")
+        box_mod.ensure(_box_name(args), args.mngr_branch)
+        box_mod.print_view_urls(_box_name(args))
+        return
+
     # Status-only subcommands read S3 and need nothing else -- they run wherever they are invoked.
     if args.command == "list-batches":
         _check_aws()
