@@ -594,6 +594,25 @@ class ProviderInstanceInterface(MutableModel, ABC):
         """
         return None
 
+    def get_container_loopback_ssh_port(self, host_id: HostId) -> int | None:
+        """Port at which the agent's container sshd is reachable from the *outer host's own loopback*.
+
+        Distinct from the externally-routable port in ``get_ssh_connection_info``:
+        that one is how a remote client reaches the container (e.g. a slice's
+        box-forwarded port), whereas this is the port the container's sshd is
+        published on from the outer host's perspective (``127.0.0.1:<port>`` on
+        the VPS/VM). The two coincide for a plain docker-on-VPS host but differ
+        for a slice, where the container is published in the VM on a fixed port
+        while reached from outside via a box-forwarded port.
+
+        Returns ``None`` by default, meaning the externally-routable port is also
+        the outer-host-loopback port (callers fall back to that). Providers whose
+        topology splits publish from connect (e.g. imbue_cloud slices) override
+        this so a service running *on the outer host* (the VPS-resident latchkey
+        gateway) can reverse-tunnel into the container on the correct port.
+        """
+        return None
+
     def get_connection_error_fallback_state(self, host_id: HostId) -> HostState | None:
         """State to report for a host whose inner-SSH agent enumeration just failed.
 
