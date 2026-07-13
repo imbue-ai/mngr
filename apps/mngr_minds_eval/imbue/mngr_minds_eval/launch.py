@@ -1,8 +1,8 @@
 """Launch an eval batch: prepare one FCT clone per case, then create one workspace per case.
 
-Each case's workspace is created with the `api_key` backup provider pointed at the case's own
-restic repo in our S3 bucket, so the in-sandbox eval worker can snapshot /mngr per turn and
-upload state/transcript -- the run self-completes and everything is retrievable from S3.
+Each case's clone carries a scripts/config.json with the S3 target, the case's restic repo +
+password, and the scoped AWS creds; backup_provider is configure_later and the in-sandbox worker
+drives restic itself. The run self-completes and everything is retrievable from S3.
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ from pathlib import Path
 
 from imbue.mngr_minds_eval import minds_client
 from imbue.mngr_minds_eval import s3_store
-from imbue.mngr_minds_eval import workspace
 from imbue.mngr_minds_eval import workspace
 
 # The forever-claude-template (workspace template) each eval case is cloned from. The default
@@ -89,25 +88,18 @@ def _prepare_clone(case: dict, case_config: dict) -> Path:
     return clone
 
 
-def destroy_existing_workspace(port: str, host_name: str, timeout: float = 600.0) -> None:
-    """Idempotent create: if a workspace with this host name already exists (a re-run with the same
-    --name, or an interrupted prior run), destroy it first. mngr registers the host name in the
-    Modal environment, so it survives box restarts -- only an actual destroy clears it."""
-    try:
-        listing = _get_json("{}/api/v1/workspaces".format(_api_base(port)))
-    except (urllib.error.URLError, OSError):
-        return
-    target = host_name.lower()
-    match = next((w for w in listing.get("workspaces", [])
-                  if (w.get("name") or "").lower() == target and w.get("agent_id")), None)
-    if match is None:
-        return
-    agent_id = match["agent_id"]
-    print("     host name in use -- destroying existing {} ({})".format(host_name, agent_id), flush=True)
+def _list_workspaces(port: str) -> list[dict]:
+    listing = _get_json("{}/api/v1/workspaces".format(_api_base(port)))
+    return [w for w in listing.get("workspaces", []) if w.get("agent_id")]
+
+
+def _destroy_and_wait(port: str, agent_id: str, label: str, timeout: float = 600.0) -> bool:
+    """POST destroy and poll until done. Returns True on confirmed teardown. Each destroy removes
+    the Modal sandbox AND its host record from the environment, so the host name frees up."""
     status, body = _post_json("{}/api/v1/workspaces/{}/destroy".format(_api_base(port), agent_id), {})
     if status != 202:
-        print("     WARN: could not start destroy ({}): {}".format(status, body), flush=True)
-        return
+        print("  [ERR ] {}: {}".format(label, str(body)[:150]), flush=True)
+        return False
     operation_id = body.get("operation_id", agent_id)
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -117,47 +109,41 @@ def destroy_existing_workspace(port: str, host_name: str, timeout: float = 600.0
             time.sleep(4)
             continue
         if info.get("is_done"):
-            print("     destroyed {}".format(host_name), flush=True)
-            return
+            print("  [OK  ] destroyed {}".format(label), flush=True)
+            return True
         time.sleep(4)
-    print("     WARN: destroy of {} did not confirm in time; create may still collide".format(host_name), flush=True)
+    print("  [WARN] {} did not confirm destroy in time".format(label), flush=True)
+    return False
+
+
+def destroy_existing_workspace(port: str, host_name: str) -> None:
+    """Idempotent create: if a workspace with this host name already exists (a re-run with the same
+    --name, or an interrupted prior run), destroy it first -- the name is registered in the Modal
+    environment and survives box restarts, so only an actual destroy clears it."""
+    try:
+        existing = _list_workspaces(port)
+    except (urllib.error.URLError, OSError):
+        return
+    match = next((w for w in existing if (w.get("name") or "").lower() == host_name.lower()), None)
+    if match is not None:
+        print("     host name in use -- destroying existing {}".format(host_name), flush=True)
+        _destroy_and_wait(port, match["agent_id"], host_name)
 
 
 def destroy_all_workspaces(port: str) -> None:
-    """Clean slate: destroy every workspace the box currently sees. Each destroy tears down the
-    Modal sandbox AND removes the host record from the Modal environment, so names free up."""
+    """Clean slate: destroy every workspace the box currently sees (for a per-eval box, that is that
+    eval's Modal env)."""
     try:
-        listing = _get_json("{}/api/v1/workspaces".format(_api_base(port)))
+        workspaces = _list_workspaces(port)
     except (urllib.error.URLError, OSError) as exc:
         raise SystemExit("could not list workspaces: {}".format(exc))
-    workspaces = [w for w in listing.get("workspaces", []) if w.get("agent_id")]
     if not workspaces:
         print(">> no workspaces to destroy", flush=True)
         return
     print(">> destroying {} workspace(s) ...".format(len(workspaces)), flush=True)
     for w in workspaces:
-        name, agent_id = w.get("name") or w["agent_id"], w["agent_id"]
-        status, body = _post_json("{}/api/v1/workspaces/{}/destroy".format(_api_base(port), agent_id), {})
-        if status != 202:
-            print("  [ERR ] {}: {}".format(name, str(body)[:150]), flush=True)
-            continue
-        operation_id = body.get("operation_id", agent_id)
-        deadline = time.time() + 600.0
-        while time.time() < deadline:
-            try:
-                info = _get_json("{}/api/v1/workspaces/operations/destroy/{}".format(_api_base(port), operation_id))
-            except (urllib.error.URLError, OSError):
-                time.sleep(4)
-                continue
-            if info.get("is_done"):
-                print("  [OK  ] destroyed {}".format(name), flush=True)
-                break
-            time.sleep(4)
-        else:
-            print("  [WARN] {} did not confirm destroy in time".format(name), flush=True)
+        _destroy_and_wait(port, w["agent_id"], w.get("name") or w["agent_id"])
     print(">> done", flush=True)
-
-
 
 
 def launch_batch(

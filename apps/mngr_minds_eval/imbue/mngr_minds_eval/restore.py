@@ -17,6 +17,7 @@ from pathlib import Path
 
 from imbue.mngr_minds_eval import minds_client
 from imbue.mngr_minds_eval import s3_store
+from imbue.mngr_minds_eval import workspace
 
 RESTORE_ROOT = Path("/work/restores")
 
@@ -81,10 +82,10 @@ def restore(batch: str, case_name: str, message_index: int, *, port: str, restic
     host_name = "RESTORE-{}-{}-{}".format(eval_name, case_name, message_index)
     print(">> creating modal workspace {} from {}".format(host_name, code_dir), flush=True)
     try:
-        agent_id = minds_client.create_and_wait(port, {
-            "git_url": str(code_dir), "host_name": host_name, "branch": "",
-            "launch_mode": "MODAL", "ai_provider": "SUBSCRIPTION", "backup_provider": "CONFIGURE_LATER",
-        }, on_stage=lambda s: print("   ... {}".format(s), flush=True))
+        agent_id = workspace.create_workspace(
+            port=port, fct_link=str(code_dir), name=host_name, compute="modal",
+            ai_provider="subscription", backup_provider="configure_later", quiet=True,
+        )
     except minds_client.CreateError as exc:
         raise SystemExit(str(exc))
 

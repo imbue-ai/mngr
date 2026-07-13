@@ -18,8 +18,10 @@ def build_payload(
     payload = {
         "git_url": fct_link, "branch": fct_branch,
         "launch_mode": compute.upper(), "ai_provider": ai_provider.upper(),
-        "anthropic_api_key": anthropic_key, "backup_provider": backup_provider.upper(),
+        "backup_provider": backup_provider.upper(),
     }
+    if anthropic_key:  # omit for SUBSCRIPTION (e.g. restore); API_KEY provider needs it
+        payload["anthropic_api_key"] = anthropic_key
     if name:
         payload["host_name"] = name
     return payload
