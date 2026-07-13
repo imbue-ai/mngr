@@ -64,13 +64,16 @@ class WorkspaceSyncScheduler(MutableModel):
         while not self._stop_event.is_set() and not self.resolver.has_completed_initial_discovery():
             self._stop_event.wait(_DISCOVERY_POLL_SECONDS)
         while not self._stop_event.is_set():
+            # Clear BEFORE the pass: a kick arriving mid-pass then stays set,
+            # so the wait below returns immediately and the request is served
+            # by the next pass instead of being lost.
+            self._kick_event.clear()
             try:
                 self.run_one_pass()
             except (ImbueCloudCliError, WorkspaceSyncError, SyncCryptoError, OSError) as e:
                 # The loop is the only writer-side repair mechanism; log loudly
                 # but never die on a single bad pass (e.g. a connector outage).
                 logger.opt(exception=e).error("Workspace-record sync pass failed")
-            self._kick_event.clear()
             self._kick_event.wait(_SYNC_TICK_SECONDS)
 
     def start(self, concurrency_group: ConcurrencyGroup) -> None:
