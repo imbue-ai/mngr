@@ -791,6 +791,68 @@ def _attempt_create_workspace_via_electron(
                 browser.close()
 
 
+@contextmanager
+def electron_app_session(
+    workspace_git_url: Path,
+    debug_port: int,
+    host_config_dir: Path | None = None,
+) -> Iterator[tuple[Browser, Page]]:
+    """Launch Electron + attach Playwright and yield ``(browser, content_page)``.
+
+    The generic sibling of :func:`create_workspace_via_electron` for flows that
+    drive arbitrary app pages (sign-in, settings, the landing list) instead of
+    the create form. The launch + CDP attach is retried with a fresh Electron
+    process and port up to ``_ELECTRON_LAUNCH_ATTEMPTS`` times (the same
+    wedged-handshake flake recovery); once the session is yielded, caller
+    exceptions propagate unchanged and tear the app down.
+
+    The same caller contract as :func:`create_workspace_via_electron` applies
+    (``MINDS_ROOT_NAME`` set, ``debug_port`` free, ``host_config_dir`` for the
+    pytest config guard). ``workspace_git_url`` only seeds the create form's
+    repo prefill; sessions that never open the create form still need a real
+    path here.
+    """
+    last_error: _ElectronConnectError | None = None
+    for attempt in range(1, _ELECTRON_LAUNCH_ATTEMPTS + 1):
+        attempt_port = debug_port if attempt == 1 else find_free_port()
+        with _launched_electron(workspace_git_url, attempt_port, host_config_dir):
+            with sync_playwright() as playwright:
+                try:
+                    _wait_for_cdp(attempt_port, _CDP_READY_TIMEOUT_SECONDS)
+                    browser = playwright.chromium.connect_over_cdp(
+                        f"http://127.0.0.1:{attempt_port}", timeout=_CDP_CONNECT_TIMEOUT_MS
+                    )
+                except (PlaywrightError, TimeoutError) as exc:
+                    last_error = _ElectronConnectError(f"Electron CDP attach failed on port {attempt_port}: {exc}")
+                    logger.warning(
+                        "Electron launch/CDP attempt {}/{} failed; relaunching: {}",
+                        attempt,
+                        _ELECTRON_LAUNCH_ATTEMPTS,
+                        last_error,
+                    )
+                    continue
+                try:
+                    try:
+                        page = _pick_content_page(browser, _BACKEND_READY_TIMEOUT_SECONDS)
+                    except (PlaywrightError, TimeoutError) as exc:
+                        last_error = _ElectronConnectError(f"Electron CDP attach failed on port {attempt_port}: {exc}")
+                        logger.warning(
+                            "Electron launch/CDP attempt {}/{} failed; relaunching: {}",
+                            attempt,
+                            _ELECTRON_LAUNCH_ATTEMPTS,
+                            last_error,
+                        )
+                        continue
+                    _attach_renderer_diagnostics(page)
+                    yield browser, page
+                    return
+                finally:
+                    browser.close()
+    raise PlaywrightTimeoutError(
+        f"Electron CDP attach failed after {_ELECTRON_LAUNCH_ATTEMPTS} relaunch attempts (last error: {last_error})"
+    )
+
+
 def create_workspace_via_electron(
     default_workspace_template_path: Path,
     workspace_name: str,

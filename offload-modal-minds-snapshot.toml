@@ -20,7 +20,10 @@
 # Tiny test suite to start. max_parallel scales up as more
 # @pytest.mark.minds_snapshot_resume tests get added.
 max_parallel = 10
-test_timeout_secs = 900
+# The sync e2e lifecycle tests (test_sync_e2e.py) create a workspace via the
+# real Electron create flow, run a real first backup to R2, wipe the install,
+# and restore -- the amnesia test budgets 2400s (its pytest mark matches).
+test_timeout_secs = 2400
 stream_output = true
 sandbox_project_root = "/code/mngr"
 

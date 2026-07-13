@@ -149,6 +149,15 @@ test-offload-minds-snapshot snapshot_image_id args="":
     if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
         EXTRA_ENV_ARGS+=(--env "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}")
     fi
+    # Forward the sync e2e connector-env coordinates when present (only the
+    # run_minds_release_tests CI path exports them; see apps/minds/test_sync_e2e.py).
+    # Secret values are masked in CI logs by the Vault use-vault-secrets action.
+    for sync_e2e_var in MINDS_SYNC_E2E_CONNECTOR_URL MINDS_SYNC_E2E_LITELLM_URL \
+        MINDS_SYNC_E2E_SUPERTOKENS_CONNECTION_URI MINDS_SYNC_E2E_SUPERTOKENS_API_KEY; do
+        if [ -n "${!sync_e2e_var:-}" ]; then
+            EXTRA_ENV_ARGS+=(--env "${sync_e2e_var}=${!sync_e2e_var}")
+        fi
+    done
     offload -c offload-modal-minds-snapshot.toml run --trace \
         --override-image-id "{{snapshot_image_id}}" \
         --env "GITHUB_HEAD_REF=${GITHUB_HEAD_REF:-}" \
