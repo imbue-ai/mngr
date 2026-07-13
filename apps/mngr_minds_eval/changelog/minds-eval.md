@@ -37,3 +37,5 @@
 - De-duplicated workspace creation: launch, workspace, and restore now share a single `minds_client.create_and_wait` (POST + poll) instead of three near-identical copies.
 
 - Removed the user-facing `self-check` subcommand; its asserts are now a real unit test (`main_test.py`). Clarified that `clean-modal-workspaces` is identified by `--name` alone (the Modal env); `--mngr-branch` is only a fallback to build a box when the eval's box isn't already running.
+
+- launch now creates each case via workspace.create_workspace instead of its own build_create_payload, so the create payload shape is defined in exactly one place. create_workspace returns the agent id and raises minds_client.CreateError (callers decide abort vs continue).

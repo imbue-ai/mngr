@@ -158,13 +158,17 @@ def main() -> None:
     if args.command == "workspace":
         if not IN_BOX:
             _exec_in_box(_box_for(args.mngr_branch, args.box), args.mngr_branch, sys.argv[1:], None)
+        from imbue.mngr_minds_eval import minds_client
         from imbue.mngr_minds_eval import workspace as workspace_mod
 
-        workspace_mod.create_workspace(
-            port=_port(), fct_link=args.fct_link, fct_branch=args.fct_branch, name=args.name,
-            compute=args.compute, ai_provider=args.ai_provider, anthropic_key=args.anthropic_key,
-            backup_provider=args.backup_provider,
-        )
+        try:
+            workspace_mod.create_workspace(
+                port=_port(), fct_link=args.fct_link, fct_branch=args.fct_branch, name=args.name,
+                compute=args.compute, ai_provider=args.ai_provider, anthropic_key=args.anthropic_key,
+                backup_provider=args.backup_provider,
+            )
+        except minds_client.CreateError as exc:
+            sys.exit(str(exc))
         return
 
     # Status-only subcommands read S3 and need nothing else -- they run wherever they are invoked.

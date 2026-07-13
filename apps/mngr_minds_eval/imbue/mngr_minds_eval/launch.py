@@ -18,6 +18,8 @@ from pathlib import Path
 
 from imbue.mngr_minds_eval import minds_client
 from imbue.mngr_minds_eval import s3_store
+from imbue.mngr_minds_eval import workspace
+from imbue.mngr_minds_eval import workspace
 
 # The forever-claude-template (workspace template) each eval case is cloned from. The default
 # branch carries the eval worker (eval_responder + config.json gating); a branch WITHOUT it won't
@@ -55,25 +57,6 @@ def load_cases(personas_path: Path) -> list[dict]:
             raise ValueError("case {!r} is missing first_prompt".format(case_id))
         out.append({"id": case_id, "persona": str(case.get("persona", "")).strip(), "first_prompt": prompt})
     return out
-
-
-def build_create_payload(clone_path: Path, host_name: str, anthropic_key: str, compute: str) -> dict:
-    """Create-form fields. Empty branch: a local clone is already on the right commit, and passing
-    a branch trips mngr's checkout_branch(FETCH_HEAD) on the use-in-place path.
-
-    backup_provider is configure_later: the eval worker drives restic itself (creds are slotted into
-    the clone's config.json), because minds' api_key backup provisioning does not reliably land a
-    restic.env inside a Modal sandbox.
-    """
-    return {
-        "git_url": str(clone_path),
-        "host_name": host_name,
-        "branch": "",
-        "launch_mode": compute.upper(),
-        "ai_provider": "API_KEY",
-        "anthropic_api_key": anthropic_key,
-        "backup_provider": "CONFIGURE_LATER",
-    }
 
 
 def _ensure_base(fct_repo: str, fct_branch: str) -> None:
@@ -227,9 +210,11 @@ def launch_batch(
         clone = _prepare_clone(case, case_config)
 
         try:
-            agent_id = minds_client.create_and_wait(
-                port, build_create_payload(clone, host_name, anthropic_key, compute),
-                on_stage=lambda s: print("     ... {}".format(s), flush=True),
+            # backup_provider=configure_later: the worker drives restic itself from config.json.
+            agent_id = workspace.create_workspace(
+                port=port, fct_link=str(clone), name=host_name, compute=compute,
+                ai_provider="api_key", anthropic_key=anthropic_key, backup_provider="configure_later",
+                quiet=True,
             )
             results.append({"case": case["id"], "ok": True, "agent_id": agent_id})
             print("     OK agent {}".format(agent_id), flush=True)
