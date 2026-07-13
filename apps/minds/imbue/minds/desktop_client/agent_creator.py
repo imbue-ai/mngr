@@ -1407,10 +1407,11 @@ class AgentCreator(MutableModel):
         ask for.
 
         When ``on_created`` is provided, it is called with the canonical
-        ``AgentId`` once ``mngr create`` returns (immediately before the
-        status flips to ``DONE``). The id is parsed from the inner
-        ``mngr create``'s JSONL ``"event": "created"`` line, not pre-generated;
-        for imbue_cloud agents it's the leased pool host's pre-baked id.
+        ``AgentId`` and ``HostId`` once ``mngr create`` returns (immediately
+        before the status flips to ``DONE``). Both ids are parsed from the
+        inner ``mngr create``'s JSONL ``"event": "created"`` line, not
+        pre-generated; for imbue_cloud agents they are the leased pool
+        host's pre-baked ids.
 
         Returns a ``CreationId`` immediately for tracking the in-flight
         creation. Use ``get_creation_info()`` to poll status (and read
