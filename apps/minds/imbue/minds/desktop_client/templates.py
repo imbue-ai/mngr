@@ -276,11 +276,11 @@ def render_landing_page(
 # Hardcoded fallbacks for the workspace-creation form. Overridable via the
 # MINDS_WORKSPACE_* env vars only when the operator explicitly opts in -- see
 # ``_operator_workspace_default`` for the gating rationale.
-# Public alias: the default forever-claude-template repo URL. The pre-baked Lima
+# Public alias: the default-workspace-template repo URL. The pre-baked Lima
 # image gate (lima_image_prefetch) keys on this to recognize the default workspace.
-DEFAULT_FOREVER_CLAUDE_GIT_URL: Final[str] = "https://github.com/imbue-ai/forever-claude-template.git"
-_FALLBACK_GIT_URL: Final[str] = DEFAULT_FOREVER_CLAUDE_GIT_URL
-# Pin to an annotated FCT tag so a shipped binary clones the exact FCT
+DEFAULT_WORKSPACE_TEMPLATE_GIT_URL: Final[str] = "https://github.com/imbue-ai/default-workspace-template.git"
+_FALLBACK_GIT_URL: Final[str] = DEFAULT_WORKSPACE_TEMPLATE_GIT_URL
+# Pin to an annotated DEFAULT_WORKSPACE_TEMPLATE tag so a shipped binary clones the exact DEFAULT_WORKSPACE_TEMPLATE
 # snapshot it was verified against. Bump to a newer tag only after
 # re-verifying launch-to-msg CI against (this binary, the new tag).
 FALLBACK_BRANCH: Final[str] = "minds-v0.3.6"
@@ -292,7 +292,7 @@ FALLBACK_BRANCH: Final[str] = "minds-v0.3.6"
 # while a normal end-user ``minds run`` never honors a stray MINDS_WORKSPACE_*
 # left over in the operator's shell, on any tier. The previous tier-based gate
 # did the opposite: it blocked legitimate dev iteration on staging (forcing the
-# form back to the public GitHub FCT on ``main``) while leaving dev tiers exposed
+# form back to the public GitHub DEFAULT_WORKSPACE_TEMPLATE on ``main``) while leaving dev tiers exposed
 # to stray vars.
 _WORKSPACE_DEFAULTS_OPT_IN_ENV_VAR: Final[str] = "MINDS_USE_LOCAL_WORKSPACE_DEFAULTS"
 
@@ -301,7 +301,7 @@ def is_local_workspace_defaults_opt_in() -> bool:
     """Return whether the operator opted into local-worktree create-form defaults (the dev loop).
 
     True when ``MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1`` -- the same signal that
-    routes the create form at the operator's local FCT worktree. The pre-baked
+    routes the create form at the operator's local DEFAULT_WORKSPACE_TEMPLATE worktree. The pre-baked
     image gate treats this as "dev loop" and falls back to build-in-VM.
     """
     return os.environ.get(_WORKSPACE_DEFAULTS_OPT_IN_ENV_VAR) == "1"
@@ -311,7 +311,7 @@ def _operator_workspace_default(env_var: str, fallback: str) -> str:
     """Return ``env_var`` only when the operator explicitly opted in; else ``fallback``.
 
     The MINDS_WORKSPACE_GIT_URL / _BRANCH env vars wire the create-form
-    defaults to the operator's local FCT worktree. They are honored only when
+    defaults to the operator's local DEFAULT_WORKSPACE_TEMPLATE worktree. They are honored only when
     ``MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1`` is set in the same environment
     (``just minds-start`` and the e2e runner set it). An end-user ``minds run``
     never sets it, so a stray MINDS_WORKSPACE_* left in the shell is ignored on
@@ -1172,10 +1172,10 @@ _RECOVERY_SCRIPT: Final[str] = """\
           if (providerReasonEl) { providerReasonEl.textContent = ''; show(providerReasonEl, false); }
           latestHealth = null;
         }
-        // The shared "Workspace unresponsive" state -- shown for ambiguous-host
-        // states, after a restart failure, and whenever the container is live
-        // but unreachable (bouncing it would interrupt user agents, so we want
-        // explicit consent before doing so).
+        // The shared "Workspace unresponsive" state -- shown after a restart
+        // failure and for the host_unresponsive tier (container observed
+        // running but unreachable: bouncing it would interrupt user agents, so
+        // we want explicit consent before doing so).
         function renderUnresponsive() {
           titleEl.textContent = 'Workspace unresponsive';
           messageEl.textContent =
@@ -1193,9 +1193,11 @@ _RECOVERY_SCRIPT: Final[str] = """\
           armHealthyPoll();
         }
         // INDETERMINATE: we lack trustworthy evidence to classify -- the
-        // in-container probe timed out (observed nothing), or discovery has not
-        // re-observed the host since the outage began, so its host state may be
-        // stale. Render neither a verdict nor a restart button, just a live
+        // in-container probe timed out (observed nothing), discovery has not
+        // re-observed the host since the outage began (so its host state may be
+        // stale), or the snapshot carries no observation of the container (host
+        // state UNKNOWN, transitional, or absent).
+        // Render neither a verdict nor a restart button, just a live
         // "reconnecting" spinner. The cheap liveness poll (armed here) returns the
         // user home the instant the workspace answers; a slow heavy re-probe
         // converges to a real tier if it is genuinely down and a fresh snapshot
@@ -1315,8 +1317,9 @@ _RECOVERY_SCRIPT: Final[str] = """\
             scheduleRefresh();
             return;
           }
-          // No trustworthy evidence to classify (probe timed out, or discovery has
-          // not re-observed the host since the outage). Show a live "reconnecting"
+          // No trustworthy evidence to classify (probe timed out, discovery has
+          // not re-observed the host since the outage, or the snapshot carries no
+          // observation of the container). Show a live "reconnecting"
           // state and keep checking -- never a verdict or an auto-restart off
           // non-evidence -- on EITHER entry path. Checked before the restart_failed
           // branch below so an indeterminate result there also keeps checking

@@ -20,7 +20,7 @@ Every release we add **one `24sys032-us` box in each of the two US regions**
 | `US-WEST-OR` | `hil` | `24sys032-us` (Intel Xeon-E 2288G, 8c/16t) | 128 GB | `softraid-2x960nvme` | 14 |
 
 So each release nets **+28 baked, leasable production slices** (14 per box, at
-8 GB/slice), all advertising the new release's FCT tag so leases land on the
+8 GB/slice), all advertising the new release's DEFAULT_WORKSPACE_TEMPLATE tag so leases land on the
 fast path.
 
 > Region wrinkle: OVH **orders** take the datacenter code (`vin` / `hil`); slice
@@ -48,9 +48,9 @@ fast path.
 ```bash
 cd <repo-root>
 
-# The release whose slices you are baking. Both mngr and forever-claude-template
+# The release whose slices you are baking. Both mngr and default-workspace-template
 # are tagged minds-v<version> (see apps/minds/docs/release.md). Example: 0.3.6.
-# NOTE: this tag pins the *desktop* binary and the FCT slice bake (Step 6) -- NOT
+# NOTE: this tag pins the *desktop* binary and the DEFAULT_WORKSPACE_TEMPLATE slice bake (Step 6) -- NOT
 # the server. The connector/proxy deploy (Step 1) tracks `main`, which is normally
 # ahead of the tag.
 export REL_VERSION=0.3.6
@@ -88,7 +88,7 @@ vault token lookup >/dev/null && echo "vault ok"
 Deploy the connector + LiteLLM proxy **from the tip of `main`** -- the server is
 redeployed frequently and tracks `main`, which is normally ahead of the latest
 release tag. Do **not** check out `${REL_TAG}` for this: the tag pins the desktop
-binary and the FCT slice bake (Step 6), not the server. (Only pin the server to a
+binary and the DEFAULT_WORKSPACE_TEMPLATE slice bake (Step 6), not the server. (Only pin the server to a
 literal tag in the rare case you deliberately need it at an exact release.) Kick
 the deploy off **in the background** so it runs while you confirm the order
 (instead of blocking on it):
@@ -109,8 +109,8 @@ This pushes every production Vault secret into Modal and `modal deploy`s both
 is the mandatory safety bar. It typically finishes in a few minutes -- long
 before the boxes ordered below are delivered.
 
-> The connector/proxy deploy tracks `main` and is independent of the slice FCT
-> version: slices carry the release via their baked FCT tag (Step 6, `--from-tag
+> The connector/proxy deploy tracks `main` and is independent of the slice DEFAULT_WORKSPACE_TEMPLATE
+> version: slices carry the release via their baked DEFAULT_WORKSPACE_TEMPLATE tag (Step 6, `--from-tag
 > ${REL_TAG}`), while the server runs whatever is on `main`. We start the deploy
 > first only so the runtime services are current before the new capacity comes
 > online; we gate on its success before setting up the boxes (Step 5).
@@ -232,7 +232,7 @@ their regions.
 ## Step 6 -- bake 14 slices per box at the release tag
 
 Activate the production tier (use-mode is enough; the bake resolves the pool key
-+ DSN from Vault). Then bake a full box's worth of slices, at the release FCT
++ DSN from Vault). Then bake a full box's worth of slices, at the release DEFAULT_WORKSPACE_TEMPLATE
 tag, pinned to each box by `--server-id`:
 
 ```bash
@@ -246,7 +246,7 @@ just bake-slice-prod US-WEST-OR "${REL_TAG}" 14 --server-id "$SRV_HIL"
 ```
 
 Notes:
-- `bake-slice-prod` clones forever-claude-template at exactly `${REL_TAG}` and
+- `bake-slice-prod` clones default-workspace-template at exactly `${REL_TAG}` and
   bakes byte-for-byte tag content, stamping `repo_branch_or_tag=${REL_TAG}` so the
   production binary's leases land on the fast path.
 - Slices bake at most 4 at a time per box (the rest queue); a full box takes a

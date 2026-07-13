@@ -4,7 +4,7 @@ A "workspace" is a persistent mngr agent created from a template repository. The
 
 ## Template structure
 
-The template repository (e.g. [forever-claude-template](https://github.com/imbue-ai/forever-claude-template)) contains:
+The template repository (e.g. [default-workspace-template](https://github.com/imbue-ai/default-workspace-template)) contains:
 
 - `.mngr/settings.toml` -- mngr configuration: agent types, create templates, environment variables
 - `supervisord.conf` -- background services, each a `[program:*]` section supervised by supervisord

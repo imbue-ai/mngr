@@ -214,6 +214,29 @@ class _PyinfraToLoguruHandler(logging.Handler):
         logger.trace("[pyinfra] {}", msg)
 
 
+# Logger-name glob patterns (matched by Sentry's ``ignore_logger`` via ``fnmatch``) for the
+# noisy third-party stdlib loggers that ``suppress_warnings`` already redirects into loguru.
+#
+# Sentry's default ``LoggingIntegration`` patches ``logging.Logger.callHandlers`` at the class
+# level, so it captures these records as Sentry *events* regardless of the ``propagate=False`` we
+# set on the loggers below. That floods Sentry with already-handled connection-failure noise --
+# e.g. paramiko's transport thread logging ``Error reading SSH protocol banner`` (at ERROR, with a
+# full traceback) every time a reverse-tunnel target goes offline and the health check retries it.
+# Those events are not even rate-limited, because the stdlib records carry no ``exc_info`` and none
+# of the loguru ``full_location`` fingerprint the rate limiter keys on.
+#
+# Passing these patterns to ``setup_sentry`` (which calls ``ignore_logger`` for each) tells Sentry
+# to drop the raw records. Genuine, actionable failures still reach Sentry: they surface as typed
+# exceptions (``HostConnectionError``, ``SSHTunnelError``, ...) logged through loguru at a higher
+# level, which go through the loguru -> Sentry handler normally.
+SENTRY_IGNORED_STDLIB_LOGGER_PATTERNS: Final[tuple[str, ...]] = (
+    "paramiko",
+    "paramiko.*",
+    "pyinfra",
+    "pyinfra.*",
+)
+
+
 _PARAMIKO_EXPECTED_ERROR_RE = re.compile(
     r"Exception \((?:client|server)\):"
     r"|Socket exception:"

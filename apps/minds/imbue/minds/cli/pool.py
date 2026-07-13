@@ -466,7 +466,7 @@ def pool() -> None:
     "--repo-url",
     "repo_url",
     default=None,
-    help="[--from-tag only] Canonical repo to clone the tag from (default: the FCT remote).",
+    help="[--from-tag only] Canonical repo to clone the tag from (default: the DEFAULT_WORKSPACE_TEMPLATE remote).",
 )
 @click.option(
     "--workspace-dir",
@@ -536,7 +536,7 @@ def pool() -> None:
     is_flag=True,
     default=False,
     help=(
-        "[dev only] Don't wait for the FCT deferred-install (heavy apt + Playwright/Chromium) before "
+        "[dev only] Don't wait for the DEFAULT_WORKSPACE_TEMPLATE deferred-install (heavy apt + Playwright/Chromium) before "
         "stopping the baked services agent. Faster, but the baked container's deferred-install may be "
         "incomplete. Never use for production hosts."
     ),

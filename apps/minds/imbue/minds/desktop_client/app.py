@@ -208,10 +208,13 @@ def _get_mngr_forward_origin() -> str:
     """Build the bare-origin URL of the ``mngr forward`` plugin.
 
     Used by templates to construct ``/goto/<agent>/`` URLs that target the
-    plugin (which owns subdomain forwarding) rather than minds.
+    plugin (which owns subdomain forwarding) rather than minds. minds always
+    runs the proxy with TLS + HTTP/2, so the scheme is ``https`` and the
+    rendered links reach it rather than failing a plaintext request against
+    the TLS listener.
     """
     port = get_state().mngr_forward_port or 8421
-    return f"http://localhost:{port}"
+    return f"https://localhost:{port}"
 
 
 def _get_is_mac() -> bool:
@@ -578,7 +581,7 @@ def _handle_help_assist() -> Response:
 
     Only valid when the help flow was opened from a loaded workspace: the body carries that
     workspace's agent id and the user's description. Before spawning, we probe the workspace for the
-    ``/assist`` skill and return 409 if it lacks it (an older FCT template) or 502 if the workspace is
+    ``/assist`` skill and return 409 if it lacks it (an older default workspace template) or 502 if the workspace is
     unreachable -- so we never spawn a chat that could only hang. Otherwise the desktop app runs
     ``mngr create`` inside that workspace's container (via ``mngr exec``) to spawn a new chat seeded
     with ``/assist <description>``; the system interface auto-opens its tab. The call blocks until
@@ -613,7 +616,7 @@ def _handle_help_assist() -> Response:
     mngr_caller = state.mngr_caller or get_default_mngr_caller()
 
     # Refuse before spawning if this workspace can't actually host an /assist chat.
-    # Workspaces created from an FCT predating the /assist skill would otherwise accept
+    # Workspaces created from a DEFAULT_WORKSPACE_TEMPLATE predating the /assist skill would otherwise accept
     # the ``mngr create`` but hang on the ``/assist`` message (an unknown slash command
     # never submits a prompt, so the send blocks to its full timeout) and leave a
     # half-created chat behind. The probe is a quick filesystem check inside the
@@ -2435,9 +2438,9 @@ def create_desktop_client(
     The agent-subdomain forwarding lives in the ``mngr_forward`` plugin
     (``libs/mngr_forward``) now; this app only serves minds-specific routes
     on the bare origin (login, landing, accounts, workspace settings,
-    sharing, agent create / destroy). Workspace links go to
-    ``http://localhost:<mngr_forward_port>/goto/<agent>/`` instead of being
-    routed in-process.
+    sharing, agent create / destroy). Workspace links go to the proxy's
+    ``localhost:<mngr_forward_port>/goto/<agent>/`` route (``https`` when the
+    proxy serves HTTP/2, else ``http``) instead of being routed in-process.
 
     ``envelope_stream_consumer`` feeds discovery events into
     ``backend_resolver`` and is also the bounce target for ``SIGHUP``-style

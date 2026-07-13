@@ -24,7 +24,7 @@ from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr_imbue_cloud.bake.bake_source import BakeSourceError
-from imbue.mngr_imbue_cloud.bake.bake_source import DEFAULT_FCT_REPO_URL
+from imbue.mngr_imbue_cloud.bake.bake_source import DEFAULT_WORKSPACE_TEMPLATE_REPO_URL
 from imbue.mngr_imbue_cloud.bake.bake_source import merge_bake_identity_attributes
 from imbue.mngr_imbue_cloud.bake.bake_source import resolved_bake_source
 from imbue.mngr_imbue_cloud.cli._common import emit_json
@@ -76,8 +76,8 @@ def pool() -> None:
 @click.option(
     "--repo-url",
     "repo_url",
-    default=DEFAULT_FCT_REPO_URL,
-    help="[--from-tag only] Canonical repo to clone the tag from (default: the FCT remote).",
+    default=DEFAULT_WORKSPACE_TEMPLATE_REPO_URL,
+    help="[--from-tag only] Canonical repo to clone the tag from (default: the DEFAULT_WORKSPACE_TEMPLATE remote).",
 )
 @click.option(
     "--workspace-dir",
@@ -170,7 +170,7 @@ def pool() -> None:
     is_flag=True,
     default=False,
     help=(
-        "[dev only] Don't wait for the FCT deferred-install (heavy apt + Playwright/Chromium) to "
+        "[dev only] Don't wait for the DEFAULT_WORKSPACE_TEMPLATE deferred-install (heavy apt + Playwright/Chromium) to "
         "finish before stopping the baked services agent. Saves a few minutes per bake, but the baked "
         "container's deferred-install may be left incomplete (stopping mid-apt can corrupt dpkg). Safe "
         "for dev/throwaway bakes; NEVER use for production pool hosts."
