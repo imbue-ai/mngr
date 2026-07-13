@@ -33,6 +33,8 @@ from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.dek_store import bundle_mirror_path
+from imbue.minds.desktop_client.dek_store import is_account_unlocked
+from imbue.minds.desktop_client.dek_store import set_master_password_for_account
 from imbue.minds.desktop_client.dek_store import verify_master_password_for_account
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.discovery_health import ProducerRemediator
@@ -52,6 +54,7 @@ from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServiceName
@@ -2393,3 +2396,84 @@ def _create_readiness_test_client(
         http_client=http_client,
     )
     return client, auth_store, probed
+
+
+# -- sync unlock / remove-record tests --
+
+
+def test_sync_unlock_installs_the_dek_for_a_locked_account(tmp_path: Path) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    # Another device set a password and synced a workspace with secrets: the
+    # bundle + a secret-carrying record exist on the (fake) connector, but
+    # this device has no DEK file.
+    other_device = WorkspacePaths(data_dir=tmp_path / "other-device")
+    bundle = set_master_password_for_account(other_device, "user-1", SecretStr("hunter2"))
+    assert bundle is not None
+    cli.sync_bundle_push("a@b.com", bundle)
+    remote = ReplicaRecord(
+        host_id="host-remote-1",
+        agent_id=str(AgentId.generate()),
+        display_name="remote-ws",
+        provider_kind="lima",
+        hosting_device_id="device-other",
+        device_label="other-device",
+        encrypted_secrets="b3BhcXVl",
+    )
+    cli.sync_records_by_email["a@b.com"] = {"host-remote-1": remote.to_wire(1)}
+
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
+    _authenticate_client(client, auth_store)
+    # The reconcile normally pulls on startup; do it directly for the test.
+    session_store = get_state(client.application).session_store
+    assert session_store is not None and session_store.record_store is not None
+    session_store.record_store.pull("user-1", "a@b.com")
+
+    wrong = client.post("/_chrome/sync-unlock", json={"password": "nope"})
+    assert wrong.status_code == 200
+    assert wrong.get_json()["ok"] is False
+
+    response = client.post("/_chrome/sync-unlock", json={"password": "hunter2"})
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["ok"] is True
+    assert body["unlocked"] == ["a@b.com"]
+    assert is_account_unlocked(WorkspacePaths(data_dir=tmp_path), "user-1")
+
+
+def test_sync_unlock_requires_auth(tmp_path: Path) -> None:
+    client, _ = _create_test_client_with_stores(tmp_path)
+    assert client.post("/_chrome/sync-unlock", json={"password": "x"}).status_code == 403
+
+
+def test_remove_workspace_record_deletes_the_row(tmp_path: Path) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
+    _authenticate_client(client, auth_store)
+    session_store = get_state(client.application).session_store
+    assert session_store is not None
+    session_store.associate_created_workspace(
+        user_id="user-1",
+        agent_id=str(AgentId.generate()),
+        host_id="host-remove-me",
+        display_name="stale",
+        color=None,
+        is_cloud_row=False,
+    )
+    assert "host-remove-me" in cli.sync_records_by_email["a@b.com"]
+
+    response = client.post("/_chrome/workspaces/remove-record", json={"host_id": "host-remove-me"})
+
+    assert response.status_code == 200
+    assert "host-remove-me" not in cli.sync_records_by_email["a@b.com"]
+    assert session_store.record_store is not None
+    assert session_store.record_store.list_records("user-1") == []
+
+
+def test_remove_workspace_record_unknown_host_is_404(tmp_path: Path) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
+    _authenticate_client(client, auth_store)
+    assert client.post("/_chrome/workspaces/remove-record", json={"host_id": "host-nope"}).status_code == 404
