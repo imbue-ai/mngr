@@ -458,7 +458,7 @@
       // create time -- the pinned region shows as a static note instead (see
       // update()). The AZURE entry in REGION_OPTIONS exists for the
       // add-account form only.
-      var isRegionFixed = selection.mode === 'AZURE';
+      var isRegionFixed = selection.cloudAccount !== '';
       if (!options || options.length === 0 || isRegionFixed) {
         regionRow.classList.add('hidden');
         regionSelect.disabled = true;
@@ -546,18 +546,19 @@
       launchModeError.classList.toggle('hidden', !launchInvalid);
       if (awsCredentialsNote) awsCredentialsNote.classList.toggle('hidden', launchSelect.value !== 'AWS');
       if (modalDirectNote) modalDirectNote.classList.toggle('hidden', launchSelect.value !== 'MODAL');
-      // Azure BYO: the region is pinned per account entry; surface it as a
-      // static note (from the option's data-default-region) instead of a picker.
-      var azureRegionNote = document.getElementById('azure-region-note');
-      if (azureRegionNote) {
-        var azureSel = launchSelection();
-        var isAzureByo = azureSel.mode === 'AZURE' && azureSel.cloudAccount !== '';
-        if (isAzureByo) {
+      // BYO accounts: the placement (region / GCE zone) is pinned per account
+      // entry -- discovery is region/zone-bound, so a moved pin would orphan the
+      // entry's workspaces. Surface the pin as a static note instead of a picker.
+      var byoRegionNote = document.getElementById('byo-region-note');
+      if (byoRegionNote) {
+        var byoSel = launchSelection();
+        var isByo = byoSel.cloudAccount !== '';
+        if (isByo) {
           var pinned = launchSelect.options[launchSelect.selectedIndex].getAttribute('data-default-region') || '';
-          azureRegionNote.textContent = 'Runs in ' + pinned + ' — the region was fixed when this account was added. '
+          byoRegionNote.textContent = 'Runs in ' + pinned + ' — fixed when this account was added. '
             + 'For a different region, add another account entry with the same keys.';
         }
-        azureRegionNote.classList.toggle('hidden', !isAzureByo);
+        byoRegionNote.classList.toggle('hidden', !isByo);
       }
       aiProviderError.classList.toggle('hidden', !aiInvalid);
       backupProviderError.classList.toggle('hidden', !backupInvalid);
@@ -641,7 +642,13 @@
     function caRenderRow(acct) {
       var tr = document.createElement('tr');
       tr.className = 'border-b border-default';
-      var cells = [acct.alias, acct.backend.toUpperCase(), acct.identifier, acct.region];
+      // The alias cell keeps a reference: Rename swaps it to an inline input
+      // (window.prompt is unsupported in Electron renderers -- it throws).
+      var aliasTd = document.createElement('td');
+      aliasTd.className = 'py-2 pr-2';
+      aliasTd.textContent = acct.alias;
+      tr.appendChild(aliasTd);
+      var cells = [acct.backend.toUpperCase(), acct.identifier, acct.region];
       for (var i = 0; i < cells.length; i++) {
         var td = document.createElement('td');
         td.className = 'py-2 pr-2';
@@ -655,15 +662,38 @@
       renameBtn.className = 'underline type-helper text-tertiary hover:text-primary mr-3 cursor-pointer';
       renameBtn.textContent = 'Rename';
       renameBtn.addEventListener('click', function () {
-        var alias = prompt('New alias for this account:', acct.alias);
-        if (!alias || alias.trim() === '' || alias === acct.alias) return;
-        fetch('/api/v1/desktop/cloud-accounts/' + encodeURIComponent(acct.name), {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ alias: alias.trim() })
-        }).then(function (r) {
-          if (r.ok) caLoadAccounts();
+        if (aliasTd.querySelector('input')) return;
+        var input = document.createElement('input');
+        input.type = 'text';
+        input.value = acct.alias;
+        input.className = 'w-full bg-transparent border border-default rounded-md px-1 py-0.5 type-body';
+        aliasTd.textContent = '';
+        aliasTd.appendChild(input);
+        input.focus();
+        input.select();
+        var done = false;
+        function finish(save) {
+          if (done) return;
+          done = true;
+          var alias = input.value.trim();
+          if (!save || alias === '' || alias === acct.alias) {
+            aliasTd.textContent = acct.alias;
+            return;
+          }
+          fetch('/api/v1/desktop/cloud-accounts/' + encodeURIComponent(acct.name), {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ alias: alias })
+          }).then(function (r) {
+            if (r.ok) caLoadAccounts();
+            else aliasTd.textContent = acct.alias;
+          }).catch(function () { aliasTd.textContent = acct.alias; });
+        }
+        input.addEventListener('keydown', function (e) {
+          if (e.key === 'Enter') finish(true);
+          else if (e.key === 'Escape') finish(false);
         });
+        input.addEventListener('blur', function () { finish(true); });
       });
       var deleteBtn = document.createElement('button');
       deleteBtn.type = 'button';
@@ -1000,7 +1030,7 @@
           </Select>
         </div>
         <p id="launch-mode-account-error" class="hidden mt-1 type-helper text-warning text-right">imbue_cloud requires a selected account.</p>
-        <p id="azure-region-note" class="hidden mt-1 type-helper text-tertiary"></p>
+        <p id="byo-region-note" class="hidden mt-1 type-helper text-tertiary"></p>
         <p class="mt-1 type-helper text-tertiary text-right">
           Want to use your own AWS / GCP / Azure account?
           <button type="button" id="open-cloud-accounts" class="underline hover:text-primary cursor-pointer">Configure</button>

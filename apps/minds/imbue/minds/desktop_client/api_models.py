@@ -199,14 +199,14 @@ class CreateWorkspaceRequest(ApiRequestModel):
     region: str | None = Field(default=None, description="Provider region")
     instance_type: str | None = Field(
         default=None,
-        description="EC2 instance type (AWS modes only); must be one of the form's offered types",
+        description="Machine size for the cloud-VM modes (AWS/GCP/Azure); must be one of the form's offered types",
     )
     cloud_account: str | None = Field(
         default=None,
         description=(
             "Bring-your-own cloud account to create on: the ``byo-<backend>-<slug>`` provider "
             "block name from /desktop/cloud-accounts. When set, launch_mode must match the "
-            "account's backend (AWS today) and the create targets that provider instance."
+            "account's backend and the create targets that provider instance."
         ),
     )
     backup_provider: BackupProvider | None = Field(

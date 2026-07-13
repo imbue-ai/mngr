@@ -41,7 +41,6 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
-from imbue.minds.bootstrap import update_cloud_account_region
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.backend_resolver import SYSTEM_SERVICES_AGENT_NAME
@@ -1837,12 +1836,13 @@ class AgentCreator(MutableModel):
                 # refuses to launch without it). prepare is read-only-first, so
                 # this is a no-op describe when the region is already prepared.
                 # For a bring-your-own account the account's block (which holds
-                # the pasted credentials) is the prepare target, and a region
-                # switch re-pins the block first: the AWS client is bound to
-                # the block's default_region and refuses cross-region creates.
+                # the pasted credentials) is the prepare target. ``region`` is
+                # always the account's pinned placement (the create API resolves
+                # it from the block and never re-pins -- the discovery clients
+                # are region/zone-bound, so a moved pin would orphan the entry's
+                # existing workspaces).
                 if launch_mode is LaunchMode.AWS:
                     if cloud_account:
-                        update_cloud_account_region(cloud_account, region)
                         log_queue.put(f"[minds] Preparing cloud account '{cloud_account}' in {region}...")
                         run_mngr_aws_prepare(
                             region,
@@ -1854,14 +1854,6 @@ class AgentCreator(MutableModel):
                         log_queue.put(f"[minds] Ensuring AWS security group is ready in {region}...")
                         run_mngr_aws_prepare(region, on_output=emit_log, parent_cg=self.root_concurrency_group)
                 elif launch_mode in (LaunchMode.GCP, LaunchMode.AZURE) and cloud_account:
-                    # GCP: re-pin the account block when the user picked a
-                    # different zone in the form (its firewall is global and its
-                    # bucket region-independent, so zone moves are free), then
-                    # prepare (idempotent). Azure never re-pins: an account
-                    # entry's region is fixed for life (its resource group /
-                    # vnet live there) and the create form sends no region.
-                    if region and launch_mode is LaunchMode.GCP:
-                        update_cloud_account_region(cloud_account, region)
                     log_queue.put(f"[minds] Preparing cloud account '{cloud_account}'...")
                     run_mngr_provider_prepare(
                         launch_mode.value.lower(),

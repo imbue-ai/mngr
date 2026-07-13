@@ -246,9 +246,17 @@ class GcpProviderConfig(OfflineCapableVpsProviderConfig):
                     "GCP service_account_key_json is not valid JSON. Paste the full contents of a "
                     "service-account key file (the object with 'type': 'service_account')."
                 ) from e
-            credentials = service_account.Credentials.from_service_account_info(
-                key_info, scopes=DEFAULT_SERVICE_ACCOUNT_SCOPES
-            )
+            try:
+                credentials = service_account.Credentials.from_service_account_info(
+                    key_info, scopes=DEFAULT_SERVICE_ACCOUNT_SCOPES
+                )
+            except (ValueError, KeyError) as e:
+                # JSON-valid but not a usable key (missing/garbled private_key,
+                # wrong fields): surface as the typed credentials error so read
+                # paths wrap it in ProviderUnavailableError instead of crashing.
+                raise GcpCredentialsError(
+                    f"GCP service_account_key_json is not a usable service-account key: {e}"
+                ) from e
             return credentials, key_info.get("project_id")
         try:
             credentials, resolved_project = google.auth.default()

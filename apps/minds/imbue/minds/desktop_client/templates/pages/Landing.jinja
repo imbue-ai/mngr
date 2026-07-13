@@ -208,6 +208,11 @@
       // arrives over the SSE). In a plain browser there is no shell, so confirm
       // in-page and stop via fetch with an optimistic transient.
       if (isElectronShell) {
+        // The stop itself runs in the main process; arm the transition grace
+        // window here so a mid-stop discovery dropout doesn't reload the page
+        // (the user may still cancel the native dialog -- the only cost of a
+        // false arm is a few minutes of suppressed removal-reloads).
+        lastMindActionAt = Date.now();
         window.postMessage({ type: 'minds:confirm-stop-mind', agentId: agentId, name: name }, '*');
         return;
       }

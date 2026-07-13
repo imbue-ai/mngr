@@ -980,10 +980,8 @@ def _write_cloud_account_alias(root_name: str, provider_name: str, alias: str | 
         del doc[provider_name]
     else:
         doc[provider_name] = alias
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(".tmp")
-    tmp_path.write_text(tomlkit.dumps(doc))
-    tmp_path.rename(path)
+    # Generic tmp+rename TOML writer despite its name -- same guarantees needed here.
+    _atomic_write_settings(path, doc)
 
 
 def set_cloud_account_provider(
@@ -1122,37 +1120,6 @@ def set_cloud_account_alias(provider_name: str, alias: str, *, root_name: str | 
     if not any(account["name"] == provider_name for account in list_cloud_account_providers(root_name=root_name)):
         return False
     _write_cloud_account_alias(root_name, provider_name, alias)
-    return True
-
-
-def update_cloud_account_region(provider_name: str, region: str, *, root_name: str | None = None) -> bool:
-    """Set ``default_region`` on a cloud account block (create-time region switch).
-
-    The AWS client is bound to the block's ``default_region`` and refuses
-    cross-region creates, so picking a different region in the create form
-    re-pins the block first (prepare then runs for the new region). Returns
-    ``False`` when the account does not exist; ``True`` when the file changed
-    or already matched.
-    """
-    if root_name is None:
-        root_name = resolve_minds_root_name()
-    settings_path = _resolve_active_settings_path(root_name)
-    if settings_path is None or not settings_path.exists():
-        return False
-    doc = tomlkit.loads(settings_path.read_text())
-    providers = doc.get("providers")
-    if not isinstance(providers, dict) or provider_name not in providers:
-        return False
-    block = providers[provider_name]
-    if not isinstance(block, dict) or not str(provider_name).startswith(_BYO_PROVIDER_NAME_PREFIX):
-        return False
-    # GCE is zonal: the GCP block's placement knob is default_zone.
-    region_key = "default_zone" if block.get("backend") == "gcp" else "default_region"
-    if block.get(region_key) == region:
-        return True
-    block[region_key] = region
-    _atomic_write_settings(settings_path, doc)
-    logger.info("Cloud account {} re-pinned to {} {}", provider_name, region_key, region)
     return True
 
 

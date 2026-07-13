@@ -33,6 +33,13 @@ def friendly_provider_label(provider_name: str | None) -> str:
     """
     if not provider_name:
         return ""
+    if provider_name.startswith("byo-"):
+        # Bring-your-own cloud accounts: ``byo-<backend>-<slug>`` -> "AWS (slug)".
+        # The slug is derived from the user's chosen alias, so it reads naturally.
+        remainder = provider_name[len("byo-") :]
+        backend, _, slug = remainder.partition("-")
+        label = backend.upper() if backend in ("aws", "gcp") else backend.capitalize()
+        return f"{label} ({slug})" if slug else label
     if provider_name == _AWS_PROVIDER_PREFIX or provider_name.startswith(f"{_AWS_PROVIDER_PREFIX}-"):
         return "AWS"
     if provider_name == _IMBUE_CLOUD_PROVIDER_PREFIX or provider_name.startswith(f"{_IMBUE_CLOUD_PROVIDER_PREFIX}_"):

@@ -220,6 +220,13 @@ class AwsProviderConfig(PublicIpVpsProviderConfig):
         """
         access_key = self.aws_access_key_id.get_secret_value() if self.aws_access_key_id else None
         secret_key = self.aws_secret_access_key.get_secret_value() if self.aws_secret_access_key else None
+        if bool(access_key) != bool(secret_key):
+            # Half-pasted credentials must not silently fall back to the ambient
+            # chain -- that would authenticate as whoever the environment says.
+            raise AwsConfigError(
+                "Both aws_access_key_id and aws_secret_access_key must be set together "
+                "(one without the other is a misconfiguration, not a fallback to the ambient chain)."
+            )
         if access_key and secret_key:
             session_token = self.aws_session_token.get_secret_value() if self.aws_session_token else None
             return boto3.Session(
