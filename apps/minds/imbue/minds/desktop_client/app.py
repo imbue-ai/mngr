@@ -814,6 +814,11 @@ def _collect_remote_workspace_tiles(
     """Workspaces known only from synced records (not in local discovery), for the landing list."""
     if session_store is None or session_store.record_store is None:
         return []
+    # "Not in local discovery" is only meaningful once discovery has produced
+    # its first complete snapshot; before that every record (including this
+    # device's own workspaces) would misclassify as remote.
+    if not backend_resolver.has_completed_initial_discovery():
+        return []
     local_ids = {str(aid) for aid in backend_resolver.list_known_workspace_ids()}
     tiles: list[RemoteWorkspaceTile] = []
     seen_agent_ids: set[str] = set()

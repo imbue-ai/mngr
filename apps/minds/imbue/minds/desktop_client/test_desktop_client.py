@@ -15,6 +15,7 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.app import _build_requests_payload
 from imbue.minds.desktop_client.app import _build_workspace_list
+from imbue.minds.desktop_client.app import _collect_remote_workspace_tiles
 from imbue.minds.desktop_client.app import _destroying_agent_ids
 from imbue.minds.desktop_client.app import _resolve_destroying_for_landing
 from imbue.minds.desktop_client.app import _ssh_command_for_agent
@@ -992,6 +993,32 @@ def test_resolve_destroying_for_landing_keeps_failed_when_host_still_up(tmp_path
     assert marker == {str(agent_id): "failed"}
     assert (paths.data_dir / "destroying" / str(agent_id)).exists()
     assert session_store.get_account_for_workspace(str(agent_id)) is not None
+
+
+def test_remote_tiles_wait_for_the_initial_discovery_snapshot(tmp_path: Path) -> None:
+    """No record renders as a remote tile until discovery has produced its first snapshot.
+
+    Before that, local knowledge is empty and every record -- including this
+    device's own workspaces -- would misclassify as a greyed remote tile.
+    """
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    session_store = make_session_store_for_test(tmp_path, cli=cli)
+    session_store.associate_created_workspace(
+        user_id="user-1",
+        agent_id="agent-elsewhere",
+        host_id="host-elsewhere",
+        display_name="remote-ws",
+        color=None,
+        is_cloud_row=False,
+    )
+
+    undiscovered_resolver = MngrCliBackendResolver()
+    assert _collect_remote_workspace_tiles(undiscovered_resolver, session_store) == []
+
+    discovered_resolver = make_resolver_with_data(agents_json=make_agents_json(AgentId.generate()))
+    tiles = _collect_remote_workspace_tiles(discovered_resolver, session_store)
+    assert [tile.agent_id for tile in tiles] == ["agent-elsewhere"]
 
 
 class _AllAgentsKnownStaticResolver(StaticBackendResolver):
