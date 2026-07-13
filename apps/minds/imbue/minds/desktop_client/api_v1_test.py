@@ -43,7 +43,6 @@ from imbue.minds.desktop_client.imbue_cloud_cli import TunnelInfo
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
-from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.templates import status_text_for
 from imbue.minds.desktop_client.workspace_operations import OPERATION_LOG_SENTINEL
@@ -1563,40 +1562,60 @@ def test_workspace_restart_requires_bearer(tmp_path: Path) -> None:
     assert response.status_code == 401
 
 
-def test_auto_dispatched_restart_skipped_when_workspace_already_recovered(
+def test_restart_dispatches_for_never_probed_workspace(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:
-    """An auto-dispatched recovery restart must no-op once the workspace recovered.
+    """A recovery-page dispatch for a never-probed workspace must actually restart.
 
-    The recovery page's host-health probe is slow, so the background probe loop can
-    flip the tracker back to HEALTHY while it is in flight; firing the queued
-    restart then would bounce a healthy backend. With the ``auto_dispatched``
-    marker the endpoint must skip the restart -- leaving the tracker HEALTHY rather
-    than transitioning it to RESTARTING -- so the recovery page's refresh simply
-    sends the user back to the now-healthy workspace. A manual restart (no marker)
-    always proceeds.
+    A workspace whose host has been offline since before this process started is
+    never enrolled as a probe suspect, so the tracker reports default-HEALTHY for
+    it. A veto keyed on that reading used to drop the recovery page's cold-boot
+    dispatch (host scope + ``host_already_stopped``), stranding the workspace on
+    the loader forever. The dispatch must proceed to a real restart operation --
+    self-recovery races are absorbed by ``mngr start`` only targeting STOPPED
+    agents, not by an endpoint-side veto.
     """
     agent_id = AgentId()
-    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    services_id = AgentId()
+    resolver = _resolver_with_services_agent(agent_id, services_id)
+    fake_mngr = _write_fake_mngr(tmp_path / "bin")
     tracker = SystemInterfaceHealthTracker()
     client = _build_client(
         tmp_path,
         resolver,
         root_concurrency_group=root_concurrency_group,
+        mngr_binary=fake_mngr,
+        mngr_host_dir=tmp_path / "host",
         system_interface_health_tracker=tracker,
     )
 
-    # Tracker reports HEALTHY for this workspace (it recovered / was never enrolled).
+    # Tracker has no record for this workspace (never probed): the dispatch must
+    # still go through rather than being vetoed off the default-HEALTHY reading.
     response = client.post(
         f"/api/v1/workspaces/{agent_id}/restart",
         headers=_auth_header(),
-        json={"scope": "services", "auto_dispatched": True},
+        json={"scope": "host", "host_already_stopped": True},
     )
 
     assert response.status_code == 202
     assert json.loads(response.data) == {"operation_id": str(agent_id), "kind": "restart"}
-    # The guard returned before mark_restarting, so no restart was dispatched.
-    assert tracker.get_health(agent_id) == AgentHealth.HEALTHY
+
+    # Drain the worker's log queue to the terminal sentinel, then confirm a real
+    # restart operation ran to DONE (with no mngr_forward_port wired, a clean
+    # dispatch counts as success).
+    registry = get_state(client.application).workspace_operation_registry
+    log_queue = registry.get_log_queue(agent_id)
+    assert log_queue is not None
+    deadline = time.monotonic() + 15.0
+    while time.monotonic() < deadline:
+        if log_queue.get(timeout=15.0) == OPERATION_LOG_SENTINEL:
+            break
+
+    status_resp = client.get(f"/api/v1/workspaces/operations/restart/{agent_id}", headers=_auth_header())
+    assert status_resp.status_code == 200
+    body = json.loads(status_resp.data)
+    assert body["kind"] == "restart"
+    assert body["status"] == "DONE"
 
 
 def test_workspace_restart_registers_operation_reaching_done(
