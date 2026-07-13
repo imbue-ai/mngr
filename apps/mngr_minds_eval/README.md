@@ -5,19 +5,9 @@ sandbox drives its own conversation, snapshots `/mngr` to S3 after every turn, a
 transcript at the end. Results are read back from S3 -- the launching machine does not need to
 stay on, and there is nothing to poll.
 
-## Setup (once)
+## Setup
 
-Put scoped AWS credentials at `~/.minds-eval/aws.env` (the box mounts it read-only):
-
-```
-AWS_ACCESS_KEY_ID=...
-AWS_SECRET_ACCESS_KEY=...
-AWS_DEFAULT_REGION=us-east-1
-MINDS_EVAL_BUCKET=minds-eval-backups-<account>
-```
-
-Use an IAM user scoped to that one bucket -- the keys are handed to every sandbox (the agent runs
-arbitrary code), so they must not be able to touch anything else.
+One-time: an S3 bucket and a bucket-scoped IAM key at `~/.minds-eval/aws.env`. See SETUP.md.
 
 ## Use
 
