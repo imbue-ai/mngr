@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import json
 from collections.abc import Callable
@@ -47,10 +48,12 @@ from imbue.remote_service_connector.testing import FakeCloudflareOps
 from imbue.remote_service_connector.testing import FakePoolBackend
 from imbue.remote_service_connector.testing import FakeSuperTokensBackend
 from imbue.remote_service_connector.testing import InMemoryKeyStore
+from imbue.remote_service_connector.testing import InMemorySyncStore
 from imbue.remote_service_connector.testing import make_fake_forwarding_ctx
 from imbue.remote_service_connector.testing import make_fake_key_store
 from imbue.remote_service_connector.testing import make_fake_pool_backend
 from imbue.remote_service_connector.testing import make_fake_supertokens_backend
+from imbue.remote_service_connector.testing import make_fake_sync_store
 from imbue.remote_service_connector.testing import make_fake_tunnel_token
 
 _ADMIN_STUB_TOKEN = "admin-stub-jwt"
@@ -2646,3 +2649,221 @@ def test_slice_name_env_owner_returns_none_for_legacy_and_non_slice_names() -> N
     # Non-slice lima names are never attributed to an env.
     assert app_mod.slice_name_env_owner("default") is None
     assert app_mod.slice_name_env_owner("some-other-vm") is None
+
+
+# -- Workspace sync endpoint tests --
+
+
+def _make_sync_test_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[TestClient, InMemorySyncStore, dict[str, str]]:
+    """Create a TestClient with the in-memory sync store installed.
+
+    Returns a mutable ``caller`` holder whose ``user_id`` entry the stubbed
+    token-decode reads on every request, so tests can switch the calling user
+    without another patch (keeps the monkeypatch ratchet at one occurrence,
+    mirroring the bucket-test helper's single-loop pattern).
+    """
+    client = _make_test_client(monkeypatch)
+    store = make_fake_sync_store()
+    caller = {"user_id": _ADMIN_STUB_USER_ID}
+    sync_fakes: dict[str, object] = {
+        "get_sync_store": lambda: store,
+        "_get_user_id_from_access_token": lambda token: caller["user_id"],
+    }
+    for name, fake_impl in sync_fakes.items():
+        monkeypatch.setattr(app_mod, name, fake_impl)
+    return client, store, caller
+
+
+def _sync_record_body(
+    host_id: str = "host-aaa111",
+    agent_id: str = "agent-bbb222",
+    revision: int = 1,
+    state: str = "active",
+    encrypted_secrets: str | None = None,
+) -> dict[str, object]:
+    return {
+        "host_id": host_id,
+        "agent_id": agent_id,
+        "display_name": "my workspace",
+        "color": "#aabbcc",
+        "provider_kind": "lima",
+        "hosting_device_id": "device-123",
+        "device_label": "joshs-laptop",
+        "state": state,
+        "restored_from_host_id": None,
+        "backup_kind": "imbue_r2",
+        "encrypted_secrets": encrypted_secrets,
+        "revision": revision,
+    }
+
+
+def test_put_and_list_workspace_records_round_trips(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _store, _caller = _make_sync_test_client(monkeypatch)
+    secrets_b64 = base64.b64encode(b"opaque-encrypted-payload").decode("ascii")
+
+    put_resp = client.put(
+        "/sync/records/host-aaa111",
+        json=_sync_record_body(encrypted_secrets=secrets_b64),
+        headers=_admin_headers(),
+    )
+    assert put_resp.status_code == 200
+    assert put_resp.json()["revision"] == 1
+
+    list_resp = client.get("/sync/records", headers=_admin_headers())
+    assert list_resp.status_code == 200
+    records = list_resp.json()["records"]
+    assert len(records) == 1
+    assert records[0]["host_id"] == "host-aaa111"
+    assert records[0]["agent_id"] == "agent-bbb222"
+    assert records[0]["display_name"] == "my workspace"
+    assert records[0]["encrypted_secrets"] == secrets_b64
+    assert records[0]["created_at"]
+
+
+def test_put_workspace_record_rejects_mismatched_path_host_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _store, _caller = _make_sync_test_client(monkeypatch)
+    resp = client.put("/sync/records/host-other", json=_sync_record_body(), headers=_admin_headers())
+    assert resp.status_code == 400
+
+
+def test_put_workspace_record_cas_conflict_returns_409_with_stored_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _store, _caller = _make_sync_test_client(monkeypatch)
+    assert (
+        client.put("/sync/records/host-aaa111", json=_sync_record_body(), headers=_admin_headers()).status_code == 200
+    )
+
+    stale = client.put("/sync/records/host-aaa111", json=_sync_record_body(revision=1), headers=_admin_headers())
+    assert stale.status_code == 409
+    assert stale.json()["detail"]["stored"]["revision"] == 1
+
+    fresh = client.put("/sync/records/host-aaa111", json=_sync_record_body(revision=2), headers=_admin_headers())
+    assert fresh.status_code == 200
+    assert fresh.json()["revision"] == 2
+
+
+def test_second_active_record_for_same_agent_id_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _store, _caller = _make_sync_test_client(monkeypatch)
+    assert (
+        client.put("/sync/records/host-aaa111", json=_sync_record_body(), headers=_admin_headers()).status_code == 200
+    )
+
+    conflicting = client.put(
+        "/sync/records/host-ccc333",
+        json=_sync_record_body(host_id="host-ccc333"),
+        headers=_admin_headers(),
+    )
+    assert conflicting.status_code == 409
+
+    # Tombstoning the first row frees the agent_id for a restored workspace.
+    tombstone = _sync_record_body(revision=2, state="destroyed")
+    assert client.put("/sync/records/host-aaa111", json=tombstone, headers=_admin_headers()).status_code == 200
+    restored = client.put(
+        "/sync/records/host-ccc333",
+        json=_sync_record_body(host_id="host-ccc333"),
+        headers=_admin_headers(),
+    )
+    assert restored.status_code == 200
+
+
+def test_scrub_secrets_strips_blobs_but_keeps_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _store, _caller = _make_sync_test_client(monkeypatch)
+    secrets_b64 = base64.b64encode(b"payload").decode("ascii")
+    client.put(
+        "/sync/records/host-aaa111",
+        json=_sync_record_body(encrypted_secrets=secrets_b64),
+        headers=_admin_headers(),
+    )
+
+    scrub = client.post("/sync/scrub-secrets", headers=_admin_headers())
+    assert scrub.status_code == 200
+    assert scrub.json()["scrubbed"] == 1
+
+    records = client.get("/sync/records", headers=_admin_headers()).json()["records"]
+    assert records[0]["encrypted_secrets"] is None
+    assert records[0]["display_name"] == "my workspace"
+
+
+def test_put_workspace_record_rejects_invalid_base64_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _store, _caller = _make_sync_test_client(monkeypatch)
+    resp = client.put(
+        "/sync/records/host-aaa111",
+        json=_sync_record_body(encrypted_secrets="not-base64!!!"),
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 400
+
+
+def test_put_workspace_record_rejects_oversized_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _store, _caller = _make_sync_test_client(monkeypatch)
+    oversized = base64.b64encode(b"x" * (256 * 1024 + 1)).decode("ascii")
+    resp = client.put(
+        "/sync/records/host-aaa111",
+        json=_sync_record_body(encrypted_secrets=oversized),
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 400
+
+
+def test_put_workspace_record_rejects_unknown_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _store, _caller = _make_sync_test_client(monkeypatch)
+    resp = client.put(
+        "/sync/records/host-aaa111",
+        json=_sync_record_body(state="bogus"),
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 422
+
+
+def test_sync_records_require_admin_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _store, _caller = _make_sync_test_client(monkeypatch)
+    resp = client.get("/sync/records", headers={"Authorization": "Bearer wrong-token"})
+    assert resp.status_code == 401
+
+
+def test_sync_records_are_isolated_per_user(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, store, caller = _make_sync_test_client(monkeypatch)
+    client.put("/sync/records/host-aaa111", json=_sync_record_body(), headers=_admin_headers())
+
+    caller["user_id"] = "other-user-id"
+    other_list = client.get("/sync/records", headers=_admin_headers())
+    assert other_list.json()["records"] == []
+    assert len(store.records_by_key) == 1
+
+
+def test_key_bundle_round_trip_and_delete(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _store, _caller = _make_sync_test_client(monkeypatch)
+    assert client.get("/sync/bundle", headers=_admin_headers()).status_code == 404
+
+    body = {
+        "kdf_salt": base64.b64encode(b"0123456789abcdef").decode("ascii"),
+        "kdf_time_cost": 3,
+        "kdf_memory_kib": 65536,
+        "kdf_parallelism": 4,
+        "wrapped_dek": base64.b64encode(b"wrapped-dek-bytes").decode("ascii"),
+        "key_epoch": 1,
+    }
+    assert client.put("/sync/bundle", json=body, headers=_admin_headers()).status_code == 200
+
+    fetched = client.get("/sync/bundle", headers=_admin_headers())
+    assert fetched.status_code == 200
+    assert fetched.json()["wrapped_dek"] == body["wrapped_dek"]
+    assert fetched.json()["kdf_salt"] == body["kdf_salt"]
+    assert fetched.json()["key_epoch"] == 1
+
+    assert client.delete("/sync/bundle", headers=_admin_headers()).status_code == 200
+    assert client.get("/sync/bundle", headers=_admin_headers()).status_code == 404
+
+
+def test_key_bundle_rejects_oversized_wrapped_dek(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _store, _caller = _make_sync_test_client(monkeypatch)
+    body = {
+        "kdf_salt": base64.b64encode(b"0123456789abcdef").decode("ascii"),
+        "kdf_time_cost": 3,
+        "kdf_memory_kib": 65536,
+        "kdf_parallelism": 4,
+        "wrapped_dek": base64.b64encode(b"x" * 8192).decode("ascii"),
+        "key_epoch": 1,
+    }
+    assert client.put("/sync/bundle", json=body, headers=_admin_headers()).status_code == 400

@@ -34,6 +34,8 @@ from imbue.remote_service_connector.app import ForwardingCtx
 from imbue.remote_service_connector.app import PoolHostCleanupError
 from imbue.remote_service_connector.app import R2BucketNotEmptyError
 from imbue.remote_service_connector.app import R2BucketNotFoundError
+from imbue.remote_service_connector.app import SyncActiveAgentConflictError
+from imbue.remote_service_connector.app import SyncRevisionConflictError
 
 
 class FakeCloudflareOps:
@@ -1383,3 +1385,82 @@ def make_fake_pool_backend() -> FakePoolBackend:
     backend.paid_domains = {}
     backend.paid_emails = {}
     return backend
+
+
+class InMemorySyncStore:
+    """In-memory SyncStore implementation for testing the workspace-sync endpoints.
+
+    Mirrors PostgresSyncStore's semantics: CAS on revision for updates, at
+    most one ACTIVE record per (user_id, agent_id), scrub, and the per-user
+    key bundle. Records are keyed (user_id, host_id); secrets are raw bytes.
+    """
+
+    def __init__(self) -> None:
+        self.records_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+        self.bundle_by_user_id: dict[str, dict[str, Any]] = {}
+        self._created_counter = 0
+
+    def _next_timestamp(self) -> str:
+        self._created_counter += 1
+        return f"2026-01-01T00:00:{self._created_counter:02d}+00:00"
+
+    def _encode_secrets(self, record: dict[str, Any]) -> dict[str, Any]:
+        encoded = dict(record)
+        secrets_bytes = record.get("encrypted_secrets")
+        encoded["encrypted_secrets"] = (
+            base64.b64encode(secrets_bytes).decode("ascii") if secrets_bytes is not None else None
+        )
+        return encoded
+
+    def list_records(self, user_id: str) -> list[dict[str, Any]]:
+        rows = [self._encode_secrets(record) for (uid, _), record in self.records_by_key.items() if uid == user_id]
+        return sorted(rows, key=lambda record: record["created_at"])
+
+    def put_record(self, user_id: str, record: dict[str, Any]) -> dict[str, Any]:
+        key = (user_id, record["host_id"])
+        existing = self.records_by_key.get(key)
+        if existing is not None and record["revision"] != existing["revision"] + 1:
+            raise SyncRevisionConflictError(self._encode_secrets(existing))
+        if record["state"] == "active":
+            for (uid, host_id), other in self.records_by_key.items():
+                is_other_row = uid == user_id and host_id != record["host_id"]
+                if is_other_row and other["agent_id"] == record["agent_id"] and other["state"] == "active":
+                    raise SyncActiveAgentConflictError(
+                        f"another ACTIVE record already exists for agent {record['agent_id']}"
+                    )
+        stored = dict(record)
+        stored["created_at"] = existing["created_at"] if existing is not None else self._next_timestamp()
+        stored["updated_at"] = self._next_timestamp()
+        self.records_by_key[key] = stored
+        return self._encode_secrets(stored)
+
+    def scrub_secrets(self, user_id: str) -> int:
+        scrubbed = 0
+        for (uid, _), record in self.records_by_key.items():
+            if uid == user_id and record.get("encrypted_secrets") is not None:
+                record["encrypted_secrets"] = None
+                record["updated_at"] = self._next_timestamp()
+                scrubbed += 1
+        return scrubbed
+
+    def get_bundle(self, user_id: str) -> dict[str, Any] | None:
+        bundle = self.bundle_by_user_id.get(user_id)
+        if bundle is None:
+            return None
+        encoded = dict(bundle)
+        encoded["kdf_salt"] = base64.b64encode(bundle["kdf_salt"]).decode("ascii")
+        encoded["wrapped_dek"] = base64.b64encode(bundle["wrapped_dek"]).decode("ascii")
+        return encoded
+
+    def put_bundle(self, user_id: str, bundle: dict[str, Any]) -> None:
+        stored = dict(bundle)
+        stored["updated_at"] = self._next_timestamp()
+        self.bundle_by_user_id[user_id] = stored
+
+    def delete_bundle(self, user_id: str) -> None:
+        self.bundle_by_user_id.pop(user_id, None)
+
+
+def make_fake_sync_store() -> InMemorySyncStore:
+    """Construct an empty in-memory SyncStore for tests."""
+    return InMemorySyncStore()
