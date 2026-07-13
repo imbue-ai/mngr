@@ -29,8 +29,10 @@ from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
 from imbue.minds.desktop_client.workspace_color import normalize_workspace_color
 from imbue.minds.desktop_client.workspace_color import pick_unused_create_color
 from imbue.minds.primitives import AIProvider
+from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
+from imbue.minds.primitives import default_docker_runtime
 from imbue.mngr.primitives import AgentId
 
 # The hand-written Tailwind v4 source. Holds the :root design tokens (the
@@ -321,6 +323,27 @@ def test_render_create_form_contains_ai_provider_options() -> None:
     html = render_create_form()
     for provider in AIProvider:
         assert f'value="{provider.value}"' in html
+
+
+def test_render_create_form_contains_docker_runtime_options() -> None:
+    html = render_create_form()
+    for runtime in DockerRuntime:
+        assert f'value="{runtime.value}"' in html
+
+
+def test_render_create_form_defaults_docker_runtime_to_platform_value() -> None:
+    # The runtime select pre-selects the platform-appropriate default (runc on
+    # macOS, runsc on Linux) so the form works out of the box on either host.
+    html = render_create_form()
+    assert f'value="{default_docker_runtime().value}" selected' in html
+
+
+def test_render_create_form_selects_specified_docker_runtime() -> None:
+    # Pick the runtime that is NOT this platform's default so the "selection
+    # honored over the default" assertion is meaningful on both macOS and Linux.
+    non_default = DockerRuntime.RUNSC if default_docker_runtime() is DockerRuntime.RUNC else DockerRuntime.RUNC
+    html = render_create_form(docker_runtime=non_default)
+    assert f'value="{non_default.value}" selected' in html
 
 
 def test_render_create_form_defaults_ai_provider_to_imbue_cloud() -> None:
