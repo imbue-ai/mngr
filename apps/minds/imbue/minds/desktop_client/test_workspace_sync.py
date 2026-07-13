@@ -147,6 +147,43 @@ def test_setting_a_password_later_pushes_the_pending_secrets(tmp_path: Path) -> 
     assert cli.sync_records_by_email[_EMAIL][str(host_id)]["encrypted_secrets"] is not None
 
 
+def test_password_change_does_not_degrade_other_device_secrets(tmp_path: Path) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id=_USER_ID, email=_EMAIL)
+
+    # Device A hosts a backed-up workspace with a password set and syncs it.
+    paths_a, _store_a, session_a = _make_device(tmp_path, "laptop", cli)
+    bundle = set_master_password_for_account(paths_a, _USER_ID, SecretStr(_PASSWORD))
+    assert bundle is not None
+    cli.sync_bundle_push(_EMAIL, bundle)
+    agent_id = AgentId.generate()
+    host_id = HostId.generate()
+    write_canonical_env(paths_a, agent_id, "RESTIC_REPOSITORY=s3:x\nRESTIC_PASSWORD=y\n")
+    resolver_a = _resolver_with_workspace(agent_id, host_id, "hosted-on-laptop")
+    session_a.associate_workspace(_USER_ID, str(agent_id), resolver_a)
+    original_blob = cli.sync_records_by_email[_EMAIL][str(host_id)]["encrypted_secrets"]
+    assert original_blob is not None
+
+    # Device B pulls, unlocks, and materializes the env, so partial secret
+    # material (the env, but not the laptop's SSH key) now exists on B.
+    paths_b, store_b, session_b = _make_device(tmp_path, "desktop", cli)
+    empty_resolver = make_resolver_with_data(agents_json=json.dumps({"agents": []}))
+    WorkspaceSyncScheduler(record_store=store_b, session_store=session_b, resolver=empty_resolver).run_one_pass()
+    assert store_b.unlock_account(_USER_ID, _EMAIL, SecretStr(_PASSWORD)) is True
+    assert store_b.materialize_env_from_record(str(agent_id)) is True
+
+    # A password change on B is rewrap-only: push_all_secrets must not rebuild
+    # the laptop-hosted record from B's partial material and overwrite the
+    # laptop's full blob -- even when B's discovery can see the workspace.
+    new_bundle = set_master_password_for_account(paths_b, _USER_ID, SecretStr("a different passphrase"))
+    assert new_bundle is not None
+    cli.sync_bundle_push(_EMAIL, new_bundle)
+    resolver_b = _resolver_with_workspace(agent_id, host_id, "hosted-on-laptop")
+    store_b.push_all_secrets(_USER_ID, _EMAIL, resolver_b)
+
+    assert cli.sync_records_by_email[_EMAIL][str(host_id)]["encrypted_secrets"] == original_blob
+
+
 def test_scheduler_pass_converts_legacy_state_and_tombstones_absent_rows(tmp_path: Path) -> None:
     cli = make_fake_imbue_cloud_cli()
     cli.add_account(user_id=_USER_ID, email=_EMAIL)

@@ -559,12 +559,25 @@ class WorkspaceRecordStore(MutableModel):
                 logger.warning("Deferred dirty record push for {}: {}", record.agent_id, e)
 
     def push_all_secrets(self, user_id: str, account_email: str, resolver: BackendResolverInterface) -> None:
-        """Rebuild + push secrets for every locally-hosted ACTIVE record (password just set)."""
+        """Build + push secrets for pending locally-discovered ACTIVE records (password just set).
+
+        Pending means the record carries no synced secrets yet -- the rows the
+        metadata-only tier stripped on the wire. Rows that already carry
+        secrets stay untouched: a password change is rewrap-only (the DEK is
+        unchanged), so existing blobs remain valid, and rebuilding a row this
+        device does not host (only in discovery on other devices) would
+        overwrite the hosting device's full material with whatever partial
+        material -- e.g. a materialized backup env without the SSH key --
+        exists here.
+        """
+        known_ids = {str(aid) for aid in resolver.list_known_workspace_ids()}
         for record in self.list_records(user_id):
-            if record.state != RECORD_STATE_ACTIVE:
+            if record.state != RECORD_STATE_ACTIVE or record.agent_id not in known_ids:
+                continue
+            if record.encrypted_secrets is not None:
                 continue
             encrypted = self.build_encrypted_secrets(user_id, record.agent_id, record.provider_kind, record.host_id)
-            if encrypted is None or encrypted == record.encrypted_secrets:
+            if encrypted is None:
                 continue
             updated = record.model_copy_update(
                 to_update(record.field_ref().encrypted_secrets, encrypted),
