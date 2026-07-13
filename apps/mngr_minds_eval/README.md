@@ -12,20 +12,24 @@ One-time: an S3 bucket and a bucket-scoped IAM key at `~/.minds-eval/aws.env`. S
 ## Use
 
 ```
-# the box (controller): any mngr branch; it is also what gets vendored into each case
-scripts/spin-up-minds-in-docker.sh mngr-branch=minds-eval container-name=box1
-
 # launch a batch (one self-completing workspace per case)
-ANTHROPIC_API_KEY=sk-ant-... scripts/minds-evals.sh box1 launch \
-    --name web1 --personas sample-personas.json --turns 4
+ANTHROPIC_API_KEY=sk-ant-... minds-evals launch \
+    --name web1 --personas sample-personas.json --turns 4 --mngr-branch main
 
-# status, straight from S3 (works from anywhere, any time)
-scripts/minds-evals.sh box1 list-batches
-scripts/minds-evals.sh box1 inspect web1_20260713-101500
+# status, straight from S3 -- no box, works any time from anywhere
+minds-evals list-batches
+minds-evals inspect web1_20260713-101500
 
-# bring a snapshot back up as a local docker workspace and click through what the agent built
-scripts/minds-evals.sh box1 restore web1_20260713-101500 --case todo-app --message 2
+# bring a case's per-turn snapshot back up as a workspace and click through what the agent built
+minds-evals restore web1_20260713-101500 --case todo-app --message 2
 ```
+
+`launch` and `restore` need the box (Minds' create API, the clone dir, mngr), so they build/boot it
+from `--mngr-branch` if it isn't already up and re-run themselves inside it -- one command, nothing
+to spin up by hand. `list-batches` / `inspect` only read S3 and run wherever you are.
+
+Minds always runs in the Docker box (that is the mngr-branch isolation); workspaces always run on
+Modal, including restored ones.
 
 ## Turn logic (`--turns N`, from the case config)
 

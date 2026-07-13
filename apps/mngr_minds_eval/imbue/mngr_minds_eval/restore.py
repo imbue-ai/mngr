@@ -74,11 +74,13 @@ def restore(batch: str, case_name: str, message_index: int, *, port: str, restic
     if result.returncode != 0:
         raise SystemExit("restic restore failed:\n{}".format((result.stderr or result.stdout)[:600]))
 
-    code_dir = next((p for p in target.rglob("code") if (p / ".git").exists()), None)
-    if code_dir is None:
-        raise SystemExit("restored snapshot has no /mngr/code git repo under {}".format(target))
+    # The restored tree is a whole /mngr: <target>/mngr/{code,agents,events,...}
+    mngr_dir = next((p for p in target.rglob("code") if (p / ".git").exists()), None)
+    if mngr_dir is None:
+        raise SystemExit("restored snapshot has no code git repo under {}".format(target))
+    mngr_dir = mngr_dir.parent
+    code_dir = mngr_dir / "code"
 
-    # The restored tree is the source repo for a fresh DOCKER workspace.
     subprocess.run(["git", "-C", str(code_dir), "add", "-A"], capture_output=True, text=True)
     subprocess.run(
         ["git", "-C", str(code_dir), "-c", "user.email=eval@minds", "-c", "user.name=minds-eval",
@@ -86,17 +88,21 @@ def restore(batch: str, case_name: str, message_index: int, *, port: str, restic
         capture_output=True, text=True,
     )
 
+    # Workspaces are always Modal (the docker box is the branch isolation; workspaces run in the
+    # cloud). Create from the restored code, then seed the rest of /mngr (agent state + chat
+    # sessions + events) over it so the workspace shows the conversation as it was, not a fresh agent.
     host_name = "RESTORE-{}-{}-{}".format(eval_name, case_name, message_index)
-    print(">> creating docker workspace {} from {}".format(host_name, code_dir), flush=True)
+    print(">> creating modal workspace {} from {}".format(host_name, code_dir), flush=True)
     status, body = _post_json("http://127.0.0.1:{}/api/v1/workspaces".format(port), {
         "git_url": str(code_dir), "host_name": host_name, "branch": "",
-        "launch_mode": "DOCKER", "ai_provider": "SUBSCRIPTION", "backup_provider": "CONFIGURE_LATER",
+        "launch_mode": "MODAL", "ai_provider": "SUBSCRIPTION", "backup_provider": "CONFIGURE_LATER",
     })
     if status != 202:
         raise SystemExit("create failed HTTP {}: {}".format(status, body))
 
     operation_id = body["operation_id"]
     deadline = time.time() + 1800.0
+    agent_id = None
     while time.time() < deadline:
         try:
             with urllib.request.urlopen(
@@ -107,10 +113,36 @@ def restore(batch: str, case_name: str, message_index: int, *, port: str, restic
             time.sleep(5)
             continue
         if info.get("is_done"):
-            print(">> restored workspace up: {} (agent {})".format(host_name, info.get("agent_id")), flush=True)
-            print("   open the dashboard and click into it; the app reinstalls deps on first boot.", flush=True)
-            return
+            agent_id = info.get("agent_id")
+            break
         if info.get("error"):
             raise SystemExit("create failed: {}".format(info["error"]))
         time.sleep(5)
-    raise SystemExit("timed out waiting for the restored workspace")
+    if agent_id is None:
+        raise SystemExit("timed out waiting for the restored workspace")
+
+    _seed_agent_state(agent_id, mngr_dir)
+    print(">> restored workspace up: {} (agent {})".format(host_name, agent_id), flush=True)
+    print("   open it from the dashboard; deps reinstall from the lockfiles on first boot.", flush=True)
+
+
+def _seed_agent_state(agent_id: str, mngr_dir: Path) -> None:
+    """Push the restored agent state/sessions/events into the new sandbox's /mngr.
+
+    The create API only transfers the repo, so a fresh workspace starts with a fresh agent. rsync
+    the rest of the restored /mngr over it (mngr rsync is the reliable transport; `mngr exec` is
+    not) so the chat history from that turn is present. `code/` is excluded -- create already
+    shipped it via the git mirror.
+    """
+    env = dict(os.environ)
+    for provider in ("DOCKER", "AZURE", "AWS", "VULTR", "LIMA", "IMBUE_CLOUD", "GCP", "OVH"):
+        env["MNGR__PROVIDERS__{}__IS_ENABLED".format(provider)] = "false"
+    print(">> seeding agent state + chat history into the new sandbox ...", flush=True)
+    result = subprocess.run(
+        ["uv", "run", "mngr", "rsync", "--exclude", "code",
+         str(mngr_dir).rstrip("/") + "/", "{}:/mngr/".format(agent_id)],
+        cwd="/work/mngr", env=env, capture_output=True, text=True, timeout=900,
+    )
+    if result.returncode != 0:
+        print("   WARN: could not seed agent state ({}); the code is restored but the chat will be "
+              "empty.\n   {}".format(result.returncode, (result.stderr or "").strip()[:300]), flush=True)
