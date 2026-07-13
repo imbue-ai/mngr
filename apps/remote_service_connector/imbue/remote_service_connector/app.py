@@ -3600,6 +3600,10 @@ _WORKSPACE_RECORD_COLUMNS = (
     "state, restored_from_host_id, backup_kind, encrypted_secrets, revision, created_at, updated_at"
 )
 
+# Must match the index name in migrations/013_workspace_sync.sql; used to tell
+# an active-agent conflict apart from a primary-key insert race.
+_ONE_ACTIVE_PER_AGENT_INDEX_NAME = "workspace_records_one_active_per_agent_idx"
+
 
 def _workspace_record_row_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
     encrypted_secrets = row[10]
@@ -3659,8 +3663,18 @@ class PostgresSyncStore:
         otherwise :class:`SyncRevisionConflictError` carries the stored row so
         the client can merge and retry. The partial unique index on
         ``(user_id, agent_id) WHERE state = 'active'`` surfaces as
-        :class:`SyncActiveAgentConflictError`.
+        :class:`SyncActiveAgentConflictError`. Two concurrent *first* pushes
+        of the same host_id both pass the FOR UPDATE probe and the loser's
+        INSERT hits the primary key instead; by then the winner's row is
+        committed, so one retry reports that race through the regular CAS
+        path (409 + stored row) rather than as an agent conflict.
         """
+        try:
+            return self._put_record_once(user_id, record)
+        except psycopg2.errors.UniqueViolation:
+            return self._put_record_once(user_id, record)
+
+    def _put_record_once(self, user_id: str, record: dict[str, Any]) -> dict[str, Any]:
         conn = _get_pool_db_connection()
         try:
             with conn:
@@ -3726,9 +3740,13 @@ class PostgresSyncStore:
                             )
                         written = cur.fetchone()
                     except psycopg2.errors.UniqueViolation as exc:
-                        raise SyncActiveAgentConflictError(
-                            f"another ACTIVE record already exists for agent {record['agent_id']}"
-                        ) from exc
+                        if exc.diag.constraint_name == _ONE_ACTIVE_PER_AGENT_INDEX_NAME:
+                            raise SyncActiveAgentConflictError(
+                                f"another ACTIVE record already exists for agent {record['agent_id']}"
+                            ) from exc
+                        # Any other unique violation (the primary key) is a
+                        # concurrent-insert race; the caller retries once.
+                        raise
         finally:
             conn.close()
         if written is None:
