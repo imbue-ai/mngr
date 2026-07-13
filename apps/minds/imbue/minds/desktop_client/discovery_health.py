@@ -2,7 +2,7 @@
 
 The discovery pipeline is two processes: a *producer* (``mngr observe
 --discovery-only``, a grandchild of the detached ``mngr latchkey forward``
-supervisor, which writes the shared discovery-events file every ~10s) and a
+supervisor, which writes the shared discovery-events file on each poll cycle) and a
 *consumer* (the single ``mngr forward --observe-via-file`` subprocess minds
 spawns, which tails that file and folds snapshots into
 ``MngrCliBackendResolver``). When snapshots stop arriving the resolver freezes
@@ -77,14 +77,21 @@ from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 
 # How stale the resolver's ``last_event_at`` must be before the watchdog treats
-# the producer as stalled. Discovery polls every ~10s (and every full snapshot
-# bumps ``last_event_at``), so this is ~3-4 missed polls -- above the recovery
-# redirect's own 30s freshness threshold so the two never fight over a single
-# slow-but-healthy poll.
-_DEFAULT_STALL_THRESHOLD_SECONDS: Final[float] = 35.0
+# the producer as stalled. This must clear the *slowest healthy* interval between
+# discovery snapshots so that only a producer emitting literally nothing trips it
+# (a merely-slow-but-alive producer must read as healthy -- restarting it is
+# expensive, re-provisioning every managed host). mngr's per-provider discovery
+# waits ``discovery_poll_interval_seconds`` (default 30s) *between* polls, and a
+# single slow or erroring provider can take up to ``discovery_error_timeout_seconds``
+# (default 120s) to finish a poll while *still* emitting a snapshot at the end --
+# so an alive-but-slow single-provider setup can legitimately go ~150s between
+# snapshots (30s wait + 120s poll). The threshold sits comfortably above that
+# worst case (and well above the recovery redirect's own 30s freshness threshold),
+# so genuine slowness never triggers a spurious bounce/restart storm.
+_DEFAULT_STALL_THRESHOLD_SECONDS: Final[float] = 180.0
 
 # Base wait before the first ``restart`` (and the doubling base for the backoff
-# on subsequent restarts). ~one discovery poll cycle.
+# on subsequent restarts). ~half a discovery poll interval.
 _DEFAULT_REMEDIATION_WAIT_SECONDS: Final[float] = 15.0
 
 # Ceiling for the exponential backoff between restarts. With the 15s base the

@@ -464,7 +464,7 @@ def run(
             f"{_MNGR_FORWARD_LISTEN_TIMEOUT_SECONDS:.0f}s; the plugin likely failed to start. "
             "Check the logs above for its stderr and retry."
         )
-    logger.info("  mngr forward: http://127.0.0.1:{}", mngr_forward_port)
+    logger.info("  mngr forward: https://127.0.0.1:{}", mngr_forward_port)
 
     # AgentCreator is constructed *after* ``start_mngr_forward`` so the
     # readiness probe can use the same preauth cookie the plugin accepts and
