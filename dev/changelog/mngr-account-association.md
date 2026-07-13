@@ -1,0 +1,1 @@
+Added `specs/workspace-sync/spec.md`: the design record for end-to-end-encrypted cross-device sync of workspace metadata and secrets (workspace records on the connector, per-account DEKs wrapped by the master password, metadata-only tier for empty passwords, and the one-shot migration off the legacy local files).

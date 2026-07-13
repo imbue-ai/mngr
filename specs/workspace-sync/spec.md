@@ -1,5 +1,7 @@
 # Workspace Sync: end-to-end-encrypted cross-device sync of workspace metadata and secrets
 
+Status: **Implemented** (branch `mngr/account-association`). Written as a blueprint plan; kept as the design record.
+
 ## Overview
 
 - Replace minds' machine-local account/workspace state (`workspace_associations.json`, `backup_password_hash`, `backup_password`) with per-account **workspace records** stored in the `remote_service_connector`, so every device signed into an account sees the same workspace inventory.
@@ -11,7 +13,6 @@
 - Association = record existence under an account. Cross-account moves are disassociate-then-associate (re-encrypt secrets under the other DEK; no rekeying). Leased imbue_cloud workspaces get records like everything else, with association immutable (lease account).
 - Sync is a **free** feature (no paid gate). Backup downloads from other devices use the synced credentials directly, so the paid gate (which only guards key *minting*) is not involved.
 - Compromise recovery ships as schema (`key_epoch`) plus a design section only; no rotation tooling.
-- When implementation starts, this plan is converted into `specs/workspace-sync/spec.md` per repo convention.
 
 ## Expected behavior
 
