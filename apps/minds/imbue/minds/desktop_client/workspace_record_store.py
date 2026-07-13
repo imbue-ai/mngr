@@ -50,6 +50,10 @@ from imbue.mngr.primitives import AgentId
 
 _RECORDS_DIRNAME = "workspace_records"
 _LEGACY_ASSOCIATIONS_FILENAME = "workspace_associations.json"
+# The pre-associations-file layout: full identity records keyed by user_id,
+# each carrying a "workspace_ids" list. Only consulted when the newer
+# associations file does not exist (mirroring the retired fallback reader).
+_LEGACY_SESSIONS_FILENAME = "sessions.json"
 _LEGACY_RETIRED_SUFFIX = ".pre-sync"
 # Providers whose hosts any signed-in device can reach/modify; their records
 # carry no hosting_device_id (concurrent writers are resolved by CAS).
@@ -664,32 +668,62 @@ class WorkspaceRecordStore(MutableModel):
     def _legacy_associations_path(self) -> Path:
         return self.paths.data_dir / _LEGACY_ASSOCIATIONS_FILENAME
 
+    def _legacy_sessions_path(self) -> Path:
+        return self.paths.data_dir / _LEGACY_SESSIONS_FILENAME
+
     def read_legacy_associations(self) -> dict[str, list[str]]:
-        """Read the legacy ``workspace_associations.json`` (user_id -> [agent_id, ...])."""
+        """Read the legacy association state (user_id -> [agent_id, ...]).
+
+        Prefers ``workspace_associations.json``; when that never existed,
+        falls back to the older ``sessions.json`` layout (full identity
+        records), extracting each entry's ``workspace_ids`` -- the same
+        precedence the pre-sync reader used, so associations written only in
+        the sessions.json era still convert.
+        """
         path = self._legacy_associations_path()
-        if not path.is_file():
+        if path.is_file():
+            try:
+                raw = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError) as e:
+                logger.warning("Could not read the legacy associations file {}: {}", path, e)
+                return {}
+            if not isinstance(raw, dict):
+                return {}
+            result: dict[str, list[str]] = {}
+            for user_id, value in raw.items():
+                if isinstance(value, list):
+                    result[user_id] = [str(item) for item in value if isinstance(item, str)]
+            return result
+        sessions_path = self._legacy_sessions_path()
+        if not sessions_path.is_file():
             return {}
         try:
-            raw = json.loads(path.read_text())
+            raw_sessions = json.loads(sessions_path.read_text())
         except (OSError, json.JSONDecodeError) as e:
-            logger.warning("Could not read the legacy associations file {}: {}", path, e)
+            logger.warning("Could not read the legacy sessions file {}: {}", sessions_path, e)
             return {}
-        if not isinstance(raw, dict):
+        if not isinstance(raw_sessions, dict):
             return {}
-        result: dict[str, list[str]] = {}
-        for user_id, value in raw.items():
-            if isinstance(value, list):
-                result[user_id] = [str(item) for item in value if isinstance(item, str)]
-        return result
+        result_sessions: dict[str, list[str]] = {}
+        for user_id, data in raw_sessions.items():
+            if not isinstance(data, dict):
+                continue
+            workspace_ids = data.get("workspace_ids", [])
+            if isinstance(workspace_ids, list):
+                result_sessions[user_id] = [str(item) for item in workspace_ids if isinstance(item, str)]
+        return result_sessions
 
     def _retire_legacy_associations(self) -> None:
-        path = self._legacy_associations_path()
-        if not path.is_file():
-            return
-        try:
-            path.rename(path.with_name(path.name + _LEGACY_RETIRED_SUFFIX))
-        except OSError as e:
-            logger.warning("Could not retire the legacy associations file {}: {}", path, e)
+        # Both generations must retire together: a lingering sessions.json
+        # would read as unconverted legacy state on every later pass (and
+        # re-create records the user has since disassociated).
+        for path in (self._legacy_associations_path(), self._legacy_sessions_path()):
+            if not path.is_file():
+                continue
+            try:
+                path.rename(path.with_name(path.name + _LEGACY_RETIRED_SUFFIX))
+            except OSError as e:
+                logger.warning("Could not retire the legacy associations file {}: {}", path, e)
 
     def reconcile(
         self,

@@ -202,11 +202,14 @@ class MultiAccountSessionStore(MutableModel):
         return bool(self._identity_by_user_id())
 
     def has_signed_in_before(self) -> bool:
-        """Whether the user has ever signed in (replica/legacy state exists or the plugin reports anything)."""
-        has_local_state = (
-            bool(self._associations_view())
-            or (self.data_dir / _LEGACY_ASSOCIATIONS_FILENAME).exists()
-            or (self.data_dir / _LEGACY_SESSIONS_FILENAME).exists()
+        """Whether the user has ever signed in (replica/legacy state exists or the plugin reports anything).
+
+        The legacy files are matched by prefix so their retired
+        (``.pre-sync``-renamed) copies still count after the one-shot
+        record-store conversion.
+        """
+        has_local_state = bool(self._associations_view()) or any(
+            any(self.data_dir.glob(f"{name}*")) for name in (_LEGACY_ASSOCIATIONS_FILENAME, _LEGACY_SESSIONS_FILENAME)
         )
         if has_local_state:
             return True

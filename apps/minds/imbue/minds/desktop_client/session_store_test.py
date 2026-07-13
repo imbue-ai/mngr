@@ -293,6 +293,14 @@ def test_has_signed_in_before_with_legacy_files(tmp_path: Path) -> None:
     assert store.has_signed_in_before()
 
 
+def test_has_signed_in_before_with_retired_legacy_files(tmp_path: Path) -> None:
+    """Legacy files renamed aside by the one-shot conversion still count as having signed in."""
+    store, _cli = _make_store_with_users(tmp_path, [])
+    assert not store.has_signed_in_before()
+    (tmp_path / "sessions.json.pre-sync").write_text("{}")
+    assert store.has_signed_in_before()
+
+
 def test_persistence_across_store_instances(tmp_path: Path) -> None:
     """Workspace records written by one store instance are readable by another."""
     cli = make_fake_imbue_cloud_cli()

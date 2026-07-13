@@ -295,6 +295,40 @@ def test_reconcile_migrates_legacy_associations_and_retires_the_file(paths: Work
     assert len(cli.sync_records_by_email[_EMAIL]) == 1
 
 
+def test_reconcile_migrates_sessions_json_era_associations(paths: WorkspacePaths) -> None:
+    """The pre-associations-file layout (sessions.json identity records) converts too.
+
+    An install whose associations were only ever written in the sessions.json
+    era has no workspace_associations.json; its workspace_ids must still
+    become records, and the file must retire so later passes cannot re-create
+    deliberately disassociated records from it.
+    """
+    cli = make_fake_imbue_cloud_cli()
+    store = _make_store(paths, cli)
+    user_id = _user_id()
+    agent_id = AgentId.generate()
+    resolver = make_resolver_with_data(agents_json=make_agents_json(agent_id, host_name="old-ws"))
+    (paths.data_dir / "sessions.json").write_text(
+        json.dumps({user_id: {"user_id": user_id, "email": _EMAIL, "workspace_ids": [str(agent_id)]}})
+    )
+
+    store.reconcile({user_id: _EMAIL}, resolver)
+
+    assert store.associations_view() == {user_id: [str(agent_id)]}
+    assert not (paths.data_dir / "sessions.json").exists()
+    assert (paths.data_dir / "sessions.json.pre-sync").exists()
+    assert str(agent_id) in {row["agent_id"] for row in cli.sync_records_by_email[_EMAIL].values()}
+
+
+def test_read_legacy_associations_prefers_the_newer_file_over_sessions_json(paths: WorkspacePaths) -> None:
+    store = _make_store(paths)
+    user_id = _user_id()
+    (paths.data_dir / "workspace_associations.json").write_text(json.dumps({user_id: ["agent-new"]}))
+    (paths.data_dir / "sessions.json").write_text(json.dumps({user_id: {"workspace_ids": ["agent-old"]}}))
+
+    assert store.read_legacy_associations() == {user_id: ["agent-new"]}
+
+
 def test_reconcile_keeps_legacy_file_until_every_entry_converts(paths: WorkspacePaths) -> None:
     """A failed poll proves nothing: a legacy association whose workspace was
     not discoverable (its provider errored) must survive for a later pass
