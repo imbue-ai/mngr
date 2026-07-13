@@ -18,8 +18,11 @@ from pathlib import Path
 
 from imbue.mngr_minds_eval import s3_store
 
-FCT_REPO = "https://github.com/imbue-ai/default-workspace-template.git"
-FCT_BRANCH = "minds-eval-autosend"
+# The forever-claude-template (workspace template) each eval case is cloned from. The default
+# branch carries the eval worker (eval_responder + config.json gating); a branch WITHOUT it won't
+# auto-run the conversation or snapshot. Override with --fct-repo / --fct-branch.
+DEFAULT_FCT_REPO = "https://github.com/imbue-ai/default-workspace-template.git"
+DEFAULT_FCT_BRANCH = "minds-eval-autosend"
 CLONES_DIR = Path("/work/clones")
 BASE_DIR = Path("/work/eval-base")
 BOX_MNGR = Path("/work/mngr")
@@ -100,11 +103,11 @@ def build_create_payload(
     }
 
 
-def _ensure_base() -> None:
+def _ensure_base(fct_repo: str, fct_branch: str) -> None:
     if BASE_DIR.exists():
         shutil.rmtree(BASE_DIR)
-    print(">> cloning {}@{} (fresh tip)".format(FCT_REPO, FCT_BRANCH), flush=True)
-    _sh("git", "clone", "--branch", FCT_BRANCH, FCT_REPO, str(BASE_DIR))
+    print(">> cloning {}@{} (fresh tip)".format(fct_repo, fct_branch), flush=True)
+    _sh("git", "clone", "--branch", fct_branch, fct_repo, str(BASE_DIR))
 
 
 def _vendor_mngr(clone: Path) -> None:
@@ -153,7 +156,7 @@ def _await_create(port: str, operation_id: str, timeout: float = 1800.0) -> dict
 
 def launch_batch(
     *, eval_name: str, personas_path: Path, anthropic_key: str, num_turns: int, compute: str, port: str, stamp: str,
-    mngr_branch: str = "",
+    mngr_branch: str = "", fct_repo: str = DEFAULT_FCT_REPO, fct_branch: str = DEFAULT_FCT_BRANCH,
 ) -> dict:
     env = s3_store.load_aws_env()
     client = s3_store.make_client(env)
@@ -171,11 +174,12 @@ def launch_batch(
     # one), and the worker uploads that generated password to the case prefix in S3 for restore.
     s3_store.put_json(client, bucket, "{}/{}".format(batch, s3_store.BATCH_CONFIG_NAME), {
         "eval_name": eval_name, "created_at": stamp, "num_turns": num_turns,
-        "compute": compute, "mngr_branch": mngr_branch, "cases": cases,
+        "compute": compute, "mngr_branch": mngr_branch, "fct_repo": fct_repo, "fct_branch": fct_branch,
+        "cases": cases,
     })
 
     CLONES_DIR.mkdir(parents=True, exist_ok=True)
-    _ensure_base()
+    _ensure_base(fct_repo, fct_branch)
 
     results = []
     for index, case in enumerate(cases, 1):

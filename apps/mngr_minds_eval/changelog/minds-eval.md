@@ -17,3 +17,5 @@
 - Added `minds-evals box --mngr-branch X` as a first-class utility to build/boot a Minds box for any mngr branch (previously box spin-up only happened as a side effect of launch/restore).
 
 - Unified the CLI: `workspace` (create one ad-hoc workspace in a box) is now a `minds-evals` subcommand like the rest, and the last shell wrapper is gone. Everything is one Python CLI (`minds-evals launch|box|workspace|list-batches|inspect|restore`); the only remaining shell file is the Docker container entrypoint, which must be bash.
+
+- `launch` now takes `--fct-branch` / `--fct-repo` (the workspace-template each case is cloned from), instead of hardcoding the branch. Recorded in the batch config. Default remains the branch that carries the eval worker.

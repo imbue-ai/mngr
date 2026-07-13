@@ -124,6 +124,9 @@ def main() -> None:
     p_launch.add_argument("--personas", required=True, type=Path, help="config json: [{id, persona, first_prompt}]")
     p_launch.add_argument("--turns", type=int, default=4, help="waits the responder sits through (default 4)")
     p_launch.add_argument("--mngr-branch", default="main", help="mngr branch the box runs (and vendors into cases)")
+    p_launch.add_argument("--fct-branch", default=launch_mod.DEFAULT_FCT_BRANCH,
+                          help="workspace-template branch each case is cloned from (must carry the eval worker)")
+    p_launch.add_argument("--fct-repo", default=launch_mod.DEFAULT_FCT_REPO, help="workspace-template git URL")
     p_launch.add_argument("--box", default="", help="container name (default: minds-box-<mngr-branch>)")
     p_launch.add_argument("--anthropic-key", default=os.environ.get("ANTHROPIC_API_KEY", ""))
 
@@ -209,7 +212,7 @@ def main() -> None:
         launch_mod.launch_batch(
             eval_name=args.name, personas_path=args.personas, anthropic_key=args.anthropic_key,
             num_turns=args.turns, compute="modal", port=_port(), stamp=_utc_stamp(),
-            mngr_branch=args.mngr_branch,
+            mngr_branch=args.mngr_branch, fct_repo=args.fct_repo, fct_branch=args.fct_branch,
         )
         return
     if args.command == "restore":
