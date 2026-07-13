@@ -9,6 +9,7 @@ from imbue.mngr_forward.data_types import ForwardPortStrategy
 from imbue.mngr_forward.data_types import ForwardServiceStrategy
 from imbue.mngr_forward.envelope import EnvelopeWriter
 from imbue.mngr_forward.resolver import ForwardResolver
+from imbue.mngr_forward.service_map_cache import ServiceMapCache
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_forward.testing import TEST_AGENT_ID_1
 from imbue.mngr_forward.testing import TEST_AGENT_ID_2
@@ -202,3 +203,76 @@ def test_initial_discovery_flag() -> None:
     assert resolver.has_completed_initial_discovery() is False
     resolver.update_known_agents(())
     assert resolver.has_completed_initial_discovery() is True
+
+
+# --- last-known service-map cache (fast first-load) -----------------------
+
+
+def test_seeded_entry_not_served_until_agent_is_known() -> None:
+    """A seeded service URL is not routable until discovery confirms the agent.
+
+    This is the safety property that makes seeding a stale cache acceptable:
+    ``resolve`` gates on this run's known-agent set, so a cache entry for an
+    agent this run does not discover is never served.
+    """
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    resolver.seed_services({str(TEST_AGENT_ID_1): {"system_interface": "http://127.0.0.1:8000"}})
+    assert resolver.resolve(TEST_AGENT_ID_1) is None
+    resolver.add_known_agent(TEST_AGENT_ID_1)
+    target = resolver.resolve(TEST_AGENT_ID_1)
+    assert target is not None
+    assert str(target.url).rstrip("/") == "http://127.0.0.1:8000"
+
+
+def test_live_update_overwrites_seeded_service_entry() -> None:
+    """The live event stream's full-replace corrects a stale seed."""
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    resolver.add_known_agent(TEST_AGENT_ID_1)
+    resolver.seed_services({str(TEST_AGENT_ID_1): {"system_interface": "http://127.0.0.1:8000"}})
+    resolver.update_services(TEST_AGENT_ID_1, {"system_interface": "http://127.0.0.1:9999"})
+    target = resolver.resolve(TEST_AGENT_ID_1)
+    assert target is not None
+    assert str(target.url).rstrip("/") == "http://127.0.0.1:9999"
+
+
+def test_update_services_persists_to_cache(tmp_path: Path) -> None:
+    cache = ServiceMapCache(cache_path=tmp_path / "service_map.json")
+    resolver = ForwardResolver(
+        strategy=ForwardServiceStrategy(service_name="system_interface"),
+        service_map_cache=cache,
+    )
+    resolver.add_known_agent(TEST_AGENT_ID_1)
+    resolver.update_services(TEST_AGENT_ID_1, {"system_interface": "http://127.0.0.1:8000"})
+    assert cache.load() == {str(TEST_AGENT_ID_1): {"system_interface": "http://127.0.0.1:8000"}}
+
+
+def test_remove_known_agent_drops_cache_entry(tmp_path: Path) -> None:
+    cache = ServiceMapCache(cache_path=tmp_path / "service_map.json")
+    resolver = ForwardResolver(
+        strategy=ForwardServiceStrategy(service_name="system_interface"),
+        service_map_cache=cache,
+    )
+    resolver.add_known_agent(TEST_AGENT_ID_1)
+    resolver.update_services(TEST_AGENT_ID_1, {"system_interface": "http://127.0.0.1:8000"})
+    resolver.remove_known_agent(TEST_AGENT_ID_1)
+    assert cache.load() == {}
+
+
+def test_persisted_map_seeds_a_fresh_resolver(tmp_path: Path) -> None:
+    """End-to-end: one run persists its service map; a fresh run seeds from it and resolves."""
+    cache = ServiceMapCache(cache_path=tmp_path / "service_map.json")
+    first_run = ForwardResolver(
+        strategy=ForwardServiceStrategy(service_name="system_interface"),
+        service_map_cache=cache,
+    )
+    first_run.add_known_agent(TEST_AGENT_ID_1)
+    first_run.update_services(TEST_AGENT_ID_1, {"system_interface": "http://127.0.0.1:8000"})
+
+    fresh_run = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    fresh_run.seed_services(cache.load())
+    # Still gated on discovery: not served until this run marks the agent known.
+    assert fresh_run.resolve(TEST_AGENT_ID_1) is None
+    fresh_run.add_known_agent(TEST_AGENT_ID_1)
+    target = fresh_run.resolve(TEST_AGENT_ID_1)
+    assert target is not None
+    assert str(target.url).rstrip("/") == "http://127.0.0.1:8000"

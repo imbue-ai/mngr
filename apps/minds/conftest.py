@@ -59,7 +59,7 @@ register_marker(
 )
 register_marker(
     "minds_snapshot_resume: tests that run in a sandbox booted from a Modal snapshot produced by "
-    "`scripts/snapshot_minds_e2e_state.py` (a stopped FCT workspace Docker container already on "
+    "`scripts/snapshot_minds_e2e_state.py` (a stopped DEFAULT_WORKSPACE_TEMPLATE workspace Docker container already on "
     "disk, plus a warm Electron/Playwright/Xvfb/Docker toolchain). Includes both the resume "
     "sanity checks (against the baked workspace) and the Electron-driven create+chat test (which "
     "drives the warm toolchain to create a fresh workspace). Run only via "
@@ -86,8 +86,8 @@ def mngr_test_prefix() -> str:
     prefix into that subprocess is os.environ, which the autouse fixture
     (setup_test_mngr_env -> monkeypatch.setenv("MNGR_PREFIX", ...)) already owns.
     Overriding mngr_test_prefix here makes the autouse put the correct value in
-    os.environ for the whole test, covering both the desktop client's in-process
-    spawn AND clean_env()-based subprocess calls uniformly.
+    os.environ for the whole test, covering every mngr subprocess the desktop
+    client spawns uniformly.
     """
     return f"{generate_test_environment_name()}-"
 

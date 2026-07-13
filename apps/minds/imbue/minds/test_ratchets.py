@@ -120,7 +120,7 @@ def test_prevent_getattr() -> None:
     # Both usages are one line in the ported Sentry HTTP transport, reading the
     # response body whose attribute (``data`` vs ``content``) varies across
     # sentry-sdk / urllib3 versions.
-    rc.check_getattr(_DIR, snapshot(2))
+    rc.check_getattr(_DIR, snapshot(0))
 
 
 def test_prevent_setattr() -> None:
@@ -134,7 +134,7 @@ def test_prevent_asyncio_import() -> None:
     # The minds backend is synchronous (Flask) and uses no asyncio. The only remaining import is in
     # ``scripts/launch_to_msg_e2e.py``, a standalone Playwright e2e driver that runs its own event
     # loop in a separate process.
-    rc.check_asyncio_import(_DIR, snapshot(1))
+    rc.check_asyncio_import(_DIR, snapshot(0))
 
 
 def test_prevent_pandas_import() -> None:
@@ -163,7 +163,7 @@ def test_prevent_functools_partial() -> None:
     # All in the ported Sentry module: the import plus binding the before_send
     # wrapper and the per-file S3 upload callbacks. Rewriting these as nested
     # defs/lambdas would only trade the violation for an inline-function one.
-    rc.check_functools_partial(_DIR, snapshot(3))
+    rc.check_functools_partial(_DIR, snapshot(0))
 
 
 def test_prevent_exit_stack() -> None:
@@ -171,7 +171,7 @@ def test_prevent_exit_stack() -> None:
 
 
 def test_prevent_async_await() -> None:
-    rc.check_async_await(_DIR, snapshot(198))
+    rc.check_async_await(_DIR, snapshot(12))
 
 
 # --- Hardcoded paths ---
@@ -327,11 +327,11 @@ def test_prevent_direct_subprocess() -> None:
         # as ``testing.py``: it is only ever called from test / operator
         # entrypoints, never from product code.
         "*/desktop_client/e2e_workspace_runner.py",
-        # ``desktop_client/fct_worktree.py`` is the sibling helper that
-        # materializes the paired FCT worktree (git clone / archive / commit)
+        # ``desktop_client/default_workspace_template_worktree.py`` is the sibling helper that
+        # materializes the paired DEFAULT_WORKSPACE_TEMPLATE worktree (git clone / archive / commit)
         # for the same e2e / snapshot entrypoints. Same justification: one-shot
         # git shell-outs from test / operator code, never from product code.
-        "*/desktop_client/fct_worktree.py",
+        "*/desktop_client/default_workspace_template_worktree.py",
     )
     # The one allowed match is ``cli/env.py::_exec_into_recover``,
     # which uses ``os.execvp`` to REPLACE the current process with
@@ -357,33 +357,34 @@ def test_prevent_if_elif_without_else() -> None:
     # the values they branch on; an else: pass would be cosmetic. The two added
     # branches are in the ported Sentry transport/uploader and likewise
     # exhaustively handle their cases.
-    rc.check_if_elif_without_else(_DIR, snapshot(4))
+    rc.check_if_elif_without_else(_DIR, snapshot(2))
 
 
 def test_prevent_inline_functions() -> None:
-    # The added inline function is the ``record_loss`` helper nested in the
+    # One of the inline functions is the ``record_loss`` helper nested in the
     # ported Sentry HTTP transport's ``_send_request`` (it closes over the
-    # envelope being sent).
+    # envelope being sent). The recorded count reflects the actual finder count
+    # for the current tree.
     rc.check_inline_functions(_DIR, snapshot(9))
 
 
 def test_prevent_underscore_imports() -> None:
     # ``loguru_handler.py`` imports sentry-sdk's ``_IGNORED_LOGGERS`` registry,
     # the documented way to interoperate with sentry's logger-ignore mechanism.
-    rc.check_underscore_imports(_DIR, snapshot(1))
+    rc.check_underscore_imports(_DIR, snapshot(0))
 
 
 def test_prevent_init_methods_in_non_exception_classes() -> None:
     # Both are the ported Sentry loguru ``logging.Handler`` subclasses, which
     # need ``__init__`` to set up their executor / flags around super().__init__.
-    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(2))
+    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(0))
 
 
 def test_prevent_cast_usage() -> None:
     # All in the ported Sentry module: sentry-sdk's ``Event`` TypedDict types
     # ``extra`` as ``object`` and scope contexts are loosely typed, so reading
     # them back requires casts to satisfy the type checker.
-    rc.check_cast_usage(_DIR, snapshot(6))
+    rc.check_cast_usage(_DIR, snapshot(0))
 
 
 def test_prevent_assert_isinstance() -> None:

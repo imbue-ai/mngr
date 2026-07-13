@@ -161,7 +161,16 @@ def _build_provisioning_script(
     host_data_disk_name: str | None = None,
     root_authorized_public_key: str | None = None,
 ) -> str:
-    """Build the Lima ``provision[mode=system]`` script that installs required packages, configures sshd, optionally lands the btrfs host-data disk at the canonical mount point, optionally enables key-based root login (when running the agent as root), and (when a keypair is supplied) installs it as the guest's ed25519 sshd host key."""
+    """Build the Lima ``provision[mode=system]`` script.
+
+    The script first establishes SSH host-key trust -- installing the
+    caller-supplied ed25519 sshd host key (when given), tightening sshd limits,
+    and optionally enabling key-based root login -- because mngr pins that key
+    and connects with strict host-key checking, so it must not depend on any
+    network-fetched package. Only then does it install the required packages
+    (with retries, to ride out transient apt mirror failures) and optionally
+    land the btrfs host-data disk at the canonical mount point.
+    """
     host_key_block = _build_host_key_block(host_private_key_pem, host_public_key_openssh)
     host_data_disk_block = _build_host_data_disk_block(host_data_disk_name, host_dir)
     root_authorized_keys_block = _build_root_authorized_keys_block(root_authorized_public_key)
@@ -179,29 +188,23 @@ def _build_provisioning_script(
 #!/bin/bash
 set -eux -o pipefail
 
-# Install required packages if missing
-PKGS_TO_INSTALL=""
-command -v tmux >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL tmux"
-command -v git >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL git"
-command -v jq >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL jq"
-command -v rsync >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL rsync"
-command -v curl >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL curl"
-command -v xxd >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL xxd"
-command -v flock >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL util-linux"
-test -x /usr/sbin/sshd || PKGS_TO_INSTALL="$PKGS_TO_INSTALL openssh-server"
-test -f /etc/ssl/certs/ca-certificates.crt || PKGS_TO_INSTALL="$PKGS_TO_INSTALL ca-certificates"{btrfs_pkg_line}
-
-if [ -n "$PKGS_TO_INSTALL" ]; then
-    apt-get update -qq && apt-get install -y -qq $PKGS_TO_INSTALL
-fi
-
 mkdir -p /run/sshd
 
 # Create /code directory for agent work directories (writable by all users).
 # Lima VMs run as a regular user, not root, so /code must be pre-created.
 mkdir -p /code && chmod 777 /code
 
-# Install the caller-provided sshd host key (when given).
+# Establish SSH host-key trust FIRST, before any network-dependent step.
+#
+# mngr pins this VM's host key in its per-host known_hosts and connects with
+# StrictHostKeyChecking=yes, so the guest MUST present exactly the injected
+# key. This block (and the sshd_config tweak below) only uses coreutils plus
+# the already-present sshd -- no packages, no network -- so it can never be
+# skipped by a failed package fetch. Ordering it ahead of the apt install
+# keeps host-key trust independent of the network: a transient apt mirror
+# failure previously aborted the whole `set -e` script *before* the key swap
+# ran, leaving the VM on its default host keys and surfacing on connect as a
+# baffling "host key does not match" instead of a clear provisioning error.
 SSH_KEY_CHANGED=0
 {host_key_block}
 
@@ -227,9 +230,43 @@ if [ "$SSH_KEY_CHANGED" = "1" ] || [ "$SSHD_CONFIG_CHANGED" = "1" ]; then
     systemctl restart sshd 2>/dev/null || service ssh restart 2>/dev/null || true
 fi
 
+# Install required packages if missing. Retry to ride out transient apt mirror
+# failures (deb.debian.org intermittently drops index fetches). This runs
+# *after* host-key trust is established, so even a hard failure here surfaces
+# as a clear provisioning error on an SSH-reachable host rather than as a
+# host-key mismatch.
+apt_get_retry() {{
+    local attempt
+    for attempt in 1 2 3 4 5; do
+        if apt-get "$@"; then
+            return 0
+        fi
+        echo "apt-get $* failed (attempt $attempt/5); retrying in $((attempt * 5))s" >&2
+        sleep "$((attempt * 5))"
+    done
+    return 1
+}}
+
+PKGS_TO_INSTALL=""
+command -v tmux >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL tmux"
+command -v git >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL git"
+command -v jq >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL jq"
+command -v rsync >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL rsync"
+command -v curl >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL curl"
+command -v xxd >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL xxd"
+command -v flock >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL util-linux"
+test -x /usr/sbin/sshd || PKGS_TO_INSTALL="$PKGS_TO_INSTALL openssh-server"
+test -f /etc/ssl/certs/ca-certificates.crt || PKGS_TO_INSTALL="$PKGS_TO_INSTALL ca-certificates"{btrfs_pkg_line}
+
+if [ -n "$PKGS_TO_INSTALL" ]; then
+    apt_get_retry update -qq
+    apt_get_retry install -y -qq $PKGS_TO_INSTALL
+fi
+
 # Optional: if a btrfs additional disk was attached, format + mount it at the
 # canonical path and symlink host_dir to it. No-op when the block below is the
-# inert comment placeholder.
+# inert comment placeholder. Runs last because it needs mkfs.btrfs from the
+# btrfs-progs package installed above.
 {host_data_disk_block}
 """
 

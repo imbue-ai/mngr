@@ -12,6 +12,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Changed
 
+- Changed: The forward stream manager now logs provider-level discovery errors once per process via the shared `DiscoveryErrorLogSuppressor` (with an info-level recovery line when discovery next succeeds), instead of one warning per poll cycle. Host- and agent-attributed discovery errors keep logging on every occurrence.
 - Changed: `mngr forward` consumes mngr's new per-provider discovery model — the stream manager feeds every parsed discovery event into the shared span-aware `DiscoveryStateAggregator` and reacts to the returned membership delta (newly-present agents get a tunnel + `mngr event` stream, newly-absent agents are torn down). The plugin routes `ProviderDiscoverySnapshotEvent` (`DISCOVERY_PROVIDER`) plus incremental agent/host events; handling of the legacy global `FullDiscoverySnapshotEvent` (`DISCOVERY_FULL`) has been removed. Retain-on-provider-error semantics are unchanged, now provided by the aggregator's per-provider scoping.
 
 ### Fixed

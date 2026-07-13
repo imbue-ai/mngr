@@ -453,21 +453,11 @@
         link.style.pointerEvents = '';
         link.removeAttribute('data-exporting');
       }
-      // v1 export is per-snapshot, so first list the workspace's snapshots and
-      // pick the most recent one (matching the old latest-snapshot export),
-      // then POST to export it as a zip.
-      fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backups').then(function (resp) {
-        if (!resp.ok) throw new Error('listing backups failed: ' + resp.status);
-        return resp.json();
-      }).then(function (data) {
-        var snapshots = (data && data.snapshots) || [];
-        if (snapshots.length === 0) throw new Error('no snapshots to export');
-        var latest = snapshots.reduce(function (a, b) {
-          return Date.parse(b.time) >= Date.parse(a.time) ? b : a;
-        });
-        return fetch('/api/v1/workspaces/' + encodeURIComponent(agentId)
-          + '/backups/' + encodeURIComponent(latest.snapshot_id) + '/export', { method: 'POST' });
-      }).then(function (resp) {
+      // The export route passes the snapshot id to restic verbatim, so
+      // restic's own 'latest' addressing exports the newest snapshot without
+      // listing them first.
+      fetch('/api/v1/workspaces/' + encodeURIComponent(agentId)
+        + '/backups/latest/export', { method: 'POST' }).then(function (resp) {
         if (!resp.ok) throw new Error('export failed: ' + resp.status);
         var disp = resp.headers.get('Content-Disposition') || '';
         var match = /filename="?([^"]+)"?/.exec(disp);
