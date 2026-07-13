@@ -1503,13 +1503,11 @@ def _handle_create_cloud_account() -> CloudAccountPrepareResponse | Response:
     if backend == "aws":
         access_key_id = str(body.get("aws_access_key_id", "")).strip()
         secret_access_key = str(body.get("aws_secret_access_key", "")).strip()
-        session_token = str(body.get("aws_session_token", "")).strip()
         if not access_key_id or not secret_access_key:
             return _json_field_error("An AWS access key id and secret access key are required.", "aws_access_key_id")
         credentials = {
             "aws_access_key_id": access_key_id,
             "aws_secret_access_key": secret_access_key,
-            "aws_session_token": session_token,
         }
     elif backend == "gcp":
         key_json = str(body.get("gcp_service_account_key_json", "")).strip()
@@ -1556,24 +1554,19 @@ def _handle_create_cloud_account() -> CloudAccountPrepareResponse | Response:
     except BootstrapError as exc:
         return _json_field_error(str(exc), "alias")
 
-    # Stream-capture the prepare output so both outcomes can report it.
-    prepare_lines: list[str] = []
-
-    def _capture(line: str, is_stdout: bool) -> None:
-        prepare_lines.append(line)
-
     agent_creator: AgentCreator | None = get_state().agent_creator
     parent_cg = agent_creator.root_concurrency_group if agent_creator is not None else None
     try:
         if backend == "aws":
-            run_mngr_aws_prepare(region, on_output=_capture, provider_name=provider_name, parent_cg=parent_cg)
+            run_mngr_aws_prepare(region, provider_name=provider_name, parent_cg=parent_cg)
         else:
             # gcp/azure prepare read placement + credentials from the account
             # block itself, so only --provider is passed.
-            run_mngr_provider_prepare(backend, provider_name, on_output=_capture, parent_cg=parent_cg)
+            run_mngr_provider_prepare(backend, provider_name, parent_cg=parent_cg)
     except MngrCommandError as exc:
         # Roll back: a failed prepare means unusable credentials/permissions;
         # keeping the block would make every `mngr list` fan out to it.
+        # The exception text already carries the prepare output tail.
         delete_cloud_account_provider(provider_name)
         return _json_error(f"Account setup failed: {exc}", 502)
 
@@ -1586,10 +1579,7 @@ def _handle_create_cloud_account() -> CloudAccountPrepareResponse | Response:
     # snapshots (no liveness, no Stop/Start controls). Mirrors
     # desktop_control.set_provider_enabled's bounce-on-change.
     bounce_latchkey_forward_supervisor(get_state().latchkey_forward_supervisor)
-    return CloudAccountPrepareResponse(
-        account=_cloud_account_summary(matching),
-        prepare_log="\n".join(prepare_lines[-50:]),
-    )
+    return CloudAccountPrepareResponse(account=_cloud_account_summary(matching))
 
 
 @require_api_or_cookie_auth

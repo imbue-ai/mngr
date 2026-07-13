@@ -235,7 +235,6 @@ class CloudAccountCreateRequest(ApiRequestModel):
     )
     aws_access_key_id: str | None = Field(default=None, description="AWS access key id (required for aws)")
     aws_secret_access_key: str | None = Field(default=None, description="AWS secret access key (required for aws)")
-    aws_session_token: str | None = Field(default=None, description="Optional AWS session token (STS/SSO creds)")
     gcp_service_account_key_json: str | None = Field(
         default=None, description="Full JSON contents of a GCP service-account key (required for gcp)"
     )
@@ -273,7 +272,6 @@ class CloudAccountPrepareResponse(FrozenModel):
     """Result of registering + preparing a cloud account."""
 
     account: CloudAccountSummary = Field(description="The registered account")
-    prepare_log: str = Field(description="Tail of the `mngr <backend> prepare` output")
 
 
 class SetProviderEnabledRequest(ApiRequestModel):
