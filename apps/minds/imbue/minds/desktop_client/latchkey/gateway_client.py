@@ -598,6 +598,58 @@ class LatchkeyGatewayClient(MutableModel):
                     granted.update(p for p in permissions if isinstance(p, str))
         return frozenset(granted)
 
+    def get_permission_rules(
+        self,
+        permissions_file_path: Path,
+    ) -> dict[str, tuple[str, ...]]:
+        """Return every rule in the file as a ``{scope: (permission, ...)}`` mapping.
+
+        Wraps ``GET /permissions?path=<...>`` and flattens the parsed
+        ``rules`` list (each element is a single-key ``{scope:
+        [permission, ...]}`` object) into one mapping keyed by scope.
+        A missing file (404) is treated as "no rules" and returns an
+        empty mapping, matching :meth:`get_granted_permissions_for_scopes`.
+        Any other non-2xx surfaces as :class:`LatchkeyGatewayClientError`.
+
+        Duplicate scope keys (which the on-disk format does not expect)
+        are merged by union so no grant is silently dropped.
+        """
+        self.ensure_initialized()
+        url = f"{self._require_base_url().rstrip('/')}/permissions"
+        params = {"path": str(permissions_file_path)}
+        try:
+            with self._one_shot_client() as client:
+                response = client.get(url, params=params, headers=self._build_headers())
+        except httpx.HTTPError as e:
+            raise self._wrap_transport_error(e, f"GET {url} failed") from e
+        if response.status_code == 404:
+            return {}
+        if response.status_code >= 400:
+            raise LatchkeyGatewayClientError(
+                f"GET {url} returned {response.status_code}: {response.text.strip()}",
+            )
+        try:
+            payload = response.json()
+        except ValueError as e:
+            raise LatchkeyGatewayClientError(f"GET {url} returned non-JSON body: {e}") from e
+        if not isinstance(payload, dict):
+            raise LatchkeyGatewayClientError(f"GET {url} returned non-object JSON: {payload!r}")
+        rules = payload.get("rules")
+        if not isinstance(rules, list):
+            return {}
+        merged: dict[str, list[str]] = {}
+        for rule in rules:
+            if not isinstance(rule, dict):
+                continue
+            for scope_name, permissions in rule.items():
+                if not isinstance(scope_name, str) or not isinstance(permissions, list):
+                    continue
+                bucket = merged.setdefault(scope_name, [])
+                for permission in permissions:
+                    if isinstance(permission, str) and permission not in bucket:
+                        bucket.append(permission)
+        return {scope: tuple(permissions) for scope, permissions in merged.items()}
+
     def set_permission_rule(
         self,
         permissions_file_path: Path,
@@ -630,4 +682,38 @@ class LatchkeyGatewayClient(MutableModel):
         if response.status_code >= 400:
             raise LatchkeyGatewayClientError(
                 f"POST {url} returned {response.status_code}: {response.text.strip()}",
+            )
+
+    def delete_permission_rule(
+        self,
+        permissions_file_path: Path,
+        rule_key: str,
+    ) -> None:
+        """Remove the rule for ``rule_key`` from ``permissions_file_path``.
+
+        Wraps ``DELETE /permissions/rules?path=<...>&rule_key=<...>``.
+        The gateway reads the agent's permissions through the file's
+        symlink live, so the revocation takes effect on the agent's next
+        request (which then falls back to the deny-all baseline for that
+        scope).
+
+        A ``404`` -- the file or the rule is already gone -- is tolerated:
+        the caller's intent ("this scope must not be granted") is
+        satisfied either way. Any other non-2xx surfaces as
+        :class:`LatchkeyGatewayClientError`.
+        """
+        self.ensure_initialized()
+        url = f"{self._require_base_url().rstrip('/')}/permissions/rules"
+        params = {"path": str(permissions_file_path), "rule_key": rule_key}
+        try:
+            with self._one_shot_client() as client:
+                response = client.delete(url, params=params, headers=self._build_headers())
+        except httpx.HTTPError as e:
+            raise self._wrap_transport_error(e, f"DELETE {url} failed") from e
+        if response.status_code == 404:
+            logger.debug("DELETE {} rule_key={} returned 404; rule already gone", url, rule_key)
+            return
+        if response.status_code >= 400:
+            raise LatchkeyGatewayClientError(
+                f"DELETE {url} returned {response.status_code}: {response.text.strip()}",
             )

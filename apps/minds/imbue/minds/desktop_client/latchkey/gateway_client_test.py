@@ -81,6 +81,66 @@ def test_set_permission_rule_raises_on_non_2xx() -> None:
     assert "outside root" in str(exc_info.value)
 
 
+def test_get_permission_rules_flattens_and_merges() -> None:
+    """``get_permission_rules`` returns every scope's granted permissions, merging duplicates."""
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert "/permissions" in str(request.url)
+        return httpx.Response(
+            200,
+            json={
+                "rules": [
+                    {"slack-api": ["slack-read-all"]},
+                    {"github-rest-api": ["github-read-all"]},
+                    {"slack-api": ["slack-write-all", "slack-read-all"]},
+                ]
+            },
+        )
+
+    client = _build_client(_handler)
+    rules = client.get_permission_rules(Path("/perms/host-1/latchkey_permissions.json"))
+    assert rules["github-rest-api"] == ("github-read-all",)
+    assert rules["slack-api"] == ("slack-read-all", "slack-write-all")
+
+
+def test_get_permission_rules_treats_404_as_empty() -> None:
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(404, json={"error": "missing"})
+
+    client = _build_client(_handler)
+    assert client.get_permission_rules(Path("/perms/missing.json")) == {}
+
+
+def test_delete_permission_rule_sends_expected_url_and_tolerates_404() -> None:
+    captured: dict[str, object] = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["url"] = str(request.url)
+        return httpx.Response(404, json={"error": "gone"})
+
+    client = _build_client(_handler)
+    # 404 must not raise -- the intent ("scope must not be granted") is satisfied.
+    client.delete_permission_rule(Path("/perms/host-1/latchkey_permissions.json"), "slack-api")
+    assert captured["method"] == "DELETE"
+    url = str(captured["url"])
+    assert "/permissions/rules" in url
+    assert "rule_key=slack-api" in url
+
+
+def test_delete_permission_rule_raises_on_other_4xx() -> None:
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(403, json={"error": "outside root"})
+
+    client = _build_client(_handler)
+    with pytest.raises(LatchkeyGatewayClientError) as exc_info:
+        client.delete_permission_rule(Path("/etc/passwd"), "any")
+    assert "403" in str(exc_info.value)
+
+
 def test_delete_permission_request_tolerates_404() -> None:
     """Deletes that race a concurrent grant/deny succeed silently."""
 

@@ -3,6 +3,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from loguru import logger
+from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
 
@@ -50,12 +51,27 @@ class HostRecord(FrozenModel):
     is required. The SSH fields and config will be None since the host never started.
     """
 
+    # populate_by_name lets code construct records with the descriptive field
+    # name while the alias below keeps the persisted JSON key stable.
+    model_config = ConfigDict(populate_by_name=True)
+
     certified_host_data: CertifiedHostData = Field(
         frozen=True,
         description="The certified host data loaded from data.json",
     )
     ssh_host: str | None = Field(default=None, description="SSH hostname for connecting to the container")
-    ssh_port: int | None = Field(default=None, description="SSH port number")
+    # Persisted under the original "ssh_port" JSON key: host records live on the
+    # shared state volume and are read by other mngr clients (including older
+    # versions), so the on-disk name must not change even though the attribute
+    # is named for what it is -- the port as last observed from docker, which
+    # can go stale across a daemon restart and is reconciled against the live
+    # mapping on connect/discovery.
+    last_discovered_ssh_port: int | None = Field(
+        default=None,
+        validation_alias="ssh_port",
+        serialization_alias="ssh_port",
+        description="Host-mapped SSH port as last observed from docker (a hint; may be stale after a daemon restart)",
+    )
     ssh_host_public_key: str | None = Field(default=None, description="SSH host public key for verification")
     config: ContainerConfig | None = Field(default=None, description="Container configuration")
     container_id: str | None = Field(default=None, description="Docker container ID for reconnection")
@@ -91,7 +107,9 @@ class DockerHostStore(MutableModel):
         """Write a host record to the volume."""
         host_id = HostId(host_record.certified_host_data.host_id)
         path = self._host_record_path(host_id)
-        data = host_record.model_dump_json(indent=2)
+        # by_alias keeps the persisted JSON keys stable (e.g. "ssh_port") for
+        # older mngr clients sharing the same state volume.
+        data = host_record.model_dump_json(indent=2, by_alias=True)
         self.volume.write_files({path: data.encode("utf-8")})
         logger.trace("Wrote host record: {}", path)
         self._cache[host_id] = host_record

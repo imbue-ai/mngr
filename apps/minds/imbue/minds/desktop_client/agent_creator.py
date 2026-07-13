@@ -609,7 +609,7 @@ _DEFAULT_AGENT_NAME: Final[AgentName] = AgentName(SYSTEM_SERVICES_AGENT_NAME)
 
 # imbue_cloud create-path knobs forwarded as ``-b fast_mode=<value>``. ``require``
 # adopts an exact-attribute pre-baked pool host (fast); ``prevent`` leases any
-# available host and rebuilds it from the FCT Dockerfile (slow).
+# available host and rebuilds it from the DEFAULT_WORKSPACE_TEMPLATE Dockerfile (slow).
 _FAST_MODE_REQUIRE: Final[str] = "require"
 _FAST_MODE_PREVENT: Final[str] = "prevent"
 
@@ -718,10 +718,10 @@ def _build_mngr_create_command(
     mngr's ``--reuse`` matches on agent name without host scope.
 
     Secrets (``ANTHROPIC_API_KEY``, ``ANTHROPIC_BASE_URL``) are forwarded by
-    the FCT template's own ``pass_(host_)env`` declarations, not by inline
+    the default workspace template's own ``pass_(host_)env`` declarations, not by inline
     flags here -- ``run_mngr_create`` populates them in the subprocess env
     when needed and the template-declared forwards pick them up. Keeping the
-    forwarding declaration in FCT means the same template works for ``mngr
+    forwarding declaration in DEFAULT_WORKSPACE_TEMPLATE means the same template works for ``mngr
     create`` invocations from outside minds too.
 
     ``latchkey_env`` is the latchkey wiring (gateway URL, password, JWT,
@@ -742,7 +742,7 @@ def _build_mngr_create_command(
     )
     address = f"{_DEFAULT_AGENT_NAME}@{host_name}.{provider_instance}"
 
-    # The `/welcome` initial message is now baked into the FCT template's
+    # The `/welcome` initial message is now baked into the default workspace template's
     # [create_templates.main] section, so we no longer pass `--message` here.
     # ``--format jsonl`` makes mngr emit ``{"event": "created", "agent_id": ..., "host_id": ...}``
     # as the final stdout line; ``run_mngr_create`` parses that to recover
@@ -888,7 +888,7 @@ def _build_mngr_create_command(
                 mngr_command.extend(["-b", f"repo_branch_or_tag={imbue_cloud_branch_or_tag}"])
             # ``fast_mode`` selects the imbue_cloud create path: ``require``
             # adopts an exact-attribute pre-baked pool host (fast); ``prevent``
-            # leases any available host and rebuilds it from the FCT Dockerfile
+            # leases any available host and rebuilds it from the DEFAULT_WORKSPACE_TEMPLATE Dockerfile
             # (slow, but always works). minds tries ``require`` first and falls
             # back to ``prevent`` on FastPathUnavailableError (see
             # ``_run_imbue_cloud_create_with_fallback``).
@@ -1090,7 +1090,7 @@ def run_mngr_create(
     irrelevant.
 
     ``anthropic_api_key`` / ``anthropic_base_url`` are placed into the
-    subprocess env (not argv) so they don't show up in ``ps`` output; the FCT
+    subprocess env (not argv) so they don't show up in ``ps`` output; the DEFAULT_WORKSPACE_TEMPLATE
     template's own ``pass_(host_)env`` declarations cause mngr to forward them
     onto the host as appropriate.
 
@@ -1382,7 +1382,7 @@ class AgentCreator(MutableModel):
         frozen=True,
         description=(
             "Pre-baked Lima image create gate (issue 2306). When set and the create matches the "
-            "default workspace (Lima + default FCT repo + current release tag), the create gates on "
+            "default workspace (Lima + default workspace template repo + current release tag), the create gates on "
             "the verified image and points Lima at it; None disables the path."
         ),
     )
@@ -1840,7 +1840,7 @@ class AgentCreator(MutableModel):
                 log_queue.put("[minds] Creating workspace '{}' (mode: {})...".format(host_name, launch_mode.value))
 
                 # Pre-baked Lima image gate (issue 2306): for the default
-                # workspace (Lima + default FCT repo + current release tag) wait on
+                # workspace (Lima + default workspace template repo + current release tag) wait on
                 # the prefetched, verified image and point Lima at it. Returns None
                 # (build in-VM) for any non-default create or unpublished version;
                 # raises a retryable error if a published image can't be readied.
@@ -2010,7 +2010,7 @@ class AgentCreator(MutableModel):
         ``{"event": "error", "error_class": "FastPathUnavailableError"}`` line;
         minds matches on that ``error_class`` and retries with
         ``fast_mode=prevent``, which leases any available host and rebuilds it
-        from the FCT Dockerfile (full client-side setup). Any other failure
+        from the DEFAULT_WORKSPACE_TEMPLATE Dockerfile (full client-side setup). Any other failure
         (including a genuinely empty pool) propagates unchanged.
         """
         log_queue.put("[minds] Trying fast path (adopt a matching pre-baked pool host)...")

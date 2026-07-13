@@ -4,16 +4,24 @@ import pytest
 
 from imbue.mngr.api.providers import _is_backend_enabled
 from imbue.mngr.api.providers import get_all_provider_instances
+from imbue.mngr.api.providers import get_all_provider_instances_and_skipped
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.api.providers import reset_provider_instances
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.config.provider_config_registry import _provider_config_registry
+from imbue.mngr.errors import ProviderEmptyError
+from imbue.mngr.errors import ProviderNotAuthorizedError
 from imbue.mngr.errors import UnknownBackendError
+from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
+from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.config import LocalProviderConfig
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.providers.registry import _backend_registry
 from imbue.mngr.providers.registry import get_backend
 from imbue.mngr.providers.registry import list_backends
 
@@ -307,3 +315,120 @@ def test_get_all_provider_instances_raises_for_failing_provider(
     mngr_ctx = MngrContext(config=config, pm=temp_mngr_ctx.pm, profile_dir=temp_mngr_ctx.profile_dir)
     with pytest.raises(UnknownBackendError):
         get_all_provider_instances(mngr_ctx)
+
+
+_UNAVAILABLE_AT_CONSTRUCTION_BACKEND_NAME = ProviderBackendName("test-unavailable-at-construction-backend")
+_EMPTY_AT_CONSTRUCTION_BACKEND_NAME = ProviderBackendName("test-empty-at-construction-backend")
+
+
+class _UnavailableAtConstructionBackend(ProviderBackendInterface):
+    """Backend whose construction always raises ``ProviderNotAuthorizedError``."""
+
+    @staticmethod
+    def get_name() -> ProviderBackendName:
+        return _UNAVAILABLE_AT_CONSTRUCTION_BACKEND_NAME
+
+    @staticmethod
+    def get_description() -> str:
+        return "Test backend that reports itself unauthorized at construction time"
+
+    @staticmethod
+    def get_config_class() -> type[ProviderInstanceConfig]:
+        return ProviderInstanceConfig
+
+    @staticmethod
+    def get_build_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def get_start_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def build_provider_instance(
+        name: ProviderInstanceName,
+        config: ProviderInstanceConfig,
+        mngr_ctx: MngrContext,
+    ) -> ProviderInstanceInterface:
+        del config, mngr_ctx
+        raise ProviderNotAuthorizedError(provider_name=name, reason="simulated missing credentials from test")
+
+
+class _EmptyAtConstructionBackend(ProviderBackendInterface):
+    """Backend whose construction always raises ``ProviderEmptyError``."""
+
+    @staticmethod
+    def get_name() -> ProviderBackendName:
+        return _EMPTY_AT_CONSTRUCTION_BACKEND_NAME
+
+    @staticmethod
+    def get_description() -> str:
+        return "Test backend that reports itself empty at construction time"
+
+    @staticmethod
+    def get_config_class() -> type[ProviderInstanceConfig]:
+        return ProviderInstanceConfig
+
+    @staticmethod
+    def get_build_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def get_start_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def build_provider_instance(
+        name: ProviderInstanceName,
+        config: ProviderInstanceConfig,
+        mngr_ctx: MngrContext,
+    ) -> ProviderInstanceInterface:
+        del config, mngr_ctx
+        raise ProviderEmptyError(provider_name=name, reason="simulated empty backend from test")
+
+
+def test_get_all_provider_instances_and_skipped_reports_construction_skips(
+    temp_mngr_ctx: MngrContext, mngr_test_prefix: str
+) -> None:
+    """Providers skipped as unauthorized/unavailable or empty at construction are
+    reported in the skipped list (with the empty/unavailable distinction), while
+    constructible providers are returned as instances."""
+    _backend_registry[_UNAVAILABLE_AT_CONSTRUCTION_BACKEND_NAME] = _UnavailableAtConstructionBackend
+    _provider_config_registry[_UNAVAILABLE_AT_CONSTRUCTION_BACKEND_NAME] = ProviderInstanceConfig
+    _backend_registry[_EMPTY_AT_CONSTRUCTION_BACKEND_NAME] = _EmptyAtConstructionBackend
+    _provider_config_registry[_EMPTY_AT_CONSTRUCTION_BACKEND_NAME] = ProviderInstanceConfig
+    try:
+        unauthorized_name = ProviderInstanceName("unauthorized-provider")
+        empty_name = ProviderInstanceName("empty-provider")
+        config = MngrConfig(
+            default_host_dir=temp_mngr_ctx.config.default_host_dir,
+            prefix=mngr_test_prefix,
+            providers={
+                unauthorized_name: ProviderInstanceConfig(backend=_UNAVAILABLE_AT_CONSTRUCTION_BACKEND_NAME),
+                empty_name: ProviderInstanceConfig(backend=_EMPTY_AT_CONSTRUCTION_BACKEND_NAME),
+            },
+        )
+        mngr_ctx = MngrContext(config=config, pm=temp_mngr_ctx.pm, profile_dir=temp_mngr_ctx.profile_dir)
+
+        providers, skipped = get_all_provider_instances_and_skipped(mngr_ctx)
+
+        provider_names = {str(p.name) for p in providers}
+        assert "local" in provider_names
+        assert str(unauthorized_name) not in provider_names
+        assert str(empty_name) not in provider_names
+
+        # The registered test backends also auto-enumerate as implicit default
+        # instances (named after the backend), which are skipped too -- assert on
+        # the two configured instances rather than the exact skipped set.
+        skipped_by_name = {str(s.provider_name): s for s in skipped}
+        assert {str(unauthorized_name), str(empty_name)}.issubset(set(skipped_by_name))
+        assert skipped_by_name[str(unauthorized_name)].is_empty is False
+        assert skipped_by_name[str(unauthorized_name)].error_type_name == "ProviderNotAuthorizedError"
+        assert "simulated missing credentials from test" in skipped_by_name[str(unauthorized_name)].error_message
+        assert skipped_by_name[str(empty_name)].is_empty is True
+        assert skipped_by_name[str(empty_name)].error_type_name == "ProviderEmptyError"
+    finally:
+        del _backend_registry[_UNAVAILABLE_AT_CONSTRUCTION_BACKEND_NAME]
+        del _provider_config_registry[_UNAVAILABLE_AT_CONSTRUCTION_BACKEND_NAME]
+        del _backend_registry[_EMPTY_AT_CONSTRUCTION_BACKEND_NAME]
+        del _provider_config_registry[_EMPTY_AT_CONSTRUCTION_BACKEND_NAME]
