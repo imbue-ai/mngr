@@ -25,6 +25,8 @@ from imbue.imbue_common.event_envelope import EventSource
 from imbue.imbue_common.event_envelope import IsoTimestamp
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
+from imbue.minds.desktop_client.forward_cli import ForwardSubprocessConfig
+from imbue.minds.desktop_client.forward_cli import _build_forward_command
 from imbue.minds.desktop_client.forward_cli import _redact_secrets
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
@@ -677,6 +679,38 @@ def test_start_before_attach_raises(consumer: EnvelopeStreamConsumer) -> None:
     cg = ConcurrencyGroup(name="forward-cli-test")
     with cg, pytest.raises(RuntimeError, match="start called before attach"):
         consumer.start(cg)
+
+
+# --- _build_forward_command ----------------------------------------------
+
+
+def test_build_forward_command_includes_use_http2_flag() -> None:
+    """The spawned argv always carries --use-http2 so the proxy serves TLS.
+
+    minds always runs the proxy with TLS + HTTP/2, matching the https/wss URLs
+    the rest of minds builds, so a client that expects https reaches an https
+    proxy.
+    """
+    config = ForwardSubprocessConfig(service="system_interface")
+    command = _build_forward_command(config, preauth_cookie="a-secret")
+    assert "--use-http2" in command
+    # Core flags are always present alongside the TLS flag.
+    assert command[:2] == [config.mngr_binary, "forward"]
+    assert "--observe-via-file" in command
+    assert command[command.index("--service") + 1] == "system_interface"
+    assert command[command.index("--preauth-cookie") + 1] == "a-secret"
+
+
+def test_build_forward_command_threads_includes_and_reverse_specs() -> None:
+    """Agent-include and reverse specs are expanded into repeated flags."""
+    config = ForwardSubprocessConfig(
+        agent_include=("has(agent.labels.is_primary)", "agent.name == 'x'"),
+        reverse_specs=("8420:8420",),
+    )
+    command = _build_forward_command(config, preauth_cookie="s")
+    includes = [command[i + 1] for i, tok in enumerate(command) if tok == "--agent-include"]
+    assert includes == ["has(agent.labels.is_primary)", "agent.name == 'x'"]
+    assert command[command.index("--reverse") + 1] == "8420:8420"
 
 
 # --- _redact_secrets ------------------------------------------------------

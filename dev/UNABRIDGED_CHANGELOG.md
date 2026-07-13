@@ -4,6 +4,16 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-11
+
+Rename the forever-claude-template repo to default-workspace-template across the monorepo (justfile, CI workflows, scripts, and Claude skills), applied mechanically by the new rename tool below. The GitHub repo rename itself happens out of band and must precede merging this PR.
+
+Add `scripts/rename_template_repo.py`, a migration tool that renames the forever-claude-template repo to a new name given on the command line. All case forms (kebab, snake, SNAKE_UPPER, Title, Pascal) are derived from the `--new-name` input; `--new-abbreviation` sets the shorthand that replaces `fct`/`FCT`, applied context-sensitively (snake_case next to `_` and for bare identifiers, kebab-case next to `-` or `:` when followed by a tag, CamelCase inside identifiers like `FctTemplateRef`). A cleanup pass collapses word duplication the rename introduces (e.g. `DEFAULT_DEFAULT_...` and "the WORKSPACE_TEMPLATE template") and fixes a/an article agreement.
+
+Dry-run by default; `--apply` edits in place and is idempotent, `--check` verifies no live references remain (including CamelCase-embedded forms), `--show-diff` prints unified diffs. Renames whose target already exists (an old-name file reintroduced by merging a pre-rename branch) drop the old file when contents match and warn otherwise; symlink targets embedding the old name are rewritten. Historical records (changelog entries, consolidated CHANGELOG files, `specs/`, `blueprint/`), vendored trees, and lockfiles (`uv.lock`, `pnpm-lock.yaml`, `package-lock.json`) are reported but never rewritten.
+
+Add `scripts/migrate_state_fct_to_default_workspace_template.sh`: developer-local state migration (stale `.external_worktrees` removal, template checkout dir rename, git remote URLs, `apps/minds/.env` var rename, `__pycache__` sweep). Dry-run flag, idempotent, reports anything it is unsure about instead of touching it.
+
 ## 2026-07-10
 
 Added `specs/discovery-log-cleanup.md`: a plan for cleaning up discovery logging and provider treatment in the Minds app. It covers once-per-process suppression of repeated provider-level discovery-error warnings in the three stream consumers, startup snapshots from `mngr observe --discovery-only` for providers skipped as unauthorized/unavailable/empty, always writing the `[providers.aws-<region>]` blocks regardless of AWS credentials (preserving `is_enabled`), and bouncing the observe child when the bootstrap's settings write changes the provider set.
