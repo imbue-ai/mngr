@@ -620,6 +620,132 @@ mngr imbue_cloud tunnels auth set [OPTIONS] TUNNEL_NAME POLICY_JSON
 | `--service` | text | If set, set the policy for this service instead of the tunnel default | None |
 | `--connector-url` | text | Override connector URL | None |
 
+## mngr imbue_cloud sync
+
+**Usage:**
+
+```text
+mngr imbue_cloud sync [OPTIONS] COMMAND [ARGS]...
+```
+**Options:**
+
+
+## mngr imbue_cloud sync records
+
+**Usage:**
+
+```text
+mngr imbue_cloud sync records [OPTIONS] COMMAND [ARGS]...
+```
+**Options:**
+
+
+## mngr imbue_cloud sync records pull
+
+**Usage:**
+
+```text
+mngr imbue_cloud sync records pull [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
+## mngr imbue_cloud sync records push
+
+**Usage:**
+
+```text
+mngr imbue_cloud sync records push [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
+## mngr imbue_cloud sync scrub-secrets
+
+**Usage:**
+
+```text
+mngr imbue_cloud sync scrub-secrets [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
+## mngr imbue_cloud sync bundle
+
+**Usage:**
+
+```text
+mngr imbue_cloud sync bundle [OPTIONS] COMMAND [ARGS]...
+```
+**Options:**
+
+
+## mngr imbue_cloud sync bundle pull
+
+**Usage:**
+
+```text
+mngr imbue_cloud sync bundle pull [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
+## mngr imbue_cloud sync bundle push
+
+**Usage:**
+
+```text
+mngr imbue_cloud sync bundle push [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
+## mngr imbue_cloud sync bundle delete
+
+**Usage:**
+
+```text
+mngr imbue_cloud sync bundle delete [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
 ## mngr imbue_cloud admin
 
 **Usage:**

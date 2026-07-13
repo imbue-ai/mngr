@@ -35,6 +35,8 @@ from imbue.mngr_imbue_cloud.data_types import R2BucketInfo
 from imbue.mngr_imbue_cloud.data_types import R2KeyInfo
 from imbue.mngr_imbue_cloud.data_types import R2KeyMaterial
 from imbue.mngr_imbue_cloud.data_types import ServiceInfo
+from imbue.mngr_imbue_cloud.data_types import SyncKeyBundle
+from imbue.mngr_imbue_cloud.data_types import SyncWorkspaceRecord
 from imbue.mngr_imbue_cloud.data_types import TunnelInfo
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketError
@@ -46,6 +48,8 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudKeyError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudPaidListError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudSyncConflictError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudSyncError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudTunnelError
 
 DEFAULT_TIMEOUT_SECONDS = 30.0
@@ -718,6 +722,104 @@ class ImbueCloudConnectorClient(MutableModel):
             timeout=KEY_OP_TIMEOUT_SECONDS,
         )
         self._check_bucket(response)
+
+    # ------------------------------------------------------------------
+    # Workspace sync (records + account key bundle)
+    # ------------------------------------------------------------------
+
+    def list_sync_records(self, access_token: SecretStr) -> list[SyncWorkspaceRecord]:
+        response = self._send(
+            "GET",
+            self._url("/sync/records"),
+            exc_cls=ImbueCloudSyncError,
+            headers=self._bearer(access_token),
+            timeout=self.timeout_seconds,
+        )
+        body = self._check(response, ImbueCloudSyncError)
+        records = body.get("records", [])
+        return [SyncWorkspaceRecord.model_validate(entry) for entry in records if isinstance(entry, dict)]
+
+    def put_sync_record(self, access_token: SecretStr, record: SyncWorkspaceRecord) -> SyncWorkspaceRecord:
+        """Push one record (CAS on revision); returns the stored row after the write.
+
+        Raises :class:`ImbueCloudSyncConflictError` on a 409, carrying the
+        server's current row for a revision conflict so the caller can merge
+        and retry.
+        """
+        response = self._send(
+            "PUT",
+            self._url(f"/sync/records/{record.host_id}"),
+            exc_cls=ImbueCloudSyncError,
+            headers=self._bearer(access_token),
+            json=record.model_dump(mode="json"),
+            timeout=self.timeout_seconds,
+        )
+        if response.status_code == 409:
+            detail = _detail_from_response(response)
+            stored = self._parse_conflict_stored_record(response)
+            raise ImbueCloudSyncConflictError(detail, stored)
+        body = self._check(response, ImbueCloudSyncError)
+        return SyncWorkspaceRecord.model_validate(body)
+
+    def _parse_conflict_stored_record(self, response: httpx.Response) -> dict[str, object] | None:
+        """Extract the ``detail.stored`` row from a 409 record-push response, if present."""
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            logger.warning("Could not parse the 409 conflict body as JSON: {}", exc)
+            return None
+        detail = payload.get("detail") if isinstance(payload, dict) else None
+        if not isinstance(detail, dict):
+            return None
+        stored = detail.get("stored")
+        return stored if isinstance(stored, dict) else None
+
+    def scrub_sync_secrets(self, access_token: SecretStr) -> int:
+        """Strip encrypted_secrets from all the account's records; returns how many were scrubbed."""
+        response = self._send(
+            "POST",
+            self._url("/sync/scrub-secrets"),
+            exc_cls=ImbueCloudSyncError,
+            headers=self._bearer(access_token),
+            timeout=self.timeout_seconds,
+        )
+        body = self._check(response, ImbueCloudSyncError)
+        return int(body.get("scrubbed", 0))
+
+    def get_key_bundle(self, access_token: SecretStr) -> SyncKeyBundle | None:
+        """Fetch the account's password-wrapped key bundle, or None when none is stored."""
+        response = self._send(
+            "GET",
+            self._url("/sync/bundle"),
+            exc_cls=ImbueCloudSyncError,
+            headers=self._bearer(access_token),
+            timeout=self.timeout_seconds,
+        )
+        if response.status_code == 404:
+            return None
+        body = self._check(response, ImbueCloudSyncError)
+        return SyncKeyBundle.model_validate(body)
+
+    def put_key_bundle(self, access_token: SecretStr, bundle: SyncKeyBundle) -> None:
+        response = self._send(
+            "PUT",
+            self._url("/sync/bundle"),
+            exc_cls=ImbueCloudSyncError,
+            headers=self._bearer(access_token),
+            json=bundle.model_dump(mode="json"),
+            timeout=self.timeout_seconds,
+        )
+        self._check(response, ImbueCloudSyncError)
+
+    def delete_key_bundle(self, access_token: SecretStr) -> None:
+        response = self._send(
+            "DELETE",
+            self._url("/sync/bundle"),
+            exc_cls=ImbueCloudSyncError,
+            headers=self._bearer(access_token),
+            timeout=self.timeout_seconds,
+        )
+        self._check(response, ImbueCloudSyncError)
 
     # ------------------------------------------------------------------
     # Paid lists (admin-key authenticated)
