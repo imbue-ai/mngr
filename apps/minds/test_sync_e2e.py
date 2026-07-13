@@ -430,6 +430,22 @@ def _set_master_password_via_ui(page: Page, origin: str, new_password: str) -> N
     logger.info("Master password {} via settings", "cleared" if new_password == "" else "updated")
 
 
+def _goto_landing(page: Page, origin: str) -> None:
+    """Open the landing page, clicking through the first-run consent screen if it appears.
+
+    A fresh install's first visit to ``/`` after sign-in shows the
+    error-reporting consent page (the real UX); a user clicks Continue. The
+    submit's redirect can be swallowed like other in-page navigations, so the
+    landing is loaded explicitly afterwards.
+    """
+    page.goto(f"{origin}/", wait_until="domcontentloaded")
+    if page.query_selector("#consent-continue") is not None:
+        logger.info("Dismissing the first-run error-reporting consent screen")
+        page.click("#consent-continue")
+        page.wait_for_timeout(1_000)
+        page.goto(f"{origin}/", wait_until="domcontentloaded")
+
+
 def _landing_backup_badge_text(page: Page, agent_id: str) -> str | None:
     selector = f'[data-agent-id="{agent_id}"] .landing-backup-badge'
     if page.query_selector(selector) is None:
@@ -441,7 +457,7 @@ def _wait_for_backed_up_badge(page: Page, origin: str, agent_id: str) -> None:
     """Reload the landing page until this workspace's badge reports a completed backup."""
 
     def backed_up() -> bool | None:
-        page.goto(f"{origin}/", wait_until="domcontentloaded")
+        _goto_landing(page, origin)
         # Give the badge JS a beat to fetch per-workspace backup status.
         page.wait_for_timeout(2_000)
         badge = _landing_backup_badge_text(page, agent_id)
@@ -472,7 +488,7 @@ def _landing_state_snapshot(page: Page) -> str:
 
 def _wait_for_unlock_banner(page: Page, origin: str) -> None:
     def banner_present() -> bool | None:
-        page.goto(f"{origin}/", wait_until="domcontentloaded")
+        _goto_landing(page, origin)
         return True if page.query_selector("#sync-unlock-banner") is not None else None
 
     try:
@@ -491,7 +507,7 @@ def _unlock_via_banner(page: Page, origin: str, password: str, expect_success: b
     if expect_success:
 
         def banner_gone() -> bool | None:
-            page.goto(f"{origin}/", wait_until="domcontentloaded")
+            _goto_landing(page, origin)
             return True if page.query_selector("#sync-unlock-banner") is None else None
 
         _wait_until("the unlock banner to clear after unlocking", 60, banner_gone)
@@ -505,7 +521,7 @@ def _assert_remote_row_visible(page: Page, origin: str, agent_id: str) -> None:
     """The workspace renders as a greyed other-device row with a remove control."""
 
     def remote_row() -> bool | None:
-        page.goto(f"{origin}/", wait_until="domcontentloaded")
+        _goto_landing(page, origin)
         card = page.query_selector(f'[data-agent-id="{agent_id}"]')
         if card is None:
             return None
@@ -528,7 +544,7 @@ def _download_backup_zip(page: Page, origin: str, agent_id: str, dest_dir: Path)
     link_selector = f'[data-agent-id="{agent_id}"] .landing-backup-download'
 
     def link_visible() -> bool | None:
-        page.goto(f"{origin}/", wait_until="domcontentloaded")
+        _goto_landing(page, origin)
         page.wait_for_timeout(2_000)
         link = page.query_selector(link_selector)
         if link is None:
@@ -834,7 +850,7 @@ def test_master_password_lifecycle_rewraps_scrubs_and_restores(
             assert record_scrubbed is not None
             assert record_scrubbed.display_name == record_one.display_name, "Metadata must survive the scrub"
             # This hosting install keeps its key: the landing shows no unlock banner.
-            page.goto(f"{origin}/", wait_until="domcontentloaded")
+            _goto_landing(page, origin)
             assert page.query_selector("#sync-unlock-banner") is None, (
                 "Clearing the password must not lock the device that holds the key"
             )
