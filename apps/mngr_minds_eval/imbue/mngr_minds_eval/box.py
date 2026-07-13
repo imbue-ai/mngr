@@ -49,6 +49,24 @@ def port_of(container: str) -> str:
     return port
 
 
+def print_view_urls(container: str) -> None:
+    """How to actually look at the workspaces: the box (Docker, on this machine) serves the Minds
+    dashboard, and its mngr-forward proxy serves each Modal workspace's UI -- both on localhost.
+    The proxy has its own auth, so the one-time login URL must be visited once per box."""
+    if not is_running(container):
+        return
+    ui = _run(["docker", "exec", container, "printenv", "MINDS_BARE_PORT"]).stdout.strip()
+    forward = _run(["docker", "exec", container, "printenv", "MINDS_FORWARD_PORT"]).stdout.strip()
+    if not ui:
+        return
+    print("\n  dashboard:       http://localhost:{}".format(ui), flush=True)
+    if forward:
+        login = _forward_login(container, int(forward))
+        if login:
+            print("  workspace login: {}".format(login), flush=True)
+            print("                   ^ visit once, then click the workspace in the dashboard", flush=True)
+
+
 def ensure(container: str, mngr_branch: str, minds_env: str = "staging") -> str:
     """Build + boot the box (idempotent: reuses it if already running). Returns its dashboard port."""
     if is_running(container):

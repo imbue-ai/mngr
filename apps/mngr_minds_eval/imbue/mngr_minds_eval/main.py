@@ -55,7 +55,12 @@ def _exec_in_box(container: str, mngr_branch: str, argv: list[str], personas: Pa
         "-w", "/work/mngr", container,
         "uv", "run", "--package", "mngr-minds-eval", "minds-evals", *argv,
     ]
-    sys.exit(subprocess.run(command).returncode)
+    returncode = subprocess.run(command).returncode
+    if returncode == 0:
+        # The workspaces run on Modal, but you view them through THIS box (Docker, on this machine):
+        # its dashboard + mngr-forward proxy, both on localhost.
+        box_mod.print_view_urls(container)
+    sys.exit(returncode)
 
 
 def _utc_stamp() -> str:
