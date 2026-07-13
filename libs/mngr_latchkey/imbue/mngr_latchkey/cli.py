@@ -631,26 +631,20 @@ def _run_forward_supervisor(
         daemon=True,
         is_checked=False,
     )
-    # Supervise the shared gateway subprocess: if it dies mid-session (leaving
-    # discovery + reverse tunnels up, so minds' discovery-freshness watchdog never
-    # notices), respawn it on its original port before agent traffic stays broken.
-    mngr_ctx.concurrency_group.start_new_thread(
-        target=_run_gateway_health_check_loop,
-        args=(
-            shutdown_event,
-            latchkey,
-            mngr_ctx.concurrency_group,
-            _GATEWAY_HEALTH_CHECK_INTERVAL_SECONDS,
-        ),
-        name="latchkey-forward-gateway-health-check",
-        daemon=True,
-        is_checked=False,
-    )
     logger.info("Waiting for discovery events; send SIGINT or SIGTERM to shut down, SIGHUP to refresh providers.")
     try:
-        # Block until shutdown is signalled. The signal handler sets the
-        # event from any thread, including the main thread itself.
-        shutdown_event.wait()
+        # Block until shutdown is signalled, meanwhile supervising the shared gateway
+        # subprocess: if it dies mid-session (leaving discovery + reverse tunnels up,
+        # so minds' discovery-freshness watchdog never notices), respawn it on its
+        # original port before agent traffic stays broken. This runs on the main
+        # thread, which would otherwise just block on ``shutdown_event``, so it needs
+        # no thread of its own; the loop returns as soon as shutdown is signalled.
+        _run_gateway_health_check_loop(
+            shutdown_event=shutdown_event,
+            latchkey=latchkey,
+            concurrency_group=mngr_ctx.concurrency_group,
+            health_check_interval_seconds=_GATEWAY_HEALTH_CHECK_INTERVAL_SECONDS,
+        )
     finally:
         logger.info("Shutting down: terminating mngr observe, reverse tunnels, and shared gateway.")
         # Wake the SIGHUP watcher so it observes ``shutdown_event`` and exits;
