@@ -258,6 +258,15 @@ def build_create_argv(agent_name: str, skill_dir: str, mngr_path: str = "mngr") 
         # out of the box regardless of the user's agent_types.headless_claude config.
         "-S",
         f"agent_types.{DONATE_AGENT_TYPE}.isolate_local_config_dir=false",
+        # Forward the long-lived OAuth token (from the keychain stash or the
+        # caller's env; see _donation_agent_env) into the agent's environment.
+        # `mngr create` sanitizes the agent env and only forwards vars named via
+        # --pass-env, so without this the headless claude agent never sees the
+        # token and fails "Not logged in" even though donate put it in the
+        # subprocess env. A no-op when the var isn't set (resolve_env_vars skips
+        # names not in os.environ), so it's safe unconditionally.
+        "--pass-env",
+        "CLAUDE_CODE_OAUTH_TOKEN",
         "--message",
         build_donation_message(skill_dir),
         "--",
