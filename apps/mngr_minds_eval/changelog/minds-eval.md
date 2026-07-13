@@ -39,3 +39,7 @@
 - Removed the user-facing `self-check` subcommand; its asserts are now a real unit test (`main_test.py`). Clarified that `clean-modal-workspaces` is identified by `--name` alone (the Modal env); `--mngr-branch` is only a fallback to build a box when the eval's box isn't already running.
 
 - launch now creates each case via workspace.create_workspace instead of its own build_create_payload, so the create payload shape is defined in exactly one place. create_workspace returns the agent id and raises minds_client.CreateError (callers decide abort vs continue).
+
+- Box + Modal env keying reworked: container is minds-box-<branch>-<sha> (encodes the exact mngr, so reuse is idempotent and never stale; the Dockerfile now checks out that exact SHA), and the Modal env is the branch alone (stable for clean/list). restore rebuilds at the batch's recorded mngr_sha -> the exact mngr.
+
+- launch now takes a single `--config eval_config.json` ({name, turns, mngr_branch, fct_branch?, fct_repo?, personas}) stored verbatim in S3 as the batch config. `workspace` renamed to `make-modal-workspace` (Modal is fixed; the `compute` knob is gone). The per-clone metadata file is renamed config.json -> test_case_metadata.json. sample-personas.json -> sample-eval-config.json.

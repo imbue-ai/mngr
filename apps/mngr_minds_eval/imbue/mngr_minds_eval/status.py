@@ -16,7 +16,7 @@ def list_batches() -> None:
     for batch in batches:
         config = s3_store.get_json(client, env["MINDS_EVAL_BUCKET"], "{}/{}".format(batch, s3_store.BATCH_CONFIG_NAME))
         _, stamp = s3_store.split_batch(batch)
-        cases = len(config.get("cases", [])) if config else 0
+        cases = len(config.get("personas", [])) if config else 0
         print("{:<40} {:>6}  {}".format(batch, cases or "?", stamp))
     print("\ninspect a batch:  minds-evals inspect <BATCH>")
 
@@ -30,14 +30,15 @@ def inspect(batch: str) -> None:
         print("no such batch: {} (try: minds-evals list-batches)".format(batch))
         return
 
-    eval_name = config.get("eval_name", "")
-    num_turns = config.get("num_turns", "?")
-    print("batch {}   turns: {}   compute: {}".format(batch, num_turns, config.get("compute", "?")))
+    eval_name = config.get("name") or s3_store.split_batch(batch)[0]
+    num_turns = config.get("turns", "?")
+    print("batch {}   turns: {}   mngr: {}@{}".format(
+        batch, num_turns, config.get("mngr_branch", "?"), (config.get("mngr_sha") or "")[:12]))
     print("{:<26} {:<12} {:>10}  {}".format("CASE", "STATE", "TURNS", "TRANSCRIPT"))
 
     finished = 0
-    for case in config.get("cases", []):
-        case_id = case["id"]
+    for case in config.get("personas", []):
+        case_id = str(case.get("id") or "")
         prefix = s3_store.case_prefix(batch, eval_name, case_id)
         state = s3_store.get_json(client, bucket, "{}/{}".format(prefix, s3_store.STATE_NAME))
         if state is None:
@@ -49,7 +50,7 @@ def inspect(batch: str) -> None:
         has_transcript = _exists(client, bucket, "{}/{}".format(prefix, s3_store.TRANSCRIPT_KEY))
         print("{:<26} {:<12} {:>10}  {}".format(case_id[:26], test_state, turns, "yes" if has_transcript else "-"))
 
-    total = len(config.get("cases", []))
+    total = len(config.get("personas", []))
     print("\n{}/{} finished".format(finished, total))
 
 

@@ -1,0 +1,33 @@
+{
+  "name": "web1",
+  "turns": 4,
+  "mngr_branch": "minds-eval",
+  "fct_branch": "minds-eval-autosend",
+  "personas": [
+    {
+      "id": "todo-app",
+      "persona": "Non-technical founder who wants a working web app fast.",
+      "first_prompt": "Build me a simple to-do list web app: add tasks, mark them complete, delete them, and keep them saved in the browser between reloads. Then tell me how to open it."
+    },
+    {
+      "id": "landing-page",
+      "persona": "Solo founder launching a product.",
+      "first_prompt": "Build a clean single-page marketing site for a product called 'Focus' with a hero headline, three feature cards, and an email signup form. Show me how to run it locally."
+    },
+    {
+      "id": "weather-dashboard",
+      "persona": "Hobbyist who likes little dashboards.",
+      "first_prompt": "Build a small weather dashboard web page where I type a city and it shows a mocked 5-day forecast as cards. Plain HTML/CSS/JS, no build step."
+    },
+    {
+      "id": "markdown-notes",
+      "persona": "Writer who wants a simple notes tool.",
+      "first_prompt": "Build a single-page markdown notes app: a textarea on the left, a live-rendered HTML preview on the right, and notes saved in localStorage."
+    },
+    {
+      "id": "url-shortener",
+      "persona": "Junior dev learning full-stack basics.",
+      "first_prompt": "Build a tiny URL shortener web app using only Python's standard library for the backend plus a simple HTML form. Show me how to run and test it."
+    }
+  ]
+}

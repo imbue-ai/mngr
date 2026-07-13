@@ -40,7 +40,7 @@ def restore(batch: str, case_name: str, message_index: int, *, port: str, restic
     config = s3_store.get_json(client, bucket, "{}/{}".format(batch, s3_store.BATCH_CONFIG_NAME))
     if config is None:
         raise SystemExit("no such batch: {}".format(batch))
-    eval_name = config.get("eval_name", "")
+    eval_name = config.get("name") or s3_store.split_batch(batch)[0]
     prefix = s3_store.case_prefix(batch, eval_name, case_name)
     repo_url = s3_store.restic_repo_url(env, prefix)
     # The batch config carries the restic password launch generated (we own it -- see launch_batch).
@@ -83,7 +83,7 @@ def restore(batch: str, case_name: str, message_index: int, *, port: str, restic
     print(">> creating modal workspace {} from {}".format(host_name, code_dir), flush=True)
     try:
         agent_id = workspace.create_workspace(
-            port=port, fct_link=str(code_dir), name=host_name, compute="modal",
+            port=port, fct_link=str(code_dir), name=host_name,
             ai_provider="subscription", backup_provider="configure_later", quiet=True,
         )
     except minds_client.CreateError as exc:

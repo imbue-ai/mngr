@@ -6,7 +6,7 @@ from pathlib import Path
 
 from imbue.mngr_minds_eval import s3_store
 from imbue.mngr_minds_eval import workspace
-from imbue.mngr_minds_eval.launch import load_cases
+from imbue.mngr_minds_eval.launch import load_config, normalize_cases
 
 _ENV = {"AWS_ACCESS_KEY_ID": "AK", "AWS_SECRET_ACCESS_KEY": "SK", "AWS_DEFAULT_REGION": "us-east-1",
         "MINDS_EVAL_BUCKET": "b"}
@@ -23,7 +23,7 @@ def test_s3_prefixes() -> None:
 def test_launch_case_payload_is_modal_apikey_configure_later() -> None:
     # The payload launch builds per case (via workspace.build_payload).
     payload = workspace.build_payload(
-        fct_link="/work/clones/todo", fct_branch="", name="EVAL-web1-CASE-todo", compute="modal",
+        fct_link="/work/clones/todo", fct_branch="", name="EVAL-web1-CASE-todo",
         ai_provider="api_key", anthropic_key="sk-ant", backup_provider="configure_later",
     )
     assert payload["launch_mode"] == "MODAL"
@@ -33,14 +33,26 @@ def test_launch_case_payload_is_modal_apikey_configure_later() -> None:
     assert payload["branch"] == "" and payload["git_url"] == "/work/clones/todo"
 
 
-def test_load_cases_ok_and_rejects_empty_prompt() -> None:
+def test_normalize_cases_ok_and_rejects_empty_prompt() -> None:
+    assert normalize_cases([{"id": "a", "persona": "p", "first_prompt": "go"}]) == \
+        [{"id": "a", "persona": "p", "first_prompt": "go"}]
+    try:
+        normalize_cases([{"id": "a", "first_prompt": " "}])
+        raise AssertionError("expected ValueError on empty first_prompt")
+    except ValueError:
+        pass
+
+
+def test_load_config_validates_required_keys() -> None:
     with tempfile.TemporaryDirectory() as tmp:
-        path = Path(tmp) / "p.json"
-        path.write_text(json.dumps([{"id": "a", "persona": "p", "first_prompt": "go"}]))
-        assert load_cases(path) == [{"id": "a", "persona": "p", "first_prompt": "go"}]
-        path.write_text(json.dumps([{"id": "a", "first_prompt": " "}]))
+        path = Path(tmp) / "eval.json"
+        path.write_text(json.dumps({"name": "web1", "turns": 3, "mngr_branch": "minds-eval",
+                                     "personas": [{"id": "a", "first_prompt": "go"}]}))
+        config = load_config(path)
+        assert config["name"] == "web1" and config["turns"] == 3
+        path.write_text(json.dumps({"name": "web1", "turns": 3, "personas": []}))  # missing mngr_branch
         try:
-            load_cases(path)
-            raise AssertionError("expected ValueError on empty first_prompt")
-        except ValueError:
+            load_config(path)
+            raise AssertionError("expected SystemExit on missing mngr_branch")
+        except SystemExit:
             pass

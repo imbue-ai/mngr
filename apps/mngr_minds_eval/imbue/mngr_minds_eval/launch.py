@@ -1,6 +1,6 @@
 """Launch an eval batch: prepare one FCT clone per case, then create one workspace per case.
 
-Each case's clone carries a scripts/config.json with the S3 target, the case's restic repo +
+Each case's clone carries a scripts/test_case_metadata.json with the S3 target, the case's restic repo +
 password, and the scoped AWS creds; backup_provider is configure_later and the in-sandbox worker
 drives restic itself. The run self-completes and everything is retrievable from S3.
 """
@@ -8,6 +8,7 @@ drives restic itself. The run self-completes and everything is retrievable from 
 from __future__ import annotations
 
 import json
+import os
 import secrets
 import shutil
 import subprocess
@@ -43,19 +44,32 @@ _post_json = minds_client.post_json
 _get_json = minds_client.get_json
 
 
-def load_cases(personas_path: Path) -> list[dict]:
-    raw = json.loads(personas_path.read_text())
-    cases = raw["personas"] if isinstance(raw, dict) else raw
-    if not isinstance(cases, list) or not cases:
-        raise ValueError('personas file must be a non-empty list (or {"personas": [...]})')
+def normalize_cases(personas: object) -> list[dict]:
+    if not isinstance(personas, list) or not personas:
+        raise ValueError("'personas' must be a non-empty list")
     out = []
-    for index, case in enumerate(cases):
+    for index, case in enumerate(personas):
         case_id = str(case.get("id") or "case-{}".format(index + 1))
         prompt = str(case.get("first_prompt", "")).strip()
         if not prompt:
             raise ValueError("case {!r} is missing first_prompt".format(case_id))
         out.append({"id": case_id, "persona": str(case.get("persona", "")).strip(), "first_prompt": prompt})
     return out
+
+
+def load_config(config_path: Path) -> dict:
+    """Read + validate the eval config json. This exact object is stored verbatim in S3 as the batch
+    config (plus created_at / restic_password / mngr_sha added at launch)."""
+    if not config_path.is_file():
+        raise SystemExit("no such config file: {}".format(config_path))
+    config = json.loads(config_path.read_text())
+    for key in ("name", "turns", "mngr_branch", "personas"):
+        if not config.get(key):
+            raise SystemExit("eval config is missing required key: {!r}".format(key))
+    if int(config["turns"]) < 2:
+        raise SystemExit("turns must be >= 2 (turn 1 sends the first prompt, the last ends the run)")
+    normalize_cases(config["personas"])  # validate shape now, on the host
+    return config
 
 
 def _ensure_base(fct_repo: str, fct_branch: str) -> None:
@@ -81,7 +95,7 @@ def _prepare_clone(case: dict, case_config: dict) -> Path:
         shutil.rmtree(clone)
     _sh("git", "clone", str(BASE_DIR), str(clone))
     _vendor_mngr(clone)
-    (clone / "scripts" / "config.json").write_text(json.dumps(case_config, indent=2))
+    (clone / "scripts" / "test_case_metadata.json").write_text(json.dumps(case_config, indent=2))
     _sh("git", "-C", str(clone), "add", "-A")
     _sh("git", "-C", str(clone), "-c", "user.email=eval@minds", "-c", "user.name=minds-eval",
         "commit", "-q", "-m", "eval case {}".format(case["id"]))
@@ -146,29 +160,30 @@ def destroy_all_workspaces(port: str) -> None:
     print(">> done", flush=True)
 
 
-def launch_batch(
-    *, eval_name: str, personas_path: Path, anthropic_key: str, num_turns: int, compute: str, port: str, stamp: str,
-    mngr_branch: str = "", fct_repo: str = DEFAULT_FCT_REPO, fct_branch: str = DEFAULT_FCT_BRANCH,
-) -> dict:
+def launch_batch(*, config: dict, anthropic_key: str, port: str, stamp: str) -> dict:
     env = s3_store.load_aws_env()
     client = s3_store.make_client(env)
     bucket = env["MINDS_EVAL_BUCKET"]
-    cases = load_cases(personas_path)
+
+    eval_name = config["name"]
+    num_turns = int(config["turns"])
+    fct_repo = config.get("fct_repo", DEFAULT_FCT_REPO)
+    fct_branch = config.get("fct_branch", DEFAULT_FCT_BRANCH)
+    cases = normalize_cases(config["personas"])
     batch = s3_store.batch_prefix(eval_name, stamp)
 
     print("=" * 66, flush=True)
     print("  EVAL BATCH  {}".format(batch), flush=True)
-    print("  cases: {}   turns: {}   compute: {}   bucket: {}".format(len(cases), num_turns, compute, bucket), flush=True)
+    print("  cases: {}   turns: {}   bucket: {}".format(len(cases), num_turns, bucket), flush=True)
     print("=" * 66, flush=True)
 
-    # One restic password per batch, stored in the batch config so `restore` can decrypt the repos.
-    # We own it (we drive restic ourselves via config.json creds), so there's no minds involvement.
+    # Store the user's config verbatim + the fields launch adds: created_at, the batch restic
+    # password (we own it -- we drive restic ourselves), and the exact mngr SHA this box is built at
+    # (stamped into the box env), so `restore` rebuilds the exact same mngr.
     restic_password = secrets.token_urlsafe(24)
-    # mngr_branch is recorded so `restore` rebuilds the SAME box this batch ran on.
     s3_store.put_json(client, bucket, "{}/{}".format(batch, s3_store.BATCH_CONFIG_NAME), {
-        "eval_name": eval_name, "created_at": stamp, "num_turns": num_turns,
-        "compute": compute, "mngr_branch": mngr_branch, "fct_repo": fct_repo, "fct_branch": fct_branch,
-        "restic_password": restic_password, "cases": cases,
+        **config, "created_at": stamp, "restic_password": restic_password,
+        "mngr_sha": os.environ.get("MINDS_BOX_MNGR_REF", ""),
     })
 
     CLONES_DIR.mkdir(parents=True, exist_ok=True)
@@ -178,9 +193,9 @@ def launch_batch(
     for index, case in enumerate(cases, 1):
         case_pref = s3_store.case_prefix(batch, eval_name, case["id"])
         host_name = "EVAL-{}-CASE-{}".format(eval_name, case["id"])
-        # Everything the in-sandbox worker needs is in config.json (committed into the clone): the
-        # S3 target, the restic repo/password, and the scoped AWS creds. This is why the worker does
-        # not depend on minds' backup provisioning (which doesn't land a restic.env in the sandbox).
+        # Everything the in-sandbox worker needs is in test_case_metadata.json (committed into the
+        # clone): the S3 target, the restic repo/password, and the scoped AWS creds -- so the worker
+        # does not depend on minds' backup provisioning (which doesn't land a restic.env in the box).
         case_config = {
             "eval_name": eval_name, "case_name": case["id"], "persona": case["persona"],
             "first_prompt": case["first_prompt"], "num_turns": num_turns,
@@ -192,13 +207,13 @@ def launch_batch(
             "aws_region": env.get("AWS_DEFAULT_REGION", "us-east-1"),
         }
         print("\n  [{}/{}] {}".format(index, len(cases), host_name), flush=True)
-        destroy_existing_workspace(port, host_name)  # idempotent: re-run with the same --name works
+        destroy_existing_workspace(port, host_name)  # idempotent: re-run with the same name works
         clone = _prepare_clone(case, case_config)
 
         try:
-            # backup_provider=configure_later: the worker drives restic itself from config.json.
+            # backup_provider=configure_later: the worker drives restic itself from the metadata file.
             agent_id = workspace.create_workspace(
-                port=port, fct_link=str(clone), name=host_name, compute=compute,
+                port=port, fct_link=str(clone), name=host_name,
                 ai_provider="api_key", anthropic_key=anthropic_key, backup_provider="configure_later",
                 quiet=True,
             )

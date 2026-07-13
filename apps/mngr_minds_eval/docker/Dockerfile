@@ -12,12 +12,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 ARG MNGR_REPO=https://github.com/imbue-ai/mngr.git
 ARG MNGR_BRANCH=main
-# MNGR_REF = the branch's current remote-tip SHA, resolved on the host and passed in. Referencing
-# it in this RUN changes the layer's cache key whenever the branch moves -> ALWAYS a fresh clone
-# of the tip (no stale cached checkout).
+# MNGR_REF = the exact SHA to check out (resolved on the host: a branch tip, or a pinned commit for
+# restore). We shallow-fetch that exact commit, so the box IS that SHA -- not merely the tip at
+# build time. The SHA is also the layer cache key, so a different SHA always rebuilds.
 ARG MNGR_REF=unset
 RUN echo "mngr ${MNGR_BRANCH} @ ${MNGR_REF}" \
- && git clone --depth 1 --branch "${MNGR_BRANCH}" "${MNGR_REPO}" /work/mngr
+ && git init /work/mngr \
+ && git -C /work/mngr remote add origin "${MNGR_REPO}" \
+ && git -C /work/mngr fetch --depth 1 origin "${MNGR_REF}" \
+ && git -C /work/mngr checkout FETCH_HEAD
 
 # Overlay the eval app from THIS checkout onto the cloned mngr, so the harness is present even on
 # an mngr branch that doesn't carry it (and is always this repo's version).
