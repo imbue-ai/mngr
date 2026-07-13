@@ -89,8 +89,8 @@ def self_check() -> None:
     assert s3_store.restic_repo_url(env, "web1_S/web1_todo") == \
         "s3:s3.us-east-1.amazonaws.com/b/web1_S/web1_todo/restic"
 
-    block = backup_env_block(env, "s3:repo", "pw")
-    assert "RESTIC_REPOSITORY=s3:repo" in block and "RESTIC_PASSWORD=pw" in block
+    block = backup_env_block(env, "s3:repo")
+    assert "RESTIC_REPOSITORY=s3:repo" in block and "RESTIC_PASSWORD" not in block  # minds sets it
     assert "AWS_ACCESS_KEY_ID=AK" in block and "AWS_SECRET_ACCESS_KEY=SK" in block
 
     payload = build_create_payload(Path("/work/clones/todo"), "EVAL-web1-CASE-todo", "sk-ant", "modal", block)

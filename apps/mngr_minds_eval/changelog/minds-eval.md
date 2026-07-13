@@ -9,3 +9,5 @@
 - `launch` now records the mngr branch it ran on in the batch config, and `restore` reads it back, so a restore rebuilds the same box the batch ran on instead of silently defaulting to a different mngr. `--mngr-branch` is still accepted as an override.
 
 - The box is now keyed to the mngr branch tip: its image is tagged `minds-box:<branch>-<sha>` and the running box is stamped with the SHA it was built from. `ensure` reuses a running box only when it matches the branch's current tip, and rebuilds when the branch has moved -- so launch/restore never silently run a stale mngr. Reuse stays instant; restore speed is unaffected (it is dominated by the new Modal workspace, not the box).
+
+- Fixed backup wiring: minds assigns each workspace its own restic password and rejects a caller-supplied one, so `launch` no longer sends `RESTIC_PASSWORD` (only the repo URL + AWS creds). The in-sandbox worker uploads the generated password to the case's S3 prefix, and `restore` reads it from there -- so a repo stays decryptable after the box and sandbox are gone.

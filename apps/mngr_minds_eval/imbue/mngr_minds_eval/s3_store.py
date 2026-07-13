@@ -87,6 +87,13 @@ def get_json(client, bucket: str, key: str) -> dict | None:
         return None
 
 
+def get_text(client, bucket: str, key: str) -> str | None:
+    try:
+        return client.get_object(Bucket=bucket, Key=key)["Body"].read().decode()
+    except Exception:
+        return None
+
+
 def list_batches(client, bucket: str) -> list[str]:
     """Top-level batch folders, newest first (names embed a sortable UTC timestamp)."""
     paginator = client.get_paginator("list_objects_v2")

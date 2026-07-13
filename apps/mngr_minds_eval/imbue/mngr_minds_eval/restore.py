@@ -54,12 +54,17 @@ def restore(batch: str, case_name: str, message_index: int, *, port: str, restic
     if config is None:
         raise SystemExit("no such batch: {}".format(batch))
     eval_name = config.get("eval_name", "")
-    # The batch config carries the restic password launch generated (see launch.launch_batch).
-    restic_password = restic_password or config.get("restic_password", "")
-    if not restic_password:
-        raise SystemExit("batch {} has no restic_password; pass --restic-password".format(batch))
     prefix = s3_store.case_prefix(batch, eval_name, case_name)
     repo_url = s3_store.restic_repo_url(env, prefix)
+    # The worker uploaded minds' per-workspace password to <case_prefix>/restic_password.
+    if not restic_password:
+        obj = s3_store.get_text(client, bucket, "{}/restic_password".format(prefix))
+        restic_password = (obj or "").strip()
+    if not restic_password:
+        raise SystemExit(
+            "no restic password for {}/{} (the case may not have run yet, or predates password "
+            "upload); pass --restic-password".format(batch, case_name)
+        )
     tag = "post_message_{}".format(message_index)
 
     target = RESTORE_ROOT / "{}-{}-{}".format(batch, case_name, tag)

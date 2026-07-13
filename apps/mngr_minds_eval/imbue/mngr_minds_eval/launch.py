@@ -8,7 +8,6 @@ upload state/transcript -- the run self-completes and everything is retrievable 
 from __future__ import annotations
 
 import json
-import secrets
 import shutil
 import subprocess
 import sys
@@ -68,11 +67,16 @@ def load_cases(personas_path: Path) -> list[dict]:
     return out
 
 
-def backup_env_block(env: dict, repo_url: str, restic_password: str) -> str:
-    """The KEY=VALUE block the create form's api_key backup provider injects into restic.env."""
+def backup_env_block(env: dict, repo_url: str) -> str:
+    """The KEY=VALUE block the create form's api_key backup provider injects into restic.env.
+
+    NOT the password: minds assigns each workspace its own random repository password (and rejects a
+    caller-supplied one). The eval worker reads that generated password from restic.env inside the
+    sandbox and uploads it to the case's S3 prefix, so restore can decrypt the repo even after the
+    box and sandbox are gone.
+    """
     return "\n".join([
         "RESTIC_REPOSITORY={}".format(repo_url),
-        "RESTIC_PASSWORD={}".format(restic_password),
         "AWS_ACCESS_KEY_ID={}".format(env["AWS_ACCESS_KEY_ID"]),
         "AWS_SECRET_ACCESS_KEY={}".format(env["AWS_SECRET_ACCESS_KEY"]),
         "AWS_DEFAULT_REGION={}".format(env.get("AWS_DEFAULT_REGION", "us-east-1")),
@@ -162,15 +166,12 @@ def launch_batch(
     print("  cases: {}   turns: {}   compute: {}   bucket: {}".format(len(cases), num_turns, compute, bucket), flush=True)
     print("=" * 66, flush=True)
 
-    # One restic password per batch, persisted in the batch config so `restore` can read the repos
-    # later. The bucket is private and the key is scoped to it; without this the snapshots would be
-    # permanently undecryptable.
-    restic_password = secrets.token_urlsafe(24)
-    # mngr_branch is recorded so `restore` rebuilds the SAME box this batch ran on, instead of
-    # silently defaulting to some other mngr.
+    # mngr_branch is recorded so `restore` rebuilds the SAME box this batch ran on. The restic
+    # password is NOT set here: minds assigns each workspace its own (and rejects a caller-supplied
+    # one), and the worker uploads that generated password to the case prefix in S3 for restore.
     s3_store.put_json(client, bucket, "{}/{}".format(batch, s3_store.BATCH_CONFIG_NAME), {
         "eval_name": eval_name, "created_at": stamp, "num_turns": num_turns,
-        "compute": compute, "mngr_branch": mngr_branch, "cases": cases, "restic_password": restic_password,
+        "compute": compute, "mngr_branch": mngr_branch, "cases": cases,
     })
 
     CLONES_DIR.mkdir(parents=True, exist_ok=True)
@@ -188,7 +189,7 @@ def launch_batch(
         print("\n  [{}/{}] {}".format(index, len(cases), host_name), flush=True)
         clone = _prepare_clone(case, case_config)
 
-        backup_env = backup_env_block(env, s3_store.restic_repo_url(env, case_pref), restic_password)
+        backup_env = backup_env_block(env, s3_store.restic_repo_url(env, case_pref))
         status, body = _post_json(
             "{}/api/v1/workspaces".format(_api_base(port)),
             build_create_payload(clone, host_name, anthropic_key, compute, backup_env),
