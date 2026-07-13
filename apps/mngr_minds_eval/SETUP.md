@@ -42,7 +42,7 @@ aws iam create-access-key --user-name minds-eval-sandbox    # secret is shown ON
 
 ## 4. Write the credentials file
 
-The CLI reads this; `spin-up-minds-in-docker.sh` mounts it into the box read-only.
+The CLI reads this and mounts it into the box read-only.
 
 ```
 mkdir -p ~/.minds-eval

@@ -1,11 +1,15 @@
 """minds-evals -- launch and inspect Minds eval batches.
 
-Runs inside the minds-box container (the create API and clone paths are container-local).
+Host-native CLI. Box-using commands (launch/box/workspace/clean-modal-workspaces/restore) build/boot
+a Docker box and re-invoke themselves inside it; status commands (list-batches/inspect) only read S3.
 
-  minds-evals launch --name web1 --personas sample-personas.json --turns 4
+  minds-evals launch --name web1 --personas sample-personas.json --turns 4 --mngr-branch minds-eval
   minds-evals list-batches
   minds-evals inspect web1_20260713-101500
   minds-evals restore web1_20260713-101500 --case todo-app --message 2
+  minds-evals clean-modal-workspaces --name web1
+  minds-evals box --mngr-branch minds-eval
+  minds-evals workspace --mngr-branch minds-eval --fct-link <url> --fct-branch main
 
 Launched runs self-complete: the in-sandbox eval worker drives the conversation, snapshots /mngr
 per turn (restic -> S3), and uploads the transcript -- so results are retrieved from S3 and the

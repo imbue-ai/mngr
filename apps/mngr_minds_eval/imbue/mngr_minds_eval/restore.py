@@ -1,7 +1,8 @@
-"""Restore a case's post-message snapshot and spin it back up as a local Docker workspace.
+"""Restore a case's post-message snapshot and spin it back up as a fresh Modal workspace.
 
-restic restore <tag> -> a /mngr tree -> seed a new workspace's repo from its /mngr/code and create
-it with launch_mode=DOCKER, so you can open the workspace and click through what the agent built.
+restic restore <tag> -> a /mngr tree -> create a Modal workspace from its /mngr/code, then seed the
+rest of /mngr (agent state + chat) into the new sandbox, so you can open the workspace and see the
+conversation as it was plus the app the agent built.
 
 Deps (node_modules/.venv) are excluded from the snapshot, so the restored workspace reinstalls
 them from the preserved lockfiles on boot -- deterministic, a couple of minutes.
