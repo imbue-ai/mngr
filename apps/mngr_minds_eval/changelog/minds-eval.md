@@ -13,3 +13,5 @@
 - Fixed backup wiring: minds assigns each workspace its own restic password and rejects a caller-supplied one, so `launch` no longer sends `RESTIC_PASSWORD` (only the repo URL + AWS creds). The in-sandbox worker uploads the generated password to the case's S3 prefix, and `restore` reads it from there -- so a repo stays decryptable after the box and sandbox are gone.
 
 - Added `minds-evals box --mngr-branch X` as a first-class utility to build/boot a Minds box for any mngr branch (previously box spin-up only happened as a side effect of launch/restore).
+
+- Added `minds-evals box --mngr-branch X` as a first-class utility to build/boot a Minds box for any mngr branch (previously box spin-up only happened as a side effect of launch/restore).
