@@ -122,14 +122,28 @@ def _prepare_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sync_e2e_e
 
 
 def _wait_until(description: str, timeout_seconds: float, probe: Callable[[], _T | None]) -> _T:
-    """Poll ``probe`` (None = not yet) until it yields a value, or fail loudly."""
+    """Poll ``probe`` (None = not yet) until it yields a value, or fail loudly.
+
+    A ``PlaywrightError`` from the probe counts as "not yet": the Electron
+    content view can navigate out from under a probe (the landing page's
+    discovering auto-reload, post-auth redirects), destroying the JS execution
+    context mid-read. Deliberate assertion failures raised by probes propagate.
+    """
     deadline = time.monotonic() + timeout_seconds
+    last_playwright_error: PlaywrightError | None = None
     while time.monotonic() < deadline:
-        result = probe()
+        try:
+            result = probe()
+        except PlaywrightError as e:
+            last_playwright_error = e
+            result = None
         if result is not None:
             return result
         threading.Event().wait(timeout=3.0)
-    raise AssertionError(f"Timed out after {timeout_seconds}s waiting for {description}")
+    raise AssertionError(
+        f"Timed out after {timeout_seconds}s waiting for {description}"
+        f" (last playwright error: {last_playwright_error})"
+    )
 
 
 # -- Docker-level setup helpers (pre/post the UI-driven story) ----------------
@@ -286,14 +300,20 @@ def _sign_in_via_ui(page: Page, email: str, password: str) -> str:
     page.click("#signin-btn")
 
     # auth.js re-enables the button once the /auth/api/signin fetch resolved
-    # (both on success and on error), so this bounds the request itself.
-    page.wait_for_function(
-        "() => { const btn = document.getElementById('signin-btn'); return btn && !btn.disabled; }",
-        timeout=_SIGN_IN_TIMEOUT_SECONDS * 1000,
-    )
-    error_element = page.query_selector("#signin-error")
-    if error_element is not None and "hidden" not in (error_element.get_attribute("class") or "").split():
-        raise AssertionError(f"Sign-in for {email} failed: {error_element.inner_text().strip()!r}")
+    # (both on success and on error), so this bounds the request itself. A
+    # successful sign-in sometimes navigates the view away mid-probe (the
+    # redirect is only *sometimes* swallowed), destroying the JS context --
+    # treat that as progress and let the /accounts gate below decide.
+    try:
+        page.wait_for_function(
+            "() => { const btn = document.getElementById('signin-btn'); return btn && !btn.disabled; }",
+            timeout=_SIGN_IN_TIMEOUT_SECONDS * 1000,
+        )
+        error_element = page.query_selector("#signin-error")
+        if error_element is not None and "hidden" not in (error_element.get_attribute("class") or "").split():
+            raise AssertionError(f"Sign-in for {email} failed: {error_element.inner_text().strip()!r}")
+    except PlaywrightError as e:
+        logger.info("Sign-in probe interrupted by a navigation ({}); deferring to the session gate", e)
 
     def account_listed() -> bool | None:
         page.goto(f"{origin}/accounts", wait_until="domcontentloaded")
