@@ -106,13 +106,20 @@ class CloudflareClient:
         return body.get("result") or {}
 
     def bucket_exists(self, bucket: str) -> bool:
+        # Only a genuine 404 means the bucket is absent. Reading any other failure as
+        # "absent" would turn a token that cannot list buckets into a confusing
+        # "create failed" further down, instead of naming the permission problem here.
         response = self._client.get(
             f"{_API_ROOT}/accounts/{self._env.account_id}/r2/buckets/{bucket}",
             headers={"Authorization": f"Bearer {self._env.api_token}"},
         )
         if response.status_code == httpx.codes.NOT_FOUND:
             return False
-        return bool(response.json().get("success"))
+        if response.is_success:
+            return True
+        raise click.ClickException(
+            f"Cloudflare GET r2/buckets/{bucket} failed ({response.status_code}): {response.text}"
+        )
 
     def create_bucket(self, bucket: str) -> None:
         self._call("POST", f"/accounts/{self._env.account_id}/r2/buckets", {"name": bucket})
@@ -184,7 +191,8 @@ def main(env_name: str, hostname: str | None, mint_token: bool, dry_run: bool) -
     click.echo(f"  hostname: {resolved_hostname}")
     click.echo("")
 
-    if client.bucket_exists(bucket):
+    bucket_already_exists = client.bucket_exists(bucket)
+    if bucket_already_exists:
         click.echo(f"[ok]   bucket {bucket} already exists")
     elif dry_run:
         click.echo(f"[plan] would create bucket {bucket}")
@@ -192,8 +200,11 @@ def main(env_name: str, hostname: str | None, mint_token: bool, dry_run: bool) -
         client.create_bucket(bucket)
         click.echo(f"[new]  created bucket {bucket}")
 
-    existing = [domain["domain"] for domain in client.custom_domains(bucket)] if not dry_run else []
-    if resolved_hostname in existing:
+    # Listing domains on a bucket that does not exist yet 404s, so only ask once it does.
+    # A dry run still asks, so it reports what would actually change rather than assuming
+    # the domain is missing and always claiming it would attach one.
+    attached = [domain["domain"] for domain in client.custom_domains(bucket)] if bucket_already_exists else []
+    if resolved_hostname in attached:
         click.echo(f"[ok]   custom domain {resolved_hostname} already attached")
     elif dry_run:
         click.echo(f"[plan] would attach custom domain {resolved_hostname} (zone {env.zone_id})")
@@ -202,7 +213,8 @@ def main(env_name: str, hostname: str | None, mint_token: bool, dry_run: bool) -
         click.echo(f"[new]  attached custom domain {resolved_hostname} (DNS + cert take a minute to go active)")
 
     if dry_run:
-        click.echo("[plan] would mint a bucket-scoped R2 token" if mint_token else "")
+        if mint_token:
+            click.echo("[plan] would mint a bucket-scoped R2 token")
         return
 
     click.echo("")

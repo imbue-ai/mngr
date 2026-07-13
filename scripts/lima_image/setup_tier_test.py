@@ -36,6 +36,13 @@ def test_bucket_exists_is_false_only_for_a_missing_bucket() -> None:
     assert _client(lambda request: httpx.Response(200, json={"success": True})).bucket_exists("b") is True
 
 
+def test_bucket_exists_raises_rather_than_calling_an_unreadable_bucket_absent() -> None:
+    # A token that cannot read buckets must name that here, not report "no bucket" and
+    # leave the operator staring at a confusing failure from the create call after it.
+    with pytest.raises(ClickException):
+        _client(lambda request: httpx.Response(403, json={"success": False})).bucket_exists("b")
+
+
 def test_a_failed_call_raises_rather_than_reporting_success() -> None:
     # Cloudflare answers a rejected call with HTTP 200 and success=false, so a naive
     # status check would read a permission failure as a completed setup.

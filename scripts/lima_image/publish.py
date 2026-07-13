@@ -246,12 +246,14 @@ def main(version: str, arch: str, raw_image: Path, bucket: str, secret_key_file:
         manifest = _merge_manifest(store, version, entry)
         manifest_bytes = json.dumps(manifest).encode()
         signature_bytes = _sign_manifest(manifest_bytes, secret_key_file)
-        store.put(f"{_MANIFEST_PREFIX}/{version}/{_ROOT_MANIFEST_FILENAME}", manifest_bytes, "application/json")
-        store.put(
-            f"{_MANIFEST_PREFIX}/{version}/{_ROOT_MANIFEST_FILENAME}{_SIGNATURE_SUFFIX}",
-            signature_bytes,
-            "application/octet-stream",
-        )
+        # The manifest is the commit point: a client reads it, then verifies it against
+        # the detached signature. Upload the signature first so no client can observe a
+        # manifest whose signature is still missing (first publish) or still the previous
+        # image's (republish) -- either mismatch is a hard verification failure, whereas an
+        # absent manifest is just VERSION_UNAVAILABLE and falls back to building in-VM.
+        manifest_key = f"{_MANIFEST_PREFIX}/{version}/{_ROOT_MANIFEST_FILENAME}"
+        store.put(f"{manifest_key}{_SIGNATURE_SUFFIX}", signature_bytes, "application/octet-stream")
+        store.put(manifest_key, manifest_bytes, "application/json")
         click.echo(f"Published {version} / {arch} (manifest entries: {len(manifest['entries'])}).")
 
 
