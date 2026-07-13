@@ -77,12 +77,16 @@ def built_ref(container: str) -> str:
     return _run(["docker", "exec", container, "printenv", "MINDS_BOX_MNGR_REF"]).stdout.strip()
 
 
-def ensure(container: str, mngr_branch: str, minds_env: str = "staging") -> str:
+def ensure(container: str, mngr_branch: str, minds_env: str = "staging", modal_user_id: str = "") -> str:
     """Build + boot the box, keyed to the branch's current tip.
 
     Reuse the running box only if it was built from the branch's CURRENT tip SHA; otherwise the box
     is stale (the branch moved) and we rebuild -- so launch/restore always run the mngr they claim.
     Reuse is instant; a rebuild only happens when the branch has actually advanced.
+
+    modal_user_id names the Modal environment (minds-<env>-<user_id>) all this box's workspaces land
+    in. Eval flows pass the eval name so a run's sandboxes are findable under minds-<env>-<name>;
+    defaults to the container name when unset (the general box/workspace utilities).
     """
     ref = _remote_tip(mngr_branch)
     if is_running(container):
@@ -103,7 +107,8 @@ def ensure(container: str, mngr_branch: str, minds_env: str = "staging") -> str:
 
     ui, forward = _free_port(), _free_port()
     tag = "minds-box:{}-{}".format(mngr_branch.replace("/", "-"), ref[:12])
-    modal_env = "".join(c if c.isalnum() or c == "-" else "-" for c in container.lower())
+    user_id = modal_user_id or container
+    modal_env = "".join(c if c.isalnum() or c == "-" else "-" for c in user_id.lower())
 
     print(">> building {} from mngr {}@{}".format(tag, mngr_branch, ref[:12]), flush=True)
     build = subprocess.run(

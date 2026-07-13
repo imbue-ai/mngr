@@ -35,15 +35,17 @@ def _port() -> str:
     return os.environ.get(DEFAULT_PORT_ENV, "8420")
 
 
-def _exec_in_box(container: str, mngr_branch: str, argv: list[str], personas: Path | None) -> None:
+def _exec_in_box(container: str, mngr_branch: str, argv: list[str], personas: Path | None,
+                 modal_user_id: str = "") -> None:
     """Host side: ensure the box exists, then run this same command inside it.
 
     `launch` and `restore` need the box's Minds API, its clone dir and its mngr -- so they run
-    there. Status subcommands only read S3 and stay on the host.
+    there. Status subcommands only read S3 and stay on the host. modal_user_id names the Modal
+    environment the box's workspaces land in (eval flows pass the eval name).
     """
     import subprocess
 
-    box_mod.ensure(container, mngr_branch)
+    box_mod.ensure(container, mngr_branch, modal_user_id=modal_user_id)
     if personas is not None:
         subprocess.run(["docker", "cp", str(personas), "{}:/work/personas.json".format(container)], check=True)
         argv = ["/work/personas.json" if a == str(personas) else a for a in argv]
@@ -67,8 +69,9 @@ def _utc_stamp() -> str:
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S")
 
 
-def _box_name(args) -> str:
-    return args.box or "minds-box-{}".format(args.mngr_branch.replace("/", "-"))
+def _box_for(key: str, box_override: str = "") -> str:
+    """Container name for a box keyed on `key` (an eval name for eval flows, a branch for utils)."""
+    return box_override or "minds-box-{}".format(key.replace("/", "-"))
 
 
 def _check_aws() -> dict:
@@ -130,9 +133,11 @@ def main() -> None:
     p_box.add_argument("--mngr-branch", required=True, help="mngr branch the box runs")
     p_box.add_argument("--box", default="", help="container name (default: minds-box-<mngr-branch>)")
 
-    p_clean = sub.add_parser("clean-modal-workspaces", help="destroy ALL workspaces in a box (clean slate)")
-    p_clean.add_argument("--mngr-branch", required=True, help="mngr branch (to derive the box name)")
-    p_clean.add_argument("--box", default="", help="container name (default: minds-box-<mngr-branch>)")
+    p_clean = sub.add_parser("clean-modal-workspaces",
+                             help="destroy ALL workspaces in an eval's Modal env (clean slate)")
+    p_clean.add_argument("--name", required=True, help="eval name (its box + Modal env)")
+    p_clean.add_argument("--mngr-branch", default="main", help="mngr branch to build the box if it isn't up")
+    p_clean.add_argument("--box", default="", help="container name (default: minds-box-<name>)")
 
     p_ws = sub.add_parser("workspace", help="create ONE workspace in a box (general utility, no eval)")
     p_ws.add_argument("--mngr-branch", required=True, help="mngr branch the box runs")
@@ -172,17 +177,20 @@ def main() -> None:
     if args.command == "box":
         if IN_BOX:
             parser.error("run `box` from the host, not inside a box")
-        box_mod.ensure(_box_name(args), args.mngr_branch)
-        box_mod.print_view_urls(_box_name(args))
+        box = _box_for(args.mngr_branch, args.box)
+        box_mod.ensure(box, args.mngr_branch)
+        box_mod.print_view_urls(box)
         return
     if args.command == "clean-modal-workspaces":
+        # Key on the eval name so it targets that run's box + Modal env (minds-<env>-<name>).
         if not IN_BOX:
-            _exec_in_box(_box_name(args), args.mngr_branch, sys.argv[1:], None)
+            _exec_in_box(_box_for(args.name, args.box), args.mngr_branch, sys.argv[1:], None,
+                         modal_user_id=args.name)
         launch_mod.destroy_all_workspaces(_port())
         return
     if args.command == "workspace":
         if not IN_BOX:
-            _exec_in_box(_box_name(args), args.mngr_branch, sys.argv[1:], None)
+            _exec_in_box(_box_for(args.mngr_branch, args.box), args.mngr_branch, sys.argv[1:], None)
         from imbue.mngr_minds_eval import workspace as workspace_mod
 
         workspace_mod.create_workspace(
@@ -213,7 +221,10 @@ def main() -> None:
         if not IN_BOX:
             if not args.personas.is_file():
                 parser.error("no such personas file: {}".format(args.personas))
-            _exec_in_box(_box_name(args), args.mngr_branch, sys.argv[1:], args.personas)
+            # The box + Modal env are keyed on the eval name: this run's sandboxes land in
+            # minds-<env>-<name>, findable and separable from other evals.
+            _exec_in_box(_box_for(args.name, args.box), args.mngr_branch, sys.argv[1:], args.personas,
+                         modal_user_id=args.name)
         launch_mod.launch_batch(
             eval_name=args.name, personas_path=args.personas, anthropic_key=args.anthropic_key,
             num_turns=args.turns, compute="modal", port=_port(), stamp=_utc_stamp(),
@@ -223,23 +234,21 @@ def main() -> None:
     if args.command == "restore":
         env = _check_aws()
         if not IN_BOX:
-            # Restore on the SAME mngr the batch ran on: read it from the batch config in S3 rather
-            # than defaulting to some other branch (which would restore under the wrong mngr).
+            # Rebuild the SAME box the batch ran on: read its mngr branch + eval name from the batch
+            # config in S3, so restore uses the right mngr and the run's own Modal env.
+            config = s3_store.get_json(
+                s3_store.make_client(env), env["MINDS_EVAL_BUCKET"],
+                "{}/{}".format(args.batch, s3_store.BATCH_CONFIG_NAME),
+            )
+            if config is None:
+                sys.exit("no such batch: {} (try: minds-evals list-batches)".format(args.batch))
+            args.mngr_branch = args.mngr_branch or config.get("mngr_branch") or ""
             if not args.mngr_branch:
-                config = s3_store.get_json(
-                    s3_store.make_client(env), env["MINDS_EVAL_BUCKET"],
-                    "{}/{}".format(args.batch, s3_store.BATCH_CONFIG_NAME),
-                )
-                if config is None:
-                    sys.exit("no such batch: {} (try: minds-evals list-batches)".format(args.batch))
-                args.mngr_branch = config.get("mngr_branch") or ""
-                if not args.mngr_branch:
-                    sys.exit(
-                        "batch {} does not record its mngr branch (launched before this was tracked); "
-                        "pass --mngr-branch explicitly".format(args.batch)
-                    )
-                print(">> batch ran on mngr {!r}; restoring with the same box".format(args.mngr_branch), flush=True)
-            _exec_in_box(_box_name(args), args.mngr_branch, sys.argv[1:], None)
+                sys.exit("batch {} does not record its mngr branch; pass --mngr-branch".format(args.batch))
+            eval_name = config.get("eval_name") or s3_store.split_batch(args.batch)[0]
+            print(">> batch ran on mngr {!r} (eval {!r})".format(args.mngr_branch, eval_name), flush=True)
+            _exec_in_box(_box_for(eval_name, args.box), args.mngr_branch, sys.argv[1:], None,
+                         modal_user_id=eval_name)
         restore_mod.restore(args.batch, args.case, args.message, port=_port(), restic_password=args.restic_password)
 
 
