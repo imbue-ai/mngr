@@ -122,7 +122,7 @@ def test_empty_password_account_syncs_metadata_but_never_secrets(tmp_path: Path)
     assert pushed["display_name"] == "metadata-only"
     # No master password -> the metadata-only tier: nothing secret on the wire.
     assert pushed["encrypted_secrets"] is None
-    assert "a@b.com" not in cli.sync_bundle_by_email
+    assert _EMAIL not in cli.sync_bundle_by_email
 
 
 def test_setting_a_password_later_pushes_the_pending_secrets(tmp_path: Path) -> None:
