@@ -1562,6 +1562,25 @@ def test_workspace_restart_requires_bearer(tmp_path: Path) -> None:
     assert response.status_code == 401
 
 
+def _wait_for_restart_worker_and_get_status(client: FlaskClient, agent_id: AgentId) -> dict[str, Any]:
+    """Drain the restart worker's log queue to its terminal sentinel, then fetch the status.
+
+    Waits for the dispatched restart worker to finish (condition-based, no arbitrary
+    sleeps) and returns the parsed body of the typed restart-operation resource,
+    asserting the resource responds 200.
+    """
+    registry = get_state(client.application).workspace_operation_registry
+    log_queue = registry.get_log_queue(agent_id)
+    assert log_queue is not None
+    deadline = time.monotonic() + 15.0
+    while time.monotonic() < deadline:
+        if log_queue.get(timeout=15.0) == OPERATION_LOG_SENTINEL:
+            break
+    status_resp = client.get(f"/api/v1/workspaces/operations/restart/{agent_id}", headers=_auth_header())
+    assert status_resp.status_code == 200
+    return json.loads(status_resp.data)
+
+
 def test_restart_dispatches_for_never_probed_workspace(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:
@@ -1600,20 +1619,9 @@ def test_restart_dispatches_for_never_probed_workspace(
     assert response.status_code == 202
     assert json.loads(response.data) == {"operation_id": str(agent_id), "kind": "restart"}
 
-    # Drain the worker's log queue to the terminal sentinel, then confirm a real
-    # restart operation ran to DONE (with no mngr_forward_port wired, a clean
-    # dispatch counts as success).
-    registry = get_state(client.application).workspace_operation_registry
-    log_queue = registry.get_log_queue(agent_id)
-    assert log_queue is not None
-    deadline = time.monotonic() + 15.0
-    while time.monotonic() < deadline:
-        if log_queue.get(timeout=15.0) == OPERATION_LOG_SENTINEL:
-            break
-
-    status_resp = client.get(f"/api/v1/workspaces/operations/restart/{agent_id}", headers=_auth_header())
-    assert status_resp.status_code == 200
-    body = json.loads(status_resp.data)
+    # Confirm a real restart operation ran to DONE (with no mngr_forward_port
+    # wired, a clean dispatch counts as success).
+    body = _wait_for_restart_worker_and_get_status(client, agent_id)
     assert body["kind"] == "restart"
     assert body["status"] == "DONE"
 
@@ -1643,19 +1651,7 @@ def test_workspace_restart_registers_operation_reaching_done(
     )
     assert dispatch.status_code == 202
 
-    # Wait for the worker to finish by draining its log queue to the terminal
-    # sentinel (condition-based, no arbitrary sleeps).
-    registry = get_state(client.application).workspace_operation_registry
-    log_queue = registry.get_log_queue(agent_id)
-    assert log_queue is not None
-    deadline = time.monotonic() + 15.0
-    while time.monotonic() < deadline:
-        if log_queue.get(timeout=15.0) == OPERATION_LOG_SENTINEL:
-            break
-
-    status_resp = client.get(f"/api/v1/workspaces/operations/restart/{agent_id}", headers=_auth_header())
-    assert status_resp.status_code == 200
-    body = json.loads(status_resp.data)
+    body = _wait_for_restart_worker_and_get_status(client, agent_id)
     assert body["kind"] == "restart"
     assert body["is_done"] is True
     assert body["status"] == "DONE"
