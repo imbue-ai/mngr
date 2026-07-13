@@ -401,7 +401,9 @@ class WorkspaceRecordStore(MutableModel):
             raise WorkspaceSyncError("workspace sync is not configured (no imbue_cloud CLI)")
         # The metadata-only tier: while the account has no (non-empty) master
         # password, its secrets never leave this machine -- the wire copy is
-        # stripped, while the local replica keeps them for this device's use.
+        # stripped. (The next pull mirrors the secretless server row into the
+        # replica; this device reads its own secrets from the canonical env
+        # files, never from the replica.)
         is_password_set = dek_store.is_master_password_set_for_account(self.paths, user_id)
         wire = record.to_wire(record.revision + 1)
         if not is_password_set:
@@ -711,6 +713,12 @@ class WorkspaceRecordStore(MutableModel):
         no secrets yet) are enriched by this pass once discovery catches up.
         """
         known_ids = {str(aid) for aid in resolver.list_known_workspace_ids()}
+        # The secrets-missing trigger is only meaningful while a master
+        # password is set: without one, pushes strip the secrets from the wire
+        # and pulls mirror the secretless server row back, so re-adding them
+        # here would dirty-push a new revision every pass without ever
+        # converging.
+        is_secrets_sync_enabled = dek_store.is_master_password_set_for_account(self.paths, user_id)
         for record in self.list_records(user_id):
             if record.state != RECORD_STATE_ACTIVE or record.agent_id not in known_ids:
                 continue
@@ -722,7 +730,11 @@ class WorkspaceRecordStore(MutableModel):
                 or rebuilt.color != record.color
                 or rebuilt.provider_kind != record.provider_kind
                 or rebuilt.hosting_device_id != record.hosting_device_id
-                or (rebuilt.encrypted_secrets is not None and record.encrypted_secrets is None)
+                or (
+                    is_secrets_sync_enabled
+                    and rebuilt.encrypted_secrets is not None
+                    and record.encrypted_secrets is None
+                )
                 or rebuilt.backup_kind != record.backup_kind
             )
             if not is_changed:

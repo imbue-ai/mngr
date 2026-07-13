@@ -291,6 +291,28 @@ def test_reconcile_migrates_legacy_associations_and_retires_the_file(paths: Work
     assert len(cli.sync_records_by_email[_EMAIL]) == 1
 
 
+def test_reconcile_does_not_churn_revisions_without_a_master_password(paths: WorkspacePaths) -> None:
+    """Metadata-only tier: pushes strip secrets from the wire, so repeated
+    reconciles must not keep 're-adding' them (dirty-pushing a new revision
+    every pass without ever converging)."""
+    cli = make_fake_imbue_cloud_cli()
+    store = _make_store(paths, cli)
+    user_id = _user_id()
+    agent_id = AgentId.generate()
+    resolver = make_resolver_with_data(agents_json=make_agents_json(agent_id, host_name="churn-ws"))
+    # Unlocked (DEK exists) but no master password: secrets stay local-only.
+    ensure_dek(paths, user_id)
+    write_canonical_env(paths, agent_id, "RESTIC_REPOSITORY=s3:x\nRESTIC_PASSWORD=y\n")
+    store.associate_workspace_or_raise(user_id, _EMAIL, str(agent_id), resolver)
+    host_id = next(iter(cli.sync_records_by_email[_EMAIL]))
+    revision_after_associate = cli.sync_records_by_email[_EMAIL][host_id]["revision"]
+
+    store.reconcile({user_id: _EMAIL}, resolver)
+    store.reconcile({user_id: _EMAIL}, resolver)
+
+    assert cli.sync_records_by_email[_EMAIL][host_id]["revision"] == revision_after_associate
+
+
 def test_reconcile_tombstones_definitively_absent_local_rows(paths: WorkspacePaths) -> None:
     cli = make_fake_imbue_cloud_cli()
     store = _make_store(paths, cli)
