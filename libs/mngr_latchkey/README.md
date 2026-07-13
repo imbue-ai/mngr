@@ -28,6 +28,12 @@ agents lose their gateway endpoint until the next `mngr latchkey
 forward` is started; the per-host permissions files survive across
 restarts.
 
+While running, the supervisor also health-checks the shared gateway
+subprocess: if it dies mid-session it is respawned on its original
+port (so agent reverse tunnels and the published gateway port stay
+valid), rather than leaving agent traffic silently broken until the
+supervisor itself is restarted.
+
 ### Wiring a new agent using the CLI interface
 
 ```sh

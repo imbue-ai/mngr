@@ -36,6 +36,7 @@ from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.sentry.core import flush_sentry_on_shutdown
 from imbue.mngr.cli.common_opts import add_common_options
@@ -77,6 +78,12 @@ ENV_LATCHKEY_BINARY: Final[str] = "MNGR_LATCHKEY_BINARY"
 # Built-in fallback for the latchkey root directory when no override is
 # supplied via CLI flag, env var, or ``settings.toml``.
 _DEFAULT_LATCHKEY_DIRECTORY: Final[Path] = Path("~/.mngr/latchkey")
+
+# How often the supervisor's gateway health check polls the shared
+# ``latchkey gateway`` subprocess's liveness. A dead gateway takes all agent
+# traffic down, so we detect it quickly; the poll itself is cheap (a
+# non-blocking ``poll()`` on the tracked subprocess, no network I/O).
+_GATEWAY_HEALTH_CHECK_INTERVAL_SECONDS: Final[float] = 10.0
 
 # Plugin-config registry key. Must match the name passed to
 # ``register_plugin_config`` in :mod:`imbue.mngr_latchkey.plugin`.
@@ -624,6 +631,21 @@ def _run_forward_supervisor(
         daemon=True,
         is_checked=False,
     )
+    # Supervise the shared gateway subprocess: if it dies mid-session (leaving
+    # discovery + reverse tunnels up, so minds' discovery-freshness watchdog never
+    # notices), respawn it on its original port before agent traffic stays broken.
+    mngr_ctx.concurrency_group.start_new_thread(
+        target=_run_gateway_health_check_loop,
+        args=(
+            shutdown_event,
+            latchkey,
+            mngr_ctx.concurrency_group,
+            _GATEWAY_HEALTH_CHECK_INTERVAL_SECONDS,
+        ),
+        name="latchkey-forward-gateway-health-check",
+        daemon=True,
+        is_checked=False,
+    )
     logger.info("Waiting for discovery events; send SIGINT or SIGTERM to shut down, SIGHUP to refresh providers.")
     try:
         # Block until shutdown is signalled. The signal handler sets the
@@ -720,6 +742,46 @@ def _run_sighup_bounce_watcher(
             logger.opt(exception=e).error("SIGHUP observe bounce failed; continuing to watch for further bounces")
 
 
+def _run_gateway_health_check_loop(
+    shutdown_event: threading.Event,
+    latchkey: Latchkey,
+    concurrency_group: ConcurrencyGroup,
+    health_check_interval_seconds: float,
+) -> None:
+    """Loop until shutdown: respawn the shared gateway whenever its subprocess has died.
+
+    ``mngr latchkey forward`` owns the single shared ``latchkey gateway``. If that
+    subprocess crashes mid-session, discovery and the reverse tunnels stay up -- so
+    minds' discovery-freshness watchdog reads the pipeline as healthy -- while every
+    agent's traffic to the gateway silently fails. This loop is the supervisor-side
+    counterpart to that watchdog: it polls the gateway's liveness on a fixed cadence
+    and respawns it (reusing its previous port, so the reverse tunnels and the
+    published ``gateway_port`` stay valid) the moment it finds it dead.
+
+    A single respawn failure never tears the loop down: it is logged and the loop
+    keeps polling, so a transient failure is retried on the next tick.
+    """
+    while not shutdown_event.is_set():
+        # Wait first, then check: the gateway was started eagerly just before this
+        # loop, so the first liveness check is due one interval later. Returns
+        # promptly when shutdown is signalled during the wait.
+        if shutdown_event.wait(timeout=health_check_interval_seconds):
+            return
+        if latchkey.is_gateway_running:
+            continue
+        logger.warning("Shared Latchkey gateway subprocess is not running; respawning it.")
+        try:
+            gateway_port = latchkey.start_gateway(concurrency_group)
+        except LatchkeyError as e:
+            logger.warning("Failed to respawn shared Latchkey gateway; will retry on the next check: {}", e)
+            continue
+        logger.info("Respawned shared Latchkey gateway at http://{}:{}", latchkey.listen_host, gateway_port)
+        try:
+            update_forward_info_gateway_port(latchkey.plugin_data_dir, gateway_port)
+        except LatchkeyStoreError as e:
+            logger.warning("Failed to publish respawned gateway port: {}", e)
+
+
 def _install_signal_handlers(shutdown_event: threading.Event, bounce_event: threading.Event) -> None:
     """Wire SIGINT / SIGTERM to shutdown and SIGHUP to an observe bounce.
 
@@ -754,7 +816,10 @@ CommandHelpMetadata(
 
 1. Initializes the configured ``Latchkey`` (version-checks the binary,
    adopts or discards any pre-existing detached gateway record).
-2. Eagerly spawns the shared ``latchkey gateway`` subprocess.
+2. Eagerly spawns the shared ``latchkey gateway`` subprocess and
+   supervises it: a background health check respawns it (reusing its
+   original port) if the subprocess dies mid-session, so a crashed
+   gateway does not silently take agent traffic down.
 3. Spawns ``mngr observe --discovery-only --quiet`` and, for every
    agent discovered, opens a reverse SSH tunnel that bridges the
    agent's ``127.0.0.1:AGENT_SIDE_LATCHKEY_PORT`` to the host-side
