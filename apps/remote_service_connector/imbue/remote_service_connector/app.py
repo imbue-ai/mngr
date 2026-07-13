@@ -3595,6 +3595,10 @@ class SyncActiveAgentConflictError(Exception):
     """A second ACTIVE record for the same (user_id, agent_id) was rejected."""
 
 
+class SyncStoreConsistencyError(RuntimeError):
+    """The store violated one of its own invariants (e.g. a write returned no row)."""
+
+
 _WORKSPACE_RECORD_COLUMNS = (
     "host_id, agent_id, display_name, color, provider_kind, hosting_device_id, device_label, "
     "state, restored_from_host_id, backup_kind, encrypted_secrets, revision, created_at, updated_at"
@@ -3750,7 +3754,12 @@ class PostgresSyncStore:
         finally:
             conn.close()
         if written is None:
-            raise SyncRevisionConflictError(record)
+            # INSERT/UPDATE ... RETURNING on a locked, existing row always
+            # yields a row; reaching here means the store broke its own
+            # invariant, which must surface as a server error -- not as a 409
+            # whose "stored" row would be the pushed record (whose secrets are
+            # raw bytes at this point, not wire-shaped base64).
+            raise SyncStoreConsistencyError(f"workspace record write for host {record['host_id']} returned no row")
         return _workspace_record_row_to_dict(written)
 
     def delete_record(self, user_id: str, host_id: str) -> None:
