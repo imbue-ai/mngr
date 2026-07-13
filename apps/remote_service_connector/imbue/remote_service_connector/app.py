@@ -3547,7 +3547,8 @@ class WorkspaceRecordModel(BaseModel):
     display_name: str = Field(max_length=_MAX_SYNC_TEXT_FIELD_LENGTH, description="Workspace display name")
     color: str | None = Field(default=None, max_length=64, description="Workspace accent color (#rrggbb)")
     provider_kind: str = Field(
-        min_length=1, max_length=_MAX_SYNC_TEXT_FIELD_LENGTH, description="mngr provider backend kind"
+        max_length=_MAX_SYNC_TEXT_FIELD_LENGTH,
+        description="mngr provider backend kind; empty when not yet known (create-path seed records)",
     )
     hosting_device_id: str | None = Field(
         default=None,

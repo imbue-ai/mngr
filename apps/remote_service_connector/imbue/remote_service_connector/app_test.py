@@ -2806,6 +2806,20 @@ def test_put_workspace_record_rejects_oversized_secrets(monkeypatch: pytest.Monk
     assert resp.status_code == 400
 
 
+def test_put_workspace_record_accepts_empty_provider_kind(monkeypatch: pytest.MonkeyPatch) -> None:
+    # minds' create-path seeds a record before discovery knows the provider,
+    # so an empty provider_kind must be accepted (enriched by a later push).
+    client, _store, _caller = _make_sync_test_client(monkeypatch)
+    body = _sync_record_body()
+    body["provider_kind"] = ""
+
+    resp = client.put("/sync/records/host-aaa111", json=body, headers=_admin_headers())
+
+    assert resp.status_code == 200
+    records = client.get("/sync/records", headers=_admin_headers()).json()["records"]
+    assert records[0]["provider_kind"] == ""
+
+
 def test_put_workspace_record_rejects_unknown_state(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _store, _caller = _make_sync_test_client(monkeypatch)
     resp = client.put(
