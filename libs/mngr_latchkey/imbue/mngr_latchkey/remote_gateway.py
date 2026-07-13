@@ -5,13 +5,22 @@ each agent, this module installs the upstream ``latchkey`` CLI directly on
 the agent's outer host (the VPS) and runs a gateway there.
 
 The VPS-resident gateway and the VPS->container reverse SSH tunnel are both
-long-running processes that must survive crashes, VM pause/resume, and full
-reboots. Rather than spawn them detached (``nohup`` + a PID-file guard), they
-are registered as ``supervisord`` programs: ``supervisord`` is installed from
-the distro package (so its init service auto-starts it on boot), auto-restarts
-either process if it dies, and brings both back up after a reboot. The SSH
-tunnel additionally carries keepalive flags so a connection wedged by a paused
-VM is detected and torn down, letting ``supervisord`` restart it.
+long-running processes that must survive crashes and VM pause/resume. Rather
+than spawn them detached (``nohup`` + a PID-file guard), they are registered as
+``supervisord`` programs: ``supervisord`` is installed from the distro package
+and auto-restarts either process if it dies. The SSH tunnel additionally
+carries keepalive flags so a connection wedged by a paused-then-resumed VM is
+detected and torn down, letting ``supervisord`` restart it.
+
+Crash recovery deliberately stops short of surviving a full *reboot*: the
+gateway's secrets (the encryption key and the derived listen password) are
+kept in a tmpfs directory (``/dev/shm``), which is RAM-backed and so survives
+process crashes -- letting ``supervisord`` restart the gateway without a
+desktop round-trip -- but is wiped by a reboot. This is a deliberate choice to
+never persist the encryption key on the VPS disk beside the encrypted
+credential store (which would be equivalent to storing the credentials in
+plaintext from a disk-snapshot threat model). After a reboot the gateway stays
+down until the next provisioning pass re-writes the secrets.
 """
 
 import shlex
@@ -98,19 +107,22 @@ _REMOTE_FILE_MODE: Final[str] = "0600"
 _REMOTE_GATEWAY_LOG_FILENAME: Final[str] = "gateway.log"
 _REMOTE_TUNNEL_LOG_FILENAME: Final[str] = "tunnel.log"
 
-# Filenames (under the remote ``$HOME/.latchkey`` directory) for the gateway's
-# persisted secrets and its supervisord launch wrapper. The wrapper reads the
-# two 0600 secret files into the environment and execs the gateway, so the
-# secrets never appear in the supervisord config or a process listing. Unlike
-# the previous detached launch (which read the secrets from short-lived temp
-# files and deleted them immediately), supervisord must be able to (re)start the
-# gateway autonomously -- on crash and, crucially, after a reboot, when no
-# desktop is connected to re-push them -- so the secrets are necessarily
-# persisted here alongside the encrypted credential store. See
-# :func:`_ensure_latchkey_gateway_running` for the security tradeoff this makes.
+# Filename (under the remote ``$HOME/.latchkey`` directory) for the gateway's
+# supervisord launch wrapper. The wrapper is not secret (it only references the
+# secret file *paths*), so it lives on the normal disk.
+_GATEWAY_RUN_SCRIPT_FILENAME: Final[str] = "gateway_run.sh"
+
+# tmpfs (RAM-backed) directory holding the gateway's two secrets: the encryption
+# key and the derived listen password. ``/dev/shm`` is wiped on reboot, so the
+# key is never persisted to the VPS disk beside the encrypted credential store
+# (which would be equivalent to storing the credentials in plaintext against a
+# disk-snapshot threat model), yet it survives a process crash so supervisord
+# can restart the gateway without a desktop round-trip. The wrapper reads these
+# 0600 files into the environment and execs the gateway, so the secrets never
+# appear in the supervisord config or a process listing.
+_TMPFS_SECRETS_DIR: Final[Path] = Path("/dev/shm/mngr-latchkey")
 _GATEWAY_ENCRYPTION_KEY_FILENAME: Final[str] = "gateway_encryption_key"
 _GATEWAY_PASSWORD_FILENAME: Final[str] = "gateway_listen_password"
-_GATEWAY_RUN_SCRIPT_FILENAME: Final[str] = "gateway_run.sh"
 
 # supervisord drop-in program directory (the distro ``supervisor`` package's
 # ``supervisord.conf`` includes ``conf.d/*.conf``) and the program names /
@@ -129,12 +141,16 @@ _SH_BINARY_PATH: Final[str] = "/bin/sh"
 _SSH_BINARY_PATH: Final[str] = "/usr/bin/ssh"
 
 # supervisord program tuning. ``startsecs`` is how long a program must stay up
-# to count as successfully started; a huge ``startretries`` keeps supervisord
-# retrying a program that keeps failing to start (e.g. the tunnel while the
-# container's sshd is still coming up) instead of giving up and marking it
-# FATAL. Logs are size-rotated by supervisord itself.
+# to count as successfully started. The tunnel uses a huge ``startretries`` so
+# supervisord keeps retrying while the container's sshd is still coming up
+# (or a stale remote bind clears) instead of giving up. The gateway uses a
+# small ``startretries``: the only expected repeated start failure is a reboot
+# (its tmpfs secrets are gone), where going quietly FATAL is the desired
+# "down until re-provisioned" state rather than an endless retry loop. Logs are
+# size-rotated by supervisord itself.
 _SUPERVISOR_START_SECONDS: Final[int] = 5
-_SUPERVISOR_MAX_START_RETRIES: Final[int] = 1_000_000
+_SUPERVISOR_GATEWAY_START_RETRIES: Final[int] = 3
+_SUPERVISOR_TUNNEL_START_RETRIES: Final[int] = 1_000_000
 _SUPERVISOR_LOG_MAX_BYTES: Final[str] = "10MB"
 _SUPERVISOR_LOG_BACKUPS: Final[int] = 3
 
@@ -178,8 +194,9 @@ def _build_ensure_installed_script(latchkey_version: str, node_major_version: st
     ``pipefail`` (unsupported by Debian's default ``/bin/sh``, dash) by
     downloading the NodeSource setup script to a file instead of piping it,
     so ``set -e`` still aborts on a failed download. supervisord is installed
-    (and its init service enabled so it auto-starts on boot) so the gateway and
-    reverse tunnel can be run as auto-restarting, reboot-surviving programs.
+    (and its init service started) so the gateway and reverse tunnel can be run
+    as auto-restarting programs that recover from crashes without a desktop
+    round-trip.
     """
     nodesource_url = f"https://deb.nodesource.com/setup_{node_major_version}.x"
     return "\n".join(
@@ -199,17 +216,17 @@ def _build_ensure_installed_script(latchkey_version: str, node_major_version: st
             "  apt-get install -y nodejs",
             "  rm -f /tmp/nodesource_setup.sh",
             "fi",
-            # supervisor: supervises the gateway + tunnel and (via its init
-            # service) restarts them on boot.
+            # supervisor: supervises the gateway + tunnel and restarts either on
+            # crash.
             "if ! command -v supervisord >/dev/null 2>&1; then",
             "  apt-get update",
             "  apt-get install -y supervisor",
             "fi",
-            # Ensure supervisord is enabled at boot and running now. The distro
-            # package does this on install, but repeating it is idempotent and
-            # recovers a host where the service was left disabled or stopped.
-            # Tolerated on the rare non-systemd host: the reread/update below
-            # then fails loudly instead of silently degrading.
+            # Ensure supervisord is running now (the distro package starts it on
+            # install, but repeating it is idempotent and recovers a host where
+            # the service was left stopped). Tolerated on the rare non-systemd
+            # host: the reread/update below then fails loudly instead of
+            # silently degrading.
             "systemctl enable --now supervisor >/dev/null 2>&1 || true",
             # latchkey CLI, pinned to the exact version. Reinstall whenever the
             # installed version differs (missing latchkey reports an empty string).
@@ -423,15 +440,17 @@ def sync_permissions(host: OuterHostInterface, latchkey_directory: Path, host_id
         host.write_file(remote_path, content.encode("utf-8"), mode=_REMOTE_FILE_MODE, is_atomic=True)
 
 
-def _build_supervisor_program_config(program_name: str, command: str, log_path: str) -> str:
+def _build_supervisor_program_config(program_name: str, command: str, log_path: str, start_retries: int) -> str:
     """Build a supervisord ``[program:...]`` drop-in config for a long-running process.
 
-    ``autostart``/``autorestart`` make supervisord launch the program on start
-    (including at boot, since its init service auto-starts) and relaunch it
-    whenever it exits. A huge ``startretries`` keeps supervisord retrying a
-    program that repeatedly fails to *start* (e.g. the tunnel while the
-    container's sshd is still coming up) rather than giving up and marking it
-    FATAL. ``stopasgroup``/``killasgroup`` ensure a stop/restart tears down the
+    ``autostart``/``autorestart`` make supervisord launch the program and
+    relaunch it whenever it exits, so a crashed process is brought back without
+    a desktop round-trip. ``start_retries`` bounds how many times supervisord
+    retries a program that keeps failing to *start* before marking it FATAL
+    (the tunnel wants a large value while the container's sshd comes up; the
+    gateway wants a small one, since a repeated start failure means its tmpfs
+    secrets are gone after a reboot and going quietly FATAL is the desired
+    state). ``stopasgroup``/``killasgroup`` ensure a stop/restart tears down the
     whole process group (any ssh or child), and supervisord size-rotates the
     combined stdout+stderr into ``log_path``.
     """
@@ -443,7 +462,7 @@ def _build_supervisor_program_config(program_name: str, command: str, log_path: 
             "autostart=true",
             "autorestart=true",
             f"startsecs={_SUPERVISOR_START_SECONDS}",
-            f"startretries={_SUPERVISOR_MAX_START_RETRIES}",
+            f"startretries={start_retries}",
             "stopasgroup=true",
             "killasgroup=true",
             f"stdout_logfile={log_path}",
@@ -455,16 +474,22 @@ def _build_supervisor_program_config(program_name: str, command: str, log_path: 
     )
 
 
-def _reload_supervisor_programs(host: OuterHostInterface, host_name: str) -> None:
-    """Apply freshly-written supervisord drop-in configs via ``reread`` + ``update``.
+def _reload_supervisor_programs(host: OuterHostInterface, host_name: str, program_name: str) -> None:
+    """Apply a freshly-written supervisord drop-in and ensure ``program_name`` is running.
 
     ``reread`` reloads the config files and ``update`` (re)starts new/changed
-    programs and stops removed ones. Together they are idempotent: an unchanged
-    config is a no-op, so re-provisioning never needlessly bounces a healthy
-    gateway or tunnel. Raises :class:`RemoteGatewayError` if the reload fails.
+    programs and stops removed ones -- idempotent, so an unchanged config never
+    needlessly bounces a healthy program. ``update`` does not, however, restart
+    a program that is merely STOPPED/FATAL (e.g. a gateway that went FATAL after
+    a reboot wiped its tmpfs secrets) when its config is unchanged, so a
+    best-effort ``start`` follows: it brings such a program back up with the
+    freshly-written secrets, and is a harmless no-op (``|| true``) when the
+    program is already running. ``program_name`` is a fixed internal literal, so
+    it is interpolated directly. Raises :class:`RemoteGatewayError` if the
+    reread/update fails.
     """
     result = host.execute_idempotent_command(
-        "supervisorctl reread && supervisorctl update",
+        f"supervisorctl reread && supervisorctl update && (supervisorctl start {program_name} || true)",
         timeout_seconds=_SUPERVISOR_COMMAND_TIMEOUT_SECONDS,
     )
     if not result.success:
@@ -479,7 +504,7 @@ def _build_gateway_run_script(outer_port: int, key_file_path: Path, password_fil
     """Build the wrapper script supervisord runs to launch ``latchkey gateway``.
 
     supervisord invokes this as ``/bin/sh <script>``. It reads the encryption
-    key and the gateway listen password from their two 0600 files into
+    key and the gateway listen password from their two 0600 tmpfs files into
     ``LATCHKEY_ENCRYPTION_KEY`` / ``LATCHKEY_GATEWAY_LISTEN_PASSWORD`` and
     ``exec``s the gateway (so supervisord tracks the gateway PID directly, not a
     wrapping shell). Reading the secrets from files -- rather than baking them
@@ -487,6 +512,12 @@ def _build_gateway_run_script(outer_port: int, key_file_path: Path, password_fil
     and out of any process listing (``/proc/<pid>/cmdline``). The gateway binds
     ``outer_port`` on the VPS loopback only; it is reached from the container via
     the reverse tunnel, never exposed off-host.
+
+    The secret files live in tmpfs (see :data:`_TMPFS_SECRETS_DIR`), so a reboot
+    wipes them. The script therefore refuses to launch a gateway with missing
+    secrets: it exits non-zero with a clear message, which supervisord treats as
+    a failed start (the gateway stays down until the next provisioning pass
+    re-writes the secrets) rather than running a broken, keyless gateway.
 
     ``LATCHKEY_ENCRYPTION_KEY`` must be the same key the desktop gateway uses so
     the gateway can decrypt the synced ``credentials.json.enc``.
@@ -510,6 +541,13 @@ def _build_gateway_run_script(outer_port: int, key_file_path: Path, password_fil
             # wrapper execs ``latchkey`` (an npm global) itself, so make sure the
             # npm global bin dirs are on PATH regardless of supervisord's.
             'export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"',
+            # Refuse to start with missing secrets (tmpfs wiped by a reboot):
+            # exit non-zero so supervisord records a failed start instead of
+            # launching a keyless gateway.
+            f"if [ ! -s {key_q} ] || [ ! -s {password_q} ]; then",
+            '  echo "latchkey gateway secrets are missing (tmpfs cleared by a reboot?); awaiting re-provision" >&2',
+            "  exit 1",
+            "fi",
             # Read both secrets from their 0600 files into the environment; only
             # the file paths (not the secrets) ever appear in this script.
             f'LATCHKEY_ENCRYPTION_KEY="$(cat {key_q})"',
@@ -532,50 +570,51 @@ def _ensure_latchkey_gateway_running(
 
     Writes a supervisord drop-in that launches ``latchkey gateway`` bound to the
     VPS loopback on ``OUTER_PORT`` and applies it via ``reread``/``update``, so
-    supervisord keeps the gateway running, restarts it if it crashes, and brings
-    it back up after a reboot. The local latchkey encryption key (from
-    ``<latchkey_directory>/encryption_key``) and ``gateway_password`` (the
-    desktop-derived shared password) are written to two 0600 files under the
-    remote ``$HOME/.latchkey`` directory; a wrapper script reads them into the
-    gateway's environment at launch, so the secrets never appear in the
-    supervisord config or a process listing.
+    supervisord keeps the gateway running and restarts it if it crashes. The
+    local latchkey encryption key (from ``<latchkey_directory>/encryption_key``)
+    and ``gateway_password`` (the desktop-derived shared password) are written
+    to two 0600 files in a tmpfs directory (:data:`_TMPFS_SECRETS_DIR`); a
+    wrapper script (on the normal disk) reads them into the gateway's
+    environment at launch, so the secrets never appear in the supervisord config
+    or a process listing.
 
-    Security tradeoff: unlike the previous detached launch, which read the
-    secrets from short-lived temp files and deleted them immediately, these
-    secrets are *persisted* on the VPS disk alongside the encrypted
-    ``credentials.json.enc``. This is unavoidable for the reboot-survival this
-    function exists to provide -- supervisord must be able to (re)start the
-    gateway autonomously, including after a reboot when no desktop is connected
-    to re-push them. The persistent key file beside the encrypted store is, from
-    a disk-snapshot threat model, equivalent to storing the credentials in
-    plaintext; the files are 0600 and root-owned, matching the credential
-    store's own protection. Idempotent. Raises :class:`RemoteGatewayError` if
-    loading the key or the reload fails.
+    The secrets go in tmpfs (RAM), not on the disk beside the encrypted
+    ``credentials.json.enc``: this deliberately keeps the encryption key off the
+    persistent disk (a key file beside the encrypted store would, against a
+    disk-snapshot threat model, be equivalent to storing the credentials in
+    plaintext) while still surviving a process crash, so supervisord can restart
+    the gateway without a desktop round-trip. The tradeoff is that a reboot
+    wipes the secrets, leaving the gateway down until the next provisioning pass
+    re-writes them -- an accepted limitation. Idempotent. Raises
+    :class:`RemoteGatewayError` if loading the key or the reload fails.
     """
     try:
         encryption_key = load_or_create_encryption_key(latchkey_directory).get_secret_value()
     except LatchkeyEncryptionKeyPermissionError as e:
         raise RemoteGatewayError(str(e)) from e
     remote_dir = _resolve_remote_latchkey_directory(host)
-    key_file_path = remote_dir / _GATEWAY_ENCRYPTION_KEY_FILENAME
-    password_file_path = remote_dir / _GATEWAY_PASSWORD_FILENAME
+    # Secrets go in tmpfs (RAM); the wrapper + log stay on the normal disk.
+    key_file_path = _TMPFS_SECRETS_DIR / _GATEWAY_ENCRYPTION_KEY_FILENAME
+    password_file_path = _TMPFS_SECRETS_DIR / _GATEWAY_PASSWORD_FILENAME
     run_script_path = remote_dir / _GATEWAY_RUN_SCRIPT_FILENAME
     log_path = remote_dir / _REMOTE_GATEWAY_LOG_FILENAME
     conf_path = _SUPERVISOR_CONFD_DIR / _GATEWAY_CONF_FILENAME
 
-    # Persist the two secrets (0600) and the wrapper that reads them.
+    # Write the two secrets (0600) into tmpfs and the wrapper that reads them.
     host.write_file(key_file_path, encryption_key.encode("utf-8"), mode=_REMOTE_FILE_MODE)
     host.write_file(password_file_path, gateway_password.encode("utf-8"), mode=_REMOTE_FILE_MODE)
     run_script = _build_gateway_run_script(OUTER_PORT, key_file_path, password_file_path)
     host.write_file(run_script_path, run_script.encode("utf-8"), mode="0700")
 
-    # Write the supervisord program config, then reread/update to apply it.
+    # Write the supervisord program config, then reread/update/start to apply it.
     command = f"{_SH_BINARY_PATH} {shlex.quote(str(run_script_path))}"
-    conf = _build_supervisor_program_config(_GATEWAY_PROGRAM_NAME, command, str(log_path))
+    conf = _build_supervisor_program_config(
+        _GATEWAY_PROGRAM_NAME, command, str(log_path), _SUPERVISOR_GATEWAY_START_RETRIES
+    )
     host_name = host.get_name()
     with log_span("Ensuring latchkey gateway is running on VPS {} (port {})", host_name, OUTER_PORT):
         host.write_file(conf_path, conf.encode("utf-8"), mode=_REMOTE_FILE_MODE, is_atomic=True)
-        _reload_supervisor_programs(host, host_name)
+        _reload_supervisor_programs(host, host_name, _GATEWAY_PROGRAM_NAME)
 
 
 def _build_reverse_tunnel_ssh_command(
@@ -651,8 +690,10 @@ def _ensure_latchkey_gateway_reachable_from_container(
     ``127.0.0.1:OUTER_PORT`` (where :func:`_ensure_latchkey_gateway_running`
     started the gateway), so the agent's ``LATCHKEY_GATEWAY=http://127.0.0.1:INNER_PORT``
     reaches the VPS-resident gateway with no change to how the agent env is
-    injected. supervisord keeps the tunnel up, restarts it if ssh exits (e.g.
-    after a keepalive timeout on a resumed VM), and re-establishes it on boot.
+    injected. supervisord keeps the tunnel up and restarts it if ssh exits (e.g.
+    after a keepalive timeout on a resumed VM). The tunnel carries no secret, so
+    unlike the gateway it also survives a reboot on its own (though it forwards
+    to a down gateway until the gateway is re-provisioned).
 
     ``container_ssh_key_path`` must be a private key present *on the VPS* that
     authenticates to the container's sshd. Idempotent. Raises
@@ -667,7 +708,9 @@ def _ensure_latchkey_gateway_reachable_from_container(
     )
     log_path = _resolve_remote_latchkey_directory(host) / _REMOTE_TUNNEL_LOG_FILENAME
     conf_path = _SUPERVISOR_CONFD_DIR / _TUNNEL_CONF_FILENAME
-    conf = _build_supervisor_program_config(_TUNNEL_PROGRAM_NAME, command, str(log_path))
+    conf = _build_supervisor_program_config(
+        _TUNNEL_PROGRAM_NAME, command, str(log_path), _SUPERVISOR_TUNNEL_START_RETRIES
+    )
     host_name = host.get_name()
     with log_span(
         "Ensuring latchkey gateway is reachable from the container on VPS {} (container:{} -> gateway:{})",
@@ -676,7 +719,7 @@ def _ensure_latchkey_gateway_reachable_from_container(
         OUTER_PORT,
     ):
         host.write_file(conf_path, conf.encode("utf-8"), mode=_REMOTE_FILE_MODE, is_atomic=True)
-        _reload_supervisor_programs(host, host_name)
+        _reload_supervisor_programs(host, host_name, _TUNNEL_PROGRAM_NAME)
 
 
 def _build_container_tunnel_keypair_script(
@@ -802,9 +845,12 @@ def provision_remote_gateway(
     VPS->container keypair, and register the VPS->container reverse tunnel as a
     second supervisord program so the agent's
     ``LATCHKEY_GATEWAY=http://127.0.0.1:INNER_PORT`` reaches it. supervisord
-    keeps both processes running, restarts them on failure, and brings them back
-    up on reboot. The container's ssh user/port come from the inner host's SSH
-    info; the container itself is located on the VPS by its host-id label.
+    keeps both processes running and restarts them on failure. (The gateway's
+    secrets live in tmpfs, so a reboot leaves the gateway down until the next
+    provisioning pass; this is a deliberate choice to keep the encryption key
+    off the persistent disk -- see :func:`_ensure_latchkey_gateway_running`.)
+    The container's ssh user/port come from the inner host's SSH info; the
+    container itself is located on the VPS by its host-id label.
 
     Only genuinely-remote outer hosts are provisioned: when ``host`` is the
     local machine (e.g. the outer of a local docker daemon) this is a no-op, so

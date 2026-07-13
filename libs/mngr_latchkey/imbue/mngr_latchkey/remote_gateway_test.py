@@ -411,21 +411,29 @@ def test_ensure_latchkey_gateway_running_registers_supervisord_program_on_outer_
     assert 'LATCHKEY_GATEWAY_LISTEN_PASSWORD="$(cat ' in run_script
     assert "export LATCHKEY_ENCRYPTION_KEY LATCHKEY_GATEWAY_LISTEN_PASSWORD" in run_script
     assert "shared-password" not in run_script
-    # supervisord keeps it up: autostart (incl. on boot) + autorestart on crash.
+    # The wrapper refuses to launch a keyless gateway when its tmpfs secrets are
+    # gone (e.g. wiped by a reboot).
+    assert "exit 1" in run_script
+    assert "awaiting re-provision" in run_script
+    # supervisord keeps it up: autostart + autorestart on crash.
     assert f"[program:{_GATEWAY_PROGRAM_NAME}]" in conf
     assert "autostart=true" in conf
     assert "autorestart=true" in conf
     assert "/bin/sh /root/.latchkey/gateway_run.sh" in conf
-    # Applied via reread + update; no more nohup/pidfile launch.
-    assert _reload_commands(outer) == ["supervisorctl reread && supervisorctl update"]
+    # Applied via reread + update + best-effort start; no more nohup/pidfile launch.
+    assert _reload_commands(outer) == [
+        f"supervisorctl reread && supervisorctl update && (supervisorctl start {_GATEWAY_PROGRAM_NAME} || true)"
+    ]
     assert all("nohup" not in r.command for r in _stub(outer).recorded)
 
 
-def test_ensure_latchkey_gateway_running_persists_secrets_to_0600_files(tmp_path: Path) -> None:
+def test_ensure_latchkey_gateway_running_writes_secrets_to_0600_tmpfs_files(tmp_path: Path) -> None:
     outer = _outer(CommandResult(stdout="", stderr="", success=True))
     _ensure_latchkey_gateway_running(outer, tmp_path, "shared-password")
-    key_file = _written_by_path(outer, "/root/.latchkey/gateway_encryption_key")
-    password_file = _written_by_path(outer, "/root/.latchkey/gateway_listen_password")
+    # Secrets go in tmpfs (RAM), never on the persistent disk beside the
+    # encrypted credential store; the wrapper stays on the normal disk.
+    key_file = _written_by_path(outer, "/dev/shm/mngr-latchkey/gateway_encryption_key")
+    password_file = _written_by_path(outer, "/dev/shm/mngr-latchkey/gateway_listen_password")
     run_file = _written_by_path(outer, "/root/.latchkey/gateway_run.sh")
     # The password file's content is the literal secret; it is never written to
     # a command (see the wrapper test above).
@@ -434,7 +442,7 @@ def test_ensure_latchkey_gateway_running_persists_secrets_to_0600_files(tmp_path
     assert key_file.mode == "0600"
     assert password_file.mode == "0600"
     assert run_file.mode == "0700"
-    # The wrapper reads back exactly the two secret file paths.
+    # The wrapper reads back exactly the two tmpfs secret file paths.
     run_script = run_file.content.decode("utf-8")
     assert key_file.path in run_script
     assert password_file.path in run_script
@@ -452,7 +460,7 @@ def test_ensure_latchkey_gateway_running_injects_local_encryption_key(
     os.chmod(key_path, 0o600)
     outer = _outer(CommandResult(stdout="", stderr="", success=True))
     _ensure_latchkey_gateway_running(outer, tmp_path, "shared-password")
-    key_file = _written_by_path(outer, "/root/.latchkey/gateway_encryption_key")
+    key_file = _written_by_path(outer, "/dev/shm/mngr-latchkey/gateway_encryption_key")
     assert key_file.content == b"my-test-key-abc123"
     # The key never appears in any recorded command string.
     assert all("my-test-key-abc123" not in r.command for r in _stub(outer).recorded)
@@ -498,8 +506,10 @@ def test_ensure_latchkey_gateway_reachable_registers_reverse_tunnel_program() ->
     assert "ServerAliveInterval=30" in conf
     assert "ServerAliveCountMax=3" in conf
     assert "TCPKeepAlive=yes" in conf
-    # Applied via reread + update.
-    assert _reload_commands(outer) == ["supervisorctl reread && supervisorctl update"]
+    # Applied via reread + update + best-effort start.
+    assert _reload_commands(outer) == [
+        f"supervisorctl reread && supervisorctl update && (supervisorctl start {_TUNNEL_PROGRAM_NAME} || true)"
+    ]
 
 
 def test_ensure_latchkey_gateway_reachable_quotes_key_path_with_spaces() -> None:
@@ -578,7 +588,7 @@ def test_provision_remote_gateway_runs_full_sequence_on_the_outer_host(tmp_path:
     assert "ssh-keygen -t ed25519" in commands
     assert "docker exec -u root" in commands
     assert "mngr-ws-1" in commands
-    assert "supervisorctl reread && supervisorctl update" in commands
+    assert "supervisorctl reread && supervisorctl update && (supervisorctl start" in commands
     # Both supervisord programs (gateway + tunnel) were written.
     assert f"[program:{_GATEWAY_PROGRAM_NAME}]" in written
     assert f"[program:{_TUNNEL_PROGRAM_NAME}]" in written
