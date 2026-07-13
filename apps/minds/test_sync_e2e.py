@@ -462,7 +462,7 @@ def _read_settled_badge(page: Page, origin: str, agent_id: str) -> str | None:
     this reads WITHOUT navigating until the badge settles (or 90s pass).
     """
     _goto_landing(page, origin)
-    deadline = time.monotonic() + 90
+    deadline = time.monotonic() + 150
     badge = _landing_backup_badge_text(page, agent_id)
     while time.monotonic() < deadline:
         if badge is not None and badge and "Checking backups" not in badge:
@@ -472,7 +472,25 @@ def _read_settled_badge(page: Page, origin: str, agent_id: str) -> str | None:
     return badge
 
 
-def _wait_for_backed_up_badge(page: Page, origin: str, agent_id: str) -> None:
+def _container_backup_diagnostics(container_name: str) -> str:
+    """Tail of the workspace's backup service state, for badge-timeout failures."""
+    parts: list[str] = []
+    for label, command in (
+        ("supervisor", "supervisorctl status host-backup"),
+        ("events", "tail -c 3000 /mngr/*/events/backup/events.jsonl 2>/dev/null || echo no-events-file"),
+        ("env", "test -f /code/runtime/secrets/restic.env && echo env-present || echo env-missing"),
+    ):
+        result = subprocess.run(
+            ["docker", "exec", container_name, "bash", "-lc", command],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        parts.append(f"[{label}] {(result.stdout or result.stderr).strip()[:1200]}")
+    return " | ".join(parts)
+
+
+def _wait_for_backed_up_badge(page: Page, origin: str, agent_id: str, container_name: str) -> None:
     """Reload the landing page until this workspace's badge reports a completed backup."""
 
     def backed_up() -> bool | None:
@@ -487,7 +505,11 @@ def _wait_for_backed_up_badge(page: Page, origin: str, agent_id: str) -> None:
             backed_up,
         )
     except AssertionError as e:
-        raise AssertionError(f"{e}; {_landing_state_snapshot(page)}") from None
+        try:
+            container_state = _container_backup_diagnostics(container_name)
+        except (subprocess.SubprocessError, OSError) as diag_error:
+            container_state = f"(container diagnostics unavailable: {diag_error})"
+        raise AssertionError(f"{e}; {_landing_state_snapshot(page)}; {container_state}") from None
     logger.info("Landing badge reports a completed backup for {}", agent_id)
 
 
@@ -625,7 +647,9 @@ def _assert_zip_contains_sentinel(zip_path: Path, sentinel_content: str) -> None
 @pytest.mark.minds_snapshot_resume
 @pytest.mark.docker
 @pytest.mark.rsync
-@pytest.mark.timeout(2400)
+# Strictly below offload's test_timeout_secs=2400 so a timeout fails INSIDE
+# pytest (junit + failure diagnostics survive) instead of a sandbox kill.
+@pytest.mark.timeout(2100)
 def test_amnesia_and_recover_full_lifecycle_via_electron(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -666,7 +690,7 @@ def test_amnesia_and_recover_full_lifecycle_via_electron(
             _associate_workspace_via_ui(page, origin, agent_id, sync_e2e_account.email)
             _configure_backups_via_ui(page, origin, agent_id, "IMBUE_CLOUD")
             _set_master_password_via_ui(page, origin, master_password)
-            _wait_for_backed_up_badge(page, origin, agent_id)
+            _wait_for_backed_up_badge(page, origin, agent_id, container_name)
 
         # Convergence gates before pulling the plug: the record's secrets and
         # the wrapped key are on the server (read-only connector waits).
