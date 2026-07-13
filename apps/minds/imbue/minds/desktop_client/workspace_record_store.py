@@ -403,10 +403,15 @@ class WorkspaceRecordStore(MutableModel):
         # password, its secrets never leave this machine -- the wire copy is
         # stripped. (The next pull mirrors the secretless server row into the
         # replica; this device reads its own secrets from the canonical env
-        # files, never from the replica.)
+        # files, never from the replica.) Only an UNLOCKED device can make
+        # that call: a locked device has no bundle mirror even when a password
+        # is set elsewhere, and stripping there would scrub secrets another
+        # device synced -- it passes the replica's opaque blob through as-is.
+        is_unlocked = dek_store.is_account_unlocked(self.paths, user_id)
         is_password_set = dek_store.is_master_password_set_for_account(self.paths, user_id)
+        is_metadata_only = is_unlocked and not is_password_set
         wire = record.to_wire(record.revision + 1)
-        if not is_password_set:
+        if is_metadata_only:
             wire["encrypted_secrets"] = None
         try:
             stored = self.cli.sync_record_push(account_email, wire)
@@ -415,7 +420,7 @@ class WorkspaceRecordStore(MutableModel):
                 raise
             server_revision = int(str(conflict.stored_record.get("revision", 0)))
             rebased = record.to_wire(server_revision + 1)
-            if not is_password_set:
+            if is_metadata_only:
                 rebased["encrypted_secrets"] = None
             stored = self.cli.sync_record_push(account_email, rebased)
         acked = record.model_copy_update(

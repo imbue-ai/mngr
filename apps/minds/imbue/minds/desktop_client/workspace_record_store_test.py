@@ -4,6 +4,7 @@ from uuid import uuid4
 
 import pytest
 
+from imbue.imbue_common.model_update import to_update
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.backup_env_store import write_canonical_env
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
@@ -335,6 +336,34 @@ def test_reconcile_tombstones_definitively_absent_local_rows(paths: WorkspacePat
     store.reconcile({user_id: _EMAIL}, resolver)
 
     assert store.list_records(user_id)[0].state == RECORD_STATE_DESTROYED
+
+
+def test_locked_device_push_preserves_server_secrets(paths: WorkspacePaths) -> None:
+    """A locked device (no DEK, no bundle mirror) must pass pulled secrets
+    through verbatim when it pushes a metadata change -- stripping them there
+    would scrub secrets another device synced."""
+    cli = make_fake_imbue_cloud_cli()
+    store = _make_store(paths, cli)
+    user_id = _user_id()
+    remote = ReplicaRecord(
+        host_id="host-cloud",
+        agent_id=_agent_id(),
+        display_name="old-name",
+        provider_kind="imbue_cloud_alice",
+        hosting_device_id=None,
+        device_label="laptop",
+        encrypted_secrets="b3BhcXVl",
+    )
+    cli.sync_records_by_email[_EMAIL] = {"host-cloud": remote.to_wire(1)}
+    store.pull(user_id, _EMAIL)
+
+    pulled = store.list_records(user_id)[0]
+    renamed = pulled.model_copy_update(to_update(pulled.field_ref().display_name, "new-name"))
+    store.upsert_local_record(user_id, _EMAIL, renamed)
+
+    server_row = cli.sync_records_by_email[_EMAIL]["host-cloud"]
+    assert server_row["display_name"] == "new-name"
+    assert server_row["encrypted_secrets"] == "b3BhcXVl"
 
 
 def test_reconcile_does_not_tombstone_unenriched_create_seed_rows(paths: WorkspacePaths) -> None:
