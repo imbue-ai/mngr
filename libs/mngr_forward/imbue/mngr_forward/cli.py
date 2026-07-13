@@ -1,8 +1,11 @@
 """Click entry point for ``mngr forward``."""
 
+import asyncio
+import os
 import secrets
 import signal
 import socket
+import ssl
 import subprocess
 import threading
 import time
@@ -12,7 +15,8 @@ from typing import Any
 from typing import Final
 
 import click
-import uvicorn
+from hypercorn.asyncio import serve as hypercorn_serve
+from hypercorn.config import Config
 from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -42,13 +46,18 @@ from imbue.mngr_forward.primitives import ReverseTunnelSpec
 from imbue.mngr_forward.resolver import ForwardResolver
 from imbue.mngr_forward.reverse_handler import ReverseTunnelHandler
 from imbue.mngr_forward.server import create_forward_app
+from imbue.mngr_forward.service_map_cache import ServiceMapCache
 from imbue.mngr_forward.snapshot import mngr_list_snapshot
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_forward.stream_manager import ForwardStreamManager
+from imbue.mngr_forward.tls import InMemoryTLSConfig
+from imbue.mngr_forward.tls import build_server_ssl_context
+from imbue.mngr_forward.tls import generate_self_signed_cert
 
 _DEFAULT_HOST: Final[str] = "127.0.0.1"
 _DEFAULT_PORT: Final[int] = 8421
 _OTP_LENGTH: Final[int] = 32
+_SERVICE_MAP_CACHE_FILENAME: Final[str] = "service_map.json"
 
 
 class ForwardCliOptions(CommonCliOptions):
@@ -69,6 +78,7 @@ class ForwardCliOptions(CommonCliOptions):
     preauth_cookie: str | None = None
     open_browser: bool = False
     allow_host_loopback: bool = False
+    use_http2: bool = False
 
 
 def _parse_reverse_specs(raw: tuple[str, ...]) -> tuple[ReverseTunnelSpec, ...]:
@@ -110,8 +120,8 @@ def _bind_listen_socket(host: str, requested_port: int | None) -> socket.socket:
       ``click.ClickException`` is raised -- a caller that picked a specific
       port did so deliberately, so silently moving would hide a real conflict.
 
-    The returned socket is bound but not listening; uvicorn calls ``listen()``
-    on it via ``loop.create_server``.
+    The returned socket is bound but not listening; hypercorn calls
+    ``listen()`` on it via ``asyncio.start_server`` after the fd handoff.
     """
     family = socket.AF_INET6 if ":" in host else socket.AF_INET
     sock = socket.socket(family=family)
@@ -235,6 +245,17 @@ def _bind_listen_socket(host: str, requested_port: int | None) -> socket.socket:
         "the host. Pass this flag only for setups that intentionally run agents directly on the host."
     ),
 )
+@click.option(
+    "--use-http2",
+    is_flag=True,
+    default=False,
+    help=(
+        "Terminate TLS and negotiate HTTP/2 (via ALPN) instead of serving plain HTTP/1.1. "
+        "Removes Chromium's ~6-connection-per-origin ceiling for the workspace UI. The proxy "
+        "generates a fresh self-signed cert at startup, so only clients that trust it (the minds "
+        "desktop app) should enable this; a human browser will see a cert warning."
+    ),
+)
 @add_common_options
 @click.pass_context
 def forward(ctx: click.Context, **kwargs: Any) -> None:
@@ -260,8 +281,15 @@ def forward(ctx: click.Context, **kwargs: Any) -> None:
 
     envelope_writer = EnvelopeWriter()
 
+    plugin_state_dir = _resolve_plugin_state_dir(_resolve_mngr_host_dir(mngr_ctx))
+    service_map_cache = ServiceMapCache(cache_path=plugin_state_dir / _SERVICE_MAP_CACHE_FILENAME)
+
     strategy = _build_strategy(opts)
-    resolver = ForwardResolver(strategy=strategy, envelope_writer=envelope_writer)
+    resolver = ForwardResolver(
+        strategy=strategy,
+        envelope_writer=envelope_writer,
+        service_map_cache=service_map_cache,
+    )
     tunnel_manager = SSHTunnelManager()
 
     reverse_specs = _parse_reverse_specs(opts.reverse)
@@ -281,6 +309,12 @@ def forward(ctx: click.Context, **kwargs: Any) -> None:
         del kept  # used internally by the helper
         stream_manager: ForwardStreamManager | None = None
     else:
+        # Seed the resolver's service map from the previous run's cache so a
+        # restored window resolves as soon as discovery supplies membership +
+        # SSH info, instead of waiting on the slow per-agent event stream. The
+        # live stream still runs and overwrites the seed as it delivers; an
+        # empty/absent cache is a no-op (today's behavior).
+        resolver.seed_services(service_map_cache.load())
         discovery_events_path = get_discovery_events_path(mngr_ctx.config) if opts.observe_via_file else None
         stream_manager = ForwardStreamManager(
             resolver=resolver,
@@ -298,13 +332,13 @@ def forward(ctx: click.Context, **kwargs: Any) -> None:
     if reverse_specs:
         tunnel_manager.start_reverse_tunnel_health_check()
 
-    plugin_state_dir = _resolve_plugin_state_dir(_resolve_mngr_host_dir(mngr_ctx))
     auth_store = FileAuthStore(data_directory=plugin_state_dir)
 
     one_time_code = OneTimeCode(secrets.token_urlsafe(_OTP_LENGTH))
     auth_store.add_one_time_code(code=one_time_code)
     login_host = "localhost" if opts.host in {"127.0.0.1", "0.0.0.0", "::1", "::"} else opts.host
-    login_url = f"http://{login_host}:{listen_port}/login?one_time_code={one_time_code}"
+    scheme = "https" if opts.use_http2 else "http"
+    login_url = f"{scheme}://{login_host}:{listen_port}/login?one_time_code={one_time_code}"
 
     logger.info("Login URL (one-time use): {}", login_url)
     envelope_writer.emit_login_url(login_url)
@@ -332,20 +366,66 @@ def forward(ctx: click.Context, **kwargs: Any) -> None:
         preauth_cookie_value=opts.preauth_cookie,
         on_listening=_on_listening,
         allow_host_loopback=opts.allow_host_loopback,
+        use_http2=opts.use_http2,
     )
 
     try:
-        # Hand uvicorn the socket we already bound rather than a host/port
-        # pair, so there is no window between resolving the port and the
-        # server claiming it (and no chance uvicorn binds a different one).
-        server = uvicorn.Server(uvicorn.Config(app, timeout_graceful_shutdown=1, log_level="warning"))
-        server.run(sockets=[listen_socket])
+        _serve_forward_app(app, listen_socket, use_http2=opts.use_http2)
     finally:
         listen_socket.close()
         if stream_manager is not None:
             stream_manager.stop()
         tunnel_manager.cleanup()
         envelope_writer.close()
+
+
+def _build_hypercorn_config(listen_socket: socket.socket, use_http2: bool) -> Config:
+    """Build the hypercorn ``Config`` for serving over the already-bound socket.
+
+    When ``use_http2`` is set the config carries an in-memory TLS context
+    (HTTP/2 negotiated via ALPN); otherwise it is plain HTTP/1.1, matching the
+    previous uvicorn behaviour. The bound-but-not-listening socket is handed off
+    by file descriptor (``fd://``): hypercorn's ``asyncio.start_server`` performs
+    the ``listen()``, so there is no window where a different server could claim
+    the port. hypercorn closes the fd it wraps on shutdown, so we hand it a
+    ``os.dup`` of the socket's fd and let the caller's ``finally`` close the
+    original -- avoiding a double close.
+    """
+    config: Config
+    if use_http2:
+        try:
+            cert_pem, key_pem = generate_self_signed_cert()
+            ssl_context = build_server_ssl_context(cert_pem, key_pem)
+        except (ValueError, ssl.SSLError, OSError) as e:
+            # Naming TLS/HTTP-2 setup explicitly here makes the failure
+            # diagnosable: minds' `wait_for_listening` will otherwise just time
+            # out with no indication that the cert/context was the cause.
+            logger.error("mngr forward TLS/HTTP-2 setup failed (cert generation or SSL context): {}", e)
+            raise
+        config = InMemoryTLSConfig(ssl_context)
+    else:
+        config = Config()
+
+    dup_fd = os.dup(listen_socket.fileno())
+    config.bind = [f"fd://{dup_fd}"]
+    # Match the previous uvicorn settings: 1s graceful drain and warning-level
+    # logging (so hypercorn's per-connection "Running on ..." info line is
+    # suppressed).
+    config.graceful_timeout = 1.0
+    config.loglevel = "WARNING"
+    return config
+
+
+def _serve_forward_app(app: Any, listen_socket: socket.socket, use_http2: bool) -> None:
+    """Serve the forward app over the already-bound ``listen_socket`` via hypercorn.
+
+    ``shutdown_trigger`` defaults to ``None``, which makes hypercorn install its
+    own SIGINT/SIGTERM handlers -- matching the SIGTERM->graceful behaviour
+    minds' ``terminate()`` relies on. Must run on the main thread so the loop can
+    install those signal handlers.
+    """
+    config = _build_hypercorn_config(listen_socket, use_http2)
+    asyncio.run(hypercorn_serve(app, config))
 
 
 def _validate_options(opts: ForwardCliOptions) -> None:

@@ -9,7 +9,7 @@
 #
 # where ``<snapshot-image-id>`` is the Modal image id printed by
 # ``scripts/snapshot_minds_e2e_state.py``. That image already has the
-# entire mngr checkout + FCT workspace + a stopped Docker container
+# entire mngr checkout + DEFAULT_WORKSPACE_TEMPLATE workspace + a stopped Docker container
 # baked in, so we skip the full image-setup phase and just boot
 # sandboxes from the snapshot.
 #
@@ -34,7 +34,7 @@ type = "modal"
 # Resource request per sandbox. offload's Modal default is only 128 MiB,
 # which is fine for the trivial container-state checks but nowhere near
 # enough to RESUME the workspace: a resumed sandbox runs dockerd, starts
-# the FCT workspace container, AND its nested docker-state (docker-in-
+# the DEFAULT_WORKSPACE_TEMPLATE workspace container, AND its nested docker-state (docker-in-
 # docker) daemon. Without this the resume tests OOM and pytest is killed
 # before it writes junit, which surfaces only as offload "failed to
 # download junit.xml ... path does not exist". Match what

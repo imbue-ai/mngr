@@ -30,6 +30,7 @@ from imbue.mngr_forward.data_types import ForwardServiceStrategy
 from imbue.mngr_forward.data_types import ForwardStrategy
 from imbue.mngr_forward.data_types import ProxyTarget
 from imbue.mngr_forward.envelope import EnvelopeWriter
+from imbue.mngr_forward.service_map_cache import ServiceMapCache
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 
@@ -49,6 +50,16 @@ class ForwardResolver(MutableModel):
             "``update_known_agents`` when they drop an agent that had services). "
             "The plugin wires this so a downstream consumer can mirror the per-agent "
             "service map. None in tests / code paths that don't care about emission."
+        ),
+    )
+    service_map_cache: ServiceMapCache | None = Field(
+        default=None,
+        description=(
+            "Optional last-known service-map cache. When set, every mutation of "
+            "the per-agent services map (the same points that emit "
+            "``resolver_snapshot``) is persisted through it, and ``seed_services`` "
+            "loads from it at startup so a fresh run resolves without waiting on "
+            "the slow per-agent event stream. None in tests / paths that don't persist."
         ),
     )
 
@@ -88,8 +99,8 @@ class ForwardResolver(MutableModel):
             self._initial_discovery_done = True
             if services_changed:
                 snapshot = self._snapshot_services_locked()
-        if snapshot is not None and self.envelope_writer is not None:
-            self.envelope_writer.emit_resolver_snapshot(snapshot)
+        if snapshot is not None:
+            self._publish_services_snapshot(snapshot)
 
     def add_known_agent(self, agent_id: AgentId) -> None:
         """Mark a single agent as known (incremental discovery)."""
@@ -115,8 +126,8 @@ class ForwardResolver(MutableModel):
             self._ssh_by_agent.pop(aid_str, None)
             if services_changed:
                 snapshot = self._snapshot_services_locked()
-        if snapshot is not None and self.envelope_writer is not None:
-            self.envelope_writer.emit_resolver_snapshot(snapshot)
+        if snapshot is not None:
+            self._publish_services_snapshot(snapshot)
 
     def update_services(self, agent_id: AgentId, services: dict[str, str]) -> None:
         """Replace the known services for a single agent.
@@ -129,8 +140,33 @@ class ForwardResolver(MutableModel):
         with self._lock:
             self._services_by_agent[str(agent_id)] = dict(services)
             snapshot = self._snapshot_services_locked()
+        self._publish_services_snapshot(snapshot)
+
+    def seed_services(self, services_by_agent: dict[str, dict[str, str]]) -> None:
+        """Seed the per-agent service map from a last-known cache at startup.
+
+        Fills only the services map; ``resolve()`` still gates on
+        discovery-supplied membership, so a seeded entry is served only once
+        this run's discovery confirms the agent is known. Does not emit or
+        re-persist -- it loads what is already on disk. The resolver is empty at
+        startup, so in practice this is a plain fill.
+        """
+        with self._lock:
+            for aid_str, services in services_by_agent.items():
+                self._services_by_agent[aid_str] = dict(services)
+
+    def _publish_services_snapshot(self, snapshot: dict[str, dict[str, str]]) -> None:
+        """Emit the ``resolver_snapshot`` envelope and persist the service-map cache.
+
+        Called (outside ``self._lock``) at every point that mutates the
+        per-agent services map. The envelope keeps a downstream consumer's
+        mirror in sync; the cache persists the same full map so a later run can
+        seed from it.
+        """
         if self.envelope_writer is not None:
             self.envelope_writer.emit_resolver_snapshot(snapshot)
+        if self.service_map_cache is not None:
+            self.service_map_cache.persist(snapshot)
 
     def update_ssh_info(self, agent_id: AgentId, ssh_info: RemoteSSHInfo) -> None:
         """Set or replace the SSH info for a single agent."""

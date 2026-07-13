@@ -8,6 +8,7 @@ import httpx
 from flask import Request
 from flask import Response
 from flask.testing import FlaskClient
+from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
@@ -23,6 +24,9 @@ from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
+from imbue.minds.desktop_client.backup_password_store import read_saved_backup_password
+from imbue.minds.desktop_client.backup_password_store import verify_backup_password
+from imbue.minds.desktop_client.backup_password_store import write_backup_password_hash
 from imbue.minds.desktop_client.conftest import DEFAULT_SERVICE_NAME
 from imbue.minds.desktop_client.conftest import make_agents_json
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
@@ -1706,6 +1710,59 @@ def test_error_reporting_settings_persist_each_toggle(tmp_path: Path) -> None:
     assert config.get_include_error_logs() is True
 
 
+# -- backup master-password change tests --
+
+
+def test_backup_password_change_requires_auth(tmp_path: Path) -> None:
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.post("/_chrome/backup-password", json={"new_password": "x", "new_password_confirm": "x"})
+    assert response.status_code == 403
+    # The hash authority was not touched (still the startup empty-password seed).
+    assert verify_backup_password(WorkspacePaths(data_dir=tmp_path), SecretStr("")) is True
+
+
+def test_backup_password_change_rejects_mismatched_confirmation(tmp_path: Path) -> None:
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    response = client.post("/_chrome/backup-password", json={"new_password": "one", "new_password_confirm": "two"})
+    assert response.status_code == 400
+    assert "match" in response.get_json()["error"]
+    assert verify_backup_password(WorkspacePaths(data_dir=tmp_path), SecretStr("")) is True
+
+
+def test_backup_password_change_updates_the_hash_and_optionally_saves(tmp_path: Path) -> None:
+    # No workspaces exist, so the rotation itself is a no-op; the flow still
+    # updates the hash authority and (when asked) the plaintext copy.
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    paths = WorkspacePaths(data_dir=tmp_path)
+
+    response = client.post(
+        "/_chrome/backup-password",
+        json={"new_password": "brand-new", "new_password_confirm": "brand-new", "save_password": True},
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["ok"] is True
+    assert body["results"] == []
+    assert verify_backup_password(paths, SecretStr("brand-new")) is True
+    assert verify_backup_password(paths, SecretStr("")) is False
+    assert read_saved_backup_password(paths) == "brand-new"
+
+
+def test_backup_password_change_may_return_to_the_empty_password(tmp_path: Path) -> None:
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    paths = WorkspacePaths(data_dir=tmp_path)
+    write_backup_password_hash(paths, SecretStr("something"))
+
+    response = client.post("/_chrome/backup-password", json={"new_password": "", "new_password_confirm": ""})
+
+    assert response.status_code == 200
+    assert verify_backup_password(paths, SecretStr("")) is True
+
+
 # -- get-help / report-a-bug tests --
 
 
@@ -1769,7 +1826,7 @@ def test_help_assist_requires_a_description(tmp_path: Path) -> None:
 
 
 def test_help_assist_refuses_a_workspace_without_the_assist_skill(tmp_path: Path) -> None:
-    """A workspace from an older FCT (no /assist skill) is refused up front (409) rather than spawning
+    """A workspace from an older DEFAULT_WORKSPACE_TEMPLATE (no /assist skill) is refused up front (409) rather than spawning
     a chat that would hang on the unknown ``/assist`` command -- and no ``mngr create`` is attempted."""
     caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout="MNGR_ASSIST_SKILL_ABSENT\n"))
     client, _ = _create_test_client_with_stores(tmp_path, mngr_caller=caller)

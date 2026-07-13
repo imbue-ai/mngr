@@ -3,6 +3,7 @@ import os
 import queue
 import threading
 import time
+from collections.abc import Callable
 from collections.abc import Collection
 from collections.abc import Iterator
 from collections.abc import Mapping
@@ -18,6 +19,7 @@ from flask import abort
 from flask import request
 from loguru import logger
 from pydantic import Field
+from pydantic import SecretStr
 from werkzeug.exceptions import HTTPException
 from werkzeug.middleware.dispatcher import DispatcherMiddleware
 
@@ -41,7 +43,10 @@ from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.backup_password_rotation import rotate_backup_master_password
+from imbue.minds.desktop_client.backup_password_store import ensure_backup_password_hash
 from imbue.minds.desktop_client.backup_password_store import has_saved_backup_password
+from imbue.minds.desktop_client.backup_password_store import is_master_password_set
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
@@ -55,6 +60,17 @@ from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.help_modal_requests import OpenHelpRequest
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
+from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
+from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
+from imbue.minds.desktop_client.latchkey.permission_overview import PermissionOverviewError
+from imbue.minds.desktop_client.latchkey.permission_overview import build_file_sharing_overview
+from imbue.minds.desktop_client.latchkey.permission_overview import build_permission_overview
+from imbue.minds.desktop_client.latchkey.permission_overview import build_workspace_overview
+from imbue.minds.desktop_client.latchkey.permission_overview import revoke_file_sharing_for_all_workspaces
+from imbue.minds.desktop_client.latchkey.permission_overview import revoke_file_sharing_for_workspace
+from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_for_all_workspaces
+from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_for_workspace
+from imbue.minds.desktop_client.latchkey.permission_overview import revoke_workspace_verb_for_workspace
 from imbue.minds.desktop_client.mind_liveness import compute_mind_liveness_by_agent_id
 from imbue.minds.desktop_client.mind_liveness import get_shutdown_capable_workspace_agent_ids
 from imbue.minds.desktop_client.minds_config import MindsConfig
@@ -193,10 +209,13 @@ def _get_mngr_forward_origin() -> str:
     """Build the bare-origin URL of the ``mngr forward`` plugin.
 
     Used by templates to construct ``/goto/<agent>/`` URLs that target the
-    plugin (which owns subdomain forwarding) rather than minds.
+    plugin (which owns subdomain forwarding) rather than minds. minds always
+    runs the proxy with TLS + HTTP/2, so the scheme is ``https`` and the
+    rendered links reach it rather than failing a plaintext request against
+    the TLS listener.
     """
     port = get_state().mngr_forward_port or 8421
-    return f"http://localhost:{port}"
+    return f"https://localhost:{port}"
 
 
 def _get_is_mac() -> bool:
@@ -418,6 +437,61 @@ def _handle_error_reporting_settings() -> Response:
     return make_response(status_code=200, content='{"ok": true}', media_type="application/json")
 
 
+def _handle_backup_password_change() -> Response:
+    """Rotate the shared backup master password (POST /_chrome/backup-password).
+
+    Deliberately a desktop-only cookie-auth route (not part of /api/v1): agents
+    must never be able to rotate the master password. The rotation is
+    synchronous -- it rekeys every existing backed-up workspace's repository --
+    and the response carries per-workspace results for the Settings page to
+    render inline.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
+    body = request.get_json(silent=True, force=True)
+    if not isinstance(body, dict):
+        return make_response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
+    paths: WorkspacePaths | None = get_state().api_v1_paths
+    if paths is None:
+        return make_response(
+            status_code=503,
+            content='{"error": "Backup management is unavailable in this configuration"}',
+            media_type="application/json",
+        )
+    # Wrapped in SecretStr immediately; the plaintext must never reach a log.
+    new_password = SecretStr(str(body.get("new_password") or ""))
+    confirmation = SecretStr(str(body.get("new_password_confirm") or ""))
+    if new_password.get_secret_value() != confirmation.get_secret_value():
+        return make_response(
+            status_code=400, content='{"error": "The two passwords do not match."}', media_type="application/json"
+        )
+    result = rotate_backup_master_password(
+        paths=paths,
+        resolver=get_state().backend_resolver,
+        new_password=new_password,
+        is_save_password=bool(body.get("save_password", False)),
+        parent_cg=get_state().root_concurrency_group,
+    )
+    return make_response(
+        status_code=200,
+        content=json.dumps(
+            {
+                "ok": result.is_all_ok,
+                "results": [
+                    {
+                        "agent_id": entry.agent_id,
+                        "workspace_name": entry.workspace_name,
+                        "is_ok": entry.is_ok,
+                        "error": entry.error,
+                    }
+                    for entry in result.results
+                ],
+            }
+        ),
+        media_type="application/json",
+    )
+
+
 def _sync_latchkey_forward_sentry_consent(minds_config: MindsConfig) -> None:
     """Rewrite the detached ``mngr latchkey forward`` daemon's live consent file after a consent change.
 
@@ -508,7 +582,7 @@ def _handle_help_assist() -> Response:
 
     Only valid when the help flow was opened from a loaded workspace: the body carries that
     workspace's agent id and the user's description. Before spawning, we probe the workspace for the
-    ``/assist`` skill and return 409 if it lacks it (an older FCT template) or 502 if the workspace is
+    ``/assist`` skill and return 409 if it lacks it (an older default workspace template) or 502 if the workspace is
     unreachable -- so we never spawn a chat that could only hang. Otherwise the desktop app runs
     ``mngr create`` inside that workspace's container (via ``mngr exec``) to spawn a new chat seeded
     with ``/assist <description>``; the system interface auto-opens its tab. The call blocks until
@@ -543,7 +617,7 @@ def _handle_help_assist() -> Response:
     mngr_caller = state.mngr_caller or get_default_mngr_caller()
 
     # Refuse before spawning if this workspace can't actually host an /assist chat.
-    # Workspaces created from an FCT predating the /assist skill would otherwise accept
+    # Workspaces created from a DEFAULT_WORKSPACE_TEMPLATE predating the /assist skill would otherwise accept
     # the ``mngr create`` but hang on the ``/assist`` message (an unknown slash command
     # never submits a prompt, so the send blocks to its full timeout) and leave a
     # half-created chat behind. The probe is a quick filesystem check inside the
@@ -663,6 +737,7 @@ def _handle_landing_page() -> Response:
     accounts = session_store.list_accounts() if session_store else []
     default_account_id = minds_config.get_default_account_id() if minds_config else None
     is_backup_password_saved = has_saved_backup_password(agent_creator.paths) if agent_creator is not None else False
+    is_backup_password_set = is_master_password_set(agent_creator.paths) if agent_creator is not None else False
     region_options, region_selected = _build_region_form_context(minds_config, geo_cache)
     html = render_create_form(
         git_url=git_url,
@@ -670,6 +745,7 @@ def _handle_landing_page() -> Response:
         accounts=accounts,
         default_account_id=default_account_id or "",
         has_saved_backup_password=is_backup_password_saved,
+        is_master_password_set=is_backup_password_set,
         region_options_by_launch_mode=region_options,
         region_selected_by_launch_mode=region_selected,
         cloud_accounts=list_cloud_account_providers(),
@@ -751,6 +827,7 @@ def _handle_create_page() -> Response:
     accounts = session_store.list_accounts() if session_store else []
     default_account_id = minds_config.get_default_account_id() if minds_config else None
     is_backup_password_saved = has_saved_backup_password(agent_creator.paths) if agent_creator is not None else False
+    is_backup_password_set = is_master_password_set(agent_creator.paths) if agent_creator is not None else False
     region_options, region_selected = _build_region_form_context(minds_config, geo_cache)
     html = render_create_form(
         git_url=git_url,
@@ -758,6 +835,7 @@ def _handle_create_page() -> Response:
         accounts=accounts,
         default_account_id=default_account_id or "",
         has_saved_backup_password=is_backup_password_saved,
+        is_master_password_set=is_backup_password_set,
         region_options_by_launch_mode=region_options,
         region_selected_by_launch_mode=region_selected,
         cloud_accounts=list_cloud_account_providers(),
@@ -1605,22 +1683,235 @@ def _handle_accounts_page() -> Response:
     return make_html_response(content=html)
 
 
+def _find_predefined_permission_handler() -> LatchkeyPermissionGrantHandler | None:
+    """Return the registered predefined-permission handler, or ``None`` if absent.
+
+    The handler owns the latchkey gateway client, the services catalog, and the
+    :class:`Latchkey` wrapper the permissions settings section needs. It is
+    registered in ``request_event_handlers`` at startup; minimal setups (some
+    tests) may omit it, in which case the permissions section renders empty.
+    """
+    for handler in get_state().request_event_handlers:
+        if isinstance(handler, LatchkeyPermissionGrantHandler):
+            return handler
+    return None
+
+
 def _handle_settings_page() -> Response:
     """Render the app-level settings page (GET /settings).
 
-    Hosts the per-machine error-reporting toggles, seeded from ``MindsConfig``. Requires the same
-    local session as the rest of the app; it is not account-scoped.
+    Hosts the Permissions subsection (predefined-service grants across all
+    active workspaces) and the per-machine error-reporting toggles (seeded from
+    ``MindsConfig``). Requires the same local session as the rest of the app; it
+    is not account-scoped.
     """
     if not _is_request_authenticated():
         return make_response(status_code=403, content="Not authenticated")
     minds_config: MindsConfig | None = get_state().minds_config
     report_unexpected_errors = minds_config.get_report_unexpected_errors() if minds_config else False
     include_error_logs = minds_config.get_include_error_logs() if minds_config else False
+    paths: WorkspacePaths | None = get_state().api_v1_paths
+
+    services_overview: list[object] = []
+    file_sharing_grants: list[object] = []
+    workspace_delegation_grants: list[object] = []
+    permissions_unavailable = False
+    handler = _find_predefined_permission_handler()
+    if handler is not None:
+        try:
+            services_overview = list(
+                build_permission_overview(
+                    backend_resolver=get_state().backend_resolver,
+                    gateway_client=handler.gateway_client,
+                    services_catalog=handler.services_catalog,
+                    latchkey=handler.latchkey,
+                )
+            )
+            file_sharing_grants = list(
+                build_file_sharing_overview(
+                    backend_resolver=get_state().backend_resolver,
+                    gateway_client=handler.gateway_client,
+                    latchkey=handler.latchkey,
+                )
+            )
+            workspace_delegation_grants = list(
+                build_workspace_overview(
+                    backend_resolver=get_state().backend_resolver,
+                    gateway_client=handler.gateway_client,
+                    latchkey=handler.latchkey,
+                )
+            )
+        except LatchkeyGatewayClientError as e:
+            logger.warning("Could not build permission overview for settings page: {}", e)
+            permissions_unavailable = True
+
     html = render_settings_page(
         report_unexpected_errors=report_unexpected_errors,
         include_error_logs=include_error_logs,
+        services_overview=services_overview,
+        file_sharing_grants=file_sharing_grants,
+        workspace_delegation_grants=workspace_delegation_grants,
+        permissions_unavailable=permissions_unavailable,
+        has_saved_backup_password=has_saved_backup_password(paths) if paths is not None else False,
     )
     return make_html_response(content=html)
+
+
+# The revoke routes below (predefined services, file sharing, workspace
+# delegation; per-workspace and across-all-workspaces) share the same plumbing.
+# ``_revoke_prelude`` does auth + body parsing + locating the
+# predefined-permission handler (which owns the shared gateway client +
+# latchkey); ``_apply_revoke`` runs the route-specific revoke and maps its two
+# failure modes to status codes. Each route is then a short, linear body that
+# extracts its fields between the two.
+
+
+def _revoke_prelude() -> Response | tuple[Mapping[str, Any], LatchkeyPermissionGrantHandler]:
+    """Auth + JSON-body + handler lookup shared by the revoke routes.
+
+    Returns an error :class:`Response` (403 unauthenticated, 400 invalid body,
+    503 when the predefined-permission handler is unavailable), or ``(body,
+    handler)`` on success.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
+    body = request.get_json(silent=True, force=True)
+    if not isinstance(body, dict):
+        return make_response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
+    handler = _find_predefined_permission_handler()
+    if handler is None:
+        return _json_error("Permission management is unavailable", status_code=503)
+    return body, handler
+
+
+def _apply_revoke(revoke: Callable[..., object], **kwargs: Any) -> Response:
+    """Run a revoke call and map its outcome to an HTTP response (its return value is ignored).
+
+    :class:`PermissionOverviewError` (bad request / unresolvable target) -> 400;
+    :class:`LatchkeyGatewayClientError` (gateway unreachable) -> 502; success ->
+    ``200 {"status": "ok"}``.
+    """
+    try:
+        revoke(**kwargs)
+    except PermissionOverviewError as e:
+        return _json_error(str(e), status_code=400)
+    except LatchkeyGatewayClientError as e:
+        logger.warning("Could not revoke through the latchkey gateway: {}", e)
+        return _json_error(f"Could not revoke through the latchkey gateway: {e}", status_code=502)
+    return make_response(content='{"status": "ok"}', media_type="application/json")
+
+
+def _handle_revoke_service_for_workspace() -> Response:
+    """Revoke a predefined service's grants for one workspace (POST /settings/permissions/revoke).
+
+    Body: ``{"workspace_agent_id": "...", "service_name": "..."}``. Removes every
+    rule the service owns from that workspace's host permissions file (stored
+    credentials untouched).
+    """
+    prelude = _revoke_prelude()
+    if isinstance(prelude, Response):
+        return prelude
+    body, handler = prelude
+    workspace_agent_id = str(body.get("workspace_agent_id", ""))
+    service_name = str(body.get("service_name", ""))
+    if not workspace_agent_id or not service_name:
+        return _json_error("workspace_agent_id and service_name are required.", status_code=400)
+    return _apply_revoke(
+        revoke_service_for_workspace,
+        backend_resolver=get_state().backend_resolver,
+        gateway_client=handler.gateway_client,
+        services_catalog=handler.services_catalog,
+        latchkey=handler.latchkey,
+        workspace_agent_id=workspace_agent_id,
+        service_name=service_name,
+    )
+
+
+def _handle_revoke_service_for_all_workspaces() -> Response:
+    """Revoke a predefined service's grants across every active workspace (POST /settings/permissions/revoke-all).
+
+    Body: ``{"service_name": "..."}``.
+    """
+    prelude = _revoke_prelude()
+    if isinstance(prelude, Response):
+        return prelude
+    body, handler = prelude
+    service_name = str(body.get("service_name", ""))
+    if not service_name:
+        return _json_error("service_name is required.", status_code=400)
+    return _apply_revoke(
+        revoke_service_for_all_workspaces,
+        backend_resolver=get_state().backend_resolver,
+        gateway_client=handler.gateway_client,
+        services_catalog=handler.services_catalog,
+        latchkey=handler.latchkey,
+        service_name=service_name,
+    )
+
+
+def _handle_revoke_file_sharing_for_workspace() -> Response:
+    """Revoke all file-sharing grants for one workspace (POST /settings/permissions/file-sharing/revoke).
+
+    Body: ``{"workspace_agent_id": "..."}``. Removes every ``minds-file-server-*``
+    permission from that workspace's host file, leaving unrelated permissions
+    intact.
+    """
+    prelude = _revoke_prelude()
+    if isinstance(prelude, Response):
+        return prelude
+    body, handler = prelude
+    workspace_agent_id = str(body.get("workspace_agent_id", ""))
+    if not workspace_agent_id:
+        return _json_error("workspace_agent_id is required.", status_code=400)
+    return _apply_revoke(
+        revoke_file_sharing_for_workspace,
+        backend_resolver=get_state().backend_resolver,
+        gateway_client=handler.gateway_client,
+        latchkey=handler.latchkey,
+        workspace_agent_id=workspace_agent_id,
+    )
+
+
+def _handle_revoke_file_sharing_for_all_workspaces() -> Response:
+    """Revoke file-sharing grants across every active workspace (POST /settings/permissions/file-sharing/revoke-all).
+
+    Takes no body parameters.
+    """
+    prelude = _revoke_prelude()
+    if isinstance(prelude, Response):
+        return prelude
+    _, handler = prelude
+    return _apply_revoke(
+        revoke_file_sharing_for_all_workspaces,
+        backend_resolver=get_state().backend_resolver,
+        gateway_client=handler.gateway_client,
+        latchkey=handler.latchkey,
+    )
+
+
+def _handle_revoke_workspace_delegation_verb() -> Response:
+    """Revoke one cross-workspace-management verb for one granting workspace.
+
+    Route: POST /settings/permissions/workspace/revoke. Body:
+    ``{"workspace_agent_id": "...", "verb": "minds-workspaces-<verb>"}``. Removes
+    that verb across every target it was granted on for the given workspace.
+    """
+    prelude = _revoke_prelude()
+    if isinstance(prelude, Response):
+        return prelude
+    body, handler = prelude
+    workspace_agent_id = str(body.get("workspace_agent_id", ""))
+    verb = str(body.get("verb", ""))
+    if not workspace_agent_id or not verb:
+        return _json_error("workspace_agent_id and verb are required.", status_code=400)
+    return _apply_revoke(
+        revoke_workspace_verb_for_workspace,
+        backend_resolver=get_state().backend_resolver,
+        gateway_client=handler.gateway_client,
+        latchkey=handler.latchkey,
+        workspace_agent_id=workspace_agent_id,
+        verb_permission=verb,
+    )
 
 
 def _handle_set_default_account() -> Response:
@@ -1703,6 +1994,13 @@ def _handle_workspace_settings(
     errored_provider_names = {str(name) for name in backend_resolver.get_provider_errors()}
     is_stale = _is_workspace_provider_errored(info, errored_provider_names)
 
+    # The backup section's configure form needs to know whether a shared
+    # master password is already saved (it then never re-prompts) and whether
+    # an account is associated (imbue_cloud backups require one).
+    paths = get_state().api_v1_paths
+    is_backup_password_saved = has_saved_backup_password(paths) if paths is not None else False
+    is_backup_password_set = is_master_password_set(paths) if paths is not None else False
+
     html = render_workspace_settings(
         agent_id=agent_id,
         ws_name=ws_name,
@@ -1712,6 +2010,9 @@ def _handle_workspace_settings(
         is_leased_imbue_cloud=is_leased_imbue_cloud,
         current_color=current_color,
         is_stale=is_stale,
+        has_saved_backup_password=is_backup_password_saved,
+        is_master_password_set=is_backup_password_set,
+        has_account=current_account is not None,
     )
     return make_html_response(content=html)
 
@@ -1849,6 +2150,11 @@ def _handle_inbox_page() -> Response:
     selected_id, detail_html = _resolve_inbox_selection(selected_query, backend_resolver)
     minds_config: MindsConfig | None = get_state().minds_config
     auto_open = minds_config.get_auto_open_requests_panel() if minds_config else True
+    # ``keep_open=1`` is set only when the user intentionally opens the whole
+    # inbox via the Requests button; without it (notification click, workspace
+    # relay, or auto-open on a new request), resolving a request dismisses the
+    # whole window rather than advancing to an unrelated stale request.
+    keep_open = request.args.get("keep_open") == "1"
     return make_html_response(
         content=render_inbox_page(
             cards=cards,
@@ -1856,6 +2162,7 @@ def _handle_inbox_page() -> Response:
             detail_html=detail_html,
             is_empty=len(cards) == 0,
             auto_open=auto_open,
+            keep_open=keep_open,
         )
     )
 
@@ -2134,9 +2441,9 @@ def create_desktop_client(
     The agent-subdomain forwarding lives in the ``mngr_forward`` plugin
     (``libs/mngr_forward``) now; this app only serves minds-specific routes
     on the bare origin (login, landing, accounts, workspace settings,
-    sharing, agent create / destroy). Workspace links go to
-    ``http://localhost:<mngr_forward_port>/goto/<agent>/`` instead of being
-    routed in-process.
+    sharing, agent create / destroy). Workspace links go to the proxy's
+    ``localhost:<mngr_forward_port>/goto/<agent>/`` route (``https`` when the
+    proxy serves HTTP/2, else ``http``) instead of being routed in-process.
 
     ``envelope_stream_consumer`` feeds discovery events into
     ``backend_resolver`` and is also the bounce target for ``SIGHUP``-style
@@ -2160,6 +2467,12 @@ def create_desktop_client(
     if not (_static_dir / "app.min.css").exists():
         logger.warning("Missing static/app.min.css. Run `just minds-css` from the repo root to build it.")
     app = Flask(__name__, static_folder=str(_static_dir), static_url_path="/_static")
+
+    # The backup master-password hash must always exist (initially the hash of
+    # the empty password, or of a pre-hash install's saved plaintext) so every
+    # backup flow can validate against it.
+    if paths is not None:
+        ensure_backup_password_hash(paths)
 
     @app.errorhandler(Exception)
     def _unhandled_exception_handler(exc: Exception) -> Response | HTTPException:
@@ -2238,6 +2551,7 @@ def create_desktop_client(
     app.add_url_rule("/consent", view_func=_handle_consent_page)
     app.add_url_rule("/consent", view_func=_handle_consent_submit, methods=["POST"])
     app.add_url_rule("/_chrome/error-reporting", view_func=_handle_error_reporting_settings, methods=["POST"])
+    app.add_url_rule("/_chrome/backup-password", view_func=_handle_backup_password_change, methods=["POST"])
     app.add_url_rule("/help", view_func=_handle_help_page)
     app.add_url_rule("/help/report", view_func=_handle_help_report, methods=["POST"])
     app.add_url_rule("/help/assist", view_func=_handle_help_assist, methods=["POST"])
@@ -2250,6 +2564,25 @@ def create_desktop_client(
     # Account management routes
     app.add_url_rule("/accounts", view_func=_handle_accounts_page)
     app.add_url_rule("/settings", view_func=_handle_settings_page)
+    app.add_url_rule("/settings/permissions/revoke", view_func=_handle_revoke_service_for_workspace, methods=["POST"])
+    app.add_url_rule(
+        "/settings/permissions/revoke-all", view_func=_handle_revoke_service_for_all_workspaces, methods=["POST"]
+    )
+    app.add_url_rule(
+        "/settings/permissions/file-sharing/revoke",
+        view_func=_handle_revoke_file_sharing_for_workspace,
+        methods=["POST"],
+    )
+    app.add_url_rule(
+        "/settings/permissions/file-sharing/revoke-all",
+        view_func=_handle_revoke_file_sharing_for_all_workspaces,
+        methods=["POST"],
+    )
+    app.add_url_rule(
+        "/settings/permissions/workspace/revoke",
+        view_func=_handle_revoke_workspace_delegation_verb,
+        methods=["POST"],
+    )
     app.add_url_rule("/accounts/set-default", view_func=_handle_set_default_account, methods=["POST"])
     app.add_url_rule("/accounts/<user_id>/logout", view_func=_handle_account_logout, methods=["POST"])
 

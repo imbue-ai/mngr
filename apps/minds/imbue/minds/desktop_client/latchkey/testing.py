@@ -40,6 +40,7 @@ class FakeLatchkeyGatewayClient(LatchkeyGatewayClient):
 
     _set_calls: list[RecordedSetPermissionCall] = PrivateAttr(default_factory=list)
     _deleted_request_ids: list[str] = PrivateAttr(default_factory=list)
+    _deleted_rule_calls: list[tuple[Path, str]] = PrivateAttr(default_factory=list)
 
     @property
     def set_calls(self) -> tuple[RecordedSetPermissionCall, ...]:
@@ -50,6 +51,43 @@ class FakeLatchkeyGatewayClient(LatchkeyGatewayClient):
     def deleted_request_ids(self) -> tuple[str, ...]:
         """Request ids the test code asked to delete, in arrival order."""
         return tuple(self._deleted_request_ids)
+
+    @property
+    def deleted_rule_calls(self) -> tuple[tuple[Path, str], ...]:
+        """``(path, rule_key)`` pairs the test code asked to delete, in arrival order."""
+        return tuple(self._deleted_rule_calls)
+
+    def get_permission_rules(
+        self,
+        permissions_file_path: Path,
+    ) -> dict[str, tuple[str, ...]]:
+        """Read the on-disk file directly, matching the real extension's GET response."""
+        if not permissions_file_path.is_file():
+            return {}
+        rules = json.loads(permissions_file_path.read_text()).get("rules", [])
+        merged: dict[str, list[str]] = {}
+        for rule in rules:
+            for scope_name, permissions in rule.items():
+                bucket = merged.setdefault(scope_name, [])
+                for permission in permissions:
+                    if permission not in bucket:
+                        bucket.append(permission)
+        return {scope: tuple(permissions) for scope, permissions in merged.items()}
+
+    def delete_permission_rule(
+        self,
+        permissions_file_path: Path,
+        rule_key: str,
+    ) -> None:
+        """Remove the rule in-process, matching the real extension's filesystem effect."""
+        self._deleted_rule_calls.append((permissions_file_path, rule_key))
+        if not permissions_file_path.is_file():
+            return
+        existing = json.loads(permissions_file_path.read_text())
+        existing_rules = existing.get("rules", [])
+        new_rules = [rule for rule in existing_rules if rule_key not in rule]
+        updated = {**existing, "rules": new_rules}
+        permissions_file_path.write_text(json.dumps(updated, indent=2))
 
     def get_granted_permissions_for_scopes(
         self,

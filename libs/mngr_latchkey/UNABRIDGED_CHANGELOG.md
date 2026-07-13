@@ -4,6 +4,40 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-10
+
+The latchkey discovery stream consumer no longer logs a "Discovery error from ..." warning on every poll cycle for a provider stuck on the same failure (e.g. missing credentials): provider-level discovery errors are now logged once per process via the shared `DiscoveryErrorLogSuppressor`, with an info-level recovery line (and re-armed suppression) when the provider's discovery next succeeds. Host- and agent-attributed discovery errors keep logging on every occurrence.
+
+Both latchkey gateway spawn sites (the shared desktop gateway and the
+VPS-resident gateway) now pass `--max-body-size` raised to 512 MiB (upstream
+default: 10 MiB).
+
+The gateway natively proxies GitHub's git smart-HTTP endpoints
+(`/gateway/https://github.com/<owner>/<repo>.git/...`, gated by the
+`github-git` scope with `github-git-read`/`github-git-write` permissions), so
+agents can run `git push`/`git fetch` through it with the credential injected
+server-side -- but a push's packfile scales with repo history (a minds
+template push is roughly 30 MiB today), which exceeded the old 10 MiB cap and
+made gateway-authenticated pushes fail. The forever-claude-template's
+publish-inspiration flow now relies on this push path.
+
+Already-running gateways keep the old cap until they restart: the desktop
+gateway picks the flag up on the next minds-app session, and a VPS gateway on
+the next launch after its recorded process exits (the pidfile guard
+deliberately never kills a live gateway).
+
+## 2026-07-09
+
+# Cover the new backup disable route with the backups-manage verb
+
+- The `minds-workspaces-backups-manage` target-scoped verb's path pattern now also covers `POST /api/v1/workspaces/<id>/backup-service/disable` (the minds app's new "turn backups off" action), and its description mentions disabling.
+
+Added a new target-scoped verb to the `minds-workspaces` permission scope: `minds-workspaces-backups-manage`, gating the new backup-management routes (`/backup-service/update`, `/backup-service/update/cancel`, `/backup-service/configure`, `/backup-service/verification`) so an agent needs an explicit per-target grant to update a workspace's backup service, enable/repoint its backups, or toggle backup verification.
+
+## 2026-07-08
+
+Add `SECRET_LATCHKEY_ENV_VAR_NAMES` to `agent_setup`: the subset of latchkey wiring env vars whose values are secrets (the gateway password and the permissions-override JWT). Callers that render a command carrying these as `--host-env NAME=VALUE` flags use it to mask the values before logging.
+
 ## 2026-07-07
 
 Bump Latchkey to 2.20.0.

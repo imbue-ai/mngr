@@ -95,6 +95,11 @@ _MNGR_FORWARD_SESSION_COOKIE_NAME: Final[str] = "mngr_forward_session"
 # assumption about which app that is or which routes it implements.
 _WORKSPACE_PROBE_PATH: Final[str] = "/"
 
+# Scheme of the `mngr forward` proxy origin. minds always runs the proxy with
+# `--use-http2`, so it terminates TLS and the probe/redirect URLs the Python
+# side builds are always `https`.
+_MNGR_FORWARD_SCHEME: Final[str] = "https"
+
 
 def make_workspace_probe_client(preauth_cookie: str, probe_timeout_seconds: float) -> httpx.Client:
     """Construct a reusable httpx.Client preconfigured for workspace probes.
@@ -102,11 +107,17 @@ def make_workspace_probe_client(preauth_cookie: str, probe_timeout_seconds: floa
     Callers that probe in a tight poll loop should construct one of these and
     pass it to ``probe_workspace_through_plugin`` on each iteration, instead
     of letting the helper construct a one-shot client per call.
+
+    The proxy serves TLS (HTTP/2), so cert verification is disabled: these
+    probes dial ``127.0.0.1`` with a ``Host: agent-<hex>.localhost`` header, so
+    hostname verification could never pass, and the cert is a self-signed
+    ephemeral one the probe is not positioned to validate anyway. Loopback-only.
     """
     return httpx.Client(
         timeout=probe_timeout_seconds,
         follow_redirects=False,
         cookies={_MNGR_FORWARD_SESSION_COOKIE_NAME: preauth_cookie},
+        verify=False,
     )
 
 
@@ -152,7 +163,7 @@ def probe_workspace_through_plugin(
     one-shot client is constructed for this single probe -- fine for
     one-off / sporadic callers but wasteful in a loop.
     """
-    probe_url = f"http://127.0.0.1:{mngr_forward_port}{_WORKSPACE_PROBE_PATH}"
+    probe_url = f"{_MNGR_FORWARD_SCHEME}://127.0.0.1:{mngr_forward_port}{_WORKSPACE_PROBE_PATH}"
     host_header = f"{agent_id}.localhost"
     if client is not None:
         return _probe_once(client, probe_url, host_header)
@@ -507,7 +518,7 @@ _DEFAULT_AGENT_NAME: Final[AgentName] = AgentName(SYSTEM_SERVICES_AGENT_NAME)
 
 # imbue_cloud create-path knobs forwarded as ``-b fast_mode=<value>``. ``require``
 # adopts an exact-attribute pre-baked pool host (fast); ``prevent`` leases any
-# available host and rebuilds it from the FCT Dockerfile (slow).
+# available host and rebuilds it from the DEFAULT_WORKSPACE_TEMPLATE Dockerfile (slow).
 _FAST_MODE_REQUIRE: Final[str] = "require"
 _FAST_MODE_PREVENT: Final[str] = "prevent"
 
@@ -631,10 +642,10 @@ def _build_mngr_create_command(
     mngr's ``--reuse`` matches on agent name without host scope.
 
     Secrets (``ANTHROPIC_API_KEY``, ``ANTHROPIC_BASE_URL``) are forwarded by
-    the FCT template's own ``pass_(host_)env`` declarations, not by inline
+    the default workspace template's own ``pass_(host_)env`` declarations, not by inline
     flags here -- ``run_mngr_create`` populates them in the subprocess env
     when needed and the template-declared forwards pick them up. Keeping the
-    forwarding declaration in FCT means the same template works for ``mngr
+    forwarding declaration in DEFAULT_WORKSPACE_TEMPLATE means the same template works for ``mngr
     create`` invocations from outside minds too.
 
     ``latchkey_env`` is the latchkey wiring (gateway URL, password, JWT,
@@ -655,7 +666,7 @@ def _build_mngr_create_command(
     )
     address = f"{_DEFAULT_AGENT_NAME}@{host_name}.{provider_instance}"
 
-    # The `/welcome` initial message is now baked into the FCT template's
+    # The `/welcome` initial message is now baked into the default workspace template's
     # [create_templates.main] section, so we no longer pass `--message` here.
     # ``--format jsonl`` makes mngr emit ``{"event": "created", "agent_id": ..., "host_id": ...}``
     # as the final stdout line; ``run_mngr_create`` parses that to recover
@@ -805,7 +816,7 @@ def _build_mngr_create_command(
                 mngr_command.extend(["-b", f"repo_branch_or_tag={imbue_cloud_branch_or_tag}"])
             # ``fast_mode`` selects the imbue_cloud create path: ``require``
             # adopts an exact-attribute pre-baked pool host (fast); ``prevent``
-            # leases any available host and rebuilds it from the FCT Dockerfile
+            # leases any available host and rebuilds it from the DEFAULT_WORKSPACE_TEMPLATE Dockerfile
             # (slow, but always works). minds tries ``require`` first and falls
             # back to ``prevent`` on FastPathUnavailableError (see
             # ``_run_imbue_cloud_create_with_fallback``).
@@ -1028,7 +1039,7 @@ def run_mngr_create(
     irrelevant.
 
     ``anthropic_api_key`` / ``anthropic_base_url`` are placed into the
-    subprocess env (not argv) so they don't show up in ``ps`` output; the FCT
+    subprocess env (not argv) so they don't show up in ``ps`` output; the DEFAULT_WORKSPACE_TEMPLATE
     template's own ``pass_(host_)env`` declarations cause mngr to forward them
     onto the host as appropriate.
 
@@ -1371,7 +1382,7 @@ class AgentCreator(MutableModel):
         frozen=True,
         description=(
             "Pre-baked Lima image create gate (issue 2306). When set and the create matches the "
-            "default workspace (Lima + default FCT repo + current release tag), the create gates on "
+            "default workspace (Lima + default workspace template repo + current release tag), the create gates on "
             "the verified image and points Lima at it; None disables the path."
         ),
     )
@@ -1863,7 +1874,7 @@ class AgentCreator(MutableModel):
                 log_queue.put("[minds] Creating workspace '{}' (mode: {})...".format(host_name, launch_mode.value))
 
                 # Pre-baked Lima image gate (issue 2306): for the default
-                # workspace (Lima + default FCT repo + current release tag) wait on
+                # workspace (Lima + default workspace template repo + current release tag) wait on
                 # the prefetched, verified image and point Lima at it. Returns None
                 # (build in-VM) for any non-default create or unpublished version;
                 # raises a retryable error if a published image can't be readied.
@@ -2032,7 +2043,7 @@ class AgentCreator(MutableModel):
         ``{"event": "error", "error_class": "FastPathUnavailableError"}`` line;
         minds matches on that ``error_class`` and retries with
         ``fast_mode=prevent``, which leases any available host and rebuilds it
-        from the FCT Dockerfile (full client-side setup). Any other failure
+        from the DEFAULT_WORKSPACE_TEMPLATE Dockerfile (full client-side setup). Any other failure
         (including a genuinely empty pool) propagates unchanged.
         """
         log_queue.put("[minds] Trying fast path (adopt a matching pre-baked pool host)...")
@@ -2135,7 +2146,7 @@ class AgentCreator(MutableModel):
         """
         if self.mngr_forward_port == 0:
             return f"/goto/{agent_id}/"
-        return f"http://localhost:{self.mngr_forward_port}/goto/{agent_id}/"
+        return f"{_MNGR_FORWARD_SCHEME}://localhost:{self.mngr_forward_port}/goto/{agent_id}/"
 
     def _wait_for_workspace_ready(self, agent_id: AgentId, log_queue: queue.Queue[str]) -> None:
         """Poll the agent's system_interface through the plugin until it responds 200.
