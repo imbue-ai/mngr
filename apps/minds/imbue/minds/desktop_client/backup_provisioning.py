@@ -427,8 +427,8 @@ def change_backup_destination_for_host(
     Archives the existing canonical env minds-side (the old repository stays
     reachable through the archive), then runs the ordinary idempotent
     provisioning against the new inputs: new random per-workspace password,
-    ``restic init`` with the master (or empty) password, ``restic key add``,
-    canonical env write, and injection (which rotates the workspace copy).
+    ``restic init`` keyed solely by that password, canonical env write, and
+    injection (which rotates the workspace copy).
     Existing snapshots stay in the old repository; the new destination starts
     fresh.
     """

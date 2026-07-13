@@ -834,7 +834,8 @@ def test_backup_enable_repair_and_destination_change_on_resumed_workspace(
     """Enable backups, repair a corrupted env, and change the destination -- minds-side, for real.
 
     Drives the actual provisioning entry points from the sandbox host: real
-    `restic init` + `restic key add` against local repositories, and real
+    `restic init` against local repositories (keyed by the per-workspace
+    password), and real
     `mngr exec` injection/rotation of `runtime/secrets/restic.env` inside the
     resumed workspace container.
     """
