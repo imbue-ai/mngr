@@ -1921,7 +1921,7 @@ kill -TERM 1
                 if host_record is not None:
                     host_obj = self._create_host_from_host_record(host_record)
         else:
-            # Try container label lookup first (fast path)
+            # Try this environment's container for that host name first (fast path)
             container = self._find_container_by_name(host)
             if container is not None and self._is_container_running(container):
                 host_obj = self._create_host_from_container(container)
