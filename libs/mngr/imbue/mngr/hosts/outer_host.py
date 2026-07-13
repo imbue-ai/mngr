@@ -226,6 +226,30 @@ _retry_on_transient_ssh_error = retry(
 )
 
 
+def _is_transient_ssh_connect_error(exception: BaseException) -> bool:
+    """Check if the exception is a transient SSH connect failure worth retrying.
+
+    Matches only pyinfra ``ConnectError``s wrapping paramiko's "Error reading
+    SSH protocol banner": the TCP connection was accepted but sshd did not
+    answer the SSH handshake in time, which happens transiently while a freshly
+    booted host's sshd is still coming up (e.g. a new Modal sandbox or VPS) or
+    while it is briefly overloaded. Refused/unreachable/auth/host-key failures
+    are deliberately not matched so genuinely-down hosts still fail fast.
+    """
+    return isinstance(exception, ConnectError) and "error reading ssh protocol banner" in str(exception).lower()
+
+
+_retry_on_transient_ssh_connect_error = retry(
+    retry=retry_if_exception(_is_transient_ssh_connect_error),
+    stop=stop_after_attempt(3),
+    wait=wait_chain(
+        wait_fixed(1),
+        wait_fixed(3),
+    ),
+    reraise=True,
+)
+
+
 def _get_ssh_transport(pyinfra_host: Any) -> Transport | None:
     """Extract the paramiko Transport from a pyinfra host, or None for non-SSH connectors."""
     try:
@@ -382,11 +406,22 @@ class OuterHost(OuterHostInterface):
         except (EOFError, SSHException) as e:
             raise HostConnectionError(failed) from e
 
+    @_retry_on_transient_ssh_connect_error
+    def _connect_with_transient_retry(self) -> None:
+        """Connect the pyinfra host, retrying banner-read connect failures.
+
+        Each banner-read failure already spent paramiko's own banner timeout
+        waiting for sshd to answer, so a couple of retries ride out the boot
+        race where a freshly created host accepts TCP before sshd is ready --
+        which otherwise surfaces to users as a spurious create failure.
+        """
+        self.connector.host.connect(raise_exceptions=True)
+
     def _ensure_connected(self) -> None:
         """Ensure the pyinfra host is connected."""
         try:
             if not self.connector.host.connected:
-                self.connector.host.connect(raise_exceptions=True)
+                self._connect_with_transient_retry()
         except ConnectError as e:
             message = str(e).lower()
             # Missing/unverifiable host keys are a trust failure: we have no basis to

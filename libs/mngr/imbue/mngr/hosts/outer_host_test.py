@@ -15,6 +15,7 @@ from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.outer_host import OuterHost
+from imbue.mngr.hosts.outer_host import _is_transient_ssh_connect_error
 from imbue.mngr.hosts.outer_host import _is_transient_ssh_error
 from imbue.mngr.hosts.outer_host import _prepend_env_exports
 from imbue.mngr.hosts.outer_host import _sftp_walk
@@ -440,6 +441,93 @@ def test_ensure_connected_classifies_unrelated_connect_errors_as_connection_erro
     # the concrete type to confirm we did NOT promote a generic connectivity
     # failure to a trust failure.
     assert not isinstance(excinfo.value, HostAuthenticationError)
+
+
+class _FakePyinfraHostRecoveringOnConnect:
+    """Pyinfra-host stand-in whose ``connect()`` fails a configured number of times, then succeeds.
+
+    Just enough surface for ``OuterHost._ensure_connected`` to exercise its
+    transient-connect-failure retry without touching the network or paramiko.
+    """
+
+    def __init__(self, failure_count: int, message: str) -> None:
+        self.connected = False
+        self.name = "fake-ssh-host"
+        self.connector_cls = type("SSHConnector", (), {})
+        self.connect_call_count = 0
+        self._failure_count = failure_count
+        self._message = message
+
+    def connect(self, raise_exceptions: bool = False) -> None:
+        self.connect_call_count += 1
+        if self.connect_call_count <= self._failure_count:
+            raise ConnectError(self._message)
+        self.connected = True
+
+
+def test_ensure_connected_retries_banner_read_connect_failures(temp_mngr_ctx: MngrContext) -> None:
+    """A banner-read ConnectError is retried, and the connect succeeds on the next attempt.
+
+    Regression test for ``mngr create`` failing on freshly booted Modal
+    sandboxes/VPSs: the host accepts TCP before sshd answers the SSH
+    handshake, paramiko gives up with "Error reading SSH protocol banner",
+    and treating that first failed connect as fatal surfaced a spurious
+    "Create agent failed" (and a flaky ``test_snapshot_create_then_list_on_modal``).
+    """
+    fake = _FakePyinfraHostRecoveringOnConnect(
+        failure_count=1,
+        message="SSH error (Error reading SSH protocol banner)",
+    )
+    outer = OuterHost(
+        id=HostId.generate(),
+        connector=PyinfraConnector(cast(PyinfraHost, fake)),
+        mngr_ctx=temp_mngr_ctx,
+    )
+
+    outer._ensure_connected()
+
+    assert fake.connected is True
+    assert fake.connect_call_count == 2
+
+
+def test_ensure_connected_does_not_retry_non_transient_connect_failures(temp_mngr_ctx: MngrContext) -> None:
+    """A refused connection is not retried: genuinely-down hosts must keep failing fast."""
+    fake = _FakePyinfraHostRecoveringOnConnect(
+        failure_count=5,
+        message="Could not connect (Connection refused)",
+    )
+    outer = OuterHost(
+        id=HostId.generate(),
+        connector=PyinfraConnector(cast(PyinfraHost, fake)),
+        mngr_ctx=temp_mngr_ctx,
+    )
+
+    with pytest.raises(HostConnectionError):
+        outer._ensure_connected()
+
+    assert fake.connect_call_count == 1
+
+
+@pytest.mark.parametrize(
+    ("exception", "expected"),
+    [
+        (ConnectError("SSH error (Error reading SSH protocol banner)"), True),
+        (ConnectError("Could not connect (Connection refused)"), False),
+        (ConnectError("Authentication error (username=alice): bad password"), False),
+        (SSHException("Error reading SSH protocol banner"), False),
+    ],
+    ids=["banner-read", "refused", "auth", "raw-ssh-exception"],
+)
+def test_is_transient_ssh_connect_error_matches_only_banner_read_connect_errors(
+    exception: BaseException, expected: bool
+) -> None:
+    """Only pyinfra ``ConnectError``s wrapping paramiko's banner-read failure are transient.
+
+    The raw ``SSHException`` case must stay False: at connect time pyinfra
+    always wraps it in ``ConnectError``, and mid-command banner problems are
+    handled by the separate ``_is_transient_ssh_error`` classifier.
+    """
+    assert _is_transient_ssh_connect_error(exception) is expected
 
 
 @pytest.mark.parametrize(
