@@ -25,6 +25,7 @@ from imbue.mngr_latchkey.remote_gateway import _ensure_container_tunnel_keypair
 from imbue.mngr_latchkey.remote_gateway import _ensure_latchkey_gateway_reachable_from_container
 from imbue.mngr_latchkey.remote_gateway import _ensure_latchkey_gateway_running
 from imbue.mngr_latchkey.remote_gateway import _ensure_latchkey_installed
+from imbue.mngr_latchkey.remote_gateway import _migrate_legacy_remote_gateway_state
 from imbue.mngr_latchkey.remote_gateway import provision_remote_gateway
 from imbue.mngr_latchkey.remote_gateway import sync_credentials
 from imbue.mngr_latchkey.remote_gateway import sync_permissions
@@ -629,6 +630,11 @@ def test_provision_remote_gateway_runs_full_sequence_on_the_outer_host(tmp_path:
     assert "docker exec -u root" in commands
     assert "mngr-ws-1" in commands
     assert "supervisorctl reread && supervisorctl update && (supervisorctl start" in commands
+    # A legacy (nohup + PID-file) gateway/tunnel is torn down *before* the new
+    # supervisord programs are applied, so it frees OUTER_PORT / the container
+    # forward bind first.
+    assert '"$HOME/.latchkey/gateway.pid"' in commands
+    assert commands.index('"$HOME/.latchkey/gateway.pid"') < commands.index("supervisorctl reread")
     # Both supervisord programs (gateway + tunnel) were written.
     assert f"[program:{_GATEWAY_PROGRAM_NAME}]" in written
     assert f"[program:{_TUNNEL_PROGRAM_NAME}]" in written
@@ -638,6 +644,32 @@ def test_provision_remote_gateway_runs_full_sequence_on_the_outer_host(tmp_path:
     assert "shared-password" not in commands
     password_files = [w for w in _stub(outer).written if w.content == b"shared-password"]
     assert len(password_files) == 1
+
+
+def test_migrate_legacy_remote_gateway_state_kills_pidfile_processes_and_scrubs_secrets() -> None:
+    outer = _outer(CommandResult(stdout="", stderr="", success=True))
+    _migrate_legacy_remote_gateway_state(outer)
+    assert len(_stub(outer).recorded) == 1
+    script = _stub(outer).recorded[0].command
+    # Kills the legacy nohup gateway + tunnel by their PID files, each guarded by
+    # a /proc cmdline marker so a reused PID is never signalled (TERM then KILL
+    # so the held port/forward is freed before the supervisord replacement).
+    assert '"$HOME/.latchkey/gateway.pid"' in script
+    assert '"$HOME/.latchkey/tunnel.pid"' in script
+    assert "grep -qaF gateway " in script
+    assert f"grep -qaF 127.0.0.1:{INNER_PORT}:127.0.0.1:{OUTER_PORT} " in script
+    assert 'kill "$_pid"' in script
+    assert 'kill -9 "$_pid"' in script
+    assert 'rm -f "$_pidfile"' in script
+    # Scrubs any on-disk secrets an intermediate build persisted (now tmpfs-only);
+    # double-quoted so $HOME expands (shlex.quote would stop it).
+    assert 'rm -f "$HOME/.latchkey/gateway_encryption_key" "$HOME/.latchkey/gateway_listen_password"' in script
+
+
+def test_migrate_legacy_remote_gateway_state_raises_on_failure() -> None:
+    outer = _outer(CommandResult(stdout="", stderr="boom", success=False))
+    with pytest.raises(RemoteGatewayError, match="migrate legacy latchkey gateway"):
+        _migrate_legacy_remote_gateway_state(outer)
 
 
 def test_provision_remote_gateway_raises_when_container_not_found(tmp_path: Path) -> None:

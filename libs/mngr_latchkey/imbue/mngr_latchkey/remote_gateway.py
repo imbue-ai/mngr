@@ -110,6 +110,17 @@ _REMOTE_FILE_MODE: Final[str] = "0600"
 _REMOTE_GATEWAY_LOG_FILENAME: Final[str] = "gateway.log"
 _REMOTE_TUNNEL_LOG_FILENAME: Final[str] = "tunnel.log"
 
+# PID files a *pre-supervisord* build wrote under ``$HOME/.latchkey`` when it
+# launched the gateway and reverse tunnel detached via ``nohup``. A VPS
+# provisioned by such a build still has those processes alive, holding
+# ``OUTER_PORT`` and the container's reverse-forward bind, so provisioning tears
+# them down (by PID, cmdline-guarded) before starting the supervisord programs
+# (see :func:`_migrate_legacy_remote_gateway_state`). The cmdline markers match
+# what the old PID-file guard used to verify each process by.
+_LEGACY_GATEWAY_PID_FILENAME: Final[str] = "gateway.pid"
+_LEGACY_TUNNEL_PID_FILENAME: Final[str] = "tunnel.pid"
+_LEGACY_GATEWAY_CMDLINE_MARKER: Final[str] = "gateway"
+
 # Filename (under the remote ``$HOME/.latchkey`` directory) for the gateway's
 # supervisord launch wrapper. The wrapper is not secret (it only references the
 # secret file *paths*), so it lives on the normal disk.
@@ -876,6 +887,86 @@ def _ensure_container_tunnel_keypair(
     return key_path
 
 
+def _build_legacy_pidfile_kill_block(pid_filename: str, cmdline_marker: str) -> tuple[str, ...]:
+    """Build sh lines that kill (and forget) a legacy nohup process from its PID file.
+
+    Reads ``$HOME/.latchkey/<pid_filename>`` and, only when that PID is still
+    alive *and* its ``/proc/<pid>/cmdline`` contains ``cmdline_marker`` (guarding
+    a reused PID -- the same check the old PID-file launcher used), SIGTERMs it,
+    gives it a moment, then SIGKILLs to guarantee the held port/forward is freed
+    before the supervisord replacement starts. The stale PID file is always
+    removed. Every step tolerates a dead/missing process, so this is a no-op on a
+    VPS that never ran the old build (or has already been migrated).
+    """
+    return (
+        f'_pidfile="$HOME/.latchkey/{pid_filename}"',
+        'if [ -f "$_pidfile" ]; then',
+        '  _pid="$(cat "$_pidfile" 2>/dev/null || true)"',
+        '  if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null && '
+        f'grep -qaF {shlex.quote(cmdline_marker)} "/proc/$_pid/cmdline" 2>/dev/null; then',
+        '    kill "$_pid" 2>/dev/null || true',
+        "    sleep 1",
+        '    kill -9 "$_pid" 2>/dev/null || true',
+        "  fi",
+        '  rm -f "$_pidfile"',
+        "fi",
+    )
+
+
+def _build_legacy_migration_script(forward_spec: str) -> str:
+    """Build the sh script that tears down a pre-supervisord (nohup) gateway + tunnel.
+
+    Kills the legacy gateway (holding ``OUTER_PORT``) and reverse tunnel (holding
+    the container's ``forward_spec`` bind), each guarded by a cmdline marker, and
+    scrubs any encryption key / listen password an intermediate build left on the
+    persistent disk under ``$HOME/.latchkey`` (the current gateway keeps its
+    secrets in tmpfs only). Idempotent.
+    """
+    gateway_block = _build_legacy_pidfile_kill_block(_LEGACY_GATEWAY_PID_FILENAME, _LEGACY_GATEWAY_CMDLINE_MARKER)
+    # The old tunnel's cmdline carried the exact reverse-forward spec, which is
+    # the unambiguous marker for it (unlike a bare "ssh").
+    tunnel_block = _build_legacy_pidfile_kill_block(_LEGACY_TUNNEL_PID_FILENAME, forward_spec)
+    return "\n".join(
+        (
+            "set -e",
+            *gateway_block,
+            *tunnel_block,
+            # Scrub any on-disk secrets a pre-tmpfs build persisted here. The
+            # basenames are fixed constants (no shell-special chars), so they are
+            # double-quoted inline -- ``shlex.quote`` would single-quote and thus
+            # stop ``$HOME`` from expanding.
+            f'rm -f "$HOME/.latchkey/{_GATEWAY_ENCRYPTION_KEY_FILENAME}" '
+            f'"$HOME/.latchkey/{_GATEWAY_PASSWORD_FILENAME}"',
+        )
+    )
+
+
+def _migrate_legacy_remote_gateway_state(host: OuterHostInterface) -> None:
+    """Tear down any pre-supervisord (nohup + PID-file) gateway/tunnel on the VPS.
+
+    A VPS provisioned by an older build runs the gateway and reverse tunnel as
+    detached ``nohup`` processes tracked by
+    ``$HOME/.latchkey/{gateway,tunnel}.pid``. Those still hold ``OUTER_PORT`` and
+    the container's reverse-forward bind, so the new supervisord programs would
+    fail to start (address in use / refused forward) until they are gone. This
+    kills each legacy process (cmdline-guarded against PID reuse), drops the
+    stale PID files, and scrubs any on-disk secrets an intermediate build left
+    behind. Idempotent: a no-op on an already-migrated or freshly-created VPS.
+    Raises :class:`RemoteGatewayError` if the cleanup command fails.
+    """
+    forward_spec = f"127.0.0.1:{INNER_PORT}:127.0.0.1:{OUTER_PORT}"
+    script = _build_legacy_migration_script(forward_spec)
+    host_name = host.get_name()
+    with log_span("Migrating any legacy nohup latchkey gateway/tunnel to supervisord on VPS {}", host_name):
+        result = host.execute_idempotent_command(script, timeout_seconds=_REMOTE_COMMAND_TIMEOUT_SECONDS)
+    if not result.success:
+        raise RemoteGatewayError(
+            "Failed to migrate legacy latchkey gateway state on VPS {}: {}".format(
+                host_name, result.stderr.strip() or result.stdout.strip()
+            )
+        )
+
+
 def _resolve_container_name_for_host(host: OuterHostInterface, host_id: HostId) -> str:
     """Return the docker container name on the VPS for the given mngr host id.
 
@@ -919,7 +1010,10 @@ def provision_remote_gateway(
     VPS->container keypair, and register the VPS->container reverse tunnel as a
     second supervisord program so the agent's
     ``LATCHKEY_GATEWAY=http://127.0.0.1:INNER_PORT`` reaches it. supervisord
-    keeps both processes running and restarts them on failure. (The gateway's
+    keeps both processes running and restarts them on failure. A VPS provisioned
+    by an older (nohup + PID-file) build is migrated first: its detached gateway
+    and tunnel are killed so they free ``OUTER_PORT`` and the container forward
+    bind before the supervisord programs start. (The gateway's
     secrets live in tmpfs, so a reboot leaves the gateway down until the next
     provisioning pass; this is a deliberate choice to keep the encryption key
     off the persistent disk -- see :func:`_ensure_latchkey_gateway_running`.)
@@ -938,6 +1032,10 @@ def provision_remote_gateway(
         )
         return
     _ensure_latchkey_installed(host)
+    # Tear down any pre-supervisord (nohup + PID-file) gateway/tunnel first: an
+    # old build's processes still hold OUTER_PORT and the container's forward
+    # bind, which would make the new supervisord programs fail to start.
+    _migrate_legacy_remote_gateway_state(host)
     _ensure_latchkey_gateway_running(host, latchkey_directory, gateway_password)
     container_name = _resolve_container_name_for_host(host, host_id)
     container_ssh_key_path = _ensure_container_tunnel_keypair(
