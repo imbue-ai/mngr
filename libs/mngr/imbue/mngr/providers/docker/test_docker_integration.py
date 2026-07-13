@@ -53,12 +53,16 @@ def _create_test_container(
 ) -> tuple[docker.models.containers.Container, HostId]:
     """Create a bare container with labels (no SSH setup).
 
-    The container name uses the provider's MNGR prefix so that
-    ``_list_containers`` (which filters by prefix) can find it during
-    cleanup. Pass ``container_name`` to control it exactly -- production
-    containers are always named ``<prefix><host-name>``, which the
-    name-scoped lookups depend on; the default keeps a random suffix so
-    unrelated tests never collide on Docker's name uniqueness.
+    By default the container name uses the provider's MNGR prefix (plus a
+    random suffix, so unrelated tests never collide on Docker's name
+    uniqueness) and the ``docker_provider`` fixture's prefix-based teardown
+    cleans it up.
+
+    Pass ``container_name`` to control the name exactly -- production
+    containers are always named ``<prefix><host-name>``, which the name-scoped
+    lookups depend on. A ``container_name`` outside the provider's prefix (e.g.
+    to stand in for another environment's container) is invisible to that
+    teardown, so the caller must remove such a container itself.
     """
     if host_id is None:
         host_id = HostId.generate()
