@@ -1,4 +1,6 @@
+import logging
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from typing import cast
 
@@ -8,6 +10,8 @@ from loguru import logger
 from sentry_sdk import Client
 from sentry_sdk import isolation_scope
 from sentry_sdk.envelope import Envelope
+from sentry_sdk.integrations.logging import EventHandler
+from sentry_sdk.integrations.logging import unignore_logger
 from sentry_sdk.transport import Transport
 from sentry_sdk.types import Event
 from sentry_sdk.types import Hint
@@ -17,6 +21,7 @@ from imbue.imbue_common.sentry.core import MANUALLY_SUBMITTED_TAG
 from imbue.imbue_common.sentry.core import _before_send_wrapper
 from imbue.imbue_common.sentry.core import _drop_interrupt_events
 from imbue.imbue_common.sentry.core import _make_automatic_reporting_gate
+from imbue.imbue_common.sentry.core import _register_ignored_loggers
 from imbue.imbue_common.sentry.core import add_extra_info_hook
 from imbue.imbue_common.sentry.core import fixup_release_id
 from imbue.imbue_common.sentry.core import register_attachments_uploader
@@ -256,6 +261,31 @@ def test_submit_manual_bug_report_sends_tagged_event_even_when_reporting_disable
     assert tags["manually_submitted"] == "true"
     extra = cast(dict, event["extra"])
     assert extra["bug_report"]["description"] == "boom"
+
+
+@pytest.fixture
+def _cleanup_ignored_loggers() -> Iterator[list[str]]:
+    # ``ignore_logger`` mutates a process-global sentry registry, so any patterns a test registers
+    # must be reverted afterward to avoid leaking into other tests.
+    registered: list[str] = []
+    yield registered
+    for pattern in registered:
+        unignore_logger(pattern)
+
+
+def test_register_ignored_loggers_makes_matching_loggers_ignored(_cleanup_ignored_loggers: list[str]) -> None:
+    # The default LoggingIntegration captures ERROR-level stdlib records as Sentry events even for
+    # loggers with propagate=False (it patches Logger.callHandlers at the class level). Registering a
+    # glob pattern must make its EventHandler drop matching records -- both the exact name and any
+    # child logger -- while leaving unrelated loggers alone.
+    patterns = ["paramiko", "paramiko.*"]
+    _cleanup_ignored_loggers.extend(patterns)
+    _register_ignored_loggers(patterns)
+
+    handler = EventHandler(level=logging.ERROR)
+    assert handler._can_record(logging.makeLogRecord({"name": "paramiko"})) is False
+    assert handler._can_record(logging.makeLogRecord({"name": "paramiko.transport"})) is False
+    assert handler._can_record(logging.makeLogRecord({"name": "imbue.minds"})) is True
 
 
 def test_submit_manual_bug_report_returns_none_when_sentry_inactive() -> None:
