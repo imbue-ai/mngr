@@ -30,6 +30,7 @@ from imbue.mngr.providers.docker.instance import LABEL_HOST_NAME
 from imbue.mngr.providers.docker.instance import LABEL_PROVIDER
 from imbue.mngr.providers.docker.instance import LABEL_TAGS
 from imbue.mngr.providers.docker.instance import build_container_labels
+from imbue.mngr.providers.docker.volume import host_container_name
 from imbue.mngr.utils.testing import get_short_random_string
 
 pytestmark = [pytest.mark.acceptance]
@@ -131,10 +132,10 @@ def test_find_container_by_host_id_returns_none_for_unknown(docker_provider: Doc
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
 @pytest.mark.docker_sdk
 def test_find_container_by_name(docker_provider: DockerProviderInstance) -> None:
-    # Production containers are always named ``<prefix><host-name>``; the
+    # Production containers are always named by ``host_container_name``; the
     # name-scoped lookup requires that shape, so mirror it here.
-    prefix = docker_provider.mngr_ctx.config.prefix
-    _create_test_container(docker_provider, name="discoverable", container_name=f"{prefix}discoverable")
+    container_name = host_container_name(docker_provider.mngr_ctx.config.prefix, "discoverable")
+    _create_test_container(docker_provider, name="discoverable", container_name=container_name)
     found = docker_provider._find_container_by_name(HostName("discoverable"))
     assert found is not None
 

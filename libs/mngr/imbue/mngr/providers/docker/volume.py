@@ -31,6 +31,18 @@ STATE_CONTAINER_IMAGE: Final[str] = "alpine:latest"
 STATE_VOLUME_MOUNT_PATH: Final[str] = "/mngr-state"
 
 
+def host_container_name(prefix: str, host_name: str) -> str:
+    """Generate the name for the container backing host ``host_name``.
+
+    Every creation path names a host's container this way, and lookups rely on
+    it: the labels alone carry no environment discriminator (two mngr
+    environments differing only in ``MNGR_PREFIX`` label their containers
+    identically), so the prefixed container name is what scopes a host name to
+    a single environment -- the same uniqueness scope Docker itself enforces.
+    """
+    return f"{prefix}{host_name}"
+
+
 def state_container_name(prefix: str, user_id: str) -> str:
     """Generate the name for the singleton state container."""
     return f"{prefix}docker-state-{user_id}"

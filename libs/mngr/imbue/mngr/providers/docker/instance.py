@@ -86,6 +86,7 @@ from imbue.mngr.providers.docker.volume import STATE_CONTAINER_TYPE_LABEL
 from imbue.mngr.providers.docker.volume import STATE_CONTAINER_TYPE_VALUE
 from imbue.mngr.providers.docker.volume import STATE_VOLUME_MOUNT_PATH
 from imbue.mngr.providers.docker.volume import ensure_state_container
+from imbue.mngr.providers.docker.volume import host_container_name
 from imbue.mngr.providers.docker.volume import state_container_name
 from imbue.mngr.providers.docker.volume import state_volume_name
 from imbue.mngr.providers.ssh_host_setup import REQUIRED_HOST_PACKAGES
@@ -1066,11 +1067,12 @@ kill -TERM 1
         two mngr environments with different ``MNGR_PREFIX`` values (e.g. two
         minds envs) both label their containers ``provider=docker`` +
         ``host_name=<name>``, so a label-only lookup can match another
-        environment's container. Require the container's actual name to be
-        ``<prefix><name>`` -- the same uniqueness scope Docker itself enforces
-        and the same prefix filter ``_list_containers`` applies to discovery.
-        (Containers are never renamed after creation -- ``mngr rename`` updates
-        only the host record -- so name and label stay in lockstep.)
+        environment's container. Require the container's actual name to be the
+        one ``host_container_name`` assigns, which scopes the match to this
+        environment (the same prefix filter ``_list_containers`` applies to
+        discovery). Containers are never renamed after creation -- ``mngr
+        rename`` updates only the host record -- so name and label stay in
+        lockstep.
         """
         try:
             containers = self._docker_client.containers.list(
@@ -1080,7 +1082,7 @@ kill -TERM 1
         except docker.errors.DockerException as e:
             raise MngrError(f"Cannot connect to Docker daemon: {e}") from e
 
-        expected_container_name = f"{self.mngr_ctx.config.prefix}{name}"
+        expected_container_name = host_container_name(self.mngr_ctx.config.prefix, name)
         for container in containers:
             if container.name == expected_container_name:
                 return container
@@ -1324,7 +1326,7 @@ kill -TERM 1
 
         # Fail fast if a container with this name already exists, before the
         # expensive image build step.
-        container_name = f"{self.mngr_ctx.config.prefix}{name}"
+        container_name = host_container_name(self.mngr_ctx.config.prefix, name)
         existing = self._find_container_by_name(name)
         if existing is not None:
             raise MngrError(
@@ -1643,7 +1645,7 @@ kill -TERM 1
         logger.info("Restoring Docker container from snapshot", host_id=str(host_id), snapshot_id=str(snapshot_id))
 
         labels = build_container_labels(host_id, host_name, str(self.name), user_tags)
-        container_name = f"{self.mngr_ctx.config.prefix}{host_name}"
+        container_name = host_container_name(self.mngr_ctx.config.prefix, host_name)
 
         effective_start_args = config.start_args
 
