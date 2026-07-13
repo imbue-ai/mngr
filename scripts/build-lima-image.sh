@@ -159,6 +159,46 @@ echo "==> Flattening the Lima disk ($DISK_FILE) to a standalone qcow2 + raw"
 qemu-img convert -O qcow2 "$DISK_FILE" "$QCOW2_OUT"
 qemu-img convert -f qcow2 -O raw "$QCOW2_OUT" "$RAW_OUT"
 
+# Boot the finished image as a user that does not exist in it, at the uid macOS
+# gives its first account. Lima derives the guest user's name and uid from the
+# booting host's account, so an image that kept any human user collides
+# ("useradd: UID 501 is not unique"), leaves no user holding Lima's SSH key, and
+# hangs forever on the ssh requirement -- on every machine except the baker's.
+# The bake asserts this internally; boot it here too, because the internal check
+# cannot prove the image is bootable by a stranger.
+PROBE_INSTANCE="mngr-lima-probe-$ARCH_TAG"
+PROBE_LIMA_HOME="$(mktemp -d -t mngr-lima-probe-XXXXXX)"
+PROBE_YAML="$PROBE_LIMA_HOME/probe.yaml"
+probe_cleanup() {
+  LIMA_HOME="$PROBE_LIMA_HOME" limactl delete -f "$PROBE_INSTANCE" >/dev/null 2>&1 || true
+  rm -rf "$PROBE_LIMA_HOME"
+}
+cat > "$PROBE_YAML" <<EOF
+images:
+  - location: "$RAW_OUT"
+    arch: "$LIMA_ARCH"
+cpus: 2
+memory: "4GiB"
+disk: "${DISK}GiB"
+mounts: []
+user:
+  name: "limaprobe"
+  uid: 501
+  home: "/home/limaprobe.linux"
+ssh:
+  loadDotSSHPubKeys: false
+EOF
+echo "==> Verifying the image boots for a host user it has never seen (limaprobe, uid 501)"
+if LIMA_HOME="$PROBE_LIMA_HOME" limactl start --name="$PROBE_INSTANCE" --tty=false "$PROBE_YAML"; then
+  echo "==> Boot probe passed: the image is not tied to this machine's account"
+  probe_cleanup
+else
+  echo "ERROR: the baked image did not boot for a foreign host user." >&2
+  echo "       It is host-specific and would hang on ssh for every other machine." >&2
+  probe_cleanup
+  exit 1
+fi
+
 echo ""
 echo "Build complete:"
 echo "  qcow2: $QCOW2_OUT"
