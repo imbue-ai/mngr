@@ -1588,7 +1588,7 @@ def test_restart_dispatches_for_never_probed_workspace(
 
     A workspace whose host has been offline since before this process started is
     never enrolled as a probe suspect, so the tracker reports default-HEALTHY for
-    it. A veto keyed on that reading used to drop the recovery page's cold-boot
+    it. A veto keyed on that reading would drop the recovery page's cold-boot
     dispatch (host scope + ``host_already_stopped``), stranding the workspace on
     the loader forever. The dispatch must proceed to a real restart operation --
     self-recovery races are absorbed by ``mngr start`` only targeting STOPPED
