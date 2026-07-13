@@ -52,6 +52,7 @@ from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKi
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import CreationId
+from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.testing import stub_mngr_host_dir
 from imbue.minds.utils.testing import RecordingMngrCaller
@@ -113,6 +114,7 @@ class _RecordingAgentCreator(AgentCreator):
         on_created: Callable[[AgentId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
         color: str | None = None,
+        docker_runtime: DockerRuntime = DockerRuntime.RUNC,
         original_minds_version: str = "",
     ) -> CreationId:
         self._last_call = {
@@ -127,6 +129,7 @@ class _RecordingAgentCreator(AgentCreator):
             "region": region,
             "anthropic_api_key": anthropic_api_key,
             "color": color,
+            "docker_runtime": docker_runtime,
             "original_minds_version": original_minds_version,
         }
         return CreationId()
@@ -578,6 +581,7 @@ def test_create_workspace_full_surface_returns_202_and_threads_fields(
             "launch_mode": "DOCKER",
             "ai_provider": "SUBSCRIPTION",
             "backup_provider": "CONFIGURE_LATER",
+            "runtime": "RUNSC",
         },
     )
 
@@ -588,6 +592,7 @@ def test_create_workspace_full_surface_returns_202_and_threads_fields(
     assert str(creator.last_call["host_name"]) == "my-mind"
     assert str(creator.last_call["color"]) == "#0b292b"
     assert str(creator.last_call["branch"]) == "main"
+    assert creator.last_call["docker_runtime"] == DockerRuntime.RUNSC
 
 
 def test_create_workspace_requires_api_key_for_api_key_provider(
