@@ -1,0 +1,1 @@
+Add the open-seer app: an autonomous Sentry-error-to-PR system. It polls Sentry for new issues, triages them, and drives Claude Code sessions (via the fix-sentry-error and sentry-sweep skills) to produce candidate fix PRs. Includes the tick loop, a gitleaks-based secret-scanning gate, Dockerfile, design docs, and tests.
