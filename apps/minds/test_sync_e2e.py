@@ -72,7 +72,7 @@ _DOCKER_STATE_MARKER: Final[str] = "docker-state"
 _SIGN_IN_TIMEOUT_SECONDS: Final[int] = 90
 _ACCOUNT_VISIBLE_TIMEOUT_SECONDS: Final[int] = 120
 _BACKUP_CONFIGURE_TIMEOUT_SECONDS: Final[int] = 420
-_FIRST_BACKUP_TIMEOUT_SECONDS: Final[int] = 900
+_FIRST_BACKUP_TIMEOUT_SECONDS: Final[int] = 1500
 _SYNC_CONVERGENCE_TIMEOUT_SECONDS: Final[int] = 300
 _UNLOCK_BANNER_TIMEOUT_SECONDS: Final[int] = 240
 _DOWNLOAD_LINK_TIMEOUT_SECONDS: Final[int] = 300
@@ -648,9 +648,10 @@ def _assert_zip_contains_sentinel(zip_path: Path, sentinel_content: str) -> None
 @pytest.mark.minds_snapshot_resume
 @pytest.mark.docker
 @pytest.mark.rsync
-# Strictly below offload's test_timeout_secs=2400 so a timeout fails INSIDE
-# pytest (junit + failure diagnostics survive) instead of a sandbox kill.
-@pytest.mark.timeout(2100)
+# Strictly below offload's test_timeout_secs=3600 so a timeout fails INSIDE
+# pytest (junit + failure diagnostics survive) instead of a sandbox kill;
+# func_only=False covers fixture time too (the config default exempts it).
+@pytest.mark.timeout(3300, func_only=False)
 def test_amnesia_and_recover_full_lifecycle_via_electron(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -721,7 +722,7 @@ def test_amnesia_and_recover_full_lifecycle_via_electron(
 @pytest.mark.minds_snapshot_resume
 @pytest.mark.docker
 @pytest.mark.rsync
-@pytest.mark.timeout(1800)
+@pytest.mark.timeout(1800, func_only=False)
 def test_legacy_association_files_migrate_into_synced_records(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -810,7 +811,7 @@ def test_legacy_association_files_migrate_into_synced_records(
 @pytest.mark.minds_snapshot_resume
 @pytest.mark.docker
 @pytest.mark.rsync
-@pytest.mark.timeout(1800)
+@pytest.mark.timeout(1800, func_only=False)
 def test_master_password_lifecycle_rewraps_scrubs_and_restores(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

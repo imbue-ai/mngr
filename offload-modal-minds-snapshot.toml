@@ -25,8 +25,12 @@
 max_parallel = 16
 # The sync e2e lifecycle tests (test_sync_e2e.py) create a workspace via the
 # real Electron create flow, run a real first backup to R2, wipe the install,
-# and restore -- the amnesia test budgets 2400s (its pytest mark matches).
-test_timeout_secs = 2400
+# and restore. The amnesia test's legitimate worst case (create + flows + a
+# real first backup of the whole host_dir to R2 + relaunch + restore) needs
+# most of an hour; its pytest mark (3300s, func_only=false) is deliberately
+# below this ceiling so overruns fail INSIDE pytest with diagnostics instead
+# of a sandbox kill.
+test_timeout_secs = 3600
 stream_output = true
 sandbox_project_root = "/code/mngr"
 
