@@ -3075,6 +3075,31 @@ function handleNotification(event) {
 //
 // Mirrors the cookie into the workspace content partition so any
 // chrome/iframe / WebContentsView using that partition is authenticated too.
+// Loopback hosts the `mngr forward` proxy serves under its self-signed cert:
+// the bare `localhost` origin, the `agent-<id>.localhost` workspace subdomains
+// (`*.localhost`), and the `127.0.0.1` IP host. Every other host must fall
+// through to Chromium's normal verification.
+function isLoopbackHostname(hostname) {
+  return hostname === 'localhost' || hostname.endsWith('.localhost') || hostname === '127.0.0.1';
+}
+
+// Trust the proxy's ephemeral self-signed cert for its loopback origins, in the
+// workspace-content partition only. The proxy regenerates the cert every
+// startup and only minds' own loopback origins use it, so there is no OS trust
+// store or CA to install; every real https origin still gets Chromium's default
+// verification (cb(-3)). Registered only when the proxy actually serves TLS.
+function trustLoopbackCertsForWorkspaceContent() {
+  const contentSession = session.fromPartition(CONTENT_PARTITION);
+  contentSession.setCertificateVerifyProc((request, callback) => {
+    if (isLoopbackHostname(request.hostname)) {
+      callback(0); // trust
+    } else {
+      callback(-3); // defer to Chromium's default verification
+    }
+  });
+  console.log('[startup] Trusting self-signed loopback certs for workspace content (HTTP/2 on)');
+}
+
 async function handleMngrForwardStarted(event) {
   const port = event.mngr_forward_port;
   const preauth = event.preauth_cookie;
@@ -3082,10 +3107,13 @@ async function handleMngrForwardStarted(event) {
     console.warn('[startup] mngr_forward_started missing port or preauth_cookie:', event);
     return;
   }
-  const url = `http://localhost:${port}`;
+  // The proxy serves TLS + HTTP/2, so the origin is https and the session
+  // cookie must be Secure (a Secure cookie is only sent over https).
+  const url = `https://localhost:${port}`;
   // Cache the plugin origin so workspaceUrlForAgent() can build /goto/ URLs
   // against the correct port (the plugin, not minds).
   mngrForwardBaseUrl = url;
+  trustLoopbackCertsForWorkspaceContent();
   const baseSpec = {
     url,
     name: 'mngr_forward_session',
@@ -3093,6 +3121,7 @@ async function handleMngrForwardStarted(event) {
     httpOnly: true,
     sameSite: 'lax',
     path: '/',
+    secure: true,
   };
   try {
     await session.defaultSession.cookies.set(baseSpec);
