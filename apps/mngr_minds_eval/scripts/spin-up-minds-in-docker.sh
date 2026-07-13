@@ -38,11 +38,17 @@ docker build -f "${APP_DIR}/docker/Dockerfile" \
   --build-arg MNGR_BRANCH="${MNGR_BRANCH}" --build-arg MNGR_REF="${REF}" \
   -t "${TAG}" "${APP_DIR}" || { echo "!! build failed" >&2; exit 1; }
 
+# Scoped eval AWS creds (bucket-only) -- the eval CLI reads these to write batch configs and to
+# hand each sandbox its restic repo. Optional: only the eval subcommands need them.
+AWS_MOUNT=""
+[ -f "${HOME}/.minds-eval/aws.env" ] && AWS_MOUNT="-v ${HOME}/.minds-eval/aws.env:/root/.minds-eval/aws.env:ro"
+
 docker rm -f "${CONTAINER}" >/dev/null 2>&1
 echo ">> starting '${CONTAINER}' (dashboard ${UI}, forward ${FWD}) ..."
+# shellcheck disable=SC2086
 docker run -d --name "${CONTAINER}" \
   -p "${UI}:${UI}" -p "${FWD}:${FWD}" \
-  -v "${HOME}/.modal.toml:/root/.modal.toml:ro" \
+  -v "${HOME}/.modal.toml:/root/.modal.toml:ro" ${AWS_MOUNT} \
   -e MINDS_BARE_PORT="${UI}" -e MINDS_FORWARD_HOST=0.0.0.0 -e MINDS_FORWARD_PORT="${FWD}" \
   -e MINDS_ENV="${MINDS_ENV}" \
   -e MNGR__PROVIDERS__MODAL__USER_ID="${MODAL_ENV}" \

@@ -1,0 +1,116 @@
+"""Restore a case's post-message snapshot and spin it back up as a local Docker workspace.
+
+restic restore <tag> -> a /mngr tree -> seed a new workspace's repo from its /mngr/code and create
+it with launch_mode=DOCKER, so you can open the workspace and click through what the agent built.
+
+Deps (node_modules/.venv) are excluded from the snapshot, so the restored workspace reinstalls
+them from the preserved lockfiles on boot -- deterministic, a couple of minutes.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+from imbue.mngr_minds_eval import s3_store
+
+RESTORE_ROOT = Path("/work/restores")
+
+
+def _restic_env(env: dict, repo_url: str, password: str) -> dict:
+    return {
+        **os.environ,
+        "RESTIC_REPOSITORY": repo_url,
+        "RESTIC_PASSWORD": password,
+        "AWS_ACCESS_KEY_ID": env["AWS_ACCESS_KEY_ID"],
+        "AWS_SECRET_ACCESS_KEY": env["AWS_SECRET_ACCESS_KEY"],
+        "AWS_DEFAULT_REGION": env.get("AWS_DEFAULT_REGION", "us-east-1"),
+    }
+
+
+def _post_json(url: str, payload: dict) -> tuple[int, dict]:
+    request = urllib.request.Request(
+        url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}, method="POST"
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return response.status, json.loads(response.read().decode())
+    except urllib.error.HTTPError as exc:
+        return exc.code, {"error": exc.read().decode()[:400]}
+
+
+def restore(batch: str, case_name: str, message_index: int, *, port: str, restic_password: str = "") -> None:
+    env = s3_store.load_aws_env()
+    client = s3_store.make_client(env)
+    bucket = env["MINDS_EVAL_BUCKET"]
+    config = s3_store.get_json(client, bucket, "{}/{}".format(batch, s3_store.BATCH_CONFIG_NAME))
+    if config is None:
+        raise SystemExit("no such batch: {}".format(batch))
+    eval_name = config.get("eval_name", "")
+    # The batch config carries the restic password launch generated (see launch.launch_batch).
+    restic_password = restic_password or config.get("restic_password", "")
+    if not restic_password:
+        raise SystemExit("batch {} has no restic_password; pass --restic-password".format(batch))
+    prefix = s3_store.case_prefix(batch, eval_name, case_name)
+    repo_url = s3_store.restic_repo_url(env, prefix)
+    tag = "post_message_{}".format(message_index)
+
+    target = RESTORE_ROOT / "{}-{}-{}".format(batch, case_name, tag)
+    shutil.rmtree(target, ignore_errors=True)
+    target.mkdir(parents=True, exist_ok=True)
+
+    print(">> restic restore {} from {}".format(tag, repo_url), flush=True)
+    result = subprocess.run(
+        ["restic", "restore", "latest", "--tag", tag, "--target", str(target)],
+        env=_restic_env(env, repo_url, restic_password), capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise SystemExit("restic restore failed:\n{}".format((result.stderr or result.stdout)[:600]))
+
+    code_dir = next((p for p in target.rglob("code") if (p / ".git").exists()), None)
+    if code_dir is None:
+        raise SystemExit("restored snapshot has no /mngr/code git repo under {}".format(target))
+
+    # The restored tree is the source repo for a fresh DOCKER workspace.
+    subprocess.run(["git", "-C", str(code_dir), "add", "-A"], capture_output=True, text=True)
+    subprocess.run(
+        ["git", "-C", str(code_dir), "-c", "user.email=eval@minds", "-c", "user.name=minds-eval",
+         "commit", "-q", "-m", "restore {} {}".format(case_name, tag)],
+        capture_output=True, text=True,
+    )
+
+    host_name = "RESTORE-{}-{}-{}".format(eval_name, case_name, message_index)
+    print(">> creating docker workspace {} from {}".format(host_name, code_dir), flush=True)
+    status, body = _post_json("http://127.0.0.1:{}/api/v1/workspaces".format(port), {
+        "git_url": str(code_dir), "host_name": host_name, "branch": "",
+        "launch_mode": "DOCKER", "ai_provider": "SUBSCRIPTION", "backup_provider": "CONFIGURE_LATER",
+    })
+    if status != 202:
+        raise SystemExit("create failed HTTP {}: {}".format(status, body))
+
+    operation_id = body["operation_id"]
+    deadline = time.time() + 1800.0
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(
+                "http://127.0.0.1:{}/api/v1/workspaces/operations/create/{}".format(port, operation_id), timeout=30
+            ) as response:
+                info = json.loads(response.read().decode())
+        except (urllib.error.URLError, OSError):
+            time.sleep(5)
+            continue
+        if info.get("is_done"):
+            print(">> restored workspace up: {} (agent {})".format(host_name, info.get("agent_id")), flush=True)
+            print("   open the dashboard and click into it; the app reinstalls deps on first boot.", flush=True)
+            return
+        if info.get("error"):
+            raise SystemExit("create failed: {}".format(info["error"]))
+        time.sleep(5)
+    raise SystemExit("timed out waiting for the restored workspace")
