@@ -21,8 +21,12 @@ from imbue.remote_service_connector.app import CloudflareApiError
 from imbue.remote_service_connector.app import HttpCloudflareOps
 from imbue.remote_service_connector.app import InvalidR2BucketNameError
 from imbue.remote_service_connector.app import InvalidTunnelComponentError
+from imbue.remote_service_connector.app import PostgresSyncStore
 from imbue.remote_service_connector.app import R2BucketOwnershipError
 from imbue.remote_service_connector.app import ServiceNotFoundError
+from imbue.remote_service_connector.app import SyncActiveAgentConflictError
+from imbue.remote_service_connector.app import SyncRevisionConflictError
+from imbue.remote_service_connector.app import SyncStoreConsistencyError
 from imbue.remote_service_connector.app import TunnelComponentTooLongError
 from imbue.remote_service_connector.app import TunnelNotFoundError
 from imbue.remote_service_connector.app import TunnelOwnershipError
@@ -35,6 +39,7 @@ from imbue.remote_service_connector.app import clear_paid_status_cache
 from imbue.remote_service_connector.app import derive_s3_secret_access_key
 from imbue.remote_service_connector.app import extract_service_name
 from imbue.remote_service_connector.app import extract_username_from_tunnel_name
+from imbue.remote_service_connector.app import get_sync_store
 from imbue.remote_service_connector.app import is_email_paid
 from imbue.remote_service_connector.app import is_email_paid_in_db
 from imbue.remote_service_connector.app import make_bucket_name
@@ -2893,3 +2898,152 @@ def test_delete_workspace_record_removes_row(monkeypatch: pytest.MonkeyPatch) ->
     # Idempotent: deleting again still succeeds.
     assert client.delete("/sync/records/host-aaa111", headers=_admin_headers()).status_code == 200
     assert len(store.records_by_key) == 0
+
+
+# -- PostgresSyncStore tests (against the in-memory SQL fake) --
+
+
+def _make_postgres_sync_store(monkeypatch: pytest.MonkeyPatch) -> tuple[PostgresSyncStore, FakePoolBackend]:
+    """Build a PostgresSyncStore whose connections hit the in-memory pool backend."""
+    backend = make_fake_pool_backend()
+    backend.install_on_app_module(app_mod, monkeypatch)
+    return PostgresSyncStore(), backend
+
+
+def _store_record(
+    host_id: str = "host-aaa111",
+    agent_id: str = "agent-1",
+    display_name: str = "my-workspace",
+    state: str = "active",
+    encrypted_secrets: bytes | None = None,
+    revision: int = 1,
+) -> dict[str, Any]:
+    """A store-layer record dict (raw-bytes secrets), as the endpoints hand to put_record."""
+    return {
+        "host_id": host_id,
+        "agent_id": agent_id,
+        "display_name": display_name,
+        "color": None,
+        "provider_kind": "docker",
+        "hosting_device_id": "device-1",
+        "device_label": "laptop",
+        "state": state,
+        "restored_from_host_id": None,
+        "backup_kind": "imbue_r2",
+        "encrypted_secrets": encrypted_secrets,
+        "revision": revision,
+    }
+
+
+def test_postgres_sync_store_round_trips_a_record(monkeypatch: pytest.MonkeyPatch) -> None:
+    store, _backend = _make_postgres_sync_store(monkeypatch)
+
+    written = store.put_record("user-1", _store_record(encrypted_secrets=b"\x00opaque-blob"))
+
+    assert written["revision"] == 1
+    assert written["encrypted_secrets"] == base64.b64encode(b"\x00opaque-blob").decode("ascii")
+    listed = store.list_records("user-1")
+    assert [record["host_id"] for record in listed] == ["host-aaa111"]
+    assert listed[0]["created_at"] != ""
+    assert store.list_records("user-2") == []
+
+    updated = store.put_record("user-1", _store_record(display_name="renamed", revision=2))
+    assert updated["display_name"] == "renamed"
+    assert updated["revision"] == 2
+    # The metadata-only update carried no secrets, so the blob is now gone.
+    assert updated["encrypted_secrets"] is None
+
+
+def test_postgres_sync_store_raises_the_stored_row_on_a_stale_push(monkeypatch: pytest.MonkeyPatch) -> None:
+    store, _backend = _make_postgres_sync_store(monkeypatch)
+    store.put_record("user-1", _store_record())
+
+    with pytest.raises(SyncRevisionConflictError) as conflict:
+        store.put_record("user-1", _store_record(display_name="stale", revision=1))
+
+    assert conflict.value.stored_record["revision"] == 1
+    assert conflict.value.stored_record["display_name"] == "my-workspace"
+
+
+def test_postgres_sync_store_enforces_one_active_record_per_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    store, _backend = _make_postgres_sync_store(monkeypatch)
+    store.put_record("user-1", _store_record())
+
+    with pytest.raises(SyncActiveAgentConflictError):
+        store.put_record("user-1", _store_record(host_id="host-bbb222"))
+
+    # A tombstone for the same agent on another host is allowed by the partial index.
+    tombstone = store.put_record("user-1", _store_record(host_id="host-bbb222", state="destroyed"))
+    assert tombstone["state"] == "destroyed"
+
+
+def test_postgres_sync_store_reports_an_insert_race_as_a_cas_conflict(monkeypatch: pytest.MonkeyPatch) -> None:
+    store, backend = _make_postgres_sync_store(monkeypatch)
+    backend.sync_insert_race_winner = {"user_id": "user-1", **_store_record(display_name="winner")}
+
+    # The loser's INSERT hits the primary key after the winner commits; the
+    # retry then reports the race through the regular CAS path.
+    with pytest.raises(SyncRevisionConflictError) as conflict:
+        store.put_record("user-1", _store_record(display_name="loser"))
+
+    assert conflict.value.stored_record["display_name"] == "winner"
+
+
+def test_postgres_sync_store_surfaces_a_rowless_update_as_a_server_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, backend = _make_postgres_sync_store(monkeypatch)
+    store.put_record("user-1", _store_record())
+    backend.sync_update_returns_no_row = True
+
+    with pytest.raises(SyncStoreConsistencyError):
+        store.put_record("user-1", _store_record(revision=2))
+
+
+def test_postgres_sync_store_deletes_and_scrubs(monkeypatch: pytest.MonkeyPatch) -> None:
+    store, _backend = _make_postgres_sync_store(monkeypatch)
+    store.put_record("user-1", _store_record(encrypted_secrets=b"blob"))
+    store.put_record("user-1", _store_record(host_id="host-bbb222", agent_id="agent-2"))
+
+    assert store.scrub_secrets("user-1") == 1
+    assert all(record["encrypted_secrets"] is None for record in store.list_records("user-1"))
+    # A second scrub finds nothing left to strip.
+    assert store.scrub_secrets("user-1") == 0
+
+    store.delete_record("user-1", "host-aaa111")
+    assert [record["host_id"] for record in store.list_records("user-1")] == ["host-bbb222"]
+
+
+def test_postgres_sync_store_bundle_crud(monkeypatch: pytest.MonkeyPatch) -> None:
+    store, _backend = _make_postgres_sync_store(monkeypatch)
+    assert store.get_bundle("user-1") is None
+
+    bundle = {
+        "kdf_salt": b"salt-bytes",
+        "kdf_time_cost": 3,
+        "kdf_memory_kib": 65536,
+        "kdf_parallelism": 4,
+        "wrapped_dek": b"wrapped-dek-bytes",
+        "key_epoch": 1,
+    }
+    store.put_bundle("user-1", bundle)
+
+    fetched = store.get_bundle("user-1")
+    assert fetched is not None
+    assert fetched["kdf_salt"] == base64.b64encode(b"salt-bytes").decode("ascii")
+    assert fetched["wrapped_dek"] == base64.b64encode(b"wrapped-dek-bytes").decode("ascii")
+    assert fetched["key_epoch"] == 1
+
+    # The upsert path: a rewrapped bundle replaces the stored one in place.
+    store.put_bundle("user-1", {**bundle, "wrapped_dek": b"rewrapped", "key_epoch": 2})
+    refetched = store.get_bundle("user-1")
+    assert refetched is not None
+    assert refetched["key_epoch"] == 2
+
+    store.delete_bundle("user-1")
+    assert store.get_bundle("user-1") is None
+
+
+def test_get_sync_store_returns_a_cached_postgres_store() -> None:
+    assert isinstance(get_sync_store(), PostgresSyncStore)
+    assert get_sync_store() is get_sync_store()
