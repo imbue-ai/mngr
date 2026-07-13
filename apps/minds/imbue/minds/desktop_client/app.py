@@ -1118,6 +1118,13 @@ def _finalize_destroyed_workspace(
             owner_email = session_store.get_account_email(owner_user_id)
             if owner_email is not None:
                 session_store.record_store.tombstone_record(owner_user_id, owner_email, str(agent_id))
+            else:
+                logger.warning(
+                    "Skipping workspace-record tombstone for destroyed agent {}: owning account {} is not "
+                    "signed in on this device; the owner's next signed-in reconcile will retire the record",
+                    agent_id,
+                    owner_user_id,
+                )
     delete_destroying(agent_id, paths)
 
 
