@@ -507,6 +507,21 @@ def _has_target_disappeared_past_grace(runtime: _WaitRuntime, now: float) -> boo
     return False
 
 
+def _should_recheck_target_presence(last_check_at: float, now: float) -> bool:
+    """Return True if enough time has elapsed since the last `mngr list`
+    presence check to issue another one.
+
+    `mngr list` is expensive, so the wait loop rate-limits its
+    target-disappearance check to once per ``_TARGET_PRESENCE_RECHECK_SECONDS``
+    even though the loop polls roughly every ``_POLL_INTERVAL_SECONDS``.
+    Pulling the cadence decision into a pure function lets it be tested
+    directly -- a regression that fired the check on every poll (or never
+    fired it) is observable here, which a constant-relationship assertion
+    could not catch.
+    """
+    return now - last_check_at >= _TARGET_PRESENCE_RECHECK_SECONDS
+
+
 def resolve_destroyed_result(target_name: str, location: AgentLocation) -> str:
     """Build the END_TURN payload for an agent that was destroyed before completing."""
     preserved_dir = get_preserved_agent_dir(location.host_dir, AgentName(target_name), AgentId(location.agent_id))
@@ -642,7 +657,7 @@ def wait_for_subagent(target_name: str, watermark_file: Path | None = None) -> s
                 _delete_watermark_file(watermark_file)
             return f"END_TURN:{truncated}"
 
-        if now - runtime.last_presence_check_at >= _TARGET_PRESENCE_RECHECK_SECONDS:
+        if _should_recheck_target_presence(runtime.last_presence_check_at, now):
             runtime.last_presence_check_at = now
             if _has_target_disappeared_past_grace(runtime, now):
                 destroyed_text = resolve_destroyed_result(target_name, location)

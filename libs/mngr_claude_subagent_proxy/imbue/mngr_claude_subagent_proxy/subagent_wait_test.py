@@ -175,6 +175,36 @@ def test_extract_assistant_text_concatenates_text_blocks_only() -> None:
     assert extract_assistant_text(multi_text_event) == "hello world"
 
 
+# extract_assistant_text feeds the body relayed to the parent, so a
+# malformed event must yield "" rather than raise -- otherwise the relay
+# wedges. These mirror the boundary coverage the sibling predicates
+# (is_end_turn_event, is_real_user_event) already have.
+_EXTRACT_EMPTY_CASES: tuple[tuple[str, dict[str, Any]], ...] = (
+    ("empty_content_list", {"type": "assistant", "message": {"content": []}}),
+    ("missing_message", {"type": "assistant"}),
+    ("non_dict_message", {"type": "assistant", "message": "not-a-dict"}),
+    ("content_not_a_list", {"type": "assistant", "message": {"content": "just a string"}}),
+    ("content_missing", {"type": "assistant", "message": {"stop_reason": "end_turn"}}),
+    (
+        "only_non_text_blocks",
+        {"type": "assistant", "message": {"content": [{"type": "thinking", "thinking": "x"}]}},
+    ),
+    (
+        "empty_string_text_block",
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": ""}]}},
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    "event",
+    [case[1] for case in _EXTRACT_EMPTY_CASES],
+    ids=[case[0] for case in _EXTRACT_EMPTY_CASES],
+)
+def test_extract_assistant_text_returns_empty_on_malformed_or_empty(event: dict[str, Any]) -> None:
+    assert extract_assistant_text(event) == ""
+
+
 # is_real_user_event must accept only plain-text human prompts and reject
 # tool_result blocks plus the synthetic hook-feedback messages Claude
 # Code emits as type=user. Hook-feedback prefixes are matched after a
@@ -395,20 +425,42 @@ def test_permission_gate_suppresses_until_transcript_advances(tmp_path: Path) ->
     assert _check_permissions_newly_waiting(runtime) is True
 
 
-def test_target_presence_recheck_is_rate_limited() -> None:
-    """The wait loop's `mngr list` calls for target-presence checks must be
-    rate-limited via _TARGET_PRESENCE_RECHECK_SECONDS so the 5x/s polling
-    cadence does not flood the host with concurrent `mngr list` runs.
+# The wait loop's `mngr list` target-presence check must be rate-limited:
+# the loop polls ~5x/s but the disappearance check must fire only once per
+# _TARGET_PRESENCE_RECHECK_SECONDS. Found live: a nested verify-and-fix
+# subagent stalled when many parents made `mngr list` slow -- the loop fired
+# the check every 200ms, each call timing out after 30s, queueing faster
+# than they finished and starving the rest of the loop.
+#
+# These cases pin the actual cadence decision (the pure helper the loop
+# uses), not just a relationship between two constants. A regression that
+# fired the check on every poll -- e.g. deleting the elapsed-time guard, or
+# failing to advance last_presence_check_at -- would make the within-interval
+# cases below return True and fail, which the old constants-only assertion
+# could not catch.
+_RECHECK_INTERVAL: float = subagent_wait._TARGET_PRESENCE_RECHECK_SECONDS
+_RECHECK_CADENCE_CASES: tuple[tuple[str, float, float, bool], ...] = (
+    ("just_checked_zero_elapsed", 100.0, 100.0, False),
+    ("one_poll_later", 100.0, 100.0 + subagent_wait._POLL_INTERVAL_SECONDS, False),
+    ("just_under_interval", 100.0, 100.0 + _RECHECK_INTERVAL - 0.001, False),
+    ("exactly_at_interval", 100.0, 100.0 + _RECHECK_INTERVAL, True),
+    ("well_past_interval", 100.0, 100.0 + _RECHECK_INTERVAL * 3, True),
+)
 
-    Found live: a nested verify-and-fix subagent stalled when many parent
-    agents made `mngr list` slow. The wait loop fired its disappearance
-    check on every poll iteration (every 200ms), each call timing out
-    after 30s, queueing up faster than they finished and starving the
-    rest of the loop.
-    """
-    # The rate-limit interval must be substantially larger than the poll
-    # interval; otherwise the rate-limiting is effectively a no-op.
-    assert subagent_wait._TARGET_PRESENCE_RECHECK_SECONDS > subagent_wait._POLL_INTERVAL_SECONDS * 5
-    # The interval must also be at least a few seconds in absolute terms,
-    # since a single mngr-list call commonly takes >1s on busy hosts.
-    assert subagent_wait._TARGET_PRESENCE_RECHECK_SECONDS >= 2.0
+
+@pytest.mark.parametrize(
+    ("last_check_at", "now", "expected"),
+    [(case[1], case[2], case[3]) for case in _RECHECK_CADENCE_CASES],
+    ids=[case[0] for case in _RECHECK_CADENCE_CASES],
+)
+def test_should_recheck_target_presence_cadence(last_check_at: float, now: float, expected: bool) -> None:
+    assert subagent_wait._should_recheck_target_presence(last_check_at, now) is expected
+
+
+def test_target_presence_recheck_interval_is_sane() -> None:
+    """Secondary sanity check on the chosen interval: it must be both
+    substantially larger than the poll interval (or the rate-limiting is a
+    no-op) and at least a couple seconds absolute (a single mngr-list call
+    commonly takes >1s on busy hosts)."""
+    assert _RECHECK_INTERVAL > subagent_wait._POLL_INTERVAL_SECONDS * 5
+    assert _RECHECK_INTERVAL >= 2.0

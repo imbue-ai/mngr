@@ -273,6 +273,14 @@ def test_plugin_allows_guarded_project_stop_hook(work_dir: Path, fake_host: Fake
 
     _provision(agent, fake_host, None)
 
+    # Provisioning must not just avoid raising -- it must actually install
+    # the PROXY hooks. A silent no-op would also "not raise" but would mean
+    # the guarded project hook was never honored.
+    settings = json.loads((work_dir / ".claude" / "settings.local.json").read_text())
+    hooks = settings["hooks"]
+    assert any(entry.get("matcher") == "Agent" for entry in hooks["PreToolUse"])
+    assert "imbue.mngr_claude_subagent_proxy.hooks.spawn" in hooks["PreToolUse"][0]["hooks"][0]["command"]
+
 
 def test_plugin_project_stop_hook_check_can_be_bypassed_via_env(
     work_dir: Path, fake_host: FakeHost, monkeypatch: pytest.MonkeyPatch
@@ -283,6 +291,13 @@ def test_plugin_project_stop_hook_check_can_be_bypassed_via_env(
     agent = FakeAgent(AgentId.generate(), work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
 
     _provision(agent, fake_host, None)
+
+    # The bypass must still produce a fully-provisioned agent, not a silent
+    # no-op that merely skipped the un-guarded check.
+    settings = json.loads((work_dir / ".claude" / "settings.local.json").read_text())
+    hooks = settings["hooks"]
+    assert any(entry.get("matcher") == "Agent" for entry in hooks["PreToolUse"])
+    assert "imbue.mngr_claude_subagent_proxy.hooks.spawn" in hooks["PreToolUse"][0]["hooks"][0]["command"]
 
 
 def test_plugin_skips_non_claude_agents(work_dir: Path, fake_host: FakeHost) -> None:
@@ -614,6 +629,12 @@ def test_deny_mode_skips_project_stop_hook_check(
 
     # Must NOT raise -- the project-stop-hook check is gated behind PROXY mode.
     _provision(agent, fake_host, ctx)
+
+    # And it must still install the DENY-mode hook, not silently no-op.
+    settings = json.loads((work_dir / ".claude" / "settings.local.json").read_text())
+    hooks = settings["hooks"]
+    assert any(entry.get("matcher") == "Agent" for entry in hooks["PreToolUse"])
+    assert "imbue.mngr_claude_subagent_proxy.hooks.deny" in hooks["PreToolUse"][0]["hooks"][0]["command"]
 
 
 def test_deny_mode_does_not_strip_subagent_user_hooks(

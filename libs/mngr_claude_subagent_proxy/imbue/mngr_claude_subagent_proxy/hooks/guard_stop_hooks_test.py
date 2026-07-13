@@ -58,7 +58,14 @@ def test_guard_stop_hooks_run_noop_when_state_dir_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """SessionStart fires on plain Claude sessions without mngr context;
-    the hook must tolerate the missing-env case silently."""
+    the hook must tolerate the missing-env case silently.
+
+    There is intentionally no side-effect assertion here: when
+    MNGR_AGENT_STATE_DIR is unset, run() reads stdin and returns before it
+    has any path to act on (it never computes a state dir, so it cannot
+    create or write anything). The contract is purely "tolerate and return,"
+    so "does not raise" is the complete guarantee. The positive wrapping
+    behavior is covered by test_guard_stop_hooks_run_wraps_per_agent_plugin_cache.
+    """
     monkeypatch.delenv("MNGR_AGENT_STATE_DIR", raising=False)
-    # Should not raise.
     guard_stop_hooks.run(io.StringIO(""))
