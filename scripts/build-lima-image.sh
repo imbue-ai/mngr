@@ -166,8 +166,11 @@ qemu-img convert -f qcow2 -O raw "$QCOW2_OUT" "$RAW_OUT"
 # hangs forever on the ssh requirement -- on every machine except the baker's.
 # The bake asserts this internally; boot it here too, because the internal check
 # cannot prove the image is bootable by a stranger.
-PROBE_INSTANCE="mngr-lima-probe-$ARCH_TAG"
-PROBE_LIMA_HOME="$(mktemp -d -t mngr-lima-probe-XXXXXX)"
+# Lima puts its ssh socket under LIMA_HOME/<instance>/, and a UNIX socket path
+# must fit in 104 bytes. macOS mktemp -d hands out /var/folders/... paths that
+# blow that on their own, so keep both the directory and the instance name short.
+PROBE_INSTANCE="probe"
+PROBE_LIMA_HOME="$(mktemp -d /tmp/mlp-XXXXXX)"
 PROBE_YAML="$PROBE_LIMA_HOME/probe.yaml"
 probe_cleanup() {
   LIMA_HOME="$PROBE_LIMA_HOME" limactl delete -f "$PROBE_INSTANCE" >/dev/null 2>&1 || true
