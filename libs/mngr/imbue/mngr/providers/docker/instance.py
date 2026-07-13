@@ -1060,7 +1060,18 @@ kill -TERM 1
         return None
 
     def _find_container_by_name(self, name: HostName) -> docker.models.containers.Container | None:
-        """Find a Docker container by host_name label."""
+        """Find this environment's Docker container for host ``name``.
+
+        The host-name and provider labels carry no environment discriminator:
+        two mngr environments with different ``MNGR_PREFIX`` values (e.g. two
+        minds envs) both label their containers ``provider=docker`` +
+        ``host_name=<name>``, so a label-only lookup can match another
+        environment's container. Require the container's actual name to be
+        ``<prefix><name>`` -- the same uniqueness scope Docker itself enforces
+        and the same prefix filter ``_list_containers`` applies to discovery.
+        (Containers are never renamed after creation -- ``mngr rename`` updates
+        only the host record -- so name and label stay in lockstep.)
+        """
         try:
             containers = self._docker_client.containers.list(
                 all=True,
@@ -1069,7 +1080,11 @@ kill -TERM 1
         except docker.errors.DockerException as e:
             raise MngrError(f"Cannot connect to Docker daemon: {e}") from e
 
-        return containers[0] if containers else None
+        expected_container_name = f"{self.mngr_ctx.config.prefix}{name}"
+        for container in containers:
+            if container.name == expected_container_name:
+                return container
+        return None
 
     def _list_containers(self) -> list[docker.models.containers.Container]:
         """List all Docker containers managed by this provider instance.
