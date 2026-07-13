@@ -17,9 +17,12 @@
 # 0.9.5 -> 0.9.6 in this PR is what enables this config to exist.
 
 [offload]
-# Tiny test suite to start. max_parallel scales up as more
-# @pytest.mark.minds_snapshot_resume tests get added.
-max_parallel = 10
+# Must stay >= the number of minds_snapshot_resume tests: when batches
+# exceed it, offload reuses sandboxes, and test_snapshot_resume's
+# stopped-container-state check is order-dependent against the resume
+# tests (a reused sandbox has the baked containers already started).
+# 12 tests today; headroom for a few more.
+max_parallel = 16
 # The sync e2e lifecycle tests (test_sync_e2e.py) create a workspace via the
 # real Electron create flow, run a real first backup to R2, wipe the install,
 # and restore -- the amnesia test budgets 2400s (its pytest mark matches).
