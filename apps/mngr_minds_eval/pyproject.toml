@@ -1,11 +1,12 @@
 [project]
 name = "mngr-minds-eval"
 version = "0.1.0"
-description = "Minds eval harness: launch self-completing eval batches on Modal, snapshot each turn to S3, inspect and restore them."
+description = "Minds eval harness: launch self-completing eval batches on Modal, snapshot each turn to S3, inspect and evaluate them."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "boto3>=1.34",
+    "anthropic>=0.40",
 ]
 
 [project.scripts]

@@ -1,12 +1,13 @@
 """minds-evals -- launch and inspect Minds eval batches.
 
 Host-native CLI. Box-using commands (launch/box/make-modal-workspace/clean-modal-workspaces) ensure
-a Docker box (minds-box-<branch>-<sha>) and re-invoke themselves inside it; status commands
-(list-batches/inspect) only read S3.
+a Docker box (minds-box-<branch>-<sha>) and re-invoke themselves inside it; the S3-only commands
+(list-batches/inspect/evaluate) never touch the box.
 
   minds-evals launch --config eval_config.json
   minds-evals list-batches
   minds-evals inspect web1_20260713-101500
+  minds-evals evaluate web1_20260713-101500      # ANTHROPIC_API_KEY required
   minds-evals clean-modal-workspaces
   minds-evals box --mngr-branch minds-eval
   minds-evals make-modal-workspace --mngr-branch minds-eval --fct-link <url> --fct-branch main
@@ -26,6 +27,7 @@ import sys
 from pathlib import Path
 
 from imbue.mngr_minds_eval import box as box_mod
+from imbue.mngr_minds_eval import evaluate as evaluate_mod
 from imbue.mngr_minds_eval import launch as launch_mod
 from imbue.mngr_minds_eval import minds_client
 from imbue.mngr_minds_eval import s3_store
@@ -101,6 +103,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_inspect = sub.add_parser("inspect", help="per-case status of a batch (from S3)")
     p_inspect.add_argument("batch", help="<eval>_<datetime>")
+
+    p_eval = sub.add_parser("evaluate", help="score a finished batch (from S3; needs ANTHROPIC_API_KEY)")
+    p_eval.add_argument("batch", help="<eval>_<datetime>")
     return parser
 
 
@@ -115,6 +120,12 @@ def main() -> None:
     if args.command == "inspect":
         _check_aws()
         status_mod.inspect(args.batch)
+        return
+    if args.command == "evaluate":
+        _check_aws()
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            parser.error("set ANTHROPIC_API_KEY -- the LLM-graded evals call the Anthropic API")
+        evaluate_mod.evaluate_batch(args.batch)
         return
 
     if args.command == "box":

@@ -21,26 +21,39 @@ def list_batches() -> None:
     print("\ninspect a batch:  minds-evals inspect <BATCH>")
 
 
+def case_report(client, bucket: str, batch: str) -> tuple[dict | None, list[dict]]:
+    """(config, rows) for a batch. Each row is {id, prefix, state} where state is the parsed
+    state.json or None. (None, []) when the batch does not exist. Shared by inspect and evaluate."""
+    config = s3_store.get_json(client, bucket, "{}/{}".format(batch, s3_store.BATCH_CONFIG_NAME))
+    if config is None:
+        return None, []
+    eval_name = config.get("name") or s3_store.split_batch(batch)[0]
+    rows = []
+    for case in config.get("personas", []):
+        case_id = str(case.get("id") or "")
+        prefix = s3_store.case_prefix(batch, eval_name, case_id)
+        state = s3_store.get_json(client, bucket, "{}/{}".format(prefix, s3_store.STATE_NAME))
+        rows.append({"id": case_id, "prefix": prefix, "state": state})
+    return config, rows
+
+
 def inspect(batch: str) -> None:
     env = s3_store.load_aws_env()
     client = s3_store.make_client(env)
     bucket = env["MINDS_EVAL_BUCKET"]
-    config = s3_store.get_json(client, bucket, "{}/{}".format(batch, s3_store.BATCH_CONFIG_NAME))
+    config, rows = case_report(client, bucket, batch)
     if config is None:
         print("no such batch: {} (try: minds-evals list-batches)".format(batch))
         return
 
-    eval_name = config.get("name") or s3_store.split_batch(batch)[0]
     num_turns = config.get("turns", "?")
     print("batch {}   turns: {}   mngr: {}@{}".format(
         batch, num_turns, config.get("mngr_branch", "?"), (config.get("mngr_sha") or "")[:12]))
     print("{:<26} {:<12} {:>10}  {}".format("CASE", "STATE", "TURNS", "TRANSCRIPT"))
 
     finished = 0
-    for case in config.get("personas", []):
-        case_id = str(case.get("id") or "")
-        prefix = s3_store.case_prefix(batch, eval_name, case_id)
-        state = s3_store.get_json(client, bucket, "{}/{}".format(prefix, s3_store.STATE_NAME))
+    for row in rows:
+        case_id, prefix, state = row["id"], row["prefix"], row["state"]
         if state is None:
             print("{:<26} {:<12} {:>10}  {}".format(case_id[:26], "missing", "-", "-"))
             continue
@@ -50,8 +63,7 @@ def inspect(batch: str) -> None:
         has_transcript = _exists(client, bucket, "{}/{}".format(prefix, s3_store.TRANSCRIPT_KEY))
         print("{:<26} {:<12} {:>10}  {}".format(case_id[:26], test_state, turns, "yes" if has_transcript else "-"))
 
-    total = len(config.get("personas", []))
-    print("\n{}/{} finished".format(finished, total))
+    print("\n{}/{} finished".format(finished, len(rows)))
 
 
 def _exists(client, bucket: str, key: str) -> bool:

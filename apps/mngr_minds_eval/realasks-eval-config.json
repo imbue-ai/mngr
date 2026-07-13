@@ -1,0 +1,28 @@
+{
+  "name": "realasks",
+  "turns": 4,
+  "mngr_branch": "minds-eval",
+  "fct_branch": "minds-eval-autosend",
+  "personas": [
+    {
+      "id": "greeting",
+      "persona": "",
+      "first_prompt": "hi what can you do"
+    },
+    {
+      "id": "task-manager",
+      "persona": "",
+      "first_prompt": "Help me create a task management solution for my 4-person company. I want it to be AI-native, meaning the content should be editable via natural language. however only one person should be able to edit the codebase (ie the structure of the dashboard, the ui, etc) to eliminate the chance of a non-technical team member accidentally breaking the dashboard."
+    },
+    {
+      "id": "github-scout",
+      "persona": "",
+      "first_prompt": "I want to surface 25 unique profiles from GitHub of engineers that are passionate open source contributors. Ideally, they're located in the Bay Area and have projects that are over 200 stars. They should also have actively contributed to a project within the last month"
+    },
+    {
+      "id": "name-scanner",
+      "persona": "",
+      "first_prompt": "We have designed a hosting service for small apps meant for personal use — the opposite of scale. The idea is that people can deploy their own apps (usually open source) instead of relying on third party Saas. I would like you to develop a tool for me where I can provide potential names and it will do a trademark and competitive scan (including things like domain availability). I also want to be able to compare names after the tool has done these assessments."
+    }
+  ]
+}
