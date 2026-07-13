@@ -34,8 +34,10 @@ from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
+from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
+from imbue.minds.primitives import default_docker_runtime
 from imbue.minds.utils.sentry.frontend import frontend_sentry_browser_payload
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostName
@@ -414,6 +416,7 @@ def render_create_form(
     host_name: str = "",
     launch_mode: LaunchMode | None = None,
     ai_provider: AIProvider | None = None,
+    docker_runtime: DockerRuntime | None = None,
     backup_provider: BackupProvider | None = None,
     backup_api_key_env: str = "",
     has_saved_backup_password: bool = False,
@@ -488,6 +491,10 @@ def render_create_form(
         if ai_provider is not None
         else (AIProvider.IMBUE_CLOUD if is_remote_preset else AIProvider.SUBSCRIPTION)
     )
+    # The Docker container-runtime select defaults to the platform-appropriate
+    # value (runc on macOS, runsc on Linux). Only consumed when the compute
+    # provider is Docker; the form hides it otherwise.
+    effective_docker_runtime = docker_runtime if docker_runtime is not None else default_docker_runtime()
     effective_backup_provider = (
         backup_provider
         if backup_provider is not None
@@ -502,6 +509,8 @@ def render_create_form(
         selected_launch_mode=effective_launch_mode.value,
         ai_providers=list(AIProvider),
         selected_ai_provider=effective_ai_provider.value,
+        docker_runtimes=list(DockerRuntime),
+        selected_docker_runtime=effective_docker_runtime.value,
         backup_providers=list(BackupProvider),
         selected_backup_provider=effective_backup_provider.value,
         backup_api_key_env=backup_api_key_env,
@@ -1172,10 +1181,10 @@ _RECOVERY_SCRIPT: Final[str] = """\
           if (providerReasonEl) { providerReasonEl.textContent = ''; show(providerReasonEl, false); }
           latestHealth = null;
         }
-        // The shared "Workspace unresponsive" state -- shown for ambiguous-host
-        // states, after a restart failure, and whenever the container is live
-        // but unreachable (bouncing it would interrupt user agents, so we want
-        // explicit consent before doing so).
+        // The shared "Workspace unresponsive" state -- shown after a restart
+        // failure and for the host_unresponsive tier (container observed
+        // running but unreachable: bouncing it would interrupt user agents, so
+        // we want explicit consent before doing so).
         function renderUnresponsive() {
           titleEl.textContent = 'Workspace unresponsive';
           messageEl.textContent =
@@ -1193,9 +1202,11 @@ _RECOVERY_SCRIPT: Final[str] = """\
           armHealthyPoll();
         }
         // INDETERMINATE: we lack trustworthy evidence to classify -- the
-        // in-container probe timed out (observed nothing), or discovery has not
-        // re-observed the host since the outage began, so its host state may be
-        // stale. Render neither a verdict nor a restart button, just a live
+        // in-container probe timed out (observed nothing), discovery has not
+        // re-observed the host since the outage began (so its host state may be
+        // stale), or the snapshot carries no observation of the container (host
+        // state UNKNOWN, transitional, or absent).
+        // Render neither a verdict nor a restart button, just a live
         // "reconnecting" spinner. The cheap liveness poll (armed here) returns the
         // user home the instant the workspace answers; a slow heavy re-probe
         // converges to a real tier if it is genuinely down and a fresh snapshot
@@ -1315,8 +1326,9 @@ _RECOVERY_SCRIPT: Final[str] = """\
             scheduleRefresh();
             return;
           }
-          // No trustworthy evidence to classify (probe timed out, or discovery has
-          // not re-observed the host since the outage). Show a live "reconnecting"
+          // No trustworthy evidence to classify (probe timed out, discovery has
+          // not re-observed the host since the outage, or the snapshot carries no
+          // observation of the container). Show a live "reconnecting"
           // state and keep checking -- never a verdict or an auto-restart off
           // non-evidence -- on EITHER entry path. Checked before the restart_failed
           // branch below so an indeterminate result there also keeps checking
