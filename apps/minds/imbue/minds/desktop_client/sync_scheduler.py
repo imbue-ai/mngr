@@ -19,6 +19,7 @@ from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.imbue_common.secret_wrapping import SecretWrappingError
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.dek_store import convert_legacy_password_files
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
@@ -70,7 +71,7 @@ class WorkspaceSyncScheduler(MutableModel):
             self._kick_event.clear()
             try:
                 self.run_one_pass()
-            except (ImbueCloudCliError, WorkspaceSyncError, SyncCryptoError, OSError) as e:
+            except (ImbueCloudCliError, WorkspaceSyncError, SyncCryptoError, SecretWrappingError, OSError) as e:
                 # The loop is the only writer-side repair mechanism; log loudly
                 # but never die on a single bad pass (e.g. a connector outage).
                 logger.opt(exception=e).error("Workspace-record sync pass failed")
