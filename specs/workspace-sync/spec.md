@@ -50,6 +50,7 @@ Status: **Implemented** (branch `mngr/account-association`). Written as a bluepr
 - New endpoints in `app.py` (SuperTokens admin auth via `authenticate_request`/`require_admin`; **not** paid-gated; `handle_endpoint_errors` wrapping):
   - `GET /sync/records` — all of the caller's records.
   - `PUT /sync/records/{host_id}` — upsert; CAS on `revision` (409 on mismatch, echoing the stored row).
+  - `DELETE /sync/records/{host_id}` — remove the row outright (disassociation / remove-from-list).
   - `POST /sync/scrub-secrets` — strip `encrypted_secrets` from all caller's records (clear-password flow).
   - `GET|PUT|DELETE /sync/bundle` — AccountKeyBundle fetch/replace/delete.
 - Request/response pydantic models mirroring the row shapes; `encrypted_secrets` transported base64; server-side caps (secrets size, name lengths).
@@ -57,14 +58,14 @@ Status: **Implemented** (branch `mngr/account-association`). Written as a bluepr
 ### `libs/imbue_common`
 - New `imbue/imbue_common/secret_wrapping.py` (pure, no I/O):
   - `derive_kek(password, salt, params) -> bytes` (argon2id via `argon2-cffi` low-level API).
-  - `wrap_dek(kek, dek) -> bytes` / `unwrap_dek(kek, wrapped) -> bytes` (AESGCM from `cryptography`; raises typed `WrongPasswordOrCorruptError` on tag failure).
+  - `wrap_dek(kek, dek) -> bytes` / `unwrap_dek(kek, wrapped) -> bytes` (AESGCM from `cryptography`; raises typed `WrongPasswordOrCorruptDataError` on tag failure).
   - `encrypt_secrets(dek, plaintext_bytes) -> bytes` / `decrypt_secrets(dek, blob) -> bytes`.
   - Constants: KDF defaults, nonce sizes; `generate_dek()`.
 
 ### `libs/mngr_imbue_cloud`
-- `connector/client.py`: `list_sync_records`, `put_sync_record`, `scrub_sync_secrets`, `get_key_bundle`, `put_key_bundle`, `delete_key_bundle` (Bearer JWT, transparent refresh as existing calls).
+- `connector/client.py`: `list_sync_records`, `put_sync_record`, `delete_sync_record`, `scrub_sync_secrets`, `get_key_bundle`, `put_key_bundle`, `delete_key_bundle` (Bearer JWT, transparent refresh as existing calls).
 - `data_types.py`: `SyncWorkspaceRecord`, `SyncKeyBundle` wire models (plaintext fields + base64 secrets; no crypto here).
-- `cli/sync.py`: new `sync` click group registered in `cli/root.py` — `records pull`, `records push` (record JSON on stdin), `scrub-secrets`, `bundle pull|push|delete`; `--account` option; JSON-on-stdout/stderr contract from `cli/_common.py`. Pure transport: the plugin never sees plaintext secrets or the DEK.
+- `cli/sync.py`: new `sync` click group registered in `cli/root.py` — `records pull`, `records push` (record JSON on stdin), `records delete`, `scrub-secrets`, `bundle pull|push|delete`; `--account` option; JSON-on-stdout/stderr contract from `cli/_common.py`. Pure transport: the plugin never sees plaintext secrets or the DEK.
 
 ### `apps/minds`
 - New `desktop_client/dek_store.py`: per-account DEK files at `~/.minds/keys/<user_id>.dek` (0600, atomic writes); create-if-absent; lock status (`is_unlocked(user_id)`); unlock (fetch bundle via CLI → unwrap → write file); wrap-and-push; per-account results for the "which accounts are still locked" surface.
@@ -74,7 +75,7 @@ Status: **Implemented** (branch `mngr/account-association`). Written as a bluepr
   - secrets assembly per provider: the SSH private key that grants access (per-host key when the provider has one, e.g. imbue_cloud's `hosts/<host_id>/ssh_key`; else the provider-wide key), its known_hosts entries, and the canonical `restic.env` text when present;
   - push (CAS retry loop), pull, merge, and the post-discovery reconcile (migrate unmigrated, push dirty, tombstone definitively-absent, one-shot legacy conversion with `.pre-sync` renames).
 - `desktop_client/imbue_cloud_cli.py`: typed wrappers for the new `sync` verbs.
-- `desktop_client/session_store.py`: `MultiAccountSessionStore` reworked — associations are now record existence in the replica; `associate_workspace`/`disassociate_workspace` become record create / tombstone-or-re-encrypt operations that require connectivity; identity caching unchanged; orphan-GC machinery removed with the legacy file.
+- `desktop_client/session_store.py`: `MultiAccountSessionStore` reworked — associations are now record existence in the replica; `associate_workspace`/`disassociate_workspace` become record create / delete operations that require connectivity (tombstoning is reserved for destroyed workspaces); identity caching unchanged; orphan-GC machinery removed with the legacy file.
 - `desktop_client/backup_password_store.py`: reduced to password verification-by-unwrap + `is_master_password_set` (bundle/dek presence); `backup_password_rotation.py` deleted outright.
 - `desktop_client/backup_provisioning.py`: `BackupSetupRequest.master_password` removed; `restic init` with the workspace password directly; `write_canonical_env`/`archive_canonical_env` call sites trigger a record secrets re-push.
 - `desktop_client/backup_status.py` / `backup_export.py`: env resolution falls back to materializing `~/.minds/backup_envs/<agent_id>.env` from the record's decrypted secrets when no local file exists (other-device and post-restore cases).
