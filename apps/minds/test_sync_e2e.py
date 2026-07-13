@@ -453,14 +453,31 @@ def _landing_backup_badge_text(page: Page, agent_id: str) -> str | None:
     return page.inner_text(selector).strip()
 
 
+def _read_settled_badge(page: Page, origin: str, agent_id: str) -> str | None:
+    """One landing load, waited on until the badge leaves its loading state.
+
+    The badge populates from a one-shot per-workspace status fetch on page
+    load, and that fetch runs restic against the real backend -- it can take
+    tens of seconds. Reloading before it resolves aborts and restarts it, so
+    this reads WITHOUT navigating until the badge settles (or 90s pass).
+    """
+    _goto_landing(page, origin)
+    deadline = time.monotonic() + 90
+    badge = _landing_backup_badge_text(page, agent_id)
+    while time.monotonic() < deadline:
+        if badge is not None and badge and "Checking backups" not in badge:
+            return badge
+        page.wait_for_timeout(3_000)
+        badge = _landing_backup_badge_text(page, agent_id)
+    return badge
+
+
 def _wait_for_backed_up_badge(page: Page, origin: str, agent_id: str) -> None:
     """Reload the landing page until this workspace's badge reports a completed backup."""
 
     def backed_up() -> bool | None:
-        _goto_landing(page, origin)
-        # Give the badge JS a beat to fetch per-workspace backup status.
-        page.wait_for_timeout(2_000)
-        badge = _landing_backup_badge_text(page, agent_id)
+        badge = _read_settled_badge(page, origin, agent_id)
+        logger.info("Backup badge for {}: {!r}", agent_id, badge)
         return True if badge is not None and badge.startswith("Backed up") else None
 
     try:
@@ -544,8 +561,11 @@ def _download_backup_zip(page: Page, origin: str, agent_id: str, dest_dir: Path)
     link_selector = f'[data-agent-id="{agent_id}"] .landing-backup-download'
 
     def link_visible() -> bool | None:
-        _goto_landing(page, origin)
-        page.wait_for_timeout(2_000)
+        # The link unhides only when the settled badge state is BACKED_UP, so
+        # let the per-load status fetch finish before reading (see
+        # _read_settled_badge for why reload-polling would starve it).
+        badge = _read_settled_badge(page, origin, agent_id)
+        logger.info("Post-unlock backup badge for {}: {!r}", agent_id, badge)
         link = page.query_selector(link_selector)
         if link is None:
             return None
