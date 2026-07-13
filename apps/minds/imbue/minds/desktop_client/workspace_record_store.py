@@ -819,6 +819,12 @@ class WorkspaceRecordStore(MutableModel):
         """
         if not resolver.has_completed_initial_discovery():
             return
+        if not self.device_id:
+            # Without a real device id (missing/unreadable mngr host_id file)
+            # this install cannot attribute hosted rows to itself: another
+            # id-less install's rows would match an empty id and get destroyed.
+            logger.warning("Skipping absent-host tombstoning: this install has no device id")
+            return
         known_ids = {str(aid) for aid in resolver.list_known_workspace_ids()}
         errored_providers = {str(name) for name in resolver.get_provider_errors()}
         for record in self.list_records(user_id):

@@ -447,6 +447,30 @@ def test_reconcile_does_not_tombstone_unenriched_create_seed_rows(paths: Workspa
     assert records[0].state == RECORD_STATE_ACTIVE
 
 
+def test_reconcile_without_a_device_id_never_tombstones(paths: WorkspacePaths) -> None:
+    """An install with no device id (missing mngr host_id file) cannot tell its
+    own hosted rows apart from another id-less install's, so it must not
+    tombstone anything -- an empty-id row may be hosted live elsewhere."""
+    cli = make_fake_imbue_cloud_cli()
+    store = WorkspaceRecordStore(paths=paths, cli=cli, device_id="", device_label="test-laptop")
+    user_id = _user_id()
+    remote = ReplicaRecord(
+        host_id="host-idless",
+        agent_id=_agent_id(),
+        provider_kind="lima",
+        hosting_device_id="",
+        device_label="other-idless-install",
+    )
+    cli.sync_records_by_email[_EMAIL] = {"host-idless": remote.to_wire(1)}
+    resolver = make_resolver_with_data(agents_json=json.dumps({"agents": []}))
+
+    store.reconcile({user_id: _EMAIL}, resolver)
+
+    records = store.list_records(user_id)
+    assert len(records) == 1
+    assert records[0].state == RECORD_STATE_ACTIVE
+
+
 def test_reconcile_does_not_tombstone_other_device_rows(paths: WorkspacePaths) -> None:
     cli = make_fake_imbue_cloud_cli()
     store = _make_store(paths, cli)
