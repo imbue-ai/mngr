@@ -738,24 +738,24 @@ def test_apply_create_template_multiple_templates_extend_stack(mngr_test_prefix:
 
 def test_apply_create_template_post_host_create_command_extend_stacks(mngr_test_prefix: str) -> None:
     """`post_host_create_command__extend` from a template merges into the CLI tuple param
-    so users can opt into image-specific first-boot setup (e.g. FCT's /usr/local/bin/fct-seed)
+    so users can opt into image-specific first-boot setup (e.g. DEFAULT_WORKSPACE_TEMPLATE's /usr/local/bin/default-workspace-template-seed)
     without inlining shell into mngr."""
     ctx = _make_click_context(
         params={
-            "template": ("fct-docker",),
+            "template": ("default-workspace-template-docker",),
             "post_host_create_command": (),
         },
     )
     config = MngrConfig(
         prefix=mngr_test_prefix,
         create_templates={
-            CreateTemplateName("fct-docker"): CreateTemplate(
-                options={"post_host_create_command__extend": ["/usr/local/bin/fct-seed"]}
+            CreateTemplateName("default-workspace-template-docker"): CreateTemplate(
+                options={"post_host_create_command__extend": ["/usr/local/bin/default-workspace-template-seed"]}
             ),
         },
     )
     result = apply_create_template(ctx, ctx.params.copy(), config)
-    assert result["post_host_create_command"] == ("/usr/local/bin/fct-seed",)
+    assert result["post_host_create_command"] == ("/usr/local/bin/default-workspace-template-seed",)
 
 
 def test_apply_create_template_second_template_narrowing_raises(mngr_test_prefix: str) -> None:

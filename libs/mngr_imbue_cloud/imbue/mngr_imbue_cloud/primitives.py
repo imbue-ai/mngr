@@ -3,6 +3,7 @@ from enum import auto
 from typing import Final
 from typing import Self
 
+from imbue.imbue_common.enums import LowerCaseStrEnum
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.primitives import NonEmptyStr
 
@@ -89,6 +90,27 @@ class ImbueCloudKeyType(UpperCaseStrEnum):
     LITELLM = auto()
 
 
+class PoolHostDestroyOutcomeStatus(LowerCaseStrEnum):
+    """Per-host outcome of an admin pool destroy, as emitted in the JSON report.
+
+    Lowercase wire values (``destroyed`` / ``skipped_leased`` / ``already_gone`` /
+    ``failed``) -- the format operators and scripts read from ``admin pool destroy``
+    and ``teardown-slices``.
+    """
+
+    DESTROYED = auto()
+    SKIPPED_LEASED = auto()
+    ALREADY_GONE = auto()
+    FAILED = auto()
+
+
+class SliceBakeOutcomeStatus(LowerCaseStrEnum):
+    """Per-slice outcome of an admin pool create (bake), as emitted in the JSON report."""
+
+    SUCCEEDED = auto()
+    FAILED = auto()
+
+
 class FastMode(UpperCaseStrEnum):
     """Whether ``mngr create`` on imbue_cloud may take the fast (adopt) path.
 
@@ -114,7 +136,7 @@ DEFAULT_FAST_MODE: Final[FastMode] = FastMode.PREVENT
 
 # Docker ``--start-arg`` flags that the pre-baked pool-host container is already
 # created with -- these are the ``docker run`` flags the ``pool_host`` create
-# template applies at bake time (see forever-claude-template's
+# template applies at bake time (see default-workspace-template's
 # ``.mngr/settings.toml``). On the fast (adopt) path the container is reused
 # as-is, so a create that requests any of these is asking for state the running
 # container already has: harmless and consistent rather than a conflict. This is

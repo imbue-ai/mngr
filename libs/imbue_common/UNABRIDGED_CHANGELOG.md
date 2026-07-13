@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-09
+
+- Added: `LowerCaseStrEnum` in `imbue.imbue_common.enums` -- the lowercase sibling of `UpperCaseStrEnum`, for enums whose values are an externally visible, already-lowercase wire format (first used by the pool bake / destroy outcome statuses in `mngr_imbue_cloud`).
+
 ## 2026-07-06
 
 Added a shared Sentry error-reporting library under `imbue.imbue_common.sentry`, so multiple Imbue Python processes can report errors without duplicating the machinery. It packages the generic pieces that previously lived in the minds backend: the loguru-to-Sentry event/breadcrumb handlers, the unsigned-S3 attachment uploader, the per-exception rate limiter, the oversized-event (HTTP 413) transport, the `before_send` chain (including the automatic-reporting consent gate and interrupt/clean-shutdown filtering), manual bug-report submission, and a parameterized `setup_sentry`.

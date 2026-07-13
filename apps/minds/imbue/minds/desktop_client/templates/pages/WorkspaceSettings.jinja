@@ -1,4 +1,4 @@
-{#def agent_id, ws_name, current_account, accounts, servers, is_leased_imbue_cloud=False, current_color="#0b292b", is_stale=False, palette={} #}
+{#def agent_id, ws_name, current_account, accounts, servers, is_leased_imbue_cloud=False, current_color="#0b292b", is_stale=False, has_saved_backup_password=False, is_master_password_set=False, has_account=False, palette={} #}
 {#
   Workspace settings page. Color picker, account section, sharing servers
   list, and the danger-zone destroy flow.
@@ -18,6 +18,7 @@
 {% set _scripts %}
 <script src="/_static/workspace_accent.js" defer></script>
 <script src="/_static/workspace_settings.js" defer></script>
+<script src="/_static/workspace_backups.js" defer></script>
 <script>
   (function() {
     var destroyBtn = document.getElementById('destroy-btn');
@@ -216,6 +217,75 @@
       {% else %}
         <p class="text-secondary">No servers discovered for this workspace.</p>
       {% endif %}
+
+      <SectionHeader divider>Backups</SectionHeader>
+      <div id="backup-section">
+        {# Verification comes first: the service-status breakdown below only
+           exists while verification is enabled. The conditional buttons are
+           wrapped in plain spans because a `hidden` class loses to the Button
+           component's own inline-flex (see templates/README.md). #}
+        <div class="flex items-center gap-2 mb-2">
+          <span class="type-body text-primary">Backup service verification</span>
+          <span id="backup-verification-btn-wrap" class="hidden">
+            <Button variant="secondary" id="backup-verification-btn">Disable</Button>
+          </span>
+          <span id="backup-verification-spinner" class="hidden type-section text-secondary"></span>
+        </div>
+        <p id="backup-status-line" class="type-body text-secondary mb-2">Loading backup status...</p>
+        <div id="backup-versions" class="hidden type-helper text-tertiary mb-2"></div>
+        <ul id="backup-problems" class="hidden type-body text-important mb-2 list-disc pl-4"></ul>
+        <div class="flex items-center gap-2 mb-2">
+          <span id="backup-update-btn-wrap" class="hidden">
+            <Button variant="secondary" id="backup-update-btn">Update backup service</Button>
+          </span>
+          <span id="backup-stop-chats-btn-wrap" class="hidden">
+            <Button variant="secondary" id="backup-stop-chats-btn">Stop all chats and retry</Button>
+          </span>
+          <span id="backup-cancel-btn-wrap" class="hidden">
+            <Button variant="secondary" id="backup-cancel-btn">Cancel</Button>
+          </span>
+          <span id="backup-op-spinner" class="hidden type-section text-secondary">Working...</span>
+        </div>
+        <p id="backup-op-progress" class="hidden type-helper text-tertiary mb-2" aria-live="polite"></p>
+        <p id="backup-error" class="hidden type-body text-important mb-2" role="alert"></p>
+
+        <div id="backup-configure" class="mb-3">
+          <Button variant="secondary" id="backup-configure-toggle-btn">Configure backups...</Button>
+          <div id="backup-configure-form" class="hidden mt-3 flex flex-col gap-2">
+            <div class="flex items-center gap-2">
+              <FormLabel target="backup-provider-select">Provider</FormLabel>
+              <select id="backup-provider-select" class="h-[34px] px-3 rounded-full type-body bg-surface-secondary text-primary">
+                <option value="IMBUE_CLOUD" {% if not has_account %}disabled{% endif %}>Imbue Cloud{% if not has_account %} (requires an account){% endif %}</option>
+                <option value="API_KEY" {% if not has_account %}selected{% endif %}>Bring my own (restic env)</option>
+                <option value="NONE">None (disable backups)</option>
+              </select>
+            </div>
+            {% if is_master_password_set %}
+            {# Only rendered when a non-empty master password exists; the JS
+               additionally hides it when the selection doesn't need one. #}
+            <div id="backup-master-password-row" class="flex items-center gap-2">
+              <FormLabel target="backup-master-password-input">Master password</FormLabel>
+              <input id="backup-master-password-input" type="password"
+                     class="h-[34px] px-3 rounded-full type-body bg-surface-secondary text-primary"
+                     autocomplete="current-password"
+                     {% if has_saved_backup_password %}placeholder="leave blank to use your saved password"{% endif %}>
+              <label class="type-helper text-tertiary flex items-center gap-1">
+                <input id="backup-save-password-input" type="checkbox"> Save this password
+              </label>
+            </div>
+            {% endif %}
+            <div id="backup-api-key-row" class="hidden">
+              <FormLabel target="backup-api-key-env-input">Restic env (KEY=VALUE per line; no RESTIC_PASSWORD)</FormLabel>
+              <textarea id="backup-api-key-env-input" rows="4" spellcheck="false"
+                        class="w-full px-3 py-2 rounded-md type-body font-mono bg-surface-secondary text-primary"
+                        placeholder="RESTIC_REPOSITORY=&#10;AWS_ACCESS_KEY_ID=&#10;AWS_SECRET_ACCESS_KEY="></textarea>
+            </div>
+            <div>
+              <Button variant="secondary" id="backup-configure-submit-btn">Apply</Button>
+            </div>
+          </div>
+        </div>
+      </div>
 
       <SectionHeader divider>Danger zone</SectionHeader>
       <p class="type-body text-secondary mb-3">Permanently destroy this workspace and release any associated resources.</p>

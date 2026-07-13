@@ -13,6 +13,8 @@ from imbue.mngr.api.discovery_events import get_discovery_events_path
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
 from imbue.mngr.api.provider_discovery_stream import _ProviderDiscoveryPoller
 from imbue.mngr.api.provider_discovery_stream import _discover_one_provider
+from imbue.mngr.api.provider_discovery_stream import _emit_startup_snapshot_for_skipped_provider
+from imbue.mngr.api.providers import SkippedProviderConstruction
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.interfaces.data_types import BoundedProviderDiscoveryResult
@@ -147,6 +149,54 @@ def _read_host_ssh_info_events(temp_mngr_ctx: MngrContext) -> list[HostSSHInfoEv
         if isinstance(parsed, HostSSHInfoEvent):
             events.append(parsed)
     return events
+
+
+def test_startup_snapshot_for_unavailable_provider_carries_error_and_config(temp_mngr_ctx: MngrContext) -> None:
+    """A provider skipped as unavailable/unauthorized at stream startup gets one snapshot
+    carrying its construction error plus its config, so consumers (e.g. the minds providers
+    panel) see its state from the stream without a full ``mngr list``."""
+    skipped = SkippedProviderConstruction(
+        provider_name=ProviderInstanceName("vultr"),
+        error_type_name="ProviderNotAuthorizedError",
+        error_message="Vultr API key not configured",
+        is_empty=False,
+    )
+
+    _emit_startup_snapshot_for_skipped_provider(temp_mngr_ctx, skipped)
+
+    snapshots = _read_snapshots(temp_mngr_ctx)
+    assert len(snapshots) == 1
+    snapshot = snapshots[0]
+    assert snapshot.provider_name == ProviderInstanceName("vultr")
+    assert snapshot.error is not None
+    assert snapshot.error.type_name == "ProviderNotAuthorizedError"
+    assert snapshot.error.message == "Vultr API key not configured"
+    assert snapshot.agents == ()
+    assert snapshot.hosts == ()
+    assert snapshot.provider is not None
+    assert snapshot.provider.provider_name == ProviderInstanceName("vultr")
+
+
+def test_startup_snapshot_for_empty_provider_is_clean(temp_mngr_ctx: MngrContext) -> None:
+    """A provider skipped as known-empty (e.g. Modal with no per-user environment) gets a
+    clean zero-agent snapshot: it is a healthy state, not an error."""
+    skipped = SkippedProviderConstruction(
+        provider_name=ProviderInstanceName("modal"),
+        error_type_name="ProviderEmptyError",
+        error_message="Modal environment does not exist yet",
+        is_empty=True,
+    )
+
+    _emit_startup_snapshot_for_skipped_provider(temp_mngr_ctx, skipped)
+
+    snapshots = _read_snapshots(temp_mngr_ctx)
+    assert len(snapshots) == 1
+    snapshot = snapshots[0]
+    assert snapshot.provider_name == ProviderInstanceName("modal")
+    assert snapshot.error is None
+    assert snapshot.agents == ()
+    assert snapshot.hosts == ()
+    assert snapshot.provider is not None
 
 
 def test_poller_emits_host_ssh_info_events_from_discovery_result(

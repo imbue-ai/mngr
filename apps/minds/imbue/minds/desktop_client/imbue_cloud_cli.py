@@ -2,9 +2,12 @@
 
 Every operation that minds previously did via direct HTTP calls into the
 ``remote_service_connector`` (auth, host pool, LiteLLM keys, Cloudflare
-tunnels) now runs as a child process invocation of ``mngr imbue_cloud …``,
-spawned through a ``ConcurrencyGroup`` so failures and lifetimes are managed
-the same way as every other subprocess minds drives.
+tunnels) now runs as an invocation of ``mngr imbue_cloud …`` handed to a
+:class:`~imbue.minds.utils.mngr_caller.MngrCaller`, which runs it in a
+pre-warmed, single-use ``mngr`` process. This avoids re-paying the
+multi-second interpreter + plugin-import startup on every call (which matters
+for the sharing flow, where a single user action fires several sequential
+``mngr imbue_cloud tunnels …`` invocations).
 
 The plugin always emits a JSON document on stdout for the success case and a
 JSON ``{"error": ...}`` document on stderr for the failure case (see
@@ -13,7 +16,6 @@ parses those into typed pydantic objects.
 """
 
 import json as _json
-import os
 import time
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -25,13 +27,13 @@ from pydantic import AnyUrl
 from pydantic import Field
 from pydantic import SecretStr
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.errors import MindError
+from imbue.minds.utils.mngr_caller import MngrCallResult
+from imbue.minds.utils.mngr_caller import MngrCaller
+from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 
-_MNGR_BINARY = "mngr"
 _DEFAULT_TIMEOUT_SECONDS = 60.0
 _LEASE_TIMEOUT_SECONDS = 300.0
 _KEY_OP_TIMEOUT_SECONDS = 90.0
@@ -145,17 +147,19 @@ class R2BucketCreateResult(FrozenModel):
 
 
 class ImbueCloudCli(MutableModel):
-    """Run ``mngr imbue_cloud …`` subcommands inside a ConcurrencyGroup.
+    """Run ``mngr imbue_cloud …`` subcommands via a :class:`MngrCaller`.
 
-    All invocations are routed through ``ConcurrencyGroup.run_process_to_completion``
-    so the calling code's resource lifetime extends to cover the subprocess.
+    All invocations are routed through the shared ``MngrCaller``, which runs each
+    one in a pre-warmed, single-use ``mngr`` process so repeated calls don't
+    re-pay the interpreter + plugin-import startup cost.
     """
 
-    parent_concurrency_group: ConcurrencyGroup = Field(
-        frozen=True,
+    mngr_caller: MngrCaller = Field(
+        default_factory=get_default_mngr_caller,
         description=(
-            "Parent CG. Each invocation creates a child group named after the subcommand "
-            "so subprocesses are tied to the desktop client's overall lifetime."
+            "Runs each `mngr imbue_cloud …` invocation in a pre-warmed process. Defaults to the "
+            "process-wide shared caller (initialized at startup) so imbue_cloud calls reuse the same "
+            "warm-process machinery as the rest of the app."
         ),
     )
     connector_url: AnyUrl = Field(
@@ -173,38 +177,33 @@ class ImbueCloudCli(MutableModel):
         *,
         cg_name: str,
         timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
-        on_output: Any = None,
-    ) -> FinishedProcess:
-        full_command = [_MNGR_BINARY, "imbue_cloud", *args]
-        # Inherit the parent env so subprocesses still see HOME / PATH /
-        # MNGR_HOST_DIR etc.; layer the connector URL on top so the
-        # `mngr imbue_cloud` plugin reaches the right backend without
-        # a baked-in default.
-        env = dict(os.environ)
-        env[_CONNECTOR_URL_SUBPROCESS_ENV] = str(self.connector_url).rstrip("/")
+    ) -> MngrCallResult:
+        argv = ["imbue_cloud", *args]
+        # Layer the connector URL onto the warm process's inherited env so the
+        # `mngr imbue_cloud` plugin reaches the right backend without a
+        # baked-in default. The warm process already inherits HOME / PATH /
+        # MNGR_HOST_DIR etc. from the minds backend, so only this override is
+        # needed.
+        env_overrides = {_CONNECTOR_URL_SUBPROCESS_ENV: str(self.connector_url).rstrip("/")}
         # Run from $HOME like every other laptop-side mngr invocation, so this
         # does not resolve project config from minds' cwd (the monorepo root in
         # a dev checkout). Otherwise `mngr imbue_cloud auth list` loads
         # `<repo>/.mngr/settings.toml`, which under the e2e test trips mngr's
         # pytest config guard and the account-discovery poll fails every cycle.
-        cg = self.parent_concurrency_group.make_concurrency_group(name=cg_name)
+        #
         # Debug timing so a slow/timed-out imbue_cloud command tells us which
-        # subcommand it was and how long it took before the timeout fired
-        # (these run as detached post-create callbacks, so a bare "exit -15" is
-        # otherwise hard to attribute). cg_name already uniquely identifies the
-        # subcommand; the raw args are deliberately not logged because some
-        # callsites (e.g. auth signin/signup) pass secrets like --password.
+        # subcommand it was and how long it took before the timeout fired.
+        # cg_name uniquely identifies the subcommand; the raw args are
+        # deliberately not logged because some callsites (e.g. auth
+        # signin/signup) pass secrets like --password.
         logger.debug("Running imbue_cloud command (cg={}, timeout={}s)", cg_name, timeout_seconds)
         start_time = time.monotonic()
-        with cg:
-            result = cg.run_process_to_completion(
-                command=full_command,
-                timeout=float(timeout_seconds),
-                is_checked_after=False,
-                on_output=on_output,
-                cwd=Path.home(),
-                env=env,
-            )
+        result = self.mngr_caller.call(
+            argv,
+            timeout=float(timeout_seconds),
+            env_overrides=env_overrides,
+            cwd=Path.home(),
+        )
         logger.debug(
             "Finished imbue_cloud command (cg={}) in {:.1f}s: returncode={} timed_out={}",
             cg_name,
@@ -216,7 +215,7 @@ class ImbueCloudCli(MutableModel):
 
     def _expect_success(
         self,
-        result: FinishedProcess,
+        result: MngrCallResult,
         command_repr: str,
         *,
         unavailable_signal: str | None = None,

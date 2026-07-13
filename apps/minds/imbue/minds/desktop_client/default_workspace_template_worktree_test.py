@@ -1,6 +1,6 @@
 import pytest
 
-from imbue.minds.desktop_client.fct_worktree import _current_mngr_branch
+from imbue.minds.desktop_client.default_workspace_template_worktree import _current_mngr_branch
 
 
 def test_current_mngr_branch_prefers_github_head_ref(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -20,7 +20,7 @@ def test_current_mngr_branch_uses_github_ref_name_for_push(monkeypatch: pytest.M
 
 def test_current_mngr_branch_ignores_pr_merge_ref(monkeypatch: pytest.MonkeyPatch) -> None:
     """A PR's GITHUB_REF_NAME is a `<n>/merge` ref, not a real branch; it must be
-    ignored so resolution falls through to git rather than asking FCT for a
+    ignored so resolution falls through to git rather than asking DEFAULT_WORKSPACE_TEMPLATE for a
     `<n>/merge` branch."""
     monkeypatch.delenv("GITHUB_HEAD_REF", raising=False)
     monkeypatch.setenv("GITHUB_REF_NAME", "2065/merge")

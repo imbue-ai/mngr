@@ -1170,7 +1170,11 @@ function openInbox(bundle, query) {
 function toggleInbox(bundle) {
   if (!bundle || bundle.window.isDestroyed()) return;
   if (isInboxModalOpen(bundle)) closeModal(bundle);
-  else openInbox(bundle, '');
+  // ``keep_open=1`` marks this as an intentional open of the whole inbox
+  // (the Requests button), so resolving a request advances to the next
+  // pending one rather than dismissing the window. Notification-click and
+  // auto-open paths omit it, so they close after Approve/Deny.
+  else openInbox(bundle, '?keep_open=1');
 }
 
 // -- Get-help modal (per-bundle) --

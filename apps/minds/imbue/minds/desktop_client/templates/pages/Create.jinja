@@ -1,4 +1,4 @@
-{#def git_url, branch, host_name, launch_modes, selected_launch_mode, ai_providers, selected_ai_provider, backup_providers, selected_backup_provider, backup_encryption_methods, selected_backup_encryption_method, backup_api_key_env, has_saved_backup_password, accounts, default_account_id, anthropic_api_key, error_message, region_options_by_launch_mode, region_selected_by_launch_mode, selected_preset="remote", start_advanced=False, color="#0b292b" #}
+{#def git_url, branch, host_name, launch_modes, selected_launch_mode, ai_providers, selected_ai_provider, backup_providers, selected_backup_provider, backup_api_key_env, has_saved_backup_password, is_master_password_set, accounts, default_account_id, anthropic_api_key, error_message, region_options_by_launch_mode, region_selected_by_launch_mode, selected_preset="remote", start_advanced=False, color="#0b292b" #}
 {#
   Workspace creation form.
 
@@ -55,8 +55,6 @@
     var aiProviderError = document.getElementById('ai-provider-account-error');
     var backupSelect = document.getElementById('backup_provider');
     var backupApiKeyRow = document.getElementById('backup-api-key-row');
-    var backupEncryptionRow = document.getElementById('backup-encryption-row');
-    var backupEncryptionSelect = document.getElementById('backup_encryption_method');
     var backupMasterPasswordRow = document.getElementById('backup-master-password-row');
     var backupMasterPasswordInput = document.getElementById('backup_master_password');
     var backupProviderError = document.getElementById('backup-provider-account-error');
@@ -65,8 +63,7 @@
     var regionSelect = document.getElementById('region');
     var presetCards = document.querySelectorAll('[data-preset]');
     var accountError = document.getElementById('account-error');
-    // Inputs read when building the create request body (some -- master password,
-    // save-password -- only exist when no shared backup password is saved yet).
+    // Inputs read when building the create request body.
     var gitUrlInput = document.getElementById('git_url');
     var branchInput = document.getElementById('branch');
     var hostNameInput = document.getElementById('host_name');
@@ -88,8 +85,8 @@
     // Each preset fills the advanced selects with its compute / AI / backup
     // defaults. These mirror the per-account defaults the server applies.
     var PRESETS = {
-      remote: {launch_mode: 'IMBUE_CLOUD', ai_provider: 'IMBUE_CLOUD', backup_provider: 'IMBUE_CLOUD', backup_encryption_method: 'NO_PASSWORD'},
-      local:  {launch_mode: 'LIMA', ai_provider: 'SUBSCRIPTION', backup_provider: 'CONFIGURE_LATER', backup_encryption_method: 'NO_PASSWORD'}
+      remote: {launch_mode: 'IMBUE_CLOUD', ai_provider: 'IMBUE_CLOUD', backup_provider: 'IMBUE_CLOUD'},
+      local:  {launch_mode: 'LIMA', ai_provider: 'SUBSCRIPTION', backup_provider: 'CONFIGURE_LATER'}
     };
 
     function applyPreset(name) {
@@ -98,7 +95,6 @@
       launchSelect.value = preset.launch_mode;
       aiProviderSelect.value = preset.ai_provider;
       backupSelect.value = preset.backup_provider;
-      backupEncryptionSelect.value = preset.backup_encryption_method;
     }
 
     function selectedPreset() {
@@ -342,7 +338,6 @@
         account_id: accountSelect.value,
         anthropic_api_key: fieldValue(apiKeyInput).trim(),
         backup_provider: backupSelect.value,
-        backup_encryption_method: backupEncryptionSelect.value,
         backup_api_key_env: fieldValue(backupApiKeyEnvInput),
         backup_master_password: fieldValue(backupMasterPasswordInput),
         backup_save_password: backupSavePasswordInput ? backupSavePasswordInput.checked : false,
@@ -475,11 +470,12 @@
       var isBackupConfigured = backupValue === 'IMBUE_CLOUD' || backupValue === 'API_KEY';
       var isBackupApiKey = backupValue === 'API_KEY';
       backupApiKeyRow.classList.toggle('hidden', !isBackupApiKey);
-      backupEncryptionRow.classList.toggle('hidden', !isBackupConfigured);
 
-      var isMasterPassword = isBackupConfigured && backupEncryptionSelect.value === 'MASTER_PASSWORD';
-      if (backupMasterPasswordRow) backupMasterPasswordRow.classList.toggle('hidden', !isMasterPassword);
-      if (backupMasterPasswordInput) backupMasterPasswordInput.required = isMasterPassword;
+      // The master password field shows for any real backup provider. It is
+      // never required: blank means "use the saved password, else the empty
+      // password" -- the server validates whichever value results against the
+      // stored hash.
+      if (backupMasterPasswordRow) backupMasterPasswordRow.classList.toggle('hidden', !isBackupConfigured);
 
       var launchInvalid = !hasAccount && launchSelect.value === 'IMBUE_CLOUD';
       var aiInvalid = !hasAccount && aiProviderSelect.value === 'IMBUE_CLOUD';
@@ -505,7 +501,6 @@
     launchSelect.addEventListener('change', update);
     aiProviderSelect.addEventListener('change', update);
     backupSelect.addEventListener('change', update);
-    backupEncryptionSelect.addEventListener('change', update);
 
     hostNameInput.addEventListener('input', scheduleHostNameValidation);
     // Provider / account / region changes move the goalposts for "taken", so
@@ -686,30 +681,23 @@
                     :value="backup_api_key_env if backup_api_key_env else _default_restic_env" />
         </div>
 
-        <div id="backup-encryption-row" class="mt-2 hidden">
-          <div class="flex items-center justify-between gap-3">
-            <FormLabel target="backup_encryption_method" inline>Backup encryption method</FormLabel>
-            <Select id="backup_encryption_method" name="backup_encryption_method" width="w-48">
-              {% for method in backup_encryption_methods %}
-                <option value="{{ method.value }}"{% if method.value == selected_backup_encryption_method %} selected{% endif %}>{{ method.value | lower }}</option>
-              {% endfor %}
-            </Select>
-          </div>
-        </div>
-
+        {% if is_master_password_set %}
+        {# Only rendered when a non-empty master password exists (it is needed
+           to initialize the repository); the JS shows it only while a real
+           backup provider is selected. #}
         <div id="backup-master-password-row" class="mt-2 hidden">
           <FormLabel target="backup_master_password">Backup master password</FormLabel>
+          <TextInput type="password" name="backup_master_password" id="backup_master_password"
+                     placeholder="the shared backup master password" />
           {% if has_saved_backup_password %}
-            <p class="type-helper text-secondary">A saved backup password will be used for this workspace.</p>
-          {% else %}
-            <TextInput type="password" name="backup_master_password" id="backup_master_password"
-                       placeholder="remember this -- backups are unrecoverable without it" />
-            <label class="mt-2 flex items-center gap-2 type-helper text-secondary">
-              <input type="checkbox" id="backup_save_password" name="backup_save_password" value="1" />
-              Save this password for all my workspaces
-            </label>
+            <p class="mt-1 type-helper text-secondary">Leave blank to use your saved password.</p>
           {% endif %}
+          <label class="mt-2 flex items-center gap-2 type-helper text-secondary">
+            <input type="checkbox" id="backup_save_password" name="backup_save_password" value="1" />
+            Save this password so you don't have to retype it
+          </label>
         </div>
+        {% endif %}
       </div>
 
       <div id="region-row" class="hidden">
