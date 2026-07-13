@@ -4,4 +4,4 @@ The master password's only role is now wrapping that per-account key: new backup
 
 The landing page and sidebar list workspaces that live on the user's other devices as greyed rows with an "on <device>" badge and a remove-from-list action; their backup status and download still work here (the backup credentials are materialized from the synced record once the account is unlocked). A new-device unlock banner asks for the master password once and installs the account key.
 
-Legacy local state (`workspace_associations.json`, `backup_password_hash`, `backup_password`) is converted once at startup and renamed aside with a `.pre-sync` suffix. Destroying a workspace now tombstones its record (metadata and secrets kept) so its backups remain reachable from any device.
+Legacy local state (`workspace_associations.json` -- or the older `sessions.json` layout when that file never existed -- plus `backup_password_hash` and `backup_password`) is converted once at startup and renamed aside with a `.pre-sync` suffix. Destroying a workspace now tombstones its record (metadata and secrets kept) so its backups remain reachable from any device.
