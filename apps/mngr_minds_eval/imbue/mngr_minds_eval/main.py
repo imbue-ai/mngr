@@ -131,6 +131,17 @@ def main() -> None:
     p_box.add_argument("--mngr-branch", required=True, help="mngr branch the box runs")
     p_box.add_argument("--box", default="", help="container name (default: minds-box-<mngr-branch>)")
 
+    p_ws = sub.add_parser("workspace", help="create ONE workspace in a box (general utility, no eval)")
+    p_ws.add_argument("--mngr-branch", required=True, help="mngr branch the box runs")
+    p_ws.add_argument("--box", default="", help="container name (default: minds-box-<mngr-branch>)")
+    p_ws.add_argument("--fct-link", required=True, help="git URL or local path, passed to create verbatim")
+    p_ws.add_argument("--fct-branch", default="", help="branch (blank for a local clone already on its commit)")
+    p_ws.add_argument("--name", default="", help="workspace host name (blank = auto)")
+    p_ws.add_argument("--compute", default="modal")
+    p_ws.add_argument("--ai-provider", default="api_key", choices=("api_key", "subscription", "imbue_cloud"))
+    p_ws.add_argument("--backup-provider", default="configure_later")
+    p_ws.add_argument("--anthropic-key", default=os.environ.get("ANTHROPIC_API_KEY", ""))
+
     sub.add_parser("list-batches", help="list eval batches in S3")
 
     p_inspect = sub.add_parser("inspect", help="per-case status of a batch (from S3)")
@@ -160,6 +171,17 @@ def main() -> None:
             parser.error("run `box` from the host, not inside a box")
         box_mod.ensure(_box_name(args), args.mngr_branch)
         box_mod.print_view_urls(_box_name(args))
+        return
+    if args.command == "workspace":
+        if not IN_BOX:
+            _exec_in_box(_box_name(args), args.mngr_branch, sys.argv[1:], None)
+        from imbue.mngr_minds_eval import workspace as workspace_mod
+
+        workspace_mod.create_workspace(
+            port=_port(), fct_link=args.fct_link, fct_branch=args.fct_branch, name=args.name,
+            compute=args.compute, ai_provider=args.ai_provider, anthropic_key=args.anthropic_key,
+            backup_provider=args.backup_provider,
+        )
         return
 
     # Status-only subcommands read S3 and need nothing else -- they run wherever they are invoked.
