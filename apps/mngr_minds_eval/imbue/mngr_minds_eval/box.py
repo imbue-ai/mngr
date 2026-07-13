@@ -67,12 +67,28 @@ def print_view_urls(container: str) -> None:
             print("                   ^ visit once, then click the workspace in the dashboard", flush=True)
 
 
+def built_ref(container: str) -> str:
+    """The mngr SHA the running box was built from (stamped in as MINDS_BOX_MNGR_REF)."""
+    return _run(["docker", "exec", container, "printenv", "MINDS_BOX_MNGR_REF"]).stdout.strip()
+
+
 def ensure(container: str, mngr_branch: str, minds_env: str = "staging") -> str:
-    """Build + boot the box (idempotent: reuses it if already running). Returns its dashboard port."""
+    """Build + boot the box, keyed to the branch's current tip.
+
+    Reuse the running box only if it was built from the branch's CURRENT tip SHA; otherwise the box
+    is stale (the branch moved) and we rebuild -- so launch/restore always run the mngr they claim.
+    Reuse is instant; a rebuild only happens when the branch has actually advanced.
+    """
+    ref = _remote_tip(mngr_branch)
     if is_running(container):
-        port = port_of(container)
-        print(">> reusing box {} (dashboard http://localhost:{})".format(container, port), flush=True)
-        return port
+        if built_ref(container) == ref:
+            port = port_of(container)
+            print(">> reusing box {} @ mngr {} (dashboard http://localhost:{})".format(
+                container, ref[:12], port), flush=True)
+            return port
+        print(">> box {} is stale (branch {} moved to {}); rebuilding".format(
+            container, mngr_branch, ref[:12]), flush=True)
+
     if _run(["docker", "info"]).returncode != 0:
         raise BoxError("Docker daemon is not running -- start Docker Desktop")
     if not AWS_ENV.is_file():
@@ -80,12 +96,11 @@ def ensure(container: str, mngr_branch: str, minds_env: str = "staging") -> str:
     if not (Path.home() / ".modal.toml").is_file():
         raise BoxError("missing ~/.modal.toml (Modal auth) -- workspaces run on Modal")
 
-    ref = _remote_tip(mngr_branch)
     ui, forward = _free_port(), _free_port()
-    tag = "minds-box:{}".format(container)
+    tag = "minds-box:{}-{}".format(mngr_branch.replace("/", "-"), ref[:12])
     modal_env = "".join(c if c.isalnum() or c == "-" else "-" for c in container.lower())
 
-    print(">> building {} from mngr {}@{} (fresh tip)".format(tag, mngr_branch, ref[:12]), flush=True)
+    print(">> building {} from mngr {}@{}".format(tag, mngr_branch, ref[:12]), flush=True)
     build = subprocess.run(
         ["docker", "build", "-f", str(APP_DIR / "docker" / "Dockerfile"),
          "--build-arg", "MNGR_BRANCH={}".format(mngr_branch), "--build-arg", "MNGR_REF={}".format(ref),
@@ -105,6 +120,8 @@ def ensure(container: str, mngr_branch: str, minds_env: str = "staging") -> str:
         "-e", "MINDS_FORWARD_HOST=0.0.0.0", "-e", "MINDS_FORWARD_PORT={}".format(forward),
         "-e", "MINDS_ENV={}".format(minds_env),
         "-e", "MNGR__PROVIDERS__MODAL__USER_ID={}".format(modal_env),
+        # Stamp the mngr SHA so a later ensure() can tell if this box is still current.
+        "-e", "MINDS_BOX_MNGR_REF={}".format(ref),
         tag,
     ])
     if run.returncode != 0:

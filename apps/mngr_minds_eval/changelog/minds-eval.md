@@ -7,3 +7,5 @@
 - The CLI is now a single host-native command: `launch` and `restore` build/boot the box from `--mngr-branch` if needed and re-run themselves inside it; `list-batches` and `inspect` read S3 directly and need no box. The `spin-up-minds-in-docker.sh` / `minds-evals.sh` shell wrappers are gone.
 
 - `launch` now records the mngr branch it ran on in the batch config, and `restore` reads it back, so a restore rebuilds the same box the batch ran on instead of silently defaulting to a different mngr. `--mngr-branch` is still accepted as an override.
+
+- The box is now keyed to the mngr branch tip: its image is tagged `minds-box:<branch>-<sha>` and the running box is stamped with the SHA it was built from. `ensure` reuses a running box only when it matches the branch's current tip, and rebuilds when the branch has moved -- so launch/restore never silently run a stale mngr. Reuse stays instant; restore speed is unaffected (it is dominated by the new Modal workspace, not the box).
