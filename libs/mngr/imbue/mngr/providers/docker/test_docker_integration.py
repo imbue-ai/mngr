@@ -134,7 +134,7 @@ def test_find_container_by_host_id_returns_none_for_unknown(docker_provider: Doc
 def test_find_container_by_name(docker_provider: DockerProviderInstance) -> None:
     # Production containers are always named by ``host_container_name``; the
     # name-scoped lookup requires that shape, so mirror it here.
-    container_name = host_container_name(docker_provider.mngr_ctx.config.prefix, "discoverable")
+    container_name = host_container_name(docker_provider.mngr_ctx.config.prefix, HostName("discoverable"))
     _create_test_container(docker_provider, name="discoverable", container_name=container_name)
     found = docker_provider._find_container_by_name(HostName("discoverable"))
     assert found is not None

@@ -14,6 +14,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import VolumeFile
 from imbue.mngr.interfaces.volume import BaseVolume
+from imbue.mngr.primitives import HostName
 
 # Docker label constants shared between volume.py and instance.py.
 # Defined here (the lower-level module) to avoid circular imports.
@@ -31,7 +32,7 @@ STATE_CONTAINER_IMAGE: Final[str] = "alpine:latest"
 STATE_VOLUME_MOUNT_PATH: Final[str] = "/mngr-state"
 
 
-def host_container_name(prefix: str, host_name: str) -> str:
+def host_container_name(prefix: str, host_name: HostName) -> str:
     """Generate the name for the container backing host ``host_name``.
 
     Every creation path names a host's container this way, and lookups rely on
