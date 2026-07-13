@@ -244,6 +244,16 @@ def _legacy_hash_path(paths: WorkspacePaths) -> Path:
     return paths.data_dir / _LEGACY_PASSWORD_HASH_FILENAME
 
 
+def _matches_legacy_hash(stored_hash: str, candidate: str) -> bool:
+    if not stored_hash:
+        return candidate == ""
+    try:
+        _PASSWORD_HASHER.verify(stored_hash, candidate)
+    except (VerifyMismatchError, VerificationError, InvalidHashError):
+        return False
+    return True
+
+
 def _read_legacy_master_password(paths: WorkspacePaths) -> SecretStr | None:
     """Recover the legacy master password when it is knowable, else None.
 
@@ -260,16 +270,6 @@ def _read_legacy_master_password(paths: WorkspacePaths) -> SecretStr | None:
         except OSError as e:
             logger.warning("Could not read the legacy password hash at {}: {}", hash_path, e)
             return None
-
-    def matches(candidate: str) -> bool:
-        if not stored_hash:
-            return candidate == ""
-        try:
-            _PASSWORD_HASHER.verify(stored_hash, candidate)
-        except (VerifyMismatchError, VerificationError, InvalidHashError):
-            return False
-        return True
-
     plaintext_path = _legacy_password_path(paths)
     if plaintext_path.is_file():
         try:
@@ -277,9 +277,9 @@ def _read_legacy_master_password(paths: WorkspacePaths) -> SecretStr | None:
         except OSError as e:
             logger.warning("Could not read the legacy password copy at {}: {}", plaintext_path, e)
             saved = ""
-        if saved and matches(saved):
+        if saved and _matches_legacy_hash(stored_hash, saved):
             return SecretStr(saved)
-    if matches(""):
+    if _matches_legacy_hash(stored_hash, ""):
         return SecretStr("")
     return None
 

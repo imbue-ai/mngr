@@ -157,6 +157,16 @@ def _resolve_mngr_profile_dir(mngr_host_dir: Path) -> Path | None:
     return mngr_host_dir / "profiles" / profile_id
 
 
+def _read_optional_text(path: Path) -> str | None:
+    if not path.is_file():
+        return None
+    try:
+        return path.read_text()
+    except OSError as e:
+        logger.warning("Could not read SSH material at {}: {}", path, e)
+        return None
+
+
 def collect_ssh_key_material(mngr_host_dir: Path, provider_kind: str, host_id: str) -> tuple[str | None, str | None]:
     """Best-effort collection of the (private key, known_hosts) that grant access to a host.
 
@@ -172,24 +182,14 @@ def collect_ssh_key_material(mngr_host_dir: Path, provider_kind: str, host_id: s
     providers_dir = profile_dir / "providers"
     if not providers_dir.is_dir():
         return None, None
-
-    def read_optional(path: Path) -> str | None:
-        if not path.is_file():
-            return None
-        try:
-            return path.read_text()
-        except OSError as e:
-            logger.warning("Could not read SSH material at {}: {}", path, e)
-            return None
-
     for key_path in sorted(providers_dir.glob(f"*/*/hosts/{host_id}/ssh_key")):
-        known_hosts = read_optional(key_path.parent / "known_hosts")
-        private_key = read_optional(key_path)
+        known_hosts = _read_optional_text(key_path.parent / "known_hosts")
+        private_key = _read_optional_text(key_path)
         if private_key is not None:
             return private_key, known_hosts
     if provider_kind.startswith("lima"):
-        private_key = read_optional(providers_dir / "lima" / "lima" / "keys" / "root_ssh_key")
-        known_hosts = read_optional(providers_dir / "lima" / "lima" / "keys" / "hosts")
+        private_key = _read_optional_text(providers_dir / "lima" / "lima" / "keys" / "root_ssh_key")
+        known_hosts = _read_optional_text(providers_dir / "lima" / "lima" / "keys" / "hosts")
         if private_key is not None:
             return private_key, known_hosts
     return None, None
@@ -204,6 +204,14 @@ class WorkspaceRecordStore(MutableModel):
     """
 
     paths: WorkspacePaths = Field(frozen=True, description="Minds data dir (replica + keys live under it)")
+    mngr_host_dir: Path | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "The minds env's mngr host dir (SSH key material + device id live under it). "
+            "None falls back to paths.mngr_host_dir (the default-env convention)."
+        ),
+    )
     cli: ImbueCloudCli | None = Field(default=None, frozen=True, description="Transport; None disables pushes/pulls")
     device_id: str = Field(frozen=True, description="This install's mngr host_id (record provenance)")
     device_label: str = Field(frozen=True, description="This device's human-readable name")
@@ -212,6 +220,9 @@ class WorkspaceRecordStore(MutableModel):
     _is_loaded: bool = PrivateAttr(default=False)
 
     # -- Replica persistence -------------------------------------------------
+
+    def _effective_mngr_host_dir(self) -> Path:
+        return self.mngr_host_dir if self.mngr_host_dir is not None else self.paths.mngr_host_dir
 
     def _records_dir(self) -> Path:
         return self.paths.data_dir / _RECORDS_DIRNAME
@@ -311,7 +322,9 @@ class WorkspaceRecordStore(MutableModel):
         if dek is None:
             return None
         restic_env = read_canonical_env(self.paths, AgentId(agent_id))
-        ssh_private_key, ssh_known_hosts = collect_ssh_key_material(self.paths.mngr_host_dir, provider_kind, host_id)
+        ssh_private_key, ssh_known_hosts = collect_ssh_key_material(
+            self._effective_mngr_host_dir(), provider_kind, host_id
+        )
         if restic_env is None and ssh_private_key is None:
             return None
         payload = WorkspaceSecretsPayload(
@@ -601,13 +614,18 @@ class WorkspaceRecordStore(MutableModel):
                 self._retire_legacy_associations()
 
     def _refresh_local_metadata(self, user_id: str, account_email: str, resolver: BackendResolverInterface) -> None:
-        """Fold local name/color/backup changes into this device's rows (queued push)."""
+        """Fold local metadata/secret changes into locally-discovered rows (queued push).
+
+        Any ACTIVE row whose workspace is in local discovery is refreshable
+        from here -- that covers this device's own rows and imbue_cloud leased
+        rows (which every signed-in device discovers). Rows hosted on other
+        devices never appear in local discovery, so they are never touched.
+        Freshly-created rows seeded with minimal metadata (empty provider,
+        no secrets yet) are enriched by this pass once discovery catches up.
+        """
         known_ids = {str(aid) for aid in resolver.list_known_workspace_ids()}
         for record in self.list_records(user_id):
-            is_ours = record.hosting_device_id == self.device_id or record.provider_kind.startswith(
-                _CLOUD_PROVIDER_PREFIX
-            )
-            if record.state != RECORD_STATE_ACTIVE or not is_ours or record.agent_id not in known_ids:
+            if record.state != RECORD_STATE_ACTIVE or record.agent_id not in known_ids:
                 continue
             rebuilt = self.build_record_from_resolver(user_id, record.agent_id, resolver, state=record.state)
             if rebuilt is None:
@@ -615,6 +633,8 @@ class WorkspaceRecordStore(MutableModel):
             is_changed = (
                 rebuilt.display_name != record.display_name
                 or rebuilt.color != record.color
+                or rebuilt.provider_kind != record.provider_kind
+                or rebuilt.hosting_device_id != record.hosting_device_id
                 or (rebuilt.encrypted_secrets is not None and record.encrypted_secrets is None)
                 or rebuilt.backup_kind != record.backup_kind
             )
@@ -623,6 +643,8 @@ class WorkspaceRecordStore(MutableModel):
             merged = record.model_copy_update(
                 to_update(record.field_ref().display_name, rebuilt.display_name),
                 to_update(record.field_ref().color, rebuilt.color),
+                to_update(record.field_ref().provider_kind, rebuilt.provider_kind),
+                to_update(record.field_ref().hosting_device_id, rebuilt.hosting_device_id),
                 to_update(record.field_ref().backup_kind, rebuilt.backup_kind),
                 to_update(
                     record.field_ref().encrypted_secrets,

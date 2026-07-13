@@ -36,9 +36,6 @@
   var configureToggleBtn = document.getElementById('backup-configure-toggle-btn');
   var configureForm = document.getElementById('backup-configure-form');
   var providerSelect = document.getElementById('backup-provider-select');
-  var masterPasswordRow = document.getElementById('backup-master-password-row');
-  var masterPasswordInput = document.getElementById('backup-master-password-input');
-  var savePasswordInput = document.getElementById('backup-save-password-input');
   var apiKeyRow = document.getElementById('backup-api-key-row');
   var apiKeyEnvInput = document.getElementById('backup-api-key-env-input');
   var configureSubmitBtn = document.getElementById('backup-configure-submit-btn');
@@ -296,10 +293,6 @@
   function syncConfigureFormVisibility() {
     var provider = providerSelect.value;
     apiKeyRow.classList.toggle('hidden', provider !== 'API_KEY');
-    // The master-password row only exists when a non-empty master password is
-    // set; it is only *needed* when a repository will be initialized, which
-    // "None" (disable) never does.
-    if (masterPasswordRow) masterPasswordRow.classList.toggle('hidden', provider === 'NONE');
   }
   configureToggleBtn.addEventListener('click', function () {
     configureForm.classList.toggle('hidden');
@@ -307,9 +300,9 @@
   });
   providerSelect.addEventListener('change', syncConfigureFormVisibility);
 
-  // The master password (blank = use the saved copy, else the empty password)
-  // is validated server-side against the stored hash; save_password persists
-  // the just-validated typed value as the plaintext convenience copy.
+  // No password is involved: repositories are keyed by each workspace's own
+  // random password, and the master password's only role is wrapping the
+  // account's sync key (see the app-level Settings page).
   configureSubmitBtn.addEventListener('click', function () {
     if (providerSelect.value === 'NONE') {
       startOperation('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backup-service/disable', {}, false);
@@ -318,8 +311,6 @@
     var body = {
       backup_provider: providerSelect.value,
       api_key_env: apiKeyEnvInput ? apiKeyEnvInput.value : '',
-      master_password: masterPasswordInput ? masterPasswordInput.value : '',
-      save_password: savePasswordInput ? savePasswordInput.checked : false,
     };
     startOperation('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backup-service/configure', body, false);
   });

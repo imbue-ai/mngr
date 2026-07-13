@@ -148,16 +148,12 @@ def test_ensure_restic_available_does_not_raise() -> None:
 
 
 @pytest.mark.timeout(60)
-def test_init_add_key_and_status_against_local_repo(tmp_path: Path) -> None:
+def test_init_and_status_against_local_repo(tmp_path: Path) -> None:
     repo = str(tmp_path / "repo")
-    master = "master-passphrase"
     workspace_password = "workspace-random-key"
 
-    # Init with the master password, then add the random workspace key.
-    restic_cli.init_repo(repository=repo, backend_env={}, password=master)
-    restic_cli.add_password_key(
-        repository=repo, backend_env={}, existing_password=master, new_password=workspace_password
-    )
+    # Init with the workspace's own random password -- the repo's single key.
+    restic_cli.init_repo(repository=repo, backend_env={}, password=workspace_password)
 
     now = datetime.now(timezone.utc)
     # Fresh repo: no snapshots, no in-progress lock -- queried with the

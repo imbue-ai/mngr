@@ -8,19 +8,20 @@ entry point can be re-applied to any already-created host later.
 
 The key idea: minds initializes the restic repository itself (from the
 machine running minds) and gives each workspace its own random repository
-password, so the workspace never holds the user's master password and
-carries no repo-init logic. Concretely, enabling backups:
+password -- the repo's single key. Disaster recovery does not need a repo
+"master key": the canonical env (and therefore the random password) syncs
+inside the account's encrypted workspace record, unlocked by the master
+password via the account DEK (see ``dek_store``). Concretely, enabling
+backups:
 
 1. resolves the repository URL + backend credentials (``IMBUE_CLOUD``:
    create/reuse a per-workspace R2 bucket + readwrite key; ``API_KEY``:
    from the user's free-form env block),
-2. generates a random per-workspace ``RESTIC_PASSWORD``,
-3. ``restic init``s the repo using the user's master password (which may be
-   empty),
-4. ``restic key add``s the random per-workspace password,
-5. writes the canonical ``restic.env`` (repo + creds + random password) to
+2. generates a random per-workspace ``RESTIC_PASSWORD`` and ``restic init``s
+   the repo with it,
+3. writes the canonical ``restic.env`` (repo + creds + random password) to
    the minds-side store (see ``backup_env_store``), and
-6. injects that whole file into the workspace at
+4. injects that whole file into the workspace at
    ``runtime/secrets/restic.env`` via ``mngr exec``.
 
 ``CONFIGURE_LATER`` is a no-op. Re-provisioning is idempotent: if a
@@ -37,7 +38,6 @@ from typing import Final
 
 from loguru import logger
 from pydantic import Field
-from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
@@ -81,14 +81,6 @@ class BackupSetupRequest(FrozenModel):
     """The inputs needed to configure backups for one host."""
 
     backup_provider: BackupProvider = Field(description="Which backup provider to configure")
-    master_password: SecretStr | None = Field(
-        default=None,
-        description=(
-            "The user's master/recovery password used (only) to `restic init` the repo. None means "
-            "the master password is empty -- the repo is initialized with an empty password. "
-            "This is never written into the workspace; the workspace gets its own random password."
-        ),
-    )
     api_key_env_text: str = Field(
         default="",
         description=(

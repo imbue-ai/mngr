@@ -11,6 +11,7 @@ from pydantic import AnyUrl
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import ServiceLogRecord
@@ -22,6 +23,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudSyncConflictCliError
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
+from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
 from imbue.minds.primitives import ServiceName
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.testing import RecordingMngrCaller
@@ -155,8 +157,15 @@ def make_fake_imbue_cloud_cli() -> FakeImbueCloudCli:
 
 
 def make_session_store_for_test(data_dir: Path, cli: ImbueCloudCli | None = None) -> MultiAccountSessionStore:
-    """Build a :class:`MultiAccountSessionStore` with a fake CLI by default."""
-    return MultiAccountSessionStore(data_dir=data_dir, cli=cli or make_fake_imbue_cloud_cli())
+    """Build a :class:`MultiAccountSessionStore` (with its record store) over a fake CLI by default."""
+    effective_cli = cli or make_fake_imbue_cloud_cli()
+    record_store = WorkspaceRecordStore(
+        paths=WorkspacePaths(data_dir=data_dir),
+        cli=effective_cli,
+        device_id="device-test",
+        device_label="test-device",
+    )
+    return MultiAccountSessionStore(data_dir=data_dir, cli=effective_cli, record_store=record_store)
 
 
 @pytest.fixture
@@ -268,7 +277,9 @@ def make_resolver_with_data(
         raw = json.loads(agents_json)
         discovered = tuple(
             DiscoveredAgent(
-                host_id=HostId("host-00000000000000000000000000000000"),
+                # Honor a per-agent host id when the test data provides one so
+                # multi-workspace tests get distinct hosts; else the fixed id.
+                host_id=HostId(a.get("host", {}).get("id", _FIXED_TEST_HOST_ID)),
                 agent_id=AgentId(a["id"]),
                 agent_name=AgentName(a.get("name", a["id"])),
                 provider_name=ProviderInstanceName("local"),

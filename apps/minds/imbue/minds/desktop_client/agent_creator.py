@@ -1379,7 +1379,7 @@ class AgentCreator(MutableModel):
         branch_or_tag: str = "",
         region: str = "",
         anthropic_api_key: str = "",
-        on_created: Callable[[AgentId], None] | None = None,
+        on_created: Callable[[AgentId, HostId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
         color: str | None = None,
         original_minds_version: str = "",
@@ -1519,7 +1519,7 @@ class AgentCreator(MutableModel):
         branch_or_tag: str = "",
         region: str = "",
         anthropic_api_key: str = "",
-        on_created: Callable[[AgentId], None] | None = None,
+        on_created: Callable[[AgentId, HostId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
         color: str | None = None,
         original_minds_version: str = "",
@@ -1856,7 +1856,7 @@ class AgentCreator(MutableModel):
                     self._redirect_urls[cid_str] = redirect_url
 
                 if on_created is not None:
-                    on_created(canonical_id)
+                    on_created(canonical_id, canonical_host_id)
 
                 # Configure restic backups asynchronously on a detached
                 # thread (mirrors the Cloudflare tunnel-token path): bucket

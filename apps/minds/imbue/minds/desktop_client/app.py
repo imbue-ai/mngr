@@ -42,13 +42,11 @@ from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
-from imbue.minds.desktop_client.backup_password_rotation import rotate_backup_master_password
-from imbue.minds.desktop_client.backup_password_store import ensure_backup_password_hash
-from imbue.minds.desktop_client.backup_password_store import has_saved_backup_password
-from imbue.minds.desktop_client.backup_password_store import is_master_password_set
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
+from imbue.minds.desktop_client.dek_store import is_master_password_set_for_account
+from imbue.minds.desktop_client.dek_store import set_master_password_for_account
 from imbue.minds.desktop_client.destroying import DestroyingStatus
 from imbue.minds.desktop_client.destroying import delete_destroying
 from imbue.minds.desktop_client.destroying import is_host_still_active
@@ -59,6 +57,7 @@ from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.help_modal_requests import OpenHelpRequest
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.permission_overview import PermissionOverviewError
@@ -128,7 +127,10 @@ from imbue.minds.desktop_client.webdav import create_webdav_app
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import pick_unused_create_color
 from imbue.minds.desktop_client.workspace_create import default_region_for_provider_with_config
+from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
 from imbue.minds.errors import InvalidJsonBodyError
+from imbue.minds.errors import SyncCryptoError
+from imbue.minds.errors import WorkspaceSyncError
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
@@ -433,14 +435,49 @@ def _handle_error_reporting_settings() -> Response:
     return make_response(status_code=200, content='{"ok": true}', media_type="application/json")
 
 
+def _push_new_password_state(
+    record_store: WorkspaceRecordStore,
+    resolver: BackendResolverInterface,
+    user_id: str,
+    account_email: str,
+    bundle: Mapping[str, object],
+) -> None:
+    """A non-empty password was just set: push the new bundle + any pending secrets."""
+    if record_store.cli is not None:
+        record_store.cli.sync_bundle_push(account_email, bundle)
+    record_store.push_all_secrets(user_id, account_email, resolver)
+
+
+def _scrub_cleared_password_server_state(record_store: WorkspaceRecordStore, account_email: str) -> None:
+    """The password was cleared: nothing secret may stay server-side."""
+    if record_store.cli is None:
+        return
+    record_store.cli.sync_bundle_delete(account_email)
+    record_store.cli.sync_scrub_secrets(account_email)
+
+
+def _is_any_account_password_set(paths: WorkspacePaths | None) -> bool:
+    """Whether any signed-in account has a non-empty master password (per its bundle mirror)."""
+    if paths is None:
+        return False
+    session_store = get_state().session_store
+    if session_store is None:
+        return False
+    return any(
+        is_master_password_set_for_account(paths, str(account.user_id)) for account in session_store.list_accounts()
+    )
+
+
 def _handle_backup_password_change() -> Response:
-    """Rotate the shared backup master password (POST /_chrome/backup-password).
+    """Change the sync master password (POST /_chrome/backup-password).
 
     Deliberately a desktop-only cookie-auth route (not part of /api/v1): agents
-    must never be able to rotate the master password. The rotation is
-    synchronous -- it rekeys every existing backed-up workspace's repository --
-    and the response carries per-workspace results for the Settings page to
-    render inline.
+    must never be able to change the master password. The password's only role
+    is wrapping each signed-in account's sync DEK: a change rewraps the DEK and
+    pushes the new bundle (plus any pending secrets) to the connector; clearing
+    the password deletes the server bundle and scrubs the synced secrets.
+    Workspace repositories are never touched. The response carries per-account
+    results for the Settings page to render inline.
     """
     if not _is_request_authenticated():
         return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
@@ -448,10 +485,11 @@ def _handle_backup_password_change() -> Response:
     if not isinstance(body, dict):
         return make_response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
     paths: WorkspacePaths | None = get_state().api_v1_paths
-    if paths is None:
+    session_store = get_state().session_store
+    if paths is None or session_store is None or session_store.record_store is None:
         return make_response(
             status_code=503,
-            content='{"error": "Backup management is unavailable in this configuration"}',
+            content='{"error": "Sync is unavailable in this configuration"}',
             media_type="application/json",
         )
     # Wrapped in SecretStr immediately; the plaintext must never reach a log.
@@ -461,29 +499,30 @@ def _handle_backup_password_change() -> Response:
         return make_response(
             status_code=400, content='{"error": "The two passwords do not match."}', media_type="application/json"
         )
-    result = rotate_backup_master_password(
-        paths=paths,
-        resolver=get_state().backend_resolver,
-        new_password=new_password,
-        is_save_password=bool(body.get("save_password", False)),
-        parent_cg=get_state().root_concurrency_group,
-    )
+    accounts = session_store.list_accounts()
+    if not accounts:
+        return make_response(
+            status_code=400,
+            content='{"error": "Sign in to an account first -- the master password protects synced account data."}',
+            media_type="application/json",
+        )
+    record_store = session_store.record_store
+    resolver = get_state().backend_resolver
+    results: list[dict[str, object]] = []
+    for account in accounts:
+        try:
+            bundle = set_master_password_for_account(paths, str(account.user_id), new_password)
+            if bundle is not None:
+                _push_new_password_state(record_store, resolver, str(account.user_id), str(account.email), bundle)
+            else:
+                _scrub_cleared_password_server_state(record_store, str(account.email))
+            results.append({"account": str(account.email), "is_ok": True, "error": None})
+        except (SyncCryptoError, WorkspaceSyncError, ImbueCloudCliError) as exc:
+            logger.warning("Master password change failed for {}: {}", account.email, exc)
+            results.append({"account": str(account.email), "is_ok": False, "error": str(exc)})
     return make_response(
         status_code=200,
-        content=json.dumps(
-            {
-                "ok": result.is_all_ok,
-                "results": [
-                    {
-                        "agent_id": entry.agent_id,
-                        "workspace_name": entry.workspace_name,
-                        "is_ok": entry.is_ok,
-                        "error": entry.error,
-                    }
-                    for entry in result.results
-                ],
-            }
-        ),
+        content=json.dumps({"ok": all(bool(entry["is_ok"]) for entry in results), "results": results}),
         media_type="application/json",
     )
 
@@ -728,20 +767,15 @@ def _handle_landing_page() -> Response:
     branch = request.args.get("branch", "")
     session_store: MultiAccountSessionStore | None = get_state().session_store
     minds_config: MindsConfig | None = get_state().minds_config
-    agent_creator: AgentCreator | None = get_state().agent_creator
     geo_cache: GeoLocationCache | None = get_state().geo_location_cache
     accounts = session_store.list_accounts() if session_store else []
     default_account_id = minds_config.get_default_account_id() if minds_config else None
-    is_backup_password_saved = has_saved_backup_password(agent_creator.paths) if agent_creator is not None else False
-    is_backup_password_set = is_master_password_set(agent_creator.paths) if agent_creator is not None else False
     region_options, region_selected = _build_region_form_context(minds_config, geo_cache)
     html = render_create_form(
         git_url=git_url,
         branch=branch,
         accounts=accounts,
         default_account_id=default_account_id or "",
-        has_saved_backup_password=is_backup_password_saved,
-        is_master_password_set=is_backup_password_set,
         region_options_by_launch_mode=region_options,
         region_selected_by_launch_mode=region_selected,
         # A deep-link that pre-fills a repo/branch wants those advanced fields
@@ -817,20 +851,15 @@ def _handle_create_page() -> Response:
     branch = request.args.get("branch", "")
     session_store: MultiAccountSessionStore | None = get_state().session_store
     minds_config: MindsConfig | None = get_state().minds_config
-    agent_creator: AgentCreator | None = get_state().agent_creator
     geo_cache: GeoLocationCache | None = get_state().geo_location_cache
     accounts = session_store.list_accounts() if session_store else []
     default_account_id = minds_config.get_default_account_id() if minds_config else None
-    is_backup_password_saved = has_saved_backup_password(agent_creator.paths) if agent_creator is not None else False
-    is_backup_password_set = is_master_password_set(agent_creator.paths) if agent_creator is not None else False
     region_options, region_selected = _build_region_form_context(minds_config, geo_cache)
     html = render_create_form(
         git_url=git_url,
         branch=branch,
         accounts=accounts,
         default_account_id=default_account_id or "",
-        has_saved_backup_password=is_backup_password_saved,
-        is_master_password_set=is_backup_password_set,
         region_options_by_launch_mode=region_options,
         region_selected_by_launch_mode=region_selected,
         # A deep-link that pre-fills a repo/branch wants those advanced fields
@@ -917,17 +946,22 @@ def _finalize_destroyed_workspace(
     paths: WorkspacePaths,
     session_store: MultiAccountSessionStore | None,
 ) -> None:
-    """Disassociate a fully-destroyed workspace from its account, then delete its record.
+    """Tombstone a fully-destroyed workspace's record, then delete the destroying marker.
 
-    Runs only once the host is confirmed gone (DONE). Disassociating here --
-    rather than synchronously when the user clicks destroy -- means a failed or
-    partial teardown keeps the workspace visible instead of hiding a host that
-    is still running.
+    Runs only once the host is confirmed gone (DONE). The workspace record is
+    kept (state=DESTROYED, secrets intact) so the workspace's backups stay
+    reachable from any of the account's devices; it just disappears from the
+    active UI. Tombstoning here -- rather than synchronously when the user
+    clicks destroy -- means a failed or partial teardown keeps the workspace
+    visible instead of hiding a host that is still running.
     """
-    if session_store is not None:
-        account = session_store.get_account_for_workspace(str(agent_id))
-        if account is not None:
-            session_store.disassociate_workspace(str(account.user_id), str(agent_id))
+    if session_store is not None and session_store.record_store is not None:
+        found = session_store.record_store.find_active_record(str(agent_id))
+        if found is not None:
+            owner_user_id, _record = found
+            owner_email = session_store.get_account_email(owner_user_id)
+            if owner_email is not None:
+                session_store.record_store.tombstone_record(owner_user_id, owner_email, str(agent_id))
     delete_destroying(agent_id, paths)
 
 
@@ -1746,7 +1780,7 @@ def _handle_settings_page() -> Response:
         file_sharing_grants=file_sharing_grants,
         workspace_delegation_grants=workspace_delegation_grants,
         permissions_unavailable=permissions_unavailable,
-        has_saved_backup_password=has_saved_backup_password(paths) if paths is not None else False,
+        is_master_password_set=_is_any_account_password_set(paths),
     )
     return make_html_response(content=html)
 
@@ -1988,13 +2022,6 @@ def _handle_workspace_settings(
     errored_provider_names = {str(name) for name in backend_resolver.get_provider_errors()}
     is_stale = _is_workspace_provider_errored(info, errored_provider_names)
 
-    # The backup section's configure form needs to know whether a shared
-    # master password is already saved (it then never re-prompts) and whether
-    # an account is associated (imbue_cloud backups require one).
-    paths = get_state().api_v1_paths
-    is_backup_password_saved = has_saved_backup_password(paths) if paths is not None else False
-    is_backup_password_set = is_master_password_set(paths) if paths is not None else False
-
     html = render_workspace_settings(
         agent_id=agent_id,
         ws_name=ws_name,
@@ -2004,8 +2031,6 @@ def _handle_workspace_settings(
         is_leased_imbue_cloud=is_leased_imbue_cloud,
         current_color=current_color,
         is_stale=is_stale,
-        has_saved_backup_password=is_backup_password_saved,
-        is_master_password_set=is_backup_password_set,
         has_account=current_account is not None,
     )
     return make_html_response(content=html)
@@ -2461,12 +2486,6 @@ def create_desktop_client(
     if not (_static_dir / "app.min.css").exists():
         logger.warning("Missing static/app.min.css. Run `just minds-css` from the repo root to build it.")
     app = Flask(__name__, static_folder=str(_static_dir), static_url_path="/_static")
-
-    # The backup master-password hash must always exist (initially the hash of
-    # the empty password, or of a pre-hash install's saved plaintext) so every
-    # backup flow can validate against it.
-    if paths is not None:
-        ensure_backup_password_hash(paths)
 
     @app.errorhandler(Exception)
     def _unhandled_exception_handler(exc: Exception) -> Response | HTTPException:

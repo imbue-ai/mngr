@@ -171,7 +171,7 @@ def test_settings_sidebar_groups_nav_into_sections(tmp_path: Path) -> None:
     # The two group eyebrows and the compact nav labels.
     assert 'type-section text-tertiary px-2 mb-1">Permissions' in nav
     assert 'type-section text-tertiary px-2 mt-4 mb-1">Other' in nav
-    for label in ("Connectors", "Local files", "Workspaces", "Error reporting", "Backup password"):
+    for label in ("Connectors", "Local files", "Workspaces", "Error reporting", "Master password"):
         assert label in nav
     # The switchable entries are the nav buttons (the eyebrows are not buttons).
     assert nav.count("data-settings-nav=") == 5
