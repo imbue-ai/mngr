@@ -115,7 +115,7 @@ function fixupReleaseId(releaseId) {
  * account settings) takes effect without restarting the app. Call this as early
  * as possible in main.js so startup errors are captured once reporting is on.
  */
-function initSentry() {
+function initSentry(options = {}) {
   const environment = resolveEnvironment();
   const dsn = dsnForEnvironment(environment);
   const { releaseId, gitSha } = getBuildMetadata();
@@ -123,6 +123,10 @@ function initSentry() {
     dsn,
     environment,
     release: fixupReleaseId(releaseId),
+    // Label renderer-death events by which window view died (chrome/content/modal).
+    // The caller (main.js) supplies the mapping since it owns the window registry;
+    // undefined is fine (the childProcess integration falls back to "renderer").
+    getRendererName: options.getRendererName,
     // Drop the native-crash (Crashpad) integration when the dev launcher asks
     // us to (it sets MINDS_DISABLE_CRASHPAD; see the `start` script in
     // package.json). Crashpad's `crashReporter.start()` spawns a
@@ -134,10 +138,32 @@ function initSentry() {
     // quit. Keying off the launcher's flag (not packaged-ness) keeps native-crash
     // minidump reporting on for every other run -- packaged builds and a plain
     // `electron .` alike.
-    integrations: (defaults) =>
-      process.env.MINDS_DISABLE_CRASHPAD === '1'
-        ? defaults.filter((integration) => integration.name !== 'SentryMinidump')
-        : defaults,
+    integrations: (defaults) => {
+      const kept =
+        process.env.MINDS_DISABLE_CRASHPAD === '1'
+          ? defaults.filter((integration) => integration.name !== 'SentryMinidump')
+          : defaults;
+      // Replace the default ChildProcess integration so an out-of-memory renderer
+      // death is captured as a Sentry EVENT, not just a breadcrumb. Its default
+      // ``events`` list is ['abnormal-exit', 'launch-failed', 'integrity-failure']
+      // -- none of which produce a Crashpad minidump -- so an OOM'd renderer (e.g. a
+      // workspace view dying under memory pressure) is otherwise never reported. We
+      // add only 'oom': it does not produce a minidump either, so it's a unique
+      // signal. We deliberately do NOT add:
+      //   * 'crashed' -- a native renderer crash already produces a minidump event
+      //     via the SentryMinidump integration above (that's why the SDK default
+      //     omits it); adding it here would double-report every crash in prod.
+      //   * 'killed'  -- dominated by OS/sleep reaping and external kills we can't
+      //     act on, so it stays breadcrumb-only (still on disk in electron.log and
+      //     attached to manual reports).
+      return kept.map((integration) =>
+        integration.name === 'ChildProcess'
+          ? Sentry.childProcessIntegration({
+              events: ['abnormal-exit', 'launch-failed', 'integrity-failure', 'oom'],
+            })
+          : integration
+      );
+    },
     // Error reporting only -- no performance tracing (matches the backend).
     tracesSampleRate: 0,
     // Keep PII out of reports, matching the backend's send_default_pii=False.

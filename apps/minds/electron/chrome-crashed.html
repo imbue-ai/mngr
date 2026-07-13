@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<!--
+  Chrome (titlebar) crash strip.
+
+  Loaded LOCALLY into the chrome view by main.js when that view's renderer process
+  dies (render-process-gone), so a dead titlebar shows a recoverable strip instead
+  of a blank bar. The chrome view is a full-window underlay with the content view
+  layered on top below the titlebar, so only the top ~38px band of this page is
+  visible -- hence the single compact row (no full-page card like crashed.html).
+
+  Runs under preload.js (the trusted first-party window.minds bridge), so the
+  Reload button drives the shell directly:
+    * Reload -> window.minds.reloadChrome() -> reload-chrome IPC (re-loads /_chrome)
+
+  Stateless: it does NOT auto-reload (if /_chrome is what crashed, that would loop),
+  matching the content crash page -- the user is the loop-breaker.
+-->
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Menu bar crashed</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    /* Fill the view with the brand deep-maroon so the parts that peek through the
+       inset frame match; only the top strip actually shows the row. */
+    html, body { height: 100%; background: #492222; overflow: hidden; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      color: #E9ECD9;
+      user-select: none;
+      /* Keep the strip draggable so the window can still be moved while the bar is
+         crashed; the Reload button opts out below. */
+      -webkit-app-region: drag;
+    }
+    .bar {
+      /* Matches TITLEBAR_HEIGHT in main.js -- the only visible slice of this view.
+         Centered so the row clears the macOS traffic lights on the left and any
+         custom window controls on the right. */
+      height: 38px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      padding: 0 16px;
+      font-size: 13px;
+    }
+    .msg { opacity: 0.9; white-space: nowrap; }
+    button {
+      -webkit-app-region: no-drag;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 4px 12px;
+      border-radius: 6px;
+      border: 1px solid transparent;
+      background: #E9ECD9;
+      color: #492222;
+      cursor: pointer;
+      transition: background 0.12s ease;
+    }
+    button:hover { background: #ffffff; }
+  </style>
+</head>
+<body>
+  <div class="bar">
+    <span class="msg">The menu bar stopped responding.</span>
+    <button id="reload" type="button">Reload</button>
+  </div>
+  <script>
+    document.getElementById('reload').addEventListener('click', function () {
+      if (window.minds && window.minds.reloadChrome) window.minds.reloadChrome();
+    });
+  </script>
+</body>
+</html>

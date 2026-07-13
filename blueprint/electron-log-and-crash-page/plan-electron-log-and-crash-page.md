@@ -36,7 +36,7 @@ Plan improvements from the blank-screen-after-sleep diagnosis (Sentry event bc6d
 * Clicking "Report a bug" opens the existing help/report modal (same flow the workspace-recovery page uses), scoped to the affected workspace.
 * The content-view crash page occupies only the content view and is replaced by any subsequent navigation (e.g. the recovery flow or the user going Home); the window title, sidebar, and all backend-driven health/recovery flows are unchanged.
 * When the chrome (titlebar) renderer dies, the user sees a miniaturized error strip in the titlebar with a Reload button instead of a blank white bar; the workspace content view keeps running, and Reload restores a fully-populated titlebar. When the overlay renderer dies it is silently reloaded warm, so the next sidebar/inbox/help open works normally.
-* Abnormal renderer/child-process deaths (`crashed`, `oom`) are reported to Sentry automatically (subject to the existing `report_unexpected_errors` opt-in), labeled by which view died; sleep/external kills (`killed`) are deliberately not reported as events (unactionable, noisy) but remain in `electron.log` and any manual report.
+* Out-of-memory renderer deaths (`oom`) are reported to Sentry automatically (subject to the existing `report_unexpected_errors` opt-in), labeled by which view died; native crashes already flow as minidumps, and sleep/external kills (`killed`) are deliberately not reported as events (unactionable, noisy) but remain in `electron.log` and any manual report.
 
 ## Changes
 
@@ -86,8 +86,9 @@ The original blank-screen-after-sleep incident only reached us because a user hi
 
 Fix, honoring the "only report what we can act on" filter:
 
-* In `initSentry`, replace the default `childProcessIntegration()` with `childProcessIntegration({ events: [...defaults, 'crashed', 'oom'] })` so **`crashed` and `oom`** are captured as Sentry events across *all* processes (content/chrome/modal renderers plus GPU/utility). These are bug-shaped -- `crashed` is a real renderer fault, `oom` is frequently our own memory leak (especially in the first-party chrome view) -- so an individual event is diagnosable and a post-release rate spike is an actionable regression signal.
-* **Do not** capture `killed` as an event. It is dominated by OS/sleep reaping and other external kills, is individually unactionable, and would be noisy. It stays a breadcrumb, still lands in `electron.log` (the `[content-crash]` / `[chrome-crash]` lines), and still uploads with any manual bug report -- so we are not blind to sleep-deaths, we just do not create unactionable Sentry issues for laptops going to sleep.
+* In `initSentry`, replace the default `childProcessIntegration()` with `childProcessIntegration({ events: [...defaults, 'oom'] })` so **`oom`** is captured as a Sentry event across *all* processes (content/chrome/modal renderers plus GPU/utility). An OOM does not produce a Crashpad minidump, so this is a unique signal; it is frequently our own memory leak (especially in the first-party chrome view), so an individual event is diagnosable and a post-release rate spike is an actionable regression signal.
+* **Do not** add `crashed` to the events list. A native renderer crash already produces a minidump event via the default `SentryMinidump` integration (that is precisely why the SDK's default events list omits `crashed`); adding it to `childProcess` would double-report every crash in packaged builds. (Caveat: the dev launcher sets `MINDS_DISABLE_CRASHPAD`, so `crashed` is unreported in dev runs -- acceptable, since dev crashes are observed live.)
+* **Do not** capture `killed` as an event. It is dominated by OS/sleep reaping and other external kills, is individually unactionable, and would be noisy. It stays a breadcrumb, still lands in `electron.log` (the `[content-crash]` / `[chrome-crash]` / `[overlay-crash]` lines), and still uploads with any manual bug report -- so we are not blind to sleep-deaths, we just do not create unactionable Sentry issues for laptops going to sleep.
 * Set `getRendererName(contents)` in `Sentry.init` (maps a `webContents` to its bundle view) so renderer-death events are labeled `chrome` / `content` / `modal` for triage.
 * No new gating: the existing `beforeSend` already drops events when `report_unexpected_errors` is off, so these auto-captures honor the same opt-in.
 * Optional enrichment (decide during implementation): additionally `Sentry.captureException`/`captureMessage` inside the content-view `render-process-gone` handler with the workspace URL/id, for richer per-workspace context than the app-global hook can attach. Baseline is the SDK-level broadening above.
@@ -97,7 +98,7 @@ Fix, honoring the "only report what we can act on" filter:
 * Killing the **content** renderer (`forcefullyCrashRenderer` / SIGKILL) still shows `crashed.html` with a working Reload (unchanged).
 * Killing the **chrome** renderer shows the miniaturized titlebar error strip with a Reload button; the workspace content view keeps running; clicking Reload restores a fully-populated `/_chrome` bar. On macOS the traffic lights remain usable throughout.
 * Killing the **modal/overlay** renderer is invisible while idle; opening the sidebar/inbox/help afterward works (the host silently reloaded).
-* With `report_unexpected_errors` on: a `crashed` or `oom` renderer death produces a Sentry event labeled by view; a `killed` death produces **no** event (breadcrumb only) but still appears in `electron.log`.
+* With `report_unexpected_errors` on: an `oom` renderer death produces a Sentry event labeled by view; a `killed` death produces **no** event (breadcrumb only) but still appears in `electron.log`. (A native `crashed` death is covered separately by the minidump integration in packaged builds.)
 
 ### Follow-ups (out of scope, noted for later)
 
