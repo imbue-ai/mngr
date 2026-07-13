@@ -24,8 +24,14 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 
 # A host stop/start shells out to ``mngr`` and blocks until the host transition
-# resolves before returning the outcome.
-_LIFECYCLE_TIMEOUT_SECONDS: Final[float] = 300.0
+# resolves before returning the outcome. Sized for the slowest legitimate case:
+# a cloud VM's FIRST stop mirrors the entire host_dir to the provider's state
+# store before deallocating (observed ~10 minutes on Azure after a fresh
+# workspace build; later stops sync deltas and take ~1-2 min). A timeout here
+# is reported to the UI as a stop *failure* even though the underlying stop
+# keeps running -- so a too-small cap manufactures false failures for exactly
+# the flows that are working.
+_LIFECYCLE_TIMEOUT_SECONDS: Final[float] = 1200.0
 
 
 class MindHostAction(UpperCaseStrEnum):
