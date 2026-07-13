@@ -458,12 +458,15 @@ def _read_settled_badge(page: Page, origin: str, agent_id: str) -> str | None:
     """One landing load, waited on until the badge leaves its loading state.
 
     The badge populates from a one-shot per-workspace status fetch on page
-    load, and that fetch runs restic against the real backend -- it can take
-    tens of seconds. Reloading before it resolves aborts and restarts it, so
-    this reads WITHOUT navigating until the badge settles (or 90s pass).
+    load, and that fetch blocks on BOTH the restic snapshot listing and the
+    backup-service verification exec into the workspace -- the exec alone is
+    allowed CHECK_EXEC_TIMEOUT_SECONDS (360s), and the route joins it before
+    responding. Reloading before it resolves aborts and restarts it, so this
+    reads WITHOUT navigating until the badge settles, waiting longer than one
+    full fetch cycle.
     """
     _goto_landing(page, origin)
-    deadline = time.monotonic() + 150
+    deadline = time.monotonic() + 420
     badge = _landing_backup_badge_text(page, agent_id)
     while time.monotonic() < deadline:
         if badge is not None and badge and "Checking backups" not in badge:
@@ -471,6 +474,20 @@ def _read_settled_badge(page: Page, origin: str, agent_id: str) -> str | None:
         page.wait_for_timeout(3_000)
         badge = _landing_backup_badge_text(page, agent_id)
     return badge
+
+
+def _timed_status_fetch(page: Page, agent_id: str) -> str:
+    """Diagnostic: how long one full backups-status fetch takes and what it returns."""
+    started = time.monotonic()
+    try:
+        result = page.evaluate(
+            """(aid) => fetch('/api/v1/workspaces/' + aid + '/backups')
+                .then((resp) => resp.text().then((body) => ({status: resp.status, body: body.slice(0, 600)})))""",
+            agent_id,
+        )
+    except PlaywrightError as e:
+        return f"status fetch failed after {time.monotonic() - started:.0f}s: {e}"
+    return f"status fetch took {time.monotonic() - started:.0f}s -> {result}"
 
 
 def _container_backup_diagnostics(container_name: str) -> str:
@@ -510,7 +527,8 @@ def _wait_for_backed_up_badge(page: Page, origin: str, agent_id: str, container_
             container_state = _container_backup_diagnostics(container_name)
         except (subprocess.SubprocessError, OSError) as diag_error:
             container_state = f"(container diagnostics unavailable: {diag_error})"
-        raise AssertionError(f"{e}; {_landing_state_snapshot(page)}; {container_state}") from None
+        fetch_timing = _timed_status_fetch(page, agent_id)
+        raise AssertionError(f"{e}; {_landing_state_snapshot(page)}; {container_state}; {fetch_timing}") from None
     logger.info("Landing badge reports a completed backup for {}", agent_id)
 
 
