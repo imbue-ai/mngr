@@ -187,6 +187,38 @@ def test_convert_legacy_files_is_idempotent(paths: WorkspacePaths) -> None:
     assert read_bundle_mirror(paths, user_id) == bundle_after_first
 
 
+def test_unwrap_bundle_json_raises_typed_error_for_malformed_bundles(paths: WorkspacePaths) -> None:
+    # A bundle written by an unknown client version (or a corrupt connector
+    # row) must surface as SecretWrappingError, never KeyError/ValueError.
+    user_id = _user_id()
+    bundle = set_master_password_for_account(paths, user_id, SecretStr("hunter2"))
+    assert bundle is not None
+
+    missing_field = {key: value for key, value in bundle.items() if key != "kdf_salt"}
+    with pytest.raises(SecretWrappingError):
+        unwrap_bundle_json(missing_field, SecretStr("hunter2"))
+
+    bad_base64 = dict(bundle)
+    bad_base64["wrapped_dek"] = "not base64!!!"
+    with pytest.raises(SecretWrappingError):
+        unwrap_bundle_json(bad_base64, SecretStr("hunter2"))
+
+    bad_cost = dict(bundle)
+    bad_cost["kdf_time_cost"] = "not-a-number"
+    with pytest.raises(SecretWrappingError):
+        unwrap_bundle_json(bad_cost, SecretStr("hunter2"))
+
+
+def test_verify_master_password_returns_false_for_a_wrong_shaped_mirror(paths: WorkspacePaths) -> None:
+    # Valid JSON dict, wrong shape: verification must fail closed, not raise.
+    user_id = _user_id()
+    ensure_dek(paths, user_id)
+    bundle_mirror_path(paths, user_id).parent.mkdir(parents=True, exist_ok=True)
+    bundle_mirror_path(paths, user_id).write_text('{"unexpected": "shape"}')
+
+    assert not verify_master_password_for_account(paths, user_id, SecretStr("x"))
+
+
 def test_corrupt_bundle_mirror_is_treated_as_no_password(paths: WorkspacePaths) -> None:
     user_id = _user_id()
     ensure_dek(paths, user_id)

@@ -31,6 +31,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from argon2 import PasswordHasher
+from argon2.exceptions import Argon2Error
 from argon2.exceptions import InvalidHashError
 from argon2.exceptions import VerificationError
 from argon2.exceptions import VerifyMismatchError
@@ -139,15 +140,26 @@ def wrap_dek_to_bundle_json(dek: bytes, password: SecretStr, key_epoch: int) -> 
 
 
 def unwrap_bundle_json(bundle: Mapping[str, object], password: SecretStr) -> bytes:
-    """Recover the DEK from a wire-shaped bundle; raises SecretWrappingError on a wrong password."""
-    parameters = KdfParameters(
-        salt=base64.b64decode(str(bundle["kdf_salt"])),
-        time_cost=int(str(bundle["kdf_time_cost"])),
-        memory_kib=int(str(bundle["kdf_memory_kib"])),
-        parallelism=int(str(bundle["kdf_parallelism"])),
-    )
-    kek = derive_kek(password, parameters)
-    return unwrap_dek(kek, base64.b64decode(str(bundle["wrapped_dek"])))
+    """Recover the DEK from a wire-shaped bundle.
+
+    Raises ``SecretWrappingError`` on a wrong password AND on a structurally
+    malformed bundle (missing fields, bad base64, invalid KDF costs) -- the
+    callers treat both as "this password cannot unlock this bundle", and a
+    bundle written by an unknown client version must never escape as an
+    untyped KeyError/ValueError.
+    """
+    try:
+        parameters = KdfParameters(
+            salt=base64.b64decode(str(bundle["kdf_salt"])),
+            time_cost=int(str(bundle["kdf_time_cost"])),
+            memory_kib=int(str(bundle["kdf_memory_kib"])),
+            parallelism=int(str(bundle["kdf_parallelism"])),
+        )
+        wrapped = base64.b64decode(str(bundle["wrapped_dek"]))
+        kek = derive_kek(password, parameters)
+    except (KeyError, ValueError, TypeError, Argon2Error) as e:
+        raise SecretWrappingError(f"Malformed key bundle: {e}") from e
+    return unwrap_dek(kek, wrapped)
 
 
 def read_bundle_mirror(paths: WorkspacePaths, user_id: str) -> dict[str, object] | None:
