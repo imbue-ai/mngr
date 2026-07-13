@@ -38,6 +38,7 @@ from argon2.exceptions import VerifyMismatchError
 from loguru import logger
 from pydantic import SecretStr
 
+from imbue.imbue_common.secret_wrapping import KEY_LENGTH_BYTES
 from imbue.imbue_common.secret_wrapping import KdfParameters
 from imbue.imbue_common.secret_wrapping import SecretWrappingError
 from imbue.imbue_common.secret_wrapping import derive_kek
@@ -85,14 +86,26 @@ def _write_secret_bytes(path: Path, content: bytes) -> None:
 
 
 def load_dek(paths: WorkspacePaths, user_id: str) -> bytes | None:
-    """Return the account's raw DEK, or None when this device is locked for it."""
+    """Return the account's raw DEK, or None when this device is locked for it.
+
+    A present-but-wrong-length file (truncated write, disk corruption) raises
+    :class:`SyncCryptoError` rather than being treated as locked: callers like
+    :func:`ensure_dek` would otherwise mint a fresh DEK and fork the account's
+    key lineage away from what the server bundle and other devices hold.
+    """
     path = dek_file_path(paths, user_id)
     if not path.is_file():
         return None
     try:
-        return path.read_bytes()
+        dek = path.read_bytes()
     except OSError as e:
         raise SyncCryptoError(f"Could not read the DEK file at {path}: {e}") from e
+    if len(dek) != KEY_LENGTH_BYTES:
+        raise SyncCryptoError(
+            f"The DEK file at {path} is corrupt ({len(dek)} bytes, expected {KEY_LENGTH_BYTES}); "
+            "remove it and unlock the account with the master password to restore the key"
+        )
+    return dek
 
 
 def ensure_dek(paths: WorkspacePaths, user_id: str) -> bytes:

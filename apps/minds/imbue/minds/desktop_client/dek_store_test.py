@@ -20,6 +20,7 @@ from imbue.minds.desktop_client.dek_store import set_master_password_for_account
 from imbue.minds.desktop_client.dek_store import unlock_account_with_bundle
 from imbue.minds.desktop_client.dek_store import unwrap_bundle_json
 from imbue.minds.desktop_client.dek_store import verify_master_password_for_account
+from imbue.minds.errors import SyncCryptoError
 
 
 @pytest.fixture
@@ -46,6 +47,28 @@ def test_ensure_dek_creates_a_0600_file_and_is_stable(paths: WorkspacePaths) -> 
 def test_load_dek_returns_none_when_locked(paths: WorkspacePaths) -> None:
     assert load_dek(paths, _user_id()) is None
     assert not is_account_unlocked(paths, _user_id())
+
+
+def test_load_dek_raises_a_typed_error_for_a_corrupt_file(paths: WorkspacePaths) -> None:
+    # A truncated DEK must raise (typed) rather than read as locked: treating
+    # it as absent would let ensure_dek mint a fresh DEK and fork the account's
+    # key lineage away from the server bundle and other devices.
+    user_id = _user_id()
+    ensure_dek(paths, user_id)
+    dek_file_path(paths, user_id).write_bytes(b"truncated")
+
+    with pytest.raises(SyncCryptoError):
+        load_dek(paths, user_id)
+    with pytest.raises(SyncCryptoError):
+        ensure_dek(paths, user_id)
+
+    # Re-unlocking with the wrapped bundle rewrites a valid DEK over the wreck.
+    other_device = WorkspacePaths(data_dir=paths.data_dir / "other-device")
+    dek = ensure_dek(other_device, user_id)
+    bundle = set_master_password_for_account(other_device, user_id, SecretStr("hunter2"))
+    assert bundle is not None
+    assert unlock_account_with_bundle(paths, user_id, bundle, SecretStr("hunter2")) == dek
+    assert load_dek(paths, user_id) == dek
 
 
 def test_set_master_password_writes_bundle_and_verification_works(paths: WorkspacePaths) -> None:
