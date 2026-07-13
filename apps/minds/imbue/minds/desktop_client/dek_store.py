@@ -258,9 +258,12 @@ def _read_legacy_master_password(paths: WorkspacePaths) -> SecretStr | None:
     """Recover the legacy master password when it is knowable, else None.
 
     Knowable means: the plaintext convenience copy exists and matches the
-    hash, or the hash is the empty-password seed (password = ""). A non-empty
-    hash with no (valid) plaintext copy is unknowable -- the user keeps their
-    repos (workspace keys are untouched) but must set a fresh password.
+    hash (or there is no hash at all -- the pre-hash layout, where the
+    plaintext IS the password, exactly as ``ensure_backup_password_hash``
+    used to seed it), or the hash is the empty-password seed (password =
+    ""). A non-empty hash with no (valid) plaintext copy is unknowable --
+    the user keeps their repos (workspace keys are untouched) but must set
+    a fresh password.
     """
     hash_path = _legacy_hash_path(paths)
     stored_hash = ""
@@ -277,7 +280,7 @@ def _read_legacy_master_password(paths: WorkspacePaths) -> SecretStr | None:
         except OSError as e:
             logger.warning("Could not read the legacy password copy at {}: {}", plaintext_path, e)
             saved = ""
-        if saved and _matches_legacy_hash(stored_hash, saved):
+        if saved and (not stored_hash or _matches_legacy_hash(stored_hash, saved)):
             return SecretStr(saved)
     if _matches_legacy_hash(stored_hash, ""):
         return SecretStr("")

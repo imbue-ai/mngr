@@ -130,6 +130,20 @@ def test_convert_legacy_files_carries_over_a_saved_password(paths: WorkspacePath
     assert (paths.data_dir / "backup_password_hash.pre-sync").exists()
 
 
+def test_convert_legacy_files_carries_over_a_pre_hash_plaintext_password(paths: WorkspacePaths) -> None:
+    # The pre-hash layout: only the plaintext file exists. The retired
+    # ensure_backup_password_hash seeded the hash from it, so the plaintext
+    # IS the master password and must carry over.
+    user_id = _user_id()
+    (paths.data_dir / "backup_password").write_text("pre-hash-pass\n")
+
+    convert_legacy_password_files(paths, [user_id])
+
+    assert is_master_password_set_for_account(paths, user_id)
+    assert verify_master_password_for_account(paths, user_id, SecretStr("pre-hash-pass"))
+    assert (paths.data_dir / "backup_password.pre-sync").exists()
+
+
 def test_convert_legacy_files_with_empty_password_seed_sets_no_password(paths: WorkspacePaths) -> None:
     user_id = _user_id()
     (paths.data_dir / "backup_password_hash").write_text(PasswordHasher().hash(""))
