@@ -124,25 +124,26 @@ def _prepare_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sync_e2e_e
 def _wait_until(description: str, timeout_seconds: float, probe: Callable[[], _T | None]) -> _T:
     """Poll ``probe`` (None = not yet) until it yields a value, or fail loudly.
 
-    A ``PlaywrightError`` from the probe counts as "not yet": the Electron
-    content view can navigate out from under a probe (the landing page's
-    discovering auto-reload, post-auth redirects), destroying the JS execution
-    context mid-read. Deliberate assertion failures raised by probes propagate.
+    Transient errors from the probe count as "not yet": the Electron content
+    view can navigate out from under a Playwright read (the landing page's
+    discovering auto-reload, post-auth redirects), and a read-only connector
+    poll can hit a transient platform 500 (e.g. Modal's "Server has lost
+    track of input"). Deliberate assertion failures raised by probes
+    propagate.
     """
     deadline = time.monotonic() + timeout_seconds
-    last_playwright_error: PlaywrightError | None = None
+    last_transient_error: Exception | None = None
     while time.monotonic() < deadline:
         try:
             result = probe()
-        except PlaywrightError as e:
-            last_playwright_error = e
+        except (PlaywrightError, ImbueCloudError, httpx.HTTPError) as e:
+            last_transient_error = e
             result = None
         if result is not None:
             return result
         threading.Event().wait(timeout=3.0)
     raise AssertionError(
-        f"Timed out after {timeout_seconds}s waiting for {description}"
-        f" (last playwright error: {last_playwright_error})"
+        f"Timed out after {timeout_seconds}s waiting for {description} (last transient error: {last_transient_error})"
     )
 
 
