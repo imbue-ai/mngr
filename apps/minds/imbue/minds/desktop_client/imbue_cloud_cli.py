@@ -720,18 +720,31 @@ class ImbueCloudCli(MutableModel):
 
 
 def _parse_conflict_stored(stderr: str) -> dict[str, Any] | None:
-    """Extract the ``stored`` row from a sync-push conflict's JSON error body, if present."""
-    for line in stderr.splitlines():
-        stripped = line.strip()
-        if not stripped.startswith("{"):
-            continue
-        try:
-            parsed = _json.loads(stderr[stderr.index(stripped) :])
-        except _json.JSONDecodeError as exc:
-            logger.warning("Could not parse the sync-conflict error body as JSON: {}", exc)
-            return None
-        stored = parsed.get("stored") if isinstance(parsed, dict) else None
-        return stored if isinstance(stored, dict) else None
+    """Extract the ``stored`` row from a sync-push conflict's JSON error body, if present.
+
+    The body is indent-formatted JSON (its first line is a bare ``{``) that
+    may be surrounded by log lines, so each candidate document is raw-decoded
+    from the opening brace's actual byte offset -- that consumes exactly one
+    document regardless of what precedes or follows it on the stream.
+    """
+    decoder = _json.JSONDecoder()
+    offset = 0
+    is_any_document_parsed = False
+    for line in stderr.splitlines(keepends=True):
+        lstripped = line.lstrip()
+        if lstripped.startswith("{"):
+            try:
+                parsed, _consumed_until = decoder.raw_decode(stderr, offset + len(line) - len(lstripped))
+            except _json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, dict):
+                is_any_document_parsed = True
+                stored = parsed.get("stored")
+                if isinstance(stored, dict):
+                    return stored
+        offset += len(line)
+    if not is_any_document_parsed:
+        logger.warning("Could not locate a JSON error body on the sync-conflict stderr")
     return None
 
 
