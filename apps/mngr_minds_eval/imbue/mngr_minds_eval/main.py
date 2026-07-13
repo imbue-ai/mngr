@@ -136,7 +136,8 @@ def main() -> None:
     p_restore.add_argument("batch")
     p_restore.add_argument("--case", required=True)
     p_restore.add_argument("--message", type=int, required=True, help="message index (post_message_<N>)")
-    p_restore.add_argument("--mngr-branch", default="main", help="mngr branch the box runs")
+    p_restore.add_argument("--mngr-branch", default="",
+                           help="override; by default the mngr branch the batch was launched with")
     p_restore.add_argument("--box", default="", help="container name (default: minds-box-<mngr-branch>)")
     p_restore.add_argument("--restic-password", default=os.environ.get("RESTIC_PASSWORD", ""),
                            help="override; by default read from the batch config in S3")
@@ -173,11 +174,28 @@ def main() -> None:
         launch_mod.launch_batch(
             eval_name=args.name, personas_path=args.personas, anthropic_key=args.anthropic_key,
             num_turns=args.turns, compute="modal", port=_port(), stamp=_utc_stamp(),
+            mngr_branch=args.mngr_branch,
         )
         return
     if args.command == "restore":
-        _check_aws()
+        env = _check_aws()
         if not IN_BOX:
+            # Restore on the SAME mngr the batch ran on: read it from the batch config in S3 rather
+            # than defaulting to some other branch (which would restore under the wrong mngr).
+            if not args.mngr_branch:
+                config = s3_store.get_json(
+                    s3_store.make_client(env), env["MINDS_EVAL_BUCKET"],
+                    "{}/{}".format(args.batch, s3_store.BATCH_CONFIG_NAME),
+                )
+                if config is None:
+                    sys.exit("no such batch: {} (try: minds-evals list-batches)".format(args.batch))
+                args.mngr_branch = config.get("mngr_branch") or ""
+                if not args.mngr_branch:
+                    sys.exit(
+                        "batch {} does not record its mngr branch (launched before this was tracked); "
+                        "pass --mngr-branch explicitly".format(args.batch)
+                    )
+                print(">> batch ran on mngr {!r}; restoring with the same box".format(args.mngr_branch), flush=True)
             _exec_in_box(_box_name(args), args.mngr_branch, sys.argv[1:], None)
         restore_mod.restore(args.batch, args.case, args.message, port=_port(), restic_password=args.restic_password)
 

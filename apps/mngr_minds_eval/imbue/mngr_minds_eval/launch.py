@@ -148,7 +148,8 @@ def _await_create(port: str, operation_id: str, timeout: float = 1800.0) -> dict
 
 
 def launch_batch(
-    *, eval_name: str, personas_path: Path, anthropic_key: str, num_turns: int, compute: str, port: str, stamp: str
+    *, eval_name: str, personas_path: Path, anthropic_key: str, num_turns: int, compute: str, port: str, stamp: str,
+    mngr_branch: str = "",
 ) -> dict:
     env = s3_store.load_aws_env()
     client = s3_store.make_client(env)
@@ -165,9 +166,11 @@ def launch_batch(
     # later. The bucket is private and the key is scoped to it; without this the snapshots would be
     # permanently undecryptable.
     restic_password = secrets.token_urlsafe(24)
+    # mngr_branch is recorded so `restore` rebuilds the SAME box this batch ran on, instead of
+    # silently defaulting to some other mngr.
     s3_store.put_json(client, bucket, "{}/{}".format(batch, s3_store.BATCH_CONFIG_NAME), {
         "eval_name": eval_name, "created_at": stamp, "num_turns": num_turns,
-        "compute": compute, "cases": cases, "restic_password": restic_password,
+        "compute": compute, "mngr_branch": mngr_branch, "cases": cases, "restic_password": restic_password,
     })
 
     CLONES_DIR.mkdir(parents=True, exist_ok=True)
