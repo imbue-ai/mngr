@@ -399,7 +399,7 @@ class _KanpanState(MutableModel):
     peek_box: Any = None
     peek_body_text: Any = None
     peek_input: Any = None
-    # Last clean `mngr transcript --conversation` stdout shown in the panel.
+    # Last clean `mngr transcript` stdout (see _run_transcript) shown in the panel.
     peek_transcript: str = ""
     # Replies sent but not yet echoed back by the transcript, shown optimistically.
     peek_pending_replies: list[str] = []
