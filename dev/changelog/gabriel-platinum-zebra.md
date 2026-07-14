@@ -1,0 +1,1 @@
+Added a blueprint plan for per-workspace resource resizing (CPU + memory) of local minds: a generic provider resize capability (lima + docker), `mngr limit --cpus/--memory` CLI support, minds settings-page and create-page controls, and agent-facing workspace API exposure via a new `minds-workspaces-resize` permission verb.
