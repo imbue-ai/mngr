@@ -577,10 +577,11 @@ def test_is_transient_ssh_connect_error_matches_only_banner_read_connect_errors(
         "non-os-error",
     ],
 )
-def test_is_transient_ssh_error_classifies_timeout_as_transient(exception: BaseException, expected: bool) -> None:
-    """Regression: ``TimeoutError`` from pyinfra's ``read_output_buffers`` must be classified transient.
+def test_is_transient_ssh_error(exception: BaseException, expected: bool) -> None:
+    """The classifier accepts each transient SSH error kind and rejects everything else.
 
-    pyinfra raises a bare ``TimeoutError`` (Python builtin) when an SSH
+    The TimeoutError case is a regression guard: pyinfra raises a bare
+    ``TimeoutError`` (Python builtin) when an SSH
     command's response doesn't arrive within the per-command read
     timeout -- for example, when the remote sshd is reloaded mid-read
     during cloud-init. Without TimeoutError in the transient set, the
