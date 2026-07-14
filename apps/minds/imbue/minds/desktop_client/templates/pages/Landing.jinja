@@ -115,7 +115,10 @@
       var signedIn = (document.getElementById('landing-account') || {}).dataset || {};
       var isSignedIn = signedIn.signedIn === 'true';
       if (isElectronShell) {
-        window.postMessage({ type: isSignedIn ? 'minds:open-accounts' : 'minds:open-signin-modal' }, '*');
+        // ``returnTo: '/'`` lands a successful sign-in back on this home
+        // screen (the server's return_to default is the create screen).
+        if (isSignedIn) window.postMessage({ type: 'minds:open-accounts' }, '*');
+        else window.postMessage({ type: 'minds:open-signin-modal', returnTo: '/' }, '*');
       } else {
         window.location = isSignedIn ? '/accounts' : '/auth/login';
       }

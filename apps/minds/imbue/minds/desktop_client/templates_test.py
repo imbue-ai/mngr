@@ -191,6 +191,28 @@ def test_render_landing_page_discovering_shows_auto_refresh() -> None:
     assert "/goto/" not in html
 
 
+def test_render_landing_page_signed_out_launcher_signs_in_back_to_home() -> None:
+    # Signed out (no account email): the bottom-left account launcher reads
+    # "Log in", and the Electron path opens the sign-in modal with
+    # ``returnTo: '/'`` so a successful sign-in lands back on the home screen
+    # (the server's return_to default is the create screen).
+    html = render_landing_page(accessible_agent_ids=())
+    assert 'id="landing-minds-settings"' in html
+    assert 'id="landing-account"' in html
+    assert "Log in" in html
+    assert "{ type: 'minds:open-signin-modal', returnTo: '/' }" in html
+
+
+def test_render_landing_page_signed_in_launcher_shows_email_and_extra_count() -> None:
+    html = render_landing_page(
+        accessible_agent_ids=(),
+        account_email="alice@example.com",
+        extra_account_count=2,
+    )
+    assert "alice@example.com" in html
+    assert "(+2)" in html
+
+
 def test_render_login_redirect_page_contains_redirect_script() -> None:
     html = render_login_redirect_page(
         one_time_code=OneTimeCode("abc123-secret-82341"),
