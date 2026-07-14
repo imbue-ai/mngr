@@ -80,14 +80,15 @@ traffic stops entirely.
   snapshot tick with known services preserved. Persistent respawn failure is
   logged and skipped; the workspace-health path eventually catches the
   fallout.
-- *Producer stall* (>35s with no discovery event, which also covers a dead
+- *Producer stall* (>180s with no discovery event, which also covers a dead
   supervisor): the minds-side watchdog enters `RECONNECTING` and remediates
   forever -- one cheap SIGHUP bounce, then full supervisor restarts on a
   15s-to-300s capped backoff. Loaded workspaces keep working throughout
   (the proxy's routes are never expired); what freezes is home-screen data,
   switching to an unrouted workspace, and creation. The only surfaced signal
-  is the providers panel's freshness counter; `RECONNECTING` never escalates
-  to a takeover. Two structural notes: the observe child has no in-process
+  is the providers panel's freshness counter (collapsed by default);
+  `RECONNECTING` is never emitted over the chrome SSE stream (only the
+  terminal `BLOCKED` is) and never escalates to a takeover. Two structural notes: the observe child has no in-process
   supervision anywhere, so this watchdog is its sole resurrection path; and
   `restart()` is heavyweight (re-provisions the gateway, tunnels, and every
   managed VPS host), which is why the backoff is deliberate.
@@ -110,9 +111,9 @@ workspace that breaks *during* a persistent stall sits on the auto-refresh
 loader rather than reaching the recovery page.
 
 **Timeouts and sleep.** The stall detector is wall-clock, so any sleep longer
-than 35s makes the first post-wake watchdog tick read "stalled" and bounce the
-observe child -- every wake pays a producer respawn for a producer that was
-never broken. The escalation math is tighter than it looks: the first full
+than 180s makes the first post-wake watchdog tick read "stalled" and bounce
+the observe child -- a wake from any real nap pays a producer respawn for a
+producer that was never broken. The escalation math is tighter than it looks: the first full
 `restart()` fires 15s after the bounce if no event has landed, and a bounced
 observe needs a process spawn plus a ~10s provider poll against
 possibly-still-waking networking to produce one -- so a wake can plausibly
@@ -138,9 +139,12 @@ state.
 probe (the literal commands and outputs are shown) and classifies the failure:
 provider unreachable (Retry only, provider's verbatim error, background poll
 that returns the user on recovery), host offline (unattended host restart),
-interface unresponsive (unattended in-place restart), ambiguous (consent-gated
-host restart), or already-healthy (sends the user straight back, preventing a
-needless restart). The restart worker (`mngr stop`/`start` + a 15s/30s
+interface unresponsive (unattended in-place restart), container observed
+running but not exec-reachable (consent-gated host restart), indeterminate
+evidence -- timed-out probe, stale snapshot, or unobserved host state --
+(live "Reconnecting" state that keeps checking, no restart affordance), or
+already-healthy (sends the user straight back, preventing a needless
+restart). The restart worker (`mngr stop`/`start` + a 15s/30s
 readiness poll) is deduped by an atomic compare-and-set.
 
 **If recovery fails.** Every restart failure path -- command error, readiness
@@ -161,7 +165,7 @@ Sleeping through a restart's 15s/30s readiness window yields a
 spurious-but-visible `RESTART_FAILED` that the probe loop cleans up on its
 next success. The sticky case was the verdict pages, below.
 
-**Known flaw, fixed by PR #2370 (open).** This subsystem was less well-behaved
+**Known flaw, fixed by PR #2370 (merged).** This subsystem was less well-behaved
 than the framing above suggests: its *verdict* states did not keep checking.
 Diagnosed from a real incident (Sentry `fc54dc12`): the in-container probe was
 launched just before a laptop suspended, spanned the sleep, and was declared
@@ -209,9 +213,14 @@ durable response event to disk, then nudges the waiting agent via
   no "permission system offline" indicator anywhere.
 - *Lost wake-up nudge:* fire-and-forget, judged by exit code -- and
   `mngr message` exits 0 even when no agent matched, so a nudge to nobody is
-  neither detected nor retried. Latency, not loss: the grant is durable and
-  the agent's own polling eventually picks it up. (A delivery-verifying
-  `deliver()` exists in the same module with no production caller.)
+  neither detected nor retried (a *matched* agent whose delivery fails does
+  exit 1 and is logged at error level, which reaches Sentry; only the
+  no-match mode is fully silent). The grant itself is durable, and the
+  working assumption is latency rather than loss -- but the "agent's own
+  polling eventually picks it up" backstop lives in the workspace-template
+  agent runtime and has not been verified from this repo. (A
+  delivery-verifying `deliver()` exists in the same module with no
+  production caller.)
 - *Auto-register store error:* the agent/host pair is marked processed anyway,
   so one transient IO error permanently skips that agent -- its gateway calls
   are rejected until an operator runs `mngr latchkey register-agent`.
