@@ -166,9 +166,17 @@ def test_classify_creation_error_flags_non_github_remotes_generically() -> None:
     error = GitCloneError(
         "git clone failed:\nfatal: Authentication failed for 'https://gitlab.example.com/acme/repo.git/'"
     )
-    assert classify_creation_error("https://gitlab.example.com/acme/repo.git", error) is CreationErrorKind.GIT_AUTH_REQUIRED
-    assert classify_creation_error("git@gitlab.example.com:acme/repo.git", error) is CreationErrorKind.GIT_AUTH_REQUIRED
-    assert classify_creation_error("ssh://git@gitlab.example.com/acme/repo.git", error) is CreationErrorKind.GIT_AUTH_REQUIRED
+    assert (
+        classify_creation_error("https://gitlab.example.com/acme/repo.git", error)
+        is CreationErrorKind.GIT_AUTH_REQUIRED
+    )
+    assert (
+        classify_creation_error("git@gitlab.example.com:acme/repo.git", error) is CreationErrorKind.GIT_AUTH_REQUIRED
+    )
+    assert (
+        classify_creation_error("ssh://git@gitlab.example.com/acme/repo.git", error)
+        is CreationErrorKind.GIT_AUTH_REQUIRED
+    )
 
 
 def test_classify_creation_error_ignores_local_paths_and_bare_input() -> None:
