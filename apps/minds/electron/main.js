@@ -496,6 +496,22 @@ function wireBundleWindowEvents(bundle) {
     mruWindows.unshift(bundle);
   });
 
+  // Keep the native macOS traffic lights visible when the window is not the
+  // key window. With a custom ``trafficLightPosition`` (see
+  // ``buildBundleWindowOptions``) Electron hides the buttons entirely on blur
+  // instead of dimming them to the inactive grey a standard window shows
+  // (electron/electron#27295). Re-assert visibility on both focus and blur so
+  // the grey inactive buttons stay put; non-mac windows draw their own
+  // controls and have no traffic lights to manage.
+  if (isMac) {
+    const keepTrafficLightsVisible = () => {
+      if (!win.isDestroyed()) win.setWindowButtonVisibility(true);
+    };
+    win.on('focus', keepTrafficLightsVisible);
+    win.on('blur', keepTrafficLightsVisible);
+    keepTrafficLightsVisible();
+  }
+
   win.on('maximize', () => { bundle._maximizedByUs = true; });
   win.on('unmaximize', () => { bundle._maximizedByUs = false; });
   win.on('resize', () => updateBundleBounds(bundle));

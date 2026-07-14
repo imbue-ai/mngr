@@ -33,7 +33,7 @@ contextBridge.exposeInMainWorld('minds', {
   // (all numbers; viewport-relative). Main packs it into the sidebar's URL
   // so Sidebar.jinja can position the menu via server-rendered inline
   // style. If omitted, the server falls back to sensible defaults
-  // (anchor a 38px-tall element at the top-left, nudged 2px left and 2px below it).
+  // (anchor a 38px-tall element at the top-left, nudged 24px left and 2px below it).
   toggleSidebar: (anchor) => ipcRenderer.send('toggle-sidebar', anchor),
 
   // Get-help modal (report a bug). ``agentId`` is the currently-displayed

@@ -1,4 +1,4 @@
-{#def mngr_forward_origin, trigger_x=0, trigger_y=0, trigger_w=0, trigger_h=38, offset_x=-2, offset_y=2 #}
+{#def mngr_forward_origin, trigger_x=0, trigger_y=0, trigger_w=0, trigger_h=38, offset_x=-24, offset_y=2 #}
 {#
   Standalone sidebar page loaded into the shared modal WebContentsView
   when the user opens the sidebar. The modal view covers the full window
@@ -21,10 +21,13 @@
   coordinate space, the trigger's rect translates directly. The panel
   carries a uniform 4px pad on all sides (``p-1``) with 2px between
   entries (``gap-0.5``); each row adds its own ``px-2`` for the hover
-  highlight's inset.
+  highlight's inset. The default offset_x (-24) lines a row's workspace-name
+  label up under the breadcrumb's workspace-name text: the label sits 30px
+  inside the menu's left edge (p-1 4 + px-2 8 + dot 10 + gap-2 8) while the
+  breadcrumb name sits 6px inside the trigger, so the menu shifts left by 24.
 
   Defaults (no query params): anchor a 38px-tall element at the top-left
-  of the window, nudged 2px left and 2px below it. That's the right shape
+  of the window, nudged 24px left and 2px below it. That's the right shape
   for the titlebar's first button without any caller customization.
 
   mngr_forward_origin is exposed via data-mngr-forward-origin so sidebar.js

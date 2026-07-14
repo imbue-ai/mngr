@@ -9,3 +9,7 @@ Reworked the desktop app's titlebar and navigation to match the minds-options mo
 - Pending permission requests moved out of the left-anchored inbox drawer into each workspace's Connections view (/workspace/<id>/connections), opened from the titlebar's Connections icon-tab (which carries a per-workspace pending-request badge). The view shows "Waiting on you" cards holding the full Approve/Deny forms plus the connectors, shared files, and workspace delegation the workspace holds, with revoke actions. A new pending request just updates the badge and raises an OS notification whose click lands on the owning workspace's Connections view with the request highlighted -- nothing auto-opens, and the auto-open setting and /inbox routes were removed.
 
 - The sign-in modal honors ?return_to= so sign-ins launched from the home screen or the Manage Accounts modal land back where they started; the create-flow default is unchanged.
+
+- The macOS traffic lights now stay visible (as the inactive grey) when a minds window is not the focused window, instead of vanishing -- Electron hides them on blur when a custom traffic-light position is set, so visibility is now re-asserted on focus and blur.
+
+- The workspace switcher menu opens shifted left so each row's workspace-name text lines up directly under the breadcrumb's workspace-name text.

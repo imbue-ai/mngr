@@ -71,8 +71,14 @@
   // ``sidebarOpen`` is intentionally browser-mode-only -- in Electron
   // the main process owns visibility (see toggleSidebar / openModal /
   // closeModal in electron/main.js).
-  // Nudge 2px left of the trigger's left edge, and sit 2px below its bottom.
-  var SIDEBAR_OFFSET_X = -2;
+  // Nudge left of the trigger's left edge so a menu row's workspace-name text
+  // lines up under the breadcrumb's workspace-name text, and sit 2px below the
+  // trigger's bottom. The -24 is that alignment magic number: a row's label
+  // sits 30px inside the menu's left edge (panel p-1 4px + row px-2 8px + accent
+  // dot w-2.5 10px + gap-2 8px), while the breadcrumb name sits only 6px inside
+  // the trigger (the switcher button's p-1.5), so the menu shifts left by
+  // 30 - 6 = 24 to make label-left meet name-left.
+  var SIDEBAR_OFFSET_X = -24;
   var SIDEBAR_OFFSET_Y = 2;
   var sidebarOpen = false;
   function computeSidebarAnchor() {

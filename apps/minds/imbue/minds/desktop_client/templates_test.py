@@ -798,11 +798,12 @@ def test_render_sidebar_page_position_tracks_trigger_anchor() -> None:
     assert "top:36px" in html
 
     # Defaults (no caller args) anchor a 38px-tall element at the top-left,
-    # nudged 2px left (offset_x=-2 -> 0 + -2) and 2px below it
+    # nudged 24px left (offset_x=-24 -> 0 + -24) and 2px below it
     # (offset_y=2 -> 0 + 38 + 2) -- right shape for "open the sidebar from
-    # the first titlebar button" without any caller customization.
+    # the first titlebar button" without any caller customization. The -24
+    # lines a row's workspace-name label up under the breadcrumb's name text.
     html_default = render_sidebar_page()
-    assert "left:-2px" in html_default
+    assert "left:-24px" in html_default
     assert "top:40px" in html_default
 
 
