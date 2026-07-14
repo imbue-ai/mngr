@@ -1,16 +1,16 @@
 """Offline tests for the secrets/PII gate (DESIGN.md §7, §11).
 
-The gate is three scanners, all of which must pass before a fixer's PR goes
-up: Betterleaks (stock rules + the custom PII rules in .betterleaks.toml),
-TruffleHog, and Kingfisher (both with stock rules). Each scanner is tested
-against two checked-in corpora:
+The gate is two scanners, both of which must pass before a fixer's PR goes
+up: Betterleaks (stock rules + the custom PII rules in .betterleaks.toml)
+and Kingfisher (stock rules). Each scanner is tested against two checked-in
+corpora:
 
 - corpora/planted_secrets.txt — fake secrets + PII; every planted line must
   be flagged by Betterleaks (the scanner carrying the PII rules), and the
-  real-credential lines must also be flagged by TruffleHog and Kingfisher.
+  real-credential lines must also be flagged by Kingfisher.
 - corpora/clean.txt — ordinary code/diff text salted with lookalikes
   (version strings, 0.0.0.0, decorators, git remotes); no scanner may flag
-  anything, because a single hit from any scanner blocks the PR.
+  anything, because a single hit from either scanner blocks the PR.
 
 This is the one part of open-seer tested offline — everything else is
 validated on live surfaces (DESIGN.md §11). Each scanner's tests skip when
@@ -47,11 +47,9 @@ CUSTOM_RULE_IDS = {
 ANTHROPIC_KEY_LINE = 13
 
 BETTERLEAKS = shutil.which("betterleaks")
-TRUFFLEHOG = shutil.which("trufflehog")
 KINGFISHER = shutil.which("kingfisher")
 
 requires_betterleaks = pytest.mark.skipif(BETTERLEAKS is None, reason="betterleaks binary not available")
-requires_trufflehog = pytest.mark.skipif(TRUFFLEHOG is None, reason="trufflehog binary not available")
 requires_kingfisher = pytest.mark.skipif(KINGFISHER is None, reason="kingfisher binary not available")
 
 
@@ -116,54 +114,6 @@ def test_every_custom_rule_fires_on_planted_corpus() -> None:
 def test_betterleaks_passes_clean_corpus() -> None:
     exit_code, findings = run_betterleaks(CORPORA / "clean.txt")
     hits = [(f["RuleID"], f["StartLine"], f["Secret"]) for f in findings]
-    assert exit_code == 0 and not hits, f"false positives on clean corpus: {hits}"
-
-
-# --- TruffleHog (stock detectors) -------------------------------------------
-
-
-def run_trufflehog(corpus: Path) -> tuple[int, list[dict]]:
-    """Scan a single corpus file; return (exit code, findings from JSONL stdout)."""
-    proc = subprocess.run(
-        [
-            TRUFFLEHOG,
-            "filesystem",
-            str(corpus),
-            "--no-verification",  # offline: never call providers to validate
-            "--fail",  # exit 183 when findings exist
-            "--json",
-            "--no-update",
-        ],
-        capture_output=True,
-        text=True,
-    )
-    # 0 = clean, 183 = findings (--fail); anything else is a usage error.
-    assert proc.returncode in (0, 183), f"trufflehog failed unexpectedly:\n{proc.stderr}"
-    findings = [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
-    return proc.returncode, findings
-
-
-def trufflehog_lines(findings: list[dict]) -> set[int]:
-    return {
-        finding["SourceMetadata"]["Data"]["Filesystem"]["line"]
-        for finding in findings
-        if "Filesystem" in finding.get("SourceMetadata", {}).get("Data", {})
-    }
-
-
-@requires_trufflehog
-def test_trufflehog_flags_planted_credentials() -> None:
-    exit_code, findings = run_trufflehog(CORPORA / "planted_secrets.txt")
-    assert exit_code == 183, "planted corpus scanned clean — trufflehog is not catching anything"
-    assert ANTHROPIC_KEY_LINE in trufflehog_lines(findings), (
-        f"trufflehog did not flag the planted Anthropic key on line {ANTHROPIC_KEY_LINE}"
-    )
-
-
-@requires_trufflehog
-def test_trufflehog_passes_clean_corpus() -> None:
-    exit_code, findings = run_trufflehog(CORPORA / "clean.txt")
-    hits = [(f.get("DetectorName"), sorted(trufflehog_lines([f]))) for f in findings]
     assert exit_code == 0 and not hits, f"false positives on clean corpus: {hits}"
 
 

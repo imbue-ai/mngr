@@ -1,8 +1,8 @@
 # Clean corpus for the open-seer secrets gate (DESIGN.md §11).
 # Ordinary code/diff text, deliberately salted with things that LOOK like
-# secrets or PII to a naive regex. Nothing in this file may be flagged by any
-# of the gate's scanners (betterleaks with the repo's .betterleaks.toml,
-# trufflehog, kingfisher).
+# secrets or PII to a naive regex. Nothing in this file may be flagged by
+# either of the gate's scanners (betterleaks with the repo's
+# .betterleaks.toml, kingfisher).
 
 # --- version strings are not IPs ---
 __version__ = "1.2.3"

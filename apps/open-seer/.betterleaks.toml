@@ -1,12 +1,11 @@
 # Betterleaks config for the open-seer secrets/PII gate (DESIGN.md §7).
 #
-# Betterleaks is one of three scanners every fixer runs over its squashed
-# commit (and over PR body text) before a PR goes up — the other two,
-# TruffleHog and Kingfisher, run with their stock rules. This config extends
-# Betterleaks' stock secret rules with custom PII rules for the things Sentry
-# event data leaks that stock rules ignore — emails, IP literals, auth-header
-# values, and user IDs. A hit from any scanner blocks the PR until the
-# content is scrubbed.
+# Betterleaks is one of two scanners every fixer runs over its squashed
+# commit (and over PR body text) before a PR goes up — the other, Kingfisher,
+# runs with its stock rules. This config extends Betterleaks' stock secret
+# rules with custom PII rules for the things Sentry event data leaks that
+# stock rules ignore — emails, IP literals, auth-header values, and user IDs.
+# A hit from either scanner blocks the PR until the content is scrubbed.
 #
 # Rule-level `filter` expressions (Expr) discard known-benign matches; if a
 # filter evaluates to true the finding is skipped.

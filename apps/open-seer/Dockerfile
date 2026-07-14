@@ -5,7 +5,6 @@
 FROM python:3.12-slim-bookworm
 
 ARG BETTERLEAKS_VERSION=1.6.1
-ARG TRUFFLEHOG_VERSION=3.95.9
 ARG KINGFISHER_VERSION=1.106.0
 # mngr install spec. Default is the published package (the repo's own install
 # method: `uv tool install imbue-mngr`). Pin an unreleased branch/ref with:
@@ -34,14 +33,12 @@ RUN npm install -g @anthropic-ai/claude-code
 RUN claude plugin marketplace add imbue-ai/code-guardian \
     && claude plugin install imbue-code-guardian@imbue-code-guardian
 
-# The secrets/PII gate scanners (betterleaks, trufflehog, kingfisher) all
-# ship as bare release binaries — no apt packages.
+# The secrets/PII gate scanners (betterleaks, kingfisher) both ship as bare
+# release binaries — no apt packages.
 RUN arch="$(dpkg --print-architecture)" \
     && case "$arch" in amd64) x_arch=x64 ;; arm64) x_arch=arm64 ;; *) echo "unsupported arch: $arch" >&2; exit 1 ;; esac \
     && curl -fsSL "https://github.com/betterleaks/betterleaks/releases/download/v${BETTERLEAKS_VERSION}/betterleaks_${BETTERLEAKS_VERSION}_linux_${x_arch}.tar.gz" \
         | tar -xz -C /usr/local/bin betterleaks \
-    && curl -fsSL "https://github.com/trufflesecurity/trufflehog/releases/download/v${TRUFFLEHOG_VERSION}/trufflehog_${TRUFFLEHOG_VERSION}_linux_${arch}.tar.gz" \
-        | tar -xz -C /usr/local/bin trufflehog \
     && curl -fsSL "https://github.com/mongodb/kingfisher/releases/download/v${KINGFISHER_VERSION}/kingfisher-linux-${x_arch}.tgz" \
         | tar -xz -C /usr/local/bin kingfisher
 

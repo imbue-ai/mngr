@@ -6,9 +6,9 @@ description: >-
   reproduce at the erroring release SHA in an isolated worktree, check whether
   main already fixes it, fix minimally, port to main, pass imbue-code-guardian
   (max 3 cycles), squash to one commit, gate with the secret scanners
-  (Betterleaks, TruffleHog, Kingfisher), open a draft PR, triage its CI
-  checks, flip it ready, and mark the Sentry issue(s) resolved-by-commit. Use
-  when invoked as /fix-sentry-error with a Sentry issue URL or short ID.
+  (Betterleaks and Kingfisher), open a draft PR, triage its CI checks, flip
+  it ready, and mark the Sentry issue(s) resolved-by-commit. Use when invoked
+  as /fix-sentry-error with a Sentry issue URL or short ID.
 ---
 
 # /fix-sentry-error — fixer agent contract
@@ -313,11 +313,10 @@ git reset --soft "$(git merge-base origin/main HEAD)"
 git commit -m "fix: <sanitized one-line summary> ($SHORT_ID)"
 ```
 
-**Secrets gate** — three scanners, and ALL of them must pass. Betterleaks
-runs with the `.betterleaks.toml` at the root of the open-seer checkout on
-this image (the repo containing this skill file), which extends its stock
-secret rules with custom PII rules; TruffleHog and Kingfisher run with their
-stock rules:
+**Secrets gate** — two scanners, and BOTH must pass. Betterleaks runs with
+the `.betterleaks.toml` at the root of the open-seer checkout on this image
+(the repo containing this skill file), which extends its stock secret rules
+with custom PII rules; Kingfisher runs with its stock rules:
 
 ```bash
 BETTERLEAKS_CONFIG=<open-seer repo root>/.betterleaks.toml
@@ -325,23 +324,20 @@ BETTERLEAKS_CONFIG=<open-seer repo root>/.betterleaks.toml
 # 1. Scan the squashed commit (the only commit past origin/main):
 betterleaks git --log-opts="origin/main..HEAD" -c "$BETTERLEAKS_CONFIG" \
   --no-banner --redact "$WORK/wt-main"
-(cd "$WORK/wt-main" && trufflehog git "file://$PWD" --since-commit origin/main \
-  --branch HEAD --fail --no-verification --no-update)
 (cd "$WORK/wt-main" && kingfisher scan . --since-commit origin/main \
   --no-validate --no-update-check)
 
 # 2. Write the PR body (per the template below) to $WORK/pr-body.md, then
 #    scan it BEFORE posting:
 betterleaks stdin -c "$BETTERLEAKS_CONFIG" --no-banner --redact < "$WORK/pr-body.md"
-trufflehog stdin --fail --no-verification --no-update < "$WORK/pr-body.md"
 kingfisher scan - --no-validate --no-update-check < "$WORK/pr-body.md"
 ```
 
-Exit code 0 = clean for every scanner; findings exit nonzero (Betterleaks 1,
-TruffleHog 183, Kingfisher 200). **Any hit from any scanner blocks you**:
-scrub the offending content (amend the commit / edit the body — remove the
-value, don't just mask part of it), re-run, and repeat until all six scans
-exit 0. Never bypass with a baseline, rule narrowing, ignore comments, or
+Exit code 0 = clean for both scanners; findings exit nonzero (Betterleaks 1,
+Kingfisher 200). **Any hit from either scanner blocks you**: scrub the
+offending content (amend the commit / edit the body — remove the value,
+don't just mask part of it), re-run, and repeat until all four scans exit 0.
+Never bypass with a baseline, rule narrowing, ignore comments, or
 `--confidence`/allowlist loosening.
 
 ## 10. PR: draft → ready, close the Sentry loop
