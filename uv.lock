@@ -2202,7 +2202,7 @@ requires-dist = [
     { name = "packaging", specifier = ">=21.0" },
     { name = "paramiko", specifier = ">=3.0" },
     { name = "pluggy", specifier = ">=1.5.0" },
-    { name = "psutil", specifier = ">=5.9" },
+    { name = "psutil", specifier = ">=7.2" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pygtail", specifier = ">=0.14.0" },
     { name = "pyinfra", specifier = ">=3.0" },

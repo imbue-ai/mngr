@@ -1,0 +1,1 @@
+Fixed the `test_command_agent_data_pipeline` e2e tutorial test to scope its `mngr list` verification to `--provider modal` (where the `etl-job` command agent runs). Previously the unscoped listing reached out to every enabled provider, so it failed with exit code 6 in environments where another provider (e.g. aws) is enabled but has no credentials configured.

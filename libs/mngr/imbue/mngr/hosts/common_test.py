@@ -21,7 +21,7 @@ from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import classify_waiting_reason
 from imbue.mngr.hosts.common import compute_idle_seconds
 from imbue.mngr.hosts.common import copy_on_host
-from imbue.mngr.hosts.common import determine_lifecycle_state
+from imbue.mngr.hosts.common import determine_lifecycle_probe_result
 from imbue.mngr.hosts.common import get_descendant_process_names
 from imbue.mngr.hosts.common import get_ssh_known_hosts_file
 from imbue.mngr.hosts.common import resolve_expected_process_name
@@ -80,33 +80,35 @@ def test_compute_idle_seconds_with_single_activity() -> None:
 
 
 # =========================================================================
-# determine_lifecycle_state tests
+# determine_lifecycle_probe_result state tests
 # =========================================================================
 
 
 def test_lifecycle_stopped_when_no_tmux_info() -> None:
-    assert determine_lifecycle_state(None, False, "claude", "") == AgentLifecycleState.STOPPED
+    assert determine_lifecycle_probe_result(None, False, "claude", "").state == AgentLifecycleState.STOPPED
 
 
 def test_lifecycle_stopped_when_malformed_tmux_info() -> None:
-    assert determine_lifecycle_state("bad", False, "claude", "") == AgentLifecycleState.STOPPED
+    assert determine_lifecycle_probe_result("bad", False, "claude", "").state == AgentLifecycleState.STOPPED
 
 
 def test_lifecycle_done_when_pane_dead() -> None:
-    assert determine_lifecycle_state("1|bash|123", False, "claude", "") == AgentLifecycleState.DONE
+    assert determine_lifecycle_probe_result("1|bash|123", False, "claude", "").state == AgentLifecycleState.DONE
 
 
 def test_lifecycle_running_when_command_matches_and_active() -> None:
-    assert determine_lifecycle_state("0|claude|123", True, "claude", "") == AgentLifecycleState.RUNNING
+    assert determine_lifecycle_probe_result("0|claude|123", True, "claude", "").state == AgentLifecycleState.RUNNING
 
 
 def test_lifecycle_waiting_when_command_matches_and_not_active() -> None:
-    assert determine_lifecycle_state("0|claude|123", False, "claude", "") == AgentLifecycleState.WAITING
+    assert determine_lifecycle_probe_result("0|claude|123", False, "claude", "").state == AgentLifecycleState.WAITING
 
 
 def test_lifecycle_running_when_descendant_matches() -> None:
     ps_output = "100 1 init\n200 123 bash\n300 200 claude\n"
-    assert determine_lifecycle_state("0|bash|123", True, "claude", ps_output) == AgentLifecycleState.RUNNING
+    assert (
+        determine_lifecycle_probe_result("0|bash|123", True, "claude", ps_output).state == AgentLifecycleState.RUNNING
+    )
 
 
 def test_lifecycle_done_when_non_shell_descendant_but_foreground_is_shell_known_type() -> None:
@@ -120,22 +122,25 @@ def test_lifecycle_done_when_non_shell_descendant_but_foreground_is_shell_known_
     is a shell. Only a non-shell *foreground* means a real replacement.
     """
     ps_output = "200 123 python3\n"
-    assert determine_lifecycle_state("0|bash|123", True, "claude", ps_output) == AgentLifecycleState.DONE
+    assert determine_lifecycle_probe_result("0|bash|123", True, "claude", ps_output).state == AgentLifecycleState.DONE
 
 
 def test_lifecycle_done_when_shell_only() -> None:
-    assert determine_lifecycle_state("0|bash|123", True, "claude", "") == AgentLifecycleState.DONE
+    assert determine_lifecycle_probe_result("0|bash|123", True, "claude", "").state == AgentLifecycleState.DONE
 
 
 def test_lifecycle_replaced_when_unknown_command_and_pane_not_shell() -> None:
     """REPLACED when pane_current_command is unknown and pane PID's own process is not a shell."""
     ps_output = "123 1 python3\n"
-    assert determine_lifecycle_state("0|python3|123", True, "claude", ps_output) == AgentLifecycleState.REPLACED
+    assert (
+        determine_lifecycle_probe_result("0|python3|123", True, "claude", ps_output).state
+        == AgentLifecycleState.REPLACED
+    )
 
 
 def test_lifecycle_replaced_when_unknown_command_and_pane_pid_not_in_ps() -> None:
     """REPLACED when pane_current_command is unknown and pane PID is not found in ps."""
-    assert determine_lifecycle_state("0|python3|123", True, "claude", "") == AgentLifecycleState.REPLACED
+    assert determine_lifecycle_probe_result("0|python3|123", True, "claude", "").state == AgentLifecycleState.REPLACED
 
 
 def test_lifecycle_done_when_modified_process_title_and_pane_is_shell() -> None:
@@ -147,13 +152,15 @@ def test_lifecycle_done_when_modified_process_title_and_pane_is_shell() -> None:
     from ps ("bash") is the authoritative source.
     """
     ps_output = "123 1 bash\n"
-    assert determine_lifecycle_state("0|2.1.73|123", False, "claude", ps_output) == AgentLifecycleState.DONE
+    assert (
+        determine_lifecycle_probe_result("0|2.1.73|123", False, "claude", ps_output).state == AgentLifecycleState.DONE
+    )
 
 
 def test_lifecycle_running_unknown_when_non_shell_descendant_and_unknown_type() -> None:
     ps_output = "200 123 python3\n"
     assert (
-        determine_lifecycle_state("0|bash|123", True, "claude", ps_output, is_agent_type_known=False)
+        determine_lifecycle_probe_result("0|bash|123", True, "claude", ps_output, is_agent_type_known=False).state
         == AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE
     )
 
@@ -161,14 +168,14 @@ def test_lifecycle_running_unknown_when_non_shell_descendant_and_unknown_type() 
 def test_lifecycle_running_unknown_when_pane_not_shell_and_unknown_type() -> None:
     ps_output = "123 1 python3\n"
     assert (
-        determine_lifecycle_state("0|python3|123", True, "claude", ps_output, is_agent_type_known=False)
+        determine_lifecycle_probe_result("0|python3|123", True, "claude", ps_output, is_agent_type_known=False).state
         == AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE
     )
 
 
 def test_lifecycle_running_unknown_when_pane_pid_not_in_ps_and_unknown_type() -> None:
     assert (
-        determine_lifecycle_state("0|python3|123", True, "claude", "", is_agent_type_known=False)
+        determine_lifecycle_probe_result("0|python3|123", True, "claude", "", is_agent_type_known=False).state
         == AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE
     )
 
@@ -179,7 +186,7 @@ def test_lifecycle_replaced_when_non_shell_foreground_and_known_type() -> None:
     a shell prompt, which is DONE (see the test above)."""
     ps_output = "123 1 python3\n"
     assert (
-        determine_lifecycle_state("0|python3|123", True, "claude", ps_output, is_agent_type_known=True)
+        determine_lifecycle_probe_result("0|python3|123", True, "claude", ps_output, is_agent_type_known=True).state
         == AgentLifecycleState.REPLACED
     )
 
@@ -199,7 +206,7 @@ def test_lifecycle_replaced_when_non_shell_foreground_child_and_known_type() -> 
     """
     ps_output = "123 1 bash\n200 123 sleep\n"
     assert (
-        determine_lifecycle_state("0|sleep|123", True, "claude", ps_output, is_agent_type_known=True)
+        determine_lifecycle_probe_result("0|sleep|123", True, "claude", ps_output, is_agent_type_known=True).state
         == AgentLifecycleState.REPLACED
     )
 
@@ -207,7 +214,7 @@ def test_lifecycle_replaced_when_non_shell_foreground_child_and_known_type() -> 
 def test_lifecycle_done_when_shell_and_unknown_type() -> None:
     """Unknown type does not affect DONE state (shell in pane means agent exited)."""
     assert (
-        determine_lifecycle_state("0|bash|123", True, "claude", "", is_agent_type_known=False)
+        determine_lifecycle_probe_result("0|bash|123", True, "claude", "", is_agent_type_known=False).state
         == AgentLifecycleState.DONE
     )
 
@@ -215,7 +222,59 @@ def test_lifecycle_done_when_shell_and_unknown_type() -> None:
 def test_lifecycle_waiting_when_modified_title_and_expected_in_descendants() -> None:
     """WAITING when tmux reports version string but claude is running as descendant."""
     ps_output = "123 1 bash\n456 123 claude\n"
-    assert determine_lifecycle_state("0|2.1.73|123", False, "claude", ps_output) == AgentLifecycleState.WAITING
+    assert (
+        determine_lifecycle_probe_result("0|2.1.73|123", False, "claude", ps_output).state
+        == AgentLifecycleState.WAITING
+    )
+
+
+# =========================================================================
+# determine_lifecycle_probe_result pid tests
+# =========================================================================
+
+
+def test_pid_is_claude_descendant_when_running() -> None:
+    """The returned PID is the descendant whose comm matches the expected process."""
+    ps_output = "100 1 init\n200 123 bash\n300 200 claude\n"
+    probe = determine_lifecycle_probe_result("0|bash|123", True, "claude", ps_output)
+    assert probe.state == AgentLifecycleState.RUNNING
+    assert probe.pid == 300
+
+
+def test_pid_is_pane_pid_when_process_runs_directly_in_pane() -> None:
+    """When claude is the pane's own top process (not under a shell), its PID is the pane PID."""
+    ps_output = "123 1 claude\n"
+    probe = determine_lifecycle_probe_result("0|claude|123", True, "claude", ps_output)
+    assert probe.state == AgentLifecycleState.RUNNING
+    assert probe.pid == 123
+
+
+def test_pid_found_when_title_modified_and_claude_is_descendant() -> None:
+    """A modified tmux title still yields the claude PID from the ps tree (WAITING here)."""
+    ps_output = "123 1 bash\n456 123 claude\n"
+    probe = determine_lifecycle_probe_result("0|2.1.73|123", False, "claude", ps_output)
+    assert probe.state == AgentLifecycleState.WAITING
+    assert probe.pid == 456
+
+
+def test_pid_none_when_stopped() -> None:
+    probe = determine_lifecycle_probe_result(None, False, "claude", "")
+    assert probe.state == AgentLifecycleState.STOPPED
+    assert probe.pid is None
+
+
+def test_pid_none_when_done() -> None:
+    probe = determine_lifecycle_probe_result("1|bash|123", False, "claude", "")
+    assert probe.state == AgentLifecycleState.DONE
+    assert probe.pid is None
+
+
+def test_pid_none_when_replaced() -> None:
+    """A non-shell foreground is REPLACED and carries no main PID."""
+    ps_output = "123 1 python3\n"
+    probe = determine_lifecycle_probe_result("0|python3|123", True, "claude", ps_output)
+    assert probe.state == AgentLifecycleState.REPLACED
+    assert probe.pid is None
 
 
 # =========================================================================

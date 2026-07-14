@@ -1,0 +1,3 @@
+Fixed the tutorial e2e create tests so `mngr list --format json` no longer exits non-zero in a bare test environment: the isolated e2e profile now disables the credential-requiring cloud providers (aws, gcp, azure, vultr, ovh, imbue_cloud), which register default-enabled instances in the monorepo venv and would otherwise fail provider discovery with a "not available" error. Modal and Docker remain enabled.
+
+Also removed a spurious `@pytest.mark.rsync` from `test_create_default`: a bare worktree `mngr create` on a clean working tree copies no untracked/gitignored files, so rsync is never invoked and the resource guard's NEVER_INVOKED check would fail the test.

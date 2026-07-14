@@ -1,0 +1,1 @@
+Gave the `test_plugin_add_by_path` e2e tutorial test a 60s timeout, matching the other subprocess-driven plugin e2e tests. Each `mngr` invocation pays a ~10s cold-start cost that alone exceeds the 10s default per-test timeout, so the test was timing out rather than exercising the `mngr plugin add --path` behavior it verifies.

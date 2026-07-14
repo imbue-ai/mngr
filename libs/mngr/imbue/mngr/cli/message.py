@@ -291,7 +291,17 @@ message is sent to the agent's stdin.
 If no message is specified with --message or --message-file, reads from stdin
 (if not a tty) or opens an editor (if interactive).
 
-Use '-' in place of agent names to read them from stdin, one per line.""",
+Use '-' in place of agent names to read them from stdin, one per line.
+
+Delivery guarantee: for interactive TUI agents (claude, codex, antigravity)
+the command succeeds only after durable evidence shows the agent accepted the
+message (for claude, the message's own content appearing in its transcript;
+for codex/antigravity, their turn marker advancing). If no evidence appears
+within the confirmation window -- with the Enter keystroke re-sent a bounded
+number of times along the way -- the command fails with diagnostics instead of
+silently dropping the message. Messages starting with '/' (TUI slash commands
+such as /clear) are best-effort: they succeed even when no evidence is
+observable, logging a warning and an agent event instead.""",
     aliases=("msg",),
     examples=(
         ("Send a message to an agent", 'mngr message my-agent --message "Hello"'),

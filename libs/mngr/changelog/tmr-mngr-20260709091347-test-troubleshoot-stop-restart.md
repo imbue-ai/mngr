@@ -1,0 +1,1 @@
+Removed a superfluous `@pytest.mark.rsync` mark from the `test_troubleshoot_stop_restart` e2e tutorial test. The test exercises a local `command` agent, whose create/stop/start path uses git-worktree transfer and tmux, never rsync, so the resource guard correctly flagged the mark as never invoked.

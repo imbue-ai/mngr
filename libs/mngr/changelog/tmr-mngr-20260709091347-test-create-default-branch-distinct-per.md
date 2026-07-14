@@ -1,0 +1,1 @@
+Removed an incorrect `@pytest.mark.rsync` mark from the release test `test_create_default_branch_distinct_per_agent`. The test creates local agents from a clean git repo, which uses the git-worktree transfer (never rsync), so the resource guard failed the test for declaring a resource it never invoked.

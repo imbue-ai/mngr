@@ -34,11 +34,14 @@
 # may open a fresh rollout), so it is re-captured at each fresh root turn too.
 #
 # Submit signal: after the marker is set, this hook fires the
-# `mngr-submit-<tmux session>` tmux wait-for channel that CodexAgent.send_message
-# blocks on. Signalling AFTER the recompute means a caller that wakes on it always
-# observes the agent as RUNNING, closing the race between submit and the lifecycle
-# flip. Channel prefix is kept in sync with codex_config.py's
-# SUBMIT_WAIT_CHANNEL_PREFIX (a test pins this).
+# `mngr-submit-<tmux session>` tmux wait-for channel. FIXME: remove the signal
+#  once released senders no longer wait on it. Current mngr confirms sends by
+#  polling the `active` marker itself (see CodexAgent's submission-evidence
+#  probes) and never listens on the channel -- tmux latches a signal fired with
+#  no waiter, which is exactly why the channel stopped being trusted. The
+#  signal is kept ONLY so older mngr versions messaging a newly created agent
+#  still confirm submissions. Channel prefix is kept in sync with
+#  codex_config.py's SUBMIT_WAIT_CHANNEL_PREFIX (a test pins this).
 #
 # Marker / root / transcript-path file names are kept in sync with
 # codex_config.py via the sourced helper. Never writes stdout (codex treats
