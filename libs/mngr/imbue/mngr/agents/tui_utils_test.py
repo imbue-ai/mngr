@@ -285,6 +285,26 @@ def test_submit_and_confirm_returns_unconfirmed_outcome_on_timeout() -> None:
     assert outcome.probe_diagnostics == ("marker base=[] final=[]",)
 
 
+@pytest.mark.allow_warnings
+def test_submit_and_confirm_surfaces_abnormal_script_abort_in_diagnostics() -> None:
+    """A script that dies without printing its own timeout marker is not a normal timeout.
+
+    stdout carries neither MNGR_CONFIRMED nor MNGR_UNCONFIRMED, so the script
+    aborted abnormally (e.g. a broken probe command crashed bash); the outcome
+    must stay unconfirmed AND carry the script's stderr so the real error
+    reaches the strict-failure diagnostics instead of being discarded.
+    """
+    agent = _make_probe_agent(
+        CommandResult(stdout="", stderr="bash: syntax error near unexpected token", success=False)
+    )
+    outcome = submit_message_and_confirm(
+        agent=agent, tmux_target=_FAKE_TARGET, message="hello", probes=_make_probes(), timeout_seconds=5.0
+    )
+    assert outcome.is_confirmed is False
+    assert any("aborted abnormally" in diagnostic for diagnostic in outcome.probe_diagnostics)
+    assert any("syntax error" in diagnostic for diagnostic in outcome.probe_diagnostics)
+
+
 def test_submit_and_confirm_raises_when_enter_cannot_be_sent() -> None:
     agent = _make_probe_agent(CommandResult(stdout="MNGR_ENTER_FAILED\n", stderr="no such session", success=False))
     with pytest.raises(SendMessageError, match="tmux send-keys Enter failed"):

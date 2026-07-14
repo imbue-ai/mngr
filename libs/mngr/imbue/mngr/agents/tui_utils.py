@@ -478,6 +478,20 @@ def submit_message_and_confirm(
     outcome = _parse_confirmation_output(result.stdout)
     if outcome.is_confirmed:
         logger.debug("Message submitted successfully (confirmed by {})", outcome.confirming_probe_name)
+        return outcome
+    if _TIMEOUT_MARKER not in result.stdout:
+        # The script printed neither a confirmation nor its own timeout marker,
+        # so it aborted abnormally (e.g. a broken probe command crashed bash)
+        # rather than polling out its window. Surface the crash instead of
+        # letting it masquerade as an ordinary evidence timeout.
+        abort_diagnostic = f"confirmation script aborted abnormally before its deadline; stderr: {result.stderr!r}"
+        logger.warning("Confirmation script for agent {} aborted abnormally: {}", agent.name, result.stderr)
+        outcome = SubmissionConfirmationOutcome(
+            is_confirmed=False,
+            confirming_probe_name=None,
+            enter_retry_offsets=outcome.enter_retry_offsets,
+            probe_diagnostics=(*outcome.probe_diagnostics, abort_diagnostic),
+        )
     return outcome
 
 
