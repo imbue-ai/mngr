@@ -724,63 +724,41 @@ def render_auth_error_page(message: str) -> str:
 
 
 @pure
-def render_inbox_page(
-    cards: Sequence[Mapping[str, str]],
+def render_workspace_connections(
+    agent_id: str,
+    ws_name: str,
+    pending_requests: Sequence[Mapping[str, str]] | None = None,
     selected_id: str = "",
-    detail_html: str = "",
-    is_empty: bool = False,
-    auto_open: bool = True,
-    keep_open: bool = False,
+    services_overview: Sequence[object] | None = None,
+    file_sharing_grants: Sequence[object] | None = None,
+    workspace_delegation_grants: Sequence[object] | None = None,
+    permissions_unavailable: bool = False,
 ) -> str:
-    """Render the full inbox modal page served by ``GET /inbox``.
+    """Render a workspace's Connections view (``GET /workspace/<id>/connections``).
 
-    ``cards`` is the initial left-list content (most-recent-first).
-    ``selected_id`` highlights one card; ``detail_html`` is the
-    pre-rendered right-pane fragment (handler detail, unavailable
-    fragment, or empty). ``is_empty`` is True when there are no
-    pending requests and the layout collapses to a centered message.
-    ``auto_open`` is the initial state of the "Auto-open on new
-    request" checkbox in the inbox header. ``keep_open`` is True only
-    when the user intentionally opened the whole inbox (via the
-    Requests button); when False, resolving a request via Approve/Deny
-    dismisses the whole window instead of advancing to the next
-    pending request.
+    ``pending_requests`` is a sequence of dicts with keys ``id``,
+    ``kind_label``, ``display_name``, and ``detail_html`` (the pre-rendered
+    permission-request fragment, complete with its Approve/Deny form), one per
+    pending request belonging to this workspace, most-recent-first.
+    ``selected_id`` highlights (and scrolls to) one of them.
+
+    ``services_overview`` / ``file_sharing_grants`` /
+    ``workspace_delegation_grants`` are the permission-overview models
+    (see :mod:`~imbue.minds.desktop_client.latchkey.permission_overview`)
+    already filtered to this workspace. ``permissions_unavailable`` is True
+    when the latchkey gateway could not be reached to read grants.
     """
     return CATALOG.render(
-        "pages.Inbox",
-        cards=cards,
+        "pages.WorkspaceConnections",
+        agent_id=agent_id,
+        ws_name=ws_name,
+        pending_requests=list(pending_requests or []),
         selected_id=selected_id,
-        detail_html=detail_html,
-        is_empty=is_empty,
-        auto_open=auto_open,
-        keep_open=keep_open,
+        services_overview=list(services_overview or []),
+        file_sharing_grants=list(file_sharing_grants or []),
+        workspace_delegation_grants=list(workspace_delegation_grants or []),
+        permissions_unavailable=permissions_unavailable,
     )
-
-
-@pure
-def render_inbox_list_fragment(
-    cards: Sequence[Mapping[str, str]],
-    selected_id: str = "",
-) -> str:
-    """Render the inbox left-list fragment served by ``GET /inbox/list``."""
-    return CATALOG.render("InboxList", cards=cards, selected_id=selected_id)
-
-
-@pure
-def render_inbox_unavailable_fragment(message: str = "") -> str:
-    """Render the inbox right-pane "no longer available" fragment.
-
-    Returned by ``GET /inbox/detail/<id>`` when the id is unknown or
-    already resolved; also innerHTML-swapped into the right pane by the
-    inbox shell JS when an SSE event resolves the currently-selected
-    item.
-
-    ``message`` is an optional supporting sentence rendered under the
-    fragment's heading. When empty (the default), only the heading is
-    shown, so callers that drop the supporting sentence don't end up
-    duplicating the heading.
-    """
-    return CATALOG.render("InboxUnavailable", message=message)
 
 
 # CSS for the recovery page's restart controls, appended to the shared

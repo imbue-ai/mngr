@@ -1,0 +1,172 @@
+{#def agent_id, ws_name, pending_requests=[], selected_id="", services_overview=[], file_sharing_grants=[], workspace_delegation_grants=[], permissions_unavailable=False #}
+{#
+  Per-workspace Connections view, opened from the titlebar's Connections
+  icon-tab (and by permission-request OS notifications / deep links, which
+  pass ``?selected=<request id>``).
+
+  Two halves:
+
+  "Waiting on you" -- this workspace's pending permission requests, each
+  rendered as a card holding its full detail fragment (the same latchkey
+  fragments the request handlers produce, complete with the Approve/Deny
+  form). Because several fragments can be on the page at once and they carry
+  fixed element ids, all interactivity in /_static/workspace_connections.js
+  is scoped per-card, and the fragments' inline handlers pass ``this`` so the
+  shared globals can find their enclosing card. ``selected_id`` highlights
+  and scrolls to one card.
+
+  The granted sections -- Connectors, File sharing, and Workspace delegation
+  held by THIS workspace (the overview models are filtered by the route),
+  with the same revoke flows the old app-level settings page had. Grants are
+  stored per host and every agent on the host shares them; revoking removes
+  the rule only, stored credentials stay put.
+#}
+{% set _head %}
+<style>
+  /* Deep-link highlight (?selected=<id>): an accent ring around the target
+     request card, cleared by workspace_connections.js on first interaction. */
+  .connections-request.is-selected { outline: 2px solid var(--c-accent); outline-offset: 2px; }
+  /* A deny POST is fire-and-forget; the card stays until the SSE-driven
+     reload drops it. Fade + freeze it so it can't be re-actioned meanwhile. */
+  .connections-request.is-denying { opacity: 0.6; pointer-events: none; }
+</style>
+{% endset %}
+{% set _scripts %}
+<script src="/_static/workspace_connections.js" defer></script>
+{% endset %}
+{% set _body_attrs %}data-agent-id="{{ agent_id }}"{% endset %}
+<Base title="Connections" head={{ _head }} body_attrs={{ _body_attrs }} scripts={{ _scripts }}>
+  <PageContainer>
+    <h1 class="type-heading-lg text-primary mb-2">Connections</h1>
+    <p class="type-body text-secondary mb-8">
+      Bring your tools and data into <span class="font-semibold">{{ ws_name or agent_id }}</span>.
+      The agent can read from and act on anything you connect &mdash; and it always asks before
+      reaching something new.
+    </p>
+
+    {# -- Pending permission requests -- #}
+    {% if pending_requests %}
+      <section class="mb-10" data-connections-pending>
+        <h2 class="type-section text-tertiary mb-3">Waiting on you</h2>
+        <div class="flex flex-col gap-3">
+          {% for req in pending_requests %}
+            <div class="minds-card p-5 connections-request {% if req.id == selected_id %}is-selected{% endif %}"
+                 id="request-{{ req.id }}"
+                 data-request-id="{{ req.id }}">
+              {{ req.detail_html|safe }}
+            </div>
+          {% endfor %}
+        </div>
+      </section>
+    {% endif %}
+
+    {# -- Connectors held by this workspace -- #}
+    <section class="mb-10">
+      <h2 class="type-section text-tertiary mb-3">Connected</h2>
+      {% if permissions_unavailable %}
+        <Notice variant="warn">
+          Connections can't be loaded right now.
+          Try again in a moment.
+        </Notice>
+      {% elif services_overview %}
+        <div class="flex flex-col gap-6">
+          {% for service in services_overview %}
+            <div data-service-name="{{ service.service_name }}" data-service-label="{{ service.display_name }}">
+              {% for grant in service.workspace_grants %}
+                <div class="minds-card p-4 flex flex-col gap-3"
+                     data-workspace-agent-id="{{ grant.workspace_agent_id }}"
+                     data-workspace-name="{{ grant.workspace_name }}">
+                  <div class="flex items-center justify-between gap-3">
+                    <span class="type-body font-semibold text-primary">{{ service.display_name }}</span>
+                    <Button variant="secondary" size="md" class="revoke-btn">Revoke</Button>
+                  </div>
+                  <div>
+                    <p class="type-helper text-tertiary mb-1">Allowed</p>
+                    <div class="flex flex-wrap gap-1">
+                      {% for perm in grant.permissions %}
+                        <code class="code-pill"{% if perm.description %} data-tooltip="{{ perm.description }}"{% endif %}>{{ perm.label }}</code>
+                      {% endfor %}
+                    </div>
+                  </div>
+                </div>
+              {% endfor %}
+            </div>
+          {% endfor %}
+        </div>
+      {% else %}
+        <Notice variant="info">No connectors have been added yet. To connect a new service, just ask the agent in this workspace to use it.</Notice>
+      {% endif %}
+    </section>
+
+    {# -- File sharing held by this workspace -- #}
+    {% if file_sharing_grants %}
+      <section class="mb-10">
+        <h2 class="type-section text-tertiary mb-3">File sharing</h2>
+        <p class="type-body text-secondary mb-3">
+          Files and folders on this machine the workspace's agents can read or write.
+          Revoking removes access; agents can ask again later.
+        </p>
+        <div class="flex flex-col gap-3">
+          {% for grant in file_sharing_grants %}
+            <div class="minds-card p-4 flex flex-col gap-3"
+                 data-workspace-agent-id="{{ grant.workspace_agent_id }}"
+                 data-workspace-name="{{ grant.workspace_name }}">
+              <div class="flex items-center justify-between gap-3">
+                <p class="type-helper text-tertiary">Allowed</p>
+                <Button variant="secondary" size="md" class="revoke-fs-btn">Revoke</Button>
+              </div>
+              <div class="flex flex-col gap-1">
+                {% for shared in grant.paths %}
+                  <div class="flex items-center justify-between gap-3">
+                    <code class="code-pill truncate min-w-0" data-tooltip="{{ shared.path }}">{{ shared.path }}</code>
+                    <span class="type-helper text-secondary shrink-0">{{ shared.access_label }}</span>
+                  </div>
+                {% endfor %}
+              </div>
+            </div>
+          {% endfor %}
+        </div>
+      </section>
+    {% endif %}
+
+    {# -- Workspace delegation held by this workspace -- #}
+    {% if workspace_delegation_grants %}
+      <section class="mb-10">
+        <h2 class="type-section text-tertiary mb-3">Workspace delegation</h2>
+        <p class="type-body text-secondary mb-3">
+          Access this workspace's agents hold to manage other workspaces (listing, creating,
+          destroying, SSH, health checks, and more). Revoking removes it; agents can ask again later.
+        </p>
+        <div class="flex flex-col gap-6">
+          {% for grant in workspace_delegation_grants %}
+            <div data-workspace-agent-id="{{ grant.workspace_agent_id }}" data-workspace-name="{{ grant.workspace_name }}">
+              <div class="flex flex-col">
+                {% for verb in grant.verbs %}
+                  <div class="flex items-center justify-between gap-3 py-1.5 border-b border-subtle"
+                       data-verb-permission="{{ verb.verb_permission }}" data-verb-label="{{ verb.label }}">
+                    <div class="flex items-center gap-2 min-w-0 flex-wrap">
+                      <code class="code-pill" data-tooltip="{{ verb.description }}">{{ verb.label }}</code>
+                      <span class="type-helper text-tertiary">on:</span>
+                      <span class="type-body text-secondary truncate">{{ "All workspaces" if verb.is_all_workspaces else verb.target_names | join(", ") }}</span>
+                    </div>
+                    <Button variant="ghost" size="md" class="revoke-verb-btn shrink-0">Revoke</Button>
+                  </div>
+                {% endfor %}
+              </div>
+            </div>
+          {% endfor %}
+        </div>
+      </section>
+    {% endif %}
+  </PageContainer>
+
+  <Modal id="revoke-dialog" card_extra="text-left">
+    <h2 id="revoke-dialog-title" class="type-heading text-primary mb-3">Revoke access?</h2>
+    <p id="revoke-dialog-body" class="type-body text-primary mb-4"></p>
+    <p id="revoke-error" class="hidden type-body text-important mb-3" role="alert"></p>
+    <div class="flex justify-end gap-3">
+      <Button variant="secondary" id="revoke-cancel-btn">Cancel</Button>
+      <Button variant="danger" id="revoke-confirm-btn">Revoke</Button>
+    </div>
+  </Modal>
+</Base>

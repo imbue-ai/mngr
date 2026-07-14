@@ -188,27 +188,3 @@ class MindsConfig(MutableModel):
         """Set whether log/traceback attachments are included with error reports."""
         self._set_bool("include_error_logs", enabled)
 
-    def get_auto_open_requests_panel(self) -> bool:
-        """Return whether the inbox should auto-open on new pending requests. Default: True.
-
-        Setting key kept as ``auto_open_requests_panel`` for backward
-        compatibility with existing on-disk configs; "panel" now refers
-        to the inbox modal (the old side panel has been removed).
-        """
-        with self._lock:
-            data = self._read_raw()
-            value = data.get("auto_open_requests_panel")
-            if isinstance(value, bool):
-                return value
-            return True
-
-    def set_auto_open_requests_panel(self, enabled: bool) -> None:
-        """Set whether the inbox should auto-open on new pending requests.
-
-        Setting key kept as ``auto_open_requests_panel`` for backward
-        compatibility; "panel" now refers to the inbox modal.
-        """
-        with self._lock:
-            data = self._read_raw()
-            data["auto_open_requests_panel"] = enabled
-            self._write_raw(data)

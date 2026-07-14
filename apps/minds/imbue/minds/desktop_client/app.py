@@ -113,9 +113,6 @@ from imbue.minds.desktop_client.templates import render_creating_page
 from imbue.minds.desktop_client.templates import render_destroying_page
 from imbue.minds.desktop_client.templates import render_dev_styleguide_page
 from imbue.minds.desktop_client.templates import render_help_page
-from imbue.minds.desktop_client.templates import render_inbox_list_fragment
-from imbue.minds.desktop_client.templates import render_inbox_page
-from imbue.minds.desktop_client.templates import render_inbox_unavailable_fragment
 from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
@@ -126,12 +123,12 @@ from imbue.minds.desktop_client.templates import render_settings_page
 from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_welcome_page
+from imbue.minds.desktop_client.templates import render_workspace_connections
 from imbue.minds.desktop_client.templates import render_workspace_settings
 from imbue.minds.desktop_client.webdav import create_webdav_app
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import pick_unused_create_color
 from imbue.minds.desktop_client.workspace_create import default_region_for_provider_with_config
-from imbue.minds.errors import InvalidJsonBodyError
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
@@ -184,27 +181,6 @@ def _discovery_health_payload(health: DiscoveryHealth) -> dict[str, str]:
     """Build a ``discovery_health`` SSE payload for the app-global pipeline state."""
     return {"type": "discovery_health", "state": health.value}
 
-
-# -- Request-body + dependency helpers --
-
-
-def _read_json_body() -> Any:
-    """Parse the request body as JSON, raising ``ValueError`` on missing/invalid input.
-
-    Mirrors the FastAPI ``await request.json()`` contract closely enough that
-    the existing ``except (json.JSONDecodeError, ValueError)`` handlers around
-    the call sites keep working: Flask's ``get_json(silent=True)`` returns
-    ``None`` on a malformed body, which we turn into a ``ValueError``.
-
-    ``force=True`` parses the body regardless of the request's ``Content-Type``
-    so a client that POSTs JSON without an ``application/json`` header is still
-    accepted -- matching the FastAPI ``request.json()`` behavior (which ignored
-    the content type) and avoiding a wire-behavior regression for API callers.
-    """
-    data = request.get_json(silent=True, force=True)
-    if data is None:
-        raise InvalidJsonBodyError("Invalid or empty JSON body")
-    return data
 
 
 def _get_mngr_forward_origin() -> str:
@@ -1208,14 +1184,7 @@ def _handle_chrome_events() -> Response:
             yield "data: {}\n\n".format(json.dumps({"type": "providers_state", **last_providers_data}))
             inbox: RequestInbox | None = get_state().request_inbox
             last_requests_payload = _build_requests_payload(inbox, backend_resolver)
-            # ``auto_open`` is bundled with the requests payload (rather than
-            # its own SSE event) so the Electron shell sees both atomically
-            # when deciding whether to auto-open the panel.
-            minds_config: MindsConfig | None = get_state().minds_config
-            auto_open = minds_config.get_auto_open_requests_panel() if minds_config else True
-            yield "data: {}\n\n".format(
-                json.dumps({"type": "requests", **last_requests_payload, "auto_open": auto_open})
-            )
+            yield "data: {}\n\n".format(json.dumps({"type": "requests", **last_requests_payload}))
 
             # Agents for which a STUCK redirect has already been emitted on this
             # connection, so a steadily-STUCK workspace is redirected exactly once
@@ -1365,13 +1334,10 @@ def _handle_chrome_events() -> Response:
                 current_requests_payload = _build_requests_payload(inbox, backend_resolver)
                 # Diff the full payload (count + ordered pending ids), not just
                 # the count, so a change to the pending *set* at constant size
-                # still pushes an update and the panel refreshes.
+                # still pushes an update and the consumers refresh.
                 if current_requests_payload != last_requests_payload:
                     last_requests_payload = current_requests_payload
-                    auto_open = minds_config.get_auto_open_requests_panel() if minds_config else True
-                    yield "data: {}\n\n".format(
-                        json.dumps({"type": "requests", **current_requests_payload, "auto_open": auto_open})
-                    )
+                    yield "data: {}\n\n".format(json.dumps({"type": "requests", **current_requests_payload}))
         finally:
             help_broker.unsubscribe(open_help_queue, change_event)
             if isinstance(backend_resolver, MngrCliBackendResolver):
@@ -1601,10 +1567,16 @@ def _build_requests_payload(
     Requests whose host can't be resolved are excluded (see
     :func:`_displayable_pending_requests`) so the badge count and the
     rendered cards stay in agreement.
+
+    ``requests`` carries one entry per pending request with its owning
+    workspace's primary agent id (see :func:`_pending_request_entries`), so
+    the titlebar can scope the Connections badge to the breadcrumb's
+    workspace and the Electron shell can attribute a new request's OS
+    notification to the right workspace.
     """
-    pending = _displayable_pending_requests(inbox, backend_resolver)
-    request_ids = [str(req.event_id) for req in pending]
-    return {"count": len(request_ids), "request_ids": request_ids}
+    entries = _pending_request_entries(inbox, backend_resolver)
+    request_ids = [entry["id"] for entry in entries]
+    return {"count": len(request_ids), "request_ids": request_ids, "requests": entries}
 
 
 # -- System-interface recovery page --
@@ -2091,34 +2063,32 @@ def _handle_workspace_settings(
 # -- Inbox routes --
 
 
-def _build_inbox_cards() -> list[Mapping[str, str]]:
-    """Build the inbox card dicts for the current pending requests.
+def _pending_request_entries(
+    inbox: RequestInbox | None,
+    backend_resolver: BackendResolverInterface,
+) -> list[dict[str, str]]:
+    """Describe every displayable pending request with its owning workspace.
 
-    Each card carries the fields the InboxList JinjaX component reads:
-    ``id``, ``kind_label``, ``ws_name``, ``display_name``, ``accent``.
-    Order matches ``RequestInbox.get_pending_requests`` --
-    most-recent-first.
+    Each entry carries ``id``, ``kind_label``, ``display_name``, ``ws_name``,
+    and ``workspace_agent_id`` -- the workspace's PRIMARY (homepage) agent id,
+    which is what the titlebar badge, the Connections deep link, and the OS
+    notification click-through all key on. Each minds workspace owns two
+    sibling mngr agents -- a user-facing claude agent + a ``system-services``
+    agent -- and latchkey permission requests are filed by ``system-services``,
+    so ``req.agent_id`` is the sibling-not-shown-on-homepage; the primary id is
+    resolved through the shared workspace name. ``workspace_agent_id`` is empty
+    when no discovered agent claims that workspace yet (e.g. a freshly-arrived
+    request whose host hasn't been re-discovered). Order matches
+    ``RequestInbox.get_pending_requests`` -- most-recent-first.
     """
-    inbox: RequestInbox | None = get_state().request_inbox
-    backend_resolver: BackendResolverInterface = get_state().backend_resolver
     pending = _displayable_pending_requests(inbox, backend_resolver)
     handlers: tuple[RequestEventHandler, ...] = get_state().request_event_handlers
-    # Map ws_name -> "homepage agent id" so the card accent matches the
-    # color the homepage tile and the titlebar use for that workspace
-    # name. Each minds workspace owns two sibling mngr agents -- a
-    # user-facing claude agent + a ``system-services`` agent. Latchkey
-    # permission requests are filed by ``system-services``, so
-    # ``req.agent_id`` is the sibling-not-shown-on-homepage. Computing
-    # accent off the homepage agent's id keeps the inbox color in sync
-    # with the rest of the UI. Falls back to the default workspace color
-    # if no discovered agent claims that workspace (e.g. a freshly-arrived
-    # request whose host hasn't been re-discovered yet).
     primary_agent_id_by_ws_name: dict[str, str] = {}
     for aid in backend_resolver.list_known_workspace_ids():
         wn = backend_resolver.get_workspace_name(aid)
         if wn and wn not in primary_agent_id_by_ws_name:
             primary_agent_id_by_ws_name[wn] = str(aid)
-    cards: list[Mapping[str, str]] = []
+    entries: list[dict[str, str]] = []
     for req in pending:
         handler = find_handler_for_event(handlers, req)
         if handler is not None:
@@ -2127,8 +2097,8 @@ def _build_inbox_cards() -> list[Mapping[str, str]]:
         else:
             # Fall through: unknown request type. Should never happen in
             # practice -- a request without a registered handler can't be
-            # rendered or resolved -- but we still surface it in the
-            # inbox so the user sees something is wrong.
+            # rendered or resolved -- but we still surface it so the user
+            # sees something is wrong.
             kind_label = "request"
             display_name = ""
         parsed_id = AgentId(req.agent_id)
@@ -2136,179 +2106,121 @@ def _build_inbox_cards() -> list[Mapping[str, str]]:
         if not ws_name:
             info = backend_resolver.get_agent_display_info(parsed_id)
             ws_name = info.agent_name if info else req.agent_id[:16]
-        # Inbox card accent mirrors the homepage tile's accent for the
-        # workspace the request belongs to. ``primary_agent_id_by_ws_name``
-        # comes from the resolver's current snapshot, so the primary id
-        # is always a freshly-stringified AgentId -- reparsing through
-        # AgentId is safe.
-        primary_agent_id_str = primary_agent_id_by_ws_name.get(ws_name)
-        accent = (
-            _resolved_workspace_color(backend_resolver, AgentId(primary_agent_id_str))
-            if primary_agent_id_str is not None
-            else DEFAULT_WORKSPACE_COLOR
-        )
-        cards.append(
+        entries.append(
             {
                 "id": str(req.event_id),
                 "kind_label": kind_label,
                 "ws_name": ws_name,
                 "display_name": display_name,
-                "accent": accent,
+                "workspace_agent_id": primary_agent_id_by_ws_name.get(ws_name, ""),
             }
         )
-    return cards
+    return entries
 
 
-def _resolve_inbox_selection(
-    selected_id: str,
-    backend_resolver: BackendResolverInterface,
-) -> tuple[str, str]:
-    """Resolve ``?selected=<id>`` to ``(selected_id, detail_html)``.
-
-    Returns the id that should be highlighted in the left list and the
-    HTML to embed in the right pane. Falls back to the first pending
-    request when ``selected_id`` is empty; returns an "unavailable"
-    fragment when the id is unknown or already resolved. ``selected_id``
-    is the empty string if the inbox is empty or no item could be
-    resolved.
-    """
-    inbox: RequestInbox | None = get_state().request_inbox
-    if inbox is None:
-        return "", ""
-    pending = _displayable_pending_requests(inbox, backend_resolver)
-    if not pending:
-        return "", ""
-
-    handlers: tuple[RequestEventHandler, ...] = get_state().request_event_handlers
-    # Only requests in the displayable set are selectable: a request whose
-    # host can't be resolved is hidden from the list, so honoring a stale
-    # ``selected_id`` that points at one would render the same
-    # agent-id-only detail we're hiding the card to avoid.
-    displayable_by_id = {str(req.event_id): req for req in pending}
-    target = None
-    if selected_id:
-        candidate = displayable_by_id.get(selected_id)
-        if candidate is not None and not inbox.is_request_resolved(selected_id):
-            target = candidate
-    if target is None and selected_id:
-        # Caller asked for a specific id but it can't be resolved: keep
-        # the master list on its server-rendered default ordering and
-        # surface the "no longer available" message in the right pane.
-        return "", render_inbox_unavailable_fragment(
-            message="It may have expired, or it was opened from an old link.",
-        )
-    if target is None:
-        target = pending[0]
-
-    handler = find_handler_for_event(handlers, target)
-    if handler is None:
-        return str(target.event_id), (f"<p>No handler registered for request type {target.request_type!r}</p>")
-    detail_html = handler.render_request_detail_fragment(
-        req_event=target,
-        backend_resolver=backend_resolver,
-        mngr_forward_origin=_get_mngr_forward_origin(),
-    )
-    return str(target.event_id), detail_html
-
-
-def _handle_inbox_page() -> Response:
-    """Render the full inbox modal page (``GET /inbox``)."""
-    if not _is_request_authenticated():
-        return make_html_response(content="<p>Not authenticated</p>")
-    backend_resolver = get_state().backend_resolver
-    cards = _build_inbox_cards()
-    selected_query = request.args.get("selected", "")
-    selected_id, detail_html = _resolve_inbox_selection(selected_query, backend_resolver)
-    minds_config: MindsConfig | None = get_state().minds_config
-    auto_open = minds_config.get_auto_open_requests_panel() if minds_config else True
-    # ``keep_open=1`` is set only when the user intentionally opens the whole
-    # inbox via the Requests button; without it (notification click, workspace
-    # relay, or auto-open on a new request), resolving a request dismisses the
-    # whole window rather than advancing to an unrelated stale request.
-    keep_open = request.args.get("keep_open") == "1"
-    return make_html_response(
-        content=render_inbox_page(
-            cards=cards,
-            selected_id=selected_id,
-            detail_html=detail_html,
-            is_empty=len(cards) == 0,
-            auto_open=auto_open,
-            keep_open=keep_open,
-        )
-    )
-
-
-def _handle_inbox_list_fragment() -> Response:
-    """Return the left-list fragment (``GET /inbox/list``)."""
-    if not _is_request_authenticated():
-        return make_html_response(content="<p>Not authenticated</p>")
-    cards = _build_inbox_cards()
-    return make_html_response(content=render_inbox_list_fragment(cards=cards, selected_id=""))
-
-
-def _handle_inbox_detail_fragment(
-    request_id: str,
+def _handle_workspace_connections(
+    agent_id: str,
 ) -> Response:
-    """Return the right-pane detail fragment (``GET /inbox/detail/{id}``).
+    """Render a workspace's Connections view (``GET /workspace/<agent_id>/connections``).
 
-    Resolved or unknown ids get the "no longer available" fragment with
-    HTTP 200 so the shell JS can innerHTML-swap it directly.
+    The per-workspace home for everything the workspace is connected to:
+    pending permission requests ("Waiting on you", each rendered with its full
+    Approve/Deny form) plus the connectors, shared local files, and workspace
+    delegation the workspace's host currently holds (with revoke actions).
+    ``agent_id`` is the workspace's primary (homepage) agent id; requests are
+    attributed to it through the shared workspace name because latchkey
+    requests are filed by the workspace's ``system-services`` sibling agent.
+
+    ``?selected=<request id>`` highlights (and scrolls to) one pending
+    request -- the OS notification and workspace deep links land here.
     """
     if not _is_request_authenticated():
-        return make_html_response(content="<p>Not authenticated</p>")
+        return make_response(status_code=403, content="Not authenticated")
     backend_resolver = get_state().backend_resolver
+    parsed_id = AgentId(agent_id)
+    ws_name = backend_resolver.get_workspace_name(parsed_id) or ""
+    if not ws_name:
+        info = backend_resolver.get_agent_display_info(parsed_id)
+        ws_name = info.agent_name if info else agent_id
+
     inbox: RequestInbox | None = get_state().request_inbox
-    if inbox is None:
-        # The InboxUnavailable heading reads "This permission request is no
-        # longer available", which makes no sense when the issue is that there
-        # is no inbox at all. Drop the supporting message so only the heading
-        # shows; the template treats an empty message as the no-extra-copy case.
-        return make_html_response(content=render_inbox_unavailable_fragment())
-    req_event = inbox.get_request_by_id(request_id)
-    if req_event is None:
-        return make_html_response(
-            content=render_inbox_unavailable_fragment(
-                message="It may have expired, or it was opened from an old link.",
-            ),
-        )
-    if inbox.is_request_resolved(request_id):
-        return make_html_response(
-            content=render_inbox_unavailable_fragment(message="It has already been processed."),
-        )
     handlers: tuple[RequestEventHandler, ...] = get_state().request_event_handlers
-    handler = find_handler_for_event(handlers, req_event)
-    if handler is None:
-        return make_html_response(
-            content=f"<p>No handler registered for request type {req_event.request_type!r}</p>",
-            status_code=500,
+    entries = _pending_request_entries(inbox, backend_resolver)
+    pending_by_id = {str(req.event_id): req for req in _displayable_pending_requests(inbox, backend_resolver)}
+    pending_requests: list[dict[str, str]] = []
+    for entry in entries:
+        if entry["workspace_agent_id"] != agent_id:
+            continue
+        req = pending_by_id.get(entry["id"])
+        if req is None:
+            continue
+        handler = find_handler_for_event(handlers, req)
+        if handler is None:
+            detail_html = f"<p>No handler registered for request type {req.request_type!r}</p>"
+        else:
+            detail_html = handler.render_request_detail_fragment(
+                req_event=req,
+                backend_resolver=backend_resolver,
+                mngr_forward_origin=_get_mngr_forward_origin(),
+            )
+        pending_requests.append(
+            {
+                "id": entry["id"],
+                "kind_label": entry["kind_label"],
+                "display_name": entry["display_name"],
+                "detail_html": detail_html,
+            }
         )
-    return make_html_response(
-        content=handler.render_request_detail_fragment(
-            req_event=req_event,
-            backend_resolver=backend_resolver,
-            mngr_forward_origin=_get_mngr_forward_origin(),
-        )
-    )
 
-
-def _handle_requests_auto_open() -> Response:
-    """Toggle the auto-open setting for the inbox modal.
-
-    The route URL and on-disk setting key keep ``requests-panel`` /
-    ``auto_open_requests_panel`` for backward compatibility (see
-    :class:`MindsConfig`); "panel" here now refers to the inbox modal.
-    """
-    if not _is_request_authenticated():
-        return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
-    minds_config: MindsConfig | None = get_state().minds_config
-    if minds_config:
+    services_overview: list[object] = []
+    file_sharing_grants: list[object] = []
+    workspace_delegation_grants: list[object] = []
+    permissions_unavailable = False
+    permission_handler = _find_predefined_permission_handler()
+    if permission_handler is not None:
         try:
-            body = _read_json_body()
-            enabled = body.get("enabled", True)
-            minds_config.set_auto_open_requests_panel(bool(enabled))
-        except (json.JSONDecodeError, ValueError):
-            pass
-    return make_response(status_code=200, content='{"ok": true}', media_type="application/json")
+            for service in build_permission_overview(
+                backend_resolver=backend_resolver,
+                gateway_client=permission_handler.gateway_client,
+                services_catalog=permission_handler.services_catalog,
+                latchkey=permission_handler.latchkey,
+            ):
+                grants = tuple(g for g in service.workspace_grants if g.workspace_agent_id == agent_id)
+                if grants:
+                    services_overview.append(service.model_copy(update={"workspace_grants": grants}))
+            file_sharing_grants = [
+                grant
+                for grant in build_file_sharing_overview(
+                    backend_resolver=backend_resolver,
+                    gateway_client=permission_handler.gateway_client,
+                    latchkey=permission_handler.latchkey,
+                )
+                if grant.workspace_agent_id == agent_id
+            ]
+            workspace_delegation_grants = [
+                grant
+                for grant in build_workspace_overview(
+                    backend_resolver=backend_resolver,
+                    gateway_client=permission_handler.gateway_client,
+                    latchkey=permission_handler.latchkey,
+                )
+                if grant.workspace_agent_id == agent_id
+            ]
+        except LatchkeyGatewayClientError as e:
+            logger.warning("Could not build permission overview for the connections page: {}", e)
+            permissions_unavailable = True
+
+    html = render_workspace_connections(
+        agent_id=agent_id,
+        ws_name=ws_name,
+        pending_requests=pending_requests,
+        selected_id=request.args.get("selected", ""),
+        services_overview=services_overview,
+        file_sharing_grants=file_sharing_grants,
+        workspace_delegation_grants=workspace_delegation_grants,
+        permissions_unavailable=permissions_unavailable,
+    )
+    return make_html_response(content=html)
 
 
 def _resolve_ws_name_and_account(
@@ -2665,11 +2577,9 @@ def create_desktop_client(
     # now go through PATCH /api/v1/workspaces/<id>).
     app.add_url_rule("/workspace/<agent_id>/settings", view_func=_handle_workspace_settings)
 
-    # Request inbox routes
-    app.add_url_rule("/inbox", view_func=_handle_inbox_page)
-    app.add_url_rule("/inbox/list", view_func=_handle_inbox_list_fragment)
-    app.add_url_rule("/inbox/detail/<request_id>", view_func=_handle_inbox_detail_fragment)
-    app.add_url_rule("/_chrome/requests-auto-open", view_func=_handle_requests_auto_open, methods=["POST"])
+    # Workspace connections page (pending permission requests + granted
+    # connectors) and the request grant/deny actions it drives.
+    app.add_url_rule("/workspace/<agent_id>/connections", view_func=_handle_workspace_connections)
     app.add_url_rule("/requests/<request_id>/grant", view_func=_handle_request_grant, methods=["POST"])
     app.add_url_rule("/requests/<request_id>/deny", view_func=_handle_request_deny, methods=["POST"])
 

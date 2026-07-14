@@ -564,11 +564,12 @@
   // The workspace (the cross-origin content iframe) can ask the shell to show
   // a permission request by posting `{type:'minds:open-request-modal',
   // requestId}` to `window.parent`. In Electron this is handled by the content
-  // view's relay preload + main process (which opens the inbox modal pre-
-  // selected on the target); in browser mode there is no overlay, so we
-  // navigate the content iframe to the inbox page instead. Only honour
-  // messages from the content iframe itself, and only well-formed server-
-  // issued ids (`evt-<uuid hex>`), so arbitrary pages cannot drive navigation.
+  // view's relay preload + main process (which lands on the owning
+  // workspace's Connections view); in browser mode we navigate the content
+  // iframe there directly, resolving the owning workspace from the latest SSE
+  // request entries. Only honour messages from the content iframe itself, and
+  // only well-formed server-issued ids (`evt-<uuid hex>`), so arbitrary pages
+  // cannot drive navigation.
   if (!isElectron) {
     window.addEventListener('message', function (e) {
       var frame = document.getElementById('content-frame');
@@ -578,7 +579,16 @@
       if (data.type === 'minds:open-request-modal') {
         var requestId = data.requestId;
         if (typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(requestId)) return;
-        navigateContent('/inbox?selected=' + encodeURIComponent(requestId));
+        var owning = null;
+        lastRequestEntries.forEach(function (entry) {
+          if (!owning && entry && String(entry.id) === requestId && entry.workspace_agent_id) {
+            owning = entry.workspace_agent_id;
+          }
+        });
+        // Fall back to the workspace currently displayed (the sender).
+        if (!owning) owning = currentTitleAgentId;
+        if (!owning) return;
+        navigateContent('/workspace/' + encodeURIComponent(owning) + '/connections?selected=' + encodeURIComponent(requestId));
         return;
       }
       // Error pages (e.g. the recovery page) ask to open the get-help / report-a-bug

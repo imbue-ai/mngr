@@ -1,10 +1,10 @@
 {#def agent_id, request_id, ws_name, rationale, display_name, scope, permission_schemas, description_by_permission_name, checked_permissions, wildcard_permission, wildcard_label, will_open_browser, mngr_forward_origin #}
 {#
-  Latchkey predefined permission request fragment. Rendered inside the
-  inbox modal's right pane. Provides the per-permission simple/editor
-  views and the auth-browser progress notice. Chrome (backdrop, close
-  button, escape/backdrop dismiss, form submission JS, Adjust toggle)
-  lives in the inbox shell and operates on these elements via the ids
+  Latchkey predefined permission request fragment. Rendered inside a
+  request card on the workspace Connections page. Provides the per-permission simple/editor
+  views and the auth-browser progress notice. Form submission JS and the
+  Adjust toggle live in the Connections shell, which scopes lookups to the
+  enclosing card (several fragments can be on the page at once) via the ids
   below (#permissions-form, #permissions-simple-view, etc.).
 #}
 <div class="permissions-detail">
@@ -43,7 +43,7 @@
              border separates it from the permission list above. #}
           <div class="flex justify-end border-t border-subtle pt-2">
             <Button variant="ghost" id="permissions-adjust-link"
-                    onclick="showPermissionEditor()"
+                    onclick="showPermissionEditor(this)"
                     extra="!p-0 !bg-transparent !type-helper !text-accent hover:!bg-transparent hover:underline">
               Adjust
             </Button>
@@ -56,7 +56,7 @@
         </Notice>
         <div class="flex justify-end mt-3">
           <Button variant="ghost" id="permissions-adjust-link"
-                  onclick="showPermissionEditor()"
+                  onclick="showPermissionEditor(this)"
                   extra="!p-0 !bg-transparent !type-helper !text-accent hover:!bg-transparent hover:underline">
             Adjust
           </Button>

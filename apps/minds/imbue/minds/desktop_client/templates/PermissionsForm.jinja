@@ -1,14 +1,16 @@
 {#def request_id #}
 {#
-  The form wrapper used inside an inbox detail fragment. Action
-  targets /requests/<request_id>/grant. The content slot is the form
+  The form wrapper used inside a permission-request detail fragment on
+  the workspace Connections page. Action targets /requests/<request_id>/grant. The content slot is the form
   body (the backend-specific input controls). Approve/Deny buttons
   live in this component; Approve starts disabled and is enabled by
-  the inbox shell's ``updateApproveState`` once any
+  the Connections shell's ``updateApproveState`` once any
   name="permissions" input is checked.
 
-  While an approval is in flight (a browser sign-in, a follow-up grant,
-  etc.), the inbox shell disables BOTH buttons and swaps the Approve
+  Several fragments can render on the page at once, so the shell scopes
+  all lookups to the enclosing request card and the Deny handler passes
+  ``this`` to locate it. While an approval is in flight (a browser sign-in,
+  a follow-up grant, etc.), the shell disables BOTH buttons and swaps the Approve
   label for a spinner + "Approving...", so the user always sees that
   work is happening in the background and cannot double-submit. The
   spinner and label are addressed by id (#permissions-approve-spinner /
@@ -21,7 +23,7 @@
   {{ content }}
 
   <div class="flex gap-2 mt-4 justify-end">
-    <Button id="permissions-deny-btn" variant="danger" onclick="submitPermissionDeny()">Deny</Button>
+    <Button id="permissions-deny-btn" variant="danger" onclick="submitPermissionDeny(this)">Deny</Button>
     <ButtonSubmit id="permissions-approve-btn" variant="success" disabled>
       <span id="permissions-approve-spinner" class="hidden"><Spinner size="sm" tone="inverse" /></span>
       <span id="permissions-approve-label">Approve</span>
