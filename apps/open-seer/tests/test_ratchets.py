@@ -5,7 +5,7 @@ from inline_snapshot import snapshot
 
 from imbue.imbue_common.ratchet_testing import standard_ratchet_checks as rc
 
-_DIR = Path(__file__).parent
+_DIR = Path(__file__).resolve().parents[1]
 
 pytestmark = pytest.mark.xdist_group(name="ratchets")
 
