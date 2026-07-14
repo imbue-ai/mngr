@@ -15,5 +15,3 @@
 - Added: a warning plus a structured agent event when the input box already contains text before a send (the new message is appended, as before).
 
 - Added: release-test harness journeys for message delivery (`run_message_delivery_journey`: idle -> busy/queued -> rapid sequential -> long buffer-pasted message -> slash command, each delivered exactly once) and concurrent delivery to two agents on one tmux server (`run_concurrent_message_delivery`).
-
-- Fixed: the gevent-hub accumulation unit test (`thread_cleanup_test.py`) no longer fails spuriously on loaded machines -- its repeated full-heap `gc.collect()` passes could exceed the suite-default 10s timeout, so it now carries its own 60s timeout and a flaky retry.

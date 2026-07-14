@@ -29,11 +29,13 @@ def _run_one_discovery_like_poll() -> None:
         future.result()
 
 
-# The repeated full-heap gc.collect() passes are slow on a loaded machine (the
-# observed failure mode is the suite-default 10s timeout, not the assertion),
-# so this test carries its own generous timeout and a flaky retry on top.
+# The 30 executor spinups (each starting 4 worker threads) and the full-heap
+# gc.collect()/gc.get_objects() probes take ~5s even on an idle machine, so on a
+# contended runner this can cross the suite-wide 10s timeout. Give it headroom
+# (a real leak still fails the growth assertion, just later) and let offload
+# retry it as a known-flaky test.
 @pytest.mark.flaky
-@pytest.mark.timeout(60)
+@pytest.mark.timeout(30)
 def test_worker_hubs_do_not_accumulate_across_polls() -> None:
     """Each poll spins up worker threads that create gevent hubs; cleanup must
     free them so repeated polls do not strand a hub (and its retained object
