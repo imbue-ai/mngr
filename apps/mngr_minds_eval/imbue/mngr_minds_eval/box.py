@@ -70,30 +70,27 @@ def port_of(container: str) -> str:
     return port
 
 
+def forward_port_of(container: str) -> str:
+    result = _run(["docker", "exec", container, "printenv", "MINDS_FORWARD_PORT"])
+    port = result.stdout.strip()
+    if not port:
+        raise BoxError("container {!r} has no MINDS_FORWARD_PORT".format(container))
+    return port
+
+
 def print_view_urls(container: str) -> None:
-    """How to actually look at the workspaces: the box (Docker, on this machine) serves the Minds
-    dashboard, and its mngr-forward proxy serves each Modal workspace's UI -- both on localhost.
-    The proxy has its own auth, so the one-time login URL must be visited once per box. Never prints
-    a silent nothing for the login line: if it can't find the URL, it says how to get it."""
+    """The box's Minds dashboard on localhost. The old per-box forward-login URL is intentionally NOT
+    printed: the box's built-in forward eagerly proxies the whole env and OOMs, so that login was
+    unreliable. Use `minds-evals view-modal-workspace <name>` for a cheap, scoped, self-authenticating
+    view of one workspace instead."""
     if not is_running(container):
         print("  (box {} is not running)".format(container), flush=True)
         return
     ui = _run(["docker", "exec", container, "printenv", "MINDS_BARE_PORT"]).stdout.strip()
-    forward = _run(["docker", "exec", container, "printenv", "MINDS_FORWARD_PORT"]).stdout.strip()
     if not ui:
         return
-    print("\n  dashboard:       http://localhost:{}".format(ui), flush=True)
-    if forward:
-        login = _forward_login(container, int(forward))
-        if login:
-            print("  workspace login: {}".format(login), flush=True)
-            print("                   ^ visit once, then click the workspace in the dashboard", flush=True)
-        else:
-            print(
-                "  workspace login: not emitted yet -- re-run  minds-evals box  once the proxy is up "
-                "(or: docker logs {} | grep login)".format(container),
-                flush=True,
-            )
+    print("\n  dashboard (http, not https):  http://localhost:{}".format(ui), flush=True)
+    print("  view a workspace:             minds-evals view-modal-workspace <name>", flush=True)
 
 
 def _slug(text: str) -> str:
@@ -238,11 +235,9 @@ def ensure(mngr_branch: str, minds_env: str = "staging") -> str:
         raise BoxError("docker run failed: {}".format((run.stderr or "").strip()[:300]))
 
     _await_ready(container, ui)
-    print("   dashboard:  http://localhost:{}".format(ui), flush=True)
+    print("   dashboard (http):  http://localhost:{}".format(ui), flush=True)
     print("   modal env:  minds-{}-{}  (this box's workspaces spin up here)".format(minds_env, modal_env), flush=True)
-    login = _forward_login(container, forward)
-    if login:
-        print("   workspace login (visit once): {}".format(login), flush=True)
+    print("   view a workspace:  minds-evals view-modal-workspace <name>", flush=True)
     return container
 
 
@@ -264,24 +259,3 @@ def _await_ready(container: str, ui: int, tries: int = 100) -> None:
             raise BoxError("box exited early -- docker logs {}".format(container))
         time.sleep(3)
     raise BoxError("Minds did not come up -- docker logs {}".format(container))
-
-
-def _forward_login(container: str, forward: int, tries: int = 20) -> str:
-    """The mngr-forward one-time login URL (SKIP_AUTH covers the dashboard, not the proxy).
-
-    Greps the box's full log history and returns the LATEST match, so it works whether the box just
-    booted (poll a bit) or has been up a while (found immediately). tries=1 for an instant lookup.
-    """
-    import re
-    import time
-
-    # Scheme varies by mngr version: plain http, or https when the proxy runs with --use-http2.
-    pattern = re.compile(r"https?://localhost:{}/login\?one_time_code=[A-Za-z0-9_-]+".format(forward))
-    for attempt in range(tries):
-        logs = _run(["docker", "logs", container])
-        found = pattern.findall((logs.stdout or "") + (logs.stderr or ""))
-        if found:
-            return found[-1]
-        if attempt < tries - 1:
-            time.sleep(2)
-    return ""

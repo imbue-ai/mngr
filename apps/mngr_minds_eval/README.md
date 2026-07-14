@@ -41,6 +41,10 @@ minds-evals inspect combined_20260713-101500
 # score a finished batch (S3 + Anthropic only, no box); writes results back to S3
 ANTHROPIC_API_KEY=sk-ant-... minds-evals evaluate combined_20260713-101500
 
+# see + open the live workspaces in the shared Modal env
+minds-evals list-modal-workspaces
+minds-evals view-modal-workspace EVAL-combined-CASE-todo-app   # prints a self-authenticating URL
+
 # destroy a branch's Modal workspaces (clean slate)
 minds-evals clean-modal-workspaces
 
@@ -108,6 +112,21 @@ Per-case results land in `<case>/case_eval_results.json`, the batch average in
 `<batch>/batch_eval_results.json`, and a table (rows = cases, columns = the keys, plus a batch-average
 row) is printed. Add a new evaluation by appending a function to `EVALUATIONS` in `evaluate.py`.
 
+## Viewing workspaces (`list-modal-workspaces` / `view-modal-workspace`)
+
+All eval workspaces live in one shared Modal env and share one SSH key, so any running box can reach
+any of them. But the box's built-in `mngr forward` eagerly proxies the *whole* env (a per-agent
+Python stream + SSH tunnel each), which OOMs past ~20 live workspaces. So viewing is decoupled:
+
+- `list-modal-workspaces` -- every workspace in the env (name + agent id) and each running box's memory.
+- `view-modal-workspace <name>` -- runs a **scoped** `mngr forward` for that one workspace on a box's
+  forward port and prints a self-authenticating `http://localhost:<port>/login?...` URL. One workspace
+  forwarded -> cheap, so it works no matter how many workspaces exist. Picks the least-loaded running
+  box by default; `--box <container>` / `--new-box-on-mngr-branch <branch>` / `--service <name>` override.
+
+Keep the env lean anyway (`clean-modal-workspaces` after `evaluate` pulls results to S3) -- the box's
+own eager forward still tries to proxy everything and will OOM a box if the env grows large.
+
 ## S3 layout
 
 ```
@@ -128,6 +147,7 @@ minds_client.py    the Minds create API (POST + poll) -- shared by launch/worksp
 launch.py          batch: prep clone (+ vendor mngr + slot test_case_metadata.json) and create per case
 workspace.py       create one Modal workspace (build_payload + create_workspace) -- the one create path
 status.py          list-batches / inspect / case_report (S3 reads only)
+view.py            list-modal-workspaces / view-modal-workspace (scoped `mngr forward` per workspace)
 evaluate.py        evaluate: pull transcripts, score (avg_word_count + LLM scores), write results to S3
 anthropic_call.py  one plain Anthropic Messages call (the LLM-graded evals)
 s3_store.py        S3 layout, creds file, batch/case prefixes

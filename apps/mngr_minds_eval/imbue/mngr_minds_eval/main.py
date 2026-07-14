@@ -32,6 +32,7 @@ from imbue.mngr_minds_eval import launch as launch_mod
 from imbue.mngr_minds_eval import minds_client
 from imbue.mngr_minds_eval import s3_store
 from imbue.mngr_minds_eval import status as status_mod
+from imbue.mngr_minds_eval import view as view_mod
 from imbue.mngr_minds_eval import workspace as workspace_mod
 
 DEFAULT_PORT_ENV = "MINDS_BARE_PORT"
@@ -118,6 +119,16 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_eval = sub.add_parser("evaluate", help="score a finished batch (from S3; needs ANTHROPIC_API_KEY)")
     p_eval.add_argument("batch", help="<eval>_<datetime>")
+
+    sub.add_parser("list-modal-workspaces", help="list workspaces in the shared Modal env (via a running box)")
+
+    p_view = sub.add_parser("view-modal-workspace", help="open a scoped, self-authenticating view of one workspace")
+    p_view.add_argument("name", help="workspace host name (see list-modal-workspaces)")
+    p_view.add_argument("--box", default="", help="use this specific box (default: least-loaded running box)")
+    p_view.add_argument(
+        "--new-box-on-mngr-branch", default="", help="spin up a fresh box on this mngr branch to view from"
+    )
+    p_view.add_argument("--service", default="system_interface", help="which workspace service to forward")
     return parser
 
 
@@ -138,6 +149,14 @@ def main() -> None:
         if not os.environ.get("ANTHROPIC_API_KEY"):
             parser.error("set ANTHROPIC_API_KEY -- the LLM-graded evals call the Anthropic API")
         evaluate_mod.evaluate_batch(args.batch)
+        return
+    if args.command == "list-modal-workspaces":
+        view_mod.list_modal_workspaces()
+        return
+    if args.command == "view-modal-workspace":
+        view_mod.view_modal_workspace(
+            args.name, box=args.box, new_box_on_mngr_branch=args.new_box_on_mngr_branch, service=args.service
+        )
         return
 
     if args.command == "box":
