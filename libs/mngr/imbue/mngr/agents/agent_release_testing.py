@@ -680,10 +680,10 @@ def run_concurrent_message_delivery(profile: AgentReleaseProfile, tmp_path: Path
                     f"Remember this exact value: {token}. Reply with just OK.",
                     timeout=_DELIVERY_SEND_TIMEOUT_SECONDS,
                 )
-                for agent_name, token in zip(agent_names, tokens, strict=False)
+                for agent_name, token in zip(agent_names, tokens, strict=True)
             ]
             results = [future.result() for future in futures]
-        for agent_name, result in zip(agent_names, results, strict=False):
+        for agent_name, result in zip(agent_names, results, strict=True):
             assert result.returncode == 0, f"concurrent send to {agent_name} failed:\n{result.stdout}\n{result.stderr}"
 
         # Each message landed exactly once on its own agent, and never on the other.
