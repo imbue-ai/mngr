@@ -117,18 +117,23 @@ row) is printed. Add a new evaluation by appending a function to `EVALUATIONS` i
 All eval workspaces live in one shared Modal env and every box mounts one shared SSH key, so any box --
 and the host itself -- can reach any of them.
 
-- `list-modal-workspaces` -- every workspace in the env (name + agent id) and each running box's memory.
-- `view-modal-workspace <name>` -- reads the sandbox's SSH endpoint from `mngr list` and opens a
-  **host-side `ssh -L`** straight to the workspace UI (a fixed `:8000` in every sandbox) with the shared
-  key, then prints `http://localhost:<port>/`. No `mngr forward` involved, so it's O(1) per workspace
-  (never OOMs, never scales with env size) and branch-agnostic. A stopped/paused sandbox is restarted
-  first (`--no-restart` to skip; a `DESTROYED` one errors). `--box` / `--new-box-on-mngr-branch` choose
-  which box's Minds to read.
+Both commands read the box's **Minds API** -- the same discovery the dashboard uses, and the source of
+truth for what workspaces exist and their SSH endpoints:
 
-The box's built-in `mngr forward` -- which eagerly proxies the whole env and would OOM the box (a
-heavyweight `mngr event` subprocess per workspace) -- is killed at box boot; viewing never touches it.
-`clean-modal-workspaces` clears the env host-side via `scripts/modal_nuke.py` (stops every sandbox +
-deletes volumes, SSH-free), so it works even when the boxes have died.
+- `list-modal-workspaces` -- every workspace in the env (name, state, agent id, via `GET
+  /api/v1/workspaces`) and each running box's memory.
+- `view-modal-workspace <name>` -- asks Minds for the sandbox's SSH endpoint (`POST
+  /api/v1/workspaces/<id>/ssh`, which authorizes the shared key and returns the address), then opens a
+  **host-side `ssh -L`** straight to the workspace UI (a fixed `:8000` in every sandbox) and prints
+  `http://localhost:<port>/`. O(1) per workspace (never scales with env size) and branch-agnostic. A
+  stopped/paused sandbox is restarted first (`--no-restart` to skip; a `DESTROYED` one errors). `--box`
+  / `--new-box-on-mngr-branch` choose which box's Minds to read.
+
+The box's built-in `mngr forward` **is** minds' discovery pipeline (it feeds the dashboard and the list
+API), so it is left running -- it must not be killed, or discovery goes down and every list/view comes
+back empty. Boxes run with a `--memory` cap to bound the blast radius instead. `clean-modal-workspaces`
+clears the env host-side via `scripts/modal_nuke.py` (stops every sandbox + deletes volumes, SSH-free),
+so it works even when the boxes have died.
 
 ## S3 layout
 

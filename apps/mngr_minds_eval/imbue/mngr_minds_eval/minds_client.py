@@ -34,6 +34,31 @@ def get_json(url: str) -> dict:
         return json.loads(response.read().decode())
 
 
+def list_workspaces(port: str) -> list[dict]:
+    """Every workspace the box's Minds has discovered in the shared env (name, agent_id, host_state --
+    the same discovery the dashboard uses). Raises CreateError if the API is unreachable (e.g.
+    discovery still starting) rather than pretending the env is empty."""
+    try:
+        data = get_json("{}/api/v1/workspaces".format(api_base(port)))
+    except (urllib.error.URLError, OSError) as exc:
+        raise CreateError(
+            "could not reach the box's Minds API on :{} ({}) -- discovery may still be starting".format(port, exc)
+        ) from exc
+    return list(data.get("workspaces") or [])
+
+
+def establish_ssh(port: str, agent_id: str, public_key: str, requester_id: str) -> tuple[str, str, int]:
+    """Authorize `public_key` into a workspace and return its (user, host, port) SSH endpoint. The
+    workspace must be online (discovery-resolved). Raises CreateError otherwise."""
+    status, body = post_json(
+        "{}/api/v1/workspaces/{}/ssh".format(api_base(port), agent_id),
+        {"public_key": public_key, "requester_workspace_id": requester_id},
+    )
+    if status != 200:
+        raise CreateError("could not resolve SSH endpoint (HTTP {}): {}".format(status, body))
+    return str(body.get("user") or "root"), str(body["host"]), int(body["port"])
+
+
 def create_and_wait(
     port: str, payload: dict, *, timeout: float = 1800.0, on_stage: Callable[[str], None] | None = None
 ) -> str:

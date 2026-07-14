@@ -121,23 +121,6 @@ def _prune_stopped_boxes() -> None:
         _run(["docker", "rm", "-f", *ids])
 
 
-def _kill_eager_forward(container: str) -> None:
-    """minds' built-in forward eagerly proxies every workspace in the shared env (a heavyweight
-    `mngr event` subprocess each) and OOMs the box. We view on demand host-side instead, so kill it
-    once here -- branch-agnostic (no reliance on any mngr/minds code change); minds does not respawn
-    it, and the dashboard's workspace list is independent of the forward."""
-    _run(
-        [
-            "docker",
-            "exec",
-            container,
-            "sh",
-            "-lc",
-            "ps -eo pid,args | grep 'mngr forward' | grep -v latchkey | grep -v grep | awk '{print $1}' | xargs -r kill",
-        ]
-    )
-
-
 def modal_env_name(minds_env: str = "staging") -> str:
     return "minds-{}-{}".format(minds_env, MODAL_ENV_USER_ID)
 
@@ -275,7 +258,6 @@ def ensure(mngr_branch: str, minds_env: str = "staging") -> str:
         raise BoxError("docker run failed: {}".format((run.stderr or "").strip()[:300]))
 
     _await_ready(container, ui)
-    _kill_eager_forward(container)
     print("   dashboard (http):  http://localhost:{}".format(ui), flush=True)
     print("   modal env:  minds-{}-{}  (this box's workspaces spin up here)".format(minds_env, modal_env), flush=True)
     print("   view a workspace:  minds-evals view-modal-workspace <name>", flush=True)

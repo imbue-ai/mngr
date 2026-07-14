@@ -1,15 +1,15 @@
 """list-modal-workspaces / view-modal-workspace: see and open the workspaces in the shared Modal env.
 
-`view-modal-workspace` opens a plain host-side `ssh -L` straight to one workspace's UI, so it stays
-cheap no matter how many workspaces the env holds -- unlike the box's built-in `mngr forward`, which
-eagerly proxies every workspace and OOMs past ~20. All boxes share one Modal SSH key, so any box (and
-the host) can reach any workspace; by default we pick the least-loaded running box to read the SSH
-endpoint from.
+Both read the box's Minds API -- the same discovery the dashboard uses, and the source of truth for
+which workspaces exist and their SSH endpoints. `view-modal-workspace` then opens a plain host-side
+`ssh -L` straight to the workspace UI (a fixed :8000 in every sandbox) using the one shared Modal key,
+so it is O(1) per workspace (never scales with env size, never OOMs) and branch-agnostic. Every box
+mounts that key, so any box (and the host) can reach any workspace; by default we pick the
+least-loaded running box to read from.
 """
 
 from __future__ import annotations
 
-import json
 import re
 
 from imbue.mngr_minds_eval import box as box_mod
@@ -17,6 +17,8 @@ from imbue.mngr_minds_eval import minds_client
 
 _MEM_RE = re.compile(r"\s*([0-9.]+)\s*([KMG]i?B)")
 _MEM_UNITS = {"KiB": 1 / 1024, "MiB": 1.0, "GiB": 1024.0, "KB": 1 / 1024, "MB": 1.0, "GB": 1024.0}
+# Tag for the temporary authorized_keys grant the Minds SSH endpoint records for us.
+_SSH_REQUESTER = "minds-evals-viewer"
 
 
 def _running_boxes() -> list[str]:
@@ -25,7 +27,7 @@ def _running_boxes() -> list[str]:
 
 
 def _box_mem_mib(container: str) -> float:
-    """Current memory usage of a box in MiB -- used to pick the least-loaded box to forward from."""
+    """Current memory usage of a box in MiB -- used to pick the least-loaded box to read from."""
     out = box_mod._run(["docker", "stats", "--no-stream", "--format", "{{.MemUsage}}", container]).stdout
     match = _MEM_RE.match(out)
     if not match:
@@ -34,26 +36,26 @@ def _box_mem_mib(container: str) -> float:
 
 
 def _workspaces(container: str) -> list[dict]:
-    """The workspaces the box's Minds sees in the shared env (name + agent_id)."""
-    port = box_mod.port_of(container)
-    out = box_mod._run(
-        ["docker", "exec", container, "curl", "-sS", "-m", "5", "http://127.0.0.1:{}/api/v1/workspaces".format(port)]
-    ).stdout
-    try:
-        return [w for w in json.loads(out).get("workspaces", []) if w.get("agent_id")]
-    except (ValueError, TypeError):
-        return []
+    """Workspaces the box's Minds has discovered in the shared env (name, agent_id, host_state)."""
+    return minds_client.list_workspaces(box_mod.port_of(container))
 
 
 def list_modal_workspaces() -> None:
     boxes = _running_boxes()
     if not boxes:
         raise SystemExit("no running box -- start one: minds-evals box --mngr-branch <branch>")
-    workspaces = _workspaces(boxes[0])
+    try:
+        workspaces = _workspaces(boxes[0])
+    except minds_client.CreateError as exc:
+        raise SystemExit(str(exc)) from exc
     print("{} workspace(s) in the shared Modal env:".format(len(workspaces)))
-    print("{:<40} {}".format("NAME", "AGENT"))
+    print("{:<40} {:<10} {}".format("NAME", "STATE", "AGENT"))
     for w in sorted(workspaces, key=lambda w: w.get("name") or ""):
-        print("{:<40} {}".format((w.get("name") or "?")[:40], w.get("agent_id") or "?"))
+        print(
+            "{:<40} {:<10} {}".format(
+                (w.get("name") or "?")[:40], (w.get("host_state") or "?")[:10], w.get("agent_id") or "?"
+            )
+        )
     print("\nrunning boxes (memory -- lowest is picked by default for viewing):")
     for container in sorted(boxes, key=_box_mem_mib):
         print("  {:<36} {:>6.0f} MiB".format(container, _box_mem_mib(container)))
@@ -70,34 +72,27 @@ def _pick_box(box: str, new_box_on_mngr_branch: str) -> str:
     boxes = _running_boxes()
     if not boxes:
         raise SystemExit("no running box -- pass --new-box-on-mngr-branch <branch> to start one")
-    # least-loaded, so we don't pile onto an OOM-heavy box
+    # least-loaded, so we don't pile onto a memory-heavy box
     return min(boxes, key=_box_mem_mib)
 
 
-def _mngr_ssh_endpoint(container: str, agent_id: str) -> tuple[str, str, int] | None:
-    """(user, host, port) of the workspace's Modal sandbox, from `mngr list --format json` inside the
-    box, matched by agent id (unambiguous). None if not found or unparseable."""
-    out = box_mod._run(
-        ["docker", "exec", container, "sh", "-lc", "cd /work/mngr && uv run mngr list --format json"]
-    ).stdout
-    try:
-        parsed = json.loads(out)
-    except (ValueError, TypeError):
-        return None
-    entries = parsed if isinstance(parsed, list) else (parsed.get("agents") or parsed.get("workspaces") or [])
-    for entry in entries if isinstance(entries, list) else []:
-        if not isinstance(entry, dict) or entry.get("id") != agent_id:
-            continue
-        ssh = (entry.get("host") or {}).get("ssh") or {}
-        host, port = ssh.get("host"), ssh.get("port")
-        if host and port:
-            return str(ssh.get("user") or "root"), str(host), int(port)
-    return None
+def _shared_public_key() -> str:
+    """The public half of the shared Modal key (already in every eval workspace's authorized_keys).
+    We hand it to the Minds SSH endpoint, which refreshes the grant and returns the sandbox address."""
+    key = box_mod.SHARED_MODAL_KEYS / "modal_ssh_key"
+    result = box_mod._run(["ssh-keygen", "-y", "-f", str(key)])
+    if result.returncode != 0 or not result.stdout.strip():
+        raise SystemExit("could not read the shared SSH public key from {}".format(key))
+    return result.stdout.strip()
 
 
 def view_modal_workspace(name: str, *, box: str = "", new_box_on_mngr_branch: str = "", restart: bool = True) -> None:
     container = _pick_box(box, new_box_on_mngr_branch)
-    match = next((w for w in _workspaces(container) if (w.get("name") or "") == name), None)
+    port = box_mod.port_of(container)
+    try:
+        match = next((w for w in _workspaces(container) if (w.get("name") or "") == name), None)
+    except minds_client.CreateError as exc:
+        raise SystemExit(str(exc)) from exc
     if match is None:
         raise SystemExit("no workspace named {!r} in the env (see: minds-evals list-modal-workspaces)".format(name))
     agent_id = match["agent_id"]
@@ -109,20 +104,18 @@ def view_modal_workspace(name: str, *, box: str = "", new_box_on_mngr_branch: st
     if restart and host_state in ("STOPPED", "PAUSED"):
         print(">> {} is {}; restarting its sandbox ...".format(name, host_state), flush=True)
         try:
-            minds_client.restart_and_wait(
-                box_mod.port_of(container), agent_id, on_stage=lambda s: print("   ... {}".format(s), flush=True)
-            )
+            minds_client.restart_and_wait(port, agent_id, on_stage=lambda s: print("   ... {}".format(s), flush=True))
         except minds_client.CreateError as exc:
             raise SystemExit("restart failed: {}".format(exc)) from exc
 
-    endpoint = _mngr_ssh_endpoint(container, agent_id)
-    if endpoint is None:
-        raise SystemExit("could not resolve the SSH endpoint for {} (via mngr list) -- is it running?".format(name))
-    user, ssh_host, ssh_port = endpoint
+    # Ask Minds for the sandbox's SSH endpoint (it authorizes our shared key + returns the address).
+    try:
+        user, ssh_host, ssh_port = minds_client.establish_ssh(port, agent_id, _shared_public_key(), _SSH_REQUESTER)
+    except minds_client.CreateError as exc:
+        raise SystemExit("could not resolve the SSH endpoint for {}: {}".format(name, exc)) from exc
 
     # View = a plain host-side SSH local-forward to the workspace UI (a fixed :8000 in every sandbox),
-    # authenticated with the shared key already on the host. No mngr forward, no OOM, O(1) per
-    # workspace, branch-agnostic. `ssh -f` backgrounds the tunnel once it is up.
+    # authenticated with the shared key already on the host. `ssh -f` backgrounds the tunnel once up.
     local_port = box_mod._free_port()
     key = box_mod.SHARED_MODAL_KEYS / "modal_ssh_key"
     known_hosts = box_mod.SHARED_MODAL_KEYS / "known_hosts"
