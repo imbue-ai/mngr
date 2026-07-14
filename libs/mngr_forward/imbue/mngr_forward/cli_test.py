@@ -372,7 +372,7 @@ def _connect_tls_client_when_listening(port: int) -> ssl.SSLSocket:
 
 
 def test_abandoned_tls_connection_is_torn_down_quickly_and_quietly(caplog: pytest.LogCaptureFixture) -> None:
-    """End-to-end repro of the --use-http2 teardown noise (issue #2455).
+    """End-to-end repro of the --use-http2 teardown noise (GitHub issue 2455).
 
     A TLS client completes a handshake and then goes silent, never answering
     the server's close_notify. The serve loop must force-close the connection
