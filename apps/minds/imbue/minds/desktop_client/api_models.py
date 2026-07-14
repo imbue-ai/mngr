@@ -243,7 +243,7 @@ class RestartWorkspaceRequest(ApiRequestModel):
     # rejected with a 400.
     scope: str = Field(description="Must be 'host' (bounce the whole host); no other scope is supported")
     host_already_stopped: bool | None = Field(
-        default=None, description="Skip the redundant stop step (host scope only) when the host is known stopped"
+        default=None, description="Skip the redundant stop step when the host is known stopped"
     )
     auto_dispatched: bool | None = Field(
         default=None,
