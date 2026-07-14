@@ -321,6 +321,7 @@ minds-css:
 # deletion of any other clone/cache) and needs no configuration.
 # Set DEFAULT_WORKSPACE_TEMPLATE_DIR (gitignored apps/minds/.env or your shell) to a local default_workspace_template clone to
 # make the clone fast -- purely a speed hint, no lasting dependency is created.
+alias dwt-worktree := default-workspace-template-worktree
 default-workspace-template-worktree branch="" base="origin/main":
     bash scripts/default_workspace_template_worktree.sh "{{branch}}" "{{base}}"
 
