@@ -919,7 +919,7 @@ def _attach_to_focused_agent(state: _KanpanState) -> None:  # pragma: no cover
         # clear it and show a connecting line so the handoff is not a flash of that
         # old command line before the agent's session paints over it.
         write_human_line(f"{CLEAR_SCREEN}  Connecting to {entry.name}...")
-        subprocess.run(["mngr", "connect", str(entry.name)], env=attach_env)
+        result = subprocess.run(["mngr", "connect", str(entry.name)], env=attach_env)
     finally:
         loop.start()
         loop.screen.clear()
@@ -927,6 +927,13 @@ def _attach_to_focused_agent(state: _KanpanState) -> None:  # pragma: no cover
         # the next refresh, which left the detach output on screen -- the "stuck" exit.
         loop.draw_screen()
 
+    if result.returncode != 0:
+        # The child's own error output went to the terminal the repaint just erased; the
+        # exit code is the only signal left (its output is not captured because the
+        # connect child needs the real TTY for the tmux takeover).
+        _show_transient_message(
+            state, f"  Connect to {entry.name} failed (mngr connect exited with code {result.returncode})"
+        )
     _start_local_refresh(loop, state)
 
 
