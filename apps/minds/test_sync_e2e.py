@@ -68,17 +68,23 @@ _SENTINEL_FILENAME: Final[str] = "e2e-backup-sentinel.txt"
 _EXPORT_ZIP_DIR: Final[Path] = Path("/tmp")
 _DOCKER_STATE_MARKER: Final[str] = "docker-state"
 
-# How long UI-observable convergence may take. The first imbue-cloud backup
-# uploads the workspace host_dir to real R2, so its budget is the largest.
-_SIGN_IN_TIMEOUT_SECONDS: Final[int] = 90
-_ACCOUNT_VISIBLE_TIMEOUT_SECONDS: Final[int] = 120
-_BACKUP_CONFIGURE_TIMEOUT_SECONDS: Final[int] = 420
-_FIRST_BACKUP_TIMEOUT_SECONDS: Final[int] = 1500
-_SYNC_CONVERGENCE_TIMEOUT_SECONDS: Final[int] = 300
-_UNLOCK_BANNER_TIMEOUT_SECONDS: Final[int] = 240
-_DOWNLOAD_LINK_TIMEOUT_SECONDS: Final[int] = 300
+# Budgets for each UI-observable step, set from what the flows actually take
+# (a passing amnesia run is ~5 minutes end to end) plus room for a loaded
+# sandbox -- not from fear. The measured cost of each step is noted so a
+# future regression shows up as a failure here instead of being absorbed by a
+# budget nobody re-derived.
+_SIGN_IN_TIMEOUT_SECONDS: Final[int] = 90  # measured ~15s
+_ACCOUNT_VISIBLE_TIMEOUT_SECONDS: Final[int] = 90  # measured ~7s
+_BACKUP_CONFIGURE_TIMEOUT_SECONDS: Final[int] = 180  # measured ~31s (real R2 bucket + restic init)
+_FIRST_BACKUP_TIMEOUT_SECONDS: Final[int] = 420  # measured ~10s; two full status-fetch cycles of headroom
+_SYNC_CONVERGENCE_TIMEOUT_SECONDS: Final[int] = 180  # the scheduler ticks every 60s, so >= 2 ticks
+_UNLOCK_BANNER_TIMEOUT_SECONDS: Final[int] = 180  # measured ~27s (needs one pull)
+_DOWNLOAD_LINK_TIMEOUT_SECONDS: Final[int] = 240  # gated on one settled status fetch
+# One landing load's backup-status fetch (measured ~10s; see #2470).
+_STATUS_FETCH_SETTLE_SECONDS: Final[int] = 120
 # The sync scheduler reconciles every 60s; two full ticks with margin is
-# enough to observe "the revision did NOT advance".
+# enough to observe "the revision did NOT advance". This one is a
+# deliberate wait, not a timeout -- it is the cost of the assertion.
 _REVISION_QUIET_SECONDS: Final[int] = 150
 
 _T = TypeVar("_T")
@@ -474,14 +480,15 @@ def _read_settled_badge(page: Page, origin: str, agent_id: str) -> str | None:
 
     The badge populates from a one-shot per-workspace status fetch on page
     load, and that fetch blocks on BOTH the restic snapshot listing and the
-    backup-service verification exec into the workspace -- the exec alone is
-    allowed CHECK_EXEC_TIMEOUT_SECONDS (360s), and the route joins it before
-    responding. Reloading before it resolves aborts and restarts it, so this
-    reads WITHOUT navigating until the badge settles, waiting longer than one
-    full fetch cycle.
+    backup-service verification exec into the workspace before the route
+    responds (imbue-ai/mngr#2470). Reloading before it resolves aborts and
+    restarts it, so this reads WITHOUT navigating until the badge settles.
+    The window is generous against the measured ~10s fetch but deliberately
+    well below that route's 360s worst case: if #2470's latency ever regresses
+    this fails in minutes rather than hanging.
     """
     _goto_landing(page, origin)
-    deadline = time.monotonic() + 420
+    deadline = time.monotonic() + _STATUS_FETCH_SETTLE_SECONDS
     badge = _landing_backup_badge_text(page, agent_id)
     while time.monotonic() < deadline:
         if badge is not None and badge and "Checking backups" not in badge:
@@ -659,7 +666,7 @@ def _download_backup_zip(page: Page, origin: str, agent_id: str, dest_dir: Path)
                 return path
         return None
 
-    zip_path = _wait_until(f"the export route to produce a backup zip for {agent_id}", 600, exported)
+    zip_path = _wait_until(f"the export route to produce a backup zip for {agent_id}", 300, exported)
     saved_path = dest_dir / f"{agent_id}-backup.zip"
     shutil.copyfile(zip_path, saved_path)
     logger.info("Backup export produced {} ({} bytes)", zip_path, saved_path.stat().st_size)
@@ -684,10 +691,11 @@ def _assert_zip_contains_sentinel(zip_path: Path, sentinel_content: str) -> None
 @pytest.mark.minds_snapshot_resume
 @pytest.mark.docker
 @pytest.mark.rsync
-# Strictly below offload's test_timeout_secs=3600 so a timeout fails INSIDE
-# pytest (junit + failure diagnostics survive) instead of a sandbox kill;
+# ~3x the measured 5-minute runtime, and strictly below offload's
+# test_timeout_secs so an overrun fails INSIDE pytest (junit + failure
+# diagnostics survive) instead of being killed by the sandbox.
 # func_only=False covers fixture time too (the config default exempts it).
-@pytest.mark.timeout(3300, func_only=False)
+@pytest.mark.timeout(900, func_only=False)
 def test_amnesia_and_recover_full_lifecycle_via_electron(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -758,7 +766,7 @@ def test_amnesia_and_recover_full_lifecycle_via_electron(
 @pytest.mark.minds_snapshot_resume
 @pytest.mark.docker
 @pytest.mark.rsync
-@pytest.mark.timeout(1800, func_only=False)
+@pytest.mark.timeout(900, func_only=False)
 def test_legacy_association_files_migrate_into_synced_records(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -847,7 +855,7 @@ def test_legacy_association_files_migrate_into_synced_records(
 @pytest.mark.minds_snapshot_resume
 @pytest.mark.docker
 @pytest.mark.rsync
-@pytest.mark.timeout(1800, func_only=False)
+@pytest.mark.timeout(900, func_only=False)
 def test_master_password_lifecycle_rewraps_scrubs_and_restores(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -23,14 +23,13 @@
 # tests (a reused sandbox has the baked containers already started).
 # 12 tests today; headroom for a few more.
 max_parallel = 16
-# The sync e2e lifecycle tests (test_sync_e2e.py) create a workspace via the
-# real Electron create flow, run a real first backup to R2, wipe the install,
-# and restore. The amnesia test's legitimate worst case (create + flows + a
-# real first backup of the whole host_dir to R2 + relaunch + restore) needs
-# most of an hour; its pytest mark (3300s, func_only=false) is deliberately
-# below this ceiling so overruns fail INSIDE pytest with diagnostics instead
-# of a sandbox kill.
-test_timeout_secs = 3600
+# The sync e2e lifecycle tests (test_sync_e2e.py) are the longest in this
+# suite: each drives the real Electron app through workspace creation, a real
+# backup, a full install wipe and a restore, and takes ~5 minutes. Their
+# pytest marks (900s, func_only=false) sit below this ceiling so an overrun
+# fails INSIDE pytest -- with junit and diagnostics -- instead of being killed
+# here with nothing to show for it.
+test_timeout_secs = 1200
 stream_output = true
 sandbox_project_root = "/code/mngr"
 
