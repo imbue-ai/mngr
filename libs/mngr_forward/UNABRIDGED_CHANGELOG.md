@@ -4,6 +4,16 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-13
+
+Add a `--use-http2` flag to `mngr forward` that terminates TLS and negotiates HTTP/2 (via ALPN) for the workspace origin instead of serving plain HTTP/1.1.
+
+HTTP/2 multiplexes many streams over one connection, so the workspace UI is no longer capped by Chromium's ~6-connection-per-origin HTTP/1.1 limit (which hangs the UI once enough chat/app streams are open). When the flag is set, the proxy generates a fresh self-signed cert at startup (SANs `localhost`, `*.localhost`, `127.0.0.1`; loaded via a transient 0600 temp file, never persisted), serves TLS + h2 via hypercorn (replacing uvicorn), and its client-facing URLs become `https`/`wss` with the `mngr_forward_session` cookie marked `Secure`. WebSockets (terminal, log stream, `/api/ws` state socket) keep working over the TLS connection. hypercorn is the ASGI server whether or not a WebSocket rides the h2 connection (it advertises RFC 8441 Extended CONNECT), and its `websocket.receive` events always include both `text` and `bytes` keys with the unused one `None` (uvicorn omitted it), so the client->backend forwarder now selects each frame's payload by value rather than key presence.
+
+The flag is off by default, so a human running `mngr forward` still gets plain HTTP/1.1 with no cert friction; only clients that can trust the self-signed cert (the minds desktop app) should enable it. There is no runtime HTTP fallback -- if TLS setup fails the proxy exits during startup with a log line naming TLS/HTTP-2 as the cause.
+
+`mngr forward` now persists its per-agent service map to a small on-disk cache (`$MNGR_HOST_DIR/plugin/forward/service_map.json`) while running, and seeds the resolver from it at startup. A restored window onto a remote mind whose container is up becomes routable as soon as discovery supplies membership + SSH info, instead of waiting on the slow per-agent `mngr event ... services` stream (measured ~10s cold, ~50s under spawn contention). The live stream still runs and overwrites the seed as soon as it delivers, so a stale seed self-corrects within one stream connect. An empty, missing, or corrupt cache is a no-op: startup behaves exactly as before.
+
 ## 2026-07-10
 
 The forward stream manager no longer logs a "Discovery error from ..." warning on every poll cycle for a provider stuck on the same failure (e.g. missing credentials): provider-level discovery errors are now logged once per process via the shared `DiscoveryErrorLogSuppressor`, with an info-level recovery line (and re-armed suppression) when the provider's discovery next succeeds. Host- and agent-attributed discovery errors keep logging on every occurrence.
