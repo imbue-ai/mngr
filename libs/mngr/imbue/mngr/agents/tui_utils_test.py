@@ -1,21 +1,20 @@
 """Unit tests for tui_utils."""
 
 import os
-import signal
 import subprocess
-import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from typing import Final
 
+import psutil
 import pydantic
 import pytest
 
 from imbue.mngr.agents.base_agent import BaseAgent
-from imbue.mngr.agents.tui_utils import _PERL_TIMEOUT
-from imbue.mngr.agents.tui_utils import _TIMEOUT_FUNCTION
-from imbue.mngr.agents.tui_utils import _build_signal_only_command
-from imbue.mngr.agents.tui_utils import _build_signal_or_marker_command
+from imbue.mngr.agents.tui_utils import _build_submission_command
 from imbue.mngr.agents.tui_utils import _check_paste_content
 from imbue.mngr.agents.tui_utils import _normalize_for_match
 from imbue.mngr.agents.tui_utils import send_enter_and_poll_for_cleared_indicator
@@ -32,6 +31,7 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.utils.polling import poll_until
 
 # =========================================================================
 # Paste-detection helpers
@@ -264,84 +264,40 @@ def test_send_enter_via_hook_raises_on_timeout(signal_agent: _ProbeAgent) -> Non
         )
 
 
-# === Submission command builders ===
+# === The submission command builder ===
 
 _TARGET = TmuxWindowTarget(session_name="sess", window=0)
 
+# The two shapes every submission command comes in: no acceptance marker to watch
+# (the hook is the only thing that can confirm), and a marker whose constant token
+# never sorts after its own baseline (so, again, only the hook can confirm -- but
+# through the marker-watching code path).
+_MARKER_COMMANDS: Final[list[str | None]] = [None, "printf 'frozen-marker'"]
 
-@pytest.mark.parametrize(
-    "command",
-    [
-        _build_signal_only_command(2.0, "chan", _TARGET),
-        _build_signal_or_marker_command(2.0, "chan", _TARGET, "printf ''"),
-    ],
-)
-def test_submission_commands_never_require_a_timeout_binary(command: str) -> None:
-    """Both builders run on the agent's host, which for a local agent is the user's machine.
 
-    That host may be macOS, which ships no ``timeout``, so every use of it has to
-    be guarded by a probe with a fallback behind it.
+@pytest.mark.parametrize("accept_marker_command", _MARKER_COMMANDS)
+def test_submission_command_needs_no_deadline_binary(accept_marker_command: str | None) -> None:
+    """The command runs on the agent's host, which for a local agent is the user's machine.
+
+    That host may be macOS, which ships no ``timeout``, so the deadline is kept in the
+    script itself and the command needs nothing beyond bash builtins, ``tmux``,
+    ``date`` and ``sleep``.
     """
-    assert "command -v timeout" in command
-    assert "Time::HiRes" in command
+    command = _build_submission_command(2.0, "chan", _TARGET, accept_marker_command)
+    assert "timeout" not in command
+    assert "perl" not in command
+    assert "mktemp" not in command
 
 
-@pytest.mark.parametrize(
-    "command",
-    [
-        _build_signal_only_command(2.0, "chan", _TARGET),
-        _build_signal_or_marker_command(2.0, "chan", _TARGET, "printf ''"),
-    ],
-)
-def test_submission_commands_wait_on_the_channel_and_send_to_the_target(command: str) -> None:
+@pytest.mark.parametrize("accept_marker_command", _MARKER_COMMANDS)
+def test_submission_command_waits_on_the_channel_and_sends_to_the_target(accept_marker_command: str | None) -> None:
     """The channel reaches ``tmux wait-for`` and the target reaches ``tmux send-keys``, not vice versa."""
+    command = _build_submission_command(2.0, "chan", _TARGET, accept_marker_command)
     assert "chan" in command
     assert _TARGET.as_shell_arg() in command
     channel_index = command.index("chan")
     target_index = command.index(_TARGET.as_shell_arg())
     assert channel_index < target_index
-
-
-def _run_perl_timeout(arguments: str) -> subprocess.CompletedProcess[str]:
-    """Run the perl fallback directly, so the assertions hold on a host that also has ``timeout``."""
-    return subprocess.run(["bash", "-c", f"{_PERL_TIMEOUT} {arguments}"], capture_output=True, text=True, timeout=60)
-
-
-def _is_killed_by_the_alarm(result: subprocess.CompletedProcess[str]) -> bool:
-    """SIGALRM reads as ``-SIGALRM`` when bash ``exec``-ed perl, and as ``128 + SIGALRM`` when a shell outlived it."""
-    return result.returncode in (-signal.SIGALRM, 128 + signal.SIGALRM)
-
-
-@pytest.mark.parametrize("seconds", [0.5, 1.0])
-def test_perl_fallback_kills_a_command_that_outlives_its_deadline(seconds: float) -> None:
-    """A sub-second deadline is the interesting case.
-
-    The whole-second ``alarm`` would round it down to ``alarm(0)``, which cancels the
-    timer outright, so ``sleep 30`` would run to completion and report success.
-    """
-    start_time = time.monotonic()
-    result = _run_perl_timeout(f"{seconds} sleep 30")
-    assert _is_killed_by_the_alarm(result)
-    assert time.monotonic() - start_time < 10.0
-
-
-def test_perl_fallback_passes_through_the_command_s_own_exit_status() -> None:
-    """``exec`` replaces perl, so a command that finishes first reports its own status."""
-    assert _run_perl_timeout('10 sh -c "exit 7"').returncode == 7
-
-
-def test_perl_fallback_fails_when_the_command_cannot_be_exec_ed() -> None:
-    """A failed ``exec`` returns to perl, which would otherwise run off the end and exit 0."""
-    assert _run_perl_timeout("5 /nonexistent-binary-for-this-test").returncode == 127
-
-
-@pytest.mark.parametrize("seconds", [0.5, 30.0])
-def test_timeout_function_runs_the_command_under_whichever_deadline_the_host_has(seconds: float) -> None:
-    """The exit status differs by branch (``timeout`` gives 124, perl 142), so only the outcome is asserted."""
-    script = f"{_TIMEOUT_FUNCTION} _timeout {seconds} sh -c 'sleep 5; exit 0'"
-    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60)
-    expired = seconds < 5
-    assert (result.returncode != 0) is expired
 
 
 @pytest.mark.tmux
@@ -395,32 +351,36 @@ def _run_with_failing_tmux(command: str, tmp_path: Path) -> subprocess.Completed
     return subprocess.run(command, shell=True, capture_output=True, text=True, env=env, timeout=60)
 
 
-@pytest.mark.parametrize(
-    "command",
-    [
-        _build_signal_only_command(0.5, "chan", _TARGET),
-        _build_signal_or_marker_command(0.5, "chan", _TARGET, "printf 'frozen'"),
-    ],
-)
-def test_submission_command_fails_when_tmux_itself_fails(command: str, tmp_path: Path) -> None:
+@pytest.mark.parametrize("accept_marker_command", _MARKER_COMMANDS)
+def test_submission_command_fails_when_tmux_itself_fails(accept_marker_command: str | None, tmp_path: Path) -> None:
     """A ``tmux wait-for`` that errors out (no server, dead session) is not a submission.
 
     A killed ``tmux wait-for`` exits 0, so the deadline is tracked separately; the
     wait status still has to be honored, or an unreachable tmux reports success.
     """
+    command = _build_submission_command(0.5, "chan", _TARGET, accept_marker_command)
     result = _run_with_failing_tmux(command, tmp_path)
     assert result.returncode != 0, f"reported success though tmux failed: {result.stdout!r}"
 
 
-def _run_built_command_against_real_tmux(
-    command: str, *, fire_signal_after_seconds: float | None
-) -> subprocess.CompletedProcess[str]:
-    """Run a built submission command against the test's isolated tmux server.
+def _count_wait_for_clients(wait_channel: str) -> int:
+    """Count the live ``tmux wait-for`` clients registered on ``wait_channel``."""
+    clients = 0
+    for process in psutil.process_iter(["cmdline"]):
+        cmdline = process.info["cmdline"] or []
+        if "wait-for" in cmdline and wait_channel in cmdline:
+            clients += 1
+    return clients
+
+
+@contextmanager
+def _real_tmux_target_session() -> Iterator[None]:
+    """Hold the send-keys target session open on the test's isolated tmux server.
 
     The autouse tmux-isolation fixture already points ``TMUX_TMPDIR`` at a private
-    server, so the bare ``tmux`` calls here and in the script never reach a real
-    one. Creates the send-keys target session, optionally fires the hook after a
-    delay, and returns the finished process.
+    server, so the bare ``tmux`` calls here and in the built script never reach a real
+    one. Killing this session is what shuts that server down, taking every client
+    still connected to it along.
     """
     subprocess.run(
         ["tmux", "new-session", "-d", "-s", _TARGET.session_name, "bash"],
@@ -429,14 +389,9 @@ def _run_built_command_against_real_tmux(
         text=True,
         timeout=10,
     )
-    firing: subprocess.Popen[bytes] | None = None
-    if fire_signal_after_seconds is not None:
-        firing = subprocess.Popen(f"sleep {fire_signal_after_seconds} && tmux wait-for -S chan", shell=True)
     try:
-        return subprocess.run(command, shell=True, capture_output=True, text=True, timeout=30)
+        yield
     finally:
-        if firing is not None:
-            firing.wait(timeout=10)
         subprocess.run(
             ["tmux", "kill-session", "-t", f"={_TARGET.session_name}"],
             capture_output=True,
@@ -444,17 +399,86 @@ def _run_built_command_against_real_tmux(
         )
 
 
+def _run_built_command_against_real_tmux(
+    command: str, *, background_command: str | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Run a built submission command against the test's isolated tmux server.
+
+    ``background_command`` (the agent's hook firing, or its TUI recording an
+    acceptance marker) runs concurrently with the submission.
+    """
+    with _real_tmux_target_session():
+        background: subprocess.Popen[bytes] | None = None
+        if background_command is not None:
+            background = subprocess.Popen(background_command, shell=True)
+        try:
+            return subprocess.run(command, shell=True, capture_output=True, text=True, timeout=30)
+        finally:
+            if background is not None:
+                background.wait(timeout=10)
+
+
 @pytest.mark.tmux
-def test_signal_only_script_exits_zero_when_the_hook_fires() -> None:
+def test_submission_script_exits_zero_when_the_hook_fires() -> None:
     """The generated script confirms (exit 0) once the hook fires its wait-for channel."""
-    command = _build_signal_only_command(5.0, "chan", _TARGET)
-    result = _run_built_command_against_real_tmux(command, fire_signal_after_seconds=0.3)
+    command = _build_submission_command(5.0, "hook-fires", _TARGET, None)
+    result = _run_built_command_against_real_tmux(
+        command, background_command="sleep 0.3 && tmux wait-for -S hook-fires"
+    )
     assert result.returncode == 0, f"script did not confirm the fired hook: {result.stderr!r}"
 
 
 @pytest.mark.tmux
-def test_signal_only_script_exits_nonzero_at_the_deadline() -> None:
-    """With no hook, the generated script fails once the sleep-then-kill deadline passes."""
-    command = _build_signal_only_command(0.5, "chan", _TARGET)
-    result = _run_built_command_against_real_tmux(command, fire_signal_after_seconds=None)
+def test_submission_script_exits_nonzero_at_the_deadline() -> None:
+    """With nothing to confirm it, the generated script fails once the deadline passes."""
+    command = _build_submission_command(0.5, "no-hook", _TARGET, None)
+    result = _run_built_command_against_real_tmux(command)
     assert result.returncode != 0, f"script reported success though no hook fired: {result.stdout!r}"
+
+
+@pytest.mark.tmux
+def test_submission_script_exits_zero_when_the_acceptance_marker_advances(tmp_path: Path) -> None:
+    """A submission the hook never confirms is still confirmed by a marker newer than the baseline."""
+    marker_file = tmp_path / "marker"
+    marker_file.write_text("")
+    command = _build_submission_command(5.0, "marker-advances", _TARGET, f"cat {marker_file}")
+    result = _run_built_command_against_real_tmux(
+        command, background_command=f"sleep 0.3 && printf 'accepted' > {marker_file}"
+    )
+    assert result.returncode == 0, f"script did not confirm the fresh marker: {result.stderr!r}"
+
+
+@pytest.mark.tmux
+def test_a_timed_out_submission_leaves_no_wait_for_client_behind() -> None:
+    """A submission that reaches its deadline must not leave its waiter registered on the channel.
+
+    ``wait_channel`` is stable across every submission in a session, and a signal
+    fired while a waiter is registered is consumed rather than latched -- so a
+    leftover waiter would swallow a later submission's signal and make that
+    submission time out even though its message went through.
+
+    The clients are counted while the tmux server is still up: the server exits with
+    its last session, which would take a leaked client with it and hide the leak.
+    """
+    wait_channel = "leaves-no-waiter"
+    command = _build_submission_command(0.5, wait_channel, _TARGET, None)
+    with _real_tmux_target_session():
+        result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=30)
+        assert result.returncode != 0, f"script reported success though no hook fired: {result.stdout!r}"
+        assert poll_until(lambda: _count_wait_for_clients(wait_channel) == 0, timeout=5.0), (
+            f"submission left {_count_wait_for_clients(wait_channel)} tmux wait-for client(s) on {wait_channel}"
+        )
+
+
+@pytest.mark.tmux
+def test_a_submission_confirms_on_the_hook_after_an_earlier_one_timed_out() -> None:
+    """Consecutive submissions share a wait channel, so a timed-out one must not poison the next."""
+    wait_channel = "reused-after-timeout"
+    timed_out = _run_built_command_against_real_tmux(_build_submission_command(0.5, wait_channel, _TARGET, None))
+    assert timed_out.returncode != 0, "the first submission was supposed to time out"
+
+    result = _run_built_command_against_real_tmux(
+        _build_submission_command(5.0, wait_channel, _TARGET, None),
+        background_command=f"sleep 0.3 && tmux wait-for -S {wait_channel}",
+    )
+    assert result.returncode == 0, f"the next submission did not confirm its hook: {result.stderr!r}"

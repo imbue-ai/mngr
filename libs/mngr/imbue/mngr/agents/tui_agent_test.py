@@ -123,11 +123,10 @@ def test_send_enter_waits_on_hook_only_without_a_marker_command() -> None:
         accept_marker_command=None,
     )
     assert result is True
-    # Exactly one host round-trip, and it blocks on the hook rather than polling
-    # (no marker to poll for).
+    # Exactly one host round-trip, and it watches the hook and nothing else.
     assert len(commands) == 1
     assert "tmux wait-for" in commands[0]
-    assert "while" not in commands[0]
+    assert _PROBE_MARKER_COMMAND not in commands[0]
 
 
 def test_send_enter_watches_marker_and_hook_concurrently_with_a_marker_command() -> None:
@@ -152,7 +151,6 @@ def test_send_enter_watches_marker_and_hook_concurrently_with_a_marker_command()
     # ...and it watches the hook AND the agent-supplied acceptance-marker probe.
     assert "tmux wait-for" in commands[0]
     assert "accept-marker-probe" in commands[0]
-    assert "mktemp" in commands[0]
 
 
 def test_send_enter_returns_false_when_the_command_fails() -> None:

@@ -39,21 +39,10 @@ _SEND_ENTER_NO_SIGNAL_PER_ATTEMPT_TIMEOUT_SECONDS: Final[float] = 2.0
 
 _NON_ALNUM_RE: Final[re.Pattern[str]] = re.compile(r"[^a-z0-9]")
 
-# Defines ``_timeout SECONDS COMMAND...`` for the scripts emitted below: it runs
-# COMMAND under ``timeout(1)`` if that exists, and under perl otherwise. Linux ships
-# ``timeout``; macOS ships no ``timeout`` but does ship perl. Both forms read the
-# deadline as their first argument, so ``"$@"`` reaches either unchanged.
-#
-# The perl form arms a SIGALRM, then ``exec`` replaces perl with COMMAND itself, so
-# COMMAND reports its own exit status and dies outright when the alarm fires. The
-# alarm comes from ``Time::HiRes`` because the builtin one takes whole seconds and
-# ``alarm(0)`` cancels the timer, so a sub-second deadline would mean no deadline. A
-# failed ``exec`` returns to perl, which would fall off the end of the program and
-# exit 0, so it exits 127 instead.
-_PERL_TIMEOUT: Final[str] = "perl -MTime::HiRes=alarm -e 'alarm shift; exec @ARGV or exit 127'"
-_TIMEOUT_FUNCTION: Final[str] = (
-    f'_timeout() {{ if command -v timeout >/dev/null 2>&1; then timeout "$@"; else {_PERL_TIMEOUT} "$@"; fi; }}; '
-)
+# The acceptance-marker command for a TUI that records no acceptance marker. It prints
+# an empty token, which never satisfies the marker check, leaving the hook signal as
+# the only thing that can confirm a submission.
+_NEVER_CONFIRMING_MARKER_COMMAND: Final[str] = "printf ''"
 
 
 def _normalize_for_match(text: str) -> str:
@@ -249,9 +238,9 @@ def send_enter_via_tmux_wait_for_hook(
     the marker before Enter, poll for a newer value alongside the hook wait, and
     succeed on whichever lands first, keeping the call fast (well under any
     front-door HTTP/proxy timeout) for busy agents while the hook still covers
-    submissions that record no marker. ``None`` waits on the hook alone (the
-    original behavior). Keeping the marker command agent-supplied is what lets
-    this module stay agent-neutral.
+    submissions that record no marker. ``None`` leaves the hook as the sole
+    confirmation. Keeping the marker command agent-supplied is what lets this
+    module stay agent-neutral.
 
     Raises ``SendMessageError`` on timeout.
     """
@@ -292,10 +281,7 @@ def _send_enter_and_wait_for_signal(
     start = time.time()
     full_timeout = timeout_seconds + 1
 
-    if accept_marker_command is None:
-        cmd = _build_signal_only_command(full_timeout, wait_channel, tmux_target)
-    else:
-        cmd = _build_signal_or_marker_command(full_timeout, wait_channel, tmux_target, accept_marker_command)
+    cmd = _build_submission_command(full_timeout, wait_channel, tmux_target, accept_marker_command)
 
     # Give the remote command a beat past its own internal deadline to return
     # cleanly before the pyinfra-level timeout fires.
@@ -303,9 +289,9 @@ def _send_enter_and_wait_for_signal(
     try:
         result = agent.host.execute_stateful_command(cmd, timeout_seconds=remaining_time)
     except TimeoutError:
-        # The execute_command timeout can race with the bash `timeout` inside
-        # the command. Treat the pyinfra-level timeout as a normal timeout.
-        logger.debug("Execute command timed out before bash timeout; treating as signal timeout")
+        # The execute_command timeout can race with the script's own deadline.
+        # Treat the pyinfra-level timeout as a normal timeout.
+        logger.debug("Execute command timed out before the script's own deadline; treating as signal timeout")
         return False
     elapsed_ms = (time.time() - start) * 1000
     if result.success:
@@ -314,69 +300,54 @@ def _send_enter_and_wait_for_signal(
     return False
 
 
-def _build_signal_only_command(full_timeout: float, wait_channel: str, tmux_target: TmuxWindowTarget) -> str:
-    """Send Enter, then block on the hook's wait-for channel until it fires or the deadline passes.
-
-    Used for TUIs with no acceptance-marker command to watch. The waiter is started
-    in the foreground before Enter is sent from a backgrounded subshell, so it is
-    registered by the time the hook can fire. The exit status is the waiter's, so
-    exit 0 = signalled, non-zero = deadline reached or tmux failed.
-    """
-    script = (
-        f"{_TIMEOUT_FUNCTION}"
-        '( sleep 0.1 && tmux send-keys -t "$2" Enter ) & '
-        f'_timeout {full_timeout} tmux wait-for "$1"'
-    )
-    return f"bash -c {shlex.quote(script)} _ {shlex.quote(wait_channel)} {tmux_target.as_shell_arg()}"
-
-
-def _build_signal_or_marker_command(
+def _build_submission_command(
     full_timeout: float,
     wait_channel: str,
     tmux_target: TmuxWindowTarget,
-    accept_marker_command: str,
+    accept_marker_command: str | None,
 ) -> str:
     """Succeed as soon as EITHER the hook signal fires OR a fresh acceptance marker appears.
 
-    A single remote command so the two conditions are watched concurrently with
-    no dangling process: it registers the (full-timeout) hook waiter in the
-    background -- which writes a sentinel file on success, preserving the
-    register-before-Enter ordering so the signal is never missed (which matters
-    for submissions that only ever fire the signal, never recording a marker)
-    -- sends Enter, then polls both the sentinel and the acceptance marker until
-    either confirms or the deadline passes. Exit 0 = confirmed, non-zero =
-    timeout.
-
-    The sentinel is written only on success, so every way of *not* confirming --
-    the deadline, a tmux failure, even ``mktemp`` failing and leaving ``$sig``
-    empty -- lands on the same non-zero exit.
+    A single remote command, so the two conditions are watched concurrently with no
+    dangling process: it registers the hook waiter, sends Enter after a beat, then
+    polls the waiter and the acceptance marker until either confirms or the deadline
+    passes. Exit 0 = confirmed, exit 1 = deadline reached or tmux failed. Needs only
+    bash builtins, ``tmux``, ``date`` and ``sleep``.
 
     ``accept_marker_command`` is the agent-supplied shell snippet that prints the
-    agent's latest acceptance-marker token (empty if none yet). A baseline is
-    captured before Enter so only a newer token counts; the comparison is a
-    plain string ``>``, so the token must be lexicographically monotonic (an
-    ISO-8601 timestamp satisfies this, and an empty baseline sorts before any
-    real token). The module stays agent-neutral by treating this command as an
-    opaque probe -- all knowledge of the agent's marker schema lives in the
-    agent that supplies it.
+    agent's latest acceptance-marker token (empty if none yet). A baseline is captured
+    before Enter so only a newer token counts; the comparison is a plain string ``>``,
+    so the token must be lexicographically monotonic (an ISO-8601 timestamp satisfies
+    this, and an empty baseline sorts before any real token). ``None`` selects
+    ``_NEVER_CONFIRMING_MARKER_COMMAND``, leaving the hook as the sole confirmation.
+    The module stays agent-neutral by treating this command as an opaque probe -- all
+    knowledge of the agent's marker schema lives in the agent that supplies it.
+
+    Three properties of ``tmux wait-for`` shape the script:
+
+    * A signal fired while nobody is waiting on the channel is latched and satisfies
+      the next waiter, but a waiter present at that moment consumes it and no latch is
+      retained. The waiter is therefore registered before Enter is sent, and must not
+      outlive this command: ``wait_channel`` is reused by every submission in the
+      session, so a leftover waiter would eat the signal for a later one.
+    * A killed ``tmux wait-for`` exits 0, exactly like a signalled one. The waiter is
+      killed only from the EXIT trap, once the outcome is already decided, which is
+      what makes its status meaningful when the loop reads it.
+    * The trap's kill has to land on the tmux client itself, so the waiter is a direct
+      background job whose pid is ``$waiter``.
     """
+    marker_command = _NEVER_CONFIRMING_MARKER_COMMAND if accept_marker_command is None else accept_marker_command
     script = (
-        f"{_TIMEOUT_FUNCTION}"
-        'sig="$(mktemp)"; '
-        # Clean up on every exit path: remove the sentinel file and reap any
-        # still-running background job (notably the hook waiter, which otherwise
-        # outlives a fast marker-win and would recreate "$sig" -- leaking the
-        # temp file -- when the hook finally fires). Runs exactly once on exit.
-        'trap \'p="$(jobs -p)"; [ -n "$p" ] && kill $p 2>/dev/null; rm -f "$sig"\' EXIT; '
-        f'base="$({accept_marker_command})"; '
-        # Register the hook waiter first (full timeout), sentinel on success.
-        f'( _timeout {full_timeout} tmux wait-for "$1" >/dev/null 2>&1 && echo 1 > "$sig" ) & '
-        # Then submit, after a beat so the waiter is registered.
-        '( sleep 0.1 && tmux send-keys -t "$2" Enter ) & '
+        'trap \'kill "$waiter" "$submit" 2>/dev/null\' EXIT; '
+        f'base="$({marker_command})"; '
+        'tmux wait-for "$1" >/dev/null 2>&1 & waiter=$!; '
+        '( sleep 0.1 && tmux send-keys -t "$2" Enter ) >/dev/null 2>&1 & submit=$!; '
         f'end="$(( $(date +%s) + {int(full_timeout) + 1} ))"; '
         'while [ "$(date +%s)" -lt "$end" ]; do '
-        'if [ -s "$sig" ]; then exit 0; fi; '
-        f'cur="$({accept_marker_command})"; '
+        # The waiter exited on its own, so its status says which: 0 = the hook fired,
+        # non-zero = tmux failed outright (no server, dead session).
+        'if ! kill -0 "$waiter" 2>/dev/null; then wait "$waiter" && exit 0; break; fi; '
+        f'cur="$({marker_command})"; '
         'if [[ -n "$cur" && "$cur" > "$base" ]]; then exit 0; fi; '
         "sleep 0.25; "
         "done; "
