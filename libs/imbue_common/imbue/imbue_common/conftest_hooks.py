@@ -98,6 +98,11 @@ importlib.metadata.entry_points = _cached_entry_points  # ty: ignore[invalid-ass
 # Relative to wherever pytest is invoked from.
 _TEST_OUTPUTS_DIR: Final[Path] = Path(".test_output")
 
+# Phase-timing scratch (see _emit_phase_timing). Each offload batch is its own
+# pytest process with a single session, so a module global is sufficient -- no
+# need to scope it to the session object.
+_PHASE_TIMING: dict[str, Any] = {}
+
 # The lock file path - a constant location in /tmp so all pytest processes can find it
 _GLOBAL_TEST_LOCK_PATH: Final[Path] = Path("/tmp/pytest_global_test_lock")
 
@@ -540,6 +545,10 @@ def _pytest_sessionstart(session: pytest.Session) -> None:
 
     start_resource_guards(session)
 
+    if os.environ.get("PHASE_TIMING"):
+        _PHASE_TIMING["proc_create"] = _proc_create_time()
+        _PHASE_TIMING["sessionstart"] = time.time()
+
 
 @pytest.hookimpl(trylast=True)
 def _pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
@@ -549,6 +558,10 @@ def _pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     is always visible in CI output, even when the suite exceeds the limit.
     """
     stop_resource_guards()
+
+    # Emit phase timing (no-op unless PHASE_TIMING is set) before the
+    # duration check below, which may pytest.exit() and abort the session.
+    _emit_phase_timing()
 
     # Print test durations before checking the time limit, so they are
     # visible in the CI output even when pytest.exit() aborts the session.
@@ -593,6 +606,52 @@ def _ensure_test_outputs_dir() -> Path:
 def _generate_output_filename(prefix: str, extension: str) -> Path:
     """Generate a unique filename for test output."""
     return _ensure_test_outputs_dir() / f"{prefix}_{uuid4().hex}{extension}"
+
+
+def _proc_create_time() -> float | None:
+    """Wall-clock time the current process started, used for phase-1 (startup) timing.
+
+    Reads /proc (Linux sandboxes only); returns None elsewhere. Only consulted
+    when PHASE_TIMING is set, which in practice is the Linux offload sandbox.
+    """
+    try:
+        with open("/proc/self/stat") as fh:
+            starttime_ticks = float(fh.read().split()[21])
+        with open("/proc/uptime") as fh:
+            uptime = float(fh.read().split()[0])
+        return (time.time() - uptime) + starttime_ticks / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _emit_phase_timing() -> None:
+    """Write per-phase session wall times to .test_output when PHASE_TIMING is set.
+
+    Splits a pytest session into startup (process start -> sessionstart),
+    collection (-> collection_finish), and calls (-> sessionfinish), reading the
+    timestamps recorded in the _PHASE_TIMING module global by the session hooks.
+    offload downloads `.test_output/**` from every sandbox, so this surfaces the
+    per-batch overhead breakdown in CI without affecting normal runs (the whole
+    thing is a no-op unless PHASE_TIMING is set in the environment).
+    """
+    if not os.environ.get("PHASE_TIMING"):
+        return
+    proc_create = _PHASE_TIMING.get("proc_create")
+    sessionstart = _PHASE_TIMING.get("sessionstart")
+    collection_done = _PHASE_TIMING.get("collection_done")
+    now = time.time()
+    record = {
+        "n_collected": _PHASE_TIMING.get("n_collected"),
+        "phase1_startup_s": round(sessionstart - proc_create, 3) if (proc_create and sessionstart) else None,
+        "phase2_collection_s": round(collection_done - sessionstart, 3)
+        if (sessionstart and collection_done)
+        else None,
+        "phase3_calls_s": round(now - collection_done, 3) if collection_done else None,
+    }
+    try:
+        _generate_output_filename("phase_timing", ".json").write_text(json.dumps(record))
+    except OSError:
+        pass
 
 
 @pytest.hookimpl(tryfirst=True)
@@ -736,6 +795,10 @@ def _pytest_collection_finish(session: pytest.Session) -> None:
         return
     _configure_shared_coverage_defaults(session.config)
     _write_flaky_manifest(session)
+
+    if os.environ.get("PHASE_TIMING"):
+        _PHASE_TIMING["collection_done"] = time.time()
+        _PHASE_TIMING["n_collected"] = len(session.items)
 
 
 def _compute_junit_test_id(nodeid: str, fspath: str) -> str:

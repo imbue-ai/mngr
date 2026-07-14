@@ -50,7 +50,8 @@ test-offload args="":
     trap "rm -f .dockerignore" EXIT
     offload -c offload-modal.toml run --trace \
         --env "GITHUB_HEAD_REF=${GITHUB_HEAD_REF:-}" \
-        --env "GITHUB_REF_NAME=${GITHUB_REF_NAME:-}" {{args}} || [[ $? -eq 2 ]]
+        --env "GITHUB_REF_NAME=${GITHUB_REF_NAME:-}" \
+        --env "PHASE_TIMING=1" {{args}} || [[ $? -eq 2 ]]
 
     # Copy results to the main worktree so new worktrees inherit baselines via COPY mode.
     MAIN_WORKTREE=$(git worktree list --porcelain | head -1 | sed 's/^worktree //')
