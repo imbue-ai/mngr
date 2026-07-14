@@ -493,7 +493,7 @@ def test_stream_output_raises_when_empty_file(
     Creates both stdout.jsonl (empty) and stderr.log (empty). Stderr and the
     (absent) tmux pane produce no content, so the raised error carries only
     the always-appended [state-dir] diagnostic (and HeadlessClaude's
-    [work-dir] diagnostic) under the stable 'exited without producing output'
+    [prompt-inputs] diagnostic) under the stable 'exited without producing output'
     template.
 
     Uses _AlwaysFinishedHeadlessClaude instead of _patch_agent_as_stopped to
@@ -787,38 +787,43 @@ def test_file_during_grace_period_returns_true_immediately(
 
 
 # =============================================================================
-# Tests for _get_work_dir_diagnostic
+# Tests for _get_prompt_inputs_diagnostic
 # =============================================================================
 
 
-def test_work_dir_diagnostic_reports_missing_files(
+def test_prompt_inputs_diagnostic_reports_missing_files(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
 ) -> None:
-    """When neither .mngr-prompt nor .mngr-system-prompt exists, the diagnostic says so.
+    """When neither prompt-input file exists, the diagnostic says so.
 
-    Guards the silent-exit branch of the work-dir diagnostic -- post-mortems need
-    to distinguish "claude never ran because its prompt inputs are missing" from
-    "claude ran and produced no output." The header must include the work_dir path
-    so triage can locate the directory; each file line must report "does not exist".
+    Guards the silent-exit branch of the prompt-inputs diagnostic -- post-mortems
+    need to distinguish "claude never ran because its prompt inputs are missing"
+    from "claude ran and produced no output." ``.mngr-prompt`` is probed in the
+    agent's *state* dir (where :meth:`stage_initial_message` writes it) and
+    ``.mngr-system-prompt`` in the *work* dir (where ``mngr ask``'s
+    ``pre_create_setup`` writes it); each line must report "does not exist" when
+    the file is absent, and must label which dir it was probed in.
     """
     agent, _host = _make_headless_agent(local_provider, tmp_path)
-    diagnostic = agent._get_work_dir_diagnostic()
-    assert f"work_dir: {agent.work_dir}" in diagnostic
-    assert ".mngr-prompt:" in diagnostic
-    assert ".mngr-system-prompt:" in diagnostic
+    diagnostic = agent._get_prompt_inputs_diagnostic()
+    assert ".mngr-prompt (state dir):" in diagnostic
+    assert ".mngr-system-prompt (work dir):" in diagnostic
     assert diagnostic.count("does not exist") == 2
 
 
-def test_work_dir_diagnostic_reports_char_counts(
+def test_prompt_inputs_diagnostic_reports_char_counts(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
 ) -> None:
-    """When the prompt files are present, the diagnostic reports each file's char count.
+    """When the prompt-input files are present, the diagnostic reports each char count.
 
-    The work-dir call site passes no tail_chars (only char counts, no trailing
-    content) -- this asserts the wiring stays aligned with that choice so a
-    regression adding tail_chars here would be caught.
+    ``.mngr-prompt`` lives in the agent *state* dir, ``.mngr-system-prompt`` in
+    the *work* dir -- each written where the assembled command reads it from.
+    The call site passes no tail_chars (only char counts, no trailing content),
+    so this asserts the wiring stays aligned with that choice (a regression
+    adding tail_chars here would be caught) and that the file contents
+    themselves are not echoed back.
     """
     agent, _host = _make_headless_agent(local_provider, tmp_path)
     # Use distinct lengths so the per-file char-count assertions are
@@ -829,9 +834,13 @@ def test_work_dir_diagnostic_reports_char_counts(
     prompt = "prompt-body"
     system_prompt = "system-prompt-body-extra"
     assert len(prompt) != len(system_prompt), "test data must have distinct lengths"
-    (agent.work_dir / ".mngr-prompt").write_text(prompt)
+    # .mngr-prompt is staged in the agent state dir (not the work dir);
+    # .mngr-system-prompt is staged in the work dir (only by `mngr ask`).
+    agent_dir = agent._get_agent_dir()
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / ".mngr-prompt").write_text(prompt)
     (agent.work_dir / ".mngr-system-prompt").write_text(system_prompt)
-    diagnostic = agent._get_work_dir_diagnostic()
+    diagnostic = agent._get_prompt_inputs_diagnostic()
     assert f"{len(prompt)} chars" in diagnostic
     assert f"{len(system_prompt)} chars" in diagnostic
     # With no tail_chars, the file contents themselves must NOT be echoed back.
