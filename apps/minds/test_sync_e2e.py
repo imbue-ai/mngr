@@ -116,6 +116,10 @@ def _prepare_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sync_e2e_e
     monkeypatch.setenv("MNGR__PROVIDERS__MODAL__IS_ENABLED", "false")
     monkeypatch.setenv("MNGR__PROVIDERS__AWS__IS_ENABLED", "false")
     monkeypatch.setenv("MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME", "runc")
+    # The create form POSTs an explicit `runtime`, which wins over the mngr-level
+    # env var above; this is the knob that pins the form's own default (the
+    # sandbox has no gVisor). Same override test_snapshot_resume.py uses.
+    monkeypatch.setenv("MINDS_DOCKER_RUNTIME_DEFAULT", "RUNC")
     monkeypatch.setenv("LATCHKEY_DISABLE_COUNTING", "1")
     ensure_minds_env_defaults(setenv=monkeypatch.setenv)
     return _SyncE2ERuntime(
