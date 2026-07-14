@@ -1,0 +1,1 @@
+Gave the `test_message_nonexistent_agent` e2e test explicit timeout headroom (`@pytest.mark.timeout(60)`) so a single `mngr message` invocation's CLI startup cost no longer trips the default 10s func-only timeout on slower filesystems.

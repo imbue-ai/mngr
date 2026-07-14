@@ -109,7 +109,10 @@ from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
 from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
-from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
+from imbue.mngr.agents.tui_utils import SubmissionConfirmationPolicy
+from imbue.mngr.agents.tui_utils import SubmissionEvidenceProbe
+from imbue.mngr.agents.tui_utils import build_changed_token_probe
+from imbue.mngr.agents.tui_utils import build_file_mtime_token_command
 from imbue.mngr.agents.update_policy import AgentUpdatePolicy
 from imbue.mngr.agents.update_policy import is_self_update_disabled
 from imbue.mngr.api.preservation import PreservedItem
@@ -128,7 +131,6 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import copy_on_host
 from imbue.mngr.hosts.common import symlink_on_host
-from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import CliBackedAgentMixin
 from imbue.mngr.interfaces.agent import HasAutoInstallMixin
@@ -532,23 +534,30 @@ class AntigravityAgent(
         # `agy` is a single-file Go binary; ps/tmux show the literal command name.
         return "agy"
 
-    def _send_enter_and_validate(self, tmux_target: TmuxWindowTarget) -> None:
-        # agy's ``statusLine`` command fires ``tmux wait-for -S`` on the
-        # per-session channel whenever the agent enters a busy state -- i.e. once
-        # it starts processing the just-submitted message (see statusline.sh).
-        # Wait for that, exactly as Claude waits for its UserPromptSubmit hook.
-        # agy waits on the statusLine busy-signal alone -- no acceptance marker is
-        # supplied (agy records none), so the hook signal is the sole confirmation,
-        # which covers the normal and queue-while-busy cases. (Known edge: a model
-        # that *refuses* the prompt -- e.g. quota exhausted -- never enters a busy
-        # state, so this times out even though the prompt was enqueued.)
-        send_enter_via_tmux_wait_for_hook(
-            self,
-            tmux_target,
-            wait_channel=f"mngr-submit-{self.session_name}",
-            timeout_seconds=self.enter_submission_timeout_seconds,
-            accept_marker_command=None,
+    def _build_submission_evidence_probes(
+        self, message: str, policy: SubmissionConfirmationPolicy
+    ) -> Sequence[SubmissionEvidenceProbe]:
+        """Confirm submission via the ``active`` marker advancing past its pre-Enter state.
+
+        agy's ``statusLine`` command touches the ``active`` marker on every
+        busy-state sample -- i.e. once it starts processing the just-submitted
+        message (see statusline.sh) -- so the marker appearing (or its mtime
+        advancing) is durable evidence with the same timing as the tmux
+        wait-for signal the statusline also fires (which mngr no longer
+        trusts: an unconsumed signal latches on the tmux server and would
+        instantly false-confirm a later send). agy records no per-message
+        acceptance event, so the marker is the only evidence, for slash
+        commands and normal messages alike; it exists on agents created by
+        older mngr versions too. (Known edge, unchanged from the signal era: a
+        model that *refuses* the prompt -- e.g. quota exhausted -- never
+        enters a busy state, so a strict send times out even though the prompt
+        was enqueued.)
+        """
+        env_command_prefix = self.host.build_source_env_prefix(self)
+        active_marker_token_command = (
+            f"{env_command_prefix} {{ " + build_file_mtime_token_command('"$MNGR_AGENT_STATE_DIR/active"') + " ; }"
         )
+        return [build_changed_token_probe("active-marker", active_marker_token_command)]
 
     @property
     def is_common_transcript_enabled(self) -> bool:

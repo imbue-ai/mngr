@@ -13,6 +13,7 @@ from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.api.data_types import CreateAgentResult
 from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
+from imbue.mngr.api.message import send_message_with_resend_guidance
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import MngrContext
@@ -23,7 +24,6 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasSessionAdoptionMixin
 from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
-from imbue.mngr.interfaces.agent import require_interactive_agent
 from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostEnvironmentOptions
@@ -408,7 +408,7 @@ def create(
                         timeout=timeout,
                     )
                     logger.info("Sending initial message...")
-                    require_interactive_agent(agent).send_message(initial_message)
+                    send_message_with_resend_guidance(agent, initial_message, "created and started")
                 else:
                     # No initial message - just start the agent
                     logger.info("Starting agent {} ...", agent.name)

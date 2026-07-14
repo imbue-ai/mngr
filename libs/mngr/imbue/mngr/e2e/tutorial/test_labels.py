@@ -8,7 +8,6 @@ from imbue.mngr.e2e.conftest import E2eSession
 from imbue.skitwright.expect import expect
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -40,7 +39,6 @@ def test_create_with_multiple_labels(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.rsync
 @pytest.mark.tmux
 @pytest.mark.timeout(180)
 def test_list_filter_by_label_cel(e2e: E2eSession) -> None:
@@ -79,7 +77,6 @@ def test_list_filter_by_label_cel(e2e: E2eSession) -> None:
     expect(result.stdout).not_to_contain("low-pri")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(180)
@@ -95,7 +92,7 @@ def test_list_combine_include_filters(e2e: E2eSession) -> None:
     backend+STOPPED combination returns exactly the stopped backend agent.
     """
     # Set up agents that exercise both clauses of the AND filter:
-    #   - backend-running:  labels.team == backend, still running
+    #   - backend-running:  labels.team == backend, marked active below so state == RUNNING
     #   - frontend-running: labels.team == frontend (fails the team clause)
     #   - backend-stopped:  labels.team == backend but STOPPED (fails the state clause)
     # Pin a unique sleep value per agent so leaked processes trace back to the create call.
@@ -110,22 +107,24 @@ def test_list_combine_include_filters(e2e: E2eSession) -> None:
                 comment=f"create {name} with {label}",
             )
         ).to_succeed()
+    # A freshly created command agent sits in WAITING: its process is alive but
+    # there is no "active" marker (which real agent integrations write while
+    # doing work), so `state == "RUNNING"` would not match it. Mark backend-running
+    # active through the public exec interface so mngr reports it as RUNNING --
+    # the state the combined filter's second clause requires it to satisfy.
+    expect(
+        e2e.run(
+            "mngr exec backend-running 'touch \"$MNGR_AGENT_STATE_DIR/active\"'",
+            comment="mark backend-running as actively running",
+        )
+    ).to_succeed()
     # Stop one backend agent so it fails the state clause of the combined filter.
     expect(e2e.run("mngr stop backend-stopped", comment="stop one backend agent")).to_succeed()
 
-    # Baseline: filtering on the team clause alone keeps both backend agents and
-    # drops the frontend one. This is the set the second clause further narrows.
-    team_only = e2e.run(
-        "mngr list --include 'labels.team == \"backend\"' --format json",
-        comment="filter on the team clause alone",
-    )
-    expect(team_only).to_succeed()
-    team_only_names = {agent["name"] for agent in json.loads(team_only.stdout)["agents"]}
-    assert team_only_names == {"backend-running", "backend-stopped"}, team_only_names
-
     # The combined filter ANDs both clauses, so every returned agent must match
-    # team == backend AND state == RUNNING. frontend-running fails the team
-    # clause and backend-stopped fails the state clause, so neither may appear.
+    # team == backend AND state == RUNNING. Of the three created agents only
+    # backend-running satisfies both: frontend-running fails the team clause and
+    # backend-stopped fails the state clause.
     combined = e2e.run(
         "mngr list --include 'labels.team == \"backend\"' --include 'state == \"RUNNING\"' --format json",
         comment="combine multiple --include filters (AND)",
@@ -133,8 +132,10 @@ def test_list_combine_include_filters(e2e: E2eSession) -> None:
     expect(combined).to_succeed()
     combined_agents = json.loads(combined.stdout)["agents"]
     combined_names = {agent["name"] for agent in combined_agents}
-    assert "frontend-running" not in combined_names, combined_names
-    assert "backend-stopped" not in combined_names, combined_names
+    # The backend RUNNING agent survives the AND; the frontend agent (fails the
+    # team clause) and the stopped backend agent (fails the state clause) are
+    # both dropped.
+    assert combined_names == {"backend-running"}, combined_names
     # Whatever survives the AND must satisfy both clauses simultaneously.
     for agent in combined_agents:
         assert agent["labels"]["team"] == "backend", agent
@@ -203,7 +204,6 @@ def test_list_exclude_filter(e2e: E2eSession) -> None:
 
 
 @pytest.mark.timeout(180)
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 def test_list_combine_exclude_filters(e2e: E2eSession) -> None:
@@ -238,7 +238,6 @@ def test_list_combine_exclude_filters(e2e: E2eSession) -> None:
     assert remaining == {"backend-svc"}, f"expected only backend-svc to remain, got {remaining}"
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -283,6 +282,20 @@ def test_list_compound_cel(e2e: E2eSession) -> None:
     assert "backend-task" in label_only.stdout, label_only.stdout
     assert "frontend-task" not in label_only.stdout, label_only.stdout
 
+    # Confirm the backend agent is idle (WAITING), not RUNNING -- this is the
+    # mechanism the scope relies on: it is precisely because the agent is not
+    # RUNNING that adding `&& state == "RUNNING"` to the label clause below must
+    # drop it. Reading the state back proves the compound filter's exclusion is
+    # attributable to the state predicate rather than a coincidental filter miss.
+    backend_state = e2e.run(
+        "mngr list --include 'labels.team == \"backend\"' --format json",
+        comment="confirm the backend agent's state is WAITING",
+    )
+    expect(backend_state).to_succeed()
+    backend_agents = json.loads(backend_state.stdout)["agents"]
+    assert [agent["name"] for agent in backend_agents] == ["backend-task"], backend_agents
+    assert backend_agents[0]["state"] == "WAITING", backend_agents[0]
+
     # The exact tutorial command ANDs that label clause with state == "RUNNING".
     # Both agents are idle (WAITING), so the conjunction now excludes the backend
     # agent too -- demonstrating that BOTH predicates of the compound expression
@@ -296,7 +309,6 @@ def test_list_compound_cel(e2e: E2eSession) -> None:
     assert "frontend-task" not in result.stdout, result.stdout
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(180)
@@ -335,7 +347,9 @@ def test_message_filtered_backend(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(180)
+# Generous overall budget: a remote Modal create plus a list+exec SSH round trip
+# can each take up to the 120s remote timeout, so allow headroom above their sum.
+@pytest.mark.timeout(300)
 def test_exec_filtered_remote_disk(e2e: E2eSession) -> None:
     """Tutorial block:
         # use filters with exec: check disk usage on remote agents only
@@ -360,9 +374,13 @@ def test_exec_filtered_remote_disk(e2e: E2eSession) -> None:
             timeout=120.0,
         )
     ).to_succeed()
+    # The list+exec pipeline reaches the remote Modal host over SSH, so it needs
+    # the same generous timeout the other Modal e2e tests use for remote round
+    # trips; the default 30s run timeout is too short and spuriously times out.
     result = e2e.run(
         'mngr list --include \'host.provider == "modal"\' --ids | mngr exec - "df -h /workspace"',
         comment="exec across remote agents only",
+        timeout=120.0,
     )
     expect(result).to_succeed()
     # Verify the exec actually ran df on the remote host: df -h prints a header
@@ -374,9 +392,9 @@ def test_exec_filtered_remote_disk(e2e: E2eSession) -> None:
     expect(result.stdout).to_contain("Command succeeded on agent my-task")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.timeout(180)
 def test_destroy_filtered_dry_run(e2e: E2eSession) -> None:
     """Tutorial block:
         # use filters with destroy: clean up all stopped agents for a team
@@ -411,13 +429,26 @@ def test_destroy_filtered_dry_run(e2e: E2eSession) -> None:
     expect(dry_run_result.stdout).to_contain("backend-task")
 
     # ...but must NOT actually destroy it: the agent still exists afterward.
+    # Assert only on the listing content (that the STOPPED agent survives), not on
+    # the exit code: a bare `mngr list` queries every enabled provider and exits
+    # non-zero when one is merely unreachable (e.g. AWS with no credentials in the
+    # e2e env), which is orthogonal to whether the dry-run deleted the agent. This
+    # mirrors the pre-dry-run `mngr list` check above.
     list_after = e2e.run("mngr list", comment="verify the dry-run left the agent intact")
-    expect(list_after).to_succeed()
     expect(list_after.stdout).to_match(r"backend-task\s+STOPPED")
 
 
+# NOTE: no @pytest.mark.modal. `mngr list` is a read path
+# (is_environment_creation_allowed=False): if the per-user Modal environment
+# does not exist it raises ProviderEmptyError and skips the modal provider
+# without ever shelling out to the `modal` CLI. The gRPC App.lookup runs in the
+# mngr subprocess, which the SDK monkeypatch (installed in the pytest process)
+# never sees, so no modal tracking file is touched. Carrying @pytest.mark.modal
+# would therefore trip the resource guard's "marked but never invoked" check.
+# The generous timeout accommodates the slow Modal gRPC round-trip that
+# discovery still performs.
 @pytest.mark.release
-@pytest.mark.modal
+@pytest.mark.timeout(180)
 def test_list_jq_filter(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can also just list agents by filtering using jq:
@@ -432,6 +463,7 @@ def test_list_jq_filter(e2e: E2eSession) -> None:
         e2e.run(
             "mngr list --format json | jq '.agents[] | select(.labels.priority == \"high\")'",
             comment="list with jq filter",
+            timeout=120.0,
         )
     ).to_succeed()
 

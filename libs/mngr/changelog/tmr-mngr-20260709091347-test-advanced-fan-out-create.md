@@ -1,0 +1,1 @@
+Removed a spurious `@pytest.mark.rsync` mark from the `test_advanced_fan_out_create` e2e tutorial test. The test creates local `--type command` agents in a clean git repo, which mngr materializes via a git worktree and never rsyncs, so the resource guard correctly flagged the mark as declared-but-never-invoked.

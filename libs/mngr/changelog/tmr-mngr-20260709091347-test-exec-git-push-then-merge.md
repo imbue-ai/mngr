@@ -1,0 +1,1 @@
+Removed an incorrect `@pytest.mark.rsync` from the `test_exec_git_push_then_merge` tutorial e2e test. The test only exercises a local agent (`mngr create`/`mngr exec` plus a local `git fetch`/`git merge`), and local agent operations never invoke the `rsync` binary, so the resource guard correctly failed the test for declaring rsync without using it.

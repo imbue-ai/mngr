@@ -22,6 +22,8 @@ from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.tui_utils import SubmissionConfirmationPolicy
+from imbue.mngr.agents.tui_utils import SubmissionEvidenceProbe
 from imbue.mngr.agents.update_policy import AgentUpdatePolicy
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.preservation import preserve_agent_data
@@ -1298,58 +1300,152 @@ def test_tui_ready_indicator_is_input_prompt_glyph(
     assert agent.get_tui_ready_indicator() == "❯"
 
 
+def _run_content_probe(host: OnlineHostInterface, probe: SubmissionEvidenceProbe, state_dir: Path) -> tuple[str, str]:
+    """Run a probe's baseline then poll (with ``base`` bound), returning both outputs."""
+    env = {"MNGR_AGENT_STATE_DIR": str(state_dir)}
+    baseline = host.execute_stateful_command(f"bash -c {shlex.quote(probe.baseline_command)}", env=env).stdout.strip()
+    poll_script = f"base={shlex.quote(baseline)}; {probe.poll_command}"
+    poll = host.execute_stateful_command(f"bash -c {shlex.quote(poll_script)}", env=env).stdout.strip()
+    return baseline, poll
+
+
 @pytest.mark.skipif(
-    shutil.which("jq") is None, reason="jq not installed; required by the Claude acceptance-marker probe"
+    shutil.which("jq") is None, reason="jq not installed; required by the Claude submission-evidence probes"
 )
-def test_build_accept_marker_command_extracts_latest_enqueue_timestamp(
+def test_content_probe_confirms_only_on_message_content_appended_after_baseline(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """The acceptance-marker probe returns the most recent enqueue event's timestamp.
+    """The content probe finds THIS message in records appended past the baseline.
 
-    This is the agent-specific behavior that ``tui_utils`` deliberately does not
-    hold: read the transcript event log at ``$MNGR_AGENT_STATE_DIR/logs/claude_transcript/events.jsonl``,
-    select ``enqueue`` events, and print the last (most recently appended) one's
-    timestamp -- the monotonic token ``send_enter_via_tmux_wait_for_hook``
-    watches. We run the actual probe against a fixture transcript that
-    interleaves multiple enqueue events with non-enqueue events, and assert it
-    skips the non-enqueue events and the earlier enqueue, printing the timestamp
-    of the last enqueue line.
+    Run against a fixture transcript: the baseline is captured while the log
+    holds only older records (including an identical earlier copy of the
+    message, which must NOT confirm -- that is what makes repeated identical
+    messages safe), then the enqueue record for this submission is appended
+    (with JSON-escaped newlines, which jq must decode before normalization).
     """
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    message = 'Please destroy that "inspiration" repo\non github now'
+    probes = agent._build_submission_evidence_probes(message, SubmissionConfirmationPolicy.STRICT)
+    assert [probe.name for probe in probes] == ["content-raw-transcript", "content-native-transcript"]
+
     state_dir = tmp_path / "agent-state"
     log_path = state_dir / "logs" / "claude_transcript" / "events.jsonl"
     log_path.parent.mkdir(parents=True)
+    # The identical message appears BEFORE the baseline: it must not confirm.
     log_path.write_text(
-        '{"operation":"enqueue","timestamp":"2026-06-09T10:00:00Z"}\n'
-        '{"operation":"dequeue","timestamp":"2026-06-09T10:00:05Z"}\n'
-        '{"operation":"enqueue","timestamp":"2026-06-09T10:01:00Z"}\n'
-        '{"type":"assistant","timestamp":"2026-06-09T10:02:00Z"}\n'
+        json.dumps({"type": "queue-operation", "operation": "enqueue", "content": message})
+        + "\n"
+        + json.dumps({"type": "assistant", "content": "decoy"})
+        + "\n"
     )
 
-    result = host.execute_stateful_command(
-        agent._build_accept_marker_command(),
-        env={"MNGR_AGENT_STATE_DIR": str(state_dir)},
-    )
+    raw_probe = probes[0]
+    baseline, poll_before_evidence = _run_content_probe(host, raw_probe, state_dir)
+    assert baseline != ""
+    assert poll_before_evidence == ""
 
-    assert result.success
-    assert result.stdout.strip() == "2026-06-09T10:01:00Z"
+    # Now the submission's own record is appended -- the probe must confirm.
+    with log_path.open("a") as log_file:
+        log_file.write(json.dumps({"type": "queue-operation", "operation": "enqueue", "content": message}) + "\n")
+    env = {"MNGR_AGENT_STATE_DIR": str(state_dir)}
+    poll_script = f"base={shlex.quote(baseline)}; {raw_probe.poll_command}"
+    poll_after_evidence = host.execute_stateful_command(f"bash -c {shlex.quote(poll_script)}", env=env).stdout.strip()
+    assert poll_after_evidence == "found"
 
 
-def test_build_accept_marker_command_emits_empty_token_when_no_enqueue_event(
+@pytest.mark.skipif(
+    shutil.which("jq") is None, reason="jq not installed; required by the Claude submission-evidence probes"
+)
+def test_content_probe_matches_user_records_and_ignores_other_content(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """With no transcript log yet, the probe prints nothing -- the "no marker" baseline.
-
-    ``send_enter_via_tmux_wait_for_hook`` relies on an empty token sorting before
-    any real timestamp, so a missing log must not error or emit a stray value.
-    """
+    """Direct submissions (user records) confirm; other messages' content does not."""
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
-    # Point at a state dir whose transcript log does not exist.
-    result = host.execute_stateful_command(
-        agent._build_accept_marker_command(),
-        env={"MNGR_AGENT_STATE_DIR": str(tmp_path / "missing-state")},
+    message = "run the full test suite and report back"
+    probes = agent._build_submission_evidence_probes(message, SubmissionConfirmationPolicy.STRICT)
+    raw_probe = probes[0]
+
+    state_dir = tmp_path / "agent-state"
+    log_path = state_dir / "logs" / "claude_transcript" / "events.jsonl"
+    log_path.parent.mkdir(parents=True)
+    log_path.write_text("")
+    baseline, _ = _run_content_probe(host, raw_probe, state_dir)
+
+    env = {"MNGR_AGENT_STATE_DIR": str(state_dir)}
+    poll_script = f"base={shlex.quote(baseline)}; {raw_probe.poll_command}"
+
+    # A different message's record does not confirm.
+    with log_path.open("a") as log_file:
+        log_file.write(json.dumps({"type": "user", "message": {"role": "user", "content": "something else"}}) + "\n")
+    assert host.execute_stateful_command(f"bash -c {shlex.quote(poll_script)}", env=env).stdout.strip() == ""
+
+    # This message arriving as a direct user record confirms.
+    with log_path.open("a") as log_file:
+        log_file.write(json.dumps({"type": "user", "message": {"role": "user", "content": message}}) + "\n")
+    assert host.execute_stateful_command(f"bash -c {shlex.quote(poll_script)}", env=env).stdout.strip() == "found"
+
+
+def test_low_content_messages_fall_back_to_any_record_probes(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A message that normalizes to (almost) nothing cannot carry identity."""
+    agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    probes = agent._build_submission_evidence_probes("!!", SubmissionConfirmationPolicy.STRICT)
+    assert [probe.name for probe in probes] == ["any-record-raw-transcript", "any-record-native-transcript"]
+
+
+def test_relaxed_probes_cover_session_id_marker_and_records(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """Slash commands accept any durable evidence: /clear surfaces only as a session-id change."""
+    agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    probes = agent._build_submission_evidence_probes("/clear", SubmissionConfirmationPolicy.RELAXED)
+    assert [probe.name for probe in probes] == [
+        "session-id",
+        "active-marker",
+        "any-record-raw-transcript",
+        "any-record-native-transcript",
+    ]
+    session_probe = probes[0]
+    assert "claude_session_id" in session_probe.poll_command
+
+
+def test_native_transcript_path_expression_resolves_config_dir_and_session(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """The native probe re-reads $CLAUDE_CONFIG_DIR and the session id at poll time."""
+    agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    expression = agent._build_native_transcript_path_expression()
+    assert expression.startswith('"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/')
+    assert 'cat "$MNGR_AGENT_STATE_DIR/claude_session_id"' in expression
+    assert expression.endswith('.jsonl"')
+    encoded_project_dir = encode_claude_project_dir_name(agent._resolve_work_dir_on_host())
+    assert f"/projects/{encoded_project_dir}/" in expression
+
+
+def test_detect_preexisting_input_text_reads_bottom_prompt_line(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """Leftover input-box text is detected from the bottom-most ``❯`` line only.
+
+    The empty input row and the dim ``Try "..."`` placeholder must NOT count as
+    leftover text (they are what a routine send sees), while genuinely stranded
+    text after the glyph must be reported. Prompt lines higher up in the
+    scrollback (already-submitted turns) must be ignored in favor of the
+    bottom-most input row.
+    """
+    agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    assert agent._detect_preexisting_input_text("some output\n❯ previously stranded text") == (
+        "previously stranded text"
     )
-    assert result.stdout.strip() == ""
+    # Empty input row and the placeholder are routine, not leftovers.
+    assert agent._detect_preexisting_input_text("some output\n❯ ") is None
+    assert agent._detect_preexisting_input_text('some output\n❯ Try "how do I fix this test?"') is None
+    # No prompt glyph anywhere (e.g. a dialog occupies the pane).
+    assert agent._detect_preexisting_input_text("Do you trust the files in this folder?") is None
+    # The bottom-most prompt line wins: an older submitted turn above an empty
+    # input row is not leftover text.
+    assert agent._detect_preexisting_input_text("❯ old submitted message\nresponse text\n❯ ") is None
 
 
 def _make_hooks_test_agent(

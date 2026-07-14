@@ -1,0 +1,1 @@
+Added a per-test timeout to the `test_create_with_nonexistent_template` e2e test so its several `mngr` subprocess calls (each with a multi-second cold start) are not killed by the default 10s per-test timeout.

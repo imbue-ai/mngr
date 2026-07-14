@@ -1,0 +1,1 @@
+Fixed the `test_start_all_via_stdin` lifecycle e2e test: its `--stopped` verification queries are now scoped to `--provider local` so an unreachable remote provider (e.g. `aws` without credentials) no longer makes them exit non-zero, and the superfluous `@pytest.mark.rsync` mark was removed since creating a local git-repo agent uses git-worktree transfer and never invokes rsync.
