@@ -72,8 +72,11 @@ def print_view_urls(container: str) -> None:
             print("  workspace login: {}".format(login), flush=True)
             print("                   ^ visit once, then click the workspace in the dashboard", flush=True)
         else:
-            print("  workspace login: not emitted yet -- re-run  minds-evals box  once the proxy is up "
-                  "(or: docker logs {} | grep login)".format(container), flush=True)
+            print(
+                "  workspace login: not emitted yet -- re-run  minds-evals box  once the proxy is up "
+                "(or: docker logs {} | grep login)".format(container),
+                flush=True,
+            )
 
 
 def _slug(text: str) -> str:
@@ -110,7 +113,9 @@ def ensure(mngr_branch: str, minds_env: str = "staging") -> str:
     container, ref = resolve(mngr_branch)
     if is_running(container):
         port = port_of(container)
-        print(">> reusing box {} @ mngr {} (dashboard http://localhost:{})".format(container, ref[:12], port), flush=True)
+        print(
+            ">> reusing box {} @ mngr {} (dashboard http://localhost:{})".format(container, ref[:12], port), flush=True
+        )
         return container
 
     if _run(["docker", "info"]).returncode != 0:
@@ -126,27 +131,55 @@ def ensure(mngr_branch: str, minds_env: str = "staging") -> str:
 
     print(">> building {} from mngr {}@{}".format(tag, mngr_branch, ref[:12]), flush=True)
     build = subprocess.run(
-        ["docker", "build", "-f", str(APP_DIR / "docker" / "Dockerfile"),
-         "--build-arg", "MNGR_BRANCH={}".format(mngr_branch), "--build-arg", "MNGR_REF={}".format(ref),
-         "-t", tag, str(APP_DIR)],
+        [
+            "docker",
+            "build",
+            "-f",
+            str(APP_DIR / "docker" / "Dockerfile"),
+            "--build-arg",
+            "MNGR_BRANCH={}".format(mngr_branch),
+            "--build-arg",
+            "MNGR_REF={}".format(ref),
+            "-t",
+            tag,
+            str(APP_DIR),
+        ],
     )
     if build.returncode != 0:
         raise BoxError("docker build failed")
 
     _run(["docker", "rm", "-f", container])
     print(">> starting box {} (dashboard {}, forward {})".format(container, ui, forward), flush=True)
-    run = _run([
-        "docker", "run", "-d", "--name", container,
-        "-p", "{}:{}".format(ui, ui), "-p", "{}:{}".format(forward, forward),
-        "-v", "{}:/root/.modal.toml:ro".format(Path.home() / ".modal.toml"),
-        "-v", "{}:/root/.minds-eval/aws.env:ro".format(AWS_ENV),
-        "-e", "MINDS_BARE_PORT={}".format(ui),
-        "-e", "MINDS_FORWARD_HOST=0.0.0.0", "-e", "MINDS_FORWARD_PORT={}".format(forward),
-        "-e", "MINDS_ENV={}".format(minds_env),
-        "-e", "MNGR__PROVIDERS__MODAL__USER_ID={}".format(modal_env),
-        "-e", "MINDS_BOX_MNGR_REF={}".format(ref),
-        tag,
-    ])
+    run = _run(
+        [
+            "docker",
+            "run",
+            "-d",
+            "--name",
+            container,
+            "-p",
+            "{}:{}".format(ui, ui),
+            "-p",
+            "{}:{}".format(forward, forward),
+            "-v",
+            "{}:/root/.modal.toml:ro".format(Path.home() / ".modal.toml"),
+            "-v",
+            "{}:/root/.minds-eval/aws.env:ro".format(AWS_ENV),
+            "-e",
+            "MINDS_BARE_PORT={}".format(ui),
+            "-e",
+            "MINDS_FORWARD_HOST=0.0.0.0",
+            "-e",
+            "MINDS_FORWARD_PORT={}".format(forward),
+            "-e",
+            "MINDS_ENV={}".format(minds_env),
+            "-e",
+            "MNGR__PROVIDERS__MODAL__USER_ID={}".format(modal_env),
+            "-e",
+            "MINDS_BOX_MNGR_REF={}".format(ref),
+            tag,
+        ]
+    )
     if run.returncode != 0:
         raise BoxError("docker run failed: {}".format((run.stderr or "").strip()[:300]))
 

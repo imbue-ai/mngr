@@ -36,7 +36,7 @@ def load_aws_env() -> dict:
         for raw in AWS_ENV_PATH.read_text().splitlines():
             line = raw.strip()
             if line.startswith("export "):
-                line = line[len("export "):].lstrip()
+                line = line[len("export ") :].lstrip()
             if line and not line.startswith("#") and "=" in line:
                 key, value = line.split("=", 1)
                 env[key.strip()] = value.strip().strip("'\"")
@@ -77,7 +77,9 @@ def restic_repo_url(env: dict, case_prefix_value: str) -> str:
 
 
 def put_json(client, bucket: str, key: str, payload: dict) -> None:
-    client.put_object(Bucket=bucket, Key=key, Body=json.dumps(payload, indent=2).encode(), ContentType="application/json")
+    client.put_object(
+        Bucket=bucket, Key=key, Body=json.dumps(payload, indent=2).encode(), ContentType="application/json"
+    )
 
 
 def get_json(client, bucket: str, key: str) -> dict | None:

@@ -22,9 +22,7 @@ def test_parse_transcript_keeps_real_turns_only() -> None:
     case = evaluate._parse_transcript(text)
     assert case.agent_turns == ["I can help with three things.", "Pick a number one two or three"]
     assert case.conversation == (
-        "USER: hi what can you do\n\n"
-        "AGENT: I can help with three things.\n\n"
-        "AGENT: Pick a number one two or three"
+        "USER: hi what can you do\n\nAGENT: I can help with three things.\n\nAGENT: Pick a number one two or three"
     )
 
 

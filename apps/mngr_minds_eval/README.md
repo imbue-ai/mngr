@@ -26,11 +26,14 @@ One-time: an S3 bucket and a bucket-scoped IAM key at `~/.minds-eval/aws.env`. S
 
 ```
 # run an eval batch (one self-completing workspace per case) from a single config file
-ANTHROPIC_API_KEY=sk-ant-... minds-evals launch --config sample-eval-config.json
+ANTHROPIC_API_KEY=sk-ant-... minds-evals launch --config eval-config.json
 
 # status, straight from S3 -- no box, works any time from anywhere
 minds-evals list-batches
-minds-evals inspect web1_20260713-101500
+minds-evals inspect combined_20260713-101500
+
+# score a finished batch (S3 + Anthropic only, no box); writes results back to S3
+ANTHROPIC_API_KEY=sk-ant-... minds-evals evaluate combined_20260713-101500
 
 # destroy a branch's Modal workspaces (clean slate)
 minds-evals clean-modal-workspaces
@@ -49,31 +52,53 @@ per box, then click the workspace in the dashboard).
 ## Eval config (`--config`)
 
 A single json, stored verbatim in S3 as the batch config (plus `created_at`, `restic_password`,
-`mngr_sha`). See `sample-eval-config.json`:
+`mngr_sha`). See `eval-config.json`:
 
 ```json
 {
-  "name": "web1",
-  "turns": 4,
+  "name": "combined",
   "mngr_branch": "minds-eval",
   "fct_branch": "minds-eval-autosend",
-  "personas": [{"id": "todo-app", "persona": "...", "first_prompt": "Build me ..."}]
+  "personas": [
+    {"id": "todo-app", "persona": "...", "prompts": ["Build me ...", "Sounds good.", "DECIDE_FROM_PERSONA"]}
+  ]
 }
 ```
+
+Each case's `prompts` array is the conversation, one entry per turn -- so different cases can run
+different numbers of turns. Each entry is either:
+
+- a **literal string** -- sent to the agent verbatim (e.g. the opening ask, or `"Sounds good."`); or
+- **`DECIDE_FROM_PERSONA`** -- the in-sandbox worker role-plays the client: it feeds the
+  transcript-so-far + the case's `persona` to the Anthropic API (using the key `launch` was given)
+  and sends back a short casual reply. It cannot be the first entry (nothing to decide from yet).
 
 `fct_branch`/`fct_repo` are optional (default the workspace-template branch that carries the eval
 worker). `fct_branch` must carry the worker or the sandbox boots but never self-runs.
 
-## Turn logic (`turns: N`)
+## Turn logic (N = `len(prompts)`)
 
-| wait | the in-sandbox worker does |
+| turn | the in-sandbox worker does |
 |---|---|
-| 1 | send the case's `first_prompt` |
-| 2 .. N-1 | `restic backup /mngr --tag post_message_<k>`, then send `OKAY` |
-| N | upload the full transcript, mark `finished`, exit |
+| 1 | send `prompts[0]` (a literal -- the opening ask) |
+| 2 .. N | `restic backup /mngr --tag post_message_<k>`, then send `prompts[k]` (literal, or a role-played reply for `DECIDE_FROM_PERSONA`) |
+| after N | upload the full transcript, mark `finished`, exit |
 
-Each wait writes `state.json` (`waits_done` / `num_turns` / `ongoing`|`finished`). Snapshots are
+Each turn writes `state.json` (`waits_done` / `num_turns` / `ongoing`|`finished`). Snapshots are
 captured to S3 per turn; spinning one back up as a live workspace (restore) is not implemented yet.
+
+## Evaluating a finished batch (`evaluate`)
+
+`minds-evals evaluate <batch>` reads the batch from S3 (no box, no Modal), checks every case is
+`finished`, nukes any prior results, then scores each case in parallel and writes results back:
+
+- `avg_word_count` -- average words per agent turn, from the transcript.
+- `conciseness_score` / `nontechnical_language_score` / `proactive_score` -- three 1-10 scores from
+  one Anthropic call per case (needs `ANTHROPIC_API_KEY`).
+
+Per-case results land in `<case>/case_eval_results.json`, the batch average in
+`<batch>/batch_eval_results.json`, and a table (rows = cases, columns = the keys, plus a batch-average
+row) is printed. Add a new evaluation by appending a function to `EVALUATIONS` in `evaluate.py`.
 
 ## S3 layout
 
@@ -94,7 +119,9 @@ box.py             Docker box lifecycle (build/boot minds-box-<branch>-<sha>, id
 minds_client.py    the Minds create API (POST + poll) -- shared by launch/workspace
 launch.py          batch: prep clone (+ vendor mngr + slot test_case_metadata.json) and create per case
 workspace.py       create one Modal workspace (build_payload + create_workspace) -- the one create path
-status.py          list-batches / inspect (S3 reads only)
+status.py          list-batches / inspect / case_report (S3 reads only)
+evaluate.py        evaluate: pull transcripts, score (avg_word_count + LLM scores), write results to S3
+anthropic_call.py  one plain Anthropic Messages call (the LLM-graded evals)
 s3_store.py        S3 layout, creds file, batch/case prefixes
 docker/            Dockerfile + entrypoint.sh (boots headless Minds in the box)
 ```

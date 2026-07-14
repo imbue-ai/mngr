@@ -114,6 +114,7 @@ addopts = [
   "--cov=imbue.mngr_ovh",
   "--cov=imbue.mngr_gcp",
   "--cov=imbue.mngr_azure",
+  "--cov=imbue.mngr_minds_eval",
   "--cov-report=term-missing",
   "--cov-report=xml",
   "--durations=20",

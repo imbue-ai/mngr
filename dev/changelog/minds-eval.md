@@ -1,0 +1,1 @@
+- Added the new `apps/mngr_minds_eval` app as a uv workspace member (recorded in `uv.lock`).

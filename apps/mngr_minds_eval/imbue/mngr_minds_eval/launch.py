@@ -18,6 +18,7 @@ import time
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
 from imbue.mngr_minds_eval import minds_client
 from imbue.mngr_minds_eval import s3_store
@@ -32,8 +33,20 @@ CLONES_DIR = Path("/work/clones")
 BASE_DIR = Path("/work/eval-base")
 BOX_MNGR = Path("/work/mngr")
 
-_VENDOR_EXCLUDES = (".git", ".venv", "node_modules", "__pycache__", "*.pyc", ".pytest_cache",
-                    ".mypy_cache", ".ruff_cache", "dist", "build", "*.egg-info", ".coverage")
+_VENDOR_EXCLUDES = (
+    ".git",
+    ".venv",
+    "node_modules",
+    "__pycache__",
+    "*.pyc",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    "dist",
+    "build",
+    "*.egg-info",
+    ".coverage",
+)
 
 
 def _sh(*args: str) -> None:
@@ -70,31 +83,52 @@ _post_json = minds_client.post_json
 _get_json = minds_client.get_json
 
 
+# A case's prompts are sent one per turn. A literal string is sent verbatim; this sentinel makes the
+# in-sandbox worker role-play the client instead -- it feeds (transcript-so-far + persona) to the
+# Anthropic API and sends back a short casual reply. The first prompt cannot be the sentinel (there
+# is no transcript to decide from yet).
+DECIDE_SENTINEL = "DECIDE_FROM_PERSONA"
+
+
 def normalize_cases(personas: object) -> list[dict]:
     if not isinstance(personas, list) or not personas:
         raise ValueError("'personas' must be a non-empty list")
     out = []
-    for index, case in enumerate(personas):
+    for index, raw_case in enumerate(personas):
+        case: Any = raw_case
+        if not isinstance(case, dict):
+            raise ValueError("each persona case must be an object")
         case_id = str(case.get("id") or "case-{}".format(index + 1))
-        prompt = str(case.get("first_prompt", "")).strip()
-        if not prompt:
-            raise ValueError("case {!r} is missing first_prompt".format(case_id))
-        out.append({"id": case_id, "persona": str(case.get("persona", "")).strip(), "first_prompt": prompt})
+        raw_prompts = case.get("prompts")
+        if not isinstance(raw_prompts, list) or not raw_prompts:
+            raise ValueError("case {!r} must have a non-empty 'prompts' list".format(case_id))
+        prompts = [str(p).strip() for p in raw_prompts]
+        if any(not p for p in prompts):
+            raise ValueError("case {!r} has an empty prompt".format(case_id))
+        if prompts[0] == DECIDE_SENTINEL:
+            raise ValueError(
+                "case {!r}: the first prompt cannot be {} (nothing to decide from yet)".format(
+                    case_id, DECIDE_SENTINEL
+                )
+            )
+        out.append({"id": case_id, "persona": str(case.get("persona", "")).strip(), "prompts": prompts})
     return out
 
 
 def load_config(config_path: Path) -> dict:
     """Read + validate the eval config json. This exact object is stored verbatim in S3 as the batch
-    config (plus created_at / restic_password / mngr_sha added at launch)."""
+    config (plus created_at / restic_password / mngr_sha added at launch). Each case's 'prompts' array
+    defines that case's turns, so different cases can run different numbers of turns."""
     if not config_path.is_file():
         raise SystemExit("no such config file: {}".format(config_path))
     config = json.loads(config_path.read_text())
-    for key in ("name", "turns", "mngr_branch", "personas"):
+    for key in ("name", "mngr_branch", "personas"):
         if not config.get(key):
             raise SystemExit("eval config is missing required key: {!r}".format(key))
-    if int(config["turns"]) < 2:
-        raise SystemExit("turns must be >= 2 (turn 1 sends the first prompt, the last ends the run)")
-    normalize_cases(config["personas"])  # validate shape now, on the host
+    try:
+        normalize_cases(config["personas"])  # validate case shape now, on the host
+    except ValueError as exc:
+        raise SystemExit("eval config: {}".format(exc)) from exc
     return config
 
 
@@ -123,8 +157,19 @@ def _prepare_clone(case: dict, case_config: dict) -> Path:
     _vendor_mngr(clone)
     (clone / "scripts" / "test_case_metadata.json").write_text(json.dumps(case_config, indent=2))
     _sh("git", "-C", str(clone), "add", "-A")
-    _sh("git", "-C", str(clone), "-c", "user.email=eval@minds", "-c", "user.name=minds-eval",
-        "commit", "-q", "-m", "eval case {}".format(case["id"]))
+    _sh(
+        "git",
+        "-C",
+        str(clone),
+        "-c",
+        "user.email=eval@minds",
+        "-c",
+        "user.name=minds-eval",
+        "commit",
+        "-q",
+        "-m",
+        "eval case {}".format(case["id"]),
+    )
     return clone
 
 
@@ -136,6 +181,7 @@ def _list_workspaces(port: str) -> list[dict]:
 def _destroy_and_wait(port: str, agent_id: str, label: str, timeout: float = 600.0, quiet: bool = False) -> bool:
     """POST destroy and poll until done. Returns True on confirmed teardown. Each destroy removes the
     Modal sandbox AND its host record from the environment, so the host name frees up."""
+
     def _say(msg: str) -> None:
         if not quiet:
             print(msg, flush=True)
@@ -178,7 +224,7 @@ def destroy_all_workspaces(port: str) -> None:
     try:
         workspaces = _list_workspaces(port)
     except (urllib.error.URLError, OSError) as exc:
-        raise SystemExit("could not list workspaces: {}".format(exc))
+        raise SystemExit("could not list workspaces: {}".format(exc)) from exc
     if not workspaces:
         print(">> no workspaces to destroy", flush=True)
         return
@@ -194,7 +240,6 @@ def launch_batch(*, config: dict, anthropic_key: str, port: str, stamp: str) -> 
     bucket = env["MINDS_EVAL_BUCKET"]
 
     eval_name = config["name"]
-    num_turns = int(config["turns"])
     fct_repo = config.get("fct_repo", DEFAULT_FCT_REPO)
     fct_branch = config.get("fct_branch", DEFAULT_FCT_BRANCH)
     cases = normalize_cases(config["personas"])
@@ -202,17 +247,24 @@ def launch_batch(*, config: dict, anthropic_key: str, port: str, stamp: str) -> 
 
     print("=" * 66, flush=True)
     print("  EVAL BATCH  {}".format(batch), flush=True)
-    print("  cases: {}   turns: {}   bucket: {}".format(len(cases), num_turns, bucket), flush=True)
+    print("  cases: {}   bucket: {}".format(len(cases), bucket), flush=True)
     print("=" * 66, flush=True)
 
     # Store the user's config verbatim + the fields launch adds: created_at, the batch restic
     # password (we own it -- we drive restic ourselves), and the exact mngr SHA this box is built at
     # (stamped into the box env) as provenance of exactly which mngr this batch ran on.
     restic_password = secrets.token_urlsafe(24)
-    s3_store.put_json(client, bucket, "{}/{}".format(batch, s3_store.BATCH_CONFIG_NAME), {
-        **config, "created_at": stamp, "restic_password": restic_password,
-        "mngr_sha": os.environ.get("MINDS_BOX_MNGR_REF", ""),
-    })
+    s3_store.put_json(
+        client,
+        bucket,
+        "{}/{}".format(batch, s3_store.BATCH_CONFIG_NAME),
+        {
+            **config,
+            "created_at": stamp,
+            "restic_password": restic_password,
+            "mngr_sha": os.environ.get("MINDS_BOX_MNGR_REF", ""),
+        },
+    )
 
     CLONES_DIR.mkdir(parents=True, exist_ok=True)
     _ensure_base(fct_repo, fct_branch)
@@ -225,14 +277,18 @@ def launch_batch(*, config: dict, anthropic_key: str, port: str, stamp: str) -> 
     for case in cases:
         case_pref = s3_store.case_prefix(batch, eval_name, case["id"])
         case_config = {
-            "eval_name": eval_name, "case_name": case["id"], "persona": case["persona"],
-            "first_prompt": case["first_prompt"], "num_turns": num_turns,
-            "s3_bucket": bucket, "s3_prefix": case_pref,
+            "eval_name": eval_name,
+            "case_name": case["id"],
+            "persona": case["persona"],
+            "prompts": case["prompts"],  # one per turn; a literal is sent verbatim, DECIDE_FROM_PERSONA is role-played
+            "s3_bucket": bucket,
+            "s3_prefix": case_pref,
             "restic_repository": s3_store.restic_repo_url(env, case_pref),
             "restic_password": restic_password,
             "aws_access_key_id": env["AWS_ACCESS_KEY_ID"],
             "aws_secret_access_key": env["AWS_SECRET_ACCESS_KEY"],
             "aws_region": env.get("AWS_DEFAULT_REGION", "us-east-1"),
+            "anthropic_api_key": anthropic_key,  # so the worker can role-play the client on DECIDE_FROM_PERSONA turns
         }
         print("  preparing clone: {}".format(case["id"]), flush=True)
         prepared.append((case, _prepare_clone(case, case_config)))
@@ -246,8 +302,12 @@ def launch_batch(*, config: dict, anthropic_key: str, port: str, stamp: str) -> 
         destroy_existing_workspace(port, host_name, quiet=True)  # idempotent: re-run with same name works
         try:
             agent_id = workspace.create_workspace(
-                port=port, fct_link=str(clone), name=host_name,
-                ai_provider="api_key", anthropic_key=anthropic_key, backup_provider="configure_later",
+                port=port,
+                fct_link=str(clone),
+                name=host_name,
+                ai_provider="api_key",
+                anthropic_key=anthropic_key,
+                backup_provider="configure_later",
                 on_stage=lambda s: live.set(cid, s),
             )
             live.set(cid, "OK -- agent {}".format(agent_id))

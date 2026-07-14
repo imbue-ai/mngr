@@ -59,7 +59,10 @@ def create_and_wait(
             on_stage(stage)
             last_stage = stage
         if info.get("is_done"):
-            return info.get("agent_id")
+            agent_id = info.get("agent_id")
+            if not isinstance(agent_id, str):
+                raise CreateError("create finished without an agent_id: {}".format(info))
+            return agent_id
         if info.get("error"):
             raise CreateError(str(info["error"]))
         time.sleep(4)

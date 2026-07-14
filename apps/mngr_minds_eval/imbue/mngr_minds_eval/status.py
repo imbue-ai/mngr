@@ -46,9 +46,7 @@ def inspect(batch: str) -> None:
         print("no such batch: {} (try: minds-evals list-batches)".format(batch))
         return
 
-    num_turns = config.get("turns", "?")
-    print("batch {}   turns: {}   mngr: {}@{}".format(
-        batch, num_turns, config.get("mngr_branch", "?"), (config.get("mngr_sha") or "")[:12]))
+    print("batch {}   mngr: {}@{}".format(batch, config.get("mngr_branch", "?"), (config.get("mngr_sha") or "")[:12]))
     print("{:<26} {:<12} {:>10}  {}".format("CASE", "STATE", "TURNS", "TRANSCRIPT"))
 
     finished = 0
@@ -59,7 +57,7 @@ def inspect(batch: str) -> None:
             continue
         test_state = state.get("test_state", "?")
         finished += test_state == "finished"
-        turns = "{}/{}".format(state.get("waits_done", "?"), state.get("num_turns", num_turns))
+        turns = "{}/{}".format(state.get("waits_done", "?"), state.get("num_turns", "?"))
         has_transcript = _exists(client, bucket, "{}/{}".format(prefix, s3_store.TRANSCRIPT_KEY))
         print("{:<26} {:<12} {:>10}  {}".format(case_id[:26], test_state, turns, "yes" if has_transcript else "-"))
 

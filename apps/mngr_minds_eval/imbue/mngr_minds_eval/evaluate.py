@@ -108,9 +108,11 @@ RESULT_KEYS = ("avg_word_count", *_LLM_KEYS)
 
 def evaluate_single_case(client, bucket: str, case_prefix_value: str) -> dict:
     """Pull the transcript, run every evaluation, write case_eval_results.json, return the merged dict."""
-    body = client.get_object(
-        Bucket=bucket, Key="{}/{}".format(case_prefix_value, s3_store.TRANSCRIPT_KEY)
-    )["Body"].read().decode()
+    body = (
+        client.get_object(Bucket=bucket, Key="{}/{}".format(case_prefix_value, s3_store.TRANSCRIPT_KEY))["Body"]
+        .read()
+        .decode()
+    )
     case = _parse_transcript(body)
     results: dict = {}
     for evaluation in EVALUATIONS:
@@ -145,8 +147,9 @@ def evaluate_batch(batch: str) -> None:
     incomplete = [r["id"] for r in rows if not (r["state"] and r["state"].get("test_state") == "finished")]
     if incomplete:
         raise SystemExit(
-            "batch not fully finished -- {} case(s) not done: {}\n"
-            "run  minds-evals inspect {}  to see status".format(len(incomplete), ", ".join(incomplete), batch)
+            "batch not fully finished -- {} case(s) not done: {}\nrun  minds-evals inspect {}  to see status".format(
+                len(incomplete), ", ".join(incomplete), batch
+            )
         )
 
     # Nuke any prior results so this is a clean recompute.

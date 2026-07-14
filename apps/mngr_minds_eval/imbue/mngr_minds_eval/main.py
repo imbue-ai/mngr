@@ -66,9 +66,17 @@ def _run_in_container(container: str, argv: list[str], *, upload: tuple[Path, st
     if sys.stdout.isatty():
         command.append("-t")
     command += [
-        "-e", "ANTHROPIC_API_KEY={}".format(os.environ.get("ANTHROPIC_API_KEY", "")),
-        "-w", "/work/mngr", container,
-        "uv", "run", "--package", "mngr-minds-eval", "minds-evals", *argv,
+        "-e",
+        "ANTHROPIC_API_KEY={}".format(os.environ.get("ANTHROPIC_API_KEY", "")),
+        "-w",
+        "/work/mngr",
+        container,
+        "uv",
+        "run",
+        "--package",
+        "mngr-minds-eval",
+        "minds-evals",
+        *argv,
     ]
     returncode = subprocess.run(command).returncode
     if returncode == 0:
@@ -81,8 +89,12 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_launch = sub.add_parser("launch", help="launch an eval batch from a single config json")
-    p_launch.add_argument("--config", required=True, type=Path,
-                          help="eval config json: {name, turns, mngr_branch, fct_branch?, fct_repo?, personas:[...]}")
+    p_launch.add_argument(
+        "--config",
+        required=True,
+        type=Path,
+        help="eval config json: {name, mngr_branch, fct_branch?, fct_repo?, personas:[{id, persona, prompts:[...]}]}",
+    )
     p_launch.add_argument("--anthropic-key", default=os.environ.get("ANTHROPIC_API_KEY", ""))
 
     p_box = sub.add_parser("box", help="build/boot a Minds box for an mngr branch (general utility)")
@@ -148,8 +160,12 @@ def main() -> None:
             _run_in_container(box_mod.ensure(args.mngr_branch), sys.argv[1:])
         try:
             workspace_mod.create_workspace(
-                port=_port(), fct_link=args.fct_link, fct_branch=args.fct_branch, name=args.name,
-                ai_provider=args.ai_provider, anthropic_key=args.anthropic_key,
+                port=_port(),
+                fct_link=args.fct_link,
+                fct_branch=args.fct_branch,
+                name=args.name,
+                ai_provider=args.ai_provider,
+                anthropic_key=args.anthropic_key,
                 backup_provider=args.backup_provider,
             )
         except minds_client.CreateError as exc:
@@ -162,8 +178,9 @@ def main() -> None:
         if not args.anthropic_key:
             parser.error("set ANTHROPIC_API_KEY (or --anthropic-key)")
         if not IN_BOX:
-            _run_in_container(box_mod.ensure(config["mngr_branch"]), sys.argv[1:],
-                              upload=(args.config, _CONFIG_IN_BOX))
+            _run_in_container(
+                box_mod.ensure(config["mngr_branch"]), sys.argv[1:], upload=(args.config, _CONFIG_IN_BOX)
+            )
         launch_mod.launch_batch(config=config, anthropic_key=args.anthropic_key, port=_port(), stamp=_utc_stamp())
         return
 

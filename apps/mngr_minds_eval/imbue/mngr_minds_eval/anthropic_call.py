@@ -6,6 +6,7 @@ Deliberately minimal: the evaluator just hands Claude a prompt and gets text bac
 from __future__ import annotations
 
 import anthropic
+from anthropic.types import TextBlock
 
 MODEL = "claude-opus-4-8"
 
@@ -18,4 +19,4 @@ def ask(prompt: str, *, max_tokens: int = 1024) -> str:
         max_tokens=max_tokens,
         messages=[{"role": "user", "content": prompt}],
     )
-    return "".join(block.text for block in message.content if block.type == "text")
+    return "".join(block.text for block in message.content if isinstance(block, TextBlock))
