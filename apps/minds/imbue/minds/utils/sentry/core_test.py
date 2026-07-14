@@ -14,6 +14,7 @@ from imbue.minds.utils.sentry.core import _MINDS_LOG_ATTACHMENT_GROUPS
 from imbue.minds.utils.sentry.core import _S3_ATTACHMENT_BUCKET_BY_ENVIRONMENT
 from imbue.minds.utils.sentry.core import _SENTRY_DSN_BY_ENVIRONMENT
 from imbue.minds.utils.sentry.core import latchkey_forward_sentry_consent_path
+from imbue.minds.utils.sentry.core import resolve_anonymous_user_id
 from imbue.minds.utils.sentry.core import resolve_latchkey_forward_sentry_env
 from imbue.minds.utils.sentry.core import resolve_sentry_environment
 from imbue.minds.utils.sentry.core import sentry_deploy_environment_from_minds_env_name
@@ -22,6 +23,7 @@ from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_CONSENT_FILE_ENV_VAR
 from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_DSN_ENV_VAR
 from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_ENVIRONMENT_ENV_VAR
 from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_S3_BUCKET_ENV_VAR
+from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_USER_ID_ENV_VAR
 from imbue.mngr_latchkey.sentry import read_forward_sentry_consent
 from imbue.mngr_latchkey.sentry import resolve_forward_sentry_config
 
@@ -69,6 +71,14 @@ def test_resolve_sentry_environment_defaults_to_development_when_unactivated(mon
     assert resolve_sentry_environment() is SentryDeployEnvironment.DEVELOPMENT
 
 
+def test_resolve_anonymous_user_id_persists_under_the_data_dir_and_is_stable(tmp_path: Path) -> None:
+    # The id is persisted at <data_dir>/anonymous_user_id and reused on subsequent calls, so an
+    # install keeps one stable Sentry user across sessions.
+    first = resolve_anonymous_user_id(tmp_path)
+    assert (tmp_path / "anonymous_user_id").read_text() == first
+    assert resolve_anonymous_user_id(tmp_path) == first
+
+
 def test_resolve_latchkey_forward_sentry_env_round_trips_into_forward_config(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -78,10 +88,13 @@ def test_resolve_latchkey_forward_sentry_env_round_trips_into_forward_config(
     # is infrastructure, decoupled from consent); consent lives in the file.
     monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, "minds-staging")
     consent_path = latchkey_forward_sentry_consent_path(tmp_path)
-    published_env = resolve_latchkey_forward_sentry_env(consent_file_path=consent_path)
+    published_env = resolve_latchkey_forward_sentry_env(
+        consent_file_path=consent_path, anonymous_user_id="0123456789abcdef0123456789abcdef"
+    )
     assert published_env[MNGR_LATCHKEY_SENTRY_DSN_ENV_VAR] == SENTRY_DSN_STAGING
     assert published_env[MNGR_LATCHKEY_SENTRY_ENVIRONMENT_ENV_VAR] == SentryDeployEnvironment.STAGING.value
     assert published_env[MNGR_LATCHKEY_SENTRY_S3_BUCKET_ENV_VAR] == STAGING_UPLOADS_BUCKET
+    assert published_env[MNGR_LATCHKEY_SENTRY_USER_ID_ENV_VAR] == "0123456789abcdef0123456789abcdef"
     assert published_env[MNGR_LATCHKEY_SENTRY_CONSENT_FILE_ENV_VAR] == str(consent_path)
 
     for env_var_name, value in published_env.items():
@@ -91,6 +104,7 @@ def test_resolve_latchkey_forward_sentry_env_round_trips_into_forward_config(
     assert forward_config.dsn == SENTRY_DSN_STAGING
     assert forward_config.environment_name == SentryDeployEnvironment.STAGING.value
     assert forward_config.s3_attachment_bucket == STAGING_UPLOADS_BUCKET
+    assert forward_config.user_id == "0123456789abcdef0123456789abcdef"
     assert forward_config.consent_file_path == consent_path
 
 

@@ -38,6 +38,7 @@ from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import default_docker_runtime
+from imbue.minds.utils.sentry.core import resolve_anonymous_user_id
 from imbue.minds.utils.sentry.frontend import frontend_sentry_browser_payload
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostName
@@ -171,7 +172,11 @@ def _frontend_sentry_browser_payload() -> dict[str, str] | None:
     """
     minds_config = get_state().minds_config if has_app_context() else None
     is_error_reporting_enabled = minds_config.get_report_unexpected_errors() if minds_config is not None else False
-    return frontend_sentry_browser_payload(is_error_reporting_enabled)
+    # Attach the install's stable anonymous user id (no PII) so the browser web UI's events count as
+    # the same install as the backend's in Sentry's per-issue user counts. With no app context (e.g.
+    # template unit tests) reporting is already disabled above, so the placeholder id is never emitted.
+    anonymous_user_id = resolve_anonymous_user_id(minds_config.data_dir) if minds_config is not None else ""
+    return frontend_sentry_browser_payload(is_error_reporting_enabled, anonymous_user_id)
 
 
 def _build_catalog() -> Catalog:

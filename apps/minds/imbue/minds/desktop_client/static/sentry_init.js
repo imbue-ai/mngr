@@ -26,6 +26,11 @@
     if (config.git_sha) {
       window.Sentry.setTag('git_sha', config.git_sha);
     }
+    if (config.anonymous_user_id) {
+      // Attach the install's stable anonymous id (no PII) so Sentry counts distinct installs per
+      // issue -- matching the Python backend's sentry_sdk.set_user (see utils/sentry/core.py).
+      window.Sentry.setUser({ id: config.anonymous_user_id });
+    }
   } catch (error) {
     // Never let Sentry bootstrap break the page -- a reporting failure must not
     // take down the web UI itself.

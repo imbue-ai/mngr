@@ -2,6 +2,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const zlib = require('zlib');
+const crypto = require('crypto');
 const Sentry = require('@sentry/electron/main');
 const { parse: parseToml } = require('smol-toml');
 const paths = require('./paths');
@@ -67,6 +68,51 @@ function isErrorReportingEnabled() {
  */
 function isLogInclusionEnabled() {
   return readUserConfig().include_error_logs === true;
+}
+
+// This install's stable anonymous user id is persisted at `<dataDir>/anonymous_user_id` as a 32-char
+// lowercase hex string, matching the Python backend's `uuid4().hex` format so both surfaces read the
+// same value (see imbue/imbue_common/sentry/core.py get_or_create_anonymous_user_id).
+const ANONYMOUS_USER_ID_FILENAME = 'anonymous_user_id';
+const ANONYMOUS_USER_ID_PATTERN = /^[0-9a-f]{32}$/;
+
+/**
+ * Read (or create-and-persist) this install's stable anonymous user id, or return null on failure.
+ *
+ * The id is a random, opaque value (no PII) attached to every event via `Sentry.setUser` so Sentry
+ * can count the distinct installs affected by each issue. It is shared with the Python backend (which
+ * writes/reads the same `<dataDir>/anonymous_user_id` file) so an install is counted once regardless
+ * of which surface reported the event. The file is created atomically with the `wx` (O_EXCL) flag so
+ * the Electron main process and the Python backend racing on first launch converge on a single id:
+ * the loser sees `EEXIST` and reads the winner's value. A missing/blank/malformed file is regenerated.
+ * Returns null (rather than throwing) if the id cannot be read or written, so Sentry setup never fails.
+ */
+function getOrCreateAnonymousUserId() {
+  const idFilePath = path.join(paths.getDataDir(), ANONYMOUS_USER_ID_FILENAME);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    let existing = '';
+    try {
+      existing = fs.readFileSync(idFilePath, 'utf8').trim();
+    } catch {
+      existing = '';
+    }
+    if (ANONYMOUS_USER_ID_PATTERN.test(existing)) {
+      return existing;
+    }
+    const newId = crypto.randomUUID().replace(/-/g, '');
+    try {
+      fs.mkdirSync(path.dirname(idFilePath), { recursive: true });
+      fs.writeFileSync(idFilePath, newId, { flag: 'wx' });
+      return newId;
+    } catch (err) {
+      // Another process created it first (EEXIST) -- loop to read its value. Any other error means we
+      // cannot persist an id; give up so Sentry setup proceeds without a user rather than crashing.
+      if (err && err.code === 'EEXIST') continue;
+      console.warn(`[sentry] could not persist anonymous user id: ${err && err.message}`);
+      return null;
+    }
+  }
+  return null;
 }
 
 /**
@@ -155,6 +201,12 @@ function initSentry() {
     },
   });
   Sentry.setTag('git_sha', gitSha);
+  // Attach the install's stable anonymous id (no PII) so Sentry counts distinct installs per issue,
+  // matching the Python backend's sentry_sdk.set_user (see imbue/minds/utils/sentry/core.py).
+  const anonymousUserId = getOrCreateAnonymousUserId();
+  if (anonymousUserId) {
+    Sentry.setUser({ id: anonymousUserId });
+  }
   console.log(
     `[sentry] Initialized (environment=${environment}, release=${fixupReleaseId(releaseId)}); ` +
       'automatic reporting gated live by the report_unexpected_errors user setting.'
@@ -354,5 +406,6 @@ module.exports = {
   isLogInclusionEnabled,
   resolveEnvironment,
   fixupReleaseId,
+  getOrCreateAnonymousUserId,
   captureManualReport,
 };
