@@ -129,6 +129,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "--new-box-on-mngr-branch", default="", help="spin up a fresh box on this mngr branch to view from"
     )
     p_view.add_argument("--service", default="system_interface", help="which workspace service to forward")
+    p_view.add_argument(
+        "--no-restart", action="store_true", help="don't restart the workspace if it's stopped; just forward"
+    )
     return parser
 
 
@@ -155,7 +158,11 @@ def main() -> None:
         return
     if args.command == "view-modal-workspace":
         view_mod.view_modal_workspace(
-            args.name, box=args.box, new_box_on_mngr_branch=args.new_box_on_mngr_branch, service=args.service
+            args.name,
+            box=args.box,
+            new_box_on_mngr_branch=args.new_box_on_mngr_branch,
+            service=args.service,
+            restart=not args.no_restart,
         )
         return
 

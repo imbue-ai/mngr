@@ -228,9 +228,10 @@ def destroy_all_workspaces(port: str) -> None:
     if not workspaces:
         print(">> no workspaces to destroy", flush=True)
         return
-    print(">> destroying {} workspace(s) ...".format(len(workspaces)), flush=True)
-    for w in workspaces:
-        _destroy_and_wait(port, w["agent_id"], w.get("name") or w["agent_id"])
+    print(">> destroying {} workspace(s) in parallel ...".format(len(workspaces)), flush=True)
+    # Each destroy is independent (different agent), so fan out instead of waiting for each in turn.
+    with ThreadPoolExecutor(max_workers=min(8, len(workspaces))) as pool:
+        list(pool.map(lambda w: _destroy_and_wait(port, w["agent_id"], w.get("name") or w["agent_id"]), workspaces))
     print(">> done", flush=True)
 
 

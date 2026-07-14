@@ -13,6 +13,7 @@ import re
 import time
 
 from imbue.mngr_minds_eval import box as box_mod
+from imbue.mngr_minds_eval import minds_client
 
 _LOGIN_RE = re.compile(r"https?://\S*?/login\?one_time_code=[A-Za-z0-9_-]+")
 _MEM_RE = re.compile(r"\s*([0-9.]+)\s*([KMG]i?B)")
@@ -75,7 +76,12 @@ def _pick_box(box: str, new_box_on_mngr_branch: str) -> str:
 
 
 def view_modal_workspace(
-    name: str, *, box: str = "", new_box_on_mngr_branch: str = "", service: str = "system_interface"
+    name: str,
+    *,
+    box: str = "",
+    new_box_on_mngr_branch: str = "",
+    service: str = "system_interface",
+    restart: bool = True,
 ) -> None:
     container = _pick_box(box, new_box_on_mngr_branch)
     match = next((w for w in _workspaces(container) if (w.get("name") or "") == name), None)
@@ -84,6 +90,22 @@ def view_modal_workspace(
     agent_id = match["agent_id"]
     forward_port = box_mod.forward_port_of(container)
     log_path = "/tmp/view_{}.log".format(agent_id)
+
+    # A stopped/paused sandbox can't be forwarded -- bring it back up first (with live progress).
+    host_state = (match.get("host_state") or "").upper()
+    if host_state == "DESTROYED":
+        raise SystemExit(
+            "workspace {} is DESTROYED -- relaunch it (a destroyed sandbox can't be restarted)".format(name)
+        )
+    if restart and host_state in ("STOPPED", "PAUSED"):
+        print(">> {} is {}; restarting its sandbox ...".format(name, host_state), flush=True)
+        try:
+            minds_client.restart_and_wait(
+                box_mod.port_of(container), agent_id, on_stage=lambda s: print("   ... {}".format(s), flush=True)
+            )
+        except minds_client.CreateError as exc:
+            raise SystemExit("restart failed: {}".format(exc)) from exc
+        print(">> {} is back up".format(name), flush=True)
 
     # Free the forward port: stop the box's built-in eager forward (the one that OOMs) so our scoped
     # forward -- which proxies just this one workspace -- can bind the already-published port.

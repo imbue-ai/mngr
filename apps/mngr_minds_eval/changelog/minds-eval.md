@@ -61,3 +61,7 @@
 - Box output no longer prints the per-box forward-login URL (unreliable -- the built-in forward OOMs); it prints only the dashboard URL (over http, not https) and points at `view-modal-workspace`. Removed the now-unused `_forward_login`.
 
 - Eval boxes now set `MINDS_FORWARD_AGENT_INCLUDE` to a never-match CEL filter, so minds' built-in forward proxies **nothing** instead of eagerly proxying every workspace in the shared env (which OOM'd the box past ~20 live workspaces). Discovery/listing is unaffected (so `list-modal-workspaces` and the dashboard list still work), and viewing is on-demand via `view-modal-workspace`. Requires the paired `minds run` change that reads that env var (unset elsewhere, so normal minds is unaffected).
+
+- `view-modal-workspace` now restarts a stopped/paused workspace before forwarding it (streaming the restart progress), so you can view a workspace whose sandbox has timed out. Pass `--no-restart` to skip and just forward. A `DESTROYED` workspace errors (relaunch instead).
+
+- `clean-modal-workspaces` now destroys workspaces in parallel (up to 8 at a time) instead of one-at-a-time -- much faster on a large env.

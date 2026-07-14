@@ -67,3 +67,40 @@ def create_and_wait(
             raise CreateError(str(info["error"]))
         time.sleep(4)
     raise CreateError("timed out waiting for workspace create")
+
+
+def restart_and_wait(
+    port: str, agent_id: str, *, timeout: float = 1800.0, on_stage: Callable[[str], None] | None = None
+) -> None:
+    """Bounce a workspace's host (restart the Modal sandbox) and poll until done. Streams each new
+    status caption via on_stage. Raises CreateError on failure/timeout. Used to bring a stopped
+    workspace back up before forwarding it."""
+    status, body = post_json(
+        "{}/api/v1/workspaces/{}/restart".format(api_base(port), agent_id),
+        {"scope": "host", "host_already_stopped": True},
+    )
+    if status != 202:
+        raise CreateError("restart failed HTTP {}: {}".format(status, body))
+    operation_id = body.get("operation_id")
+    if not operation_id:
+        raise CreateError("restart returned no operation_id: {}".format(body))
+
+    deadline = time.time() + timeout
+    last_stage = ""
+    while time.time() < deadline:
+        try:
+            info = get_json("{}/api/v1/workspaces/operations/restart/{}".format(api_base(port), operation_id))
+        except (urllib.error.URLError, OSError):
+            time.sleep(4)
+            continue
+        stage = info.get("status_text") or info.get("status") or ""
+        if on_stage and stage and stage != last_stage:
+            on_stage(stage)
+            last_stage = stage
+        state = (info.get("status") or "").upper()
+        if state == "DONE" or info.get("is_done"):
+            return
+        if state == "FAILED" or info.get("error"):
+            raise CreateError("restart failed: {}".format(info.get("error") or info))
+        time.sleep(4)
+    raise CreateError("timed out waiting for workspace restart")
