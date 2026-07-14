@@ -83,12 +83,14 @@ from imbue.mngr_lima.limactl import limactl_start_new
 from imbue.mngr_lima.limactl import limactl_stop
 from imbue.mngr_lima.limactl import resolve_lima_home
 
-# Lima instance status values mapped to mngr HostState
+# Lima instance status values mapped to mngr HostState. "Broken" is limactl
+# positively reporting breakage -> CRASHED; "Unknown" means limactl could not
+# determine the state -> UNKNOWN, so consumers don't auto-restart off it.
 _LIMA_STATUS_TO_HOST_STATE: dict[str, HostState] = {
     "Running": HostState.RUNNING,
     "Stopped": HostState.STOPPED,
     "Broken": HostState.CRASHED,
-    "Unknown": HostState.CRASHED,
+    "Unknown": HostState.UNKNOWN,
 }
 
 # Filename of the pre-injected ed25519 sshd host key stored per host on disk.
@@ -1047,7 +1049,9 @@ sudo poweroff
             if record.config is not None:
                 lima_status = instance_status.pop(record.config.instance_name, None)
                 if lima_status is not None:
-                    host_state = _LIMA_STATUS_TO_HOST_STATE.get(lima_status, HostState.CRASHED)
+                    # An unrecognized status is a gap in our mapping, not
+                    # evidence of a crash.
+                    host_state = _LIMA_STATUS_TO_HOST_STATE.get(lima_status, HostState.UNKNOWN)
                 else:
                     # Instance not found in Lima -- derive from record
                     if record.certified_host_data.failure_reason is not None:

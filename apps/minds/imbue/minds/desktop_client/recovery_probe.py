@@ -18,8 +18,8 @@ The single sentinel ``===PROBE-READY===`` is printed before the in-container
 JSON payload. If the sentinel is absent from stdout, the "Can we run a
 command inside the container?" probe answers ``no`` -- the ``mngr exec``
 plumbing returned without ever invoking the in-container script, so we
-have no in-container observations and the page steers the user to a host
-restart rather than auto-dispatching surgical.
+have no in-container observations and the page steers the user to a
+consent-gated host restart.
 """
 
 import base64
@@ -122,8 +122,8 @@ class DispatchTier(str, Enum):
 
     Every member names a *condition* (what we observed), not the *action* the
     recovery page takes in response -- the action is a consequence of the
-    condition (e.g. INTERFACE_UNRESPONSIVE -> in-place restart; HOST_OFFLINE ->
-    unattended host restart; HOST_UNRESPONSIVE -> ask the user first).
+    condition (e.g. HOST_OFFLINE -> unattended host restart;
+    HOST_UNRESPONSIVE -> ask the user first).
     """
 
     HEALTHY = "healthy"
@@ -144,7 +144,9 @@ class DispatchTier(str, Enum):
     reads the stale host state, e.g. a just-stopped container still shows RUNNING),
     or the snapshot itself carries no observation of the container (host state
     UNKNOWN -- the host was unobservable during discovery -- or a
-    transitional/absent state).
+    transitional/absent state, e.g. STOPPING, which settles to STOPPED a
+    moment later), or supervisord inside the container reports the interface
+    mid-self-heal (STARTING/BACKOFF -- supervisord is already fixing it).
     A negative verdict or an auto-dispatched restart off such non-evidence is
     exactly the misclassification this tier avoids. The recovery page renders a
     live "reconnecting" state and keeps checking: the cheap liveness poll returns
@@ -154,35 +156,37 @@ class DispatchTier(str, Enum):
     still short-circuits to HEALTHY even here -- positive evidence is trusted
     regardless of snapshot freshness."""
 
-    INTERFACE_UNRESPONSIVE = "interface_unresponsive"
-    """Container running and exec works, but the inner web server does not answer
-    GET / with 200 -- restart the system-services agent in place."""
-
     HOST_OFFLINE = "host_offline"
     """Container is offline -- restart the host (no live work to interrupt)."""
 
     HOST_UNRESPONSIVE = "host_unresponsive"
-    """Container was observed running but we cannot get inside it.
+    """The workspace is not answering and only a consent-gated host restart is on
+    offer -- a restart may bounce a live container, so it requires an explicit
+    click.
 
-    Covers an observed RUNNING claim whose exec cleanly failed, and the
-    UNAUTHENTICATED state -- which providers report when the container was
-    observed running but inner SSH is unreachable (e.g. its sshd died; see
-    PR #2247). A host restart bounces a possibly-live container, so it
-    requires explicit user consent -- and for the dead-inner-sshd case that
-    consent-gated restart is the engineered recovery (the stop step is not
-    skipped, so the relaunch brings sshd back). A host state that answers
-    neither "running" nor "offline" is non-evidence and classifies
-    INDETERMINATE instead.
+    Covers three observations: exec reached the container but the interface does
+    not answer GET / with 200 (and supervisord is not mid-self-heal); an observed
+    RUNNING claim whose exec cleanly failed, including the UNAUTHENTICATED state
+    -- which providers report when the container was observed running but inner
+    SSH is unreachable (e.g. its sshd died; see PR #2247), where the consent-gated
+    restart is the engineered recovery (the stop step is not skipped, so the
+    relaunch brings sshd back); and the FAILED host state (a failed-to-create
+    host, where an unattended ``mngr start`` mostly re-fails, so the restart is
+    consent-gated too). A host state that answers neither "running" nor "offline"
+    is non-evidence and classifies INDETERMINATE instead.
     """
 
     BACKEND_UNREACHABLE = "backend_unreachable"
     """The provider/backend hosting this workspace can't be reached, or refused us
-    -- the connector is down, the local docker daemon is stopped or paused, or the
-    provider rejected us (e.g. an expired login). Whatever the cause, a host or
-    interface restart routes through that same backend, so it cannot help: the
-    page offers only a Retry, surfaces the provider's own error verbatim, and arms
+    -- the connector is down, the local docker daemon is stopped or paused, the
+    provider rejected us (e.g. an expired login), or the host itself rejected this
+    machine's access (the UNREACHABLE host state, e.g. imbue_cloud's outer SSH
+    refusing our key). Whatever the cause, a host restart routes through that same
+    backend, so it cannot help: the page offers only a Retry, surfaces the
+    provider's own error verbatim (or the canned access-rejected reason for
+    UNREACHABLE, since discovery carries no per-host failure detail), and arms
     a background poll that returns the user to the workspace the moment it
-    recovers. Takes precedence over every host/interface tier because no
+    recovers. Takes precedence over every host tier because no
     host-state observation can be trusted when the backend that produces it is
     unreachable.
     """
@@ -195,8 +199,9 @@ class HostHealthResponse(FrozenModel):
     ``Probe`` in ``probes``, and the page's branching reads only
     ``dispatch_tier``. The two provider-error fields below are the sole
     exception: the BACKEND_UNREACHABLE tier is not derived from in-container
-    probes (it short-circuits before those run), so the reason and provider label
-    travel alongside the tier instead.
+    probes (a provider error short-circuits before those run; the UNREACHABLE
+    host state precludes them), so the reason and provider label travel
+    alongside the tier instead.
     """
 
     probes: tuple[Probe, ...] = Field(
@@ -208,7 +213,11 @@ class HostHealthResponse(FrozenModel):
     )
     unreachable_reason: str = Field(
         default="",
-        description="Provider error message for the BACKEND_UNREACHABLE tier; empty for all other tiers.",
+        description=(
+            "Human-readable reason for the BACKEND_UNREACHABLE tier (the provider's own error "
+            "message, or the canned access-rejected reason for the UNREACHABLE host state); "
+            "empty for all other tiers."
+        ),
     )
     provider_label: str = Field(
         default="",
@@ -319,12 +328,36 @@ _RUNNING_STATE: Final[str] = "RUNNING"
 # hook and imbue_cloud's listing path; see PR #2247), "the container was observed
 # running but inner SSH is unreachable" -- so for the "is the container running?"
 # question it is an observed YES. This routes the dead-inner-sshd case to the
-# consent-gated HOST_UNRESPONSIVE restart that actually fixes it. The imbue_cloud
-# outer-SSH-auth-rejected fallback reuses the same state, where a restart fails on
-# the same auth error; distinguishing the two needs a dedicated provider state
-# (e.g. UNREACHABLE), which remains deferred (flagged in PR #2247).
+# consent-gated HOST_UNRESPONSIVE restart that actually fixes it. The
+# outer-SSH-auth-rejected case that once shared this state now has its own
+# UNREACHABLE host state (resolving the deferral flagged in PR #2247).
 _OBSERVED_RUNNING_STATES: Final[frozenset[str]] = frozenset({_RUNNING_STATE, "UNAUTHENTICATED"})
+# Display vocabulary for the "is the container running?" probe: states that are
+# a truthful "observed not running". The classifier does NOT branch on this
+# collapsed answer -- it consults the raw host state, because these states
+# diverge in treatment (STOPPED/CRASHED auto-restart, FAILED is consent-gated,
+# STOPPING is transitional).
 _OFFLINE_HOST_STATES: Final[frozenset[str]] = frozenset({"STOPPED", "STOPPING", "CRASHED", "FAILED"})
+# Host states that justify an *unattended* host restart when the observation is
+# trusted: the container was positively observed not running and is not in
+# transition, so there is no live work to interrupt. In-app stops close their
+# workspace windows first, so an open window observing STOPPED implies an
+# out-of-app stop, and reviving it is intended (this is also the path that
+# revives workspaces after a laptop reboot). FAILED is deliberately excluded:
+# an unattended ``mngr start`` on a failed-to-create host mostly re-fails.
+_AUTO_RESTART_OFFLINE_STATES: Final[frozenset[str]] = frozenset({"STOPPED", "CRASHED"})
+_FAILED_STATE: Final[str] = "FAILED"
+_UNREACHABLE_STATE: Final[str] = "UNREACHABLE"
+
+# Canned reason for the UNREACHABLE host state's BACKEND_UNREACHABLE page.
+# Discovery carries only the host state (DiscoveredHost has no failure_reason
+# field), so the page cannot show the provider's verbatim error; this canned
+# text covers the class of causes instead.
+HOST_ACCESS_REJECTED_REASON: Final[str] = (
+    "This machine's access to the workspace host was rejected. Retrying or "
+    "restarting won't fix this -- the workspace may need to be recreated, or "
+    "contact support."
+)
 
 
 # -- Per-probe builders ----------------------------------------------------
@@ -436,11 +469,11 @@ def _build_system_interface_probe(
 ) -> Probe:
     """Probe 4: is the system_interface service RUNNING under supervisord?
 
-    Purely diagnostic -- the dispatch tier never branches on it. A
-    not-RUNNING service while the container is up and exec works still
-    classifies as INTERFACE_UNRESPONSIVE (a surgical restart bounces
-    supervisord with it), so this probe is the detail behind that tier, not
-    a tier of its own.
+    The dispatch tier consults the underlying supervisord state (not this
+    probe's collapsed answer): STARTING/BACKOFF means supervisord is already
+    self-healing the service, so the classifier keeps checking
+    (INDETERMINATE) instead of rendering the consent-gated
+    HOST_UNRESPONSIVE verdict.
     """
     command = _mngr_exec_command(mngr_binary, services_agent_id, _supervisorctl_status_inner_command())
     if not in_container.sentinel_seen:
@@ -586,11 +619,13 @@ def _build_plugin_resolver_probe(plugin_resolver_services: dict[str, str]) -> Pr
 
 def _classify_dispatch_tier(
     probes: tuple[Probe, ...],
+    host_state: str,
+    supervisor_state: str | None,
     provider_error_message: str | None,
     probe_timed_out: bool,
     classification_is_trustworthy: bool,
 ) -> DispatchTier:
-    """Derive the dispatch tier from probe answers, the provider error, and evidence quality.
+    """Derive the dispatch tier from the probe answers, the raw host state, and evidence quality.
 
     Ordered by precedence:
 
@@ -601,29 +636,31 @@ def _classify_dispatch_tier(
       by error kind (a stopped daemon, a paused daemon, an expired login all land
       here): the user-facing impact is identical -- show the provider's own
       message, offer Retry, and wait for it to recover.
-    * HEALTHY / INTERFACE_UNRESPONSIVE next, whenever the batched exec reached the
-      container (``can_run`` is YES). Direct in-container evidence is authoritative
-      regardless of snapshot freshness or how we got here: the container is
-      demonstrably up, so a live GET / 200 is proof the interface is answering
-      (HEALTHY, sent home) and a non-200 is the wedge a surgical in-place restart
-      fixes (INTERFACE_UNRESPONSIVE). Positive evidence short-circuits every
-      host-state-derived tier below.
+    * HEALTHY / HOST_UNRESPONSIVE / INDETERMINATE next, whenever the batched exec
+      reached the container (``can_run`` is YES). Direct in-container evidence is
+      authoritative regardless of snapshot freshness or how we got here: the
+      container is demonstrably up, so a live GET / 200 is proof the interface is
+      answering (HEALTHY, sent home). A non-200 with supervisord reporting the
+      service STARTING or BACKOFF means supervisord is already self-healing it --
+      keep checking (INDETERMINATE). Any other non-200 is the consent-gated
+      HOST_UNRESPONSIVE: the page's liveness poll still sends the user home the
+      moment the interface self-heals, so no restart fires without a click.
     * INDETERMINATE when we have no direct in-container evidence AND cannot trust a
       negative verdict: the probe timed out (it observed *nothing* -- a timeout is
-      absence of evidence, not evidence of a down workspace), no discovery
+      absence of evidence, not evidence of a down workspace), or no discovery
       snapshot taken at/after the outage onset backs the host state (a pre-outage
-      snapshot still reads the stale host state), or the snapshot itself carries
-      no observation of the container (host state UNKNOWN -- e.g. an imbue_cloud
-      host whose outer SSH was unreachable, which says the *path* to the host is
-      broken, not that the container is down -- or a transitional/absent state).
-      A verdict or restart affordance off such non-evidence is the
-      misclassification we avoid; the recovery page keeps checking instead.
-    * HOST_OFFLINE when the container was observed offline (and we trust that
-      observation): nothing live to interrupt, so a host restart can run
-      unattended.
-    * HOST_UNRESPONSIVE when the container was observed running but the exec
-      cleanly failed to reach it (ssh dead): a host restart bounces a live
-      container, so it requires explicit user consent.
+      snapshot still reads the stale host state).
+    * The trusted host-state verdicts, branching on the *raw* state rather than
+      the collapsed "is it running?" probe answer, because observed-not-running
+      states diverge in treatment: STOPPED / CRASHED -> HOST_OFFLINE (nothing
+      live to interrupt, restart runs unattended); FAILED -> HOST_UNRESPONSIVE
+      (an unattended start on a failed-to-create host mostly re-fails, so
+      consent-gate it); UNREACHABLE -> BACKEND_UNREACHABLE (the host rejected
+      this machine's access; a restart routes through the same rejected
+      credential); RUNNING / UNAUTHENTICATED -> HOST_UNRESPONSIVE (observed
+      running but the exec could not get inside). Anything else -- UNKNOWN,
+      transitional states like STOPPING, or an absent state -- is non-evidence:
+      keep checking (INDETERMINATE).
     """
     if provider_error_message is not None:
         return DispatchTier.BACKEND_UNREACHABLE
@@ -631,14 +668,15 @@ def _classify_dispatch_tier(
     # Direct in-container evidence is authoritative regardless of snapshot
     # freshness: if the batched exec reached the container, the container is
     # demonstrably up. A confirmed GET / 200 means the interface is actually
-    # responding (HEALTHY); any other result is the wedge a surgical in-place
-    # restart fixes (INTERFACE_UNRESPONSIVE). This positive evidence is trusted
-    # over both the discovery snapshot and the slower background health tracker.
+    # responding (HEALTHY). Otherwise consult supervisord's own report before
+    # concluding anything is wrong: STARTING/BACKOFF means it is mid-self-heal.
     can_run = answers.get(_QUESTION_CAN_RUN_COMMANDS_INSIDE)
     if can_run == ProbeAnswer.YES:
         if answers.get(_QUESTION_CURL_OK) == ProbeAnswer.YES:
             return DispatchTier.HEALTHY
-        return DispatchTier.INTERFACE_UNRESPONSIVE
+        if supervisor_state in _SELF_HEALING_SUPERVISOR_STATES:
+            return DispatchTier.INDETERMINATE
+        return DispatchTier.HOST_UNRESPONSIVE
     # No direct in-container evidence: every remaining tier is a *negative*
     # verdict that leans on the discovery snapshot's host state. We can only trust
     # such a verdict when the probe actually completed (a timeout observed nothing)
@@ -648,14 +686,19 @@ def _classify_dispatch_tier(
     # user home) rather than rendering a verdict or auto-dispatching a restart.
     if probe_timed_out or not classification_is_trustworthy:
         return DispatchTier.INDETERMINATE
-    container_running = answers.get(_QUESTION_CONTAINER_RUNNING)
-    if container_running == ProbeAnswer.NO:
+    upper_state = host_state.upper()
+    if upper_state == _UNREACHABLE_STATE:
+        return DispatchTier.BACKEND_UNREACHABLE
+    if upper_state in _AUTO_RESTART_OFFLINE_STATES:
         return DispatchTier.HOST_OFFLINE
-    if container_running == ProbeAnswer.YES:
+    if upper_state == _FAILED_STATE:
+        return DispatchTier.HOST_UNRESPONSIVE
+    if upper_state in _OBSERVED_RUNNING_STATES:
         return DispatchTier.HOST_UNRESPONSIVE
     # The snapshot carries no observation of the container (host state UNKNOWN,
-    # transitional, or absent). That is non-evidence, same as a timed-out probe:
-    # render no verdict and offer no restart -- keep checking.
+    # transitional -- e.g. STOPPING, which settles to STOPPED a moment later --
+    # or absent). That is non-evidence, same as a timed-out probe: render no
+    # verdict and offer no restart -- keep checking.
     return DispatchTier.INDETERMINATE
 
 
@@ -707,14 +750,28 @@ def build_host_health_response(
         _build_curl_probe(in_container, mngr_binary, services_agent_id),
         _build_plugin_resolver_probe(plugin_resolver_services),
     )
+    supervisor_state = (
+        parse_supervisorctl_status_state(in_container.system_interface_status)
+        if in_container.system_interface_status
+        else None
+    )
     dispatch_tier = _classify_dispatch_tier(
-        probes, provider_error_message, probe_timed_out, classification_is_trustworthy
+        probes, host_state, supervisor_state, provider_error_message, probe_timed_out, classification_is_trustworthy
     )
     is_backend_unreachable = dispatch_tier == DispatchTier.BACKEND_UNREACHABLE
+    # BACKEND_UNREACHABLE has two sources: a provider-level discovery error
+    # (surface its message verbatim) and the UNREACHABLE host state, where
+    # discovery carries no per-host failure detail -- show the canned reason.
+    if provider_error_message is not None:
+        unreachable_reason = provider_error_message
+    elif is_backend_unreachable:
+        unreachable_reason = HOST_ACCESS_REJECTED_REASON
+    else:
+        unreachable_reason = ""
     return HostHealthResponse(
         probes=probes,
         dispatch_tier=dispatch_tier,
-        unreachable_reason=(provider_error_message if provider_error_message is not None else ""),
+        unreachable_reason=unreachable_reason,
         provider_label=(provider_label if is_backend_unreachable else ""),
     )
 
@@ -727,6 +784,12 @@ _SUPERVISOR_RUNNING_STATE: Final[str] = "RUNNING"
 _SUPERVISOR_PROCESS_STATES: Final[frozenset[str]] = frozenset(
     {"STOPPED", "STARTING", "RUNNING", "BACKOFF", "STOPPING", "EXITED", "FATAL", "UNKNOWN"}
 )
+# supervisord states meaning "self-heal in progress": STARTING is a launch in
+# its startsecs window, BACKOFF is supervisord's own retry loop after a failed
+# start. Either way supervisord is already doing the fixing, so the classifier
+# keeps checking rather than asking the user to restart the host. The settled
+# states (RUNNING / FATAL / EXITED / STOPPED) carry no such promise.
+_SELF_HEALING_SUPERVISOR_STATES: Final[frozenset[str]] = frozenset({"STARTING", "BACKOFF"})
 
 
 def parse_supervisorctl_status_state(output: str) -> str | None:

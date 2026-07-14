@@ -1358,11 +1358,6 @@ _RECOVERY_SCRIPT: Final[str] = """\
             postRestart({ scope: 'host', host_already_stopped: true, auto_dispatched: true });
             return;
           }
-          if (tier === 'interface_unresponsive') {
-            // Container running, exec works: restart the system-services agent in place.
-            postRestart({ scope: 'services', auto_dispatched: true });
-            return;
-          }
           // 'host_unresponsive' or anything else: require explicit user consent for a host restart.
           renderUnresponsive();
         }

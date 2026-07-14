@@ -15,9 +15,11 @@ def derive_host_state_from_raw(raw: Mapping[str, Any]) -> HostState:
         return HostState.DESTROYED
     container_state = raw.get("container_state")
     if not container_state:
-        # Outer SSH succeeded but produced no state -- treat as crashed
-        # (no info to be more specific).
-        return HostState.CRASHED
+        # Outer SSH succeeded but produced no state -- a degraded
+        # observation, not evidence that the container is down, so
+        # UNKNOWN rather than CRASHED (consumers auto-restart off
+        # CRASHED and must not do so off non-evidence).
+        return HostState.UNKNOWN
     exit_code = raw.get("container_exit_code") or 0
     has_certified_data = bool(raw.get("certified_data"))
     if container_state == "running" and has_certified_data:
@@ -69,4 +71,6 @@ def map_docker_status_to_host_state(status: str, exit_code: int) -> tuple[HostSt
         return HostState.STARTING, f"container in {status} state"
     if status in ("dead", "removing"):
         return HostState.CRASHED, f"container in {status} state"
-    return HostState.CRASHED, f"unrecognized docker status {status!r}"
+    # An unrecognized status is a gap in our mapping, not evidence the
+    # container is down: UNKNOWN, so consumers don't auto-restart off it.
+    return HostState.UNKNOWN, f"could not determine state: unrecognized docker status {status!r}"

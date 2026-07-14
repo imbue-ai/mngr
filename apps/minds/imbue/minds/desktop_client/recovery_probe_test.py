@@ -3,7 +3,10 @@
 import json
 import shlex
 
+import pytest
+
 from imbue.minds.desktop_client.recovery_probe import DispatchTier
+from imbue.minds.desktop_client.recovery_probe import HOST_ACCESS_REJECTED_REASON
 from imbue.minds.desktop_client.recovery_probe import HostHealthResponse
 from imbue.minds.desktop_client.recovery_probe import PROBE_SENTINEL
 from imbue.minds.desktop_client.recovery_probe import Probe
@@ -250,28 +253,75 @@ def test_plugin_resolver_probe_no_when_no_services_registered() -> None:
 # --- dispatch_tier classification ----------------------------------------
 
 
-def test_dispatch_tier_interface_unresponsive_when_container_running_and_exec_works() -> None:
+def test_dispatch_tier_host_unresponsive_when_exec_works_but_interface_not_answering() -> None:
+    """Exec reached the container but GET / is not answering 200 -> consent-gated verdict.
+
+    There is no in-place (surgical) restart tier anymore: an interface that is
+    not answering, with supervisord not reporting a self-heal in progress, gets
+    the consent-gated "Workspace unresponsive" page. The page's liveness poll
+    still returns the user home the moment the interface self-heals, so no
+    restart fires without a click.
+    """
     response = _response(
         host_state="RUNNING",
         in_container_stdout=_probe_stdout({"inner_port": 8000, "curl_status": "502"}),
     )
-    assert response.dispatch_tier == DispatchTier.INTERFACE_UNRESPONSIVE
+    assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
 
 
-def test_dispatch_tier_interface_unresponsive_when_system_interface_not_running() -> None:
-    """A not-RUNNING system_interface (container up, exec works) is still INTERFACE_UNRESPONSIVE.
+@pytest.mark.parametrize(
+    "status_line",
+    [
+        "system_interface   RUNNING   pid 42, uptime 0:10:00",
+        "system_interface   FATAL     Exited too quickly",
+        "system_interface   EXITED    Jul 14 09:00 AM",
+        "system_interface   STOPPED   Not started",
+        "unix:///var/run/supervisor.sock refused connection",
+    ],
+)
+def test_dispatch_tier_host_unresponsive_for_settled_or_unparseable_supervisord_state(status_line: str) -> None:
+    """A settled (or unreadable) supervisord state carries no self-heal promise.
 
-    The supervisorctl probe is diagnostic detail, not its own tier: a surgical
-    restart bounces supervisord (and the system_interface with it), which is the
-    correct recovery, so the dispatch tier must not branch on probe 4.
+    Exec works but the interface is not answering: unless supervisord positively
+    reports a start in progress, the verdict is the consent-gated
+    HOST_UNRESPONSIVE -- including a status line we cannot parse.
     """
     response = _response(
         host_state="RUNNING",
         in_container_stdout=_probe_stdout(
-            {"system_interface_status": "system_interface   FATAL     Exited too quickly", "inner_port": 8000}
+            {"system_interface_status": status_line, "inner_port": 8000, "curl_status": "502"}
         ),
     )
-    assert response.dispatch_tier == DispatchTier.INTERFACE_UNRESPONSIVE
+    assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
+
+
+@pytest.mark.parametrize(
+    "status_line",
+    [
+        "system_interface   STARTING",
+        "system_interface   BACKOFF   Exited too quickly (process log may have details)",
+    ],
+)
+def test_dispatch_tier_indeterminate_while_supervisord_self_heals(status_line: str) -> None:
+    """supervisord STARTING/BACKOFF means it is already fixing the interface -> keep checking.
+
+    Restart-worthy conclusions must wait for the evidence to settle: a service in
+    its startsecs window (STARTING) or supervisord's own retry loop (BACKOFF) is
+    mid-self-heal, so the classifier keeps checking rather than rendering the
+    consent-gated verdict.
+    """
+    response = _response(
+        host_state="RUNNING",
+        in_container_stdout=_probe_stdout(
+            {"system_interface_status": status_line, "inner_port": 8000, "curl_status": "502"}
+        ),
+    )
+    assert response.dispatch_tier == DispatchTier.INDETERMINATE
+
+
+def test_no_interface_unresponsive_tier_exists() -> None:
+    """The surgical-restart tier is gone: no DispatchTier member carries its value."""
+    assert "interface_unresponsive" not in {tier.value for tier in DispatchTier}
 
 
 def test_dispatch_tier_healthy_when_interface_answers_http_200() -> None:
@@ -279,7 +329,7 @@ def test_dispatch_tier_healthy_when_interface_answers_http_200() -> None:
 
     The live in-container HTTP 200 is direct proof the interface is responding, so
     the classifier must report HEALTHY (the recovery page returns the user to the
-    workspace) rather than the by-elimination INTERFACE_UNRESPONSIVE -- this is
+    workspace) rather than a by-elimination unresponsive verdict -- this is
     the fix for a healthy workspace being misclassified (and needlessly
     restarted) just because container+exec were up.
     """
@@ -291,9 +341,52 @@ def test_dispatch_tier_healthy_when_interface_answers_http_200() -> None:
     assert response.dispatch_tier == DispatchTier.HEALTHY
 
 
-def test_dispatch_tier_host_offline_when_container_is_offline() -> None:
-    response = _response(host_state="STOPPED")
+@pytest.mark.parametrize("host_state", ["STOPPED", "CRASHED"])
+def test_dispatch_tier_host_offline_when_container_observed_stopped_or_crashed(host_state: str) -> None:
+    """A trusted observed-not-running state (settled, non-FAILED) auto-restarts unattended.
+
+    In-app stops close their workspace windows first, so an open window observing
+    STOPPED implies an out-of-app stop; reviving it is intended (this is also the
+    path that revives workspaces after a laptop reboot).
+    """
+    response = _response(host_state=host_state)
     assert response.dispatch_tier == DispatchTier.HOST_OFFLINE
+
+
+def test_dispatch_tier_indeterminate_while_host_is_stopping() -> None:
+    """STOPPING is transitional: keep checking; the restart fires off the settled STOPPED."""
+    response = _response(host_state="STOPPING", in_container_stdout=None)
+    assert response.dispatch_tier == DispatchTier.INDETERMINATE
+
+
+def test_dispatch_tier_host_unresponsive_for_failed_host_state() -> None:
+    """FAILED is consent-gated, not auto-restarted.
+
+    A failed-to-create host is observed not running, but an unattended
+    ``mngr start`` on it mostly re-fails -- so it renders the consent-gated
+    "Workspace unresponsive" page instead of HOST_OFFLINE's unattended restart.
+    """
+    response = _response(host_state="FAILED", in_container_stdout=None)
+    assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
+
+
+def test_dispatch_tier_backend_unreachable_for_unreachable_host_state_with_canned_reason() -> None:
+    """UNREACHABLE (host rejected this machine's access) is terminal: retry/report only.
+
+    A restart routes through the same rejected credential, so the page must not
+    offer one. Discovery carries no per-host failure detail, so the response
+    carries the canned access-rejected reason and the provider label.
+    """
+    response = _response(host_state="UNREACHABLE", in_container_stdout=None, provider_label="Imbue Cloud")
+    assert response.dispatch_tier == DispatchTier.BACKEND_UNREACHABLE
+    assert response.unreachable_reason == HOST_ACCESS_REJECTED_REASON
+    assert response.provider_label == "Imbue Cloud"
+
+
+def test_dispatch_tier_unreachable_host_state_is_subject_to_the_freshness_gate() -> None:
+    """A stale UNREACHABLE reading is a negative verdict like any other -> INDETERMINATE first."""
+    response = _response(host_state="UNREACHABLE", in_container_stdout=None, classification_is_trustworthy=False)
+    assert response.dispatch_tier == DispatchTier.INDETERMINATE
 
 
 def test_dispatch_tier_host_unresponsive_when_container_running_but_exec_dead() -> None:

@@ -870,12 +870,12 @@ def _handle_workspace_health(agent_id: str) -> Response:
 @require_api_or_cookie_auth
 @API_SPEC.validate(json=RestartWorkspaceRequest, resp=json_response_model(OperationHandleResponse, status_code=202))
 def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, int] | Response:
-    """Dispatch a workspace restart; return an operation handle to poll.
+    """Dispatch a workspace host restart; return an operation handle to poll.
 
-    Body: ``{"scope": "services" | "host", "host_already_stopped"?: bool}``. The
-    ``services`` scope restarts the system-services agent in place; ``host``
-    bounces the whole host (``host_already_stopped`` is honored only for the host
-    scope, letting a known-stopped host skip the redundant stop step). Returns
+    Body: ``{"scope": "host", "host_already_stopped"?: bool}``. The restart
+    bounces the whole host; ``host_already_stopped`` lets a known-stopped host
+    skip the redundant stop step. The former ``services`` scope (an in-place
+    system-services restart) was removed and is rejected with a 400. Returns
     ``202`` with ``{operation_id, kind: "restart"}`` (the op id is the workspace
     agent id), followed via ``/api/v1/workspaces/operations/restart/<id>``
     (+``/logs``) exactly like create / destroy. A restart already in flight is
@@ -885,13 +885,12 @@ def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, i
     host under an in-flight backup mutation.
     """
     parsed_id = AgentId(agent_id)
-    # The spectree model enforces ``scope`` is a required string; its value (one
-    # of services/host) is a value-semantic check kept here.
+    # The spectree model enforces ``scope`` is a required string; its value
+    # ('host') is a value-semantic check kept here.
     body = request.get_json(silent=True, force=True) or {}
     scope = body.get("scope")
-    if scope not in ("services", "host"):
-        return _json_error("'scope' must be one of: services, host", 400)
-    is_host_restart = scope == "host"
+    if scope != "host":
+        return _json_error("'scope' must be 'host'", 400)
 
     state = get_state()
     backend_resolver = state.backend_resolver
@@ -913,9 +912,8 @@ def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, i
     # no marker and always proceeds; the user explicitly asked.
     if bool(body.get("auto_dispatched", False)) and tracker.get_health(parsed_id) == AgentHealth.HEALTHY:
         logger.info(
-            "Skipping auto-dispatched {} restart for {}: workspace already recovered to HEALTHY "
+            "Skipping auto-dispatched host restart for {}: workspace already recovered to HEALTHY "
             "before the recovery probe completed",
-            scope,
             parsed_id,
         )
         return handle, 202
@@ -944,10 +942,10 @@ def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, i
 
     registry.start(parsed_id, WorkspaceOperationKind.RESTART, datetime.now(timezone.utc))
 
-    # host_already_stopped lets an auto-dispatched host restart skip the redundant
-    # stop step; honored only for host restarts (a manual restart may target a
-    # still-running container, which must be stopped first).
-    skip_stop = is_host_restart and bool(body.get("host_already_stopped", False))
+    # host_already_stopped lets an auto-dispatched restart skip the redundant
+    # stop step (a manual restart may target a still-running container, which
+    # must be stopped first).
+    skip_stop = bool(body.get("host_already_stopped", False))
 
     # is_checked=False + on_failure: a crash of the one-shot worker transitions
     # the tracker to RESTART_FAILED and the registry to FAILED (so neither the
@@ -959,7 +957,6 @@ def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, i
             target=run_restart_sequence,
             kwargs={
                 "workspace_agent_id": parsed_id,
-                "is_host_restart": is_host_restart,
                 "tracker": tracker,
                 "backend_resolver": backend_resolver,
                 "mngr_binary": state.mngr_binary,
@@ -976,7 +973,9 @@ def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, i
             on_failure=RestartWorkerFailureHandler(tracker=tracker, workspace_agent_id=parsed_id, registry=registry),
         )
     except (OSError, RuntimeError, ConcurrencyGroupError) as exc:
-        logger.warning("Failed to spawn restart worker for {}: {}", parsed_id, exc)
+        # Error level so the failure reaches Sentry (Principle 3: the recovery
+        # surface is quiet, so a restart that never even spawned must report).
+        logger.error("Failed to spawn restart worker for {}: {}", parsed_id, exc)
         message = f"Could not start the restart worker: {exc}"
         tracker.mark_restart_failed(parsed_id, message)
         registry.fail(parsed_id, message)

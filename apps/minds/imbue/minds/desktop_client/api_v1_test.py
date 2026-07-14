@@ -1477,11 +1477,10 @@ def test_workspace_health_requires_bearer(tmp_path: Path, root_concurrency_group
     assert response.status_code == 401
 
 
-@pytest.mark.parametrize("scope", ["services", "host"])
 def test_workspace_restart_returns_202_operation_handle(
-    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, scope: str
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:
-    # Both restart scopes return a 202 with the workspace's own id as the
+    # A host restart returns a 202 with the workspace's own id as the
     # operation handle and a kind of "restart".
     agent_id = AgentId()
     services_id = AgentId()
@@ -1496,13 +1495,16 @@ def test_workspace_restart_returns_202_operation_handle(
         system_interface_health_tracker=SystemInterfaceHealthTracker(),
     )
 
-    response = client.post(f"/api/v1/workspaces/{agent_id}/restart", headers=_auth_header(), json={"scope": scope})
+    response = client.post(f"/api/v1/workspaces/{agent_id}/restart", headers=_auth_header(), json={"scope": "host"})
 
     assert response.status_code == 202
     assert json.loads(response.data) == {"operation_id": str(agent_id), "kind": "restart"}
 
 
-def test_workspace_restart_rejects_invalid_scope(tmp_path: Path, root_concurrency_group: ConcurrencyGroup) -> None:
+@pytest.mark.parametrize("scope", ["nope", "services"])
+def test_workspace_restart_rejects_non_host_scope(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, scope: str
+) -> None:
     agent_id = AgentId()
     resolver = make_resolver_with_data(make_agents_json(agent_id))
     client = _build_client(
@@ -1512,11 +1514,12 @@ def test_workspace_restart_rejects_invalid_scope(tmp_path: Path, root_concurrenc
         system_interface_health_tracker=SystemInterfaceHealthTracker(),
     )
 
-    response = client.post(f"/api/v1/workspaces/{agent_id}/restart", headers=_auth_header(), json={"scope": "nope"})
+    response = client.post(f"/api/v1/workspaces/{agent_id}/restart", headers=_auth_header(), json={"scope": scope})
 
     # ``scope`` is structurally a string (so it passes spectree), but its *value*
-    # must be one of services/host -- a value-semantic check the handler keeps,
-    # emitting the field-naming 400.
+    # must be 'host' -- a value-semantic check the handler keeps, emitting the
+    # field-naming 400. The former 'services' scope (in-place system-services
+    # restart) was removed, so it is rejected the same way.
     assert response.status_code == 400
     assert "scope" in json.loads(response.data)["error"]
 
@@ -1533,7 +1536,7 @@ def test_workspace_restart_unknown_workspace_returns_404(
     )
 
     response = client.post(
-        f"/api/v1/workspaces/{AgentId()}/restart", headers=_auth_header(), json={"scope": "services"}
+        f"/api/v1/workspaces/{AgentId()}/restart", headers=_auth_header(), json={"scope": "host"}
     )
 
     assert response.status_code == 404
@@ -1547,7 +1550,7 @@ def test_workspace_restart_unavailable_without_tracker_returns_503(tmp_path: Pat
     client = _build_client(tmp_path, resolver)
 
     response = client.post(
-        f"/api/v1/workspaces/{agent_id}/restart", headers=_auth_header(), json={"scope": "services"}
+        f"/api/v1/workspaces/{agent_id}/restart", headers=_auth_header(), json={"scope": "host"}
     )
 
     assert response.status_code == 503
@@ -1558,7 +1561,7 @@ def test_workspace_restart_requires_bearer(tmp_path: Path) -> None:
     resolver = make_resolver_with_data(make_agents_json(agent_id))
     client = _build_client(tmp_path, resolver)
 
-    response = client.post(f"/api/v1/workspaces/{agent_id}/restart", json={"scope": "services"})
+    response = client.post(f"/api/v1/workspaces/{agent_id}/restart", json={"scope": "host"})
 
     assert response.status_code == 401
 
@@ -1590,7 +1593,7 @@ def test_auto_dispatched_restart_skipped_when_workspace_already_recovered(
     response = client.post(
         f"/api/v1/workspaces/{agent_id}/restart",
         headers=_auth_header(),
-        json={"scope": "services", "auto_dispatched": True},
+        json={"scope": "host", "auto_dispatched": True},
     )
 
     assert response.status_code == 202
@@ -1620,7 +1623,7 @@ def test_workspace_restart_registers_operation_reaching_done(
     )
 
     dispatch = client.post(
-        f"/api/v1/workspaces/{agent_id}/restart", headers=_auth_header(), json={"scope": "services"}
+        f"/api/v1/workspaces/{agent_id}/restart", headers=_auth_header(), json={"scope": "host"}
     )
     assert dispatch.status_code == 202
 
@@ -1819,7 +1822,7 @@ def test_workspace_restart_conflicts_with_a_running_backup_operation(
     registry.start(agent_id, WorkspaceOperationKind.BACKUP_UPDATE, datetime.now(timezone.utc))
 
     response = client.post(
-        f"/api/v1/workspaces/{agent_id}/restart", headers=_auth_header(), json={"scope": "services"}
+        f"/api/v1/workspaces/{agent_id}/restart", headers=_auth_header(), json={"scope": "host"}
     )
 
     assert response.status_code == 409

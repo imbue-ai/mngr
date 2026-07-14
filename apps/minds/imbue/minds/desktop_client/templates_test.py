@@ -792,10 +792,9 @@ def test_render_recovery_page_includes_agent_id_and_return_to() -> None:
     assert "http://agent.localhost:8421/" in html
     # The versioned workspace surface the page's JS drives.
     assert "/api/v1/workspaces/" in html
-    # The two restart tiers the recovery page can dispatch (a ``scope`` body on
-    # the versioned restart route) plus the health probe it calls on load.
+    # The only restart the recovery page dispatches (a ``scope`` body on the
+    # versioned restart route) plus the health probe it calls on load.
     assert "/restart" in html
-    assert "scope: 'services'" in html
     assert "scope: 'host'" in html
     assert "/health" in html
     assert 'data-initial-status="stuck"' in html
@@ -893,12 +892,16 @@ def test_render_recovery_page_script_branches_on_dispatch_tier() -> None:
     assert "dispatch_tier" in html
     for tier in (
         "'host_offline'",
-        "'interface_unresponsive'",
         "'host_unresponsive'",
         "'backend_unreachable'",
         "'indeterminate'",
     ):
         assert tier in html, f"recovery page JS missing branch for {tier}"
+    # The interface_unresponsive tier (and its surgical in-place restart) is
+    # gone: the server never emits it, and unknown tiers fall back to the
+    # consent-gated unresponsive page.
+    assert "interface_unresponsive" not in html
+    assert "scope: 'services'" not in html
     # The shared landing places for each branch.
     assert "renderUnresponsive" in html
     assert "renderBackendUnreachable" in html

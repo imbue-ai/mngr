@@ -7,11 +7,14 @@ failure modes (unresolved system-services agent, stop/start command failures,
 the host-already-stopped fast path).
 """
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 from pathlib import Path
 
+from loguru import logger as loguru_logger
 from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -99,20 +102,32 @@ def _started_registry(workspace_agent: AgentId) -> InMemoryWorkspaceOperationReg
     return registry
 
 
+@contextmanager
+def _capture_error_logs() -> Iterator[list[str]]:
+    """Capture loguru ERROR-level records (a loguru sink; caplog can't hook loguru).
+
+    Every RESTART_FAILED transition must reach error reporting (Principle 3:
+    the recovery surface is quiet), so the failure tests assert exactly one
+    error record per attempt through this capture.
+    """
+    records: list[str] = []
+    sink_id = loguru_logger.add(lambda msg: records.append(str(msg)), level="ERROR")
+    try:
+        yield records
+    finally:
+        loguru_logger.remove(sink_id)
+
+
 # -- argv builders --
 
 
-def test_build_mngr_stop_argv_appends_stop_host_only_for_host_restart() -> None:
-    """The host tier adds --stop-host; the surgical tier stops just the agent."""
+def test_build_mngr_stop_argv_always_stops_the_host() -> None:
+    """The restart is host-only (the surgical services tier is gone), so the stop
+    always carries --stop-host."""
     aid = AgentId.generate()
-
-    surgical = _build_mngr_stop_argv("/usr/local/bin/mngr", aid, is_host_restart=False)
-    assert surgical[:3] == ["/usr/local/bin/mngr", "stop", str(aid)]
-    assert "--stop-host" not in surgical
-
-    host = _build_mngr_stop_argv("/usr/local/bin/mngr", aid, is_host_restart=True)
-    assert host[:3] == ["/usr/local/bin/mngr", "stop", str(aid)]
-    assert "--stop-host" in host
+    argv = _build_mngr_stop_argv("/usr/local/bin/mngr", aid)
+    assert argv[:3] == ["/usr/local/bin/mngr", "stop", str(aid)]
+    assert "--stop-host" in argv
 
 
 def test_build_mngr_start_argv_targets_the_agent() -> None:
@@ -176,10 +191,9 @@ def test_run_restart_sequence_fails_when_system_services_agent_is_unresolved(tmp
     tracker.mark_restarting(workspace_agent)
     registry = _started_registry(workspace_agent)
 
-    with ConcurrencyGroup(name="test-restart") as cg:
+    with ConcurrencyGroup(name="test-restart") as cg, _capture_error_logs() as error_records:
         run_restart_sequence(
             workspace_agent_id=workspace_agent,
-            is_host_restart=False,
             tracker=tracker,
             backend_resolver=MngrCliBackendResolver(),
             mngr_binary="mngr",
@@ -194,6 +208,7 @@ def test_run_restart_sequence_fails_when_system_services_agent_is_unresolved(tmp
     assert "system-services" in (tracker.get_last_restart_error(workspace_agent) or "")
     record = registry.get(workspace_agent)
     assert record is not None and record.status == WorkspaceOperationStatus.FAILED
+    assert len(error_records) == 1, error_records
 
 
 def test_run_restart_sequence_fails_when_stop_command_errors(tmp_path: Path) -> None:
@@ -204,10 +219,9 @@ def test_run_restart_sequence_fails_when_stop_command_errors(tmp_path: Path) -> 
     tracker.mark_restarting(workspace_agent)
     resolver = _resolver_with_system_services(workspace_agent, services_agent)
 
-    with ConcurrencyGroup(name="test-restart") as cg:
+    with ConcurrencyGroup(name="test-restart") as cg, _capture_error_logs() as error_records:
         run_restart_sequence(
             workspace_agent_id=workspace_agent,
-            is_host_restart=False,
             tracker=tracker,
             backend_resolver=resolver,
             mngr_binary=_write_fake_mngr(tmp_path, stop_exit=1),
@@ -220,6 +234,66 @@ def test_run_restart_sequence_fails_when_stop_command_errors(tmp_path: Path) -> 
 
     assert tracker.get_health(workspace_agent) == AgentHealth.RESTART_FAILED
     assert "Stop step" in (tracker.get_last_restart_error(workspace_agent) or "")
+    assert len(error_records) == 1, error_records
+
+
+def test_run_restart_sequence_fails_when_start_command_errors(tmp_path: Path) -> None:
+    """A non-zero ``mngr start`` ends the sequence in RESTART_FAILED naming the start step."""
+    tracker = SystemInterfaceHealthTracker()
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    tracker.mark_restarting(workspace_agent)
+    resolver = _resolver_with_system_services(workspace_agent, services_agent)
+
+    with ConcurrencyGroup(name="test-restart") as cg, _capture_error_logs() as error_records:
+        run_restart_sequence(
+            workspace_agent_id=workspace_agent,
+            tracker=tracker,
+            backend_resolver=resolver,
+            mngr_binary=_write_fake_mngr(tmp_path, start_exit=1),
+            mngr_host_dir=tmp_path,
+            concurrency_group=cg,
+            mngr_forward_port=0,
+            mngr_forward_preauth_cookie=None,
+            registry=_started_registry(workspace_agent),
+        )
+
+    assert tracker.get_health(workspace_agent) == AgentHealth.RESTART_FAILED
+    assert "Start step" in (tracker.get_last_restart_error(workspace_agent) or "")
+    assert len(error_records) == 1, error_records
+
+
+def test_run_restart_sequence_fails_and_reports_when_interface_never_answers(tmp_path: Path) -> None:
+    """A clean stop+start whose interface never answers ends in RESTART_FAILED with one error log.
+
+    With a plugin route configured (nonzero forward port + cookie) but nothing
+    answering on it, the readiness wait times out; this failure branch was
+    previously unlogged, so pin that it now reports exactly once.
+    """
+    tracker = SystemInterfaceHealthTracker()
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    tracker.mark_restarting(workspace_agent)
+    resolver = _resolver_with_system_services(workspace_agent, services_agent)
+
+    with ConcurrencyGroup(name="test-restart") as cg, _capture_error_logs() as error_records:
+        run_restart_sequence(
+            workspace_agent_id=workspace_agent,
+            tracker=tracker,
+            backend_resolver=resolver,
+            mngr_binary=_write_fake_mngr(tmp_path),
+            mngr_host_dir=tmp_path,
+            concurrency_group=cg,
+            # Port 1 refuses connections, so every readiness poll fails fast.
+            mngr_forward_port=1,
+            mngr_forward_preauth_cookie="cookie",
+            registry=_started_registry(workspace_agent),
+            startup_wait_seconds=0.1,
+        )
+
+    assert tracker.get_health(workspace_agent) == AgentHealth.RESTART_FAILED
+    assert "did not respond" in (tracker.get_last_restart_error(workspace_agent) or "")
+    assert len(error_records) == 1, error_records
 
 
 def test_run_restart_sequence_fails_when_stop_command_cannot_launch(tmp_path: Path) -> None:
@@ -239,7 +313,6 @@ def test_run_restart_sequence_fails_when_stop_command_cannot_launch(tmp_path: Pa
     with ConcurrencyGroup(name="test-restart") as cg:
         run_restart_sequence(
             workspace_agent_id=workspace_agent,
-            is_host_restart=False,
             tracker=tracker,
             backend_resolver=resolver,
             mngr_binary=missing_binary,
@@ -266,7 +339,6 @@ def test_run_restart_sequence_recovers_on_clean_dispatch_without_plugin(tmp_path
     with ConcurrencyGroup(name="test-restart") as cg:
         run_restart_sequence(
             workspace_agent_id=workspace_agent,
-            is_host_restart=True,
             tracker=tracker,
             backend_resolver=resolver,
             mngr_binary=_write_fake_mngr(tmp_path),
@@ -309,7 +381,6 @@ def test_run_restart_sequence_skips_unsupported_stop_and_proceeds(tmp_path: Path
     with ConcurrencyGroup(name="test-restart") as cg:
         run_restart_sequence(
             workspace_agent_id=workspace_agent,
-            is_host_restart=True,
             tracker=tracker,
             backend_resolver=resolver,
             mngr_binary=str(script),
@@ -338,7 +409,6 @@ def test_run_restart_sequence_skips_stop_when_host_already_stopped(tmp_path: Pat
     with ConcurrencyGroup(name="test-restart") as cg:
         run_restart_sequence(
             workspace_agent_id=workspace_agent,
-            is_host_restart=True,
             tracker=tracker,
             backend_resolver=resolver,
             mngr_binary=mngr_binary,
@@ -368,7 +438,6 @@ def test_run_restart_sequence_stops_before_start_by_default(tmp_path: Path) -> N
     with ConcurrencyGroup(name="test-restart") as cg:
         run_restart_sequence(
             workspace_agent_id=workspace_agent,
-            is_host_restart=True,
             tracker=tracker,
             backend_resolver=resolver,
             mngr_binary=mngr_binary,
