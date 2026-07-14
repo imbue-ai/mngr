@@ -69,12 +69,20 @@ class LimaImageSource(FrozenModel):
 class LimaImagePrefetchStatus(UpperCaseStrEnum):
     """Lifecycle status of the per-env "ensure current image present" operation.
 
-    Written to a state file by the prefetch worker and read by the Lima create
-    gate. The non-terminal values are the ordered phases the ensure operation
-    walks through; ``READY`` means the image is assembled, verified, and usable;
-    ``VERSION_UNAVAILABLE`` means the CDN has nothing for this release+arch (the
-    gate then falls back to build-in-VM); ``FAILED`` means a published image
-    could not be fetched/verified (the gate surfaces a retryable error).
+    Written to a state file by the prefetch worker and read by the Lima create gate. The
+    non-terminal values are the ordered phases the ensure operation walks through; ``READY``
+    means the image is assembled, verified, and usable.
+
+    The three ways it can end without an image differ in what a create should do, so they are
+    distinct rather than one ``FAILED``:
+
+    - ``VERSION_UNAVAILABLE``: nothing is published for this release+arch. Build in-VM.
+    - ``FAILED``: a published image could not be *fetched* (network, disk, a missing tool).
+      Nothing is wrong with the image and the slow path still works, so build in-VM; the
+      prefetch keeps retrying in the background.
+    - ``UNTRUSTED``: a published image did not *verify* -- its signature or hash does not
+      match what the manifest names. Those bytes are never booted and the create fails loudly:
+      silently building in-VM would paper over someone serving an image we cannot vouch for.
     """
 
     IDLE = auto()
@@ -84,6 +92,7 @@ class LimaImagePrefetchStatus(UpperCaseStrEnum):
     READY = auto()
     VERSION_UNAVAILABLE = auto()
     FAILED = auto()
+    UNTRUSTED = auto()
 
 
 class LimaImagePrefetchState(FrozenModel):

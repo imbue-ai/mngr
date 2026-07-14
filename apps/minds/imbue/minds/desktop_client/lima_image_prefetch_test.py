@@ -19,7 +19,7 @@ from imbue.minds.desktop_client.lima_image_prefetch import make_lima_image_sourc
 from imbue.minds.desktop_client.lima_image_prefetch import prebaked_image_mngr_setting_args
 from imbue.minds.desktop_client.lima_image_prefetch import resolve_ready_prebaked_lima_image
 from imbue.minds.desktop_client.lima_image_prefetch import should_use_prebaked_lima_image
-from imbue.minds.errors import LimaImageDownloadError
+from imbue.minds.errors import LimaImageVerificationError
 from imbue.minds.lima_image.cache_layout import LimaImageCacheLayout
 from imbue.minds.lima_image.cache_layout import manifest_signature_url
 from imbue.minds.lima_image.cache_layout import manifest_url
@@ -33,6 +33,7 @@ from imbue.minds.lima_image.mock_lima_image_test import AcceptingSignatureVerifi
 from imbue.minds.lima_image.mock_lima_image_test import FixedRawChunkStore
 from imbue.minds.lima_image.mock_lima_image_test import InMemoryManifestFetcher
 from imbue.minds.lima_image.mock_lima_image_test import RecordingProgressSink
+from imbue.minds.lima_image.mock_lima_image_test import RejectingSignatureVerifier
 from imbue.minds.lima_image.primitives import ImageArch
 from imbue.minds.lima_image.primitives import MindsImageVersion
 from imbue.minds.lima_image.primitives import Sha256Hex
@@ -223,6 +224,30 @@ def test_ensure_once_records_failed_on_missing_published_objects(tmp_path: Path)
     assert state.error is not None
 
 
+def test_ensure_once_records_untrusted_when_the_signature_does_not_verify(tmp_path: Path) -> None:
+    # A fetch failure is worth retrying; bytes that do not verify are not. They must be a
+    # distinct status, because a create builds in-VM for the first and refuses for the second.
+    fetcher = InMemoryManifestFetcher()
+    fetcher.objects_by_url[manifest_url(_SOURCE.base_url, MindsImageVersion(_TAG))] = b"{}"
+    fetcher.objects_by_url[manifest_signature_url(_SOURCE.base_url, MindsImageVersion(_TAG))] = b"forged"
+
+    sink = RecordingProgressSink()
+    prefetcher = LimaImagePrefetcher(
+        source=_SOURCE,
+        minds_version=MindsImageVersion(_TAG),
+        arch=ImageArch.X86_64,
+        cache_dir=tmp_path,
+        fetcher=fetcher,
+        verifier=RejectingSignatureVerifier(),
+        chunk_store=FixedRawChunkStore(),
+        progress_sink=sink,
+    )
+    state = prefetcher.ensure_once()
+
+    assert state.status is LimaImagePrefetchStatus.UNTRUSTED
+    assert state.error is not None
+
+
 def test_wait_until_terminal_returns_ready(tmp_path: Path) -> None:
     sink = RecordingProgressSink()
     prefetcher = _prefetcher(InMemoryManifestFetcher(), FixedRawChunkStore(), sink, tmp_path)
@@ -300,11 +325,23 @@ def test_resolve_returns_none_when_version_unavailable(tmp_path: Path) -> None:
     assert _resolve(prefetcher) is None
 
 
-def test_resolve_raises_when_failed(tmp_path: Path) -> None:
+def test_resolve_builds_in_vm_when_the_image_could_not_be_downloaded(tmp_path: Path) -> None:
+    # A network drop is not a broken image, and the create has a working slow path. Failing it
+    # would leave the user worse off than if the pre-baked image had never existed -- and the
+    # prefetch retries with backoff, so a create landing in that window must not inherit it.
     sink = RecordingProgressSink()
     prefetcher = _prefetcher(InMemoryManifestFetcher(), FixedRawChunkStore(), sink, tmp_path)
     _seed(sink, LimaImagePrefetchStatus.FAILED, raw_path=None, error="network down")
-    with pytest.raises(LimaImageDownloadError):
+    assert _resolve(prefetcher) is None
+
+
+def test_resolve_raises_when_the_image_does_not_verify(tmp_path: Path) -> None:
+    # The one case that must be loud: the published bytes do not match the signed manifest.
+    # Booting them is out of the question, and silently building in-VM would hide it.
+    sink = RecordingProgressSink()
+    prefetcher = _prefetcher(InMemoryManifestFetcher(), FixedRawChunkStore(), sink, tmp_path)
+    _seed(sink, LimaImagePrefetchStatus.UNTRUSTED, raw_path=None, error="signature does not verify")
+    with pytest.raises(LimaImageVerificationError):
         _resolve(prefetcher)
 
 

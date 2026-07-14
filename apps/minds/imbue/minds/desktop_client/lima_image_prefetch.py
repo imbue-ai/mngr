@@ -24,6 +24,7 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.errors import LimaImageDownloadError
 from imbue.minds.errors import LimaImageError
+from imbue.minds.errors import LimaImageVerificationError
 from imbue.minds.lima_image.cache_layout import LimaImageCacheLayout
 from imbue.minds.lima_image.data_types import LimaImagePrefetchState
 from imbue.minds.lima_image.data_types import LimaImagePrefetchStatus
@@ -189,7 +190,12 @@ class LimaImagePrefetcher(MutableModel):
     )
 
     def ensure_once(self) -> LimaImagePrefetchState:
-        """Run a single ensure attempt; on a published-image failure record FAILED and return it."""
+        """Run a single ensure attempt, recording how it failed if it did.
+
+        An image that cannot be *fetched* is FAILED and worth retrying; one that does not
+        *verify* is UNTRUSTED, which retrying cannot fix -- the published bytes are the
+        problem, and re-pulling multiple GB of them is pure waste.
+        """
         try:
             ensure_current_lima_image(
                 source=self.source,
@@ -201,23 +207,33 @@ class LimaImagePrefetcher(MutableModel):
                 chunk_store=self.chunk_store,
                 progress_sink=self.progress_sink,
             )
+        except LimaImageVerificationError as exc:
+            logger.error("Pre-baked Lima image did not verify against its signed manifest: {}", exc)
+            self.progress_sink.write_state(self._failure_state(str(exc), LimaImagePrefetchStatus.UNTRUSTED))
         except LimaImageError as exc:
             logger.warning("Lima image prefetch attempt failed: {}", exc)
-            self._record_failure(str(exc))
+            self.progress_sink.write_state(self._failure_state(str(exc), LimaImagePrefetchStatus.FAILED))
         state = self.progress_sink.read_state()
         # read_state cannot be None right after a write, but stay total for the type checker.
-        return state if state is not None else self._failure_state("no state recorded")
+        return state if state is not None else self._failure_state("no state recorded", LimaImagePrefetchStatus.FAILED)
 
     def run_background_loop(self, concurrency_group: ConcurrencyGroup) -> None:
-        """Ensure-with-backoff until READY or VERSION_UNAVAILABLE (or shutdown).
+        """Ensure-with-backoff until the image is READY or no retry could help (or shutdown).
 
-        A FAILED published-image download is retried with capped exponential
-        backoff -- the inner-level auto-retry behind the user's manual retry.
+        A FAILED fetch is retried with capped exponential backoff -- the inner-level auto-retry
+        behind the user's manual retry. UNTRUSTED is not retried: the bytes that are published
+        do not verify, so the next attempt would download the same multiple GB to reject them
+        again.
         """
         backoff = _RETRY_INITIAL_BACKOFF_SECONDS
+        terminal_statuses = (
+            LimaImagePrefetchStatus.READY,
+            LimaImagePrefetchStatus.VERSION_UNAVAILABLE,
+            LimaImagePrefetchStatus.UNTRUSTED,
+        )
         while not concurrency_group.is_shutting_down():
             state = self.ensure_once()
-            if state.status in (LimaImagePrefetchStatus.READY, LimaImagePrefetchStatus.VERSION_UNAVAILABLE):
+            if state.status in terminal_statuses:
                 return
             # Interruptible backoff: wait() returns True if shutdown was requested.
             if concurrency_group.shutdown_event.wait(backoff):
@@ -259,6 +275,7 @@ class LimaImagePrefetcher(MutableModel):
             LimaImagePrefetchStatus.READY,
             LimaImagePrefetchStatus.VERSION_UNAVAILABLE,
             LimaImagePrefetchStatus.FAILED,
+            LimaImagePrefetchStatus.UNTRUSTED,
         )
         # A throwaway Event gives an interruptible sleep without time.sleep (the
         # codebase's standard poll idiom); it is never set, so wait() just delays.
@@ -291,12 +308,9 @@ class LimaImagePrefetcher(MutableModel):
             latest_state = self.progress_sink.read_state()
         return latest_state
 
-    def _record_failure(self, message: str) -> None:
-        self.progress_sink.write_state(self._failure_state(message))
-
-    def _failure_state(self, message: str) -> LimaImagePrefetchState:
+    def _failure_state(self, message: str, status: LimaImagePrefetchStatus) -> LimaImagePrefetchState:
         return LimaImagePrefetchState(
-            status=LimaImagePrefetchStatus.FAILED,
+            status=status,
             minds_version=self.minds_version,
             arch=self.arch,
             updated_at=datetime.now(timezone.utc),
@@ -322,15 +336,16 @@ def resolve_ready_prebaked_lima_image(
 ) -> Path | None:
     """Resolve the baked raw image path to use for a create, or None to build in-VM.
 
-    Returns None when the gate does not apply (non-default workspace, no prefetcher,
-    kill switch, dev loop), when no image is published for this release+arch
-    (VERSION_UNAVAILABLE), or when the image is still being fetched when the wait runs
-    out -- a slow download is not a broken one, and building in-VM gets the user a
-    workspace now while the prefetch keeps running for the next create.
+    Returns None (build in-VM) whenever the image is merely *absent*: the gate does not apply
+    (non-default workspace, no prefetcher, kill switch, dev loop), nothing is published for this
+    release+arch, the download could not be made (network, disk, a missing tool), or it stalled
+    or ran out the wait. None of those mean anything is wrong with the image, and the slow path
+    still works -- so the user gets a workspace instead of an error, and the prefetch keeps
+    running for the next create.
 
-    Raises ``LimaImageDownloadError`` only for FAILED: a *published* image that could
-    not be fetched or verified is an operator-visible defect, so it is surfaced rather
-    than silently papered over by the slow path.
+    Raises ``LimaImageVerificationError`` for UNTRUSTED, the one case where the image itself is
+    the problem: bytes that do not match the signed manifest are never booted, and quietly
+    building in-VM would hide the fact that someone is serving an image we cannot vouch for.
     """
     if prefetcher is None:
         return None
@@ -360,9 +375,20 @@ def resolve_ready_prebaked_lima_image(
             return _fall_back_to_in_vm(
                 f"no pre-baked image is published for {current_release_tag}", on_fallback_to_in_vm
             )
+        case LimaImagePrefetchState(status=LimaImagePrefetchStatus.UNTRUSTED):
+            # The published bytes do not match the signed manifest. Never boot them, and do not
+            # paper over it by quietly building in-VM: someone is serving an image we cannot
+            # vouch for, and that is worth stopping for.
+            raise LimaImageVerificationError(
+                state.error or f"Pre-baked Lima image for {current_release_tag} did not verify"
+            )
         case LimaImagePrefetchState(status=LimaImagePrefetchStatus.FAILED):
-            raise LimaImageDownloadError(
-                state.error or f"Pre-baked Lima image could not be fetched for {current_release_tag}; please retry."
+            # The image could not be fetched (network, disk, a missing tool). Nothing is wrong
+            # with the image itself and the slow path still works, so the user gets a workspace
+            # rather than an error; the prefetch keeps retrying behind them.
+            return _fall_back_to_in_vm(
+                state.error or f"the pre-baked image for {current_release_tag} could not be downloaded",
+                on_fallback_to_in_vm,
             )
         case _:
             # Still working when we stopped waiting -- either the download stalled or it ran out
