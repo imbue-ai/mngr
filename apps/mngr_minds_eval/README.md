@@ -114,18 +114,21 @@ row) is printed. Add a new evaluation by appending a function to `EVALUATIONS` i
 
 ## Viewing workspaces (`list-modal-workspaces` / `view-modal-workspace`)
 
-All eval workspaces live in one shared Modal env and share one SSH key, so any running box can reach
-any of them. But the box's built-in `mngr forward` eagerly proxies the *whole* env (a per-agent
-Python stream + SSH tunnel each), which OOMs past ~20 live workspaces. So viewing is decoupled:
+All eval workspaces live in one shared Modal env and every box mounts one shared SSH key, so any box --
+and the host itself -- can reach any of them.
 
 - `list-modal-workspaces` -- every workspace in the env (name + agent id) and each running box's memory.
-- `view-modal-workspace <name>` -- runs a **scoped** `mngr forward` for that one workspace on a box's
-  forward port and prints a self-authenticating `http://localhost:<port>/login?...` URL. One workspace
-  forwarded -> cheap, so it works no matter how many workspaces exist. Picks the least-loaded running
-  box by default; `--box <container>` / `--new-box-on-mngr-branch <branch>` / `--service <name>` override.
+- `view-modal-workspace <name>` -- reads the sandbox's SSH endpoint from `mngr list` and opens a
+  **host-side `ssh -L`** straight to the workspace UI (a fixed `:8000` in every sandbox) with the shared
+  key, then prints `http://localhost:<port>/`. No `mngr forward` involved, so it's O(1) per workspace
+  (never OOMs, never scales with env size) and branch-agnostic. A stopped/paused sandbox is restarted
+  first (`--no-restart` to skip; a `DESTROYED` one errors). `--box` / `--new-box-on-mngr-branch` choose
+  which box's Minds to read.
 
-Keep the env lean anyway (`clean-modal-workspaces` after `evaluate` pulls results to S3) -- the box's
-own eager forward still tries to proxy everything and will OOM a box if the env grows large.
+The box's built-in `mngr forward` -- which eagerly proxies the whole env and would OOM the box (a
+heavyweight `mngr event` subprocess per workspace) -- is killed at box boot; viewing never touches it.
+`clean-modal-workspaces` clears the env host-side via `scripts/modal_nuke.py` (stops every sandbox +
+deletes volumes, SSH-free), so it works even when the boxes have died.
 
 ## S3 layout
 

@@ -25,13 +25,8 @@ MODAL_ENV_USER_ID = "evaluator"
 MNGR_PROFILE = "evaluator"
 SHARED_MODAL_KEYS = Path.home() / ".minds-eval" / "modal-profile" / "providers" / "modal"
 ROOT_CONFIG_FILE = Path.home() / ".minds-eval" / "mngr-root-config.toml"
-
-# minds' built-in forward would otherwise eagerly proxy every workspace in the shared env (a per-agent
-# stream + SSH tunnel each) and OOM the box past ~20 live workspaces. We view on demand instead
-# (view-modal-workspace), so we tell minds to proxy NOTHING via a never-match CEL filter -- no agent
-# carries this label. Read by `minds run` from MINDS_FORWARD_AGENT_INCLUDE; unset elsewhere, so normal
-# minds is unaffected. Discovery/listing is independent of the forward, so the workspace list still works.
-FORWARD_NOTHING_CEL = "has(agent.labels.minds_eval_never_forward)"
+# Cap the box's memory so a runaway process can't take down the whole Docker VM.
+BOX_MEMORY = "8g"
 
 
 class BoxError(RuntimeError):
@@ -77,14 +72,6 @@ def port_of(container: str) -> str:
     return port
 
 
-def forward_port_of(container: str) -> str:
-    result = _run(["docker", "exec", container, "printenv", "MINDS_FORWARD_PORT"])
-    port = result.stdout.strip()
-    if not port:
-        raise BoxError("container {!r} has no MINDS_FORWARD_PORT".format(container))
-    return port
-
-
 def print_view_urls(container: str) -> None:
     """The box's Minds dashboard on localhost. The old per-box forward-login URL is intentionally NOT
     printed: the box's built-in forward eagerly proxies the whole env and OOMs, so that login was
@@ -109,16 +96,6 @@ def container_name(mngr_branch: str, ref: str) -> str:
     return "minds-box-{}-{}".format(_slug(mngr_branch), ref[:12])
 
 
-def find_any_running() -> str:
-    """Any running eval box (any branch/SHA). All boxes share the one Modal env, so clean can use any
-    of them instead of building a fresh box. '' if none."""
-    out = _run(["docker", "ps", "--filter", "name=minds-box-", "--format", "{{.Names}}"]).stdout
-    for line in out.splitlines():
-        if line.startswith("minds-box-"):
-            return line.strip()
-    return ""
-
-
 def find_running_for_branch(mngr_branch: str) -> str:
     """A running box for this branch (any SHA), matched by container-name prefix. '' if none. Lets us
     reuse an existing box without hitting the remote when GitHub is unreachable."""
@@ -136,12 +113,59 @@ def resolve(mngr_branch: str) -> tuple[str, str]:
     return container_name(mngr_branch, ref), ref
 
 
+def _prune_stopped_boxes() -> None:
+    """Remove exited eval boxes so they don't accumulate (a box is only needed while running)."""
+    ids = _run(["docker", "ps", "-aq", "--filter", "name=minds-box-", "--filter", "status=exited"]).stdout.split()
+    if ids:
+        _run(["docker", "rm", "-f", *ids])
+
+
+def _kill_eager_forward(container: str) -> None:
+    """minds' built-in forward eagerly proxies every workspace in the shared env (a heavyweight
+    `mngr event` subprocess each) and OOMs the box. We view on demand host-side instead, so kill it
+    once here -- branch-agnostic (no reliance on any mngr/minds code change); minds does not respawn
+    it, and the dashboard's workspace list is independent of the forward."""
+    _run(
+        [
+            "docker",
+            "exec",
+            container,
+            "sh",
+            "-lc",
+            "ps -eo pid,args | grep 'mngr forward' | grep -v latchkey | grep -v grep | awk '{print $1}' | xargs -r kill",
+        ]
+    )
+
+
+def modal_env_name(minds_env: str = "staging") -> str:
+    return "minds-{}-{}".format(minds_env, MODAL_ENV_USER_ID)
+
+
+def nuke_modal_env(minds_env: str = "staging") -> None:
+    """Clean the shared Modal env to zero, SSH-free. `mngr destroy` SSHes into each sandbox first --
+    which fails for workspaces created by a box with a different key -- so we bypass mngr entirely via
+    scripts/modal_nuke.py (stops every Modal app + deletes the state volumes in the env). Host-side,
+    so it works even when the boxes have died."""
+    env = modal_env_name(minds_env)
+    monorepo_root = APP_DIR.parents[1]
+    script = monorepo_root / "scripts" / "modal_nuke.py"
+    if not script.is_file():
+        raise BoxError("modal_nuke.py not found at {}".format(script))
+    print(">> nuking Modal env {} (stops all sandboxes + deletes volumes) ...".format(env), flush=True)
+    result = _run(["uv", "run", "python", str(script), "-e", env], cwd=str(monorepo_root))
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()[-300:]
+        raise BoxError("modal_nuke failed for env {} (rc={}): {}".format(env, result.returncode, detail))
+    print(">> {} cleaned".format(env), flush=True)
+
+
 def ensure(mngr_branch: str, minds_env: str = "staging") -> str:
     """Build + boot the box for the branch's current tip; return its container name.
 
     The container name encodes the SHA, so if it is already running it is exactly the right mngr --
     reuse it, no staleness check. All boxes point workspaces at one shared Modal env
     (minds-<env>-evaluator), so clean has a single place to wipe."""
+    _prune_stopped_boxes()
     try:
         container, ref = resolve(mngr_branch)
     except BoxError as exc:
@@ -211,6 +235,10 @@ def ensure(mngr_branch: str, minds_env: str = "staging") -> str:
             "-d",
             "--name",
             container,
+            "--memory",
+            BOX_MEMORY,
+            "--memory-swap",
+            BOX_MEMORY,
             "-p",
             "{}:{}".format(ui, ui),
             "-p",
@@ -230,8 +258,6 @@ def ensure(mngr_branch: str, minds_env: str = "staging") -> str:
             "-e",
             "MINDS_FORWARD_PORT={}".format(forward),
             "-e",
-            "MINDS_FORWARD_AGENT_INCLUDE={}".format(FORWARD_NOTHING_CEL),
-            "-e",
             "MINDS_ENV={}".format(minds_env),
             "-e",
             "MNGR__PROVIDERS__MODAL__USER_ID={}".format(modal_env),
@@ -244,6 +270,7 @@ def ensure(mngr_branch: str, minds_env: str = "staging") -> str:
         raise BoxError("docker run failed: {}".format((run.stderr or "").strip()[:300]))
 
     _await_ready(container, ui)
+    _kill_eager_forward(container)
     print("   dashboard (http):  http://localhost:{}".format(ui), flush=True)
     print("   modal env:  minds-{}-{}  (this box's workspaces spin up here)".format(minds_env, modal_env), flush=True)
     print("   view a workspace:  minds-evals view-modal-workspace <name>", flush=True)

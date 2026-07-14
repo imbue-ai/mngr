@@ -1,8 +1,9 @@
 """minds-evals -- launch and inspect Minds eval batches.
 
-Host-native CLI. Box-using commands (launch/box/make-modal-workspace/clean-modal-workspaces) ensure
-a Docker box (minds-box-<branch>-<sha>) and re-invoke themselves inside it; the S3-only commands
-(list-batches/inspect/evaluate) never touch the box.
+Host-native CLI. launch/box/make-modal-workspace build/boot a Docker box (minds-box-<branch>-<sha>);
+list-batches/inspect/evaluate read S3; list-modal-workspaces/view-modal-workspace read a box's Minds
+and open a host-side SSH tunnel to a workspace; clean-modal-workspaces nukes the shared Modal env
+host-side (no box needed).
 
   minds-evals launch --config eval_config.json
   minds-evals list-batches
@@ -128,9 +129,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_view.add_argument(
         "--new-box-on-mngr-branch", default="", help="spin up a fresh box on this mngr branch to view from"
     )
-    p_view.add_argument("--service", default="system_interface", help="which workspace service to forward")
     p_view.add_argument(
-        "--no-restart", action="store_true", help="don't restart the workspace if it's stopped; just forward"
+        "--no-restart", action="store_true", help="don't restart the workspace if it's stopped; just tunnel"
     )
     return parser
 
@@ -158,11 +158,7 @@ def main() -> None:
         return
     if args.command == "view-modal-workspace":
         view_mod.view_modal_workspace(
-            args.name,
-            box=args.box,
-            new_box_on_mngr_branch=args.new_box_on_mngr_branch,
-            service=args.service,
-            restart=not args.no_restart,
+            args.name, box=args.box, new_box_on_mngr_branch=args.new_box_on_mngr_branch, restart=not args.no_restart
         )
         return
 
@@ -173,12 +169,8 @@ def main() -> None:
         return
 
     if args.command == "clean-modal-workspaces":
-        if not IN_BOX:
-            box = box_mod.find_any_running()
-            if not box:
-                sys.exit("no running box -- start one (minds-evals box --mngr-branch <X>) or launch a batch first")
-            _run_in_container(box, sys.argv[1:])
-        launch_mod.destroy_all_workspaces(_port())
+        # host-side, SSH-free -- works even when the boxes have died
+        box_mod.nuke_modal_env()
         return
 
     if args.command == "make-modal-workspace":

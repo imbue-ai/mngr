@@ -219,22 +219,6 @@ def destroy_existing_workspace(port: str, host_name: str, quiet: bool = False) -
         _destroy_and_wait(port, match["agent_id"], host_name, quiet=quiet)
 
 
-def destroy_all_workspaces(port: str) -> None:
-    """Clean slate: destroy every workspace the box currently sees -- i.e. the branch's Modal env."""
-    try:
-        workspaces = _list_workspaces(port)
-    except (urllib.error.URLError, OSError) as exc:
-        raise SystemExit("could not list workspaces: {}".format(exc)) from exc
-    if not workspaces:
-        print(">> no workspaces to destroy", flush=True)
-        return
-    print(">> destroying {} workspace(s) in parallel ...".format(len(workspaces)), flush=True)
-    # Each destroy is independent (different agent), so fan out instead of waiting for each in turn.
-    with ThreadPoolExecutor(max_workers=min(8, len(workspaces))) as pool:
-        list(pool.map(lambda w: _destroy_and_wait(port, w["agent_id"], w.get("name") or w["agent_id"]), workspaces))
-    print(">> done", flush=True)
-
-
 def launch_batch(*, config: dict, anthropic_key: str, port: str, stamp: str) -> dict:
     env = s3_store.load_aws_env()
     client = s3_store.make_client(env)

@@ -10,12 +10,10 @@ from __future__ import annotations
 
 import json
 import re
-import time
 
 from imbue.mngr_minds_eval import box as box_mod
 from imbue.mngr_minds_eval import minds_client
 
-_LOGIN_RE = re.compile(r"https?://\S*?/login\?one_time_code=[A-Za-z0-9_-]+")
 _MEM_RE = re.compile(r"\s*([0-9.]+)\s*([KMG]i?B)")
 _MEM_UNITS = {"KiB": 1 / 1024, "MiB": 1.0, "GiB": 1024.0, "KB": 1 / 1024, "MB": 1.0, "GB": 1024.0}
 
@@ -75,28 +73,38 @@ def _pick_box(box: str, new_box_on_mngr_branch: str) -> str:
     return min(boxes, key=_box_mem_mib)
 
 
-def view_modal_workspace(
-    name: str,
-    *,
-    box: str = "",
-    new_box_on_mngr_branch: str = "",
-    service: str = "system_interface",
-    restart: bool = True,
-) -> None:
+def _mngr_ssh_endpoint(container: str, agent_id: str) -> tuple[str, str, int] | None:
+    """(user, host, port) of the workspace's Modal sandbox, from `mngr list --format json` inside the
+    box, matched by agent id (unambiguous). None if not found or unparseable."""
+    out = box_mod._run(
+        ["docker", "exec", container, "sh", "-lc", "cd /work/mngr && uv run mngr list --format json"]
+    ).stdout
+    try:
+        parsed = json.loads(out)
+    except (ValueError, TypeError):
+        return None
+    entries = parsed if isinstance(parsed, list) else (parsed.get("agents") or parsed.get("workspaces") or [])
+    for entry in entries if isinstance(entries, list) else []:
+        if not isinstance(entry, dict) or entry.get("id") != agent_id:
+            continue
+        ssh = (entry.get("host") or {}).get("ssh") or {}
+        host, port = ssh.get("host"), ssh.get("port")
+        if host and port:
+            return str(ssh.get("user") or "root"), str(host), int(port)
+    return None
+
+
+def view_modal_workspace(name: str, *, box: str = "", new_box_on_mngr_branch: str = "", restart: bool = True) -> None:
     container = _pick_box(box, new_box_on_mngr_branch)
     match = next((w for w in _workspaces(container) if (w.get("name") or "") == name), None)
     if match is None:
         raise SystemExit("no workspace named {!r} in the env (see: minds-evals list-modal-workspaces)".format(name))
     agent_id = match["agent_id"]
-    forward_port = box_mod.forward_port_of(container)
-    log_path = "/tmp/view_{}.log".format(agent_id)
 
-    # A stopped/paused sandbox can't be forwarded -- bring it back up first (with live progress).
+    # A stopped/paused sandbox has no reachable sshd -- bring it back up first (with live progress).
     host_state = (match.get("host_state") or "").upper()
     if host_state == "DESTROYED":
-        raise SystemExit(
-            "workspace {} is DESTROYED -- relaunch it (a destroyed sandbox can't be restarted)".format(name)
-        )
+        raise SystemExit("workspace {} is DESTROYED -- relaunch it (can't restart a destroyed sandbox)".format(name))
     if restart and host_state in ("STOPPED", "PAUSED"):
         print(">> {} is {}; restarting its sandbox ...".format(name, host_state), flush=True)
         try:
@@ -105,43 +113,39 @@ def view_modal_workspace(
             )
         except minds_client.CreateError as exc:
             raise SystemExit("restart failed: {}".format(exc)) from exc
-        print(">> {} is back up".format(name), flush=True)
 
-    # Free the forward port: stop the box's built-in eager forward (the one that OOMs) so our scoped
-    # forward -- which proxies just this one workspace -- can bind the already-published port.
-    box_mod._run(
+    endpoint = _mngr_ssh_endpoint(container, agent_id)
+    if endpoint is None:
+        raise SystemExit("could not resolve the SSH endpoint for {} (via mngr list) -- is it running?".format(name))
+    user, ssh_host, ssh_port = endpoint
+
+    # View = a plain host-side SSH local-forward to the workspace UI (a fixed :8000 in every sandbox),
+    # authenticated with the shared key already on the host. No mngr forward, no OOM, O(1) per
+    # workspace, branch-agnostic. `ssh -f` backgrounds the tunnel once it is up.
+    local_port = box_mod._free_port()
+    key = box_mod.SHARED_MODAL_KEYS / "modal_ssh_key"
+    known_hosts = box_mod.SHARED_MODAL_KEYS / "known_hosts"
+    result = box_mod._run(
         [
-            "docker",
-            "exec",
-            container,
-            "sh",
-            "-lc",
-            "ps -eo pid,args | grep 'mngr forward' | grep -v latchkey | grep -v grep | awk '{print $1}' | xargs -r kill",
+            "ssh",
+            "-N",
+            "-f",
+            "-L",
+            "{}:127.0.0.1:8000".format(local_port),
+            "-p",
+            str(ssh_port),
+            "-i",
+            str(key),
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            "-o",
+            "UserKnownHostsFile={}".format(known_hosts),
+            "-o",
+            "ExitOnForwardFailure=yes",
+            "{}@{}".format(user, ssh_host),
         ]
     )
-    time.sleep(1)
-
-    cel = 'agent.labels.workspace_display_name == "{}"'.format(name)
-    launch = (
-        "cd /work/mngr && MNGR__PROVIDERS__MODAL__USER_ID={} uv run mngr forward --service {} "
-        "--agent-include '{}' --host 0.0.0.0 --port {} > {} 2>&1"
-    ).format(box_mod.MODAL_ENV_USER_ID, service, cel, forward_port, log_path)
-    box_mod._run(["docker", "exec", "-d", container, "sh", "-lc", launch])
-    print(">> forwarding {} (service {}) via box {} ...".format(name, service, container), flush=True)
-
-    login = ""
-    for _ in range(20):
-        time.sleep(2)
-        log = box_mod._run(["docker", "exec", container, "sh", "-lc", "cat {} 2>/dev/null".format(log_path)]).stdout
-        found = _LOGIN_RE.findall(log)
-        if found:
-            login = found[-1]
-            break
-    if login:
-        print("\n  open this (authenticates + lands on the workspace):\n    {}".format(login), flush=True)
-    else:
-        print(
-            "\n  forward started but no login URL yet -- check: docker exec {} cat {}".format(container, log_path),
-            flush=True,
-        )
-        print("  then open: http://localhost:{}/".format(forward_port), flush=True)
+    if result.returncode != 0:
+        raise SystemExit("ssh tunnel to {} failed: {}".format(name, (result.stderr or "").strip()[:300]))
+    print("\n  {} is viewable at:  http://localhost:{}/".format(name, local_port), flush=True)
+    print("  (background SSH tunnel to the sandbox; kill the ssh process to close it)", flush=True)
