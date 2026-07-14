@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.minds.errors import LimaImageDownloadError
 from imbue.minds.errors import LimaImageVerificationError
 from imbue.minds.lima_image.cache_layout import LimaImageCacheLayout
 from imbue.minds.lima_image.cache_layout import LimaImageCurrentPointer
@@ -142,6 +143,17 @@ def _fetch_and_verify_manifest(
     return manifest
 
 
+def _installed_image_path(
+    current: LimaImageCurrentPointer | None, minds_version: MindsImageVersion, arch: ImageArch
+) -> Path | None:
+    """The assembled image for this version+arch that is present on disk, or None."""
+    if current is None or current.minds_version != minds_version or current.arch != arch:
+        return None
+    if not current.raw_path.exists():
+        return None
+    return current.raw_path
+
+
 def _seed_paths_from_current(
     *,
     current: LimaImageCurrentPointer | None,
@@ -172,35 +184,75 @@ def ensure_current_lima_image(
 ) -> EnsureImageResult:
     """Idempotently ensure the pre-baked image for ``minds_version``+``arch`` is present, verified, and current.
 
-    Safe to re-run and resumable: an already-current image short-circuits with no
-    network; an interrupted download resumes via desync's in-place extract; the
-    previous version is deleted only after the new one is fully assembled and
-    verified. Returns READY (with the raw image path) or VERSION_UNAVAILABLE (no
-    published image for this release+arch). Raises ``LimaImageError`` subclasses
-    for a published-but-unfetchable/unverifiable image -- never a silent rebuild.
+    Safe to re-run and resumable: an interrupted download resumes via desync's
+    in-place extract, and the previous version is deleted only after the new one is
+    fully assembled and verified. Returns READY (with the raw image path) or
+    VERSION_UNAVAILABLE (no published image for this release+arch). Raises
+    ``LimaImageError`` subclasses for a published-but-unfetchable/unverifiable image
+    -- never a silent rebuild.
+
+    An image already on disk is only reused when the hash it was verified against at
+    install time is still the one the signed manifest names, so a version republished
+    with different bytes is re-fetched rather than booted forever. It is not re-hashed
+    on each run (that would read multiple GB every launch), so this catches a
+    *replaced* image, not silent bit-rot in an installed one; the size is checked
+    alongside it, which does catch a truncated file.
+
+    The origin being *unreachable* is different from the image being *wrong*: it falls
+    back to the installed image so the app still works offline, whereas a signature or
+    hash that does not verify is always fatal.
     """
     layout = LimaImageCacheLayout(cache_dir=cache_dir)
     reporter = _ProgressReporter(progress_sink=progress_sink, minds_version=minds_version, arch=arch)
-
-    # Fast path: the image for this exact version is already assembled.
     current = _read_current_pointer(layout)
-    if current is not None and current.minds_version == minds_version and current.arch == arch:
-        if current.raw_path.exists():
-            reporter.emit(LimaImagePrefetchStatus.READY, None, current.raw_path)
-            return EnsureImageResult(status=LimaImagePrefetchStatus.READY, raw_path=current.raw_path)
 
     reporter.emit(LimaImagePrefetchStatus.FETCHING_MANIFEST, None, None)
-    manifest = _fetch_and_verify_manifest(
-        source=source, minds_version=minds_version, layout=layout, fetcher=fetcher, verifier=verifier
-    )
-    if manifest is None:
-        reporter.emit(LimaImagePrefetchStatus.VERSION_UNAVAILABLE, None, None)
-        return EnsureImageResult(status=LimaImagePrefetchStatus.VERSION_UNAVAILABLE, raw_path=None)
-    entry = manifest.entry_for_arch(arch)
+    try:
+        manifest = _fetch_and_verify_manifest(
+            source=source, minds_version=minds_version, layout=layout, fetcher=fetcher, verifier=verifier
+        )
+    except LimaImageDownloadError as exc:
+        installed = _installed_image_path(current, minds_version, arch)
+        if installed is None:
+            raise
+        logger.warning("Cannot reach the lima image origin ({}); using the installed {} image", exc, minds_version)
+        reporter.emit(LimaImagePrefetchStatus.READY, None, installed)
+        return EnsureImageResult(status=LimaImagePrefetchStatus.READY, raw_path=installed)
+
+    installed = _installed_image_path(current, minds_version, arch)
+    entry = manifest.entry_for_arch(arch) if manifest is not None else None
     if entry is None:
-        logger.info("Manifest for {} has no image for arch {}", minds_version, arch.value)
+        # Nothing is published for this release+arch. An image already installed and
+        # verified for it does not become invalid just because the manifest went away,
+        # so keep serving it; only a machine with no image falls back to building in-VM.
+        if installed is not None:
+            logger.info("No published image for {}/{}; keeping the installed one", minds_version, arch.value)
+            reporter.emit(LimaImagePrefetchStatus.READY, None, installed)
+            return EnsureImageResult(status=LimaImagePrefetchStatus.READY, raw_path=installed)
         reporter.emit(LimaImagePrefetchStatus.VERSION_UNAVAILABLE, None, None)
         return EnsureImageResult(status=LimaImagePrefetchStatus.VERSION_UNAVAILABLE, raw_path=None)
+
+    if installed is not None and current is not None:
+        # Trust the hash recorded when the image was verified at install time rather than
+        # re-hashing multiple GB on every launch; the size is a stat, so check it too and
+        # catch a file that was truncated after we wrote it.
+        installed_sha = current.raw_image_sha256 or _sha256_of_file(installed)
+        installed_size = installed.stat().st_size
+        if installed_sha == entry.raw_image_sha256 and installed_size == entry.raw_image_size_bytes:
+            if current.raw_image_sha256 is None:
+                # Adopt a pointer written before the hash was recorded, so the next run
+                # does not have to hash the image again to learn the same thing.
+                _write_current_pointer(layout, current.model_copy(update={"raw_image_sha256": installed_sha}))
+            reporter.emit(LimaImagePrefetchStatus.READY, None, installed)
+            return EnsureImageResult(status=LimaImagePrefetchStatus.READY, raw_path=installed)
+        logger.warning(
+            "Installed {} image ({}, {} bytes) is not what the signed manifest names ({}, {} bytes); re-fetching",
+            minds_version,
+            installed_sha,
+            installed_size,
+            entry.raw_image_sha256,
+            entry.raw_image_size_bytes,
+        )
 
     raw_path = _assemble_and_install_image(
         source=source,
@@ -272,10 +324,17 @@ def _assemble_and_install_image(
     downloaded_index.replace(final_index)
 
     # Commit the new pointer, then prune the prior version (which is the seed, so it
-    # must outlive the assembly above).
+    # must outlive the assembly above). Recording the hash it was verified against
+    # lets a later run re-check the image against the manifest without re-hashing it.
     _write_current_pointer(
         layout,
-        LimaImageCurrentPointer(minds_version=minds_version, arch=arch, raw_path=final_raw, index_path=final_index),
+        LimaImageCurrentPointer(
+            minds_version=minds_version,
+            arch=arch,
+            raw_path=final_raw,
+            index_path=final_index,
+            raw_image_sha256=actual_sha,
+        ),
     )
     _prune_other_versions(layout, keep_version=minds_version, keep_arch=arch)
     return final_raw

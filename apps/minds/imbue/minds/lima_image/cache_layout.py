@@ -10,6 +10,7 @@ from imbue.minds.lima_image.primitives import MANIFEST_OBJECT_PREFIX
 from imbue.minds.lima_image.primitives import MINISIGN_SIGNATURE_SUFFIX
 from imbue.minds.lima_image.primitives import MindsImageVersion
 from imbue.minds.lima_image.primitives import ROOT_MANIFEST_FILENAME
+from imbue.minds.lima_image.primitives import Sha256Hex
 
 
 class LimaImageCurrentPointer(FrozenModel):
@@ -19,6 +20,14 @@ class LimaImageCurrentPointer(FrozenModel):
     arch: ImageArch = Field(description="The architecture of the current image")
     raw_path: Path = Field(description="Absolute path to the current raw image")
     index_path: Path = Field(description="Absolute path to the current image's desync index, kept for seeding")
+    raw_image_sha256: Sha256Hex | None = Field(
+        default=None,
+        description=(
+            "SHA-256 the raw image was verified against when installed, so a later run can tell whether it still "
+            "matches the published manifest without re-hashing multiple GB. None in pointers written before this "
+            "field existed; those are re-hashed once and rewritten with it."
+        ),
+    )
 
 
 class LimaImageCacheLayout(FrozenModel):

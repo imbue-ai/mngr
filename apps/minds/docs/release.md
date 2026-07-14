@@ -155,11 +155,18 @@ gh workflow run minds-launch-to-msg.yml -R imbue-ai/mngr \
   -r main -f commit_sha="$VERSION" -f template_ref="$VERSION"
 ```
 
-**Green here concludes the release.** Note the build ID in the `build` summary.
+**Green here concludes the *binary*.** Note the build ID in the `build` summary. If any tier you are releasing configures a pre-baked Lima image, the release is not finished until §8b has published one for this tag and §8c has proven it — otherwise those users silently lose the fast create path.
 
 ### 8b. Build + publish the pre-baked Lima image
 
-Optional but recommended once the tag exists: bake + publish the pre-baked Lima VM image so local Lima creates of the default workspace boot the baked toolchain instead of building it in-VM. **Operator-run, not CI** — the R2 credentials and the minisign signing **private** key stay on your machine; only a public URL + public key are committed.
+Bake + publish the pre-baked Lima VM image so local Lima creates of the default workspace boot the baked toolchain instead of building it in-VM. **Operator-run, not CI** — the R2 credentials and the minisign signing **private** key stay on your machine; only a public URL + public key are committed.
+
+> **Whether this step is optional depends on the tier, and getting it wrong is silent.**
+>
+> - A tier whose `client.toml` sets **no** `lima_image_base_url` never looks for an image. Skipping this step changes nothing.
+> - A tier that **does** set it asks for an image keyed to the binary's `FALLBACK_BRANCH`. If you bumped `FALLBACK_BRANCH` (step 1) and did not publish an image for the new tag, every client asks for a manifest that does not exist, gets `VERSION_UNAVAILABLE`, and **silently falls back to building in-VM** — creates quietly go from ~45s back to ~5 minutes, nothing turns red, and no one finds out until someone asks why creates got slow again.
+>
+> So: **if the tier you are releasing configures an image, this step is required, and §8c is how you prove you did it.**
 
 The bake runs *with Lima itself* (the image is built by the same virtualizer that consumes it — `vz` on Apple Silicon, accelerated QEMU on Linux). What a desktop client uses is decided entirely by the per-tier `client.toml` (`lima_image_base_url` + `lima_image_minisign_public_key`); if those are unset, or no image is published for the tag/arch, the client **backs off to building in-VM** (so this whole step is safe to skip and safe to half-finish).
 
@@ -214,6 +221,23 @@ Notes:
 - Re-publishing a near-identical image only uploads the changed chunks (content-addressed dedup); chunks are immutable, so this is safe to re-run.
 - Both arches publish into the **same** bucket (the per-(version, arch) index + the shared chunk store), and the signed root manifest merges arch entries, so publishing arm64 after amd64 adds to the manifest rather than replacing it.
 - Measure the real `desync` delta between two consecutive builds before investing further in reproducibility (the dominant residual churn is `/root/.cache/uv`, which `desync` largely dedups by content).
+
+### 8c. Gate: prove the released tag actually has an image
+
+**Do not skip this.** The failure mode of §8b is silence — a tier that configures an image but has none published just gets slow creates forever. This check is the only thing standing between that and a release, so run it for **every tier whose `client.toml` sets `lima_image_base_url`**, using the same `$VERSION` the binary ships as `FALLBACK_BRANCH`:
+
+```bash
+BASE_URL=$(grep -h '^lima_image_base_url' apps/minds/imbue/minds/config/envs/production/client.toml | cut -d'"' -f2)
+curl -fsS "$BASE_URL/manifests/$VERSION/root.json" | python3 -m json.tool
+```
+
+It must print a manifest naming `$VERSION` and listing an entry per shipped arch. Anything else — a 404, a manifest for a different version, a missing arch — means clients will fall back to building in-VM, and the release is **not** done:
+
+- **404** → nothing was published for this tag. Go back to §8b.
+- **Manifest names a different `minds_version`** → you published under the wrong `--version`. It must equal `FALLBACK_BRANCH` exactly.
+- **Your arch is missing from `entries`** → that arch was never baked. Users on it silently take the slow path.
+
+A tag that has an image published under it is **immutable**: never move it and never republish different bytes under it. Clients cache on `(version, arch)` and only re-fetch when the signed manifest names a different hash, so a moved tag means the image and the code a create clones can silently disagree. Need different content? Cut a new tag.
 
 ### 9. Optional: dev verify + ship
 

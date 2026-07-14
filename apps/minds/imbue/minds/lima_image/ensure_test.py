@@ -116,7 +116,9 @@ def test_base_download_assembles_verifies_and_installs(tmp_path: Path) -> None:
     assert statuses[-1] is LimaImagePrefetchStatus.READY
 
 
-def test_second_call_is_a_no_network_fast_path(tmp_path: Path) -> None:
+def test_an_unreachable_origin_still_serves_the_installed_image(tmp_path: Path) -> None:
+    # The image is already assembled and verified, so an origin we cannot reach must not
+    # take the app offline: it keeps working, it just cannot learn about a newer image.
     version = MindsImageVersion("minds-v9.9.2")
     raw = b"content" * 50
     fetcher = InMemoryManifestFetcher()
@@ -131,13 +133,84 @@ def test_second_call_is_a_no_network_fast_path(tmp_path: Path) -> None:
         cache_dir=tmp_path,
     )
 
-    # Drop every published object: a second call must still succeed from local state.
     fetcher.objects_by_url.clear()
     sink2 = RecordingProgressSink()
     result = _run(fetcher, chunk_store, AcceptingSignatureVerifier(), sink2, version=version, cache_dir=tmp_path)
 
     assert result.status is LimaImagePrefetchStatus.READY
-    assert [state.status for state in sink2.states] == [LimaImagePrefetchStatus.READY]
+    assert result.raw_path is not None
+    assert result.raw_path.read_bytes() == raw
+    # It consults the manifest (that is what catches a replaced image), but having failed
+    # to get one it neither re-downloads nor discards what it has.
+    statuses = [state.status for state in sink2.states]
+    assert statuses == [LimaImagePrefetchStatus.FETCHING_MANIFEST, LimaImagePrefetchStatus.READY]
+
+
+def test_an_image_republished_under_the_same_version_is_re_fetched(tmp_path: Path) -> None:
+    # The whole point of recording the verified hash: the cache keys on (version, arch),
+    # so without comparing bytes against the signed manifest a version republished with a
+    # corrected image would be ignored forever and every client would boot the old one.
+    version = MindsImageVersion("minds-v9.9.6")
+    stale_raw = b"the-broken-image" * 40
+    fixed_raw = b"the-corrected-image" * 40
+    fetcher = InMemoryManifestFetcher()
+    chunk_store = FixedRawChunkStore()
+
+    _publish(fetcher, chunk_store, version=version, raw_bytes=stale_raw)
+    first = _run(
+        fetcher,
+        chunk_store,
+        AcceptingSignatureVerifier(),
+        RecordingProgressSink(),
+        version=version,
+        cache_dir=tmp_path,
+    )
+    assert first.raw_path is not None
+    assert first.raw_path.read_bytes() == stale_raw
+
+    # Same version, different bytes -- the signed manifest now names a different hash.
+    _publish(fetcher, chunk_store, version=version, raw_bytes=fixed_raw)
+    sink2 = RecordingProgressSink()
+    result = _run(fetcher, chunk_store, AcceptingSignatureVerifier(), sink2, version=version, cache_dir=tmp_path)
+
+    assert result.status is LimaImagePrefetchStatus.READY
+    assert result.raw_path is not None
+    assert result.raw_path.read_bytes() == fixed_raw, "the republished image must replace the stale one"
+    assert LimaImagePrefetchStatus.DOWNLOADING in [state.status for state in sink2.states]
+
+
+def test_a_truncated_installed_image_is_re_fetched(tmp_path: Path) -> None:
+    # The installed image is trusted via the hash recorded when it was verified, not
+    # re-hashed every launch, so the size is what catches a file that lost bytes after
+    # we wrote it (an interrupted write, a full disk) rather than being replaced.
+    version = MindsImageVersion("minds-v9.9.7")
+    raw = b"good-image" * 60
+    fetcher = InMemoryManifestFetcher()
+    chunk_store = FixedRawChunkStore()
+    _publish(fetcher, chunk_store, version=version, raw_bytes=raw)
+    first = _run(
+        fetcher,
+        chunk_store,
+        AcceptingSignatureVerifier(),
+        RecordingProgressSink(),
+        version=version,
+        cache_dir=tmp_path,
+    )
+    assert first.raw_path is not None
+
+    first.raw_path.write_bytes(raw[: len(raw) // 2])
+    result = _run(
+        fetcher,
+        chunk_store,
+        AcceptingSignatureVerifier(),
+        RecordingProgressSink(),
+        version=version,
+        cache_dir=tmp_path,
+    )
+
+    assert result.status is LimaImagePrefetchStatus.READY
+    assert result.raw_path is not None
+    assert result.raw_path.read_bytes() == raw, "a truncated image must be re-fetched, not booted"
 
 
 def test_missing_manifest_reports_version_unavailable(tmp_path: Path) -> None:
