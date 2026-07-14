@@ -127,6 +127,7 @@ Workflow:
 - **Fixes:** links to every Sentry issue in the group.
 - **Diagnosis:** root-cause narrative with file/line references and the reproduction evidence from the worktree.
 - **The fix:** what changed and why; explicitly labeled *root-cause fix* vs *defensive band-aid*; verification status (reproduced-then-eliminated, or unverified).
+- **Regression risk:** a low/medium/high rating with evidence — blast radius of the changed lines, whether behavior changes off the failing path, what protects against a regression, and the riskiest assumption for the reviewer to check.
 - **Guardian:** pass summary or remaining findings.
 - Attribution footer with the group's primary Sentry short ID.
 

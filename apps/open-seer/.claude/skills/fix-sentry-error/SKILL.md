@@ -377,6 +377,14 @@ failing output — or the stated hypothesis if reproduction wasn't feasible.>
 **Verification:** reproduced, then eliminated (repro re-run passes) |
 UNVERIFIED — could not reproduce; fix is based on the hypothesis above
 
+## Regression risk
+**Rating:** low | medium | high
+<2-4 sentences of evidence for the rating: which callers/code paths execute
+the changed lines (blast radius), whether behavior changes off the failing
+path, and what protects against a regression (existing tests exercising the
+path, the new regression test, type coverage). Name the riskiest assumption
+— the thing a reviewer should double-check.>
+
 ## Guardian
 <Pass on cycle N of 3 | cycles exhausted — remaining findings listed below.>
 
@@ -388,6 +396,16 @@ For an **unverified/hypothesis fix**, the label must be prominent: put
 `[unverified]` in the PR title and keep the UNVERIFIED verification line.
 This does not keep the PR in draft — done = ready for review; verification
 status is information for the reviewer, not a gate.
+
+**Regression risk is an assessment, not a formality.** Derive the rating
+from the diff, not the intent: count the call sites of what you changed
+(`grep`/LSP, not memory), and say whether inputs outside the failing case
+take a different path than before. An additive guard on a single failing
+path with a regression test is low; touching a shared helper, changing a
+signature, or altering behavior for non-erroring inputs is at least medium;
+anything you could not exercise (unverified fixes, platform-specific code)
+is high. An honest "high" is fine — it routes reviewer attention; a reflexive
+"low" trains reviewers to ignore the section.
 
 **CI triage** — the draft PR triggers the target repo's checks; wait for them
 and triage every failure before flipping ready:
