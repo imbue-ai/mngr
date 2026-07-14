@@ -2061,8 +2061,9 @@ def test_handle_peek_key_arrows_are_not_handled() -> None:
     state = _make_state()
     _build_peek_panel(state)
     state.peek_agent_name = AgentName("agent-a")
-    # Arrows are not panel actions: they fall through (None) to the reply Edit for
-    # cursor movement, and never attach or switch the peeked agent.
+    # Arrows are not panel actions: the reply Edit already handled in-line cursor
+    # movement before this handler runs, so the handler leaves them alone (None)
+    # and never attaches or switches the peeked agent.
     for key in ("up", "down", "left", "right"):
         assert _handle_peek_key(state, key) is None
     assert state.peek_agent_name == AgentName("agent-a")
