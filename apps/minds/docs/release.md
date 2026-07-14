@@ -201,6 +201,15 @@ Setup is one script, `scripts/lima_image/setup_tier.py`. It is idempotent (re-ru
 
 Build one arch per native host (amd64 on a KVM Linux host, arm64 on an Apple-Silicon Mac), then publish each into the tier bucket.
 
+The bake host needs a Lima that can actually boot a VM. On macOS that is `brew install lima qemu` (Lima uses `vz`, and `qemu-img` is only for the final flatten). On Linux, Lima drives **qemu** and boots the guest via UEFI, so the system emulator alone is not enough -- it also needs the EDK2 firmware and the virtio option ROMs, which `qemu-utils` does not pull in:
+
+```bash
+# Debian/Ubuntu, amd64 bake host:
+sudo apt install lima qemu-system-x86 qemu-utils ovmf ipxe-qemu
+```
+
+Without the firmware, `limactl start` dies with `could not find firmware for "x86_64"`; without the ROMs, with `failed to find romfile "efi-virtio.rom"`. `build-lima-image.sh` checks for the binaries up front and names these packages, but it cannot check the firmware itself. The bake user must also be in the `kvm` group.
+
 Credentials are the three `R2_*` values `setup_tier.py` printed. Cloudflare's REST object API is not a usable alternative: it falls under the global `api.cloudflare.com` limit of 1200 requests per 5 minutes, and one image is roughly 65,000 chunks, so a publish cannot finish within that budget and starts returning `429` partway through. The S3 API is not rate-limited this way.
 
 ```bash

@@ -60,25 +60,37 @@ if [ -z "$ARCH" ]; then
   esac
 fi
 
-# Fail before the bake, not after it: the toolchain build is the long pole, and
-# qemu-img is only needed at the very end (it is not preinstalled on either macOS
-# or a stock Linux host, where it lives in qemu-utils).
-MISSING=""
-for tool in limactl qemu-img; do
-  command -v "$tool" >/dev/null 2>&1 || MISSING="$MISSING $tool"
-done
-if [ -n "$MISSING" ]; then
-  echo "ERROR: missing required tool(s):$MISSING" >&2
-  echo "       macOS: brew install lima qemu   Linux: install lima + qemu-utils" >&2
-  exit 1
-fi
-
 if [ "$ARCH" = "arm64" ]; then
   ARCH_TAG="aarch64"; LIMA_ARCH="aarch64"
   DEBIAN_URL="https://cloud.debian.org/images/cloud/bookworm/20260601-2496/debian-12-genericcloud-arm64-20260601-2496.qcow2"
 else
   ARCH_TAG="x86_64"; LIMA_ARCH="x86_64"
   DEBIAN_URL="https://cloud.debian.org/images/cloud/bookworm/20260601-2496/debian-12-genericcloud-amd64-20260601-2496.qcow2"
+fi
+
+# Fail before the bake, not during it. qemu-img is only needed by the final flatten,
+# so a missing one would otherwise surface after the toolchain build -- the long pole.
+MISSING=""
+for tool in limactl qemu-img; do
+  command -v "$tool" >/dev/null 2>&1 || MISSING="$MISSING $tool"
+done
+# Lima drives vz on macOS but qemu on Linux, where it boots the guest via UEFI: that
+# needs the arch's system emulator plus EDK2 firmware and the virtio option ROMs,
+# none of which come with qemu-utils. Missing firmware/ROMs fail inside limactl
+# ("could not find firmware for ...", "failed to find romfile"), so name the packages
+# here rather than leave the operator to decode that.
+if [ "$(uname -s)" = "Linux" ]; then
+  command -v "qemu-system-$LIMA_ARCH" >/dev/null 2>&1 || MISSING="$MISSING qemu-system-$LIMA_ARCH"
+fi
+if [ -n "$MISSING" ]; then
+  echo "ERROR: missing required tool(s):$MISSING" >&2
+  echo "  macOS: brew install lima qemu" >&2
+  if [ "$LIMA_ARCH" = "aarch64" ]; then
+    echo "  Debian/Ubuntu: apt install lima qemu-system-arm qemu-utils qemu-efi-aarch64 ipxe-qemu" >&2
+  else
+    echo "  Debian/Ubuntu: apt install lima qemu-system-x86 qemu-utils ovmf ipxe-qemu" >&2
+  fi
+  exit 1
 fi
 
 INSTANCE="mngr-lima-bake-$ARCH_TAG"
@@ -146,6 +158,13 @@ for attempt in $(seq 1 "$START_ATTEMPTS"); do
     break
   fi
   echo "WARN: 'limactl start' failed (attempt $attempt/$START_ATTEMPTS); cleaning up + retrying" >&2
+  # limactl's own stdout says only "exiting, status=..."; the reason lives in
+  # ha.stderr.log, which the delete below takes with it.
+  if [ -f "$LIMA_INSTANCE_DIR/ha.stderr.log" ]; then
+    echo "----- last lines of $LIMA_INSTANCE_DIR/ha.stderr.log -----" >&2
+    tail -5 "$LIMA_INSTANCE_DIR/ha.stderr.log" >&2 || true
+    echo "----------------------------------------------------------" >&2
+  fi
   limactl delete -f "$INSTANCE" >/dev/null 2>&1 || true
   [ "$attempt" -lt "$START_ATTEMPTS" ] && sleep $((attempt * 10))
 done
