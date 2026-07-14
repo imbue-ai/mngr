@@ -1084,6 +1084,11 @@ def _handle_chrome_events() -> Response:
         # way health transitions are handled.
         open_help_queue: queue.Queue[OpenHelpRequest] = queue.Queue()
 
+        # One-shot broadcast payloads (e.g. ``workspace_stopped``) arrive on a
+        # Flask request thread via the broadcaster; same per-connection
+        # queue-and-drain arrangement.
+        broadcast_queue: queue.Queue[dict[str, str]] = queue.Queue()
+
         def _on_change() -> None:
             change_event.set()
 
@@ -1094,6 +1099,8 @@ def _handle_chrome_events() -> Response:
         # so the broker fans open-help requests onto it the same way health
         # transitions reach ``health_queue``.
         help_broker.subscribe(open_help_queue, change_event)
+        event_broadcaster = get_state().chrome_event_broadcaster
+        event_broadcaster.subscribe(broadcast_queue, change_event)
 
         if isinstance(backend_resolver, MngrCliBackendResolver):
             backend_resolver.add_on_change_callback(_on_change)
@@ -1234,6 +1241,9 @@ def _handle_chrome_events() -> Response:
                         )
                     )
 
+                while not broadcast_queue.empty():
+                    yield "data: {}\n\n".format(json.dumps(broadcast_queue.get_nowait()))
+
                 while not health_queue.empty():
                     aid_str, status = health_queue.get_nowait()
                     # Leaving STUCK clears the redirect latch so a later re-STUCK
@@ -1310,6 +1320,7 @@ def _handle_chrome_events() -> Response:
                     )
         finally:
             help_broker.unsubscribe(open_help_queue, change_event)
+            event_broadcaster.unsubscribe(broadcast_queue, change_event)
             if isinstance(backend_resolver, MngrCliBackendResolver):
                 backend_resolver.remove_on_change_callback(_on_change)
             if tracker is not None:

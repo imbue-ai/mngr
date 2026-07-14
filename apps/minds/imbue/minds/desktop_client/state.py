@@ -28,6 +28,7 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
+from imbue.minds.desktop_client.chrome_event_broadcast import ChromeEventBroadcaster
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.help_modal_requests import HelpModalRequestBroker
@@ -84,6 +85,10 @@ class DesktopClientState(MutableModel):
     help_modal_request_broker: HelpModalRequestBroker = Field(
         default_factory=HelpModalRequestBroker,
         description="Fans agent-initiated 'open the pre-filled help modal' requests out to chrome SSE connections",
+    )
+    chrome_event_broadcaster: ChromeEventBroadcaster = Field(
+        default_factory=ChromeEventBroadcaster,
+        description="Fans one-shot chrome-events SSE payloads (e.g. workspace_stopped) out to connections",
     )
     client_env_config: ClientEnvConfig | None = Field(
         default=None, frozen=True, description="Loaded per-env client config (connector URL, etc.)"

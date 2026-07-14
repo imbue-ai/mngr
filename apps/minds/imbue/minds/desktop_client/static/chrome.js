@@ -264,6 +264,19 @@
     maybeRedirectToRecovery();
   }
 
+  // An in-app action stopped this workspace's host. In Electron the main
+  // process closes the affected windows itself; in browser mode navigate the
+  // content frame home so the open view doesn't observe the dead interface,
+  // redirect to recovery, and auto-restart the host -- silently undoing the
+  // stop. Skipped while the workspace is mid-restart (the user is
+  // intentionally restarting it).
+  function handleWorkspaceStopped(agentId) {
+    if (isElectron) return;
+    if (!agentId || currentTitleAgentId !== agentId) return;
+    if (systemInterfaceStatusByAgent[agentId] === 'restarting') return;
+    navigateContent('/');
+  }
+
   // -- Button wiring --------------------------------------------------------
   document.getElementById('sidebar-toggle').onclick = toggleSidebar;
   document.getElementById('home-btn').onclick = function () { navigateContent('/'); };
@@ -596,6 +609,7 @@
       if (data.type === 'auth_status') updateAuthUI(data);
       if (data.type === 'requests') updateRequestsBadge(data.count);
       if (data.type === 'system_interface_status') handleSystemInterfaceStatus(data.agent_id, data.status);
+      if (data.type === 'workspace_stopped') handleWorkspaceStopped(data.agent_id);
     } catch (e) {}
   }
 

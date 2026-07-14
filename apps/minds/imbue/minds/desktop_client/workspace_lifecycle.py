@@ -19,6 +19,8 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
+from imbue.minds.desktop_client.chrome_event_broadcast import ChromeEventBroadcaster
+from imbue.minds.desktop_client.chrome_event_broadcast import build_workspace_stopped_payload
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
@@ -42,6 +44,7 @@ def perform_mind_host_action(
     mngr_binary: str,
     mngr_host_dir: Path,
     concurrency_group: ConcurrencyGroup,
+    chrome_event_broadcaster: ChromeEventBroadcaster | None = None,
 ) -> bool:
     """Stop or start one mind's host, running ``mngr`` to completion; return True on success.
 
@@ -50,6 +53,11 @@ def perform_mind_host_action(
     synchronously. On success sets the optimistic host-state override (so the UI
     flips immediately, reconciling on the next discovery snapshot); on failure
     clears any override so the UI reverts to the authoritative discovery state.
+
+    A successful STOP also broadcasts a one-shot ``workspace_stopped`` payload on
+    ``chrome_event_broadcaster`` (when provided), so any window still open to the
+    workspace closes instead of observing the dead interface and auto-restarting
+    the host -- which would silently undo the stop.
     """
     services_agent_id = backend_resolver.get_system_services_agent_id(workspace_agent_id)
     if services_agent_id is None:
@@ -100,4 +108,6 @@ def perform_mind_host_action(
                 backend_resolver.set_host_state_override(host_id, HostState.RUNNING)
             case _ as unreachable:
                 assert_never(unreachable)
+    if action is MindHostAction.STOP and chrome_event_broadcaster is not None:
+        chrome_event_broadcaster.broadcast(build_workspace_stopped_payload(str(workspace_agent_id)))
     return True

@@ -1,6 +1,8 @@
 import json
 import os
+import queue
 import shlex
+import threading
 import time
 from collections.abc import Callable
 from datetime import datetime
@@ -632,6 +634,63 @@ def test_lifecycle_without_concurrency_group_returns_501(tmp_path: Path) -> None
     response = client.post(f"/api/v1/workspaces/{agent_id}/start", headers=_auth_header())
 
     assert response.status_code == 501
+
+
+def test_stop_workspace_broadcasts_workspace_stopped_event(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """A successful v1 stop broadcasts a one-shot ``workspace_stopped`` chrome SSE payload.
+
+    The Electron shell closes any window still open to the workspace off this
+    event (otherwise the open view would observe the dead interface, redirect
+    to recovery, and auto-restart the host -- silently undoing an
+    agent-requested stop). The landing-page stop shares this route, so both
+    stop paths emit through the one mechanism.
+    """
+    agent_id = AgentId()
+    services_id = AgentId()
+    resolver = _resolver_with_services_agent(agent_id, services_id)
+    fake_mngr = _write_fake_mngr(tmp_path / "bin")
+    client = _build_client(
+        tmp_path,
+        resolver,
+        root_concurrency_group=root_concurrency_group,
+        mngr_binary=fake_mngr,
+        mngr_host_dir=tmp_path / "host",
+    )
+    event_queue: "queue.Queue[dict[str, str]]" = queue.Queue()
+    wake_event = threading.Event()
+    get_state(client.application).chrome_event_broadcaster.subscribe(event_queue, wake_event)
+
+    response = client.post(f"/api/v1/workspaces/{agent_id}/stop", headers=_auth_header())
+
+    assert response.status_code == 200
+    assert wake_event.is_set()
+    assert event_queue.get_nowait() == {"type": "workspace_stopped", "agent_id": str(agent_id)}
+
+
+def test_start_workspace_does_not_broadcast_workspace_stopped(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """Only the STOP action emits ``workspace_stopped``; a start emits nothing."""
+    agent_id = AgentId()
+    services_id = AgentId()
+    resolver = _resolver_with_services_agent(agent_id, services_id)
+    fake_mngr = _write_fake_mngr(tmp_path / "bin")
+    client = _build_client(
+        tmp_path,
+        resolver,
+        root_concurrency_group=root_concurrency_group,
+        mngr_binary=fake_mngr,
+        mngr_host_dir=tmp_path / "host",
+    )
+    event_queue: "queue.Queue[dict[str, str]]" = queue.Queue()
+    get_state(client.application).chrome_event_broadcaster.subscribe(event_queue, threading.Event())
+
+    response = client.post(f"/api/v1/workspaces/{agent_id}/start", headers=_auth_header())
+
+    assert response.status_code == 200
+    assert event_queue.empty()
 
 
 def test_operation_status_unknown_create_id_returns_404(tmp_path: Path) -> None:

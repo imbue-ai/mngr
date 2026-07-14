@@ -727,6 +727,7 @@ def _perform_workspace_lifecycle(agent_id: str, action: str) -> WorkspaceLifecyc
         get_state().mngr_binary,
         get_state().mngr_host_dir,
         parent_cg,
+        chrome_event_broadcaster=get_state().chrome_event_broadcaster,
     )
     if not succeeded:
         return _json_error(f"Could not {action} the workspace host", 502)

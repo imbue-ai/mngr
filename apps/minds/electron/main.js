@@ -1923,6 +1923,17 @@ function handleChromeSSEEvent(evt) {
         systemInterfaceStatusByAgent.set(String(evt.agent_id), status);
       }
     }
+  } else if (evt.type === 'workspace_stopped') {
+    // An in-app action stopped this workspace's host (the landing-page Stop
+    // button or the agent-facing /api/v1 stop route). Any window still open to
+    // it would observe the now-unreachable system interface, get redirected to
+    // the recovery page, and auto-restart the host -- silently undoing the
+    // stop. Close those windows now (the confirm-stop-mind handler's own
+    // detach becomes a harmless redundancy for the dialog path). Skip it if
+    // the mind is mid-restart (the user is intentionally restarting it).
+    if (evt.agent_id && systemInterfaceStatusByAgent.get(String(evt.agent_id)) !== 'restarting') {
+      detachWindowsForWorkspace(String(evt.agent_id));
+    }
   } else if (evt.type === 'auth_required') {
     // Clear every window's accent on the authenticated -> unauthenticated
     // boundary (account sign-out or session expiration). Without this each
