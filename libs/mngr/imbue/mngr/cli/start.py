@@ -15,6 +15,7 @@ from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
 from imbue.mngr.api.find import ensure_host_started
 from imbue.mngr.api.find import find_all_agents
 from imbue.mngr.api.find import group_agents_by_host
+from imbue.mngr.api.message import send_message_with_resend_guidance
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.cli.address_params import AGENT_ADDRESS
 from imbue.mngr.cli.address_params import HOST_ADDRESS
@@ -35,7 +36,6 @@ from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.interfaces.agent import AgentInterface
-from imbue.mngr.interfaces.agent import require_interactive_agent
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentLifecycleState
@@ -109,7 +109,7 @@ def _send_resume_message_if_configured(agent: AgentInterface, output_opts: Outpu
             "Failed to reach WAITING state within {}s, proceeding anyway",
             timeout,
         )
-    require_interactive_agent(agent).send_message(resume_message)
+    send_message_with_resend_guidance(agent, resume_message, "started and resumed")
     logger.debug("Sent resume message to agent {}", agent.name)
 
 
