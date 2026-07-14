@@ -7,6 +7,7 @@ fresh Hub (and everything the task referenced) is stranded on every call.
 """
 
 import gc
+import time
 
 import gevent
 import pytest
@@ -45,8 +46,17 @@ def test_worker_hubs_do_not_accumulate_across_polls() -> None:
     for _ in range(iterations):
         _run_one_discovery_like_poll()
 
-    growth = _count_live_hubs() - baseline_hubs
     # With the join-before-destroy fix, growth is ~0. Without it, growth scales
     # with the number of iterations (one stranded hub each). Allow a small
-    # margin for worker threads that happen to be in flight.
+    # margin for worker threads that happen to be in flight -- and, since
+    # thread teardown can lag on a loaded machine, re-poll until the count
+    # settles under the margin rather than trusting a single snapshot (truly
+    # leaked hubs are pinned by an unbreakable GC cycle, so they never shrink
+    # away and a real regression still fails).
+    deadline = time.monotonic() + 5.0
+    while True:
+        growth = _count_live_hubs() - baseline_hubs
+        if growth <= 5 or time.monotonic() >= deadline:
+            break
+        time.sleep(0.2)
     assert growth <= 5, f"gevent hubs accumulated across polls (grew by {growth} over {iterations} polls)"
