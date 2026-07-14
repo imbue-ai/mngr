@@ -90,6 +90,12 @@ _get_json = minds_client.get_json
 DECIDE_SENTINEL = "DECIDE_FROM_PERSONA"
 
 
+def derive_case_id(case: dict, index: int) -> str:
+    """A case's stable id: its explicit 'id', else a positional 'case-N'. Launch writes results under
+    this id and status/evaluate read under it, so the two sides must derive it identically."""
+    return str(case.get("id") or "case-{}".format(index + 1))
+
+
 def normalize_cases(personas: object) -> list[dict]:
     if not isinstance(personas, list) or not personas:
         raise ValueError("'personas' must be a non-empty list")
@@ -98,7 +104,7 @@ def normalize_cases(personas: object) -> list[dict]:
         case: Any = raw_case
         if not isinstance(case, dict):
             raise ValueError("each persona case must be an object")
-        case_id = str(case.get("id") or "case-{}".format(index + 1))
+        case_id = derive_case_id(case, index)
         raw_prompts = case.get("prompts")
         if not isinstance(raw_prompts, list) or not raw_prompts:
             raise ValueError("case {!r} must have a non-empty 'prompts' list".format(case_id))
@@ -112,6 +118,12 @@ def normalize_cases(personas: object) -> list[dict]:
                 )
             )
         out.append({"id": case_id, "persona": str(case.get("persona", "")).strip(), "prompts": prompts})
+    ids = [str(c["id"]) for c in out]
+    dupes = sorted({i for i in ids if ids.count(i) > 1})
+    if dupes:
+        # Two cases with the same id collide on one S3 prefix and one Modal host name (one silently
+        # overwrites/destroys the other), so reject it up front.
+        raise ValueError("duplicate case id(s): {}".format(", ".join(dupes)))
     return out
 
 

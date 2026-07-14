@@ -97,7 +97,7 @@ def _eval_llm_scores(case: _Case) -> dict:
 def _extract_json(text: str) -> dict:
     """Pull the JSON object out of the reply (tolerates ```json fences and surrounding prose)."""
     start, end = text.find("{"), text.rfind("}")
-    if start == -1 or end == -1:
+    if start == -1 or end == -1 or start > end:
         raise ValueError("no JSON object in model reply: {!r}".format(text[:200]))
     return json.loads(text[start : end + 1])
 
@@ -121,17 +121,18 @@ def evaluate_single_case(client, bucket: str, case_prefix_value: str) -> dict:
     return results
 
 
+def _is_number(value) -> bool:
+    # bool is a subclass of int -- exclude it so a stray true/false score isn't averaged as 1/0.
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 def _aggregate(per_case: dict[str, dict]) -> dict:
     """Average each numeric result key across cases (skips keys a case failed to produce)."""
     aggregate: dict = {}
     for key in RESULT_KEYS:
-        values = [c[key] for c in per_case.values() if isinstance(c.get(key), (int, float))]
+        values = [c[key] for c in per_case.values() if _is_number(c.get(key))]
         aggregate[key] = round(sum(values) / len(values), 2) if values else None
     return aggregate
-
-
-def _delete(client, bucket: str, key: str) -> None:
-    client.delete_object(Bucket=bucket, Key=key)  # S3 delete is a no-op if the key is absent
 
 
 def evaluate_batch(batch: str) -> None:
@@ -151,11 +152,9 @@ def evaluate_batch(batch: str) -> None:
     if not finished:
         raise SystemExit("no finished cases to evaluate in {} ({} still running)".format(batch, len(rows)))
 
-    # Nuke any prior results so this is a clean recompute.
-    _delete(client, bucket, "{}/{}".format(batch, BATCH_RESULTS_NAME))
-    for row in rows:
-        _delete(client, bucket, "{}/{}".format(row["prefix"], CASE_RESULTS_NAME))
-
+    # Each successful case overwrites its own case_eval_results.json below, and the batch aggregate is
+    # rewritten at the end -- so a re-run recomputes cleanly WITHOUT a pre-delete that would destroy
+    # prior good scores if this run then fails (e.g. an expired ANTHROPIC_API_KEY or a network blip).
     print(">> evaluating {}/{} finished case(s) in {} ...".format(len(finished), len(rows), batch), flush=True)
     per_case: dict[str, dict] = {}
     errors: dict[str, str] = {}

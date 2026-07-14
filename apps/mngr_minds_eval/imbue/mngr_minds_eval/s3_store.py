@@ -83,20 +83,28 @@ def put_json(client, bucket: str, key: str, payload: dict) -> None:
 
 
 def get_json(client, bucket: str, key: str) -> dict | None:
+    """Parsed JSON at `key`, or None only when the object genuinely does not exist. A transient
+    S3/network error propagates instead of masquerading as absence (which would silently drop a
+    finished case or report a real batch as missing)."""
+    import botocore.exceptions
+
     try:
         return json.loads(client.get_object(Bucket=bucket, Key=key)["Body"].read().decode())
-    except Exception:
-        return None
+    except botocore.exceptions.ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") in ("NoSuchKey", "404"):
+            return None
+        raise
 
 
 def list_batches(client, bucket: str) -> list[str]:
-    """Top-level batch folders, newest first (names embed a sortable UTC timestamp)."""
+    """Top-level batch folders, newest first. Sorted by the embedded UTC timestamp, NOT the whole
+    `<name>_<stamp>` string -- otherwise ordering is only chronological within a single eval name."""
     paginator = client.get_paginator("list_objects_v2")
     names: set[str] = set()
     for page in paginator.paginate(Bucket=bucket, Delimiter="/"):
         for common in page.get("CommonPrefixes", []):
             names.add(common["Prefix"].rstrip("/"))
-    return sorted(names, reverse=True)
+    return sorted(names, key=lambda b: split_batch(b)[1], reverse=True)
 
 
 def split_batch(batch: str) -> tuple[str, str]:

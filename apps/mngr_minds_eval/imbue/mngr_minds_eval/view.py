@@ -95,7 +95,9 @@ def view_modal_workspace(name: str, *, box: str = "", new_box_on_mngr_branch: st
         raise SystemExit(str(exc)) from exc
     if match is None:
         raise SystemExit("no workspace named {!r} in the env (see: minds-evals list-modal-workspaces)".format(name))
-    agent_id = match["agent_id"]
+    agent_id = match.get("agent_id")
+    if not agent_id:
+        raise SystemExit("workspace {!r} has no agent id yet (still resolving) -- try again shortly".format(name))
 
     # A stopped/paused sandbox has no reachable sshd -- bring it back up first (with live progress).
     host_state = (match.get("host_state") or "").upper()

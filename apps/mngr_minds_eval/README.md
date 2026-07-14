@@ -54,10 +54,10 @@ minds-evals make-modal-workspace --mngr-branch minds-eval \
     --fct-link https://github.com/imbue-ai/default-workspace-template.git --fct-branch main
 ```
 
-`launch`/`make-modal-workspace`/`clean-modal-workspaces` build/boot the box if needed and
-re-run themselves inside it. `list-batches`/`inspect` only read S3 and run wherever you are. After a
-box-using command, the dashboard + one-time workspace-login URL are printed (open the login URL once
-per box, then click the workspace in the dashboard).
+`launch`/`make-modal-workspace` build/boot the box if needed and re-run themselves inside it.
+`list-batches`/`inspect`/`evaluate` only read S3 and run wherever you are; `clean-modal-workspaces`
+is host-side (no box). After a box-using command the box's dashboard URL is printed; open a specific
+workspace with `minds-evals view-modal-workspace <name>`.
 
 ## Eval config (`--config`)
 
@@ -99,8 +99,9 @@ captured to S3 per turn; spinning one back up as a live workspace (restore) is n
 
 ## Evaluating a finished batch (`evaluate`)
 
-`minds-evals evaluate <batch>` reads the batch from S3 (no box, no Modal), nukes any prior results,
-then scores every **finished** case in parallel and writes results back. Cases that aren't finished
+`minds-evals evaluate <batch>` reads the batch from S3 (no box, no Modal), then scores every
+**finished** case in parallel and writes results back, overwriting each case's result (a failed
+re-run leaves the prior good results intact -- there is no destructive pre-delete). Cases that aren't finished
 yet (or whose eval errors) show as `N/A` rows and are left out of the batch average -- so a batch
 with a straggler can still be scored for the rest. The per-case outputs are:
 

@@ -27,6 +27,10 @@ def post_json(url: str, payload: dict) -> tuple[int, dict]:
             return response.status, json.loads(response.read().decode())
     except urllib.error.HTTPError as exc:
         return exc.code, {"error": exc.read().decode()[:400]}
+    except (urllib.error.URLError, OSError) as exc:
+        # Connection refused/dropped (box not up yet, transient blip). Report as a non-2xx so the
+        # caller raises CreateError instead of letting a raw traceback abort a whole batch.
+        return 0, {"error": str(exc)}
 
 
 def get_json(url: str) -> dict:
@@ -56,7 +60,14 @@ def establish_ssh(port: str, agent_id: str, public_key: str, requester_id: str) 
     )
     if status != 200:
         raise CreateError("could not resolve SSH endpoint (HTTP {}): {}".format(status, body))
-    return str(body.get("user") or "root"), str(body["host"]), int(body["port"])
+    host, raw_port = body.get("host"), body.get("port")
+    if not host or raw_port is None:
+        raise CreateError("SSH endpoint response missing host/port: {}".format(body))
+    try:
+        ssh_port = int(raw_port)
+    except (TypeError, ValueError):
+        raise CreateError("SSH endpoint response has a non-numeric port: {}".format(body)) from None
+    return str(body.get("user") or "root"), str(host), ssh_port
 
 
 def create_and_wait(

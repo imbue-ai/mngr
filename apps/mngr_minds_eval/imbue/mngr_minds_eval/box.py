@@ -97,14 +97,21 @@ def container_name(mngr_branch: str, ref: str) -> str:
     return "minds-box-{}-{}".format(_slug(mngr_branch), ref[:12])
 
 
+def _is_sha12(text: str) -> bool:
+    return len(text) == 12 and all(c in "0123456789abcdef" for c in text)
+
+
 def find_running_for_branch(mngr_branch: str) -> str:
-    """A running box for this branch (any SHA), matched by container-name prefix. '' if none. Lets us
+    """A running box for this branch (any SHA), matched by container name. '' if none. Lets us
     reuse an existing box without hitting the remote when GitHub is unreachable."""
     prefix = "minds-box-{}-".format(_slug(mngr_branch))
     out = _run(["docker", "ps", "--filter", "name={}".format(prefix), "--format", "{{.Names}}"]).stdout
     for line in out.splitlines():
-        if line.strip().startswith(prefix):
-            return line.strip()
+        name = line.strip()
+        # The suffix after the prefix is exactly the 12-char sha, so branch `foo` never matches a
+        # box built for `foo-bar` (whose name merely starts with the `minds-box-foo-` prefix).
+        if name.startswith(prefix) and _is_sha12(name[len(prefix) :]):
+            return name
     return ""
 
 
@@ -183,7 +190,10 @@ def ensure(mngr_branch: str, minds_env: str = "staging") -> str:
     if not (Path.home() / ".modal.toml").is_file():
         raise BoxError("missing ~/.modal.toml (Modal auth) -- workspaces run on Modal")
 
-    ui, forward = _free_port(), _free_port()
+    ui = _free_port()
+    forward = _free_port()
+    while forward == ui:  # two ephemeral binds can hand back the same number; keep them distinct
+        forward = _free_port()
     tag = "minds-box:{}-{}".format(_slug(mngr_branch), ref[:12])
     modal_env = MODAL_ENV_USER_ID  # one shared env for all eval workspaces (the box carries the SHA)
 

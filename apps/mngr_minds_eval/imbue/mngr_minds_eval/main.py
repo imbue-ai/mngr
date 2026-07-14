@@ -47,7 +47,8 @@ def _port() -> str:
 
 
 def _utc_stamp() -> str:
-    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S")
+    # Microseconds so two launches in the same wall-clock second don't collide on one batch prefix.
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
 
 
 def _check_aws() -> dict:
@@ -57,13 +58,29 @@ def _check_aws() -> dict:
         sys.exit("error: {}".format(exc))
 
 
+def _point_arg_to_box(argv: list[str], local: Path, box_path: str) -> list[str]:
+    """Rewrite the uploaded file's CLI value to its in-box path, for any form the user typed
+    (`X`, `./X`, `X/`, `--flag X`, `--flag=X`). Matches by Path, so `./eval-config.json` and
+    `eval-config.json` (which `str(Path(...))` would render differently) both resolve to `local`."""
+    out = []
+    for token in argv:
+        flag, sep, value = token.partition("=")
+        if token == str(local) or Path(token) == local:
+            out.append(box_path)
+        elif sep and value and Path(value) == local:
+            out.append("{}={}".format(flag, box_path))
+        else:
+            out.append(token)
+    return out
+
+
 def _run_in_container(container: str, argv: list[str], *, upload: tuple[Path, str] | None = None) -> None:
     """Run this same command inside an already-resolved box, then print how to view the workspaces.
     upload = (local_path, box_path) copies a file in and rewrites its arg (the eval config)."""
     if upload is not None:
         local, box_path = upload
         subprocess.run(["docker", "cp", str(local), "{}:{}".format(container, box_path)], check=True)
-        argv = [box_path if a == str(local) else a for a in argv]
+        argv = _point_arg_to_box(argv, local, box_path)
     command = ["docker", "exec", "-i"]
     if sys.stdout.isatty():
         command.append("-t")

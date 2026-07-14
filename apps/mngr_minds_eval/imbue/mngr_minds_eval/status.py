@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from imbue.mngr_minds_eval import launch as launch_mod
 from imbue.mngr_minds_eval import s3_store
 
 
@@ -29,8 +30,9 @@ def case_report(client, bucket: str, batch: str) -> tuple[dict | None, list[dict
         return None, []
     eval_name = config.get("name") or s3_store.split_batch(batch)[0]
     rows = []
-    for case in config.get("personas", []):
-        case_id = str(case.get("id") or "")
+    for index, case in enumerate(config.get("personas", [])):
+        # Same id derivation launch used when writing, so id-less personas still resolve to their prefix.
+        case_id = launch_mod.derive_case_id(case, index)
         prefix = s3_store.case_prefix(batch, eval_name, case_id)
         state = s3_store.get_json(client, bucket, "{}/{}".format(prefix, s3_store.STATE_NAME))
         rows.append({"id": case_id, "prefix": prefix, "state": state})
