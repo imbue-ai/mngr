@@ -29,6 +29,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.minds.bootstrap import is_imbue_cloud_provider_enabled_for_account
 from imbue.minds.bootstrap import list_disabled_provider_names
+from imbue.minds.build_info import resolve_release_id
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
@@ -104,7 +105,6 @@ from imbue.minds.desktop_client.supertokens_routes import create_supertokens_blu
 from imbue.minds.desktop_client.supertokens_routes import signout_user_via_plugin
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
-from imbue.minds.build_info import resolve_release_id
 from imbue.minds.desktop_client.templates import render_accounts_modal_page
 from imbue.minds.desktop_client.templates import render_accounts_page
 from imbue.minds.desktop_client.templates import render_auth_error_page
@@ -182,7 +182,6 @@ def _system_interface_status_payload(
 def _discovery_health_payload(health: DiscoveryHealth) -> dict[str, str]:
     """Build a ``discovery_health`` SSE payload for the app-global pipeline state."""
     return {"type": "discovery_health", "state": health.value}
-
 
 
 def _get_mngr_forward_origin() -> str:

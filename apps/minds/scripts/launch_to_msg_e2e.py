@@ -88,7 +88,6 @@ from loguru import logger
 # `--remote-debugging-port=<N>` so its Chromium DevTools endpoint is reachable,
 # then `chromium.connect_over_cdp()`. Same API for pages, locators, etc.
 from playwright.sync_api import BrowserContext
-from playwright.sync_api import Frame
 from playwright.sync_api import Page
 from playwright.sync_api import sync_playwright
 from pydantic import BaseModel
