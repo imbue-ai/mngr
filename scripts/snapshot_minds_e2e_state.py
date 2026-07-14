@@ -96,7 +96,7 @@ _RUNC_VERSION: Final[str] = "v1.3.0"
 # Keep these in sync with apps/minds/.nvmrc and apps/minds/package.json engines.
 _NODE_VERSION: Final[str] = "24.15.0"
 _PNPM_VERSION: Final[str] = "10.33.4"
-_CLAUDE_CODE_VERSION: Final[str] = "2.1.160"
+_CLAUDE_CODE_VERSION: Final[str] = "2.1.207"
 
 # In-sandbox entrypoint that invokes the shared e2e workspace runner the
 # pytest test also uses, but without the test's mngr-destroy cleanup. The

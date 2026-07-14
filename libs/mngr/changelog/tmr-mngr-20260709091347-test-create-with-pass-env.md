@@ -1,0 +1,1 @@
+Fixed the `test_create_with_pass_env` e2e tutorial test (verifying `mngr create --pass-env`). It was failing because a `mngr list` verification step scanned remote providers and timed out, and because the test carried a `@pytest.mark.rsync` mark that local command-agent creation never actually exercises.

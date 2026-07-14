@@ -1,0 +1,1 @@
+Removed an incorrect `@pytest.mark.rsync` marker from the `test_create_with_multiple_labels` e2e tutorial test. The test creates a purely local agent, whose default `git-worktree` transfer never invokes rsync, so the resource guard rejected the test with a spurious "marked rsync but never invoked rsync" failure.

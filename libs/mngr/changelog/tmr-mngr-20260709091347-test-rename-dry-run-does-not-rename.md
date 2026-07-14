@@ -1,0 +1,1 @@
+Fixed the `mngr rename --dry-run` e2e test so it verifies the local agent via `mngr list --provider local` (unscoped listing failed when an uncredentialed remote provider such as AWS is installed) and dropped its superfluous `@pytest.mark.rsync` mark, since the test never invokes rsync.

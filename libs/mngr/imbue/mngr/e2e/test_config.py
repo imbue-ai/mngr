@@ -10,6 +10,11 @@ from imbue.skitwright.expect import expect
 
 @pytest.mark.release
 @pytest.mark.tmux
+# This test creates a live local agent and then runs `mngr list`/`mngr exec`,
+# which enumerate every configured provider; that discovery can exceed the
+# default 10s per-test timeout when a remote provider (e.g. Docker) is
+# unreachable and the client waits on a connection. Allow extra headroom.
+@pytest.mark.timeout(120)
 def test_create_with_template(e2e: E2eSession) -> None:
     """Creating with a ``--template`` applies that template's settings to the agent.
 
@@ -61,6 +66,10 @@ def test_create_with_template(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+# Each `mngr` invocation is a subprocess whose cold start alone approaches the
+# default 10s per-test timeout; this test issues several (write template, the
+# failing create, and the verification `mngr list`), so allow extra headroom.
+@pytest.mark.timeout(120)
 def test_create_with_nonexistent_template(e2e: E2eSession) -> None:
     """Unhappy path: creating with an unknown template fails with a helpful error.
 

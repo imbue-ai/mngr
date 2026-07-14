@@ -1,0 +1,1 @@
+Fixed the `minimal_install_env` test fixture so it installs the `overlay` workspace package into the isolated venv. Previously the fresh-install tests (e.g. `mngr plugin --help`) crashed with `ModuleNotFoundError: No module named 'imbue.overlay'` because `overlay`, a workspace dependency of `mngr`, was omitted from the editable workspace installs.

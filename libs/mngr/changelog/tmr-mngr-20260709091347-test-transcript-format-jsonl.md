@@ -1,0 +1,1 @@
+Dropped the superfluous `@pytest.mark.rsync` mark from the `mngr transcript --format jsonl` e2e release test. The test creates a local `claude` agent (which uses git-worktree transfer, not rsync), so the mark tripped the resource guard and failed the otherwise-passing test.

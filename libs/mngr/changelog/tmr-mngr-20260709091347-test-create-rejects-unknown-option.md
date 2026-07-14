@@ -1,0 +1,1 @@
+Raised the timeout on the `test_create_rejects_unknown_option` e2e tutorial test so it no longer fails against the global 10s pytest timeout: the `mngr create` subprocess's cold startup alone routinely takes ~10s even though the unknown option is rejected at argument-parsing time before any host/agent work happens. This mirrors the other `mngr create` e2e tests.

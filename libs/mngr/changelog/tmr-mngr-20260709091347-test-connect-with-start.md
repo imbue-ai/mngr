@@ -1,0 +1,1 @@
+Removed the spurious `@pytest.mark.rsync` marker from the `test_connect_with_start` e2e tutorial test. Connecting to a local agent execs `tmux attach` directly and never syncs files, so the resource guard was failing the test for declaring an rsync mark it never exercised.

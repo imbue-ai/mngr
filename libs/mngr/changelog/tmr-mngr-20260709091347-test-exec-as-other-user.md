@@ -1,0 +1,1 @@
+Removed the erroneous `@pytest.mark.rsync` mark from the `test_exec_as_other_user` tutorial e2e test. The test creates a local command agent in a git repo (which transfers via git-mirror and never invokes rsync) and only exercises `mngr exec`, so the rsync resource guard was failing the otherwise-passing test.

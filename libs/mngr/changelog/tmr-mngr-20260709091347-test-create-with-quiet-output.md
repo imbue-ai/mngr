@@ -1,0 +1,3 @@
+Hardened the tutorial e2e test fixture so unrelated remote providers can no longer make tests fail: the credential-backed cloud providers (aws, azure, gcp, vultr, ovh, imbue_cloud) are always disabled, and the Docker provider is disabled unless the test is `@pytest.mark.docker`. This prevents `mngr list` from exiting non-zero when those providers are unreachable in the test environment (e.g. no cloud credentials, no Docker daemon). The Docker block pins `isolate_host_volumes` so parsing it does not emit the deprecation warning that would otherwise leak past `--quiet`.
+
+Removed the `@pytest.mark.rsync` mark from `test_create_with_quiet_output`, which creates a worktree agent in a clean repo and therefore never invokes rsync.
