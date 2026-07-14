@@ -1019,7 +1019,7 @@ def _peek_body_lines(transcript: str, pending: list[str]) -> list[str]:
     for reply in pending:
         if lines:
             lines.append("")
-        lines.append(f"› {reply}")
+        lines.append(f"{PEEK_REPLY_PROMPT}{reply}")
     while lines and not lines[0].strip():
         lines.pop(0)
     while lines and not lines[-1].strip():
@@ -1068,7 +1068,7 @@ def _peek_body_markup(transcript: str, pending: list[str]) -> list[Any]:
             markup.append(("peek_hint", line))
         elif _is_transcript_header(line):
             markup.append(("peek_hint", _short_header(line)))
-        elif line.startswith("› "):
+        elif line.startswith(PEEK_REPLY_PROMPT):
             markup.append(("peek_user", line))
         else:
             markup.append(line)
