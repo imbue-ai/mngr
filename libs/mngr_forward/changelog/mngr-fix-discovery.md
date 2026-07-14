@@ -1,0 +1,3 @@
+Added a per-host exponential connect-failure backoff to `SSHTunnelManager` (same 2s-to-300s schedule as the reverse-tunnel repair loop). After a failed SSH handshake to a host, further connection attempts inside the backoff window raise the new `SSHConnectionBackoffError` (a `SSHTunnelError` subclass) immediately instead of paying for another doomed handshake. This keeps discovery-driven retry loops, which re-fire every poll cycle, cheap against a host whose sshd is permanently gone (e.g. an OOM'd instance), while still probing periodically so the host recovers once it comes back.
+
+The backoff state is cleared on the next successful connect, when the host's last tunnel is removed (so a recycled host:port is not spuriously delayed), and on manager cleanup.

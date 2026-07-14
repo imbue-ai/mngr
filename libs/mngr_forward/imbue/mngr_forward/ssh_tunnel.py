@@ -67,6 +67,19 @@ class SSHTunnelError(Exception):
     ...
 
 
+class SSHConnectionBackoffError(SSHTunnelError):
+    """Raised when an SSH connection attempt is skipped because the host is inside its connect-failure backoff window.
+
+    Cheap to raise (no network I/O happens). Subclasses ``SSHTunnelError`` so
+    existing callers that catch tunnel failures handle it transparently, while
+    callers that retry on a fixed cadence (e.g. the discovery-driven Latchkey
+    setup, which re-fires every poll cycle) can catch it specifically and skip
+    quietly instead of error-logging another doomed handshake.
+    """
+
+    ...
+
+
 def _ssh_connection_is_active(client: paramiko.SSHClient) -> bool:
     """Check whether the SSH client's transport is active."""
     transport = client.get_transport()
@@ -112,26 +125,45 @@ class ReverseTunnelInfo(FrozenModel):
 
 
 class _TunnelFailureState(MutableModel):
-    """Per-tunnel backoff bookkeeping for the health-check repair loop.
+    """Exponential-backoff bookkeeping for a repeatedly-failing target.
 
-    Held by ``SSHTunnelManager._failure_state`` keyed by the same
-    ``(conn_key, local_port)`` tuple as ``_reverse_tunnels``. Tunnels with
-    ``consecutive_failures == 0`` (the steady-state "healthy" case) need not
-    appear here at all; entries are created on first failure and removed on
-    successful repair or when the tunnel itself is dropped.
+    Used in two places on ``SSHTunnelManager``: ``_failure_state`` (per reverse
+    tunnel, keyed by the same ``(conn_key, local_port)`` tuple as
+    ``_reverse_tunnels``, driving the health-check repair loop) and
+    ``_connect_failure_state_by_conn_key`` (per SSH host, keyed by ``conn_key``,
+    driving the connect-attempt backoff in ``_get_or_create_connection``).
+    Targets with ``consecutive_failures == 0`` (the steady-state "healthy" case)
+    need not appear in either map at all; entries are created on first failure
+    and removed on success or when the tunnel/host itself is dropped.
     """
 
     consecutive_failures: int = Field(
         default=0,
-        description="Number of consecutive failed repair attempts since the last success",
+        description="Number of consecutive failed attempts since the last success",
     )
     next_attempt_at: float = Field(
         default=0.0,
         description=(
-            "Earliest ``time.monotonic()`` value at which the health check should retry this "
-            "tunnel. Tunnels whose ``next_attempt_at`` is in the future are skipped this tick."
+            "Earliest ``time.monotonic()`` value at which the next attempt against this "
+            "target should be made. Attempts while this is in the future are skipped."
         ),
     )
+
+    def record_failure_and_compute_backoff_seconds(self) -> float:
+        """Advance the exponential schedule after a failure and return the new backoff.
+
+        The schedule is ``min(2 ** failures, _REVERSE_TUNNEL_BACKOFF_CAP_SECONDS)``.
+        Once it has reached the cap, the failure counter stops incrementing.
+        Otherwise a target that fails forever would compute an ever-growing
+        ``2 ** failures`` (e.g. ~30K-digit bigints after a year of
+        one-failure-per-five-minutes) before clamping it back down to the cap,
+        which is wasted work.
+        """
+        if 2**self.consecutive_failures < _REVERSE_TUNNEL_BACKOFF_CAP_SECONDS:
+            self.consecutive_failures += 1
+        backoff_seconds = min(float(2**self.consecutive_failures), _REVERSE_TUNNEL_BACKOFF_CAP_SECONDS)
+        self.next_attempt_at = time.monotonic() + backoff_seconds
+        return backoff_seconds
 
 
 class SSHTunnelManager(MutableModel):
@@ -164,7 +196,11 @@ class SSHTunnelManager(MutableModel):
     The repair loop uses a per-tunnel exponential backoff (capped at
     ``_REVERSE_TUNNEL_BACKOFF_CAP_SECONDS``) so a tunnel whose target is
     temporarily unreachable still recovers when the target comes back
-    without hammering it on every 30s tick. Each successful repair fires
+    without hammering it on every 30s tick. A second, per-host backoff on
+    the same schedule guards the SSH connect itself (see
+    :meth:`_get_or_create_connection`), so tunnels that never came up in
+    the first place -- which the repair loop does not track -- cannot be
+    retried with a fresh handshake on every discovery cycle either. Each successful repair fires
     the registered :meth:`add_on_tunnel_repaired_callback` callbacks so
     consumers (e.g. the plugin's ``ReverseTunnelHandler``) can emit a
     fresh envelope event with the possibly-new remote port.
@@ -193,6 +229,15 @@ class SSHTunnelManager(MutableModel):
     # health-check loop. Created lazily on first failure for a given tunnel
     # key and removed on success or when the tunnel itself is dropped.
     _failure_state: dict[tuple[str, int], _TunnelFailureState] = PrivateAttr(default_factory=dict)
+    # Per-host connect-failure backoff, keyed by conn_key ("host:port") rather
+    # than tunnel key because a failed TCP/SSH handshake affects every tunnel
+    # (forward and reverse) that would share the connection. While a host's
+    # backoff window is open, ``_get_or_create_connection`` raises
+    # ``SSHConnectionBackoffError`` instead of paying for another handshake.
+    # Entries are created on connect failure and cleared on the next successful
+    # connect, when the host's last tunnel is dropped, or on cleanup. Guarded by
+    # ``_lock`` (all callers of ``_get_or_create_connection`` hold it).
+    _connect_failure_state_by_conn_key: dict[str, _TunnelFailureState] = PrivateAttr(default_factory=dict)
 
     def _get_tmpdir(self) -> Path:
         """Get or create the secure temporary directory for Unix sockets.
@@ -214,6 +259,16 @@ class SSHTunnelManager(MutableModel):
 
         Reuses existing active connections. Creates a new connection if none
         exists or the existing one has become inactive.
+
+        Connect failures arm a per-host exponential backoff (same schedule as
+        the reverse-tunnel repair loop, capped at
+        ``_REVERSE_TUNNEL_BACKOFF_CAP_SECONDS``): while the window is open,
+        further calls raise ``SSHConnectionBackoffError`` immediately instead
+        of paying for another doomed handshake. This keeps retry loops that
+        fire on a fixed cadence (the discovery stream re-fires every poll
+        cycle) cheap against a host whose sshd is gone -- e.g. an OOM'd
+        instance -- while still probing it periodically so it recovers once
+        the host comes back.
         """
         conn_key = f"{ssh_info.host}:{ssh_info.port}"
         existing = self._connections.get(conn_key)
@@ -226,10 +281,39 @@ class SSHTunnelManager(MutableModel):
             except (OSError, paramiko.SSHException) as e:
                 logger.trace("Error closing stale SSH connection: {}", e)
 
+        # Respect the per-host connect backoff before paying for a handshake.
+        failure_state = self._connect_failure_state_by_conn_key.get(conn_key)
+        if failure_state is not None and failure_state.next_attempt_at > time.monotonic():
+            raise SSHConnectionBackoffError(
+                f"Skipping SSH connection attempt to {conn_key}: "
+                f"{failure_state.consecutive_failures} consecutive connect failure(s), "
+                f"next attempt in {failure_state.next_attempt_at - time.monotonic():.0f}s"
+            )
+
         logger.debug("Establishing SSH connection to {}:{}", ssh_info.host, ssh_info.port)
-        client = _create_ssh_client(ssh_info)
+        try:
+            client = self._connect_ssh_client(ssh_info)
+        except (paramiko.SSHException, OSError) as e:
+            # Arm (or advance) the backoff, then re-raise the original error so
+            # existing callers' except clauses keep working unchanged.
+            armed_failure_state = failure_state if failure_state is not None else _TunnelFailureState()
+            self._connect_failure_state_by_conn_key[conn_key] = armed_failure_state
+            backoff_seconds = armed_failure_state.record_failure_and_compute_backoff_seconds()
+            logger.debug(
+                "Failed to establish SSH connection to {} (failure {}, next attempt in {:.0f}s): {}",
+                conn_key,
+                armed_failure_state.consecutive_failures,
+                backoff_seconds,
+                e,
+            )
+            raise
+        self._connect_failure_state_by_conn_key.pop(conn_key, None)
         self._connections[conn_key] = client
         return client
+
+    def _connect_ssh_client(self, ssh_info: RemoteSSHInfo) -> paramiko.SSHClient:
+        """Create a fresh SSH client connection (seam that tests override to avoid real SSH I/O)."""
+        return _create_ssh_client(ssh_info)
 
     def get_tunnel_socket_path(
         self,
@@ -470,26 +554,13 @@ class SSHTunnelManager(MutableModel):
         ``_REVERSE_TUNNEL_BACKOFF_CAP_SECONDS`` so a permanently-gone target
         only costs one paramiko handshake every five minutes, but a target
         that comes back online still gets repaired.
-
-        Once the exponential schedule has reached the cap, the failure
-        counter stops incrementing. Otherwise a tunnel that fails forever
-        would compute an ever-growing ``2 ** failures`` per tick (e.g.
-        ~30K-digit bigints after a year of one-failure-per-five-minutes)
-        before clamping it back down to the cap, which is wasted work.
         """
         with self._lock:
             failure_state = self._failure_state.get(tunnel_key)
             if failure_state is None:
                 failure_state = _TunnelFailureState()
                 self._failure_state[tunnel_key] = failure_state
-            # Stop incrementing once the exponential schedule has already
-            # reached the cap; further increments would just keep
-            # recomputing larger ``2 ** failures`` values that immediately
-            # get clamped back down.
-            if 2**failure_state.consecutive_failures < _REVERSE_TUNNEL_BACKOFF_CAP_SECONDS:
-                failure_state.consecutive_failures += 1
-            backoff_seconds = min(float(2**failure_state.consecutive_failures), _REVERSE_TUNNEL_BACKOFF_CAP_SECONDS)
-            failure_state.next_attempt_at = time.monotonic() + backoff_seconds
+            backoff_seconds = failure_state.record_failure_and_compute_backoff_seconds()
             failures = failure_state.consecutive_failures
 
         logger.warning(
@@ -555,6 +626,10 @@ class SSHTunnelManager(MutableModel):
             orphaned_conn_keys = affected_conn_keys - still_in_use_conn_keys - forward_in_use_conn_keys
             orphaned_clients: dict[str, paramiko.SSHClient] = {}
             for conn_key in orphaned_conn_keys:
+                # Also drop any connect-failure backoff for the orphaned host:
+                # container hosts recycle host:port pairs, so a stale window
+                # must not delay a future agent that reuses the same endpoint.
+                self._connect_failure_state_by_conn_key.pop(conn_key, None)
                 client = self._connections.pop(conn_key, None)
                 if client is not None:
                     orphaned_clients[conn_key] = client
@@ -634,6 +709,7 @@ class SSHTunnelManager(MutableModel):
                 logger.trace("Error cancelling reverse port forward: {}", e)
         self._reverse_tunnels.clear()
         self._failure_state.clear()
+        self._connect_failure_state_by_conn_key.clear()
 
         for client in self._connections.values():
             try:

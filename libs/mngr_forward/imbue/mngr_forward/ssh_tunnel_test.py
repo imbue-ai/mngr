@@ -31,10 +31,12 @@ from imbue.imbue_common.primitives import PositiveInt
 from imbue.mngr_forward.primitives import ReverseTunnelSpec
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_forward.ssh_tunnel import ReverseTunnelInfo
+from imbue.mngr_forward.ssh_tunnel import SSHConnectionBackoffError
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelError
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_forward.ssh_tunnel import _ForwardedTunnelHandler
 from imbue.mngr_forward.ssh_tunnel import _REVERSE_TUNNEL_BACKOFF_CAP_SECONDS
+from imbue.mngr_forward.ssh_tunnel import _TunnelFailureState
 from imbue.mngr_forward.ssh_tunnel import parse_url_host_port
 
 # -- Test doubles ----------------------------------------------------------
@@ -546,6 +548,151 @@ def test_alive_sibling_clears_stale_failure_state(tmp_path: Path) -> None:
 
     with manager._lock:
         assert tunnel_key not in manager._failure_state
+    manager.cleanup()
+
+
+# -- Per-host connect-failure backoff --------------------------------------
+#
+# These tests exercise ``_get_or_create_connection``'s connect backoff via a
+# subclass that overrides the ``_connect_ssh_client`` seam, so no real SSH
+# handshakes happen. This is what keeps discovery-driven retry loops (which
+# re-fire every poll cycle) from paying a full handshake plus error log every
+# 30s against a host whose sshd is permanently gone.
+
+
+class _ConnectControllableTunnelManager(SSHTunnelManager):
+    """Test double whose SSH connect attempts are counted and controllable (no real SSH)."""
+
+    _connect_attempt_count: int = PrivateAttr(default=0)
+    _is_connect_failing: bool = PrivateAttr(default=True)
+
+    def _connect_ssh_client(self, ssh_info: RemoteSSHInfo) -> paramiko.SSHClient:
+        self._connect_attempt_count += 1
+        if self._is_connect_failing:
+            raise paramiko.SSHException("simulated connect failure")
+        return FakeSSHClient.create(active=True)
+
+
+def test_connect_failure_arms_backoff_and_skips_next_handshake(tmp_path: Path) -> None:
+    """The first connect failure propagates the original error and arms the
+    per-host backoff; a second call inside the window raises
+    ``SSHConnectionBackoffError`` without attempting another handshake."""
+    manager = _ConnectControllableTunnelManager()
+    ssh_info = _sample_ssh_info(tmp_path)
+    conn_key = f"{ssh_info.host}:{ssh_info.port}"
+
+    with pytest.raises(paramiko.SSHException):
+        manager._get_or_create_connection(ssh_info)
+    assert manager._connect_attempt_count == 1
+    failure_state = manager._connect_failure_state_by_conn_key.get(conn_key)
+    assert failure_state is not None
+    assert failure_state.consecutive_failures == 1
+    assert failure_state.next_attempt_at > time.monotonic()
+
+    # Inside the backoff window: no handshake, cheap typed error. It must be
+    # an SSHTunnelError so existing callers' except clauses still catch it.
+    with pytest.raises(SSHConnectionBackoffError) as exc_info:
+        manager._get_or_create_connection(ssh_info)
+    assert isinstance(exc_info.value, SSHTunnelError)
+    assert manager._connect_attempt_count == 1
+    manager.cleanup()
+
+
+def test_connect_attempt_resumes_after_backoff_window(tmp_path: Path) -> None:
+    """Once the backoff window has passed, the next call makes a real attempt
+    again (and a further failure advances the schedule)."""
+    manager = _ConnectControllableTunnelManager()
+    ssh_info = _sample_ssh_info(tmp_path)
+    conn_key = f"{ssh_info.host}:{ssh_info.port}"
+
+    with pytest.raises(paramiko.SSHException):
+        manager._get_or_create_connection(ssh_info)
+    # Force the window to expire instead of sleeping through it.
+    manager._connect_failure_state_by_conn_key[conn_key].next_attempt_at = time.monotonic() - 1.0
+
+    with pytest.raises(paramiko.SSHException):
+        manager._get_or_create_connection(ssh_info)
+
+    assert manager._connect_attempt_count == 2
+    assert manager._connect_failure_state_by_conn_key[conn_key].consecutive_failures == 2
+    manager.cleanup()
+
+
+def test_successful_connect_clears_backoff_state(tmp_path: Path) -> None:
+    """A successful connect clears the per-host backoff so the next failure
+    starts a fresh schedule, and the new client is cached for reuse."""
+    manager = _ConnectControllableTunnelManager()
+    ssh_info = _sample_ssh_info(tmp_path)
+    conn_key = f"{ssh_info.host}:{ssh_info.port}"
+
+    with pytest.raises(paramiko.SSHException):
+        manager._get_or_create_connection(ssh_info)
+    manager._connect_failure_state_by_conn_key[conn_key].next_attempt_at = time.monotonic() - 1.0
+    manager._is_connect_failing = False
+
+    client = manager._get_or_create_connection(ssh_info)
+
+    assert conn_key not in manager._connect_failure_state_by_conn_key
+    assert manager._connections[conn_key] is client
+    manager.cleanup()
+
+
+def test_setup_reverse_tunnel_respects_connect_backoff(tmp_path: Path) -> None:
+    """The public reverse-tunnel API surfaces the backoff: after a genuine
+    connect failure, an immediate retry raises ``SSHConnectionBackoffError``
+    without a second handshake. This is the discovery-loop steady state
+    against an unreachable host."""
+    manager = _ConnectControllableTunnelManager()
+    ssh_info = _sample_ssh_info(tmp_path)
+
+    with pytest.raises(paramiko.SSHException):
+        manager.setup_reverse_tunnel(ssh_info=ssh_info, local_port=8420)
+    with pytest.raises(SSHConnectionBackoffError):
+        manager.setup_reverse_tunnel(ssh_info=ssh_info, local_port=8420)
+
+    assert manager._connect_attempt_count == 1
+    manager.cleanup()
+
+
+def test_failure_state_backoff_schedule_is_exponential_and_capped() -> None:
+    """The shared schedule doubles per failure (2s, 4s, 8s, ...) and saturates
+    at the cap instead of growing without bound."""
+    failure_state = _TunnelFailureState()
+    assert failure_state.record_failure_and_compute_backoff_seconds() == 2.0
+    assert failure_state.record_failure_and_compute_backoff_seconds() == 4.0
+    assert failure_state.record_failure_and_compute_backoff_seconds() == 8.0
+    for _ in range(20):
+        backoff_seconds = failure_state.record_failure_and_compute_backoff_seconds()
+    assert backoff_seconds == _REVERSE_TUNNEL_BACKOFF_CAP_SECONDS
+    # Counter saturates once 2**failures reaches the cap (no unbounded growth).
+    assert 2**failure_state.consecutive_failures >= _REVERSE_TUNNEL_BACKOFF_CAP_SECONDS
+    assert failure_state.consecutive_failures <= 20
+
+
+def test_remove_reverse_tunnels_for_agent_clears_connect_backoff_state(tmp_path: Path) -> None:
+    """Dropping a host's last tunnel also drops its connect backoff, so a new
+    agent reusing the same host:port is not spuriously delayed."""
+    ssh_info = _sample_ssh_info(tmp_path)
+    fake_client = FakeSSHClient.create(active=True)
+    manager = _make_manager_with_fake_connection(ssh_info, fake_client)
+    conn_key = f"{ssh_info.host}:{ssh_info.port}"
+    with manager._lock:
+        manager._reverse_tunnels[(conn_key, 8420)] = ReverseTunnelInfo(
+            ssh_info=ssh_info,
+            local_port=8420,
+            remote_port=5000,
+            agent_id="agent-a",
+        )
+        manager._connect_failure_state_by_conn_key[conn_key] = _TunnelFailureState(
+            consecutive_failures=3,
+            next_attempt_at=time.monotonic() + 100.0,
+        )
+
+    removed = manager.remove_reverse_tunnels_for_agent("agent-a")
+
+    assert removed == 1
+    with manager._lock:
+        assert conn_key not in manager._connect_failure_state_by_conn_key
     manager.cleanup()
 
 

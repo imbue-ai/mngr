@@ -55,6 +55,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
+from imbue.mngr_forward.ssh_tunnel import SSHConnectionBackoffError
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelError
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
@@ -241,6 +242,14 @@ class LatchkeyDiscoveryHandler(MutableModel):
         transports against ports that no longer exist. Failures are logged
         rather than raised so they never prevent the independent VPS-resident
         gateway provisioning path.
+
+        The discovery stream re-fires this for every agent on every poll
+        cycle, so an unreachable host (e.g. an OOM'd instance whose sshd is
+        gone) would otherwise cost a full SSH handshake plus an error log
+        every cycle forever. The tunnel manager's per-host connect backoff
+        turns those repeat attempts into a cheap ``SSHConnectionBackoffError``,
+        which we log at debug: the genuine (post-window) attempts still log
+        at error level below.
         """
         try:
             self.tunnel_manager.setup_reverse_tunnel(
@@ -248,6 +257,12 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 local_port=host_side_port,
                 remote_port=AGENT_SIDE_LATCHKEY_PORT,
                 agent_id=str(agent_id),
+            )
+        except SSHConnectionBackoffError as e:
+            logger.debug(
+                "Skipped desktop-side Latchkey reachability setup for agent {}: {}",
+                agent_id,
+                e,
             )
         except (SSHTunnelError, OSError, paramiko.SSHException) as e:
             logger.opt(exception=e).error(

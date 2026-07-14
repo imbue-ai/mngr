@@ -18,6 +18,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
+from imbue.mngr_forward.ssh_tunnel import SSHConnectionBackoffError
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelError
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_latchkey.cli import _run_gateway_health_check_loop
@@ -951,6 +952,68 @@ class _RaisingTunnelManager(SSHTunnelManager):
 
     def remove_reverse_tunnels_for_agent(self, agent_id: str) -> int:
         return 0
+
+
+class _BackoffRaisingTunnelManager(SSHTunnelManager):
+    """SSHTunnelManager whose reverse-tunnel setup reports an open connect-backoff window (no SSH)."""
+
+    def setup_reverse_tunnel(
+        self,
+        ssh_info: RemoteSSHInfo,
+        local_port: int,
+        remote_port: int = 0,
+        agent_id: str | None = None,
+    ) -> int:
+        raise SSHConnectionBackoffError("simulated open backoff window")
+
+    def remove_reverse_tunnels_for_agent(self, agent_id: str) -> int:
+        return 0
+
+
+def test_discovery_handler_logs_connect_backoff_skip_at_debug_not_error(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A backoff-window skip must not produce an error-level log.
+
+    The discovery stream re-fires for every agent on every poll cycle, so an
+    unreachable host inside its connect-backoff window hits this path every
+    cycle; error-logging each skip would recreate the log/Sentry flood the
+    backoff exists to prevent.
+    """
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
+    tunnel_manager = _BackoffRaisingTunnelManager()
+    agent_id = AgentId()
+    ssh_info = RemoteSSHInfo(user="root", host="192.0.2.1", port=22, key_path=tmp_path / "k")
+
+    captured_by_level: list[tuple[str, str]] = []
+
+    def _sink(message: object) -> None:
+        record = message.record  # ty: ignore[unresolved-attribute]
+        captured_by_level.append((record["level"].name, record["message"]))
+
+    handler_id = logger.add(_sink, level="DEBUG", format="{message}")
+    try:
+        # The tunnel setup runs on a CG worker thread; exiting the CG joins it,
+        # so all logging has happened by the time we assert.
+        with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+            handler = LatchkeyDiscoveryHandler(
+                latchkey=manager,
+                tunnel_manager=tunnel_manager,
+                concurrency_group=cg,
+                mngr_ctx=temp_mngr_ctx,
+            )
+            handler(agent_id, HostId(), ssh_info, "local")
+            manager.stop_gateway()
+    finally:
+        logger.remove(handler_id)
+
+    backoff_skip_records = [
+        (level, message) for level, message in captured_by_level if "simulated open backoff window" in message
+    ]
+    assert backoff_skip_records, "expected the backoff skip to be logged"
+    assert all(level == "DEBUG" for level, _message in backoff_skip_records), backoff_skip_records
 
 
 def test_discovery_handler_sets_up_reverse_tunnel_when_ssh_info_given(
