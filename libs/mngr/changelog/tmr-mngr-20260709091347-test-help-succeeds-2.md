@@ -1,0 +1,1 @@
+Added a `@pytest.mark.timeout(60)` override to the `test_help_succeeds` e2e tutorial test so it no longer fails under the 10s global pytest timeout. A single `mngr` CLI subprocess startup takes roughly 10 seconds, which the plain `mngr --help` invocation would exceed; this matches the timeout convention used by every other tutorial e2e test.

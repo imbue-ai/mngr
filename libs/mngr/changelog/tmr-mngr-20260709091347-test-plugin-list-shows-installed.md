@@ -1,0 +1,1 @@
+Gave the `test_plugin_list_shows_installed` e2e test a 60s timeout so it no longer trips the 10s default pytest timeout during mngr's cold start, matching the other subprocess-driven plugin e2e tests.

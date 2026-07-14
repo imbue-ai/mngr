@@ -159,7 +159,6 @@ def _create_claude_task_with_transcript(e2e: E2eSession, host_dir: Path, sleep_v
     )
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(600)
@@ -187,6 +186,7 @@ def test_transcript_default(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.timeout(600)
 def test_transcript_assistant_only(e2e: E2eSession, temp_host_dir: Path) -> None:
     """Tutorial block:
         # view only assistant messages
@@ -206,7 +206,6 @@ def test_transcript_assistant_only(e2e: E2eSession, temp_host_dir: Path) -> None
     assert "TOOL_RESULT_MARKER" not in result.stdout, result.stdout
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(600)
@@ -249,7 +248,6 @@ def test_transcript_tail_one(e2e: E2eSession) -> None:
     assert len(tail_lines) == 1, f"Expected exactly 1 tailed event, got {len(tail_lines)}"
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(600)

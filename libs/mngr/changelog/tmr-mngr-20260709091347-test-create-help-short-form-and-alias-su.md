@@ -1,0 +1,1 @@
+Fixed the `test_create_help_short_form_and_alias_succeed` e2e release test, which was timing out under the 10s default. It now carries a `@pytest.mark.timeout(120)` marker (like the rest of the e2e suite) to accommodate the multiple `mngr` CLI invocations it makes, and the `c`-alias branch now also asserts the SYNOPSIS section to match the documented scope.

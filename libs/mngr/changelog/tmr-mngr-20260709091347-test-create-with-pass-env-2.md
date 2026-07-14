@@ -1,0 +1,1 @@
+Removed a superfluous `@pytest.mark.rsync` from the `test_create_with_pass_env` e2e tutorial test. The test creates a local git-based command agent, which transfers via git-worktree and never invokes rsync, so the resource guard failed the otherwise-passing test.
