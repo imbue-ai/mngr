@@ -1919,6 +1919,7 @@ def test_peek_reply_executor_serializes_in_order() -> None:
     assert order == [0, 1, 2, 3, 4, 5]
     # The same executor is reused across submits (not recreated per reply).
     assert _ensure_peek_reply_executor(state) is executor
+    executor.shutdown(wait=True)
 
 
 def test_close_peek_restores_footer_and_clears_state() -> None:
