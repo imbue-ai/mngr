@@ -4,6 +4,26 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-13
+
+Fixed the imbue_cloud "husk" bug, where a transiently-unreachable leased workspace (a sleep/wifi blip or a brief box outage) would lose its agent labels and disappear from consumers that filter on them -- most importantly the minds sidebar's `is_primary` guard, which dropped the workspace and made a restart 404 with "Unknown workspace".
+
+The provider now remembers, per host, the identity (name + certified_data, including labels) of every agent seen in the last successful discovery pass, persisting it to disk under the host's existing state dir so it survives an app or forward relaunch. When a later pass cannot reach the host (or a successful pass lists zero agents), discovery re-attaches that full cached set -- each agent marked `"stale": true` so consumers can tell cached identity from a live listing -- instead of emitting a single label-less stub. System-services agents and any other non-primary agents survive the unreachable window too.
+
+An unreachable host now surfaces as UNKNOWN instead of CRASHED (auth failures still surface as UNAUTHENTICATED), with the real failure reason preserved. Unreachability is non-evidence about the container: the box may be down, or the network path from this client may be broken, and the two are indistinguishable from the client side. CRASHED dated from a case where a TCP-level refusal genuinely implied a dead container and predated the introduction of HostState.UNKNOWN, whose documented semantics ("could not be accessed during discovery, so actual state is unknown") describe this fallback exactly. Note the visibility consequences: `mngr list --active` no longer hides unreachable hosts (it excludes CRASHED but not UNKNOWN), and `mngr wait --host` no longer treats an unreachable host as terminal.
+
+Only the agents' identity is restored, not their reachability. A host discovered for the first time with no cache yet behaves exactly as before (a bare lease stub, also UNKNOWN), and destroying the workspace removes the cached identity along with the rest of its state dir.
+
+The imbue_cloud provider now reports the container's outer-host-loopback SSH port (`get_container_loopback_ssh_port`), which is the fixed in-VM publish port (`config.container_ssh_port`) rather than the externally-routable, box-forwarded port a remote client connects to.
+
+This lets the VPS-resident latchkey gateway reverse-tunnel into the agent's container on the correct port. On a lima slice the publish and connect ports differ, and using the connect port broke the tunnel, leaving agents without latchkey access whenever the desktop gateway was offline.
+
+## 2026-07-11
+
+The forever-claude-template repo is being renamed to default-workspace-template (with the `fct`/`FCT` shorthand expanded to `default_workspace_template`/`DEFAULT_WORKSPACE_TEMPLATE` forms).
+
+The per-box template image cache tag prefix changes from `fct:` to `default-workspace-template:`, and the per-box cache dir from `.cache/mngr-slice-fct` to `.cache/mngr-slice-default-workspace-template`. The cache build lock now `mkdir -p`s the cache dir on demand, so boxes prepped under the old dir name keep working: their first production `--from-tag` bake rebuilds the image once (instead of loading the old cached tar) and re-seeds the cache under the new name.
+
 ## 2026-07-09
 
 `mngr imbue_cloud admin server order` now takes a `--dry-run` flag: it builds and prices a non-committal OVH cart, prints the real price preview plus the derived server specs and slice count, then deletes the cart without ordering. No charge, no interactive prompt, and no DB write, so it can be used to confirm price/specs before committing to an order. `--dry-run` takes precedence over `--yes`, so `--dry-run --yes` never charges.

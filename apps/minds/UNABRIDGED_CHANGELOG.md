@@ -4,6 +4,54 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-13
+
+Serve the workspace UI over HTTP/2 to fix the hang that occurred once enough streaming tabs were open in one workspace.
+
+The whole workspace origin was previously served over plain HTTP/1.1, which Chromium caps at ~6 held-open connections per origin. Once a workspace had that many long-lived streams (one SSE per open chat tab, plus any `/service/` app's own streams), the pool was exhausted and every further request -- including the plain GETs that bootstrap a new terminal or app iframe -- queued indefinitely, hanging the UI even though the backend was healthy.
+
+Minds now runs its single `mngr forward` proxy with `--use-http2`, so the workspace origin terminates TLS and negotiates HTTP/2 (which multiplexes many streams over one connection). The Python readiness/recovery probes and the `/goto/` redirect URLs flip to `https` in lockstep, and the Electron shell builds `https`/`wss` workspace URLs, marks the `mngr_forward_session` cookie `Secure`, and silently trusts the proxy's ephemeral self-signed cert for its loopback origins (`localhost`, `*.localhost`, `127.0.0.1`) in the workspace-content session only -- every real https origin still gets Chromium's normal verification. The minds bare-origin backend (Home/Create/chrome/sidebar and its `minds_session` cookie) stays plain HTTP; the app deliberately runs a mixed http/https transport, which is not mixed-content-blocked.
+
+The recovery page no longer renders a restart verdict for a workspace whose host could not be observed during discovery. Previously, an unreachable imbue_cloud host surfaced as CRASHED, which the recovery classifier read as a trusted "container is down" observation: it classified HOST_OFFLINE and auto-dispatched an unattended host restart -- a restart that is doomed by construction, because restarting routes over the same outer SSH that is unreachable.
+
+With the imbue_cloud provider now surfacing unreachable hosts as UNKNOWN, the dispatch-tier classifier treats a host state that answers neither "running" nor "offline" (UNKNOWN, transitional states like STARTING, or an absent host state) as non-evidence, the same way it treats a timed-out probe: it classifies INDETERMINATE, so the page shows the live "Reconnecting" state, keeps checking, and offers no restart -- returning the user to the workspace automatically the moment it answers.
+
+The consent-gated HOST_UNRESPONSIVE verdict is now reserved for containers that were actually observed running but cannot be reached inside: an observed RUNNING claim whose in-container exec cleanly failed, and the UNAUTHENTICATED state, which providers emit for a running container whose inner SSH is unreachable (e.g. its sshd died). For that dead-sshd case the consent-gated host restart is the engineered recovery (its stop step is not skipped, so the stop/start relaunches sshd) -- preserving the behavior introduced for the docker provider in PR #2247. HOST_OFFLINE (unattended restart) still requires an actual observation that the container is stopped.
+
+Known remaining ambiguity, still deferred (originally flagged in PR #2247): imbue_cloud also reuses UNAUTHENTICATED for an outer-SSH authentication rejection, where the offered restart fails on the same auth error. Distinguishing "running but inner SSH dead" from "outer auth rejected" needs a dedicated provider state (e.g. UNREACHABLE), which is a provider-vocabulary change spanning imbue_cloud, docker, mngr_wait, and docs.
+
+- The Docker compute provider now picks its container runtime per platform
+  instead of always using gVisor (`runsc`). The create form gained an advanced
+  "Container runtime" setting (runc vs runsc) that defaults to runc on macOS
+  (where gVisor is unavailable) and runsc on Linux, and can be overridden per
+  workspace. macOS users no longer need the
+  `MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME=runc` environment-variable workaround
+  to create a local Docker workspace.
+
+- Under the hood, selecting runsc stacks a new `docker_runsc` create-template
+  overlay (in default-workspace-template) on top of the shared `docker` template,
+  so the gVisor choice is the only difference between the two runtimes and the
+  runc path -- the default -- is now what runs on macOS.
+
+- The create-form/API runtime default now honors a `MINDS_DOCKER_RUNTIME_DEFAULT`
+  environment override. It is unset in real deployments (so Linux still defaults
+  to runsc) and is set to `RUNC` by the e2e/snapshot test paths, whose Docker
+  daemon has no gVisor -- this is the layer that decides whether the create
+  stacks `docker_runsc` at all, which the mngr provider-config env var cannot
+  undo once the template is explicitly stacked.
+
+The minds backend now tells Sentry to ignore the paramiko/pyinfra stdlib loggers. The backend brokers cross-workspace reverse SSH tunnels through the same paramiko machinery, so handled SSH connection-failure noise logged at ERROR by paramiko would otherwise be captured by Sentry's default logging integration and flood the project with un-rate-limited events. Genuine, actionable failures still reach Sentry as typed exceptions logged through loguru.
+
+Increased the discovery-health watchdog's producer-stall threshold from 35s to 180s. The previous value sat only a few seconds above the healthy interval between discovery snapshots (mngr's default per-provider poll interval is 30s, and a single slow-but-alive provider can legitimately take up to ~150s between snapshots), so a merely-slow producer could be misread as stalled and trigger spurious supervisor bounces/restarts (each of which re-provisions every managed host). The new threshold clears the worst-case healthy cadence, so only a producer emitting literally nothing trips the watchdog, as intended. Also corrected the accompanying inline documentation, which incorrectly described the discovery cadence as ~10s.
+
+## 2026-07-11
+
+The forever-claude-template repo is being renamed to default-workspace-template (with the `fct`/`FCT` shorthand expanded to `default_workspace_template`/`DEFAULT_WORKSPACE_TEMPLATE` forms).
+
+The default template git URL constant is now `DEFAULT_WORKSPACE_TEMPLATE_GIT_URL`, the `fct_worktree` module is renamed to `default_workspace_template_worktree` (`FctWorktreeError` becomes `DefaultWorkspaceTemplateWorktreeError`, `FctTemplateRef` becomes `DefaultWorkspaceTemplateRef`), and the `FCT_DIR` env var read by `just sync-vendor-mngr` is now `DEFAULT_WORKSPACE_TEMPLATE_DIR` (the recipe errors with a rename hint when only the old var is set). Docs and skills reference the new repo name.
+
+Removed the stale-SSH-port workaround from `test_backup_enable_repair_and_destination_change_on_resumed_workspace` (the `docker stop` + host-side `mngr start` heal that ran before the first host-side connection). The docker provider now reconciles the recorded SSH port against the container's live mapping on every connection (PR #2395), so the first `mngr exec` into the raw-`docker start`-resumed workspace heals the host record on its own.
+
 ## 2026-07-10
 
 Permission-request dialogs now dismiss the whole inbox window after you Approve or Deny, unless you intentionally opened the full inbox via the Requests button. Previously, resolving a request that you had opened from a notification (or that auto-opened when it arrived) would advance to the next pending request, which could surprise you by suddenly surfacing an unrelated, stale request from another agent. Opening the whole inbox with the Requests button still advances through pending requests as before.

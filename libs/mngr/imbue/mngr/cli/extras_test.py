@@ -1,6 +1,5 @@
 """Tests for the mngr extras command."""
 
-import json
 import os
 from pathlib import Path
 
@@ -23,6 +22,7 @@ from imbue.mngr.cli.extras import _plugins_status
 from imbue.mngr.cli.extras import _print_extras_status
 from imbue.mngr.cli.extras import _read_current_default_agent_type
 from imbue.mngr.cli.extras import extras
+from imbue.mngr.cli.testing import write_stub_claude_cli
 
 # A byte-identical copy of an old self-contained zsh completion function mngr generated
 # before the managed-shim model (any baked python path). strip_legacy_completion_block
@@ -372,22 +372,24 @@ def test_print_extras_status_runs_without_error() -> None:
     )
 
 
-# Probes plugin / shell-completion / claude-plugin status, which can stall on a
-# contended CI sandbox and trip the global 10s pytest-timeout even though it runs
-# in well under a second locally. Bump the per-test timeout for headroom.
-@pytest.mark.timeout(30)
-def test_extras_no_args_shows_status(cli_runner: CliRunner) -> None:
-    """Running 'mngr extras' with no flags shows status."""
+def test_extras_no_args_shows_status(cli_runner: CliRunner, stub_claude_on_path: Path) -> None:
+    """Running 'mngr extras' with no flags shows status.
+
+    The stub claude keeps the status probe off the real Node CLI, whose
+    startup on a contended CI sandbox tripped the global 10s offload timeout.
+    """
     result = cli_runner.invoke(extras, [])
     assert result.exit_code == 0
     assert "Extras" in result.output
+    assert "claude-plugin" in result.output
 
 
-def test_extras_interactive_mode(cli_runner: CliRunner) -> None:
+def test_extras_interactive_mode(cli_runner: CliRunner, stub_claude_on_path: Path) -> None:
     """Running 'mngr extras -i' walks through all extras interactively."""
-    # In the test environment, has_interactive_terminal() returns False
-    # (no /dev/tty), so each _install_* short-circuits before reaching the
-    # urwid picker.
+    # The stub claude reports every plugin installed, so the claude-plugin step
+    # short-circuits deterministically (no Node startup, no urwid picker even
+    # when a /dev/tty is available); the other _install_* steps short-circuit
+    # on their own has_interactive_terminal() checks in CI.
     result = cli_runner.invoke(extras, ["-i"])
     assert result.exit_code == 0
     assert "Plugins" in result.output
@@ -407,10 +409,17 @@ def test_extras_completion_subcommand(cli_runner: CliRunner) -> None:
     assert result.exit_code == 0
 
 
-def test_extras_claude_plugin_subcommand(cli_runner: CliRunner) -> None:
-    """The 'extras claude-plugin' subcommand should work."""
+def test_extras_claude_plugin_subcommand(cli_runner: CliRunner, stub_claude_on_path: Path) -> None:
+    """The 'extras claude-plugin' subcommand should work.
+
+    The stub claude replaces the real Node CLI (whose startup on a contended
+    CI sandbox tripped the global 10s offload timeout) and reports every
+    plugin installed, so the command deterministically short-circuits with
+    the already-installed message on any machine.
+    """
     result = cli_runner.invoke(extras, ["claude-plugin"])
     assert result.exit_code == 0
+    assert "All Claude Code plugins are already installed." in result.output
 
 
 def test_extras_completion_yes_flag(cli_runner: CliRunner) -> None:
@@ -430,17 +439,9 @@ def test_extras_claude_plugin_yes_flag(cli_runner: CliRunner, tmp_path: Path, mo
     installed -- letting us assert that the already-installed plugin is left
     untouched.
     """
-    stub_claude = tmp_path / "claude"
-    # `claude plugin list --json` returns an array of objects keyed by `id`;
-    # report imbue-code-guardian as already installed and succeed otherwise.
-    listing = json.dumps(
-        [{"id": "imbue-code-guardian@imbue-code-guardian", "version": "0.2.1", "scope": "project", "enabled": True}]
-    )
-    stub_claude.write_text(
-        f'#!/usr/bin/env bash\nif [ "$1" = "plugin" ] && [ "$2" = "list" ]; then\n  echo \'{listing}\'\nfi\nexit 0\n'
-    )
-    stub_claude.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    bin_dir = tmp_path / "stub-claude-bin"
+    write_stub_claude_cli(bin_dir, installed_plugin_ids=["imbue-code-guardian@imbue-code-guardian"])
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
 
     result = cli_runner.invoke(extras, ["claude-plugin", "-y"])
     assert result.exit_code == 0
@@ -576,7 +577,7 @@ def test_extras_config_yes_flag(cli_runner: CliRunner) -> None:
     assert result.exit_code == 0
 
 
-def test_extras_interactive_includes_default_type(cli_runner: CliRunner) -> None:
+def test_extras_interactive_includes_default_type(cli_runner: CliRunner, stub_claude_on_path: Path) -> None:
     """Running 'mngr extras -i' walks through the default agent type prompt."""
     result = cli_runner.invoke(extras, ["-i"])
     assert result.exit_code == 0
