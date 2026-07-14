@@ -7,6 +7,7 @@ and never stale. The Modal env is the branch alone (stable across mngr updates).
 
 from __future__ import annotations
 
+import os
 import socket
 import subprocess
 from pathlib import Path
@@ -152,7 +153,11 @@ def nuke_modal_env(minds_env: str = "staging") -> None:
     if not script.is_file():
         raise BoxError("modal_nuke.py not found at {}".format(script))
     print(">> nuking Modal env {} (stops all sandboxes + deletes volumes) ...".format(env), flush=True)
-    result = _run(["uv", "run", "python", str(script), "-e", env], cwd=str(monorepo_root))
+    # TERM=dumb: modal 1.4.x bleeds ANSI color codes into `modal ... list --json` even when piped,
+    # which breaks the script's json.loads; a dumb terminal makes it emit clean JSON.
+    child_env = {**os.environ, "TERM": "dumb"}
+    # --force: we run non-interactively (captured output), so skip the script's input() confirmation.
+    result = _run(["uv", "run", "python", str(script), "-e", env, "--force"], cwd=str(monorepo_root), env=child_env)
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()[-300:]
         raise BoxError("modal_nuke failed for env {} (rc={}): {}".format(env, result.returncode, detail))
