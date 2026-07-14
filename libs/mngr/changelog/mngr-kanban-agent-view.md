@@ -1,1 +1,0 @@
-Includes (by merge) the `mngr transcript` fix from PR #2392: assistant messages from agents on an emitter predating `parts[]` no longer render as `(no content)` in human format (see `mngr-mngr-msg.md` for details). The kanpan peek panel relies on this to show assistant text for those agents.
