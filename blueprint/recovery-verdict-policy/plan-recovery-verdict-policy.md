@@ -15,8 +15,9 @@ report).
   consent-gated `HOST_UNRESPONSIVE` page instead.
 
 - Make the classifier interpret evidence it already collects rather than adding
-  delays: supervisord `STARTING`/`BACKOFF` means self-heal is in progress
-  (keep checking); `STOPPING` is transitional (keep checking); `FAILED` is
+  delays. From the in-container probe's supervisord status: `STARTING`/`BACKOFF`
+  means self-heal is in progress (keep checking). From the discovery snapshot's
+  host state: `STOPPING` is transitional (keep checking); `FAILED` is
   consent-gated; `STOPPED`/`CRASHED` keep today's unattended host restart
   (this is the path that revives workspaces after a laptop reboot).
 
