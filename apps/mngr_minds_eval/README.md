@@ -17,11 +17,11 @@ stay on and there is nothing to poll.
 - **Modal env** — one shared env `minds-staging-evaluator` for ALL eval workspaces (any branch/SHA),
   so `clean` has a single place to wipe. The box stays versioned; only the env is shared. S3 (keyed
   by eval name) is the real result store; sandboxes are told apart by host name + the S3 batch.
-- **Shared SSH access** — Modal sandboxes are reached over SSH tunnels (`mngr forward`), and mngr
-  normally rolls a *random per-box* SSH keypair, so only the box that created a workspace could open
-  it. Every eval box instead pins one mngr profile (`evaluator`) and mounts one shared keypair
-  (persisted at `~/.minds-eval/modal-profile/`, seeded by the first box), so **any box can open or
-  forward into any workspace** in the shared env. Applies to workspaces created after a box is
+- **Shared SSH access** — Modal sandboxes are reached over SSH, and mngr normally rolls a *random
+  per-box* SSH keypair, so only the box that created a workspace could open it. Every eval box instead
+  pins one mngr profile (`evaluator`) and mounts one shared keypair (persisted at
+  `~/.minds-eval/modal-profile/`, seeded by the first box), so **any box (and the host) can open a
+  tunnel into any workspace** in the shared env. Applies to workspaces created after a box is
   (re)built with this; existing ones keep their old key.
 
 ## Setup
@@ -150,7 +150,7 @@ minds_client.py    the Minds create API (POST + poll) -- shared by launch/worksp
 launch.py          batch: prep clone (+ vendor mngr + slot test_case_metadata.json) and create per case
 workspace.py       create one Modal workspace (build_payload + create_workspace) -- the one create path
 status.py          list-batches / inspect / case_report (S3 reads only)
-view.py            list-modal-workspaces / view-modal-workspace (scoped `mngr forward` per workspace)
+view.py            list-modal-workspaces / view-modal-workspace (host-side `ssh -L` per workspace)
 evaluate.py        evaluate: pull transcripts, score (avg_word_count + LLM scores), write results to S3
 anthropic_call.py  one plain Anthropic Messages call (the LLM-graded evals)
 s3_store.py        S3 layout, creds file, batch/case prefixes

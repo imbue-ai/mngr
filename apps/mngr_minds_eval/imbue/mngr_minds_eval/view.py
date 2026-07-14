@@ -1,9 +1,10 @@
 """list-modal-workspaces / view-modal-workspace: see and open the workspaces in the shared Modal env.
 
-`view-modal-workspace` runs a *scoped* `mngr forward` (a single workspace) inside a box, so it stays
-cheap no matter how many workspaces the env holds -- unlike the box's built-in forward, which eagerly
-proxies every workspace and OOMs past ~20. All boxes share one Modal SSH key, so any box can reach
-any workspace; by default we pick the least-loaded running box.
+`view-modal-workspace` opens a plain host-side `ssh -L` straight to one workspace's UI, so it stays
+cheap no matter how many workspaces the env holds -- unlike the box's built-in `mngr forward`, which
+eagerly proxies every workspace and OOMs past ~20. All boxes share one Modal SSH key, so any box (and
+the host) can reach any workspace; by default we pick the least-loaded running box to read the SSH
+endpoint from.
 """
 
 from __future__ import annotations
