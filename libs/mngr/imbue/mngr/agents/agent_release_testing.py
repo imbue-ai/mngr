@@ -40,7 +40,6 @@ import subprocess
 from collections.abc import Mapping
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
-from functools import partial
 from pathlib import Path
 from typing import Any
 from typing import Callable
@@ -693,7 +692,9 @@ def run_concurrent_message_delivery(profile: AgentReleaseProfile, tmp_path: Path
             token = tokens[index]
             other_token = tokens[1 - index]
             found = poll_until(
-                condition=partial(_is_delivered_exactly_once, host_dir, subdir, agent_name, token),
+                condition=lambda name=agent_name, wanted=token: _is_delivered_exactly_once(
+                    host_dir, subdir, name, wanted
+                ),
                 timeout=_RESPONSE_TIMEOUT_SECONDS,
                 poll_interval=2.0,
             )
