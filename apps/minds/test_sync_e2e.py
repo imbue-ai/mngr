@@ -73,14 +73,22 @@ _DOCKER_STATE_MARKER: Final[str] = "docker-state"
 # sandbox -- not from fear. The measured cost of each step is noted so a
 # future regression shows up as a failure here instead of being absorbed by a
 # budget nobody re-derived.
-_SIGN_IN_TIMEOUT_SECONDS: Final[int] = 90  # measured ~15s
-_ACCOUNT_VISIBLE_TIMEOUT_SECONDS: Final[int] = 90  # measured ~7s
-_BACKUP_CONFIGURE_TIMEOUT_SECONDS: Final[int] = 180  # measured ~31s (real R2 bucket + restic init)
-_FIRST_BACKUP_TIMEOUT_SECONDS: Final[int] = 420  # measured ~10s; two full status-fetch cycles of headroom
-_SYNC_CONVERGENCE_TIMEOUT_SECONDS: Final[int] = 180  # the scheduler ticks every 60s, so >= 2 ticks
-_UNLOCK_BANNER_TIMEOUT_SECONDS: Final[int] = 180  # measured ~27s (needs one pull)
-_DOWNLOAD_LINK_TIMEOUT_SECONDS: Final[int] = 240  # gated on one settled status fetch
-# One landing load's backup-status fetch (measured ~10s; see #2470).
+# Sign-in through the real /auth/login form: measured ~15s.
+_SIGN_IN_TIMEOUT_SECONDS: Final[int] = 90
+# The account reaching the associate form's picker: measured ~7s.
+_ACCOUNT_VISIBLE_TIMEOUT_SECONDS: Final[int] = 90
+# A real R2 bucket + scoped key + restic init: measured ~31s.
+_BACKUP_CONFIGURE_TIMEOUT_SECONDS: Final[int] = 180
+# The first backup reaching the landing badge: measured ~10s, with two full
+# status-fetch cycles of headroom.
+_FIRST_BACKUP_TIMEOUT_SECONDS: Final[int] = 420
+# Server-side convergence: the sync scheduler ticks every 60s, so >= 2 ticks.
+_SYNC_CONVERGENCE_TIMEOUT_SECONDS: Final[int] = 180
+# The unlock banner appearing (needs one pull): measured ~27s.
+_UNLOCK_BANNER_TIMEOUT_SECONDS: Final[int] = 180
+# The download link un-hiding, gated on one settled status fetch.
+_DOWNLOAD_LINK_TIMEOUT_SECONDS: Final[int] = 240
+# One landing load's backup-status fetch (measured ~10s; see imbue-ai/mngr issue 2470).
 _STATUS_FETCH_SETTLE_SECONDS: Final[int] = 120
 # The sync scheduler reconciles every 60s; two full ticks with margin is
 # enough to observe "the revision did NOT advance". This one is a
@@ -485,10 +493,10 @@ def _read_settled_badge(page: Page, origin: str, agent_id: str) -> str | None:
     The badge populates from a one-shot per-workspace status fetch on page
     load, and that fetch blocks on BOTH the restic snapshot listing and the
     backup-service verification exec into the workspace before the route
-    responds (imbue-ai/mngr#2470). Reloading before it resolves aborts and
+    responds (imbue-ai/mngr issue 2470). Reloading before it resolves aborts and
     restarts it, so this reads WITHOUT navigating until the badge settles.
     The window is generous against the measured ~10s fetch but deliberately
-    well below that route's 360s worst case: if #2470's latency ever regresses
+    well below that route's 360s worst case: if that latency ever regresses
     this fails in minutes rather than hanging.
     """
     _goto_landing(page, origin)
