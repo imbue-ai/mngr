@@ -767,11 +767,11 @@ def test_chrome_titlebar_buttons_have_tooltips(tmp_path: Path) -> None:
     response = client.get("/_chrome")
     assert response.status_code == 200
     assert 'data-tooltip="Main Menu"' in response.text
-    assert 'data-tooltip="Run into a bug?"' in response.text
+    assert 'data-tooltip="Ran into a bug?"' in response.text
     # data-tooltip is not exposed to assistive tech, so each icon-only titlebar
     # button also needs an aria-label to keep an accessible name.
     assert 'aria-label="Main Menu"' in response.text
-    assert 'aria-label="Run into a bug?"' in response.text
+    assert 'aria-label="Ran into a bug?"' in response.text
 
 
 def test_chrome_sidebar_page_renders(tmp_path: Path) -> None:
