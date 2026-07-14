@@ -164,15 +164,29 @@ def _workspace_container_name(runtime: _SyncE2ERuntime) -> str:
 
 
 def _write_sentinel_in_container(container_name: str, content: str) -> None:
-    """Drop the restore-verification sentinel into the workspace before its first backup."""
+    """Drop the restore-verification sentinel into the workspace before its first backup.
+
+    ``docker exec`` needs ``-i`` to attach stdin; without it the heredoc lands
+    empty and the restore assertion compares empty strings (which is exactly
+    how this was caught).
+    """
     result = subprocess.run(
-        ["docker", "exec", container_name, "bash", "-lc", f"cat > /code/{_SENTINEL_FILENAME}"],
+        ["docker", "exec", "-i", container_name, "bash", "-lc", f"cat > /code/{_SENTINEL_FILENAME}"],
         input=content,
         capture_output=True,
         text=True,
         timeout=30,
     )
     assert result.returncode == 0, f"Could not write the sentinel: {result.stderr}"
+    readback = subprocess.run(
+        ["docker", "exec", container_name, "bash", "-lc", f"cat /code/{_SENTINEL_FILENAME}"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert readback.stdout == content, (
+        f"The sentinel did not land in the workspace: {readback.stdout!r} != {content!r}"
+    )
 
 
 def _kill_processes_referencing(unique_marker: str) -> None:
