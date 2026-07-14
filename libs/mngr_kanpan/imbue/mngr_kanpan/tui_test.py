@@ -1996,6 +1996,18 @@ def test_update_peek_header_missing_agent_falls_back() -> None:
     assert state.peek_box.title_widget.text.strip() == "Peek"
 
 
+def test_refresh_display_updates_open_peek_header() -> None:
+    entry = _make_entry(name="agent-a", state=AgentLifecycleState.WAITING)
+    state = _make_state(snapshot=make_board_snapshot(entries=(entry,)))
+    _build_peek_panel(state)
+    state.peek_agent_name = AgentName("agent-a")
+    # A completed board refresh re-renders the open panel's title from the new entries.
+    _refresh_display(state)
+    title = state.peek_box.title_widget.text
+    assert "agent-a" in title
+    assert str(AgentLifecycleState.WAITING) in title
+
+
 def test_cancel_peek_alarm_removes_pending_alarm() -> None:
     state = _make_state()
     loop = _RecordingLoop()

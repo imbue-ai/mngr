@@ -2089,6 +2089,9 @@ def _refresh_display(state: _KanpanState) -> None:
     if state.focused_agent_name is not None:
         _focus_row_by_name(state, state.focused_agent_name)
 
+    # An open peek panel's title shows live state; re-render it from the new entries.
+    _update_peek_header(state)
+
 
 def _schedule_next_refresh(loop: MainLoop, state: _KanpanState) -> None:
     """Schedule the next auto-refresh alarm."""
