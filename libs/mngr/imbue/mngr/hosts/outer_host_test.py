@@ -586,7 +586,7 @@ def test_is_transient_ssh_error_classifies_timeout_as_transient(exception: BaseE
     during cloud-init. Without TimeoutError in the transient set, the
     retry loop didn't fire and the exception propagated all the way out
     of host creation. ``TimeoutError`` is an ``OSError`` subclass on
-    Python 3, so the classifier's ordering matters: the TimeoutError
-    branch must precede the narrow "Socket is closed" OSError check.
+    Python 3, but the classifier's OSError branch only matches on the
+    "Socket is closed" message, so bare timeouts need their own branch.
     """
     assert is_transient_ssh_error(exception) is expected

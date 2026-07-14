@@ -205,8 +205,10 @@ def is_transient_ssh_error(exception: BaseException) -> bool:
     - EOFError (remote end closed connection)
     - TimeoutError (pyinfra read_output_buffers timeout when the remote
       sshd is reloaded mid-command, e.g. during cloud-init bootstrap).
-      Note: ``TimeoutError`` is an OSError subclass on Python 3, so this
-      check must precede any narrower OSError handling.
+      Note: ``TimeoutError`` is an OSError subclass on Python 3, but the
+      OSError branch above only matches on its "Socket is closed" message,
+      so bare timeouts fall through and need this explicit branch to be
+      classified transient.
     """
     if isinstance(exception, OSError) and "Socket is closed" in str(exception):
         return True
