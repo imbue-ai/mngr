@@ -3172,8 +3172,9 @@ ipcMain.on('open-accounts', (event) => {
 });
 
 // The settings UI persisted a dark-mode change: repaint every window's other
-// surfaces. The chrome view + overlay frames flip their document class off
-// the chrome-event; minds-served content pages reload so the server-rendered
+// surfaces. The chrome view and the overlay host (which also flips its
+// mounted modal iframes; see overlay.js) flip their document classes off the
+// chrome-event; minds-served content pages reload so the server-rendered
 // theme class (Base.jinja) takes effect. Workspace content (the foreign
 // dockview UI on its own origin) is deliberately untouched.
 ipcMain.on('appearance-changed', (_event, isDark) => {
