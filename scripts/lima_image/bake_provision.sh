@@ -9,6 +9,15 @@
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
+# This script deletes every user account and wipes /home, which is correct inside the
+# disposable bake VM and catastrophic on a real machine. Only build-lima-image.sh sets
+# this marker, so a stray local run refuses instead of eating the operator's /home.
+if [ "${MNGR_LIMA_BAKE:-}" != "1" ]; then
+  echo "ERROR: this script wipes /home and must only run inside the bake VM." >&2
+  echo "       Run scripts/build-lima-image.sh instead; it sets MNGR_LIMA_BAKE=1." >&2
+  exit 1
+fi
+
 : "${DEFAULT_WORKSPACE_TEMPLATE_REPO_URL:?DEFAULT_WORKSPACE_TEMPLATE_REPO_URL is required}"
 : "${DEFAULT_WORKSPACE_TEMPLATE_REF:?DEFAULT_WORKSPACE_TEMPLATE_REF is required}"
 # Pin mtimes for the cleanup pass (reproducibility helps upgrade deltas, not the

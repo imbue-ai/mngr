@@ -60,6 +60,19 @@ if [ -z "$ARCH" ]; then
   esac
 fi
 
+# Fail before the bake, not after it: the toolchain build is the long pole, and
+# qemu-img is only needed at the very end (it is not preinstalled on either macOS
+# or a stock Linux host, where it lives in qemu-utils).
+MISSING=""
+for tool in limactl qemu-img; do
+  command -v "$tool" >/dev/null 2>&1 || MISSING="$MISSING $tool"
+done
+if [ -n "$MISSING" ]; then
+  echo "ERROR: missing required tool(s):$MISSING" >&2
+  echo "       macOS: brew install lima qemu   Linux: install lima + qemu-utils" >&2
+  exit 1
+fi
+
 if [ "$ARCH" = "arm64" ]; then
   ARCH_TAG="aarch64"; LIMA_ARCH="aarch64"
   DEBIAN_URL="https://cloud.debian.org/images/cloud/bookworm/20260601-2496/debian-12-genericcloud-arm64-20260601-2496.qcow2"
@@ -77,9 +90,23 @@ mkdir -p "$OUTPUT_DIR"
 # Lima's per-instance state dir (honor LIMA_HOME, as limactl itself does).
 LIMA_INSTANCE_DIR="${LIMA_HOME:-$HOME/.lima}/$INSTANCE"
 
-TMP_YAML=""
+TMP_DIR=""
+# Lima puts its ssh socket under LIMA_HOME/<instance>/, and a UNIX socket path must
+# fit in 104 bytes. macOS mktemp -d hands out /var/folders/... paths that blow that
+# on their own, so give both temp dirs an explicit short template under /tmp. An
+# explicit template is also the only form BSD and GNU mktemp agree on: BSD's -t
+# takes a bare prefix and appends its own suffix, so `-t foo-XXXXXX.yaml` keeps the
+# X's literal there while GNU substitutes them.
+TMP_DIR="$(mktemp -d /tmp/mlb-XXXXXX)"
+TMP_YAML="$TMP_DIR/bake.yaml"
+PROBE_INSTANCE="probe"
+PROBE_LIMA_HOME=""
 cleanup() {
-  [ -n "$TMP_YAML" ] && rm -f "$TMP_YAML"
+  if [ -n "$PROBE_LIMA_HOME" ]; then
+    LIMA_HOME="$PROBE_LIMA_HOME" limactl delete -f "$PROBE_INSTANCE" >/dev/null 2>&1 || true
+    rm -rf "$PROBE_LIMA_HOME"
+  fi
+  rm -rf "$TMP_DIR"
   if [ "$KEEP" = "1" ]; then
     echo "(--keep) leaving Lima instance '$INSTANCE' in place"
   else
@@ -96,7 +123,6 @@ limactl delete -f "$INSTANCE" >/dev/null 2>&1 || true
 # Minimal Lima config: just the Debian base sized for the toolchain build. We run
 # the bake via `limactl shell` (below) rather than a Lima `provision:` block so the
 # bake script stays a normal file we can lint/version independently.
-TMP_YAML="$(mktemp -t mngr-lima-bake-XXXXXX.yaml)"
 cat > "$TMP_YAML" <<EOF
 images:
   - location: "$DEBIAN_URL"
@@ -127,13 +153,12 @@ if [ "$start_ok" != "1" ]; then
   echo "ERROR: 'limactl start' failed after $START_ATTEMPTS attempts" >&2
   exit 1
 fi
-rm -f "$TMP_YAML"; TMP_YAML=""
 
 echo "==> Copying the bake provisioner into the VM"
 limactl copy "$LIMA_IMAGE_DIR/bake_provision.sh" "$INSTANCE:/tmp/bake_provision.sh"
 
 echo "==> Running the DEFAULT_WORKSPACE_TEMPLATE toolchain bake inside the VM (this is the long pole)"
-limactl shell --workdir / "$INSTANCE" sudo env \
+limactl shell --workdir / "$INSTANCE" sudo env MNGR_LIMA_BAKE=1 \
   DEFAULT_WORKSPACE_TEMPLATE_REPO_URL="$DEFAULT_WORKSPACE_TEMPLATE_REPO" DEFAULT_WORKSPACE_TEMPLATE_REF="$DEFAULT_WORKSPACE_TEMPLATE_REF" bash /tmp/bake_provision.sh
 
 echo "==> Stopping the VM for a consistent disk"
@@ -166,16 +191,8 @@ qemu-img convert -f qcow2 -O raw "$QCOW2_OUT" "$RAW_OUT"
 # hangs forever on the ssh requirement -- on every machine except the baker's.
 # The bake asserts this internally; boot it here too, because the internal check
 # cannot prove the image is bootable by a stranger.
-# Lima puts its ssh socket under LIMA_HOME/<instance>/, and a UNIX socket path
-# must fit in 104 bytes. macOS mktemp -d hands out /var/folders/... paths that
-# blow that on their own, so keep both the directory and the instance name short.
-PROBE_INSTANCE="probe"
 PROBE_LIMA_HOME="$(mktemp -d /tmp/mlp-XXXXXX)"
 PROBE_YAML="$PROBE_LIMA_HOME/probe.yaml"
-probe_cleanup() {
-  LIMA_HOME="$PROBE_LIMA_HOME" limactl delete -f "$PROBE_INSTANCE" >/dev/null 2>&1 || true
-  rm -rf "$PROBE_LIMA_HOME"
-}
 cat > "$PROBE_YAML" <<EOF
 images:
   - location: "$RAW_OUT"
@@ -194,11 +211,9 @@ EOF
 echo "==> Verifying the image boots for a host user it has never seen (limaprobe, uid 501)"
 if LIMA_HOME="$PROBE_LIMA_HOME" limactl start --name="$PROBE_INSTANCE" --tty=false "$PROBE_YAML"; then
   echo "==> Boot probe passed: the image is not tied to this machine's account"
-  probe_cleanup
 else
   echo "ERROR: the baked image did not boot for a foreign host user." >&2
   echo "       It is host-specific and would hang on ssh for every other machine." >&2
-  probe_cleanup
   exit 1
 fi
 
