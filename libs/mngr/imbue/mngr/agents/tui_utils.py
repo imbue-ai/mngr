@@ -299,21 +299,16 @@ def _send_enter_and_wait_for_signal(
 
 
 def _timeout_prefix(seconds: float) -> str:
-    """A ``timeout(1)`` invocation that also works where there is no ``timeout`` binary.
+    """Run the arguments under a deadline, using ``timeout(1)`` wherever it exists.
 
-    macOS ships a BSD userland with no ``timeout``. Perl's ``alarm`` arms a SIGALRM
-    and ``exec`` then replaces perl with the command itself, so the command keeps
-    perl's pid: its exit status is passed straight through, an expiry kills it
-    outright, and nothing is left behind to reap. Two sharp edges, both load-bearing:
+    macOS ships no ``timeout``. In its place, perl's ``alarm`` arms a SIGALRM and
+    ``exec`` replaces perl with the command, which therefore reports its own exit
+    status and dies outright when the alarm fires.
 
-    - ``Time::HiRes`` because the builtin ``alarm`` takes whole seconds and
-      ``alarm(0)`` *cancels* the timer, so a sub-second deadline would silently
-      mean no deadline at all.
-    - ``or exit 127`` because a failed ``exec`` returns to perl, which would
-      otherwise run off the end of the program and exit 0.
-
-    ``command -v`` rather than a platform test: the binary that is missing is what
-    matters, and a host can have either one without the other.
+    The alarm comes from ``Time::HiRes`` because the builtin one takes whole
+    seconds and ``alarm(0)`` cancels the timer, so a sub-second deadline would
+    mean no deadline. A failed ``exec`` returns to perl, which would fall off the
+    end of the program and exit 0, so it exits 127 instead.
     """
     perl_timeout = f"perl -MTime::HiRes=alarm -e 'alarm shift; exec @ARGV or exit 127' {seconds}"
     return f'if command -v timeout >/dev/null 2>&1; then timeout {seconds} "$@"; else {perl_timeout} "$@"; fi'

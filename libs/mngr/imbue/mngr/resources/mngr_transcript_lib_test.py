@@ -69,11 +69,7 @@ def test_reconcile_offset_ignores_an_unterminated_final_line(
 def test_reconcile_offset_returns_the_highest_matching_line_not_the_first(
     tmp_path: Path, posix_only_path: dict[str, str], bash_with_associative_arrays: str
 ) -> None:
-    """With a gap in the emitted set, the offset still advances to the last match.
-
-    The reverse scan this replaced stopped at the first match from the end, which is
-    the same line; a forward scan must not stop at the first match from the start.
-    """
+    """With a gap in the emitted set, the offset is the last matching line, not the first."""
     session_file = tmp_path / "session.jsonl"
     output_file = tmp_path / "output.jsonl"
     _write_jsonl(session_file, ["id-1", "id-2", "id-3"])
