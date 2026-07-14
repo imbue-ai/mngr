@@ -242,7 +242,16 @@ def ensure_current_lima_image(
             if current.raw_image_sha256 is None:
                 # Adopt a pointer written before the hash was recorded, so the next run
                 # does not have to hash the image again to learn the same thing.
-                _write_current_pointer(layout, current.model_copy(update={"raw_image_sha256": installed_sha}))
+                _write_current_pointer(
+                    layout,
+                    LimaImageCurrentPointer(
+                        minds_version=current.minds_version,
+                        arch=current.arch,
+                        raw_path=current.raw_path,
+                        index_path=current.index_path,
+                        raw_image_sha256=installed_sha,
+                    ),
+                )
             reporter.emit(LimaImagePrefetchStatus.READY, None, installed)
             return EnsureImageResult(status=LimaImagePrefetchStatus.READY, raw_path=installed)
         logger.warning(
