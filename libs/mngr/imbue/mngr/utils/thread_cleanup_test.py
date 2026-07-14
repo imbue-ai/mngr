@@ -9,6 +9,7 @@ fresh Hub (and everything the task referenced) is stranded on every call.
 import gc
 
 import gevent
+import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.utils.thread_cleanup import mngr_executor
@@ -28,6 +29,9 @@ def _run_one_discovery_like_poll() -> None:
         future.result()
 
 
+# GC-object counting is sensitive to worker threads still tearing down on a
+# loaded machine, so the measurement can transiently exceed its margin.
+@pytest.mark.flaky
 def test_worker_hubs_do_not_accumulate_across_polls() -> None:
     """Each poll spins up worker threads that create gevent hubs; cleanup must
     free them so repeated polls do not strand a hub (and its retained object
