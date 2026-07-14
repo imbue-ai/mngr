@@ -69,11 +69,15 @@
     if (failureView) failureView.classList.remove('hidden');
     var msgEl = document.getElementById('error-message');
     if (msgEl) msgEl.textContent = creationError || 'unknown error';
-    // Reveal extra static guidance for recognized failure kinds (currently
-    // just the private-GitHub-repo case). The copy lives hidden in the
-    // template; the backend only classifies.
-    if (creationErrorKind === 'GITHUB_AUTH_REQUIRED') {
-      var authHelp = document.getElementById('github-auth-help');
+    // Reveal extra static guidance for recognized failure kinds (a private
+    // repo on github.com, or on another git host). The copy lives hidden in
+    // the template; the backend only classifies.
+    var authHelpId =
+      creationErrorKind === 'GITHUB_AUTH_REQUIRED' ? 'github-auth-help'
+      : creationErrorKind === 'GIT_AUTH_REQUIRED' ? 'git-auth-help'
+      : null;
+    if (authHelpId) {
+      var authHelp = document.getElementById(authHelpId);
       if (authHelp) authHelp.classList.remove('hidden');
     }
     // The prominent error box now carries the message, so clear the faint

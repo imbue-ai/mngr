@@ -66,6 +66,21 @@
             this computer, and enter that folder's path in the form instead of the URL.
           </p>
         </div>
+        {# Generic (non-GitHub) git remote: same guidance as above but without #}
+        {# the GitHub-CLI advice, which only fits github.com. Revealed by #}
+        {# creating.js when the backend classifies the failure as GIT_AUTH_REQUIRED. #}
+        <div id="git-auth-help" class="hidden text-left type-body text-secondary mt-3">
+          <p>
+            This repository looks private, or it does not exist: it asked for
+            credentials, and none on this computer could open it. If you have access
+            to it, make sure your git credentials for this host are set up on this
+            computer, then try again.
+          </p>
+          <p class="mt-2">
+            Alternatively, clone or download the repository yourself to any folder on
+            this computer, and enter that folder's path in the form instead of the URL.
+          </p>
+        </div>
         <div class="flex items-center justify-center gap-2 mt-4">
           <ButtonLink href="/create" variant="primary">Back to setup</ButtonLink>
           <ButtonLink href="/" variant="ghost">Home</ButtonLink>

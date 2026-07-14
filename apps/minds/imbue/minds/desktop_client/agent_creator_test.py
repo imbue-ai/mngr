@@ -159,14 +159,26 @@ def test_classify_creation_error_flags_any_failed_github_clone() -> None:
         assert classify_creation_error(url, GitCloneError(message)) is CreationErrorKind.GITHUB_AUTH_REQUIRED, message
 
 
-def test_classify_creation_error_ignores_non_github_sources() -> None:
-    """The guidance recommends the GitHub CLI, so a clone failure against any
-    other host (or a local path) must not classify."""
+def test_classify_creation_error_flags_non_github_remotes_generically() -> None:
+    """A failed clone of a non-github REMOTE git source classifies as the
+    generic GIT_AUTH_REQUIRED (same access guidance, without the GitHub-CLI
+    advice) -- covering another host over https and scp-style ssh remotes."""
     error = GitCloneError(
         "git clone failed:\nfatal: Authentication failed for 'https://gitlab.example.com/acme/repo.git/'"
     )
-    assert classify_creation_error("https://gitlab.example.com/acme/repo.git", error) is None
+    assert classify_creation_error("https://gitlab.example.com/acme/repo.git", error) is CreationErrorKind.GIT_AUTH_REQUIRED
+    assert classify_creation_error("git@gitlab.example.com:acme/repo.git", error) is CreationErrorKind.GIT_AUTH_REQUIRED
+    assert classify_creation_error("ssh://git@gitlab.example.com/acme/repo.git", error) is CreationErrorKind.GIT_AUTH_REQUIRED
+
+
+def test_classify_creation_error_ignores_local_paths_and_bare_input() -> None:
+    """A clone failure on a local path is not an access problem, and a bare
+    non-remote string is not a recognizable remote -- neither classifies."""
+    error = GitCloneError("git clone failed:\nfatal: repository not found")
     assert classify_creation_error("/local/path/to/repo", error) is None
+    assert classify_creation_error("./relative/repo", error) is None
+    assert classify_creation_error("~/repo", error) is None
+    assert classify_creation_error("just-a-name", error) is None
 
 
 def test_classify_creation_error_ignores_non_clone_errors() -> None:

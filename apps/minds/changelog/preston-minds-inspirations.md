@@ -2,4 +2,6 @@ Creating a workspace from a private (or nonexistent) GitHub repository URL now s
 
 The desktop client's local `git clone` of the workspace source now runs with `GIT_TERMINAL_PROMPT=0`, so cloning a repository this computer has no credentials for fails fast with a clear error instead of hanging on a credential prompt (mirroring the earlier fix in the default-workspace-template bootstrap's git calls).
 
-The create-operation status API (`GET /api/v1/workspaces/operations/create/<id>`) gained an optional `error_kind` field carrying a machine-readable failure classification (currently `GITHUB_AUTH_REQUIRED`) alongside the human-readable `error` message.
+Non-GitHub git remotes get the same treatment without the GitHub-specific advice: a failed clone of a git URL on another host (or an ssh remote) is classified `GIT_AUTH_REQUIRED`, and the creating page shows the same "looks private / make sure your git credentials are set up, or clone it locally and use a path" guidance, minus the `gh auth login` recommendation (which only fits github.com). A local path or unrecognized source still shows just the raw error.
+
+The create-operation status API (`GET /api/v1/workspaces/operations/create/<id>`) gained an optional `error_kind` field carrying a machine-readable failure classification (`GITHUB_AUTH_REQUIRED` or `GIT_AUTH_REQUIRED`) alongside the human-readable `error` message.

@@ -238,6 +238,13 @@ class CreationErrorKind(UpperCaseStrEnum):
     # The clone mechanism is git, but the problem we surface is GitHub access.
     GITHUB_AUTH_REQUIRED = auto()
 
+    # The clone of a NON-github remote git source (a URL on another host, or an
+    # ssh remote) failed -- same likely cause (private/nonexistent, no usable
+    # credentials on this machine) and same guidance, minus the GitHub-CLI
+    # advice, which only fits github.com. The creating page shows generic
+    # git-credentials guidance for this kind.
+    GIT_AUTH_REQUIRED = auto()
+
 
 class AgentCreationInfo(FrozenModel):
     """Snapshot of agent creation state, returned to callers for status polling.
@@ -323,24 +330,48 @@ def _is_github_https_url(repo_source: str) -> bool:
     return parts.hostname in ("github.com", "www.github.com")
 
 
+def _is_remote_git_source(repo_source: str) -> bool:
+    """Check if a repo source is a REMOTE git source (a URL or ssh remote).
+
+    True for any ``scheme://`` URL (https/http/ssh/git) and for scp-style ssh
+    remotes (``user@host:path``). False for local paths and for bare strings
+    that are neither -- so a clone failure on a local path (not an access
+    problem) or on garbage input does not get the "you need access" guidance.
+    """
+    if "://" in repo_source:
+        return True
+    # scp-style ssh remote, e.g. git@gitlab.example.com:group/repo.git. The
+    # host part (before the first ':') must contain no '/', which distinguishes
+    # it from a local path like ``./a:b``.
+    return bool(re.match(r"^[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+:", repo_source))
+
+
 def classify_creation_error(repo_source: str, error: Exception) -> CreationErrorKind | None:
     """Classify a creation failure into a ``CreationErrorKind``, when recognizable.
 
-    Currently recognizes exactly one case: ANY failed clone of a
-    ``https://github.com/...`` workspace source. Deliberately no matching of
-    git's error text (git has no structured error output, and substring
-    matching is brittle across git versions and locales): a github.com clone
-    that failed at all is overwhelmingly an access problem -- the repo is
-    private (or does not exist) and this machine's git credentials cannot see
-    it -- and the creating page's guidance covers that case while the raw git
-    error stays visible right above it for anything rarer. Every other
-    failure returns ``None``.
+    Recognizes two cases, both for a failed clone (``GitCloneError``) of a
+    REMOTE git source -- the likely cause is the same (private/nonexistent,
+    no usable credentials on this machine). Deliberately no matching of git's
+    error text (git has no structured error output, and substring matching is
+    brittle across git versions and locales): a remote clone that failed at
+    all is overwhelmingly an access problem, and the creating page's guidance
+    covers it while the raw git error stays visible right above for anything
+    rarer.
+
+    - ``https://github.com/...`` -> ``GITHUB_AUTH_REQUIRED`` (guidance names
+      the GitHub CLI, which only fits github.com https).
+    - any other remote git source (a URL on another host, or an ssh remote)
+      -> ``GIT_AUTH_REQUIRED`` (generic git-credentials guidance, no GitHub CLI).
+
+    A local path or unrecognized input returns ``None`` (just the raw error).
     """
     if not isinstance(error, GitCloneError):
         return None
-    if not _is_github_https_url(repo_source):
-        return None
-    return CreationErrorKind.GITHUB_AUTH_REQUIRED
+    if _is_github_https_url(repo_source):
+        return CreationErrorKind.GITHUB_AUTH_REQUIRED
+    if _is_remote_git_source(repo_source):
+        return CreationErrorKind.GIT_AUTH_REQUIRED
+    return None
 
 
 def _redact_url_credentials(url: str) -> str:

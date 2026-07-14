@@ -479,6 +479,29 @@ def test_render_creating_page_carries_hidden_github_auth_guidance() -> None:
     assert "hidden" in html[guidance_index:tag_end]
 
 
+def test_render_creating_page_carries_hidden_generic_git_auth_guidance() -> None:
+    """The creating page also ships generic (non-GitHub) git-auth guidance,
+    revealed for error_kind GIT_AUTH_REQUIRED. It offers the local-path
+    alternative but must NOT name the GitHub CLI (which only fits github.com)."""
+    creation_id = CreationId()
+    info = AgentCreationInfo(
+        creation_id=creation_id,
+        status=AgentCreationStatus.INITIALIZING,
+        launch_mode=LaunchMode.DOCKER,
+    )
+    html = render_creating_page(creation_id=creation_id, info=info)
+    assert 'id="git-auth-help"' in html
+    assert "path in the form instead of the URL" in html
+    # Hidden on first paint.
+    guidance_index = html.index('id="git-auth-help"')
+    tag_end = html.index(">", guidance_index)
+    assert "hidden" in html[guidance_index:tag_end]
+    # The generic block must not carry the GitHub-CLI advice. Scope the check
+    # to this block (the sibling github-auth-help block legitimately has it).
+    block_end = html.index("</div>", guidance_index)
+    assert "gh auth login" not in html[guidance_index:block_end]
+
+
 def test_render_create_form_honors_workspace_env_vars_when_opted_in(monkeypatch: pytest.MonkeyPatch) -> None:
     """With the explicit opt-in, the MINDS_WORKSPACE_* env vars pre-fill the form.
 
