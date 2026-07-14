@@ -1594,9 +1594,7 @@ def test_workspace_restart_unknown_workspace_returns_404(
         system_interface_health_tracker=SystemInterfaceHealthTracker(),
     )
 
-    response = client.post(
-        f"/api/v1/workspaces/{AgentId()}/restart", headers=_auth_header(), json={"scope": "host"}
-    )
+    response = client.post(f"/api/v1/workspaces/{AgentId()}/restart", headers=_auth_header(), json={"scope": "host"})
 
     assert response.status_code == 404
 
@@ -1608,9 +1606,7 @@ def test_workspace_restart_unavailable_without_tracker_returns_503(tmp_path: Pat
     resolver = make_resolver_with_data(make_agents_json(agent_id))
     client = _build_client(tmp_path, resolver)
 
-    response = client.post(
-        f"/api/v1/workspaces/{agent_id}/restart", headers=_auth_header(), json={"scope": "host"}
-    )
+    response = client.post(f"/api/v1/workspaces/{agent_id}/restart", headers=_auth_header(), json={"scope": "host"})
 
     assert response.status_code == 503
 
@@ -1681,9 +1677,7 @@ def test_workspace_restart_registers_operation_reaching_done(
         system_interface_health_tracker=SystemInterfaceHealthTracker(),
     )
 
-    dispatch = client.post(
-        f"/api/v1/workspaces/{agent_id}/restart", headers=_auth_header(), json={"scope": "host"}
-    )
+    dispatch = client.post(f"/api/v1/workspaces/{agent_id}/restart", headers=_auth_header(), json={"scope": "host"})
     assert dispatch.status_code == 202
 
     # Wait for the worker to finish by draining its log queue to the terminal
@@ -1880,9 +1874,7 @@ def test_workspace_restart_conflicts_with_a_running_backup_operation(
     registry = get_state(client.application).workspace_operation_registry
     registry.start(agent_id, WorkspaceOperationKind.BACKUP_UPDATE, datetime.now(timezone.utc))
 
-    response = client.post(
-        f"/api/v1/workspaces/{agent_id}/restart", headers=_auth_header(), json={"scope": "host"}
-    )
+    response = client.post(f"/api/v1/workspaces/{agent_id}/restart", headers=_auth_header(), json={"scope": "host"})
 
     assert response.status_code == 409
     assert "BACKUP_UPDATE" in json.loads(response.data)["error"]

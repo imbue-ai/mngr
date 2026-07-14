@@ -1,0 +1,1 @@
+Added the recovery-verdict-policy blueprint plan (`blueprint/recovery-verdict-policy/plan-recovery-verdict-policy.md`): the spec for dropping the surgical restart tier, the raw-host-state recovery classifier, the `UNREACHABLE` provider state, provider `CRASHED` corrections, error-level restart-failure reporting, and the stop/window-close flow.
