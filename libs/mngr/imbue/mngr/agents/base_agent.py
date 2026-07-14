@@ -504,7 +504,9 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         )
         try:
             result = self.host.execute_stateful_command(append_command)
-        except HostConnectionError as e:
+        except (HostConnectionError, TimeoutError) as e:
+            # TimeoutError: the remote SSH layer re-raises its socket timeout
+            # as-is (see Host.execute_idempotent_command).
             logger.warning("Failed to record message delivery event {}: {}", event_type, e)
             return
         if not result.success:
