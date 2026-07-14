@@ -1,8 +1,10 @@
-"""Tests for ``mngr forward``'s CLI option validation.
+"""Tests for ``mngr forward``'s CLI helpers.
 
-These tests stub out heavy dependencies (the FastAPI app + uvicorn loop)
-by inspecting only the option-validation phase via direct calls to the
-helpers. End-to-end CLI invocation is exercised by the acceptance test.
+Covers option validation (direct calls to the validation helpers, without
+building the FastAPI app or a CLI process) and the hypercorn serving layer's
+TLS teardown behavior (serve-loop exception handling plus an end-to-end
+abandoned-connection repro over a loopback socket). End-to-end CLI invocation
+is exercised by the acceptance test.
 """
 
 # asyncio is normally banned, but this file tests the event-loop-level TLS
