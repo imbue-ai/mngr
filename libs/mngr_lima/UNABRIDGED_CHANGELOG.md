@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-13
+
+Creating a Lima VM no longer fails with a `UNIX_PATH_MAX=104 characters` error when your home path and mngr prefix are long. Lima names each VM's SSH socket after the instance name and rejects names that push that socket path over the OS limit; the instance name (`<prefix>host-<32-char id>`) could exceed it for longer usernames on longer-prefixed environments (e.g. `minds-staging-`). The random id portion is now shortened just enough to keep the socket path within the limit, leaving the name unchanged when it already fits. If the prefix plus `LIMA_HOME` leave no room at all, creation now fails early with a clear message instead of a cryptic limactl fatal error.
+
 ## 2026-07-10
 
 Fixed a Lima workspace-creation failure that surfaced as a confusing `SSH host key error (Host key for 127.0.0.1 does not match.)`.
