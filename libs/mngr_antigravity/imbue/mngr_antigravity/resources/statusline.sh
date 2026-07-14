@@ -22,10 +22,14 @@
 #      iff `agent_state` is NOT in {idle, initializing, authenticating, ""}
 #      (a denylist, so any present/future busy state counts as RUNNING; `idle`
 #      is the canonical done state).
-#   4. When busy, fires the tmux wait-for submission signal `mngr message` waits
-#      on. Firing on every busy sample (not just the idle->working edge) means a
-#      message queued while the agent is already busy is also confirmed; a signal
-#      with no registered waiter is a harmless no-op.
+#   4. When busy, fires the tmux wait-for submission signal that OLDER mngr
+#      versions wait on. FIXME: remove the signal once released senders no
+#      longer wait on it. Current mngr confirms sends by polling the `active`
+#      marker itself and never listens on the channel -- tmux LATCHES a signal
+#      fired with no waiter (it is NOT a harmless no-op: the next waiter is
+#      woken instantly), which is exactly why the channel stopped being
+#      trusted. Kept only so old senders messaging a newly created agent still
+#      confirm.
 #   5. Renders the status row (stdout IS the rendered statusline, unlike the hook
 #      scripts whose stdout agy treats as injected steps). mngr is lifecycle-only
 #      and prints NOTHING of its own -- agy already shows working/idle -- so the
@@ -97,12 +101,12 @@ case "$agent_state" in
         ;;
     *)
         touch "$marker_file"
-        # Confirm message submission: agy enters a busy state once it starts
-        # processing an enqueued prompt. `mngr message` registers a waiter on
-        # this channel before sending Enter; the signal wakes it. Only fire when
-        # actually inside a tmux session (agy always is): the `#S` session name
-        # must match the waiter's channel, and gating on TMUX keeps the script a
-        # pure no-op when run outside tmux. A signal with no waiter is harmless.
+        # Submission signal for OLDER mngr senders only: current mngr confirms
+        # sends by polling the `active` marker touched above and never waits on
+        # this channel (see the header FIXME for why the signal is scheduled
+        # for removal). Only fire when actually inside a tmux session (agy
+        # always is): the `#S` session name must match an old waiter's channel,
+        # and gating on TMUX keeps the script a pure no-op outside tmux.
         if [ -n "${TMUX:-}" ]; then
             tmux wait-for -S "mngr-submit-$(tmux display-message -p '#S')" 2>/dev/null || true
         fi
