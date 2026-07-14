@@ -1,1 +1,0 @@
-Add the `blueprint/mngr-forward-http2/` implementation plan for terminating TLS and negotiating HTTP/2 at the `mngr forward` proxy so the workspace UI is no longer capped by Chromium's per-origin HTTP/1.1 connection limit.

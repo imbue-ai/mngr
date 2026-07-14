@@ -72,6 +72,12 @@ def _destroy_modal_agent(
     )
 
 
+# Boots a real Modal host and SSHes into it. Sporadically fails while waiting
+# for sshd on the fresh container ("Error reading SSH protocol banner" ->
+# "Create agent failed"), which is Modal-side boot timing rather than a defect
+# here. Retried by offload; see the SSH-readiness wait in the create path if
+# this starts failing consistently.
+@pytest.mark.flaky
 @pytest.mark.acceptance
 @pytest.mark.rsync
 @pytest.mark.timeout(400)
