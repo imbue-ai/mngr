@@ -11,7 +11,9 @@ from loguru import logger
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.local_process import RunningProcess
+from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
@@ -117,6 +119,30 @@ def _stop_serial_tailer() -> None:
         _active_serial_tailer = None
 
 
+def _run_limactl(
+    cg: ConcurrencyGroup,
+    subcommand: str,
+    cmd: list[str],
+    timeout: float | None,
+    on_output: Callable[[str, bool], None] | None = None,
+) -> FinishedProcess:
+    """Run a limactl command, translating any non-zero exit into LimaCommandError.
+
+    Every limactl invocation funnels through here so the ConcurrencyGroup's
+    checked run (which raises a raw ProcessError on a non-zero exit) is always
+    converted to the domain LimaCommandError that callers catch. Without this,
+    disabling the check and re-testing the exit code by hand at each call site
+    was fragile -- a forgotten check would leak a ProcessError straight past
+    callers that only handle LimaCommandError. ``subcommand`` labels the limactl
+    subcommand in the raised error (e.g. "stop", "list"); an OSError from failing
+    to spawn limactl at all is left to propagate.
+    """
+    try:
+        return cg.run_process_to_completion(cmd, timeout=timeout, on_output=on_output)
+    except ProcessError as e:
+        raise LimaCommandError(subcommand, e.returncode, e.stderr, e.stdout) from e
+
+
 def check_lima_installed(provider_name: ProviderInstanceName) -> None:
     """Verify that limactl is on PATH. Raises LimaNotInstalledError if not."""
     if shutil.which("limactl") is None:
@@ -128,7 +154,7 @@ def get_lima_version(cg: ConcurrencyGroup) -> tuple[int, int, int]:
 
     Parses the output of `limactl --version`.
     """
-    result = cg.run_process_to_completion(["limactl", "--version"], timeout=10.0)
+    result = _run_limactl(cg, "--version", ["limactl", "--version"], timeout=10.0)
     version_str = result.stdout.strip()
     # limactl --version outputs something like "limactl version 1.0.2"
     match = re.search(r"(\d+)\.(\d+)\.(\d+)", version_str)
@@ -239,16 +265,9 @@ def limactl_start_new(
     effective_callback = on_output or _SerialLogTailerCallback(cg=cg)
     try:
         with log_span("Running limactl start for new instance: {}", instance_name):
-            result = cg.run_process_to_completion(
-                cmd,
-                timeout=timeout,
-                on_output=effective_callback,
-                is_checked_after=False,
-            )
+            _run_limactl(cg, "start", cmd, timeout=timeout, on_output=effective_callback)
     finally:
         _stop_serial_tailer()
-    if result.returncode != 0:
-        raise LimaCommandError("start", result.returncode, result.stderr)
 
 
 def limactl_start_existing(
@@ -263,14 +282,7 @@ def limactl_start_existing(
     """
     cmd = ["limactl", "--log-level=info", "start", instance_name]
     with log_span("Running limactl start for existing instance: {}", instance_name):
-        result = cg.run_process_to_completion(
-            cmd,
-            timeout=timeout,
-            on_output=on_output or _log_lima_output,
-            is_checked_after=False,
-        )
-    if result.returncode != 0:
-        raise LimaCommandError("start", result.returncode, result.stderr)
+        _run_limactl(cg, "start", cmd, timeout=timeout, on_output=on_output or _log_lima_output)
 
 
 def limactl_stop(
@@ -284,9 +296,7 @@ def limactl_stop(
     """
     cmd = ["limactl", "stop", instance_name]
     with log_span("Running limactl stop: {}", instance_name):
-        result = cg.run_process_to_completion(cmd, timeout=timeout)
-    if result.returncode != 0:
-        raise LimaCommandError("stop", result.returncode, result.stderr)
+        _run_limactl(cg, "stop", cmd, timeout=timeout)
 
 
 def limactl_delete(
@@ -304,9 +314,7 @@ def limactl_delete(
         cmd.append("--force")
     cmd.append(instance_name)
     with log_span("Running limactl delete: {}", instance_name):
-        result = cg.run_process_to_completion(cmd, timeout=timeout)
-    if result.returncode != 0:
-        raise LimaCommandError("delete", result.returncode, result.stderr)
+        _run_limactl(cg, "delete", cmd, timeout=timeout)
 
 
 def limactl_disk_create(
@@ -328,9 +336,7 @@ def limactl_disk_create(
     """
     cmd = ["limactl", "disk", "create", disk_name, "--size", size]
     with log_span("Running limactl disk create: {} (size {})", disk_name, size):
-        result = cg.run_process_to_completion(cmd, timeout=timeout)
-    if result.returncode != 0:
-        raise LimaCommandError("disk create", result.returncode, result.stderr)
+        _run_limactl(cg, "disk create", cmd, timeout=timeout)
 
 
 def limactl_disk_delete(
@@ -353,13 +359,14 @@ def limactl_disk_delete(
         cmd.append("--force")
     cmd.append(disk_name)
     with log_span("Running limactl disk delete: {}", disk_name):
-        result = cg.run_process_to_completion(cmd, timeout=timeout)
-    if result.returncode != 0:
-        stderr_lower = result.stderr.lower()
-        if "not found" in stderr_lower or "does not exist" in stderr_lower:
-            logger.debug("Lima disk {} already absent, skipping", disk_name)
-            return
-        raise LimaCommandError("disk delete", result.returncode, result.stderr)
+        try:
+            _run_limactl(cg, "disk delete", cmd, timeout=timeout)
+        except LimaCommandError as e:
+            stderr_lower = e.stderr.lower()
+            if "not found" in stderr_lower or "does not exist" in stderr_lower:
+                logger.debug("Lima disk {} already absent, skipping", disk_name)
+                return
+            raise
 
 
 def limactl_list(cg: ConcurrencyGroup, timeout: float = 30.0) -> list[dict[str, Any]]:
@@ -368,9 +375,7 @@ def limactl_list(cg: ConcurrencyGroup, timeout: float = 30.0) -> list[dict[str, 
     Runs: limactl list --json
     """
     cmd = ["limactl", "list", "--json"]
-    result = cg.run_process_to_completion(cmd, timeout=timeout)
-    if result.returncode != 0:
-        raise LimaCommandError("list", result.returncode, result.stderr)
+    result = _run_limactl(cg, "list", cmd, timeout=timeout)
 
     output = result.stdout.strip()
     if not output:
@@ -416,9 +421,7 @@ def limactl_show_ssh(
     Parses the output of: limactl show-ssh --format config <instance_name>
     """
     cmd = ["limactl", "show-ssh", "--format", "config", instance_name]
-    result = cg.run_process_to_completion(cmd, timeout=timeout)
-    if result.returncode != 0:
-        raise LimaCommandError("show-ssh", result.returncode, result.stderr)
+    result = _run_limactl(cg, "show-ssh", cmd, timeout=timeout)
 
     hostname = "127.0.0.1"
     port = 22
@@ -444,12 +447,17 @@ def limactl_shell(
     instance_name: str,
     command: str,
     timeout: float = 60.0,
-) -> tuple[int | None, str, str]:
-    """Execute a command inside a Lima instance.
+) -> str:
+    """Execute a command inside a Lima instance and return its stdout.
 
     Runs: limactl shell <instance_name> -- sh -c <command>
-    Returns: (returncode, stdout, stderr)
+
+    Raises LimaCommandError if limactl (or the command) exits non-zero, so a
+    limactl that cannot reach the instance surfaces like every other limactl
+    failure instead of being silently returned as a non-zero code the caller may
+    ignore. Callers that want to tolerate a non-zero command exit should make the
+    inner command itself return zero (e.g. append ``|| true``).
     """
     cmd = ["limactl", "shell", instance_name, "--", "sh", "-c", command]
-    result = cg.run_process_to_completion(cmd, timeout=timeout)
-    return result.returncode, result.stdout, result.stderr
+    result = _run_limactl(cg, "shell", cmd, timeout=timeout)
+    return result.stdout
