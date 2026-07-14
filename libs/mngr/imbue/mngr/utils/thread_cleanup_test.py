@@ -7,7 +7,6 @@ fresh Hub (and everything the task referenced) is stranded on every call.
 """
 
 import gc
-import time
 
 import gevent
 import pytest
@@ -30,9 +29,11 @@ def _run_one_discovery_like_poll() -> None:
         future.result()
 
 
-# GC-object counting is sensitive to worker threads still tearing down on a
-# loaded machine, so the measurement can transiently exceed its margin.
+# The repeated full-heap gc.collect() passes are slow on a loaded machine (the
+# observed failure mode is the suite-default 10s timeout, not the assertion),
+# so this test carries its own generous timeout and a flaky retry on top.
 @pytest.mark.flaky
+@pytest.mark.timeout(60)
 def test_worker_hubs_do_not_accumulate_across_polls() -> None:
     """Each poll spins up worker threads that create gevent hubs; cleanup must
     free them so repeated polls do not strand a hub (and its retained object
@@ -46,17 +47,8 @@ def test_worker_hubs_do_not_accumulate_across_polls() -> None:
     for _ in range(iterations):
         _run_one_discovery_like_poll()
 
+    growth = _count_live_hubs() - baseline_hubs
     # With the join-before-destroy fix, growth is ~0. Without it, growth scales
     # with the number of iterations (one stranded hub each). Allow a small
-    # margin for worker threads that happen to be in flight -- and, since
-    # thread teardown can lag on a loaded machine, re-poll until the count
-    # settles under the margin rather than trusting a single snapshot (truly
-    # leaked hubs are pinned by an unbreakable GC cycle, so they never shrink
-    # away and a real regression still fails).
-    deadline = time.monotonic() + 5.0
-    while True:
-        growth = _count_live_hubs() - baseline_hubs
-        if growth <= 5 or time.monotonic() >= deadline:
-            break
-        time.sleep(0.2)
+    # margin for worker threads that happen to be in flight.
     assert growth <= 5, f"gevent hubs accumulated across polls (grew by {growth} over {iterations} polls)"
