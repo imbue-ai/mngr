@@ -53,9 +53,57 @@ notifications) with calm in-app surfaces must not cost fleet visibility.
 Any failure that gets a pill/badge/page state -- and any watched process
 found dead -- also emits an opt-out-gated Sentry event at the moment it is
 detected. Mechanically: `logger.error(...)` and above reaches Sentry through
-the loguru handler; `logger.warning(...)` and below does not. Reporting is
-per-detection (deduplicated by state transition, not re-fired every poll
-tick).
+the loguru handler (threshold is level 37; `warning` is 30 and does not);
+`ObservableThread` already reports uncaught thread exceptions at error level,
+but *expected* failure branches that catch and `logger.warning` stay
+invisible. Reporting is per-detection (deduplicated by state transition, not
+re-fired every poll tick); forever-retry loops escalate to one error-level
+report when failure persists past a threshold, not one per attempt.
+
+### Known reporting gaps (audited 2026-07-13), by owning unit
+
+Failure paths that today produce no Sentry event (warning-level or below, or
+no log at all). The owning unit closes the ones in its scope as part of its
+work; transient-then-recovered cases should report only on persistence.
+
+- **discovery-supervision**: producer bounce failure
+  (`discovery_health.py:152`) and restart failure (`:292`) are warnings;
+  the observe child being *found dead* is never itself error-reported
+  (`discovery_stream.py:203` respawn failure is a warning;
+  `forward_supervisor.py:521` SIGHUP failure is a warning); per-agent
+  `mngr event --follow` follower death/respawn is info/debug
+  (`stream_manager.py:459,487`), so a persistently-dead follower is silent;
+  reverse-tunnel re-establishment failure is a warning (`ssh_tunnel.py:495`)
+  with no escalation on persistent failure. (Consumer death and the
+  watchdog's BLOCKED transition are already error-reported.)
+
+- **recovery-verdict-policy**: the expected RESTART_FAILED branches -- stop
+  step failed (`workspace_recovery.py:332`) and start step failed (`:342`)
+  -- are warnings; only a restart-worker *crash* reaches Sentry via
+  `ObservableThread`.
+
+- **notification-policy**: backup provisioning failure after the retry
+  budget is a warning plus the OS toast (`agent_creator.py:2013`) -- no
+  error log or capture anywhere; Cloudflare tunnel setup failures are
+  warnings plus the OS toast (`workspace_create.py:144,152`); share
+  tunnel-token inject/clear failures are warnings
+  (`tunnel_token_injection.py:51,68`); `notifyOpenFailed` in Electron is
+  reached from a swallowed `.catch` with no capture (`main.js:815`).
+
+- **error-surfacing**: a backend that exits with code 0 or dies by signal is
+  deliberately ignored in `main.js` (`proc.on('exit')`, ~`:2932`) -- no
+  takeover today, no capture; the nonzero-exit takeover is also not
+  auto-captured (report is manual-only).
+
+- **latchkey-nudge-delivery**: the no-match nudge is debug-level
+  (`messaging.py:132`; the unit's `deliver()` swap adds the error-level
+  report); the gateway follow-stream reconnect loop retries forever at
+  warning (`permission_requests_consumer.py:237`) with no escalation when
+  the gateway is persistently down; a latchkey auto-register store error
+  marks the agent/host pair processed anyway at warning
+  (`latchkey_auto_register.py:112`), permanently skipping that agent with
+  no report -- the last two are adjacent scope this unit should pick up or
+  explicitly hand off.
 
 ## Interface contracts between units
 
