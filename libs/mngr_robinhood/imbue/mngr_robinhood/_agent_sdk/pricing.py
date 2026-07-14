@@ -52,6 +52,12 @@ _OPUS_PRICING: Final[ModelPricing] = ModelPricing(
     cache_write_usd_per_million=Decimal("6.25"),
     cache_read_usd_per_million=Decimal("0.50"),
 )
+_FABLE_PRICING: Final[ModelPricing] = ModelPricing(
+    input_usd_per_million=Decimal("10.00"),
+    output_usd_per_million=Decimal("50.00"),
+    cache_write_usd_per_million=Decimal("12.50"),
+    cache_read_usd_per_million=Decimal("1.00"),
+)
 
 # Model-id substrings mapped to their pricing, checked in order. claude model ids look like
 # ``claude-haiku-4-5-20251001`` / ``claude-sonnet-4-6`` / ``claude-opus-4-8``, so a family
@@ -60,6 +66,7 @@ _PRICING_BY_FAMILY_SUBSTRING: Final[Sequence[tuple[str, ModelPricing]]] = (
     ("haiku", _HAIKU_PRICING),
     ("sonnet", _SONNET_PRICING),
     ("opus", _OPUS_PRICING),
+    ("fable", _FABLE_PRICING),
 )
 
 
