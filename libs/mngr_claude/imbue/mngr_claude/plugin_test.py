@@ -1387,6 +1387,31 @@ def test_native_transcript_path_expression_resolves_config_dir_and_session(
     assert f"/projects/{encoded_project_dir}/" in expression
 
 
+def test_detect_preexisting_input_text_reads_bottom_prompt_line(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """Leftover input-box text is detected from the bottom-most ``❯`` line only.
+
+    The empty input row and the dim ``Try "..."`` placeholder must NOT count as
+    leftover text (they are what a routine send sees), while genuinely stranded
+    text after the glyph must be reported. Prompt lines higher up in the
+    scrollback (already-submitted turns) must be ignored in favor of the
+    bottom-most input row.
+    """
+    agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    assert agent._detect_preexisting_input_text("some output\n❯ previously stranded text") == (
+        "previously stranded text"
+    )
+    # Empty input row and the placeholder are routine, not leftovers.
+    assert agent._detect_preexisting_input_text("some output\n❯ ") is None
+    assert agent._detect_preexisting_input_text('some output\n❯ Try "how do I fix this test?"') is None
+    # No prompt glyph anywhere (e.g. a dialog occupies the pane).
+    assert agent._detect_preexisting_input_text("Do you trust the files in this folder?") is None
+    # The bottom-most prompt line wins: an older submitted turn above an empty
+    # input row is not leftover text.
+    assert agent._detect_preexisting_input_text("❯ old submitted message\nresponse text\n❯ ") is None
+
+
 def _make_hooks_test_agent(
     host: OnlineHostInterface, temp_mngr_ctx: MngrContext, work_dir: Path, agent_config: ClaudeAgentConfig
 ) -> ClaudeAgent:
