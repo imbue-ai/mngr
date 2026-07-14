@@ -700,7 +700,11 @@ def run_concurrent_message_delivery(profile: AgentReleaseProfile, tmp_path: Path
                 poll_interval=2.0,
             )
             records = _read_common_records_for_agent(host_dir, subdir, agent_name)
-            assert found, f"message {token} never landed on {agent_name}: {json.dumps(records, indent=2)[:2000]}"
+            delivery_count = _count_user_messages_containing(records, token)
+            assert found, (
+                f"expected exactly one delivery of {token} to {agent_name}, found {delivery_count}: "
+                f"{json.dumps(records, indent=2)[:2000]}"
+            )
             assert _count_user_messages_containing(records, other_token) == 0, (
                 f"agent {agent_name} received the OTHER agent's message {other_token}"
             )
