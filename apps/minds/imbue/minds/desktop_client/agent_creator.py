@@ -63,6 +63,7 @@ from imbue.minds.lima_image.primitives import get_current_image_arch
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
+from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
 from imbue.minds.primitives import LaunchMode
@@ -94,6 +95,11 @@ _MNGR_FORWARD_SESSION_COOKIE_NAME: Final[str] = "mngr_forward_session"
 # assumption about which app that is or which routes it implements.
 _WORKSPACE_PROBE_PATH: Final[str] = "/"
 
+# Scheme of the `mngr forward` proxy origin. minds always runs the proxy with
+# `--use-http2`, so it terminates TLS and the probe/redirect URLs the Python
+# side builds are always `https`.
+_MNGR_FORWARD_SCHEME: Final[str] = "https"
+
 
 def make_workspace_probe_client(preauth_cookie: str, probe_timeout_seconds: float) -> httpx.Client:
     """Construct a reusable httpx.Client preconfigured for workspace probes.
@@ -101,11 +107,17 @@ def make_workspace_probe_client(preauth_cookie: str, probe_timeout_seconds: floa
     Callers that probe in a tight poll loop should construct one of these and
     pass it to ``probe_workspace_through_plugin`` on each iteration, instead
     of letting the helper construct a one-shot client per call.
+
+    The proxy serves TLS (HTTP/2), so cert verification is disabled: these
+    probes dial ``127.0.0.1`` with a ``Host: agent-<hex>.localhost`` header, so
+    hostname verification could never pass, and the cert is a self-signed
+    ephemeral one the probe is not positioned to validate anyway. Loopback-only.
     """
     return httpx.Client(
         timeout=probe_timeout_seconds,
         follow_redirects=False,
         cookies={_MNGR_FORWARD_SESSION_COOKIE_NAME: preauth_cookie},
+        verify=False,
     )
 
 
@@ -151,7 +163,7 @@ def probe_workspace_through_plugin(
     one-shot client is constructed for this single probe -- fine for
     one-off / sporadic callers but wasteful in a loop.
     """
-    probe_url = f"http://127.0.0.1:{mngr_forward_port}{_WORKSPACE_PROBE_PATH}"
+    probe_url = f"{_MNGR_FORWARD_SCHEME}://127.0.0.1:{mngr_forward_port}{_WORKSPACE_PROBE_PATH}"
     host_header = f"{agent_id}.localhost"
     if client is not None:
         return _probe_once(client, probe_url, host_header)
@@ -581,6 +593,7 @@ def _build_mngr_create_command(
     region: str | None = None,
     latchkey_env: Mapping[str, str] | None = None,
     color: str | None = None,
+    docker_runtime: DockerRuntime = DockerRuntime.RUNC,
     original_minds_version: str | None = None,
     original_branch: str | None = None,
     prebaked_lima_image_qcow2_path: Path | None = None,
@@ -594,7 +607,10 @@ def _build_mngr_create_command(
     id anyway, and pre-generating one led to bugs (e.g. keying gateway
     state under a fictional id).
 
-    DOCKER mode: --template main --template docker (runs in Docker container)
+    DOCKER mode: --template main --template docker (runs in a Docker container);
+        for ``docker_runtime == RUNSC`` the gVisor overlay is stacked on top
+        (--template docker_runsc) so the container runs under runsc. RUNC is the
+        docker template's default, so it adds no extra template.
     LIMA mode: --template main --template lima (runs in Lima VM)
     VULTR mode: --template main --template vultr (runs in Docker on a Vultr VPS)
     AWS mode: --new-host on the aws-<region> provider, --template main
@@ -743,6 +759,11 @@ def _build_mngr_create_command(
     match launch_mode:
         case LaunchMode.DOCKER:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "docker"])
+            if docker_runtime is DockerRuntime.RUNSC:
+                # gVisor overlay: reuses the docker template body and only flips
+                # the container runtime to runsc. runc is the docker template's
+                # default, so RUNC needs no extra template.
+                mngr_command.extend(["--template", "docker_runsc"])
             mngr_command.extend(_remote_host_env_flags())
         case LaunchMode.LIMA:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "lima"])
@@ -971,6 +992,7 @@ def run_mngr_create(
     anthropic_base_url: str | None = None,
     latchkey_env: Mapping[str, str] | None = None,
     color: str | None = None,
+    docker_runtime: DockerRuntime = DockerRuntime.RUNC,
     original_minds_version: str | None = None,
     original_branch: str | None = None,
     prebaked_lima_image_qcow2_path: Path | None = None,
@@ -1011,6 +1033,7 @@ def run_mngr_create(
         region=region,
         latchkey_env=latchkey_env,
         color=color,
+        docker_runtime=docker_runtime,
         original_minds_version=original_minds_version,
         original_branch=original_branch,
         prebaked_lima_image_qcow2_path=prebaked_lima_image_qcow2_path,
@@ -1148,6 +1171,7 @@ class _MngrCreateAttemptParams(FrozenModel):
     anthropic_base_url: str | None
     parent_cg: ConcurrencyGroup | None
     color: str | None
+    docker_runtime: DockerRuntime
     original_minds_version: str | None
     original_branch: str | None
     # Resolved ready pre-baked Lima qcow2 path (issue 2306), or None to build in-VM.
@@ -1186,6 +1210,7 @@ def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams
         anthropic_api_key=params.anthropic_api_key,
         anthropic_base_url=params.anthropic_base_url,
         color=params.color,
+        docker_runtime=params.docker_runtime,
         original_minds_version=params.original_minds_version,
         original_branch=params.original_branch,
         prebaked_lima_image_qcow2_path=params.prebaked_lima_image_qcow2_path,
@@ -1382,6 +1407,7 @@ class AgentCreator(MutableModel):
         on_created: Callable[[AgentId, HostId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
         color: str | None = None,
+        docker_runtime: DockerRuntime = DockerRuntime.RUNC,
         original_minds_version: str = "",
     ) -> CreationId:
         """Start creating an agent from a git URL or local path in a background thread.
@@ -1397,6 +1423,10 @@ class AgentCreator(MutableModel):
           talks to the official Anthropic API.
         - ``SUBSCRIPTION`` -- inject neither; the user signs in to Claude
           interactively in the workspace.
+
+        ``docker_runtime`` selects the container runtime for
+        ``LaunchMode.DOCKER`` (runc vs gVisor's runsc); it is ignored by every
+        other launch mode, which pin their own runtime.
 
         For ``LaunchMode.IMBUE_CLOUD``, the agent runs on a leased pool host
         via the ``imbue_cloud_<account-slug>`` provider; the plugin's
@@ -1461,6 +1491,7 @@ class AgentCreator(MutableModel):
                 on_created,
                 backup_request,
                 color,
+                docker_runtime,
                 original_minds_version,
             ),
             daemon=True,
@@ -1524,6 +1555,7 @@ class AgentCreator(MutableModel):
         on_created: Callable[[AgentId, HostId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
         color: str | None = None,
+        docker_runtime: DockerRuntime = DockerRuntime.RUNC,
         original_minds_version: str = "",
     ) -> None:
         """Background thread that resolves the repo source and creates an mngr agent.
@@ -1774,6 +1806,7 @@ class AgentCreator(MutableModel):
                     anthropic_base_url=effective_anthropic_base_url,
                     parent_cg=self.root_concurrency_group,
                     color=color,
+                    docker_runtime=docker_runtime,
                     original_minds_version=original_minds_version or None,
                     original_branch=branch or None,
                     prebaked_lima_image_qcow2_path=prebaked_lima_image_qcow2_path,
@@ -2007,7 +2040,7 @@ class AgentCreator(MutableModel):
         """
         if self.mngr_forward_port == 0:
             return f"/goto/{agent_id}/"
-        return f"http://localhost:{self.mngr_forward_port}/goto/{agent_id}/"
+        return f"{_MNGR_FORWARD_SCHEME}://localhost:{self.mngr_forward_port}/goto/{agent_id}/"
 
     def _wait_for_workspace_ready(self, agent_id: AgentId, log_queue: queue.Queue[str]) -> None:
         """Poll the agent's system_interface through the plugin until it responds 200.

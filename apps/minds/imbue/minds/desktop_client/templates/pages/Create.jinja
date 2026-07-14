@@ -1,4 +1,4 @@
-{#def git_url, branch, host_name, launch_modes, selected_launch_mode, ai_providers, selected_ai_provider, backup_providers, selected_backup_provider, backup_api_key_env, accounts, default_account_id, anthropic_api_key, error_message, region_options_by_launch_mode, region_selected_by_launch_mode, selected_preset="remote", start_advanced=False, color="#0b292b" #}
+{#def git_url, branch, host_name, launch_modes, selected_launch_mode, ai_providers, selected_ai_provider, docker_runtimes, selected_docker_runtime, backup_providers, selected_backup_provider, backup_api_key_env, accounts, default_account_id, anthropic_api_key, error_message, region_options_by_launch_mode, region_selected_by_launch_mode, selected_preset="remote", start_advanced=False, color="#0b292b" #}
 {#
   Workspace creation form.
 
@@ -60,6 +60,8 @@
     var submitBtn = document.getElementById('create-submit');
     var regionRow = document.getElementById('region-row');
     var regionSelect = document.getElementById('region');
+    var runtimeRow = document.getElementById('runtime-row');
+    var runtimeSelect = document.getElementById('runtime');
     var presetCards = document.querySelectorAll('[data-preset]');
     var accountError = document.getElementById('account-error');
     // Inputs read when building the create request body.
@@ -336,7 +338,12 @@
         anthropic_api_key: fieldValue(apiKeyInput).trim(),
         backup_provider: backupSelect.value,
         backup_api_key_env: fieldValue(backupApiKeyEnvInput),
-        region: fieldValue(regionSelect)
+        region: fieldValue(regionSelect),
+        // The container runtime only applies to the local Docker provider; the
+        // select is disabled for every other compute provider, so omit it then
+        // (JSON.stringify drops undefined keys) and let the server pick its
+        // platform default.
+        runtime: runtimeSelect.disabled ? undefined : runtimeSelect.value
       };
       fetch('/api/v1/workspaces', {
         method: 'POST',
@@ -447,6 +454,15 @@
       regionRow.classList.remove('hidden');
     }
 
+    function updateRuntime() {
+      // The container-runtime select only applies to the local Docker provider;
+      // every other compute provider pins its own runtime. Hide + disable it
+      // otherwise so no runtime value is submitted.
+      var isDocker = launchSelect.value === 'DOCKER';
+      runtimeRow.classList.toggle('hidden', !isDocker);
+      runtimeSelect.disabled = !isDocker;
+    }
+
     function update() {
       var hasAccount = accountSelect.value !== '';
 
@@ -483,6 +499,7 @@
       submitBtn.disabled = false;
 
       updateRegion();
+      updateRuntime();
     }
 
     accountSelect.addEventListener('change', onAccountChange);
@@ -678,6 +695,17 @@
             <p class="mt-1 type-helper text-tertiary">Where the machine is created. If a region is out of capacity, try another.</p>
           </div>
           <Select id="region" name="region" width="w-48"></Select>
+        </div>
+      </div>
+
+      <div id="runtime-row" class="hidden">
+        <div class="flex items-center justify-between gap-3">
+          <FormLabel target="runtime" inline>Container runtime</FormLabel>
+          <Select id="runtime" name="runtime" width="w-48">
+            {% for rt in docker_runtimes %}
+              <option value="{{ rt.value }}"{% if rt.value == selected_docker_runtime %} selected{% endif %}>{{ rt.value | lower }}</option>
+            {% endfor %}
+          </Select>
         </div>
       </div>
 

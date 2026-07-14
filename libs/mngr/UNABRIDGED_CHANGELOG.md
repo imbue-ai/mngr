@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-11
+
+The forever-claude-template repo is being renamed to default-workspace-template (with the `fct`/`FCT` shorthand expanded to `default_workspace_template`/`DEFAULT_WORKSPACE_TEMPLATE` forms).
+
+References in this project (comments, identifiers, docs) are mechanically updated by `scripts/rename_template_repo.py`.
+
 ## 2026-07-10
 
 Added `DiscoveryErrorLogSuppressor`, a shared per-process deduplicator for provider-level discovery-error log lines: a provider stuck on the same failure (e.g. missing credentials) is logged once (with a note that repeats are suppressed), a different error logs immediately, and a clean snapshot from the provider logs an info-level recovery line and re-arms suppression. Host- and agent-attributed discovery errors are never suppressed.
