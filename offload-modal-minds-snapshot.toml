@@ -84,7 +84,7 @@ type = "pytest"
 # the subsequent test args become "$@" rather than additional flags
 # being parsed by bash.
 command = "bash -c '[ -d /code/mngr ] && cd /code/mngr; exec uv run pytest \"$@\"' --"
-run_args = "--no-cov -p no:xdist -s"
+run_args = "--no-cov -p no:xdist"
 
 # Single group, no retries: a real failure should surface, not be masked
 # by a retry. The suite currently has no @pytest.mark.flaky test.
@@ -111,7 +111,7 @@ run_args = "--no-cov -p no:xdist -s"
 # other offload configs, so a test with this mark is only ever collected
 # here).
 retry_count = 0
-filters = "-m 'minds_snapshot_resume' -k test_amnesia"
+filters = "-m 'minds_snapshot_resume'"
 
 [history]
 path = "offload-history-modal-minds-snapshot.jsonl"
