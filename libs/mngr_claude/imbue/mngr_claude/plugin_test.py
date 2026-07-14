@@ -493,6 +493,42 @@ def test_claude_agent_assemble_command_with_cli_args_and_agent_args(
     assert parsed.create_args == ["--verbose", "--model", "opus"]
 
 
+def test_claude_agent_assemble_command_auto_disable_questions_appends_flag(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """auto_disable_questions=True should append --disallowed-tools AskUserQuestion after all other args."""
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(
+            cli_args=("--disallowed-tools", "TodoWrite"),
+            auto_disable_questions=True,
+            check_installation=False,
+        ),
+    )
+
+    command = agent.assemble_command(host=host, agent_args=(), command_override=None)
+
+    parsed = _ParsedAssembleCommand(str(command))
+    # Appended as a second --disallowed-tools flag (claude appends & unions
+    # repeated flags), so the cli_args-supplied list is preserved.
+    expected = ["--disallowed-tools", "TodoWrite", "--disallowed-tools", "AskUserQuestion"]
+    assert parsed.resume_args == expected
+    assert parsed.create_args == expected
+
+
+def test_claude_agent_assemble_command_auto_disable_questions_off_by_default(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """Default config should not add any --disallowed-tools flag."""
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+
+    command = agent.assemble_command(host=host, agent_args=(), command_override=None)
+
+    assert "--disallowed-tools" not in shlex.split(str(command))
+
+
 def test_claude_agent_assemble_command_passes_user_settings_through(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:

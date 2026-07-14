@@ -91,6 +91,10 @@ even on litellm versions whose bundled price map predates a model. The model
 list lives in `apps/modal_litellm/app.py` (`LITELLM_CONFIG`) and is mirrored in
 `litellm_proxy/config.yaml`; `config_drift_test.py` fails if the two diverge.
 
+Fable ($10 / $50 per 1M input / output):
+
+- `claude-fable-5`
+
 Opus (current price tier, $5 / $25 per 1M input / output):
 
 - `claude-opus-4-8` (latest Opus)
