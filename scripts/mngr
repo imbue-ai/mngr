@@ -42,4 +42,8 @@ else
     fi
 fi
 
-exec uv run --project "$uv_project" mngr "$@"
+# --all-packages is load-bearing: the workspace root does not depend on imbue-mngr
+# or its plugins, so without it uv only guarantees the root's own dependencies and
+# `mngr` may be absent from the venv -- in which case `uv run mngr` resolves `mngr`
+# off PATH, finds this shim, and re-execs itself until uv's recursion limit trips.
+exec uv run --all-packages --project "$uv_project" mngr "$@"
