@@ -1144,6 +1144,30 @@ def test_auth_signin_modal_page_renders_overlay_with_auth_form(tmp_path: Path) -
     assert "run your workspace on Imbue Cloud" in response.text
 
 
+def test_signin_modal_honors_valid_return_to(tmp_path: Path) -> None:
+    """A safe local ?return_to= is embedded as the post-auth landing and
+    switches the intro copy from the create-flow text to the generic one."""
+    client = _create_test_client_with_auth_routes(tmp_path)
+    response = client.get("/auth/signin-modal", query_string={"return_to": "/"})
+    assert response.status_code == 200
+    assert 'window.MINDS_AUTH_RETURN_TO = "/";' in response.text
+    assert "run your workspace on Imbue Cloud" not in response.text
+
+
+def test_signin_modal_rejects_unsafe_return_to(tmp_path: Path) -> None:
+    """Off-origin ?return_to= values (open-redirect shapes) fall back to the
+    /create default and never reach the page; absent return_to does the same."""
+    client = _create_test_client_with_auth_routes(tmp_path)
+    for unsafe in ("//evil.com", "https://evil.com", "/\\evil.com"):
+        response = client.get("/auth/signin-modal", query_string={"return_to": unsafe})
+        assert response.status_code == 200
+        assert "evil.com" not in response.text
+        assert 'window.MINDS_AUTH_RETURN_TO = "/create";' in response.text
+
+    response = client.get("/auth/signin-modal")
+    assert 'window.MINDS_AUTH_RETURN_TO = "/create";' in response.text
+
+
 def test_signin_modal_close_button_has_tooltip(tmp_path: Path) -> None:
     """The sign-in modal's close button (DialogCloseButton) carries a Close tooltip,
     wired by the shared trigger script on the overlay surface."""
