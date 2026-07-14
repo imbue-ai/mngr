@@ -53,3 +53,5 @@
 - `evaluate` now scores whatever is finished instead of refusing the whole batch when one case is still running: unfinished (or errored) cases show as `N/A` rows and are excluded from the batch average, so a batch with a straggler can still be scored for the rest.
 
 - Every eval box now shares one Modal SSH keypair (pinned mngr profile `evaluator` + a persisted keypair at `~/.minds-eval/modal-profile/`, mounted into each box), so any box can open/forward into any workspace in the shared env -- not just the box that created it. Previously mngr rolled a random per-box keypair, so a workspace could only be opened from its creating box (other boxes listed it but reset on open). Applies to workspaces created after a box is (re)built.
+
+- Box resolution is resilient to an unreachable remote: `ensure` now surfaces the real error when `git ls-remote` fails (offline / VPN down) instead of the misleading "branch not found", times out after 30s instead of hanging, and -- if a box for the branch is already running -- reuses it rather than failing.

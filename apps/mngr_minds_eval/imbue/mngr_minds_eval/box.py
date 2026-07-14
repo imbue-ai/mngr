@@ -42,7 +42,16 @@ def _free_port() -> int:
 
 
 def _remote_tip(branch: str) -> str:
-    result = _run(["git", "ls-remote", MNGR_REPO, "refs/heads/{}".format(branch)])
+    try:
+        result = _run(["git", "ls-remote", MNGR_REPO, "refs/heads/{}".format(branch)], timeout=30)
+    except subprocess.TimeoutExpired:
+        raise BoxError("timed out reaching the mngr remote {} -- check your network/VPN".format(MNGR_REPO)) from None
+    if result.returncode != 0:
+        # A failed ls-remote (offline, auth, DNS) is NOT a missing branch -- surface the real reason.
+        detail = (result.stderr or "").strip() or "git ls-remote failed"
+        raise BoxError(
+            "could not reach the mngr remote {} -- check your network/VPN ({})".format(MNGR_REPO, detail[:200])
+        )
     ref = (result.stdout or "").split("\t")[0].strip()
     if not ref:
         raise BoxError("mngr branch {!r} not found on the remote".format(branch))
@@ -106,6 +115,17 @@ def find_any_running() -> str:
     return ""
 
 
+def find_running_for_branch(mngr_branch: str) -> str:
+    """A running box for this branch (any SHA), matched by container-name prefix. '' if none. Lets us
+    reuse an existing box without hitting the remote when GitHub is unreachable."""
+    prefix = "minds-box-{}-".format(_slug(mngr_branch))
+    out = _run(["docker", "ps", "--filter", "name={}".format(prefix), "--format", "{{.Names}}"]).stdout
+    for line in out.splitlines():
+        if line.strip().startswith(prefix):
+            return line.strip()
+    return ""
+
+
 def resolve(mngr_branch: str) -> tuple[str, str]:
     """(container, ref) for a branch's current remote tip."""
     ref = _remote_tip(mngr_branch)
@@ -118,7 +138,21 @@ def ensure(mngr_branch: str, minds_env: str = "staging") -> str:
     The container name encodes the SHA, so if it is already running it is exactly the right mngr --
     reuse it, no staleness check. All boxes point workspaces at one shared Modal env
     (minds-<env>-evaluator), so clean has a single place to wipe."""
-    container, ref = resolve(mngr_branch)
+    try:
+        container, ref = resolve(mngr_branch)
+    except BoxError as exc:
+        # Remote unreachable (offline / VPN down). If a box for this branch is already running, reuse
+        # it rather than fail -- its name encodes a real SHA, so it is a valid box for the branch.
+        running = find_running_for_branch(mngr_branch)
+        if running:
+            print(
+                ">> {}\n>> reusing already-running box {} (dashboard http://localhost:{})".format(
+                    exc, running, port_of(running)
+                ),
+                flush=True,
+            )
+            return running
+        raise
     if is_running(container):
         port = port_of(container)
         print(
