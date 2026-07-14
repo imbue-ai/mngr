@@ -1,0 +1,1 @@
+Added the blueprint plan for the minds titlebar simplification and centered-modals rework (blueprint/titlebar-and-centered-modals/), covering the breadcrumb titlebar with workspace icon-tabs, the home-screen modal launchers, and the per-workspace Connections view that replaces the inbox drawer.

@@ -346,22 +346,25 @@ def test_deny_calls_gateway_delete_writes_response_notifies(tmp_path: Path) -> N
     assert sender.sent_messages and sender.sent_messages[0][0] == str(requester)
 
 
-def test_inbox_detail_route_dispatches_to_handler(tmp_path: Path) -> None:
+def test_connections_page_dispatches_to_handler(tmp_path: Path) -> None:
     handler, _sender = _make_handler(tmp_path, lambda r: httpx.Response(204))
     target = AgentId()
+    requester = AgentId()
     event = create_latchkey_workspace_permission_request_event(
-        agent_id=str(AgentId()),
+        agent_id=str(requester),
         rationale="r",
         permissions=(PERM_WORKSPACES_DESTROY,),
         target_workspace_id=str(target),
     )
     inbox = RequestInbox().add_request(event)
+    # The requester is a known, named workspace so the connections page
+    # attributes the pending request to it.
     resolver = _NamingBackendResolver(
-        url_by_agent_and_service={},
-        workspace_name_by_agent={str(target): "Target WS"},
+        url_by_agent_and_service={str(requester): {}},
+        workspace_name_by_agent={str(target): "Target WS", str(requester): "Requester WS"},
     )
     client = _build_authenticated_client(tmp_path, handler, inbox, resolver)
 
-    response = client.get(f"/inbox/detail/{event.event_id}")
+    response = client.get(f"/workspace/{requester}/connections")
     assert response.status_code == 200
     assert PERM_WORKSPACES_DESTROY in response.text

@@ -7,6 +7,7 @@ from collections.abc import Callable
 from collections.abc import Collection
 from collections.abc import Iterator
 from collections.abc import Mapping
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -1183,7 +1184,9 @@ def _handle_chrome_events() -> Response:
             last_providers_data = _build_providers_state_payload(backend_resolver)
             yield "data: {}\n\n".format(json.dumps({"type": "providers_state", **last_providers_data}))
             inbox: RequestInbox | None = get_state().request_inbox
-            last_requests_payload = _build_requests_payload(inbox, backend_resolver)
+            last_requests_payload = _build_requests_payload(
+                inbox, backend_resolver, get_state().request_event_handlers
+            )
             yield "data: {}\n\n".format(json.dumps({"type": "requests", **last_requests_payload}))
 
             # Agents for which a STUCK redirect has already been emitted on this
@@ -1331,7 +1334,9 @@ def _handle_chrome_events() -> Response:
                     yield "data: {}\n\n".format(json.dumps({"type": "providers_state", **current_providers_data}))
 
                 inbox = get_state().request_inbox
-                current_requests_payload = _build_requests_payload(inbox, backend_resolver)
+                current_requests_payload = _build_requests_payload(
+                    inbox, backend_resolver, get_state().request_event_handlers
+                )
                 # Diff the full payload (count + ordered pending ids), not just
                 # the count, so a change to the pending *set* at constant size
                 # still pushes an update and the consumers refresh.
@@ -1550,6 +1555,7 @@ def _displayable_pending_requests(
 def _build_requests_payload(
     inbox: RequestInbox | None,
     backend_resolver: BackendResolverInterface,
+    handlers: Sequence[RequestEventHandler] = (),
 ) -> dict[str, Any]:
     """Build the content-based requests payload pushed over the chrome SSE.
 
@@ -1574,7 +1580,7 @@ def _build_requests_payload(
     workspace and the Electron shell can attribute a new request's OS
     notification to the right workspace.
     """
-    entries = _pending_request_entries(inbox, backend_resolver)
+    entries = _pending_request_entries(inbox, backend_resolver, handlers)
     request_ids = [entry["id"] for entry in entries]
     return {"count": len(request_ids), "request_ids": request_ids, "requests": entries}
 
@@ -2066,6 +2072,7 @@ def _handle_workspace_settings(
 def _pending_request_entries(
     inbox: RequestInbox | None,
     backend_resolver: BackendResolverInterface,
+    handlers: Sequence[RequestEventHandler],
 ) -> list[dict[str, str]]:
     """Describe every displayable pending request with its owning workspace.
 
@@ -2082,7 +2089,6 @@ def _pending_request_entries(
     ``RequestInbox.get_pending_requests`` -- most-recent-first.
     """
     pending = _displayable_pending_requests(inbox, backend_resolver)
-    handlers: tuple[RequestEventHandler, ...] = get_state().request_event_handlers
     primary_agent_id_by_ws_name: dict[str, str] = {}
     for aid in backend_resolver.list_known_workspace_ids():
         wn = backend_resolver.get_workspace_name(aid)
@@ -2145,7 +2151,7 @@ def _handle_workspace_connections(
 
     inbox: RequestInbox | None = get_state().request_inbox
     handlers: tuple[RequestEventHandler, ...] = get_state().request_event_handlers
-    entries = _pending_request_entries(inbox, backend_resolver)
+    entries = _pending_request_entries(inbox, backend_resolver, handlers)
     pending_by_id = {str(req.event_id): req for req in _displayable_pending_requests(inbox, backend_resolver)}
     pending_requests: list[dict[str, str]] = []
     for entry in entries:

@@ -38,12 +38,16 @@ const AGENT_ID = 'agent-bb340d1c1d5a4c43b1396f277cfd6d81';
 // main.js's broadcastChromeEvent / current-workspace-changed IPC do. Captured
 // navigateContent calls land in window.__nav.
 const HARNESS_HTML = `<!DOCTYPE html><html><body data-mngr-forward-origin="http://localhost:8421">
-  <button id="sidebar-toggle"></button><button id="home-btn"></button>
-  <button id="back-btn"></button><button id="forward-btn"></button>
+  <button id="back-btn" hidden></button><button id="home-btn"></button>
+  <div id="ws-crumb" hidden>
+    <button id="workspace-switcher-btn"><span id="workspace-switcher-name"></span></button>
+    <button id="ws-tab-workspace"></button>
+    <button id="ws-tab-connections"><span id="connections-badge" hidden></span></button>
+    <button id="ws-tab-settings"></button>
+  </div>
+  <div id="page-crumb" hidden><span id="page-crumb-name"></span></div>
   <button id="min-btn"></button><button id="max-btn"></button><button id="close-btn"></button>
-  <button id="user-btn"></button><button id="requests-toggle"></button>
   <button id="help-toggle"></button>
-  <span id="page-title"></span><span id="requests-badge"></span>
   <iframe id="content-frame"></iframe>
   <div id="sidebar-backdrop"></div><div id="sidebar-workspaces"></div>
   <script>
@@ -60,9 +64,9 @@ const HARNESS_HTML = `<!DOCTYPE html><html><body data-mngr-forward-origin="http:
       onModalStateChanged: function (cb) { window.__cb.modal = cb; },
       navigateContent: function (url) { window.__nav.push(url); },
       toggleHelp: function (agentId, assistAvailable) { window.__help.push({ agentId: agentId, assistAvailable: assistAvailable }); },
-      toggleSidebar: function () {}, toggleInbox: function () {},
+      toggleSidebar: function () {},
       minimize: function () {}, maximize: function () {}, close: function () {},
-      contentGoBack: function () {}, contentGoForward: function () {},
+      contentGoBack: function () {},
     };
   </script>
 </body></html>`;

@@ -1,4 +1,4 @@
-"""Integration tests for the app-level settings permissions routes."""
+"""Integration tests for the permission overview (workspace Connections page) and revoke routes."""
 
 from pathlib import Path
 
@@ -116,7 +116,7 @@ def _plugin_dir(tmp_path: Path) -> Path:
     return Latchkey(latchkey_directory=tmp_path, latchkey_binary="/nonexistent").plugin_data_dir
 
 
-def test_settings_page_lists_granted_service_per_workspace(tmp_path: Path) -> None:
+def test_connections_page_lists_granted_service(tmp_path: Path) -> None:
     agent, host = str(AgentId()), HostId()
     save_permissions(
         permissions_path_for_host(_plugin_dir(tmp_path), host),
@@ -125,7 +125,7 @@ def test_settings_page_lists_granted_service_per_workspace(tmp_path: Path) -> No
     handler = _build_handler(tmp_path)
     client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
 
-    response = client.get("/settings")
+    response = client.get(f"/workspace/{agent}/connections")
 
     assert response.status_code == 200
     body = response.text
@@ -135,12 +135,11 @@ def test_settings_page_lists_granted_service_per_workspace(tmp_path: Path) -> No
     assert 'data-service-name="slack"' in body
     # The per-permission description is surfaced as a tooltip on the pill.
     assert 'data-tooltip="All read operations across the Slack API."' in body
-    # The service section carries a per-service revoke-all action and a workspace count.
-    assert "Revoke all" in body
-    assert "1 workspace" in body
+    # Each grant card carries its own revoke action.
+    assert "Revoke" in body
 
 
-def test_settings_page_shows_plural_workspace_count(tmp_path: Path) -> None:
+def test_connections_page_shows_only_own_workspace_grants(tmp_path: Path) -> None:
     agent_a, host_a = str(AgentId()), HostId()
     agent_b, host_b = str(AgentId()), HostId()
     for host in (host_a, host_b):
@@ -153,13 +152,18 @@ def test_settings_page_shows_plural_workspace_count(tmp_path: Path) -> None:
         tmp_path, handler, {agent_a: str(host_a), agent_b: str(host_b)}, {agent_a: "A", agent_b: "B"}
     )
 
-    response = client.get("/settings")
+    response = client.get(f"/workspace/{agent_a}/connections")
 
     assert response.status_code == 200
-    assert "2 workspaces" in response.text
+    body = response.text
+    # The view is scoped to workspace A: its grant card renders, B's doesn't.
+    assert f'data-workspace-agent-id="{agent_a}"' in body
+    assert f'data-workspace-agent-id="{agent_b}"' not in body
 
 
-def test_settings_sidebar_groups_nav_into_sections(tmp_path: Path) -> None:
+def test_settings_page_no_longer_hosts_permission_sections(tmp_path: Path) -> None:
+    """Connector / permission management is per-workspace (the Connections
+    page); app-level Settings keeps only the device settings."""
     agent, host = str(AgentId()), HostId()
     handler = _build_handler(tmp_path)
     client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
@@ -167,25 +171,21 @@ def test_settings_sidebar_groups_nav_into_sections(tmp_path: Path) -> None:
     response = client.get("/settings")
 
     assert response.status_code == 200
-    nav = response.text.split("Settings sections")[1].split("</nav>")[0]
-    # The two group eyebrows and the compact nav labels.
-    assert 'type-section text-tertiary px-2 mb-1">Permissions' in nav
-    assert 'type-section text-tertiary px-2 mt-4 mb-1">Other' in nav
-    for label in ("Connectors", "Local files", "Workspaces", "Error reporting", "Backup password"):
-        assert label in nav
-    # The switchable entries are the nav buttons (the eyebrows are not buttons).
-    assert nav.count("data-settings-nav=") == 5
+    body = response.text
+    assert "data-settings-nav" not in body
+    assert "Workspace delegation" not in body
+    for label in ("Dark mode", "Report unexpected errors", "Backup password", "Version"):
+        assert label in body
 
 
-def test_settings_page_empty_state_when_no_grants(tmp_path: Path) -> None:
+def test_connections_page_empty_state_when_no_grants(tmp_path: Path) -> None:
     agent, host = str(AgentId()), HostId()
     handler = _build_handler(tmp_path)
     client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
 
-    response = client.get("/settings")
+    response = client.get(f"/workspace/{agent}/connections")
 
     assert response.status_code == 200
-    # Each category now has its own empty state.
     assert "No connectors have been added yet." in response.text
 
 
@@ -247,12 +247,12 @@ def test_revoke_missing_fields_returns_400(tmp_path: Path) -> None:
     assert response.status_code == 400
 
 
-def test_settings_page_shows_unavailable_notice_when_gateway_down(tmp_path: Path) -> None:
+def test_connections_page_shows_unavailable_notice_when_gateway_down(tmp_path: Path) -> None:
     agent, host = str(AgentId()), HostId()
     handler = _build_handler(tmp_path, gateway_client=_UnavailableGatewayClient())
     client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
 
-    response = client.get("/settings")
+    response = client.get(f"/workspace/{agent}/connections")
 
     assert response.status_code == 200
     assert "can't be loaded right now" in response.text
@@ -275,13 +275,13 @@ def _seed_file_sharing(
     return path
 
 
-def test_settings_page_lists_file_sharing_section(tmp_path: Path) -> None:
+def test_connections_page_lists_file_sharing_section(tmp_path: Path) -> None:
     agent, host = str(AgentId()), HostId()
     _seed_file_sharing(tmp_path, host, read_paths=("/home/docs",), write_paths=("/home/out",))
     handler = _build_handler(tmp_path)
     client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
 
-    response = client.get("/settings")
+    response = client.get(f"/workspace/{agent}/connections")
 
     assert response.status_code == 200
     body = response.text
@@ -351,19 +351,18 @@ def _seed_workspace_ops(tmp_path: Path, host: HostId, names: tuple[str, ...]) ->
     return path
 
 
-def test_settings_page_lists_workspace_delegation_by_granting_workspace(tmp_path: Path) -> None:
+def test_connections_page_lists_workspace_delegation(tmp_path: Path) -> None:
     agent, host = str(AgentId()), HostId()
     target = str(AgentId())
     _seed_workspace_ops(tmp_path, host, ("minds-workspaces-read", f"minds-workspaces-ssh-{target}"))
     handler = _build_handler(tmp_path)
     client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "Ops Bot"})
 
-    response = client.get("/settings")
+    response = client.get(f"/workspace/{agent}/connections")
 
     assert response.status_code == 200
     body = response.text
     assert "Workspace delegation" in body
-    # Grouped by the granting workspace (its name is the group heading).
     assert "Ops Bot" in body
     # One row per verb, each with its own revoke, keyed by the verb schema name.
     assert ">read</code>" in body and ">ssh</code>" in body

@@ -71,14 +71,16 @@ from imbue.minds.desktop_client.templates import render_create_form
 from imbue.minds.desktop_client.templates import render_creating_page
 from imbue.minds.desktop_client.templates import render_destroying_page
 from imbue.minds.desktop_client.templates import render_dev_styleguide_page
-from imbue.minds.desktop_client.templates import render_inbox_page
-from imbue.minds.desktop_client.templates import render_inbox_unavailable_fragment
+from imbue.minds.desktop_client.templates import render_accounts_modal_page
 from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
+from imbue.minds.desktop_client.templates import render_settings_modal_page
+from imbue.minds.desktop_client.templates import render_settings_page as render_app_settings_page
 from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_welcome_page
+from imbue.minds.desktop_client.templates import render_workspace_connections
 from imbue.minds.desktop_client.templates import render_workspace_settings
 from imbue.minds.desktop_client.templates_auth import render_auth_page
 from imbue.minds.desktop_client.templates_auth import render_check_email_page
@@ -372,13 +374,68 @@ def _build_scenarios() -> list[Scenario]:
             name="auth_error",
             builder=lambda: render_auth_error_page(message="This code has already been used."),
         ),
+        # -- App-level settings (page + centered modal) -------------------
         Scenario(
-            name="inbox_unavailable_fragment",
-            builder=lambda: render_inbox_unavailable_fragment(message="This request was already granted."),
+            name="settings_page",
+            builder=lambda: render_app_settings_page(
+                report_unexpected_errors=True,
+                include_error_logs=False,
+                has_saved_backup_password=True,
+                dark_mode=False,
+                region_options=["US-EAST-VA", "US-WEST-OR"],
+                region_selected="US-EAST-VA",
+                app_version="0.0.0-visualdiff",
+            ),
         ),
         Scenario(
-            name="inbox_empty",
-            builder=lambda: render_inbox_page(cards=[], selected_id="", detail_html="", is_empty=True),
+            name="settings_modal",
+            builder=lambda: render_settings_modal_page(
+                report_unexpected_errors=False,
+                include_error_logs=False,
+                has_saved_backup_password=False,
+                dark_mode=True,
+                region_options=["US-EAST-VA", "US-WEST-OR"],
+                region_selected="US-WEST-OR",
+                app_version="0.0.0-visualdiff",
+            ),
+        ),
+        Scenario(
+            name="accounts_modal",
+            builder=lambda: render_accounts_modal_page(
+                accounts=(account_a, account_b),
+                default_account_id=str(account_a.user_id),
+                enabled_by_user_id={str(account_a.user_id): True, str(account_b.user_id): False},
+            ),
+        ),
+        # -- Workspace connections ----------------------------------------
+        Scenario(
+            name="workspace_connections_empty",
+            builder=lambda: render_workspace_connections(agent_id=str(agent_a), ws_name="alpha"),
+        ),
+        Scenario(
+            name="workspace_connections_pending",
+            builder=lambda: render_workspace_connections(
+                agent_id=str(agent_a),
+                ws_name="alpha",
+                pending_requests=[
+                    {
+                        "id": "evt-00000000000000000000000000000001",
+                        "kind_label": "permission",
+                        "display_name": "Slack",
+                        "detail_html": render_predefined_permission_dialog(
+                            agent_id=str(agent_a),
+                            request_id="req-00000000000000000000000000000001",
+                            ws_name="alpha",
+                            rationale="I want to summarize today's messages.",
+                            service=slack_service,
+                            checked_permissions=("slack-read",),
+                            will_open_browser=True,
+                            mngr_forward_origin="http://localhost:8421",
+                        ),
+                    }
+                ],
+                selected_id="evt-00000000000000000000000000000001",
+            ),
         ),
         # -- Dev styleguide ----------------------------------------------
         Scenario(name="dev_styleguide", builder=render_dev_styleguide_page),

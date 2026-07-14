@@ -46,11 +46,11 @@
 
     {# -- Pending permission requests -- #}
     {% if pending_requests %}
-      <section class="mb-10" data-connections-pending>
+      <section class="mb-12" data-connections-pending>
         <h2 class="type-section text-tertiary mb-3">Waiting on you</h2>
         <div class="flex flex-col gap-3">
           {% for req in pending_requests %}
-            <div class="minds-card p-5 connections-request {% if req.id == selected_id %}is-selected{% endif %}"
+            <div class="minds-card p-6 connections-request {% if req.id == selected_id %}is-selected{% endif %}"
                  id="request-{{ req.id }}"
                  data-request-id="{{ req.id }}">
               {{ req.detail_html|safe }}
@@ -61,7 +61,7 @@
     {% endif %}
 
     {# -- Connectors held by this workspace -- #}
-    <section class="mb-10">
+    <section class="mb-12">
       <h2 class="type-section text-tertiary mb-3">Connected</h2>
       {% if permissions_unavailable %}
         <Notice variant="warn">
@@ -100,7 +100,7 @@
 
     {# -- File sharing held by this workspace -- #}
     {% if file_sharing_grants %}
-      <section class="mb-10">
+      <section class="mb-12">
         <h2 class="type-section text-tertiary mb-3">File sharing</h2>
         <p class="type-body text-secondary mb-3">
           Files and folders on this machine the workspace's agents can read or write.
@@ -131,7 +131,7 @@
 
     {# -- Workspace delegation held by this workspace -- #}
     {% if workspace_delegation_grants %}
-      <section class="mb-10">
+      <section class="mb-12">
         <h2 class="type-section text-tertiary mb-3">Workspace delegation</h2>
         <p class="type-body text-secondary mb-3">
           Access this workspace's agents hold to manage other workspaces (listing, creating,

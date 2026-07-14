@@ -14,7 +14,7 @@ def test_default_values_when_no_file(tmp_path: Path) -> None:
     """Default values are returned when config.toml does not exist."""
     config = _make_config(tmp_path)
     assert config.get_default_account_id() is None
-    assert config.get_auto_open_requests_panel() is True
+    assert config.get_dark_mode() is False
 
 
 def test_set_and_get_default_account_id(tmp_path: Path) -> None:
@@ -54,14 +54,14 @@ def test_set_region_overwrites_previous_value(tmp_path: Path) -> None:
     assert config.get_region("imbue_cloud") == "US-WEST-OR"
 
 
-def test_set_and_get_auto_open_requests_panel(tmp_path: Path) -> None:
-    """Setting auto_open_requests_panel persists correctly."""
+def test_set_and_get_dark_mode(tmp_path: Path) -> None:
+    """Setting dark_mode persists correctly."""
     config = _make_config(tmp_path)
-    config.set_auto_open_requests_panel(False)
-    assert config.get_auto_open_requests_panel() is False
+    config.set_dark_mode(True)
+    assert config.get_dark_mode() is True
 
-    config.set_auto_open_requests_panel(True)
-    assert config.get_auto_open_requests_panel() is True
+    config.set_dark_mode(False)
+    assert config.get_dark_mode() is False
 
 
 def test_error_reporting_settings_default_off(tmp_path: Path) -> None:
@@ -91,11 +91,11 @@ def test_persistence_across_instances(tmp_path: Path) -> None:
     """Config written by one instance is readable by a new instance."""
     config1 = _make_config(tmp_path)
     config1.set_default_account_id("user-abc")
-    config1.set_auto_open_requests_panel(False)
+    config1.set_dark_mode(True)
 
     config2 = _make_config(tmp_path)
     assert config2.get_default_account_id() == "user-abc"
-    assert config2.get_auto_open_requests_panel() is False
+    assert config2.get_dark_mode() is True
 
 
 def test_corrupt_toml_raises(tmp_path: Path) -> None:
@@ -110,17 +110,17 @@ def test_corrupt_toml_raises(tmp_path: Path) -> None:
     with pytest.raises(MindsConfigError):
         config.get_default_account_id()
     with pytest.raises(MindsConfigError):
-        config.get_auto_open_requests_panel()
+        config.get_dark_mode()
 
 
 def test_multiple_settings_coexist(tmp_path: Path) -> None:
     """Setting one value does not clobber other values."""
     config = _make_config(tmp_path)
     config.set_default_account_id("user-xyz")
-    config.set_auto_open_requests_panel(False)
+    config.set_dark_mode(True)
 
     assert config.get_default_account_id() == "user-xyz"
-    assert config.get_auto_open_requests_panel() is False
+    assert config.get_dark_mode() is True
 
     config.set_default_account_id("user-new")
-    assert config.get_auto_open_requests_panel() is False
+    assert config.get_dark_mode() is True

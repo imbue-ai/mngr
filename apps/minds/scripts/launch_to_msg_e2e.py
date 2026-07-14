@@ -638,20 +638,26 @@ def find_chat_window(ctx: BrowserContext) -> Page | None:
     return None
 
 
-def find_inbox_frame(ctx: BrowserContext) -> tuple[Page, Frame] | None:
-    """Locate the open inbox: the (owner page, frame at /inbox) pair, or None.
+def find_connections_page(ctx: BrowserContext) -> Page | None:
+    """Locate the content view showing a workspace's Connections page, or None.
 
-    The inbox renders as an iframe inside the warm overlay host
-    (``/_chrome/overlay``): ``openModal`` sends ``show-modal`` to overlay.js,
-    which mounts a modal iframe at ``/inbox`` -- the modal view's own URL
-    never changes. A page's main frame is included in ``page.frames``, so a
-    window navigated directly to ``/inbox`` also matches.
+    Pending permission requests render on ``/workspace/<id>/connections``
+    (the content view navigates there via the titlebar's Connections
+    icon-tab); there is no overlay inbox anymore.
     """
     for w in all_pages(ctx):
         with contextlib.suppress(Exception):
-            for f in w.frames:
-                if "/inbox" in f.url:
-                    return (w, f)
+            if "/connections" in w.url and "/workspace/" in w.url:
+                return w
+    return None
+
+
+def find_chrome_page(ctx: BrowserContext) -> Page | None:
+    """Locate the persistent chrome shell page (the titlebar, at ``/_chrome``)."""
+    for w in all_pages(ctx):
+        with contextlib.suppress(Exception):
+            if urllib.parse.urlsplit(w.url).path == "/_chrome":
+                return w
     return None
 
 
@@ -664,9 +670,8 @@ def pick_backend_page(ctx: BrowserContext, origin: str, timeout: float = 30.0) -
     attach timing, so ``ctx.pages[0]`` is a coin flip. Only the content view
     is safe to drive end to end: driving the overlay breaks screenshots and
     navigation (main.js keeps it collapsed and reloads it), and driving the
-    chrome shell navigates it off ``/_chrome``, killing the requests SSE
-    consumer that powers the inbox badge / auto-open, so the slack permission
-    flow never surfaces a Deny button. main.js points the content view at the
+    chrome shell off ``/_chrome`` would kill the titlebar (breadcrumb, tabs,
+    Connections badge) the permission flow drives. main.js points the content view at the
     backend landing page once the backend is ready, which is what this
     selector keys on: the loopback page on the backend port (pages use
     ``localhost`` while ``wait_backend_url`` reports ``127.0.0.1``) whose path
@@ -1857,23 +1862,21 @@ def _advance_approval(
     if decision not in ("approve", "deny"):
         raise E2EFailure(f"_advance_approval: decision must be approve|deny, got {decision!r}")
     snap_stage0, snap_stage1, snap_stage2_pre, snap_stage2_post = snap_prefix_pair
-    # The inbox renders as a modal iframe at /inbox inside the warm overlay
-    # host (see find_inbox_frame); the master/detail split lives in that one
-    # document (left list = .inbox-card, right detail loads via
-    # /inbox/detail/<id> fragment and contains the Approve/Deny form).
-    # Stage 0 waits for the /inbox frame (it auto-opens on new pending
-    # requests by default, see MindsConfig.get_auto_open_requests_panel).
-    # Stage 1 clicks the inbox card for the slack request to load the detail
-    # fragment. Stage 2 clicks Approve / Deny within the same frame.
+    # Pending permission requests live on the workspace's Connections page
+    # (/workspace/<id>/connections), reached via the titlebar's Connections
+    # icon-tab; each pending request renders as a card holding its full
+    # Approve/Deny form (no left drawer, no auto-open). Stage 0 waits for the
+    # agent's request signal in the chat, then clicks the Connections tab in
+    # the chrome titlebar. Stage 1 waits for the request card to render.
+    # Stage 2 clicks Approve / Deny on the card, then returns to the
+    # workspace via the Workspace icon-tab.
     if stage == 0:
-        # Check if the inbox modal already auto-opened (an /inbox iframe in
-        # the overlay host; see find_inbox_frame).
-        found = find_inbox_frame(ctx)
-        if found is not None:
-            owner, _ = found
-            logger.info("inbox modal auto-opened; advancing to stage 1")
+        # Already on the connections page (e.g. a prior round left it open)?
+        connections = find_connections_page(ctx)
+        if connections is not None:
+            logger.info("connections page already open; advancing to stage 1")
             state["stage"] = 1
-            snap_page(owner, snap_stage0)
+            snap_page(connections, snap_stage0)
             return
         # Wait for the agent to emit its request signal first. Case-fold
         # because Claude rephrases the message each run (eg "Waiting"
@@ -1891,47 +1894,38 @@ def _advance_approval(
         ):
             # Not ready yet.
             return
-        # Auto-open should fire on the SSE-pushed pending-set update; if
-        # it hasn't fired after a couple of polls, hit /inbox/toggle on
-        # the chrome titlebar as a fallback (the inbox icon's aria-label
-        # is "Inbox"; the old `button[title="Requests"]` is gone).
-        for w in all_pages(ctx):
-            try:
-                btn = w.locator('button[aria-label="Inbox"], button[title="Inbox"]')
-                if btn.count() > 0 and btn.first.is_visible():
-                    logger.info("clicking Inbox titlebar trigger")
-                    snap_page(w, snap_stage0)
-                    btn.first.click()
-                    state["stage"] = 1
-                    return
-            except Exception:
-                pass
-
-    # Stage 1: click the slack entry in the inbox left list.
-    elif stage == 1:
-        found = find_inbox_frame(ctx)
-        if found is None:
+        # Open the Connections view via the titlebar icon-tab (visible while
+        # a workspace is displayed). The tab may not have painted yet right
+        # after a navigation; the outer poll retries.
+        chrome = find_chrome_page(ctx)
+        if chrome is None:
             return
-        owner, panel = found
-        # Prefer the slack-named .inbox-card; fall back to the first
-        # selectable card if there's only one pending request.
-        for sel in (
-            '.inbox-card:has-text("slack")',
-            '.inbox-card:has-text("Slack")',
-            ".inbox-card",
-        ):
-            try:
-                loc = panel.locator(sel).first
-                if loc.count() > 0 and loc.is_visible():
-                    logger.info("clicking inbox card via {!r}", sel)
-                    snap_page(owner, snap_stage1)
-                    loc.click()
-                    state["stage"] = 2
-                    return
-            except Exception:
-                pass
+        try:
+            btn = chrome.locator("#ws-tab-connections")
+            if btn.count() > 0 and btn.first.is_visible():
+                logger.info("clicking Connections titlebar tab")
+                snap_page(win, snap_stage0)
+                btn.first.click()
+                state["stage"] = 1
+        except Exception:
+            pass
 
-    # Stage 2: click Approve or Deny in the inbox detail pane (same /inbox page).
+    # Stage 1: wait for the pending request card to render on the page.
+    elif stage == 1:
+        connections = find_connections_page(ctx)
+        if connections is None:
+            return
+        try:
+            card = connections.locator(".connections-request").first
+            if card.count() > 0 and card.is_visible():
+                logger.info("connections page shows a pending request card")
+                snap_page(connections, snap_stage1)
+                state["stage"] = 2
+        except Exception:
+            pass
+
+    # Stage 2: click Approve or Deny on the request card, then return to the
+    # workspace via the Workspace icon-tab.
     elif stage == 2:
         if decision == "approve":
             button_selectors = (
@@ -1940,49 +1934,54 @@ def _advance_approval(
             )
         else:
             button_selectors = ('button:has-text("Deny")',)
-        found = find_inbox_frame(ctx)
-        if found is None:
+        connections = find_connections_page(ctx)
+        if connections is None:
             return
-        owner, panel = found
         try:
             btn = None
             for bsel in button_selectors:
-                candidate = panel.locator(bsel).first
+                candidate = connections.locator(bsel).first
                 if candidate.count() > 0 and candidate.is_visible():
                     btn = candidate
                     break
             if btn is None:
                 return
-            logger.info("clicking {} button on inbox detail", decision)
-            snap_page(owner, snap_stage2_pre)
+            logger.info("clicking {} button on the connections page", decision)
+            snap_page(connections, snap_stage2_pre)
             btn.click()
             state["stage"] = 3
-            # Snap a beat later. For approve the inbox shows the
-            # browser-launch / success notice; for deny the inbox
-            # closes back to the chat window.
+            # Snap a beat later. For approve the card shows the
+            # browser-launch / success notice (the page reloads once the
+            # grant resolves); for deny the card fades until the SSE-driven
+            # reload drops it.
             _sleep(2)
-            snap_target = owner
-            if decision == "deny":
-                chat_after = find_chat_window(ctx)
-                if chat_after is not None:
-                    snap_target = chat_after
             with contextlib.suppress(Exception):
-                snap_page(snap_target, snap_stage2_post)
+                snap_page(connections, snap_stage2_post)
             if decision == "approve":
                 # Surface latchkey-side authorisation failures
                 # immediately rather than waiting DRIVE_SLACK_TIMEOUT
-                # seconds for a timeout. The post-approve page renders
-                # the error banner verbatim; parse the visible text
-                # and raise so CI fails on the actual signal, not a
-                # timeout that happens to coincide.
+                # seconds for a timeout. The card renders the error
+                # banner verbatim; parse the visible text and raise so
+                # CI fails on the actual signal, not a timeout that
+                # happens to coincide.
+                try:
+                    body_text = connections.evaluate("document.body.innerText")
+                except Exception:
+                    body_text = ""
+                if "Authorization failed" in body_text or "No browser configured" in body_text:
+                    raise E2EFailure(
+                        f"{snap_stage2_post} shows authorization failure: " + body_text.replace("\n", " | ")[:400]
+                    )
+            # Return the content view to the workspace so the chat drive
+            # can continue (kicks are sent from the main poll loop after
+            # a KICK_DELAY settle period; see slack-flow loop).
+            chrome = find_chrome_page(ctx)
+            if chrome is not None:
                 with contextlib.suppress(Exception):
-                    body_text = panel.evaluate("document.body.innerText")
-                    if "Authorization failed" in body_text or "No browser configured" in body_text:
-                        raise E2EFailure(
-                            f"{snap_stage2_post} shows authorization failure: " + body_text.replace("\n", " | ")[:400]
-                        )
-            # Kicks are sent from the main poll loop after a
-            # KICK_DELAY settle period; see slack-flow loop.
+                    tab = chrome.locator("#ws-tab-workspace")
+                    if tab.count() > 0 and tab.first.is_visible():
+                        logger.info("clicking Workspace titlebar tab to return to the chat")
+                        tab.first.click()
             return
         except E2EFailure:
             raise

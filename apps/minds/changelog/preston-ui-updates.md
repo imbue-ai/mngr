@@ -1,0 +1,11 @@
+Reworked the desktop app's titlebar and navigation to match the minds-options mockup (https://imbue-ai.github.io/mind-sketches/prototypes/minds-options/):
+
+- The titlebar's left side is now a single "(home icon) Minds" button that grows into a breadcrumb ("Minds / workspace-name") on workspace-scoped screens, with Workspace / Connections / Workspace Settings icon-tabs and the workspace switcher menu anchored to the workspace name (the old hamburger menu, minus its Settings entry). The global back/forward arrows, the requests toggle, and the centered page title are gone; a contextual back arrow appears only on pages that opt in (the create form, the sharing editor, browser-mode fallbacks). The top-right keeps only the report-a-bug button.
+
+- The home screen gained bottom-left launchers ("Minds Settings" and the signed-in account email, or "Log in") that open centered modals on the shared overlay surface in Electron; the full-page /settings and /accounts routes remain as browser-mode fallbacks.
+
+- The Minds Settings surface now holds only per-machine device settings: Appearance (dark mode, promoted from the dev-only styleguide toggle to a persisted setting rendered server-side on every page), Error reporting, a functional default Imbue Cloud region (the same preference the create form pre-selects and writes back), Backup password, and About/version. Its connectors/permissions sections moved to the per-workspace Connections view.
+
+- Pending permission requests moved out of the left-anchored inbox drawer into each workspace's Connections view (/workspace/<id>/connections), opened from the titlebar's Connections icon-tab (which carries a per-workspace pending-request badge). The view shows "Waiting on you" cards holding the full Approve/Deny forms plus the connectors, shared files, and workspace delegation the workspace holds, with revoke actions. A new pending request just updates the badge and raises an OS notification whose click lands on the owning workspace's Connections view with the request highlighted -- nothing auto-opens, and the auto-open setting and /inbox routes were removed.
+
+- The sign-in modal honors ?return_to= so sign-ins launched from the home screen or the Manage Accounts modal land back where they started; the create-flow default is unchanged.

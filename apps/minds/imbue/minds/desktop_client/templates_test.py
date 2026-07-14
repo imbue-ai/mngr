@@ -556,25 +556,52 @@ def test_render_login_page_shows_prompt() -> None:
 def test_render_chrome_page_contains_titlebar() -> None:
     html = render_chrome_page()
     assert "minds-titlebar" in html
-    assert "sidebar-toggle" in html
     assert "home-btn" in html
     assert "back-btn" in html
     assert "content-frame" in html
+    # The home button reads "(icon) Minds"; there is no hamburger menu, no
+    # forward arrow, and no centered page title.
+    assert ">Minds</span>" in html
+    assert "sidebar-toggle" not in html
+    assert "forward-btn" not in html
+    assert 'id="page-title"' not in html
 
 
-def test_render_chrome_page_titlebar_centers_title_with_1_2_1_sections() -> None:
-    # The titlebar is three flex sections sized 1 / 2 / 1 (left controls |
-    # title | right controls) so the workspace title sits in the window's exact
-    # horizontal center regardless of how wide each side's controls are. The
-    # title's section grows at flex-[2] and centers its content; it is flanked
-    # by exactly two flex-1 sections (left + right). The center must NOT be a
-    # lone flex-1 -- that centered the title within the *leftover* space, so it
-    # drifted off-center whenever the two sides differed in width.
+def test_render_chrome_page_contains_workspace_crumb_and_icon_tabs() -> None:
+    # The breadcrumb block ("/ workspace-name (chevron)") and the three
+    # workspace icon-tabs render hidden; chrome.js shows them on
+    # workspace-scoped screens. The switcher button anchors the workspace
+    # menu beneath itself.
+    html = render_chrome_page()
+    assert 'id="ws-crumb"' in html
+    assert 'id="workspace-switcher-btn"' in html
+    assert 'id="ws-tab-workspace"' in html
+    assert 'id="ws-tab-connections"' in html
+    assert 'id="ws-tab-settings"' in html
+    assert 'id="page-crumb"' in html
+    # Visibility is driven through the native ``hidden`` attribute (the blocks
+    # carry flex display classes that would beat a ``hidden`` class).
+    assert 'id="ws-crumb" class="flex items-center gap-0.5 min-w-0" hidden' in html
+
+
+def test_render_chrome_page_contextual_back_button_starts_hidden() -> None:
+    # The back arrow is contextual: hidden at rest, shown by chrome.js only on
+    # pages that opt in (e.g. the create form). There is no forward arrow.
+    html = render_chrome_page()
+    back_open = html.index('id="back-btn"')
+    back_tag = html[html.rindex("<button", 0, back_open) : html.index(">", back_open)]
+    assert " hidden" in back_tag
+
+
+def test_render_chrome_page_titlebar_is_left_cluster_plus_right_cluster() -> None:
+    # The titlebar is a growing left cluster (breadcrumb + icon-tabs) and a
+    # shrink-0 right cluster (bug report + non-mac window controls); there is
+    # no centered title section.
     html = render_chrome_page()
     titlebar = html[html.index('id="minds-titlebar"') : html.index('id="sidebar-backdrop"')]
-    assert "flex-[2] flex items-center justify-center" in titlebar
-    assert "flex-[2]" in titlebar[: titlebar.index('id="page-title"')]
-    assert titlebar.count("flex-1") == 2
+    assert titlebar.count("flex-1") == 1
+    assert "flex-[2]" not in titlebar
+    assert "justify-end shrink-0" in titlebar
 
 
 def test_render_chrome_page_titlebar_reserves_mac_traffic_lights_with_spacer() -> None:
@@ -591,20 +618,21 @@ def test_render_chrome_page_titlebar_reserves_mac_traffic_lights_with_spacer() -
     # The padding approach is the bug being fixed: it must not come back.
     assert "pl-[72px]" not in html_mac
     assert "pl-[72px]" not in html_other
-    # The spacer sits at the very start of the left section, ahead of the menu
-    # button (#sidebar-toggle), only on macOS.
-    left_section_mac = html_mac[: html_mac.index('id="sidebar-toggle"')]
+    # The spacer sits at the very start of the left section, ahead of the back
+    # button (#back-btn), only on macOS.
+    left_section_mac = html_mac[: html_mac.index('id="back-btn"')]
     assert 'class="w-[72px] shrink-0" aria-hidden="true"' in left_section_mac
     assert "w-[72px]" not in html_other
 
 
-def test_render_chrome_page_requests_badge_is_inline_count() -> None:
-    # The requests badge is the Badge count pill sat inline beside the messages
-    # icon (gap-[3px] row), not a dot overlapping the icon's corner: it carries
-    # the type-badge pill role and no absolute positioning (chrome.js fills the
-    # count text + toggles the native `hidden` attribute).
+def test_render_chrome_page_connections_badge_is_inline_count() -> None:
+    # The Connections icon-tab's pending-request badge is the Badge count pill
+    # sat inline beside the plug icon (gap-[3px] row), not a dot overlapping
+    # the icon's corner: it carries the type-badge pill role and no absolute
+    # positioning (chrome.js fills the count text + toggles the native
+    # `hidden` attribute, scoped to the breadcrumb's workspace).
     html = render_chrome_page()
-    assert 'id="requests-badge"' in html
+    assert 'id="connections-badge"' in html
     assert "type-badge" in html
     assert "gap-[3px]" in html
     # No corner overlay: the badge no longer pins itself to the top-right.
@@ -612,8 +640,8 @@ def test_render_chrome_page_requests_badge_is_inline_count() -> None:
     # Hidden at rest via the native `hidden` ATTRIBUTE, not a `hidden` class: the
     # pill bakes in `inline-flex`, which beats the `.hidden` utility, so a class
     # would leave a stray "0" showing. Match the bare attribute on the pill.
-    assert 'id="requests-badge" hidden>' in html
-    assert 'id="requests-badge" class="hidden"' not in html
+    assert 'id="connections-badge" hidden>' in html
+    assert 'id="connections-badge" class="hidden"' not in html
 
 
 def test_render_chrome_page_drops_title_swatch_and_seam_border() -> None:
@@ -641,12 +669,14 @@ def test_render_chrome_page_titlebar_background_follows_titlebar_bg_var() -> Non
     assert "var(--titlebar-bg" in html
 
 
-def test_render_chrome_page_page_title_uses_text_primary_token() -> None:
-    # The page title is a plain ``text-primary`` token; the ``.titlebar-surface``
-    # scope re-bases that token off --titlebar-bg, so the title flips
-    # black/white with the accent's lightness (in pure CSS).
+def test_render_chrome_page_crumbs_use_type_label_tokens() -> None:
+    # The breadcrumb text (workspace name / page name) uses plain type-label +
+    # text tokens; the ``.titlebar-surface`` scope re-bases those tokens off
+    # --titlebar-bg, so the crumbs flip black/white with the accent's
+    # lightness (in pure CSS).
     html = render_chrome_page()
-    assert 'id="page-title" class="text-primary' in html
+    assert 'id="workspace-switcher-name" class="type-label' in html
+    assert 'id="page-crumb-name" class="type-label text-primary' in html
 
 
 def test_render_chrome_page_account_button_lives_in_sidebar() -> None:
@@ -708,13 +738,14 @@ def test_render_sidebar_page_contains_workspace_list() -> None:
     # breaks the click-outside-to-close behavior.
     assert 'id="sidebar-menu"' in html
     # SidebarBottom.jinja is rendered inside the floating menu in both
-    # Chrome.jinja (browser mode) and Sidebar.jinja (the sidebar page loaded
+    # Chrome.jinja (browser mode) and Sidebar.jinja (the switcher page loaded
     # into the shared modal WebContentsView in Electron). It carries the
-    # "New workspace" CTA, the "Settings" entry, and the "Manage account(s)" /
-    # "Log in" entry; the label is updated dynamically by sidebar.js from
-    # /auth/api/status.
+    # "New workspace" CTA and the "Manage account(s)" / "Log in" entry; the
+    # label is updated dynamically by sidebar.js from /auth/api/status.
+    # App-level Settings is NOT here -- it opens from the home screen's
+    # bottom-left launcher.
     assert 'id="sidebar-new-workspace"' in html
-    assert 'id="sidebar-settings"' in html
+    assert 'id="sidebar-settings"' not in html
     assert 'id="sidebar-account"' in html
     assert 'id="sidebar-account-label"' in html
 

@@ -6,7 +6,7 @@ Audit date: 2026-04-23
 
 The minds desktop app uses a layered proxy architecture:
 
-1. **Electron shell** (`electron/main.js`): Creates `BaseWindow` with multiple `WebContentsView` instances (chromeView, contentView, modalView -- the modalView hosts both the sidebar page and the inbox page). Manages window lifecycle and IPC.
+1. **Electron shell** (`electron/main.js`): Creates `BaseWindow` with multiple `WebContentsView` instances (chromeView, contentView, modalView -- the modalView hosts the workspace switcher and the centered modal pages: settings, accounts, sign-in, help). Manages window lifecycle and IPC.
 
 2. **Desktop client** (FastAPI, `desktop_client/app.py`): Runs on `localhost:PORT`. Handles auth, agent discovery, and proxies `<agent-id>.localhost:PORT` subdomain requests to per-agent system interfaces.
 
@@ -30,7 +30,7 @@ Previously, the desktop client proxy (`_forward_workspace_http`) forwarded all r
 
 **NO.** localStorage is origin-scoped. `agent-A.localhost:PORT` and `agent-B.localhost:PORT` are different origins, so they have completely separate localStorage, sessionStorage, and IndexedDB storage.
 
-Note: Content views now use a separate Electron session partition (`persist:workspace-content`), while the chrome and modal views (the modal hosts the sidebar and inbox pages) use the default session. Even without this partition, web storage would still be scoped by origin per Chromium's standard behavior. The partition adds defense-in-depth by fully separating the content cookie jar from chrome-level cookies.
+Note: Content views now use a separate Electron session partition (`persist:workspace-content`), while the chrome and modal views (the modal hosts the workspace switcher and the centered modal pages) use the default session. Even without this partition, web storage would still be scoped by origin per Chromium's standard behavior. The partition adds defense-in-depth by fully separating the content cookie jar from chrome-level cookies.
 
 ## Question 3: Can agents access cookies/localStorage used by the outer minds app?
 
@@ -114,7 +114,7 @@ Cons:
 
 ### Option C (variant): Content session partitioning -- IMPLEMENTED
 
-Rather than per-agent partitions (which would require complex cookie re-synchronization), a single shared content partition (`persist:workspace-content`) is used for all content views. The chrome and modal views (the modal hosts the sidebar and inbox pages) continue to use the default Electron session. A cookie sync mechanism copies `minds_session` cookies from the content partition to the default session so that chrome-level auth checks work.
+Rather than per-agent partitions (which would require complex cookie re-synchronization), a single shared content partition (`persist:workspace-content`) is used for all content views. The chrome and modal views (the modal hosts the workspace switcher and the centered modal pages) continue to use the default Electron session. A cookie sync mechanism copies `minds_session` cookies from the content partition to the default session so that chrome-level auth checks work.
 
 This separates the content cookie jar from the chrome cookie jar, adding defense-in-depth. Agents remain origin-isolated within the content partition via standard Chromium same-origin policy.
 
