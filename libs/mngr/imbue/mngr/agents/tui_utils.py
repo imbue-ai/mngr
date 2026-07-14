@@ -50,11 +50,9 @@ _NON_ALNUM_RE: Final[re.Pattern[str]] = re.compile(r"[^a-z0-9]")
 # ``alarm(0)`` cancels the timer, so a sub-second deadline would mean no deadline. A
 # failed ``exec`` returns to perl, which would fall off the end of the program and
 # exit 0, so it exits 127 instead.
+_PERL_TIMEOUT: Final[str] = "perl -MTime::HiRes=alarm -e 'alarm shift; exec @ARGV or exit 127'"
 _TIMEOUT_FUNCTION: Final[str] = (
-    "_timeout() { "
-    'if command -v timeout >/dev/null 2>&1; then timeout "$@"; '
-    "else perl -MTime::HiRes=alarm -e 'alarm shift; exec @ARGV or exit 127' \"$@\"; fi; "
-    "}; "
+    f'_timeout() {{ if command -v timeout >/dev/null 2>&1; then timeout "$@"; else {_PERL_TIMEOUT} "$@"; fi; }}; '
 )
 
 
