@@ -953,9 +953,7 @@ def _focus_row_by_name(state: _KanpanState, name: AgentName) -> None:
 def _run_transcript(agent_name: str) -> subprocess.CompletedProcess[str]:  # pragma: no cover
     """Read the agent's user/assistant messages. Called from a background thread.
 
-    Slash-command scaffolding and other framework-injected turns are already dropped
-    upstream (claude's converter reclassifies them to the tool role), so the plain
-    ``--role user --role assistant`` filter yields the readable conversation. No
+    The role filter excludes tool turns, keeping the readable conversation. No
     ``--tail`` window -- the whole thing is fetched and the panel keeps the tail.
     """
     return subprocess.run(
