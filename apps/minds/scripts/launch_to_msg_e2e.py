@@ -1964,10 +1964,9 @@ def _advance_approval(
                 # banner verbatim; parse the visible text and raise so
                 # CI fails on the actual signal, not a timeout that
                 # happens to coincide.
-                try:
+                body_text = ""
+                with contextlib.suppress(Exception):
                     body_text = connections.evaluate("document.body.innerText")
-                except Exception:
-                    body_text = ""
                 if "Authorization failed" in body_text or "No browser configured" in body_text:
                     raise E2EFailure(
                         f"{snap_stage2_post} shows authorization failure: " + body_text.replace("\n", " | ")[:400]

@@ -63,6 +63,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.permission_overview import PermissionOverviewError
+from imbue.minds.desktop_client.latchkey.permission_overview import ServicePermissionOverview
 from imbue.minds.desktop_client.latchkey.permission_overview import build_file_sharing_overview
 from imbue.minds.desktop_client.latchkey.permission_overview import build_permission_overview
 from imbue.minds.desktop_client.latchkey.permission_overview import build_workspace_overview
@@ -2193,7 +2194,13 @@ def _handle_workspace_connections(
             ):
                 grants = tuple(g for g in service.workspace_grants if g.workspace_agent_id == agent_id)
                 if grants:
-                    services_overview.append(service.model_copy(update={"workspace_grants": grants}))
+                    services_overview.append(
+                        ServicePermissionOverview(
+                            service_name=service.service_name,
+                            display_name=service.display_name,
+                            workspace_grants=grants,
+                        )
+                    )
             file_sharing_grants = [
                 grant
                 for grant in build_file_sharing_overview(
