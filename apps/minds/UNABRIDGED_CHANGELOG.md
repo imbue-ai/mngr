@@ -4,6 +4,90 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-13
+
+Serve the workspace UI over HTTP/2 to fix the hang that occurred once enough streaming tabs were open in one workspace.
+
+The whole workspace origin was previously served over plain HTTP/1.1, which Chromium caps at ~6 held-open connections per origin. Once a workspace had that many long-lived streams (one SSE per open chat tab, plus any `/service/` app's own streams), the pool was exhausted and every further request -- including the plain GETs that bootstrap a new terminal or app iframe -- queued indefinitely, hanging the UI even though the backend was healthy.
+
+Minds now runs its single `mngr forward` proxy with `--use-http2`, so the workspace origin terminates TLS and negotiates HTTP/2 (which multiplexes many streams over one connection). The Python readiness/recovery probes and the `/goto/` redirect URLs flip to `https` in lockstep, and the Electron shell builds `https`/`wss` workspace URLs, marks the `mngr_forward_session` cookie `Secure`, and silently trusts the proxy's ephemeral self-signed cert for its loopback origins (`localhost`, `*.localhost`, `127.0.0.1`) in the workspace-content session only -- every real https origin still gets Chromium's normal verification. The minds bare-origin backend (Home/Create/chrome/sidebar and its `minds_session` cookie) stays plain HTTP; the app deliberately runs a mixed http/https transport, which is not mixed-content-blocked.
+
+The recovery page no longer renders a restart verdict for a workspace whose host could not be observed during discovery. Previously, an unreachable imbue_cloud host surfaced as CRASHED, which the recovery classifier read as a trusted "container is down" observation: it classified HOST_OFFLINE and auto-dispatched an unattended host restart -- a restart that is doomed by construction, because restarting routes over the same outer SSH that is unreachable.
+
+With the imbue_cloud provider now surfacing unreachable hosts as UNKNOWN, the dispatch-tier classifier treats a host state that answers neither "running" nor "offline" (UNKNOWN, transitional states like STARTING, or an absent host state) as non-evidence, the same way it treats a timed-out probe: it classifies INDETERMINATE, so the page shows the live "Reconnecting" state, keeps checking, and offers no restart -- returning the user to the workspace automatically the moment it answers.
+
+The consent-gated HOST_UNRESPONSIVE verdict is now reserved for containers that were actually observed running but cannot be reached inside: an observed RUNNING claim whose in-container exec cleanly failed, and the UNAUTHENTICATED state, which providers emit for a running container whose inner SSH is unreachable (e.g. its sshd died). For that dead-sshd case the consent-gated host restart is the engineered recovery (its stop step is not skipped, so the stop/start relaunches sshd) -- preserving the behavior introduced for the docker provider in PR #2247. HOST_OFFLINE (unattended restart) still requires an actual observation that the container is stopped.
+
+Known remaining ambiguity, still deferred (originally flagged in PR #2247): imbue_cloud also reuses UNAUTHENTICATED for an outer-SSH authentication rejection, where the offered restart fails on the same auth error. Distinguishing "running but inner SSH dead" from "outer auth rejected" needs a dedicated provider state (e.g. UNREACHABLE), which is a provider-vocabulary change spanning imbue_cloud, docker, mngr_wait, and docs.
+
+- The Docker compute provider now picks its container runtime per platform
+  instead of always using gVisor (`runsc`). The create form gained an advanced
+  "Container runtime" setting (runc vs runsc) that defaults to runc on macOS
+  (where gVisor is unavailable) and runsc on Linux, and can be overridden per
+  workspace. macOS users no longer need the
+  `MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME=runc` environment-variable workaround
+  to create a local Docker workspace.
+
+- Under the hood, selecting runsc stacks a new `docker_runsc` create-template
+  overlay (in default-workspace-template) on top of the shared `docker` template,
+  so the gVisor choice is the only difference between the two runtimes and the
+  runc path -- the default -- is now what runs on macOS.
+
+- The create-form/API runtime default now honors a `MINDS_DOCKER_RUNTIME_DEFAULT`
+  environment override. It is unset in real deployments (so Linux still defaults
+  to runsc) and is set to `RUNC` by the e2e/snapshot test paths, whose Docker
+  daemon has no gVisor -- this is the layer that decides whether the create
+  stacks `docker_runsc` at all, which the mngr provider-config env var cannot
+  undo once the template is explicitly stacked.
+
+The minds backend now tells Sentry to ignore the paramiko/pyinfra stdlib loggers. The backend brokers cross-workspace reverse SSH tunnels through the same paramiko machinery, so handled SSH connection-failure noise logged at ERROR by paramiko would otherwise be captured by Sentry's default logging integration and flood the project with un-rate-limited events. Genuine, actionable failures still reach Sentry as typed exceptions logged through loguru.
+
+Increased the discovery-health watchdog's producer-stall threshold from 35s to 180s. The previous value sat only a few seconds above the healthy interval between discovery snapshots (mngr's default per-provider poll interval is 30s, and a single slow-but-alive provider can legitimately take up to ~150s between snapshots), so a merely-slow producer could be misread as stalled and trigger spurious supervisor bounces/restarts (each of which re-provisions every managed host). The new threshold clears the worst-case healthy cadence, so only a producer emitting literally nothing trips the watchdog, as intended. Also corrected the accompanying inline documentation, which incorrectly described the discovery cadence as ~10s.
+
+## 2026-07-11
+
+The forever-claude-template repo is being renamed to default-workspace-template (with the `fct`/`FCT` shorthand expanded to `default_workspace_template`/`DEFAULT_WORKSPACE_TEMPLATE` forms).
+
+The default template git URL constant is now `DEFAULT_WORKSPACE_TEMPLATE_GIT_URL`, the `fct_worktree` module is renamed to `default_workspace_template_worktree` (`FctWorktreeError` becomes `DefaultWorkspaceTemplateWorktreeError`, `FctTemplateRef` becomes `DefaultWorkspaceTemplateRef`), and the `FCT_DIR` env var read by `just sync-vendor-mngr` is now `DEFAULT_WORKSPACE_TEMPLATE_DIR` (the recipe errors with a rename hint when only the old var is set). Docs and skills reference the new repo name.
+
+Removed the stale-SSH-port workaround from `test_backup_enable_repair_and_destination_change_on_resumed_workspace` (the `docker stop` + host-side `mngr start` heal that ran before the first host-side connection). The docker provider now reconciles the recorded SSH port against the container's live mapping on every connection (PR #2395), so the first `mngr exec` into the raw-`docker start`-resumed workspace heals the host record on its own.
+
+## 2026-07-10
+
+Permission-request dialogs now dismiss the whole inbox window after you Approve or Deny, unless you intentionally opened the full inbox via the Requests button. Previously, resolving a request that you had opened from a notification (or that auto-opened when it arrived) would advance to the next pending request, which could surprise you by suddenly surfacing an unrelated, stale request from another agent. Opening the whole inbox with the Requests button still advances through pending requests as before.
+
+The app-level Settings page is now organized into a left nav (Permissions, Error reporting) with a right content pane, replacing the single-column layout.
+
+The app-level Settings page gains three new permission sections, grouped under a "Permissions" heading in the left nav ("Connectors", "Local files", "Workspaces"; "Error reporting" sits under "Other"), letting you inspect and revoke -- across all active workspaces -- the access your agents have been granted:
+
+"Connectors": third-party services your agents have connected to (Slack, GitHub, ...). Each service lists one card per workspace that has access, with the granted permissions; hover a permission to see what it allows. Revoke a single workspace's access, or use "Revoke all" to revoke that service from every workspace at once. Your saved sign-in is kept, so agents can reconnect later.
+
+"File sharing": local files and folders your agents can access over the shared file mount. Each workspace gets a full-width card listing every shared path with its access level ("read" or "read and write"). Revoke a single workspace's file sharing or all of it at once.
+
+"Workspace delegation": access you've granted agents in one workspace to manage other workspaces (list/create plus targeted operations like destroy, start/stop, SSH, and health checks). It's grouped by the granting workspace, with one row per operation showing which workspace(s) it applies to ("All workspaces" or specific ones); hover an operation to see what it allows. Each row can be revoked individually.
+
+Revocation only removes the relevant rules and leaves unrelated permissions intact.
+
+Revoking removes only the permission rule (through the latchkey gateway's permissions extension); your saved sign-in for the service is left in place, and agents can request access again later through the usual permission-request flow. Changing or broadening an existing grant is still done via that request flow, not from this page. Destroyed workspaces are not shown.
+
+Cloudflare sharing (and every other `mngr imbue_cloud …` call) is now routed through the shared pre-warmed `MngrCaller` instead of spawning a fresh `mngr` subprocess each time. A single sharing action fires several sequential `mngr imbue_cloud tunnels …` invocations, each of which previously re-paid the multi-second Python interpreter + plugin-import startup cost; reusing the warm-process machinery removes that per-call fixed cost.
+
+`MngrCaller.call` gained an optional `cwd` argument so callers whose config resolution must not depend on the minds backend's working directory (like `imbue_cloud`, which runs from `$HOME`) can pin it. The warm process `chdir`s into it before running the CLI, safely, since it is a throwaway process.
+
+Several more one-shot `mngr` invocations on the desktop backend now use the warm-process caller instead of spawning a fresh `mngr` each time: the Cloudflare tunnel-token injection/removal (`mngr exec`, part of the sharing flow) and the best-effort in-workspace git version reads (`mngr exec git`). Long-lived streaming invocations (`mngr forward`/`observe`), progress-streaming ones (`mngr create`, `mngr aws prepare`), the `mngr list | mngr destroy` shell pipeline, and the short-lived operator CLI commands are deliberately left as subprocesses.
+
+`MngrCaller.prewarm` is renamed to `MngrCaller.initialize`, and the caller now requires an externally-supplied concurrency group: it no longer lazily creates its own, and a `call` before `initialize` raises `MngrCallerNotInitializedError` rather than silently self-managing. The minds backend initializes the shared caller once at startup, before serving any request.
+
+The pre-warmed `mngr` processes spawned by `MngrCaller` now run mngr's parent-death watcher. Previously an idle warm process would exit on its own when the minds backend went away (its socket reports EOF), but a warm process that was orphaned *mid-request* (while running a slow or hung `mngr` command, when the socket is no longer being watched) could linger. It is now dismissed via SIGTERM when its parent dies, so no orphaned warm process is left behind.
+
+minds.log is no longer flooded with repeated "Discovery error from ..." warnings for unauthorized providers: the forward stream consumer logs each provider-level discovery error once per process (with a note that repeats are suppressed) and an info-level recovery line when the provider's discovery next succeeds. Host- and agent-attributed discovery errors keep logging on every occurrence.
+
+The bootstrap now always writes all four `[providers.aws-<region>]` blocks into the mngr profile settings, regardless of whether AWS credentials are present -- a credential-less region shows a discovery error in the providers panel (like vultr/ovh/gcp) instead of being silently absent. The rewrite preserves a panel-toggled `is_enabled` on these blocks.
+
+The `[providers.modal]` block gets the same treatment: a panel-toggled `is_enabled = false` no longer triggers a rewrite on every startup (which previously reset it back to enabled) and is carried over when a rewrite does happen.
+
+`_ensure_mngr_settings` now reports whether it modified the settings file, and the signin path bounces `mngr observe` when the provider set changed for any reason (previously only a per-account block change triggered the bounce).
+
 ## 2026-07-09
 
 The workspace (cross-workspace access) permission request dialog now splits the grantable actions into two clearly labeled groups: "General permissions" (which apply across all workspaces, e.g. listing/reading and creating workspaces) and "Workspace-specific permissions" (which act on individual workspaces, e.g. destroy, start/stop, SSH).

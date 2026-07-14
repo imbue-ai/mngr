@@ -1429,7 +1429,7 @@ def test_reap_agent_process_tree_kills_pane_and_env_marked_orphans_but_not_the_s
     orphans (reparented to PID 1), with SIGTERM then SIGKILL, but does NOT kill the
     tmux session itself.
 
-    Regression: a long-lived daemon launched under an agent (the FCT bootstrap's
+    Regression: a long-lived daemon launched under an agent (the DEFAULT_WORKSPACE_TEMPLATE bootstrap's
     supervisord and its ttyd) could be orphaned to PID 1 on an abrupt teardown and
     outlive the agent, holding a fixed port (EADDRINUSE on the next relaunch). The
     shared reap must catch such orphans via the env marker, which a pane/tree walk

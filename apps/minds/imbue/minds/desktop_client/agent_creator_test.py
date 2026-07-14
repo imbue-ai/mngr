@@ -53,6 +53,7 @@ from imbue.minds.errors import MngrCommandError
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
+from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
 from imbue.minds.primitives import LaunchMode
@@ -60,6 +61,8 @@ from imbue.minds.utils.secret_redaction import redact_secret_env_assignments
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
+from imbue.mngr_forward.tls import build_server_ssl_context
+from imbue.mngr_forward.tls import generate_self_signed_cert
 from imbue.mngr_latchkey.agent_setup import SECRET_LATCHKEY_ENV_VAR_NAMES
 
 
@@ -492,6 +495,51 @@ def test_build_mngr_create_command_ignores_region_for_docker() -> None:
     assert "region=" not in joined and "vultr-region" not in joined
 
 
+def test_build_mngr_create_command_docker_runsc_stacks_gvisor_overlay() -> None:
+    """``DockerRuntime.RUNSC`` stacks the ``docker_runsc`` overlay on the docker template.
+
+    The overlay reuses the docker template body and only flips the provider's
+    container runtime to runsc, so the host runs under gVisor.
+    """
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.DOCKER,
+        host_name=HostName("hello"),
+        docker_runtime=DockerRuntime.RUNSC,
+    )
+    # The base docker template is always present; the runsc overlay is stacked
+    # immediately after it.
+    assert command.count("--template") >= 3
+    docker_idx = command.index("docker")
+    assert command[docker_idx - 1] == "--template"
+    runsc_idx = command.index("docker_runsc")
+    assert command[runsc_idx - 1] == "--template"
+    # Order matters: the overlay must come AFTER the base so its provider
+    # setting wins the stack.
+    assert runsc_idx > docker_idx
+
+
+def test_build_mngr_create_command_docker_runc_omits_gvisor_overlay() -> None:
+    """``DockerRuntime.RUNC`` (the docker template's default) adds no extra template."""
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.DOCKER,
+        host_name=HostName("hello"),
+        docker_runtime=DockerRuntime.RUNC,
+    )
+    assert "docker" in command
+    assert "docker_runsc" not in command
+
+
+@pytest.mark.parametrize("docker_runtime", [DockerRuntime.RUNC, DockerRuntime.RUNSC])
+def test_build_mngr_create_command_runtime_ignored_for_non_docker(docker_runtime: DockerRuntime) -> None:
+    """The runsc overlay is docker-only -- other launch modes never receive it."""
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.LIMA,
+        host_name=HostName("hello"),
+        docker_runtime=docker_runtime,
+    )
+    assert "docker_runsc" not in command
+
+
 def test_build_mngr_create_command_omits_latchkey_when_env_is_empty() -> None:
     """Empty / ``None`` ``latchkey_env`` opts the host out of latchkey wiring entirely."""
     for latchkey_env in (None, {}):
@@ -527,7 +575,7 @@ def test_build_mngr_create_command_non_imbue_cloud_passes_new_host_without_reuse
     assert "--update" not in command
     assert "--template" in command
     assert "main" in command
-    # The /welcome message now lives in forever-claude-template's
+    # The /welcome message now lives in default-workspace-template's
     # [create_templates.main] section, so the explicit --message arg is gone.
     assert "--message" not in command
     # minds no longer pre-generates an agent id; mngr generates one and we
@@ -544,7 +592,7 @@ def test_build_mngr_create_command_imbue_cloud_targets_account_provider() -> Non
         launch_mode=LaunchMode.IMBUE_CLOUD,
         host_name=HostName("hello"),
         imbue_cloud_account="alice@imbue.com",
-        imbue_cloud_repo_url="https://github.com/imbue-ai/forever-claude-template",
+        imbue_cloud_repo_url="https://github.com/imbue-ai/default-workspace-template",
         imbue_cloud_branch_or_tag="v1.2.3",
     )
     joined = " ".join(command)
@@ -565,9 +613,9 @@ def test_build_mngr_create_command_imbue_cloud_targets_account_provider() -> Non
     assert "--update" not in command
     # Lease attributes flow through --build-arg.
     assert "-b" in command
-    assert "repo_url=https://github.com/imbue-ai/forever-claude-template" in command
+    assert "repo_url=https://github.com/imbue-ai/default-workspace-template" in command
     assert "repo_branch_or_tag=v1.2.3" in command
-    # No secret env vars in argv: forwarding is declared by the FCT
+    # No secret env vars in argv: forwarding is declared by the DEFAULT_WORKSPACE_TEMPLATE
     # ``imbue_cloud`` template's own ``pass_host_env`` and the values live
     # in the subprocess env ``run_mngr_create`` populates.
     assert "ANTHROPIC_API_KEY" not in joined
@@ -587,7 +635,7 @@ def test_build_mngr_create_command_imbue_cloud_targets_account_provider() -> Non
 
 
 def test_build_mngr_create_command_never_inlines_secret_env_flags() -> None:
-    """Secret forwarding lives in FCT, not minds. The command line never carries
+    """Secret forwarding lives in DEFAULT_WORKSPACE_TEMPLATE, not minds. The command line never carries
     ``--pass-(host-)env`` flags or secret values for any compute mode."""
     for mode, account in (
         (LaunchMode.DOCKER, None),
@@ -604,7 +652,7 @@ def test_build_mngr_create_command_never_inlines_secret_env_flags() -> None:
         assert "--pass-env" not in command, f"{mode} should not inline --pass-env"
         # IMBUE_CLOUD compute *does* still get _remote_host_env_flags() which
         # uses --pass-host-env MNGR_PREFIX -- that one is unrelated to the
-        # secrets we moved into FCT, so we only forbid the secret names here.
+        # secrets we moved into DEFAULT_WORKSPACE_TEMPLATE, so we only forbid the secret names here.
         assert "ANTHROPIC_API_KEY" not in joined, f"{mode} leaked ANTHROPIC_API_KEY"
         assert "ANTHROPIC_BASE_URL" not in joined, f"{mode} leaked ANTHROPIC_BASE_URL"
         assert "GH_TOKEN" not in joined, f"{mode} leaked GH_TOKEN"
@@ -938,6 +986,13 @@ def _start_scripted_server(not_ready_count: int) -> tuple[HTTPServer, threading.
         {"not_ready_count": not_ready_count, "request_count": 0, "lock": threading.Lock()},
     )
     server = HTTPServer(("127.0.0.1", 0), handler_cls)
+    # The readiness probe dials the proxy over https (minds always runs it with
+    # HTTP/2), so the stand-in server must speak TLS to match -- otherwise the
+    # probe's TLS handshake fails against a plain-HTTP socket. Reuse the proxy's
+    # own self-signed cert helpers so the test exercises the real https path.
+    cert_pem, key_pem = generate_self_signed_cert()
+    ssl_context = build_server_ssl_context(cert_pem, key_pem)
+    server.socket = ssl_context.wrap_socket(server.socket, server_side=True)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     port = server.server_address[1]
@@ -1119,6 +1174,40 @@ def test_probe_workspace_through_plugin_surfaces_non_200_status() -> None:
         )
 
     assert status == 503
+
+
+def test_probe_workspace_uses_https_scheme() -> None:
+    """The loopback probe dials https, matching the TLS + HTTP/2 proxy.
+
+    The probe must hit the same transport the proxy speaks; a mismatch would
+    make every readiness probe fail the TLS handshake (or hit a closed http
+    port).
+    """
+    captured: list[httpx.Request] = []
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, text="ok")
+
+    with httpx.Client(transport=httpx.MockTransport(_capture)) as client:
+        probe_workspace_through_plugin(
+            mngr_forward_port=18999,
+            preauth_cookie="any-preauth",
+            agent_id=AgentId.generate(),
+            probe_timeout_seconds=0.5,
+            client=client,
+        )
+
+    assert captured[0].url.scheme == "https"
+    assert captured[0].url.host == "127.0.0.1"
+
+
+def test_build_redirect_url_uses_https_scheme(tmp_path) -> None:
+    """The /goto redirect URL the UI navigates to uses the proxy's https scheme."""
+    creator = _make_test_creator(tmp_path, mngr_forward_port=8421)
+    aid = AgentId.generate()
+    url = creator._build_redirect_url(aid)
+    assert url == f"https://localhost:8421/goto/{aid}/"
 
 
 def test_wait_for_workspace_ready_publishes_anyway_on_timeout(tmp_path) -> None:

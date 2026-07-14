@@ -123,6 +123,17 @@ def test_container_running_probe_says_no_when_host_state_is_stopped() -> None:
     assert _answer(response, "container running") == ProbeAnswer.NO
 
 
+def test_container_running_probe_says_yes_when_host_state_is_unauthenticated() -> None:
+    """UNAUTHENTICATED means the container was observed running but inner SSH is dead.
+
+    Both producers (docker's connection-error fallback hook and imbue_cloud's
+    listing path; PR #2247) emit it only after observing a running container, so
+    the "is the container running?" answer is an observed YES.
+    """
+    response = _response(host_state="UNAUTHENTICATED")
+    assert _answer(response, "container running") == ProbeAnswer.YES
+
+
 def test_container_running_probe_is_unknown_for_ambiguous_host_state() -> None:
     response = _response(host_state="STARTING")
     assert _answer(response, "container running") == ProbeAnswer.UNKNOWN
@@ -297,9 +308,41 @@ def test_dispatch_tier_host_unresponsive_when_container_running_but_exec_dead() 
     assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
 
 
-def test_dispatch_tier_host_unresponsive_for_ambiguous_host_state() -> None:
-    response = _response(host_state="STARTING", in_container_stdout=None)
+def test_dispatch_tier_host_unresponsive_for_unauthenticated_host_state() -> None:
+    """Dead inner sshd (`pkill sshd` in the container) -> consent-gated host restart.
+
+    The provider observed the container running but could not get inside, so it
+    reported UNAUTHENTICATED. The consent-gated host restart is the engineered
+    recovery for this state (PR #2247): its stop step is not skipped, so the
+    stop/start relaunches the inner sshd. This must NOT classify INDETERMINATE --
+    a dead sshd never self-heals, so "keep checking" would strand the user.
+    """
+    response = _response(host_state="UNAUTHENTICATED", in_container_stdout=None)
     assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
+
+
+def test_dispatch_tier_indeterminate_for_ambiguous_host_state() -> None:
+    """A transitional host state is not an observation of the container -> keep checking.
+
+    Only an observed RUNNING claim earns the consent-gated HOST_UNRESPONSIVE
+    verdict; a state that answers neither "running" nor "offline" is non-evidence,
+    so no verdict (and no restart affordance) is rendered off it.
+    """
+    response = _response(host_state="STARTING", in_container_stdout=None)
+    assert response.dispatch_tier == DispatchTier.INDETERMINATE
+
+
+def test_dispatch_tier_indeterminate_for_unknown_host_state() -> None:
+    """An UNKNOWN host state (host unobservable during discovery) -> keep checking.
+
+    The imbue_cloud provider surfaces UNKNOWN when a leased host's outer SSH is
+    unreachable: the *path* to the host is broken, which says nothing about the
+    container. Rendering a host-offline/unresponsive verdict (with its restart
+    affordance) off that would offer a restart that is doomed for exactly the
+    same reason the host is unreachable -- so it must classify INDETERMINATE.
+    """
+    response = _response(host_state="UNKNOWN", in_container_stdout=None)
+    assert response.dispatch_tier == DispatchTier.INDETERMINATE
 
 
 def test_dispatch_tier_indeterminate_when_probe_timed_out() -> None:

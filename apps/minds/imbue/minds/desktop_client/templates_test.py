@@ -29,8 +29,10 @@ from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
 from imbue.minds.desktop_client.workspace_color import normalize_workspace_color
 from imbue.minds.desktop_client.workspace_color import pick_unused_create_color
 from imbue.minds.primitives import AIProvider
+from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
+from imbue.minds.primitives import default_docker_runtime
 from imbue.mngr.primitives import AgentId
 
 # The hand-written Tailwind v4 source. Holds the :root design tokens (the
@@ -225,7 +227,7 @@ def test_render_create_form_has_default_values() -> None:
     html = render_create_form()
     # The repository git URL still has a hardcoded fallback (in the advanced
     # view); the compute provider select is present.
-    assert "forever-claude-template" in html
+    assert "default-workspace-template" in html
     assert "launch_mode" in html
 
 
@@ -321,6 +323,27 @@ def test_render_create_form_contains_ai_provider_options() -> None:
     html = render_create_form()
     for provider in AIProvider:
         assert f'value="{provider.value}"' in html
+
+
+def test_render_create_form_contains_docker_runtime_options() -> None:
+    html = render_create_form()
+    for runtime in DockerRuntime:
+        assert f'value="{runtime.value}"' in html
+
+
+def test_render_create_form_defaults_docker_runtime_to_platform_value() -> None:
+    # The runtime select pre-selects the platform-appropriate default (runc on
+    # macOS, runsc on Linux) so the form works out of the box on either host.
+    html = render_create_form()
+    assert f'value="{default_docker_runtime().value}" selected' in html
+
+
+def test_render_create_form_selects_specified_docker_runtime() -> None:
+    # Pick the runtime that is NOT this platform's default so the "selection
+    # honored over the default" assertion is meaningful on both macOS and Linux.
+    non_default = DockerRuntime.RUNSC if default_docker_runtime() is DockerRuntime.RUNC else DockerRuntime.RUNC
+    html = render_create_form(docker_runtime=non_default)
+    assert f'value="{non_default.value}" selected' in html
 
 
 def test_render_create_form_defaults_ai_provider_to_imbue_cloud() -> None:
@@ -434,14 +457,14 @@ def test_render_create_form_honors_workspace_env_vars_when_opted_in(monkeypatch:
     """With the explicit opt-in, the MINDS_WORKSPACE_* env vars pre-fill the form.
 
     Used by ``just minds-start`` (and the e2e runner) to point the form at the
-    operator's local FCT worktree + current branch so the dev-iteration loop is
+    operator's local DEFAULT_WORKSPACE_TEMPLATE worktree + current branch so the dev-iteration loop is
     one click.
     """
     monkeypatch.setenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", "1")
-    monkeypatch.setenv("MINDS_WORKSPACE_GIT_URL", "/local/fct/path")
+    monkeypatch.setenv("MINDS_WORKSPACE_GIT_URL", "/local/default_workspace_template/path")
     monkeypatch.setenv("MINDS_WORKSPACE_BRANCH", "mngr/some-feature")
     html = render_create_form()
-    assert "/local/fct/path" in html
+    assert "/local/default_workspace_template/path" in html
     assert "mngr/some-feature" in html
 
 
@@ -452,15 +475,15 @@ def test_render_create_form_honors_workspace_env_vars_on_staging_when_opted_in(
 
     Regression test: staging previously dropped MINDS_WORKSPACE_* unconditionally,
     so ``just minds-start`` against staging silently fell back to the public
-    GitHub FCT on ``main`` -- meaning local FCT changes could never be tested
+    GitHub DEFAULT_WORKSPACE_TEMPLATE on ``main`` -- meaning local DEFAULT_WORKSPACE_TEMPLATE changes could never be tested
     against staging.
     """
     monkeypatch.setenv("MINDS_ROOT_NAME", "minds-staging")
     monkeypatch.setenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", "1")
-    monkeypatch.setenv("MINDS_WORKSPACE_GIT_URL", "/local/fct/path")
+    monkeypatch.setenv("MINDS_WORKSPACE_GIT_URL", "/local/default_workspace_template/path")
     monkeypatch.setenv("MINDS_WORKSPACE_BRANCH", "mngr/some-feature")
     html = render_create_form()
-    assert "/local/fct/path" in html
+    assert "/local/default_workspace_template/path" in html
     assert "mngr/some-feature" in html
 
 
@@ -477,13 +500,13 @@ def test_render_create_form_ignores_workspace_env_vars_without_opt_in_on_shared_
     """
     monkeypatch.delenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", raising=False)
     monkeypatch.setenv("MINDS_ROOT_NAME", "minds-staging")
-    monkeypatch.setenv("MINDS_WORKSPACE_GIT_URL", "/local/fct/path")
+    monkeypatch.setenv("MINDS_WORKSPACE_GIT_URL", "/local/default_workspace_template/path")
     monkeypatch.setenv("MINDS_WORKSPACE_BRANCH", "mngr/some-feature")
     html = render_create_form()
-    assert "/local/fct/path" not in html
+    assert "/local/default_workspace_template/path" not in html
     assert "mngr/some-feature" not in html
     # And the hardcoded git-URL fallback DOES appear (form is still usable).
-    assert "forever-claude-template" in html
+    assert "default-workspace-template" in html
 
 
 def test_render_create_form_ignores_workspace_env_vars_without_opt_in_on_dev_tier(

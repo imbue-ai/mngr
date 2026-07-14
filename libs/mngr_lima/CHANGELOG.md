@@ -15,6 +15,11 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: New Lima VMs derive their `limactl` instance name from the immutable host id (`<prefix><host_id>`) rather than the host name, so a rename never leaves the VM's instance name out of sync with the host name (`limactl` has no native rename). Existing VMs created under the old `<prefix><host_name>` scheme keep working; discovery reads the host name and instance name from the persisted record rather than parsing the instance name.
 - Changed: Lima VM provisioning script's required-package check now includes `flock` (the `util-linux` package), used by mngr's unified cross-actor host lock and the in-host idle-shutdown watcher. Already present on standard Debian images; only installs on minimal/custom images that lack it.
 
+### Fixed
+
+- Fixed: Creating a Lima VM no longer fails with a `UNIX_PATH_MAX=104 characters` error when the home path and mngr prefix are long. Lima names each VM's SSH socket after the instance name (`<prefix>host-<32-char id>`) and rejects names that push the socket path over the OS limit, which could fire for longer usernames on longer-prefixed environments (e.g. `minds-staging-`). The random id portion is now shortened just enough to keep the socket path within the limit, leaving the name unchanged when it already fits; if the prefix plus `LIMA_HOME` leaves no room at all, creation fails early with a clear message instead of a cryptic limactl fatal error.
+- Fixed: Lima workspace-creation failing with `SSH host key error (Host key for 127.0.0.1 does not match.)` after a transient Debian mirror hiccup during `apt-get install`. The VM provisioning script now installs the pre-trusted SSH host key (and applies sshd tuning) before any package fetch — host-key trust no longer depends on the network — and the package install is wrapped in a retry loop; if it still fails, the error surfaces clearly on an SSH-reachable host.
+
 ## [v0.1.10] - 2026-06-18
 
 ## [v0.1.9] - 2026-06-16

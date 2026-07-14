@@ -27,6 +27,7 @@ from imbue.mngr_forward.primitives import OneTimeCode
 from imbue.mngr_forward.resolver import ForwardResolver
 from imbue.mngr_forward.server import _is_loopback_url
 from imbue.mngr_forward.server import _sanitize_next_url
+from imbue.mngr_forward.server import _select_ws_receive_payload
 from imbue.mngr_forward.server import create_forward_app
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelError
@@ -46,6 +47,29 @@ def app_setup(tmp_path: Path) -> tuple[TestClient, FileAuthStore, ForwardResolve
         envelope_writer=envelope_writer,
         listen_host="127.0.0.1",
         listen_port=18421,
+    )
+    client = TestClient(app, follow_redirects=False)
+    return client, auth_store, resolver
+
+
+@pytest.fixture
+def http2_app_setup(tmp_path: Path) -> tuple[TestClient, FileAuthStore, ForwardResolver]:
+    """Same as ``app_setup`` but with ``use_http2=True`` so client-facing URLs
+
+    become ``https``/``wss`` and the session cookie is marked ``Secure``.
+    """
+    auth_store = FileAuthStore(data_directory=tmp_path)
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    tunnel_manager = SSHTunnelManager()
+    envelope_writer = EnvelopeWriter(output=io.StringIO())
+    app = create_forward_app(
+        auth_store=auth_store,
+        resolver=resolver,
+        tunnel_manager=tunnel_manager,
+        envelope_writer=envelope_writer,
+        listen_host="127.0.0.1",
+        listen_port=18421,
+        use_http2=True,
     )
     client = TestClient(app, follow_redirects=False)
     return client, auth_store, resolver
@@ -85,6 +109,109 @@ def test_authenticate_consumes_otp_and_sets_cookie(
     # Code is single-use: re-presenting it returns 403.
     response2 = client.get(f"/authenticate?one_time_code={code}")
     assert response2.status_code == 403
+
+
+def test_authenticate_cookie_not_secure_without_http2(
+    app_setup: tuple[TestClient, FileAuthStore, ForwardResolver],
+) -> None:
+    """With the flag off the session cookie must NOT be Secure (plain http origin)."""
+    client, store, _resolver = app_setup
+    code = OneTimeCode("no-http2-cookie-1")
+    store.add_one_time_code(code=code)
+    response = client.get(f"/authenticate?one_time_code={code}")
+    assert response.status_code == 307
+    set_cookie = response.headers["set-cookie"]
+    assert MNGR_FORWARD_SESSION_COOKIE_NAME in set_cookie
+    assert "secure" not in set_cookie.lower()
+
+
+def test_http2_authenticate_sets_secure_cookie(
+    http2_app_setup: tuple[TestClient, FileAuthStore, ForwardResolver],
+) -> None:
+    """With ``use_http2`` on, the session cookie set by /authenticate is Secure."""
+    client, store, _resolver = http2_app_setup
+    code = OneTimeCode("http2-cookie-1")
+    store.add_one_time_code(code=code)
+    response = client.get(f"/authenticate?one_time_code={code}")
+    assert response.status_code == 307
+    set_cookie = response.headers["set-cookie"]
+    assert MNGR_FORWARD_SESSION_COOKIE_NAME in set_cookie
+    assert "secure" in set_cookie.lower()
+
+
+def test_http2_goto_authenticated_redirects_to_https_subdomain(
+    http2_app_setup: tuple[TestClient, FileAuthStore, ForwardResolver],
+) -> None:
+    """With ``use_http2`` on, the /goto bridge sends the browser to an https subdomain URL."""
+    client, store, _resolver = http2_app_setup
+    cookie = create_session_cookie(store.get_signing_key())
+    valid_agent_id = "agent-" + "0" * 31 + "a"
+    response = client.get(
+        f"/goto/{valid_agent_id}/",
+        cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: cookie},
+    )
+    assert response.status_code == 302
+    location = response.headers["location"]
+    assert location.startswith(f"https://{valid_agent_id}.localhost:18421/_subdomain_auth?token=")
+
+
+def test_http2_subdomain_unauthenticated_html_redirects_to_https_goto(tmp_path: Path) -> None:
+    """With ``use_http2`` on, a stale-cookie subdomain HTML load redirects to the https /goto bridge."""
+    auth_store = FileAuthStore(data_directory=tmp_path)
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    agent_id = AgentId()
+    resolver.add_known_agent(agent_id)
+    resolver.update_services(agent_id, {"system_interface": "http://stub-backend"})
+    tunnel_manager = SSHTunnelManager()
+    envelope_writer = EnvelopeWriter(output=io.StringIO())
+    listen_port = 18421
+    app = create_forward_app(
+        auth_store=auth_store,
+        resolver=resolver,
+        tunnel_manager=tunnel_manager,
+        envelope_writer=envelope_writer,
+        listen_host="127.0.0.1",
+        listen_port=listen_port,
+        use_http2=True,
+    )
+    with TestClient(app, base_url=f"https://{agent_id}.localhost:{listen_port}", follow_redirects=False) as client:
+        response = client.get(
+            "/",
+            headers={
+                "accept": "text/html",
+                "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}=stale-cookie-from-previous-launch",
+            },
+        )
+    assert response.status_code == 302
+    assert response.headers["Location"] == f"https://localhost:{listen_port}/goto/{agent_id}/"
+
+
+def test_http2_subdomain_auth_bridge_sets_secure_cookie(tmp_path: Path) -> None:
+    """With ``use_http2`` on, the /_subdomain_auth bridge sets a Secure session cookie."""
+    auth_store = FileAuthStore(data_directory=tmp_path)
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    tunnel_manager = SSHTunnelManager()
+    envelope_writer = EnvelopeWriter(output=io.StringIO())
+    app = create_forward_app(
+        auth_store=auth_store,
+        resolver=resolver,
+        tunnel_manager=tunnel_manager,
+        envelope_writer=envelope_writer,
+        listen_host="127.0.0.1",
+        listen_port=18421,
+        use_http2=True,
+    )
+    valid_agent_id = "agent-" + "0" * 31 + "a"
+    token = create_subdomain_auth_token(signing_key=auth_store.get_signing_key(), agent_id=valid_agent_id)
+    with TestClient(app, follow_redirects=False) as client:
+        response = client.get(
+            f"/_subdomain_auth?token={token}&next=/",
+            headers={"host": f"{valid_agent_id}.localhost:18421"},
+        )
+    assert response.status_code == 302
+    set_cookie = response.headers["set-cookie"]
+    assert MNGR_FORWARD_SESSION_COOKIE_NAME in set_cookie
+    assert "secure" in set_cookie.lower()
 
 
 def test_invalid_otp_returns_403(
@@ -1101,3 +1228,19 @@ def test_subdomain_forward_websocket_emits_failure_on_ssh_tunnel_setup_error(tmp
     payload = envelope["payload"]
     assert payload["type"] == "system_interface_backend_failure"
     assert payload["reason"] == "CONNECT_ERROR"
+
+
+def test_select_ws_receive_payload_selects_by_value_not_key() -> None:
+    """A binary frame must yield its bytes, not the co-present ``text: None``.
+
+    hypercorn emits every ``websocket.receive`` event with BOTH ``text`` and
+    ``bytes`` keys, setting the unused one to ``None`` (uvicorn omitted it). A
+    key-presence check would pick ``text=None`` on a binary frame and forward
+    ``None``, which raises ``TypeError`` in the ``websockets`` client and kills
+    the terminal / state sockets the workspace SPA relies on. Selecting by value
+    fixes it; an event with neither payload yields ``None`` (caller skips it).
+    """
+    assert _select_ws_receive_payload({"type": "websocket.receive", "bytes": None, "text": "hello"}) == "hello"
+    # The regression case: a binary frame carries text=None alongside its bytes.
+    assert _select_ws_receive_payload({"type": "websocket.receive", "bytes": b"world", "text": None}) == b"world"
+    assert _select_ws_receive_payload({"type": "websocket.receive", "bytes": None, "text": None}) is None

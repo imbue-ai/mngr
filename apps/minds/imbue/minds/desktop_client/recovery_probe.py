@@ -141,7 +141,10 @@ class DispatchTier(str, Enum):
     Either the in-container probe timed out (it observed nothing -- absence of
     evidence, not evidence the workspace is down), or the discovery snapshot
     backing the host state predates the outage onset (a pre-outage snapshot still
-    reads the stale host state, e.g. a just-stopped container still shows RUNNING).
+    reads the stale host state, e.g. a just-stopped container still shows RUNNING),
+    or the snapshot itself carries no observation of the container (host state
+    UNKNOWN -- the host was unobservable during discovery -- or a
+    transitional/absent state).
     A negative verdict or an auto-dispatched restart off such non-evidence is
     exactly the misclassification this tier avoids. The recovery page renders a
     live "reconnecting" state and keeps checking: the cheap liveness poll returns
@@ -159,10 +162,17 @@ class DispatchTier(str, Enum):
     """Container is offline -- restart the host (no live work to interrupt)."""
 
     HOST_UNRESPONSIVE = "host_unresponsive"
-    """Container claims running but we can't reach it -- require explicit user consent.
+    """Container was observed running but we cannot get inside it.
 
-    Also the fallback for any ambiguous host state: the host is not responding
-    in the way we expect, so we ask the user before bouncing it.
+    Covers an observed RUNNING claim whose exec cleanly failed, and the
+    UNAUTHENTICATED state -- which providers report when the container was
+    observed running but inner SSH is unreachable (e.g. its sshd died; see
+    PR #2247). A host restart bounces a possibly-live container, so it
+    requires explicit user consent -- and for the dead-inner-sshd case that
+    consent-gated restart is the engineered recovery (the stop step is not
+    skipped, so the relaunch brings sshd back). A host state that answers
+    neither "running" nor "offline" is non-evidence and classifies
+    INDETERMINATE instead.
     """
 
     BACKEND_UNREACHABLE = "backend_unreachable"
@@ -193,7 +203,7 @@ class HostHealthResponse(FrozenModel):
         default=(), description="Ordered probe results to render in the diagnostics list."
     )
     dispatch_tier: DispatchTier = Field(
-        default=DispatchTier.HOST_UNRESPONSIVE,
+        default=DispatchTier.INDETERMINATE,
         description="Restart-tier classification derived from probe answers.",
     )
     unreachable_reason: str = Field(
@@ -305,6 +315,15 @@ def _coerce_optional_int(value: object) -> int | None:
 
 
 _RUNNING_STATE: Final[str] = "RUNNING"
+# UNAUTHENTICATED is, by provider convention (docker's connection-error fallback
+# hook and imbue_cloud's listing path; see PR #2247), "the container was observed
+# running but inner SSH is unreachable" -- so for the "is the container running?"
+# question it is an observed YES. This routes the dead-inner-sshd case to the
+# consent-gated HOST_UNRESPONSIVE restart that actually fixes it. The imbue_cloud
+# outer-SSH-auth-rejected fallback reuses the same state, where a restart fails on
+# the same auth error; distinguishing the two needs a dedicated provider state
+# (e.g. UNREACHABLE), which remains deferred (flagged in PR #2247).
+_OBSERVED_RUNNING_STATES: Final[frozenset[str]] = frozenset({_RUNNING_STATE, "UNAUTHENTICATED"})
 _OFFLINE_HOST_STATES: Final[frozenset[str]] = frozenset({"STOPPED", "STOPPING", "CRASHED", "FAILED"})
 
 
@@ -343,7 +362,7 @@ def _mngr_exec_command(mngr_binary: str, services_agent_id: AgentId | None, inne
 def _build_container_running_probe(host_state: str) -> Probe:
     """Probe 1: the workspace host's lifecycle state, read from the discovery snapshot."""
     upper = host_state.upper()
-    if upper == _RUNNING_STATE:
+    if upper in _OBSERVED_RUNNING_STATES:
         answer = ProbeAnswer.YES
     elif upper in _OFFLINE_HOST_STATES:
         answer = ProbeAnswer.NO
@@ -591,17 +610,20 @@ def _classify_dispatch_tier(
       host-state-derived tier below.
     * INDETERMINATE when we have no direct in-container evidence AND cannot trust a
       negative verdict: the probe timed out (it observed *nothing* -- a timeout is
-      absence of evidence, not evidence of a down workspace), or no discovery
+      absence of evidence, not evidence of a down workspace), no discovery
       snapshot taken at/after the outage onset backs the host state (a pre-outage
-      snapshot still reads the stale host state). A verdict or auto-restart off
-      such non-evidence is the misclassification we avoid; the recovery page keeps
-      checking instead.
-    * HOST_OFFLINE when the container is offline (and we trust that observation):
-      nothing live to interrupt, so a host restart can run unattended.
-    * HOST_UNRESPONSIVE when the container claims running but the exec cleanly
-      failed to reach it (ssh dead), or on any other ambiguous but trusted host
-      state: a host restart bounces a live container, so it requires explicit user
-      consent.
+      snapshot still reads the stale host state), or the snapshot itself carries
+      no observation of the container (host state UNKNOWN -- e.g. an imbue_cloud
+      host whose outer SSH was unreachable, which says the *path* to the host is
+      broken, not that the container is down -- or a transitional/absent state).
+      A verdict or restart affordance off such non-evidence is the
+      misclassification we avoid; the recovery page keeps checking instead.
+    * HOST_OFFLINE when the container was observed offline (and we trust that
+      observation): nothing live to interrupt, so a host restart can run
+      unattended.
+    * HOST_UNRESPONSIVE when the container was observed running but the exec
+      cleanly failed to reach it (ssh dead): a host restart bounces a live
+      container, so it requires explicit user consent.
     """
     if provider_error_message is not None:
         return DispatchTier.BACKEND_UNREACHABLE
@@ -629,7 +651,12 @@ def _classify_dispatch_tier(
     container_running = answers.get(_QUESTION_CONTAINER_RUNNING)
     if container_running == ProbeAnswer.NO:
         return DispatchTier.HOST_OFFLINE
-    return DispatchTier.HOST_UNRESPONSIVE
+    if container_running == ProbeAnswer.YES:
+        return DispatchTier.HOST_UNRESPONSIVE
+    # The snapshot carries no observation of the container (host state UNKNOWN,
+    # transitional, or absent). That is non-evidence, same as a timed-out probe:
+    # render no verdict and offer no restart -- keep checking.
+    return DispatchTier.INDETERMINATE
 
 
 def build_host_health_response(

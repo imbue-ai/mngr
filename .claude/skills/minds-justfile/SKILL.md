@@ -69,7 +69,7 @@ destroyable. First register + prep a box with `mngr imbue_cloud admin server
   is DERIVED from the folder's `origin` remote + current branch (best-effort label,
   uncommitted changes included). Pass `--server-id <id>` for the box to bake onto.
 - `just bake-slice-prod <region> <tag> [count] [extra flags]` -- PRODUCTION
-  bake: clones the FCT remote at an exact `<tag>` and bakes from that (content
+  bake: clones the DEFAULT_WORKSPACE_TEMPLATE remote at an exact `<tag>` and bakes from that (content
   provably equals the tag); identity = canonical remote + tag. Pass `--server-id`.
   - Identity is never hand-typed in `--attributes` (those are non-identity only,
     e.g. resources). For a DEV fast-path match, the create form's repository must be
@@ -81,7 +81,7 @@ destroyable. First register + prep a box with `mngr imbue_cloud admin server
   activated env (no manual DSN export needed).
 - `just prep-server <server-id>` -- (re-)prep a bare-metal box for slice baking;
   pool SSH key + DSN resolved from the activated tier automatically. Idempotent;
-  also how pre-2026-06-27 boxes get the FCT image cache dir that production
+  also how pre-2026-06-27 boxes get the DEFAULT_WORKSPACE_TEMPLATE image cache dir that production
   `--from-tag` bakes require.
 - `just destroy-pool-hosts <pool-host-id> [<pool-host-id> ...]` -- tear down the
   named hosts in parallel: atomically claim each row (a user cannot lease it
@@ -93,8 +93,8 @@ Desktop client / dev loop:
 - `just minds-start` / `just minds-stop` / `just minds-build`
 - `just propagate-changes <agent>` -- sync local mngr into a running Docker agent.
 - `just forward-system-interface <agent>` -- Cloudflare tunnel for an agent.
-- `just sync-vendor-mngr [fct]` -- sync `vendor/mngr` in forever-claude-template via `git archive` (committed snapshot; release flow). See `apps/minds/docs/vendor-mngr-sync.md`.
-- `just create-new-mind-repo <name> [parent_dir]` -- new private FCT clone.
+- `just sync-vendor-mngr [default_workspace_template]` -- sync `vendor/mngr` in default-workspace-template via `git archive` (committed snapshot; release flow). See `apps/minds/docs/vendor-mngr-sync.md`.
+- `just create-new-mind-repo <name> [parent_dir]` -- new private DEFAULT_WORKSPACE_TEMPLATE clone.
 - `just minds-css` -- compile the desktop client's Tailwind v4 stylesheet (app.css -> app.min.css).
 
 Tests:

@@ -327,11 +327,11 @@ def test_prevent_direct_subprocess() -> None:
         # as ``testing.py``: it is only ever called from test / operator
         # entrypoints, never from product code.
         "*/desktop_client/e2e_workspace_runner.py",
-        # ``desktop_client/fct_worktree.py`` is the sibling helper that
-        # materializes the paired FCT worktree (git clone / archive / commit)
+        # ``desktop_client/default_workspace_template_worktree.py`` is the sibling helper that
+        # materializes the paired DEFAULT_WORKSPACE_TEMPLATE worktree (git clone / archive / commit)
         # for the same e2e / snapshot entrypoints. Same justification: one-shot
         # git shell-outs from test / operator code, never from product code.
-        "*/desktop_client/fct_worktree.py",
+        "*/desktop_client/default_workspace_template_worktree.py",
     )
     # The one allowed match is ``cli/env.py::_exec_into_recover``,
     # which uses ``os.execvp`` to REPLACE the current process with
@@ -365,7 +365,7 @@ def test_prevent_inline_functions() -> None:
     # ported Sentry HTTP transport's ``_send_request`` (it closes over the
     # envelope being sent). The recorded count reflects the actual finder count
     # for the current tree.
-    rc.check_inline_functions(_DIR, snapshot(9))
+    rc.check_inline_functions(_DIR, snapshot(7))
 
 
 def test_prevent_underscore_imports() -> None:

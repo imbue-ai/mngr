@@ -1,6 +1,6 @@
 """Read a workspace's version history from its own git, from the minds hub.
 
-A workspace is created from the forever-claude-template at a pinned ref (the
+A workspace is created from the default-workspace-template at a pinned ref (the
 immutable ``original_minds_version`` label). Later upgrades are ``git pull``s
 from the ``upstream`` remote (the ``update-self`` skill), which land as merge
 commits on the workspace's primary branch. So the *current* version and the
