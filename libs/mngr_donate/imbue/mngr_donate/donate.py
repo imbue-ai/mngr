@@ -234,8 +234,17 @@ def build_create_argv(agent_name: str, skill_dir: str, mngr_path: str = "mngr") 
     (it streams output and auto-destroys when done). The skill instruction (see
     :func:`build_donation_message`, pointed at ``skill_dir``) is passed as the
     agent's first message; ``--dangerously-skip-permissions`` is spliced in after
-    ``--`` so it reaches ``claude`` as an agent arg. Runs from the caller's cwd, so
-    invoke ``mngr donate`` from a trusted repo (like the recipes' ``cd``).
+    ``--`` so it reaches ``claude`` as an agent arg.
+
+    The agent sources from ``skill_dir`` via ``--from`` (not the caller's cwd):
+    ``skill_dir`` is a git clone of the skill repo (see :func:`prepare_skill_dir`),
+    so it is always a valid git source regardless of where ``mngr donate`` was
+    invoked from. Without ``--from``, ``mngr create`` falls back to sourcing from
+    the current directory and raises "Not inside a git repository" when the
+    caller isn't in a git repo -- which is the common case for users who install
+    mngr from a wheel/PR rather than a monorepo checkout. The donation agent only
+    talks to the skill's coordination server (its message says so), so the skill
+    checkout is the correct source anyway.
 
     ``mngr_path`` is the mngr executable to spawn. The command passes an absolute
     path (:func:`_current_mngr_path`) so the launch never depends on ``mngr``
@@ -247,6 +256,12 @@ def build_create_argv(agent_name: str, skill_dir: str, mngr_path: str = "mngr") 
         agent_name,
         DONATE_AGENT_TYPE,
         "--foreground",
+        # Source the agent from the skill checkout (a git clone), not the
+        # caller's cwd. This lets donate run from anywhere -- a home dir, /tmp,
+        # a non-mngr project -- instead of requiring the caller to be inside a
+        # git repo. See the docstring for why the skill dir is the right source.
+        "--from",
+        skill_dir,
         # Source from the repo even with uncommitted changes: donate is meant to
         # run unattended (incl. from a schedule), and the default clean-tree guard
         # would fail every tick whenever the working repo has edits.
@@ -428,19 +443,29 @@ def _remove_schedule() -> str:
     )
 
 
-def _clear_stale_worktree(agent_name: str) -> None:
+def _clear_stale_worktree(agent_name: str, source_dir: str) -> None:
     """Best-effort removal of a leftover ``mngr/<agent>`` git worktree + branch.
 
     mngr creates each agent in a git worktree on a branch named
-    ``mngr/<agent-name>``. A run that errors after the worktree is created (or an
-    agent that never auto-destroyed) leaves the worktree and branch behind, and
-    the next ``mngr create`` fails with "a branch named 'mngr/<agent>' already
-    exists" -- ``mngr destroy`` clears the tracked agent but not this orphan.
-    Runs ``git`` in the caller's cwd (the repo mngr sourced the agent from). All
-    steps are swallowed: a missing worktree/branch is the normal, healthy case.
+    ``mngr/<agent-name>`` rooted in the *source* repo (the skill checkout donate
+    passes via ``--from``; see :func:`build_create_argv`). A run that errors
+    after the worktree is created (or an agent that never auto-destroyed) leaves
+    the worktree and branch behind, and the next ``mngr create`` fails with "a
+    branch named 'mngr/<agent>' already exists" -- ``mngr destroy`` clears the
+    tracked agent but not this orphan.
+
+    Runs ``git -C source_dir`` (the skill checkout, where the worktree is
+    rooted), NOT in the caller's cwd: the worktree is created off the skill dir,
+    so its admin records live there. All steps are swallowed: a missing
+    worktree/branch is the normal, healthy case.
     """
     branch = f"mngr/{agent_name}"
-    listing = subprocess.run(("git", "worktree", "list", "--porcelain"), check=False, capture_output=True, text=True)
+    listing = subprocess.run(
+        ("git", "-C", source_dir, "worktree", "list", "--porcelain"),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
     worktree_path: str | None = None
     current_path: str | None = None
     for line in listing.stdout.splitlines():
@@ -452,9 +477,13 @@ def _clear_stale_worktree(agent_name: str) -> None:
         else:
             continue
     if worktree_path is not None:
-        subprocess.run(("git", "worktree", "remove", "--force", worktree_path), check=False, capture_output=True)
-    subprocess.run(("git", "worktree", "prune"), check=False, capture_output=True)
-    subprocess.run(("git", "branch", "-D", branch), check=False, capture_output=True)
+        subprocess.run(
+            ("git", "-C", source_dir, "worktree", "remove", "--force", worktree_path),
+            check=False,
+            capture_output=True,
+        )
+    subprocess.run(("git", "-C", source_dir, "worktree", "prune"), check=False, capture_output=True)
+    subprocess.run(("git", "-C", source_dir, "branch", "-D", branch), check=False, capture_output=True)
 
 
 def _donate_log_dir() -> Path:
@@ -683,8 +712,9 @@ def donate(ctx: click.Context, **kwargs: Any) -> None:
     non-interactive agent that runs the donation skill; otherwise do nothing.
     One tick per invocation -- use ``--start`` to install a launchd LaunchAgent
     (macOS) that re-runs it on an interval (``--stop`` removes it), so spare quota
-    is drained over many ticks. Run it from a trusted git repo, since the created
-    agent is sourced from the current directory.
+    is drained over many ticks. The donation agent sources from the skill
+    checkout (a pinned clone under the mngr host dir), so you can run
+    ``mngr donate`` from any directory -- it need not be a git repo.
     """
     mngr_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,
@@ -780,7 +810,7 @@ def donate(ctx: click.Context, **kwargs: Any) -> None:
     # `mngr destroy` doesn't cover. Both best-effort -- a missing agent/worktree
     # is the normal case, and a cleanup failure shouldn't mask the create's own.
     subprocess.run(list(build_destroy_argv(opts.agent_name, mngr_path)), check=False, capture_output=True)
-    _clear_stale_worktree(opts.agent_name)
+    _clear_stale_worktree(opts.agent_name, str(skill_dir))
     returncode = _run_and_tee(argv, log_path, env=_donation_agent_env())
     if returncode != 0:
         raise MngrError(f"`{' '.join(argv)}` exited with status {returncode} (see {log_path}).")

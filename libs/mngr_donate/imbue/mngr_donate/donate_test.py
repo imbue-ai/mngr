@@ -138,6 +138,10 @@ def test_build_create_argv_launches_a_headless_agent_that_skips_permissions() ->
         "donate-extra-quota-bio",
         "headless_claude",
         "--foreground",
+        # Source the agent from the skill checkout (a git clone), not the
+        # caller's cwd, so donate works from a non-git directory.
+        "--from",
+        "/host/donate-skills/document-review",
         "--no-ensure-clean",
         # Force shared config so claude uses/refreshes the real keychain token.
         "-S",
