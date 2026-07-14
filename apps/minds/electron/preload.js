@@ -16,7 +16,6 @@ contextBridge.exposeInMainWorld('minds', {
   goHome: () => ipcRenderer.send('go-home'),
   navigateContent: (url) => ipcRenderer.send('navigate-content', url),
   contentGoBack: () => ipcRenderer.send('content-go-back'),
-  contentGoForward: () => ipcRenderer.send('content-go-forward'),
 
   // Content events (forwarded from main process)
   onContentTitleChange: (callback) => {

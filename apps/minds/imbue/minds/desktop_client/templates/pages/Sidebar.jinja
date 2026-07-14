@@ -11,10 +11,10 @@
   handler. The panel's height comes from its own flex content -- no JS
   measurement or Electron-side bounds math is needed.
 
-  Position model: the trigger (chrome page's #sidebar-toggle button)
-  passes its viewport-relative rect (trigger_x, trigger_y, trigger_w,
-  trigger_h) plus a caller-chosen offset (offset_x, offset_y). The menu
-  anchors its top-left at the trigger's bottom-left + offset:
+  Position model: the trigger (the chrome page's #workspace-switcher-btn
+  in the titlebar breadcrumb) passes its viewport-relative rect (trigger_x,
+  trigger_y, trigger_w, trigger_h) plus a caller-chosen offset (offset_x,
+  offset_y). The menu anchors its top-left at the trigger's bottom-left + offset:
     left = trigger_x + offset_x
     top  = trigger_y + trigger_h + offset_y
   Because the chrome view and the modal view share the same window
@@ -39,7 +39,7 @@
 {% endset %}
 {% set _menu_left = trigger_x + offset_x %}
 {% set _menu_top = trigger_y + trigger_h + offset_y %}
-<Base title="Main Menu"
+<Base title="Switch workspace"
       body_class="font-sans antialiased bg-transparent"
       body_attrs={{ _body_attrs }}
       scripts={{ _scripts }}>

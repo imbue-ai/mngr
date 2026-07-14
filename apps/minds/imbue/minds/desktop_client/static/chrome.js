@@ -36,6 +36,13 @@
 
   // -- Navigation adapter ---------------------------------------------------
   function navigateContent(url) {
+    // Optimistically re-derive the titlebar context from the target URL so
+    // the breadcrumb/tabs update without waiting for the navigation to land
+    // (Electron re-pushes the authoritative URL on did-navigate; browser
+    // mode has no push for cross-origin workspace URLs at all, so this is
+    // also its only signal for those).
+    lastContentUrl = url;
+    applyTitlebarContext();
     if (isElectron) window.minds.navigateContent(url);
     else document.getElementById('content-frame').src = url;
   }
@@ -43,19 +50,15 @@
     if (isElectron) window.minds.contentGoBack();
     else { try { document.getElementById('content-frame').contentWindow.history.back(); } catch (e) {} }
   }
-  function goForward() {
-    if (isElectron) window.minds.contentGoForward();
-    else { try { document.getElementById('content-frame').contentWindow.history.forward(); } catch (e) {} }
-  }
 
-  // -- Sidebar toggle -------------------------------------------------------
+  // -- Workspace switcher menu ("sidebar") toggle -----------------------------
   //
   // The menu's position is derived from the trigger button's
   // getBoundingClientRect + a caller-chosen offset (anchor model:
   // menu.top-left = trigger.bottom-left + offset). This keeps the menu
-  // visually attached to whatever opens it -- if the button moves (mac
-  // traffic-light spacing, a future layout change, a different control
-  // entirely), the menu follows for free without baking the trigger
+  // visually attached to whatever opens it -- the trigger is the
+  // breadcrumb's workspace-name button (#workspace-switcher-btn), and if
+  // it moves the menu follows for free without baking the trigger
   // location into a server-side template branch.
   //
   // Browser mode: this script positions the inline #sidebar-menu via
@@ -73,7 +76,7 @@
   var SIDEBAR_OFFSET_Y = 2;
   var sidebarOpen = false;
   function computeSidebarAnchor() {
-    var btn = document.getElementById('sidebar-toggle');
+    var btn = document.getElementById('workspace-switcher-btn');
     if (!btn) return null;
     var rect = btn.getBoundingClientRect();
     return {
@@ -172,8 +175,117 @@
       if (!w || !w.id) return;
       accentByAgentId[w.id] = {
         accent: typeof w.accent === 'string' ? w.accent : null,
+        name: typeof w.name === 'string' ? w.name : null,
       };
     });
+  }
+
+  // -- Titlebar context (breadcrumb / icon-tabs / contextual back) -----------
+  //
+  // The left cluster's shape is a pure function of the content view's current
+  // URL: a workspace-scoped screen shows the "/ workspace-name" breadcrumb
+  // plus the Workspace / Connections / Workspace Settings icon-tabs (with the
+  // tab for the visible screen highlighted); a non-workspace full page shows
+  // a "/ page-name" crumb and, for pages that opted in, the contextual back
+  // arrow; the home screen shows just the home button. Electron pushes the
+  // URL over ``content-url-changed``; browser mode reads the iframe's
+  // location in the 500ms poll (cross-origin workspace URLs throw there, so
+  // ``navigateContent`` seeds the context optimistically for those).
+  var lastContentUrl = null;
+  // The workspace named in the breadcrumb (null outside workspace context).
+  // Drives the switcher menu's target and the Connections badge scope.
+  var currentCrumbAgentId = null;
+  // Per-workspace pending-request entries from the latest SSE ``requests``
+  // payload: [{id, workspace_agent_id}]. The Connections icon-tab badge
+  // counts the entries belonging to the breadcrumb's workspace.
+  var lastRequestEntries = [];
+
+  function classifyContent(urlString) {
+    var parsed;
+    try {
+      parsed = new URL(urlString, window.location.origin);
+    } catch (e) {
+      return { kind: 'home' };
+    }
+    var host = parsed.hostname;
+    var path = parsed.pathname;
+    var m = host.match(/^(agent-[a-f0-9]+)\.localhost$/i);
+    if (m) return { kind: 'workspace', agentId: m[1], activeTab: 'workspace' };
+    m = path.match(/^\/goto\/(agent-[a-f0-9]+)(?:\/|$)/i);
+    if (m) return { kind: 'workspace', agentId: m[1], activeTab: 'workspace' };
+    m = path.match(/^\/workspace\/(agent-[a-f0-9]+)\/connections(?:\/|$)/i);
+    if (m) return { kind: 'workspace', agentId: m[1], activeTab: 'connections' };
+    m = path.match(/^\/workspace\/(agent-[a-f0-9]+)(?:\/|$)/i);
+    if (m) return { kind: 'workspace', agentId: m[1], activeTab: 'settings' };
+    // Sharing is reached from workspace settings, so it gets the back arrow.
+    m = path.match(/^\/sharing\/(agent-[a-f0-9]+)(?:\/|$)/i);
+    if (m) return { kind: 'workspace', agentId: m[1], activeTab: null, showBack: true };
+    m = path.match(/^\/destroying\/(agent-[a-f0-9]+)(?:\/|$)/i);
+    if (m) return { kind: 'workspace', agentId: m[1], activeTab: null };
+    m = path.match(/^\/agents\/(agent-[a-f0-9]+)\/recovery(?:\/|$)/i);
+    if (m) return { kind: 'workspace', agentId: m[1], activeTab: null };
+    if (path === '/create') return { kind: 'page', pageLabel: 'New workspace', showBack: true };
+    if (/^\/creating\//.test(path)) return { kind: 'page', pageLabel: 'New workspace' };
+    // Browser-mode full-page fallbacks (Electron shows these as modals).
+    if (path === '/settings') return { kind: 'page', pageLabel: 'Settings', showBack: true };
+    if (path === '/accounts') return { kind: 'page', pageLabel: 'Accounts', showBack: true };
+    if (/^\/auth(?:\/|$)/.test(path)) return { kind: 'page', pageLabel: 'Sign in', showBack: true };
+    if (path === '/help') return { kind: 'page', pageLabel: 'Get help', showBack: true };
+    return { kind: 'home' };
+  }
+
+  function updateConnectionsBadge() {
+    var badge = document.getElementById('connections-badge');
+    if (!badge) return;
+    var count = 0;
+    if (currentCrumbAgentId) {
+      lastRequestEntries.forEach(function (entry) {
+        if (entry && entry.workspace_agent_id === currentCrumbAgentId) count += 1;
+      });
+    }
+    if (count > 0) {
+      // The badge is the Badge.jinja count pill; mirror its 99+ cap here.
+      badge.textContent = count > 99 ? '99+' : String(count);
+      badge.hidden = false;
+    } else {
+      // Hide via the native `hidden` attribute, not a `hidden` class: the pill
+      // bakes in `inline-flex`, which beats the `.hidden` utility in the
+      // cascade. The `[hidden]` base rule is `display: none !important`.
+      badge.hidden = true;
+    }
+  }
+
+  function applyTitlebarContext() {
+    var ctx = classifyContent(lastContentUrl || '/');
+    var wsCrumb = document.getElementById('ws-crumb');
+    var pageCrumb = document.getElementById('page-crumb');
+    var backBtn = document.getElementById('back-btn');
+    var isWorkspace = ctx.kind === 'workspace';
+    currentCrumbAgentId = isWorkspace ? ctx.agentId : null;
+    if (wsCrumb) wsCrumb.hidden = !isWorkspace;
+    if (isWorkspace) {
+      var cached = accentByAgentId[ctx.agentId];
+      var nameEl = document.getElementById('workspace-switcher-name');
+      // Fall back to the raw agent id until the SSE workspace list lands
+      // (the 'workspaces' handler re-runs this once names are known).
+      if (nameEl) nameEl.textContent = (cached && cached.name) || ctx.agentId;
+      ['workspace', 'connections', 'settings'].forEach(function (tab) {
+        var btn = document.getElementById('ws-tab-' + tab);
+        if (!btn) return;
+        var isActive = ctx.activeTab === tab;
+        btn.classList.toggle('bg-fill-active', isActive);
+        if (isActive) btn.setAttribute('aria-current', 'page');
+        else btn.removeAttribute('aria-current');
+      });
+    }
+    var isPage = ctx.kind === 'page';
+    if (pageCrumb) pageCrumb.hidden = !isPage;
+    if (isPage) {
+      var crumbName = document.getElementById('page-crumb-name');
+      if (crumbName) crumbName.textContent = ctx.pageLabel || '';
+    }
+    if (backBtn) backBtn.hidden = !ctx.showBack;
+    updateConnectionsBadge();
   }
 
   // Toggle the titlebar's self-theming scope. ``.titlebar-surface`` re-bases the
@@ -265,10 +377,18 @@
   }
 
   // -- Button wiring --------------------------------------------------------
-  document.getElementById('sidebar-toggle').onclick = toggleSidebar;
+  document.getElementById('workspace-switcher-btn').onclick = toggleSidebar;
   document.getElementById('home-btn').onclick = function () { navigateContent('/'); };
   document.getElementById('back-btn').onclick = goBack;
-  document.getElementById('forward-btn').onclick = goForward;
+  document.getElementById('ws-tab-workspace').onclick = function () {
+    if (currentCrumbAgentId) selectWorkspace(currentCrumbAgentId);
+  };
+  document.getElementById('ws-tab-connections').onclick = function () {
+    if (currentCrumbAgentId) navigateContent('/workspace/' + currentCrumbAgentId + '/connections');
+  };
+  document.getElementById('ws-tab-settings').onclick = function () {
+    if (currentCrumbAgentId) navigateContent('/workspace/' + currentCrumbAgentId + '/settings');
+  };
 
   if (isElectron) {
     document.getElementById('min-btn').onclick = function () { window.minds.minimize(); };
@@ -298,13 +418,13 @@
   }
 
   if (isElectron) {
-    if (window.minds.onWindowTitleChange) {
-      window.minds.onWindowTitleChange(function (title) {
-        document.getElementById('page-title').textContent = title || 'Minds';
-      });
-    } else {
-      window.minds.onContentTitleChange(function (title) {
-        document.getElementById('page-title').textContent = title || 'Minds';
+    // The titlebar's breadcrumb / icon-tabs / contextual back arrow track the
+    // content view's URL, which main pushes on every navigation (and replays
+    // when this chrome view (re)loads, via primeViewWithCachedChromeState).
+    if (window.minds.onContentURLChange) {
+      window.minds.onContentURLChange(function (url) {
+        lastContentUrl = url || null;
+        applyTitlebarContext();
       });
     }
     // The account row that refreshAuthStatus would update lives inside the
@@ -312,9 +432,7 @@
     // the visible copy renders inside the shared modal WebContentsView when
     // it is loaded with /_chrome/sidebar, and the sidebar.js running there
     // subscribes to its own content-url-changed IPC and re-fetches
-    // /auth/api/status. So we don't subscribe to onContentURLChange here in
-    // Electron mode; doing so would fire the fetch on every nav for no
-    // visible effect.
+    // /auth/api/status.
     // In Electron mode the current workspace is authoritative via IPC: main.js
     // tracks the active workspace per bundle (handles both /goto/<id>/ URLs and
     // post-redirect agent-<id>.localhost subdomains) and pushes it here. Deriving
@@ -345,9 +463,11 @@
   } else {
     setInterval(function () {
       try {
-        var t = document.getElementById('content-frame').contentDocument.title;
-        if (t) document.getElementById('page-title').textContent = t;
         var loc = document.getElementById('content-frame').contentWindow.location.pathname;
+        if (lastContentUrl !== loc) {
+          lastContentUrl = loc;
+          applyTitlebarContext();
+        }
         var m = loc.match(/^\/goto\/([^/]+)/);
         var derivedAgentId = m ? m[1] : null;
         // Re-render the inline workspace list only when the displayed
@@ -394,13 +514,14 @@
     }
   }
   refreshAuthStatus();
+  // Paint the initial titlebar context (home state until the first content
+  // URL push / poll tick lands).
+  applyTitlebarContext();
 
-  // -- Sidebar action wiring (browser mode only) ----------------------------
+  // -- Switcher menu action wiring (browser mode only) -----------------------
   if (!isElectron) {
     var newWsBtn = document.getElementById('sidebar-new-workspace');
     if (newWsBtn) newWsBtn.onclick = function () { navigateContent('/create'); closeSidebar(); };
-    var settingsBtn = document.getElementById('sidebar-settings');
-    if (settingsBtn) settingsBtn.onclick = function () { navigateContent('/settings'); closeSidebar(); };
     var accountBtn = document.getElementById('sidebar-account');
     if (accountBtn) {
       accountBtn.onclick = function () {
@@ -410,15 +531,7 @@
     }
   }
 
-  document.getElementById('requests-toggle').onclick = function () {
-    // ``keep_open=1`` marks this as an intentional open of the whole inbox,
-    // so resolving a request advances to the next pending one rather than
-    // dismissing the window (notification-driven opens omit it and close).
-    if (isElectron) window.minds.toggleInbox();
-    else navigateContent('/inbox?keep_open=1');
-  };
-
-  // Get-help opens the help modal (report a bug). Pass the currently-displayed
+  // The report-a-bug button opens the help modal (report a bug). Pass the currently-displayed
   // workspace id along so the report can scope workspace context; in Electron the
   // modal is the shared overlay view, in browser mode it loads into the content frame.
   document.getElementById('help-toggle').onclick = function () {
@@ -527,22 +640,6 @@
     });
   }
 
-  function updateRequestsBadge(count) {
-    var badge = document.getElementById('requests-badge');
-    if (!badge) return;
-    if (count > 0) {
-      // The badge is the Badge.jinja count pill; mirror its 99+ cap here.
-      badge.textContent = count > 99 ? '99+' : String(count);
-      badge.hidden = false;
-    } else {
-      // Hide via the native `hidden` attribute, not a `hidden` class: the pill
-      // bakes in `inline-flex`, which beats the `.hidden` utility in the
-      // cascade (so a `hidden` class would leave a stray "0" showing). The
-      // `[hidden]` base rule is `display: none !important`, which wins.
-      badge.hidden = true;
-    }
-  }
-
   function handleChromeEvent(data) {
     try {
       if (data.type === 'workspace_accent_preview') {
@@ -592,9 +689,15 @@
         // wider than the displayed workspace -- the accent rides
         // ``lastRequestedAccentAgentId``, not the recovery-redirect lock.
         if (lastRequestedAccentAgentId) applyTitleAccent(lastRequestedAccentAgentId);
+        // Re-derive the breadcrumb: the workspace name for the current crumb
+        // may only now be known (cold start, rename).
+        applyTitlebarContext();
       }
       if (data.type === 'auth_status') updateAuthUI(data);
-      if (data.type === 'requests') updateRequestsBadge(data.count);
+      if (data.type === 'requests') {
+        lastRequestEntries = Array.isArray(data.requests) ? data.requests : [];
+        updateConnectionsBadge();
+      }
       if (data.type === 'system_interface_status') handleSystemInterfaceStatus(data.agent_id, data.status);
     } catch (e) {}
   }

@@ -1895,6 +1895,13 @@ function primeViewWithCachedChromeState(bundle, wc) {
     // right accent (or the neutral chrome, when it's null) without the
     // renderer remembering anything.
     wc.send('accent-changed', bundle.currentAccentAgentId);
+    // Replay the content view's current URL for the same reason: the
+    // titlebar's breadcrumb / icon-tabs / contextual back arrow are a pure
+    // function of it, and the per-navigation ``content-url-changed`` push
+    // may have fired before this chrome view registered its listener.
+    if (bundle.currentContentUrl) {
+      wc.send('content-url-changed', bundle.currentContentUrl);
+    }
   }
 }
 
@@ -3067,13 +3074,6 @@ ipcMain.on('content-go-back', (event) => {
   const bundle = getBundleFromEvent(event);
   if (bundle && bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
     bundle.contentView.webContents.goBack();
-  }
-});
-
-ipcMain.on('content-go-forward', (event) => {
-  const bundle = getBundleFromEvent(event);
-  if (bundle && bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
-    bundle.contentView.webContents.goForward();
   }
 });
 
