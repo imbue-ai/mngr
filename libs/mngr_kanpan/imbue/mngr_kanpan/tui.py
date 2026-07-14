@@ -2088,10 +2088,7 @@ def _refresh_display(state: _KanpanState) -> None:
 
     # Restore focus to the previously focused agent
     if state.focused_agent_name is not None:
-        for idx, entry in state.index_to_entry.items():
-            if entry.name == state.focused_agent_name:
-                walker.set_focus(idx)
-                return
+        _focus_row_by_name(state, state.focused_agent_name)
 
 
 def _schedule_next_refresh(loop: MainLoop, state: _KanpanState) -> None:
