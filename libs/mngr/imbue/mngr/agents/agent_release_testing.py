@@ -175,11 +175,15 @@ def _marker_path(host_dir: Path) -> Path:
     return _agent_state_dir(host_dir) / "active"
 
 
-def _read_common_records(host_dir: Path, subdir: str) -> list[dict[str, Any]]:
-    path = _agent_state_dir(host_dir) / "events" / subdir / "common_transcript" / "events.jsonl"
+def _read_common_records_in_state_dir(state_dir: Path, subdir: str) -> list[dict[str, Any]]:
+    path = state_dir / "events" / subdir / "common_transcript" / "events.jsonl"
     if not path.exists():
         return []
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def _read_common_records(host_dir: Path, subdir: str) -> list[dict[str, Any]]:
+    return _read_common_records_in_state_dir(_agent_state_dir(host_dir), subdir)
 
 
 # Predicates over the current common-transcript records. Module-level (the call sites
@@ -493,10 +497,7 @@ def _agent_state_dir_by_name(host_dir: Path, agent_name: str) -> Path:
 
 
 def _read_common_records_for_agent(host_dir: Path, subdir: str, agent_name: str) -> list[dict[str, Any]]:
-    path = _agent_state_dir_by_name(host_dir, agent_name) / "events" / subdir / "common_transcript" / "events.jsonl"
-    if not path.exists():
-        return []
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    return _read_common_records_in_state_dir(_agent_state_dir_by_name(host_dir, agent_name), subdir)
 
 
 def _count_user_messages_containing(records: list[dict[str, Any]], token: str) -> int:
