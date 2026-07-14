@@ -496,8 +496,8 @@ def _run_serve_loop(
 def _serve_forward_app(app: Any, listen_socket: socket.socket, use_http2: bool) -> None:
     """Serve the forward app over the already-bound ``listen_socket`` via hypercorn.
 
-    ``shutdown_trigger`` defaults to ``None``, which makes hypercorn install its
-    own SIGINT/SIGTERM handlers -- matching the SIGTERM->graceful behaviour
+    Passes ``shutdown_trigger=None``, which makes hypercorn install its own
+    SIGINT/SIGTERM handlers -- matching the SIGTERM->graceful behaviour
     minds' ``terminate()`` relies on. Must run on the main thread so the loop can
     install those signal handlers.
 
