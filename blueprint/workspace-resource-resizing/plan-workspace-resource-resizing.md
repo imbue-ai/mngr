@@ -26,7 +26,7 @@
 
 * Providers without resize support report that in the descriptor; attempting to set values errors clearly.
 
-* For lima, values set while the VM runs take effect on the next stop+start (`mngr limit` says so); values set while stopped simply apply on next start. For docker, values apply live to the running container and persist across container stop/start.
+* For lima, values set while the VM runs take effect on the next stop+start (`mngr limit` says so); values set while stopped simply apply on next start. For docker, values apply live to the running container and persist across container stop/start. When docker rejects a live change (e.g. shrinking memory below current usage), the values persist in the host record and the result reports "restart required" — resize results always state whether values applied live or are pending.
 
 ### Minds settings page
 
@@ -38,7 +38,7 @@
 
 * Saving on a running lima workspace shows a confirmation dialog offering "Save & restart now" or "Save only — apply on next restart" (for when in-progress work shouldn't be interrupted). Restart-now runs: `mngr limit` → the existing host-scope restart operation, with its existing progress/status UI and operation-conflict guards (e.g. blocked during a running backup; concurrent resizes of the same workspace rejected the same way). Save-only leaves the values pending, shown via the same "pending restart" note + Restart-now button as CLI-set values.
 
-* Saving on a running docker workspace applies live — no dialog, no restart.
+* Saving on a running docker workspace applies live — no dialog, no restart. Live application is a dynamic result, not just a static prediction: if docker rejects the change (e.g. shrinking memory below current usage), the values are still persisted and the same "Restart now / apply on next restart" dialog appears after the save — no manual stop needed, and no dialog when the change did apply live.
 
 * Saving while the workspace is already stopped saves silently; values apply on next start.
 
@@ -72,7 +72,7 @@
 
 * **Lima provider** (`libs/mngr_lima`): store desired CPU/memory in the durable per-host record; apply them via `limactl edit` during `start_host`; read actuals from `limactl list --json`; report descriptor with machine-physical ceilings (psutil, already a dependency); fix resource recording at create time.
 
-* **Docker provider** (`libs/mngr/providers/docker`): apply limits live via `docker update` and persist them; read actuals from `docker inspect`; report descriptor with ceilings from `docker info`; replace the placeholder `get_host_resources`; support clearing back to unlimited (restart-based if live clearing fails).
+* **Docker provider** (`libs/mngr/providers/docker`): apply limits live via `docker update` and persist them in the durable host record; when live application is rejected, keep the persisted values and report restart-required, re-applying from the host record during `start_host` (mirroring lima); read actuals from `docker inspect`; report descriptor with ceilings from `docker info`; replace the placeholder `get_host_resources`; support clearing back to unlimited (restart-based if live clearing fails).
 
 * **mngr CLI** (`cli/limit.py`): add `--cpus` / `--memory` flags, the no-flags read mode, over-provisioning warning, and updated help/docs (regenerate CLI docs via `scripts/make_cli_docs.py`).
 
