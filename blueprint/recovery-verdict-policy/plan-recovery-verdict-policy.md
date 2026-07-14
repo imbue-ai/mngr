@@ -151,10 +151,10 @@ minds policy layer (`apps/minds`):
   error-surfacing unit -- additive changes in a different region than their
   work; coordinate before merge.)
 
-- `templates.py` is NOT touched: the now-dead `interface_unresponsive` JS
-  branch stays for the error-surfacing unit to remove (per the unit contract);
-  the server never emits that tier, and unknown tiers already fall back to the
-  consent page.
+- `templates.py`: only the now-dead `interface_unresponsive` JS branch (and its
+  `scope: 'services'` dispatch) is removed; the rest of the recovery-page JS is
+  owned by the error-surfacing unit and stays untouched. The server never emits
+  that tier, and unknown tiers already fall back to the consent page.
 
 - Tests updated across `recovery_probe_test.py`, `workspace_recovery_test.py`,
   `api_v1_test.py`, provider state-minting tests, and any ratchet counts that
@@ -181,9 +181,8 @@ minds policy layer (`apps/minds`):
   only `host_state`, so the page shows a canned reason; an additive schema
   extension would restore provider-verbatim fidelity.
 
-- Error-surfacing unit: remove the dead `interface_unresponsive` JS branch;
-  optionally give FAILED-condition consent pages tailored copy (today they
-  show the generic "Workspace unresponsive" text).
+- Error-surfacing unit: optionally give FAILED-condition consent pages tailored
+  copy (today they show the generic "Workspace unresponsive" text).
 
 ## Acceptance criteria
 
