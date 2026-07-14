@@ -234,8 +234,9 @@ class CreationErrorKind(UpperCaseStrEnum):
     # common cause: the repo is private (or does not exist -- GitHub
     # deliberately answers both the same way, to avoid leaking which private
     # repos exist) and none of this machine's git credentials can see it, so
-    # the creating page shows sign-in guidance alongside the raw error.
-    GIT_AUTH_REQUIRED = auto()
+    # the creating page shows GitHub sign-in guidance alongside the raw error.
+    # The clone mechanism is git, but the problem we surface is GitHub access.
+    GITHUB_AUTH_REQUIRED = auto()
 
 
 class AgentCreationInfo(FrozenModel):
@@ -339,7 +340,7 @@ def classify_creation_error(repo_source: str, error: Exception) -> CreationError
         return None
     if not _is_github_https_url(repo_source):
         return None
-    return CreationErrorKind.GIT_AUTH_REQUIRED
+    return CreationErrorKind.GITHUB_AUTH_REQUIRED
 
 
 def _redact_url_credentials(url: str) -> str:

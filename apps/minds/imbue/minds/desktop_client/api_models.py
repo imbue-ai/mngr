@@ -82,7 +82,7 @@ class CreateOperationStatusResponse(FrozenModel):
     error_kind: str | None = Field(
         default=None,
         description=(
-            "Machine-readable failure classification (e.g. GIT_AUTH_REQUIRED), set when the "
+            "Machine-readable failure classification (e.g. GITHUB_AUTH_REQUIRED), set when the "
             "failure is recognized; the creating page gates extra static guidance on it"
         ),
     )

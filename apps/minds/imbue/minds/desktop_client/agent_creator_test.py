@@ -156,7 +156,7 @@ def test_classify_creation_error_flags_any_failed_github_clone() -> None:
         "Could not resolve host: github.com",
     )
     for message in failures:
-        assert classify_creation_error(url, GitCloneError(message)) is CreationErrorKind.GIT_AUTH_REQUIRED, message
+        assert classify_creation_error(url, GitCloneError(message)) is CreationErrorKind.GITHUB_AUTH_REQUIRED, message
 
 
 def test_classify_creation_error_ignores_non_github_sources() -> None:

@@ -72,8 +72,8 @@
     // Reveal extra static guidance for recognized failure kinds (currently
     // just the private-GitHub-repo case). The copy lives hidden in the
     // template; the backend only classifies.
-    if (creationErrorKind === 'GIT_AUTH_REQUIRED') {
-      var authHelp = document.getElementById('git-auth-help');
+    if (creationErrorKind === 'GITHUB_AUTH_REQUIRED') {
+      var authHelp = document.getElementById('github-auth-help');
       if (authHelp) authHelp.classList.remove('hidden');
     }
     // The prominent error box now carries the message, so clear the faint

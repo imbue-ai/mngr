@@ -541,7 +541,7 @@ def test_create_operation_status_carries_error_kind_for_classified_failures(
             status=AgentCreationStatus.FAILED,
             launch_mode=LaunchMode.DOCKER,
             error="git clone failed:\nfatal: could not read Username for 'https://github.com'",
-            error_kind=CreationErrorKind.GIT_AUTH_REQUIRED,
+            error_kind=CreationErrorKind.GITHUB_AUTH_REQUIRED,
         ),
     )
     client = _client_with_agent_creator(
@@ -554,7 +554,7 @@ def test_create_operation_status_carries_error_kind_for_classified_failures(
     body = json.loads(response.data)
     assert body["status"] == "FAILED"
     assert body["error"]
-    assert body["error_kind"] == "GIT_AUTH_REQUIRED"
+    assert body["error_kind"] == "GITHUB_AUTH_REQUIRED"
 
 
 def test_create_workspace_full_surface_returns_202_and_threads_fields(

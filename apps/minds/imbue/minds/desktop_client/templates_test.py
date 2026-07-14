@@ -457,10 +457,10 @@ def test_render_create_form_shows_error_message_when_supplied() -> None:
     assert "Imbue cloud requires an account." in html
 
 
-def test_render_creating_page_carries_hidden_git_auth_guidance() -> None:
+def test_render_creating_page_carries_hidden_github_auth_guidance() -> None:
     """The creating page ships the private-repo guidance as static, hidden
     content: creating.js reveals it only when the create-operation status
-    reports error_kind GIT_AUTH_REQUIRED. It must name the GitHub CLI sign-in
+    reports error_kind GITHUB_AUTH_REQUIRED. It must name the GitHub CLI sign-in
     command, link the official docs, and offer the local-path alternative."""
     creation_id = CreationId()
     info = AgentCreationInfo(
@@ -469,12 +469,12 @@ def test_render_creating_page_carries_hidden_git_auth_guidance() -> None:
         launch_mode=LaunchMode.DOCKER,
     )
     html = render_creating_page(creation_id=creation_id, info=info)
-    assert 'id="git-auth-help"' in html
+    assert 'id="github-auth-help"' in html
     assert "gh auth login" in html
     assert "https://docs.github.com/en/github-cli/github-cli/quickstart" in html
     assert "path in the form instead of the URL" in html
     # Hidden on first paint -- the block only shows for the classified failure.
-    guidance_index = html.index('id="git-auth-help"')
+    guidance_index = html.index('id="github-auth-help"')
     tag_end = html.index(">", guidance_index)
     assert "hidden" in html[guidance_index:tag_end]
 

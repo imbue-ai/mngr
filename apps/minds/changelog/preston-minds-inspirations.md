@@ -2,4 +2,4 @@ Creating a workspace from a private (or nonexistent) GitHub repository URL now s
 
 The desktop client's local `git clone` of the workspace source now runs with `GIT_TERMINAL_PROMPT=0`, so cloning a repository this computer has no credentials for fails fast with a clear error instead of hanging on a credential prompt (mirroring the earlier fix in the FCT bootstrap's git calls).
 
-The create-operation status API (`GET /api/v1/workspaces/operations/create/<id>`) gained an optional `error_kind` field carrying a machine-readable failure classification (currently `GIT_AUTH_REQUIRED`) alongside the human-readable `error` message.
+The create-operation status API (`GET /api/v1/workspaces/operations/create/<id>`) gained an optional `error_kind` field carrying a machine-readable failure classification (currently `GITHUB_AUTH_REQUIRED`) alongside the human-readable `error` message.
