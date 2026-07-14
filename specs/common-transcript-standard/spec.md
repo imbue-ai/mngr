@@ -205,10 +205,10 @@ This is reflected by an "Ordered assistant parts[]" row in the parity matrix in
   host): every agent on the current emitter had `parts[]` on all 2310 post-`90ef7a979` assistant lines (0
   missing); every parts-less line came from an agent pinned to an old emitter, 12 of which were still
   active after the cutoff. We accept this -- we do not care about old-emitter transcripts, and everything
-  created on the current emitter renders correctly. A reader that nonetheless wants old-emitter lines
-  readable (e.g. the kanpan peek against a still-running pre-`parts[]` agent) must fall back to the flat
-  `text` / `tool_calls`; that fallback is a back-compat shim for old-emitter lines, not a workaround for a
-  broken emitter -- the current emitter always fills `parts[]`.
+  created on the current emitter renders correctly. A temporary flat-field fallback (MIND-104) rendered
+  old-emitter lines from `text` / `tool_calls` while those agents were still running; it was a back-compat
+  shim, not a workaround for a broken emitter, and it was removed (MIND-113) once they aged out, restoring
+  the single-path reader described above.
 - `finish_reason`: the reader never displayed the stop reason, so pre-existing lines carrying the old
   `stop_reason` are unaffected at read time (the field simply lands in `extra`).
 - No `schema_version` field: the format is uniform going forward, so there is nothing to branch on.

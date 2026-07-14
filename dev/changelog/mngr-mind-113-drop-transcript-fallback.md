@@ -1,0 +1,1 @@
+Updated `specs/common-transcript-standard/spec.md`: the temporary flat-field reader fallback for pre-`parts[]` emitter lines has been removed now that those agents have aged out, so the Compatibility section again describes a single-path `parts[]`-only reader.

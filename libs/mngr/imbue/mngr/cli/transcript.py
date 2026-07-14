@@ -171,20 +171,6 @@ def _format_event_human(event: dict[str, Any]) -> str:
                 else:
                     # Unknown part type (e.g. a future reasoning part): nothing to render here.
                     continue
-            if not lines:
-                # FIXME: MIND-113, later remove this fallback logic. Flat text/tool_calls
-                # for agents on an emitter predating parts[] (before 2026-06-15) so their
-                # turns aren't blank; new agents all fill parts[], so this serves only
-                # existing old-emitter agents. Remove once they age out.
-                text = event.get("text", "")
-                if text:
-                    lines.append(text)
-                for tool_call in event.get("tool_calls") or []:
-                    if not isinstance(tool_call, dict):
-                        continue
-                    tool_name = tool_call.get("tool_name", "unknown")
-                    preview = tool_call.get("input_preview", "")
-                    lines.append(f"  -> {tool_name}({preview})")
             body = "\n".join(lines) if lines else "(no content)"
             return f"[{timestamp}] assistant:\n{body}"
 
