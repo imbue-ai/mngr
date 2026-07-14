@@ -370,6 +370,11 @@ def resolve_ready_prebaked_lima_image(
         case LimaImagePrefetchState(status=LimaImagePrefetchStatus.READY, raw_path=None):
             raise LimaImageDownloadError("Pre-baked Lima image reported ready without a path; please retry.")
         case LimaImagePrefetchState(status=LimaImagePrefetchStatus.READY, raw_path=Path() as raw_path):
+            if not raw_path.exists():
+                # The state says READY but the image is gone (a cleaned cache, a pruned disk).
+                # Handing Lima a path to nothing would fail the create with an obscure error;
+                # the prefetch re-downloads it on the next run.
+                return _fall_back_to_in_vm(f"the pre-baked image is no longer at {raw_path}", on_fallback_to_in_vm)
             return raw_path
         case LimaImagePrefetchState(status=LimaImagePrefetchStatus.VERSION_UNAVAILABLE):
             return _fall_back_to_in_vm(

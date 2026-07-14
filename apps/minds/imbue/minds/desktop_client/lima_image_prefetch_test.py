@@ -314,8 +314,18 @@ def test_resolve_returns_path_when_ready(tmp_path: Path) -> None:
     sink = RecordingProgressSink()
     prefetcher = _prefetcher(InMemoryManifestFetcher(), FixedRawChunkStore(), sink, tmp_path)
     raw = tmp_path / "image.raw"
+    raw.write_bytes(b"image")
     _seed(sink, LimaImagePrefetchStatus.READY, raw_path=raw, error=None)
     assert _resolve(prefetcher) == raw
+
+
+def test_resolve_builds_in_vm_when_the_ready_image_is_gone(tmp_path: Path) -> None:
+    # READY is a claim about the past: the file can be deleted afterwards (a cleaned cache, a
+    # pruned disk). Handing Lima a path to nothing fails the create with an obscure error.
+    sink = RecordingProgressSink()
+    prefetcher = _prefetcher(InMemoryManifestFetcher(), FixedRawChunkStore(), sink, tmp_path)
+    _seed(sink, LimaImagePrefetchStatus.READY, raw_path=tmp_path / "deleted.raw", error=None)
+    assert _resolve(prefetcher) is None
 
 
 def test_resolve_returns_none_when_version_unavailable(tmp_path: Path) -> None:
