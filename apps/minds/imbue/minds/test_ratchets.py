@@ -365,7 +365,7 @@ def test_prevent_inline_functions() -> None:
     # ported Sentry HTTP transport's ``_send_request`` (it closes over the
     # envelope being sent). The recorded count reflects the actual finder count
     # for the current tree.
-    rc.check_inline_functions(_DIR, snapshot(9))
+    rc.check_inline_functions(_DIR, snapshot(7))
 
 
 def test_prevent_underscore_imports() -> None:

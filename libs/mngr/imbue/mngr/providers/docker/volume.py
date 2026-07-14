@@ -14,6 +14,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import VolumeFile
 from imbue.mngr.interfaces.volume import BaseVolume
+from imbue.mngr.primitives import HostName
 
 # Docker label constants shared between volume.py and instance.py.
 # Defined here (the lower-level module) to avoid circular imports.
@@ -29,6 +30,18 @@ CONTAINER_ENTRYPOINT_CMD: Final[str] = "trap 'exit 0' TERM; tail -f /dev/null & 
 # Name and configuration for the singleton state container
 STATE_CONTAINER_IMAGE: Final[str] = "alpine:latest"
 STATE_VOLUME_MOUNT_PATH: Final[str] = "/mngr-state"
+
+
+def host_container_name(prefix: str, host_name: HostName) -> str:
+    """Generate the name for the container backing host ``host_name``.
+
+    Every creation path names a host's container this way, and lookups rely on
+    it: the labels alone carry no environment discriminator (two mngr
+    environments differing only in ``MNGR_PREFIX`` label their containers
+    identically), so the prefixed container name is what scopes a host name to
+    a single environment -- the same uniqueness scope Docker itself enforces.
+    """
+    return f"{prefix}{host_name}"
 
 
 def state_container_name(prefix: str, user_id: str) -> str:
