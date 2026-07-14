@@ -31,6 +31,8 @@ from imbue.remote_service_connector.app import TunnelComponentTooLongError
 from imbue.remote_service_connector.app import TunnelNotFoundError
 from imbue.remote_service_connector.app import TunnelOwnershipError
 from imbue.remote_service_connector.app import _MAX_BUCKETS_PER_ACCOUNT
+from imbue.remote_service_connector.app import _MAX_ENCRYPTED_SECRETS_BYTES
+from imbue.remote_service_connector.app import _MAX_KEY_BUNDLE_FIELD_BYTES
 from imbue.remote_service_connector.app import _authenticate_supertokens
 from imbue.remote_service_connector.app import _default_email_getter
 from imbue.remote_service_connector.app import cf_check
@@ -2801,7 +2803,7 @@ def test_put_workspace_record_rejects_invalid_base64_secrets(monkeypatch: pytest
 
 def test_put_workspace_record_rejects_oversized_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _store, _caller = _make_sync_test_client(monkeypatch)
-    oversized = base64.b64encode(b"x" * (256 * 1024 + 1)).decode("ascii")
+    oversized = base64.b64encode(b"x" * (_MAX_ENCRYPTED_SECRETS_BYTES + 1)).decode("ascii")
     resp = client.put(
         "/sync/records/host-aaa111",
         json=_sync_record_body(encrypted_secrets=oversized),
@@ -2881,7 +2883,7 @@ def test_key_bundle_rejects_oversized_wrapped_dek(monkeypatch: pytest.MonkeyPatc
         "kdf_time_cost": 3,
         "kdf_memory_kib": 65536,
         "kdf_parallelism": 4,
-        "wrapped_dek": base64.b64encode(b"x" * 8192).decode("ascii"),
+        "wrapped_dek": base64.b64encode(b"x" * (_MAX_KEY_BUNDLE_FIELD_BYTES + 1)).decode("ascii"),
         "key_epoch": 1,
     }
     assert client.put("/sync/bundle", json=body, headers=_admin_headers()).status_code == 400

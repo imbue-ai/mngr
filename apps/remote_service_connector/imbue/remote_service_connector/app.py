@@ -3516,13 +3516,21 @@ def delete_bucket_key_endpoint(request: Request, access_key_id: str) -> dict[str
 # ---------------------------------------------------------------------------
 
 
-# Hard cap on the client-encrypted secrets blob (decoded bytes). Generous for
-# an SSH key + known_hosts + a restic env, tight enough to keep rows small.
-_MAX_ENCRYPTED_SECRETS_BYTES = 256 * 1024
-# Cap for each binary key-bundle field (the wrapped DEK -- a 32-byte key +
-# nonce + tag -- and the argon2id salt), so 4 KiB is ample for either.
-_MAX_KEY_BUNDLE_FIELD_BYTES = 4096
-_MAX_SYNC_TEXT_FIELD_LENGTH = 512
+# Hard caps on what one sync row may carry. These exist to bound a row's size
+# (the server can never read the blobs, so it cannot validate their contents)
+# -- not to police the payload's shape. Today's payload uses a small fraction
+# of each, and the headroom is deliberate: the secrets blob is an opaque,
+# client-versioned envelope, so adding another secret to it later must not
+# require a connector deploy to raise a limit.
+#
+# Client-encrypted secrets blob, decoded bytes. Today: an SSH private key +
+# known_hosts + a canonical restic env (a few KiB).
+_MAX_ENCRYPTED_SECRETS_BYTES = 2560 * 1024
+# Each binary key-bundle field: the password-wrapped DEK (a 32-byte key +
+# nonce + tag) and the argon2id salt. Today: under 100 bytes each.
+_MAX_KEY_BUNDLE_FIELD_BYTES = 40960
+# Each plaintext metadata field (names, ids, device labels).
+_MAX_SYNC_TEXT_FIELD_LENGTH = 5120
 
 
 class WorkspaceRecordState(str, Enum):
