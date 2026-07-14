@@ -511,8 +511,8 @@ def test_claude_agent_assemble_command_auto_disable_questions_appends_flag(
     command = agent.assemble_command(host=host, agent_args=(), command_override=None)
 
     parsed = _ParsedAssembleCommand(str(command))
-    # Appended as a second --disallowed-tools flag (claude accumulates repeats),
-    # so the cli_args-supplied list is preserved.
+    # Appended as a second --disallowed-tools flag (claude appends & unions
+    # repeated flags), so the cli_args-supplied list is preserved.
     expected = ["--disallowed-tools", "TodoWrite", "--disallowed-tools", "AskUserQuestion"]
     assert parsed.resume_args == expected
     assert parsed.create_args == expected

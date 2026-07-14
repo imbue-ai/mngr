@@ -2365,8 +2365,7 @@ class ClaudeAgent(
         # (Claude is last-wins) -- the accepted, documented limitation of that mode.
         cli_args = self.agent_config.cli_args
         all_extra_args = cli_args + quote_agent_args(agent_args)
-        # Claude accumulates repeated --disallowed-tools flags, so appending here
-        # cannot clobber a list already present in cli_args/agent_args.
+        # Claude appends & unions repeated --disallowed-tools flags.
         if self.agent_config.auto_disable_questions:
             all_extra_args = all_extra_args + ("--disallowed-tools", "AskUserQuestion")
         args_str = " ".join(all_extra_args) if all_extra_args else ""
