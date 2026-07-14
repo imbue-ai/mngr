@@ -1964,7 +1964,6 @@ class VpsProvider(BaseProviderInstance):
                     id=host_ref.host_id,
                     name=str(host_ref.host_name),
                     provider_name=host_ref.provider_name,
-                    is_local=False,
                     state=HostState.RUNNING,
                 ), []
             else:
@@ -2030,7 +2029,6 @@ class VpsProvider(BaseProviderInstance):
             id=host.id,
             name=certified_data.host_name,
             provider_name=host_ref.provider_name,
-            is_local=False,
             state=HostState.RUNNING,
             image=certified_data.image,
             tags=tags,
@@ -2138,7 +2136,7 @@ class VpsProvider(BaseProviderInstance):
             create_time=create_time,
             start_on_boot=agent_data.get("start_on_boot", False),
             state=lifecycle.state,
-            main_pid=lifecycle.main_pid,
+            pid=lifecycle.pid,
             url=agent_raw.get("url"),
             start_time=start_time,
             runtime_seconds=runtime_seconds,

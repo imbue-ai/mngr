@@ -125,14 +125,14 @@ def test_probe_lifecycle_returns_live_process_pid(
 
     try:
         wait_for(
-            lambda: test_agent.probe_lifecycle().main_pid is not None,
+            lambda: test_agent.probe_lifecycle().pid is not None,
             error_message="Expected the agent's main process PID to be discovered",
         )
         probe = test_agent.probe_lifecycle()
         assert probe.state == AgentLifecycleState.RUNNING
-        assert probe.main_pid is not None
+        assert probe.pid is not None
         # The PID is a live process whose name matches the expected process (sleep).
-        process = psutil.Process(probe.main_pid)
+        process = psutil.Process(probe.pid)
         assert process.is_running()
         assert process.name() == test_agent.get_expected_process_name()
     finally:

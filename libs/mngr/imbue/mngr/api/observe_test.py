@@ -1209,7 +1209,7 @@ def test_reconcile_watcher_opens_replaces_and_closes(temp_mngr_ctx: MngrContext,
     host_id = HostId.generate()
     try:
         with observer._concurrency_group:
-            agent_a = make_test_agent_details(name="watched", host_id=host_id, main_pid=proc_a.pid)
+            agent_a = make_test_agent_details(name="watched", host_id=host_id, pid=proc_a.pid)
             agent_id_str = str(agent_a.id)
 
             # First sighting opens a watcher bound to proc_a.
@@ -1222,15 +1222,13 @@ def test_reconcile_watcher_opens_replaces_and_closes(temp_mngr_ctx: MngrContext,
             assert observer._watchers[agent_id_str].thread is first_thread
 
             # PID changed: watcher is replaced and the old thread is stopped.
-            agent_b = agent_a.model_copy_update(to_update(agent_a.field_ref().main_pid, proc_b.pid))
+            agent_b = agent_a.model_copy_update(to_update(agent_a.field_ref().pid, proc_b.pid))
             observer._reconcile_watcher_for_agent(agent_b)
             assert observer._watchers[agent_id_str].pid == proc_b.pid
             assert not first_thread.is_alive()
 
-            # No live process (main_pid None): watcher closed and removed.
-            observer._reconcile_watcher_for_agent(
-                agent_a.model_copy_update(to_update(agent_a.field_ref().main_pid, None))
-            )
+            # No live process (pid None): watcher closed and removed.
+            observer._reconcile_watcher_for_agent(agent_a.model_copy_update(to_update(agent_a.field_ref().pid, None)))
             assert agent_id_str not in observer._watchers
     finally:
         for proc in (proc_a, proc_b):
@@ -1239,7 +1237,7 @@ def test_reconcile_watcher_opens_replaces_and_closes(temp_mngr_ctx: MngrContext,
 
 
 def test_reconcile_watcher_skips_remote_agents(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
-    """A remote agent is never watched, even though it carries a main_pid.
+    """A remote agent is never watched, even though it carries a pid.
 
     The PID is in the remote host's namespace; watching it here would bind to an
     unrelated same-numbered local process. A remote sighting also closes any
@@ -1249,12 +1247,14 @@ def test_reconcile_watcher_skips_remote_agents(temp_mngr_ctx: MngrContext, noop_
     proc = _spawn_sleeper()
     try:
         with observer._concurrency_group:
-            local_agent = make_test_agent_details(name="roaming", main_pid=proc.pid)
-            remote_host = local_agent.host.model_copy_update(to_update(local_agent.host.field_ref().is_local, False))
+            local_agent = make_test_agent_details(name="roaming", pid=proc.pid)
+            remote_host = local_agent.host.model_copy_update(
+                to_update(local_agent.host.field_ref().provider_name, ProviderInstanceName("modal"))
+            )
             remote_agent = local_agent.model_copy_update(to_update(local_agent.field_ref().host, remote_host))
             agent_id_str = str(local_agent.id)
 
-            # A remote agent carrying a main_pid does not open a watcher.
+            # A remote agent carrying a pid does not open a watcher.
             observer._reconcile_watcher_for_agent(remote_agent)
             assert agent_id_str not in observer._watchers
 
@@ -1275,7 +1275,7 @@ def test_pid_watcher_enqueues_host_when_watched_process_dies(temp_mngr_ctx: Mngr
     host_id = HostId.generate()
     try:
         with observer._concurrency_group:
-            agent = make_test_agent_details(name="dying", host_id=host_id, main_pid=proc.pid)
+            agent = make_test_agent_details(name="dying", host_id=host_id, pid=proc.pid)
             observer._reconcile_watcher_for_agent(agent)
             assert str(agent.id) in observer._watchers
 

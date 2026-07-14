@@ -50,6 +50,7 @@ from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
+from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
 
@@ -602,7 +603,7 @@ class AgentObserver(MutableModel):
 
         The discovery stream is the low-latency membership signal. A newly
         discovered agent enqueues its host for a re-probe so its real lifecycle
-        state (and main_pid) is emitted promptly, matching the near-instant create
+        state (and pid) is emitted promptly, matching the near-instant create
         latency consumers had when they read the discovery stream directly. A
         removed agent emits an AGENT_REMOVED event on the agents stream and drops
         its per-agent tracking and PID watcher, so a consumer of --stream-events
@@ -852,7 +853,7 @@ class AgentObserver(MutableModel):
             self._emit_state_change(agent, old_agent_state, old_host_state)
 
         # Reconcile PID watchers from the live listing (open/replace/close by
-        # main_pid), and close watchers for agents dropped from tracking. The
+        # pid), and close watchers for agents dropped from tracking. The
         # synthesized UNKNOWN agents are intentionally left untouched: their
         # provider is unreachable, so the last-known watcher (if any) stays as-is.
         for agent in agents:
@@ -865,16 +866,17 @@ class AgentObserver(MutableModel):
     def _reconcile_watcher_for_agent(self, agent: AgentDetails) -> None:
         """Open, replace, or close the PID watcher for one agent from its probed details.
 
-        Only local agents are watched: a remote agent's ``main_pid`` is a PID in
-        the remote host's namespace, so watching it here would watch an unrelated
-        same-numbered local process. A remote agent, or a local agent with no
-        ``main_pid`` (no longer running), closes any existing watcher.
+        Only local agents are watched: a remote agent's ``pid`` is a PID in the
+        remote host's namespace, so watching it here would watch an unrelated
+        same-numbered local process. Locality is keyed on the ``local`` provider,
+        the one and only user of the local connector. A remote agent, or a local
+        agent with no ``pid`` (no longer running), closes any existing watcher.
         """
         agent_id_str = str(agent.id)
-        if not agent.host.is_local or agent.main_pid is None:
+        if agent.host.provider_name != LOCAL_PROVIDER_NAME or agent.pid is None:
             self._close_watcher(agent_id_str)
             return
-        self._open_or_replace_watcher(agent_id_str, str(agent.host.id), agent.main_pid)
+        self._open_or_replace_watcher(agent_id_str, str(agent.host.id), agent.pid)
 
     def _open_or_replace_watcher(self, agent_id_str: str, host_id_str: str, pid: int) -> None:
         """Ensure a watcher thread is running for ``pid``, replacing one on a stale PID.

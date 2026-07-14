@@ -401,11 +401,11 @@ def determine_lifecycle_probe_result(
     # Claude Code sets it to its version string like "2.1.73"), which tmux
     # picks up while ps -o comm= still reports the original executable name.
     children_by_ppid, comm_by_pid = _parse_ps_output(ps_output)
-    main_pid_str = _find_process_pid_by_name(pane_pid, expected_process_name, children_by_ppid, comm_by_pid)
-    main_pid = int(main_pid_str) if main_pid_str is not None else None
+    pid_str = _find_process_pid_by_name(pane_pid, expected_process_name, children_by_ppid, comm_by_pid)
+    pid = int(pid_str) if pid_str is not None else None
     running_result = LifecycleProbeResult(
         state=AgentLifecycleState.RUNNING if is_active else AgentLifecycleState.WAITING,
-        main_pid=main_pid,
+        pid=pid,
     )
 
     # Check tmux's report first (fast path for well-behaved processes)

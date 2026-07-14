@@ -68,7 +68,6 @@ def test_synthesized_keys_match_what_cel_context_actually_emits() -> None:
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
-        is_local=True,
         ssh_activity_time=now,
     )
     agent = AgentDetails(

@@ -268,9 +268,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
                 ps_output=ps_output,
                 is_agent_type_known=is_type_known,
             )
-            logger.trace(
-                "Determined agent {} lifecycle state: {} (main_pid={})", self.name, probe.state, probe.main_pid
-            )
+            logger.trace("Determined agent {} lifecycle state: {} (pid={})", self.name, probe.state, probe.pid)
             return probe
         except HostConnectionError:
             logger.trace("Determined agent {} lifecycle state: STOPPED (host connection error)", self.name)

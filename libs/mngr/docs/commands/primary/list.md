@@ -126,7 +126,7 @@ Fields marked `(cel only)` cannot be used in `--fields`/`--format` template stri
 - `create_time` - Creation timestamp
 - `start_on_boot` - Whether agent starts on host boot
 - `state` - Agent lifecycle state (STOPPED/RUNNING/WAITING/REPLACED/RUNNING_UNKNOWN_AGENT_TYPE/DONE/UNKNOWN)
-- `main_pid` - PID of the agent's main process (e.g. claude) in its host's PID namespace, populated when the agent is running; None for stopped agents. Only watchable in-process (e.g. via psutil) when the host is local (host.is_local).
+- `pid` - PID of the agent's main process (e.g. claude) in its host's PID namespace, populated when the agent is running; None for stopped agents. Only watchable in-process (e.g. via psutil) when the host is the local machine (its provider is 'local').
 - `url` - Agent URL (reported)
 - `start_time` - Last start time (reported)
 - `runtime_seconds` - Runtime in seconds
@@ -144,7 +144,6 @@ Fields marked `(cel only)` cannot be used in `--fields`/`--format` template stri
 - `host.id` - Host ID
 - `host.name` - Host name
 - `host.provider_name` - Provider that owns the host
-- `host.is_local` - Whether the host is the local machine (rather than a remote host)
 - `host.state` - Current host state (RUNNING, STOPPED, etc.)
 - `host.image` - Host image (Docker image name, Modal image ID, etc.)
 - `host.tags` - Metadata tags for the host

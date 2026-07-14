@@ -284,7 +284,7 @@ class LifecycleProbeResult(FrozenModel):
     """Agent lifecycle state plus the agent's main process PID, from a single probe."""
 
     state: AgentLifecycleState = Field(description="Agent lifecycle state")
-    main_pid: int | None = Field(
+    pid: int | None = Field(
         default=None,
         description=(
             "PID of the agent's running main process (e.g. claude) in its host's PID "

@@ -84,10 +84,6 @@ def _make_mock_online_host(host_id: HostId) -> MagicMock:
     """
     host = MagicMock(spec=OnlineHostInterface)
     host.id = host_id
-    # Default these mocks to a remote host: a bare MagicMock is_local would
-    # otherwise be truthy. Tests that need a local host set is_local=True
-    # explicitly.
-    host.is_local = False
     host.get_name.return_value = "test-host"
     host.get_state.return_value = HostState.RUNNING
     host.get_ssh_connection_info.return_value = None
@@ -245,7 +241,7 @@ def _make_mock_online_agent(agent_id: AgentId) -> MagicMock:
     agent.get_reported_url.return_value = None
     agent.get_labels.return_value = {}
     agent.get_lifecycle_state.return_value = AgentLifecycleState.RUNNING
-    agent.probe_lifecycle.return_value = LifecycleProbeResult(state=AgentLifecycleState.RUNNING, main_pid=4321)
+    agent.probe_lifecycle.return_value = LifecycleProbeResult(state=AgentLifecycleState.RUNNING, pid=4321)
     return agent
 
 
@@ -255,26 +251,23 @@ def _make_activity_config_mock() -> MagicMock:
     )
 
 
-def test_build_agent_details_populates_main_pid_from_probe(host_id: HostId) -> None:
-    """The single lifecycle probe supplies both state and main_pid, local or remote.
+def test_build_agent_details_populates_pid_from_probe(host_id: HostId) -> None:
+    """The single lifecycle probe supplies both state and pid, local or remote.
 
-    A remote agent's main_pid is a PID in the remote host's namespace; it is
-    carried anyway (consumers gate any in-process watching on host.is_local).
+    A remote agent's pid is a PID in the remote host's namespace; it is carried
+    anyway (consumers gate any in-process watching on the local provider).
     """
-    for is_local, provider_name in ((True, "local"), (False, "modal")):
+    for provider_name in ("local", "modal"):
         online_host = _make_mock_online_host(host_id)
-        online_host.is_local = is_local
         online_host.get_activity_config.return_value = _make_activity_config_mock()
         agent = _make_mock_online_agent(AgentId.generate())
-        host_details = HostDetails(
-            id=host_id, name="test-host", provider_name=ProviderInstanceName(provider_name), is_local=is_local
-        )
+        host_details = HostDetails(id=host_id, name="test-host", provider_name=ProviderInstanceName(provider_name))
 
         details = _build_agent_details_from_online_agent(agent, host_details, online_host, None, {})
 
         assert details.state == AgentLifecycleState.RUNNING
-        assert details.main_pid == 4321
-        assert details.host.is_local is is_local
+        assert details.pid == 4321
+        assert details.host.provider_name == ProviderInstanceName(provider_name)
         agent.probe_lifecycle.assert_called_once()
 
 
@@ -416,7 +409,6 @@ def _make_offline_host_details(host_id: HostId, provider_name: ProviderInstanceN
         id=host_id,
         name="test-host",
         provider_name=provider_name,
-        is_local=False,
         state=HostState.CRASHED,
     )
 

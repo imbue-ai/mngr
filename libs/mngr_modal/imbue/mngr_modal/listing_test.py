@@ -128,7 +128,6 @@ def _make_host_details() -> HostDetails:
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("modal-test"),
-        is_local=False,
     )
 
 

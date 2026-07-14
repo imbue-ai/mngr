@@ -116,7 +116,6 @@ def test_agent_details_to_cel_context_basic_fields() -> None:
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
-        is_local=True,
     )
     agent_details = AgentDetails(
         id=AgentId.generate(),
@@ -149,7 +148,6 @@ def test_agent_details_to_cel_context_with_runtime() -> None:
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
-        is_local=True,
     )
     agent_details = AgentDetails(
         id=AgentId.generate(),
@@ -176,7 +174,6 @@ def test_agent_details_to_cel_context_with_activity_time() -> None:
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
-        is_local=True,
     )
     activity_time = datetime.now(timezone.utc)
     agent_details = AgentDetails(
@@ -206,7 +203,6 @@ def test_agent_details_to_cel_context_with_state() -> None:
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
-        is_local=True,
     )
     agent_details = AgentDetails(
         id=AgentId.generate(),
@@ -232,7 +228,6 @@ def test_apply_cel_filters_with_include_filter() -> None:
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
-        is_local=True,
     )
     agent_details = AgentDetails(
         id=AgentId.generate(),
@@ -263,7 +258,6 @@ def test_apply_cel_filters_with_non_matching_include() -> None:
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
-        is_local=True,
     )
     agent_details = AgentDetails(
         id=AgentId.generate(),
@@ -294,7 +288,6 @@ def test_apply_cel_filters_with_exclude_filter() -> None:
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
-        is_local=True,
     )
     agent_details = AgentDetails(
         id=AgentId.generate(),
@@ -325,7 +318,6 @@ def test_apply_cel_filters_with_state_filter() -> None:
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
-        is_local=True,
     )
     agent_details = AgentDetails(
         id=AgentId.generate(),
@@ -356,7 +348,6 @@ def test_apply_cel_filters_with_host_provider_filter() -> None:
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
-        is_local=True,
     )
     agent_details = AgentDetails(
         id=AgentId.generate(),
@@ -387,7 +378,6 @@ def test_apply_cel_filters_accepts_host_provider_name() -> None:
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
-        is_local=True,
     )
     agent_details = AgentDetails(
         id=AgentId.generate(),
@@ -562,7 +552,6 @@ def test_agent_details_to_cel_context_with_host_state() -> None:
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
-        is_local=True,
         state=HostState.RUNNING,
     )
     agent_details = AgentDetails(
@@ -590,7 +579,6 @@ def test_agent_details_to_cel_context_with_host_resources() -> None:
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("modal"),
-        is_local=False,
         resource=resources,
     )
     agent_details = AgentDetails(
@@ -625,7 +613,6 @@ def test_agent_details_to_cel_context_with_host_ssh() -> None:
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("docker"),
-        is_local=False,
         ssh=ssh_info,
     )
     agent_details = AgentDetails(
@@ -654,7 +641,6 @@ def test_apply_cel_filters_with_host_state_filter() -> None:
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
-        is_local=True,
         state=HostState.RUNNING,
     )
     agent_details = AgentDetails(
@@ -687,7 +673,6 @@ def test_apply_cel_filters_with_host_resource_filter() -> None:
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("modal"),
-        is_local=False,
         resource=resources,
     )
     agent_details = AgentDetails(
@@ -720,7 +705,6 @@ def test_agent_details_to_cel_context_with_host_lock_fields() -> None:
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
-        is_local=True,
         is_locked=True,
         locked_time=lock_time,
     )
@@ -749,7 +733,6 @@ def test_agent_details_to_cel_context_with_host_not_locked() -> None:
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
-        is_local=True,
         is_locked=False,
         locked_time=None,
     )
@@ -778,7 +761,6 @@ def test_apply_cel_filters_with_host_is_locked_filter() -> None:
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
-        is_local=True,
         is_locked=True,
         locked_time=datetime.now(timezone.utc),
     )
@@ -811,7 +793,6 @@ def test_apply_cel_filters_with_host_uptime_filter() -> None:
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
-        is_local=True,
         # More than a day (86400 seconds)
         uptime_seconds=100000.0,
     )
@@ -845,7 +826,6 @@ def test_apply_cel_filters_with_host_tags_filter() -> None:
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("modal"),
-        is_local=False,
         tags={"env": "production", "team": "ml"},
     )
     agent_details = AgentDetails(
@@ -882,7 +862,6 @@ def test_agent_details_to_cel_context_with_idle_mode() -> None:
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
-        is_local=True,
     )
     agent_details = AgentDetails(
         id=AgentId.generate(),
@@ -909,7 +888,6 @@ def test_agent_details_to_cel_context_with_idle_seconds() -> None:
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
-        is_local=True,
     )
     agent_details = AgentDetails(
         id=AgentId.generate(),
@@ -936,7 +914,6 @@ def test_apply_cel_filters_with_idle_mode_filter() -> None:
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
-        is_local=True,
     )
     agent_details = AgentDetails(
         id=AgentId.generate(),
@@ -968,7 +945,6 @@ def test_apply_cel_filters_with_idle_seconds_filter() -> None:
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
-        is_local=True,
     )
     agent_details = AgentDetails(
         id=AgentId.generate(),

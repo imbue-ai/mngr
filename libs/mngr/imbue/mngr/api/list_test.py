@@ -84,7 +84,6 @@ def _make_host_details() -> HostDetails:
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
-        is_local=True,
     )
 
 
@@ -448,7 +447,6 @@ def test_agent_details_to_cel_context_preserves_full_model_structure() -> None:
         id=HostId.generate(),
         name="full-host",
         provider_name=ProviderInstanceName("modal"),
-        is_local=False,
         state=HostState.RUNNING,
         image="my-image",
         tags={"env": "prod"},
@@ -525,7 +523,6 @@ def test_agent_details_to_cel_context_idle_includes_host_ssh_activity() -> None:
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
-        is_local=True,
         ssh_activity_time=ssh_activity,
     )
     agent = AgentDetails(
@@ -553,7 +550,6 @@ def test_agent_details_to_cel_context_idle_uses_most_recent_activity() -> None:
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
-        is_local=True,
         ssh_activity_time=now - timedelta(minutes=10),
     )
     agent = AgentDetails(
@@ -689,7 +685,6 @@ def test_agent_details_to_cel_context_exposes_host_provider_under_both_names() -
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("modal"),
-        is_local=False,
     )
     agent = _make_agent_details("test-agent", host_details)
     context = agent_details_to_cel_context(agent)
@@ -1949,7 +1944,6 @@ def test_maybe_write_provider_discovery_snapshots_emits_ssh_host_info(
         id=HostId.generate(),
         name="ssh-host",
         provider_name=ProviderInstanceName("local"),
-        is_local=True,
         ssh=ssh_info,
     )
     agent = _make_agent_details("ssh-agent", host_details)

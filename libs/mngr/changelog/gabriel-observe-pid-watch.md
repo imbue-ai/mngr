@@ -6,6 +6,6 @@ The full `mngr observe` observer now detects a local agent's main process dying 
 
 - New `AGENT_REMOVED` event on the agents stream, emitted when a previously-known agent is destroyed, so consumers learn of removals promptly rather than at the next full snapshot.
 
-- `AgentDetails` gains an optional `main_pid` field, populated for running agents on any provider (the PID of their main process, e.g. `claude`, in the host's PID namespace); it is a filterable/sortable listing field. The observer only PID-watches local agents, gated on the new `HostDetails.is_local` field (also filterable/sortable, e.g. `host.is_local`).
+- `AgentDetails` gains an optional `pid` field, populated for running agents on any provider (the PID of their main process, e.g. `claude`, in the host's PID namespace); it is a filterable/sortable listing field. The observer only PID-watches local agents, gated on the agent's host belonging to the `local` provider (the one and only user of the local connector) -- a remote PID must never be watched in-process, since psutil would bind an unrelated same-numbered local process.
 
 - The `libs/mngr` psutil floor is raised from `>=5.9` to `>=7.2` to guarantee the event-driven `wait()` path (os.pidfd_open on Linux, kqueue on macOS).
