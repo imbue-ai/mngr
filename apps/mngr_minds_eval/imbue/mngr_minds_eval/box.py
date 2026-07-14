@@ -18,6 +18,14 @@ AWS_ENV = Path.home() / ".minds-eval" / "aws.env"
 # The box stays versioned (minds-box-<branch>-<sha>); only the env is shared.
 MODAL_ENV_USER_ID = "evaluator"
 
+# Every eval box pins the SAME mngr profile and mounts ONE shared Modal SSH keypair, so any box can
+# SSH/forward into any workspace in the shared env. (mngr otherwise rolls a random per-box profile ->
+# a per-box keypair, so only the box that created a workspace could open it -- other boxes list it but
+# reset on open.) The keypair persists on the host and is seeded by the first box that boots.
+MNGR_PROFILE = "evaluator"
+SHARED_MODAL_KEYS = Path.home() / ".minds-eval" / "modal-profile" / "providers" / "modal"
+ROOT_CONFIG_FILE = Path.home() / ".minds-eval" / "mngr-root-config.toml"
+
 
 class BoxError(RuntimeError):
     pass
@@ -129,6 +137,14 @@ def ensure(mngr_branch: str, minds_env: str = "staging") -> str:
     tag = "minds-box:{}-{}".format(_slug(mngr_branch), ref[:12])
     modal_env = MODAL_ENV_USER_ID  # one shared env for all eval workspaces (the box carries the SHA)
 
+    # Share one Modal SSH keypair across every eval box (see MNGR_PROFILE): pin the profile via a
+    # mounted root config, and mount a persistent host-side keypair dir. Created here; the first box to
+    # boot writes the keypair into it, later boxes reuse it -> any box can open any workspace.
+    SHARED_MODAL_KEYS.mkdir(parents=True, exist_ok=True)
+    if not ROOT_CONFIG_FILE.is_file():
+        ROOT_CONFIG_FILE.write_text('profile = "{}"\n'.format(MNGR_PROFILE))
+    mngr_base = "/root/.minds-{}/mngr".format(minds_env)
+
     print(">> building {} from mngr {}@{}".format(tag, mngr_branch, ref[:12]), flush=True)
     build = subprocess.run(
         [
@@ -165,6 +181,10 @@ def ensure(mngr_branch: str, minds_env: str = "staging") -> str:
             "{}:/root/.modal.toml:ro".format(Path.home() / ".modal.toml"),
             "-v",
             "{}:/root/.minds-eval/aws.env:ro".format(AWS_ENV),
+            "-v",
+            "{}:{}/config.toml:ro".format(ROOT_CONFIG_FILE, mngr_base),
+            "-v",
+            "{}:{}/profiles/{}/providers/modal".format(SHARED_MODAL_KEYS, mngr_base, MNGR_PROFILE),
             "-e",
             "MINDS_BARE_PORT={}".format(ui),
             "-e",

@@ -55,6 +55,14 @@ def test_aggregate_averages_numeric_keys() -> None:
     }
 
 
+def test_print_table_renders_na_for_unfinished(capsys) -> None:
+    done = {"avg_word_count": 60.0, "conciseness_score": 8, "nontechnical_language_score": 7, "proactive_score": 6}
+    evaluate._print_table([("done", done), ("pending", None)], done)
+    out = capsys.readouterr().out
+    assert "N/A" in out
+    assert "done" in out and "pending" in out and "BATCH AVG" in out
+
+
 def test_aggregate_skips_missing_keys() -> None:
     per_case = {"a": {"avg_word_count": 60.0}, "b": {"avg_word_count": None}}
     assert evaluate._aggregate(per_case)["avg_word_count"] == 60.0

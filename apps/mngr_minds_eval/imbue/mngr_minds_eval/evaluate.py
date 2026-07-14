@@ -135,7 +135,9 @@ def _delete(client, bucket: str, key: str) -> None:
 
 
 def evaluate_batch(batch: str) -> None:
-    """Check the batch is fully finished, nuke old results, score every case in parallel, aggregate."""
+    """Score every FINISHED case in parallel, aggregate, and write results back. Cases that aren't
+    finished yet (or that error) are shown as N/A rows and left out of the aggregate -- so a batch
+    with a straggler can still be evaluated for the rest."""
     env = s3_store.load_aws_env()
     client = s3_store.make_client(env)
     bucket = env["MINDS_EVAL_BUCKET"]
@@ -144,24 +146,21 @@ def evaluate_batch(batch: str) -> None:
     if config is None:
         raise SystemExit("no such batch: {} (try: minds-evals list-batches)".format(batch))
 
-    incomplete = [r["id"] for r in rows if not (r["state"] and r["state"].get("test_state") == "finished")]
-    if incomplete:
-        raise SystemExit(
-            "batch not fully finished -- {} case(s) not done: {}\nrun  minds-evals inspect {}  to see status".format(
-                len(incomplete), ", ".join(incomplete), batch
-            )
-        )
+    finished = [r for r in rows if r["state"] and r["state"].get("test_state") == "finished"]
+    unfinished = [r["id"] for r in rows if r not in finished]
+    if not finished:
+        raise SystemExit("no finished cases to evaluate in {} ({} still running)".format(batch, len(rows)))
 
     # Nuke any prior results so this is a clean recompute.
     _delete(client, bucket, "{}/{}".format(batch, BATCH_RESULTS_NAME))
     for row in rows:
         _delete(client, bucket, "{}/{}".format(row["prefix"], CASE_RESULTS_NAME))
 
-    print(">> evaluating {} case(s) in {} ...".format(len(rows), batch), flush=True)
+    print(">> evaluating {}/{} finished case(s) in {} ...".format(len(finished), len(rows), batch), flush=True)
     per_case: dict[str, dict] = {}
     errors: dict[str, str] = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(rows))) as pool:
-        futures = {pool.submit(evaluate_single_case, client, bucket, r["prefix"]): r["id"] for r in rows}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(finished))) as pool:
+        futures = {pool.submit(evaluate_single_case, client, bucket, r["prefix"]): r["id"] for r in finished}
         for future in concurrent.futures.as_completed(futures):
             case_id = futures[future]
             try:
@@ -170,13 +169,17 @@ def evaluate_batch(batch: str) -> None:
                 errors[case_id] = str(exc)
 
     if not per_case:
-        raise SystemExit("all cases failed to evaluate: {}".format(errors))
+        raise SystemExit("all finished cases failed to evaluate: {}".format(errors))
 
     batch_results = _aggregate(per_case)
     s3_store.put_json(client, bucket, "{}/{}".format(batch, BATCH_RESULTS_NAME), batch_results)
-    _print_table(per_case, batch_results)
-    for case_id, message in errors.items():
-        print("  [ERR] {}: {}".format(case_id, message), flush=True)
+    # A row per case in config order; None -> N/A (case not finished yet, or its eval errored).
+    display_rows = [(row["id"], per_case.get(row["id"])) for row in rows]
+    _print_table(display_rows, batch_results)
+    notes = ["not finished: {}".format(", ".join(unfinished))] if unfinished else []
+    notes += ["eval error for {}: {}".format(case_id, message) for case_id, message in errors.items()]
+    if notes:
+        print("  N/A -- " + "; ".join(notes), flush=True)
 
 
 def _cell(value) -> str:
@@ -185,19 +188,21 @@ def _cell(value) -> str:
     return "{:.1f}".format(value) if isinstance(value, float) else str(value)
 
 
-def _print_table(per_case: dict[str, dict], batch_results: dict) -> None:
-    """Rows = cases, columns = the result keys, cells = scores, plus a BATCH AVG row."""
-    name_w = max([len("CASE"), len("BATCH AVG")] + [len(c) for c in per_case])
+def _print_table(display_rows: list[tuple[str, dict | None]], batch_results: dict) -> None:
+    """Rows = cases (a results dict, or None -> N/A), columns = the result keys, plus a BATCH AVG row."""
+    name_w = max([len("CASE"), len("BATCH AVG")] + [len(cid) for cid, _ in display_rows])
     widths = {key: max(len(key), 5) for key in RESULT_KEYS}
 
-    def _row(label: str, results: dict) -> str:
-        cells = "".join("  {:>{w}}".format(_cell(results.get(k)), w=widths[k]) for k in RESULT_KEYS)
+    def _row(label: str, results: dict | None) -> str:
+        cells = "".join(
+            "  {:>{w}}".format("N/A" if results is None else _cell(results.get(k)), w=widths[k]) for k in RESULT_KEYS
+        )
         return "{:<{w}}{}".format(label, cells, w=name_w)
 
-    header = _row("CASE", {k: k for k in RESULT_KEYS})
+    header = "{:<{w}}".format("CASE", w=name_w) + "".join("  {:>{w}}".format(k, w=widths[k]) for k in RESULT_KEYS)
     print("\n" + header)
     print("-" * len(header))
-    for case_id, results in sorted(per_case.items()):
+    for case_id, results in display_rows:
         print(_row(case_id, results))
     print("-" * len(header))
     print(_row("BATCH AVG", batch_results))

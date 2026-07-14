@@ -17,6 +17,12 @@ stay on and there is nothing to poll.
 - **Modal env** — one shared env `minds-staging-evaluator` for ALL eval workspaces (any branch/SHA),
   so `clean` has a single place to wipe. The box stays versioned; only the env is shared. S3 (keyed
   by eval name) is the real result store; sandboxes are told apart by host name + the S3 batch.
+- **Shared SSH access** — Modal sandboxes are reached over SSH tunnels (`mngr forward`), and mngr
+  normally rolls a *random per-box* SSH keypair, so only the box that created a workspace could open
+  it. Every eval box instead pins one mngr profile (`evaluator`) and mounts one shared keypair
+  (persisted at `~/.minds-eval/modal-profile/`, seeded by the first box), so **any box can open or
+  forward into any workspace** in the shared env. Applies to workspaces created after a box is
+  (re)built with this; existing ones keep their old key.
 
 ## Setup
 
@@ -89,8 +95,10 @@ captured to S3 per turn; spinning one back up as a live workspace (restore) is n
 
 ## Evaluating a finished batch (`evaluate`)
 
-`minds-evals evaluate <batch>` reads the batch from S3 (no box, no Modal), checks every case is
-`finished`, nukes any prior results, then scores each case in parallel and writes results back:
+`minds-evals evaluate <batch>` reads the batch from S3 (no box, no Modal), nukes any prior results,
+then scores every **finished** case in parallel and writes results back. Cases that aren't finished
+yet (or whose eval errors) show as `N/A` rows and are left out of the batch average -- so a batch
+with a straggler can still be scored for the rest. The per-case outputs are:
 
 - `avg_word_count` -- average words per agent turn, from the transcript.
 - `conciseness_score` / `nontechnical_language_score` / `proactive_score` -- three 1-10 scores from
