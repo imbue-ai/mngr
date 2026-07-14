@@ -207,6 +207,32 @@ def test_get_state_returns_crashed_when_no_stop_reason(offline_host: OfflineHost
     assert state == HostState.CRASHED
 
 
+def test_state_override_takes_precedence_over_certified_data_derivation(
+    fake_provider: MockProviderInstance, temp_mngr_ctx: MngrContext
+) -> None:
+    """A provider-supplied state_override (e.g. STARTING for a VM still booting) is returned
+    instead of the state derived from certified data (which, with no stop_reason, would be CRASHED)."""
+    host_id = HostId.generate()
+    now = datetime.now(timezone.utc)
+    certified_data = CertifiedHostData(
+        host_id=str(host_id),
+        host_name="booting-host",
+        user_tags={},
+        snapshots=[],
+        created_at=now,
+        updated_at=now,
+    )
+    host = OfflineHost(
+        id=host_id,
+        certified_host_data=certified_data,
+        state_override=HostState.STARTING,
+        provider_instance=fake_provider,
+        mngr_ctx=temp_mngr_ctx,
+    )
+
+    assert host.get_state() == HostState.STARTING
+
+
 def test_get_state_returns_crashed_when_provider_does_not_support_snapshots_and_no_stop_reason(
     offline_host: OfflineHost, fake_provider: MockProviderInstance
 ) -> None:

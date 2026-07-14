@@ -299,11 +299,25 @@ class OfflineHost(BaseHost):
         frozen=True,
         description="The certified host data loaded from data.json",
     )
+    # Set by a provider that can observe a transient live state which certified data
+    # cannot express (e.g. a VM that limactl reports Running but whose guest sshd is
+    # still coming up -- surfaced as HostState.STARTING). When set, it overrides the
+    # state derived from certified data.
+    state_override: HostState | None = Field(
+        default=None,
+        frozen=True,
+        description="Provider-observed transient state that overrides certified-data-derived state",
+    )
 
     @property
     def is_local(self) -> bool:
         """Check if this host is local. Offline hosts are never local."""
         return False
+
+    def get_state(self) -> HostState:
+        if self.state_override is not None:
+            return self.state_override
+        return super().get_state()
 
     def get_name(self) -> HostName:
         """Return the human-readable name of this host from persisted data."""
@@ -411,6 +425,7 @@ class OfflineHostWithVolume(OfflineHost, HostFileReadInterface, HostFileWriteInt
         return cls(
             id=host.id,
             certified_host_data=host.certified_host_data,
+            state_override=host.state_override,
             provider_instance=host.provider_instance,
             mngr_ctx=host.mngr_ctx,
             on_updated_host_data=host.on_updated_host_data,

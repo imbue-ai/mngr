@@ -231,9 +231,11 @@ def _start_agents(
         provider = get_provider_instance(provider_name, mngr_ctx)
         host = provider.get_host(HostId(host_id_str))
 
-        # Ensure host is started (always start since this is the start command).
-        # start_host is idempotent (returns early if the host is already running),
-        # so concurrent starts do not need to coordinate around this step.
+        # Ensure the host is online before starting agents on it. ensure_host_started
+        # returns an already-online host untouched, and routes an offline (or
+        # still-booting, STARTING-classified) host through provider.start_host, whose
+        # own `limactl start`-style call no-ops on an already-running backend and whose
+        # wait-for-connectivity blocks until the host is actually reachable.
         online_host, _ = ensure_host_started(host, is_start_desired=True, provider=provider)
 
         agent_ids = [match.agent_id for match in agent_list]

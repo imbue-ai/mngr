@@ -3,10 +3,12 @@ import os
 import re
 import shutil
 from collections.abc import Callable
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 from typing import Final
 
+import psutil
 from loguru import logger
 from pydantic import Field
 
@@ -17,6 +19,7 @@ from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.imbue_common.pure import pure
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import LogLevel
@@ -283,6 +286,72 @@ def limactl_start_existing(
     cmd = ["limactl", "--log-level=info", "start", instance_name]
     with log_span("Running limactl start for existing instance: {}", instance_name):
         _run_limactl(cg, "start", cmd, timeout=timeout, on_output=on_output or _log_lima_output)
+
+
+# The command-line argv of a running process, as a tuple of tokens (argv[0] is the program).
+ProcessArgv = tuple[str, ...]
+# Lists the argv of every running process. Injected so tests can supply a deterministic
+# process table instead of scanning the real one.
+ProcessArgvLister = Callable[[], list[ProcessArgv]]
+
+_LIMACTL_PROGRAM_NAME: Final[str] = "limactl"
+_LIMACTL_START_SUBCOMMAND: Final[str] = "start"
+_LIMACTL_NAME_FLAG_PREFIX: Final[str] = "--name="
+
+
+def list_running_process_argvs() -> list[ProcessArgv]:
+    """Return the command-line argv of every process visible to this user, via psutil."""
+    argvs: list[ProcessArgv] = []
+    for process in psutil.process_iter(["cmdline"]):
+        cmdline = process.info["cmdline"]
+        if cmdline:
+            argvs.append(tuple(cmdline))
+    return argvs
+
+
+@pure
+def _is_limactl_start_argv_for_instance(argv: Sequence[str], instance_name: str) -> bool:
+    """Whether a single process argv is a `limactl start` targeting exactly ``instance_name``."""
+    # Shortest matchable form is `limactl start <name>` (three tokens).
+    if len(argv) < 3:
+        return False
+    if os.path.basename(argv[0]) != _LIMACTL_PROGRAM_NAME:
+        return False
+
+    # The subcommand is the first non-flag token after the program; global flags
+    # (e.g. --log-level=info) precede it. Only `start` invocations matter.
+    tokens_after_program = tuple(argv[1:])
+    subcommand_index = None
+    for offset, token in enumerate(tokens_after_program):
+        if not token.startswith("-"):
+            subcommand_index = offset
+            break
+    if subcommand_index is None or tokens_after_program[subcommand_index] != _LIMACTL_START_SUBCOMMAND:
+        return False
+
+    # limactl_start_new passes the instance as `--name=<instance>`; limactl_start_existing
+    # (and a bare `limactl start <instance>`) passes it as a positional argument. Match the
+    # instance name exactly in either shape so `mngr-foo` never matches `mngr-foo2`.
+    tokens_after_start = tokens_after_program[subcommand_index + 1 :]
+    name_flag = f"{_LIMACTL_NAME_FLAG_PREFIX}{instance_name}"
+    if name_flag in tokens_after_start:
+        return True
+    return any(token == instance_name for token in tokens_after_start)
+
+
+@pure
+def is_limactl_start_in_flight_for_instance(instance_name: str, process_argvs: Sequence[ProcessArgv]) -> bool:
+    """Whether some running process is a `limactl start` still booting ``instance_name``.
+
+    Lima reports an instance as ``Running`` from the moment its hostagent spawns,
+    well before the guest sshd answers. The `limactl start` process, by contrast,
+    spawns before that status flip and exits only once ssh is ready, so its
+    presence is a precise "still booting" signal covering the whole readiness
+    window. Matching is exact-argument across mngr's two start shapes plus a
+    best-effort bare `limactl start <name>`; out-of-band lima usage is not
+    otherwise covered.
+    """
+    return any(_is_limactl_start_argv_for_instance(argv, instance_name) for argv in process_argvs)
 
 
 def limactl_stop(

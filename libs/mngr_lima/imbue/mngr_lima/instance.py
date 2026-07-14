@@ -71,6 +71,8 @@ from imbue.mngr_lima.lima_yaml import merge_lima_yaml
 from imbue.mngr_lima.lima_yaml import parse_build_args_for_yaml_path
 from imbue.mngr_lima.lima_yaml import write_lima_yaml
 from imbue.mngr_lima.limactl import LimaSshConfig
+from imbue.mngr_lima.limactl import ProcessArgvLister
+from imbue.mngr_lima.limactl import is_limactl_start_in_flight_for_instance
 from imbue.mngr_lima.limactl import lima_instance_name_from_host_id
 from imbue.mngr_lima.limactl import limactl_delete
 from imbue.mngr_lima.limactl import limactl_disk_create
@@ -81,6 +83,7 @@ from imbue.mngr_lima.limactl import limactl_show_ssh
 from imbue.mngr_lima.limactl import limactl_start_existing
 from imbue.mngr_lima.limactl import limactl_start_new
 from imbue.mngr_lima.limactl import limactl_stop
+from imbue.mngr_lima.limactl import list_running_process_argvs
 from imbue.mngr_lima.limactl import resolve_lima_home
 
 # Lima instance status values mapped to mngr HostState
@@ -115,6 +118,14 @@ class LimaProviderInstance(BaseProviderInstance):
     """
 
     config: LimaProviderConfig = Field(frozen=True, description="Lima provider configuration")
+    # Lists running-process argvs so classification can detect an in-flight `limactl start`
+    # (see instance boot-readiness handling in _get_host_by_id/discover_hosts). Injected in
+    # unit tests to supply a deterministic process table; defaults to a real psutil scan.
+    process_argv_lister: ProcessArgvLister = Field(
+        default=list_running_process_argvs,
+        frozen=True,
+        description="Lists running-process argvs; used to detect an in-flight `limactl start`",
+    )
 
     _lima_checked: bool = PrivateAttr(default=False)
 
@@ -316,18 +327,21 @@ class LimaProviderInstance(BaseProviderInstance):
             )
             self._host_store.write_host_record(updated_host_record)
 
-    def _create_offline_host(self, host_record: HostRecord) -> OfflineHost:
+    def _create_offline_host(self, host_record: HostRecord, state_override: HostState | None = None) -> OfflineHost:
         """Create an OfflineHost from a host record.
 
         Wrapped so the offline host is readable (file reads served from its
         persisted volume) whether reached via ``get_host`` or
         ``to_offline_host``; the volume is resolved lazily, so this is free.
+        ``state_override`` surfaces a transient live state (e.g. STARTING for a
+        VM still booting) that the persisted record cannot express.
         """
         host_id = HostId(host_record.certified_host_data.host_id)
         return make_readable_offline_host(
             OfflineHost(
                 id=host_id,
                 certified_host_data=host_record.certified_host_data,
+                state_override=state_override,
                 provider_instance=self,
                 mngr_ctx=self.mngr_ctx,
                 on_updated_host_data=lambda callback_host_id, certified_data: self._on_certified_host_data_updated(
@@ -968,7 +982,19 @@ sudo poweroff
         if not is_running:
             return self._create_offline_host(host_record)
 
-        # Instance is running -- create online host.
+        # Lima reports "Running" from the instant the hostagent spawns, well before the
+        # guest sshd answers. Read the process table AFTER the limactl list above (this
+        # ordering matters: "Running and no start process" then reliably means the boot
+        # already finished): if a `limactl start` for this instance is still in flight,
+        # the VM is mid-boot, so classify it as STARTING (offline-shaped) rather than
+        # returning an online host that a caller would immediately fail to connect to.
+        # The offline classification routes callers through ensure_host_started ->
+        # start_host, whose own limactl start no-ops and whose wait_for_sshd absorbs the
+        # remaining boot.
+        if is_limactl_start_in_flight_for_instance(instance_name, self.process_argv_lister()):
+            return self._create_offline_host(host_record, state_override=HostState.STARTING)
+
+        # Instance is running and no start is in flight -- sshd is up. Create online host.
         ssh_config = self._get_ssh_config(instance_name)
         host_obj = self._create_host_object(
             host_id,
@@ -1037,6 +1063,14 @@ sudo poweroff
             if inst_name.startswith(prefix):
                 instance_status[inst_name] = inst.get("status", "Unknown")
 
+        # Snapshot the process table once (only if some instance is Running, to avoid an
+        # unnecessary scan) so a mid-boot instance -- Running per lima but with its
+        # `limactl start` still in flight -- is reported STARTING rather than RUNNING.
+        # Read AFTER the limactl list above so "Running and no start process" reliably
+        # means the boot already finished.
+        has_running_instance = any(status == "Running" for status in instance_status.values())
+        process_argvs = self.process_argv_lister() if has_running_instance else []
+
         # Discover from host records (covers stopped/destroyed hosts too)
         discovered: list[DiscoveredHost] = []
         for record in self._host_store.list_all_host_records():
@@ -1047,7 +1081,12 @@ sudo poweroff
             if record.config is not None:
                 lima_status = instance_status.pop(record.config.instance_name, None)
                 if lima_status is not None:
-                    host_state = _LIMA_STATUS_TO_HOST_STATE.get(lima_status, HostState.CRASHED)
+                    if lima_status == "Running" and is_limactl_start_in_flight_for_instance(
+                        record.config.instance_name, process_argvs
+                    ):
+                        host_state = HostState.STARTING
+                    else:
+                        host_state = _LIMA_STATUS_TO_HOST_STATE.get(lima_status, HostState.CRASHED)
                 else:
                     # Instance not found in Lima -- derive from record
                     if record.certified_host_data.failure_reason is not None:

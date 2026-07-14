@@ -2557,12 +2557,14 @@ version = "0.1.10"
 source = { editable = "libs/mngr_lima" }
 dependencies = [
     { name = "imbue-mngr" },
+    { name = "psutil" },
     { name = "pyyaml" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "imbue-mngr", editable = "libs/mngr" },
+    { name = "psutil", specifier = ">=5.9" },
     { name = "pyyaml", specifier = ">=6.0" },
 ]
 
