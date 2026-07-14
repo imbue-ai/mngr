@@ -260,72 +260,45 @@ def _asyncio_error_records(caplog: pytest.LogCaptureFixture) -> list[str]:
     return [record.getMessage() for record in caplog.records if record.name == "asyncio"]
 
 
-def test_serve_loop_exception_handler_drops_ssl_shutdown_timeout(caplog: pytest.LogCaptureFixture) -> None:
-    """The TimeoutError of an abandoned TLS teardown must not reach asyncio's default handler."""
+def _serve_loop_asyncio_error_records(
+    caplog: pytest.LogCaptureFixture, message: str, exception: BaseException
+) -> list[str]:
+    """Run the serve-loop exception handler on a fresh loop; return asyncio ERROR records."""
     loop = asyncio.new_event_loop()
     try:
         with caplog.at_level("ERROR", logger="asyncio"):
-            _handle_serve_loop_exception(
-                loop,
-                {
-                    "message": "Unhandled exception in client_connected_cb",
-                    "exception": TimeoutError("SSL shutdown timed out"),
-                },
-            )
+            _handle_serve_loop_exception(loop, {"message": message, "exception": exception})
     finally:
         loop.close()
-    assert _asyncio_error_records(caplog) == []
+    return _asyncio_error_records(caplog)
+
+
+def test_serve_loop_exception_handler_drops_ssl_shutdown_timeout(caplog: pytest.LogCaptureFixture) -> None:
+    """The TimeoutError of an abandoned TLS teardown must not reach asyncio's default handler."""
+    records = _serve_loop_asyncio_error_records(
+        caplog, "Unhandled exception in client_connected_cb", TimeoutError("SSL shutdown timed out")
+    )
+    assert records == []
 
 
 def test_serve_loop_exception_handler_drops_ssl_errors(caplog: pytest.LogCaptureFixture) -> None:
     """TLS handshake failures are dropped, matching hypercorn's own runner behavior."""
-    loop = asyncio.new_event_loop()
-    try:
-        with caplog.at_level("ERROR", logger="asyncio"):
-            _handle_serve_loop_exception(
-                loop,
-                {
-                    "message": "SSL handshake failed",
-                    "exception": ssl.SSLError(1, "TLSV1_ALERT_UNKNOWN_CA"),
-                },
-            )
-    finally:
-        loop.close()
-    assert _asyncio_error_records(caplog) == []
+    records = _serve_loop_asyncio_error_records(
+        caplog, "SSL handshake failed", ssl.SSLError(1, "TLSV1_ALERT_UNKNOWN_CA")
+    )
+    assert records == []
 
 
 def test_serve_loop_exception_handler_delegates_unrelated_errors(caplog: pytest.LogCaptureFixture) -> None:
     """Anything that is not benign TLS teardown noise still reaches the default handler."""
-    loop = asyncio.new_event_loop()
-    try:
-        with caplog.at_level("ERROR", logger="asyncio"):
-            _handle_serve_loop_exception(
-                loop,
-                {
-                    "message": "something exploded in a task",
-                    "exception": RuntimeError("kaboom-7c1f"),
-                },
-            )
-    finally:
-        loop.close()
-    assert any("something exploded in a task" in message for message in _asyncio_error_records(caplog))
+    records = _serve_loop_asyncio_error_records(caplog, "something exploded in a task", RuntimeError("kaboom-7c1f"))
+    assert any("something exploded in a task" in message for message in records)
 
 
 def test_serve_loop_exception_handler_delegates_other_timeouts(caplog: pytest.LogCaptureFixture) -> None:
     """Only the SSL-shutdown TimeoutError is suppressed; other timeouts must stay visible."""
-    loop = asyncio.new_event_loop()
-    try:
-        with caplog.at_level("ERROR", logger="asyncio"):
-            _handle_serve_loop_exception(
-                loop,
-                {
-                    "message": "some other timeout",
-                    "exception": TimeoutError("read timed out"),
-                },
-            )
-    finally:
-        loop.close()
-    assert any("some other timeout" in message for message in _asyncio_error_records(caplog))
+    records = _serve_loop_asyncio_error_records(caplog, "some other timeout", TimeoutError("read timed out"))
+    assert any("some other timeout" in message for message in records)
 
 
 class _FastSSLShutdownEventLoop(_BoundedSSLShutdownEventLoop):
