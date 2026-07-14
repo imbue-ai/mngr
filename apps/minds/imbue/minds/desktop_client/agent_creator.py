@@ -562,6 +562,15 @@ class _PrebakedImageProgressReporter(MutableModel):
         self.log_line(f"[minds] Downloading pre-baked Lima image... {fetched_bytes / 1e9:.1f} GB")
 
 
+class _PrebakedImageFallbackReporter(MutableModel):
+    """Tells the create log why the workspace is being built in-VM rather than from the image."""
+
+    log_line: Callable[[str], None] = Field(frozen=True, description="Sink for one create-log line")
+
+    def __call__(self, reason: str) -> None:
+        self.log_line(f"[minds] Building the workspace in the VM (slower): {reason}.")
+
+
 def provider_instance_name_for_launch(
     launch_mode: LaunchMode,
     imbue_cloud_account: str | None = None,
@@ -1769,20 +1778,26 @@ class AgentCreator(MutableModel):
                 log_queue.put("[minds] Creating workspace '{}' (mode: {})...".format(host_name, launch_mode.value))
 
                 # Returns None (build in-VM) for any non-default create, an unpublished
-                # version, or an image still downloading when the wait runs out; raises a
-                # retryable error only when a published image failed to fetch or verify.
+                # version, or a download that stalled or ran out the wait; raises a retryable
+                # error only when a published image failed to fetch or verify.
                 prebaked_lima_image_raw_path: Path | None = None
                 if self.lima_image_gate is not None:
-                    if launch_mode is LaunchMode.LIMA:
+                    is_lima = launch_mode is LaunchMode.LIMA
+                    if is_lima:
                         log_queue.put("[minds] Checking for a pre-baked Lima image...")
                     prebaked_lima_image_raw_path = self.lima_image_gate.resolve_image_for_create(
-                        is_lima_launch_mode=launch_mode is LaunchMode.LIMA,
+                        is_lima_launch_mode=is_lima,
                         repo_url=repo_source or "",
                         branch_or_tag=branch_or_tag,
                         environ=os.environ,
                         wait_timeout_seconds=_PREBAKED_IMAGE_WAIT_TIMEOUT_SECONDS,
                         poll_interval_seconds=_PREBAKED_IMAGE_POLL_INTERVAL_SECONDS,
                         on_download_progress=_PrebakedImageProgressReporter(log_line=log_queue.put),
+                        # Only a Lima create was ever going to use the image, so only it is owed
+                        # an explanation for building the workspace the slow way instead.
+                        on_fallback_to_in_vm=_PrebakedImageFallbackReporter(log_line=log_queue.put)
+                        if is_lima
+                        else None,
                     )
                     if prebaked_lima_image_raw_path is not None:
                         log_queue.put("[minds] Using pre-baked Lima image (fast create).")

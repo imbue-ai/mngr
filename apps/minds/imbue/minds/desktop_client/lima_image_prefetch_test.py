@@ -1,3 +1,4 @@
+import time
 from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
@@ -5,9 +6,13 @@ from pathlib import Path
 
 import pytest
 from pydantic import AnyUrl
+from pydantic import Field
 
+from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.primitives import NonNegativeInt
 from imbue.minds.config.data_types import ClientEnvConfig
+from imbue.minds.desktop_client.lima_image_prefetch import DOWNLOAD_STALL_MIN_PROGRESS_BYTES
+from imbue.minds.desktop_client.lima_image_prefetch import DOWNLOAD_STALL_WINDOW_SECONDS
 from imbue.minds.desktop_client.lima_image_prefetch import LimaImagePrefetcher
 from imbue.minds.desktop_client.lima_image_prefetch import is_lima_image_cache_disabled
 from imbue.minds.desktop_client.lima_image_prefetch import make_lima_image_source
@@ -143,6 +148,8 @@ def _prefetcher(
     chunk_store: FixedRawChunkStore,
     sink: RecordingProgressSink,
     cache_dir: Path,
+    stall_window_seconds: float = DOWNLOAD_STALL_WINDOW_SECONDS,
+    stall_min_progress_bytes: int = DOWNLOAD_STALL_MIN_PROGRESS_BYTES,
 ) -> LimaImagePrefetcher:
     return LimaImagePrefetcher(
         source=_SOURCE,
@@ -153,7 +160,39 @@ def _prefetcher(
         verifier=AcceptingSignatureVerifier(),
         chunk_store=chunk_store,
         progress_sink=sink,
+        stall_window_seconds=stall_window_seconds,
+        stall_min_progress_bytes=stall_min_progress_bytes,
     )
+
+
+class _GrowingImage(MutableModel):
+    """Grows the in-flight image on every progress poll, then flips the state to READY.
+
+    Stands in for a healthy desync extract: the bytes keep landing, so the waiter must
+    keep waiting rather than declaring the download stalled.
+    """
+
+    path: Path = Field(frozen=True, description="The in-flight image the waiter measures")
+    sink: RecordingProgressSink = Field(frozen=True, description="Where the terminal state is written")
+    ready_after_calls: int = Field(frozen=True, description="Polls to grow for before reporting READY")
+    raw_path: Path = Field(frozen=True, description="Path reported once READY")
+    calls: int = Field(default=0, description="Progress polls seen so far")
+
+    def __call__(self, fetched_bytes: int) -> None:
+        self.calls += 1
+        if self.calls >= self.ready_after_calls:
+            self.sink.write_state(
+                LimaImagePrefetchState(
+                    status=LimaImagePrefetchStatus.READY,
+                    minds_version=MindsImageVersion(_TAG),
+                    arch=ImageArch.X86_64,
+                    updated_at=datetime.now(timezone.utc),
+                    raw_path=self.raw_path,
+                )
+            )
+            return
+        with self.path.open("ab") as handle:
+            handle.write(b"y" * 4096)
 
 
 def test_ensure_once_records_failed_on_missing_published_objects(tmp_path: Path) -> None:
@@ -330,3 +369,96 @@ def test_no_download_progress_is_reported_when_nothing_is_being_assembled(tmp_pa
     sink = RecordingProgressSink()
     prefetcher = _prefetcher(InMemoryManifestFetcher(), FixedRawChunkStore(), sink, tmp_path)
     assert prefetcher.downloaded_bytes() is None
+
+
+def test_a_stalled_download_stops_the_wait_instead_of_sitting_out_the_timeout(tmp_path: Path) -> None:
+    # A download that is not advancing is not going to arrive, and every second spent waiting
+    # on it is one the user could have spent building the workspace in-VM. The create must give
+    # up as soon as it stops moving -- not at the far end of the overall timeout.
+    sink = RecordingProgressSink()
+    prefetcher = _prefetcher(
+        InMemoryManifestFetcher(),
+        FixedRawChunkStore(),
+        sink,
+        tmp_path,
+        stall_window_seconds=0.05,
+        stall_min_progress_bytes=1024,
+    )
+    layout = LimaImageCacheLayout(cache_dir=tmp_path)
+    assembling = layout.assembling_raw_path(MindsImageVersion(_TAG), ImageArch.X86_64)
+    assembling.parent.mkdir(parents=True, exist_ok=True)
+    # Written once and never again: the download is wedged.
+    assembling.write_bytes(b"x" * 4096)
+    _seed(sink, LimaImagePrefetchStatus.DOWNLOADING, raw_path=None, error=None)
+
+    started_at = time.monotonic()
+    state = prefetcher.wait_until_terminal(timeout_seconds=30.0, poll_interval_seconds=0.01)
+    elapsed = time.monotonic() - started_at
+
+    assert state is not None and state.status is LimaImagePrefetchStatus.DOWNLOADING
+    assert elapsed < 5.0, "it must bail on the stall, not wait out the 30s timeout"
+
+
+def test_a_create_that_falls_back_says_why(tmp_path: Path) -> None:
+    # The user watched the download report bytes and then stop. Falling back silently would
+    # leave them staring at a create that got slow for no stated reason.
+    sink = RecordingProgressSink()
+    prefetcher = _prefetcher(
+        InMemoryManifestFetcher(),
+        FixedRawChunkStore(),
+        sink,
+        tmp_path,
+        stall_window_seconds=0.05,
+        stall_min_progress_bytes=1024,
+    )
+    layout = LimaImageCacheLayout(cache_dir=tmp_path)
+    assembling = layout.assembling_raw_path(MindsImageVersion(_TAG), ImageArch.X86_64)
+    assembling.parent.mkdir(parents=True, exist_ok=True)
+    assembling.write_bytes(b"x" * 4096)
+    _seed(sink, LimaImagePrefetchStatus.DOWNLOADING, raw_path=None, error=None)
+
+    reasons: list[str] = []
+    resolved = resolve_ready_prebaked_lima_image(
+        prefetcher=prefetcher,
+        is_lima_launch_mode=True,
+        repo_url=_DEFAULT_REPO,
+        branch_or_tag=_TAG,
+        current_release_tag=_TAG,
+        default_repo_url=_DEFAULT_REPO,
+        is_dev_loop=False,
+        environ={},
+        wait_timeout_seconds=30.0,
+        poll_interval_seconds=0.01,
+        on_fallback_to_in_vm=reasons.append,
+    )
+
+    assert resolved is None
+    assert reasons and "downloading" in reasons[0]
+
+
+def test_a_download_that_keeps_advancing_is_not_treated_as_stalled(tmp_path: Path) -> None:
+    # The flip side: a working download must never be cut off. It keeps growing past the
+    # per-window floor, so the wait stays alive until the image is READY.
+    sink = RecordingProgressSink()
+    prefetcher = _prefetcher(
+        InMemoryManifestFetcher(),
+        FixedRawChunkStore(),
+        sink,
+        tmp_path,
+        stall_window_seconds=0.02,
+        stall_min_progress_bytes=8,
+    )
+    layout = LimaImageCacheLayout(cache_dir=tmp_path)
+    assembling = layout.assembling_raw_path(MindsImageVersion(_TAG), ImageArch.X86_64)
+    assembling.parent.mkdir(parents=True, exist_ok=True)
+    assembling.write_bytes(b"x" * 4096)
+    _seed(sink, LimaImagePrefetchStatus.DOWNLOADING, raw_path=None, error=None)
+
+    grower = _GrowingImage(path=assembling, sink=sink, ready_after_calls=25, raw_path=tmp_path / "image.raw")
+    state = prefetcher.wait_until_terminal(
+        timeout_seconds=30.0, poll_interval_seconds=0.01, on_download_progress=grower
+    )
+
+    assert state is not None and state.status is LimaImagePrefetchStatus.READY, (
+        "a download that is still advancing must be waited for, not abandoned"
+    )

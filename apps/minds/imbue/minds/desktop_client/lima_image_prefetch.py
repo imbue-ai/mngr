@@ -59,6 +59,14 @@ _RETRY_MAX_BACKOFF_SECONDS: Final[float] = 120.0
 # st_blocks is defined in 512-byte units regardless of the filesystem's block size.
 _STAT_BLOCK_BYTES: Final[int] = 512
 
+# A create stops waiting on a download that gains less than this in this long: the image is
+# not coming, so build in-VM now instead of sitting out the rest of the wait. The floor is
+# far below any working download (a measured cold pull moves ~5.5GB in ~6 minutes, i.e. this
+# much every few seconds), so it fires on a dead or hopelessly throttled transfer, not a slow
+# one -- a merely slow link keeps its full wait and is bounded by the overall timeout instead.
+DOWNLOAD_STALL_WINDOW_SECONDS: Final[float] = 120.0
+DOWNLOAD_STALL_MIN_PROGRESS_BYTES: Final[int] = 32 * 1024 * 1024
+
 
 def is_lima_image_cache_disabled(environ: Mapping[str, str]) -> bool:
     """Return whether the kill-switch env var disables the pre-baked image path."""
@@ -169,6 +177,16 @@ class LimaImagePrefetcher(MutableModel):
     verifier: SignatureVerifierInterface = Field(frozen=True, description="Manifest signature verifier")
     chunk_store: ImageChunkStoreInterface = Field(frozen=True, description="Chunk-store extractor")
     progress_sink: LimaImageProgressSinkInterface = Field(frozen=True, description="Progress state sink")
+    stall_window_seconds: float = Field(
+        default=DOWNLOAD_STALL_WINDOW_SECONDS,
+        frozen=True,
+        description="A waiting create gives up on a download that does not advance within this window",
+    )
+    stall_min_progress_bytes: int = Field(
+        default=DOWNLOAD_STALL_MIN_PROGRESS_BYTES,
+        frozen=True,
+        description="Bytes a download must gain per window to count as still advancing",
+    )
 
     def ensure_once(self) -> LimaImagePrefetchState:
         """Run a single ensure attempt; on a published-image failure record FAILED and return it."""
@@ -224,10 +242,17 @@ class LimaImagePrefetcher(MutableModel):
         poll_interval_seconds: float,
         on_download_progress: Callable[[int], None] | None = None,
     ) -> LimaImagePrefetchState | None:
-        """Poll the persisted state until a terminal status or timeout; None if no state yet at timeout.
+        """Poll the persisted state until a terminal status, a stalled download, or the timeout.
 
-        ``on_download_progress`` is called with the bytes fetched so far while the image is
-        downloading, so a caller blocked on this can show that something is happening.
+        Returns the last state seen (None if none was ever written). A non-terminal state means
+        the image is not usable *yet*: the caller builds in-VM rather than failing.
+
+        Returns early when the download stops advancing. Waiting the full timeout out only pays
+        off if the bytes are still coming; once they are not, every further second is one the
+        user could have spent building the workspace in-VM instead.
+
+        ``on_download_progress`` is called with the bytes fetched so far, so a caller blocked
+        here can show that something is happening -- desync itself prints nothing off a tty.
         """
         deadline = time.monotonic() + timeout_seconds
         terminal_statuses = (
@@ -239,12 +264,29 @@ class LimaImagePrefetcher(MutableModel):
         # codebase's standard poll idiom); it is never set, so wait() just delays.
         waiter = threading.Event()
         latest_state = self.progress_sink.read_state()
+        window_started_at = time.monotonic()
+        bytes_at_window_start = self.downloaded_bytes() or 0
         while (latest_state is None or latest_state.status not in terminal_statuses) and time.monotonic() < deadline:
-            if on_download_progress is not None and latest_state is not None:
-                if latest_state.status is LimaImagePrefetchStatus.DOWNLOADING:
-                    fetched_bytes = self.downloaded_bytes()
-                    if fetched_bytes is not None:
-                        on_download_progress(fetched_bytes)
+            if latest_state is not None and latest_state.status is LimaImagePrefetchStatus.DOWNLOADING:
+                fetched_bytes = self.downloaded_bytes() or 0
+                if on_download_progress is not None:
+                    on_download_progress(fetched_bytes)
+                elapsed = time.monotonic() - window_started_at
+                if elapsed >= self.stall_window_seconds:
+                    if fetched_bytes - bytes_at_window_start < self.stall_min_progress_bytes:
+                        logger.warning(
+                            "Pre-baked image download gained only {} bytes in {:.0f}s; treating it as stalled",
+                            fetched_bytes - bytes_at_window_start,
+                            elapsed,
+                        )
+                        return latest_state
+                    window_started_at = time.monotonic()
+                    bytes_at_window_start = fetched_bytes
+            else:
+                # Not downloading (fetching the manifest, verifying): nothing to stall on, and
+                # the byte count is meaningless, so keep the window anchored to now.
+                window_started_at = time.monotonic()
+                bytes_at_window_start = self.downloaded_bytes() or 0
             waiter.wait(poll_interval_seconds)
             latest_state = self.progress_sink.read_state()
         return latest_state
@@ -276,6 +318,7 @@ def resolve_ready_prebaked_lima_image(
     poll_interval_seconds: float,
     current_release_commit: str | None = None,
     on_download_progress: Callable[[int], None] | None = None,
+    on_fallback_to_in_vm: Callable[[str], None] | None = None,
 ) -> Path | None:
     """Resolve the baked raw image path to use for a create, or None to build in-VM.
 
@@ -308,28 +351,34 @@ def resolve_ready_prebaked_lima_image(
     )
     match state:
         case None:
-            logger.warning("Pre-baked Lima image reported no progress at all; building in-VM")
-            return None
+            return _fall_back_to_in_vm("the pre-baked image download never started", on_fallback_to_in_vm)
         case LimaImagePrefetchState(status=LimaImagePrefetchStatus.READY, raw_path=None):
             raise LimaImageDownloadError("Pre-baked Lima image reported ready without a path; please retry.")
         case LimaImagePrefetchState(status=LimaImagePrefetchStatus.READY, raw_path=Path() as raw_path):
             return raw_path
         case LimaImagePrefetchState(status=LimaImagePrefetchStatus.VERSION_UNAVAILABLE):
-            logger.info("No pre-baked Lima image published for {}; building in-VM", current_release_tag)
-            return None
+            return _fall_back_to_in_vm(
+                f"no pre-baked image is published for {current_release_tag}", on_fallback_to_in_vm
+            )
         case LimaImagePrefetchState(status=LimaImagePrefetchStatus.FAILED):
             raise LimaImageDownloadError(
                 state.error or f"Pre-baked Lima image could not be fetched for {current_release_tag}; please retry."
             )
         case _:
-            # Still working (fetching/downloading/verifying) when the wait ran out. The image
-            # is not broken, so do not fail the create over it: the slow path still works.
-            logger.warning(
-                "Pre-baked Lima image still {} after {}s; building in-VM and leaving the download running",
-                state.status.value,
-                wait_timeout_seconds,
+            # Still working when we stopped waiting -- either the download stalled or it ran out
+            # the clock. The image is not broken, so do not fail the create over it: build the
+            # workspace in-VM and leave the download running for the next one.
+            return _fall_back_to_in_vm(
+                f"the pre-baked image is still {state.status.value.lower()}", on_fallback_to_in_vm
             )
-            return None
+
+
+def _fall_back_to_in_vm(reason: str, on_fallback_to_in_vm: Callable[[str], None] | None) -> None:
+    """Report why the create is building in-VM rather than using the pre-baked image, and return None."""
+    logger.info("Building the workspace in-VM: {}", reason)
+    if on_fallback_to_in_vm is not None:
+        on_fallback_to_in_vm(reason)
+    return None
 
 
 class LimaImageCreateGate(FrozenModel):
@@ -359,6 +408,7 @@ class LimaImageCreateGate(FrozenModel):
         wait_timeout_seconds: float,
         poll_interval_seconds: float,
         on_download_progress: Callable[[int], None] | None = None,
+        on_fallback_to_in_vm: Callable[[str], None] | None = None,
     ) -> Path | None:
         """Resolve the baked image path for a create (or None to build in-VM); raises on a published-but-unready image."""
         return resolve_ready_prebaked_lima_image(
@@ -374,6 +424,7 @@ class LimaImageCreateGate(FrozenModel):
             wait_timeout_seconds=wait_timeout_seconds,
             poll_interval_seconds=poll_interval_seconds,
             on_download_progress=on_download_progress,
+            on_fallback_to_in_vm=on_fallback_to_in_vm,
         )
 
 
