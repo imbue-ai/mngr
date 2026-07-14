@@ -5,6 +5,8 @@ from datetime import datetime
 from datetime import timezone
 from functools import cached_property
 from pathlib import Path
+from typing import Any
+from typing import Callable
 from typing import Final
 from typing import Mapping
 from typing import Sequence
@@ -58,6 +60,33 @@ HOSTS_SUBDIR: Final[str] = "hosts"
 _LOCAL_VOLUME_ID_NAMESPACE: Final[uuid.UUID] = uuid.UUID("b7e3d4a1-2f5c-4890-abcd-123456789abc")
 HOST_ID_FILENAME: Final[str] = "host_id"
 TAGS_FILENAME: Final[str] = "labels.json"
+
+# psutil.cpu_freq() is unreliable on Apple Silicon and reading it must never abort
+# host listing. psutil's has_cpu_freq() only checks that the IOKit "pmgr" entry
+# exists, so on M4/M5 Macs it reports the metric as available while the actual read
+# raises -- Apple changed the private voltage-state data format that psutil parses
+# (psutil #2642 shifted the M4 representation to kHz; #2382 tracks the arm64 read
+# raising). The failure surfaces as SystemError ("<built-in function cpu_freq>
+# returned a result with an exception set") wrapping psutil's RuntimeError, so we
+# treat any of these as "no reading". CPU frequency is an optional, informational
+# field, so a missing value is fine -- callers already handle frequency_ghz=None.
+_CPU_FREQ_READ_ERRORS: Final = (NotImplementedError, OSError, RuntimeError, SystemError)
+
+
+def read_cpu_freq_ghz(read_cpu_freq: Callable[[], Any]) -> float | None:
+    """Return the current CPU frequency in GHz, or None if it cannot be read.
+
+    ``read_cpu_freq`` is injected (normally ``psutil.cpu_freq``) so callers can
+    exercise the failure path without patching psutil. See ``_CPU_FREQ_READ_ERRORS``
+    for why the read can fail on Apple Silicon.
+    """
+    try:
+        cpu_freq = read_cpu_freq()
+    except _CPU_FREQ_READ_ERRORS:
+        return None
+    if cpu_freq is None:
+        return None
+    return cpu_freq.current / 1000
 
 
 def get_or_create_local_host_id(base_dir: Path) -> HostId:
@@ -484,8 +513,7 @@ class LocalProviderInstance(BaseProviderInstance):
         """
         # Get CPU count and frequency
         cpu_count = psutil.cpu_count(logical=True) or 1
-        cpu_freq = psutil.cpu_freq() if hasattr(psutil, "cpu_freq") else None
-        cpu_freq_ghz = cpu_freq.current / 1000 if cpu_freq else None
+        cpu_freq_ghz = read_cpu_freq_ghz(psutil.cpu_freq) if hasattr(psutil, "cpu_freq") else None
 
         # Get memory in GB
         memory = psutil.virtual_memory()
