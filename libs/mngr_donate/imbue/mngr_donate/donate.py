@@ -28,16 +28,20 @@ pre-clear stale agents/worktrees) are documented at each helper below.
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
 from xml.sax.saxutils import escape
 
 import click
+from loguru import logger
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -50,6 +54,7 @@ from imbue.mngr.cli.output_helpers import emit_operator_result
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.host_dir import read_default_host_dir
 from imbue.mngr.errors import MngrError
+from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr_usage.api import derive_elapsed
 from imbue.mngr_usage.api import gather_usage_snapshots
 from imbue.mngr_usage.data_types import UsagePluginConfig
@@ -517,14 +522,30 @@ def prepare_skill_dir(skill_name: str, skill_repo: str, skill_ref: str) -> Path:
 
 
 def _donation_log_path(agent_name: str, now: int) -> Path:
-    """Where to persist one donation agent's streamed event log.
+    """Where to persist one donation agent's streamed assistant text.
 
     A headless agent auto-destroys on success, taking its own ``stdout.jsonl``
     with it, and a donation you can't inspect afterwards is one you can't audit --
-    so we keep a copy under the host dir. ``now`` (passed in, not read here) keeps
+    so we keep a copy under the host dir. This file holds the agent's
+    **assistant text** (reasoning + final summary) tee'd from the
+    ``mngr create --foreground`` parent stdout; the raw stream-json (tool calls,
+    tool results) is captured separately by :func:`_tail_agent_stream` into
+    :func:`_donation_stream_log_path`. ``now`` (passed in, not read here) keeps
     successive ticks from clobbering each other's logs.
     """
     return _donate_log_dir() / f"{agent_name}-{now}.jsonl"
+
+
+def _donation_stream_log_path(agent_name: str, now: int) -> Path:
+    """Where to persist the agent's raw stream-json (tool calls + tool results).
+
+    Sibling to :func:`_donation_log_path` with a ``.stream.jsonl`` suffix so the
+    assistant-text log and the raw event log are easy to tell apart. Written by
+    :func:`_tail_agent_stream`, which live-tails the agent's own
+    ``stdout.jsonl`` before ``destroy_agent`` deletes it (see
+    ``BUG_donate_log_not_captured.md`` for why a post-run copy can't work).
+    """
+    return _donate_log_dir() / f"{agent_name}-{now}.stream.jsonl"
 
 
 @pure
@@ -574,10 +595,15 @@ def _donation_agent_env() -> dict[str, str] | None:
 def _run_and_tee(argv: tuple[str, ...], log_path: Path, env: dict[str, str] | None = None) -> int:
     """Run ``argv``, streaming its combined output to both stdout and ``log_path``.
 
-    The headless agent emits stream-json (one event per line: tool calls,
-    assistant text, the skill's outbound HTTP + submission), so teeing
-    line-by-line gives a live view *and* a durable record without holding the
-    whole run in memory. Returns the child's exit status.
+    For a headless_claude donation agent the parent stdout carries the agent's
+    **assistant text** deltas (reasoning + final summary), not the raw
+    stream-json -- ``mngr create --foreground`` streams via ``StreamJsonReader``,
+    which extracts only text deltas (tool calls / tool results / system events
+    are skipped). So this log is a prose-level record; the raw stream-json is
+    captured separately by :func:`_tail_agent_stream` into
+    :func:`_donation_stream_log_path`. Tees line-by-line for a live view *and* a
+    durable record without holding the whole run in memory. Returns the child's
+    exit status.
     """
     with open(log_path, "w", encoding="utf-8") as log_file:
         # Header only in the file (not stdout) so it timestamps the per-run log
@@ -594,6 +620,141 @@ def _run_and_tee(argv: tuple[str, ...], log_path: Path, env: dict[str, str] | No
             log_file.write(line)
             log_file.flush()
         return process.wait()
+
+
+# Secret patterns whose values must never land in the durable stream log. The
+# donation agent's env carries CLAUDE_CODE_OAUTH_TOKEN (the auth fix), so any
+# command the agent runs that echoes env (``env``, ``printenv``, an error
+# message logging credentials) would otherwise leak the token into the raw
+# stream-json we tee here. Each pattern keeps the label and masks only the
+# value, so a reader can see *which* secret was redacted.
+_REDACTED = "REDACTED"
+_SK_ANT_PATTERN = re.compile(r"sk-ant-[A-Za-z0-9_-]+")
+_ENV_ASSIGN_PATTERN = re.compile(r"(CLAUDE_CODE_OAUTH_TOKEN=)[^\s\"',}]+")
+_JSON_TOKEN_PATTERN = re.compile(r'("CLAUDE_CODE_OAUTH_TOKEN"\s*:\s*")[^"]+(")')
+_BEARER_PATTERN = re.compile(r"(Bearer\s+)[A-Za-z0-9_.\-]+")
+
+
+def _redact_stream_line(line: str) -> str:
+    """Mask secret values in one raw stream-json line before writing the durable log.
+
+    A no-op for lines that carry no secret (the common case: the pinned
+    document-review skill talks to an unauthenticated public server and never
+    prints the token). The redaction is a safety net for the case where the
+    agent runs a command that echoes env, or a future skill change introduces
+    credentials -- without it, the durable ``.stream.jsonl`` would persist that
+    secret indefinitely in ``~/.mngr/donate-logs/``.
+    """
+    line = _SK_ANT_PATTERN.sub(_REDACTED, line)
+    line = _ENV_ASSIGN_PATTERN.sub(lambda m: f"{m.group(1)}{_REDACTED}", line)
+    line = _JSON_TOKEN_PATTERN.sub(lambda m: f"{m.group(1)}{_REDACTED}{m.group(2)}", line)
+    line = _BEARER_PATTERN.sub(lambda m: f"{m.group(1)}{_REDACTED}", line)
+    return line
+
+
+def _find_agent_state_dir(agent_name: str, host_dir: Path) -> Path | None:
+    """Resolve the live donation agent's state dir by matching its name.
+
+    donate knows the agent *name* it created (``donate-extra-quota-bio``), but
+    the state dir is keyed by an opaque agent id hash
+    (``<host_dir>/agents/agent-<id>/``). Scan each ``data.json`` for a matching
+    ``name`` field. Returns the newest match (by mtime) or None if no live agent
+    has that name (e.g. create failed before writing state, or the agent
+    already auto-destroyed and the dir is gone).
+    """
+    agents_root = host_dir / "agents"
+    if not agents_root.is_dir():
+        return None
+    best: Path | None = None
+    best_mtime = 0.0
+    for agent_dir in agents_root.iterdir():
+        if not agent_dir.is_dir() or not agent_dir.name.startswith("agent-"):
+            continue
+        data_path = agent_dir / "data.json"
+        try:
+            data = json.loads(data_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            continue
+        except OSError:
+            continue
+        except json.JSONDecodeError:
+            # An mngr-written data.json should always parse; a transiently
+            # partial write during agent creation is the only realistic cause.
+            # Skip it (the newest match wins anyway) rather than crashing the tail.
+            logger.warning("donate: skipping unparseable agent state file at {}", data_path)
+            continue
+        if data.get("name") == agent_name:
+            try:
+                mtime = data_path.stat().st_mtime
+            except OSError:
+                mtime = 0.0
+            if mtime >= best_mtime:
+                best = agent_dir
+                best_mtime = mtime
+    return best
+
+
+# How long to wait for the agent's state dir + stdout.jsonl to appear before
+# giving up on capturing the raw stream for this tick. The foreground run
+# itself can take minutes; this only covers the startup window before claude
+# writes its first byte.
+_AGENT_STARTUP_TIMEOUT_SECONDS = 60.0
+_AGENT_STARTUP_POLL_INTERVAL_SECONDS = 0.5
+
+
+def _tail_agent_stream(agent_name: str, host_dir: Path, dest_path: Path, stop_event: threading.Event) -> None:
+    """Capture the agent's raw ``stdout.jsonl`` into ``dest_path`` before destroy.
+
+    The headless agent writes its full stream-json (tool calls, tool results,
+    the skill's outbound HTTP + submissions) to ``<state_dir>/stdout.jsonl``.
+    ``destroy_agent`` runs ``rm -rf`` on the state dir after streaming completes
+    (inside ``mngr create --foreground``), so by the time the parent subprocess
+    returns the file is unlinked -- a naive post-run copy would find nothing.
+
+    The trick: open the fd *during* the run (polling for the state dir + file to
+    appear), then on POSIX an open fd survives the later unlink, so after the
+    parent returns we can still read the complete file contents (claude closed
+    and flushed its write end before exiting, i.e. before destroy ran). So this
+    discovers + opens the fd up front, blocks until the parent signals
+    completion via ``stop_event``, then drains the fd line-by-line (redacting
+    secrets) into ``dest_path``.
+
+    Best-effort and silent on failure: a capture miss never masks the run itself
+    (the assistant-text log + the parent stdout still record the outcome).
+    """
+    state_dir, _, _ = poll_for_value(
+        lambda: _find_agent_state_dir(agent_name, host_dir),
+        timeout=_AGENT_STARTUP_TIMEOUT_SECONDS,
+        poll_interval=_AGENT_STARTUP_POLL_INTERVAL_SECONDS,
+    )
+    if state_dir is None:
+        return
+    stdout_path = state_dir / "stdout.jsonl"
+    found, _, _ = poll_for_value(
+        lambda: stdout_path if stdout_path.is_file() else None,
+        timeout=_AGENT_STARTUP_TIMEOUT_SECONDS,
+        poll_interval=_AGENT_STARTUP_POLL_INTERVAL_SECONDS,
+    )
+    if found is None:
+        return
+    try:
+        src = open(stdout_path, "r", encoding="utf-8")
+    except OSError:
+        return
+    try:
+        # Block until the foreground run finishes, then read the complete file.
+        # The fd was opened before destroy_agent unlinked the file, so on POSIX
+        # it stays readable to EOF after the unlink.
+        stop_event.wait()
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(dest_path, "w", encoding="utf-8") as out:
+            line = src.readline()
+            while line:
+                out.write(_redact_stream_line(line))
+                line = src.readline()
+            out.flush()
+    finally:
+        src.close()
 
 
 class DonateCliOptions(CommonCliOptions):
@@ -770,9 +931,11 @@ def donate(ctx: click.Context, **kwargs: Any) -> None:
     skill_dir = prepare_skill_dir(opts.skill, opts.skill_repo, opts.skill_ref)
     argv = build_create_argv(opts.agent_name, str(skill_dir), mngr_path)
     log_path = _donation_log_path(opts.agent_name, now)
+    stream_log_path = _donation_stream_log_path(opts.agent_name, now)
     emit_info(
         f"Spare capacity available -- launching '{opts.agent_name}' to run the {opts.skill} skill "
-        f"from {skill_dir}.\nStreaming its steps below; full event log at {log_path}",
+        f"from {skill_dir}.\nStreaming its steps below; assistant-text log at {log_path}, "
+        f"raw stream-json (tool calls + results) at {stream_log_path}",
         output_opts.output_format,
     )
     # Clear anything a prior failed tick left behind so the create below can't
@@ -781,7 +944,22 @@ def donate(ctx: click.Context, **kwargs: Any) -> None:
     # is the normal case, and a cleanup failure shouldn't mask the create's own.
     subprocess.run(list(build_destroy_argv(opts.agent_name, mngr_path)), check=False, capture_output=True)
     _clear_stale_worktree(opts.agent_name)
-    returncode = _run_and_tee(argv, log_path, env=_donation_agent_env())
+    # Live-tail the agent's raw stream-json into stream_log_path concurrently with
+    # the foreground run: destroy_agent deletes the agent's stdout.jsonl before
+    # the parent returns, so a post-run copy is impossible (see
+    # _tail_agent_stream). Best-effort; a miss never masks the run.
+    stream_stop = threading.Event()
+    stream_thread = threading.Thread(
+        target=_tail_agent_stream,
+        args=(opts.agent_name, read_default_host_dir(), stream_log_path, stream_stop),
+        daemon=True,
+    )
+    stream_thread.start()
+    try:
+        returncode = _run_and_tee(argv, log_path, env=_donation_agent_env())
+    finally:
+        stream_stop.set()
+        stream_thread.join(timeout=10)
     if returncode != 0:
         raise MngrError(f"`{' '.join(argv)}` exited with status {returncode} (see {log_path}).")
     emit_operator_result(

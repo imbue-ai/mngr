@@ -8,11 +8,18 @@ integration tests / by ``mngr donate --dry-run``.
 
 from __future__ import annotations
 
+import json
+import os
+from pathlib import Path
+
 import pytest
 
 from imbue.mngr_donate.donate import CLAUDE_SOURCE
 from imbue.mngr_donate.donate import FIVE_HOUR_WINDOW
 from imbue.mngr_donate.donate import SEVEN_DAY_WINDOW
+from imbue.mngr_donate.donate import _donation_stream_log_path
+from imbue.mngr_donate.donate import _find_agent_state_dir
+from imbue.mngr_donate.donate import _redact_stream_line
 from imbue.mngr_donate.donate import build_agent_env
 from imbue.mngr_donate.donate import build_create_argv
 from imbue.mngr_donate.donate import build_destroy_argv
@@ -223,3 +230,70 @@ def test_agent_env_injects_stashed_keychain_token() -> None:
 
 def test_agent_env_inherits_unchanged_when_no_token_is_stashed() -> None:
     assert build_agent_env({"PATH": "/usr/bin"}, None) is None
+
+
+def test_donation_stream_log_path_is_sibling_with_stream_suffix() -> None:
+    # Sibling to the assistant-text log (.jsonl) with a .stream.jsonl suffix so
+    # the two are easy to tell apart, and shares the same timestamp.
+    assert _donation_stream_log_path("donate-extra-quota-bio", 1783983463).name == (
+        "donate-extra-quota-bio-1783983463.stream.jsonl"
+    )
+
+
+def test_redact_stream_line_masks_oauth_token_and_sk_ant() -> None:
+    # An env-echo (e.g. `env` or `printenv` the agent might run) would leak the
+    # token into the raw stream; redaction must mask it wherever it appears.
+    assert _redact_stream_line("CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat-abc123_xyz") == ("CLAUDE_CODE_OAUTH_TOKEN=REDACTED")
+    # JSON form (e.g. a tool_result echoing an env dict).
+    assert _redact_stream_line('{"CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat-abc"}') == (
+        '{"CLAUDE_CODE_OAUTH_TOKEN": "REDACTED"}'
+    )
+    # Bare sk-ant token anywhere in the line.
+    assert _redact_stream_line("got token sk-ant-oat-xyz and more") == "got token REDACTED and more"
+
+
+def test_redact_stream_line_masks_authorization_headers() -> None:
+    # Bearer tokens (the OAuth form) keep the "Bearer" label and mask only the secret.
+    assert _redact_stream_line("Authorization: Bearer abc.def-ghi") == "Authorization: Bearer REDACTED"
+    assert _redact_stream_line("header: Bearer xyz123") == "header: Bearer REDACTED"
+
+
+def test_redact_stream_line_is_noop_on_clean_lines() -> None:
+    # The common case: the pinned skill talks to an unauthenticated server and
+    # never prints a secret, so redaction must leave the line untouched.
+    clean = '{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]}}'
+    assert _redact_stream_line(clean) == clean
+
+
+def test_find_agent_state_dir_matches_by_name(tmp_path: Path) -> None:
+    # donate knows the agent name, but the state dir is keyed by an opaque id;
+    # _find_agent_state_dir resolves name -> state dir by reading data.json.
+    host_dir = tmp_path / "host"
+    agents = host_dir / "agents"
+    other = agents / "agent-deadbeef"
+    other.mkdir(parents=True)
+    (other / "data.json").write_text(json.dumps({"name": "some-other-agent"}))
+    ours = agents / "agent-abc123"
+    ours.mkdir()
+    (ours / "data.json").write_text(json.dumps({"name": "donate-extra-quota-bio"}))
+    assert _find_agent_state_dir("donate-extra-quota-bio", host_dir) == ours
+    assert _find_agent_state_dir("nonexistent", host_dir) is None
+
+
+def test_find_agent_state_dir_returns_none_when_agents_dir_missing(tmp_path: Path) -> None:
+    assert _find_agent_state_dir("donate-extra-quota-bio", tmp_path / "nope") is None
+
+
+def test_find_agent_state_dir_picks_newest_on_name_collision(tmp_path: Path) -> None:
+    # A stale dir with the same name should never win over the live one.
+    host_dir = tmp_path / "host"
+    agents = host_dir / "agents"
+    stale = agents / "agent-stale"
+    stale.mkdir(parents=True)
+    (stale / "data.json").write_text(json.dumps({"name": "donate-extra-quota-bio"}))
+    # Force the stale one's mtime to the epoch so the live one (written next) is newer.
+    os.utime(stale / "data.json", (0, 0))
+    live = agents / "agent-live"
+    live.mkdir()
+    (live / "data.json").write_text(json.dumps({"name": "donate-extra-quota-bio"}))
+    assert _find_agent_state_dir("donate-extra-quota-bio", host_dir) == live

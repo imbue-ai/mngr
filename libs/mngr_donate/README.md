@@ -95,6 +95,16 @@ safe default for scheduled runs (bump the ref to adopt updates after review).
 - **It needs usage data.** Spare capacity is judged from the account-level snapshot, which is
   populated by mngr-managed Claude agents. With none recorded recently, `donate` reports
   "can't tell" and skips rather than guessing.
-- **Logs.** Each run's full event stream is tee'd to `<host_dir>/donate-logs/<agent>-<ts>.jsonl`,
-  and scheduled runs also append to `<host_dir>/donate-logs/schedule.log`, so a run survives the
-  agent's auto-destroy for later inspection.
+- **Logs.** Each run writes two siblings under `<host_dir>/donate-logs/`:
+  - `<agent>-<ts>.jsonl` — the agent's **assistant text** (reasoning + final summary), tee'd from
+    the `mngr create --foreground` parent stdout. (For a `headless_claude` agent the parent stdout
+    carries only assistant text deltas — `StreamJsonReader` skips tool calls / tool results — so this
+    log is prose-level, not the raw event stream.)
+  - `<agent>-<ts>.stream.jsonl` — the agent's **raw stream-json** (tool calls, tool results, the
+    skill's outbound HTTP + submissions), captured by live-tailing the agent's own `stdout.jsonl`
+    before the agent auto-destroys (which would otherwise delete it). Secret values (OAuth tokens,
+    `Authorization: Bearer ...`, `sk-ant-...`) are redacted before writing.
+  Scheduled runs also append to `<host_dir>/donate-logs/schedule.log`. Together the two logs let a
+  completed run be audited after the agent's auto-destroy, with the raw stream giving per-tool-call
+  detail (which papers were leased / submitted) and the assistant-text log giving the agent's own
+  summary of the outcome.
