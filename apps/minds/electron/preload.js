@@ -18,14 +18,8 @@ contextBridge.exposeInMainWorld('minds', {
   contentGoBack: () => ipcRenderer.send('content-go-back'),
 
   // Content events (forwarded from main process)
-  onContentTitleChange: (callback) => {
-    ipcRenderer.on('content-title-changed', (_event, title) => callback(title));
-  },
   onContentURLChange: (callback) => {
     ipcRenderer.on('content-url-changed', (_event, url) => callback(url));
-  },
-  onWindowTitleChange: (callback) => {
-    ipcRenderer.on('window-title-changed', (_event, title) => callback(title));
   },
   onChromeEvent: (callback) => {
     ipcRenderer.on('chrome-event', (_event, data) => callback(data));

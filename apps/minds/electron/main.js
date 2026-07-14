@@ -308,11 +308,7 @@ function computeTitleFor(bundle) {
 
 function updateOsTitle(bundle) {
   if (!bundle || bundle.window.isDestroyed()) return;
-  const title = computeTitleFor(bundle);
-  bundle.window.setTitle(title);
-  if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
-    bundle.chromeView.webContents.send('window-title-changed', title);
-  }
+  bundle.window.setTitle(computeTitleFor(bundle));
 }
 
 function updateAllOsTitles() {
@@ -639,12 +635,6 @@ function wireContentViewEvents(bundle, contentView) {
   // Forward content view nav events to the bundle's chrome view and update state.
   // Called from both createBundle and prepareAllWindowsForRetry (which rebuilds
   // the contentView that showErrorInAllWindows tore down).
-  contentView.webContents.on('page-title-updated', (_e, title) => {
-    if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
-      bundle.chromeView.webContents.send('content-title-changed', title);
-    }
-  });
-
   const onContentNavigate = (url, httpResponseCode) => {
     if (!bundle.isErrorState) {
       bundle.currentContentUrl = url;

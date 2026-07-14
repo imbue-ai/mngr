@@ -58,7 +58,6 @@ const HARNESS_HTML = `<!DOCTYPE html><html><body data-mngr-forward-origin="http:
     window.minds = {
       onChromeEvent: function (cb) { window.__cb.chromeEvent = cb; },
       onCurrentWorkspaceChanged: function (cb) { window.__cb.currentWorkspace = cb; },
-      onContentTitleChange: function (cb) { window.__cb.contentTitle = cb; },
       onContentURLChange: function (cb) { window.__cb.contentUrl = cb; },
       onAccentChanged: function (cb) { window.__cb.accent = cb; },
       onModalStateChanged: function (cb) { window.__cb.modal = cb; },
