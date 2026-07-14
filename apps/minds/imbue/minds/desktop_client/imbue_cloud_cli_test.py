@@ -8,6 +8,7 @@ from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import _CONNECTOR_URL_SUBPROCESS_ENV
+from imbue.minds.desktop_client.imbue_cloud_cli import _parse_conflict_stored
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.testing import RecordingMngrCaller
 
@@ -53,3 +54,21 @@ def test_run_routes_through_mngr_caller_with_home_cwd_and_connector_env() -> Non
     assert recorded.cwd == Path.home()
     # The trailing slash is stripped so the plugin builds clean URLs.
     assert recorded.env_overrides == {_CONNECTOR_URL_SUBPROCESS_ENV: "https://connector.example"}
+
+
+def test_parse_conflict_stored_survives_surrounding_log_lines() -> None:
+    """The indent-formatted error body may be preceded by log lines containing
+    braces and followed by trailing output; the stored row must still parse."""
+    body = json.dumps({"error": "conflict", "error_class": "X", "stored": {"host_id": "h1", "revision": 4}}, indent=2)
+    stderr = (
+        "2026-07-12 10:00:00 | WARNING | retrying {attempt 1} after HTTP 409\n" + body + "\nsome trailing log line\n"
+    )
+    assert _parse_conflict_stored(stderr) == {"host_id": "h1", "revision": 4}
+
+
+def test_parse_conflict_stored_returns_none_without_a_stored_row() -> None:
+    # The active-agent-conflict shape carries no stored row.
+    body = json.dumps({"error": "another ACTIVE record exists", "stored": None}, indent=2)
+    assert _parse_conflict_stored(body) is None
+    # Brace-free stderr (no JSON document at all) parses to None too.
+    assert _parse_conflict_stored("plain traceback text\nwithout any json\n") is None
