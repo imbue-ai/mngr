@@ -14,6 +14,7 @@ from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.find import ensure_agent_started
 from imbue.mngr.api.find import ensure_host_started
 from imbue.mngr.api.find import group_agents_by_host
+from imbue.mngr.api.find import revive_done_agent
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentNotFoundOnHostError
@@ -196,13 +197,35 @@ def _send_message_to_agent(
     """
     agent_name = str(agent.name)
 
-    # Check if agent has a tmux session (only STOPPED agents cannot receive messages)
+    # (Re)start the agent unless it is live enough to receive a message. STOPPED
+    # has no tmux session at all; DONE has a lingering session whose agent process
+    # already exited (a ctrl-c, a crash, or an OOM shed leaves tmux holding the
+    # pane open on a bare shell). In both cases there is no agent to deliver to, so
+    # a raw send would just type the message into a dead shell and silently lose
+    # it. A DONE husk must be torn down before the relaunch actually happens
+    # (revive_done_agent), whereas a STOPPED agent just needs a plain start.
     lifecycle_state = agent.get_lifecycle_state()
-    if lifecycle_state == AgentLifecycleState.STOPPED:
+    if lifecycle_state in (AgentLifecycleState.STOPPED, AgentLifecycleState.DONE):
         if is_start_desired:
-            ensure_agent_started(agent, host, is_start_desired=True)
+            # Record a failed (re)start against this agent just like a failed send,
+            # so it shows up in the result (and the exit code) instead of only in a
+            # host-level warning log.
+            try:
+                if lifecycle_state == AgentLifecycleState.DONE:
+                    revive_done_agent(agent, host)
+                else:
+                    ensure_agent_started(agent, host, is_start_desired=True)
+            except MngrError as e:
+                error_msg = str(e)
+                with result_lock:
+                    result.failed_agents.append((agent_name, error_msg))
+                if on_error:
+                    on_error(agent_name, error_msg)
+                if error_behavior == ErrorBehavior.ABORT:
+                    raise MngrError(error_msg) from e
+                return
         else:
-            error_msg = f"Agent has no tmux session (state: {lifecycle_state.value})"
+            error_msg = f"Agent is not running (state: {lifecycle_state.value})"
             with result_lock:
                 result.failed_agents.append((agent_name, error_msg))
             if on_error:
