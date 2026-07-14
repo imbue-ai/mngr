@@ -2,16 +2,15 @@
 
 import contextlib
 import re
-from pathlib import Path
 from typing import Final
 from typing import Generator
 from typing import Sequence
 from typing import cast
 
-import pydantic
 import pytest
 
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.mock_host_test import ScriptedHost
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import SubmissionConfirmationPolicy
 from imbue.mngr.agents.tui_utils import SubmissionEvidenceProbe
@@ -23,20 +22,6 @@ from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
-
-
-class _ScriptedHost(pydantic.BaseModel):
-    """In-memory host stub: records commands and replays scripted results (then succeeds)."""
-
-    host_dir: Path = pydantic.Field(default=Path("/tmp/fake-mngr-host"))
-    captured: list[str] = pydantic.Field(default_factory=list)
-    scripted_results: list[CommandResult] = pydantic.Field(default_factory=list)
-
-    def execute_stateful_command(self, command: str, **_: object) -> CommandResult:
-        self.captured.append(command)
-        if self.scripted_results:
-            return self.scripted_results.pop(0)
-        return CommandResult(stdout="", stderr="", success=True)
 
 
 class _ProbeTuiAgent(InteractiveTuiAgent[AgentTypeConfig]):
@@ -54,7 +39,7 @@ class _RecordingTuiAgent(_ProbeTuiAgent):
     ``pane_content`` is what every pane capture returns; setting it to a string
     that lacks ``TUI_READY_INDICATOR`` makes the readiness wait time out, while
     one that contains both the indicator and the message makes the whole pipeline
-    succeed without touching a real tmux (host commands go to a ``_ScriptedHost``).
+    succeed without touching a real tmux (host commands go to a ``ScriptedHost``).
     """
 
     pane_content: str = ""
@@ -94,7 +79,7 @@ def _make_recording_agent(
     *scripted_results: CommandResult,
     probes: Sequence[SubmissionEvidenceProbe] = (),
 ) -> _RecordingTuiAgent:
-    host = _ScriptedHost(scripted_results=list(scripted_results))
+    host = ScriptedHost(scripted_results=list(scripted_results))
     return _RecordingTuiAgent.model_construct(
         id=AgentId.generate(),
         name=AgentName("probe"),
@@ -142,7 +127,7 @@ def test_send_message_waits_for_ready_indicator_before_pasting() -> None:
     agent = _make_recording_agent(pane)
     agent.send_message(_RESUME_MESSAGE)
     assert agent.steps == ["preflight", "paste"]
-    host_commands = cast(_ScriptedHost, agent.host).captured
+    host_commands = cast(ScriptedHost, agent.host).captured
     assert host_commands == ["tmux send-keys -t =s:0 Enter"]
 
 
@@ -183,7 +168,7 @@ def test_send_message_warns_but_succeeds_for_unconfirmed_slash_command() -> None
         probes=[_never_confirming_probe()],
     )
     agent.send_message("/clear")
-    event_commands = [command for command in cast(_ScriptedHost, agent.host).captured if "events/messages" in command]
+    event_commands = [command for command in cast(ScriptedHost, agent.host).captured if "events/messages" in command]
     assert len(event_commands) == 1
     assert "relaxed_send_unconfirmed" in event_commands[0]
 
@@ -195,7 +180,7 @@ def test_send_message_confirms_slash_command_without_warning_event() -> None:
         probes=[_never_confirming_probe()],
     )
     agent.send_message("/clear")
-    event_commands = [command for command in cast(_ScriptedHost, agent.host).captured if "events/messages" in command]
+    event_commands = [command for command in cast(ScriptedHost, agent.host).captured if "events/messages" in command]
     assert event_commands == []
 
 
@@ -207,7 +192,7 @@ def test_send_message_warns_and_records_event_for_preexisting_input_text() -> No
         def _detect_preexisting_input_text(self, pane_content: str) -> str | None:
             return "previously stranded message"
 
-    host = _ScriptedHost()
+    host = ScriptedHost()
     agent = _LeftoverDetectingAgent.model_construct(
         id=AgentId.generate(),
         name=AgentName("probe"),
@@ -281,7 +266,7 @@ def test_send_message_runs_preflight_before_readiness_wait() -> None:
         steps=[],
         built_policies=[],
         probes_to_return=[],
-        host=_ScriptedHost(),
+        host=ScriptedHost(),
     )
     with pytest.raises(SendMessageError, match="blocking dialog"):
         agent.send_message("hello")

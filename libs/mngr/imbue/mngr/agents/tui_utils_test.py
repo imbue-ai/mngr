@@ -9,6 +9,7 @@ import pydantic
 import pytest
 
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.mock_host_test import ScriptedHost
 from imbue.mngr.agents.tui_utils import SubmissionEvidenceProbe
 from imbue.mngr.agents.tui_utils import _check_paste_content
 from imbue.mngr.agents.tui_utils import _normalize_for_match
@@ -218,19 +219,6 @@ def test_parse_confirmation_output_handles_empty_output() -> None:
 # =========================================================================
 
 
-class _RecorderHost(pydantic.BaseModel):
-    """In-memory host stub: records each command and replays scripted results."""
-
-    captured: list[str] = pydantic.Field(default_factory=list)
-    scripted_results: list[CommandResult] = pydantic.Field(default_factory=list)
-
-    def execute_stateful_command(self, command: str, **_: object) -> CommandResult:
-        self.captured.append(command)
-        if self.scripted_results:
-            return self.scripted_results.pop(0)
-        return CommandResult(stdout="", stderr="", success=True)
-
-
 class _ProbeAgent(BaseAgent[AgentTypeConfig]):
     """In-memory BaseAgent that captures host commands and synthesizes pane content."""
 
@@ -241,7 +229,7 @@ class _ProbeAgent(BaseAgent[AgentTypeConfig]):
 
 
 def _make_probe_agent(*scripted_results: CommandResult) -> _ProbeAgent:
-    host = _RecorderHost(scripted_results=list(scripted_results))
+    host = ScriptedHost(scripted_results=list(scripted_results))
     return _ProbeAgent.model_construct(
         id=AgentId.generate(),
         name=AgentName("probe"),
