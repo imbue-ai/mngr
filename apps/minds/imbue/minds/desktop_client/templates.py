@@ -161,6 +161,17 @@ _ICONS_12: Final[Mapping[str, str]] = {
 }
 
 
+def _is_dark_mode() -> bool:
+    """Catalog-global wrapper for the persisted dark-mode user setting.
+
+    Read on every page render so Base.jinja can apply the ``dark`` class on the
+    document root server-side (no flash, no client-side storage). Outside a
+    Flask app context (template unit tests) it defaults to light.
+    """
+    minds_config = get_state().minds_config if has_app_context() else None
+    return minds_config.get_dark_mode() if minds_config is not None else False
+
+
 def _frontend_sentry_browser_payload() -> dict[str, str] | None:
     """Catalog-global wrapper that gates the browser Sentry payload on the live user setting.
 
@@ -207,6 +218,9 @@ def _build_catalog() -> Catalog:
             # See _frontend_sentry_browser_payload, imbue/minds/utils/sentry/frontend.py,
             # and Base.jinja.
             "frontend_sentry_browser_payload": _frontend_sentry_browser_payload,
+            # Resolved per render so Base.jinja applies the persisted dark-mode
+            # setting on the document root server-side (see _is_dark_mode).
+            "is_dark_mode": _is_dark_mode,
         },
     )
     catalog.add_folder(str(TEMPLATE_DIR))
@@ -230,6 +244,8 @@ def render_landing_page(
     shutdown_capable_agent_ids: Sequence[AgentId] | None = None,
     mind_liveness_by_agent_id: dict[str, str] | None = None,
     agent_providers: dict[str, str] | None = None,
+    account_email: str = "",
+    extra_account_count: int = 0,
 ) -> str:
     """Render the landing page listing accessible workspaces.
 
@@ -256,6 +272,11 @@ def render_landing_page(
     When is_discovering is True, the page shows a "Discovering agents..." message
     with auto-refresh instead of the empty state. This is used when the
     envelope-stream consumer hasn't completed initial agent discovery yet.
+
+    ``account_email`` / ``extra_account_count`` feed the bottom-left account
+    launcher: the default (or first) signed-in account's email, plus how many
+    further accounts are signed in (rendered as a "(+N)" suffix). An empty
+    email renders the launcher as "Log in" instead.
     """
     # Workspaces without an entry in agent_accents (caller didn't supply
     # one, or supplied a partial map) fall back to the default workspace
@@ -276,6 +297,8 @@ def render_landing_page(
         shutdown_capable_agent_ids=shutdown_capable_agent_id_strings,
         mind_liveness_by_agent_id=mind_liveness_by_agent_id or {},
         agent_providers=agent_providers or {},
+        account_email=account_email,
+        extra_account_count=extra_account_count,
     )
 
 
@@ -1768,45 +1791,74 @@ def render_accounts_page(
 def render_settings_page(
     report_unexpected_errors: bool = False,
     include_error_logs: bool = False,
-    services_overview: Sequence[object] | None = None,
-    file_sharing_grants: Sequence[object] | None = None,
-    workspace_delegation_grants: Sequence[object] | None = None,
-    permissions_unavailable: bool = False,
     has_saved_backup_password: bool = False,
+    dark_mode: bool = False,
+    region_options: Sequence[str] | None = None,
+    region_selected: str = "",
+    app_version: str = "",
 ) -> str:
-    """Render the app-level settings page (reachable from the sidebar's "Settings" entry).
+    """Render the app-level settings page (the browser-mode fallback for the settings modal).
 
-    The page has a left nav (Permissions / Error reporting) and a right content
-    pane.
-
-    ``report_unexpected_errors`` / ``include_error_logs`` seed the per-machine
-    error-reporting toggles hosted on this page (the same settings the
-    first-launch consent screen records); ``has_saved_backup_password`` feeds
-    the backup master-password section's helper text. All are global to the
-    machine, not account-scoped.
-
-    ``services_overview`` is a sequence of
-    :class:`~imbue.minds.desktop_client.latchkey.permission_overview.ServicePermissionOverview`
-    describing the predefined-service grants held across all active workspaces
-    (empty when nothing is granted). ``file_sharing_grants`` is a sequence of
-    :class:`~imbue.minds.desktop_client.latchkey.permission_overview.WorkspaceFileSharingGrant`
-    describing the file-sharing access granted per workspace, rendered as a
-    separate section below the services. ``workspace_delegation_grants`` is a
-    sequence of
-    :class:`~imbue.minds.desktop_client.latchkey.permission_overview.WorkspaceDelegationGrant`
-    describing the cross-workspace-management grants, grouped by the granting
-    workspace with one row per verb (naming the target[s] it covers), rendered
-    below file sharing. ``permissions_unavailable`` is True when the latchkey
-    gateway could not be reached to read grants, so the page shows a notice
-    instead of an empty list.
+    Renders the shared app-level settings sections (Appearance, Error
+    reporting, Account default region, Backup password, About) as a full page;
+    Electron shows the same sections in the centered settings modal instead
+    (:func:`render_settings_modal_page`). All settings here are per-machine
+    device settings, not account-scoped. Connector / permission management is
+    per-workspace and lives on each workspace's Connections view.
     """
     return CATALOG.render(
         "pages.Settings",
         report_unexpected_errors=report_unexpected_errors,
         include_error_logs=include_error_logs,
-        services_overview=list(services_overview or []),
-        file_sharing_grants=list(file_sharing_grants or []),
-        workspace_delegation_grants=list(workspace_delegation_grants or []),
-        permissions_unavailable=permissions_unavailable,
         has_saved_backup_password=has_saved_backup_password,
+        dark_mode=dark_mode,
+        region_options=list(region_options or []),
+        region_selected=region_selected,
+        app_version=app_version,
+    )
+
+
+@pure
+def render_settings_modal_page(
+    report_unexpected_errors: bool = False,
+    include_error_logs: bool = False,
+    has_saved_backup_password: bool = False,
+    dark_mode: bool = False,
+    region_options: Sequence[str] | None = None,
+    region_selected: str = "",
+    app_version: str = "",
+) -> str:
+    """Render the centered "Minds Settings" modal page (``GET /settings/modal``).
+
+    Hosted in the shared modal WebContentsView; shows the same shared sections
+    as :func:`render_settings_page`.
+    """
+    return CATALOG.render(
+        "pages.SettingsModal",
+        report_unexpected_errors=report_unexpected_errors,
+        include_error_logs=include_error_logs,
+        has_saved_backup_password=has_saved_backup_password,
+        dark_mode=dark_mode,
+        region_options=list(region_options or []),
+        region_selected=region_selected,
+        app_version=app_version,
+    )
+
+
+@pure
+def render_accounts_modal_page(
+    accounts: Sequence[object],
+    default_account_id: str | None = None,
+    enabled_by_user_id: Mapping[str, bool] | None = None,
+) -> str:
+    """Render the centered "Manage Accounts" modal page (``GET /accounts/modal``).
+
+    Hosted in the shared modal WebContentsView; the full accounts page
+    (:func:`render_accounts_page`) remains as the browser-mode fallback.
+    """
+    return CATALOG.render(
+        "pages.AccountsModal",
+        accounts=accounts,
+        default_account_id=default_account_id or "",
+        enabled_by_user_id=dict(enabled_by_user_id or {}),
     )

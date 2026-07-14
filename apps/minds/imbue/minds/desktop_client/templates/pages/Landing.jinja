@@ -1,8 +1,15 @@
-{#def agent_ids, agent_accents, mngr_forward_origin, is_discovering, agent_names, destroying_status_by_agent_id, shutdown_capable_agent_ids, mind_liveness_by_agent_id, agent_providers={} #}
+{#def agent_ids, agent_accents, mngr_forward_origin, is_discovering, agent_names, destroying_status_by_agent_id, shutdown_capable_agent_ids, mind_liveness_by_agent_id, agent_providers={}, account_email="", extra_account_count=0 #}
 {#
   Landing page: list of accessible workspaces with per-row health and backup
   status. Subscribes to the chrome SSE so the page reloads
   when a destroy completes (or any other workspace-list change lands).
+
+  The bottom-left corner carries the app-level launchers: "Minds Settings"
+  and the account entry (default account email + "(+N)" when more accounts
+  are signed in, or "Log in" when signed out). In the desktop shell these
+  open the centered overlay modals via the content relay's allowlisted
+  postMessage channels; in a plain browser they navigate to the full-page
+  fallbacks.
 #}
 {% set _scripts %}
 <script>
@@ -88,6 +95,30 @@
       var ret = row.dataset.defaultHref || '';
       window.location = '/agents/' + encodeURIComponent(agentId)
         + '/recovery?return_to=' + encodeURIComponent(ret) + '&intent=restart';
+    };
+
+    // -- Bottom-left app-level launchers --
+    //
+    // In the desktop shell these open the centered overlay modals through the
+    // content relay's allowlisted postMessage channels (the content view has
+    // no window.minds bridge); in a plain browser they navigate the page to
+    // the full-page fallbacks.
+    window.landingOpenMindsSettings = function () {
+      if (isElectronShell) {
+        window.postMessage({ type: 'minds:open-minds-settings' }, '*');
+      } else {
+        window.location = '/settings';
+      }
+    };
+
+    window.landingOpenAccounts = function () {
+      var signedIn = (document.getElementById('landing-account') || {}).dataset || {};
+      var isSignedIn = signedIn.signedIn === 'true';
+      if (isElectronShell) {
+        window.postMessage({ type: isSignedIn ? 'minds:open-accounts' : 'minds:open-signin-modal' }, '*');
+      } else {
+        window.location = isSignedIn ? '/accounts' : '/auth/login';
+      }
     };
 
     window.landingOpenInNewWindow = function (button) {
@@ -755,5 +786,27 @@
         <div class="flex flex-col gap-1.5" data-providers-list></div>
       </div>
     </section>
+
+    {# Spacer so the last workspace rows can scroll clear of the fixed
+       bottom-left launchers below. #}
+    <div class="h-20" aria-hidden="true"></div>
   </PageContainer>
+
+  {# Bottom-left app-level launchers: Minds Settings + the account entry.
+     Fixed to the content area's bottom-left corner, matching the mockup. #}
+  <div class="fixed bottom-3 left-3 flex flex-col items-start gap-0.5">
+    <button type="button" id="landing-minds-settings"
+            onclick="window.landingOpenMindsSettings()"
+            class="flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer type-body text-secondary hover:text-primary hover:bg-fill-hover bg-transparent border-0 text-left">
+      <Icon16 name="settings" extra="shrink-0" />
+      <span>Minds Settings</span>
+    </button>
+    <button type="button" id="landing-account"
+            onclick="window.landingOpenAccounts()"
+            data-signed-in="{{ 'true' if account_email else 'false' }}"
+            class="flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer type-body text-secondary hover:text-primary hover:bg-fill-hover bg-transparent border-0 text-left">
+      <Icon16 name="user" extra="shrink-0" />
+      <span>{% if account_email %}{{ account_email }}{% if extra_account_count > 0 %} (+{{ extra_account_count }}){% endif %}{% else %}Log in{% endif %}</span>
+    </button>
+  </div>
 </Base>

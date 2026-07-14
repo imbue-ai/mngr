@@ -91,7 +91,15 @@
       return;
     }
     if (e.target.closest('#sidebar-account')) {
-      navigate(signedIn ? '/accounts' : '/auth/login');
+      // In Electron the account entry opens the centered overlay modals
+      // (swapping this switcher iframe for the modal); browser mode
+      // navigates to the full-page fallbacks.
+      if (isElectron && window.minds.openAccounts) {
+        if (signedIn) window.minds.openAccounts();
+        else window.minds.openSigninModal('/');
+      } else {
+        navigate(signedIn ? '/accounts' : '/auth/login');
+      }
       return;
     }
     handleRowClick(e.target);

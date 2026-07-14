@@ -65,8 +65,23 @@ contextBridge.exposeInMainWorld('minds', {
   // (shown only when the setting is off; when on, logs are always attached).
   getLogInclusionSetting: () => ipcRenderer.invoke('get-log-inclusion-setting'),
 
-  // Modal overlay close (used by the inbox shell and any one-off dialogs)
+  // Modal overlay close (used by the overlay-hosted modal pages)
   closeModal: () => ipcRenderer.send('close-modal'),
+
+  // Centered app-level modals on the shared overlay surface. Used by
+  // overlay-hosted pages (the workspace switcher's account entry, the
+  // accounts modal's "Add account"); the content view reaches the same
+  // modals through the content relay's allowlisted postMessage channels.
+  // ``returnTo`` is the local path a successful sign-in lands on (validated
+  // by main and the server; defaults to the create screen when omitted).
+  openMindsSettings: () => ipcRenderer.send('open-minds-settings'),
+  openAccounts: () => ipcRenderer.send('open-accounts'),
+  openSigninModal: (returnTo) => ipcRenderer.send('open-signin-modal', returnTo),
+
+  // Fired by the settings UI after persisting the dark-mode toggle so main
+  // can repaint every window's other views (chrome titlebar, minds content
+  // pages) in the new theme.
+  notifyAppearanceChanged: (isDark) => ipcRenderer.send('appearance-changed', isDark),
 
   // Overlay surface (the always-warm modal WebContentsView host page,
   // /_chrome/overlay). The overlay manager (/_static/overlay.js) receives

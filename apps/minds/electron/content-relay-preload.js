@@ -25,6 +25,12 @@ const AGENT_ID_PATTERN = /^agent-[a-f0-9]{1,64}$/i;
 // the titlebar with arbitrary CSS values via the preview channel.
 const ACCENT_HEX_PATTERN = /^#[0-9a-f]{6}$/;
 
+// Local path for the sign-in modal's post-auth landing: must start with a
+// single '/' (never '//', which browsers treat as scheme-relative) and stay
+// within a conservative charset. The server re-validates with
+// safe_local_redirect_path (never trust the renderer).
+const LOCAL_PATH_PATTERN = /^\/(?!\/)[A-Za-z0-9\-._~/?=&%]*$/;
+
 window.addEventListener('message', (event) => {
   // Only honour messages posted by this same top-level page, never by a
   // nested third-party iframe the workspace might embed.
@@ -50,11 +56,27 @@ window.addEventListener('message', (event) => {
     ipcRenderer.send('open-help', typeof agentId === 'string' ? agentId : '');
     return;
   }
-  // Create-screen sign-in: open the shared modal overlay loaded with the
-  // sign-in page (so it covers the whole window, including the title bar).
-  // No payload -- the main process builds the fixed `/auth/signin-modal` URL.
+  // Sign-in: open the shared modal overlay loaded with the sign-in page (so
+  // it covers the whole window, including the title bar). ``returnTo`` is an
+  // optional local path a successful sign-in should land on; it is validated
+  // to a conservative local-path shape here AND re-validated in the main
+  // process and by the server route (safe_local_redirect_path). Absent, the
+  // server defaults to the create screen (the modal's original caller).
   if (data.type === 'minds:open-signin-modal') {
-    ipcRenderer.send('open-signin-modal');
+    const returnTo = data.returnTo;
+    if (returnTo !== undefined && (typeof returnTo !== 'string' || !LOCAL_PATH_PATTERN.test(returnTo))) return;
+    ipcRenderer.send('open-signin-modal', typeof returnTo === 'string' ? returnTo : '');
+    return;
+  }
+  // Home-screen launchers: open the centered Minds Settings / Manage Accounts
+  // modals in the shared overlay. No payload -- the main process builds the
+  // fixed URLs.
+  if (data.type === 'minds:open-minds-settings') {
+    ipcRenderer.send('open-minds-settings');
+    return;
+  }
+  if (data.type === 'minds:open-accounts') {
+    ipcRenderer.send('open-accounts');
     return;
   }
   // Landing-page Stop button: ask the main process to show a native

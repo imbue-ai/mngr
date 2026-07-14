@@ -911,6 +911,8 @@ function overlayIdForUrl(url) {
   if (pathname === '/inbox') return 'inbox';
   if (pathname === '/help') return 'help';
   if (pathname === '/auth/signin-modal') return 'signin';
+  if (pathname === '/settings/modal') return 'settings';
+  if (pathname === '/accounts/modal') return 'accounts';
   return null;
 }
 
@@ -1103,16 +1105,36 @@ function inboxUrlFor(query) {
   return backendBaseUrl + '/inbox' + (query || '');
 }
 
-function signinModalUrlFor() {
+// Local path a successful sign-in should land on. Must start with a single
+// '/' (never '//') and stay within a conservative charset; the server
+// re-validates with safe_local_redirect_path. Anything else falls back to the
+// server default (the create screen).
+const SIGNIN_RETURN_TO_PATTERN = /^\/(?!\/)[A-Za-z0-9\-._~/?=&%]*$/;
+
+function signinModalUrlFor(returnTo) {
   if (!backendBaseUrl) return null;
-  return backendBaseUrl + '/auth/signin-modal';
+  const base = backendBaseUrl + '/auth/signin-modal';
+  if (typeof returnTo === 'string' && returnTo && SIGNIN_RETURN_TO_PATTERN.test(returnTo)) {
+    return base + '?return_to=' + encodeURIComponent(returnTo);
+  }
+  return base;
 }
 
-function openSigninModal(bundle) {
+function openSigninModal(bundle, returnTo) {
   if (!bundle || bundle.window.isDestroyed()) return;
-  const url = signinModalUrlFor();
+  const url = signinModalUrlFor(returnTo);
   if (!url) return;
   openModal(bundle, url);
+}
+
+function openMindsSettingsModal(bundle) {
+  if (!bundle || bundle.window.isDestroyed() || !backendBaseUrl) return;
+  openModal(bundle, backendBaseUrl + '/settings/modal');
+}
+
+function openAccountsModal(bundle) {
+  if (!bundle || bundle.window.isDestroyed() || !backendBaseUrl) return;
+  openModal(bundle, backendBaseUrl + '/accounts/modal');
 }
 
 function isInboxModalOpen(bundle) {
@@ -3162,14 +3184,50 @@ ipcMain.on('open-help', (event, agentId) => {
   openHelp(getBundleFromEvent(event), scopedAgentId);
 });
 
-// Open the sign-in modal in the shared overlay on behalf of the (otherwise
-// unprivileged) workspace content view -- the create screen posts an
-// allowlisted `minds:open-signin-modal` when a signed-out user presses
-// "Create" with the Imbue Cloud preset selected. No payload to validate; the
-// URL is a fixed server route.
-ipcMain.on('open-signin-modal', (event) => {
+// Open the sign-in modal in the shared overlay. Senders: the content relay
+// (the create screen's signed-out "Create" press, the home screen's "Log in"
+// launcher) and overlay-hosted pages via window.minds (the accounts modal's
+// "Add account"). ``returnTo`` is where a successful sign-in lands; it is
+// validated here (never trust the renderer) and again by the server route.
+ipcMain.on('open-signin-modal', (event, returnTo) => {
   const sender = getBundleFromEvent(event);
-  if (sender) openSigninModal(sender);
+  if (sender) openSigninModal(sender, typeof returnTo === 'string' ? returnTo : '');
+});
+
+// Open the centered Minds Settings / Manage Accounts modals. Senders: the
+// content relay (home-screen launchers) and overlay-hosted pages via
+// window.minds (the workspace switcher's account entry). No payload; the
+// URLs are fixed server routes.
+ipcMain.on('open-minds-settings', (event) => {
+  const sender = getBundleFromEvent(event);
+  if (sender) openMindsSettingsModal(sender);
+});
+
+ipcMain.on('open-accounts', (event) => {
+  const sender = getBundleFromEvent(event);
+  if (sender) openAccountsModal(sender);
+});
+
+// The settings UI persisted a dark-mode change: repaint every window's other
+// surfaces. The chrome view + overlay frames flip their document class off
+// the chrome-event; minds-served content pages reload so the server-rendered
+// theme class (Base.jinja) takes effect. Workspace content (the foreign
+// dockview UI on its own origin) is deliberately untouched.
+ipcMain.on('appearance-changed', (_event, isDark) => {
+  const dark = !!isDark;
+  for (const b of bundles) {
+    if (b.window.isDestroyed()) continue;
+    if (b.chromeView && !b.chromeView.webContents.isDestroyed()) {
+      try {
+        b.chromeView.webContents.send('chrome-event', { type: 'appearance', is_dark: dark });
+      } catch { /* noop */ }
+    }
+    sendToOverlayFrames(b, 'chrome-event', { type: 'appearance', is_dark: dark });
+    const cv = b.contentView;
+    if (cv && !cv.webContents.isDestroyed() && !parseWorkspaceId(cv.webContents.getURL())) {
+      try { cv.webContents.reload(); } catch { /* noop */ }
+    }
+  }
 });
 
 ipcMain.on('close-modal', (event) => {

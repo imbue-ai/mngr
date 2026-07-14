@@ -102,6 +102,8 @@ from imbue.minds.desktop_client.supertokens_routes import create_supertokens_blu
 from imbue.minds.desktop_client.supertokens_routes import signout_user_via_plugin
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.build_info import resolve_release_id
+from imbue.minds.desktop_client.templates import render_accounts_modal_page
 from imbue.minds.desktop_client.templates import render_accounts_page
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
@@ -119,6 +121,7 @@ from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
 from imbue.minds.desktop_client.templates import render_overlay_host_page
 from imbue.minds.desktop_client.templates import render_recovery_page
+from imbue.minds.desktop_client.templates import render_settings_modal_page
 from imbue.minds.desktop_client.templates import render_settings_page
 from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
@@ -433,6 +436,45 @@ def _handle_error_reporting_settings() -> Response:
     return make_response(status_code=200, content='{"ok": true}', media_type="application/json")
 
 
+def _handle_appearance_settings() -> Response:
+    """Persist the dark-mode toggle from the settings UI (POST /_chrome/appearance).
+
+    The theme is applied server-side on every page render (Base.jinja), so the
+    change takes effect on the next render of every surface; the settings UI
+    also flips its own document live.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
+    body = request.get_json(silent=True, force=True)
+    if not isinstance(body, dict):
+        return make_response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
+    minds_config: MindsConfig | None = get_state().minds_config
+    if minds_config is not None:
+        minds_config.set_dark_mode(bool(body.get("dark_mode", False)))
+    return make_response(status_code=200, content='{"ok": true}', media_type="application/json")
+
+
+def _handle_default_region_setting() -> Response:
+    """Persist the default Imbue Cloud region from the settings UI (POST /_chrome/default-region).
+
+    Writes the same per-provider region preference the create form reads (and
+    writes back on each create), so the picked region pre-selects the create
+    form's region field for Imbue Cloud workspaces.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
+    body = request.get_json(silent=True, force=True)
+    if not isinstance(body, dict):
+        return make_response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
+    region = str(body.get("region") or "")
+    if region not in known_regions_for_provider(IMBUE_CLOUD_PROVIDER_KEY):
+        return make_response(status_code=400, content='{"error": "Unknown region"}', media_type="application/json")
+    minds_config: MindsConfig | None = get_state().minds_config
+    if minds_config is not None:
+        minds_config.set_region(IMBUE_CLOUD_PROVIDER_KEY, region)
+    return make_response(status_code=200, content='{"ok": true}', media_type="application/json")
+
+
 def _handle_backup_password_change() -> Response:
     """Rotate the shared backup master password (POST /_chrome/backup-password).
 
@@ -663,6 +705,26 @@ def _handle_welcome_page() -> Response:
     return make_html_response(content=html)
 
 
+def _account_launcher_context(session_store: MultiAccountSessionStore | None) -> tuple[str, int]:
+    """Resolve the home screen's bottom-left account launcher label.
+
+    Returns ``(email, extra_count)``: the default (or first) signed-in
+    account's email plus how many further accounts are signed in, or
+    ``("", 0)`` when signed out (the launcher then reads "Log in").
+    """
+    accounts = session_store.list_accounts() if session_store else []
+    if not accounts:
+        return "", 0
+    minds_config: MindsConfig | None = get_state().minds_config
+    default_account_id = minds_config.get_default_account_id() if minds_config else None
+    shown = accounts[0]
+    for account in accounts:
+        if default_account_id is not None and str(account.user_id) == default_account_id:
+            shown = account
+            break
+    return str(shown.email), len(accounts) - 1
+
+
 def _handle_landing_page() -> Response:
     if not _is_request_authenticated():
         html = render_login_page()
@@ -680,6 +742,7 @@ def _handle_landing_page() -> Response:
     paths: WorkspacePaths | None = get_state().api_v1_paths
     landing_session_store: MultiAccountSessionStore | None = get_state().session_store
     destroying_status_by_agent_id = _resolve_destroying_for_landing(paths, backend_resolver, landing_session_store)
+    launcher_email, launcher_extra_count = _account_launcher_context(landing_session_store)
 
     if all_agent_ids:
         agent_names: dict[str, str] = {}
@@ -709,6 +772,8 @@ def _handle_landing_page() -> Response:
             shutdown_capable_agent_ids=shutdown_capable_agent_ids,
             mind_liveness_by_agent_id=mind_liveness_by_agent_id,
             agent_providers=agent_providers,
+            account_email=launcher_email,
+            extra_account_count=launcher_extra_count,
         )
         return make_html_response(content=html)
 
@@ -721,6 +786,8 @@ def _handle_landing_page() -> Response:
             accessible_agent_ids=(),
             mngr_forward_origin=_get_mngr_forward_origin(),
             is_discovering=True,
+            account_email=launcher_email,
+            extra_account_count=launcher_extra_count,
         )
         return make_html_response(content=html)
 
@@ -1691,62 +1758,72 @@ def _find_predefined_permission_handler() -> LatchkeyPermissionGrantHandler | No
     return None
 
 
+def _build_app_settings_context() -> dict[str, Any]:
+    """Build the shared render kwargs for the app-level settings surfaces.
+
+    Used by both the full settings page (browser-mode fallback) and the
+    centered settings modal, which render the same shared sections.
+    """
+    minds_config: MindsConfig | None = get_state().minds_config
+    geo_cache: GeoLocationCache | None = get_state().geo_location_cache
+    paths: WorkspacePaths | None = get_state().api_v1_paths
+    return {
+        "report_unexpected_errors": minds_config.get_report_unexpected_errors() if minds_config else False,
+        "include_error_logs": minds_config.get_include_error_logs() if minds_config else False,
+        "has_saved_backup_password": has_saved_backup_password(paths) if paths is not None else False,
+        "dark_mode": minds_config.get_dark_mode() if minds_config else False,
+        "region_options": list(known_regions_for_provider(IMBUE_CLOUD_PROVIDER_KEY)),
+        "region_selected": default_region_for_provider_with_config(IMBUE_CLOUD_PROVIDER_KEY, minds_config, geo_cache),
+        "app_version": resolve_release_id(),
+    }
+
+
 def _handle_settings_page() -> Response:
     """Render the app-level settings page (GET /settings).
 
-    Hosts the Permissions subsection (predefined-service grants across all
-    active workspaces) and the per-machine error-reporting toggles (seeded from
-    ``MindsConfig``). Requires the same local session as the rest of the app; it
-    is not account-scoped.
+    The full-page browser-mode fallback for the centered settings modal
+    (GET /settings/modal): Appearance, error reporting, default region,
+    backup password, and About -- all per-machine device settings seeded
+    from ``MindsConfig``. Requires the same local session as the rest of
+    the app; it is not account-scoped.
     """
     if not _is_request_authenticated():
         return make_response(status_code=403, content="Not authenticated")
+    return make_html_response(content=render_settings_page(**_build_app_settings_context()))
+
+
+def _handle_settings_modal() -> Response:
+    """Render the centered "Minds Settings" modal page (GET /settings/modal).
+
+    Served into the shared modal WebContentsView; opened from the home
+    screen's bottom-left "Minds Settings" launcher.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+    return make_html_response(content=render_settings_modal_page(**_build_app_settings_context()))
+
+
+def _handle_accounts_modal() -> Response:
+    """Render the centered "Manage Accounts" modal page (GET /accounts/modal).
+
+    Served into the shared modal WebContentsView; opened from the home
+    screen's bottom-left account launcher and the workspace switcher's
+    account entry. The full page (GET /accounts) remains as the
+    browser-mode fallback.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+    session_store: MultiAccountSessionStore | None = get_state().session_store
     minds_config: MindsConfig | None = get_state().minds_config
-    report_unexpected_errors = minds_config.get_report_unexpected_errors() if minds_config else False
-    include_error_logs = minds_config.get_include_error_logs() if minds_config else False
-    paths: WorkspacePaths | None = get_state().api_v1_paths
-
-    services_overview: list[object] = []
-    file_sharing_grants: list[object] = []
-    workspace_delegation_grants: list[object] = []
-    permissions_unavailable = False
-    handler = _find_predefined_permission_handler()
-    if handler is not None:
-        try:
-            services_overview = list(
-                build_permission_overview(
-                    backend_resolver=get_state().backend_resolver,
-                    gateway_client=handler.gateway_client,
-                    services_catalog=handler.services_catalog,
-                    latchkey=handler.latchkey,
-                )
-            )
-            file_sharing_grants = list(
-                build_file_sharing_overview(
-                    backend_resolver=get_state().backend_resolver,
-                    gateway_client=handler.gateway_client,
-                    latchkey=handler.latchkey,
-                )
-            )
-            workspace_delegation_grants = list(
-                build_workspace_overview(
-                    backend_resolver=get_state().backend_resolver,
-                    gateway_client=handler.gateway_client,
-                    latchkey=handler.latchkey,
-                )
-            )
-        except LatchkeyGatewayClientError as e:
-            logger.warning("Could not build permission overview for settings page: {}", e)
-            permissions_unavailable = True
-
-    html = render_settings_page(
-        report_unexpected_errors=report_unexpected_errors,
-        include_error_logs=include_error_logs,
-        services_overview=services_overview,
-        file_sharing_grants=file_sharing_grants,
-        workspace_delegation_grants=workspace_delegation_grants,
-        permissions_unavailable=permissions_unavailable,
-        has_saved_backup_password=has_saved_backup_password(paths) if paths is not None else False,
+    accounts = session_store.list_accounts() if session_store else []
+    default_account_id = minds_config.get_default_account_id() if minds_config else None
+    enabled_by_user_id = {
+        str(account.user_id): is_imbue_cloud_provider_enabled_for_account(str(account.email)) for account in accounts
+    }
+    html = render_accounts_modal_page(
+        accounts=accounts,
+        default_account_id=default_account_id,
+        enabled_by_user_id=enabled_by_user_id,
     )
     return make_html_response(content=html)
 
@@ -2545,6 +2622,8 @@ def create_desktop_client(
     app.add_url_rule("/consent", view_func=_handle_consent_page)
     app.add_url_rule("/consent", view_func=_handle_consent_submit, methods=["POST"])
     app.add_url_rule("/_chrome/error-reporting", view_func=_handle_error_reporting_settings, methods=["POST"])
+    app.add_url_rule("/_chrome/appearance", view_func=_handle_appearance_settings, methods=["POST"])
+    app.add_url_rule("/_chrome/default-region", view_func=_handle_default_region_setting, methods=["POST"])
     app.add_url_rule("/_chrome/backup-password", view_func=_handle_backup_password_change, methods=["POST"])
     app.add_url_rule("/help", view_func=_handle_help_page)
     app.add_url_rule("/help/report", view_func=_handle_help_report, methods=["POST"])
@@ -2557,7 +2636,9 @@ def create_desktop_client(
 
     # Account management routes
     app.add_url_rule("/accounts", view_func=_handle_accounts_page)
+    app.add_url_rule("/accounts/modal", view_func=_handle_accounts_modal)
     app.add_url_rule("/settings", view_func=_handle_settings_page)
+    app.add_url_rule("/settings/modal", view_func=_handle_settings_modal)
     app.add_url_rule("/settings/permissions/revoke", view_func=_handle_revoke_service_for_workspace, methods=["POST"])
     app.add_url_rule(
         "/settings/permissions/revoke-all", view_func=_handle_revoke_service_for_all_workspaces, methods=["POST"]

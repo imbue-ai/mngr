@@ -1,7 +1,7 @@
 // Light/dark dev toggle. Flips the `.dark` class on <html> and persists the
-// choice to localStorage, which Base.jinja reads pre-paint -- so the choice
-// sticks across every minds page. This is a development affordance; the formal
-// light/dark UX (OS preference / in-app control) lands in a later stage.
+// choice through the real dark-mode setting (POST /_chrome/appearance), which
+// Base.jinja renders server-side on every page -- so the choice sticks across
+// every minds page, same as the Minds Settings toggle.
 (function () {
   var btn = document.getElementById('styleguide-theme-toggle');
   if (!btn) return;
@@ -11,11 +11,11 @@
   }
   btn.addEventListener('click', function () {
     var isDark = document.documentElement.classList.toggle('dark');
-    try {
-      localStorage.setItem('minds-theme', isDark ? 'dark' : 'light');
-    } catch (e) {
-      /* ignore */
-    }
+    fetch('/_chrome/appearance', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dark_mode: isDark }),
+    }).catch(function () { /* dev affordance -- ignore persist failures */ });
     syncLabel();
   });
   syncLabel();

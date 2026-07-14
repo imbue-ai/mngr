@@ -163,6 +163,19 @@ class MindsConfig(MutableModel):
         """Set whether unexpected errors are reported to Sentry automatically."""
         self._set_bool("report_unexpected_errors", enabled)
 
+    def get_dark_mode(self) -> bool:
+        """Return whether the dark window theme is enabled. Default: False (light).
+
+        Read at page render time (Base.jinja applies the ``dark`` class on the
+        document root server-side), so toggling takes effect on the next render
+        of every page without an app restart.
+        """
+        return self._get_bool("dark_mode", default=False)
+
+    def set_dark_mode(self, enabled: bool) -> None:
+        """Set whether the dark window theme is enabled."""
+        self._set_bool("dark_mode", enabled)
+
     def get_include_error_logs(self) -> bool:
         """Return whether log/traceback attachments are included with error reports. Default: False.
 

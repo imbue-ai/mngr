@@ -36,21 +36,30 @@ def render_auth_page(
 
 # Copy shown above the sign-in modal's tabs explaining why the user is being
 # asked to sign in (the create screen needs an Imbue account for Imbue Cloud).
-_SIGNIN_MODAL_INTRO: str = (
+_SIGNIN_MODAL_CREATE_INTRO: str = (
     "To run your workspace on Imbue Cloud, sign in or create an Imbue account. "
     "You can also close this and run it directly on your computer instead."
 )
 
+# Generic copy for sign-ins launched outside the create flow (the home
+# screen's account launcher, the Manage Accounts modal's "Add account").
+_SIGNIN_MODAL_GENERIC_INTRO: str = "Sign in to enable sharing and run workspaces on Imbue Cloud."
 
-def render_signin_modal_page() -> str:
+
+def render_signin_modal_page(return_to: str = "/create") -> str:
     """Render the sign-in modal page served by ``GET /auth/signin-modal``.
 
-    Loaded into the desktop client's shared modal WebContentsView (the same
-    overlay layer as the inbox) so it covers the whole window, including the
-    title bar, when a signed-out user presses "Create" with the Imbue Cloud
-    preset selected on the create screen.
+    Loaded into the desktop client's shared modal WebContentsView so it covers
+    the whole window, including the title bar. Opened from the create screen
+    (a signed-out user pressing "Create" with the Imbue Cloud preset), from
+    the home screen's account launcher when signed out, and from the Manage
+    Accounts modal's "Add account".
+
+    ``return_to`` is where a successful sign-in lands the content view; the
+    create flow keeps its dedicated intro copy.
     """
-    return CATALOG.render("pages.SigninModal", intro=_SIGNIN_MODAL_INTRO)
+    intro = _SIGNIN_MODAL_CREATE_INTRO if return_to == "/create" else _SIGNIN_MODAL_GENERIC_INTRO
+    return CATALOG.render("pages.SigninModal", intro=intro, return_to=return_to)
 
 
 def render_check_email_page(email: str) -> str:

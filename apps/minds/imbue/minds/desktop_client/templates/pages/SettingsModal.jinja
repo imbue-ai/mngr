@@ -1,0 +1,50 @@
+{#def report_unexpected_errors=false, include_error_logs=false, has_saved_backup_password=false, dark_mode=false, region_options=[], region_selected="", app_version="" #}
+{#
+  Centered "Minds Settings" modal page, hosted in the desktop client's shared
+  modal WebContentsView (the same overlay layer as the sign-in modal) so it
+  covers the whole window including the title bar. Opened from the home
+  screen's bottom-left "Minds Settings" launcher.
+
+  Transparent body + a dim backdrop reveal the home screen behind it; the
+  centered card holds the shared app-level settings sections
+  (templates/SettingsSections.jinja), whose interactivity lives in
+  /_static/app_settings.js. Escape is handled by the Electron main process
+  for any modal-view page; backdrop clicks and the X button dismiss via the
+  closeModal bridge (with a plain-page fallback for direct loads).
+#}
+{% set _scripts %}
+<script src="/_static/app_settings.js" defer></script>
+<script>
+  (function () {
+    window.dismissSettingsModal = function () {
+      if (window.minds && window.minds.closeModal) window.minds.closeModal();
+      else window.location.href = "/";
+    };
+    var backdrop = document.getElementById("settings-modal-backdrop");
+    if (backdrop) {
+      backdrop.addEventListener("click", function (e) {
+        if (e.target === backdrop) window.dismissSettingsModal();
+      });
+    }
+  })();
+</script>
+{% endset %}
+<Base title="Minds Settings"
+      body_class="bg-transparent text-primary font-sans antialiased"
+      body_style="-webkit-app-region: no-drag;"
+      scripts={{ _scripts }}>
+  <div id="settings-modal-backdrop" class="fixed inset-0 flex items-center justify-center bg-surface-overlay p-4">
+    <div class="relative bg-surface-primary rounded-lg shadow-overlay max-w-md w-full p-8 max-h-[85vh] overflow-y-auto text-left">
+      <DialogCloseButton onclick="dismissSettingsModal()" />
+      <h1 class="type-heading-lg text-primary mb-6">Settings</h1>
+      <SettingsSections
+        :report_unexpected_errors="report_unexpected_errors"
+        :include_error_logs="include_error_logs"
+        :has_saved_backup_password="has_saved_backup_password"
+        :dark_mode="dark_mode"
+        :region_options="region_options"
+        :region_selected="region_selected"
+        :app_version="app_version" />
+    </div>
+  </div>
+</Base>

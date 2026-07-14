@@ -463,6 +463,13 @@
   } else {
     setInterval(function () {
       try {
+        var frameDoc = document.getElementById('content-frame').contentDocument;
+        // Mirror the iframe's server-rendered theme class so the chrome shell
+        // follows a dark-mode toggle made on the settings page inside it.
+        document.documentElement.classList.toggle(
+          'dark',
+          frameDoc.documentElement.classList.contains('dark'),
+        );
         var loc = document.getElementById('content-frame').contentWindow.location.pathname;
         if (lastContentUrl !== loc) {
           lastContentUrl = loc;
@@ -699,6 +706,12 @@
         updateConnectionsBadge();
       }
       if (data.type === 'system_interface_status') handleSystemInterfaceStatus(data.agent_id, data.status);
+      if (data.type === 'appearance') {
+        // The dark-mode setting changed (settings modal / page). Server-side
+        // rendering covers pages painted after this; the live chrome view
+        // flips its document class here.
+        document.documentElement.classList.toggle('dark', !!data.is_dark);
+      }
     } catch (e) {}
   }
 
