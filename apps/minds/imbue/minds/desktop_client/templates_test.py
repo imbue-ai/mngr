@@ -762,12 +762,13 @@ def test_render_sidebar_page_contains_workspace_list() -> None:
     # SidebarBottom.jinja is rendered inside the floating menu in both
     # Chrome.jinja (browser mode) and Sidebar.jinja (the switcher page loaded
     # into the shared modal WebContentsView in Electron). It carries the
-    # "New workspace" CTA and the "Manage account(s)" / "Log in" entry; the
-    # label is updated dynamically by sidebar.js from /auth/api/status.
-    # App-level Settings is NOT here -- it opens from the home screen's
-    # bottom-left launcher.
+    # "New workspace" CTA, the "Minds Settings" entry (which opens the
+    # centered settings modal in Electron), and the "Manage account(s)" /
+    # "Log in" entry; the label is updated dynamically by sidebar.js from
+    # /auth/api/status.
     assert 'id="sidebar-new-workspace"' in html
-    assert 'id="sidebar-settings"' not in html
+    assert 'id="sidebar-settings"' in html
+    assert "Minds Settings" in html
     assert 'id="sidebar-account"' in html
     assert 'id="sidebar-account-label"' in html
 

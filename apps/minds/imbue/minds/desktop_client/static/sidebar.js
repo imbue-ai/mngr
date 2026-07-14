@@ -90,6 +90,13 @@
       navigate('/create');
       return;
     }
+    if (e.target.closest('#sidebar-settings')) {
+      // Centered settings modal in Electron (swapping this switcher iframe
+      // for the modal); the full-page fallback in a browser.
+      if (isElectron && window.minds.openMindsSettings) window.minds.openMindsSettings();
+      else navigate('/settings');
+      return;
+    }
     if (e.target.closest('#sidebar-account')) {
       // In Electron the account entry opens the centered overlay modals
       // (swapping this switcher iframe for the modal); browser mode

@@ -2124,6 +2124,22 @@ def _pending_request_entries(
     return entries
 
 
+def _request_card_title(kind_label: str, display_name: str) -> str:
+    """Compose the Connections page's compact request-card title.
+
+    Mirrors the mockup's action-phrase style ("Connect a GitHub account"):
+    the kind decides the verb, the handler's display name fills in the
+    object. Falls back to the raw display name for unknown kinds.
+    """
+    if kind_label == "permission":
+        return f"Connect {display_name}" if display_name else "Permission request"
+    if kind_label == "file sharing":
+        return f"Share {display_name}" if display_name else "Share local files"
+    if kind_label == "sharing":
+        return f"Sharing request: {display_name}" if display_name else "Sharing request"
+    return display_name or "Permission request"
+
+
 def _handle_workspace_connections(
     agent_id: str,
 ) -> Response:
@@ -2174,6 +2190,12 @@ def _handle_workspace_connections(
                 "id": entry["id"],
                 "kind_label": entry["kind_label"],
                 "display_name": entry["display_name"],
+                "title": _request_card_title(entry["kind_label"], entry["display_name"]),
+                # Most request events carry a one-paragraph rationale; it is
+                # the compact card's single summary line. ``rationale`` lives
+                # on the concrete event subclasses, not the RequestEvent
+                # base, so read it through the model dump.
+                "description": str(req.model_dump().get("rationale") or ""),
                 "detail_html": detail_html,
             }
         )

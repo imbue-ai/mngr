@@ -422,6 +422,8 @@ def _build_scenarios() -> list[Scenario]:
                         "id": "evt-00000000000000000000000000000001",
                         "kind_label": "permission",
                         "display_name": "Slack",
+                        "title": "Connect Slack",
+                        "description": "I want to summarize today's messages.",
                         "detail_html": render_predefined_permission_dialog(
                             agent_id=str(agent_a),
                             request_id="req-00000000000000000000000000000001",

@@ -285,9 +285,10 @@ def test_connections_page_lists_file_sharing_section(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     body = response.text
-    assert "File sharing" in body
+    # File sharing renders as a "Local files" row in the Connected list.
+    assert "Local files" in body
     assert "read and write" in body
-    # The shared paths are surfaced as the chip tooltip.
+    # The shared paths are surfaced as the chip tooltip in the row's detail.
     assert 'data-tooltip="/home/docs"' in body
     assert 'data-tooltip="/home/out"' in body
 
@@ -363,7 +364,6 @@ def test_connections_page_lists_workspace_delegation(tmp_path: Path) -> None:
     assert response.status_code == 200
     body = response.text
     assert "Workspace delegation" in body
-    assert "Ops Bot" in body
     # One row per verb, each with its own revoke, keyed by the verb schema name.
     assert ">read</code>" in body and ">ssh</code>" in body
     assert 'data-verb-permission="minds-workspaces-read"' in body

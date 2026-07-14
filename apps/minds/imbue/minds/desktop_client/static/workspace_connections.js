@@ -175,13 +175,19 @@
     var denyBtn = card.querySelector('#permissions-deny-btn');
     var spinner = card.querySelector('#permissions-approve-spinner');
     var label = card.querySelector('#permissions-approve-label');
+    var compactApprove = card.querySelector('.connections-approve-btn');
+    var compactDeny = card.querySelector('.connections-deny-btn');
     if (isBusy) {
       if (approveBtn) approveBtn.disabled = true;
       if (denyBtn) denyBtn.disabled = true;
+      if (compactApprove) compactApprove.disabled = true;
+      if (compactDeny) compactDeny.disabled = true;
       if (spinner) spinner.classList.remove('hidden');
       if (label) label.textContent = 'Approving…';
     } else {
       if (denyBtn) denyBtn.disabled = false;
+      if (compactApprove) compactApprove.disabled = false;
+      if (compactDeny) compactDeny.disabled = false;
       if (spinner) spinner.classList.add('hidden');
       if (label) label.textContent = 'Approve';
       updateApproveStateForCard(card);
@@ -259,22 +265,27 @@
   // Deny is fire-and-forget (the user shouldn't wait for the mngr message
   // round trip); the card fades and freezes until the SSE-driven reload
   // drops it from the pending set.
-  window.submitPermissionDeny = function (el) {
-    var card = cardFor(el);
-    if (!card) return;
+  function denyCard(card) {
     var form = card.querySelector('#permissions-form');
     if (!form) return;
     card.classList.add('is-denying');
-    var approveBtn = card.querySelector('#permissions-approve-btn');
-    if (approveBtn) approveBtn.disabled = true;
-    var denyBtn = card.querySelector('#permissions-deny-btn');
-    if (denyBtn) denyBtn.disabled = true;
+    ['#permissions-approve-btn', '#permissions-deny-btn', '.connections-approve-btn', '.connections-deny-btn'].forEach(
+      function (sel) {
+        var btn = card.querySelector(sel);
+        if (btn) btn.disabled = true;
+      },
+    );
     var denyUrl = form.action.replace(/\/grant\b/, '/deny');
     fetch(denyUrl, {
       method: 'POST',
       credentials: 'same-origin',
       keepalive: true,
     }).catch(function () {});
+  }
+
+  window.submitPermissionDeny = function (el) {
+    var card = cardFor(el);
+    if (card) denyCard(card);
   };
 
   // -- Event delegation over the request cards --------------------------------
@@ -290,6 +301,59 @@
   document.addEventListener('change', function (e) {
     if (e.target && e.target.name === 'permissions') {
       updateApproveStateForCard(cardFor(e.target));
+    }
+  });
+
+  // -- Compact request-card actions + expand/collapse --------------------------
+
+  function toggleRequestDetail(card, expand) {
+    var detail = card.querySelector('.connections-request-detail');
+    if (!detail) return;
+    var shouldExpand = expand !== undefined ? expand : detail.classList.contains('hidden');
+    detail.classList.toggle('hidden', !shouldExpand);
+    card.classList.toggle('is-expanded', shouldExpand);
+  }
+
+  document.addEventListener('click', function (e) {
+    var toggleBtn = e.target.closest('.connections-toggle-btn');
+    if (toggleBtn) {
+      var card = cardFor(toggleBtn);
+      if (card) toggleRequestDetail(card);
+      return;
+    }
+    var compactApprove = e.target.closest('.connections-approve-btn');
+    if (compactApprove) {
+      var approveCard = cardFor(compactApprove);
+      if (!approveCard) return;
+      var form = approveCard.querySelector('#permissions-form');
+      var formApprove = approveCard.querySelector('#permissions-approve-btn');
+      // The fragment's Approve is disabled while the request still needs
+      // input (an unticked permission set, an empty/out-of-root share
+      // path); expand the detail so the user can supply it. Otherwise the
+      // compact Approve submits the underlying form directly.
+      if (!form || !formApprove || formApprove.disabled) {
+        toggleRequestDetail(approveCard, true);
+        return;
+      }
+      submitGrant(approveCard, form);
+      return;
+    }
+    var compactDeny = e.target.closest('.connections-deny-btn');
+    if (compactDeny) {
+      var denyTarget = cardFor(compactDeny);
+      if (denyTarget) denyCard(denyTarget);
+      return;
+    }
+    // Connected rows expand/collapse their detail (permission pills + revoke).
+    var row = e.target.closest('.connection-row');
+    if (row) {
+      var item = row.closest('.connection-item');
+      var detail = item && item.querySelector('.connection-detail');
+      if (detail) {
+        var expanding = detail.classList.contains('hidden');
+        detail.classList.toggle('hidden', !expanding);
+        item.classList.toggle('is-expanded', expanding);
+      }
     }
   });
 

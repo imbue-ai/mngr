@@ -336,6 +336,7 @@ function detachWindowsForWorkspace(agentId) {
       b.window.close();
     } else {
       b.currentWorkspaceId = null;
+      destroyShellView(b, { reassertContent: false });
       if (b.contentView && !b.contentView.webContents.isDestroyed() && backendBaseUrl) {
         b.contentView.webContents.loadURL(backendBaseUrl + '/');
       }
@@ -392,6 +393,11 @@ function updateBundleBounds(bundle) {
   }
   if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
     bundle.contentView.setBounds(bounds.content);
+  }
+  if (bundle.shellView && !bundle.shellView.webContents.isDestroyed()) {
+    // The shell view sits exactly over the content view (it shows a minds
+    // page while the workspace stays parked underneath).
+    bundle.shellView.setBounds(bounds.content);
   }
   if (bundle.modalView && !bundle.modalView.webContents.isDestroyed()) {
     // While a tooltip is showing (and no modal is open), the overlay manager
@@ -519,7 +525,7 @@ function wireBundleWindowEvents(bundle) {
     // set and we must not overwrite it with a progressively shrinking snapshot
     // as the teardown closes each window.
     if (!isShuttingDown) saveSessionState();
-    const views = [bundle.chromeView, bundle.contentView, bundle.modalView];
+    const views = [bundle.chromeView, bundle.contentView, bundle.shellView, bundle.modalView];
     for (const view of views) {
       if (!view) continue;
       if (view.webContents.isDestroyed()) continue;
@@ -572,6 +578,8 @@ function createBundle() {
     // rect). Gates updateBundleBounds so a resize doesn't clobber that rect with
     // the full-window modal bounds.
     tooltipVisible: false,
+    // Minds-page view layered over a parked workspace (see createShellView).
+    shellView: null,
     currentContentUrl: null,
     currentWorkspaceId: null,
     // Whether the content view is currently displaying a REACHABLE workspace
@@ -669,17 +677,24 @@ function wireContentViewEvents(bundle, contentView) {
     // intentionally pass it through unconditionally rather than gating
     // on truthiness: the accent tracks the *current* screen, not the last
     // workspace opened in this window.
-    updateBundleAccentAgentId(bundle, parseAccentSourceAgentId(url));
     updateOsTitle(bundle);
-    if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
-      bundle.chromeView.webContents.send('content-url-changed', url);
+    // While a shell page is up, it owns the titlebar (breadcrumb, accent):
+    // a background navigation in the parked workspace underneath must not
+    // clobber what the user is looking at. The workspace-identity tracking
+    // above still ran, so uniqueness and the switcher's current-row marker
+    // stay correct.
+    if (!bundle.shellView) {
+      updateBundleAccentAgentId(bundle, parseAccentSourceAgentId(url));
+      if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
+        bundle.chromeView.webContents.send('content-url-changed', url);
+      }
+      // The workspace switcher (hosted in an overlay iframe) refreshes its
+      // "Manage account(s)" / "Log in" label on every content URL change so
+      // a sign-in / sign-out performed in the workspace iframe propagates
+      // to the menu the next time the user opens it. Sent per-frame so it
+      // reaches the iframe.
+      sendToOverlayFrames(bundle, 'content-url-changed', url);
     }
-    // The sidebar (hosted in an overlay iframe) refreshes its
-    // "Manage account(s)" / "Log in" label on every content URL change so
-    // a sign-in / sign-out performed in the workspace iframe propagates
-    // to the menu the next time the user opens it. Sent per-frame so it
-    // reaches the iframe; inbox doesn't subscribe so it's a no-op there.
-    sendToOverlayFrames(bundle, 'content-url-changed', url);
   };
 
   contentView.webContents.on('did-navigate', (_e, url, httpResponseCode) => onContentNavigate(url, httpResponseCode));
@@ -816,6 +831,161 @@ function notifyOpenFailed(url) {
     title: "Couldn't open link",
     body: `No app is set up to handle this ${what}. It has been copied to your clipboard.`,
   }).show();
+}
+
+// -- Shell view (per-bundle) --
+//
+// Minds-backend pages (home, the workspace Connections / Settings tabs,
+// create, ...) shown OVER a parked workspace, so tab switches and home
+// round-trips never reload the workspace -- a reload would drop its
+// in-page layout (open panels, scroll positions). The shell view is
+// created on demand the first time a window that is showing a workspace
+// navigates to a minds page, and destroyed when the user returns to the
+// parked workspace (revealing it untouched) or opens a different
+// workspace. A window with no workspace keeps the old behavior: minds
+// pages load directly in the content view.
+
+function shellUrlIfVisible(bundle) {
+  if (!bundle || !bundle.shellView || bundle.shellView.webContents.isDestroyed()) return null;
+  return bundle.shellView.webContents.getURL();
+}
+
+// The screen the titlebar should describe: the shell page when one is up,
+// else the content view's page.
+function effectiveContentUrl(bundle) {
+  return shellUrlIfVisible(bundle) || bundle.currentContentUrl;
+}
+
+function createShellView(bundle, url) {
+  const shell = new WebContentsView({
+    webPreferences: {
+      preload: path.join(__dirname, 'content-relay-preload.js'),
+      partition: CONTENT_PARTITION,
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+  // Match the content view's shape so the swap is invisible (rounded corners
+  // in the accent frame, white between-load background).
+  shell.setBorderRadius(CONTENT_CORNER_RADIUS);
+  shell.setBackgroundColor('#ffffff');
+  bundle.shellView = shell;
+  bundle.window.contentView.addChildView(shell);
+  // Keep the overlay surface above the shell (addChildView appends to the
+  // top of the z-order).
+  if (bundle.modalView) {
+    bundle.window.contentView.removeChildView(bundle.modalView);
+    bundle.window.contentView.addChildView(bundle.modalView);
+  }
+  registerShortcutsFor(bundle, shell.webContents);
+  applyExternalLinkHandling(shell.webContents);
+  // Workspace links inside shell pages (a landing row, the recovery page's
+  // return_to, the switcher fallback) must not load the workspace INTO the
+  // shell -- route them so the parked workspace is revealed / replaced via
+  // the content view instead.
+  shell.webContents.on('will-navigate', (event, targetUrl) => {
+    if (!parseWorkspaceId(targetUrl)) return;
+    event.preventDefault();
+    routeContentNavigation(bundle, targetUrl);
+  });
+  // Minds pages never need beforeunload stalls (mirrors the content view).
+  shell.webContents.on('will-prevent-unload', (event) => {
+    event.preventDefault();
+  });
+  const onShellNavigate = (navUrl) => {
+    if (!bundle.shellView) return;
+    // The titlebar (breadcrumb / icon-tabs / accent) tracks the shell page
+    // while it is up. The parked workspace's identity (currentWorkspaceId,
+    // used for uniqueness and the switcher's current-row marker) is
+    // deliberately untouched.
+    updateBundleAccentAgentId(bundle, parseAccentSourceAgentId(navUrl));
+    if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
+      bundle.chromeView.webContents.send('content-url-changed', navUrl);
+    }
+    sendToOverlayFrames(bundle, 'content-url-changed', navUrl);
+  };
+  shell.webContents.on('did-navigate', (_e, navUrl) => onShellNavigate(navUrl));
+  shell.webContents.on('did-navigate-in-page', (_e, navUrl) => onShellNavigate(navUrl));
+  shell.webContents.loadURL(url).catch(() => {});
+  updateBundleBounds(bundle);
+}
+
+// Tear down the shell view, revealing the parked workspace (when
+// ``reassertContent`` is true, the titlebar is re-pointed at the content
+// view's page).
+function destroyShellView(bundle, { reassertContent = true } = {}) {
+  const shell = bundle && bundle.shellView;
+  if (!shell) return;
+  bundle.shellView = null;
+  try {
+    bundle.window.contentView.removeChildView(shell);
+  } catch { /* noop */ }
+  if (!shell.webContents.isDestroyed()) {
+    try {
+      shell.webContents.close();
+    } catch { /* noop */ }
+  }
+  if (!reassertContent || bundle.window.isDestroyed()) return;
+  const url = bundle.currentContentUrl;
+  if (!url) return;
+  updateBundleAccentAgentId(bundle, parseAccentSourceAgentId(url));
+  if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
+    bundle.chromeView.webContents.send('content-url-changed', url);
+  }
+  sendToOverlayFrames(bundle, 'content-url-changed', url);
+}
+
+// Single choke point for driving what a window displays. Routes workspace
+// URLs to the content view (enforcing one-window-per-workspace and revealing
+// a parked workspace without reloading it) and minds pages to the shell view
+// when a workspace is parked (else the content view). Closes any open
+// overlay modal, matching the old navigate-content behavior.
+function routeContentNavigation(bundle, url) {
+  if (!bundle || bundle.window.isDestroyed()) return;
+  const absolute = toAbsoluteUrl(url);
+  const targetAgentId = parseWorkspaceId(absolute);
+
+  if (targetAgentId) {
+    const existing = findBundleForWorkspace(targetAgentId);
+    if (existing && existing !== bundle) {
+      // Another window owns this workspace: focus it (revealing it if it is
+      // parked under a shell page there) and leave the sender untouched.
+      focusBundle(existing);
+      destroyShellView(existing);
+      closeModal(bundle);
+      return;
+    }
+    if (existing === bundle) {
+      // This window already holds the workspace -- parked or displayed.
+      // Revealing is the whole point: no reload, the layout survives.
+      destroyShellView(bundle);
+      closeModal(bundle);
+      return;
+    }
+    destroyShellView(bundle, { reassertContent: false });
+    if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
+      bundle.contentView.webContents.loadURL(absolute);
+    }
+    closeModal(bundle);
+    return;
+  }
+
+  // A minds page. While a workspace is loaded in the content view, show the
+  // page in the shell view over it so the workspace keeps running untouched.
+  if (bundle.currentWorkspaceId && bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
+    if (bundle.shellView && !bundle.shellView.webContents.isDestroyed()) {
+      bundle.shellView.webContents.loadURL(absolute).catch(() => {});
+    } else {
+      createShellView(bundle, absolute);
+    }
+    closeModal(bundle);
+    return;
+  }
+  destroyShellView(bundle, { reassertContent: false });
+  if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
+    bundle.contentView.webContents.loadURL(absolute);
+  }
+  closeModal(bundle);
 }
 
 // -- Sidebar helpers (per-bundle) --
@@ -1102,10 +1272,7 @@ function openConnectionsForRequest(workspaceAgentId, requestId) {
   const target = findBundleForWorkspace(workspaceAgentId) || getMostRecentWindow();
   if (!target || target.window.isDestroyed()) return;
   focusBundle(target);
-  if (target.contentView && !target.contentView.webContents.isDestroyed()) {
-    target.contentView.webContents.loadURL(url);
-  }
-  closeModal(target);
+  routeContentNavigation(target, url);
 }
 
 // Resolve a pending request id to its owning workspace's primary agent id via
@@ -1267,6 +1434,9 @@ function openOrFocusWorkspace(agentId, url) {
   const existing = findBundleForWorkspace(agentId);
   if (existing) {
     focusBundle(existing);
+    // The workspace may be parked under a shell page (the user browsed home
+    // or a settings tab in that window); reveal it.
+    destroyShellView(existing);
     return existing;
   }
   const absolute = toAbsoluteUrl(url || workspaceUrlForAgent(agentId));
@@ -1314,6 +1484,7 @@ function showErrorInAllWindows(message, details, actionLabel, canUseBackendRepor
     bundle.isErrorState = true;
 
     if (bundle.modalView) closeModal(bundle);
+    destroyShellView(bundle, { reassertContent: false });
 
     if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
       bundle.window.contentView.removeChildView(bundle.contentView);
@@ -1413,7 +1584,7 @@ function showQuittingInAllWindows() {
     // visible flags) so the full-window chrome view is the only thing on
     // screen, and restoreFromQuittingInAllWindows can bring back exactly what
     // was open if the user backs out of the quit.
-    for (const view of [bundle.modalView]) {
+    for (const view of [bundle.modalView, bundle.shellView]) {
       if (view && !view.webContents.isDestroyed()) view.setVisible(false);
     }
     if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
@@ -1451,6 +1622,9 @@ function restoreFromQuittingInAllWindows() {
     }
     if (bundle.modalView && bundle.modalVisible && !bundle.modalView.webContents.isDestroyed()) {
       bundle.modalView.setVisible(true);
+    }
+    if (bundle.shellView && !bundle.shellView.webContents.isDestroyed()) {
+      bundle.shellView.setVisible(true);
     }
     updateBundleBounds(bundle);
   }
@@ -1881,12 +2055,14 @@ function primeViewWithCachedChromeState(bundle, wc) {
     // right accent (or the neutral chrome, when it's null) without the
     // renderer remembering anything.
     wc.send('accent-changed', bundle.currentAccentAgentId);
-    // Replay the content view's current URL for the same reason: the
-    // titlebar's breadcrumb / icon-tabs / contextual back arrow are a pure
-    // function of it, and the per-navigation ``content-url-changed`` push
-    // may have fired before this chrome view registered its listener.
-    if (bundle.currentContentUrl) {
-      wc.send('content-url-changed', bundle.currentContentUrl);
+    // Replay the displayed page's URL for the same reason: the titlebar's
+    // breadcrumb / icon-tabs / contextual back arrow are a pure function of
+    // it, and the per-navigation ``content-url-changed`` push may have fired
+    // before this chrome view registered its listener. The shell page wins
+    // over the parked workspace when one is up.
+    const displayedUrl = effectiveContentUrl(bundle);
+    if (displayedUrl) {
+      wc.send('content-url-changed', displayedUrl);
     }
   }
 }
@@ -2662,7 +2838,7 @@ function installApplicationMenu() {
           click: () => {
             const bundle = getMostRecentWindow();
             if (!bundle || bundle.window.isDestroyed()) return;
-            for (const view of [bundle.chromeView, bundle.contentView, bundle.modalView]) {
+            for (const view of [bundle.chromeView, bundle.contentView, bundle.shellView, bundle.modalView]) {
               if (!view) continue;
               if (view.webContents.isDestroyed()) continue;
               if (view.webContents.isDevToolsOpened()) {
@@ -2957,9 +3133,9 @@ function handleNotification(event) {
       openOrFocusWorkspace(agentId, absolute);
     } else {
       const mru = getMostRecentWindow();
-      if (mru && mru.contentView && !mru.contentView.webContents.isDestroyed()) {
+      if (mru) {
         focusBundle(mru);
-        mru.contentView.webContents.loadURL(absolute);
+        routeContentNavigation(mru, absolute);
       }
     }
   });
@@ -3016,10 +3192,10 @@ function handleAuthEvent(event) {
     const mru = getMostRecentWindow();
     if (!mru) return;
     focusBundle(mru);
-    if (mru.contentView && !mru.contentView.webContents.isDestroyed() && backendBaseUrl) {
+    if (backendBaseUrl) {
       const authUrl = `${backendBaseUrl}/auth/login?message=` +
         encodeURIComponent('You need to sign in to Imbue in order to share');
-      mru.contentView.webContents.loadURL(authUrl);
+      routeContentNavigation(mru, authUrl);
     }
   }
 }
@@ -3029,31 +3205,13 @@ function handleAuthEvent(event) {
 ipcMain.on('go-home', (event) => {
   const bundle = getBundleFromEvent(event);
   if (!bundle || !backendBaseUrl) return;
-  if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
-    bundle.contentView.webContents.loadURL(backendBaseUrl + '/');
-  }
+  routeContentNavigation(bundle, backendBaseUrl + '/');
 });
 
 ipcMain.on('navigate-content', (event, url) => {
   const bundle = getBundleFromEvent(event);
   if (!bundle) return;
-  const absolute = toAbsoluteUrl(url);
-  const targetAgentId = parseWorkspaceId(absolute);
-
-  if (targetAgentId) {
-    const existing = findBundleForWorkspace(targetAgentId);
-    if (existing) {
-      focusBundle(existing);
-      closeModal(bundle);
-      return;
-    }
-  }
-
-  // Nobody is on this workspace (or it's a non-workspace URL): navigate sender
-  if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
-    bundle.contentView.webContents.loadURL(absolute);
-  }
-  closeModal(bundle);
+  routeContentNavigation(bundle, url);
 });
 
 ipcMain.on('content-go-back', (event) => {
@@ -3192,6 +3350,9 @@ ipcMain.on('appearance-changed', (_event, isDark) => {
     const cv = b.contentView;
     if (cv && !cv.webContents.isDestroyed() && !parseWorkspaceId(cv.webContents.getURL())) {
       try { cv.webContents.reload(); } catch { /* noop */ }
+    }
+    if (b.shellView && !b.shellView.webContents.isDestroyed()) {
+      try { b.shellView.webContents.reload(); } catch { /* noop */ }
     }
   }
 });
