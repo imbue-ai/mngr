@@ -46,6 +46,19 @@ _BUNDLED_RESTIC = Path(__file__).parent / "resources" / "restic" / "restic"
 if _BUNDLED_RESTIC.exists() and "MINDS_RESTIC_BINARY" not in os.environ:
     os.environ["MINDS_RESTIC_BINARY"] = str(_BUNDLED_RESTIC)
 
+# Point Playwright at a stable browsers path so the shared autouse HOME
+# isolation (register_plugin_test_fixtures below points HOME at a per-test temp
+# dir) doesn't hide a chromium installed in the default ``~/.cache/ms-playwright``.
+# ``/opt/ms-playwright`` is the same location the snapshot image bakes into
+# (scripts/snapshot_minds_e2e_state.py), so playwright-driven tests find the
+# browser regardless of HOME. Only set it when that directory actually holds an
+# install and the env var isn't already set (the snapshot image sets it itself);
+# otherwise leave it unset so playwright's own "run playwright install" message
+# points at the right fix.
+_STABLE_PLAYWRIGHT_BROWSERS_PATH = Path("/opt/ms-playwright")
+if _STABLE_PLAYWRIGHT_BROWSERS_PATH.is_dir() and "PLAYWRIGHT_BROWSERS_PATH" not in os.environ:
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(_STABLE_PLAYWRIGHT_BROWSERS_PATH)
+
 suppress_warnings()
 register_marker(
     "minds_deployment: tests that exercise the minds deploy process itself by minting their own "
