@@ -25,7 +25,6 @@ import subprocess
 import threading
 import time
 import zipfile
-from base64 import b64decode
 from collections.abc import Callable
 from pathlib import Path
 from typing import Final
@@ -37,7 +36,6 @@ from argon2 import PasswordHasher
 from loguru import logger
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Page
-from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from pydantic import AnyUrl
 from pydantic import SecretStr
 from test_snapshot_resume import _ensure_restic_on_sandbox_host
@@ -47,6 +45,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.secret_wrapping import SecretWrappingError
 from imbue.minds.bootstrap import minds_data_dir_for
 from imbue.minds.bootstrap import mngr_prefix_for
+from imbue.minds.desktop_client.backup_export import export_zip_path_for_host
 from imbue.minds.desktop_client.dek_store import unwrap_bundle_json
 from imbue.minds.desktop_client.e2e_workspace_runner import _agent_id_from_subdomain
 from imbue.minds.desktop_client.e2e_workspace_runner import _backend_origin_from_page
@@ -65,6 +64,8 @@ from imbue.mngr_imbue_cloud.data_types import SyncWorkspaceRecord
 from imbue.mngr_imbue_cloud.errors import ImbueCloudError
 
 _SENTINEL_FILENAME: Final[str] = "e2e-backup-sentinel.txt"
+# Where the export route writes its zip (backup_export._EXPORT_DIR).
+_EXPORT_ZIP_DIR: Final[Path] = Path("/tmp")
 _DOCKER_STATE_MARKER: Final[str] = "docker-state"
 
 # How long UI-observable convergence may take. The first imbue-cloud backup
@@ -593,11 +594,16 @@ def _assert_remote_row_visible(page: Page, origin: str, agent_id: str) -> None:
 
 
 def _download_backup_zip(page: Page, origin: str, agent_id: str, dest_dir: Path) -> Path:
-    """Click the landing row's download link and return the saved zip path.
+    """Click the landing row's download link and return the exported zip's path.
 
-    Prefers the real download event; falls back to an in-page fetch of the
-    same product route (cookie-authenticated) if the Electron content view
-    does not surface Playwright download events over CDP.
+    Electron's content view does not surface Playwright download events over
+    CDP (the click lands in Electron's own download handling), and the export
+    is ~100 MB -- far too large to pull back through the renderer. So the
+    click is the real product action, and the artifact we verify is the file
+    the export route itself produced for that click: ``export_zip_path_for_host``
+    names it deterministically, and the route streams exactly those bytes to
+    the browser. Waiting for it to appear (fresh mtime) proves the click ran
+    the whole restore-and-zip path.
     """
     link_selector = f'[data-agent-id="{agent_id}"] .landing-backup-download'
 
@@ -615,37 +621,35 @@ def _download_backup_zip(page: Page, origin: str, agent_id: str, dest_dir: Path)
 
     _wait_until(f"the backup download link for {agent_id}", _DOWNLOAD_LINK_TIMEOUT_SECONDS, link_visible)
 
-    zip_path = dest_dir / f"{agent_id}-backup.zip"
-    try:
-        with page.expect_download(timeout=180_000) as download_info:
-            page.click(link_selector)
-        download_info.value.save_as(zip_path)
-        logger.info("Downloaded backup zip via the UI download event: {}", zip_path)
-        return zip_path
-    except (PlaywrightError, PlaywrightTimeoutError) as e:
-        logger.warning("No Playwright download event ({}); falling back to an in-page fetch of the export route", e)
-    result = page.evaluate(
-        """(aid) => fetch('/api/v1/workspaces/' + aid + '/backups/latest/export', {method: 'POST'})
-            .then((resp) => {
-                if (!resp.ok) {
-                    return resp.text().then((body) => ({ok: false, status: resp.status, body: body.slice(0, 500)}));
-                }
-                return resp.arrayBuffer().then((buf) => {
-                    const bytes = new Uint8Array(buf);
-                    let binary = '';
-                    const chunk = 0x8000;
-                    for (let i = 0; i < bytes.length; i += chunk) {
-                        binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
-                    }
-                    return {ok: true, b64: btoa(binary)};
-                });
-            })""",
-        agent_id,
-    )
-    assert result.get("ok"), f"Backup export failed: {result}"
-    zip_path.write_bytes(b64decode(result["b64"]))
-    logger.info("Downloaded backup zip via the export route fallback: {}", zip_path)
-    return zip_path
+    # The route keys the zip by the workspace's host id, falling back to the
+    # agent id when local discovery does not know the workspace -- which is
+    # exactly this (post-wipe, remote-record) case. Accept either name.
+    candidate_paths = (export_zip_path_for_host(agent_id), *sorted(_EXPORT_ZIP_DIR.glob("minds-backup-export-*.zip")))
+    stale_mtimes = {path: path.stat().st_mtime for path in candidate_paths if path.exists()}
+    clicked_at = time.time()
+    page.click(link_selector)
+    logger.info("Clicked the backup download link for {}", agent_id)
+
+    def exported() -> Path | None:
+        for path in (export_zip_path_for_host(agent_id), *_EXPORT_ZIP_DIR.glob("minds-backup-export-*.zip")):
+            if not path.exists():
+                continue
+            stats = path.stat()
+            if stats.st_mtime <= stale_mtimes.get(path, 0.0) or stats.st_mtime < clicked_at - 5:
+                continue
+            # The route builds the zip before streaming it, but guard against
+            # reading one still being written: require a stable, non-zero size.
+            first_size = stats.st_size
+            page.wait_for_timeout(2_000)
+            if first_size > 0 and path.stat().st_size == first_size:
+                return path
+        return None
+
+    zip_path = _wait_until(f"the export route to produce a backup zip for {agent_id}", 600, exported)
+    saved_path = dest_dir / f"{agent_id}-backup.zip"
+    shutil.copyfile(zip_path, saved_path)
+    logger.info("Backup export produced {} ({} bytes)", zip_path, saved_path.stat().st_size)
+    return saved_path
 
 
 def _assert_zip_contains_sentinel(zip_path: Path, sentinel_content: str) -> None:
