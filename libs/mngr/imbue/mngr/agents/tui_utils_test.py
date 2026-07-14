@@ -1,6 +1,7 @@
 """Unit tests for tui_utils."""
 
 import os
+import shutil
 import subprocess
 from datetime import datetime
 from datetime import timezone
@@ -14,6 +15,7 @@ from imbue.mngr.agents.tui_utils import _build_signal_only_command
 from imbue.mngr.agents.tui_utils import _build_signal_or_marker_command
 from imbue.mngr.agents.tui_utils import _check_paste_content
 from imbue.mngr.agents.tui_utils import _normalize_for_match
+from imbue.mngr.agents.tui_utils import _timeout_prefix
 from imbue.mngr.agents.tui_utils import send_enter_and_poll_for_cleared_indicator
 from imbue.mngr.agents.tui_utils import send_enter_best_effort
 from imbue.mngr.agents.tui_utils import send_enter_keystroke
@@ -272,13 +274,14 @@ _TARGET = TmuxWindowTarget(session_name="sess", window=0)
         _build_signal_or_marker_command(2.0, "chan", _TARGET, "printf ''"),
     ],
 )
-def test_submission_commands_invoke_no_gnu_only_binary(command: str) -> None:
+def test_submission_commands_never_require_a_timeout_binary(command: str) -> None:
     """Both builders run on the agent's host, which for a local agent is the user's machine.
 
-    That host may be Linux or macOS, so the deadline is a hand-rolled watchdog
-    rather than ``timeout``.
+    That host may be macOS, which ships no ``timeout``, so every use of it has to
+    be guarded by a probe with a fallback behind it.
     """
-    assert "timeout" not in command
+    assert "command -v timeout" in command
+    assert "Time::HiRes" in command
 
 
 @pytest.mark.parametrize(
@@ -297,18 +300,44 @@ def test_submission_commands_wait_on_the_channel_and_send_to_the_target(command:
     assert channel_index < target_index
 
 
-def test_signal_only_command_bounds_the_waiter_with_a_watchdog() -> None:
-    """A killed ``tmux wait-for`` exits 0, so the exit code must come from the watchdog's marker."""
-    command = _build_signal_only_command(2.0, "chan", _TARGET)
-    assert 'kill "$waiter"' in command
-    assert '[ ! -s "$tmo" ]' in command
+def test_perl_fallback_uses_a_fractional_alarm() -> None:
+    """The builtin ``alarm`` truncates to whole seconds, and ``alarm(0)`` *cancels* the timer.
+
+    A sub-second deadline would therefore mean no deadline at all, so the fallback
+    has to arm the alarm through ``Time::HiRes``.
+    """
+    assert "Time::HiRes" in _timeout_prefix(0.5)
 
 
-def test_signal_or_marker_command_kills_the_tmux_client_not_a_wrapper_subshell() -> None:
-    """The waiter must be the tmux client itself, or killing it leaves the client running forever."""
-    command = _build_signal_or_marker_command(2.0, "chan", _TARGET, "printf ''")
-    assert 'tmux wait-for "$1" & waiter=$!' in command
-    assert 'kill "$waiter" "$watchdog"' in command
+def test_perl_fallback_fails_when_the_command_cannot_be_exec_ed() -> None:
+    """A failed ``exec`` returns to perl, which would otherwise run off the end and exit 0."""
+    assert "or exit 127" in _timeout_prefix(2.0)
+
+
+@pytest.mark.parametrize(
+    ("seconds", "expected_returncode"),
+    [
+        # Sub-second: the whole-second `alarm` would round this to a cancelled timer.
+        (0.5, 142),
+        (1.0, 142),
+    ],
+)
+def test_perl_fallback_kills_a_command_that_outlives_its_deadline(seconds: float, expected_returncode: int) -> None:
+    """142 is 128 + SIGALRM: the deadline killed it, rather than the command exiting on its own."""
+    script = f"set -- sleep 30; {_timeout_prefix(seconds)}"
+    result = subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, env=_path_without_timeout(), timeout=30
+    )
+    assert result.returncode == expected_returncode
+
+
+def test_perl_fallback_passes_through_the_command_s_own_exit_status() -> None:
+    """``exec`` replaces perl, so a command that finishes first reports its own status."""
+    script = f'set -- sh -c "exit 7"; {_timeout_prefix(10.0)}'
+    result = subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, env=_path_without_timeout(), timeout=30
+    )
+    assert result.returncode == 7
 
 
 @pytest.mark.tmux
@@ -348,6 +377,16 @@ def test_send_enter_via_hook_confirms_on_the_hook_when_the_marker_never_advances
             f"tmux kill-session -t '={session_name}' 2>/dev/null",
             timeout_seconds=5.0,
         )
+
+
+def _path_without_timeout() -> dict[str, str]:
+    """Env whose PATH has no ``timeout``, so the perl fallback is what runs (as on macOS)."""
+    env = dict(os.environ)
+    timeout_binary = shutil.which("timeout")
+    if timeout_binary is not None:
+        directories = [d for d in env["PATH"].split(os.pathsep) if d != str(Path(timeout_binary).parent)]
+        env["PATH"] = os.pathsep.join(directories)
+    return env
 
 
 def _run_with_failing_tmux(command: str, tmp_path: Path) -> subprocess.CompletedProcess[str]:
