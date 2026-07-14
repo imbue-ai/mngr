@@ -463,9 +463,12 @@ class LatchkeyDiscoveryHandler(MutableModel):
         First syncs every currently-known remote host (permissions, then
         credentials -- order matters). Then starts a ``watchdog`` observer that
         pushes credentials to every known remote host whenever the local
-        credentials file changes, and pushes a single host's permissions
-        whenever that host's permissions file changes. (Newly-provisioned hosts
-        get their initial sync inline in the provisioning path.)
+        credentials file changes, and pushes a single host's full state
+        (permissions, then credentials) whenever that host's permissions file
+        changes -- the permissions determine which services' credentials ship,
+        so a permissions change must re-sync the credentials too. (Newly-
+        provisioned hosts get their initial sync inline in the provisioning
+        path.)
 
         The observer's health is supervised on a *checked* CG strand: if it
         stops for any reason other than ``shutdown_event`` being set, that is a
@@ -485,7 +488,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
             plugin_data_dir=data_dir,
             known_remote_host_ids=self._known_remote_host_ids,
             on_credentials_changed=self._sync_credentials_to_all_known_hosts,
-            on_host_permissions_changed=self._sync_permissions_to_host,
+            on_host_permissions_changed=self._sync_full_state_to_host,
         )
         observer = Observer()
         # The credentials file sits at the latchkey-directory root; the per-host
@@ -548,12 +551,22 @@ class LatchkeyDiscoveryHandler(MutableModel):
         for host_id_str, provider_name in remote_hosts.items():
             self._sync_state_to_host(host_id_str, provider_name, do_permissions=False, do_credentials=True)
 
-    def _sync_permissions_to_host(self, host_id_str: str) -> None:
+    def _sync_full_state_to_host(self, host_id_str: str) -> None:
+        """Sync one host's permissions *and* credentials (used on a permissions change).
+
+        A permissions change does not just alter the file that gets copied to
+        the VPS -- it also changes which services' credentials the host may
+        hold (``sync_credentials`` resolves the shipped subset from the
+        permissions file). Syncing only the permissions would leave the VPS
+        credential store stale: a newly-granted service's credentials would be
+        missing, and a revoked service's credentials would linger. So a
+        permissions change triggers the full sync, permissions first.
+        """
         with self._remote_hosts_lock:
             provider_name = self._remote_host_provider_by_id.get(host_id_str)
         if provider_name is None:
             return
-        self._sync_state_to_host(host_id_str, provider_name, do_permissions=True, do_credentials=False)
+        self._sync_state_to_host(host_id_str, provider_name, do_permissions=True, do_credentials=True)
 
     def _sync_state_to_host(
         self,
