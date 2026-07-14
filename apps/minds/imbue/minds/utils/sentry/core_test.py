@@ -113,15 +113,21 @@ def test_consent_file_round_trips_minds_settings_to_the_daemon_reader(tmp_path: 
 
 
 def test_collect_external_attachments_classifies_flat_minds_log_layout(tmp_path: Path) -> None:
-    # The minds logs dir is flat: a live `*.jsonl`, timestamp-suffixed rotated
-    # `*.jsonl.<ts>` logs, and the Electron `*.log`. Each must land in its own
-    # group, and the globs must not cross-match (e.g. `*.jsonl` must not pick up
-    # the rotated files).
+    # The minds logs dir is flat: the live backend jsonl (`*.jsonl`) and its
+    # timestamped rotations (`*.jsonl.<ts>`), the backend stdout/stderr log
+    # (`minds.log`) and its gzipped rotations (`minds.log.<ts>.gz`), and the
+    # Electron main-process log (`electron.log`) and its gzipped rotations
+    # (`electron.log.<ts>.gz`). Each must land in its own group, and the globs
+    # must not cross-match (e.g. `*.jsonl` must not pick up the rotated files,
+    # and `minds.log` must not pick up its own `.gz` rotations).
     logs_folder = tmp_path / "logs"
     logs_folder.mkdir()
     (logs_folder / "minds-events.jsonl").write_text("live\n")
     (logs_folder / "minds-events.jsonl.20250101120000123456").write_text("rotated\n")
-    (logs_folder / "minds.log").write_text("electron\n")
+    (logs_folder / "minds.log").write_text("backend\n")
+    (logs_folder / "minds.log.20250101120000123.gz").write_bytes(b"backend-rotated")
+    (logs_folder / "electron.log").write_text("electron\n")
+    (logs_folder / "electron.log.20250101120000123.gz").write_bytes(b"electron-rotated")
 
     uploader = ErrorAttachmentsS3Uploader(log_attachment_groups=_MINDS_LOG_ATTACHMENT_GROUPS)
     try:
@@ -129,9 +135,20 @@ def test_collect_external_attachments_classifies_flat_minds_log_layout(tmp_path:
     except ValueError as exception:
         groups, callbacks = uploader.collect_external_attachments(exception=exception, logs_folder=logs_folder)
 
-    assert set(groups) == {"", "live_logs", "rotated_logs", "electron_logs"}
+    assert set(groups) == {
+        "",
+        "live_logs",
+        "rotated_logs",
+        "backend_logs",
+        "backend_rotated_logs",
+        "electron_logs",
+        "electron_rotated_logs",
+    }
     assert len(groups["live_logs"]) == 1
     assert len(groups["rotated_logs"]) == 1
+    assert len(groups["backend_logs"]) == 1
+    assert len(groups["backend_rotated_logs"]) == 1
     assert len(groups["electron_logs"]) == 1
-    # one callback per upload: traceback + the three log files.
-    assert len(callbacks) == 4
+    assert len(groups["electron_rotated_logs"]) == 1
+    # one callback per upload: traceback + the six log files.
+    assert len(callbacks) == 7

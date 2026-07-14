@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<!--
+  Content-view crash page (Chrome "Aw, Snap!" style).
+
+  Loaded LOCALLY into the workspace content view by main.js when that view's
+  renderer process dies (render-process-gone), so the user sees a recoverable
+  page instead of the pinned-white background the dead renderer leaves behind.
+  Runs under content-relay-preload.js (no window.minds bridge), so its buttons
+  drive the shell only through the allowlisted postMessage relay:
+    * Reload      -> minds:reload-crashed-view (re-loads the pre-crash URL)
+    * Report a bug -> minds:open-help (the existing report modal)
+
+  The crash reason / exit code / workspace id arrive as query params from
+  main.js. The page is stateless: it does NOT auto-reload (a page that caused the
+  crash would loop), matching Chrome/Firefox/VS Code -- the user is the loop-breaker.
+-->
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Workspace crashed</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    /* White surface with black text; the Minds head logo carries the brand color. */
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #ffffff;
+      color: #111111;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      user-select: none;
+      text-align: center;
+      padding: 24px;
+    }
+    .glyph {
+      width: 112px;
+      height: 112px;
+      margin-bottom: 24px;
+    }
+    .glyph svg { display: block; width: 100%; height: 100%; }
+    h1 { font-size: 20px; font-weight: 600; margin-bottom: 10px; }
+    p { font-size: 14px; line-height: 1.5; opacity: 0.75; max-width: 420px; }
+    .detail {
+      font-family: "SF Mono", "Fira Code", Menlo, monospace;
+      font-size: 12px;
+      opacity: 0.45;
+      margin-top: 10px;
+    }
+    .actions { display: flex; gap: 12px; margin-top: 28px; }
+    button {
+      font: inherit;
+      font-size: 14px;
+      font-weight: 500;
+      padding: 9px 18px;
+      border-radius: 8px;
+      border: 1px solid transparent;
+      cursor: pointer;
+      transition: background 0.12s ease, border-color 0.12s ease;
+    }
+    .primary { background: #111111; color: #ffffff; }
+    .primary:hover { background: #000000; }
+    .secondary { background: transparent; color: #111111; border-color: rgba(17, 17, 17, 0.3); }
+    .secondary:hover { border-color: rgba(17, 17, 17, 0.7); }
+  </style>
+</head>
+<body>
+  <div class="glyph">
+    <svg viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Head profile with X eye">
+      <!-- Black-on-white negative of the two-tone brand logo (no filled tile). -->
+      <!-- Head silhouette -->
+      <path d="M239.393 346.233C213.333 388.701 181.958 578.826 170.21 692.964C168.726 707.387 179.616 719.956 194.083 720.905L243.5 724.15C254.832 724.894 264.36 732.926 267.01 743.968L287.114 827.735C289.477 837.581 297.325 845.189 307.312 846.857C387.979 860.334 533.31 868.318 620.93 820.192C992.068 616.341 865.659 254.427 642.258 194.566C418.857 134.706 303.377 241.962 239.393 346.233Z" fill="#111111"/>
+      <!-- Tangled rings -->
+      <g filter="url(#f0)">
+        <path d="M719.991 411.97C744.539 411.97 762.39 420.422 774.234 434.21C786.236 448.181 792.898 468.606 792.898 493.876C792.898 542.499 753.481 581.916 704.858 581.916C656.235 581.916 616.819 542.499 616.819 493.876C616.819 470.597 629.516 450.292 649.247 435.491C669.022 420.657 695.153 411.97 719.991 411.97Z" stroke="#ffffff" stroke-width="17.2826"/>
+      </g>
+      <g filter="url(#f2)">
+        <path d="M583.295 282.074C621.148 282.074 649.061 294.27 667.574 314.33C686.184 334.495 696.216 363.607 696.216 399.073C696.216 467.817 636.155 524.583 560.739 524.583C485.322 524.583 425.26 467.817 425.26 399.073C425.26 365.723 444.831 336.66 475.056 315.555C505.279 294.451 545.211 282.074 583.295 282.074Z" stroke="#ffffff" stroke-width="17.2826"/>
+      </g>
+      <g filter="url(#f3)">
+        <path d="M727.416 125.17C765.268 125.17 793.182 137.366 811.695 157.426C830.305 177.591 840.337 206.703 840.337 242.169C840.337 310.913 780.275 367.679 704.859 367.679C629.443 367.679 569.38 310.913 569.38 242.169C569.381 208.819 588.951 179.756 619.176 158.651C649.4 137.547 689.331 125.17 727.416 125.17Z" stroke="#111111" stroke-width="17.2826"/>
+      </g>
+      <mask id="m0" style="mask-type:alpha" maskUnits="userSpaceOnUse" x="170" y="177" width="687" height="681">
+        <path d="M239.393 346.233C213.333 388.701 181.958 578.826 170.21 692.964C168.726 707.387 179.616 719.956 194.083 720.905L243.5 724.15C254.832 724.894 264.36 732.926 267.01 743.968L287.114 827.735C289.477 837.581 297.325 845.189 307.312 846.857C387.979 860.334 533.31 868.318 620.93 820.192C992.068 616.341 865.659 254.427 642.258 194.566C418.857 134.706 303.377 241.962 239.393 346.233Z" fill="#ffffff"/>
+      </mask>
+      <g mask="url(#m0)">
+        <g filter="url(#f4)">
+          <path d="M727.416 125.17C765.268 125.17 793.182 137.366 811.695 157.426C830.305 177.59 840.337 206.703 840.337 242.169C840.337 310.913 780.276 367.679 704.859 367.679C629.443 367.679 569.381 310.913 569.381 242.169C569.381 208.819 588.951 179.756 619.177 158.65C649.4 137.546 689.331 125.17 727.416 125.17Z" stroke="#ffffff" stroke-width="17.2826"/>
+        </g>
+      </g>
+      <!-- Distress: crack across the skull -->
+      <path d="M206 456 L 268 442 L 330 470 L 400 452 L 366 498 L 452 528 L 516 542 L 486 576 L 570 592 L 640 602 L 712 594 L 782 622 L 840 648 L 878 706" stroke="#ffffff" stroke-width="15" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+      <!-- Distress: X eye -->
+      <g stroke="#ffffff" stroke-width="21" stroke-linecap="round">
+        <line x1="262" y1="582" x2="330" y2="650"/>
+        <line x1="330" y1="582" x2="262" y2="650"/>
+      </g>
+      <!-- Distress: mouth (frown) -->
+      <path d="M206 742 C 250 716, 300 728, 332 780" stroke="#ffffff" stroke-width="15" stroke-linecap="round" fill="none"/>
+      <!-- Distress: motion / stress lines -->
+      <g stroke="#111111" stroke-width="15" stroke-linecap="round">
+        <line x1="332" y1="262" x2="316" y2="322"/>
+        <line x1="288" y1="288" x2="264" y2="340"/>
+        <line x1="300" y1="352" x2="245" y2="372"/>
+      </g>
+      <defs>
+        <filter id="f0" x="601.234" y="396.384" width="207.25" height="201.117" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+          <feFlood flood-opacity="0" result="BackgroundImageFix"/>
+          <feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix" result="shape"/>
+          <feTurbulence type="fractalNoise" baseFrequency="0.039275705814361572 0.039275705814361572" numOctaves="3" seed="1005"/>
+          <feDisplacementMap in="shape" scale="13.887835502624512" xChannelSelector="R" yChannelSelector="G" result="displacedImage" width="100%" height="100%"/>
+          <feMerge result="effect1_texture"><feMergeNode in="displacedImage"/></feMerge>
+        </filter>
+        <filter id="f2" x="409.674" y="266.488" width="302.127" height="273.679" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+          <feFlood flood-opacity="0" result="BackgroundImageFix"/>
+          <feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix" result="shape"/>
+          <feTurbulence type="fractalNoise" baseFrequency="0.039275705814361572 0.039275705814361572" numOctaves="3" seed="1005"/>
+          <feDisplacementMap in="shape" scale="13.887835502624512" xChannelSelector="R" yChannelSelector="G" result="displacedImage" width="100%" height="100%"/>
+          <feMerge result="effect1_texture"><feMergeNode in="displacedImage"/></feMerge>
+        </filter>
+        <filter id="f3" x="553.795" y="109.584" width="302.127" height="273.679" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+          <feFlood flood-opacity="0" result="BackgroundImageFix"/>
+          <feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix" result="shape"/>
+          <feTurbulence type="fractalNoise" baseFrequency="0.039275705814361572 0.039275705814361572" numOctaves="3" seed="1005"/>
+          <feDisplacementMap in="shape" scale="13.887835502624512" xChannelSelector="R" yChannelSelector="G" result="displacedImage" width="100%" height="100%"/>
+          <feMerge result="effect1_texture"><feMergeNode in="displacedImage"/></feMerge>
+        </filter>
+        <filter id="f4" x="553.795" y="109.584" width="302.127" height="273.679" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+          <feFlood flood-opacity="0" result="BackgroundImageFix"/>
+          <feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix" result="shape"/>
+          <feTurbulence type="fractalNoise" baseFrequency="0.039275705814361572 0.039275705814361572" numOctaves="3" seed="1005"/>
+          <feDisplacementMap in="shape" scale="13.887835502624512" xChannelSelector="R" yChannelSelector="G" result="displacedImage" width="100%" height="100%"/>
+          <feMerge result="effect1_texture"><feMergeNode in="displacedImage"/></feMerge>
+        </filter>
+      </defs>
+    </svg>
+  </div>
+  <h1>Bummer</h1>
+  <p>This workspace view stopped responding. Your work in the workspace is safe &mdash; reload to reconnect.</p>
+  <div class="detail" id="detail"></div>
+  <div class="actions">
+    <button class="primary" id="reload">Reload</button>
+    <button class="secondary" id="report">Report a bug</button>
+  </div>
+  <script>
+    (function () {
+      var params = new URLSearchParams(window.location.search);
+      var reason = params.get('reason') || 'unknown';
+      var exitCode = params.get('exitCode') || '';
+      var workspace = params.get('workspace') || '';
+
+      var detail = 'Reason: ' + reason;
+      if (exitCode !== '') detail += ' (exit code ' + exitCode + ')';
+      document.getElementById('detail').textContent = detail;
+
+      document.getElementById('reload').addEventListener('click', function () {
+        window.postMessage({ type: 'minds:reload-crashed-view' }, '*');
+      });
+      document.getElementById('report').addEventListener('click', function () {
+        // agentId is validated in the preload + main process; empty -> unscoped report.
+        window.postMessage({ type: 'minds:open-help', agentId: workspace }, '*');
+      });
+    })();
+  </script>
+</body>
+</html>

@@ -95,12 +95,14 @@ def test_prevent_setattr() -> None:
 
 
 def test_prevent_asyncio_import() -> None:
-    # 2: server.py has always been asyncio (the proxy is an async ASGI app), and
+    # 3: server.py has always been asyncio (the proxy is an async ASGI app), and
     # cli.py now does `asyncio.run(hypercorn.asyncio.serve(...))` to run that app
     # in-process -- the necessary replacement for uvicorn's sync `.run()` (which
     # itself ran an asyncio loop). Hypercorn exposes no non-asyncio serve path
-    # for an in-process app object.
-    rc.check_asyncio_import(_DIR, snapshot(2))
+    # for an in-process app object. cli_test.py exercises the serve loop's TLS
+    # teardown behavior (bounded SSL shutdown + exception handler), which can
+    # only be tested from inside an asyncio loop.
+    rc.check_asyncio_import(_DIR, snapshot(3))
 
 
 def test_prevent_pandas_import() -> None:
@@ -128,7 +130,11 @@ def test_prevent_exit_stack() -> None:
 
 
 def test_prevent_async_await() -> None:
-    rc.check_async_await(_DIR, snapshot(42))
+    # 48: the six additions over the historical 42 are all in cli_test.py's
+    # hypercorn serving-path tests (a minimal lifespan-only ASGI app and a
+    # shutdown trigger), which necessarily run inside the asyncio loop under
+    # test.
+    rc.check_async_await(_DIR, snapshot(48))
 
 
 # --- Hardcoded paths ---
