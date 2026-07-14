@@ -10,6 +10,8 @@ import subprocess
 import threading
 import time
 import webbrowser
+from collections.abc import Awaitable
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -474,6 +476,23 @@ def _handle_serve_loop_exception(loop: asyncio.AbstractEventLoop, context: dict[
     loop.default_exception_handler(context)
 
 
+def _run_serve_loop(
+    app: Any,
+    config: Config,
+    loop_factory: Callable[[], asyncio.AbstractEventLoop],
+    shutdown_trigger: Callable[..., Awaitable[Any]] | None,
+) -> None:
+    """Run hypercorn on a loop from ``loop_factory``, dropping benign TLS teardown noise.
+
+    ``shutdown_trigger=None`` makes hypercorn install its own SIGINT/SIGTERM
+    handlers (which requires running on the main thread); tests pass an
+    explicit trigger instead so they can stop the server from another thread.
+    """
+    with asyncio.Runner(loop_factory=loop_factory) as runner:
+        runner.get_loop().set_exception_handler(_handle_serve_loop_exception)
+        runner.run(hypercorn_serve(app, config, shutdown_trigger=shutdown_trigger))
+
+
 def _serve_forward_app(app: Any, listen_socket: socket.socket, use_http2: bool) -> None:
     """Serve the forward app over the already-bound ``listen_socket`` via hypercorn.
 
@@ -489,9 +508,7 @@ def _serve_forward_app(app: Any, listen_socket: socket.socket, use_http2: bool) 
     tracebacks.
     """
     config = _build_hypercorn_config(listen_socket, use_http2)
-    with asyncio.Runner(loop_factory=_BoundedSSLShutdownEventLoop) as runner:
-        runner.get_loop().set_exception_handler(_handle_serve_loop_exception)
-        runner.run(hypercorn_serve(app, config))
+    _run_serve_loop(app, config, loop_factory=_BoundedSSLShutdownEventLoop, shutdown_trigger=None)
 
 
 def _validate_options(opts: ForwardCliOptions) -> None:

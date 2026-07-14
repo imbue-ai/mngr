@@ -16,7 +16,6 @@ import threading
 
 import click
 import pytest
-from hypercorn.asyncio import serve as hypercorn_serve
 from hypercorn.config import Config
 from hypercorn.typing import ASGIReceiveCallable
 from hypercorn.typing import ASGISendCallable
@@ -37,6 +36,7 @@ from imbue.mngr_forward.cli import _build_strategy
 from imbue.mngr_forward.cli import _filter_snapshot
 from imbue.mngr_forward.cli import _handle_serve_loop_exception
 from imbue.mngr_forward.cli import _parse_reverse_specs
+from imbue.mngr_forward.cli import _run_serve_loop
 from imbue.mngr_forward.cli import _validate_options
 from imbue.mngr_forward.data_types import ForwardAgentSnapshot
 from imbue.mngr_forward.data_types import ForwardListSnapshot
@@ -317,15 +317,15 @@ async def _lifespan_only_asgi_app(scope: Scope, receive: ASGIReceiveCallable, se
 
 
 def _run_tls_server_until_stopped(config: Config, stop_serving: threading.Event) -> None:
-    """Serve the dummy app the way ``_serve_forward_app`` does, until the event is set."""
+    """Serve the dummy app through the production serve loop until the event is set."""
 
     async def _stop_trigger() -> None:
         while not stop_serving.is_set():
             await asyncio.sleep(0.05)
 
-    with asyncio.Runner(loop_factory=_FastSSLShutdownEventLoop) as runner:
-        runner.get_loop().set_exception_handler(_handle_serve_loop_exception)
-        runner.run(hypercorn_serve(_lifespan_only_asgi_app, config, shutdown_trigger=_stop_trigger))
+    _run_serve_loop(
+        _lifespan_only_asgi_app, config, loop_factory=_FastSSLShutdownEventLoop, shutdown_trigger=_stop_trigger
+    )
 
 
 def _connect_tls_client_when_listening(port: int) -> ssl.SSLSocket:
