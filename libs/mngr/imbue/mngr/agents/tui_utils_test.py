@@ -2,6 +2,7 @@
 
 import os
 import subprocess
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
@@ -361,6 +362,24 @@ def test_submission_command_fails_when_tmux_itself_fails(accept_marker_command: 
     command = _build_submission_command(0.5, "chan", _TARGET, accept_marker_command)
     result = _run_with_failing_tmux(command, tmp_path)
     assert result.returncode != 0, f"reported success though tmux failed: {result.stdout!r}"
+
+
+@pytest.mark.parametrize("accept_marker_command", _MARKER_COMMANDS)
+def test_submission_command_gives_up_at_once_when_tmux_is_unreachable(
+    accept_marker_command: str | None, tmp_path: Path
+) -> None:
+    """An unreachable tmux is knowable immediately, so the deadline must not be waited out.
+
+    The deadline here is the production one, and the marker probe -- which a hook-only
+    agent has no reason to consult -- can never confirm, so polling it to the end would
+    take the whole 90 seconds to report an error that the failed waiter already knows.
+    """
+    command = _build_submission_command(91.0, "chan", _TARGET, accept_marker_command)
+    start = time.monotonic()
+    result = _run_with_failing_tmux(command, tmp_path)
+    elapsed = time.monotonic() - start
+    assert result.returncode != 0, f"reported success though tmux failed: {result.stdout!r}"
+    assert elapsed < 10.0, f"took {elapsed:.1f}s to report an unreachable tmux"
 
 
 def _count_wait_for_clients(wait_channel: str) -> int:

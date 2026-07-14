@@ -325,16 +325,16 @@ def _build_submission_command(
 
     Three properties of ``tmux wait-for`` shape the script:
 
-    * A signal fired while nobody is waiting on the channel is latched and satisfies
-      the next waiter, but a waiter present at that moment consumes it and no latch is
-      retained. The waiter is therefore registered before Enter is sent, and must not
-      outlive this command: ``wait_channel`` is reused by every submission in the
-      session, so a leftover waiter would eat the signal for a later one.
+    * A signal fired while a client is waiting on the channel is consumed by it, and
+      only a signal fired with no client waiting is retained for the next waiter. The
+      waiter is registered before Enter is sent, so the hook's signal always has this
+      submission's own waiter to wake.
     * A killed ``tmux wait-for`` exits 0, exactly like a signalled one. The waiter is
       killed only from the EXIT trap, once the outcome is already decided, which is
-      what makes its status meaningful when the loop reads it.
+      what makes its status meaningful when the loop reads it -- and reading that
+      status is also what ends the wait at once when tmux is unreachable.
     * The trap's kill has to land on the tmux client itself, so the waiter is a direct
-      background job whose pid is ``$waiter``.
+      background job whose pid is ``$waiter``, and the command leaves no process behind.
     """
     marker_command = _NEVER_CONFIRMING_MARKER_COMMAND if accept_marker_command is None else accept_marker_command
     script = (
