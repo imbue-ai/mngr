@@ -1,0 +1,1 @@
+Added a `@pytest.mark.timeout(60)` marker to the `test_config_path_invalid_scope` e2e tutorial test so its single `mngr` subprocess invocation is not killed by the default 10s per-test timeout during cold start.

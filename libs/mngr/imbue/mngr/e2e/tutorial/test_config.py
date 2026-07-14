@@ -203,10 +203,14 @@ def test_config_set_unknown_key_fails(e2e: E2eSession) -> None:
     result = e2e.run("mngr config set totally_unknown_key value", comment="setting an unknown key is rejected")
     expect(result).to_fail()
     expect(result.stderr).to_contain("Unknown configuration fields")
-    # The rejected write must not be persisted. The e2e fixture pre-seeds the
-    # project settings file with the pytest opt-in key, so the file exists; assert
-    # the rejected key was never written into it rather than that the file is absent.
-    settings = e2e.run("cat .$MNGR_ROOT_NAME/settings.toml", comment="verify the invalid value was not written")
+    # The rejected write must not be persisted. The e2e fixture deliberately does
+    # NOT seed the project settings file (see conftest), so a rejected `config set`
+    # must not persist the key -- read the file back the way a human would while
+    # tolerating its absence, and assert the rejected key never landed in it.
+    settings = e2e.run(
+        "cat .$MNGR_ROOT_NAME/settings.toml 2>/dev/null || true",
+        comment="verify the invalid value was not written",
+    )
     expect(settings).to_succeed()
     expect(settings.stdout).not_to_contain("totally_unknown_key")
 
@@ -278,7 +282,7 @@ def test_config_set_invalid_scope(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.timeout(60)
-def test_config_unset(e2e: E2eSession) -> None:
+def test_config_unset(e2e: E2eSession, project_config_dir: Path) -> None:
     """Tutorial block:
         # unset a config value
         mngr config unset commands.create.provider
@@ -288,13 +292,20 @@ def test_config_unset(e2e: E2eSession) -> None:
     value is actually gone from the settings file afterward.
     """
     # `config unset` only succeeds for a key that is actually present in the
-    # target scope (a missing key fails with "Key not found"), so first set the
-    # value at the default (project) scope, then unset it the way the tutorial
-    # shows -- with no `--scope`, which also resolves to the project scope so
-    # both commands touch the same settings.toml.
-    expect(e2e.run("mngr config set commands.create.provider modal", comment="set the value first")).to_succeed()
-    # Confirm the value really landed in the project settings file before we
-    # remove it, the way a human would when debugging.
+    # target scope (a missing key fails with "Key not found"). Seed the project
+    # settings file directly with the key already present, then unset it the way
+    # the tutorial shows -- with no `--scope`, which resolves to the project
+    # scope, so it targets this same settings.toml. We seed the file rather than
+    # establishing the value via `mngr config set` because unset is a follow-up
+    # mngr command that reloads the project file: a file written by `set` does
+    # not carry the `is_allowed_in_pytest` opt-in (the opt-in comes from other
+    # scopes), so the reload would be rejected before unset could run. Seeding
+    # the opt-in here alongside the value keeps the follow-up read valid.
+    # (This mirrors test_config_unset_missing_key.)
+    settings_path = project_config_dir / "settings.toml"
+    settings_path.write_text('is_allowed_in_pytest = true\n\n[commands.create]\nprovider = "modal"\n')
+    # Confirm the value really is in the project settings file before we remove
+    # it, the way a human would when debugging.
     settings_before = e2e.run(
         "cat .$MNGR_ROOT_NAME/settings.toml", comment="confirm the value is present before unset"
     )
@@ -364,14 +375,17 @@ def test_config_edit(e2e: E2eSession, temp_git_repo: Path) -> None:
     fake_editor.chmod(0o755)
 
     # Resolve the project-scope config path (the default scope for `config edit`).
-    # The e2e fixture seeds this file (settings.toml) with the pytest opt-in, so
-    # it already exists; the marker we stamp in below is what proves the editor
-    # was handed this exact file.
+    # The e2e fixture deliberately leaves the project settings.toml unseeded so
+    # this test exercises genuine first-use behavior: `config edit` creates the
+    # file from a template before opening it. The marker we stamp in below is what
+    # proves the editor was handed this exact file.
     path_result = e2e.run("mngr config path --scope project --format json", comment="resolve the project config path")
     expect(path_result).to_succeed()
     config_path = Path(json.loads(path_result.stdout)["path"])
-    assert config_path.exists(), f"expected the fixture to have seeded {config_path}"
-    assert "# edited by fake editor" not in config_path.read_text(), "marker must not be present before editing"
+    # If the file happens to already exist, confirm our marker is not present yet
+    # so the post-edit check proves the marker came from this edit.
+    if config_path.exists():
+        assert "# edited by fake editor" not in config_path.read_text(), "marker must not be present before editing"
 
     # open the config file in your editor
     expect(
@@ -386,6 +400,9 @@ def test_config_edit(e2e: E2eSession, temp_git_repo: Path) -> None:
 
 
 @pytest.mark.release
+# A single mngr subprocess cold start costs ~10s, which exceeds the default 10s
+# func-only timeout, so allow more headroom (matching the sibling config edit tests).
+@pytest.mark.timeout(60)
 def test_config_edit_editor_failure(e2e: E2eSession) -> None:
     """Tutorial block:
         # open the config file in your editor
@@ -405,6 +422,10 @@ def test_config_edit_editor_failure(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+# Runs two mngr subprocesses (config path + config edit) plus a cat; each cold
+# start costs several seconds, so the cumulative runtime exceeds the default 10s
+# func-only timeout.
+@pytest.mark.timeout(60)
 def test_config_edit_scope(e2e: E2eSession) -> None:
     """Tutorial block:
         # open a specific scope's config file
@@ -443,6 +464,7 @@ def test_config_edit_scope(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+@pytest.mark.timeout(60)
 def test_config_edit_scope_missing_editor(e2e: E2eSession) -> None:
     """Tutorial block:
         # open a specific scope's config file
@@ -467,9 +489,15 @@ def test_config_edit_scope_missing_editor(e2e: E2eSession) -> None:
     # set, so the failure is actionable rather than a bare traceback.
     expect(combined_output).to_contain("/nonexistent/definitely-not-a-real-editor")
     expect(combined_output).to_contain("$EDITOR")
+    # The failure surfaces as the actionable message, not a bare Python traceback.
+    expect(combined_output).not_to_contain("Traceback (most recent call last)")
 
 
 @pytest.mark.release
+# Runs several mngr/shell subprocesses (config path plus a `test -e` per scope);
+# each cold start costs several seconds, so the cumulative runtime exceeds the
+# default 10s per-test pytest-timeout.
+@pytest.mark.timeout(60)
 def test_config_path(e2e: E2eSession) -> None:
     """Tutorial block:
         # show the path to the config file
@@ -541,6 +569,9 @@ def test_config_path_scope(e2e: E2eSession) -> None:
     expect(written.stdout).to_contain("headless")
 
 
+# Even a single mngr subprocess invocation exceeds the default 10s func-only
+# timeout (cold-start import cost), so allow more headroom.
+@pytest.mark.timeout(60)
 @pytest.mark.release
 def test_config_path_invalid_scope(e2e: E2eSession) -> None:
     """Tutorial block:

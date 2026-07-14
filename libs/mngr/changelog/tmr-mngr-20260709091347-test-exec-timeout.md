@@ -1,0 +1,1 @@
+Removed a spurious `@pytest.mark.rsync` mark from the `test_exec_timeout` e2e tutorial test. The test runs a local command agent inside a git repo, which syncs via git worktree/mirror rather than rsync, so the mark tripped the resource guard's "marked but never invoked" check.

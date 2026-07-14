@@ -1,0 +1,1 @@
+Fixed the `test_config_unset` e2e tutorial test so it seeds the project settings file (including the `is_allowed_in_pytest` opt-in) directly instead of establishing the value via `mngr config set`. A file written by `set` does not carry the opt-in, so the follow-up `mngr config unset` was being rejected before it could run.

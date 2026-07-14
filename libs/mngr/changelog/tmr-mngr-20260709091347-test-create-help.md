@@ -1,0 +1,1 @@
+Fixed the `minimal_install_env` test fixture so the isolated fresh-install venv also installs the `overlay` workspace package. Without it, `mngr` failed to import (`ModuleNotFoundError: No module named 'imbue.overlay'`), breaking every fresh-install CLI test (e.g. `mngr create --help`).

@@ -1,0 +1,3 @@
+Hardened the e2e tutorial test harness so bare `mngr list` commands behave like a real tutorial user's environment: the test profile now restricts `enabled_backends` to the providers the suite actually exercises (local, ssh, modal, plus docker only for docker-marked tests). This stops unconfigured cloud backends (e.g. the separately-installed `imbue-mngr-aws` plugin) from making a bare `mngr list` exit with the provider-inaccessible code in the dev monorepo, where `uv sync --all-packages` registers every backend.
+
+Removed a superfluous `@pytest.mark.rsync` mark from `test_list_project_field` (it creates a local command agent and never invokes rsync).

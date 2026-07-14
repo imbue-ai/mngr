@@ -1,0 +1,1 @@
+Increased the per-test timeout for the `mngr plugin list --active` tutorial e2e test. Each `mngr plugin list` invocation performs full plugin discovery (importing every installed plugin module), which takes several seconds; the test runs the command twice, so the combined work exceeded the default 10s timeout. This is a test-only change with no user-visible behavior difference.

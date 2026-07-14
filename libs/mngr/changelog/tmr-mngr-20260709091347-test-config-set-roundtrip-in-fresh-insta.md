@@ -1,0 +1,1 @@
+Fixed the fresh-install test fixture (`isolated_mngr_venv`) to install the `overlay` workspace package. mngr's config code path imports `imbue.overlay`, so without it the isolated venv crashed with `ModuleNotFoundError: No module named 'imbue.overlay'` when running commands like `mngr config set`.

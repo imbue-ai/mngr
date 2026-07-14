@@ -1,0 +1,1 @@
+Fixed the `test_create_with_env_file` e2e tutorial test timing out. Creating a local command agent (agent-state setup, git worktree, tmux and command-agent startup) takes longer than the default 10s per-test timeout. Added a `@pytest.mark.timeout(120)` override, matching the sibling `test_control_mngr_via_env` local-provider create test.

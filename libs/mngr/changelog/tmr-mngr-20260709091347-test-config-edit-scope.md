@@ -1,0 +1,1 @@
+Fixed the `test_config_edit_scope` e2e tutorial test to allow a 60s timeout. It runs two `mngr` subprocesses (`config path` + `config edit`) whose cumulative cold-start time exceeds the default 10s func-only timeout, matching the other multi-subprocess tests in the config tutorial suite.
