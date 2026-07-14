@@ -7,6 +7,7 @@ and never stale. The Modal env is the branch alone (stable across mngr updates).
 
 from __future__ import annotations
 
+import json
 import os
 import socket
 import subprocess
@@ -147,11 +148,28 @@ def nuke_modal_env(minds_env: str = "staging") -> None:
     # which breaks the script's json.loads; a dumb terminal makes it emit clean JSON.
     child_env = {**os.environ, "TERM": "dumb"}
     # --force: we run non-interactively (captured output), so skip the script's input() confirmation.
-    result = _run(["uv", "run", "python", str(script), "-e", env, "--force"], cwd=str(monorepo_root), env=child_env)
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip()[-300:]
-        raise BoxError("modal_nuke failed for env {} (rc={}): {}".format(env, result.returncode, detail))
-    print(">> {} cleaned".format(env), flush=True)
+    _run(["uv", "run", "python", str(script), "-e", env, "--force"], cwd=str(monorepo_root), env=child_env)
+    # Trust the end state, NOT modal_nuke's exit code: `modal app stop` returns non-zero for an
+    # already-stopped app, so the script reports "failure" on a re-run of an already-clean env. The
+    # env is clean iff no state volumes remain (each workspace has one, released only once its sandbox
+    # is stopped) -- so a leftover volume is the real signal that a sandbox is still up.
+    remaining = _modal_volume_count(env, str(monorepo_root), child_env)
+    if remaining is None:
+        raise BoxError("could not verify {} is clean (modal volume list unreadable)".format(env))
+    if remaining > 0:
+        raise BoxError(
+            "{} still has {} state volume(s) after nuke -- a sandbox may still be running".format(env, remaining)
+        )
+    print(">> {} cleaned (0 volumes)".format(env), flush=True)
+
+
+def _modal_volume_count(env: str, cwd: str, child_env: dict[str, str]) -> int | None:
+    """Number of Modal state volumes in the env, or None if the listing can't be read."""
+    out = _run(["uv", "run", "modal", "volume", "list", "--json", "-e", env], cwd=cwd, env=child_env).stdout
+    try:
+        return len(json.loads(out) or [])
+    except (ValueError, TypeError):
+        return None
 
 
 def ensure(mngr_branch: str, minds_env: str = "staging") -> str:
