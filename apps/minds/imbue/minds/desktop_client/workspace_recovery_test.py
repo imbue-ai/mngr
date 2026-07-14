@@ -7,14 +7,11 @@ failure modes (unresolved system-services agent, stop/start command failures,
 the host-already-stopped fast path).
 """
 
-from collections.abc import Iterator
-from contextlib import contextmanager
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 from pathlib import Path
 
-from loguru import logger as loguru_logger
 from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -23,6 +20,7 @@ from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.recovery_probe import DispatchTier
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.testing import capture_error_logs
 from imbue.minds.desktop_client.workspace_operations import InMemoryWorkspaceOperationRegistry
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
@@ -102,22 +100,6 @@ def _started_registry(workspace_agent: AgentId) -> InMemoryWorkspaceOperationReg
     return registry
 
 
-@contextmanager
-def _capture_error_logs() -> Iterator[list[str]]:
-    """Capture loguru ERROR-level records (a loguru sink; caplog can't hook loguru).
-
-    Every RESTART_FAILED transition must reach error reporting (Principle 3:
-    the recovery surface is quiet), so the failure tests assert exactly one
-    error record per attempt through this capture.
-    """
-    records: list[str] = []
-    sink_id = loguru_logger.add(lambda msg: records.append(str(msg)), level="ERROR")
-    try:
-        yield records
-    finally:
-        loguru_logger.remove(sink_id)
-
-
 # -- argv builders --
 
 
@@ -191,7 +173,7 @@ def test_run_restart_sequence_fails_when_system_services_agent_is_unresolved(tmp
     tracker.mark_restarting(workspace_agent)
     registry = _started_registry(workspace_agent)
 
-    with ConcurrencyGroup(name="test-restart") as cg, _capture_error_logs() as error_records:
+    with ConcurrencyGroup(name="test-restart") as cg, capture_error_logs() as error_records:
         run_restart_sequence(
             workspace_agent_id=workspace_agent,
             tracker=tracker,
@@ -219,7 +201,7 @@ def test_run_restart_sequence_fails_when_stop_command_errors(tmp_path: Path) -> 
     tracker.mark_restarting(workspace_agent)
     resolver = _resolver_with_system_services(workspace_agent, services_agent)
 
-    with ConcurrencyGroup(name="test-restart") as cg, _capture_error_logs() as error_records:
+    with ConcurrencyGroup(name="test-restart") as cg, capture_error_logs() as error_records:
         run_restart_sequence(
             workspace_agent_id=workspace_agent,
             tracker=tracker,
@@ -245,7 +227,7 @@ def test_run_restart_sequence_fails_when_start_command_errors(tmp_path: Path) ->
     tracker.mark_restarting(workspace_agent)
     resolver = _resolver_with_system_services(workspace_agent, services_agent)
 
-    with ConcurrencyGroup(name="test-restart") as cg, _capture_error_logs() as error_records:
+    with ConcurrencyGroup(name="test-restart") as cg, capture_error_logs() as error_records:
         run_restart_sequence(
             workspace_agent_id=workspace_agent,
             tracker=tracker,
@@ -276,7 +258,7 @@ def test_run_restart_sequence_fails_and_reports_when_interface_never_answers(tmp
     tracker.mark_restarting(workspace_agent)
     resolver = _resolver_with_system_services(workspace_agent, services_agent)
 
-    with ConcurrencyGroup(name="test-restart") as cg, _capture_error_logs() as error_records:
+    with ConcurrencyGroup(name="test-restart") as cg, capture_error_logs() as error_records:
         run_restart_sequence(
             workspace_agent_id=workspace_agent,
             tracker=tracker,

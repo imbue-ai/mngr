@@ -48,6 +48,7 @@ from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.templates import status_text_for
+from imbue.minds.desktop_client.testing import capture_error_logs
 from imbue.minds.desktop_client.workspace_operations import OPERATION_LOG_SENTINEL
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
@@ -1619,6 +1620,41 @@ def test_workspace_restart_requires_bearer(tmp_path: Path) -> None:
     response = client.post(f"/api/v1/workspaces/{agent_id}/restart", json={"scope": "host"})
 
     assert response.status_code == 401
+
+
+def test_workspace_restart_spawn_failure_returns_503_and_logs_error(tmp_path: Path) -> None:
+    """A restart whose worker thread cannot be spawned fails closed with one error log.
+
+    The spawn raises when the concurrency group is shutting down (simulated here
+    with an already-exited group). The route has already claimed RESTARTING, so
+    it must roll that into RESTART_FAILED, fail the registry operation (so the
+    operation poller doesn't hang), return 503 -- and log at error level: this is
+    the fifth restart-failure branch that must reach error reporting (Principle
+    3: the recovery surface is quiet).
+    """
+    agent_id = AgentId()
+    services_id = AgentId()
+    resolver = _resolver_with_services_agent(agent_id, services_id)
+    with ConcurrencyGroup(name="exited-restart-group") as exited_group:
+        pass
+    tracker = SystemInterfaceHealthTracker()
+    client = _build_client(
+        tmp_path,
+        resolver,
+        root_concurrency_group=exited_group,
+        system_interface_health_tracker=tracker,
+    )
+
+    with capture_error_logs() as error_records:
+        response = client.post(
+            f"/api/v1/workspaces/{agent_id}/restart", headers=_auth_header(), json={"scope": "host"}
+        )
+
+    assert response.status_code == 503
+    assert tracker.get_health(agent_id) == AgentHealth.RESTART_FAILED
+    record = get_state(client.application).workspace_operation_registry.get(agent_id)
+    assert record is not None and record.status == WorkspaceOperationStatus.FAILED
+    assert len(error_records) == 1, error_records
 
 
 def test_auto_dispatched_restart_skipped_when_workspace_already_recovered(
