@@ -402,9 +402,20 @@ def run(
     # Seed the mapping into user-scope settings.toml here so subsequent mngr
     # subprocesses resolve `type=main` -> ClaudeAgent without depending on cwd.
     seed_laptop_agent_types_for_minds(mngr_host_dir)
-    forward_config = ForwardSubprocessConfig(
-        mngr_host_dir=mngr_host_dir,
-    )
+    # MINDS_FORWARD_AGENT_INCLUDE (env) overrides which agents the built-in forward proxies. Unset ->
+    # the model default (primary agents only), i.e. unchanged for normal minds. Set to a never-match
+    # CEL filter to make the forward proxy nothing -- used by hosts that manage a large shared Modal
+    # env and forward workspaces on demand instead of letting the built-in forward proxy them all.
+    forward_agent_include = os.environ.get("MINDS_FORWARD_AGENT_INCLUDE")
+    if forward_agent_include:
+        forward_config = ForwardSubprocessConfig(
+            mngr_host_dir=mngr_host_dir,
+            agent_include=(forward_agent_include,),
+        )
+    else:
+        forward_config = ForwardSubprocessConfig(
+            mngr_host_dir=mngr_host_dir,
+        )
     consumer, preauth_cookie = start_mngr_forward(
         config=forward_config,
         resolver=backend_resolver,

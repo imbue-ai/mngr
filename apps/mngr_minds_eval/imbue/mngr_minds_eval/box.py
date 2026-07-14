@@ -26,6 +26,13 @@ MNGR_PROFILE = "evaluator"
 SHARED_MODAL_KEYS = Path.home() / ".minds-eval" / "modal-profile" / "providers" / "modal"
 ROOT_CONFIG_FILE = Path.home() / ".minds-eval" / "mngr-root-config.toml"
 
+# minds' built-in forward would otherwise eagerly proxy every workspace in the shared env (a per-agent
+# stream + SSH tunnel each) and OOM the box past ~20 live workspaces. We view on demand instead
+# (view-modal-workspace), so we tell minds to proxy NOTHING via a never-match CEL filter -- no agent
+# carries this label. Read by `minds run` from MINDS_FORWARD_AGENT_INCLUDE; unset elsewhere, so normal
+# minds is unaffected. Discovery/listing is independent of the forward, so the workspace list still works.
+FORWARD_NOTHING_CEL = "has(agent.labels.minds_eval_never_forward)"
+
 
 class BoxError(RuntimeError):
     pass
@@ -222,6 +229,8 @@ def ensure(mngr_branch: str, minds_env: str = "staging") -> str:
             "MINDS_FORWARD_HOST=0.0.0.0",
             "-e",
             "MINDS_FORWARD_PORT={}".format(forward),
+            "-e",
+            "MINDS_FORWARD_AGENT_INCLUDE={}".format(FORWARD_NOTHING_CEL),
             "-e",
             "MINDS_ENV={}".format(minds_env),
             "-e",
