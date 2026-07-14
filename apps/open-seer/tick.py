@@ -24,13 +24,13 @@ All judgment (grouping, diagnosis, fixing) lives in the agents and their
 skills under .claude/skills/ — this file stays about a page.
 
 Local one-shot tick (for Docker testing):
-    python app.py
+    python tick.py
 Dry run (mirror push printed instead of executed; the sweep is still
 spawned, with OPEN_SEER_DRY_RUN forwarded so the sweep itself prints its
 intended writes to its transcript instead of executing them — DESIGN §11):
-    OPEN_SEER_ENABLED=1 OPEN_SEER_DRY_RUN=1 python app.py
+    OPEN_SEER_ENABLED=1 OPEN_SEER_DRY_RUN=1 python tick.py
 
-Deploy: `modal deploy app.py`. Env comes from a single Modal secret named
+Deploy: `modal deploy tick.py`. Env comes from a single Modal secret named
 "open-seer" carrying the DESIGN.md §9 variables (SENTRY_AUTH_TOKEN,
 SENTRY_ORG, SENTRY_PROJECT_PREFIX, GITHUB_TOKEN, MIRROR_SOURCE_REPO,
 MIRROR_REPO, ANTHROPIC_API_KEY, OPEN_SEER_ENABLED, OPEN_SEER_DRY_RUN, ...).
@@ -45,7 +45,8 @@ import shlex
 import subprocess
 import sys
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime
+from datetime import timezone
 
 import requests
 
@@ -94,7 +95,7 @@ def _redact(text: str, secret: str) -> str:
 # --- Sentry ------------------------------------------------------------
 
 
-def _sentry_get_paginated(path: str, token: str, params: dict, max_pages: int = 20) -> list[dict]:
+def _sentry_get_paginated(path: str, token: str, params: dict | None, max_pages: int = 20) -> list[dict]:
     """GET a Sentry collection endpoint, following Link-header pagination."""
     results: list[dict] = []
     url = f"{SENTRY_API}{path}"
@@ -164,11 +165,19 @@ def build_create_command(name: str, message: str) -> list[str]:
     # agents anyway (mngr's --idle-mode default is "disabled if local").
     provider = os.environ.get("OPEN_SEER_SWEEP_PROVIDER", "modal")
     cmd = [
-        "mngr", "create", name,
-        "--provider", provider, "--new-host",
-        "--headless", "--no-connect", "--yes",
-        "--idle-timeout", SWEEP_IDLE_TIMEOUT,
-        "-b", f"--timeout={SWEEP_SANDBOX_TIMEOUT_SECONDS}",
+        "mngr",
+        "create",
+        name,
+        "--provider",
+        provider,
+        "--new-host",
+        "--headless",
+        "--no-connect",
+        "--yes",
+        "--idle-timeout",
+        SWEEP_IDLE_TIMEOUT,
+        "-b",
+        f"--timeout={SWEEP_SANDBOX_TIMEOUT_SECONDS}",
     ]
     for var in SWEEP_PASS_ENV:
         cmd += ["--pass-env", var]
@@ -183,7 +192,8 @@ def parse_agent_list(text: str) -> list[dict]:
         return []
     try:
         data = json.loads(text)
-    except json.JSONDecodeError:  # tolerate jsonl-shaped output
+    # tolerate jsonl-shaped output
+    except json.JSONDecodeError:
         data = [json.loads(line) for line in text.splitlines() if line.strip()]
     if isinstance(data, dict):
         data = data.get("agents", [data])
@@ -192,8 +202,7 @@ def parse_agent_list(text: str) -> list[dict]:
 
 def has_running_sweep(agents: list[dict]) -> bool:
     return any(
-        str(agent.get("name", "")).startswith("sweep-") and agent.get("state") in RUNNING_STATES
-        for agent in agents
+        str(agent.get("name", "")).startswith("sweep-") and agent.get("state") in RUNNING_STATES for agent in agents
     )
 
 
@@ -209,13 +218,20 @@ def mirror_sync(source_repo: str, mirror_repo: str, token: str, dry_run: bool = 
     with tempfile.TemporaryDirectory(prefix="open-seer-mirror-") as tmp:
         subprocess.run(["git", "init", "--bare", "--quiet", tmp], check=True)
         subprocess.run(
-            ["git", "-C", tmp, "fetch", "--quiet", _repo_url(source_repo, token),
-             "+refs/heads/*:refs/remotes/origin/*"],
+            [
+                "git",
+                "-C",
+                tmp,
+                "fetch",
+                "--quiet",
+                _repo_url(source_repo, token),
+                "+refs/heads/*:refs/remotes/origin/*",
+            ],
             check=True,
         )
         push_cmd = ["git", "-C", tmp, "push", "--quiet", _repo_url(mirror_repo, token), MIRROR_PUSH_REFSPEC]
         if dry_run:
-            print("DRY RUN (mirror push skipped):", _redact(shlex.join(push_cmd), token))
+            log.info("DRY RUN (mirror push skipped): %s", _redact(shlex.join(push_cmd), token))
         else:
             subprocess.run(push_cmd, check=True)
             log.info("mirror sync: %s -> %s", source_repo, mirror_repo)
@@ -239,7 +255,8 @@ def tick() -> int:
             github_token,
             dry_run=dry_run,
         )
-    except Exception as exc:  # deliberately broad: log and move on
+    # deliberately broad: log and move on
+    except Exception as exc:
         log.error("mirror sync failed (sweep dispatch continues): %s", _redact(str(exc), github_token))
 
     # (c) Unassigned + unresolved error issues across minds-* projects.
@@ -249,7 +266,8 @@ def tick() -> int:
     projects = filter_projects(fetch_projects(org, sentry_token), prefix)
     issues = fetch_issues(org, projects, sentry_token)
     if not issues:
-        return 0  # (d) nothing to do — no agent runs, no tokens spent
+        # (d) nothing to do — no agent runs, no tokens spent
+        return 0
 
     # (e) Overlap guard; fail closed if we cannot tell. --safe forces
     # provider-side discovery (each tick runs in a fresh container, so a
@@ -259,7 +277,9 @@ def tick() -> int:
     try:
         listing = subprocess.run(
             ["mngr", "list", "--format", "json", "--headless", "--safe", "--on-error", "abort"],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
         )
         agents = parse_agent_list(listing.stdout)
     except Exception as exc:
@@ -287,9 +307,11 @@ def tick() -> int:
 try:
     import modal
 except ImportError:
-    modal = None
+    _HAS_MODAL = False
+else:
+    _HAS_MODAL = True
 
-if modal is not None:
+if _HAS_MODAL:
     app = modal.App("open-seer")
     image = modal.Image.from_dockerfile("Dockerfile")
 

@@ -67,7 +67,7 @@ You are invoked as `/sentry-sweep` followed (usually) by a JSON list of Sentry i
 curl -sf "${AUTH[@]}" "$SENTRY_API/organizations/$SENTRY_ORG/projects/" \
   | jq -r --arg p "$SENTRY_PROJECT_PREFIX" '.[] | select(.slug | startswith($p)) | .slug'
 
-# per project: the tick's query (app.py ISSUE_QUERY), verbatim
+# per project: the tick's query (tick.py ISSUE_QUERY), verbatim
 curl -sfG "${AUTH[@]}" "$SENTRY_API/projects/$SENTRY_ORG/$PROJECT_SLUG/issues/" \
   --data-urlencode "query=is:unresolved is:unassigned issue.category:error level:[error,fatal]" \
   --data-urlencode "limit=100"

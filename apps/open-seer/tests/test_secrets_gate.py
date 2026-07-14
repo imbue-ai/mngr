@@ -67,6 +67,7 @@ def planted_lines(corpus: Path) -> list[int]:
 
 def run_betterleaks(corpus: Path) -> tuple[int, list[dict]]:
     """Scan a single corpus file; return (exit code, findings from the JSON report)."""
+    assert BETTERLEAKS is not None
     proc = subprocess.run(
         [
             BETTERLEAKS,
@@ -78,7 +79,8 @@ def run_betterleaks(corpus: Path) -> tuple[int, list[dict]]:
             "--report-format",
             "json",
             "--report-path",
-            "-",  # report on stdout; logs go to stderr
+            # report on stdout; logs go to stderr
+            "-",
         ],
         capture_output=True,
         text=True,
@@ -122,12 +124,14 @@ def test_betterleaks_passes_clean_corpus() -> None:
 
 def run_kingfisher(corpus: Path) -> tuple[int, list[dict]]:
     """Scan a single corpus file; return (exit code, findings from the JSON report)."""
+    assert KINGFISHER is not None
     proc = subprocess.run(
         [
             KINGFISHER,
             "scan",
             str(corpus),
-            "--no-validate",  # offline: never call providers to validate
+            # offline: never call providers to validate
+            "--no-validate",
             "--format",
             "json",
             "--no-update-check",

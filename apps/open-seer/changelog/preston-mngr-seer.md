@@ -1,3 +1,5 @@
 Add the open-seer app: an autonomous Sentry-error-to-PR system. It polls Sentry for new issues, triages them, and drives Claude Code sessions (via the fix-sentry-error and sentry-sweep skills) to produce candidate fix PRs. Includes the tick loop, a two-scanner secrets/PII gate (Betterleaks with custom PII rules and Kingfisher — both must pass before a fixer's PR goes up), Dockerfile, design docs, and tests.
 
 The fixer skill also triages its PR's CI checks before flipping ready: failures caused by the diff are fixed (up to 3 cycles, then escalation), while pre-existing/infrastructure failures (e.g. Vault-gated jobs that can only authenticate from the canonical repo, not the mirror) are documented on the PR with evidence instead of chased.
+
+The tick module is `tick.py` (renamed from `app.py`, which collided with another workspace member's module of the same name); deploy with `modal deploy tick.py`. The project also now carries the standard monorepo scaffolding: changelog layout, ratchet tests, coverage config, and wheel excludes.

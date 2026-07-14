@@ -57,13 +57,13 @@ ENV MNGR_HOST_DIR=/root/.mngr-open-seer \
 
 WORKDIR /opt/open-seer
 
-# Python runtime deps for app.py (requests, modal) — the base image ships none.
+# Python runtime deps for tick.py (requests, modal) — the base image ships none.
 COPY pyproject.toml ./
 RUN uv pip install --system -r pyproject.toml
 
 COPY .claude/skills ./.claude/skills
 COPY .github ./.github
-COPY .betterleaks.toml app.py ./
+COPY .betterleaks.toml tick.py ./
 
 # Make /opt/open-seer a real git repo: `mngr create`'s default source is the
 # current git root, which is how the sweep carries the skills and the SSH key
