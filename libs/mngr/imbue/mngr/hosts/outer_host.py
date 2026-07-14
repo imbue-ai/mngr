@@ -242,8 +242,11 @@ def _is_transient_ssh_connect_error(exception: BaseException) -> bool:
 _retry_on_transient_ssh_connect_error = retry(
     retry=retry_if_exception(_is_transient_ssh_connect_error),
     stop=stop_after_attempt(3),
+    # The first retry is immediate: the failed attempt already blocked for
+    # paramiko's banner timeout waiting for sshd, so an extra pause on top of
+    # that adds nothing (mirrors _retry_on_transient_ssh_error above).
     wait=wait_chain(
-        wait_fixed(1),
+        wait_fixed(0),
         wait_fixed(3),
     ),
     reraise=True,
