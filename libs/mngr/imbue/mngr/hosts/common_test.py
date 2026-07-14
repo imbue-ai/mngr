@@ -122,9 +122,7 @@ def test_lifecycle_done_when_non_shell_descendant_but_foreground_is_shell_known_
     is a shell. Only a non-shell *foreground* means a real replacement.
     """
     ps_output = "200 123 python3\n"
-    assert (
-        determine_lifecycle_probe_result("0|bash|123", True, "claude", ps_output).state == AgentLifecycleState.DONE
-    )
+    assert determine_lifecycle_probe_result("0|bash|123", True, "claude", ps_output).state == AgentLifecycleState.DONE
 
 
 def test_lifecycle_done_when_shell_only() -> None:
