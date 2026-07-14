@@ -445,7 +445,7 @@ class _BoundedSSLShutdownEventLoop(asyncio.SelectorEventLoop):
     def _make_ssl_transport(self, *args: Any, **kwargs: Any) -> Any:
         if "ssl_shutdown_timeout" in kwargs and kwargs["ssl_shutdown_timeout"] is None:
             kwargs["ssl_shutdown_timeout"] = self.ssl_shutdown_timeout_seconds
-        return super()._make_ssl_transport(*args, **kwargs)
+        return super()._make_ssl_transport(*args, **kwargs)  # ty: ignore[unresolved-attribute]
 
 
 @pure

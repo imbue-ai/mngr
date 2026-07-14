@@ -13,12 +13,14 @@ import os
 import socket
 import ssl
 import threading
-from typing import Any
 
 import click
 import pytest
 from hypercorn.asyncio import serve as hypercorn_serve
 from hypercorn.config import Config
+from hypercorn.typing import ASGIReceiveCallable
+from hypercorn.typing import ASGISendCallable
+from hypercorn.typing import Scope
 from loguru import logger
 
 from imbue.imbue_common.primitives import NonNegativeInt
@@ -332,7 +334,7 @@ class _FastSSLShutdownEventLoop(_BoundedSSLShutdownEventLoop):
     ssl_shutdown_timeout_seconds: float = 0.4
 
 
-async def _lifespan_only_asgi_app(scope: dict[str, Any], receive: Any, send: Any) -> None:
+async def _lifespan_only_asgi_app(scope: Scope, receive: ASGIReceiveCallable, send: ASGISendCallable) -> None:
     """Minimal ASGI app for serving-layer tests; no HTTP request is ever made."""
     assert scope["type"] == "lifespan"
     await receive()
