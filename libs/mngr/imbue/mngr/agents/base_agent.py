@@ -11,6 +11,7 @@ from typing import Final
 from typing import Generator
 from typing import Mapping
 from typing import Sequence
+from uuid import uuid4
 
 from loguru import logger
 from pydantic import Field
@@ -473,6 +474,45 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         }
         self.host.write_text_file(activity_path, json.dumps(data, indent=2))
         logger.trace("Recorded {} activity for agent {}", activity_type, self.name)
+
+    def record_message_delivery_event(self, event_type: str, detail: str) -> None:
+        """Append a structured message-delivery event to the agent's events dir.
+
+        Soft delivery states (an unconfirmed relaxed send, pre-existing
+        input-box text) are recorded at ``events/messages/events.jsonl`` so
+        they are auditable via ``mngr event`` rather than only visible in
+        process logs. Failures are logged and swallowed: observability must
+        never break a send.
+        """
+        events_dir = self._get_agent_dir() / "events" / "messages"
+        events_path = events_dir / "events.jsonl"
+        now = datetime.now(timezone.utc)
+        event_line = json.dumps(
+            {
+                "timestamp": now.strftime("%Y-%m-%dT%H:%M:%S.%f000Z"),
+                "type": event_type,
+                "event_id": f"evt-{uuid4().hex}",
+                "source": "messages",
+                "agent_id": str(self.id),
+                "agent_name": str(self.name),
+                "detail": detail,
+            }
+        )
+        append_command = (
+            f"mkdir -p {shlex.quote(str(events_dir))} && "
+            f"printf '%s\\n' {shlex.quote(event_line)} >> {shlex.quote(str(events_path))}"
+        )
+        try:
+            result = self.host.execute_stateful_command(append_command)
+        except (HostConnectionError, TimeoutError) as e:
+            # TimeoutError: the remote SSH layer re-raises its socket timeout
+            # as-is (see Host.execute_idempotent_command).
+            logger.warning("Failed to record message delivery event {}: {}", event_type, e)
+            return
+        if not result.success:
+            logger.warning(
+                "Failed to record message delivery event {}: {}", event_type, result.stderr or result.stdout
+            )
 
     def get_reported_activity_record(self, activity_type: ActivitySource) -> str | None:
         activity_path = self._get_agent_dir() / "activity" / activity_type.value.lower()

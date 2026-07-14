@@ -21,6 +21,7 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import HostName
+from imbue.mngr.utils.env_utils import build_source_env_shell_commands
 
 
 @contextmanager
@@ -95,6 +96,13 @@ class FakeHost(MutableModel):
             stderr=result.stderr,
             success=result.returncode == 0,
         )
+
+    def build_source_env_prefix(self, agent: Any) -> str:
+        """Build the env-sourcing shell prefix exactly like a real host does."""
+        host_env_path = self.host_dir / "env"
+        agent_env_path = self.host_dir / "agents" / str(agent.id) / "env"
+        commands = build_source_env_shell_commands(host_env_path, agent_env_path)
+        return " && ".join(commands) + " && "
 
     def execute_idempotent_command(
         self,
