@@ -39,6 +39,24 @@ _SEND_ENTER_NO_SIGNAL_PER_ATTEMPT_TIMEOUT_SECONDS: Final[float] = 2.0
 
 _NON_ALNUM_RE: Final[re.Pattern[str]] = re.compile(r"[^a-z0-9]")
 
+# Defines ``_timeout SECONDS COMMAND...`` for the scripts emitted below: it runs
+# COMMAND under ``timeout(1)`` if that exists, and under perl otherwise. Linux ships
+# ``timeout``; macOS ships no ``timeout`` but does ship perl. Both forms read the
+# deadline as their first argument, so ``"$@"`` reaches either unchanged.
+#
+# The perl form arms a SIGALRM, then ``exec`` replaces perl with COMMAND itself, so
+# COMMAND reports its own exit status and dies outright when the alarm fires. The
+# alarm comes from ``Time::HiRes`` because the builtin one takes whole seconds and
+# ``alarm(0)`` cancels the timer, so a sub-second deadline would mean no deadline. A
+# failed ``exec`` returns to perl, which would fall off the end of the program and
+# exit 0, so it exits 127 instead.
+_TIMEOUT_FUNCTION: Final[str] = (
+    "_timeout() { "
+    'if command -v timeout >/dev/null 2>&1; then timeout "$@"; '
+    "else perl -MTime::HiRes=alarm -e 'alarm shift; exec @ARGV or exit 127' \"$@\"; fi; "
+    "}; "
+)
+
 
 def _normalize_for_match(text: str) -> str:
     """Strip non-alphanumeric characters and lowercase for fuzzy matching."""
@@ -298,27 +316,6 @@ def _send_enter_and_wait_for_signal(
     return False
 
 
-def _timeout_prefix(seconds: float) -> str:
-    """Run the arguments under a deadline, using ``timeout(1)`` wherever it exists.
-
-    macOS ships no ``timeout``. In its place, perl's ``alarm`` arms a SIGALRM and
-    ``exec`` replaces perl with the command, which therefore reports its own exit
-    status and dies outright when the alarm fires.
-
-    The alarm comes from ``Time::HiRes`` because the builtin one takes whole
-    seconds and ``alarm(0)`` cancels the timer, so a sub-second deadline would
-    mean no deadline. A failed ``exec`` returns to perl, which would fall off the
-    end of the program and exit 0, so it exits 127 instead.
-    """
-    perl_timeout = f"perl -MTime::HiRes=alarm -e 'alarm shift; exec @ARGV or exit 127' {seconds}"
-    return f'if command -v timeout >/dev/null 2>&1; then timeout {seconds} "$@"; else {perl_timeout} "$@"; fi'
-
-
-def _timeout_function(seconds: float) -> str:
-    """Define ``mngr_timeout`` in the emitted script; it runs its arguments under a deadline."""
-    return f"mngr_timeout() {{ {_timeout_prefix(seconds)}; }}; "
-
-
 def _build_signal_only_command(full_timeout: float, wait_channel: str, tmux_target: TmuxWindowTarget) -> str:
     """Send Enter, then block on the hook's wait-for channel until it fires or the deadline passes.
 
@@ -327,7 +324,11 @@ def _build_signal_only_command(full_timeout: float, wait_channel: str, tmux_targ
     registered by the time the hook can fire. The exit status is the waiter's, so
     exit 0 = signalled, non-zero = deadline reached or tmux failed.
     """
-    script = f'{_timeout_function(full_timeout)}( sleep 0.1 && tmux send-keys -t "$2" Enter ) & mngr_timeout tmux wait-for "$1"'
+    script = (
+        f"{_TIMEOUT_FUNCTION}"
+        '( sleep 0.1 && tmux send-keys -t "$2" Enter ) & '
+        f'_timeout {full_timeout} tmux wait-for "$1"'
+    )
     return f"bash -c {shlex.quote(script)} _ {shlex.quote(wait_channel)} {tmux_target.as_shell_arg()}"
 
 
@@ -362,7 +363,7 @@ def _build_signal_or_marker_command(
     agent that supplies it.
     """
     script = (
-        f"{_timeout_function(full_timeout)}"
+        f"{_TIMEOUT_FUNCTION}"
         'sig="$(mktemp)"; '
         # Clean up on every exit path: remove the sentinel file and reap any
         # still-running background job (notably the hook waiter, which otherwise
@@ -371,7 +372,7 @@ def _build_signal_or_marker_command(
         'trap \'p="$(jobs -p)"; [ -n "$p" ] && kill $p 2>/dev/null; rm -f "$sig"\' EXIT; '
         f'base="$({accept_marker_command})"; '
         # Register the hook waiter first (full timeout), sentinel on success.
-        '( mngr_timeout tmux wait-for "$1" >/dev/null 2>&1 && echo 1 > "$sig" ) & '
+        f'( _timeout {full_timeout} tmux wait-for "$1" >/dev/null 2>&1 && echo 1 > "$sig" ) & '
         # Then submit, after a beat so the waiter is registered.
         '( sleep 0.1 && tmux send-keys -t "$2" Enter ) & '
         f'end="$(( $(date +%s) + {int(full_timeout) + 1} ))"; '

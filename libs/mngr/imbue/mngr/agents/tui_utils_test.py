@@ -11,11 +11,11 @@ import pydantic
 import pytest
 
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.tui_utils import _TIMEOUT_FUNCTION
 from imbue.mngr.agents.tui_utils import _build_signal_only_command
 from imbue.mngr.agents.tui_utils import _build_signal_or_marker_command
 from imbue.mngr.agents.tui_utils import _check_paste_content
 from imbue.mngr.agents.tui_utils import _normalize_for_match
-from imbue.mngr.agents.tui_utils import _timeout_prefix
 from imbue.mngr.agents.tui_utils import send_enter_and_poll_for_cleared_indicator
 from imbue.mngr.agents.tui_utils import send_enter_best_effort
 from imbue.mngr.agents.tui_utils import send_enter_keystroke
@@ -300,44 +300,45 @@ def test_submission_commands_wait_on_the_channel_and_send_to_the_target(command:
     assert channel_index < target_index
 
 
+def _run_timeout_function(arguments: str) -> subprocess.CompletedProcess[str]:
+    """Run ``_timeout <arguments>`` on a PATH with no ``timeout``, so the perl fallback is what runs."""
+    return subprocess.run(
+        ["bash", "-c", f"{_TIMEOUT_FUNCTION} _timeout {arguments}"],
+        capture_output=True,
+        text=True,
+        env=_path_without_timeout(),
+        timeout=30,
+    )
+
+
 def test_perl_fallback_uses_a_fractional_alarm() -> None:
     """The builtin ``alarm`` truncates to whole seconds, and ``alarm(0)`` *cancels* the timer.
 
     A sub-second deadline would therefore mean no deadline at all, so the fallback
     has to arm the alarm through ``Time::HiRes``.
     """
-    assert "Time::HiRes" in _timeout_prefix(0.5)
+    assert "Time::HiRes" in _TIMEOUT_FUNCTION
 
 
 def test_perl_fallback_fails_when_the_command_cannot_be_exec_ed() -> None:
     """A failed ``exec`` returns to perl, which would otherwise run off the end and exit 0."""
-    assert "or exit 127" in _timeout_prefix(2.0)
+    assert "or exit 127" in _TIMEOUT_FUNCTION
+    assert _run_timeout_function("5 /nonexistent-binary-for-this-test").returncode == 127
 
 
-@pytest.mark.parametrize(
-    ("seconds", "expected_returncode"),
-    [
-        # Sub-second: the whole-second `alarm` would round this to a cancelled timer.
-        (0.5, 142),
-        (1.0, 142),
-    ],
-)
-def test_perl_fallback_kills_a_command_that_outlives_its_deadline(seconds: float, expected_returncode: int) -> None:
-    """142 is 128 + SIGALRM: the deadline killed it, rather than the command exiting on its own."""
-    script = f"set -- sleep 30; {_timeout_prefix(seconds)}"
-    result = subprocess.run(
-        ["bash", "-c", script], capture_output=True, text=True, env=_path_without_timeout(), timeout=30
-    )
-    assert result.returncode == expected_returncode
+@pytest.mark.parametrize("seconds", [0.5, 1.0])
+def test_perl_fallback_kills_a_command_that_outlives_its_deadline(seconds: float) -> None:
+    """142 is 128 + SIGALRM: the deadline killed it, rather than the command exiting on its own.
+
+    A sub-second deadline is the interesting case, since the whole-second ``alarm``
+    would round it down to a cancelled timer and never fire at all.
+    """
+    assert _run_timeout_function(f"{seconds} sleep 30").returncode == 142
 
 
 def test_perl_fallback_passes_through_the_command_s_own_exit_status() -> None:
     """``exec`` replaces perl, so a command that finishes first reports its own status."""
-    script = f'set -- sh -c "exit 7"; {_timeout_prefix(10.0)}'
-    result = subprocess.run(
-        ["bash", "-c", script], capture_output=True, text=True, env=_path_without_timeout(), timeout=30
-    )
-    assert result.returncode == 7
+    assert _run_timeout_function('10 sh -c "exit 7"').returncode == 7
 
 
 @pytest.mark.tmux
