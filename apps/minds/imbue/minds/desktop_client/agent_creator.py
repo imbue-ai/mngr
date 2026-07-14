@@ -63,15 +63,18 @@ from imbue.minds.lima_image.primitives import get_current_image_arch
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
+from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
 from imbue.minds.primitives import LaunchMode
+from imbue.minds.utils.secret_redaction import redact_secret_env_assignments
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.utils.git_utils import rsync_worktree_over_clone
 from imbue.mngr_latchkey.agent_setup import AgentLatchkeySetup
+from imbue.mngr_latchkey.agent_setup import SECRET_LATCHKEY_ENV_VAR_NAMES
 from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
 from imbue.mngr_latchkey.core import Latchkey
@@ -92,6 +95,11 @@ _MNGR_FORWARD_SESSION_COOKIE_NAME: Final[str] = "mngr_forward_session"
 # assumption about which app that is or which routes it implements.
 _WORKSPACE_PROBE_PATH: Final[str] = "/"
 
+# Scheme of the `mngr forward` proxy origin. minds always runs the proxy with
+# `--use-http2`, so it terminates TLS and the probe/redirect URLs the Python
+# side builds are always `https`.
+_MNGR_FORWARD_SCHEME: Final[str] = "https"
+
 
 def make_workspace_probe_client(preauth_cookie: str, probe_timeout_seconds: float) -> httpx.Client:
     """Construct a reusable httpx.Client preconfigured for workspace probes.
@@ -99,11 +107,17 @@ def make_workspace_probe_client(preauth_cookie: str, probe_timeout_seconds: floa
     Callers that probe in a tight poll loop should construct one of these and
     pass it to ``probe_workspace_through_plugin`` on each iteration, instead
     of letting the helper construct a one-shot client per call.
+
+    The proxy serves TLS (HTTP/2), so cert verification is disabled: these
+    probes dial ``127.0.0.1`` with a ``Host: agent-<hex>.localhost`` header, so
+    hostname verification could never pass, and the cert is a self-signed
+    ephemeral one the probe is not positioned to validate anyway. Loopback-only.
     """
     return httpx.Client(
         timeout=probe_timeout_seconds,
         follow_redirects=False,
         cookies={_MNGR_FORWARD_SESSION_COOKIE_NAME: preauth_cookie},
+        verify=False,
     )
 
 
@@ -149,7 +163,7 @@ def probe_workspace_through_plugin(
     one-shot client is constructed for this single probe -- fine for
     one-off / sporadic callers but wasteful in a loop.
     """
-    probe_url = f"http://127.0.0.1:{mngr_forward_port}{_WORKSPACE_PROBE_PATH}"
+    probe_url = f"{_MNGR_FORWARD_SCHEME}://127.0.0.1:{mngr_forward_port}{_WORKSPACE_PROBE_PATH}"
     host_header = f"{agent_id}.localhost"
     if client is not None:
         return _probe_once(client, probe_url, host_header)
@@ -504,7 +518,7 @@ _DEFAULT_AGENT_NAME: Final[AgentName] = AgentName(SYSTEM_SERVICES_AGENT_NAME)
 
 # imbue_cloud create-path knobs forwarded as ``-b fast_mode=<value>``. ``require``
 # adopts an exact-attribute pre-baked pool host (fast); ``prevent`` leases any
-# available host and rebuilds it from the FCT Dockerfile (slow).
+# available host and rebuilds it from the DEFAULT_WORKSPACE_TEMPLATE Dockerfile (slow).
 _FAST_MODE_REQUIRE: Final[str] = "require"
 _FAST_MODE_PREVENT: Final[str] = "prevent"
 
@@ -579,6 +593,7 @@ def _build_mngr_create_command(
     region: str | None = None,
     latchkey_env: Mapping[str, str] | None = None,
     color: str | None = None,
+    docker_runtime: DockerRuntime = DockerRuntime.RUNC,
     original_minds_version: str | None = None,
     original_branch: str | None = None,
     prebaked_lima_image_qcow2_path: Path | None = None,
@@ -592,7 +607,10 @@ def _build_mngr_create_command(
     id anyway, and pre-generating one led to bugs (e.g. keying gateway
     state under a fictional id).
 
-    DOCKER mode: --template main --template docker (runs in Docker container)
+    DOCKER mode: --template main --template docker (runs in a Docker container);
+        for ``docker_runtime == RUNSC`` the gVisor overlay is stacked on top
+        (--template docker_runsc) so the container runs under runsc. RUNC is the
+        docker template's default, so it adds no extra template.
     LIMA mode: --template main --template lima (runs in Lima VM)
     VULTR mode: --template main --template vultr (runs in Docker on a Vultr VPS)
     AWS mode: --new-host on the aws-<region> provider, --template main
@@ -613,10 +631,10 @@ def _build_mngr_create_command(
     mngr's ``--reuse`` matches on agent name without host scope.
 
     Secrets (``ANTHROPIC_API_KEY``, ``ANTHROPIC_BASE_URL``) are forwarded by
-    the FCT template's own ``pass_(host_)env`` declarations, not by inline
+    the default workspace template's own ``pass_(host_)env`` declarations, not by inline
     flags here -- ``run_mngr_create`` populates them in the subprocess env
     when needed and the template-declared forwards pick them up. Keeping the
-    forwarding declaration in FCT means the same template works for ``mngr
+    forwarding declaration in DEFAULT_WORKSPACE_TEMPLATE means the same template works for ``mngr
     create`` invocations from outside minds too.
 
     ``latchkey_env`` is the latchkey wiring (gateway URL, password, JWT,
@@ -637,7 +655,7 @@ def _build_mngr_create_command(
     )
     address = f"{_DEFAULT_AGENT_NAME}@{host_name}.{provider_instance}"
 
-    # The `/welcome` initial message is now baked into the FCT template's
+    # The `/welcome` initial message is now baked into the default workspace template's
     # [create_templates.main] section, so we no longer pass `--message` here.
     # ``--format jsonl`` makes mngr emit ``{"event": "created", "agent_id": ..., "host_id": ...}``
     # as the final stdout line; ``run_mngr_create`` parses that to recover
@@ -741,6 +759,11 @@ def _build_mngr_create_command(
     match launch_mode:
         case LaunchMode.DOCKER:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "docker"])
+            if docker_runtime is DockerRuntime.RUNSC:
+                # gVisor overlay: reuses the docker template body and only flips
+                # the container runtime to runsc. runc is the docker template's
+                # default, so RUNC needs no extra template.
+                mngr_command.extend(["--template", "docker_runsc"])
             mngr_command.extend(_remote_host_env_flags())
         case LaunchMode.LIMA:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "lima"])
@@ -783,7 +806,7 @@ def _build_mngr_create_command(
                 mngr_command.extend(["-b", f"repo_branch_or_tag={imbue_cloud_branch_or_tag}"])
             # ``fast_mode`` selects the imbue_cloud create path: ``require``
             # adopts an exact-attribute pre-baked pool host (fast); ``prevent``
-            # leases any available host and rebuilds it from the FCT Dockerfile
+            # leases any available host and rebuilds it from the DEFAULT_WORKSPACE_TEMPLATE Dockerfile
             # (slow, but always works). minds tries ``require`` first and falls
             # back to ``prevent`` on FastPathUnavailableError (see
             # ``_run_imbue_cloud_create_with_fallback``).
@@ -969,6 +992,7 @@ def run_mngr_create(
     anthropic_base_url: str | None = None,
     latchkey_env: Mapping[str, str] | None = None,
     color: str | None = None,
+    docker_runtime: DockerRuntime = DockerRuntime.RUNC,
     original_minds_version: str | None = None,
     original_branch: str | None = None,
     prebaked_lima_image_qcow2_path: Path | None = None,
@@ -985,7 +1009,7 @@ def run_mngr_create(
     irrelevant.
 
     ``anthropic_api_key`` / ``anthropic_base_url`` are placed into the
-    subprocess env (not argv) so they don't show up in ``ps`` output; the FCT
+    subprocess env (not argv) so they don't show up in ``ps`` output; the DEFAULT_WORKSPACE_TEMPLATE
     template's own ``pass_(host_)env`` declarations cause mngr to forward them
     onto the host as appropriate.
 
@@ -1009,6 +1033,7 @@ def run_mngr_create(
         region=region,
         latchkey_env=latchkey_env,
         color=color,
+        docker_runtime=docker_runtime,
         original_minds_version=original_minds_version,
         original_branch=original_branch,
         prebaked_lima_image_qcow2_path=prebaked_lima_image_qcow2_path,
@@ -1027,7 +1052,13 @@ def run_mngr_create(
         if anthropic_base_url is not None:
             subprocess_env["ANTHROPIC_BASE_URL"] = anthropic_base_url
 
-    logger.info("Running: {}", " ".join(mngr_command))
+    # The command carries the latchkey gateway password + permissions-override
+    # JWT as ``--host-env NAME=VALUE`` flags; mask their values before logging
+    # so the persistent logs (uploaded with bug reports) never carry the raw
+    # secrets. The subprocess below still receives the unredacted command.
+    loggable_command = redact_secret_env_assignments(mngr_command, secret_env_var_names=SECRET_LATCHKEY_ENV_VAR_NAMES)
+    loggable_command_str = " ".join(loggable_command)
+    logger.info("Running: {}", loggable_command_str)
 
     capture = _CreateEventCapture(inner_on_output=on_output)
     cg = _make_child_cg("mngr-create", parent_cg)
@@ -1038,6 +1069,10 @@ def run_mngr_create(
             is_checked_after=False,
             on_output=capture,
             env=subprocess_env,
+            # Name the reader thread with the redacted command so the gateway
+            # password + JWT never reach the JSONL log's ``thread_name`` (nor any
+            # ProcessError message); the real command is still what executes.
+            name=loggable_command_str,
         )
 
     if result.returncode != 0:
@@ -1136,6 +1171,7 @@ class _MngrCreateAttemptParams(FrozenModel):
     anthropic_base_url: str | None
     parent_cg: ConcurrencyGroup | None
     color: str | None
+    docker_runtime: DockerRuntime
     original_minds_version: str | None
     original_branch: str | None
     # Resolved ready pre-baked Lima qcow2 path (issue 2306), or None to build in-VM.
@@ -1174,6 +1210,7 @@ def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams
         anthropic_api_key=params.anthropic_api_key,
         anthropic_base_url=params.anthropic_base_url,
         color=params.color,
+        docker_runtime=params.docker_runtime,
         original_minds_version=params.original_minds_version,
         original_branch=params.original_branch,
         prebaked_lima_image_qcow2_path=params.prebaked_lima_image_qcow2_path,
@@ -1267,7 +1304,7 @@ class AgentCreator(MutableModel):
         frozen=True,
         description=(
             "Pre-baked Lima image create gate (issue 2306). When set and the create matches the "
-            "default workspace (Lima + default FCT repo + current release tag), the create gates on "
+            "default workspace (Lima + default workspace template repo + current release tag), the create gates on "
             "the verified image and points Lima at it; None disables the path."
         ),
     )
@@ -1370,6 +1407,7 @@ class AgentCreator(MutableModel):
         on_created: Callable[[AgentId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
         color: str | None = None,
+        docker_runtime: DockerRuntime = DockerRuntime.RUNC,
         original_minds_version: str = "",
     ) -> CreationId:
         """Start creating an agent from a git URL or local path in a background thread.
@@ -1385,6 +1423,10 @@ class AgentCreator(MutableModel):
           talks to the official Anthropic API.
         - ``SUBSCRIPTION`` -- inject neither; the user signs in to Claude
           interactively in the workspace.
+
+        ``docker_runtime`` selects the container runtime for
+        ``LaunchMode.DOCKER`` (runc vs gVisor's runsc); it is ignored by every
+        other launch mode, which pin their own runtime.
 
         For ``LaunchMode.IMBUE_CLOUD``, the agent runs on a leased pool host
         via the ``imbue_cloud_<account-slug>`` provider; the plugin's
@@ -1447,6 +1489,7 @@ class AgentCreator(MutableModel):
                 on_created,
                 backup_request,
                 color,
+                docker_runtime,
                 original_minds_version,
             ),
             daemon=True,
@@ -1510,6 +1553,7 @@ class AgentCreator(MutableModel):
         on_created: Callable[[AgentId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
         color: str | None = None,
+        docker_runtime: DockerRuntime = DockerRuntime.RUNC,
         original_minds_version: str = "",
     ) -> None:
         """Background thread that resolves the repo source and creates an mngr agent.
@@ -1723,7 +1767,7 @@ class AgentCreator(MutableModel):
                 log_queue.put("[minds] Creating workspace '{}' (mode: {})...".format(host_name, launch_mode.value))
 
                 # Pre-baked Lima image gate (issue 2306): for the default
-                # workspace (Lima + default FCT repo + current release tag) wait on
+                # workspace (Lima + default workspace template repo + current release tag) wait on
                 # the prefetched, verified image and point Lima at it. Returns None
                 # (build in-VM) for any non-default create or unpublished version;
                 # raises a retryable error if a published image can't be readied.
@@ -1760,6 +1804,7 @@ class AgentCreator(MutableModel):
                     anthropic_base_url=effective_anthropic_base_url,
                     parent_cg=self.root_concurrency_group,
                     color=color,
+                    docker_runtime=docker_runtime,
                     original_minds_version=original_minds_version or None,
                     original_branch=branch or None,
                     prebaked_lima_image_qcow2_path=prebaked_lima_image_qcow2_path,
@@ -1890,7 +1935,7 @@ class AgentCreator(MutableModel):
         ``{"event": "error", "error_class": "FastPathUnavailableError"}`` line;
         minds matches on that ``error_class`` and retries with
         ``fast_mode=prevent``, which leases any available host and rebuilds it
-        from the FCT Dockerfile (full client-side setup). Any other failure
+        from the DEFAULT_WORKSPACE_TEMPLATE Dockerfile (full client-side setup). Any other failure
         (including a genuinely empty pool) propagates unchanged.
         """
         log_queue.put("[minds] Trying fast path (adopt a matching pre-baked pool host)...")
@@ -1993,7 +2038,7 @@ class AgentCreator(MutableModel):
         """
         if self.mngr_forward_port == 0:
             return f"/goto/{agent_id}/"
-        return f"http://localhost:{self.mngr_forward_port}/goto/{agent_id}/"
+        return f"{_MNGR_FORWARD_SCHEME}://localhost:{self.mngr_forward_port}/goto/{agent_id}/"
 
     def _wait_for_workspace_ready(self, agent_id: AgentId, log_queue: queue.Queue[str]) -> None:
         """Poll the agent's system_interface through the plugin until it responds 200.

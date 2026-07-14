@@ -4,6 +4,48 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-13
+
+Regenerate the `mngr forward` command docs to document its new `--use-http2` flag, which terminates TLS and negotiates HTTP/2 (via ALPN) for the workspace origin instead of serving plain HTTP/1.1.
+
+Documentation only: the `HostState.UNKNOWN` comment in `primitives.py` now covers both of the state's producers -- the existing provider-level case (AgentObserver emitting UNKNOWN for hosts of a provider that errored during discovery) and the new per-host case (a provider that is itself reachable but could not observe a specific host, e.g. imbue_cloud's lease-only fallback when a leased host's outer SSH is unreachable, which now surfaces UNKNOWN instead of CRASHED).
+
+Added `SENTRY_IGNORED_STDLIB_LOGGER_PATTERNS`, the set of noisy third-party stdlib loggers (paramiko, pyinfra) that mngr already redirects into loguru. Sentry-reporting processes pass these to `setup_sentry` so Sentry does not independently capture the raw stdlib records as events. Without this, paramiko's transport thread logging handled SSH connection failures (e.g. "Error reading SSH protocol banner" when a reverse-tunnel target goes offline and the health check retries) flooded Sentry with tens of thousands of unactionable, un-rate-limited error events.
+
+Added a `get_container_loopback_ssh_port` seam to the provider interface (default `None`). It lets a provider whose topology splits "publish" from "connect" -- e.g. an imbue_cloud lima slice, where the container's sshd is published in the VM on a fixed port but reached from outside via a box-forwarded port -- report the port at which the container is reachable from the outer host's own loopback, so a service running on the outer host (the VPS-resident latchkey gateway) can reverse-tunnel into the container on the correct port.
+
+Regenerated the `mngr latchkey forward` CLI help doc to note that the supervisor now health-checks and respawns the shared `latchkey gateway` subprocess if it dies mid-session.
+
+## 2026-07-11
+
+The forever-claude-template repo is being renamed to default-workspace-template (with the `fct`/`FCT` shorthand expanded to `default_workspace_template`/`DEFAULT_WORKSPACE_TEMPLATE` forms).
+
+References in this project (comments, identifiers, docs) are mechanically updated by `scripts/rename_template_repo.py`.
+
+## 2026-07-10
+
+Added `DiscoveryErrorLogSuppressor`, a shared per-process deduplicator for provider-level discovery-error log lines: a provider stuck on the same failure (e.g. missing credentials) is logged once (with a note that repeats are suppressed), a different error logs immediately, and a clean snapshot from the provider logs an info-level recovery line and re-arms suppression. Host- and agent-attributed discovery errors are never suppressed.
+
+`mngr observe --discovery-only` now emits one startup `DISCOVERY_PROVIDER` snapshot for each provider skipped at stream startup: an error snapshot for unavailable/unauthorized providers and a clean zero-agent snapshot for known-empty ones (e.g. Modal with no per-user environment), each carrying the provider's config. Consumers such as the minds providers panel now see these providers' state from the stream instead of only from a full `mngr list` side effect.
+
+Added `get_all_provider_instances_and_skipped`, which reports the providers whose construction was skipped as unavailable/unauthorized/empty alongside the constructed instances.
+
+## 2026-07-09
+
+Documentation: the `mngr imbue_cloud admin server order` CLI reference now lists the new `--dry-run` flag (build + price a non-committal OVH cart and print the preview, then delete it without ordering).
+
+- Changed: regenerated the `mngr imbue_cloud` CLI reference (`docs/commands/secondary/imbue_cloud.md`) for the reworked `admin pool destroy` (multiple ids destroyed in parallel, `--max-concurrency`, `--drop-row-only` replacing `--skip-vps-cancel`, `--force` re-scoped to leased rows) and the new `admin pool teardown-slices --max-concurrency` flag.
+
+Fixed Docker workspaces becoming permanently unreachable after a reboot (or any Docker daemon restart). Docker reassigns randomly-published SSH host ports when the daemon restarts (and can even reshuffle them between containers), but the Docker provider persisted the port resolved at create time and trusted it forever -- every later connection dialed the dead port, so the host showed STOPPED/UNAUTHENTICATED and the minds UI hung on "Loading workspace...". The recorded port is now treated as a hint: connection setup and discovery reconcile it against the container's live port mapping, heal the host record, replace any stale known_hosts entry left on the new port by a different container, and drop cached connectors still holding the old port. Workspaces now reconnect automatically after a reboot, and `mngr list` passively heals stale records.
+
+## 2026-07-08
+
+Fixed an unbounded memory leak in long-running `mngr observe` (discovery) processes. Each discovery poll spins up worker threads that create per-thread gevent hubs; destroying a hub without first joining it left the hub greenlet parked mid-`LoopExit`, whose traceback pinned the poll's entire object graph in a cycle the garbage collector could not reclaim. Over days this grew to multiple gigabytes. Worker-thread cleanup now joins the hub before destroying it (the pattern gevent prescribes for this leak, gevent issue 1601), so repeated polls no longer strand a hub per iteration.
+
+Regenerated the `mngr tmr` command reference to document the new variant flags (`--name`, `--mapper-prompt`, `--reducer-prompt`) for running distinct test suites as separate runs.
+
+Exported the marker text of `HostShutdownNotSupportedError`'s message as an importable `HOST_SHUTDOWN_NOT_SUPPORTED_MESSAGE` constant in `imbue.mngr.errors`, and built the exception's message from it. This lets out-of-process callers (e.g. minds, which runs `mngr` as a subprocess and only sees exit code and stderr) match on one shared source of truth instead of duplicating the literal string. No user-visible change -- the error message text is unchanged.
+
 ## 2026-07-07
 
 Fixed the grandparent-death watcher being a silent no-op on macOS (MIND-103). The watcher (used by the minds backend to reap itself, and its `mngr forward`/`event`/`observe` subprocess tree, when the Electron GUI exits uncleanly) resolved its grandparent PID by reading Linux's `/proc/<ppid>/status`, which raises on macOS -- so it never armed, and a force-quit or crash of Electron left the whole backend tree orphaned under `launchd` indefinitely.

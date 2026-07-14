@@ -1,9 +1,11 @@
 import inspect
+import json
 import os
 import pty
 import shlex
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -13,6 +15,7 @@ from collections.abc import Generator
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from urllib.parse import urlparse
 from uuid import uuid4
 
 import pluggy
@@ -584,6 +587,50 @@ def _load_modal_credentials(env: dict[str, str]) -> None:
             break
 
 
+def _is_docker_daemon_reachable() -> bool:
+    """Return True if a Docker daemon socket accepts a connection.
+
+    The e2e fixture enables the ``docker`` backend so ``@pytest.mark.docker``
+    tests can create Docker agents. But ``mngr list`` enumerates every enabled
+    provider and exits non-zero (EXIT_CODE_PROVIDER_INACCESSIBLE) when one is
+    unreachable, so leaving ``docker`` enabled in an environment with no daemon
+    would make any bare ``mngr list`` fail for a reason unrelated to the behavior
+    under test (e.g. the modal/local tutorials run under ``-m 'not docker'`` on
+    hosts with no Docker daemon). Docker-marked tests are deselected on such
+    hosts anyway, so dropping the backend there only affects providers the
+    running tests do not exercise.
+
+    This probes the daemon with a plain socket connection rather than the Docker
+    CLI or SDK, so it neither depends on those being installed nor trips the
+    resource guards that intercept them for unmarked tests. It resolves the
+    endpoint from ``DOCKER_HOST`` (``tcp://host:port`` or ``unix:///path``),
+    defaulting to the conventional ``/var/run/docker.sock``.
+    """
+    docker_host = os.environ.get("DOCKER_HOST", "")
+    if not docker_host:
+        family: socket.AddressFamily = socket.AF_UNIX
+        address: str | tuple[str, int] = "/var/run/docker.sock"
+    else:
+        parsed = urlparse(docker_host)
+        if parsed.scheme in ("unix", "unix+http"):
+            family = socket.AF_UNIX
+            address = parsed.path
+        elif parsed.scheme in ("tcp", "http", "https") and parsed.hostname and parsed.port:
+            family = socket.AF_INET
+            address = (parsed.hostname, parsed.port)
+        else:
+            # An endpoint we don't know how to probe (e.g. ssh://). Assume the
+            # daemon is reachable and let mngr surface any real error.
+            return True
+    try:
+        with socket.socket(family, socket.SOCK_STREAM) as probe:
+            probe.settimeout(2.0)
+            probe.connect(address)
+        return True
+    except OSError:
+        return False
+
+
 @pytest.fixture
 def e2e(
     temp_host_dir: Path,
@@ -634,6 +681,27 @@ def e2e(
     # e2e tests create fresh Modal environments, so they must deploy the
     # snapshot_and_shutdown function rather than looking up an existing one.
     env.pop("MNGR_MODAL_DISABLE_SNAPSHOT_DEPLOY", None)
+
+    # Constrain provider discovery to the backends the e2e suite actually
+    # exercises. Every provider plugin installed in the venv registers a default
+    # backend instance, and a full monorepo sync (`uv sync --all-packages`)
+    # installs the credential-requiring cloud plugins too (aws, azure, gcp,
+    # vultr, ovh, imbue_cloud). Commands that walk every enabled backend --
+    # `mngr list` and, crucially, the post-destroy garbage collection run by
+    # `mngr destroy --force` -- would then probe those clouds. Without
+    # credentials they either surface as unreachable (making discovery exit
+    # non-zero) or hang on unbounded network calls (making destroy/gc time out).
+    # No e2e test uses any backend beyond local/ssh/docker/modal, so scope
+    # discovery to exactly those. Docker is included only when a daemon is
+    # actually reachable: an enabled-but-unreachable docker backend makes even a
+    # bare `mngr list` exit EXIT_CODE_PROVIDER_INACCESSIBLE (see
+    # _is_docker_daemon_reachable). Set via the MNGR__* env-var layer rather than
+    # a settings file so it stays invisible to the `mngr config list --scope
+    # <file>` tests that assert on per-scope file contents.
+    enabled_backends = ["local", "ssh", "modal"]
+    if _is_docker_daemon_reachable():
+        enabled_backends.append("docker")
+    env["MNGR__ENABLED_BACKENDS"] = json.dumps(enabled_backends)
 
     # Use a short fixed prefix so that derived names (e.g. Modal environment
     # names, which are {prefix}{user_id}) stay well under provider length

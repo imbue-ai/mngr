@@ -8,9 +8,13 @@ from imbue.mngr.e2e.conftest import E2eSession
 from imbue.skitwright.expect import expect
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+# No @pytest.mark.rsync: this creates a *local* agent in a git repo, so the
+# default transfer mode is GIT_WORKTREE (`git worktree add`), which never shells
+# out to rsync (rsync is only used for non-git projects; see TransferMode in
+# primitives.py). The resource guard flags a declared-but-never-invoked rsync
+# mark, so the mark would fail the test even though the body passes.
 # Override the default 10s function timeout: a real create (tmux session +
 # asciinema connect, plus a one-time ttyd install on hosts that lack it)
 # followed by `mngr exec` and `mngr list` routinely exceeds 10s.
@@ -88,9 +92,13 @@ def test_create_with_idle_mode_and_timeout(e2e: E2eSession) -> None:
 
     # Verify the idle-mode/idle-timeout actually took effect on the created agent
     # (not just that the command exited 0). The list JSON surfaces the host's
-    # activity config per agent, so we can assert the concrete settings.
+    # activity config per agent, so we can assert the concrete settings. Scope to
+    # `--provider modal` (matching the sibling modal tests): an unscoped `mngr
+    # list` queries every enabled provider, and any that is unreachable in the
+    # test environment (e.g. aws without credentials) makes the command exit
+    # non-zero before it can print the agent we created.
     list_result = e2e.run(
-        "mngr list --format json",
+        "mngr list --provider modal --format json",
         comment="Verify the idle settings took effect on the modal host",
         timeout=120.0,
     )
@@ -108,7 +116,6 @@ def test_create_with_idle_mode_and_timeout(e2e: E2eSession) -> None:
     assert agent["host"]["provider_name"] == "modal", f"Unexpected provider: {agent['host']['provider_name']}"
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 # This is a purely local-provider test: it creates a local agent and inspects
@@ -116,13 +123,18 @@ def test_create_with_idle_mode_and_timeout(e2e: E2eSession) -> None:
 # `mngr list` no longer auto-creates the per-user Modal environment for
 # read-only commands, a local agent never invokes Modal, and the resource
 # guard would flag the mark as never-invoked.
+# It also carries no @pytest.mark.rsync: the worktree is created from a clean
+# tree (unlike test_create_with_no_ensure_clean, which dirties it), so there
+# are no uncommitted/untracked files to copy, `_transfer_extra_files` finds
+# nothing to transfer, and rsync is never invoked -- the guard would flag the
+# mark as never-invoked.
 # Override the default 10s function timeout: a real create (tmux session +
 # asciinema connect, plus a one-time ttyd install on hosts that lack it)
 # followed by `mngr list` routinely exceeds 10s.
 @pytest.mark.timeout(120)
 # Flaky: collateral damage from a leaked `mngr observe` process that the
 # system_interface's AgentManager spawns and doesn't always clean up (lives
-# in forever-claude-template/apps/system_interface). session_cleanup
+# in default-workspace-template/apps/system_interface). session_cleanup
 # attributes the leak to whichever test runs last in the offload sandbox;
 # this one happens to draw the short straw. Real fix lives in
 # system_interface's observe lifecycle, not here.
@@ -149,8 +161,11 @@ def test_create_with_extra_tmux_windows(e2e: E2eSession) -> None:
         )
     ).to_succeed()
 
-    # Verify the agent was created
-    list_result = e2e.run("mngr list --format json", comment="Verify agent was created")
+    # Verify the agent was created. Scope the listing to the local provider (the
+    # agent was created there) so discovery never queries unconfigured remote
+    # providers (aws/azure/gcp/...), which would otherwise make `mngr list` exit
+    # non-zero when their credentials are absent.
+    list_result = e2e.run("mngr list --provider local --format json", comment="Verify agent was created")
     expect(list_result).to_succeed()
     agents = json.loads(list_result.stdout)["agents"]
     matching = [a for a in agents if a["name"] == "my-task"]
@@ -251,8 +266,14 @@ def test_create_aborts_on_dirty_tree_by_default(e2e: E2eSession) -> None:
     expect(result.stderr).to_contain("uncommitted changes")
     expect(result.stderr).to_contain("--no-ensure-clean")
 
-    # The agent must not have been created.
-    list_result = e2e.run("mngr list --format json", comment="Verify no agent was created after the abort")
+    # The agent must not have been created. Scope the listing to the local
+    # provider (the aborted create's default target) so the verification does
+    # not fan out to credential-gated default cloud backends (e.g. aws), which
+    # would report themselves unavailable and make `mngr list` exit non-zero for
+    # reasons unrelated to this test. This mirrors test_invalid_provider_fails.
+    list_result = e2e.run(
+        "mngr list --provider local --format json", comment="Verify no agent was created after the abort"
+    )
     expect(list_result).to_succeed()
     agent_names = [a["name"] for a in json.loads(list_result.stdout)["agents"]]
     assert "my-task" not in agent_names, f"Agent should not exist after abort, got: {agent_names}"
@@ -263,7 +284,10 @@ def test_create_aborts_on_dirty_tree_by_default(e2e: E2eSession) -> None:
 # short-circuits inside the in-subprocess Modal SDK (it never shells out to the
 # guarded `modal` CLI binary, the only path the resource guard sees across the
 # subprocess boundary), so the modal mark would fail the never-invoked guard.
-@pytest.mark.rsync
+# No @pytest.mark.rsync either: creating a local agent from this git repo uses
+# the GIT_WORKTREE transfer mode (git projects, same host), which never invokes
+# the rsync binary -- rsync transfer is reserved for non-git projects -- so the
+# rsync mark would fail the resource guard's never-invoked check.
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -299,15 +323,14 @@ def test_create_with_connect_command(e2e: E2eSession) -> None:
     assert len(matching) == 1
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-# No @pytest.mark.modal here (unlike the sibling tests): this test creates a
-# local command agent and only contacts Modal through `mngr list`'s discovery
-# path, which runs the Modal Python SDK inside the mngr subprocess. The resource
-# guard only observes Modal usage via the `modal` CLI binary (PATH wrapper) or
-# the in-process SDK monkeypatch -- neither of which a subprocess SDK call
-# trips -- so the mark would fail the guard's NEVER_INVOKED check.
+# No @pytest.mark.rsync: this creates a local (same-host) command agent in a git
+# repo, which transfers via GIT_WORKTREE -- rsync is explicitly rejected for git
+# repos (see cli/create.py), so the create never invokes rsync and the mark would
+# fail the resource guard's NEVER_INVOKED check.
+# No @pytest.mark.modal either: the agent is local and the listing below is scoped
+# to `--provider local`, so nothing in the test body ever contacts Modal.
 # The --message path starts the agent, waits for its ready signal, and only
 # then sends the message (see api/create.py). That ready-signal dance makes
 # create slower than the sibling tests, so the default 10s function timeout is
@@ -331,8 +354,17 @@ def test_create_with_message(e2e: E2eSession) -> None:
     # Verify the create output confirms the message was sent
     expect(create_result.stderr).to_contain("Sending initial message")
 
-    # Verify the agent was created
-    list_result = e2e.run("mngr list --format json", comment="Verify agent created with initial message")
+    # Verify the agent was created. Scope the listing to the local provider
+    # (where this default-provider agent lives): `mngr list` defaults to
+    # --on-error abort, so an unrelated enabled-but-unreachable provider (e.g. a
+    # Docker daemon that is not running, or an unconfigured cloud backend that is
+    # installed in the monorepo venv) would abort the whole listing with exit 6
+    # before the agent is ever reported. Listing just the local provider is the
+    # established pattern for this "was the agent created?" check (see
+    # test_errors.py) and fully covers "the agent is created and listed".
+    list_result = e2e.run(
+        "mngr list --provider local --format json", comment="Verify agent created with initial message"
+    )
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
     agents = parsed["agents"]

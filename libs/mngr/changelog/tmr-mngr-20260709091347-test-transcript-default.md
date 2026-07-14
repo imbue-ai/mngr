@@ -1,0 +1,1 @@
+Removed a superfluous `@pytest.mark.rsync` mark from the `test_transcript_default` release test. It runs entirely against a local claude agent and never invokes rsync, so the mark tripped the resource guard's "marked but never invoked" check and failed the otherwise-passing test (matching the earlier fix for the sibling transcript tests).

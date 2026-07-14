@@ -4,6 +4,18 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-13
+
+Creating a Lima VM no longer fails with a `UNIX_PATH_MAX=104 characters` error when your home path and mngr prefix are long. Lima names each VM's SSH socket after the instance name and rejects names that push that socket path over the OS limit; the instance name (`<prefix>host-<32-char id>`) could exceed it for longer usernames on longer-prefixed environments (e.g. `minds-staging-`). The random id portion is now shortened just enough to keep the socket path within the limit, leaving the name unchanged when it already fits. If the prefix plus `LIMA_HOME` leave no room at all, creation now fails early with a clear message instead of a cryptic limactl fatal error.
+
+## 2026-07-10
+
+Fixed a Lima workspace-creation failure that surfaced as a confusing `SSH host key error (Host key for 127.0.0.1 does not match.)`.
+
+The VM provisioning script installed the pre-trusted SSH host key *after* a network-dependent `apt-get install`, all under `set -e`. A transient Debian mirror hiccup (`apt-get` failing to fetch package indexes) would abort the whole script before the host key was installed, so the VM kept its default host key while mngr had already pinned the key it expected -- causing a strict host-key-check mismatch on connect.
+
+The host-key swap (and sshd tuning) now runs first, before any package fetch, so SSH host-key trust no longer depends on the network. The package install is additionally wrapped in a retry loop to ride out transient apt mirror failures; if it still fails, the error now surfaces clearly on an SSH-reachable host instead of as a host-key mismatch.
+
 ## 2026-07-06
 
 Lima hosts can now be renamed. `LimaProviderInstance.rename_host` updates the logical host name on the host record (a local, offline-writable store), so it works whether or not the VM is running.

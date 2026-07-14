@@ -29,8 +29,10 @@ from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
 from imbue.minds.desktop_client.workspace_color import normalize_workspace_color
 from imbue.minds.desktop_client.workspace_color import pick_unused_create_color
 from imbue.minds.primitives import AIProvider
+from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
+from imbue.minds.primitives import default_docker_runtime
 from imbue.mngr.primitives import AgentId
 
 # The hand-written Tailwind v4 source. Holds the :root design tokens (the
@@ -225,7 +227,7 @@ def test_render_create_form_has_default_values() -> None:
     html = render_create_form()
     # The repository git URL still has a hardcoded fallback (in the advanced
     # view); the compute provider select is present.
-    assert "forever-claude-template" in html
+    assert "default-workspace-template" in html
     assert "launch_mode" in html
 
 
@@ -321,6 +323,27 @@ def test_render_create_form_contains_ai_provider_options() -> None:
     html = render_create_form()
     for provider in AIProvider:
         assert f'value="{provider.value}"' in html
+
+
+def test_render_create_form_contains_docker_runtime_options() -> None:
+    html = render_create_form()
+    for runtime in DockerRuntime:
+        assert f'value="{runtime.value}"' in html
+
+
+def test_render_create_form_defaults_docker_runtime_to_platform_value() -> None:
+    # The runtime select pre-selects the platform-appropriate default (runc on
+    # macOS, runsc on Linux) so the form works out of the box on either host.
+    html = render_create_form()
+    assert f'value="{default_docker_runtime().value}" selected' in html
+
+
+def test_render_create_form_selects_specified_docker_runtime() -> None:
+    # Pick the runtime that is NOT this platform's default so the "selection
+    # honored over the default" assertion is meaningful on both macOS and Linux.
+    non_default = DockerRuntime.RUNSC if default_docker_runtime() is DockerRuntime.RUNC else DockerRuntime.RUNC
+    html = render_create_form(docker_runtime=non_default)
+    assert f'value="{non_default.value}" selected' in html
 
 
 def test_render_create_form_defaults_ai_provider_to_imbue_cloud() -> None:
@@ -434,14 +457,14 @@ def test_render_create_form_honors_workspace_env_vars_when_opted_in(monkeypatch:
     """With the explicit opt-in, the MINDS_WORKSPACE_* env vars pre-fill the form.
 
     Used by ``just minds-start`` (and the e2e runner) to point the form at the
-    operator's local FCT worktree + current branch so the dev-iteration loop is
+    operator's local DEFAULT_WORKSPACE_TEMPLATE worktree + current branch so the dev-iteration loop is
     one click.
     """
     monkeypatch.setenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", "1")
-    monkeypatch.setenv("MINDS_WORKSPACE_GIT_URL", "/local/fct/path")
+    monkeypatch.setenv("MINDS_WORKSPACE_GIT_URL", "/local/default_workspace_template/path")
     monkeypatch.setenv("MINDS_WORKSPACE_BRANCH", "mngr/some-feature")
     html = render_create_form()
-    assert "/local/fct/path" in html
+    assert "/local/default_workspace_template/path" in html
     assert "mngr/some-feature" in html
 
 
@@ -452,15 +475,15 @@ def test_render_create_form_honors_workspace_env_vars_on_staging_when_opted_in(
 
     Regression test: staging previously dropped MINDS_WORKSPACE_* unconditionally,
     so ``just minds-start`` against staging silently fell back to the public
-    GitHub FCT on ``main`` -- meaning local FCT changes could never be tested
+    GitHub DEFAULT_WORKSPACE_TEMPLATE on ``main`` -- meaning local DEFAULT_WORKSPACE_TEMPLATE changes could never be tested
     against staging.
     """
     monkeypatch.setenv("MINDS_ROOT_NAME", "minds-staging")
     monkeypatch.setenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", "1")
-    monkeypatch.setenv("MINDS_WORKSPACE_GIT_URL", "/local/fct/path")
+    monkeypatch.setenv("MINDS_WORKSPACE_GIT_URL", "/local/default_workspace_template/path")
     monkeypatch.setenv("MINDS_WORKSPACE_BRANCH", "mngr/some-feature")
     html = render_create_form()
-    assert "/local/fct/path" in html
+    assert "/local/default_workspace_template/path" in html
     assert "mngr/some-feature" in html
 
 
@@ -477,13 +500,13 @@ def test_render_create_form_ignores_workspace_env_vars_without_opt_in_on_shared_
     """
     monkeypatch.delenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", raising=False)
     monkeypatch.setenv("MINDS_ROOT_NAME", "minds-staging")
-    monkeypatch.setenv("MINDS_WORKSPACE_GIT_URL", "/local/fct/path")
+    monkeypatch.setenv("MINDS_WORKSPACE_GIT_URL", "/local/default_workspace_template/path")
     monkeypatch.setenv("MINDS_WORKSPACE_BRANCH", "mngr/some-feature")
     html = render_create_form()
-    assert "/local/fct/path" not in html
+    assert "/local/default_workspace_template/path" not in html
     assert "mngr/some-feature" not in html
     # And the hardcoded git-URL fallback DOES appear (form is still usable).
-    assert "forever-claude-template" in html
+    assert "default-workspace-template" in html
 
 
 def test_render_create_form_ignores_workspace_env_vars_without_opt_in_on_dev_tier(
@@ -873,11 +896,97 @@ def test_render_recovery_page_script_branches_on_dispatch_tier() -> None:
         "'interface_unresponsive'",
         "'host_unresponsive'",
         "'backend_unreachable'",
+        "'indeterminate'",
     ):
         assert tier in html, f"recovery page JS missing branch for {tier}"
     # The shared landing places for each branch.
     assert "renderUnresponsive" in html
     assert "renderBackendUnreachable" in html
+    assert "renderReconnecting" in html
+
+
+def test_render_recovery_page_indeterminate_renders_reconnecting_not_a_verdict() -> None:
+    """The INDETERMINATE tier keeps checking instead of rendering a verdict.
+
+    When the probe timed out or the snapshot is stale, the page must not auto-
+    dispatch a restart or show a restart verdict -- it renders the live
+    "reconnecting" state and re-probes slowly. The branch must come before the
+    auto-dispatch tiers so no restart fires off non-evidence.
+    """
+    html = render_recovery_page(
+        agent_id=_AGENT_A,
+        return_to="",
+        initial_status="stuck",
+        initial_error="",
+    )
+    apply_start = html.find("function applyHealth(")
+    apply_block = html[apply_start : html.find("function ", apply_start + 1)]
+    assert "'indeterminate'" in apply_block
+    assert "renderReconnecting()" in apply_block
+    assert "scheduleIndeterminateReprobe(autoDispatch)" in apply_block
+    assert apply_block.find("'indeterminate'") < apply_block.find("postRestart")
+    # The indeterminate branch must precede the restart_failed (!autoDispatch)
+    # branch so an indeterminate result on that entry also keeps checking rather
+    # than rendering the "Workspace unresponsive" verdict off non-evidence.
+    assert apply_block.find("'indeterminate'") < apply_block.find("if (!autoDispatch)")
+    # renderReconnecting shows a spinner and no restart button, and arms the poll.
+    recon_start = html.find("function renderReconnecting")
+    recon_block = html[recon_start : html.find("function ", recon_start + 1)]
+    assert "show(hostBtn, false)" in recon_block
+    assert "armHealthyPoll()" in recon_block
+
+
+def test_render_recovery_page_dropped_probe_request_reconnects_not_a_verdict() -> None:
+    """A probe request that fails outright must reconnect-and-retry, not dead-end.
+
+    This is the post-macOS-sleep strand: Chromium aborts the in-flight health
+    fetch when the machine suspends, so ``fetchHealth`` rejects. The old handler
+    rendered the terminal "Workspace unresponsive" verdict and never re-probed,
+    stranding the user even after the workspace came back. The rejection handler
+    must instead render the live "reconnecting" state and schedule a retry
+    (preserving autoDispatch), so the cheap liveness poll returns the user home
+    and the slow re-probe converges to a real tier.
+    """
+    html = render_recovery_page(
+        agent_id=_AGENT_A,
+        return_to="https://example.test/workspace",
+        initial_status="stuck",
+        initial_error="",
+    )
+    # runProbe contains an inline ``function (data)`` callback, so slice to the
+    # next top-level statement (the hostBtn click handler) rather than the next
+    # ``function `` token.
+    probe_start = html.find("function runProbe(")
+    probe_block = html[probe_start : html.find("hostBtn.addEventListener", probe_start)]
+    # The success path still applies the health payload...
+    assert "applyHealth(data, autoDispatch)" in probe_block
+    # ...and the rejection path reconnects + retries instead of a static verdict.
+    assert "renderReconnecting()" in probe_block
+    assert "scheduleIndeterminateReprobe(autoDispatch)" in probe_block
+    assert "renderUnresponsive()" not in probe_block
+
+
+def test_render_recovery_page_every_wait_state_arms_the_homeward_poll() -> None:
+    """No recovery state is a dead end: each waiting state arms the cheap liveness poll.
+
+    This is the fix for the post-macOS-sleep "Workspace unresponsive" strand: a
+    workspace that comes back on its own must return the user home without any
+    action. Every terminal/waiting render arms the poll, and the stuck entry arms
+    it before the slow heavy probe even runs (cheap-probe-first).
+    """
+    html = render_recovery_page(
+        agent_id=_AGENT_A,
+        return_to="",
+        initial_status="stuck",
+        initial_error="",
+    )
+    for fn in ("renderUnresponsive", "renderDispatchError", "renderReconnecting", "renderBackendUnreachable"):
+        start = html.find("function " + fn)
+        block = html[start : html.find("function ", start + 1)]
+        assert "armHealthyPoll()" in block, f"{fn} must arm the homeward poll so it is not a dead end"
+    # Cheap-probe-first: the stuck entry arms the poll before running the heavy probe.
+    entry = html[html.rfind("if (initialStatus === 'restarting')") :]
+    assert entry.find("armHealthyPoll();") < entry.rfind("runProbe(true);")
 
 
 def test_render_recovery_page_backend_unreachable_offers_retry_not_restart() -> None:
@@ -912,12 +1021,13 @@ def test_render_recovery_page_backend_unreachable_offers_retry_not_restart() -> 
     # Diagnostics are suppressed on this tier (the cause is the external backend,
     # shown verbatim, not anything the in-container probes inspect).
     assert "show(debugDetailsEl, false)" in provider_block
-    # The backend_unreachable branch arms the healthy-poll (auto-return when the
-    # backend recovers) and returns before any restart dispatch.
+    # The render arms the cheap liveness poll so the page auto-returns the user
+    # once the backend recovers and the tracker flips HEALTHY.
+    assert "armHealthyPoll()" in provider_block
+    # The backend_unreachable branch returns before any restart dispatch.
     apply_start = html.find("function applyHealth(")
     apply_block = html[apply_start : html.find("function ", apply_start + 1)]
     assert apply_block.find("'backend_unreachable'") < apply_block.find("postRestart")
-    assert "scheduleHealthyPoll()" in apply_block
 
 
 def test_render_recovery_page_loading_hides_diagnostic_dropdown() -> None:

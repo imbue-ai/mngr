@@ -1,0 +1,1 @@
+Scope the `test_gc_dry_run` e2e verification to `mngr list --provider modal` so that the "dry run changed nothing" check confirms the Modal agent survived without failing when an unrelated provider backend (e.g. AWS) is enabled but unauthenticated in the test environment.

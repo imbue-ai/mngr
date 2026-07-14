@@ -96,7 +96,7 @@ class SliceReserveOutputError(BareMetalProvisioningError):
 
 
 class BoxImageCacheError(ImbueCloudError):
-    """Raised when a box-local cached-FCT-image operation (lock, save, load, disk) fails."""
+    """Raised when a box-local cached-default-workspace-template-image operation (lock, save, load, disk) fails."""
 
 
 class InvalidBuildArgError(ImbueCloudError, ValueError):

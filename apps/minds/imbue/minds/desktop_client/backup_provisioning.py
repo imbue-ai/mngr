@@ -15,8 +15,8 @@ carries no repo-init logic. Concretely, enabling backups:
    create/reuse a per-workspace R2 bucket + readwrite key; ``API_KEY``:
    from the user's free-form env block),
 2. generates a random per-workspace ``RESTIC_PASSWORD``,
-3. ``restic init``s the repo using the user's master password (or empty for
-   the ``no_password`` encryption method),
+3. ``restic init``s the repo using the user's master password (which may be
+   empty),
 4. ``restic key add``s the random per-workspace password,
 5. writes the canonical ``restic.env`` (repo + creds + random password) to
    the minds-side store (see ``backup_env_store``), and
@@ -31,6 +31,8 @@ import base64
 import os
 import secrets
 import shlex
+from datetime import datetime
+from datetime import timezone
 from typing import Final
 
 from loguru import logger
@@ -44,6 +46,9 @@ from imbue.imbue_common.logging import log_span
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client import restic_cli
+from imbue.minds.desktop_client.backup_env_store import ENV_ARCHIVE_TIMESTAMP_FORMAT
+from imbue.minds.desktop_client.backup_env_store import archive_canonical_env
+from imbue.minds.desktop_client.backup_env_store import env_content_sha256
 from imbue.minds.desktop_client.backup_env_store import parse_restic_env
 from imbue.minds.desktop_client.backup_env_store import read_canonical_env
 from imbue.minds.desktop_client.backup_env_store import write_canonical_env
@@ -80,7 +85,7 @@ class BackupSetupRequest(FrozenModel):
         default=None,
         description=(
             "The user's master/recovery password used (only) to `restic init` the repo. None means "
-            "the no_password encryption method -- the repo is initialized with an empty password. "
+            "the master password is empty -- the repo is initialized with an empty password. "
             "This is never written into the workspace; the workspace gets its own random password."
         ),
     )
@@ -140,19 +145,24 @@ def build_canonical_env_content(
 # ---------------------------------------------------------------------------
 
 
-def _run_mngr_exec(
+def run_mngr_exec_on_agent(
     agent_id: AgentId,
     command_str: str,
     *,
     parent_cg: ConcurrencyGroup | None,
+    timeout_seconds: float = _MNGR_EXEC_TIMEOUT_SECONDS,
 ) -> FinishedProcess:
-    """Run a single shell command on the agent's host via ``mngr exec``."""
-    name = "backup-inject"
+    """Run a single shell command on the agent's host via ``mngr exec``.
+
+    Shared by env injection, the backup-service verification check, and the
+    backup-service update scripts; the caller inspects the returned process.
+    """
+    name = "backup-exec"
     cg = parent_cg.make_concurrency_group(name=name) if parent_cg is not None else ConcurrencyGroup(name=name)
     with cg:
         return cg.run_process_to_completion(
             command=[MNGR_BINARY, "exec", str(agent_id), command_str],
-            timeout=_MNGR_EXEC_TIMEOUT_SECONDS,
+            timeout=timeout_seconds,
             is_checked_after=False,
         )
 
@@ -164,21 +174,37 @@ def _write_remote_file(
     *,
     mode: str | None,
     parent_cg: ConcurrencyGroup | None,
+    rotate_timestamp: str | None = None,
 ) -> None:
     """Write ``content`` to ``remote_path`` (relative to the agent work_dir) via mngr exec.
 
     The content is base64-encoded so arbitrary bytes (newlines, quotes,
     secrets) survive the shell round-trip intact. The base64 alphabet
     contains no shell-significant characters, so single-quoting it is safe.
+
+    When ``rotate_timestamp`` is given, an existing file whose content differs
+    from the new content is first moved aside to ``<path>.<timestamp>`` so the
+    old configuration stays recoverable; an identical existing file is left in
+    place unrotated (idempotent re-injection must not accumulate copies).
     """
     encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
     parent_dir = os.path.dirname(remote_path) or "."
-    chmod_suffix = f" && chmod {mode} {shlex.quote(remote_path)}" if mode is not None else ""
+    quoted_path = shlex.quote(remote_path)
+    chmod_suffix = f" && chmod {mode} {quoted_path}" if mode is not None else ""
+    rotate_prefix = ""
+    if rotate_timestamp is not None:
+        new_sha = env_content_sha256(content)
+        rotated_path = shlex.quote(f"{remote_path}.{rotate_timestamp}")
+        rotate_prefix = (
+            f'if [ -f {quoted_path} ] && [ "$(sha256sum {quoted_path} | cut -d\' \' -f1)" != "{new_sha}" ]; '
+            f"then mv {quoted_path} {rotated_path}; fi && "
+        )
     command_str = (
         f"mkdir -p {shlex.quote(parent_dir)} && "
-        f"printf %s '{encoded}' | base64 -d > {shlex.quote(remote_path)}{chmod_suffix}"
+        f"{rotate_prefix}"
+        f"printf %s '{encoded}' | base64 -d > {quoted_path}{chmod_suffix}"
     )
-    result = _run_mngr_exec(agent_id, command_str, parent_cg=parent_cg)
+    result = run_mngr_exec_on_agent(agent_id, command_str, parent_cg=parent_cg)
     if result.returncode != 0:
         raise BackupProvisioningError(
             f"Failed to write {remote_path} on agent {agent_id}: {result.stderr.strip() or result.stdout.strip()}"
@@ -186,8 +212,20 @@ def _write_remote_file(
 
 
 def _inject_canonical_env(agent_id: AgentId, content: str, *, parent_cg: ConcurrencyGroup | None) -> None:
-    """Inject the canonical restic.env into the workspace's runtime/secrets/restic.env."""
-    _write_remote_file(agent_id, _RESTIC_ENV_REMOTE_PATH, content, mode=_RESTIC_ENV_MODE, parent_cg=parent_cg)
+    """Inject the canonical restic.env into the workspace's runtime/secrets/restic.env.
+
+    An existing workspace copy with different content is rotated aside to
+    ``restic.env.<timestamp>`` first, so the previous configuration is
+    recoverable if something goes wrong.
+    """
+    _write_remote_file(
+        agent_id,
+        _RESTIC_ENV_REMOTE_PATH,
+        content,
+        mode=_RESTIC_ENV_MODE,
+        parent_cg=parent_cg,
+        rotate_timestamp=datetime.now(timezone.utc).strftime(ENV_ARCHIVE_TIMESTAMP_FORMAT),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -340,3 +378,86 @@ def configure_backups_for_host(
         write_canonical_env(paths, agent_id, canonical_env)
         _inject_canonical_env(agent_id, canonical_env, parent_cg=parent_cg)
         logger.debug("Injected restic backup config into agent {}", agent_id)
+
+
+def reinject_canonical_env(
+    *,
+    agent_id: AgentId,
+    paths: WorkspacePaths,
+    parent_cg: ConcurrencyGroup | None = None,
+) -> None:
+    """Re-inject the existing canonical env into the workspace (repair a drifted/missing copy).
+
+    Raises ``BackupProvisioningError`` when no canonical env exists (nothing
+    to repair) or the injection fails. A workspace copy with different content
+    is rotated aside to ``restic.env.<timestamp>`` first.
+    """
+    canonical_env = read_canonical_env(paths, agent_id)
+    if canonical_env is None:
+        raise BackupProvisioningError(f"No canonical restic.env exists for {agent_id}; nothing to re-inject")
+    _inject_canonical_env(agent_id, canonical_env, parent_cg=parent_cg)
+
+
+def disable_backups_for_host(
+    *,
+    agent_id: AgentId,
+    paths: WorkspacePaths,
+    parent_cg: ConcurrencyGroup | None = None,
+) -> None:
+    """Turn a workspace's backups off: archive the canonical env, rotate the workspace copy aside.
+
+    The canonical env moves to the minds-side archive (old snapshots stay
+    reachable through it) and the workspace's ``restic.env`` is rotated to
+    ``restic.env.<timestamp>`` -- a missing file means "not configured", so the
+    host-backup service goes idle and the rotated copy cannot be re-adopted.
+    Idempotent: disabling an already-disabled workspace is a no-op.
+    """
+    with log_span("Disabling backups for agent {}", agent_id):
+        archived_path = archive_canonical_env(paths, agent_id, now=datetime.now(timezone.utc))
+        if archived_path is not None:
+            logger.info("Archived canonical restic.env for {} to {}", agent_id, archived_path.name)
+        quoted_path = shlex.quote(_RESTIC_ENV_REMOTE_PATH)
+        rotated_path = shlex.quote(
+            f"{_RESTIC_ENV_REMOTE_PATH}.{datetime.now(timezone.utc).strftime(ENV_ARCHIVE_TIMESTAMP_FORMAT)}"
+        )
+        command_str = f"if [ -f {quoted_path} ]; then mv {quoted_path} {rotated_path}; fi"
+        result = run_mngr_exec_on_agent(agent_id, command_str, parent_cg=parent_cg)
+        if result.returncode != 0:
+            raise BackupProvisioningError(
+                f"Failed to rotate {_RESTIC_ENV_REMOTE_PATH} aside on agent {agent_id}: "
+                f"{result.stderr.strip() or result.stdout.strip()}"
+            )
+
+
+def change_backup_destination_for_host(
+    *,
+    agent_id: AgentId,
+    host_id: str,
+    request: BackupSetupRequest,
+    imbue_cloud_cli: ImbueCloudCli | None,
+    paths: WorkspacePaths,
+    parent_cg: ConcurrencyGroup | None = None,
+) -> None:
+    """Point a workspace's backups at a new destination via fresh provisioning.
+
+    Archives the existing canonical env minds-side (the old repository stays
+    reachable through the archive), then runs the ordinary idempotent
+    provisioning against the new inputs: new random per-workspace password,
+    ``restic init`` with the master (or empty) password, ``restic key add``,
+    canonical env write, and injection (which rotates the workspace copy).
+    Existing snapshots stay in the old repository; the new destination starts
+    fresh.
+    """
+    if request.backup_provider is BackupProvider.CONFIGURE_LATER:
+        raise BackupProvisioningError("Changing the backup destination requires a real backup provider")
+    archived_path = archive_canonical_env(paths, agent_id, now=datetime.now(timezone.utc))
+    if archived_path is not None:
+        logger.info("Archived previous canonical restic.env for {} to {}", agent_id, archived_path.name)
+    configure_backups_for_host(
+        agent_id=agent_id,
+        host_id=host_id,
+        request=request,
+        imbue_cloud_cli=imbue_cloud_cli,
+        paths=paths,
+        parent_cg=parent_cg,
+    )

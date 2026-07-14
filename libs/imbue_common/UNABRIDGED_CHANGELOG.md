@@ -4,6 +4,16 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-13
+
+The trailing-comments ratchet (PREVENT_TRAILING_COMMENTS) no longer misfires on `PR #NNNN` references inside comment or docstring prose. The unanchored pattern treated the `#` of a PR number as a trailing comment (even on comment-only lines, since a match can start mid-line); a negative lookbehind now exempts a `#` immediately preceded by `PR `, alongside the existing hex-color and `ty: ignore` exemptions.
+
+`setup_sentry` now accepts an `ignored_loggers` argument: glob patterns for stdlib logger names whose records must never become Sentry events or breadcrumbs. This is needed because Sentry's default logging integration patches `logging.Logger.callHandlers` at the class level, so it captures a logger's ERROR records as events even when that logger has `propagate=False`. Callers that already route a noisy third-party logger's output elsewhere (e.g. into loguru) can now pass those logger names so Sentry drops the raw records instead of flooding on already-handled noise.
+
+## 2026-07-09
+
+- Added: `LowerCaseStrEnum` in `imbue.imbue_common.enums` -- the lowercase sibling of `UpperCaseStrEnum`, for enums whose values are an externally visible, already-lowercase wire format (first used by the pool bake / destroy outcome statuses in `mngr_imbue_cloud`).
+
 ## 2026-07-06
 
 Added a shared Sentry error-reporting library under `imbue.imbue_common.sentry`, so multiple Imbue Python processes can report errors without duplicating the machinery. It packages the generic pieces that previously lived in the minds backend: the loguru-to-Sentry event/breadcrumb handlers, the unsigned-S3 attachment uploader, the per-exception rate limiter, the oversized-event (HTTP 413) transport, the `before_send` chain (including the automatic-reporting consent gate and interrupt/clean-shutdown filtering), manual bug-report submission, and a parameterized `setup_sentry`.

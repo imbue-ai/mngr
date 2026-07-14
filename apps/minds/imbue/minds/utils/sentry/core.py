@@ -16,6 +16,7 @@ from imbue.minds.bootstrap import is_minds_root_name_set_to_active_env
 from imbue.minds.bootstrap import resolve_minds_root_name
 from imbue.minds.build_info import resolve_git_sha
 from imbue.minds.build_info import resolve_release_id
+from imbue.mngr.utils.logging import SENTRY_IGNORED_STDLIB_LOGGER_PATTERNS
 from imbue.mngr_latchkey.sentry import ForwardSentryConsent
 from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_CONSENT_FILE_ENV_VAR
 from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_DSN_ENV_VAR
@@ -73,12 +74,16 @@ _S3_ATTACHMENT_BUCKET_BY_ENVIRONMENT: Mapping[SentryDeployEnvironment, str | Non
 
 
 # Minds writes all of its logs flat into a single logs directory (``~/.minds/logs``):
-#   * ``minds-events.jsonl``       -- the live Python backend log (the loguru JSONL sink)
-#   * ``minds-events.jsonl.<ts>``  -- rotated Python backend logs (timestamp-suffixed by make_jsonl_file_sink)
-#   * ``minds.log``                -- the Electron main-process log
-# None of these are gzip-compressed on disk, so every file is compressed on upload.
+#   * ``minds-events.jsonl``      -- the live Python backend log (the loguru JSONL sink)
+#   * ``minds-events.jsonl.<ts>`` -- rotated Python backend logs (timestamp-suffixed, uncompressed)
+#   * ``minds.log``               -- the backend subprocess's stdout/stderr, written by the Electron shell
+#   * ``minds.log.<ts>.gz``       -- rotated (gzipped) backend logs, written by the Electron shell
+#   * ``electron.log``            -- the Electron main-process log
+#   * ``electron.log.<ts>.gz``    -- rotated (gzipped) Electron main-process logs
+# The live/current files are uncompressed on disk (compressed on upload); the rotated ``*.gz``
+# files are already gzipped by the Electron rotation helper, so they are uploaded as-is.
 _MINDS_LOG_ATTACHMENT_GROUPS = (
-    # The live Python backend log (mutable -- re-upload on every report).
+    # The live Python backend jsonl log (mutable -- re-upload on every report).
     LogAttachmentGroup(
         group_name="live_logs",
         glob="*.jsonl",
@@ -86,7 +91,7 @@ _MINDS_LOG_ATTACHMENT_GROUPS = (
         is_compressed=True,
         is_immutable=False,
     ),
-    # Rotated Python backend logs (immutable -- upload once and reuse the cached key).
+    # Rotated Python backend jsonl logs (immutable -- upload once and reuse the cached key).
     LogAttachmentGroup(
         group_name="rotated_logs",
         glob="*.jsonl.*",
@@ -94,13 +99,37 @@ _MINDS_LOG_ATTACHMENT_GROUPS = (
         is_compressed=True,
         is_immutable=True,
     ),
-    # The Electron main-process log.
+    # The current backend stdout/stderr log (minds.log).
     LogAttachmentGroup(
-        group_name="electron_logs",
-        glob="*.log",
+        group_name="backend_logs",
+        glob="minds.log",
         max_file_count=MAX_SENTRY_LIST_SIZE,
         is_compressed=True,
         is_immutable=False,
+    ),
+    # The most recent rotated backend log (already gzipped on disk, so not re-compressed).
+    LogAttachmentGroup(
+        group_name="backend_rotated_logs",
+        glob="minds.log.*.gz",
+        max_file_count=1,
+        is_compressed=False,
+        is_immutable=True,
+    ),
+    # The current Electron main-process log (electron.log).
+    LogAttachmentGroup(
+        group_name="electron_logs",
+        glob="electron.log",
+        max_file_count=MAX_SENTRY_LIST_SIZE,
+        is_compressed=True,
+        is_immutable=False,
+    ),
+    # The most recent rotated Electron log (already gzipped on disk, so not re-compressed).
+    LogAttachmentGroup(
+        group_name="electron_rotated_logs",
+        glob="electron.log.*.gz",
+        max_file_count=1,
+        is_compressed=False,
+        is_immutable=True,
     ),
 )
 
@@ -210,4 +239,8 @@ def setup_sentry(
         is_error_reporting_enabled=is_error_reporting_enabled,
         is_log_inclusion_enabled=is_log_inclusion_enabled,
         s3_attachment_bucket=_s3_attachment_bucket_for_environment(environment),
+        # paramiko/pyinfra log handled SSH connection-failure noise at ERROR via stdlib logging; the
+        # minds backend brokers cross-workspace reverse tunnels through the same paramiko machinery,
+        # so ignore those loggers to keep Sentry from flooding on already-handled failures.
+        ignored_loggers=SENTRY_IGNORED_STDLIB_LOGGER_PATTERNS,
     )

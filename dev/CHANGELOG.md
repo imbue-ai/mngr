@@ -4,6 +4,61 @@ A concise, human-friendly summary of changes for repo-level dev tooling: CI work
 
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
+## 2026-07-13
+
+### Added
+
+- Added: `blueprint/mngr-forward-http2/` — implementation plan for terminating TLS and negotiating HTTP/2 at the `mngr forward` proxy so the workspace UI is no longer capped by Chromium's per-origin HTTP/1.1 connection limit.
+- Added: `blueprint/imbue-cloud-sticky-agent-labels/plan-imbue-cloud-sticky-agent-labels.md` — design plan for the imbue_cloud "husk" fix (persisting and re-attaching last-known agent identity so a transiently-unreachable leased workspace keeps its labels instead of collapsing to a label-less stub). Implementation lands in `libs/mngr_imbue_cloud`.
+- Added: `blueprint/forward-services-cache/` — spec for the `mngr_forward` fast-first-load fix (persist the resolver's per-agent service map to disk and seed from it at startup so a restored remote-mind window resolves at ~3s instead of the measured ~50s cold-stream wait, with the live `mngr event` stream as the correction path). Implementation ships on the same branch under `libs/mngr_forward/`.
+
+### Changed
+
+- Changed: The minds e2e snapshot build (`scripts/snapshot_minds_e2e_state.py`) now pins the create default to runc via `MINDS_DOCKER_RUNTIME_DEFAULT=RUNC`. The Modal snapshot sandbox has no gVisor, and the per-create runtime feature otherwise defaults the Linux create form to runsc and stacks the `docker_runsc` template, so the build's workspace creation failed with "unknown or invalid runtime name: runsc". The previous `MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME=runc` override could not fix this (an explicitly stacked template's docker_runtime outranks a provider-config env var in mngr's create-settings precedence) and was removed as redundant.
+
+## 2026-07-11
+
+### Added
+
+- Added: `scripts/rename_template_repo.py` — migration tool that renames the forever-claude-template repo to a new name. All case forms (kebab, snake, SNAKE_UPPER, Title, Pascal) are derived from `--new-name`; `--new-abbreviation` sets the shorthand that replaces `fct`/`FCT` (context-sensitive across snake, kebab, and CamelCase identifiers). Dry-run by default; `--apply` edits in place idempotently, `--check` verifies no live references remain (including CamelCase-embedded forms), `--show-diff` prints unified diffs. Historical records (changelog entries, `specs/`, `blueprint/`), vendored trees, and lockfiles are reported but never rewritten.
+- Added: `scripts/migrate_state_fct_to_default_workspace_template.sh` — developer-local state migration for the template rename (stale `.external_worktrees` removal, template checkout dir rename, git remote URLs, `apps/minds/.env` var rename, `__pycache__` sweep). Dry-run flag, idempotent; reports anything it is unsure about instead of touching it.
+
+### Changed
+
+- Changed: Repo-wide rename of forever-claude-template to default-workspace-template (justfile, CI workflows, scripts, Claude skills), applied mechanically by the new rename tool. The GitHub repo rename itself happens out of band.
+
+## 2026-07-10
+
+### Added
+
+- Added: `specs/discovery-log-cleanup.md` — plan for cleaning up discovery logging and provider treatment in the Minds app (once-per-process suppression of repeated provider-level discovery-error warnings in the three stream consumers, startup snapshots from `mngr observe --discovery-only` for skipped providers, always-write `[providers.aws-<region>]` blocks preserving `is_enabled`, and bouncing the observe child when the bootstrap's settings write changes the provider set).
+- Added: `blueprint/minds-inspirations/` — implementation plan and feature prompt for the minds "inspirations" feature. Inspirations let a running mind publish a clean, bootable snapshot of the apps it built to a new GitHub repo, and let another mind adapt one into itself. The plan records the design evolution: assembly delegated to a launch-task worker on an isolated worktree with a strict no-merge-back invariant, inline-chat confirmation, latchkey GitHub permissioning end-to-end (REST API calls via latchkey curl and the git push through the latchkey gateway's native git smart-HTTP proxying), a bespoke-thumbnail gate, and the incident fixes (destructive-merge data loss, `GH_TOKEN` shadowing, base-ref resolution on multi-root repos, welcome takeover). The implementation itself lives in `forever-claude-template` on the companion branch.
+
+## 2026-07-09
+
+### Added
+
+- Added: `just list-servers` and `just prep-server <server-id>` recipes wrapping the new env-aware `minds server {list,prep}` commands (DSN + pool SSH key resolved from the activated tier automatically). The `minds-justfile` skill doc was updated to match.
+- Added: `specs/backup-update-fixes/concise.md` and `specs/injected-backup-service/concise.md` — plans for the per-workspace backup health route (with master-password hash + rotation, fixed minimum backup version, `official` remote, snapshot-resume test rewrite) and the drift-detection + one-click converging update on running workspaces.
+
+### Changed
+
+- Changed: `destroy-pool-host` justfile recipe renamed to `destroy-pool-hosts` and now takes any number of pool-host ids (clean break, no alias). Forwards to `minds pool destroy`, which destroys all named slices in parallel after atomically claiming each row so a user lease cannot race the destroy. The `minds-justfile` skill doc was updated to match.
+- Changed: Pre-commit `regenerate-cli-docs` hook now also triggers on plugin CLI files (`libs/mngr_*/imbue/**/cli/*.py`), so editing a plugin's click commands can no longer leave the generated `libs/mngr/docs/commands/` reference stale until an unrelated PR trips the check.
+- Changed: `scripts/snapshot_minds_e2e_state.py`'s docs no longer hardcode stale snapshot image ids or describe the script as a one-off prototype — it is documented as the standing producer for the `build-minds-snapshot` CI stage, with instructions for minting an image id manually and running individual tests against it via `just test-offload-minds-snapshot <image-id> '--filter <test_name>'`.
+
+## 2026-07-08
+
+### Added
+
+- Added: `just tmr-mngr` and `just tmr-minds` recipes as the canonical per-suite flag sets for `mngr tmr` (the TMR workflow inputs mirror them). The minds recipe targets the `apps/minds` tree with the minds-tailored mapper prompt and defaults to the plain `@release` tests; the capability suites (snapshot/deployment/services) are documented as extra args needing their own secrets and setup.
+- Added: `tmr-minds-scheduled.yml` — the daily scheduled TMR run is split into two independent per-variant wrappers. `tmr-mngr-scheduled.yml` (renamed from the single `tmr-scheduled.yml`, at 08:00 UTC) and `tmr-minds-scheduled.yml` (09:00 UTC) each own a gate label (`tmr-mngr-periodic` / `tmr-minds-periodic`), concurrency group, and periodic PR, so the two suites schedule and review independently. The gate policy (auto-close a periodic PR older than 4 days, else skip) moved into a shared reusable workflow `tmr-gate.yml`, and `tmr.yml` gained a `periodic_label` input to route each variant's PR to its own gate.
+
+### Changed
+
+- Changed: `.github/workflows/tmr.yml` accepts `name`, `mapper_prompt`, and `reducer_prompt` inputs, so a dispatch can run a named TMR variant (e.g. `tmr-minds` over `apps/minds`) with its own branch/agent prefix and optional prompt-template overrides.
+- Changed: `minds-launch-to-msg.yml` freezes its `commit_sha` (mngr) and `template_ref` (forever-claude-template) inputs to full SHAs exactly once, in `check_should_run`, at run start. Inputs accept a full 40-char SHA, branch, or tag; every downstream job consumes the frozen SHAs instead of re-resolving. Fixes a race where a `template_ref=main` run could test a different FCT commit than the one recorded in the green marker and slack message (agent creation used the raw ref, resolved ~15-45 min after the pair-key fingerprint). Also cleaned up the workflow file (net -135 lines): deduplicated ref resolution into a single `resolve_ref` function, looped the ToDesktop secrets check, and replaced the hardcoded screenshot-prefix list in the summary manifest with a sorted glob. Caveat: SHAs must be full 40-hex and reachable from some ref; FCT-SHA creates need a binary built from mngr `02bb71b44` (2026-06-11) or later.
+
 ## 2026-07-07
 
 ### Changed

@@ -32,11 +32,12 @@ from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
 from imbue.minds.primitives import AIProvider
-from imbue.minds.primitives import BackupEncryptionMethod
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
+from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
+from imbue.minds.primitives import default_docker_runtime
 from imbue.minds.utils.sentry.frontend import frontend_sentry_browser_payload
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostName
@@ -277,14 +278,14 @@ def render_landing_page(
 # Hardcoded fallbacks for the workspace-creation form. Overridable via the
 # MINDS_WORKSPACE_* env vars only when the operator explicitly opts in -- see
 # ``_operator_workspace_default`` for the gating rationale.
-# Public alias: the default forever-claude-template repo URL. The pre-baked Lima
+# Public alias: the default-workspace-template repo URL. The pre-baked Lima
 # image gate (lima_image_prefetch) keys on this to recognize the default workspace.
-DEFAULT_FOREVER_CLAUDE_GIT_URL: Final[str] = "https://github.com/imbue-ai/forever-claude-template.git"
-_FALLBACK_GIT_URL: Final[str] = DEFAULT_FOREVER_CLAUDE_GIT_URL
-# Pin to an annotated FCT tag so a shipped binary clones the exact FCT
+DEFAULT_WORKSPACE_TEMPLATE_GIT_URL: Final[str] = "https://github.com/imbue-ai/default-workspace-template.git"
+_FALLBACK_GIT_URL: Final[str] = DEFAULT_WORKSPACE_TEMPLATE_GIT_URL
+# Pin to an annotated DEFAULT_WORKSPACE_TEMPLATE tag so a shipped binary clones the exact DEFAULT_WORKSPACE_TEMPLATE
 # snapshot it was verified against. Bump to a newer tag only after
 # re-verifying launch-to-msg CI against (this binary, the new tag).
-FALLBACK_BRANCH: Final[str] = "minds-v0.3.5"
+FALLBACK_BRANCH: Final[str] = "minds-v0.3.6"
 
 # Env var (set by ``just minds-start`` and the e2e workspace runner) that opts a
 # launch into the operator's local-worktree create-form defaults. Gating on an
@@ -293,7 +294,7 @@ FALLBACK_BRANCH: Final[str] = "minds-v0.3.5"
 # while a normal end-user ``minds run`` never honors a stray MINDS_WORKSPACE_*
 # left over in the operator's shell, on any tier. The previous tier-based gate
 # did the opposite: it blocked legitimate dev iteration on staging (forcing the
-# form back to the public GitHub FCT on ``main``) while leaving dev tiers exposed
+# form back to the public GitHub DEFAULT_WORKSPACE_TEMPLATE on ``main``) while leaving dev tiers exposed
 # to stray vars.
 _WORKSPACE_DEFAULTS_OPT_IN_ENV_VAR: Final[str] = "MINDS_USE_LOCAL_WORKSPACE_DEFAULTS"
 
@@ -302,7 +303,7 @@ def is_local_workspace_defaults_opt_in() -> bool:
     """Return whether the operator opted into local-worktree create-form defaults (the dev loop).
 
     True when ``MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1`` -- the same signal that
-    routes the create form at the operator's local FCT worktree. The pre-baked
+    routes the create form at the operator's local DEFAULT_WORKSPACE_TEMPLATE worktree. The pre-baked
     image gate treats this as "dev loop" and falls back to build-in-VM.
     """
     return os.environ.get(_WORKSPACE_DEFAULTS_OPT_IN_ENV_VAR) == "1"
@@ -312,7 +313,7 @@ def _operator_workspace_default(env_var: str, fallback: str) -> str:
     """Return ``env_var`` only when the operator explicitly opted in; else ``fallback``.
 
     The MINDS_WORKSPACE_GIT_URL / _BRANCH env vars wire the create-form
-    defaults to the operator's local FCT worktree. They are honored only when
+    defaults to the operator's local DEFAULT_WORKSPACE_TEMPLATE worktree. They are honored only when
     ``MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1`` is set in the same environment
     (``just minds-start`` and the e2e runner set it). An end-user ``minds run``
     never sets it, so a stray MINDS_WORKSPACE_* left in the shell is ignored on
@@ -415,10 +416,11 @@ def render_create_form(
     host_name: str = "",
     launch_mode: LaunchMode | None = None,
     ai_provider: AIProvider | None = None,
+    docker_runtime: DockerRuntime | None = None,
     backup_provider: BackupProvider | None = None,
-    backup_encryption_method: BackupEncryptionMethod | None = None,
     backup_api_key_env: str = "",
     has_saved_backup_password: bool = False,
+    is_master_password_set: bool = False,
     accounts: Sequence[object] | None = None,
     default_account_id: str = "",
     anthropic_api_key: str = "",
@@ -442,8 +444,7 @@ def render_create_form(
     follow the selected preset so the highlighted card matches what a plain
     submit would create: the ``remote`` preset maps to ``IMBUE_CLOUD`` for all
     three, the ``local`` preset to ``LIMA`` / ``SUBSCRIPTION`` /
-    ``CONFIGURE_LATER``. The backup encryption method defaults to
-    ``NO_PASSWORD``.
+    ``CONFIGURE_LATER``.
 
     ``selected_preset`` picks which preset card starts selected. When ``None``
     it defaults to ``remote`` on a fresh form (regardless of whether an account
@@ -454,9 +455,9 @@ def render_create_form(
     ``start_advanced`` opens the advanced view on first paint -- used when
     re-rendering a submit error, whose fields live there.
 
-    ``has_saved_backup_password`` toggles the master-password input between a
-    "enter a passphrase" field (no saved password yet) and a read-only
-    "a saved password will be used" indicator.
+    ``is_master_password_set`` renders the master-password input at all (a
+    still-empty master password never needs typing); ``has_saved_backup_password``
+    adds the "leave blank to use your saved password" helper under it.
 
     ``host_name`` is an optional explicit workspace name, exposed as a "Name"
     field in the advanced view. When empty the name is chosen automatically
@@ -490,13 +491,14 @@ def render_create_form(
         if ai_provider is not None
         else (AIProvider.IMBUE_CLOUD if is_remote_preset else AIProvider.SUBSCRIPTION)
     )
+    # The Docker container-runtime select defaults to the platform-appropriate
+    # value (runc on macOS, runsc on Linux). Only consumed when the compute
+    # provider is Docker; the form hides it otherwise.
+    effective_docker_runtime = docker_runtime if docker_runtime is not None else default_docker_runtime()
     effective_backup_provider = (
         backup_provider
         if backup_provider is not None
         else (BackupProvider.IMBUE_CLOUD if is_remote_preset else BackupProvider.CONFIGURE_LATER)
-    )
-    effective_backup_encryption = (
-        backup_encryption_method if backup_encryption_method is not None else BackupEncryptionMethod.NO_PASSWORD
     )
     return CATALOG.render(
         "pages.Create",
@@ -507,12 +509,13 @@ def render_create_form(
         selected_launch_mode=effective_launch_mode.value,
         ai_providers=list(AIProvider),
         selected_ai_provider=effective_ai_provider.value,
+        docker_runtimes=list(DockerRuntime),
+        selected_docker_runtime=effective_docker_runtime.value,
         backup_providers=list(BackupProvider),
         selected_backup_provider=effective_backup_provider.value,
-        backup_encryption_methods=list(BackupEncryptionMethod),
-        selected_backup_encryption_method=effective_backup_encryption.value,
         backup_api_key_env=backup_api_key_env,
         has_saved_backup_password=has_saved_backup_password,
+        is_master_password_set=is_master_password_set,
         accounts=accounts or [],
         default_account_id=default_account_id,
         anthropic_api_key=anthropic_api_key,
@@ -707,6 +710,7 @@ def render_inbox_page(
     detail_html: str = "",
     is_empty: bool = False,
     auto_open: bool = True,
+    keep_open: bool = False,
 ) -> str:
     """Render the full inbox modal page served by ``GET /inbox``.
 
@@ -716,7 +720,11 @@ def render_inbox_page(
     fragment, or empty). ``is_empty`` is True when there are no
     pending requests and the layout collapses to a centered message.
     ``auto_open`` is the initial state of the "Auto-open on new
-    request" checkbox in the inbox header.
+    request" checkbox in the inbox header. ``keep_open`` is True only
+    when the user intentionally opened the whole inbox (via the
+    Requests button); when False, resolving a request via Approve/Deny
+    dismisses the whole window instead of advancing to the next
+    pending request.
     """
     return CATALOG.render(
         "pages.Inbox",
@@ -725,6 +733,7 @@ def render_inbox_page(
         detail_html=detail_html,
         is_empty=is_empty,
         auto_open=auto_open,
+        keep_open=keep_open,
     )
 
 
@@ -1121,6 +1130,38 @@ _RECOVERY_SCRIPT: Final[str] = """\
             });
           }, REFRESH_INTERVAL_MS);
         }
+        // The cheap liveness poll, idempotently armed. scheduleHealthyPoll re-hits
+        // the recovery route on a ~1s cadence; the route 302s to return_to the
+        // instant the background probe loop flips the tracker HEALTHY, so this sends
+        // the user home the moment the workspace answers -- regardless of which
+        // verdict (if any) is on screen. Every terminal state arms this, and the
+        // stuck entry arms it before the slow in-container probe even runs, so a
+        // healthy or self-recovering workspace is never stranded. A no-op when
+        // there is no return_to to go home to.
+        var healthyPollArmed = false;
+        function armHealthyPoll() {
+          if (healthyPollArmed || !returnTo) return;
+          healthyPollArmed = true;
+          scheduleHealthyPoll();
+        }
+        // While INDETERMINATE (no trustworthy evidence to classify), or after a
+        // probe request was dropped entirely (see runProbe), re-run the heavy probe
+        // on a slow cadence so we still converge to a real verdict if the workspace
+        // is genuinely wedged but host-reachable. Slow on purpose: each heavy probe
+        // can take tens of seconds, and the cheap liveness poll above already does
+        // the fast recovery work -- this is only the slow convergence path.
+        // Re-render via applyHealth (not renderLoading) so the "Reconnecting" state
+        // stays put while the background probe is in flight. ``autoDispatch`` is
+        // threaded through so a reprobe on the restart_failed entry (autoDispatch
+        // off) never starts auto-dispatching the restarts that entry suppresses.
+        var INDETERMINATE_REPROBE_MS = 8000;
+        function scheduleIndeterminateReprobe(autoDispatch) {
+          setTimeout(function () {
+            fetchHealth().then(function (data) { applyHealth(data, autoDispatch); }, function () {
+              scheduleIndeterminateReprobe(autoDispatch);
+            });
+          }, INDETERMINATE_REPROBE_MS);
+        }
 
 
         function renderLoading() {
@@ -1140,10 +1181,10 @@ _RECOVERY_SCRIPT: Final[str] = """\
           if (providerReasonEl) { providerReasonEl.textContent = ''; show(providerReasonEl, false); }
           latestHealth = null;
         }
-        // The shared "Workspace unresponsive" state -- shown for ambiguous-host
-        // states, after a restart failure, and whenever the container is live
-        // but unreachable (bouncing it would interrupt user agents, so we want
-        // explicit consent before doing so).
+        // The shared "Workspace unresponsive" state -- shown after a restart
+        // failure and for the host_unresponsive tier (container observed
+        // running but unreachable: bouncing it would interrupt user agents, so
+        // we want explicit consent before doing so).
         function renderUnresponsive() {
           titleEl.textContent = 'Workspace unresponsive';
           messageEl.textContent =
@@ -1155,6 +1196,34 @@ _RECOVERY_SCRIPT: Final[str] = """\
           hostBtn.classList.remove('secondary');
           show(hostBtn, true);
           show(reportBtn, true);
+          // Keep watching for self-recovery: the workspace may come back on its own
+          // (a slow cold boot, a healed network) while this consent page is shown,
+          // and the cheap liveness poll returns the user home the moment it does.
+          armHealthyPoll();
+        }
+        // INDETERMINATE: we lack trustworthy evidence to classify -- the
+        // in-container probe timed out (observed nothing), discovery has not
+        // re-observed the host since the outage began (so its host state may be
+        // stale), or the snapshot carries no observation of the container (host
+        // state UNKNOWN, transitional, or absent).
+        // Render neither a verdict nor a restart button, just a live
+        // "reconnecting" spinner. The cheap liveness poll (armed here) returns the
+        // user home the instant the workspace answers; a slow heavy re-probe
+        // converges to a real tier if it is genuinely down and a fresh snapshot
+        // later lands. A live GET / 200 short-circuits to HEALTHY upstream, so we
+        // only reach here without direct positive evidence.
+        function renderReconnecting() {
+          titleEl.textContent = 'Reconnecting to your workspace';
+          messageEl.textContent =
+            'This is taking longer than usual. We\\'ll reconnect you automatically as soon '
+            + 'as your workspace responds.';
+          show(spinnerEl, true);
+          show(errorEl, false);
+          show(hostBtn, false);
+          show(retryBtn, false);
+          show(reportBtn, true);
+          if (providerReasonEl) { providerReasonEl.textContent = ''; show(providerReasonEl, false); }
+          armHealthyPoll();
         }
         function renderDispatchError() {
           titleEl.textContent = 'Workspace unresponsive';
@@ -1165,6 +1234,7 @@ _RECOVERY_SCRIPT: Final[str] = """\
           hostBtn.classList.remove('secondary');
           show(hostBtn, true);
           show(reportBtn, true);
+          armHealthyPoll();
         }
         // The provider/backend hosting this workspace is unreachable or rejected
         // us (connector down, docker daemon stopped or paused, expired login,
@@ -1196,6 +1266,10 @@ _RECOVERY_SCRIPT: Final[str] = """\
           // in-container probes are moot -- the cause is the provider's own
           // error, shown verbatim above -- so suppress the Diagnostics disclosure.
           show(debugDetailsEl, false);
+          // Return the user to the workspace automatically once the backend
+          // recovers and the tracker flips HEALTHY (a resumed daemon, a restored
+          // login, a healed network all recover identically).
+          armHealthyPoll();
         }
 
         function postRestart(body) {
@@ -1223,22 +1297,21 @@ _RECOVERY_SCRIPT: Final[str] = """\
         }
 
         // Render (and, when ``autoDispatch``, dispatch a restart for) the tier in
-        // a host-health payload. The recovery page is only reached once discovery
-        // is fresh (the redirect is gated on freshness), so the classification is
-        // trustworthy and there is no transient awaiting-discovery state to
-        // converge through.
+        // a host-health payload. The page can be reached before discovery has
+        // re-observed the host after an outage (the STUCK redirect is no longer
+        // gated on freshness), so a classification the backend cannot yet trust
+        // arrives as the ``indeterminate`` tier -- handled below as a live
+        // "reconnecting" state rather than a verdict.
         function applyHealth(data, autoDispatch) {
           latestHealth = data || null;
           renderDebugMenu(latestHealth);
           var tier = data && data.dispatch_tier;
           // A backend-unreachable outcome short-circuits before any restart
           // dispatch on EVERY entry path: no restart can or should fire while the
-          // backend is unreachable or rejecting us. Render-only, and arm the
-          // background healthy-poll so the page auto-returns once the backend
-          // recovers (a resumed daemon and a restored login recover identically).
+          // backend is unreachable or rejecting us. Render-only; renderBackendUnreachable
+          // arms the healthy-poll so the page auto-returns once the backend recovers.
           if (tier === 'backend_unreachable') {
             renderBackendUnreachable(data);
-            scheduleHealthyPoll();
             return;
           }
           // The in-container probe shows the interface is actually answering
@@ -1253,25 +1326,41 @@ _RECOVERY_SCRIPT: Final[str] = """\
             scheduleRefresh();
             return;
           }
+          // No trustworthy evidence to classify (probe timed out, discovery has
+          // not re-observed the host since the outage, or the snapshot carries no
+          // observation of the container). Show a live "reconnecting"
+          // state and keep checking -- never a verdict or an auto-restart off
+          // non-evidence -- on EITHER entry path. Checked before the restart_failed
+          // branch below so an indeterminate result there also keeps checking
+          // rather than rendering a dead "Workspace unresponsive" verdict off
+          // non-evidence. The cheap liveness poll (armed by renderReconnecting)
+          // does the fast recovery; the slow re-probe converges to a real tier,
+          // preserving autoDispatch so the restart_failed entry stays no-dispatch.
+          if (tier === 'indeterminate') {
+            renderReconnecting();
+            scheduleIndeterminateReprobe(autoDispatch);
+            return;
+          }
           if (!autoDispatch) {
             // restart_failed entry: render unresponsive so the failure reason and
-            // the diagnostics list both stay visible.
+            // the diagnostics list both stay visible (renderUnresponsive keeps the
+            // healthy-poll running so a self-recovery still returns the user home).
             renderUnresponsive();
             return;
           }
-          // ``auto_dispatched=1`` marks these as recovery-page auto-restarts (not
-          // a manual sidebar restart), so the endpoint can skip the bounce if the
-          // workspace self-recovered while the slow host-health probe was in flight.
           if (tier === 'host_offline') {
             // Container fully stopped: nothing live to interrupt, dispatch
             // unattended. Tell the endpoint the host is already stopped so it
-            // skips the redundant stop step and cold-boots straight away.
-            postRestart({ scope: 'host', host_already_stopped: true, auto_dispatched: true });
+            // skips the redundant stop step and cold-boots straight away. Safe
+            // even if the workspace self-recovered while the slow host-health
+            // probe was in flight: the resulting mngr start only targets
+            // STOPPED agents, so a live workspace makes it a no-op.
+            postRestart({ scope: 'host', host_already_stopped: true });
             return;
           }
           if (tier === 'interface_unresponsive') {
             // Container running, exec works: restart the system-services agent in place.
-            postRestart({ scope: 'services', auto_dispatched: true });
+            postRestart({ scope: 'services' });
             return;
           }
           // 'host_unresponsive' or anything else: require explicit user consent for a host restart.
@@ -1288,7 +1377,16 @@ _RECOVERY_SCRIPT: Final[str] = """\
           fetchHealth().then(function (data) {
             applyHealth(data, autoDispatch);
           }, function () {
-            renderUnresponsive();
+            // The probe request itself failed -- most often the machine slept and
+            // Chromium aborted the in-flight fetch (a dropped request is absence of
+            // evidence, not proof the workspace is down). Treat it exactly like an
+            // INDETERMINATE verdict: render the live "reconnecting" state and retry
+            // the probe on the slow cadence (preserving autoDispatch), while the
+            // cheap liveness poll armed by renderReconnecting returns the user home
+            // the instant the workspace answers. This is the post-sleep strand fix:
+            // a dropped request no longer dead-ends on a static unresponsive verdict.
+            renderReconnecting();
+            scheduleIndeterminateReprobe(autoDispatch);
           });
         }
 
@@ -1332,21 +1430,24 @@ _RECOVERY_SCRIPT: Final[str] = """\
           renderLoading();
           scheduleRefresh();
         } else if (initialStatus === 'restart_failed') {
-          // Show the failure reason AND the diagnostic together: re-run
-          // the probe with auto-dispatch off so the renderUnresponsive path
-          // also has the diagnostics populated.
+          // Show the failure reason AND the diagnostic together: re-run the probe
+          // with auto-dispatch off so the renderUnresponsive path also has the
+          // diagnostics populated. renderUnresponsive arms the healthy-poll, so a
+          // failed restart is not terminal -- if the background probe loop recovers
+          // the workspace on its own (e.g. a cold boot that finished just after the
+          // restart worker's bounded wait elapsed) the user is returned home.
           runProbe(false);
-          // A failed restart is not necessarily terminal: the background probe
-          // loop keeps polling the workspace and may recover it on its own
-          // (e.g. a cold container boot that finished just after the restart
-          // worker's bounded wait elapsed). Watch for that recovery so we can
-          // return the user to the workspace without them having to act.
-          scheduleHealthyPoll();
         } else if (initialStatus === 'healthy') {
           // Degenerate: rendered HEALTHY with no return_to to 302 to. Offer a
           // manual restart rather than auto-dispatching one on a healthy page.
           renderUnresponsive();
         } else {
+          // Cheap-probe-first: start the liveness poll immediately so a workspace
+          // that is actually healthy (or recovers while the slow in-container probe
+          // is in flight) returns the user home within ~1s, without waiting on the
+          // heavy diagnosis probe. The heavy probe still runs to populate
+          // diagnostics and pick a restart tier, but it can no longer strand anyone.
+          armHealthyPoll();
           runProbe(true);
         }
       })();
@@ -1588,6 +1689,9 @@ def render_workspace_settings(
     is_leased_imbue_cloud: bool = False,
     current_color: str = DEFAULT_WORKSPACE_COLOR,
     is_stale: bool = False,
+    has_saved_backup_password: bool = False,
+    is_master_password_set: bool = False,
+    has_account: bool = False,
 ) -> str:
     """Render the workspace settings page.
 
@@ -1617,6 +1721,9 @@ def render_workspace_settings(
         is_leased_imbue_cloud=is_leased_imbue_cloud,
         current_color=current_color,
         is_stale=is_stale,
+        has_saved_backup_password=has_saved_backup_password,
+        is_master_password_set=is_master_password_set,
+        has_account=has_account,
         palette=WORKSPACE_PALETTE,
     )
 
@@ -1664,16 +1771,45 @@ def render_accounts_page(
 def render_settings_page(
     report_unexpected_errors: bool = False,
     include_error_logs: bool = False,
+    services_overview: Sequence[object] | None = None,
+    file_sharing_grants: Sequence[object] | None = None,
+    workspace_delegation_grants: Sequence[object] | None = None,
+    permissions_unavailable: bool = False,
+    has_saved_backup_password: bool = False,
 ) -> str:
     """Render the app-level settings page (reachable from the sidebar's "Settings" entry).
 
+    The page has a left nav (Permissions / Error reporting) and a right content
+    pane.
+
     ``report_unexpected_errors`` / ``include_error_logs`` seed the per-machine
     error-reporting toggles hosted on this page (the same settings the
-    first-launch consent screen records). They are global to the machine, not
-    account-scoped.
+    first-launch consent screen records); ``has_saved_backup_password`` feeds
+    the backup master-password section's helper text. All are global to the
+    machine, not account-scoped.
+
+    ``services_overview`` is a sequence of
+    :class:`~imbue.minds.desktop_client.latchkey.permission_overview.ServicePermissionOverview`
+    describing the predefined-service grants held across all active workspaces
+    (empty when nothing is granted). ``file_sharing_grants`` is a sequence of
+    :class:`~imbue.minds.desktop_client.latchkey.permission_overview.WorkspaceFileSharingGrant`
+    describing the file-sharing access granted per workspace, rendered as a
+    separate section below the services. ``workspace_delegation_grants`` is a
+    sequence of
+    :class:`~imbue.minds.desktop_client.latchkey.permission_overview.WorkspaceDelegationGrant`
+    describing the cross-workspace-management grants, grouped by the granting
+    workspace with one row per verb (naming the target[s] it covers), rendered
+    below file sharing. ``permissions_unavailable`` is True when the latchkey
+    gateway could not be reached to read grants, so the page shows a notice
+    instead of an empty list.
     """
     return CATALOG.render(
         "pages.Settings",
         report_unexpected_errors=report_unexpected_errors,
         include_error_logs=include_error_logs,
+        services_overview=list(services_overview or []),
+        file_sharing_grants=list(file_sharing_grants or []),
+        workspace_delegation_grants=list(workspace_delegation_grants or []),
+        permissions_unavailable=permissions_unavailable,
+        has_saved_backup_password=has_saved_backup_password,
     )

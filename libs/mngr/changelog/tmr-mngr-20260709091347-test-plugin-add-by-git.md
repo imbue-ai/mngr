@@ -1,0 +1,1 @@
+Gave the `test_plugin_add_by_git` e2e test a 60s timeout so it no longer trips the 10s default while `mngr plugin add --git` pays the cold-start cost and attempts a git clone, and extended it to assert the command prints no Python traceback (matching the sibling `plugin add` tests and the test's documented scope).

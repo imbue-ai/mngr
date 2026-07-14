@@ -1,0 +1,1 @@
+Removed the superfluous `@pytest.mark.rsync` mark from the `test_stop_archive` e2e tutorial test. The test creates a local git-repo command agent and exercises `mngr stop --archive` plus `mngr list`, none of which invoke rsync, so the resource guard was failing the test for carrying a mark it never satisfied.

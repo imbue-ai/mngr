@@ -48,6 +48,12 @@ class PerTokenPrices(FrozenModel):
 # Anthropic per-token pricing, mirrored verbatim from apps/modal_litellm/app.py
 # (which itself mirrors litellm's map). Grouped by tier so the "same price"
 # relationship across model ids stays explicit, exactly as modal_litellm does.
+_FABLE_PRICES: Final[PerTokenPrices] = PerTokenPrices(
+    input_cost_per_token=0.00001,
+    output_cost_per_token=0.00005,
+    cache_creation_input_token_cost=0.0000125,
+    cache_read_input_token_cost=0.000001,
+)
 _OPUS_PRICES: Final[PerTokenPrices] = PerTokenPrices(
     input_cost_per_token=0.000005,
     output_cost_per_token=0.000025,
@@ -122,6 +128,7 @@ _O4_MINI_PRICES: Final[PerTokenPrices] = PerTokenPrices(
 # apps/modal_litellm (drift test); OpenAI stays in sync with litellm directly
 # (litellm_pricing_test).
 MODEL_PRICING: Final[dict[str, PerTokenPrices]] = {
+    "anthropic/claude-fable-5": _FABLE_PRICES,
     "anthropic/claude-opus-4-8": _OPUS_PRICES,
     "anthropic/claude-opus-4-7": _OPUS_PRICES,
     "anthropic/claude-opus-4-6": _OPUS_PRICES,

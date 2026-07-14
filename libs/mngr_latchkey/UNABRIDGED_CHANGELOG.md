@@ -4,6 +4,62 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-13
+
+The `mngr latchkey forward` daemon now tells Sentry to ignore the paramiko/pyinfra stdlib loggers. The daemon reverse-tunnels the shared gateway into every agent via paramiko; when a target went offline and the health check retried, paramiko's transport thread logged the connection-reset failure at ERROR level, and Sentry's default logging integration captured each one as an event. Those events were not even rate-limited (the stdlib records carry no exception info or fingerprint), so a handful of users produced tens of thousands of Sentry events. The daemon now drops that already-handled noise while still reporting genuine failures raised through loguru.
+
+Fixed the VPS-resident ("secondary") latchkey gateway being unreachable from the agent's container on lima-slice hosts, which left agents with no latchkey access whenever the desktop (primary) gateway was unavailable -- e.g. while the user's laptop was offline.
+
+The VPS->container reverse tunnel was opened to the container's externally-routable SSH port instead of the port the container's sshd is published on from the outer host's own loopback. On a slice (where those two ports differ) the tunnel was refused, so the secondary gateway never bound inside the container. The reverse tunnel now uses the outer-host-loopback port supplied by the provider.
+
+Tunnel setup is also no longer silently treated as successful when the `ssh -R` process dies immediately (e.g. connection refused or a failed forward bind): after backgrounding it, the launch now confirms the process survives a short window, so a broken tunnel surfaces as a failed provision and is retried instead of being cached as "provisioned".
+
+The VPS-resident Latchkey gateway and its VPS->container reverse SSH tunnel are now supervised by `supervisord` instead of being spawned detached (`nohup` + a PID-file guard). `supervisord` is installed from the distro package during remote-gateway provisioning; both processes are registered as `autostart`/`autorestart` programs, so a crashed gateway or tunnel is restarted automatically without a desktop round-trip.
+
+A VPS previously provisioned by an older build (which launched the gateway and tunnel detached via `nohup`, tracked by `~/.latchkey/{gateway,tunnel}.pid`) is migrated automatically: provisioning kills those legacy processes (freeing the gateway port and the container forward bind) and removes any encryption key/password an intermediate build had persisted to disk, before the `supervisord` programs start. Without this the new programs would fail to start against the still-running old ones.
+
+The reverse SSH tunnel now carries keepalive and timeout flags (`ServerAliveInterval`, `ServerAliveCountMax`, `TCPKeepAlive`, `ConnectTimeout`, `BatchMode`) so a connection wedged by a paused-then-resumed VM is detected and torn down, letting `supervisord` re-establish a fresh tunnel.
+
+The gateway's secrets (the encryption key and derived listen password) are kept in a RAM-backed tmpfs directory under `/run` rather than on the persistent disk: this keeps the encryption key off disk (a key file beside the encrypted credential store would be equivalent to storing the credentials in plaintext against a disk-snapshot threat) while still surviving process crashes so `supervisord` can restart the gateway. Provisioning verifies the directory is genuinely RAM-backed (tmpfs/ramfs) before writing the key and refuses to proceed otherwise, so the key can never be silently written to a disk-backed filesystem. The tradeoff is that a full reboot wipes the secrets, leaving the gateway down until the next provisioning pass re-writes them (crash recovery is supported; reboot recovery is intentionally not).
+
+`mngr latchkey forward` now supervises the shared `latchkey gateway` subprocess: a background health check detects when the gateway has died mid-session and respawns it on its original port (so agent reverse tunnels and the published gateway port stay valid across the restart). Previously a crashed gateway went unnoticed -- discovery and reverse tunnels stayed up, so nothing restarted it -- and agents could no longer reach the gateway until the whole app was restarted.
+
+`Latchkey.is_gateway_running` and `Latchkey.start_gateway` are now liveness-aware: they check the gateway subprocess's actual status (via `poll()`) rather than merely whether a record is tracked, so a dead gateway reads as not-running and is respawned instead of returning a stale port.
+
+## 2026-07-10
+
+The latchkey discovery stream consumer no longer logs a "Discovery error from ..." warning on every poll cycle for a provider stuck on the same failure (e.g. missing credentials): provider-level discovery errors are now logged once per process via the shared `DiscoveryErrorLogSuppressor`, with an info-level recovery line (and re-armed suppression) when the provider's discovery next succeeds. Host- and agent-attributed discovery errors keep logging on every occurrence.
+
+Both latchkey gateway spawn sites (the shared desktop gateway and the
+VPS-resident gateway) now pass `--max-body-size` raised to 512 MiB (upstream
+default: 10 MiB).
+
+The gateway natively proxies GitHub's git smart-HTTP endpoints
+(`/gateway/https://github.com/<owner>/<repo>.git/...`, gated by the
+`github-git` scope with `github-git-read`/`github-git-write` permissions), so
+agents can run `git push`/`git fetch` through it with the credential injected
+server-side -- but a push's packfile scales with repo history (a minds
+template push is roughly 30 MiB today), which exceeded the old 10 MiB cap and
+made gateway-authenticated pushes fail. The forever-claude-template's
+publish-inspiration flow now relies on this push path.
+
+Already-running gateways keep the old cap until they restart: the desktop
+gateway picks the flag up on the next minds-app session, and a VPS gateway on
+the next launch after its recorded process exits (the pidfile guard
+deliberately never kills a live gateway).
+
+## 2026-07-09
+
+# Cover the new backup disable route with the backups-manage verb
+
+- The `minds-workspaces-backups-manage` target-scoped verb's path pattern now also covers `POST /api/v1/workspaces/<id>/backup-service/disable` (the minds app's new "turn backups off" action), and its description mentions disabling.
+
+Added a new target-scoped verb to the `minds-workspaces` permission scope: `minds-workspaces-backups-manage`, gating the new backup-management routes (`/backup-service/update`, `/backup-service/update/cancel`, `/backup-service/configure`, `/backup-service/verification`) so an agent needs an explicit per-target grant to update a workspace's backup service, enable/repoint its backups, or toggle backup verification.
+
+## 2026-07-08
+
+Add `SECRET_LATCHKEY_ENV_VAR_NAMES` to `agent_setup`: the subset of latchkey wiring env vars whose values are secrets (the gateway password and the permissions-override JWT). Callers that render a command carrying these as `--host-env NAME=VALUE` flags use it to mask the values before logging.
+
 ## 2026-07-07
 
 Bump Latchkey to 2.20.0.

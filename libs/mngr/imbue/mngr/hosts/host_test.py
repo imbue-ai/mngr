@@ -47,7 +47,6 @@ from imbue.mngr.hosts.host import _TMUX_STATUS_LEFT_LENGTH
 from imbue.mngr.hosts.host import _build_remote_lock_command
 from imbue.mngr.hosts.host import _build_start_agent_shell_command
 from imbue.mngr.hosts.host import _format_env_file
-from imbue.mngr.hosts.host import _is_transient_ssh_error
 from imbue.mngr.hosts.host import _merge_agent_type_provisioning
 from imbue.mngr.hosts.host import _parse_boot_time_output
 from imbue.mngr.hosts.host import _parse_uptime_output
@@ -1428,7 +1427,7 @@ def test_reap_agent_process_tree_kills_pane_and_env_marked_orphans_but_not_the_s
     orphans (reparented to PID 1), with SIGTERM then SIGKILL, but does NOT kill the
     tmux session itself.
 
-    Regression: a long-lived daemon launched under an agent (the FCT bootstrap's
+    Regression: a long-lived daemon launched under an agent (the DEFAULT_WORKSPACE_TEMPLATE bootstrap's
     supervisord and its ttyd) could be orphaned to PID 1 on an abrupt teardown and
     outlive the agent, holding a fixed port (EADDRINUSE on the next relaunch). The
     shared reap must catch such orphans via the env marker, which a pane/tree walk
@@ -1482,31 +1481,6 @@ def test_execute_idempotent_command_raises_command_timeout_error_on_local_timeou
     # Opt-in: the same timeout is raised loudly as CommandTimeoutError.
     with pytest.raises(CommandTimeoutError):
         local_host.execute_idempotent_command("sleep 10", timeout_seconds=1, raise_on_timeout=True)
-
-
-@pytest.mark.parametrize(
-    ("exception", "expected"),
-    [
-        (OSError("Socket is closed"), True),
-        (OSError("No such file or directory"), False),
-        (ValueError("Socket is closed"), False),
-        (SSHException("SSH session not active"), True),
-        (ChannelException(2, "open failed"), True),
-        (EOFError(), True),
-        (TimeoutError("Timed out reading output"), True),
-    ],
-    ids=[
-        "socket-closed",
-        "other-os-error",
-        "non-os-error",
-        "ssh-exception",
-        "channel-exception",
-        "eof-error",
-        "timeout-error",
-    ],
-)
-def test_is_transient_ssh_error(exception: BaseException, expected: bool) -> None:
-    assert _is_transient_ssh_error(exception) is expected
 
 
 class _FakeLockChannel:

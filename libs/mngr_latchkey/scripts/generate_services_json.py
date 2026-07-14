@@ -70,6 +70,7 @@ _DISPLAY_NAME_BY_SCOPE: Final[Mapping[str, str]] = {
     "slack-api": "Slack",
     "discord-api": "Discord",
     "github-rest-api": "GitHub (REST API)",
+    "github-graphql-api": "GitHub (GraphQL API)",
     "github-git": "GitHub (git)",
     "gitlab-api": "GitLab (REST API)",
     "gitlab-git": "GitLab (git)",

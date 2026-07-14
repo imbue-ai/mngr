@@ -1,0 +1,1 @@
+Gave the `test_connect_by_agent_id_fictional` e2e test a `@pytest.mark.timeout(120)`. Connecting by agent id has no host hint, so resolution falls back to a full-provider discovery scan that exceeds the default 10s per-test timeout; the command's behavior (a clean "Agent not found" error naming the id, exit 1) was already correct.

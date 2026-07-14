@@ -1,0 +1,1 @@
+Gave the `test_connect_explicit_host` e2e tutorial test a 120s timeout (matching the other connect tests) so it no longer trips the default 10s per-test timeout: the `mngr conn my-task@my-host` command legitimately takes longer than 10s because of mngr's subprocess startup cost plus the full-scan discovery it triggers.
