@@ -1,9 +1,12 @@
-The `mngr` dev shim (`scripts/mngr`) now runs `uv run --all-packages`, so it keeps the workspace venv complete instead of assuming someone already ran `uv sync --all-packages`.
+The `mngr` dev shim (`scripts/mngr`) now runs `uv run --all-packages`, so pulling a commit that adds a dependency to an mngr plugin no longer breaks the `mngr` command until you hand-run `uv sync --all-packages`.
 
-The workspace root project does not depend on `imbue-mngr` or any of its plugin packages, so a plain `uv run --project <root>` only guarantees the root's own dependencies. A venv synced without `--all-packages` produced two confusing failures:
+The workspace root project does not depend on `imbue-mngr` or any of its plugin packages, so the shim's `uv run --project <root>` never considered them and never installed their dependencies. Because plugins are editable workspace installs, a plugin kept its registered entry point across a pull while a newly declared dependency of it stayed missing -- and since `mngr` imports every entry point at startup, that broke *every* subcommand, not just the plugin's own:
 
-- A plugin's dependency could be missing while its entry point remained registered, so `mngr` died at startup on an unrelated import (e.g. `ModuleNotFoundError: No module named 'hypercorn'`, a dependency of `imbue-mngr-forward` only) no matter which subcommand you ran.
+```
+% mngr create my-agent
+ModuleNotFoundError: No module named 'hypercorn'
+```
 
-- If `mngr` itself was missing from the venv, `uv run mngr` resolved `mngr` off `PATH`, found the shim, and re-executed it until uv aborted with "`uv run` was recursively invoked 101 times".
+`hypercorn` is a dependency of `imbue-mngr-forward` alone, so nothing about `mngr create` hints at why it is needed.
 
-Both now self-heal on the next `mngr` invocation. There is no measurable startup cost when the venv is already up to date.
+The shim now converges the venv on each invocation, so this resolves itself on the next `mngr` call. There is no measurable startup cost when the venv is already up to date.
