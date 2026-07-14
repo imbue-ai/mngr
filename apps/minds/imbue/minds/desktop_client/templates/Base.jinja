@@ -12,8 +12,9 @@
     title       contents. Defaults to "Minds".
     html_class  classes on the html element. Used for document-level
                 opt-outs that must sit on the viewport scroller, e.g.
-                ``no-scrollbar-gutter`` on the edge-to-edge chrome /
-                overlay surfaces (see app.css).
+                ``no-scrollbar-gutter`` on the edge-to-edge chrome page
+                (see app.css). Overlay-view pages get that opt-out by
+                wrapping in OverlaySurface instead of passing it here.
     body_class  classes on body. Default is the light page surface.
     body_style  free-form inline style on body. The chrome page uses
                 this to set ``background-color: var(--titlebar-bg, ...)``

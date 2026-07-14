@@ -50,15 +50,13 @@
   })();
 </script>
 {% endset %}
-<Base title="Sign in"
-      html_class="no-scrollbar-gutter"
-      body_class="bg-transparent text-primary font-sans antialiased"
-      body_style="-webkit-app-region: no-drag;"
-      scripts={{ _scripts }}>
+<OverlaySurface title="Sign in"
+                body_style="-webkit-app-region: no-drag;"
+                scripts={{ _scripts }}>
   <div id="signin-modal-backdrop" class="fixed inset-0 flex items-center justify-center bg-surface-overlay p-4">
     <div class="relative bg-surface-primary rounded-lg shadow-overlay max-w-md w-full p-8 text-left">
       <DialogCloseButton onclick="dismissSigninModal()" />
       <auth.AuthForm :default_to_signup="True" :intro="intro" />
     </div>
   </div>
-</Base>
+</OverlaySurface>

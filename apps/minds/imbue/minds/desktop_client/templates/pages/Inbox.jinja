@@ -622,12 +622,10 @@
   })();
 </script>
 {% endset %}
-<Base title="Requests"
-      html_class="no-scrollbar-gutter"
-      body_class="bg-transparent text-primary font-sans antialiased"
-      body_style="-webkit-app-region: no-drag;"
-      head={{ _head }}
-      scripts={{ _scripts }}>
+<OverlaySurface title="Requests"
+                body_style="-webkit-app-region: no-drag;"
+                head={{ _head }}
+                scripts={{ _scripts }}>
   {# Left-anchored slide-in drawer: full viewport height (including
      under the title bar -- the modal view bounds from y=0 in main.js),
      ~70% width capped at a max, dropping to ~90% on small viewports.
@@ -695,4 +693,4 @@
     <div class="flex-1 h-[38px] self-start"
          style="-webkit-app-region: drag;"></div>
   </div>
-</Base>
+</OverlaySurface>

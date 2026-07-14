@@ -23,9 +23,6 @@
 {% set _scripts %}
 <script src="/_static/overlay.js" defer></script>
 {% endset %}
-<Base title="Minds"
-      html_class="no-scrollbar-gutter"
-      body_class="font-sans antialiased bg-transparent"
-      scripts={{ _scripts }}>
+<OverlaySurface title="Minds" scripts={{ _scripts }}>
   <div id="overlay-root" class="fixed inset-0"></div>
-</Base>
+</OverlaySurface>
