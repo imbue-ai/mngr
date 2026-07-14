@@ -311,6 +311,11 @@ class ClaudeAgentConfig(AgentTypeConfig):
         description="When True, adds a PermissionRequest hook that auto-allows all permission dialogs. "
         "This means Claude Code will never pause for permission approval.",
     )
+    auto_disable_questions: bool = Field(
+        default=False,
+        description="When True, adds `--disallowed-tools AskUserQuestion` to the agent invocation to "
+        "prevent it from ever asking questions (which can cause the agent to get blocked)",
+    )
     settings_overrides: Annotated[dict[str, Any], SettingsPatchField()] = Field(
         default_factory=dict,
         description="A patch merged onto your home Claude settings at provisioning. A bare key assigns "
@@ -2360,6 +2365,10 @@ class ClaudeAgent(
         # (Claude is last-wins) -- the accepted, documented limitation of that mode.
         cli_args = self.agent_config.cli_args
         all_extra_args = cli_args + quote_agent_args(agent_args)
+        # Claude accumulates repeated --disallowed-tools flags, so appending here
+        # cannot clobber a list already present in cli_args/agent_args.
+        if self.agent_config.auto_disable_questions:
+            all_extra_args = all_extra_args + ("--disallowed-tools", "AskUserQuestion")
         args_str = " ".join(all_extra_args) if all_extra_args else ""
 
         # Read the latest session ID from the tracking file written by the SessionStart hook.
