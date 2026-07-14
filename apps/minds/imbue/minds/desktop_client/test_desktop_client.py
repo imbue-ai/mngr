@@ -2058,8 +2058,7 @@ def test_recovery_page_renders_for_authenticated_user(tmp_path: Path) -> None:
     assert response.status_code == 200
     assert str(agent_id) in response.text
     assert safe_return_to in response.text
-    # The recovery page chrome rendered: the host-restart button (the
-    # surgical tier is auto-dispatched, so it has no button) and the
+    # The recovery page chrome rendered: the host-restart button and the
     # versioned health + restart endpoints the page's JS drives once the probe
     # reports the container reachable.
     assert "Restart workspace" in response.text
