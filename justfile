@@ -313,6 +313,7 @@ minds-test-electron-flow *args: minds-css
 minds-css:
   bash -c '. apps/minds/scripts/select_node_version.sh && cd apps/minds && pnpm run build:css'
 
+alias dwt-worktree := default-workspace-template-worktree
 # Create an independent default-workspace-template checkout nested in the
 # current mngr checkout at .external_worktrees/default-workspace-template -- the
 # CLAUDE.md convention for developing default_workspace_template alongside mngr. Defaults the default_workspace_template branch
@@ -321,7 +322,6 @@ minds-css:
 # deletion of any other clone/cache) and needs no configuration.
 # Set DEFAULT_WORKSPACE_TEMPLATE_DIR (gitignored apps/minds/.env or your shell) to a local default_workspace_template clone to
 # make the clone fast -- purely a speed hint, no lasting dependency is created.
-alias dwt-worktree := default-workspace-template-worktree
 default-workspace-template-worktree branch="" base="origin/main":
     bash scripts/default_workspace_template_worktree.sh "{{branch}}" "{{base}}"
 
