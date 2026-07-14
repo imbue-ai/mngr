@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-13
+
+The trailing-comments ratchet (PREVENT_TRAILING_COMMENTS) no longer misfires on `PR #NNNN` references inside comment or docstring prose. The unanchored pattern treated the `#` of a PR number as a trailing comment (even on comment-only lines, since a match can start mid-line); a negative lookbehind now exempts a `#` immediately preceded by `PR `, alongside the existing hex-color and `ty: ignore` exemptions.
+
+`setup_sentry` now accepts an `ignored_loggers` argument: glob patterns for stdlib logger names whose records must never become Sentry events or breadcrumbs. This is needed because Sentry's default logging integration patches `logging.Logger.callHandlers` at the class level, so it captures a logger's ERROR records as events even when that logger has `propagate=False`. Callers that already route a noisy third-party logger's output elsewhere (e.g. into loguru) can now pass those logger names so Sentry drops the raw records instead of flooding on already-handled noise.
+
 ## 2026-07-09
 
 - Added: `LowerCaseStrEnum` in `imbue.imbue_common.enums` -- the lowercase sibling of `UpperCaseStrEnum`, for enums whose values are an externally visible, already-lowercase wire format (first used by the pool bake / destroy outcome statuses in `mngr_imbue_cloud`).

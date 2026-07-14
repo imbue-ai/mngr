@@ -4,6 +4,18 @@ A concise, human-friendly summary of changes for repo-level dev tooling: CI work
 
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
+## 2026-07-13
+
+### Added
+
+- Added: `blueprint/mngr-forward-http2/` — implementation plan for terminating TLS and negotiating HTTP/2 at the `mngr forward` proxy so the workspace UI is no longer capped by Chromium's per-origin HTTP/1.1 connection limit.
+- Added: `blueprint/imbue-cloud-sticky-agent-labels/plan-imbue-cloud-sticky-agent-labels.md` — design plan for the imbue_cloud "husk" fix (persisting and re-attaching last-known agent identity so a transiently-unreachable leased workspace keeps its labels instead of collapsing to a label-less stub). Implementation lands in `libs/mngr_imbue_cloud`.
+- Added: `blueprint/forward-services-cache/` — spec for the `mngr_forward` fast-first-load fix (persist the resolver's per-agent service map to disk and seed from it at startup so a restored remote-mind window resolves at ~3s instead of the measured ~50s cold-stream wait, with the live `mngr event` stream as the correction path). Implementation ships on the same branch under `libs/mngr_forward/`.
+
+### Changed
+
+- Changed: The minds e2e snapshot build (`scripts/snapshot_minds_e2e_state.py`) now pins the create default to runc via `MINDS_DOCKER_RUNTIME_DEFAULT=RUNC`. The Modal snapshot sandbox has no gVisor, and the per-create runtime feature otherwise defaults the Linux create form to runsc and stacks the `docker_runsc` template, so the build's workspace creation failed with "unknown or invalid runtime name: runsc". The previous `MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME=runc` override could not fix this (an explicitly stacked template's docker_runtime outranks a provider-config env var in mngr's create-settings precedence) and was removed as redundant.
+
 ## 2026-07-11
 
 ### Added

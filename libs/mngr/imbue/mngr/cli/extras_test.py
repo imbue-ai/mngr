@@ -407,6 +407,14 @@ def test_extras_completion_subcommand(cli_runner: CliRunner) -> None:
     assert result.exit_code == 0
 
 
+# Shells out to the `claude` CLI (`claude plugin list --json`) to read plugin
+# status. That Node process's startup dominates the runtime and can exceed the
+# global 10s pytest-timeout on a contended CI sandbox, even though the test runs
+# in well under a second locally (observed: "Failed: Timeout (>10.0s)" in
+# offload). Exercising the real subcommand end-to-end is the point of the test,
+# so the shell-out cannot be removed; give it headroom instead -- the same
+# treatment `test_extras_no_args_shows_status` already carries for this cause.
+@pytest.mark.timeout(30)
 def test_extras_claude_plugin_subcommand(cli_runner: CliRunner) -> None:
     """The 'extras claude-plugin' subcommand should work."""
     result = cli_runner.invoke(extras, ["claude-plugin"])

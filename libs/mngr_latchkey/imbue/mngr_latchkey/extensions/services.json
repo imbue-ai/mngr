@@ -141,7 +141,7 @@
     {
       "scope": "github-rest-api",
       "display_name": "GitHub (REST API)",
-      "description": "Any interaction with the GitHub REST API, excluding GraphQL.",
+      "description": "Any interaction with the GitHub REST API.",
       "permissions": [
         {
           "name": "github-read-all",
@@ -200,6 +200,12 @@
           "description": "Mark notifications as read or manage notification subscriptions."
         }
       ]
+    },
+    {
+      "scope": "github-graphql-api",
+      "display_name": "GitHub (GraphQL API)",
+      "description": "Any interaction with the GitHub GraphQL API.",
+      "permissions": []
     },
     {
       "scope": "github-git",

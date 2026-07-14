@@ -4,6 +4,16 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-13
+
+Add the `blueprint/mngr-forward-http2/` implementation plan for terminating TLS and negotiating HTTP/2 at the `mngr forward` proxy so the workspace UI is no longer capped by Chromium's per-origin HTTP/1.1 connection limit.
+
+Added `blueprint/imbue-cloud-sticky-agent-labels/plan-imbue-cloud-sticky-agent-labels.md`, the design plan for the imbue_cloud "husk" fix (persisting and re-attaching last-known agent identity so a transiently-unreachable leased workspace keeps its labels instead of collapsing to a label-less stub). The implementation lands in `libs/mngr_imbue_cloud`.
+
+The minds e2e snapshot build (`scripts/snapshot_minds_e2e_state.py`) now pins the create default to runc via `MINDS_DOCKER_RUNTIME_DEFAULT=RUNC`. The Modal snapshot sandbox has no gVisor, and the per-create runtime feature otherwise defaults the Linux create form to runsc and stacks the `docker_runsc` template, so the build's workspace creation failed with "unknown or invalid runtime name: runsc". The previous `MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME=runc` override could not fix this -- an explicitly stacked template's docker_runtime outranks a provider-config env var in mngr's create settings precedence -- so it was removed as redundant. Setting the minds default keeps `docker_runsc` from being stacked in the first place.
+
+Added a blueprint spec (`blueprint/forward-services-cache/`) for a fast first-load fix in the `mngr_forward` plugin: persist the resolver's per-agent service map to disk and seed from it at startup so a restored remote-mind window resolves at ~3s instead of the measured ~50s cold-stream wait, with the live `mngr event` stream as the correction path. The root-cause investigation and live latency measurements (cold single stream ~10s; contention-inflated tail ~50s; fixed/stable service ports) are folded into the spec. This `dev` entry covers the spec artifact only; the implementation ships on the same branch under `libs/mngr_forward/` (see that project's changelog).
+
 ## 2026-07-11
 
 Rename the forever-claude-template repo to default-workspace-template across the monorepo (justfile, CI workflows, scripts, and Claude skills), applied mechanically by the new rename tool below. The GitHub repo rename itself happens out of band and must precede merging this PR.
