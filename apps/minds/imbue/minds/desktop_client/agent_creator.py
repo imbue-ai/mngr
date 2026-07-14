@@ -529,12 +529,37 @@ _FAST_MODE_PREVENT: Final[str] = "prevent"
 # ``imbue.mngr_imbue_cloud.errors.FastPathUnavailableError``.
 _FAST_PATH_UNAVAILABLE_ERROR_CLASS: Final[str] = "FastPathUnavailableError"
 
-# How long a gated Lima create blocks waiting for the prefetched image before giving
-# up on it and building the workspace in-VM instead. Generous because a cold first-run
-# download of a multi-GB image can take a while; the background prefetch usually wins
-# this race long before a user clicks create.
-_PREBAKED_IMAGE_WAIT_TIMEOUT_SECONDS: Final[float] = 1800.0
+# How long a gated Lima create blocks waiting for the prefetched image before giving up
+# on it and building the workspace in-VM instead. A cold download of the real image
+# measures ~6 minutes, so this leaves generous headroom for a slower link while bounding
+# the case where the download is not slow but stuck: past this, building in-VM (~5 min)
+# gets the user a workspace sooner than continuing to wait. The download keeps running,
+# so the next create still gets the fast path.
+_PREBAKED_IMAGE_WAIT_TIMEOUT_SECONDS: Final[float] = 600.0
 _PREBAKED_IMAGE_POLL_INTERVAL_SECONDS: Final[float] = 1.0
+
+# Only log the download's progress once it has moved this much, so a 1s poll does not
+# flood the create log with near-identical lines.
+_PREBAKED_IMAGE_PROGRESS_LOG_STEP_BYTES: Final[int] = 500 * 1000 * 1000
+
+
+class _PrebakedImageProgressReporter(MutableModel):
+    """Reports how much of the pre-baked image has downloaded into the create log.
+
+    A create blocked on the image would otherwise show nothing at all: desync draws its
+    progress bar only on a tty, so a packaged app sees no output from the download.
+    """
+
+    log_line: Callable[[str], None] = Field(frozen=True, description="Sink for one create-log line")
+    last_logged_bytes: int = Field(
+        default=0, description="Bytes reported by the last line, so a per-second poll does not flood the log"
+    )
+
+    def __call__(self, fetched_bytes: int) -> None:
+        if fetched_bytes - self.last_logged_bytes < _PREBAKED_IMAGE_PROGRESS_LOG_STEP_BYTES:
+            return
+        self.last_logged_bytes = fetched_bytes
+        self.log_line(f"[minds] Downloading pre-baked Lima image... {fetched_bytes / 1e9:.1f} GB")
 
 
 def provider_instance_name_for_launch(
@@ -1757,6 +1782,7 @@ class AgentCreator(MutableModel):
                         environ=os.environ,
                         wait_timeout_seconds=_PREBAKED_IMAGE_WAIT_TIMEOUT_SECONDS,
                         poll_interval_seconds=_PREBAKED_IMAGE_POLL_INTERVAL_SECONDS,
+                        on_download_progress=_PrebakedImageProgressReporter(log_line=log_queue.put),
                     )
                     if prebaked_lima_image_raw_path is not None:
                         log_queue.put("[minds] Using pre-baked Lima image (fast create).")

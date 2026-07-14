@@ -15,6 +15,7 @@ from imbue.minds.desktop_client.lima_image_prefetch import prebaked_image_mngr_s
 from imbue.minds.desktop_client.lima_image_prefetch import resolve_ready_prebaked_lima_image
 from imbue.minds.desktop_client.lima_image_prefetch import should_use_prebaked_lima_image
 from imbue.minds.errors import LimaImageDownloadError
+from imbue.minds.lima_image.cache_layout import LimaImageCacheLayout
 from imbue.minds.lima_image.cache_layout import manifest_signature_url
 from imbue.minds.lima_image.cache_layout import manifest_url
 from imbue.minds.lima_image.data_types import LimaImageEntry
@@ -292,3 +293,40 @@ def test_resolve_builds_in_vm_when_no_progress_was_ever_recorded(tmp_path: Path)
     sink = RecordingProgressSink()
     prefetcher = _prefetcher(InMemoryManifestFetcher(), FixedRawChunkStore(), sink, tmp_path)
     assert _resolve(prefetcher, wait_timeout_seconds=0.05) is None
+
+
+def test_a_waiting_create_is_told_how_much_of_the_image_has_landed(tmp_path: Path) -> None:
+    # desync only draws a progress bar on a tty, so a packaged app gets no output from the
+    # download: without this the create blocks for minutes showing nothing at all.
+    sink = RecordingProgressSink()
+    prefetcher = _prefetcher(InMemoryManifestFetcher(), FixedRawChunkStore(), sink, tmp_path)
+    layout = LimaImageCacheLayout(cache_dir=tmp_path)
+    assembling = layout.assembling_raw_path(MindsImageVersion(_TAG), ImageArch.X86_64)
+    assembling.parent.mkdir(parents=True, exist_ok=True)
+    assembling.write_bytes(b"x" * 8192)
+    _seed(sink, LimaImagePrefetchStatus.DOWNLOADING, raw_path=None, error=None)
+
+    reported: list[int] = []
+    resolve_ready_prebaked_lima_image(
+        prefetcher=prefetcher,
+        is_lima_launch_mode=True,
+        repo_url=_DEFAULT_REPO,
+        branch_or_tag=_TAG,
+        current_release_tag=_TAG,
+        default_repo_url=_DEFAULT_REPO,
+        is_dev_loop=False,
+        environ={},
+        wait_timeout_seconds=0.05,
+        poll_interval_seconds=0.01,
+        on_download_progress=reported.append,
+    )
+
+    assert reported, "a create blocked on a downloading image must be told it is progressing"
+    # Allocated blocks, not the apparent size: the image is sparse.
+    assert all(fetched > 0 for fetched in reported)
+
+
+def test_no_download_progress_is_reported_when_nothing_is_being_assembled(tmp_path: Path) -> None:
+    sink = RecordingProgressSink()
+    prefetcher = _prefetcher(InMemoryManifestFetcher(), FixedRawChunkStore(), sink, tmp_path)
+    assert prefetcher.downloaded_bytes() is None

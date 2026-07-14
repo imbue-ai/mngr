@@ -301,7 +301,7 @@ def _assemble_and_install_image(
     seed_blob_file = seed[1] if seed is not None else None
 
     # Assemble the raw image (resumable, seeded).
-    assembled_raw = layout.tmp_dir / f"{minds_version}-{arch.value}.raw"
+    assembled_raw = layout.assembling_raw_path(minds_version, arch)
     reporter.emit(LimaImagePrefetchStatus.DOWNLOADING, None, None)
     with log_span("Assembling raw lima image {} ({})", minds_version, arch.value):
         chunk_store.extract_image(

@@ -66,6 +66,14 @@ class LimaImageCacheLayout(FrozenModel):
     def index_path(self, minds_version: MindsImageVersion, arch: ImageArch) -> Path:
         return self.version_dir(minds_version, arch) / "image.caibx"
 
+    def assembling_raw_path(self, minds_version: MindsImageVersion, arch: ImageArch) -> Path:
+        """The raw image desync is still writing, before it is installed under ``raw_path``.
+
+        Its allocated size is the only progress signal a download offers: desync draws a
+        progress bar on a tty and emits nothing otherwise, so a packaged app sees no output.
+        """
+        return self.tmp_dir / f"{minds_version}-{arch.value}.raw"
+
 
 def manifest_url(base_url: str, minds_version: MindsImageVersion) -> str:
     """Return the URL of the signed root manifest for ``minds_version``."""

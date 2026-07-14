@@ -8,6 +8,7 @@ keeps the current release's image present + verified. The heavy lifting lives in
 
 import threading
 import time
+from collections.abc import Callable
 from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
@@ -54,6 +55,9 @@ _LS_REMOTE_TIMEOUT_SECONDS: Final[float] = 30.0
 # Background auto-retry backoff bounds for a published-but-failing download.
 _RETRY_INITIAL_BACKOFF_SECONDS: Final[float] = 5.0
 _RETRY_MAX_BACKOFF_SECONDS: Final[float] = 120.0
+
+# st_blocks is defined in 512-byte units regardless of the filesystem's block size.
+_STAT_BLOCK_BYTES: Final[int] = 512
 
 
 def is_lima_image_cache_disabled(environ: Mapping[str, str]) -> bool:
@@ -202,10 +206,29 @@ class LimaImagePrefetcher(MutableModel):
                 return
             backoff = min(backoff * 2, _RETRY_MAX_BACKOFF_SECONDS)
 
+    def downloaded_bytes(self) -> int | None:
+        """Bytes of the in-flight image that have actually landed, or None if it is not being assembled.
+
+        The image is sparse, so the apparent size is the full 20GiB from the moment desync
+        creates the file; only the allocated blocks say how much has really been fetched.
+        """
+        assembling = LimaImageCacheLayout(cache_dir=self.cache_dir).assembling_raw_path(self.minds_version, self.arch)
+        try:
+            return assembling.stat().st_blocks * _STAT_BLOCK_BYTES
+        except OSError:
+            return None
+
     def wait_until_terminal(
-        self, timeout_seconds: float, poll_interval_seconds: float
+        self,
+        timeout_seconds: float,
+        poll_interval_seconds: float,
+        on_download_progress: Callable[[int], None] | None = None,
     ) -> LimaImagePrefetchState | None:
-        """Poll the persisted state until a terminal status or timeout; None if no state yet at timeout."""
+        """Poll the persisted state until a terminal status or timeout; None if no state yet at timeout.
+
+        ``on_download_progress`` is called with the bytes fetched so far while the image is
+        downloading, so a caller blocked on this can show that something is happening.
+        """
         deadline = time.monotonic() + timeout_seconds
         terminal_statuses = (
             LimaImagePrefetchStatus.READY,
@@ -217,6 +240,11 @@ class LimaImagePrefetcher(MutableModel):
         waiter = threading.Event()
         latest_state = self.progress_sink.read_state()
         while (latest_state is None or latest_state.status not in terminal_statuses) and time.monotonic() < deadline:
+            if on_download_progress is not None and latest_state is not None:
+                if latest_state.status is LimaImagePrefetchStatus.DOWNLOADING:
+                    fetched_bytes = self.downloaded_bytes()
+                    if fetched_bytes is not None:
+                        on_download_progress(fetched_bytes)
             waiter.wait(poll_interval_seconds)
             latest_state = self.progress_sink.read_state()
         return latest_state
@@ -247,6 +275,7 @@ def resolve_ready_prebaked_lima_image(
     wait_timeout_seconds: float,
     poll_interval_seconds: float,
     current_release_commit: str | None = None,
+    on_download_progress: Callable[[int], None] | None = None,
 ) -> Path | None:
     """Resolve the baked raw image path to use for a create, or None to build in-VM.
 
@@ -274,7 +303,9 @@ def resolve_ready_prebaked_lima_image(
         environ=environ,
     ):
         return None
-    state = prefetcher.wait_until_terminal(wait_timeout_seconds, poll_interval_seconds)
+    state = prefetcher.wait_until_terminal(
+        wait_timeout_seconds, poll_interval_seconds, on_download_progress=on_download_progress
+    )
     match state:
         case None:
             logger.warning("Pre-baked Lima image reported no progress at all; building in-VM")
@@ -327,6 +358,7 @@ class LimaImageCreateGate(FrozenModel):
         environ: Mapping[str, str],
         wait_timeout_seconds: float,
         poll_interval_seconds: float,
+        on_download_progress: Callable[[int], None] | None = None,
     ) -> Path | None:
         """Resolve the baked image path for a create (or None to build in-VM); raises on a published-but-unready image."""
         return resolve_ready_prebaked_lima_image(
@@ -341,6 +373,7 @@ class LimaImageCreateGate(FrozenModel):
             environ=environ,
             wait_timeout_seconds=wait_timeout_seconds,
             poll_interval_seconds=poll_interval_seconds,
+            on_download_progress=on_download_progress,
         )
 
 
