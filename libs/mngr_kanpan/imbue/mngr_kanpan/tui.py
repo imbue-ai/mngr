@@ -407,8 +407,10 @@ class _KanpanState(MutableModel):
     peek_capture_future: Future[subprocess.CompletedProcess[str]] | None = None
     # Handle for the pending live-refresh alarm (None if none scheduled).
     peek_alarm: Any = None
-    # Fire-and-forget `mngr message` reply; kept only so the future is not dropped.
+    # Most recent `mngr message` reply send; each send is watched by its own poll alarm.
     peek_reply_future: Future[subprocess.CompletedProcess[str]] | None = None
+    # Failure detail of the most recent reply send, rendered in the panel body ("" if none).
+    peek_reply_error: str = ""
     # Executor for peek transcript reads. Kept separate from the shared `executor`
     # so a read cannot freeze a board refresh, and from the reply executor so a slow
     # reply does not stall the live body refresh.
@@ -1125,9 +1127,13 @@ def _update_peek_header(state: _KanpanState) -> None:
 
 
 def _set_peek_body(state: _KanpanState) -> None:
-    """Render the peek body from the cached transcript and any pending replies."""
-    if state.peek_body_text is not None:
-        state.peek_body_text.set_text(_peek_body_markup(state.peek_transcript, state.peek_pending_replies))
+    """Render the peek body from the cached transcript, pending replies, and any reply failure."""
+    if state.peek_body_text is None:
+        return
+    markup = _peek_body_markup(state.peek_transcript, state.peek_pending_replies)
+    if state.peek_reply_error:
+        markup = [*markup, "\n", ("peek_hint", f"(reply failed: {state.peek_reply_error})")]
+    state.peek_body_text.set_text(markup)
 
 
 def _cancel_peek_alarm(state: _KanpanState) -> None:
@@ -1194,6 +1200,7 @@ def _open_peek(state: _KanpanState) -> None:
     state.focused_agent_name = entry.name
     state.peek_transcript = ""
     state.peek_pending_replies = []
+    state.peek_reply_error = ""
     panel = _build_peek_panel(state)
     state.saved_footer = state.frame.footer
     state.frame.footer = panel
@@ -1223,6 +1230,7 @@ def _close_peek(state: _KanpanState) -> None:
     state.peek_input = None
     state.peek_transcript = ""
     state.peek_pending_replies = []
+    state.peek_reply_error = ""
 
 
 def _toggle_peek(state: _KanpanState) -> None:
@@ -1248,10 +1256,52 @@ def _submit_peek_reply(state: _KanpanState) -> None:
     if not text:
         return
     state.peek_pending_replies = [*state.peek_pending_replies, text]
+    state.peek_reply_error = ""
     executor = _ensure_peek_reply_executor(state)
     state.peek_reply_future = executor.submit(_run_message, str(state.peek_agent_name), text)
     state.peek_input.set_edit_text("")
     _set_peek_body(state)
+    if state.loop is not None:
+        state.loop.set_alarm_in(
+            SPINNER_INTERVAL_SECONDS,
+            _on_peek_reply_poll,
+            (state, state.peek_reply_future, state.peek_agent_name, text),
+        )
+
+
+def _on_peek_reply_poll(
+    loop: MainLoop,
+    data: tuple[_KanpanState, Future[subprocess.CompletedProcess[str]], AgentName, str],
+) -> None:
+    """Poll a sent reply; on failure drop its optimistic echo and surface the error.
+
+    A successful send needs no action here -- the echo is pruned once the reply shows up
+    in the transcript. A failed send would otherwise leave the echo up forever, showing
+    the message as delivered when it was not.
+    """
+    state, future, agent_name, reply_text = data
+    if not future.done():
+        loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_peek_reply_poll, data)
+        return
+    try:
+        result = future.result()
+    except (subprocess.SubprocessError, OSError) as e:
+        detail = str(e)
+    else:
+        if result.returncode == 0:
+            return
+        detail = _last_nonempty_line(result.stderr) or f"exited with code {result.returncode}"
+    if state.peek_agent_name == agent_name:
+        pending = list(state.peek_pending_replies)
+        if reply_text in pending:
+            pending.remove(reply_text)
+            state.peek_pending_replies = pending
+        state.peek_reply_error = detail
+        _set_peek_body(state)
+    else:
+        # The panel has closed (or moved to another agent), so the restored footer is
+        # visible again and is the right place for the failure notice.
+        _show_transient_message(state, f"  Reply to {agent_name} failed: {detail}")
 
 
 def _handle_peek_key(state: _KanpanState, key: str) -> bool | None:

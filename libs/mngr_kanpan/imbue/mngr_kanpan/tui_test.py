@@ -99,6 +99,7 @@ from imbue.mngr_kanpan.tui import _load_user_commands
 from imbue.mngr_kanpan.tui import _make_reply_edit
 from imbue.mngr_kanpan.tui import _on_batch_item_poll
 from imbue.mngr_kanpan.tui import _on_peek_capture_poll
+from imbue.mngr_kanpan.tui import _on_peek_reply_poll
 from imbue.mngr_kanpan.tui import _on_transient_expire
 from imbue.mngr_kanpan.tui import _peek_body_lines
 from imbue.mngr_kanpan.tui import _peek_body_markup
@@ -2082,6 +2083,66 @@ def test_submit_peek_reply_empty_input_is_noop() -> None:
     _submit_peek_reply(state)
     assert state.peek_agent_name == AgentName("agent-a")
     assert state.peek_reply_future is None
+
+
+def _make_reply_result(returncode: int, stderr: str = "") -> Future[subprocess.CompletedProcess[str]]:
+    future: Future[subprocess.CompletedProcess[str]] = Future()
+    future.set_result(subprocess.CompletedProcess(args=[], returncode=returncode, stdout="", stderr=stderr))
+    return future
+
+
+def test_on_peek_reply_poll_failure_drops_echo_and_shows_error() -> None:
+    state = _make_state()
+    state.loop = _make_mock_loop()
+    _build_peek_panel(state)
+    state.peek_agent_name = AgentName("agent-a")
+    state.peek_pending_replies = ["my reply"]
+    future = _make_reply_result(returncode=1, stderr="agent not running\n")
+    _on_peek_reply_poll(state.loop, (state, future, AgentName("agent-a"), "my reply"))
+    # The optimistic echo is dropped (it will never appear in the transcript) and the
+    # failure renders in the panel instead of vanishing silently.
+    assert state.peek_pending_replies == []
+    assert "reply failed" in str(state.peek_body_text.text)
+    assert "agent not running" in str(state.peek_body_text.text)
+
+
+def test_on_peek_reply_poll_success_keeps_echo() -> None:
+    state = _make_state()
+    state.loop = _make_mock_loop()
+    _build_peek_panel(state)
+    state.peek_agent_name = AgentName("agent-a")
+    state.peek_pending_replies = ["my reply"]
+    future = _make_reply_result(returncode=0)
+    _on_peek_reply_poll(state.loop, (state, future, AgentName("agent-a"), "my reply"))
+    # A delivered reply keeps its echo until the transcript refresh prunes it.
+    assert state.peek_pending_replies == ["my reply"]
+    assert state.peek_reply_error == ""
+
+
+def test_on_peek_reply_poll_failure_after_close_shows_transient() -> None:
+    state = _make_state()
+    state.loop = _make_mock_loop()
+    future = _make_reply_result(returncode=1, stderr="delivery timed out\n")
+    _on_peek_reply_poll(state.loop, (state, future, AgentName("agent-a"), "my reply"))
+    # Panel closed: the failure goes to the (now visible) footer as a transient message.
+    assert state.transient_message is not None
+    assert "delivery timed out" in state.transient_message
+
+
+def test_submit_then_transcript_refresh_keeps_reply_error_visible() -> None:
+    state = _make_state()
+    state.loop = _make_mock_loop()
+    _build_peek_panel(state)
+    state.peek_agent_name = AgentName("agent-a")
+    state.peek_reply_error = "agent not running"
+    # A successful transcript refresh re-renders the body through _set_peek_body, which
+    # must keep the failure notice visible rather than wiping it.
+    future: Future[subprocess.CompletedProcess[str]] = Future()
+    future.set_result(subprocess.CompletedProcess(args=[], returncode=0, stdout="alpha\n", stderr=""))
+    state.peek_capture_future = future
+    _on_peek_capture_poll(state.loop, state)
+    assert "alpha" in str(state.peek_body_text.text)
+    assert "reply failed" in str(state.peek_body_text.text)
 
 
 def test_make_reply_edit_binds_arrow_word_chords() -> None:
