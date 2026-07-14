@@ -124,7 +124,6 @@ PALETTE = [
     ("error_text", "light red", ""),
     ("notification", "white", "dark magenta"),
     # Peek panel
-    ("peek_header", "white", "dark blue"),
     ("peek_hint", "dark gray", ""),
     # Your own messages/replies, marked with `›`.
     ("peek_user", "dark blue", ""),
