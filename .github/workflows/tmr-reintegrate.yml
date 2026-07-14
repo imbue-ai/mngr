@@ -21,6 +21,9 @@ on:
 jobs:
   reintegrate:
     runs-on: ubuntu-latest
+    # Vault auth via the mngr_ci_gh role only works from the canonical repo, so
+    # skip on mirrors (e.g. imbue-ai/agentic-mngr) where login always fails.
+    if: github.repository == 'imbue-ai/mngr'
     timeout-minutes: 120
     permissions:
       contents: write

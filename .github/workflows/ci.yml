@@ -53,6 +53,10 @@ jobs:
   # Unit + integration tests via offload on Modal
   test-offload:
     runs-on: ubuntu-latest
+    # The mngr_ci_gh Vault role is bound to the canonical repo, so Vault login
+    # is a guaranteed failure on mirrors (e.g. imbue-ai/agentic-mngr). Skip
+    # every Vault-dependent job there instead of failing.
+    if: github.repository == 'imbue-ai/mngr'
     # `checks: write` is required by the report-flaky-aware-tests composite
     # action: both its `mikepenz/action-junit-report@v6` invocations and its
     # `gh api POST /repos/.../check-runs` call need it. `contents: write` is
@@ -249,6 +253,8 @@ jobs:
   # Clean up old Modal test environments left behind by acceptance tests.
   cleanup-modal-environments:
     runs-on: ubuntu-latest
+    # Vault-dependent: skip on mirror repos (see test-offload).
+    if: github.repository == 'imbue-ai/mngr'
     permissions:
       contents: read
       # Lets the use-vault-secrets step below mint a GitHub OIDC token for Vault.
@@ -294,6 +300,8 @@ jobs:
   # Acceptance tests via offload on Modal
   test-offload-acceptance:
     runs-on: ubuntu-latest
+    # Vault-dependent: skip on mirror repos (see test-offload).
+    if: github.repository == 'imbue-ai/mngr'
     # See note on `test-offload` above: `checks: write` is required by the
     # report-flaky-aware-tests composite action, and `contents: write` is
     # required so offload can push its image-cache git notes back to
@@ -476,8 +484,9 @@ jobs:
     runs-on: ubuntu-latest
     # Skip on fork PRs to mirror the test job (which authenticates to Vault and
     # so cannot run on fork PRs). Same-repo branches and pushes to main run
-    # normally.
+    # normally. Also Vault-dependent: skip on mirror repos (see test-offload).
     if: >-
+      github.repository == 'imbue-ai/mngr' &&
       vars.DISABLE_MINDS_SNAPSHOT_CI != 'true' &&
       (github.event_name != 'pull_request' ||
        github.event.pull_request.head.repo.full_name == github.repository)
@@ -556,6 +565,7 @@ jobs:
     # skip it (and the `minds_services` step in test-minds-snapshot is gated the
     # same way), so they never create a ci env.
     if: >-
+      github.repository == 'imbue-ai/mngr' &&
       github.event_name == 'workflow_dispatch' &&
       inputs.run_minds_release_tests &&
       vars.DISABLE_MINDS_SNAPSHOT_CI != 'true'
@@ -646,6 +656,7 @@ jobs:
     # envs, so gate it to the same opt-in as build-minds-ci-env -- normal pushes
     # create nothing to sweep.
     if: >-
+      github.repository == 'imbue-ai/mngr' &&
       github.event_name == 'workflow_dispatch' &&
       inputs.run_minds_release_tests &&
       vars.DISABLE_MINDS_SNAPSHOT_CI != 'true'
@@ -718,9 +729,11 @@ jobs:
     # skip this whole job. The `minds_services` steps below are themselves gated
     # on the same opt-in and only run when the ci env was actually built.
     # Mirror the build job's fork-PR skip (the job authenticates to Vault, so it
-    # cannot run on fork PRs either).
+    # cannot run on fork PRs either). Also Vault-dependent: skip on mirror
+    # repos (see test-offload).
     if: >-
       !cancelled() &&
+      github.repository == 'imbue-ai/mngr' &&
       vars.DISABLE_MINDS_SNAPSHOT_CI != 'true' &&
       needs.build-minds-snapshot.result == 'success' &&
       (github.event_name != 'pull_request' ||
@@ -887,6 +900,7 @@ jobs:
     # build-minds-ci-env so it is skipped on normal pushes (nothing to destroy).
     if: >-
       always() &&
+      github.repository == 'imbue-ai/mngr' &&
       github.event_name == 'workflow_dispatch' &&
       inputs.run_minds_release_tests &&
       vars.DISABLE_MINDS_SNAPSHOT_CI != 'true'
@@ -976,6 +990,7 @@ jobs:
   test-minds-release:
     runs-on: ubuntu-latest
     if: >-
+      github.repository == 'imbue-ai/mngr' &&
       github.event_name == 'workflow_dispatch' &&
       inputs.run_minds_release_tests &&
       vars.DISABLE_MINDS_SNAPSHOT_CI != 'true'

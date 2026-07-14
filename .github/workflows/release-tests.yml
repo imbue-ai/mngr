@@ -26,6 +26,9 @@ jobs:
   # excluded by path (minds release tests run from their own minds jobs in ci.yml).
   test-mngr-release-docker:
     runs-on: ubuntu-latest
+    # Vault auth via the mngr_ci_gh role only works from the canonical repo, so
+    # skip on mirrors (e.g. imbue-ai/agentic-mngr) where login always fails.
+    if: github.repository == 'imbue-ai/mngr'
     permissions:
       contents: read
       # Lets the use-vault-secrets step below mint a GitHub OIDC token for Vault.
@@ -76,6 +79,8 @@ jobs:
   # in ci.yml).
   test-mngr-release:
     runs-on: ${{ matrix.os }}
+    # Vault-dependent: skip on mirror repos (see test-mngr-release-docker).
+    if: github.repository == 'imbue-ai/mngr'
     permissions:
       contents: read
       # Lets the use-vault-secrets step below mint a GitHub OIDC token for Vault.

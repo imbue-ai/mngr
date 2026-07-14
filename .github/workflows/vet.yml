@@ -12,7 +12,9 @@ on:
 
 jobs:
   vet:
-    if: github.event.pull_request.draft == false
+    # Vault auth via the mngr_ci_gh role only works from the canonical repo, so
+    # skip on mirrors (e.g. imbue-ai/agentic-mngr) where login always fails.
+    if: github.event.pull_request.draft == false && github.repository == 'imbue-ai/mngr'
     runs-on: ubuntu-latest
     steps:
       # Anthropic key from Vault (migrated off the ANTHROPIC_API_KEY GitHub

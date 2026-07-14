@@ -45,6 +45,10 @@ concurrency:
 
 jobs:
   gate:
+    # Scheduled workflows also fire on mirror repos (e.g. imbue-ai/agentic-mngr),
+    # where the downstream tmr.yml job cannot authenticate to Vault. Skipping the
+    # gate leaves `proceed` empty, so `run` skips too.
+    if: github.repository == 'imbue-ai/mngr'
     uses: ./.github/workflows/tmr-gate.yml
     secrets: inherit
     with:

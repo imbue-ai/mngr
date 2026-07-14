@@ -56,6 +56,11 @@ jobs:
   # -- no download).
   check_should_run:
     runs-on: ubuntu-latest
+    # Scheduled workflows also fire on mirror repos (e.g. imbue-ai/agentic-mngr),
+    # which can't authenticate to Vault (mngr_ci_gh is bound to the canonical
+    # repo) and lack the self-hosted minds runner. Skipping this root job skips
+    # every downstream job (they all gate on its outputs).
+    if: github.repository == 'imbue-ai/mngr'
     outputs:
       should_run: ${{ steps.decide.outputs.should_run }}
       pair_key:   ${{ steps.compute.outputs.pair_key }}
@@ -947,7 +952,9 @@ jobs:
   # webhook approach directly so we don't pull in a third-party action.
   notify_slack:
     needs: [check_should_run, build, launch_to_msg, macos_launch, update_marker]
-    if: always()
+    # `always()` would run this even on mirror repos where check_should_run is
+    # skipped, so repeat the canonical-repo guard here.
+    if: always() && github.repository == 'imbue-ai/mngr'
     runs-on: ubuntu-latest
     steps:
       # Slack webhook from Vault (migrated off the SLACK_LAUNCH_TO_MSG_WEBHOOK
