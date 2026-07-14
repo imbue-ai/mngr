@@ -251,10 +251,14 @@ def resolve_ready_prebaked_lima_image(
     """Resolve the baked raw image path to use for a create, or None to build in-VM.
 
     Returns None when the gate does not apply (non-default workspace, no prefetcher,
-    kill switch, dev loop) or when no image is published for this release+arch
-    (VERSION_UNAVAILABLE -> build in-VM). Raises ``LimaImageDownloadError`` when a
-    *published* image cannot be made ready in time (FAILED or timeout): a retryable
-    hard failure the create surfaces rather than silently rebuilding the slow way.
+    kill switch, dev loop), when no image is published for this release+arch
+    (VERSION_UNAVAILABLE), or when the image is still being fetched when the wait runs
+    out -- a slow download is not a broken one, and building in-VM gets the user a
+    workspace now while the prefetch keeps running for the next create.
+
+    Raises ``LimaImageDownloadError`` only for FAILED: a *published* image that could
+    not be fetched or verified is an operator-visible defect, so it is surfaced rather
+    than silently papered over by the slow path.
     """
     if prefetcher is None:
         return None
@@ -271,20 +275,30 @@ def resolve_ready_prebaked_lima_image(
     ):
         return None
     state = prefetcher.wait_until_terminal(wait_timeout_seconds, poll_interval_seconds)
-    if state is None:
-        raise LimaImageDownloadError("Pre-baked Lima image is not ready yet; please retry.")
-    match state.status:
-        case LimaImagePrefetchStatus.READY:
-            if state.raw_path is None:
-                raise LimaImageDownloadError("Pre-baked Lima image reported ready without a path; please retry.")
-            return state.raw_path
-        case LimaImagePrefetchStatus.VERSION_UNAVAILABLE:
+    match state:
+        case None:
+            logger.warning("Pre-baked Lima image reported no progress at all; building in-VM")
+            return None
+        case LimaImagePrefetchState(status=LimaImagePrefetchStatus.READY, raw_path=None):
+            raise LimaImageDownloadError("Pre-baked Lima image reported ready without a path; please retry.")
+        case LimaImagePrefetchState(status=LimaImagePrefetchStatus.READY, raw_path=Path() as raw_path):
+            return raw_path
+        case LimaImagePrefetchState(status=LimaImagePrefetchStatus.VERSION_UNAVAILABLE):
             logger.info("No pre-baked Lima image published for {}; building in-VM", current_release_tag)
             return None
-        case _:
+        case LimaImagePrefetchState(status=LimaImagePrefetchStatus.FAILED):
             raise LimaImageDownloadError(
-                state.error or f"Pre-baked Lima image not ready (status {state.status.value}); please retry."
+                state.error or f"Pre-baked Lima image could not be fetched for {current_release_tag}; please retry."
             )
+        case _:
+            # Still working (fetching/downloading/verifying) when the wait ran out. The image
+            # is not broken, so do not fail the create over it: the slow path still works.
+            logger.warning(
+                "Pre-baked Lima image still {} after {}s; building in-VM and leaving the download running",
+                state.status.value,
+                wait_timeout_seconds,
+            )
+            return None
 
 
 class LimaImageCreateGate(FrozenModel):

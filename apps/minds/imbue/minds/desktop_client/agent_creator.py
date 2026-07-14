@@ -529,10 +529,10 @@ _FAST_MODE_PREVENT: Final[str] = "prevent"
 # ``imbue.mngr_imbue_cloud.errors.FastPathUnavailableError``.
 _FAST_PATH_UNAVAILABLE_ERROR_CLASS: Final[str] = "FastPathUnavailableError"
 
-# How long a gated Lima create blocks waiting for the prefetched image to become
-# ready before surfacing a retryable error. Generous because a cold first-run
-# download of a multi-GB image can take a while; the background prefetch usually
-# wins this race long before a user clicks create.
+# How long a gated Lima create blocks waiting for the prefetched image before giving
+# up on it and building the workspace in-VM instead. Generous because a cold first-run
+# download of a multi-GB image can take a while; the background prefetch usually wins
+# this race long before a user clicks create.
 _PREBAKED_IMAGE_WAIT_TIMEOUT_SECONDS: Final[float] = 1800.0
 _PREBAKED_IMAGE_POLL_INTERVAL_SECONDS: Final[float] = 1.0
 
@@ -1743,8 +1743,9 @@ class AgentCreator(MutableModel):
                 parsed_host = HostName(host_name)
                 log_queue.put("[minds] Creating workspace '{}' (mode: {})...".format(host_name, launch_mode.value))
 
-                # Returns None (build in-VM) for any non-default create or unpublished
-                # version; raises a retryable error if a published image can't be readied.
+                # Returns None (build in-VM) for any non-default create, an unpublished
+                # version, or an image still downloading when the wait runs out; raises a
+                # retryable error only when a published image failed to fetch or verify.
                 prebaked_lima_image_raw_path: Path | None = None
                 if self.lima_image_gate is not None:
                     if launch_mode is LaunchMode.LIMA:

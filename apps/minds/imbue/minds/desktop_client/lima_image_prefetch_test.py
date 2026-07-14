@@ -268,9 +268,27 @@ def test_resolve_raises_when_failed(tmp_path: Path) -> None:
         _resolve(prefetcher)
 
 
-def test_resolve_raises_on_timeout_without_terminal_state(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "in_progress_status",
+    (
+        LimaImagePrefetchStatus.FETCHING_MANIFEST,
+        LimaImagePrefetchStatus.DOWNLOADING,
+        LimaImagePrefetchStatus.VERIFYING,
+    ),
+)
+def test_resolve_builds_in_vm_when_the_image_is_still_being_fetched(
+    tmp_path: Path, in_progress_status: LimaImagePrefetchStatus
+) -> None:
+    # A download that is merely slow (a big image on a thin connection) must not fail the
+    # create: without the pre-baked image the user would simply have built in-VM, so that
+    # is what a create falls back to. The prefetch keeps running for the next one.
     sink = RecordingProgressSink()
     prefetcher = _prefetcher(InMemoryManifestFetcher(), FixedRawChunkStore(), sink, tmp_path)
-    # No terminal state ever written -> wait times out -> retryable raise.
-    with pytest.raises(LimaImageDownloadError):
-        _resolve(prefetcher, wait_timeout_seconds=0.05)
+    _seed(sink, in_progress_status, raw_path=None, error=None)
+    assert _resolve(prefetcher, wait_timeout_seconds=0.05) is None
+
+
+def test_resolve_builds_in_vm_when_no_progress_was_ever_recorded(tmp_path: Path) -> None:
+    sink = RecordingProgressSink()
+    prefetcher = _prefetcher(InMemoryManifestFetcher(), FixedRawChunkStore(), sink, tmp_path)
+    assert _resolve(prefetcher, wait_timeout_seconds=0.05) is None

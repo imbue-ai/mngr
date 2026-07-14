@@ -228,7 +228,11 @@ Notes:
 
 ```bash
 BASE_URL=$(grep -h '^lima_image_base_url' apps/minds/imbue/minds/config/envs/production/client.toml | cut -d'"' -f2)
-curl -fsS "$BASE_URL/manifests/$VERSION/root.json" | python3 -m json.tool
+if [ -z "$BASE_URL" ]; then
+  echo "This tier configures no image, so it never looks for one: 8b and 8c do not apply."
+else
+  curl -fsS "$BASE_URL/manifests/$VERSION/root.json" | python3 -m json.tool
+fi
 ```
 
 It must print a manifest naming `$VERSION` and listing an entry per shipped arch. Anything else — a 404, a manifest for a different version, a missing arch — means clients will fall back to building in-VM, and the release is **not** done:

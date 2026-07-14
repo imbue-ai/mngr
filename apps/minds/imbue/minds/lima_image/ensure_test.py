@@ -1,4 +1,5 @@
 import hashlib
+import json
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -211,6 +212,43 @@ def test_a_truncated_installed_image_is_re_fetched(tmp_path: Path) -> None:
     assert result.status is LimaImagePrefetchStatus.READY
     assert result.raw_path is not None
     assert result.raw_path.read_bytes() == raw, "a truncated image must be re-fetched, not booted"
+
+
+def test_a_pointer_written_before_the_hash_existed_is_hashed_once_and_adopted(tmp_path: Path) -> None:
+    # A pointer from a build that did not record the hash names an image that is still the
+    # right one; re-downloading it would cost the user multiple GB. Hash it once, keep it,
+    # and write the hash down so the next run does not have to hash it again.
+    version = MindsImageVersion("minds-v9.9.8")
+    raw = b"already-installed" * 50
+    fetcher = InMemoryManifestFetcher()
+    chunk_store = FixedRawChunkStore()
+    _publish(fetcher, chunk_store, version=version, raw_bytes=raw)
+    _run(
+        fetcher,
+        chunk_store,
+        AcceptingSignatureVerifier(),
+        RecordingProgressSink(),
+        version=version,
+        cache_dir=tmp_path,
+    )
+
+    # Rewrite the pointer as the older build wrote it: no raw_image_sha256 key at all.
+    layout = LimaImageCacheLayout(cache_dir=tmp_path)
+    legacy_fields = json.loads(layout.current_pointer_file.read_text())
+    del legacy_fields["raw_image_sha256"]
+    layout.current_pointer_file.write_text(json.dumps(legacy_fields))
+
+    sink2 = RecordingProgressSink()
+    result = _run(fetcher, chunk_store, AcceptingSignatureVerifier(), sink2, version=version, cache_dir=tmp_path)
+
+    assert result.status is LimaImagePrefetchStatus.READY
+    assert result.raw_path is not None
+    assert result.raw_path.read_bytes() == raw
+    assert LimaImagePrefetchStatus.DOWNLOADING not in [state.status for state in sink2.states], (
+        "the installed image is the one the manifest names, so it must not be re-downloaded"
+    )
+    adopted = LimaImageCurrentPointer.model_validate_json(layout.current_pointer_file.read_text())
+    assert adopted.raw_image_sha256 == _sha256(raw), "the hash it was checked against must be recorded"
 
 
 def test_missing_manifest_reports_version_unavailable(tmp_path: Path) -> None:
