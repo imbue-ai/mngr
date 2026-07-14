@@ -54,6 +54,7 @@ from tenacity import wait_fixed
 
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.imbue_common.pure import pure
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
@@ -192,29 +193,38 @@ def _sftp_walk(sftp: SFTPClient, dir_path: str, recursive: bool) -> list[VolumeF
     return entries
 
 
-def _is_transient_ssh_error(exception: BaseException) -> bool:
-    """Check if the exception is a transient SSH connection error worth retrying."""
+@pure
+def is_transient_ssh_error(exception: BaseException) -> bool:
+    """Check if the exception is a transient SSH connection error worth retrying.
+
+    Matches:
+    - OSError with "Socket is closed" (stale socket from pyinfra)
+    - SSHException (e.g. "SSH session not active" when transport dies),
+      including ChannelException (server refused to open a new channel,
+      e.g. MaxSessions limit -- the transport may still be alive)
+    - EOFError (remote end closed connection)
+    - TimeoutError (pyinfra read_output_buffers timeout when the remote
+      sshd is reloaded mid-command, e.g. during cloud-init bootstrap).
+      Note: ``TimeoutError`` is an OSError subclass on Python 3, so this
+      check must precede any narrower OSError handling.
+    """
     if isinstance(exception, OSError) and "Socket is closed" in str(exception):
         return True
     if isinstance(exception, SSHException):
         return True
     if isinstance(exception, EOFError):
         return True
-    # pyinfra raises a bare ``TimeoutError`` from
-    # ``pyinfra.connectors.util.read_output_buffers`` when an SSH command
-    # response doesn't arrive within the per-command timeout -- e.g. when
-    # the remote sshd is reloaded mid-read during cloud-init bootstrap.
-    # Treat that as transient: the underlying channel is dead, but a fresh
-    # connection on retry should succeed once the disruption settles.
-    # ``TimeoutError`` is a subclass of ``OSError`` on Python 3, so this
-    # check must precede any general OSError handling.
     if isinstance(exception, TimeoutError):
         return True
     return False
 
 
-_retry_on_transient_ssh_error = retry(
-    retry=retry_if_exception(_is_transient_ssh_error),
+# Shared retry decorator for SSH operations that encounter transient
+# connection errors. Retries after (0, 1, 3, 6) seconds for a total
+# backoff window of ~10 seconds. Also used by the Host subclass in
+# ``imbue.mngr.hosts.host``.
+retry_on_transient_ssh_error = retry(
+    retry=retry_if_exception(is_transient_ssh_error),
     stop=stop_after_attempt(5),
     wait=wait_chain(
         wait_fixed(0),
@@ -241,14 +251,12 @@ def _is_transient_ssh_connect_error(exception: BaseException) -> bool:
 
 _retry_on_transient_ssh_connect_error = retry(
     retry=retry_if_exception(_is_transient_ssh_connect_error),
-    stop=stop_after_attempt(3),
-    # The first retry is immediate: the failed attempt already blocked for
-    # paramiko's banner timeout waiting for sshd, so an extra pause on top of
-    # that adds nothing (mirrors _retry_on_transient_ssh_error above).
-    wait=wait_chain(
-        wait_fixed(0),
-        wait_fixed(3),
-    ),
+    # One immediate retry, no pause: each failed attempt already blocked for
+    # paramiko's banner timeout (15s by default) waiting for sshd to answer,
+    # so two attempts bound the worst case (a host that accepts TCP but never
+    # speaks SSH) at ~30 seconds while still riding out the boot race.
+    stop=stop_after_attempt(2),
+    wait=wait_fixed(0),
     reraise=True,
 )
 
@@ -414,9 +422,10 @@ class OuterHost(OuterHostInterface):
         """Connect the pyinfra host, retrying banner-read connect failures.
 
         Each banner-read failure already spent paramiko's own banner timeout
-        waiting for sshd to answer, so a couple of retries ride out the boot
-        race where a freshly created host accepts TCP before sshd is ready --
-        which otherwise surfaces to users as a spurious create failure.
+        waiting for sshd to answer, so a single immediate retry rides out the
+        boot race where a freshly created host accepts TCP before sshd is
+        ready -- which otherwise surfaces to users as a spurious create
+        failure -- while keeping the worst case bounded at ~30 seconds.
         """
         self.connector.host.connect(raise_exceptions=True)
 
@@ -513,7 +522,7 @@ class OuterHost(OuterHostInterface):
         ):
             return self._run_shell_command_with_transient_retry(command, pyinfra_kwargs)
 
-    @_retry_on_transient_ssh_error
+    @retry_on_transient_ssh_error
     def _run_shell_command_with_transient_retry(
         self,
         command: StringCommand,
@@ -662,7 +671,7 @@ class OuterHost(OuterHostInterface):
                 remote_filename, filename_or_io, remote_temp_filename, timeout_seconds
             )
 
-    @_retry_on_transient_ssh_error
+    @retry_on_transient_ssh_error
     def _get_file_with_transient_retry(
         self,
         remote_filename: str,
@@ -771,7 +780,7 @@ class OuterHost(OuterHostInterface):
         ):
             return self._put_file_with_transient_retry(filename_or_io, remote_filename, remote_temp_filename)
 
-    @_retry_on_transient_ssh_error
+    @retry_on_transient_ssh_error
     def _put_file_with_transient_retry(
         self,
         filename_or_io: str | IO[bytes],
@@ -933,7 +942,7 @@ class OuterHost(OuterHostInterface):
             success=(finished.returncode == 0),
         )
 
-    @_retry_on_transient_ssh_error
+    @retry_on_transient_ssh_error
     def _execute_streaming_ssh_with_retry(
         self,
         command: str,
@@ -1130,7 +1139,7 @@ class OuterHost(OuterHostInterface):
         ):
             return self._list_directory_remote_with_retry(path, recursive)
 
-    @_retry_on_transient_ssh_error
+    @retry_on_transient_ssh_error
     def _list_directory_remote_with_retry(self, path: Path, recursive: bool) -> list[VolumeFile]:
         self._ensure_connected()
         transport = self._get_paramiko_transport()

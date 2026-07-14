@@ -6,6 +6,7 @@ from typing import Any
 from typing import cast
 
 import pytest
+from paramiko import ChannelException
 from paramiko import SSHException
 from pyinfra.api.exceptions import ConnectError
 from pyinfra.api.host import Host as PyinfraHost
@@ -16,11 +17,11 @@ from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.outer_host import OuterHost
 from imbue.mngr.hosts.outer_host import _is_transient_ssh_connect_error
-from imbue.mngr.hosts.outer_host import _is_transient_ssh_error
 from imbue.mngr.hosts.outer_host import _prepend_env_exports
 from imbue.mngr.hosts.outer_host import _sftp_walk
 from imbue.mngr.hosts.outer_host import create_local_pyinfra_host
 from imbue.mngr.hosts.outer_host import create_ssh_pyinfra_host_using_user_config
+from imbue.mngr.hosts.outer_host import is_transient_ssh_error
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.host import OuterHostInterface
@@ -490,6 +491,29 @@ def test_ensure_connected_retries_banner_read_connect_failures(temp_mngr_ctx: Mn
     assert fake.connect_call_count == 2
 
 
+def test_ensure_connected_gives_up_after_two_banner_read_attempts(temp_mngr_ctx: MngrContext) -> None:
+    """A persistent banner-read failure makes exactly two attempts before surfacing.
+
+    Each attempt already blocks for paramiko's ~15s banner timeout, so capping
+    at two attempts bounds the worst case (a host that accepts TCP but never
+    speaks SSH) at ~30 seconds.
+    """
+    fake = _FakePyinfraHostRecoveringOnConnect(
+        failure_count=5,
+        message="SSH error (Error reading SSH protocol banner)",
+    )
+    outer = OuterHost(
+        id=HostId.generate(),
+        connector=PyinfraConnector(cast(PyinfraHost, fake)),
+        mngr_ctx=temp_mngr_ctx,
+    )
+
+    with pytest.raises(HostConnectionError):
+        outer._ensure_connected()
+
+    assert fake.connect_call_count == 2
+
+
 def test_ensure_connected_does_not_retry_non_transient_connect_failures(temp_mngr_ctx: MngrContext) -> None:
     """A refused connection is not retried: genuinely-down hosts must keep failing fast."""
     fake = _FakePyinfraHostRecoveringOnConnect(
@@ -525,7 +549,7 @@ def test_is_transient_ssh_connect_error_matches_only_banner_read_connect_errors(
 
     The raw ``SSHException`` case must stay False: at connect time pyinfra
     always wraps it in ``ConnectError``, and mid-command banner problems are
-    handled by the separate ``_is_transient_ssh_error`` classifier.
+    handled by the separate ``is_transient_ssh_error`` classifier.
     """
     assert _is_transient_ssh_connect_error(exception) is expected
 
@@ -535,12 +559,23 @@ def test_is_transient_ssh_connect_error_matches_only_banner_read_connect_errors(
     [
         (OSError("Socket is closed"), True),
         (OSError("No such file or directory"), False),
+        (ValueError("Socket is closed"), False),
         (SSHException("SSH session not active"), True),
+        (ChannelException(2, "open failed"), True),
         (EOFError(), True),
         (TimeoutError("Timed out reading output"), True),
         (ValueError("not transient"), False),
     ],
-    ids=["socket-closed", "other-os-error", "ssh-exception", "eof-error", "timeout-error", "non-os-error"],
+    ids=[
+        "socket-closed",
+        "other-os-error",
+        "non-os-value-error",
+        "ssh-exception",
+        "channel-exception",
+        "eof-error",
+        "timeout-error",
+        "non-os-error",
+    ],
 )
 def test_is_transient_ssh_error_classifies_timeout_as_transient(exception: BaseException, expected: bool) -> None:
     """Regression: ``TimeoutError`` from pyinfra's ``read_output_buffers`` must be classified transient.
@@ -554,4 +589,4 @@ def test_is_transient_ssh_error_classifies_timeout_as_transient(exception: BaseE
     Python 3, so the classifier's ordering matters: the TimeoutError
     branch must precede the narrow "Socket is closed" OSError check.
     """
-    assert _is_transient_ssh_error(exception) is expected
+    assert is_transient_ssh_error(exception) is expected
