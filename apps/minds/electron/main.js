@@ -3113,12 +3113,14 @@ ipcMain.on('open-workspace-in-new-window', (event, agentId) => {
   if (bundle) closeModal(bundle);
 });
 
-ipcMain.on('navigate-to-request', (event, agentId, eventId) => {
+ipcMain.on('navigate-to-request', (event, _agentId, eventId) => {
   if (!eventId) return;
   // Land on the owning workspace's Connections view with the request
   // highlighted. The owning workspace is resolved from the latest SSE
-  // entries; the sender-supplied agent id (a sibling agent, not the primary)
-  // and the sender's own displayed workspace are fallbacks.
+  // entries, falling back to the sender's own displayed workspace. The
+  // sender-supplied agent id is deliberately ignored: it names the
+  // requesting sibling agent (``system-services``), not the primary
+  // (homepage) agent id the Connections URL keys on.
   const sender = getBundleFromEvent(event);
   const wsId = workspaceAgentIdForRequest(eventId) || (sender && sender.currentWorkspaceId) || '';
   openConnectionsForRequest(wsId, String(eventId));
