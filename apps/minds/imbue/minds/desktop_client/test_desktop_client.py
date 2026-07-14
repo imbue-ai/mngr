@@ -1247,6 +1247,53 @@ def test_settings_page_hosts_error_reporting_toggles(tmp_path: Path) -> None:
     assert "hidden" not in logs_row
 
 
+def test_settings_modal_requires_auth(tmp_path: Path) -> None:
+    """The centered settings modal page requires authentication."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/settings/modal")
+    assert response.status_code == 403
+
+
+def test_settings_modal_renders_device_settings_in_overlay(tmp_path: Path) -> None:
+    """GET /settings/modal renders the shared device-settings sections inside
+    the centered overlay chrome (backdrop + closeModal-based dismissal)."""
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    response = client.get("/settings/modal")
+    assert response.status_code == 200
+    body = response.text
+    # The shared sections (SettingsSections.jinja) and their external shell JS.
+    assert 'id="dark-mode-toggle"' in body
+    assert 'id="report-errors-toggle"' in body
+    assert "/_static/app_settings.js" in body
+    # Modal chrome: dim backdrop over a transparent body, dismissed through
+    # the Electron modal host (with a plain-page fallback).
+    assert 'id="settings-modal-backdrop"' in body
+    assert "window.minds.closeModal" in body
+
+
+def test_accounts_modal_requires_auth(tmp_path: Path) -> None:
+    """The centered accounts modal page requires authentication."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/accounts/modal")
+    assert response.status_code == 403
+
+
+def test_accounts_modal_lists_logged_in_accounts(tmp_path: Path) -> None:
+    """GET /accounts/modal lists the signed-in accounts inside the centered
+    overlay chrome, with the Add account launcher."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-test-123", email="test@example.com")
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
+    _authenticate_client(client, auth_store)
+    response = client.get("/accounts/modal")
+    assert response.status_code == 200
+    body = response.text
+    assert "test@example.com" in body
+    assert 'id="accounts-modal-backdrop"' in body
+    assert "Add account" in body
+
+
 def test_workspace_settings_page_requires_auth(tmp_path: Path) -> None:
     """The workspace settings page requires authentication."""
     client, _ = _create_test_client_with_stores(tmp_path)
