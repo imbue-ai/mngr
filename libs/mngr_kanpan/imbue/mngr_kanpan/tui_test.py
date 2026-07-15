@@ -2075,6 +2075,23 @@ def test_handle_peek_key_unknown_passes_through() -> None:
     assert _handle_peek_key(state, "z") is None
 
 
+def test_toggle_peek_opens_panel_for_focused_agent() -> None:
+    entry = _make_entry(name="agent-a")
+    state = _make_state_with_walker((entry,))
+    original_footer = Text("keybinding-bar")
+    state.frame.footer = original_footer
+    agent_idx = next(k for k, v in state.index_to_entry.items() if v.name == AgentName("agent-a"))
+    state.list_walker.set_focus(agent_idx)
+    _toggle_peek(state)
+    # The panel replaces the footer (saved for restore-on-close) and takes key focus.
+    assert state.peek_agent_name == AgentName("agent-a")
+    assert state.focused_agent_name == AgentName("agent-a")
+    assert state.saved_footer is original_footer
+    assert state.frame.footer is state.peek_box
+    assert state.frame.focus_position == "footer"
+    assert str(state.peek_body_text.text) == "(loading...)"
+
+
 def test_toggle_peek_closes_when_already_open() -> None:
     entry = _make_entry(name="agent-a")
     state = _make_state_with_walker((entry,))
