@@ -892,9 +892,11 @@ class ErrorAttachmentsS3Uploader(MutableModel):
             key = get_s3_upload_key("logsite_traceback_with_vars", ".txt")
             uploads[("", key)] = partial(self._upload_traceback_cb, key=key, exception=exception)
 
-        if logs_folder:
-            for group in self.log_attachment_groups:
-                self._collect_group_uploads(uploads, logs_folder, group)
+        for group in self.log_attachment_groups:
+            group_folder = group.base_dir if group.base_dir is not None else logs_folder
+            if group_folder is None:
+                continue
+            self._collect_group_uploads(uploads, group_folder, group)
 
         grouped_uris: defaultdict[str, list[str | None]] = defaultdict(list)
         for group_name, key in uploads.keys():

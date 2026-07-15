@@ -34,6 +34,7 @@ from pydantic import Field
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.bootstrap import minds_data_dir_for
+from imbue.minds.bootstrap import mngr_host_dir_for
 from imbue.minds.bootstrap import reconcile_imbue_cloud_providers_from_sessions
 from imbue.minds.bootstrap import resolve_minds_root_name
 from imbue.minds.build_info import resolve_git_sha
@@ -102,6 +103,8 @@ from imbue.minds.utils.sentry.core import resolve_latchkey_forward_sentry_env
 from imbue.minds.utils.sentry.core import resolve_sentry_environment
 from imbue.minds.utils.sentry.core import setup_sentry
 from imbue.minds.utils.sentry.core import write_latchkey_forward_sentry_consent
+from imbue.mngr.api.discovery_events import get_discovery_events_dir
+from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.parent_process import start_grandparent_death_watcher
@@ -216,6 +219,9 @@ def run(
     # can count the distinct installs affected by each issue. The same value is shared with the
     # detached ``mngr latchkey forward`` daemon (below) so both processes count as one install.
     anonymous_user_id = resolve_anonymous_user_id(data_directory)
+    # Built before Sentry setup so the attachment sweep knows the latchkey plugin
+    # data dir (the detached ``mngr latchkey forward`` daemon's logs live there).
+    latchkey = _build_latchkey(data_directory=data_directory)
     setup_sentry(
         environment=resolve_sentry_environment(),
         release_id=resolve_release_id(),
@@ -224,6 +230,8 @@ def run(
         anonymous_user_id=anonymous_user_id,
         is_error_reporting_enabled=minds_config.get_report_unexpected_errors,
         is_log_inclusion_enabled=minds_config.get_include_error_logs,
+        latchkey_plugin_data_dir=latchkey.plugin_data_dir,
+        discovery_events_dir=get_discovery_events_dir(MngrConfig(default_host_dir=mngr_host_dir_for(root_name))),
     )
     client_config_path = config_file
     client_env_config = load_client_config(client_config_path)
@@ -251,7 +259,6 @@ def run(
     backend_resolver = MngrCliBackendResolver(
         last_good_agents_path=paths.data_dir / "last_good_agent_topology.json",
     )
-    latchkey = _build_latchkey(data_directory=data_directory)
     latchkey.initialize()
 
     # Mint a fresh central minds API key for this process. The same
