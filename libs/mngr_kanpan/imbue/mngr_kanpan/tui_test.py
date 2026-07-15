@@ -1,5 +1,6 @@
 """Unit tests for the kanpan TUI."""
 
+import io
 import subprocess
 import threading
 from concurrent.futures import Future
@@ -15,6 +16,7 @@ from typing import cast
 import pytest
 from pydantic import TypeAdapter
 from pydantic import ValidationError
+from urwid.display.raw import Screen
 from urwid.event_loop.abstract_loop import ExitMainLoop
 from urwid.widget.attr_map import AttrMap
 from urwid.widget.filler import Filler
@@ -95,6 +97,7 @@ from imbue.mngr_kanpan.tui import _is_field_stale
 from imbue.mngr_kanpan.tui import _is_focus_on_first_selectable
 from imbue.mngr_kanpan.tui import _is_transcript_header
 from imbue.mngr_kanpan.tui import _last_nonempty_line
+from imbue.mngr_kanpan.tui import _legend_markup
 from imbue.mngr_kanpan.tui import _load_user_commands
 from imbue.mngr_kanpan.tui import _make_reply_edit
 from imbue.mngr_kanpan.tui import _on_batch_item_poll
@@ -120,6 +123,7 @@ from imbue.mngr_kanpan.tui import _update_mark_count_footer
 from imbue.mngr_kanpan.tui import _update_peek_header
 from imbue.mngr_kanpan.tui import _update_row_mark
 from imbue.mngr_kanpan.tui import _update_snapshot_mute
+from imbue.mngr_kanpan.tui import _write_terminal_title
 from imbue.mngr_kanpan.tui import resolve_board_layout
 
 # =============================================================================
@@ -1978,6 +1982,27 @@ def test_build_peek_panel_populates_parts() -> None:
     assert state.peek_input.get_edit_text() == ""
     assert state.peek_body_text is not None
     assert state.peek_box is not None
+
+
+def test_legend_markup_styles_keys_and_keeps_units_unwrappable() -> None:
+    markup = _legend_markup([("p", "push"), ("U", "unmark all")], "footer_key", "footer", "  ")
+    assert markup == [
+        ("footer_key", "p"),
+        ("footer", ":\u00a0push"),
+        ("footer", "  "),
+        ("footer_key", "U"),
+        ("footer", ":\u00a0unmark\u00a0all"),
+    ]
+
+
+def test_legend_markup_single_binding_has_no_separator() -> None:
+    assert _legend_markup([("q", "quit")], "k", "t", " · ") == [("k", "q"), ("t", ":\u00a0quit")]
+
+
+def test_write_terminal_title_emits_osc_zero() -> None:
+    out = io.StringIO()
+    _write_terminal_title(Screen(output=out), "kanpan")
+    assert out.getvalue() == "\x1b]0;kanpan\x07"
 
 
 def test_update_peek_header_names_agent() -> None:

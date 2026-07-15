@@ -9,3 +9,7 @@ Added agent-view style interaction to the kanpan board, so you can work with an 
 - The reply input supports readline-style editing (via the `urwid_readline` library, with the Option/Ctrl+arrow chords added): word movement (`Option`/`Ctrl`+`←`/`→`, `Meta-B`/`F`), word delete (`Option`+`Delete`, `Ctrl-W`, `Meta-D`), jump to start/end (`Ctrl-A`/`Ctrl-E`), and kill to start/end (`Ctrl-U`/`Ctrl-K`).
 
 - Optional `peek_left_returns_to_board` setting (under `[plugins.kanpan]`, off by default): when on, pressing `←` on an empty reply closes the peek panel and returns to the board. `←` still moves the cursor when the reply has text.
+
+- Key legends (the board footer and the peek panel hint) share one style: the key is highlighted, distinct from its dimmer description, and each `key: description` unit is unwrappable, so a narrow terminal wraps the footer between bindings instead of splitting a key from its description.
+
+- Kanpan sets the terminal title (`kanpan`) while running: it re-takes the title after you detach from an attached agent session (which sets its own), and restores the previous title on exit in terminals that support the title stack.

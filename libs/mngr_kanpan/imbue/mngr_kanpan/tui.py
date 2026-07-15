@@ -14,6 +14,8 @@ from typing import assert_never
 from loguru import logger
 from pydantic import ConfigDict
 from urwid.canvas import TextCanvas
+from urwid.display.common import BaseScreen
+from urwid.display.raw import Screen
 from urwid.event_loop.abstract_loop import ExitMainLoop
 from urwid.event_loop.main_loop import MainLoop
 from urwid.widget.attr_map import AttrMap
@@ -92,9 +94,21 @@ PEEK_BODY_HEIGHT: int = 14
 PEEK_REFRESH_SECONDS: float = 2.0
 PEEK_REPLY_PROMPT: str = "› "
 
+TERMINAL_TITLE: str = "kanpan"
+# XTWINOPS title stack: push the previous title on entry, pop it back on exit
+# (terminals without title-stack support ignore these).
+_TITLE_STACK_PUSH: str = "\x1b[22;0t"
+_TITLE_STACK_POP: str = "\x1b[23;0t"
+# Within a legend binding (`enter: attach`), NBSP keeps the key and its
+# description on one line, so a narrow footer wraps between bindings only.
+_LEGEND_NBSP: str = "\u00a0"
+
 PALETTE = [
     ("header", "white", "dark blue"),
     ("footer", "white", "dark blue"),
+    # Keys inside legends (`enter: attach`), visually distinct from their descriptions.
+    ("footer_key", "yellow,bold", "dark blue"),
+    ("peek_hint_key", "light gray", ""),
     ("reversed", "standout", ""),
     # Agent states: only RUNNING and WAITING-needing-attention get color
     ("state_running", "light green", ""),
@@ -920,6 +934,8 @@ def _attach_to_focused_agent(state: _KanpanState) -> None:  # pragma: no cover
         write_human_line(f"{CLEAR_SCREEN}  Connecting to {entry.name}...")
         result = subprocess.run(["mngr", "connect", str(entry.name)], env=attach_env)
     finally:
+        # The attached session sets its own terminal title; take it back.
+        _write_terminal_title(loop.screen, TERMINAL_TITLE)
         loop.start()
         loop.screen.clear()
         # Force an immediate repaint so the board returns at once instead of waiting for
@@ -1091,11 +1107,36 @@ def _make_reply_edit(caption: tuple[str, str]) -> ReadlineEdit:
     return edit
 
 
+def _legend_markup(
+    bindings: Sequence[tuple[str, str]], key_attr: str, text_attr: str, separator: str
+) -> list[str | tuple[Hashable, str]]:
+    """Text markup for a key legend, one `key: description` unit per binding.
+
+    The key carries ``key_attr`` so it stands out from its description. NBSP inside
+    each unit makes it unwrappable, so a narrow footer breaks between bindings
+    rather than splitting a key from its description.
+    """
+    markup: list[str | tuple[Hashable, str]] = []
+    for key, description in bindings:
+        if markup:
+            markup.append((text_attr, separator))
+        markup.append((key_attr, key))
+        markup.append((text_attr, f":{_LEGEND_NBSP}" + description.replace(" ", _LEGEND_NBSP)))
+    return markup
+
+
+def _write_terminal_title(screen: BaseScreen, title: str) -> None:
+    """Set the terminal window/icon title (OSC 0) through the urwid screen."""
+    if isinstance(screen, Screen):
+        screen.write(f"\x1b]0;{title}\x07")
+        screen.flush()
+
+
 def _build_peek_panel(state: _KanpanState) -> LineBox:
     """Build the peek panel (a bordered box shown in place of the footer) and stash its parts."""
     state.peek_body_text = Text("", wrap="space")
     state.peek_input = _make_reply_edit(("peek_user", PEEK_REPLY_PROMPT))
-    hint = Text(("peek_hint", "enter: send   ·   esc: close"))
+    hint = Text(_legend_markup([("enter", "send"), ("esc", "close")], "peek_hint_key", "peek_hint", "   ·   "))
     inner = Pile(
         [
             state.peek_body_text,
@@ -2169,17 +2210,22 @@ def run_kanpan(
 
     # Build footer keybindings
     mark_keys = {_BUILTIN_COMMAND_KEY_UNMARK}
-    mark_parts = [
-        f"{key}: {cmd.name}" for key, cmd in commands.items() if _mark_color(cmd) is not None or key in mark_keys
+    mark_bindings = [
+        (key, cmd.name) for key, cmd in commands.items() if _mark_color(cmd) is not None or key in mark_keys
     ]
-    mark_parts.append("U: unmark all")
-    action_parts = [
-        f"{key}: {cmd.name}" for key, cmd in commands.items() if _mark_color(cmd) is None and key not in mark_keys
+    mark_bindings.append(("U", "unmark all"))
+    action_bindings = [
+        (key, cmd.name) for key, cmd in commands.items() if _mark_color(cmd) is None and key not in mark_keys
     ]
-    action_parts.append("space: peek")
-    action_parts.append("enter: attach")
-    action_parts.append("q: quit")
-    keybindings = "  ".join(mark_parts + ["|"] + action_parts) + "  "
+    action_bindings.append(("space", "peek"))
+    action_bindings.append(("enter", "attach"))
+    action_bindings.append(("q", "quit"))
+    keybindings = [
+        *_legend_markup(mark_bindings, "footer_key", "footer", "  "),
+        ("footer", "  |  "),
+        *_legend_markup(action_bindings, "footer_key", "footer", "  "),
+        ("footer", "  "),
+    ]
 
     footer_left_text = Text("  Loading...")
     footer_left_attr = AttrMap(footer_left_text, "footer")
@@ -2244,10 +2290,14 @@ def run_kanpan(
         # Initial data load with spinner
         _start_refresh(loop, state)
 
+        screen.write(_TITLE_STACK_PUSH)
+        _write_terminal_title(screen, TERMINAL_TITLE)
         logger.disable("imbue")
         try:
             loop.run()
         finally:
+            screen.write(_TITLE_STACK_POP)
+            screen.flush()
             logger.enable("imbue")
             if state.executor is not None:
                 state.executor.shutdown(wait=False)
