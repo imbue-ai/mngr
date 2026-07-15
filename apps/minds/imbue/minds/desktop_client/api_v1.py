@@ -90,6 +90,7 @@ from imbue.minds.desktop_client.api_models import SharingToggleResponse
 from imbue.minds.desktop_client.api_models import SshConnectionResponse
 from imbue.minds.desktop_client.api_models import StopStateContainerResponse
 from imbue.minds.desktop_client.api_models import UpgradeMergeSummary
+from imbue.minds.desktop_client.api_models import WorkspaceBackupSnapshotsPageResponse
 from imbue.minds.desktop_client.api_models import WorkspaceBackupsResponse
 from imbue.minds.desktop_client.api_models import WorkspaceLifecycleResponse
 from imbue.minds.desktop_client.api_models import WorkspaceListResponse
@@ -478,6 +479,73 @@ def _handle_workspace_backups(agent_id: str) -> WorkspaceBackupsResponse | Respo
         update_target_version=backup_verification.update_target_backup_tag(),
         check_detail=check.detail,
         is_verification_enabled=is_backup_verification_enabled(paths, parsed_id),
+    )
+
+
+# Page-size bounds for the paged snapshot-history route. The default matches
+# what the backup-history page shows per page; the cap keeps a single response
+# (and the JSON the browser must hold) bounded no matter what the caller asks.
+_SNAPSHOT_PAGE_DEFAULT_LIMIT: Final[int] = 20
+_SNAPSHOT_PAGE_MAX_LIMIT: Final[int] = 100
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(resp=json_response_model(WorkspaceBackupSnapshotsPageResponse))
+def _handle_workspace_backup_snapshots(agent_id: str) -> WorkspaceBackupSnapshotsPageResponse | Response:
+    """One page of a workspace's snapshot history, newest-first.
+
+    Query params: ``offset`` (default 0) and ``limit`` (default 20, capped),
+    both clamped rather than rejected. Unlike the full ``/backups`` route this
+    skips the backup-service check and the repository lock probe, so paging
+    through history is a single restic listing per request and works even when
+    the workspace is offline or destroyed.
+    """
+    parsed_id = AgentId(agent_id)
+    state = get_state()
+    paths: WorkspacePaths | None = state.api_v1_paths
+    if paths is None:
+        return _json_error("Backups are not configured", 501)
+    _materialize_env_from_record_if_missing(paths, parsed_id)
+
+    # ``type=int`` makes Flask return the default for unparseable values, so
+    # both params only need range clamping here.
+    offset = max(0, request.args.get("offset", default=0, type=int))
+    requested_limit = request.args.get("limit", default=_SNAPSHOT_PAGE_DEFAULT_LIMIT, type=int)
+    limit = min(max(1, requested_limit), _SNAPSHOT_PAGE_MAX_LIMIT)
+
+    if not has_canonical_env(paths, parsed_id):
+        return WorkspaceBackupSnapshotsPageResponse(
+            agent_id=str(parsed_id), is_configured=False, total=0, offset=offset, limit=limit
+        )
+    try:
+        snapshots = backup_status.list_workspace_snapshots(
+            paths, parsed_id, parent_cg=state.root_concurrency_group
+        )
+    except BackupProvisioningError as e:
+        logger.warning("Backup snapshot page listing failed for {}: {}", parsed_id, e)
+        return WorkspaceBackupSnapshotsPageResponse(
+            agent_id=str(parsed_id), is_configured=True, total=0, offset=offset, limit=limit, error=str(e)
+        )
+    ordered = sorted(snapshots, key=lambda snapshot: snapshot.time, reverse=True)
+    page = ordered[offset : offset + limit]
+    return WorkspaceBackupSnapshotsPageResponse(
+        agent_id=str(parsed_id),
+        is_configured=True,
+        total=len(ordered),
+        offset=offset,
+        limit=limit,
+        snapshots=tuple(
+            BackupSnapshotSummary(
+                snapshot_id=snapshot.snapshot_id,
+                short_id=snapshot.short_id,
+                time=snapshot.time.isoformat(),
+                paths=tuple(snapshot.paths),
+                hostname=snapshot.hostname,
+                tags=tuple(snapshot.tags),
+                total_size_bytes=snapshot.total_size_bytes,
+            )
+            for snapshot in page
+        ),
     )
 
 
@@ -1935,6 +2003,11 @@ def create_api_v1_blueprint() -> Blueprint:
     blueprint.add_url_rule("/accounts", view_func=_handle_list_accounts, methods=["GET"])
     blueprint.add_url_rule("/workspaces/<agent_id>/version", view_func=_handle_workspace_version, methods=["GET"])
     blueprint.add_url_rule("/workspaces/<agent_id>/backups", view_func=_handle_workspace_backups, methods=["GET"])
+    blueprint.add_url_rule(
+        "/workspaces/<agent_id>/backups/snapshots",
+        view_func=_handle_workspace_backup_snapshots,
+        methods=["GET"],
+    )
     blueprint.add_url_rule(
         "/workspaces/<agent_id>/backups/<snapshot_id>/export",
         view_func=_handle_workspace_backup_export,

@@ -1,14 +1,14 @@
 // Backup section of the workspace settings page: shows the combined
 // snapshot status + backup-service verification breakdown from this
 // workspace's /api/v1/workspaces/<id>/backups, and drives the actions:
-//   - the verification Enable/Disable button (top of the section: the whole
-//     breakdown below it only exists while verification is on),
-//   - "Update backup service" (one idempotent converge; tracked operation
+//   - the health-checks ("verification") Enable/Disable button (the whole
+//     problem/version breakdown only exists while it is on),
+//   - "Update backup software" (one idempotent converge; tracked operation
 //     polled at /api/v1/workspaces/operations/backup/<id>, with a
-//     "Stop all chats and retry" follow-up when running chats block it and
+//     "Stop chats and try again" follow-up when running chats block it and
 //     a Cancel that works while the update is still waiting),
-//   - "Configure backups..." (enable, change destination, or disable via the
-//     "None" provider; same tracked-operation polling).
+//   - "Change storage location" (enable, change destination, or disable
+//     via the "None" provider; same tracked-operation polling).
 //
 // Conditional buttons are shown/hidden via their wrapper spans (a `hidden`
 // class directly on a Button loses to its inline-flex display class).
@@ -40,16 +40,27 @@
   var apiKeyEnvInput = document.getElementById('backup-api-key-env-input');
   var configureSubmitBtn = document.getElementById('backup-configure-submit-btn');
 
+  var historyCard = document.getElementById('backup-history-card');
+  var historyEl = document.getElementById('backup-history');
+  var historyEmptyEl = document.getElementById('backup-history-empty');
+  var viewAllLink = document.getElementById('backup-view-all');
+  var viewAllLabel = document.getElementById('backup-view-all-label');
+
   // The latest known verification state, driving the Enable/Disable label.
   var isVerificationEnabled = true;
 
+  var RECENT_LIMIT = 5;
+
+  // Plain-language problem descriptions; each ends with what to do about it.
+  // "Update backup software" (the button right below this list) fixes all of
+  // the fixable ones, so they all point there.
   var PROBLEM_LABELS = {
-    NOT_CONFIGURED: 'Backups are not configured for this workspace.',
-    CODE_OUTDATED: 'The backup service code is outdated.',
-    ENV_MISSING: 'The backup credentials file is missing on the workspace.',
-    ENV_MISMATCH: "The workspace's backup credentials don't match the expected configuration.",
-    SERVICE_NOT_RUNNING: 'The backup service is not running.',
-    UNVERIFIABLE: 'The backup service could not be verified.',
+    NOT_CONFIGURED: 'Backups are turned off for this workspace. Use "Change storage location" to turn them on.',
+    CODE_OUTDATED: 'The backup software in this workspace is out of date. Click "Update backup software" to fix this.',
+    ENV_MISSING: 'This workspace has lost its backup storage settings. Click "Update backup software" to restore them.',
+    ENV_MISMATCH: 'This workspace is set up to back up somewhere different than expected. Click "Update backup software" to fix this.',
+    SERVICE_NOT_RUNNING: 'The backup software in this workspace is not running. Click "Update backup software" to restart it.',
+    UNVERIFIABLE: "minds couldn't check on this workspace's backups. Click \"Update backup software\" to reset them.",
   };
 
   function setShown(el, isShown) {
@@ -81,7 +92,176 @@
     return 'No successful backup yet.';
   }
 
+  // -- Backup history list --------------------------------------------------
+
+  function relativeAgo(iso) {
+    var then = Date.parse(iso);
+    if (isNaN(then)) return '';
+    var s = Math.max(0, Math.floor((Date.now() - then) / 1000));
+    if (s < 45) return 'just now';
+    var m = Math.floor(s / 60);
+    if (m < 60) return m + (m === 1 ? ' min ago' : ' mins ago');
+    var h = Math.floor(m / 60);
+    if (h < 24) return h + (h === 1 ? ' hour ago' : ' hours ago');
+    var d = Math.floor(h / 24);
+    if (d < 30) return d + (d === 1 ? ' day ago' : ' days ago');
+    var mo = Math.floor(d / 30);
+    if (mo < 12) return mo + (mo === 1 ? ' month ago' : ' months ago');
+    var y = Math.floor(mo / 12);
+    return y + (y === 1 ? ' year ago' : ' years ago');
+  }
+
+  // Download one snapshot as a zip. Ported from the Landing "download" flow
+  // (window.backupExport): the export route restores the snapshot on this
+  // machine and streams it back, so this works even for an offline workspace.
+  function downloadSnapshot(link, snapshotId) {
+    if (link.getAttribute('data-exporting') === '1') return;
+    link.setAttribute('data-exporting', '1');
+    link.style.pointerEvents = 'none';
+    var original = link.textContent;
+    link.innerHTML = '<span class="spinner spinner-accent inline-block w-3 h-3 align-middle"></span> Downloading...';
+    function restore(text) {
+      link.textContent = text;
+      link.style.pointerEvents = '';
+      link.removeAttribute('data-exporting');
+    }
+    fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backups/' + encodeURIComponent(snapshotId) + '/export', {
+      method: 'POST',
+    })
+      .then(function (resp) {
+        if (!resp.ok) throw new Error('export failed: ' + resp.status);
+        var disp = resp.headers.get('Content-Disposition') || '';
+        var match = /filename="?([^"]+)"?/.exec(disp);
+        var name = match ? match[1] : (agentId + '-backup.zip');
+        return resp.blob().then(function (blob) { return { blob: blob, name: name }; });
+      })
+      .then(function (result) {
+        var url = URL.createObjectURL(result.blob);
+        var anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = result.name;
+        document.body.appendChild(anchor);
+        anchor.click();
+        document.body.removeChild(anchor);
+        URL.revokeObjectURL(url);
+        restore(original);
+      })
+      .catch(function (err) {
+        console.error('Backup export failed:', err);
+        // A snapshot pruned between load and click 404s here; show it briefly
+        // then restore the affordance (a later refresh drops the stale row).
+        link.textContent = 'Download failed';
+        setTimeout(function () { restore(original); }, 3000);
+      });
+  }
+
+  // One row of the "Recent backups" table: time (+ "Latest" badge on the
+  // newest) on the left, Download / Restore on the right. Rows after the
+  // first carry a top divider; the latest row is tinted. (Snapshot size is
+  // deliberately not shown: the workspace's restic predates the per-snapshot
+  // size summary, so there is no reliable size to display yet.)
+  function buildSnapshotRow(snapshot, isLatest, isFirst) {
+    var row = document.createElement('div');
+    row.className = 'flex items-center gap-4 px-4 py-3'
+      + (isFirst ? '' : ' border-t border-default')
+      + (isLatest ? ' bg-fill-hover' : '');
+
+    var timeCell = document.createElement('div');
+    timeCell.className = 'flex-1 flex items-center gap-2 min-w-0';
+
+    var timeEl = document.createElement('span');
+    timeEl.className = 'type-body text-primary';
+    timeEl.textContent = relativeAgo(snapshot.time);
+    timeEl.title = new Date(snapshot.time).toLocaleString();
+    timeCell.appendChild(timeEl);
+
+    if (isLatest) {
+      // Same green pill as the landing page's "Backed up ..." badge.
+      var latestBadge = document.createElement('span');
+      latestBadge.className = 'inline-flex items-center px-2 py-0.5 rounded-md type-label bg-success/15 text-success';
+      latestBadge.textContent = 'Latest';
+      timeCell.appendChild(latestBadge);
+    }
+    row.appendChild(timeCell);
+
+    var actions = document.createElement('div');
+    actions.className = 'flex items-center gap-4 shrink-0';
+
+    var download = document.createElement('a');
+    download.href = '#';
+    download.className = 'type-body text-accent cursor-pointer';
+    download.textContent = 'Download';
+    download.addEventListener('click', function (ev) {
+      ev.preventDefault();
+      downloadSnapshot(download, snapshot.snapshot_id);
+    });
+    actions.appendChild(download);
+
+    // In-place restore is not built yet; the button is shown but inert so the
+    // design is visible without implying a working action.
+    var restore = document.createElement('button');
+    restore.type = 'button';
+    restore.disabled = true;
+    restore.className = 'type-body text-tertiary cursor-not-allowed bg-transparent border-0 p-0';
+    restore.title = 'In-place restore is coming soon';
+    restore.textContent = 'Restore';
+    actions.appendChild(restore);
+
+    row.appendChild(actions);
+    return row;
+  }
+
+  // Render the "Recent backups" table from the /backups entry. Independent of
+  // the verification check_state below -- the snapshot list comes from restic
+  // run on this machine, so it renders even when the workspace is offline. Only
+  // the newest RECENT_LIMIT snapshots are shown; the "View all backups" footer
+  // links to the paginated full-history page and only appears when there are
+  // more snapshots than the table shows.
+  function renderHistory(entry) {
+    historyEl.textContent = '';
+    setShown(historyCard, false);
+    historyEmptyEl.classList.add('hidden');
+
+    if (!entry.is_configured) {
+      historyEmptyEl.textContent = 'Backups are turned off for this workspace. Use "Change storage location" to turn them on.';
+      historyEmptyEl.classList.remove('hidden');
+      return;
+    }
+    if (entry.snapshots_error) {
+      historyEmptyEl.textContent = "Couldn't load your backup history right now.";
+      historyEmptyEl.classList.remove('hidden');
+      return;
+    }
+    // restic lists snapshots oldest first; the table wants newest at the top.
+    var snapshots = (entry.snapshots || []).slice().sort(function (a, b) {
+      return Date.parse(b.time) - Date.parse(a.time);
+    });
+    if (snapshots.length === 0) {
+      historyEmptyEl.textContent = entry.is_backing_up
+        ? 'Backing up now... the first backup will appear shortly.'
+        : 'No backups yet. The first backup runs within the hour.';
+      historyEmptyEl.classList.remove('hidden');
+      return;
+    }
+
+    setShown(historyCard, true);
+    snapshots.slice(0, RECENT_LIMIT).forEach(function (snapshot, index) {
+      historyEl.appendChild(buildSnapshotRow(snapshot, index === 0, index === 0));
+    });
+
+    // The footer is pointless when the table already shows everything, so it
+    // only appears when there are more snapshots than rows -- and then says
+    // how many. Visibility is driven via style.display because a `hidden`
+    // class would lose to the anchor's own `flex` display utility.
+    var hasMore = snapshots.length > RECENT_LIMIT;
+    viewAllLink.style.display = hasMore ? '' : 'none';
+    if (hasMore) viewAllLabel.textContent = 'View all ' + snapshots.length + ' backups';
+  }
+
   function renderEntry(entry) {
+    // History renders regardless of the verification check_state early-returns
+    // below, so drive it up front.
+    renderHistory(entry);
     statusLine.textContent = snapshotText(entry);
     isVerificationEnabled = !!entry.is_verification_enabled;
     verificationBtn.textContent = isVerificationEnabled ? 'Disable' : 'Enable';
@@ -100,17 +280,20 @@
       return;
     }
     if (entry.check_state === 'OFFLINE') {
-      statusLine.textContent += ' The workspace is offline; its backup service will be verified when it is back.';
+      statusLine.textContent += ' This workspace is offline; its backups will be checked when it is back online.';
       return;
     }
-    var versionParts = [];
-    if (entry.installed_version) versionParts.push('Installed backup service: ' + entry.installed_version);
-    if (entry.minimum_version) versionParts.push('minimum required: ' + entry.minimum_version);
-    if (entry.update_target_version && entry.update_target_version !== entry.minimum_version) {
-      versionParts.push('update installs: ' + entry.update_target_version);
-    }
-    if (versionParts.length > 0) {
-      versionsEl.textContent = versionParts.join(' / ');
+    // One friendly sentence instead of the old installed/minimum/target
+    // triple: whether an update is available is the only thing a user can
+    // act on (the CODE_OUTDATED problem below covers "too old to work").
+    if (entry.installed_version) {
+      if (entry.update_target_version && entry.update_target_version !== entry.installed_version) {
+        versionsEl.textContent =
+          'Backup software version: ' + entry.installed_version +
+          ' (an update to ' + entry.update_target_version + ' is available).';
+      } else {
+        versionsEl.textContent = 'Backup software version: ' + entry.installed_version + '.';
+      }
       versionsEl.classList.remove('hidden');
     }
     // The update is an idempotent converge, so the button is always offered

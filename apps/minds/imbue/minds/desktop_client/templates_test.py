@@ -24,6 +24,7 @@ from imbue.minds.desktop_client.templates import render_login_redirect_page
 from imbue.minds.desktop_client.templates import render_recovery_page
 from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
+from imbue.minds.desktop_client.templates import render_workspace_backup_history
 from imbue.minds.desktop_client.templates import render_workspace_settings
 from imbue.minds.desktop_client.templates import resolve_create_host_name
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
@@ -87,6 +88,30 @@ def test_render_workspace_settings_data_agent_id_interpolates() -> None:
         servers=(),
     )
     assert f'data-agent-id="{_AGENT_A}"' in html
+    assert "{{" not in html
+
+
+def test_render_workspace_settings_view_all_links_to_backup_history_page() -> None:
+    # The "View all N backups" footer navigates to the paginated full-history
+    # page (workspace_backups.js only toggles its visibility and count).
+    html = render_workspace_settings(
+        agent_id=str(_AGENT_A),
+        ws_name="ws",
+        current_account=None,
+        accounts=(),
+        servers=(),
+    )
+    assert f"/workspace/{_AGENT_A}/backups" in html
+
+
+def test_render_workspace_backup_history_page_shell() -> None:
+    # The page is a shell filled client-side: it must carry the agent id for
+    # workspace_backup_history.js, load that script, and link back to settings.
+    html = render_workspace_backup_history(agent_id=str(_AGENT_A), ws_name="my-workspace")
+    assert f'data-agent-id="{_AGENT_A}"' in html
+    assert "workspace_backup_history.js" in html
+    assert f"/workspace/{_AGENT_A}/settings" in html
+    assert "my-workspace" in html
     assert "{{" not in html
 
 

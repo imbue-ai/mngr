@@ -323,7 +323,10 @@ def parse_restic_snapshots(stdout: str) -> tuple[ResticSnapshot, ...]:
         raw_paths = entry.get("paths")
         raw_tags = entry.get("tags")
         summary = entry.get("summary")
-        total_size = summary.get("total_size") if isinstance(summary, dict) else None
+        # restic 0.17+ records a backup summary in each snapshot;
+        # ``total_bytes_processed`` is its logical snapshot size. Older restic
+        # versions record no summary at all, so the size degrades to None.
+        total_size = summary.get("total_bytes_processed") if isinstance(summary, dict) else None
         snapshots.append(
             ResticSnapshot(
                 snapshot_id=str(snapshot_id),
