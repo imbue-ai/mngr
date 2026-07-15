@@ -143,7 +143,7 @@ Workflow:
 Env (Modal secrets; locally via `.env`):
 - `SENTRY_AUTH_TOKEN` (org token: `event:read`, `issue:read`, `event:write` for assignment/merge/status), `SENTRY_ORG`, `SENTRY_PROJECT_PREFIX=minds-`, `SENTRY_TEAM=minds-agent` (the assignment marker; changeable)
 - `GITHUB_TOKEN` (PAT, v1), `TARGET_REPO` (the minds mngr repo), `MIRROR_SOURCE_REPO=imbue-ai/mngr`, `MIRROR_REPO=imbue-ai/agentic-mngr`
-- `ANTHROPIC_API_KEY` (strongest model for manager + fixers)
+- Anthropic credential for manager + fixers (strongest model): `ANTHROPIC_API_KEY` and/or `CLAUDE_CODE_OAUTH_TOKEN` (`claude setup-token`). Both are forwarded to spawned hosts; Claude Code prefers the OAuth token when both are present. At least one is required.
 - `OPEN_SEER_MAX_FIXERS` (int, max fixers spawned per sweep; **default 10**)
 - `OPEN_SEER_ENABLED` (kill switch — tick exits immediately unless truthy)
 - `OPEN_SEER_DRY_RUN` (sweeps print intended actions instead of executing writes)

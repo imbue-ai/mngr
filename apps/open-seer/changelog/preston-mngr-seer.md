@@ -5,3 +5,5 @@ The fixer skill also triages its PR's CI checks before flipping ready: failures 
 The tick module is `tick.py` (renamed from `app.py`, which collided with another workspace member's module of the same name); deploy with `modal deploy tick.py`. The project also now carries the standard monorepo scaffolding: changelog layout, ratchet tests, coverage config, and wheel excludes.
 
 Fixer PRs include a "Regression risk" section: a low/medium/high rating with evidence (blast radius, off-path behavior changes, what protects against a regression, and the riskiest assumption for the reviewer to check).
+
+The agents can now authenticate Claude Code with a Claude Code OAuth token (`claude setup-token`) in addition to an API key: `CLAUDE_CODE_OAUTH_TOKEN` is forwarded from the tick to the sweep and on to each fixer host alongside `ANTHROPIC_API_KEY`. Set either (or both) in the `open-seer` Modal secret / `.env`; Claude Code prefers the OAuth token when both are present.

@@ -10,7 +10,7 @@ Mirrors DESIGN.md §10 — the skills are the system, so test them directly firs
 
 Inside the mngr monorepo, everything below runs **from this app directory** (`cd apps/open-seer`): Claude Code loads the project skills from the nearest `.claude/skills/` at your cwd, so sessions started here get `/fix-sentry-error` and `/sentry-sweep` without touching the monorepo root.
 
-1. **Configure:** `cp .env.example .env` and fill in the tokens (`SENTRY_AUTH_TOKEN`, `GITHUB_TOKEN`, `ANTHROPIC_API_KEY`, …).
+1. **Configure:** `cp .env.example .env` and fill in the tokens (`SENTRY_AUTH_TOKEN`, `GITHUB_TOKEN`, an Anthropic credential — `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`, …).
 2. **One fixer, by hand:** run `claude` here and invoke `/fix-sentry-error <sentry issue url>` for a single issue — watch the worktree → repro → draft PR flow.
 3. **One sweep, dry then live:** run `/sentry-sweep` with `OPEN_SEER_DRY_RUN=1`, read the printed decisions (spawn/join/already-resolved), then run live against a test project.
 4. **The spawned path:** rerun through mngr — `mngr create sweep-test --from :apps/open-seer --message "/sentry-sweep …"` (the `--from :PATH` scopes the agent's workspace to this app dir instead of the monorepo git root, so the skills load) — and confirm fixers spawn on fresh images with the registry keys installed. In the deployed image this scoping is automatic: the workdir is `/opt/open-seer`.

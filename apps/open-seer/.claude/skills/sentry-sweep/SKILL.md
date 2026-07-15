@@ -29,7 +29,8 @@ Required env (fail fast with a clear message if the first four are missing):
 | `TARGET_REPO` | the minds mngr repo, `owner/name` |
 | `SENTRY_PROJECT_PREFIX` | default `minds-` |
 | `SENTRY_TEAM` | assignment marker team slug, default `minds-agent` |
-| `ANTHROPIC_API_KEY` | forwarded to fixers |
+| `ANTHROPIC_API_KEY` | Anthropic API key for the agents; forwarded to fixers |
+| `CLAUDE_CODE_OAUTH_TOKEN` | Claude Code OAuth token (`claude setup-token`); forwarded to fixers. Claude Code prefers this over `ANTHROPIC_API_KEY` when both are set. At least one of the two must be present |
 | `OPEN_SEER_MAX_FIXERS` | max fixers spawned *by this sweep*, default `10` |
 | `OPEN_SEER_DRY_RUN` | truthy → print writes instead of executing (§3) |
 | `OPEN_SEER_ENABLED` | tick-level kill switch; if it is set and not truthy (truthy = `1`/`true`/`yes`/`on`, case-insensitive — same rule as §3), stop immediately (defense in depth — the tick should never have spawned you) |
@@ -194,7 +195,7 @@ mngr create "fixer-$SHORT_ID" \
   "${KEY_ARGS[@]}" \
   --pass-env SENTRY_AUTH_TOKEN --pass-env SENTRY_ORG --pass-env SENTRY_PROJECT_PREFIX \
   --pass-env SENTRY_TEAM --pass-env GITHUB_TOKEN --pass-env TARGET_REPO \
-  --pass-env ANTHROPIC_API_KEY \
+  --pass-env ANTHROPIC_API_KEY --pass-env CLAUDE_CODE_OAUTH_TOKEN \
   --message "$MSG"
 ```
 

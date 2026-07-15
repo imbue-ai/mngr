@@ -33,7 +33,8 @@ intended writes to its transcript instead of executing them — DESIGN §11):
 Deploy: `modal deploy tick.py`. Env comes from a single Modal secret named
 "open-seer" carrying the DESIGN.md §9 variables (SENTRY_AUTH_TOKEN,
 SENTRY_ORG, SENTRY_PROJECT_PREFIX, GITHUB_TOKEN, MIRROR_SOURCE_REPO,
-MIRROR_REPO, ANTHROPIC_API_KEY, OPEN_SEER_ENABLED, OPEN_SEER_DRY_RUN, ...).
+MIRROR_REPO, ANTHROPIC_API_KEY and/or CLAUDE_CODE_OAUTH_TOKEN,
+OPEN_SEER_ENABLED, OPEN_SEER_DRY_RUN, ...).
 """
 
 from __future__ import annotations
@@ -72,6 +73,7 @@ SWEEP_PASS_ENV = (
     "GITHUB_TOKEN",
     "TARGET_REPO",
     "ANTHROPIC_API_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN",
     "OPEN_SEER_MAX_FIXERS",
     "OPEN_SEER_DRY_RUN",
     "OPEN_SEER_ENABLED",
