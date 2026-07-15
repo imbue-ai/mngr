@@ -16,7 +16,7 @@
 // scheme) so the Sentry `LogAttachmentGroup` globs in utils/sentry/core.py can
 // upload the current file plus the newest rotation with no extra transform. The
 // shared electron/log-rotation.js gives us exactly that and mirrors the Python
-// jsonl sink's 100MB/keep-10 behavior, so a small, purpose-fit helper is
+// jsonl sink's 10MB/keep-10 behavior, so a small, purpose-fit helper is
 // preferable to adapting a heavier general-purpose dependency here.
 const path = require('path');
 const util = require('util');
