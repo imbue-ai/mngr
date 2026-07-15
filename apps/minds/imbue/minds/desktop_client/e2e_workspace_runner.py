@@ -45,16 +45,14 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
 from imbue.minds.config.loader import repo_tier_client_config_path
-from imbue.minds.desktop_client.templates import FALLBACK_BRANCH as _FORM_DEFAULT_BRANCH
+from imbue.minds.desktop_client.default_workspace_template_worktree import DEFAULT_WORKSPACE_TEMPLATE_EXTERNAL_WORKTREE
+from imbue.minds.desktop_client.default_workspace_template_worktree import current_worktree_branch
 
 # This file lives at apps/minds/imbue/minds/desktop_client/e2e_workspace_runner.py,
 # so parents[5] hops up over desktop_client, minds, imbue, minds, apps to the repo
 # root. (The original copy of this code lived two levels closer to the root in
 # apps/minds/test_desktop_client_e2e.py, where parents[2] was correct.)
 _REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[5]
-_FCT_EXTERNAL_WORKTREE: Final[Path] = _REPO_ROOT / ".external_worktrees" / "forever-claude-template"
-_FCT_REMOTE: Final[str] = "https://github.com/imbue-ai/forever-claude-template.git"
-_FCT_FALLBACK_BRANCH: Final[str] = "main"
 
 # The contentView page URL contains ``/_chrome`` only for the chrome
 # (sidebar/title-bar) view; the main content view never does. We match the
@@ -71,8 +69,11 @@ _CHROME_PATH_PATTERN: Final[re.Pattern[str]] = re.compile(r"^http://localhost:\d
 _INBOX_PATH_PATTERN: Final[re.Pattern[str]] = re.compile(r"^http://localhost:\d+/inbox(?:/|$|\?)")
 # The agent subdomain URL the create flow redirects to once the workspace's
 # ``system_interface`` is reachable. The desktop client wraps that origin in
-# the mngr_forward plugin, so the port may differ from the bare backend.
-_AGENT_SUBDOMAIN_PATTERN: Final[re.Pattern[str]] = re.compile(r"^http://agent-[a-f0-9]+\.localhost:\d+(?:/|$)")
+# the mngr_forward plugin, so the port may differ from the bare backend. The
+# scheme is ``https`` when the proxy serves TLS + HTTP/2 (the default) and
+# ``http`` otherwise, so accept both. (The bare minds backend origin stays
+# plain ``http`` -- see ``_BACKEND_ORIGIN_PATTERN``.)
+_AGENT_SUBDOMAIN_PATTERN: Final[re.Pattern[str]] = re.compile(r"^https?://agent-[a-f0-9]+\.localhost:\d+(?:/|$)")
 
 # Default env tier when nothing is activated. Staging's ``client.toml`` is
 # committed under apps/minds/imbue/minds/config/envs/staging/ so callers
@@ -102,7 +103,7 @@ _SYSTEM_INTERFACE_TIMEOUT_SECONDS: Final[int] = 180
 _CREATE_OUTCOME_POLL_INTERVAL_MS: Final[int] = 500
 
 # Pre-tested CSS selector against the system_interface frontend at
-# .external_worktrees/forever-claude-template/apps/system_interface/.
+# .external_worktrees/default-workspace-template/apps/system_interface/.
 # `.dockview-workspace` is the wrapper div the DockviewWorkspace mithril
 # component mounts on first render.
 _DOCKVIEW_WORKSPACE_SELECTOR: Final[str] = "div.dockview-workspace"
@@ -138,217 +139,27 @@ def find_free_port() -> int:
         return s.getsockname()[1]
 
 
-def _current_mngr_branch() -> str | None:
-    """Return the current branch name of the mngr repo, or None if detached.
+def resolve_default_workspace_template_path() -> Path:
+    """Return the DEFAULT_WORKSPACE_TEMPLATE working tree that workspace-creation tests build from.
 
-    Returning ``None`` for a detached HEAD lets the FCT resolver skip the
-    "branch matching" step rather than asking FCT for a ref named ``HEAD``.
-
-    In CI the checkout is a detached HEAD, so ``git rev-parse --abbrev-ref
-    HEAD`` returns ``HEAD`` and the branch-matching step would never fire --
-    meaning a PR that needs a same-named FCT branch (e.g. one changing the
-    mngr<->FCT config contract) could not be tested against it. GitHub Actions
-    exposes the real branch in the environment, so consult that first:
-    ``GITHUB_HEAD_REF`` is the PR source branch (set only for pull_request
-    events); ``GITHUB_REF_NAME`` is the branch for push events (but a
-    ``<n>/merge`` ref for PRs, which we ignore).
-
-    Any failure to invoke git (missing ``.git`` -- e.g. when the runner
-    executes inside a Modal sandbox whose source tree was uploaded via
-    ``add_local_dir`` and the worktree's ``.git`` file points at a
-    gitdir that does not exist on the sandbox; ``CalledProcessError``;
-    ``TimeoutExpired``) is logged at warning level and treated as
-    "branch unknown", which routes the caller through the documented
-    fall-back to FCT ``main`` rather than crashing the whole run.
+    The tree is produced ahead of time by
+    :func:`imbue.minds.desktop_client.default_workspace_template_worktree.materialize_paired_default_workspace_template_worktree`
+    -- on the CI runner before the snapshot image is staged, or by the local
+    test recipe -- and either lives at ``.external_worktrees/default-workspace-template``
+    or is baked into the snapshot image there. Consumers only *use* it; an absent
+    worktree means the materialize step did not run, which is a setup error we
+    surface loudly rather than silently cloning the released DEFAULT_WORKSPACE_TEMPLATE tag.
     """
-    ci_head_ref = os.environ.get("GITHUB_HEAD_REF")
-    if ci_head_ref:
-        return ci_head_ref
-    ci_ref_name = os.environ.get("GITHUB_REF_NAME")
-    if ci_ref_name and not ci_ref_name.endswith("/merge"):
-        return ci_ref_name
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(_REPO_ROOT), "rev-parse", "--abbrev-ref", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
-        logger.warning("Could not determine current mngr branch ({!r}); treating as unknown", exc)
-        return None
-    branch = result.stdout.strip()
-    if not branch or branch == "HEAD":
-        return None
-    return branch
-
-
-def _fct_remote_has_branch(branch: str) -> bool:
-    """Return True iff the FCT public remote currently has ``branch``.
-
-    ``git ls-remote`` exits 0 either way; presence is signalled by stdout
-    being non-empty. Network-level failures (DNS hiccup, GitHub 5xx,
-    proxy block, timeout) are logged as a warning and treated the same as
-    "no such branch" so the caller still falls back to ``main`` per the
-    documented 3-step chain rather than crashing the whole run on a
-    transient probe failure.
-    """
-    try:
-        result = subprocess.run(
-            ["git", "ls-remote", "--heads", _FCT_REMOTE, branch],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-        logger.warning(
-            "Failed to query FCT remote for branch {!r}; treating as absent so main fallback runs: {!r}",
-            branch,
-            exc,
-        )
-        return False
-    return bool(result.stdout.strip())
-
-
-def _shallow_clone_fct(branch: str, destination: Path) -> Path:
-    """Shallow-clone ``branch`` of the FCT public remote into ``destination``.
-
-    Also fetches any release tags into the clone. The minds create form's
-    default branch field (see ``FALLBACK_BRANCH`` in templates.py) pins
-    to an annotated FCT tag (e.g. ``v0.3.0``); without this extra fetch,
-    a depth-1 clone of an unrelated branch does not have the tag's commit,
-    and the downstream ``mngr create`` clone of the form's branch field
-    would fail with ``Remote branch v0.3.0 not found``. Cheap (a handful
-    of extra refs) and keeps test create flows aligned with production.
-    """
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        ["git", "clone", "--depth", "1", "--branch", branch, _FCT_REMOTE, str(destination)],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=120,
+    if (
+        DEFAULT_WORKSPACE_TEMPLATE_EXTERNAL_WORKTREE.is_dir()
+        and (DEFAULT_WORKSPACE_TEMPLATE_EXTERNAL_WORKTREE / ".git").exists()
+    ):
+        logger.info("Using DEFAULT_WORKSPACE_TEMPLATE worktree at {}", DEFAULT_WORKSPACE_TEMPLATE_EXTERNAL_WORKTREE)
+        return DEFAULT_WORKSPACE_TEMPLATE_EXTERNAL_WORKTREE
+    raise WorkspaceFlowError(
+        f"No DEFAULT_WORKSPACE_TEMPLATE worktree at {DEFAULT_WORKSPACE_TEMPLATE_EXTERNAL_WORKTREE}. Run materialize_paired_default_workspace_template_worktree() first "
+        "(the CI snapshot bake materializes it before staging; local runs go through the test recipe)."
     )
-    # ``--depth 1`` would only fetch the tag's tip, but ``--tags`` already
-    # implies fetching all tag-pointed commits at shallow depth; combine
-    # so each tag's target commit is reachable without filling out full
-    # branch history.
-    subprocess.run(
-        ["git", "-C", str(destination), "fetch", "--depth", "1", "--tags", "origin"],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    # The create form pre-fills its branch field with `_FORM_DEFAULT_BRANCH`
-    # (templates.py `FALLBACK_BRANCH`), so the spawned `mngr create` runs
-    # `git checkout <that ref>` in this very clone. Leaving the clone on
-    # the originally-cloned branch turns that into a real checkout that
-    # rejects any uncommitted edits the test fixture made to opt files in
-    # (e.g. `.mngr/settings.toml is_allowed_in_pytest`). Pre-positioning
-    # to the form's default makes that downstream checkout a no-op even
-    # when the working tree is dirty. Best effort: if the ref is not
-    # reachable (e.g. tag not present on FCT remote yet), leave the clone
-    # as-is and let `mngr create` surface the resulting error.
-    _checkout_best_effort(destination, _FORM_DEFAULT_BRANCH)
-    return destination
-
-
-def _checkout_best_effort(repo: Path, ref: str) -> None:
-    verify = subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", "--verify", f"{ref}^{{commit}}"],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    if verify.returncode != 0:
-        logger.info("Skipping pre-checkout of FCT clone to {!r}: ref not reachable", ref)
-        return
-    subprocess.run(
-        ["git", "-C", str(repo), "checkout", "--detach", ref],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    # Point FETCH_HEAD at the same commit we just checked out. The minds create
-    # flow runs ``git checkout -B <ref> FETCH_HEAD`` in this clone; with HEAD
-    # already on <ref>, making FETCH_HEAD == HEAD turns that into a true no-op
-    # that preserves the uncommitted ``is_allowed_in_pytest`` opt-in the test
-    # writes into ``.mngr/settings.toml``. Without this, FETCH_HEAD still points
-    # at the branch tip left by the earlier ``fetch --tags`` (a different
-    # commit, whose ``.mngr/settings.toml`` differs from the tag's), so the
-    # downstream checkout tries to switch content and aborts on the dirty file
-    # ("Your local changes ... would be overwritten by checkout"). Fetching from
-    # ``.`` is local-only (no network).
-    subprocess.run(
-        ["git", "-C", str(repo), "fetch", "--no-tags", ".", "HEAD"],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-
-
-def resolve_fct_path(scratch_dir: Path) -> Path:
-    """Return a local FCT working tree via the 3-step fallback chain.
-
-    Step 1 (preferred): operator-managed ``.external_worktrees/forever-claude-template/``.
-    Step 2: a shallow clone of the current mngr branch from the FCT remote
-    if FCT has a branch by that name.
-    Step 3: a shallow clone of FCT ``main``.
-
-    ``scratch_dir`` is the directory in which the shallow clone is placed
-    when steps 2 or 3 fire (e.g. ``pytest tmp_path`` for the test,
-    ``$TMPDIR`` for the snapshot script).
-    """
-    if _FCT_EXTERNAL_WORKTREE.is_dir() and (_FCT_EXTERNAL_WORKTREE / ".git").exists():
-        logger.info("Using FCT external worktree at {}", _FCT_EXTERNAL_WORKTREE)
-        return _FCT_EXTERNAL_WORKTREE
-
-    destination = scratch_dir / "fct"
-    branch = _current_mngr_branch()
-    if branch is not None and _fct_remote_has_branch(branch):
-        logger.info("Shallow-cloning FCT branch {!r} into {}", branch, destination)
-        return _shallow_clone_fct(branch, destination)
-
-    logger.info(
-        "FCT remote does not have a branch named {!r}; falling back to {!r}",
-        branch,
-        _FCT_FALLBACK_BRANCH,
-    )
-    return _shallow_clone_fct(_FCT_FALLBACK_BRANCH, destination)
-
-
-def materialize_isolated_fct(fct_source: Path, scratch_dir: Path) -> Path:
-    """Return a throwaway FCT working tree the caller may safely write into.
-
-    The pytest wrapper writes a ``is_allowed_in_pytest`` opt-in into the
-    returned tree's ``.mngr/settings.toml`` before ``mngr create`` mirrors
-    it into the workspace container. When ``fct_source`` is the operator's
-    ``.external_worktrees/forever-claude-template/`` checkout, that edit
-    must not land on the real file, so clone it into ``scratch_dir``
-    (committed state) and position it on the create form's default branch
-    (matching :func:`_shallow_clone_fct`). When ``fct_source`` is already a
-    throwaway clone (steps 2-3 of :func:`resolve_fct_path`), return it
-    unchanged.
-    """
-    if fct_source != _FCT_EXTERNAL_WORKTREE:
-        return fct_source
-    destination = scratch_dir / "fct_isolated"
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    logger.info("Cloning FCT external worktree into {} to keep the operator's checkout pristine", destination)
-    subprocess.run(
-        ["git", "clone", str(fct_source), str(destination)],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=300,
-    )
-    _checkout_best_effort(destination, _FORM_DEFAULT_BRANCH)
-    return destination
 
 
 def ensure_minds_env_defaults(setenv: Callable[[str, str], None]) -> None:
@@ -363,7 +174,14 @@ def ensure_minds_env_defaults(setenv: Callable[[str, str], None]) -> None:
     the snapshot script (which runs in a throwaway sandbox) passes a
     setter that writes to ``os.environ`` directly. Both options share
     the validation / logging logic below.
+
+    Also points the create form at the present paired DEFAULT_WORKSPACE_TEMPLATE worktree (the same
+    ``MINDS_WORKSPACE_*`` env vars ``just minds-start`` sets), so ``mngr create``
+    builds from that worktree's branch with the vendored mngr under test rather
+    than the released ``FALLBACK_BRANCH`` tag. That step runs regardless of the
+    ``MINDS_ROOT_NAME`` early return below.
     """
+    _ensure_paired_workspace_env(setenv)
     if os.environ.get("MINDS_ROOT_NAME"):
         logger.info("Using inherited MINDS_ROOT_NAME={}", os.environ["MINDS_ROOT_NAME"])
         return
@@ -383,10 +201,39 @@ def ensure_minds_env_defaults(setenv: Callable[[str, str], None]) -> None:
     )
 
 
+def _ensure_paired_workspace_env(setenv: Callable[[str, str], None]) -> None:
+    """Point the create form at the present DEFAULT_WORKSPACE_TEMPLATE worktree on its own branch.
+
+    When the materialized worktree exists, set the ``just minds-start`` env vars
+    so ``mngr create`` builds from that worktree's branch (not the released
+    ``FALLBACK_BRANCH`` tag) with the vendored mngr under test. No-op when the
+    worktree is absent (the consumer surfaces that) or when a var is already set
+    (an explicit override wins).
+    """
+    if not (
+        DEFAULT_WORKSPACE_TEMPLATE_EXTERNAL_WORKTREE.is_dir()
+        and (DEFAULT_WORKSPACE_TEMPLATE_EXTERNAL_WORKTREE / ".git").exists()
+    ):
+        return
+    if not os.environ.get("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS"):
+        setenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", "1")
+    if not os.environ.get("MINDS_WORKSPACE_GIT_URL"):
+        setenv("MINDS_WORKSPACE_GIT_URL", str(DEFAULT_WORKSPACE_TEMPLATE_EXTERNAL_WORKTREE))
+    if not os.environ.get("MINDS_WORKSPACE_BRANCH"):
+        branch = current_worktree_branch(DEFAULT_WORKSPACE_TEMPLATE_EXTERNAL_WORKTREE)
+        if branch is not None:
+            setenv("MINDS_WORKSPACE_BRANCH", branch)
+        else:
+            logger.warning(
+                "DEFAULT_WORKSPACE_TEMPLATE worktree at {} has no resolvable branch; leaving MINDS_WORKSPACE_BRANCH unset",
+                DEFAULT_WORKSPACE_TEMPLATE_EXTERNAL_WORKTREE,
+            )
+
+
 def _build_electron_env(workspace_git_url: Path) -> dict[str, str]:
     """Return the env vars the Electron child process should inherit.
 
-    Mirrors ``just minds-start``: passes the FCT path through the
+    Mirrors ``just minds-start``: passes the DEFAULT_WORKSPACE_TEMPLATE path through the
     ``MINDS_WORKSPACE_GIT_URL`` prefill var (honored only when the explicit
     opt-in ``MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1`` is also set -- see
     ``_operator_workspace_default`` in templates.py), and scrubs any
@@ -402,11 +249,11 @@ def _build_electron_env(workspace_git_url: Path) -> dict[str, str]:
     # Opt into the local-worktree create-form defaults (see just minds-start).
     env["MINDS_USE_LOCAL_WORKSPACE_DEFAULTS"] = "1"
     # Pin MNGR_ROOT_NAME back to "mngr" for the Electron child so the
-    # spawned `mngr create` subprocess finds FCT's .mngr/settings.toml
+    # spawned `mngr create` subprocess finds DEFAULT_WORKSPACE_TEMPLATE's .mngr/settings.toml
     # (which defines the `main` + `docker` create templates). The minds
     # project conftest sets MNGR_ROOT_NAME=mngr-test-<timestamp> for test
     # isolation, but that would make mngr look for
-    # .mngr-test-<timestamp>/settings.toml inside the FCT clone -- a file
+    # .mngr-test-<timestamp>/settings.toml inside the DEFAULT_WORKSPACE_TEMPLATE clone -- a file
     # that does not exist, causing mngr to abort with
     # `Template 'main' not found. No templates are configured`. MNGR_PREFIX
     # (the tmux session prefix) stays test-isolated so the spawned tmux
@@ -766,7 +613,7 @@ def _wait_for_workspace_ready_or_failure(page: Page, timeout_seconds: int) -> No
 
 def _drive_create_flow(
     page: Page,
-    fct_path: Path,
+    default_workspace_template_path: Path,
     workspace_name: str,
     launch_mode: str = "DOCKER",
     account_label: str | None = None,
@@ -818,7 +665,7 @@ def _drive_create_flow(
     page.wait_for_selector("#git_url:visible", timeout=5_000)
 
     _ensure_field_value(page, "#host_name", workspace_name)
-    _ensure_field_value(page, "#git_url", str(fct_path))
+    _ensure_field_value(page, "#git_url", str(default_workspace_template_path))
     # Optionally select an AI-provider account (by visible label) before
     # picking the compute mode -- some modes/tiers require a real account.
     if account_label is not None:
@@ -889,7 +736,7 @@ def _attach_renderer_diagnostics(page: Page) -> None:
 
 
 def _attempt_create_workspace_via_electron(
-    fct_path: Path,
+    default_workspace_template_path: Path,
     workspace_name: str,
     debug_port: int,
     host_config_dir: Path | None,
@@ -911,7 +758,7 @@ def _attempt_create_workspace_via_electron(
     unchanged -- they are real failures, not launch flakes, so they are not
     retried.
     """
-    with _launched_electron(fct_path, debug_port, host_config_dir):
+    with _launched_electron(default_workspace_template_path, debug_port, host_config_dir):
         with sync_playwright() as playwright:
             try:
                 _wait_for_cdp(debug_port, _CDP_READY_TIMEOUT_SECONDS)
@@ -934,7 +781,7 @@ def _attempt_create_workspace_via_electron(
                 _attach_renderer_diagnostics(page)
                 _drive_create_flow(
                     page,
-                    fct_path,
+                    default_workspace_template_path,
                     workspace_name,
                     launch_mode=launch_mode,
                     account_label=account_label,
@@ -947,8 +794,70 @@ def _attempt_create_workspace_via_electron(
                 browser.close()
 
 
+@contextmanager
+def electron_app_session(
+    workspace_git_url: Path,
+    debug_port: int,
+    host_config_dir: Path | None = None,
+) -> Iterator[tuple[Browser, Page]]:
+    """Launch Electron + attach Playwright and yield ``(browser, content_page)``.
+
+    The generic sibling of :func:`create_workspace_via_electron` for flows that
+    drive arbitrary app pages (sign-in, settings, the landing list) instead of
+    the create form. The launch + CDP attach is retried with a fresh Electron
+    process and port up to ``_ELECTRON_LAUNCH_ATTEMPTS`` times (the same
+    wedged-handshake flake recovery); once the session is yielded, caller
+    exceptions propagate unchanged and tear the app down.
+
+    The same caller contract as :func:`create_workspace_via_electron` applies
+    (``MINDS_ROOT_NAME`` set, ``debug_port`` free, ``host_config_dir`` for the
+    pytest config guard). ``workspace_git_url`` only seeds the create form's
+    repo prefill; sessions that never open the create form still need a real
+    path here.
+    """
+    last_error: _ElectronConnectError | None = None
+    for attempt in range(1, _ELECTRON_LAUNCH_ATTEMPTS + 1):
+        attempt_port = debug_port if attempt == 1 else find_free_port()
+        with _launched_electron(workspace_git_url, attempt_port, host_config_dir):
+            with sync_playwright() as playwright:
+                try:
+                    _wait_for_cdp(attempt_port, _CDP_READY_TIMEOUT_SECONDS)
+                    browser = playwright.chromium.connect_over_cdp(
+                        f"http://127.0.0.1:{attempt_port}", timeout=_CDP_CONNECT_TIMEOUT_MS
+                    )
+                except (PlaywrightError, TimeoutError) as exc:
+                    last_error = _ElectronConnectError(f"Electron CDP attach failed on port {attempt_port}: {exc}")
+                    logger.warning(
+                        "Electron launch/CDP attempt {}/{} failed; relaunching: {}",
+                        attempt,
+                        _ELECTRON_LAUNCH_ATTEMPTS,
+                        last_error,
+                    )
+                    continue
+                try:
+                    try:
+                        page = _pick_content_page(browser, _BACKEND_READY_TIMEOUT_SECONDS)
+                    except (PlaywrightError, TimeoutError) as exc:
+                        last_error = _ElectronConnectError(f"Electron CDP attach failed on port {attempt_port}: {exc}")
+                        logger.warning(
+                            "Electron launch/CDP attempt {}/{} failed; relaunching: {}",
+                            attempt,
+                            _ELECTRON_LAUNCH_ATTEMPTS,
+                            last_error,
+                        )
+                        continue
+                    _attach_renderer_diagnostics(page)
+                    yield browser, page
+                    return
+                finally:
+                    browser.close()
+    raise PlaywrightTimeoutError(
+        f"Electron CDP attach failed after {_ELECTRON_LAUNCH_ATTEMPTS} relaunch attempts (last error: {last_error})"
+    )
+
+
 def create_workspace_via_electron(
-    fct_path: Path,
+    default_workspace_template_path: Path,
     workspace_name: str,
     debug_port: int,
     host_config_dir: Path | None = None,
@@ -958,7 +867,7 @@ def create_workspace_via_electron(
     anthropic_api_key: str | None = None,
     on_workspace_ready: Callable[[Page], None] | None = None,
 ) -> None:
-    """Drive Electron to create a workspace from ``fct_path``.
+    """Drive Electron to create a workspace from ``default_workspace_template_path``.
 
     ``launch_mode`` selects the compute provider in the create form (DOCKER,
     LIMA, AWS, ...). ``account_label`` optionally selects an AI-provider account
@@ -983,8 +892,8 @@ def create_workspace_via_electron(
     so a genuine creation failure fails the test immediately.
 
     Caller contract:
-    - ``fct_path`` must be a populated FCT working tree (use
-      :func:`resolve_fct_path`).
+    - ``default_workspace_template_path`` must be a populated DEFAULT_WORKSPACE_TEMPLATE working tree (use
+      :func:`resolve_default_workspace_template_path`).
     - ``workspace_name`` must be unique within the current mngr install.
     - ``debug_port`` must be an unused TCP port (use :func:`find_free_port`).
     - ``MINDS_ROOT_NAME`` must already be set in ``os.environ`` (call
@@ -999,7 +908,7 @@ def create_workspace_via_electron(
         attempt_port = debug_port if attempt == 1 else find_free_port()
         try:
             _attempt_create_workspace_via_electron(
-                fct_path,
+                default_workspace_template_path,
                 workspace_name,
                 attempt_port,
                 host_config_dir,
@@ -1036,7 +945,7 @@ def create_workspace_via_electron(
 _FLOW_SHOT_DIR: Final[Path] = Path("/tmp/minds-electron-flow")
 _CHAT_INPUT_SELECTOR: Final[str] = "textarea.message-input-textbox"
 _TERMINAL_IFRAME_SELECTOR: Final[str] = 'iframe[src*="/service/terminal/"]'
-# The FCT bootstrap creates the initial chat agent asynchronously after the
+# The DEFAULT_WORKSPACE_TEMPLATE bootstrap creates the initial chat agent asynchronously after the
 # dockview first renders (it shows "Waiting for initial chat agent..." until
 # then), so the chat input can take a while to appear on a fresh first boot.
 _CHAT_INPUT_TIMEOUT_SECONDS: Final[int] = 240
@@ -1081,7 +990,9 @@ def _pick_chrome_page(browser: Browser, timeout_seconds: int) -> Page:
     raise WorkspaceFlowError(f"No /_chrome page within {timeout_seconds}s; observed: {observed}")
 
 
-def drive_create_docker_imbue_workspace(page: Page, fct_path: Path, workspace_name: str) -> None:
+def drive_create_docker_imbue_workspace(
+    page: Page, default_workspace_template_path: Path, workspace_name: str
+) -> None:
     """Fill + submit the create form for a local-Docker workspace with Imbue-Cloud AI.
 
     Local Docker compute keeps the workspace on this machine; Imbue-Cloud AI
@@ -1100,7 +1011,7 @@ def drive_create_docker_imbue_workspace(page: Page, fct_path: Path, workspace_na
     page.wait_for_selector("#git_url:visible", timeout=5_000)
 
     _ensure_field_value(page, "#host_name", workspace_name)
-    _ensure_field_value(page, "#git_url", str(fct_path))
+    _ensure_field_value(page, "#git_url", str(default_workspace_template_path))
 
     # An account must be selected for Imbue-Cloud AI. The form pre-selects the
     # env's default account; if it is empty, pick the first real account (which
@@ -1337,7 +1248,7 @@ def _run_flow_step(results: dict[str, str], name: str, page: Page, action: Calla
 
 
 def run_full_workspace_flow(
-    fct_path: Path, workspace_name: str, token: str, debug_port: int
+    default_workspace_template_path: Path, workspace_name: str, token: str, debug_port: int
 ) -> tuple[dict[str, str], str | None]:
     """Drive create -> message -> terminal -> home -> destroy; return per-step results + agent id.
 
@@ -1351,7 +1262,7 @@ def run_full_workspace_flow(
     """
     results: dict[str, str] = {}
     agent_id: str | None = None
-    with _launched_electron(fct_path, debug_port, host_config_dir=None):
+    with _launched_electron(default_workspace_template_path, debug_port, host_config_dir=None):
         with sync_playwright() as playwright:
             _wait_for_cdp(debug_port, _CDP_READY_TIMEOUT_SECONDS)
             browser = playwright.chromium.connect_over_cdp(
@@ -1362,7 +1273,7 @@ def run_full_workspace_flow(
                 backend_origin = _backend_origin_from_page(content_page)
 
                 logger.info("=== STEP 1: create local Docker workspace ===")
-                drive_create_docker_imbue_workspace(content_page, fct_path, workspace_name)
+                drive_create_docker_imbue_workspace(content_page, default_workspace_template_path, workspace_name)
                 results["STEP 1 create"] = "PASS"
                 agent_id = _agent_id_from_subdomain(content_page.url)
                 logger.info("Workspace agent id (from subdomain): {}", agent_id)

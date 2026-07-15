@@ -620,6 +620,150 @@ mngr imbue_cloud tunnels auth set [OPTIONS] TUNNEL_NAME POLICY_JSON
 | `--service` | text | If set, set the policy for this service instead of the tunnel default | None |
 | `--connector-url` | text | Override connector URL | None |
 
+## mngr imbue_cloud sync
+
+**Usage:**
+
+```text
+mngr imbue_cloud sync [OPTIONS] COMMAND [ARGS]...
+```
+**Options:**
+
+
+## mngr imbue_cloud sync records
+
+**Usage:**
+
+```text
+mngr imbue_cloud sync records [OPTIONS] COMMAND [ARGS]...
+```
+**Options:**
+
+
+## mngr imbue_cloud sync records pull
+
+**Usage:**
+
+```text
+mngr imbue_cloud sync records pull [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
+## mngr imbue_cloud sync records push
+
+**Usage:**
+
+```text
+mngr imbue_cloud sync records push [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+| `--input-file` | text | Read the record JSON from this file instead of stdin | None |
+
+## mngr imbue_cloud sync records delete
+
+**Usage:**
+
+```text
+mngr imbue_cloud sync records delete [OPTIONS] HOST_ID
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
+## mngr imbue_cloud sync scrub-secrets
+
+**Usage:**
+
+```text
+mngr imbue_cloud sync scrub-secrets [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
+## mngr imbue_cloud sync bundle
+
+**Usage:**
+
+```text
+mngr imbue_cloud sync bundle [OPTIONS] COMMAND [ARGS]...
+```
+**Options:**
+
+
+## mngr imbue_cloud sync bundle pull
+
+**Usage:**
+
+```text
+mngr imbue_cloud sync bundle pull [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
+## mngr imbue_cloud sync bundle push
+
+**Usage:**
+
+```text
+mngr imbue_cloud sync bundle push [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+| `--input-file` | text | Read the bundle JSON from this file instead of stdin | None |
+
+## mngr imbue_cloud sync bundle delete
+
+**Usage:**
+
+```text
+mngr imbue_cloud sync bundle delete [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
 ## mngr imbue_cloud admin
 
 **Usage:**
@@ -654,23 +798,19 @@ mngr imbue_cloud admin pool create [OPTIONS]
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--count` | integer | Number of pool hosts to create | None |
-| `--backend` | choice (`ovh_vps` &#x7C; `slice`) | Which machine backs each pool host. ``slice`` (the default) carves a lima VM on one of our registered bare-metal boxes (run `admin server register` + `prep` first). ``ovh_vps`` is DEPRECATED: baking new OVH classic VPS pool hosts is no longer supported -- only ``slice`` bakes are allowed. Existing OVH VPS pool hosts can still be listed and destroyed. | `slice` |
-| `--region` | text | Lease/region code stamped on every new row (e.g. ``US-EAST-VA``, ``US-WEST-OR``) -- this is what the connector's region-filtered lease matches. For ``ovh_vps`` it is also the OVH datacenter the VPS is ordered in. For ``slice`` it is the lease-region label only (NOT the box's raw datacenter code). | None |
-| `--tag` | text | [ovh_vps only] Repeatable ``KEY=VALUE`` tag attached to every freshly-provisioned VPS via the OVH IAM v2 tag system. Forwarded to the inner ``mngr create`` as ``MNGR_VPS_EXTRA_TAGS=k1=v1,k2=v2``. Example: ``--tag minds_env=alice --tag pool-owner=bob``. | None |
+| `--region` | text | Lease-region label stamped on every new row (e.g. ``US-EAST-VA``, ``US-WEST-OR``) -- this is what the connector's region-filtered lease matches. It is the lease-region label only (NOT the box's raw datacenter code). | None |
 | `--from-tag` | text | [production bake] Clone --repo-url at exactly this tag into a fresh temp dir and bake from it. Stamps repo_url=canonical(--repo-url) and repo_branch_or_tag=<tag>; the content provably equals the tag. Mutually exclusive with --workspace-dir; errors if <tag> is not a real tag. | None |
-| `--repo-url` | text | [--from-tag only] Canonical repo to clone the tag from (default: the FCT remote). | `https://github.com/imbue-ai/forever-claude-template.git` |
+| `--repo-url` | text | [--from-tag only] Canonical repo to clone the tag from (default: the DEFAULT_WORKSPACE_TEMPLATE remote). | `https://github.com/imbue-ai/default-workspace-template.git` |
 | `--workspace-dir` | path | [dev bake] Bake content from this working tree (uncommitted changes included). Stamps repo_url=canonical(origin of the folder) and repo_branch_or_tag=<folder's current branch> (override with --repo-branch-or-tag). Mutually exclusive with --from-tag; errors without an origin. | None |
 | `--repo-branch-or-tag` | text | [--workspace-dir only] Override the branch label stamped (default: the folder's current branch). | None |
-| `--attributes` | text | Optional non-identity lease-attributes JSON for the new pool rows. The identity keys repo_url and repo_branch_or_tag are NOT allowed here -- they are derived from the bake source (--from-tag / --workspace-dir). For slice the per-box size (memory_gb / cpus) is computed and stamped automatically. | None |
-| `--management-public-key-file` | path | [ovh_vps only] Path to the management SSH public key installed on the VPS + container. Slices authorize the pool key from POOL_SSH_PRIVATE_KEY at carve time, so they do not use this. | None |
+| `--attributes` | text | Optional non-identity lease-attributes JSON for the new pool rows. The identity keys repo_url and repo_branch_or_tag are NOT allowed here -- they are derived from the bake source (--from-tag / --workspace-dir). The per-box size (memory_gb / cpus) is computed and stamped automatically. | None |
 | `--database-url` | text | Neon PostgreSQL direct connection string for the pool DB. Defaults to MINDS_HOST_POOL_DSN env var, or the activated minds env's secrets.toml NEON_HOST_POOL_DSN field (so `minds env activate <dev-env>` is enough). Pass this explicitly when operating outside an activated env. | None |
 | `--mngr-source` | path | Path to the mngr monorepo root. If provided, rsyncs into the template's vendor/mngr/ before creating hosts. | None |
-| `--no-recycle` | boolean | [ovh_vps only] Force a fresh OVH VPS order instead of reclaiming a cancelled VPS. By default the OVH provider recycles a cancelled (still-billable) VPS when one is available; pass this to test the fresh-provision path. Sets MNGR__PROVIDERS__OVH__ENABLE_RECYCLE_CANCELLED=false on the inner `mngr create`. | `True` |
-| `--server-id` | text | [slice only, required] The bare_metal_servers row id to bake the slices onto (from `admin server list`). Slice baking targets an explicitly-chosen, ready box -- it never auto-selects one. | None |
-| `--slice-env-name` | text | [slice only] Owning environment name stamped into each slice's lima instance + disk names (mngr-slice-<env>-<host-hex>). Lets multiple dev envs share one bare-metal box: occupancy is read from the box, and the post-bake reap only ever touches this env's own slices. Usually forwarded by `minds pool create` from the activated env; omit only for legacy un-stamped baking. | None |
-| `--dry-run` | boolean | [slice only] Report placement + per-slice sizing; do not bake. | `False` |
-| `--max-concurrency` | integer | [slice only] Max slices baked at once; the rest queue and start as slots free. Bounds box CPU/IO/network contention so each `mngr create` stays under its timeout. | `4` |
-| `--skip-deferred-install-wait` | boolean | [dev only] Don't wait for the FCT deferred-install (heavy apt + Playwright/Chromium) to finish before stopping the baked services agent. Saves a few minutes per bake, but the baked container's deferred-install may be left incomplete (stopping mid-apt can corrupt dpkg). Safe for dev/throwaway bakes; NEVER use for production pool hosts. | `False` |
+| `--server-id` | text | [required] The bare_metal_servers row id to bake the slices onto (from `admin server list`). Slice baking targets an explicitly-chosen, ready box -- it never auto-selects one. | None |
+| `--slice-env-name` | text | Owning environment name stamped into each slice's lima instance + disk names (mngr-slice-<env>-<host-hex>). Lets multiple dev envs share one bare-metal box: occupancy is read from the box, and the post-bake reap only ever touches this env's own slices. Usually forwarded by `minds pool create` from the activated env; omit only for legacy un-stamped baking. | None |
+| `--dry-run` | boolean | Report placement + per-slice sizing; do not bake. | `False` |
+| `--max-concurrency` | integer | Max slices baked at once; the rest queue and start as slots free. Bounds box CPU/IO/network contention so each `mngr create` stays under its timeout. | `4` |
+| `--skip-deferred-install-wait` | boolean | [dev only] Don't wait for the DEFAULT_WORKSPACE_TEMPLATE deferred-install (heavy apt + Playwright/Chromium) to finish before stopping the baked services agent. Saves a few minutes per bake, but the baked container's deferred-install may be left incomplete (stopping mid-apt can corrupt dpkg). Safe for dev/throwaway bakes; NEVER use for production pool hosts. | `False` |
 
 ## mngr imbue_cloud admin pool list
 
@@ -692,7 +832,7 @@ mngr imbue_cloud admin pool list [OPTIONS]
 **Usage:**
 
 ```text
-mngr imbue_cloud admin pool destroy [OPTIONS] POOL_HOST_ID
+mngr imbue_cloud admin pool destroy [OPTIONS] POOL_HOST_IDS...
 ```
 **Options:**
 
@@ -701,8 +841,9 @@ mngr imbue_cloud admin pool destroy [OPTIONS] POOL_HOST_ID
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--database-url` | text | Neon PostgreSQL direct connection string for the pool DB. Defaults to MINDS_HOST_POOL_DSN env var, or the activated minds env's secrets.toml NEON_HOST_POOL_DSN field (so `minds env activate <dev-env>` is enough). Pass this explicitly when operating outside an activated env. | None |
-| `--force` | boolean | Drop the row even if status != 'released' | `False` |
-| `--skip-vps-cancel` | boolean | Only drop the DB row; do NOT tear down the underlying machine (cancel the OVH VPS for an ovh_vps row, or destroy the lima VM for a slice row). Use exclusively when the machine is already gone -- otherwise the default path tears it down so no billing/slot orphan is left behind. | `False` |
+| `--force` | boolean | Also destroy rows that are currently leased (tears down the leasing user's live workspace). | `False` |
+| `--drop-row-only` | boolean | Only drop the DB rows; do NOT attempt VM teardown. Exclusively for rows whose bare-metal box record is gone or whose machine is permanently dead -- the default path already tolerates a VM that is merely absent. | `False` |
+| `--max-concurrency` | integer | Max hosts destroyed at once; the rest queue and start as slots free. | `8` |
 
 ## mngr imbue_cloud admin pool teardown-slices
 
@@ -718,6 +859,7 @@ mngr imbue_cloud admin pool teardown-slices [OPTIONS]
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--database-url` | text | Neon PostgreSQL direct connection string for the pool DB. Defaults to MINDS_HOST_POOL_DSN env var, or the activated minds env's secrets.toml NEON_HOST_POOL_DSN field. Pass explicitly when operating outside an activated env. | None |
+| `--max-concurrency` | integer | Max slices torn down at once; the rest queue and start as slots free. | `8` |
 
 ## mngr imbue_cloud admin pool backfill-host-keys
 
@@ -992,6 +1134,7 @@ mngr imbue_cloud admin server order [OPTIONS]
 | `--cpu-overcommit` | float | CPU overcommit factor recorded for slice sizing on this box. | `2.0` |
 | `--option` | text | Explicit planCode for a mandatory option family that offers more than one choice (e.g. bandwidth, vrack). Repeatable. Required when the plan offers a real choice -- run once without it and the error lists each family's offers + monthly prices so you can re-run with --option. | None |
 | `--yes` | boolean | Skip the interactive confirmation and place the order. | `False` |
+| `--dry-run` | boolean | Build + assign a non-committal cart, print the real OVH price preview + derived specs, then delete the cart without ordering. No charge and no prompt -- use it to confirm price/specs before ordering. | `False` |
 | `--database-url` | text | Pool DSN (else resolved from env/activated minds env). | None |
 
 ## mngr imbue_cloud admin server await-delivery

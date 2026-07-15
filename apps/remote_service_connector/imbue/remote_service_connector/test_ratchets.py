@@ -118,6 +118,10 @@ def test_prevent_functools_partial() -> None:
     rc.check_functools_partial(_DIR, snapshot(0))
 
 
+def test_prevent_async_await() -> None:
+    rc.check_async_await(_DIR, snapshot(5))
+
+
 # --- Naming conventions ---
 
 
@@ -195,7 +199,7 @@ def test_prevent_unittest_mock_imports() -> None:
 
 
 def test_prevent_monkeypatch_setattr() -> None:
-    rc.check_monkeypatch_setattr(_DIR, snapshot(7))
+    rc.check_monkeypatch_setattr(_DIR, snapshot(8))
 
 
 def test_prevent_test_container_classes() -> None:
@@ -237,7 +241,7 @@ def test_prevent_underscore_imports() -> None:
 
 
 def test_prevent_init_methods_in_non_exception_classes() -> None:
-    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(3))
+    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(2))
 
 
 def test_prevent_cast_usage() -> None:

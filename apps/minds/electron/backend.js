@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const paths = require('./paths');
 const { getBuildMetadata } = require('./build-metadata');
+const { createRotatingLogStream } = require('./log-rotation');
 
 // Swallow EPIPE on the Electron main process's own stdout/stderr. When dev
 // launches go through a pipe (e.g. `just minds-start | head -30`), the
@@ -21,6 +22,53 @@ for (const stream of [process.stdout, process.stderr]) {
 }
 
 let backendProcess = null;
+
+// Backend stdout JSONL event fields that carry secrets and must be masked
+// before the raw line is written to minds.log (which is uploaded with bug
+// reports). Keyed by event type; each value lists the fields to redact.
+//
+//   * mngr_forward_started: the freshly-minted mngr-forward preauth cookie --
+//     a reusable, session-lifetime bearer token for the local forward. The
+//     backend never logs it through any other path, so masking it here removes
+//     it from the logs entirely.
+//
+// The ``login_url`` event's one-time login code is deliberately NOT masked: it
+// is single-use and consumed immediately at session start, so it is spent by
+// the time any log is read (it is also common to print single-use login URLs).
+// Masking it here would be a false comfort anyway -- the backend prints the
+// same URL via a stderr log line and the JSONL sink, neither of which this
+// stdout-only redaction touches.
+const SECRET_STDOUT_EVENT_FIELDS = {
+  mngr_forward_started: ['preauth_cookie'],
+};
+
+const REDACTED_PLACEHOLDER = '***';
+
+/**
+ * Return a copy of a backend stdout line safe to persist to minds.log.
+ *
+ * If the line is a JSON event carrying secrets (see SECRET_STDOUT_EVENT_FIELDS)
+ * its secret fields are replaced with a placeholder; every other line is
+ * returned unchanged. The parsed event used by the in-process handlers is
+ * derived from the ORIGINAL line, so redaction never affects behavior -- only
+ * what is written to disk.
+ */
+function redactStdoutLineForLog(line) {
+  if (!line.trim()) return line;
+  let event;
+  try {
+    event = JSON.parse(line);
+  } catch {
+    return line;
+  }
+  const secretFields = event && typeof event === 'object' ? SECRET_STDOUT_EVENT_FIELDS[event.event] : undefined;
+  if (!secretFields) return line;
+  const redacted = { ...event };
+  for (const field of secretFields) {
+    if (field in redacted) redacted[field] = REDACTED_PLACEHOLDER;
+  }
+  return JSON.stringify(redacted);
+}
 
 /**
  * Find an available port by briefly binding to port 0.
@@ -166,7 +214,11 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
       fs.mkdirSync(logDir, { recursive: true });
 
       const logFile = path.join(logDir, 'minds.log');
-      const logStream = fs.createWriteStream(logFile, { flags: 'a' });
+      // Rotate + gzip minds.log like the other logs (it was previously an
+      // unbounded append stream that grew to hundreds of MB). Same write/end
+      // surface as the old fs.createWriteStream, so the callers below are
+      // unchanged.
+      const logStream = createRotatingLogStream({ filePath: logFile });
 
       onProgress('Starting Minds...');
 
@@ -315,9 +367,18 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
       // Parse JSONL events from stdout for the login URL
       let stdoutBuffer = '';
 
+      // Flush any buffered (newline-less) trailing stdout to the log so a final
+      // fragment emitted right before exit is never dropped. Redacted like every
+      // other logged line.
+      const flushStdoutBufferToLog = () => {
+        if (stdoutBuffer) {
+          logStream.write(redactStdoutLineForLog(stdoutBuffer) + '\n');
+          stdoutBuffer = '';
+        }
+      };
+
       child.stdout.on('data', (data) => {
         const text = data.toString();
-        logStream.write(text);
         stdoutBuffer += text;
 
         const lines = stdoutBuffer.split('\n');
@@ -325,6 +386,12 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
         stdoutBuffer = lines.pop() || '';
 
         for (const line of lines) {
+          // Log every complete line, but mask secret-bearing event fields
+          // (the mngr-forward preauth cookie) first: minds.log is uploaded with
+          // bug reports, so that reusable session token must never land in it.
+          // The in-process handlers below still parse the original line, so they
+          // receive the real values.
+          logStream.write(redactStdoutLineForLog(line) + '\n');
           if (!line.trim()) continue;
           try {
             const event = JSON.parse(line);
@@ -377,6 +444,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
       });
 
       child.on('error', (err) => {
+        flushStdoutBufferToLog();
         logStream.end();
         if (!isResolved) {
           isResolved = true;
@@ -386,6 +454,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
 
       child.on('exit', (code) => {
         backendProcess = null;
+        flushStdoutBufferToLog();
         logStream.end();
         if (!isResolved) {
           isResolved = true;

@@ -95,7 +95,14 @@ def test_prevent_setattr() -> None:
 
 
 def test_prevent_asyncio_import() -> None:
-    rc.check_asyncio_import(_DIR, snapshot(1))
+    # 3: server.py has always been asyncio (the proxy is an async ASGI app), and
+    # cli.py now does `asyncio.run(hypercorn.asyncio.serve(...))` to run that app
+    # in-process -- the necessary replacement for uvicorn's sync `.run()` (which
+    # itself ran an asyncio loop). Hypercorn exposes no non-asyncio serve path
+    # for an in-process app object. cli_test.py exercises the serve loop's TLS
+    # teardown behavior (bounded SSL shutdown + exception handler), which can
+    # only be tested from inside an asyncio loop.
+    rc.check_asyncio_import(_DIR, snapshot(3))
 
 
 def test_prevent_pandas_import() -> None:
@@ -120,6 +127,14 @@ def test_prevent_functools_partial() -> None:
 
 def test_prevent_exit_stack() -> None:
     rc.check_exit_stack(_DIR, snapshot(0))
+
+
+def test_prevent_async_await() -> None:
+    # 48: the six additions over the historical 42 are all in cli_test.py's
+    # hypercorn serving-path tests (a minimal lifespan-only ASGI app and a
+    # shutdown trigger), which necessarily run inside the asyncio loop under
+    # test.
+    rc.check_async_await(_DIR, snapshot(48))
 
 
 # --- Hardcoded paths ---
@@ -256,7 +271,12 @@ def test_prevent_underscore_imports() -> None:
 
 
 def test_prevent_init_methods_in_non_exception_classes() -> None:
-    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(1))
+    # 2: InMemoryTLSConfig subclasses hypercorn's third-party `Config` (a plain,
+    # non-model class) and needs `__init__` to call super().__init__() and hold
+    # the per-instance in-memory SSLContext. It cannot be a pydantic model, and
+    # setting the context from outside the class would evade this ratchet while
+    # doing the same thing, so the __init__ stays.
+    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(2))
 
 
 def test_prevent_cast_usage() -> None:

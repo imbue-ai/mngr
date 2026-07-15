@@ -2,25 +2,22 @@ import os
 import queue
 import subprocess
 import threading
-from datetime import datetime
-from datetime import timedelta
-from datetime import timezone
 from pathlib import Path
 
 import httpx
 from flask import Request
 from flask import Response
 from flask.testing import FlaskClient
+from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.app import _build_requests_payload
 from imbue.minds.desktop_client.app import _build_workspace_list
+from imbue.minds.desktop_client.app import _collect_remote_workspace_tiles
 from imbue.minds.desktop_client.app import _destroying_agent_ids
-from imbue.minds.desktop_client.app import _is_discovery_fresh
 from imbue.minds.desktop_client.app import _resolve_destroying_for_landing
-from imbue.minds.desktop_client.app import _should_emit_system_interface_status
 from imbue.minds.desktop_client.app import _ssh_command_for_agent
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
@@ -36,6 +33,10 @@ from imbue.minds.desktop_client.conftest import make_service_log
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
+from imbue.minds.desktop_client.dek_store import bundle_mirror_path
+from imbue.minds.desktop_client.dek_store import is_account_unlocked
+from imbue.minds.desktop_client.dek_store import set_master_password_for_account
+from imbue.minds.desktop_client.dek_store import verify_master_password_for_account
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.discovery_health import ProducerRemediator
 from imbue.minds.desktop_client.help_modal_requests import OpenHelpRequest
@@ -54,9 +55,13 @@ from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServiceName
+from imbue.minds.utils.mngr_caller import MngrCallResult
+from imbue.minds.utils.mngr_caller import MngrCaller
+from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
@@ -503,6 +508,39 @@ def test_landing_page_lists_agents_when_multiple_known(tmp_path: Path) -> None:
     assert str(agent_id_2) in response.text
 
 
+def test_landing_row_buttons_have_tooltips(tmp_path: Path) -> None:
+    """Landing workspace-row action buttons carry data-tooltip labels (rendered
+    as in-page custom tooltips by tooltip_triggers.js, since the content view
+    has no overlay bridge) rather than native title= attributes, plus an
+    aria-label so these icon-only buttons keep an accessible name."""
+    agent_id = AgentId()
+    backend_resolver = StaticBackendResolver(
+        url_by_agent_and_service={str(agent_id): {"web": "http://test:9100"}},
+    )
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get("/")
+    assert response.status_code == 200
+    # A normal (non-shutdown-capable) row shows Restart / Open / Settings.
+    assert 'data-tooltip="Restart workspace"' in response.text
+    assert 'data-tooltip="Open in new window"' in response.text
+    assert 'data-tooltip="Settings"' in response.text
+    # No native title= tooltips remain on the row buttons.
+    assert 'title="Restart workspace"' not in response.text
+    assert 'title="Settings"' not in response.text
+    # data-tooltip is not exposed to assistive tech, so the aria-labels stay.
+    assert 'aria-label="Restart workspace"' in response.text
+    assert 'aria-label="Workspace settings"' in response.text
+    # The shared trigger script is loaded (via Base), which wires these up and
+    # -- absent the window.minds bridge -- renders them in-page.
+    assert "/_static/tooltip_triggers.js" in response.text
+
+
 def test_creating_page_returns_501_without_agent_creator(tmp_path: Path) -> None:
     """GET /creating/{id} returns 501 when no agent_creator is configured."""
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
@@ -723,6 +761,22 @@ def test_chrome_page_includes_sidebar_toggle(tmp_path: Path) -> None:
     assert "sidebar-menu" in response.text
 
 
+def test_chrome_titlebar_buttons_have_tooltips(tmp_path: Path) -> None:
+    """Titlebar buttons carry data-tooltip labels (rendered as custom tooltips on
+    the overlay surface) rather than native title= attributes, plus an aria-label
+    so these icon-only buttons keep an accessible name for assistive tech."""
+    client, _, _ = _setup_test_server(tmp_path)
+
+    response = client.get("/_chrome")
+    assert response.status_code == 200
+    assert 'data-tooltip="Main Menu"' in response.text
+    assert 'data-tooltip="Ran into a bug?"' in response.text
+    # data-tooltip is not exposed to assistive tech, so each icon-only titlebar
+    # button also needs an aria-label to keep an accessible name.
+    assert 'aria-label="Main Menu"' in response.text
+    assert 'aria-label="Ran into a bug?"' in response.text
+
+
 def test_chrome_sidebar_page_renders(tmp_path: Path) -> None:
     """The /_chrome/sidebar route returns the standalone sidebar HTML."""
     client, _, _ = _setup_test_server(tmp_path)
@@ -732,6 +786,16 @@ def test_chrome_sidebar_page_renders(tmp_path: Path) -> None:
     assert "sidebar-workspaces" in response.text
     # Interactivity including the SSE fallback has moved to the external JS.
     assert "/_static/sidebar.js" in response.text
+
+
+def test_chrome_overlay_page_renders(tmp_path: Path) -> None:
+    """The /_chrome/overlay route returns the always-warm overlay host HTML."""
+    client, _, _ = _setup_test_server(tmp_path)
+
+    response = client.get("/_chrome/overlay")
+    assert response.status_code == 200
+    assert "overlay-root" in response.text
+    assert "/_static/overlay.js" in response.text
 
 
 def test_chrome_events_sse_returns_auth_required_when_unauthenticated(tmp_path: Path) -> None:
@@ -864,10 +928,12 @@ def _write_dead_destroy_dir(paths: WorkspacePaths, agent_id: AgentId, host_id: H
 
 
 def test_resolve_destroying_for_landing_finalizes_when_host_gone(tmp_path: Path) -> None:
-    """A finished destroy whose host is gone is DONE: disassociated + record deleted.
+    """A finished destroy whose host is gone is DONE: the record is tombstoned.
 
-    This is the Fix for the silent-orphan bug -- finalization (disassociation)
-    happens only once the host is actually gone, not synchronously on click.
+    Finalization happens only once the host is actually gone, not
+    synchronously on click. The record is kept (state=DESTROYED, secrets
+    intact) so the workspace's backups stay reachable, but it no longer
+    reads as the workspace's owner.
     """
     paths = WorkspacePaths(data_dir=tmp_path)
     agent_id = AgentId.generate()
@@ -875,7 +941,14 @@ def test_resolve_destroying_for_landing_finalizes_when_host_gone(tmp_path: Path)
     cli = make_fake_imbue_cloud_cli()
     cli.add_account(user_id="user-1", email="a@b.com")
     session_store = make_session_store_for_test(tmp_path, cli=cli)
-    session_store.associate_workspace("user-1", str(agent_id))
+    session_store.associate_created_workspace(
+        user_id="user-1",
+        agent_id=str(agent_id),
+        host_id=str(HostId.generate()),
+        display_name="doomed",
+        color=None,
+        is_cloud_row=False,
+    )
     # Resolver knows no active agents and reports no host state -> the host is
     # gone -> the destroy is DONE.
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
@@ -885,6 +958,11 @@ def test_resolve_destroying_for_landing_finalizes_when_host_gone(tmp_path: Path)
     assert marker == {}
     assert not (paths.data_dir / "destroying" / str(agent_id)).exists()
     assert session_store.get_account_for_workspace(str(agent_id)) is None
+    # The tombstone survives (with its metadata) for future backup access.
+    assert session_store.record_store is not None
+    records = session_store.record_store.list_records("user-1")
+    assert len(records) == 1
+    assert records[0].state == "destroyed"
 
 
 def test_resolve_destroying_for_landing_keeps_failed_when_host_still_up(tmp_path: Path) -> None:
@@ -899,7 +977,14 @@ def test_resolve_destroying_for_landing_keeps_failed_when_host_still_up(tmp_path
     cli = make_fake_imbue_cloud_cli()
     cli.add_account(user_id="user-1", email="a@b.com")
     session_store = make_session_store_for_test(tmp_path, cli=cli)
-    session_store.associate_workspace("user-1", str(agent_id))
+    session_store.associate_created_workspace(
+        user_id="user-1",
+        agent_id=str(agent_id),
+        host_id=str(HostId.generate()),
+        display_name="kept",
+        color=None,
+        is_cloud_row=False,
+    )
     # Resolver still lists the workspace agent as active -> host still up -> FAILED.
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={str(agent_id): {}})
 
@@ -908,6 +993,32 @@ def test_resolve_destroying_for_landing_keeps_failed_when_host_still_up(tmp_path
     assert marker == {str(agent_id): "failed"}
     assert (paths.data_dir / "destroying" / str(agent_id)).exists()
     assert session_store.get_account_for_workspace(str(agent_id)) is not None
+
+
+def test_remote_tiles_wait_for_the_initial_discovery_snapshot(tmp_path: Path) -> None:
+    """No record renders as a remote tile until discovery has produced its first snapshot.
+
+    Before that, local knowledge is empty and every record -- including this
+    device's own workspaces -- would misclassify as a greyed remote tile.
+    """
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    session_store = make_session_store_for_test(tmp_path, cli=cli)
+    session_store.associate_created_workspace(
+        user_id="user-1",
+        agent_id="agent-elsewhere",
+        host_id="host-elsewhere",
+        display_name="remote-ws",
+        color=None,
+        is_cloud_row=False,
+    )
+
+    undiscovered_resolver = MngrCliBackendResolver()
+    assert _collect_remote_workspace_tiles(undiscovered_resolver, session_store) == []
+
+    discovered_resolver = make_resolver_with_data(agents_json=make_agents_json(AgentId.generate()))
+    tiles = _collect_remote_workspace_tiles(discovered_resolver, session_store)
+    assert [tile.agent_id for tile in tiles] == ["agent-elsewhere"]
 
 
 class _AllAgentsKnownStaticResolver(StaticBackendResolver):
@@ -981,12 +1092,15 @@ def test_build_requests_payload_distinguishes_equal_count_different_contents() -
 def _create_test_client_with_stores(
     tmp_path: Path,
     cli: ImbueCloudCli | None = None,
+    mngr_caller: MngrCaller | None = None,
 ) -> tuple[FlaskClient, FileAuthStore]:
     """Create a desktop client with session store and config for testing new routes.
 
     ``cli`` is forwarded to :func:`make_session_store_for_test` so callers
     can seed the session store with specific accounts; defaults to a
-    fresh empty fake CLI.
+    fresh empty fake CLI. ``mngr_caller`` injects a fake mngr CLI caller (e.g.
+    :class:`RecordingMngrCaller`) so routes that shell out (``/help/assist``) can be
+    exercised without a real warm process.
     """
     auth_dir = tmp_path / "auth"
     auth_store = FileAuthStore(data_directory=auth_dir)
@@ -1003,6 +1117,7 @@ def _create_test_client_with_stores(
         minds_config=minds_config,
         request_inbox=request_inbox,
         paths=WorkspacePaths(data_dir=tmp_path),
+        mngr_caller=mngr_caller,
     )
     client = app.test_client()
     return client, auth_store
@@ -1065,6 +1180,26 @@ def test_auth_signin_modal_page_renders_overlay_with_auth_form(tmp_path: Path) -
     assert 'id="signin-modal-backdrop"' in response.text
     assert 'id="signin-form"' in response.text
     assert "run your workspace on Imbue Cloud" in response.text
+
+
+def test_signin_modal_close_button_has_tooltip(tmp_path: Path) -> None:
+    """The sign-in modal's close button (DialogCloseButton) carries a Close tooltip,
+    wired by the shared trigger script on the overlay surface."""
+    client = _create_test_client_with_auth_routes(tmp_path)
+    response = client.get("/auth/signin-modal")
+    assert response.status_code == 200
+    assert 'data-tooltip="Close"' in response.text
+    assert "/_static/tooltip_triggers.js" in response.text
+
+
+def test_inbox_close_button_has_tooltip(tmp_path: Path) -> None:
+    """The inbox modal's close button carries a Close tooltip on the overlay surface."""
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    response = client.get("/inbox")
+    assert response.status_code == 200
+    assert 'data-tooltip="Close"' in response.text
+    assert "/_static/tooltip_triggers.js" in response.text
 
 
 def test_auth_page_ignores_unsafe_return_to(tmp_path: Path) -> None:
@@ -1423,6 +1558,31 @@ def test_inbox_shell_reapplies_selection_after_list_refresh(tmp_path: Path) -> N
     assert "setSelectedCard(currentId)" in body
 
 
+def test_inbox_shell_disables_both_buttons_and_spins_during_approval(tmp_path: Path) -> None:
+    """While an approval runs in the background the shell must give a clear
+    signal: a busy helper that disables BOTH buttons and reveals the Approve
+    spinner, invoked when the grant is submitted.
+
+    Regression guard for the "scary" no-feedback approval: the user needs to
+    see that work is happening (browser sign-in, follow-up grant, etc.) and
+    must not be able to double-submit or deny mid-flight.
+    """
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    response = client.get("/inbox")
+    assert response.status_code == 200
+    body = response.text
+    # The busy helper disables both buttons and toggles the spinner/label.
+    assert "function setApproveBusy(isBusy)" in body
+    assert 'document.getElementById("permissions-deny-btn")' in body
+    assert 'document.getElementById("permissions-approve-spinner")' in body
+    # Submitting the grant enters the busy state.
+    assert "setApproveBusy(true)" in body
+    # Non-resolving outcomes (failure, manual credentials, errors) clear it
+    # so the user can retry.
+    assert "setApproveBusy(false)" in body
+
+
 def test_old_requests_panel_route_removed(tmp_path: Path) -> None:
     """The legacy panel route no longer exists."""
     client, auth_store = _create_test_client_with_stores(tmp_path)
@@ -1600,6 +1760,122 @@ def test_error_reporting_settings_persist_each_toggle(tmp_path: Path) -> None:
     assert config.get_include_error_logs() is True
 
 
+# -- backup master-password change tests --
+
+
+def test_backup_password_change_requires_auth(tmp_path: Path) -> None:
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.post("/_chrome/backup-password", json={"new_password": "x", "new_password_confirm": "x"})
+    assert response.status_code == 403
+
+
+def test_backup_password_change_rejects_mismatched_confirmation(tmp_path: Path) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
+    _authenticate_client(client, auth_store)
+    response = client.post("/_chrome/backup-password", json={"new_password": "one", "new_password_confirm": "two"})
+    assert response.status_code == 400
+    assert "match" in response.get_json()["error"]
+    assert not bundle_mirror_path(WorkspacePaths(data_dir=tmp_path), "user-1").exists()
+
+
+def test_backup_password_change_requires_a_signed_in_account(tmp_path: Path) -> None:
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    response = client.post("/_chrome/backup-password", json={"new_password": "x", "new_password_confirm": "x"})
+    assert response.status_code == 400
+    assert "Sign in" in response.get_json()["error"]
+
+
+def test_backup_password_change_wraps_the_dek_and_pushes_the_bundle(tmp_path: Path) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
+    _authenticate_client(client, auth_store)
+    paths = WorkspacePaths(data_dir=tmp_path)
+
+    response = client.post(
+        "/_chrome/backup-password",
+        json={"new_password": "brand-new", "new_password_confirm": "brand-new"},
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["ok"] is True
+    assert body["results"] == [{"account": "a@b.com", "is_ok": True, "error": None}]
+    assert verify_master_password_for_account(paths, "user-1", SecretStr("brand-new")) is True
+    assert verify_master_password_for_account(paths, "user-1", SecretStr("")) is False
+    # The wrapped bundle was pushed to the (fake) connector.
+    assert "a@b.com" in cli.sync_bundle_by_email
+
+
+def test_backup_password_change_may_return_to_the_empty_password(tmp_path: Path) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
+    _authenticate_client(client, auth_store)
+    paths = WorkspacePaths(data_dir=tmp_path)
+    assert (
+        client.post(
+            "/_chrome/backup-password", json={"new_password": "temp", "new_password_confirm": "temp"}
+        ).status_code
+        == 200
+    )
+
+    response = client.post("/_chrome/backup-password", json={"new_password": "", "new_password_confirm": ""})
+
+    assert response.status_code == 200
+    assert verify_master_password_for_account(paths, "user-1", SecretStr("")) is True
+    # Clearing scrubs the server: no bundle remains on the (fake) connector.
+    assert "a@b.com" not in cli.sync_bundle_by_email
+
+
+def test_backup_password_change_refuses_accounts_locked_on_this_device(tmp_path: Path) -> None:
+    """Rewrapping a locked account would mint a fresh DEK and overwrite the
+    server bundle wrapping the real one, orphaning every synced secret -- the
+    change endpoint must report a failure and touch nothing instead."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    # Another device set a password and synced a secrets-carrying record; this
+    # device has no DEK for the account (it is locked here).
+    other_device = WorkspacePaths(data_dir=tmp_path / "other-device")
+    bundle = set_master_password_for_account(other_device, "user-1", SecretStr("hunter2"))
+    assert bundle is not None
+    cli.sync_bundle_push("a@b.com", bundle)
+    remote = ReplicaRecord(
+        host_id="host-remote-1",
+        agent_id=str(AgentId.generate()),
+        display_name="remote-ws",
+        provider_kind="lima",
+        hosting_device_id="device-other",
+        device_label="other-device",
+        encrypted_secrets="b3BhcXVl",
+    )
+    cli.sync_records_by_email["a@b.com"] = {"host-remote-1": remote.to_wire(1)}
+
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
+    _authenticate_client(client, auth_store)
+    session_store = get_state(client.application).session_store
+    assert session_store is not None and session_store.record_store is not None
+    session_store.record_store.pull("user-1", "a@b.com")
+    bundle_before = dict(cli.sync_bundle_by_email["a@b.com"])
+
+    response = client.post(
+        "/_chrome/backup-password", json={"new_password": "new-pass", "new_password_confirm": "new-pass"}
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["ok"] is False
+    assert body["results"] == [{"account": "a@b.com", "is_ok": False, "error": body["results"][0]["error"]}]
+    assert "locked" in body["results"][0]["error"]
+    # The server bundle (wrapping the real DEK) is untouched and no divergent
+    # local DEK was minted.
+    assert cli.sync_bundle_by_email["a@b.com"] == bundle_before
+    assert not is_account_unlocked(WorkspacePaths(data_dir=tmp_path), "user-1")
+
+
 # -- get-help / report-a-bug tests --
 
 
@@ -1615,14 +1891,38 @@ def test_help_page_renders_report_option(tmp_path: Path) -> None:
     assert "disabled" in agent_radio
 
 
-def test_help_page_enables_agent_option_in_a_workspace(tmp_path: Path) -> None:
-    """Opened from a loaded workspace, the agent-help option is enabled and the default choice."""
+def test_help_page_close_button_has_tooltip(tmp_path: Path) -> None:
+    """The help dialog's close button carries a custom tooltip wired by the shared
+    trigger script (modal pages can render tooltips on the overlay surface too)."""
     client, _ = _create_test_client_with_stores(tmp_path)
-    response = client.get(f"/help?workspace={AgentId()}")
+    response = client.get("/help")
+    assert response.status_code == 200
+    assert 'data-tooltip="Close"' in response.text
+    assert "/_static/tooltip_triggers.js" in response.text
+
+
+def test_help_page_enables_agent_option_for_a_healthy_workspace(tmp_path: Path) -> None:
+    """Opened from a reachable workspace (assist=1), the agent-help option is enabled and the default."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get(f"/help?workspace={AgentId()}&assist=1")
     assert response.status_code == 200
     agent_radio = response.text.split('value="agent"')[1].split(">")[0]
     assert "disabled" not in agent_radio
     assert "checked" in agent_radio
+
+
+def test_help_page_disables_agent_option_when_workspace_not_reachable(tmp_path: Path) -> None:
+    """With a workspace id but no assist=1 (e.g. a loading/stuck workspace), the agent-help option is
+    disabled -- spawning a chat there couldn't be seen or used -- while a bug report stays available."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get(f"/help?workspace={AgentId()}")
+    assert response.status_code == 200
+    agent_radio = response.text.split('value="agent"')[1].split(">")[0]
+    assert "disabled" in agent_radio
+    # Report is the default when agent help isn't available.
+    report_radio = response.text.split('value="report"')[1].split(">")[0]
+    assert "checked" in report_radio
+    assert "Available once this workspace is responding." in response.text
 
 
 def test_help_assist_requires_a_workspace(tmp_path: Path) -> None:
@@ -1638,6 +1938,41 @@ def test_help_assist_requires_a_description(tmp_path: Path) -> None:
     assert response.status_code == 400
 
 
+def test_help_assist_refuses_a_workspace_without_the_assist_skill(tmp_path: Path) -> None:
+    """A workspace from an older DEFAULT_WORKSPACE_TEMPLATE (no /assist skill) is refused up front (409) rather than spawning
+    a chat that would hang on the unknown ``/assist`` command -- and no ``mngr create`` is attempted."""
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout="MNGR_ASSIST_SKILL_ABSENT\n"))
+    client, _ = _create_test_client_with_stores(tmp_path, mngr_caller=caller)
+    response = client.post("/help/assist", json={"description": "it broke", "workspace_agent_id": str(AgentId())})
+    assert response.status_code == 409
+    assert "agent-assist skill" in response.get_json()["error"]
+    # Only the probe ran; we never attempted to create the chat.
+    assert len(caller.calls) == 1
+    assert caller.calls[0][0] == "exec"
+
+
+def test_help_assist_reports_unreachable_workspace(tmp_path: Path) -> None:
+    """When the probe can't run (no sentinel -- host down/timeout), we return 502 rather than guess."""
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=1, stderr="connection refused"))
+    client, _ = _create_test_client_with_stores(tmp_path, mngr_caller=caller)
+    response = client.post("/help/assist", json={"description": "it broke", "workspace_agent_id": str(AgentId())})
+    assert response.status_code == 502
+    assert len(caller.calls) == 1
+
+
+def test_help_assist_spawns_when_the_skill_is_present(tmp_path: Path) -> None:
+    """A supported workspace probes clean, then the chat is created (probe call + create call)."""
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout="MNGR_ASSIST_SKILL_PRESENT\n"))
+    client, _ = _create_test_client_with_stores(tmp_path, mngr_caller=caller)
+    response = client.post("/help/assist", json={"description": "it broke", "workspace_agent_id": str(AgentId())})
+    assert response.status_code == 200
+    # First the skill probe, then the inner ``mngr create``.
+    assert len(caller.calls) == 2
+    assert caller.calls[0][0] == "exec"
+    assert caller.calls[1][:2] == ["exec", "--agent"]
+    assert "mngr create" in caller.calls[1][3]
+
+
 def test_help_page_prefills_description_from_query(tmp_path: Path) -> None:
     """When an /assist agent asks the app to open the modal, the description arrives pre-filled."""
     client, _ = _create_test_client_with_stores(tmp_path)
@@ -1647,14 +1982,16 @@ def test_help_page_prefills_description_from_query(tmp_path: Path) -> None:
 
 
 def test_help_page_with_prefilled_description_defaults_to_report_mode(tmp_path: Path) -> None:
-    """An agent escalation opens the modal with both a workspace and a description; it must land on
-    the report form (so a human reviews and submits) rather than agent-help mode (which would spawn
-    another /assist chat)."""
+    """An agent escalation opens the modal with a healthy workspace (assist=1) AND a description; even
+    though agent help is available, it must default to the report form (so a human reviews and submits)
+    rather than agent-help mode (which would spawn another /assist chat)."""
     client, _ = _create_test_client_with_stores(tmp_path)
-    response = client.get(f"/help?workspace={AgentId()}&description=it+broke")
+    response = client.get(f"/help?workspace={AgentId()}&assist=1&description=it+broke")
     assert response.status_code == 200
     agent_radio = response.text.split('value="agent"')[1].split(">")[0]
     report_radio = response.text.split('value="report"')[1].split(">")[0]
+    # Agent help is enabled (assist=1) but not the default when a diagnosis was pre-filled.
+    assert "disabled" not in agent_radio
     assert "checked" not in agent_radio
     assert "checked" in report_radio
 
@@ -1810,97 +2147,6 @@ def test_api_v1_bug_report_rejects_empty_description(tmp_path: Path) -> None:
 
 
 # -- system-interface restart + recovery tests --
-
-
-def test_is_discovery_fresh_distinguishes_recent_from_stale_and_missing() -> None:
-    """Freshness gates the recovery redirect: only a recent snapshot is trustworthy."""
-    now = datetime.now(timezone.utc)
-    assert _is_discovery_fresh(now) is True
-    # A snapshot well past the freshness window (a stalled pipeline) is stale.
-    assert _is_discovery_fresh(now - timedelta(minutes=5)) is False
-    # No snapshot at all (e.g. before initial discovery) cannot be trusted.
-    assert _is_discovery_fresh(None) is False
-
-
-def _drive_to_stuck_with_onset(tracker: SystemInterfaceHealthTracker, agent_id: AgentId) -> datetime:
-    """Drive ``agent_id`` to STUCK via the real probe path and return its onset.
-
-    A zero stuck-threshold makes the first probe failure stick immediately, so the
-    outage onset is recorded deterministically without sleeping.
-    """
-    tracker.record_failure(agent_id)
-    tracker.record_probe_failure(agent_id)
-    assert tracker.get_health(agent_id) == AgentHealth.STUCK
-    onset = tracker.get_failure_run_started_wall_at(agent_id)
-    assert onset is not None
-    return onset
-
-
-def test_should_emit_system_interface_status_gates_stuck_on_post_onset_snapshot() -> None:
-    """The recovery redirect waits for a discovery snapshot taken *after* the outage began.
-
-    STUCK is the only status the chrome redirects on. A snapshot that predates the
-    outage still carries the pre-outage host state (a just-stopped container still
-    reads RUNNING), so it must not promote the redirect -- only a snapshot at or
-    after the outage onset does. Other statuses never gate the redirect.
-    """
-    resolver = MngrCliBackendResolver()
-    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
-    agent_id = AgentId.generate()
-
-    # Non-STUCK statuses do not drive the redirect, so they are never gated --
-    # even with no discovery snapshot and no recorded onset.
-    assert _should_emit_system_interface_status(resolver, tracker, agent_id, AgentHealth.RESTARTING) is True
-    assert _should_emit_system_interface_status(resolver, tracker, agent_id, AgentHealth.RESTART_FAILED) is True
-    assert _should_emit_system_interface_status(resolver, tracker, agent_id, AgentHealth.HEALTHY) is True
-
-    onset = _drive_to_stuck_with_onset(tracker, agent_id)
-
-    # A recent snapshot that nonetheless predates the outage is the exact bug case:
-    # it is well within the absolute freshness window but still shows the pre-outage
-    # host state, so it must stay suppressed.
-    resolver.update_providers(
-        providers=(), error_by_provider_name={}, last_full_snapshot_at=onset - timedelta(seconds=1)
-    )
-    assert _should_emit_system_interface_status(resolver, tracker, agent_id, AgentHealth.STUCK) is False
-
-    # A snapshot taken after the outage began reflects it; promote the redirect.
-    resolver.update_providers(
-        providers=(), error_by_provider_name={}, last_full_snapshot_at=onset + timedelta(seconds=1)
-    )
-    assert _should_emit_system_interface_status(resolver, tracker, agent_id, AgentHealth.STUCK) is True
-
-
-def test_should_emit_system_interface_status_without_onset_falls_back_to_age() -> None:
-    """Without a recorded onset, STUCK gating falls back to the absolute-age freshness check.
-
-    Only the force-``mark_stuck`` path (used in tests) reaches STUCK without a
-    probe-failure run, so there is no onset to compare against; the gate then
-    behaves as before -- cold start suppresses, a recent snapshot promotes. A
-    missing tracker entirely is treated the same way.
-    """
-    resolver = MngrCliBackendResolver()
-    tracker = SystemInterfaceHealthTracker()
-    agent_id = AgentId.generate()
-    tracker.mark_stuck(agent_id)
-    assert tracker.get_failure_run_started_wall_at(agent_id) is None
-
-    # Cold start, no snapshot yet: suppressed.
-    assert _should_emit_system_interface_status(resolver, tracker, agent_id, AgentHealth.STUCK) is False
-    # A recent snapshot promotes via the age fallback.
-    resolver.update_providers(
-        providers=(), error_by_provider_name={}, last_full_snapshot_at=datetime.now(timezone.utc)
-    )
-    assert _should_emit_system_interface_status(resolver, tracker, agent_id, AgentHealth.STUCK) is True
-    # A stale snapshot (a stalled pipeline) suppresses it again.
-    resolver.update_providers(
-        providers=(),
-        error_by_provider_name={},
-        last_full_snapshot_at=datetime.now(timezone.utc) - timedelta(minutes=5),
-    )
-    assert _should_emit_system_interface_status(resolver, tracker, agent_id, AgentHealth.STUCK) is False
-    # No tracker at all behaves identically to a missing onset.
-    assert _should_emit_system_interface_status(resolver, None, agent_id, AgentHealth.STUCK) is False
 
 
 def test_recovery_page_requires_authentication(tmp_path: Path) -> None:
@@ -2110,6 +2356,9 @@ def test_recovery_page_initial_status_reflects_tracker_restarting(tmp_path: Path
 
     assert response.status_code == 200
     assert 'data-initial-status="restarting"' in response.text
+    # The page's background convergence poll keys off this header to tell "still
+    # restarting" (keep waiting, no focus-stealing reload) from a state change.
+    assert response.headers["X-Recovery-Status"] == "restarting"
 
 
 def test_recovery_page_redirects_to_return_to_when_agent_already_healthy(tmp_path: Path) -> None:
@@ -2219,3 +2468,84 @@ def _create_readiness_test_client(
         http_client=http_client,
     )
     return client, auth_store, probed
+
+
+# -- sync unlock / remove-record tests --
+
+
+def test_sync_unlock_installs_the_dek_for_a_locked_account(tmp_path: Path) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    # Another device set a password and synced a workspace with secrets: the
+    # bundle + a secret-carrying record exist on the (fake) connector, but
+    # this device has no DEK file.
+    other_device = WorkspacePaths(data_dir=tmp_path / "other-device")
+    bundle = set_master_password_for_account(other_device, "user-1", SecretStr("hunter2"))
+    assert bundle is not None
+    cli.sync_bundle_push("a@b.com", bundle)
+    remote = ReplicaRecord(
+        host_id="host-remote-1",
+        agent_id=str(AgentId.generate()),
+        display_name="remote-ws",
+        provider_kind="lima",
+        hosting_device_id="device-other",
+        device_label="other-device",
+        encrypted_secrets="b3BhcXVl",
+    )
+    cli.sync_records_by_email["a@b.com"] = {"host-remote-1": remote.to_wire(1)}
+
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
+    _authenticate_client(client, auth_store)
+    # The reconcile normally pulls on startup; do it directly for the test.
+    session_store = get_state(client.application).session_store
+    assert session_store is not None and session_store.record_store is not None
+    session_store.record_store.pull("user-1", "a@b.com")
+
+    wrong = client.post("/_chrome/sync-unlock", json={"password": "nope"})
+    assert wrong.status_code == 200
+    assert wrong.get_json()["ok"] is False
+
+    response = client.post("/_chrome/sync-unlock", json={"password": "hunter2"})
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["ok"] is True
+    assert body["unlocked"] == ["a@b.com"]
+    assert is_account_unlocked(WorkspacePaths(data_dir=tmp_path), "user-1")
+
+
+def test_sync_unlock_requires_auth(tmp_path: Path) -> None:
+    client, _ = _create_test_client_with_stores(tmp_path)
+    assert client.post("/_chrome/sync-unlock", json={"password": "x"}).status_code == 403
+
+
+def test_remove_workspace_record_deletes_the_row(tmp_path: Path) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
+    _authenticate_client(client, auth_store)
+    session_store = get_state(client.application).session_store
+    assert session_store is not None
+    session_store.associate_created_workspace(
+        user_id="user-1",
+        agent_id=str(AgentId.generate()),
+        host_id="host-remove-me",
+        display_name="stale",
+        color=None,
+        is_cloud_row=False,
+    )
+    assert "host-remove-me" in cli.sync_records_by_email["a@b.com"]
+
+    response = client.post("/_chrome/workspaces/remove-record", json={"host_id": "host-remove-me"})
+
+    assert response.status_code == 200
+    assert "host-remove-me" not in cli.sync_records_by_email["a@b.com"]
+    assert session_store.record_store is not None
+    assert session_store.record_store.list_records("user-1") == []
+
+
+def test_remove_workspace_record_unknown_host_is_404(tmp_path: Path) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
+    _authenticate_client(client, auth_store)
+    assert client.post("/_chrome/workspaces/remove-record", json={"host_id": "host-nope"}).status_code == 404

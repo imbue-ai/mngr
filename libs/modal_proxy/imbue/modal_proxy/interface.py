@@ -279,6 +279,7 @@ class ModalInterface(MutableModel, ABC):
         region: str | None = None,
         cidr_allowlist: Sequence[str] | None = None,
         volumes: Mapping[str, VolumeInterface] | None = None,
+        experimental_options: Mapping[str, bool] | None = None,
     ) -> SandboxInterface:
         """Create a sandbox (mirrors modal.Sandbox.create)."""
         ...

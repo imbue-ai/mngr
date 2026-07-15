@@ -18,7 +18,6 @@ from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from typing import Final
 from typing import NoReturn
 from typing import TypeVar
@@ -223,57 +222,6 @@ def init_repo(
     )
 
 
-def _add_password_key_once(
-    *,
-    repository: str,
-    backend_env: Mapping[str, str],
-    existing_password: str | None,
-    new_password: str,
-    parent_cg: ConcurrencyGroup | None,
-) -> None:
-    """Run a single ``restic key add`` attempt, authenticating with ``existing_password``."""
-    env, flags = _env_and_flags(repository, backend_env, existing_password)
-    with TemporaryDirectory() as temp_dir:
-        new_password_file = Path(temp_dir) / "new_password"
-        # 0600 temp file so the random key isn't briefly world-readable on disk.
-        fd = os.open(new_password_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        try:
-            os.write(fd, new_password.encode("utf-8"))
-        finally:
-            os.close(fd)
-        result = _run_restic(
-            [*flags, "key", "add", "--new-password-file", str(new_password_file)],
-            env_overrides=env,
-            parent_cg=parent_cg,
-            timeout_seconds=_DEFAULT_TIMEOUT_SECONDS,
-        )
-    if result.returncode != 0:
-        _raise_restic_failure("restic key add", result.returncode, result.stderr)
-
-
-def add_password_key(
-    *,
-    repository: str,
-    backend_env: Mapping[str, str],
-    existing_password: str | None,
-    new_password: str,
-    parent_cg: ConcurrencyGroup | None = None,
-) -> None:
-    """Add ``new_password`` as an additional key, authenticating with ``existing_password``.
-
-    Retries a transient auth failure for a bounded window (see ``init_repo``).
-    """
-    _retry_on_transient_auth(
-        lambda: _add_password_key_once(
-            repository=repository,
-            backend_env=backend_env,
-            existing_password=existing_password,
-            new_password=new_password,
-            parent_cg=parent_cg,
-        )
-    )
-
-
 def restore_snapshot(
     *,
     repository: str,
@@ -409,37 +357,6 @@ def list_snapshots(
     if result.returncode != 0:
         raise BackupProvisioningError(f"restic snapshots failed (exit {result.returncode}): {result.stderr.strip()}")
     return parse_restic_snapshots(result.stdout or "[]")
-
-
-def get_latest_snapshot_time(
-    *,
-    repository: str,
-    backend_env: Mapping[str, str],
-    password: str | None,
-    parent_cg: ConcurrencyGroup | None = None,
-    timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
-) -> datetime | None:
-    """Return the time of the most recent snapshot, or None if there are none."""
-    env, flags = _env_and_flags(repository, backend_env, password)
-    result = _run_restic(
-        [*flags, "--no-lock", "snapshots", "--latest", "1", "--json"],
-        env_overrides=env,
-        parent_cg=parent_cg,
-        timeout_seconds=timeout_seconds,
-    )
-    if result.returncode != 0:
-        raise BackupProvisioningError(f"restic snapshots failed (exit {result.returncode}): {result.stderr.strip()}")
-    try:
-        snapshots = json.loads(result.stdout or "[]")
-    except ValueError as e:
-        raise BackupProvisioningError(f"restic snapshots returned non-JSON output: {e}") from e
-    times = [
-        parse_restic_timestamp(str(snapshot["time"]))
-        for snapshot in snapshots
-        if isinstance(snapshot, dict) and snapshot.get("time")
-    ]
-    real_times = [time for time in times if time is not None]
-    return max(real_times) if real_times else None
 
 
 def is_backup_in_progress(

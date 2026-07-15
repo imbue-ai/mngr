@@ -148,33 +148,29 @@ def test_ensure_restic_available_does_not_raise() -> None:
 
 
 @pytest.mark.timeout(60)
-def test_init_add_key_and_status_against_local_repo(tmp_path: Path) -> None:
+def test_init_and_status_against_local_repo(tmp_path: Path) -> None:
     repo = str(tmp_path / "repo")
-    master = "master-passphrase"
     workspace_password = "workspace-random-key"
 
-    # Init with the master password, then add the random workspace key.
-    restic_cli.init_repo(repository=repo, backend_env={}, password=master)
-    restic_cli.add_password_key(
-        repository=repo, backend_env={}, existing_password=master, new_password=workspace_password
-    )
+    # Init with the workspace's own random password -- the repo's single key.
+    restic_cli.init_repo(repository=repo, backend_env={}, password=workspace_password)
 
     now = datetime.now(timezone.utc)
     # Fresh repo: no snapshots, no in-progress lock -- queried with the
     # workspace key (proving the added key opens the repo).
-    assert restic_cli.get_latest_snapshot_time(repository=repo, backend_env={}, password=workspace_password) is None
+    assert restic_cli.list_snapshots(repository=repo, backend_env={}, password=workspace_password) == ()
     assert (
         restic_cli.is_backup_in_progress(repository=repo, backend_env={}, password=workspace_password, now=now)
         is False
     )
 
-    # After a backup, the latest-snapshot time is populated.
+    # After a backup, the snapshot shows up with a real timestamp.
     source = tmp_path / "data.txt"
     source.write_text("hello backup")
     restic_backup_a_file(repo, workspace_password, source)
-    latest = restic_cli.get_latest_snapshot_time(repository=repo, backend_env={}, password=workspace_password)
-    assert latest is not None
-    assert latest.tzinfo is not None
+    snapshots = restic_cli.list_snapshots(repository=repo, backend_env={}, password=workspace_password)
+    assert len(snapshots) == 1
+    assert snapshots[0].time.tzinfo is not None
 
 
 # --- parse_restic_snapshots ---

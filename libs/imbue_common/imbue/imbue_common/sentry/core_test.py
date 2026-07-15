@@ -1,0 +1,356 @@
+import logging
+import sys
+from collections.abc import Iterator
+from pathlib import Path
+from typing import cast
+
+import pytest
+import sentry_sdk
+from loguru import logger
+from sentry_sdk import Client
+from sentry_sdk import isolation_scope
+from sentry_sdk.envelope import Envelope
+from sentry_sdk.integrations.logging import EventHandler
+from sentry_sdk.integrations.logging import unignore_logger
+from sentry_sdk.transport import Transport
+from sentry_sdk.types import Event
+from sentry_sdk.types import Hint
+
+from imbue.imbue_common.sentry.core import ErrorAttachmentsS3Uploader
+from imbue.imbue_common.sentry.core import MANUALLY_SUBMITTED_TAG
+from imbue.imbue_common.sentry.core import _before_send_wrapper
+from imbue.imbue_common.sentry.core import _drop_interrupt_events
+from imbue.imbue_common.sentry.core import _make_automatic_reporting_gate
+from imbue.imbue_common.sentry.core import _register_ignored_loggers
+from imbue.imbue_common.sentry.core import add_extra_info_hook
+from imbue.imbue_common.sentry.core import fixup_release_id
+from imbue.imbue_common.sentry.core import get_or_create_anonymous_user_id
+from imbue.imbue_common.sentry.core import register_attachments_uploader
+from imbue.imbue_common.sentry.core import submit_manual_bug_report
+from imbue.imbue_common.sentry.data_types import LogAttachmentGroup
+from imbue.imbue_common.sentry.loguru_handler import should_record_sentry_event
+
+_LIVE_LOG_GROUP = LogAttachmentGroup(
+    group_name="live_logs", glob="*.jsonl", max_file_count=10, is_compressed=True, is_immutable=False
+)
+_ROTATED_LOG_GROUP = LogAttachmentGroup(
+    group_name="rotated_logs", glob="*.jsonl.*", max_file_count=1, is_compressed=True, is_immutable=True
+)
+
+
+@pytest.mark.parametrize(
+    ("release_id", "expected"),
+    [("0.1.0rc1", "0.1.0-rc.1"), ("1.2.3", "1.2.3"), ("0.0.0+unknown", "0.0.0+unknown")],
+)
+def test_fixup_release_id_normalizes_release_candidates(release_id: str, expected: str) -> None:
+    assert fixup_release_id(release_id) == expected
+
+
+def test_get_or_create_anonymous_user_id_creates_and_persists_a_hex_id(tmp_path: Path) -> None:
+    id_file_path = tmp_path / "anonymous_user_id"
+    user_id = get_or_create_anonymous_user_id(id_file_path)
+    # A 32-char lowercase hex string (uuid4().hex), persisted verbatim to the file.
+    assert len(user_id) == 32 and all(char in "0123456789abcdef" for char in user_id)
+    assert id_file_path.read_text() == user_id
+
+
+def test_get_or_create_anonymous_user_id_is_stable_across_calls(tmp_path: Path) -> None:
+    id_file_path = tmp_path / "anonymous_user_id"
+    first = get_or_create_anonymous_user_id(id_file_path)
+    second = get_or_create_anonymous_user_id(id_file_path)
+    assert first == second
+
+
+def test_get_or_create_anonymous_user_id_regenerates_a_malformed_file(tmp_path: Path) -> None:
+    id_file_path = tmp_path / "anonymous_user_id"
+    id_file_path.write_text("not-a-valid-id")
+    user_id = get_or_create_anonymous_user_id(id_file_path)
+    assert len(user_id) == 32 and all(char in "0123456789abcdef" for char in user_id)
+    assert id_file_path.read_text() == user_id
+
+
+def test_get_or_create_anonymous_user_id_creates_parent_directory(tmp_path: Path) -> None:
+    id_file_path = tmp_path / "nested" / "dir" / "anonymous_user_id"
+    user_id = get_or_create_anonymous_user_id(id_file_path)
+    assert id_file_path.read_text() == user_id
+
+
+def test_collect_external_attachments_groups_logs_by_configured_glob(tmp_path: Path) -> None:
+    # Each configured group's glob must land in its own group and not cross-match.
+    logs_folder = tmp_path / "logs"
+    logs_folder.mkdir()
+    (logs_folder / "events.jsonl").write_text("live\n")
+    (logs_folder / "events.jsonl.20250101120000123456").write_text("rotated\n")
+
+    uploader = ErrorAttachmentsS3Uploader(log_attachment_groups=(_LIVE_LOG_GROUP, _ROTATED_LOG_GROUP))
+    try:
+        raise ValueError("boom")
+    except ValueError as exception:
+        groups, callbacks = uploader.collect_external_attachments(exception=exception, logs_folder=logs_folder)
+
+    assert set(groups) == {"", "live_logs", "rotated_logs"}
+    assert len(groups["live_logs"]) == 1
+    assert len(groups["rotated_logs"]) == 1
+    # one callback per upload: traceback + the two log files (the immutable rotated
+    # file is cached only after its first upload, so it still produces a callback here).
+    assert len(callbacks) == 3
+
+
+def test_collect_external_attachments_without_logs_folder_only_uploads_traceback() -> None:
+    uploader = ErrorAttachmentsS3Uploader(log_attachment_groups=(_LIVE_LOG_GROUP,))
+    try:
+        raise ValueError("boom")
+    except ValueError as exception:
+        groups, callbacks = uploader.collect_external_attachments(exception=exception, logs_folder=None)
+
+    assert set(groups) == {""}
+    assert len(callbacks) == 1
+
+
+def test_before_send_wrapper_logs_failure_locally_without_recursing_into_sentry() -> None:
+    # When a before_send callback raises, the wrapper must surface the failure in the local app log
+    # but must NOT let that log line become another Sentry event (which would re-enter this same
+    # hook and recurse). The SentryEventHandler is modeled here by a sink guarded by the real filter.
+    local_messages: list[str] = []
+    sentry_messages: list[str] = []
+
+    def boom(event: Event, hint: Hint) -> Event:
+        raise ValueError("before_send boom")
+
+    local_sink_id = logger.add(lambda message: local_messages.append(message.record["message"]), level=0)
+    sentry_sink_id = logger.add(
+        lambda message: sentry_messages.append(message.record["message"]),
+        level=0,
+        filter=should_record_sentry_event,
+    )
+    try:
+        with pytest.raises(ValueError, match="before_send boom"):
+            _before_send_wrapper({}, {}, [boom])
+        # a normal error (no skip marker) must still flow to the Sentry-event sink: the filter only
+        # suppresses records explicitly marked with _SKIP_SENTRY_EVENT_EXTRA_KEY.
+        logger.error("ordinary error that should reach sentry")
+    finally:
+        logger.remove(local_sink_id)
+        logger.remove(sentry_sink_id)
+
+    assert any("before_send hook" in message for message in local_messages)
+    assert not any("before_send hook" in message for message in sentry_messages)
+    assert any("ordinary error" in message for message in sentry_messages)
+
+
+def test_before_send_failure_reporting_does_not_recurse() -> None:
+    # Reporting a before_send failure goes through capture_event, which re-runs the before_send chain.
+    # A deterministically broken callback would otherwise recurse forever. The reentrancy guard must
+    # bound this: the callback runs once for the original event and once for the minimal report event,
+    # but the guard prevents the report from triggering yet another report.
+    call_count = 0
+
+    def always_broken(event: Event, hint: Hint) -> Event:
+        nonlocal call_count
+        call_count += 1
+        raise ValueError("always broken before_send")
+
+    class _NoOpTransport(Transport):
+        def capture_envelope(self, envelope: Envelope) -> None:
+            pass
+
+    def before_send(event: Event, hint: Hint) -> Event | None:
+        return _before_send_wrapper(event, hint, [always_broken])
+
+    client = Client(
+        dsn="https://public@example.com/1",
+        before_send=before_send,
+        transport=_NoOpTransport(),
+        default_integrations=False,
+        auto_enabling_integrations=False,
+    )
+    with isolation_scope() as scope:
+        scope.set_client(client)
+        # must terminate (no RecursionError) thanks to the guard.
+        sentry_sdk.capture_event({"message": "trigger"})
+
+    assert call_count == 2
+
+
+def test_automatic_reporting_gate_drops_automatic_events_when_disabled() -> None:
+    gate = _make_automatic_reporting_gate(lambda: False)
+    assert gate({"message": "boom"}, {}) is None
+
+
+def test_automatic_reporting_gate_passes_automatic_events_when_enabled() -> None:
+    gate = _make_automatic_reporting_gate(lambda: True)
+    event: Event = {"message": "boom"}
+    assert gate(event, {}) is event
+
+
+def test_automatic_reporting_gate_always_passes_manual_reports_even_when_disabled() -> None:
+    # A manual bug report is an explicit user action and must be sent regardless of the automatic
+    # reporting setting.
+    gate = _make_automatic_reporting_gate(lambda: False)
+    event: Event = {"message": "bug", "tags": {MANUALLY_SUBMITTED_TAG: "true"}}
+    assert gate(event, {}) is event
+
+
+def _hint_for_raised(exception: BaseException) -> Hint:
+    """Build a before_send ``Hint`` carrying real ``exc_info`` for ``exception`` (raised to get a traceback)."""
+    # Catch the exact type raised (covers KeyboardInterrupt / SystemExit, which are not Exception
+    # subclasses) without catching the whole BaseException hierarchy.
+    try:
+        raise exception
+    except type(exception):
+        return cast(Hint, {"exc_info": sys.exc_info()})
+
+
+def test_drop_interrupt_events_drops_keyboard_interrupt() -> None:
+    # KeyboardInterrupt (Ctrl-C) reaches Sentry via the SDK's excepthook/threading integrations,
+    # bypassing the loguru handler's own filter -- before_send must drop it since it is not a real fault.
+    assert _drop_interrupt_events({"message": "x"}, _hint_for_raised(KeyboardInterrupt())) is None
+
+
+@pytest.mark.parametrize("clean_exit", [SystemExit(), SystemExit(0), SystemExit(None), SystemExit(False)])
+def test_drop_interrupt_events_drops_clean_system_exit(clean_exit: SystemExit) -> None:
+    # A clean SystemExit (code None/0) is normal teardown, not an error.
+    assert _drop_interrupt_events({"message": "x"}, _hint_for_raised(clean_exit)) is None
+
+
+@pytest.mark.parametrize("fatal_exit", [SystemExit(1), SystemExit("boom")])
+def test_drop_interrupt_events_keeps_nonzero_system_exit(fatal_exit: SystemExit) -> None:
+    # A non-zero / message-bearing SystemExit is a genuine fatal-exit signal and must still report,
+    # so a real error during shutdown is not silently swallowed.
+    event: Event = {"message": "x"}
+    assert _drop_interrupt_events(event, _hint_for_raised(fatal_exit)) is event
+
+
+def test_drop_interrupt_events_keeps_ordinary_exception_and_eventless_hints() -> None:
+    # Ordinary exceptions (the common case) and events without exc_info pass straight through.
+    event: Event = {"message": "x"}
+    assert _drop_interrupt_events(event, _hint_for_raised(ValueError("real error"))) is event
+    assert _drop_interrupt_events(event, cast(Hint, {})) is event
+    assert _drop_interrupt_events(event, cast(Hint, {"exc_info": (None, None, None)})) is event
+
+
+def test_add_extra_info_hook_skips_attachments_when_log_inclusion_disabled() -> None:
+    # With log inclusion off, no upload callbacks are prepared and no uploaded-files extras are added,
+    # but the lightweight ``platform`` extra is still attached.
+    register_attachments_uploader(ErrorAttachmentsS3Uploader())
+    event: Event = {"extra": {}}
+    result_event, _hint, callbacks = add_extra_info_hook(event, {}, is_log_inclusion_enabled=lambda: False)
+    assert callbacks == ()
+    assert "platform" in result_event["extra"]
+    assert not any(key.startswith("uploaded_files") for key in result_event["extra"])
+
+
+def test_add_extra_info_hook_collects_traceback_when_log_inclusion_enabled() -> None:
+    # With log inclusion on and no scope-configured log folder, the only attachment prepared is the
+    # synthesized-traceback upload (one callback). Callbacks are partials, so nothing is uploaded here.
+    register_attachments_uploader(ErrorAttachmentsS3Uploader())
+    event: Event = {"extra": {}}
+    _result_event, _hint, callbacks = add_extra_info_hook(event, {}, is_log_inclusion_enabled=lambda: True)
+    assert len(callbacks) == 1
+
+
+def test_scope_user_id_is_attached_to_events_even_with_send_default_pii_off() -> None:
+    # The feature relies on an explicitly-set anonymous user id being sent to Sentry even though
+    # send_default_pii is False (which only suppresses auto-collected PII like IP addresses). Verify
+    # the id set on the scope (exactly what setup_sentry does) lands on a captured event's user.
+    captured_events: list[Event] = []
+
+    class _CapturingTransport(Transport):
+        def capture_envelope(self, envelope: Envelope) -> None:
+            event = envelope.get_event()
+            if event is not None:
+                captured_events.append(event)
+
+    client = Client(
+        dsn="https://public@example.com/1",
+        transport=_CapturingTransport(),
+        default_integrations=False,
+        auto_enabling_integrations=False,
+        send_default_pii=False,
+    )
+    with isolation_scope() as scope:
+        scope.set_client(client)
+        scope.set_user({"id": "0123456789abcdef0123456789abcdef"})
+        sentry_sdk.capture_event({"message": "boom"})
+        client.flush()
+
+    assert len(captured_events) == 1
+    user = cast(dict, captured_events[0]["user"])
+    assert user["id"] == "0123456789abcdef0123456789abcdef"
+
+
+def test_submit_manual_bug_report_sends_tagged_event_even_when_reporting_disabled() -> None:
+    # A manual bug report is an explicit user action: it must reach Sentry even when the automatic
+    # reporting gate is set to drop events, and it must carry the manual tag and the report payload.
+    captured_events: list[Event] = []
+
+    class _CapturingTransport(Transport):
+        def capture_envelope(self, envelope: Envelope) -> None:
+            event = envelope.get_event()
+            if event is not None:
+                captured_events.append(event)
+
+    gate = _make_automatic_reporting_gate(lambda: False)
+
+    def before_send(event: Event, hint: Hint) -> Event | None:
+        return _before_send_wrapper(event, hint, [gate])
+
+    client = Client(
+        dsn="https://public@example.com/1",
+        before_send=before_send,
+        transport=_CapturingTransport(),
+        default_integrations=False,
+        auto_enabling_integrations=False,
+    )
+    with isolation_scope() as scope:
+        scope.set_client(client)
+        event_id = submit_manual_bug_report(
+            title="[bug report] boom",
+            report={"description": "boom", "remote_access_requested": False},
+            include_logs=False,
+            logs_folder=None,
+        )
+        client.flush()
+
+    # The event id is returned so the user can quote it; capture_event yields a 32-char hex string.
+    assert isinstance(event_id, str) and len(event_id) == 32
+    assert len(captured_events) == 1
+    event = captured_events[0]
+    # ``Event`` types tags/extra loosely (object), so narrow before subscripting.
+    tags = cast(dict, event["tags"])
+    assert tags["manually_submitted"] == "true"
+    extra = cast(dict, event["extra"])
+    assert extra["bug_report"]["description"] == "boom"
+
+
+@pytest.fixture
+def _cleanup_ignored_loggers() -> Iterator[list[str]]:
+    # ``ignore_logger`` mutates a process-global sentry registry, so any patterns a test registers
+    # must be reverted afterward to avoid leaking into other tests.
+    registered: list[str] = []
+    yield registered
+    for pattern in registered:
+        unignore_logger(pattern)
+
+
+def test_register_ignored_loggers_makes_matching_loggers_ignored(_cleanup_ignored_loggers: list[str]) -> None:
+    # The default LoggingIntegration captures ERROR-level stdlib records as Sentry events even for
+    # loggers with propagate=False (it patches Logger.callHandlers at the class level). Registering a
+    # glob pattern must make its EventHandler drop matching records -- both the exact name and any
+    # child logger -- while leaving unrelated loggers alone.
+    patterns = ["paramiko", "paramiko.*"]
+    _cleanup_ignored_loggers.extend(patterns)
+    _register_ignored_loggers(patterns)
+
+    handler = EventHandler(level=logging.ERROR)
+    assert handler._can_record(logging.makeLogRecord({"name": "paramiko"})) is False
+    assert handler._can_record(logging.makeLogRecord({"name": "paramiko.transport"})) is False
+    assert handler._can_record(logging.makeLogRecord({"name": "imbue.minds"})) is True
+
+
+def test_submit_manual_bug_report_returns_none_when_sentry_inactive() -> None:
+    # With no active Sentry client (the default in tests), the submit is a no-op that returns None
+    # (no event id) rather than raising.
+    assert (
+        submit_manual_bug_report(title="t", report={"description": "d"}, include_logs=False, logs_folder=None) is None
+    )

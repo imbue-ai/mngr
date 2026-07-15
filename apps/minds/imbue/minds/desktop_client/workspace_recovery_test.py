@@ -8,12 +8,16 @@ the host-already-stopped fast path).
 """
 
 from datetime import datetime
+from datetime import timedelta
 from datetime import timezone
 from pathlib import Path
+
+from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
+from imbue.minds.desktop_client.recovery_probe import DispatchTier
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.workspace_operations import InMemoryWorkspaceOperationRegistry
@@ -21,13 +25,18 @@ from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKi
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
 from imbue.minds.desktop_client.workspace_recovery import _build_mngr_start_argv
 from imbue.minds.desktop_client.workspace_recovery import _build_mngr_stop_argv
+from imbue.minds.desktop_client.workspace_recovery import _is_discovery_fresh
 from imbue.minds.desktop_client.workspace_recovery import _provider_error_message_for_workspace
+from imbue.minds.desktop_client.workspace_recovery import is_recovery_classification_trustworthy
+from imbue.minds.desktop_client.workspace_recovery import probe_workspace_health
 from imbue.minds.desktop_client.workspace_recovery import run_restart_sequence
 from imbue.mngr.api.discovery_events import DiscoveryError
+from imbue.mngr.errors import HOST_SHUTDOWN_NOT_SUPPORTED_MESSAGE
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 
 
@@ -273,6 +282,50 @@ def test_run_restart_sequence_recovers_on_clean_dispatch_without_plugin(tmp_path
     assert record is not None and record.status == WorkspaceOperationStatus.DONE
 
 
+def test_run_restart_sequence_skips_unsupported_stop_and_proceeds(tmp_path: Path) -> None:
+    """A host-restart on a provider that cannot stop a host in place (Modal: ``mngr stop
+    --stop-host`` raises HostShutdownNotSupportedError) must NOT fail the restart -- the stop
+    step is skipped and the sequence proceeds to ``mngr start``, which restarts it on its own."""
+    tracker = SystemInterfaceHealthTracker()
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    tracker.mark_restarting(workspace_agent)
+    resolver = _resolver_with_system_services(workspace_agent, services_agent)
+    registry = _started_registry(workspace_agent)
+    # A fake mngr whose ``stop`` fails with the host-shutdown-not-supported message (as Modal
+    # does) and whose ``start`` succeeds -- mirrors a no-shutdown provider's restart. The stderr
+    # is built from mngr's exported HOST_SHUTDOWN_NOT_SUPPORTED_MESSAGE, the same constant the
+    # restart worker matches on, so this exercises the real shared-source-of-truth mechanism.
+    script = tmp_path / "fake_mngr_no_shutdown"
+    script.write_text(
+        "#!/bin/sh\n"
+        'case "$1" in\n'
+        f'  stop) echo "Provider modal {HOST_SHUTDOWN_NOT_SUPPORTED_MESSAGE}" >&2; exit 1 ;;\n'
+        "  *) exit 0 ;;\n"
+        "esac\n"
+    )
+    script.chmod(0o755)
+
+    with ConcurrencyGroup(name="test-restart") as cg:
+        run_restart_sequence(
+            workspace_agent_id=workspace_agent,
+            is_host_restart=True,
+            tracker=tracker,
+            backend_resolver=resolver,
+            mngr_binary=str(script),
+            mngr_host_dir=tmp_path,
+            concurrency_group=cg,
+            mngr_forward_port=0,
+            mngr_forward_preauth_cookie=None,
+            registry=registry,
+        )
+
+    # The unsupported stop is treated as "skip and proceed", so the restart recovers (not FAILED).
+    assert tracker.get_health(workspace_agent) == AgentHealth.HEALTHY
+    record = registry.get(workspace_agent)
+    assert record is not None and record.status == WorkspaceOperationStatus.DONE
+
+
 def test_run_restart_sequence_skips_stop_when_host_already_stopped(tmp_path: Path) -> None:
     """``skip_stop=True`` on a host restart goes straight to ``mngr start`` (no stop subprocess)."""
     tracker = SystemInterfaceHealthTracker()
@@ -333,3 +386,212 @@ def test_run_restart_sequence_stops_before_start_by_default(tmp_path: Path) -> N
     assert stop_index is not None, invocations
     assert start_index is not None, invocations
     assert stop_index < start_index
+
+
+# -- recovery classification trustworthiness (freshness gate on the verdict path) --
+
+
+def _drive_to_stuck_with_onset(tracker: SystemInterfaceHealthTracker, agent_id: AgentId) -> datetime:
+    """Drive ``agent_id`` to STUCK via the real probe path and return its onset.
+
+    A zero stuck-threshold makes the first probe failure stick immediately, so the
+    outage onset is recorded deterministically without sleeping.
+    """
+    tracker.record_failure(agent_id)
+    tracker.record_probe_failure(agent_id)
+    assert tracker.get_health(agent_id) == AgentHealth.STUCK
+    onset = tracker.get_failure_run_started_wall_at(agent_id)
+    assert onset is not None
+    return onset
+
+
+def _register_workspace_agent(resolver: MngrCliBackendResolver, agent_id: AgentId, provider_name: str) -> None:
+    """Register one workspace agent on ``provider_name`` so its display info resolves a provider.
+
+    Trustworthiness is scoped to the workspace's own provider's last snapshot, so
+    the agent must be discoverable with a provider for the predicate to find a
+    per-provider snapshot time.
+    """
+    agent = DiscoveredAgent(
+        host_id=HostId("host-" + "0" * 31 + "1"),
+        agent_id=agent_id,
+        agent_name=AgentName("ws-agent"),
+        provider_name=ProviderInstanceName(provider_name),
+        certified_data={"labels": {"workspace": "true", "is_primary": "true"}},
+    )
+    resolver.update_agents(ParsedAgentsResult(agent_ids=(agent_id,), discovered_agents=(agent,)))
+
+
+def _set_provider_snapshot_at(resolver: MngrCliBackendResolver, provider_name: str, snapshot_at: datetime) -> None:
+    """Record ``provider_name``'s last per-provider snapshot time on the resolver."""
+    resolver.update_providers(
+        provider_name=ProviderInstanceName(provider_name),
+        provider=None,
+        error=None,
+        last_snapshot_at=snapshot_at,
+    )
+
+
+def test_is_discovery_fresh_distinguishes_recent_from_stale_and_missing() -> None:
+    """Only a recent snapshot backs a trustworthy classification via the age fallback."""
+    now = datetime.now(timezone.utc)
+    assert _is_discovery_fresh(now) is True
+    # A snapshot well past the freshness window (a stalled pipeline) is stale.
+    assert _is_discovery_fresh(now - timedelta(minutes=5)) is False
+    # No snapshot at all (e.g. before initial discovery) cannot be trusted.
+    assert _is_discovery_fresh(None) is False
+
+
+def test_classification_trustworthy_only_after_a_post_onset_snapshot() -> None:
+    """A verdict is trustworthy only once a snapshot taken *after* the outage began has landed.
+
+    A snapshot that predates the outage still carries the pre-outage host state (a
+    just-stopped container still reads RUNNING), so it must not make the
+    classification trustworthy -- only a snapshot at or after the outage onset
+    does. Freshness is scoped to the workspace's own provider's snapshot time.
+    """
+    resolver = MngrCliBackendResolver()
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    agent_id = AgentId.generate()
+    _register_workspace_agent(resolver, agent_id, "docker")
+    onset = _drive_to_stuck_with_onset(tracker, agent_id)
+
+    # A recent snapshot of the agent's provider that nonetheless predates the outage
+    # is the exact bug case: within the absolute freshness window but still showing
+    # the pre-outage host state, so the classification stays untrustworthy.
+    _set_provider_snapshot_at(resolver, "docker", onset - timedelta(seconds=1))
+    assert is_recovery_classification_trustworthy(resolver, tracker, agent_id) is False
+
+    # A snapshot of the agent's provider taken after the outage began reflects it.
+    _set_provider_snapshot_at(resolver, "docker", onset + timedelta(seconds=1))
+    assert is_recovery_classification_trustworthy(resolver, tracker, agent_id) is True
+
+
+def test_classification_trustworthiness_is_scoped_to_the_workspaces_own_provider() -> None:
+    """A fresh snapshot of an *unrelated* provider must not make the verdict trustworthy.
+
+    Each provider is discovered on its own loop, so only the workspace's own
+    provider's snapshot can establish that its host was re-observed post-onset.
+    """
+    resolver = MngrCliBackendResolver()
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    agent_id = AgentId.generate()
+    _register_workspace_agent(resolver, agent_id, "docker")
+    onset = _drive_to_stuck_with_onset(tracker, agent_id)
+
+    # A post-onset snapshot for a different provider leaves docker's freshness stale.
+    _set_provider_snapshot_at(resolver, "modal", onset + timedelta(seconds=1))
+    assert is_recovery_classification_trustworthy(resolver, tracker, agent_id) is False
+
+    # Only the agent's own provider going fresh post-onset makes it trustworthy.
+    _set_provider_snapshot_at(resolver, "docker", onset + timedelta(seconds=1))
+    assert is_recovery_classification_trustworthy(resolver, tracker, agent_id) is True
+
+
+def test_classification_trustworthiness_without_onset_falls_back_to_age() -> None:
+    """Without a recorded onset, trustworthiness falls back to the absolute-age freshness check.
+
+    Only the force-``mark_stuck`` path (used in tests) reaches STUCK without a
+    probe-failure run, so there is no onset to compare against; the predicate then
+    behaves on age alone -- cold start is untrustworthy, a recent snapshot is
+    trustworthy. A missing tracker is treated the same way.
+    """
+    resolver = MngrCliBackendResolver()
+    tracker = SystemInterfaceHealthTracker()
+    agent_id = AgentId.generate()
+    _register_workspace_agent(resolver, agent_id, "docker")
+    tracker.mark_stuck(agent_id)
+    assert tracker.get_failure_run_started_wall_at(agent_id) is None
+
+    # Cold start, no snapshot yet: untrustworthy.
+    assert is_recovery_classification_trustworthy(resolver, tracker, agent_id) is False
+    # A recent snapshot of the agent's provider is trustworthy via the age fallback.
+    _set_provider_snapshot_at(resolver, "docker", datetime.now(timezone.utc))
+    assert is_recovery_classification_trustworthy(resolver, tracker, agent_id) is True
+    # A stale snapshot (a stalled pipeline) is untrustworthy again.
+    _set_provider_snapshot_at(resolver, "docker", datetime.now(timezone.utc) - timedelta(minutes=5))
+    assert is_recovery_classification_trustworthy(resolver, tracker, agent_id) is False
+    # No tracker at all behaves identically to a missing onset.
+    assert is_recovery_classification_trustworthy(resolver, None, agent_id) is False
+
+
+# -- host-health probe: classification-time consistency --
+
+
+class _HostStateFlipResolver(MngrCliBackendResolver):
+    """Resolver whose host state flips RUNNING -> STOPPED across successive reads.
+
+    Emulates a fresh discovery snapshot landing while the slow in-container exec
+    is in flight: the pre-exec host-state read sees the stale RUNNING; every read
+    after that sees the fresh STOPPED.
+    """
+
+    _host_state_reads: int = PrivateAttr(default=0)
+
+    def get_host_state(self, host_id: HostId) -> HostState | None:
+        self._host_state_reads += 1
+        return HostState.RUNNING if self._host_state_reads == 1 else HostState.STOPPED
+
+
+def _register_workspace_with_services(
+    resolver: MngrCliBackendResolver, workspace_agent: AgentId, services_agent: AgentId, provider_name: str
+) -> None:
+    """Register a workspace agent and its system-services agent on one shared host."""
+    host_id = HostId.generate()
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(workspace_agent, services_agent),
+            discovered_agents=(
+                DiscoveredAgent(
+                    host_id=host_id,
+                    agent_id=workspace_agent,
+                    agent_name=AgentName("ws-agent"),
+                    provider_name=ProviderInstanceName(provider_name),
+                    certified_data={"labels": {"workspace": "true", "is_primary": "true"}},
+                ),
+                DiscoveredAgent(
+                    host_id=host_id,
+                    agent_id=services_agent,
+                    agent_name=AgentName("system-services"),
+                    provider_name=ProviderInstanceName(provider_name),
+                ),
+            ),
+        )
+    )
+
+
+def test_probe_pairs_the_classified_host_state_with_the_freshness_gate(tmp_path: Path) -> None:
+    """A snapshot landing mid-exec must not split the verdict from its evidence.
+
+    The in-container exec takes tens of seconds. If a fresh discovery snapshot
+    lands during it, the freshness gate (evaluated after the exec) sees a
+    post-onset snapshot time -- but the host state read *before* the exec still
+    holds the pre-snapshot value. Classifying that pair rendered a trusted
+    HOST_UNRESPONSIVE off a stale RUNNING when the very snapshot that opened the
+    gate already read STOPPED. The probe must classify the host state as re-read
+    at gate time: HOST_OFFLINE.
+    """
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    resolver = _HostStateFlipResolver()
+    _register_workspace_with_services(resolver, workspace_agent, services_agent, "docker")
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    onset = _drive_to_stuck_with_onset(tracker, workspace_agent)
+    # The mid-exec snapshot: post-onset, so the gate opens.
+    _set_provider_snapshot_at(resolver, "docker", onset + timedelta(seconds=1))
+
+    with ConcurrencyGroup(name="test-probe") as cg:
+        response = probe_workspace_health(
+            workspace_agent,
+            backend_resolver=resolver,
+            tracker=tracker,
+            mngr_binary=_write_fake_mngr(tmp_path),
+            mngr_host_dir=tmp_path,
+            concurrency_group=cg,
+            envelope_stream_consumer=None,
+        )
+
+    # Two reads happened: the pre-exec gate read (RUNNING, so the exec ran) and
+    # the classification-time read (STOPPED).
+    assert resolver._host_state_reads >= 2
+    assert response.dispatch_tier == DispatchTier.HOST_OFFLINE

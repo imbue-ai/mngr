@@ -80,19 +80,28 @@ from imbue.minds.desktop_client.server import desktop_client_runtime
 from imbue.minds.desktop_client.server import serve_desktop_client
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
+from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
+from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.system_interface_health import should_enroll_suspect_for_backend_failure
-from imbue.minds.desktop_client.templates import DEFAULT_FOREVER_CLAUDE_GIT_URL
+from imbue.minds.desktop_client.templates import DEFAULT_WORKSPACE_TEMPLATE_GIT_URL
 from imbue.minds.desktop_client.templates import FALLBACK_BRANCH
 from imbue.minds.desktop_client.templates import is_local_workspace_defaults_opt_in
+from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
+from imbue.minds.desktop_client.workspace_record_store import read_device_id
+from imbue.minds.desktop_client.workspace_record_store import read_device_label
 from imbue.minds.envs.docker_cleanup import DockerCleanupError
 from imbue.minds.envs.docker_cleanup import start_active_env_state_container
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.minds.utils.output import emit_event
+from imbue.minds.utils.sentry.core import latchkey_forward_sentry_consent_path
+from imbue.minds.utils.sentry.core import resolve_anonymous_user_id
+from imbue.minds.utils.sentry.core import resolve_latchkey_forward_sentry_env
 from imbue.minds.utils.sentry.core import resolve_sentry_environment
 from imbue.minds.utils.sentry.core import setup_sentry
+from imbue.minds.utils.sentry.core import write_latchkey_forward_sentry_consent
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.parent_process import start_grandparent_death_watcher
@@ -203,11 +212,16 @@ def run(
     # project; development never uploads attachments regardless. The release id (desktop app version)
     # and git sha come from the Electron launcher via env vars, falling back to the in-repo
     # package.json / "unknown" for bare source runs (see imbue.minds.build_info).
+    # The anonymous user id (no PII) is persisted per install and attached to every event so Sentry
+    # can count the distinct installs affected by each issue. The same value is shared with the
+    # detached ``mngr latchkey forward`` daemon (below) so both processes count as one install.
+    anonymous_user_id = resolve_anonymous_user_id(data_directory)
     setup_sentry(
         environment=resolve_sentry_environment(),
         release_id=resolve_release_id(),
         git_commit_sha=resolve_git_sha(),
         log_folder=paths.log_dir,
+        anonymous_user_id=anonymous_user_id,
         is_error_reporting_enabled=minds_config.get_report_unexpected_errors,
         is_log_inclusion_enabled=minds_config.get_include_error_logs,
     )
@@ -226,6 +240,9 @@ def run(
 
     # Bootstrap couldn't write provider entries without the connector URL,
     # so the reconcile happens here once we've loaded the client config.
+    # Its "settings modified" return is deliberately unused: the latchkey
+    # forward supervisor is restarted unconditionally below, so any provider-set
+    # change written here is picked up by the fresh observe process.
     reconcile_imbue_cloud_providers_from_sessions(connector_url_str, root_name=root_name)
 
     auth_store = FileAuthStore(data_directory=paths.auth_dir)
@@ -302,7 +319,24 @@ def run(
         extra_env={
             MINDS_API_PROXY_URL_ENV_VAR: f"http://127.0.0.1:{port}",
             MINDS_API_PROXY_KEY_ENV_VAR: minds_api_key,
+            # Publish the daemon's (mostly static) Sentry infrastructure config + the path of the
+            # live consent file, while reading only its own MNGR_LATCHKEY_* vars. The toggleable
+            # consent lives in the file (written just below and on every change), not in the env,
+            # so a grant/revoke reaches the running daemon live.
+            **resolve_latchkey_forward_sentry_env(
+                consent_file_path=latchkey_forward_sentry_consent_path(data_directory),
+                anonymous_user_id=anonymous_user_id,
+            ),
         },
+    )
+
+    # Seed the daemon's live consent file from minds' current consent before it is (re)spawned, so the
+    # daemon's gates have a value to read immediately. It is rewritten whenever the user toggles
+    # consent (see the error-reporting endpoints), which is what propagates a change to the daemon.
+    write_latchkey_forward_sentry_consent(
+        latchkey_forward_sentry_consent_path(data_directory),
+        is_error_reporting_enabled=minds_config.get_report_unexpected_errors(),
+        is_log_inclusion_enabled=minds_config.get_include_error_logs(),
     )
 
     # Background thread: supervisor restart must complete before the
@@ -324,14 +358,16 @@ def run(
     # orphan tree running across restarts.
     start_grandparent_death_watcher(root_concurrency_group)
 
-    # Run ``mngr message`` (and, over time, other ``mngr`` CLI calls) in a
-    # pre-warmed, single-use ``mngr`` process instead of spawning (and importing)
-    # a fresh interpreter each time, so UI actions like Approve/Deny don't pay the
-    # multi-second interpreter+import startup cost. ``prewarm`` is non-blocking:
-    # it spawns the first warm process (which pays the import cost) on a
-    # background thread, off the request path.
+    # Run ``mngr message`` (and other ``mngr`` CLI calls) in a pre-warmed,
+    # single-use ``mngr`` process instead of spawning (and importing) a fresh
+    # interpreter each time, so UI actions like Approve/Deny don't pay the
+    # multi-second interpreter+import startup cost. ``initialize`` adopts the
+    # app's root concurrency group (which owns every warm process's lifetime)
+    # and is non-blocking: it spawns the first warm process (which pays the
+    # import cost) on a background thread, off the request path. It must run
+    # before any ``call``, so it happens here at startup.
     mngr_caller = get_default_mngr_caller()
-    mngr_caller.prewarm(root_concurrency_group)
+    mngr_caller.initialize(root_concurrency_group)
     mngr_message_sender = MngrMessageSender(mngr_caller=mngr_caller, concurrency_group=root_concurrency_group)
     latchkey_permission_handler = LatchkeyPermissionGrantHandler(
         data_dir=data_directory,
@@ -356,10 +392,30 @@ def run(
         mngr_message_sender=mngr_message_sender,
     )
     imbue_cloud_cli = ImbueCloudCli(
-        parent_concurrency_group=root_concurrency_group,
+        mngr_caller=mngr_caller,
         connector_url=client_env_config.connector_url,
     )
-    session_store = MultiAccountSessionStore(data_dir=data_directory, cli=imbue_cloud_cli)
+    workspace_record_store = WorkspaceRecordStore(
+        paths=paths,
+        mngr_host_dir=mngr_host_dir,
+        cli=imbue_cloud_cli,
+        device_id=read_device_id(mngr_host_dir),
+        device_label=read_device_label(),
+    )
+    session_store = MultiAccountSessionStore(
+        data_dir=data_directory, cli=imbue_cloud_cli, record_store=workspace_record_store
+    )
+    sync_scheduler = WorkspaceSyncScheduler(
+        record_store=workspace_record_store,
+        session_store=session_store,
+        resolver=backend_resolver,
+        # Newly-materialized SSH material (a cloud workspace unlocked/synced
+        # from another install) is picked up lazily by discovery; bouncing the
+        # observe child makes the workspace reachable now instead of on the
+        # next poll.
+        on_ssh_material_written=lambda: bounce_latchkey_forward_supervisor(latchkey_forward_supervisor),
+    )
+    sync_scheduler.start(root_concurrency_group)
     response_events = load_response_events(data_directory)
     request_inbox = RequestInbox()
     for resp in response_events:
@@ -373,7 +429,7 @@ def run(
     # are needed here.
     # `mngr forward` and every other laptop-side mngr invocation (including the
     # bundled mngr CLI when run from a Terminal under this MNGR_HOST_DIR) starts
-    # with cwd=$HOME, so the FCT workspace's `[agent_types.main]` block in
+    # with cwd=$HOME, so the DEFAULT_WORKSPACE_TEMPLATE workspace's `[agent_types.main]` block in
     # `/code/.mngr/settings.toml` inside the lima VM is invisible to them.
     # Seed the mapping into user-scope settings.toml here so subsequent mngr
     # subprocesses resolve `type=main` -> ClaudeAgent without depending on cwd.
@@ -436,7 +492,7 @@ def run(
             f"{_MNGR_FORWARD_LISTEN_TIMEOUT_SECONDS:.0f}s; the plugin likely failed to start. "
             "Check the logs above for its stderr and retry."
         )
-    logger.info("  mngr forward: http://127.0.0.1:{}", mngr_forward_port)
+    logger.info("  mngr forward: https://127.0.0.1:{}", mngr_forward_port)
 
     # AgentCreator is constructed *after* ``start_mngr_forward`` so the
     # readiness probe can use the same preauth cookie the plugin accepts and
@@ -466,7 +522,7 @@ def run(
         lima_image_gate = LimaImageCreateGate(
             prefetcher=lima_image_prefetcher,
             current_release_tag=FALLBACK_BRANCH,
-            default_repo_url=DEFAULT_FOREVER_CLAUDE_GIT_URL,
+            default_repo_url=DEFAULT_WORKSPACE_TEMPLATE_GIT_URL,
             is_dev_loop=is_local_workspace_defaults_opt_in(),
         )
         logger.info("  lima image prefetch: started ({})", FALLBACK_BRANCH)
@@ -539,6 +595,7 @@ def run(
         minds_api_key=minds_api_key,
         latchkey_forward_supervisor=latchkey_forward_supervisor,
         discovery_health_watchdog=discovery_health_watchdog,
+        sync_scheduler=sync_scheduler,
     )
 
     # Background loop driving the discovery-pipeline watchdog: polls snapshot

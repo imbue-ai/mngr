@@ -19,8 +19,8 @@ from pydantic import StrictBool
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.primitives import AIProvider
-from imbue.minds.primitives import BackupEncryptionMethod
 from imbue.minds.primitives import BackupProvider
+from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
 
 
@@ -78,6 +78,13 @@ class CreateOperationStatusResponse(FrozenModel):
     agent_id: str | None = Field(default=None, description="The created workspace agent id, once known")
     redirect_url: str | None = Field(default=None, description="Absolute /goto/<agent>/ URL to navigate to when done")
     error: str | None = Field(default=None, description="Failure message, when the creation failed")
+    error_kind: str | None = Field(
+        default=None,
+        description=(
+            "Machine-readable failure classification (e.g. GITHUB_AUTH_REQUIRED), set when the "
+            "failure is recognized; the creating page gates extra static guidance on it"
+        ),
+    )
 
 
 class DestroyOperationStatusResponse(FrozenModel):
@@ -98,6 +105,42 @@ class RestartOperationStatusResponse(FrozenModel):
     status: str = Field(description="Raw restart status")
     is_done: bool = Field(description="Whether the restart has finished")
     error: str | None = Field(default=None, description="Failure message, when the restart failed")
+
+
+class BackupOperationStatusResponse(FrozenModel):
+    """Status of a backup update/configure operation (polled at /operations/backup/<id>)."""
+
+    operation_id: str = Field(description="The workspace agent id the operation acts on")
+    kind: str = Field(description="'backup_update' or 'backup_configure'")
+    status: str = Field(description="Raw operation status (RUNNING/DONE/FAILED)")
+    is_done: bool = Field(description="Whether the operation has finished successfully")
+    error: str | None = Field(default=None, description="Failure message, when the operation failed")
+    blocked_chats: tuple[str, ...] = Field(
+        default=(),
+        description="Chat agents whose RUNNING state blocked the update (offer 'Stop all chats and retry')",
+    )
+
+
+class BackupServiceUpdateRequest(ApiRequestModel):
+    """Body for the one idempotent 'Update backup service' action."""
+
+    stop_chats: bool = Field(
+        default=False,
+        description="Stop actively-RUNNING chat agents first (the 'Stop all chats and retry' flow)",
+    )
+
+
+class BackupServiceConfigureRequest(ApiRequestModel):
+    """Body for enabling backups or changing a workspace's backup destination."""
+
+    backup_provider: str = Field(description="'IMBUE_CLOUD' or 'API_KEY'")
+    api_key_env: str = Field(default="", description="For API_KEY: KEY=VALUE block (RESTIC_REPOSITORY + creds)")
+
+
+class BackupVerificationToggleRequest(ApiRequestModel):
+    """Body for enabling/disabling backup verification on a workspace."""
+
+    enabled: bool = Field(description="Whether verification (and the warning badge) is enabled")
 
 
 class EmptyResponse(FrozenModel):
@@ -142,6 +185,11 @@ class CreateWorkspaceRequest(ApiRequestModel):
     ai_provider: AIProvider | None = Field(
         default=None, description="How to obtain Anthropic credentials (default SUBSCRIPTION)"
     )
+    runtime: DockerRuntime | None = Field(
+        default=None,
+        description="Docker container runtime for DOCKER launch mode (runc vs gVisor's runsc); "
+        "defaults to the platform-appropriate value (runc on macOS, runsc on Linux)",
+    )
     account_id: str | None = Field(default=None, description="imbue_cloud account id (required for imbue_cloud modes)")
     anthropic_api_key: str | None = Field(
         default=None, description="Anthropic API key (required when ai_provider is API_KEY)"
@@ -150,9 +198,6 @@ class CreateWorkspaceRequest(ApiRequestModel):
     backup_provider: BackupProvider | None = Field(
         default=None, description="Restic backup provider (default CONFIGURE_LATER)"
     )
-    backup_encryption_method: BackupEncryptionMethod | None = Field(default=None, description="Backup repo key method")
-    backup_master_password: str | None = Field(default=None, description="Master/recovery passphrase, when used")
-    backup_save_password: bool | None = Field(default=None, description="Whether to persist the master password")
     backup_api_key_env: str | None = Field(default=None, description="KEY=VALUE block for an API_KEY backup provider")
 
 
@@ -178,14 +223,6 @@ class RestartWorkspaceRequest(ApiRequestModel):
     scope: str = Field(description="'services' (restart system-services in place) or 'host' (bounce the host)")
     host_already_stopped: bool | None = Field(
         default=None, description="Skip the redundant stop step (host scope only) when the host is known stopped"
-    )
-    auto_dispatched: bool | None = Field(
-        default=None,
-        description=(
-            "Set by the recovery page's automatic tier dispatch (not a manual restart). When the workspace has "
-            "already self-recovered to HEALTHY before the slow host-health probe finished, an auto-dispatched "
-            "restart is skipped rather than bouncing a healthy backend; a manual restart always proceeds."
-        ),
     )
 
 
@@ -311,11 +348,33 @@ class BackupSnapshotSummary(FrozenModel):
 
 
 class WorkspaceBackupsResponse(FrozenModel):
-    """A workspace's restic backup snapshots plus whether a backup is running now."""
+    """A workspace's full backup picture: snapshots plus the backup-service verification result.
+
+    The snapshot half (restic, run from the minds machine) works even when
+    the workspace is offline or destroyed; the verification half execs into
+    the workspace and reports OFFLINE/DISABLED instead when it cannot or
+    must not run. Cross-workspace parallelism is the caller's job -- this is
+    deliberately the only backup-health surface, one workspace per request.
+    """
 
     agent_id: str = Field(description="The workspace agent id")
+    is_configured: bool = Field(description="Whether minds holds a canonical restic.env for this workspace")
     is_backing_up: bool = Field(description="Whether a (non-stale) restic backup is currently running")
     snapshots: tuple[BackupSnapshotSummary, ...] = Field(default=(), description="All snapshots, newest-first")
+    snapshots_error: str | None = Field(
+        default=None, description="Why the snapshot listing failed (e.g. restic error), when it did"
+    )
+    check_state: str = Field(description="Verification verdict: OK/PROBLEMS/OFFLINE/DISABLED/UNKNOWN")
+    problems: tuple[str, ...] = Field(default=(), description="Detected backup-service problems (badge causes)")
+    installed_version: str | None = Field(default=None, description="Installed backup-code version, when known")
+    minimum_version: str | None = Field(
+        default=None, description="The minimum required minds-v* tag the check compared against"
+    )
+    update_target_version: str | None = Field(
+        default=None, description="The minds-v* tag the 'Update backup service' action would install"
+    )
+    check_detail: str = Field(default="", description="Extra human-readable check detail (e.g. why unverifiable)")
+    is_verification_enabled: bool = Field(description="Whether backup verification is enabled for this workspace")
 
 
 class SharingReadinessResponse(FrozenModel):

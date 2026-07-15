@@ -81,8 +81,7 @@ def test_deploy_config_secrets_match_canonical_per_env_services(tier: str) -> No
     ``<svc>-<tier>-<deploy_id>`` Modal Secret named in
     ``per_env_secret_services()`` via ``Secret.from_name``, so a tier whose
     ``[secrets].services`` omits one makes ``modal deploy`` fail with
-    "Secret ... not found in environment". This caught a missing ``ovh`` entry
-    across all tiers after the connector started signing OVH calls at runtime.
+    "Secret ... not found in environment".
     """
     config = load_deploy_config(tier)
     assert set(config.secrets.services) == set(per_env_secret_services())

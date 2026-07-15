@@ -4,6 +4,20 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-08
+
+Generalized TMR to run distinct test suites (e.g. the mngr suite and the minds suite) as separate, independently reviewable runs.
+
+- Added `--name <slug>` to give a run its own variant prefix on agent, branch, and host names (e.g. `tmr-mngr/<run>/*` vs `tmr-minds/<run>/*`), so two suites' branches and PRs stay separate. It is distinct from `--run-name`, which identifies a single run within a variant. The name is validated as a slug (alphanumerics, dashes, underscores) since it becomes a branch/agent/host name segment.
+
+- Added `--mapper-prompt` / `--reducer-prompt` to point a variant at its own Jinja prompt templates. An override template may `{% extends %}` or `{% include %}` the packaged `mapper.j2` / `reducer.j2` by name to reuse the shared body.
+
+- The reintegrate hint in the HTML report now carries `--name` for non-default variants so the suggested command resolves the same run.
+
+## 2026-07-01
+
+Added a new async/await ratchet (`test_prevent_async_await`) that freezes the current amount of `async def` / `await` usage in this project and fails if new async code is added. We strongly prefer synchronous code: it is far easier to debug, and our software is intentionally low-scale, so async provides no benefit. Existing usage is grandfathered in at its current count; the count can only decrease.
+
 ## 2026-06-26
 
 TMR is now generic over any release test rather than specific to the mngr e2e

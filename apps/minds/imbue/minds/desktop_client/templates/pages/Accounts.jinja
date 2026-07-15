@@ -14,7 +14,10 @@
   page (reachable from the sidebar), not here -- they are global to the
   machine and independent of which accounts are signed in.
 #}
-<Base title="Manage Accounts">
+{% set _scripts %}
+<script src="/_static/sync_status_banner.js" defer></script>
+{% endset %}
+<Base title="Manage Accounts" scripts={{ _scripts }}>
   <PageContainer>
     <h1 class="type-heading text-primary mb-4">Manage Accounts</h1>
 

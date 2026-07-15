@@ -14,7 +14,6 @@ from pydantic import PrivateAttr
 from pyinfra.api import Host as PyinfraHost
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.errors import HostNotFoundError
@@ -61,8 +60,8 @@ from imbue.mngr_lima.config import LimaProviderConfig
 from imbue.mngr_lima.constants import CLOUD_INIT_TIMEOUT_SECONDS
 from imbue.mngr_lima.constants import lima_host_data_disk_name
 from imbue.mngr_lima.errors import LimaCommandError
+from imbue.mngr_lima.errors import LimaCommandUnavailableError
 from imbue.mngr_lima.errors import LimaHostCreationError
-from imbue.mngr_lima.errors import LimaHostRenameError
 from imbue.mngr_lima.host_store import HostRecord
 from imbue.mngr_lima.host_store import LimaHostConfig
 from imbue.mngr_lima.host_store import LimaHostStore
@@ -72,7 +71,7 @@ from imbue.mngr_lima.lima_yaml import merge_lima_yaml
 from imbue.mngr_lima.lima_yaml import parse_build_args_for_yaml_path
 from imbue.mngr_lima.lima_yaml import write_lima_yaml
 from imbue.mngr_lima.limactl import LimaSshConfig
-from imbue.mngr_lima.limactl import lima_instance_name
+from imbue.mngr_lima.limactl import lima_instance_name_from_host_id
 from imbue.mngr_lima.limactl import limactl_delete
 from imbue.mngr_lima.limactl import limactl_disk_create
 from imbue.mngr_lima.limactl import limactl_disk_delete
@@ -82,6 +81,7 @@ from imbue.mngr_lima.limactl import limactl_show_ssh
 from imbue.mngr_lima.limactl import limactl_start_existing
 from imbue.mngr_lima.limactl import limactl_start_new
 from imbue.mngr_lima.limactl import limactl_stop
+from imbue.mngr_lima.limactl import resolve_lima_home
 
 # Lima instance status values mapped to mngr HostState
 _LIMA_STATUS_TO_HOST_STATE: dict[str, HostState] = {
@@ -400,33 +400,37 @@ sudo poweroff
         """Best-effort teardown of a half-created Lima VM and its btrfs disk.
 
         Tolerates already-absent resources so it is safe to call from a `finally`
-        on any failure path. Also swallows concurrency-group ``ProcessError``s
-        (e.g. a limactl timeout) so a slow cleanup never masks the original
+        on any failure path. Also swallows any limactl failure (e.g. a timeout,
+        surfaced as LimaCommandError) so a slow cleanup never masks the original
         creation failure that triggered it.
         """
         try:
             limactl_delete(self.mngr_ctx.concurrency_group, instance_name, force=True)
-        except (LimaCommandError, OSError, ProcessError) as cleanup_err:
+        except (LimaCommandError, OSError) as cleanup_err:
             logger.debug("Failed to clean up Lima instance {} during error recovery: {}", instance_name, cleanup_err)
         if host_data_disk_name is not None:
             try:
                 limactl_disk_delete(self.mngr_ctx.concurrency_group, host_data_disk_name, force=True)
-            except (LimaCommandError, OSError, ProcessError) as cleanup_err:
+            except (LimaCommandError, OSError) as cleanup_err:
                 logger.debug(
                     "Failed to clean up Lima disk {} during error recovery: {}", host_data_disk_name, cleanup_err
                 )
 
     def _wait_for_cloud_init(self, instance_name: str) -> None:
-        """Wait for cloud-init to complete inside the VM."""
+        """Wait for cloud-init to complete inside the VM.
+
+        The command swallows its own failure (``|| true``) so a VM without
+        cloud-init is tolerated; a LimaCommandError here therefore means limactl
+        could not run the command at all (e.g. it cannot reach the instance),
+        which aborts creation via the caller's error handling.
+        """
         with log_span("Waiting for cloud-init to complete in {}", instance_name):
-            exit_code, stdout, stderr = limactl_shell(
+            limactl_shell(
                 self.mngr_ctx.concurrency_group,
                 instance_name,
                 "cloud-init status --wait 2>/dev/null || true",
                 timeout=CLOUD_INIT_TIMEOUT_SECONDS,
             )
-            if exit_code != 0:
-                logger.debug("cloud-init wait returned non-zero (may not be installed): {}", stderr)
 
     # =========================================================================
     # Run-as-root SSH helpers
@@ -473,7 +477,10 @@ sudo poweroff
         """Create a new Lima VM host."""
         self._ensure_lima_available()
         host_id = HostId.generate()
-        instance_name = lima_instance_name(name, self.mngr_ctx.config.prefix)
+        # Derive the limactl instance name from the immutable host id, not the
+        # (mutable) host name, so a later rename never leaves the VM's instance
+        # name out of sync with the host name (limactl has no rename).
+        instance_name = lima_instance_name_from_host_id(host_id, self.mngr_ctx.config.prefix, resolve_lima_home())
         logger.info("Creating Lima VM host {} ({}) ...", name, instance_name)
 
         # Resolve the host_dir layout once and lock it in on the host record.
@@ -995,9 +1002,14 @@ sudo poweroff
     ) -> list[DiscoveredHost]:
         """Discover all Lima hosts managed by this provider instance.
 
-        If limactl is not installed, returns host records from local state only
-        (all marked as offline). This allows discovery to succeed gracefully
-        in environments without Lima.
+        If limactl is not installed (or too old), returns host records from local
+        state only (all marked as offline). This allows discovery to succeed
+        gracefully in environments without Lima.
+
+        If limactl *is* installed and correctly versioned but the invocation
+        fails at runtime (e.g. it crashes at startup), raises
+        LimaCommandUnavailableError -- no Lima host can be enumerated, so the
+        provider is reported unavailable rather than silently all-offline.
         """
         prefix = self.mngr_ctx.config.prefix
 
@@ -1006,10 +1018,17 @@ sudo poweroff
         try:
             self._ensure_lima_available()
             instances = limactl_list(cg)
-        except (LimaCommandError, OSError) as e:
-            logger.warning("Failed to list Lima instances: {}", e)
         except ProviderUnavailableError as e:
+            # limactl is absent or too old: degrade to local host records (all
+            # marked offline) so discovery still succeeds where Lima isn't set up.
             logger.debug("Lima provider not available for discovery: {}", e)
+        except (LimaCommandError, OSError) as e:
+            # limactl is present and new enough but the invocation itself failed
+            # (e.g. it crashed before listing). No Lima host can be reached this
+            # cycle, so surface provider unavailability -- matching how other
+            # providers report an unreachable backend -- instead of reporting
+            # every host offline.
+            raise LimaCommandUnavailableError(self.name, f"limactl could not be run: {e}") from e
 
         # Build a map of instance_name -> status
         instance_status: dict[str, str] = {}
@@ -1209,7 +1228,32 @@ sudo poweroff
         self._write_tags(host_id, existing)
 
     def rename_host(self, host: HostInterface | HostId, name: HostName) -> HostInterface:
-        raise LimaHostRenameError()
+        """Rename a Lima host by updating the logical host name on its record.
+
+        Only the host name in the local host record changes; the limactl
+        instance name is untouched (it is derived from the immutable host id
+        for current-scheme VMs, or persisted verbatim for legacy VMs), so no
+        VM rename -- which limactl does not support -- is needed. The host
+        store is a local directory, so this works whether or not the VM is
+        running, and applies uniformly to legacy and current-scheme VMs
+        because discovery reads the name from the record, never from the
+        instance name.
+        """
+        host_id = host.id if isinstance(host, HostInterface) else host
+        host_record = self._host_store.read_host_record(host_id, use_cache=False)
+        if host_record is None:
+            raise HostNotFoundError(self.name, host_id)
+        updated_certified = host_record.certified_host_data.model_copy_update(
+            to_update(host_record.certified_host_data.field_ref().host_name, str(name)),
+            to_update(host_record.certified_host_data.field_ref().updated_at, datetime.now(timezone.utc)),
+        )
+        self._host_store.write_host_record(
+            host_record.model_copy_update(
+                to_update(host_record.field_ref().certified_host_data, updated_certified),
+            )
+        )
+        self._evict_cached_host(host_id)
+        return self.get_host(host_id)
 
     # =========================================================================
     # Connector Method

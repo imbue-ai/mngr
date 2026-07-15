@@ -23,6 +23,14 @@ is live from the moment the child is forked, so "the warm process is not ready
 yet" is handled for free: the parent's request simply buffers in the socket
 until the child finishes importing ``mngr`` and reads it.
 
+An idle warm process (blocked in ``recv``) already dies on its own when the
+parent goes away, since the closed socket then reports EOF. But once a request
+has been read the warm process stops reading the socket to run the (possibly
+slow or hung) ``mngr`` command, and during that window a socket EOF can no
+longer wake it. To cover that window the warm process also runs mngr's
+parent-death watcher: if the parent (the minds backend) dies while the warm
+process is busy, the watcher SIGTERMs it so no orphaned warm process lingers.
+
 This deliberately avoids the ``multiprocessing`` forkserver's fork-without-exec
 model, which is unreliable on macOS. Each warm process is a clean, freshly
 execed interpreter, so there is no inherited process-global state to worry
@@ -46,6 +54,7 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from multiprocessing.connection import Connection
 from multiprocessing.connection import Pipe
+from pathlib import Path
 from subprocess import TimeoutExpired
 from typing import Final
 
@@ -57,10 +66,15 @@ from pydantic import PrivateAttr
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.local_process import RunningProcess
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.minds.errors import MindError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.utils.parent_process import start_parent_death_watcher
 
 # Module path of the warm-server entry point, launched as ``python -m <module>``.
 _WARM_SERVER_MODULE: Final[str] = "imbue.minds.utils.mngr_caller"
+
+# Name of the throwaway warm process's concurrency group (used for its logs).
+_WARM_PROCESS_GROUP_NAME: Final[str] = "mngr-caller-warm-process"
 
 _DEFAULT_CALL_TIMEOUT_SECONDS: Final[float] = 60.0
 
@@ -70,6 +84,15 @@ _TERMINATE_FORCE_KILL_SECONDS: Final[float] = 5.0
 
 # Sentinel returncode used when a call is terminated for exceeding its timeout.
 _TIMEOUT_RETURNCODE: Final[int] = -1
+
+
+class MngrCallerNotInitializedError(MindError, RuntimeError):
+    """Raised when :meth:`MngrCaller.call` is used before :meth:`MngrCaller.initialize`.
+
+    The caller has no owned concurrency group: one must be supplied from the
+    outside via :meth:`MngrCaller.initialize` (done once at startup) before any
+    call can spawn a warm process.
+    """
 
 
 class MngrCallResult(MutableModel):
@@ -97,17 +120,23 @@ def _execute_mngr_cli(
     cli: click.Command,
     argv: tuple[str, ...],
     env_overrides: Mapping[str, str],
+    cwd: Path | None,
 ) -> tuple[int, str, str]:
     """Run ``mngr <argv>`` in this (throwaway) warm process and capture its output.
 
-    All of mngr's global-state mutation (loguru, ``sys.argv``, stdout/stderr) is
-    confined to this process, which exits right after, so it never affects the
-    minds backend.
+    All of mngr's global-state mutation (loguru, ``sys.argv``, stdout/stderr,
+    ``os.chdir``) is confined to this process, which exits right after, so it
+    never affects the minds backend.
     """
     stdout_buffer = io.StringIO()
     stderr_buffer = io.StringIO()
     returncode = 0
     os.environ.update(env_overrides)
+    # Change directory in the throwaway process only; callers that must not
+    # resolve project config from the minds backend's cwd (e.g. the monorepo
+    # root in a dev checkout) pass their own cwd, typically ``$HOME``.
+    if cwd is not None:
+        os.chdir(cwd)
     sys.argv = ["mngr", *argv]
     with contextlib.redirect_stdout(stdout_buffer), contextlib.redirect_stderr(stderr_buffer):
         try:
@@ -134,13 +163,47 @@ def _execute_mngr_cli(
     return returncode, stdout_buffer.getvalue(), stderr_buffer.getvalue()
 
 
+def _serve_one_request(
+    connection: Connection,
+    cli: click.Command,
+    concurrency_group: ConcurrencyGroup,
+) -> None:
+    """Start the parent-death watcher, then serve exactly one CLI request.
+
+    Split out from :func:`_run_warm_mngr_server` (which owns the concurrency
+    group and supplies the real ``mngr`` CLI) so the watcher wiring can be
+    exercised in tests with an inspectable concurrency group and a lightweight
+    stand-in command.
+
+    The parent-death watcher is armed *before* the (blocking) ``recv`` so it also
+    covers the busy window after a request is read, when the socket is no longer
+    being watched for EOF -- if the parent dies then, the watcher SIGTERMs this
+    warm process so it does not linger as an orphan.
+    """
+    start_parent_death_watcher(concurrency_group)
+    try:
+        try:
+            argv, env_overrides, cwd = connection.recv()
+        except EOFError:
+            # The parent (minds backend) went away before sending a request --
+            # e.g. it was killed without a chance to terminate us. Exit cleanly
+            # rather than hanging on the socket or crashing with a traceback, so
+            # no orphaned warm process is left behind.
+            return
+        returncode, stdout, stderr = _execute_mngr_cli(cli, argv, env_overrides, cwd)
+        connection.send((returncode, stdout, stderr))
+    finally:
+        connection.close()
+
+
 def _run_warm_mngr_server(connection_fd: int) -> None:
     """Warm-process entry point: import mngr, then serve exactly one CLI request.
 
     Imports ``imbue.mngr.main`` eagerly (this is the warm-up), then reads one
     request off the inherited socket file descriptor, runs the CLI, and sends the
     result back. Serves a single request and then returns, so each warm process
-    is single-use.
+    is single-use. A parent-death watcher is armed for the whole serve so a warm
+    process that is orphaned mid-request does not linger.
     """
     # This inline import is the whole point of the warm process: it pays mngr's
     # multi-second import cost here (in a throwaway interpreter), off the minds
@@ -149,19 +212,10 @@ def _run_warm_mngr_server(connection_fd: int) -> None:
     from imbue.mngr.main import cli
 
     connection = Connection(connection_fd)
-    try:
-        try:
-            argv, env_overrides = connection.recv()
-        except EOFError:
-            # The parent (minds backend) went away before sending a request --
-            # e.g. it was killed without a chance to terminate us. Exit cleanly
-            # rather than hanging on the socket or crashing with a traceback, so
-            # no orphaned warm process is left behind.
-            return
-        returncode, stdout, stderr = _execute_mngr_cli(cli, argv, env_overrides)
-        connection.send((returncode, stdout, stderr))
-    finally:
-        connection.close()
+    # The concurrency group owns the parent-death watcher thread; it is a fresh,
+    # throwaway interpreter so a process-lifetime group is appropriate here.
+    with ConcurrencyGroup(name=_WARM_PROCESS_GROUP_NAME) as concurrency_group:
+        _serve_one_request(connection, cli, concurrency_group)
 
 
 class _WarmMngrProcess(MutableModel):
@@ -186,6 +240,10 @@ class MngrCaller(MutableModel):
 
     A single instance should be shared process-wide; use
     :func:`get_default_mngr_caller` to obtain the shared instance.
+
+    :meth:`initialize` must be called (with an externally-owned concurrency
+    group) once at startup before any :meth:`call`; a call on an uninitialized
+    caller raises :class:`MngrCallerNotInitializedError`.
     """
 
     default_timeout_seconds: float = Field(
@@ -196,25 +254,27 @@ class MngrCaller(MutableModel):
     # ``ConcurrencyGroup``/``RunningProcess``/locks are not pydantic-native; hold
     # them as private runtime state and allow arbitrary types through.
     _concurrency_group: ConcurrencyGroup | None = PrivateAttr(default=None)
-    _owned_concurrency_group: ConcurrencyGroup | None = PrivateAttr(default=None)
     _warm_process: _WarmMngrProcess | None = PrivateAttr(default=None)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
-    _is_prewarm_started: bool = PrivateAttr(default=False)
+    _is_initialized: bool = PrivateAttr(default=False)
 
     model_config = {"arbitrary_types_allowed": True, "frozen": False, "extra": "forbid"}
 
-    def prewarm(self, concurrency_group: ConcurrencyGroup) -> None:
-        """Spawn the first warm process in the background so the first real call is fast.
+    def initialize(self, concurrency_group: ConcurrencyGroup) -> None:
+        """Adopt an externally-owned concurrency group and pre-warm the first process.
 
-        Non-blocking and idempotent: records the concurrency group used to manage
-        warm processes and dispatches a tracked thread that spawns the first warm
-        process (which pays mngr's import cost off the request path). Intended to
-        be invoked once at startup.
+        Must be called once, at startup, before any :meth:`call` (a call before
+        this raises :class:`MngrCallerNotInitializedError`). The concurrency group
+        is supplied from the outside and owns the lifetime of every warm process.
+
+        Non-blocking and idempotent: records the group and dispatches a tracked
+        thread that spawns the first warm process (which pays mngr's import cost
+        off the request path).
         """
         with self._lock:
-            if self._is_prewarm_started:
+            if self._is_initialized:
                 return
-            self._is_prewarm_started = True
+            self._is_initialized = True
             self._concurrency_group = concurrency_group
         concurrency_group.start_new_thread(
             self._ensure_warm_process_exists,
@@ -226,20 +286,18 @@ class MngrCaller(MutableModel):
         )
 
     def _get_concurrency_group(self) -> ConcurrencyGroup:
-        """Return the concurrency group used to spawn warm processes.
+        """Return the externally-owned concurrency group recorded by :meth:`initialize`.
 
-        Uses the group recorded by :meth:`prewarm` when present; otherwise lazily
-        creates and enters an owned group (torn down by :meth:`stop`). The owned
-        group keeps standalone use (e.g. ``MngrCaller().call(...)``) self-managing.
+        Raises :class:`MngrCallerNotInitializedError` when :meth:`initialize` has
+        not been called: the caller never creates its own group, so calls are
+        refused until one is supplied from the outside.
         """
         with self._lock:
-            if self._concurrency_group is not None:
-                return self._concurrency_group
-            if self._owned_concurrency_group is None:
-                owned_group = ConcurrencyGroup(name="mngr-caller")
-                owned_group.__enter__()
-                self._owned_concurrency_group = owned_group
-            return self._owned_concurrency_group
+            if self._concurrency_group is None:
+                raise MngrCallerNotInitializedError(
+                    "MngrCaller.call() requires initialize(concurrency_group) to be called first"
+                )
+            return self._concurrency_group
 
     def _spawn_warm_process(self) -> _WarmMngrProcess:
         """Launch a fresh warm ``mngr`` process connected by an anonymous socketpair.
@@ -311,19 +369,23 @@ class MngrCaller(MutableModel):
         argv: Sequence[str],
         timeout: float | None = None,
         env_overrides: Mapping[str, str] | None = None,
+        cwd: Path | None = None,
     ) -> MngrCallResult:
         """Run ``mngr <argv>`` in a pre-warmed process and return its result.
 
         ``argv`` is the argument vector *after* the ``mngr`` program name (e.g.
         ``["message", "-m", "hi", "--", "agent"]``). ``env_overrides`` are applied
-        to the warm process's ``os.environ`` before the CLI runs. On timeout the
-        warm process is terminated and a result with ``is_timed_out=True`` and a
-        non-zero ``returncode`` is returned.
+        to the warm process's ``os.environ`` before the CLI runs. ``cwd``, when
+        given, is the directory the warm process ``chdir``s into before running
+        the CLI (used by callers whose config resolution must not depend on the
+        minds backend's cwd). On timeout the warm process is terminated and a
+        result with ``is_timed_out=True`` and a non-zero ``returncode`` is
+        returned.
         """
         resolved_timeout = self.default_timeout_seconds if timeout is None else timeout
         warm_process = self._claim_warm_process()
         connection = warm_process.connection
-        request = (tuple(argv), dict(env_overrides or {}))
+        request = (tuple(argv), dict(env_overrides or {}), cwd)
         # Always reap the claimed warm process (normally it exits on its own after
         # responding; on an exec failure or a hang it must be terminated). On a
         # cold call the warm process may still be importing ``mngr`` -- the request
@@ -348,21 +410,21 @@ class MngrCaller(MutableModel):
             warm_process.terminate()
 
     def stop(self) -> None:
-        """Terminate the idle warm process and release all resources.
+        """Terminate the idle warm process and reset to the uninitialized state.
 
-        Safe to call when nothing was started. Production relies on the
-        concurrency group passed to :meth:`prewarm` for shutdown cleanup; this is
-        primarily for standalone/test use of an owned concurrency group.
+        Safe to call when nothing was started. The concurrency group is owned by
+        the caller of :meth:`initialize`, so this only terminates the idle warm
+        process (the group's own teardown reaps anything still tracked) and
+        clears the recorded group, so a later :meth:`call` again requires
+        :meth:`initialize`.
         """
         with self._lock:
             idle_process = self._warm_process
             self._warm_process = None
-            owned_group = self._owned_concurrency_group
-            self._owned_concurrency_group = None
+            self._concurrency_group = None
+            self._is_initialized = False
         if idle_process is not None:
             idle_process.terminate()
-        if owned_group is not None:
-            owned_group.__exit__(None, None, None)
 
 
 _DEFAULT_CALLER_HOLDER: dict[str, MngrCaller | None] = {"caller": None}
@@ -373,8 +435,8 @@ def get_default_mngr_caller() -> MngrCaller:
     """Return the shared, process-wide :class:`MngrCaller` singleton.
 
     Constructing it is cheap and does not spawn any warm process; call
-    :meth:`MngrCaller.prewarm` (once, at startup) to spawn the first warm process
-    ahead of the first real invocation.
+    :meth:`MngrCaller.initialize` (once, at startup) to adopt a concurrency group
+    and spawn the first warm process ahead of the first real invocation.
     """
     with _DEFAULT_CALLER_LOCK:
         if _DEFAULT_CALLER_HOLDER["caller"] is None:

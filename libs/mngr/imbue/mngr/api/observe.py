@@ -3,6 +3,7 @@ import json
 import os
 import queue
 import threading
+from collections.abc import Callable
 from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
@@ -10,7 +11,9 @@ from enum import auto
 from pathlib import Path
 from typing import Final
 
+import psutil
 from loguru import logger
+from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
 
@@ -29,9 +32,10 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
+from imbue.mngr.api.discovery_aggregator import AggregatorDelta
+from imbue.mngr.api.discovery_aggregator import DiscoveryStateAggregator
 from imbue.mngr.api.discovery_events import DiscoveryErrorEvent
-from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
-from imbue.mngr.api.discovery_events import HostDestroyedEvent
+from imbue.mngr.api.discovery_events import ProviderDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
 from imbue.mngr.api.list import list_agents
 from imbue.mngr.config.data_types import MngrConfig
@@ -41,10 +45,12 @@ from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
+from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
 
@@ -56,6 +62,11 @@ ACTIVITY_EVENT_SOURCE: Final[EventSource] = EventSource("mngr/activity")
 OBSERVE_LOCK_FILENAME: Final[str] = "observe_lock"
 FULL_STATE_INTERVAL_SECONDS: Final[float] = 300.0
 _ACTIVITY_DEBOUNCE_SECONDS: Final[float] = 2.0
+# Timeout for each psutil wait() call in a PID watcher's loop. Bounds how long a
+# watcher takes to notice a stop request (it cannot interrupt an in-flight wait),
+# so it must stay small; process death itself is detected event-driven, well
+# before this elapses.
+_WATCH_POLL_SECONDS: Final[float] = 1.0
 
 
 # === Event Types ===
@@ -67,6 +78,7 @@ class ObserveEventType(UpperCaseStrEnum):
     AGENT_STATE = auto()
     AGENTS_FULL_STATE = auto()
     AGENT_STATE_CHANGE = auto()
+    AGENT_REMOVED = auto()
 
 
 class AgentStateEvent(EventEnvelope):
@@ -94,6 +106,19 @@ class AgentStateChangeEvent(EventEnvelope):
     old_host_state: str | None = Field(description="Previous host state value, or None if first observation")
     new_host_state: str | None = Field(description="New host state value")
     agent: AgentDetails = Field(description="Full AgentDetails at time of state change")
+
+
+class AgentRemovedEvent(EventEnvelope):
+    """Emitted on the agents stream when a previously-known agent is destroyed.
+
+    The full observer already conveys create/update via AGENT_STATE and
+    AGENTS_FULL_STATE; this closes the loop for removals so a consumer reading the
+    agents stream (e.g. via ``--stream-events``) learns promptly that an agent is
+    gone instead of inferring it from the next full snapshot.
+    """
+
+    agent_id: AgentId = Field(description="ID of the removed agent")
+    agent_name: AgentName = Field(description="Name of the removed agent")
 
 
 # === Path Helpers ===
@@ -189,6 +214,51 @@ def make_agent_state_change_event(
         new_host_state=agent.host.state.value if agent.host.state is not None else None,
         agent=agent,
     )
+
+
+def make_agent_removed_event(agent_id: AgentId, agent_name: AgentName) -> AgentRemovedEvent:
+    """Build an event recording that a single agent was removed."""
+    timestamp, event_id = _make_envelope_fields()
+    return AgentRemovedEvent(
+        timestamp=timestamp,
+        type=EventType(ObserveEventType.AGENT_REMOVED),
+        event_id=event_id,
+        source=OBSERVE_EVENT_SOURCE,
+        agent_id=agent_id,
+        agent_name=agent_name,
+    )
+
+
+# === Event Parsing ===
+
+
+def parse_observe_event_line(line: str) -> AgentStateEvent | FullAgentStateEvent | AgentRemovedEvent | None:
+    """Parse one JSONL line from the agents stream into its observe event type.
+
+    Handles exactly the event types written to the ``mngr/agents`` stream:
+    AGENT_STATE, AGENTS_FULL_STATE, and AGENT_REMOVED. The AGENT_STATE_CHANGE
+    events live on the separate ``mngr/agent_states`` stream and are not echoed
+    by ``--stream-events``, so any other (or unknown) type returns None rather
+    than raising -- this keeps a consumer robust to forward-compatible additions.
+
+    Returns None for empty/whitespace-only lines and for unrecognized event
+    types. Raises ``json.JSONDecodeError`` for malformed JSON and
+    ``pydantic.ValidationError`` for a known type whose payload does not match
+    the current schema (a real upstream problem that should surface).
+    """
+    stripped = line.strip()
+    if not stripped:
+        return None
+
+    data = json.loads(stripped)
+    event_type = data.get("type")
+    if event_type == ObserveEventType.AGENT_STATE:
+        return AgentStateEvent.model_validate(data)
+    if event_type == ObserveEventType.AGENTS_FULL_STATE:
+        return FullAgentStateEvent.model_validate(data)
+    if event_type == ObserveEventType.AGENT_REMOVED:
+        return AgentRemovedEvent.model_validate(data)
+    return None
 
 
 # === File I/O ===
@@ -325,6 +395,21 @@ class _KnownHost(FrozenModel):
     host_name: HostName = Field(description="Human-readable name of the host")
 
 
+class _AgentWatcher(FrozenModel):
+    """Bookkeeping for one local agent's PID-death watcher thread.
+
+    ``pid`` is what the watcher is currently bound to, so a reconcile can tell
+    whether the agent's main process changed. Holds a live thread and stop Event
+    (hence arbitrary_types_allowed); it is never serialized.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
+
+    pid: int = Field(description="PID the watcher is bound to")
+    stop_event: threading.Event = Field(description="Set to ask the watcher thread to stop")
+    thread: threading.Thread = Field(description="The running watcher thread")
+
+
 def _make_unknown_agent_details(last_known: AgentDetails) -> AgentDetails:
     """Build a synthetic AgentDetails representing an UNKNOWN agent.
 
@@ -344,6 +429,18 @@ def _make_unknown_agent_details(last_known: AgentDetails) -> AgentDetails:
     )
 
 
+@pure
+def _is_provider_error_event(event: object) -> bool:
+    """True if a discovery event indicates a provider failed this poll.
+
+    Used to wake the observer's periodic snapshot loop so UNKNOWN state for the
+    errored provider's agents propagates without waiting for the full interval.
+    """
+    if isinstance(event, ProviderDiscoverySnapshotEvent):
+        return event.error is not None
+    return isinstance(event, DiscoveryErrorEvent)
+
+
 class AgentObserver(MutableModel):
     """Observes agent state changes across all hosts.
 
@@ -358,13 +455,31 @@ class AgentObserver(MutableModel):
     mngr_ctx: MngrContext = Field(frozen=True)
     events_base_dir: Path = Field(frozen=True, description="Base directory for event output files and lock")
     mngr_binary: str = Field(default="mngr", frozen=True)
+    # Optional sink invoked for every agents-stream event (AGENT_STATE /
+    # AGENTS_FULL_STATE / AGENT_REMOVED) in addition to the file write, so a parent
+    # process can consume state live (e.g. the CLI's --stream-events echoes each to
+    # stdout). Injected rather than writing stdout here to keep this api-layer module
+    # free of cli output concerns. The agent_states change stream is never sent here.
+    agents_event_sink: Callable[[EventEnvelope], None] | None = Field(default=None, frozen=True)
 
     _concurrency_group: ConcurrencyGroup = PrivateAttr(default_factory=lambda: ConcurrencyGroup(name="agent-observer"))
+    # Folds the per-provider discovery stream into a consistent view (known hosts,
+    # per-provider error state) that drives activity streams and UNKNOWN synthesis.
+    _aggregator: DiscoveryStateAggregator = PrivateAttr(default_factory=DiscoveryStateAggregator)
     _known_hosts: dict[str, _KnownHost] = PrivateAttr(default_factory=dict)
     _discovery_stream_process: RunningProcess = PrivateAttr(default_factory=dict)
     _events_processes: dict[str, RunningProcess] = PrivateAttr(default_factory=dict)
     _last_tracked_state_by_id: dict[str, _TrackedState] = PrivateAttr(default_factory=dict)
+    # PID-death watchers for local agents, keyed by agent id. Each entry owns a
+    # thread that blocks on psutil until the agent's main process exits, then
+    # enqueues the agent's host for a re-probe so the death is emitted as state.
+    _watchers: dict[str, _AgentWatcher] = PrivateAttr(default_factory=dict)
+    _watchers_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    # Serializes agents_event_sink calls from the several threads that emit
+    # agents-stream events (activity worker, snapshot loop, discovery-output
+    # handler), so the sink's output never interleaves.
+    _sink_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _stop_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     _activity_queue: queue.Queue[str] = PrivateAttr(default_factory=queue.Queue)
     # UNKNOWN-state tracking. Populated only during this process's lifetime
@@ -376,17 +491,13 @@ class AgentObserver(MutableModel):
     # in this set get an UNKNOWN AgentDetails synthesized on the next full state
     # snapshot if they did not reappear in the live listing.
     _currently_errored_providers: set[ProviderInstanceName] = PrivateAttr(default_factory=set)
-    # Union of providers + error_by_provider_name from the most recent snapshot.
+    # Union of providers + errored providers currently known to the aggregator.
     # When a previously-tracked agent's provider is no longer in this set, the
     # observer treats it as implicit destroy (config-removal) and drops the
     # agent from tracking instead of marking it UNKNOWN.
     _known_provider_names: set[ProviderInstanceName] = PrivateAttr(default_factory=set)
-    # Set true on receipt of a DiscoveryErrorEvent with provider_name=None
-    # (polling loop crashed entirely); cleared on the next successful snapshot.
-    # While true, every tracked agent is considered UNKNOWN-eligible.
-    _polling_loop_crashed: bool = PrivateAttr(default=False)
-    # Triggered to wake the periodic-snapshot loop early when a DiscoveryErrorEvent
-    # arrives, so UNKNOWN state propagates without waiting for the full poll interval.
+    # Triggered to wake the periodic-snapshot loop early when a provider error is
+    # observed, so UNKNOWN state propagates without waiting for the full poll interval.
     _snapshot_trigger: threading.Event = PrivateAttr(default_factory=threading.Event)
 
     def run(self) -> None:
@@ -434,6 +545,7 @@ class AgentObserver(MutableModel):
                 pass
             finally:
                 self._stop_event.set()
+                self._close_all_watchers()
                 activity_worker.join(timeout=5.0)
 
     def _on_activity_failure(self, e: BaseException):
@@ -456,7 +568,13 @@ class AgentObserver(MutableModel):
         )
 
     def _on_discovery_stream_output(self, line: str, is_stdout: bool) -> None:
-        """Handle a line of output from 'mngr observe --discovery-only'."""
+        """Handle a line of output from 'mngr observe --discovery-only'.
+
+        Every discovery event is folded into the shared aggregator, which maintains the
+        per-provider-correct view of hosts and provider error state. The returned delta
+        drives starting/stopping per-host activity streams; provider error events wake
+        the periodic snapshot loop so UNKNOWN state propagates quickly.
+        """
         if not is_stdout:
             return
         stripped = line.strip()
@@ -464,82 +582,75 @@ class AgentObserver(MutableModel):
             return
 
         event = parse_discovery_event_line(stripped)
+        if event is None:
+            return
 
-        if isinstance(event, FullDiscoverySnapshotEvent):
-            self._handle_full_snapshot(event)
-        elif isinstance(event, HostDestroyedEvent):
-            self._handle_host_destroyed(event)
-        elif isinstance(event, DiscoveryErrorEvent):
-            self._handle_discovery_error_event(event)
-        else:
-            pass
-
-    def _handle_full_snapshot(self, event: FullDiscoverySnapshotEvent) -> None:
-        """Update known hosts and provider error state from a full discovery snapshot."""
-        # Build the new set of known hosts from the host records (which carry the
-        # authoritative host_name, unlike DiscoveredAgent which only has agent_name)
-        new_hosts: dict[str, _KnownHost] = {}
-        for host in event.hosts:
-            host_id_str = str(host.host_id)
-            new_hosts[host_id_str] = _KnownHost(
-                host_id=host.host_id,
-                host_name=host.host_name,
-            )
-
-        # The snapshot is authoritative state for which providers are currently
-        # loaded and which of those are errored. A successful snapshot (even one
-        # carrying some per-provider errors) also clears the "polling loop
-        # crashed entirely" signal.
-        new_known_providers = {p.provider_name for p in event.providers} | set(event.error_by_provider_name.keys())
-        new_errored_providers = set(event.error_by_provider_name.keys())
-        had_new_provider_errors = bool(event.error_by_provider_name)
-
-        with self._lock:
-            previously_known = set(self._known_hosts.keys())
-            self._known_hosts = new_hosts
-            self._known_provider_names = new_known_providers
-            self._currently_errored_providers = new_errored_providers
-            self._polling_loop_crashed = False
-
-        new_host_ids = set(new_hosts.keys())
-
-        # Stop streams for hosts that are no longer known
-        for host_id_str in previously_known - new_host_ids:
-            self._stop_activity_stream(host_id_str)
-
-        # Start streams for newly discovered hosts
-        for host_id_str in new_host_ids - previously_known:
-            host = new_hosts[host_id_str]
-            self._start_activity_stream(host_id_str, host.host_name)
-
-        # Wake the periodic loop so UNKNOWN state propagates without waiting
-        # for the full poll interval whenever provider errors are observed.
-        if had_new_provider_errors:
+        # Snapshot the agent map before applying so we can name agents that this
+        # event removes (the delta carries only ids, and the aggregator forgets
+        # the agent's data as part of applying the removal).
+        agents_before = self._aggregator.get_agent_by_id()
+        delta = self._aggregator.apply_event(event)
+        self._sync_known_state_from_aggregator()
+        self._reconcile_activity_streams(delta)
+        self._handle_agent_membership_delta(delta, agents_before)
+        if _is_provider_error_event(event):
             self._snapshot_trigger.set()
 
-    def _handle_discovery_error_event(self, event: DiscoveryErrorEvent) -> None:
-        """React to an incremental DiscoveryErrorEvent between snapshots.
+    def _handle_agent_membership_delta(
+        self, delta: AggregatorDelta, agents_before: dict[str, DiscoveredAgent]
+    ) -> None:
+        """React to agents appearing/disappearing in the discovery stream.
 
-        ``provider_name`` set: mark that provider's agents as UNKNOWN-eligible.
-        ``provider_name`` is ``None``: the polling loop itself crashed, so every
-        currently-tracked agent becomes UNKNOWN-eligible until the next
-        successful snapshot.
+        The discovery stream is the low-latency membership signal. A newly
+        discovered agent enqueues its host for a re-probe so its real lifecycle
+        state (and pid) is emitted promptly, matching the near-instant create
+        latency consumers had when they read the discovery stream directly. A
+        removed agent emits an AGENT_REMOVED event on the agents stream and drops
+        its per-agent tracking and PID watcher, so a consumer of --stream-events
+        learns of the removal without waiting for the next full snapshot.
         """
-        if event.provider_name is None:
-            with self._lock:
-                self._polling_loop_crashed = True
-        else:
-            with self._lock:
-                self._currently_errored_providers.add(ProviderInstanceName(event.provider_name))
-        # Trigger a state snapshot so UNKNOWN propagates within seconds.
-        self._snapshot_trigger.set()
+        if delta.added_agent_ids:
+            agents_after = self._aggregator.get_agent_by_id()
+            for agent_id_str in delta.added_agent_ids:
+                agent = agents_after.get(agent_id_str)
+                if agent is not None:
+                    self._activity_queue.put(str(agent.host_id))
+        for agent_id_str in delta.removed_agent_ids:
+            prior = agents_before.get(agent_id_str)
+            agent_name = prior.agent_name if prior is not None else AgentName(agent_id_str)
+            self._emit_agent_removed(AgentId(agent_id_str), agent_name)
+            self._drop_agent_tracking(agent_id_str)
 
-    def _handle_host_destroyed(self, event: HostDestroyedEvent) -> None:
-        """Remove a destroyed host from known hosts and stop its activity stream."""
-        host_id_str = str(event.host_id)
+    def _drop_agent_tracking(self, agent_id_str: str) -> None:
+        """Forget all per-agent state for a removed agent and close its PID watcher."""
+        self._close_watcher(agent_id_str)
         with self._lock:
-            self._known_hosts.pop(host_id_str, None)
-        self._stop_activity_stream(host_id_str)
+            self._last_tracked_state_by_id.pop(agent_id_str, None)
+            self._last_known_details_by_id.pop(agent_id_str, None)
+
+    def _sync_known_state_from_aggregator(self) -> None:
+        """Refresh known hosts and provider error/known sets from the aggregator."""
+        host_by_id = self._aggregator.get_host_by_id()
+        new_known_hosts = {
+            host_id_str: _KnownHost(host_id=host.host_id, host_name=host.host_name)
+            for host_id_str, host in host_by_id.items()
+        }
+        errored_providers = set(self._aggregator.get_error_by_provider_name().keys())
+        known_providers = {provider.provider_name for provider in self._aggregator.get_providers()} | errored_providers
+        with self._lock:
+            self._known_hosts = new_known_hosts
+            self._currently_errored_providers = errored_providers
+            self._known_provider_names = known_providers
+
+    def _reconcile_activity_streams(self, delta: AggregatorDelta) -> None:
+        """Start activity streams for newly-known hosts and stop them for removed hosts."""
+        for host_id_str in delta.removed_host_ids:
+            self._stop_activity_stream(host_id_str)
+        for host_id_str in delta.added_host_ids:
+            with self._lock:
+                host = self._known_hosts.get(host_id_str)
+            if host is not None:
+                self._start_activity_stream(host_id_str, host.host_name)
 
     # FIXME: we'll need to be smarter about this when we have tons of hosts--add these options to the observe CLI and API:
     #  1. --local-watches-only to only observe the local host. If specified, don't bother starting an activity stream for anything besides the local host
@@ -678,7 +789,6 @@ class AgentObserver(MutableModel):
 
             errored_providers = self._currently_errored_providers
             known_providers = self._known_provider_names
-            polling_crashed = self._polling_loop_crashed
 
             for agent_id_str, last_details in self._last_known_details_by_id.items():
                 if agent_id_str in live_agent_ids:
@@ -689,8 +799,8 @@ class AgentObserver(MutableModel):
                 if known_providers and provider not in known_providers:
                     ids_to_drop.append(agent_id_str)
                     continue
-                # Provider currently errored, or polling crashed -- synthesize UNKNOWN.
-                if polling_crashed or provider in errored_providers:
+                # Provider currently errored -- its agents' state is unknown, synthesize UNKNOWN.
+                if provider in errored_providers:
                     unknown_agents.append(_make_unknown_agent_details(last_details))
                     continue
                 # Provider is healthy and the agent disappeared from the listing without
@@ -730,7 +840,7 @@ class AgentObserver(MutableModel):
 
         # Emit the full state event (includes all agents regardless of change)
         event = make_full_agent_state_event(emitted_agents)
-        append_observe_event(self.events_base_dir, event)
+        self._emit_observe_event(event)
         logger.debug(
             "Emitted full agent state event with {} agent(s) ({} live, {} unknown)",
             len(emitted_agents),
@@ -742,10 +852,159 @@ class AgentObserver(MutableModel):
         for agent, old_agent_state, old_host_state in state_changes:
             self._emit_state_change(agent, old_agent_state, old_host_state)
 
+        # Reconcile PID watchers from the live listing (open/replace/close by
+        # pid), and close watchers for agents dropped from tracking. The
+        # synthesized UNKNOWN agents are intentionally left untouched: their
+        # provider is unreachable, so the last-known watcher (if any) stays as-is.
+        for agent in agents:
+            self._reconcile_watcher_for_agent(agent)
+        for agent_id_str in ids_to_drop:
+            self._close_watcher(agent_id_str)
+
+    # === PID Watchers (local agents only) ===
+
+    def _reconcile_watcher_for_agent(self, agent: AgentDetails) -> None:
+        """Open, replace, or close the PID watcher for one agent from its probed details.
+
+        Only local agents are watched: a remote agent's ``pid`` is a PID in the
+        remote host's namespace, so watching it here would watch an unrelated
+        same-numbered local process. Locality is keyed on the ``local`` provider,
+        the one and only user of the local connector. A remote agent, or a local
+        agent with no ``pid`` (no longer running), closes any existing watcher.
+        """
+        agent_id_str = str(agent.id)
+        if agent.host.provider_name != LOCAL_PROVIDER_NAME or agent.pid is None:
+            self._close_watcher(agent_id_str)
+            return
+        self._open_or_replace_watcher(agent_id_str, str(agent.host.id), agent.pid)
+
+    def _open_or_replace_watcher(self, agent_id_str: str, host_id_str: str, pid: int) -> None:
+        """Ensure a watcher thread is running for ``pid``, replacing one on a stale PID.
+
+        Held under ``_watchers_lock`` for its whole duration so two reconcile paths
+        (the activity worker and the snapshot loop) cannot each start a thread for
+        the same agent and leak one. The stale-watcher stop/join is inlined rather
+        than delegated to ``_close_watcher`` to avoid re-acquiring the non-reentrant
+        lock; joining here is deadlock-free because ``_watch_pid`` never takes it.
+        """
+        with self._watchers_lock:
+            existing = self._watchers.get(agent_id_str)
+            if existing is not None and existing.pid == pid:
+                return
+            # New agent or the main process changed (PID differs): stop the stale
+            # watcher first, then start a fresh one bound to the current PID.
+            if existing is not None:
+                self._watchers.pop(agent_id_str, None)
+                existing.stop_event.set()
+                existing.thread.join(timeout=5.0)
+            try:
+                process = psutil.Process(pid)
+            except psutil.NoSuchProcess:
+                # The process is already gone. Enqueue a re-probe so the next listing
+                # emits the stopped/done state rather than silently missing the death.
+                self._activity_queue.put(host_id_str)
+                return
+            stop_event = threading.Event()
+            # is_checked=False so a single watcher's failure is isolated (logged via
+            # on_failure) instead of being re-raised at the next strand start / group
+            # exit, which would poison the whole ConcurrencyGroup and stop all
+            # observation -- see _on_watcher_failure for the intended isolation.
+            thread = self._concurrency_group.start_new_thread(
+                target=lambda: self._watch_pid(agent_id_str, host_id_str, process, pid, stop_event),
+                daemon=True,
+                name=f"observe-pid-watch-{agent_id_str[:8]}",
+                on_failure=self._on_watcher_failure,
+                is_checked=False,
+            )
+            self._watchers[agent_id_str] = _AgentWatcher(pid=pid, stop_event=stop_event, thread=thread)
+
+    def _watch_pid(
+        self,
+        agent_id_str: str,
+        host_id_str: str,
+        process: psutil.Process,
+        pid: int,
+        stop_event: threading.Event,
+    ) -> None:
+        """Block until the watched process exits (or a stop is requested), then signal activity.
+
+        psutil implements ``wait`` event-driven (os.pidfd_open on Linux, kqueue on
+        macOS), so death is noticed within milliseconds; the short per-call timeout
+        exists only to re-check the stop flags, since an in-flight wait cannot be
+        interrupted.
+        """
+        while not (stop_event.is_set() or self._stop_event.is_set()):
+            try:
+                process.wait(timeout=_WATCH_POLL_SECONDS)
+            except psutil.TimeoutExpired:
+                continue
+            except (psutil.Error, OSError) as e:
+                # psutil.Process.wait() can surface a bare OSError (not a psutil.Error)
+                # when its underlying os.pidfd_open/kqueue/poll fails; treat any such
+                # failure the same as an exit and re-probe rather than crash the watcher.
+                logger.debug("PID watch for agent {} (pid {}) errored, treating as exit: {}", agent_id_str, pid, e)
+            # Reached once the process has exited (wait returned) or errored out.
+            logger.debug(
+                "Local agent {} main process (pid {}) exited; enqueueing host {} for re-probe",
+                agent_id_str,
+                pid,
+                host_id_str,
+            )
+            self._activity_queue.put(host_id_str)
+            return
+
+    def _close_watcher(self, agent_id_str: str) -> None:
+        """Stop and join the watcher for an agent, if any. Idempotent.
+
+        Held under ``_watchers_lock`` through the join (deadlock-free because the
+        watcher thread never takes that lock) so it cannot race a concurrent
+        reconcile into leaving two entries for the same agent.
+        """
+        with self._watchers_lock:
+            watcher = self._watchers.pop(agent_id_str, None)
+            if watcher is None:
+                return
+            watcher.stop_event.set()
+            watcher.thread.join(timeout=5.0)
+
+    def _close_all_watchers(self) -> None:
+        """Tear down every PID watcher (observer shutdown)."""
+        with self._watchers_lock:
+            agent_id_strs = list(self._watchers.keys())
+        for agent_id_str in agent_id_strs:
+            self._close_watcher(agent_id_str)
+
+    def _on_watcher_failure(self, e: BaseException) -> None:
+        """Log an unexpected watcher-thread failure without tearing down the observer.
+
+        One local agent's watch dying should not stop observing every other agent;
+        the periodic snapshot still catches that agent's death, just less promptly.
+        """
+        logger.opt(exception=e).warning("PID watcher thread failed")
+
+    def _emit_observe_event(self, event: EventEnvelope) -> None:
+        """Append an agents-stream event to its file and forward it to the sink when set.
+
+        The file write is the canonical event bus (history replay, multi-consumer
+        tailing); the sink is the additive opt-in for a parent process that consumes
+        events live. The sink is called under a lock so events from the observer's
+        several threads never interleave in the sink's output.
+        """
+        append_observe_event(self.events_base_dir, event)
+        if self.agents_event_sink is not None:
+            with self._sink_lock:
+                self.agents_event_sink(event)
+
+    def _emit_agent_removed(self, agent_id: AgentId, agent_name: AgentName) -> None:
+        """Emit an AGENT_REMOVED event to the agents stream for a destroyed agent."""
+        event = make_agent_removed_event(agent_id, agent_name)
+        self._emit_observe_event(event)
+        logger.debug("Emitted agent removed event for {} ({})", agent_name, agent_id)
+
     def _emit_agent_state(self, agent: AgentDetails) -> None:
         """Emit a single agent state event, check for state/host state change, and update tracking."""
         event = make_agent_state_event(agent)
-        append_observe_event(self.events_base_dir, event)
+        self._emit_observe_event(event)
         logger.debug("Emitted agent state event for {} (state={})", agent.name, agent.state.value)
 
         agent_id_str = str(agent.id)
@@ -763,6 +1022,9 @@ class AgentObserver(MutableModel):
 
         if old_agent_state != new_agent_state or old_host_state != new_host_state:
             self._emit_state_change(agent, old_agent_state, old_host_state)
+
+        # Keep this agent's PID watcher in sync with what we just observed.
+        self._reconcile_watcher_for_agent(agent)
 
     def _emit_state_change(self, agent: AgentDetails, old_state: str | None, old_host_state: str | None) -> None:
         """Emit a state change event to the agent_states stream."""

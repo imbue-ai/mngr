@@ -8,9 +8,11 @@ spawning code; this file replaces them with a thin consumer that:
   ``mngr latchkey forward`` instead of running its own observe;
 - reads stdout line-by-line on a background thread and parses each line as a
   ``ForwardEnvelope``;
-- dispatches by ``stream``: ``observe`` lines drive the surviving
-  ``MngrCliBackendResolver`` plus a set of ``on_agent_discovered`` /
-  ``on_agent_destroyed`` callbacks; ``event`` lines drive the resolver's
+- dispatches by ``stream``: ``observe`` lines are folded into a shared
+  ``DiscoveryStateAggregator`` (the span-aware, per-provider reconciler), whose
+  view is then pushed into the surviving ``MngrCliBackendResolver`` and fanned
+  out to a set of ``on_agent_discovered`` / ``on_agent_destroyed`` callbacks;
+  ``event`` lines drive the resolver's
   service map and fan out to request callbacks; ``forward`` lines
   feed the ``system_interface_backend_failure`` health tracker and the
   ``listening`` port handshake;
@@ -51,18 +53,16 @@ from imbue.minds.desktop_client.backend_resolver import ServiceDeregisteredRecor
 from imbue.minds.desktop_client.backend_resolver import parse_service_log_record
 from imbue.minds.errors import EnvelopeStreamConsumerError
 from imbue.minds.utils.secret_redaction import redact_secret_flag_values
-from imbue.mngr.api.discovery_events import AgentDestroyedEvent
-from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
+from imbue.mngr.api.discovery_aggregator import AggregatorDelta
+from imbue.mngr.api.discovery_aggregator import DiscoveryStateAggregator
 from imbue.mngr.api.discovery_events import DiscoveryErrorEvent
+from imbue.mngr.api.discovery_events import DiscoveryEvent
 from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
-from imbue.mngr.api.discovery_events import HostDestroyedEvent
-from imbue.mngr.api.discovery_events import HostDiscoveryEvent
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
+from imbue.mngr.api.discovery_events import ProviderDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
-from imbue.mngr.api.discovery_events import partition_removed_agents_by_provider_error
+from imbue.mngr.api.discovery_log_suppression import DiscoveryErrorLogSuppressor
 from imbue.mngr.primitives import AgentId
-from imbue.mngr.primitives import DiscoveredAgent
-from imbue.mngr.primitives import HostState
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
@@ -73,28 +73,6 @@ OnAgentDiscoveredCallback = Callable[[AgentId, RemoteSSHInfo | None, str], None]
 OnAgentDestroyedCallback = Callable[[AgentId], None]
 OnSystemInterfaceBackendFailureCallback = Callable[[AgentId, SystemInterfaceBackendFailureReason, int | None], None]
 OnUnexpectedExitCallback = Callable[[int], None]
-
-
-def _full_snapshot_observed_at(event: FullDiscoverySnapshotEvent) -> datetime:
-    """Producer-side poll time of a full snapshot, for freshness comparisons.
-
-    The envelope ``timestamp`` is stamped when the discovery producer finished the
-    poll, so the host states the snapshot carries were observed at that instant.
-    Minds gates the recovery redirect on whether a snapshot postdates an outage's
-    onset, so it must compare against *when discovery observed the world*, not when
-    minds happened to receive the line -- using the producer time removes the
-    receive-tail-latency slop between the two. The producer and this consumer run
-    on the same machine, so the timestamps share a clock. Falls back to the receive
-    time if the envelope timestamp is unparseable (which only loosens the gate back
-    to the prior receive-time behavior).
-    """
-    try:
-        return datetime.fromisoformat(event.timestamp)
-    except ValueError:
-        logger.warning(
-            "Full discovery snapshot carried an unparseable timestamp {!r}; using receive time", event.timestamp
-        )
-        return datetime.now(timezone.utc)
 
 
 class ForwardSubprocessConfig(FrozenModel):
@@ -109,7 +87,7 @@ class ForwardSubprocessConfig(FrozenModel):
 
     service: str = Field(default="system_interface", description="Service name to forward")
     agent_include: tuple[str, ...] = Field(
-        default=("has(agent.labels.workspace) && has(agent.labels.is_primary)",),
+        default=("has(agent.labels.is_primary)",),
         description="CEL include filters passed to --agent-include",
     )
     reverse_specs: tuple[str, ...] = Field(
@@ -130,10 +108,18 @@ class EnvelopeStreamConsumer(MutableModel):
     resolver: MngrCliBackendResolver = Field(frozen=True, description="Resolver to feed observe + event lines into")
 
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
-    _agent_host_map: dict[str, str] = PrivateAttr(default_factory=dict)
+    # The shared span-aware, per-provider discovery reconciler. Every parsed
+    # observe event is folded into it; its accumulated view is what we push into
+    # the resolver and fan out as discovered/destroyed callbacks.
+    _aggregator: DiscoveryStateAggregator = PrivateAttr(default_factory=DiscoveryStateAggregator)
+    # Deduplicates provider-level discovery-error warnings: a provider wedged on
+    # the same failure (e.g. missing credentials) logs once per process, not once
+    # per poll cycle. Clean snapshots feed it to re-arm on recovery.
+    _error_log_suppressor: DiscoveryErrorLogSuppressor = PrivateAttr(default_factory=DiscoveryErrorLogSuppressor)
+    # SSH connection info keyed by host id. The aggregator does not model SSH info
+    # (it carries no agent/host membership), so it is tracked here and joined onto
+    # the agents on each host when building the resolver's view.
     _ssh_by_host_id: dict[str, RemoteSSHInfo] = PrivateAttr(default_factory=dict)
-    _host_state_by_host_id: dict[str, HostState] = PrivateAttr(default_factory=dict)
-    _discovered_agents: dict[str, DiscoveredAgent] = PrivateAttr(default_factory=dict)
     _services_by_agent: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
     _on_agent_discovered_callbacks: list[OnAgentDiscoveredCallback] = PrivateAttr(default_factory=list)
     _on_agent_destroyed_callbacks: list[OnAgentDestroyedCallback] = PrivateAttr(default_factory=list)
@@ -355,193 +341,127 @@ class EnvelopeStreamConsumer(MutableModel):
             return
         if event is None:
             return
-        # Snapshot handler bumps both last_event_at and last_full_snapshot_at
-        # via update_providers; it does not flow through the
-        # record_discovery_event_received path. Dispatch the snapshot first,
-        # then bump last_event_at once for every other event type below.
+        # The legacy global snapshot is superseded by per-provider snapshots, which
+        # the shared aggregator reconciles; minds drops the legacy event here too
+        # (consuming both would double-count agents during the transition window).
         if isinstance(event, FullDiscoverySnapshotEvent):
-            self._handle_full_snapshot(event)
+            logger.trace("Ignoring legacy full discovery snapshot; minds consumes per-provider snapshots")
             return
-        self.resolver.record_discovery_event_received(datetime.now(timezone.utc))
+        # SSH info carries no agent/host membership, so the aggregator does not
+        # model it; record it here before folding the event in so the agents view
+        # we push below joins the info onto the agents on this host.
         if isinstance(event, HostSSHInfoEvent):
-            self._handle_host_ssh_info(event)
-        elif isinstance(event, HostDiscoveryEvent):
-            self._handle_host_discovered(event)
-        elif isinstance(event, AgentDiscoveryEvent):
-            self._handle_agent_discovered(event)
-        elif isinstance(event, AgentDestroyedEvent):
-            self._handle_agent_destroyed(event.agent_id)
-        elif isinstance(event, HostDestroyedEvent):
-            # Record the terminal state first so any snapshot that re-lists this
-            # host during the destroyed-host persistence window is recognized as
-            # destroyed, then tear down the agents that were on it.
-            with self._lock:
-                self._host_state_by_host_id[str(event.host_id)] = HostState.DESTROYED
-                self._ssh_by_host_id.pop(str(event.host_id), None)
-            for aid in event.agent_ids:
-                self._handle_agent_destroyed(aid)
-        elif isinstance(event, DiscoveryErrorEvent):
-            logger.warning(
-                "Discovery error from {}: {} ({})", event.source_name, event.error_message, event.error_type
+            self._record_host_ssh_info(event)
+        delta = self._aggregator.apply_event(event)
+        if isinstance(event, ProviderDiscoverySnapshotEvent):
+            # A clean snapshot re-arms the provider's error-log suppression (and
+            # logs a recovery line if its error was previously logged).
+            self._error_log_suppressor.record_provider_snapshot(event)
+            # A per-provider snapshot is also a discovery event, so update_providers
+            # bumps last_event_at; merge just this provider's state + freshness.
+            self.resolver.update_providers(
+                provider_name=event.provider_name,
+                provider=event.provider,
+                error=event.error,
+                last_snapshot_at=event.discovery_finished_at,
             )
         else:
-            # parse_discovery_event_line returns the union we already
-            # exhaustively enumerated above; an unknown event type means
-            # mngr added a new discovery type the plugin still passes
-            # through. Log once at trace-level so it's visible without
-            # being noisy.
-            logger.trace("Ignoring unknown discovery event: {}", type(event).__name__)
+            self._record_incremental_event(event)
+        self._push_agents_view()
+        self._fire_membership_delta(delta)
+        # A HostSSHInfoEvent changes no membership (empty delta), so the agents on
+        # the host were already announced without SSH info; re-announce them now
+        # that their host's SSH info is known.
+        if isinstance(event, HostSSHInfoEvent):
+            self._refire_discovered_for_host(str(event.host_id))
 
-    def _handle_full_snapshot(self, event: FullDiscoverySnapshotEvent) -> None:
-        # Agents present in this snapshot.
-        fresh_agents: dict[str, DiscoveredAgent] = {}
-        fresh_host_map: dict[str, str] = {}
-        for agent in event.agents:
-            fresh_agents[str(agent.agent_id)] = agent
-            fresh_host_map[str(agent.agent_id)] = str(agent.host_id)
-        with self._lock:
-            prior_agents = dict(self._discovered_agents)
-            prior_host_map = dict(self._agent_host_map)
-            removed = prior_agents.keys() - fresh_agents.keys()
-            # An agent absent because its provider errored is retained (kept in
-            # the resolver and surfaced as stale via error_by_provider_name)
-            # rather than dropped; only genuinely-removed agents fire destroyed.
-            partition = partition_removed_agents_by_provider_error(
-                removed_agent_ids=removed,
-                provider_name_by_prior_agent_id={
-                    aid_str: str(agent.provider_name) for aid_str, agent in prior_agents.items()
-                },
-                error_by_provider_name=event.error_by_provider_name,
-            )
-            merged_agents = dict(fresh_agents)
-            merged_host_map = dict(fresh_host_map)
-            for aid_str in partition.retained:
-                merged_agents[aid_str] = prior_agents[aid_str]
-                merged_host_map[aid_str] = prior_host_map[aid_str]
-            self._discovered_agents = merged_agents
-            self._agent_host_map = merged_host_map
-            ssh_info_by_agent = {
-                aid: self._ssh_by_host_id[hid] for aid, hid in merged_host_map.items() if hid in self._ssh_by_host_id
-            }
-            # Rebuild host state from this snapshot's hosts (a destroyed host
-            # lingers here with host_state=DESTROYED for its persistence window).
-            # Retained agents' hosts are absent from an errored provider's
-            # snapshot, so carry their last-known state forward.
-            prior_host_state = dict(self._host_state_by_host_id)
-            merged_host_state: dict[str, HostState] = {
-                str(host.host_id): host.host_state for host in event.hosts if host.host_state is not None
-            }
-            for aid_str in partition.retained:
-                retained_host_id = merged_host_map[aid_str]
-                if retained_host_id not in merged_host_state and retained_host_id in prior_host_state:
-                    merged_host_state[retained_host_id] = prior_host_state[retained_host_id]
-            self._host_state_by_host_id = merged_host_state
-            host_state_snapshot = dict(merged_host_state)
-        # Push the merged set (fresh + retained) so retained agents stay listed
-        # in the workspace UI; their provider_name lets the workspace list mark
-        # them stale by cross-referencing the errored providers below.
-        self.resolver.update_agents(
-            ParsedAgentsResult(
-                agent_ids=tuple(agent.agent_id for agent in merged_agents.values()),
-                discovered_agents=tuple(merged_agents.values()),
-                ssh_info_by_agent_id=ssh_info_by_agent,
-                host_state_by_host_id=host_state_snapshot,
-            )
-        )
-        # Push provider state + freshness timestamp through the resolver so the
-        # providers panel can render OK / Error badges, the workspace list can
-        # mark retained agents stale, and the "time since last full discovery
-        # event" counter updates -- without parsing the discovery stream itself.
-        self.resolver.update_providers(
-            providers=event.providers,
-            error_by_provider_name=event.error_by_provider_name,
-            last_full_snapshot_at=_full_snapshot_observed_at(event),
-        )
-        if partition.retained:
-            logger.debug(
-                "Retained {} agent(s) through a provider discovery error; surfacing as stale: {}",
-                len(partition.retained),
-                sorted(partition.retained),
-            )
-        for aid_str in partition.dropped:
-            self._fire_destroyed(AgentId(aid_str))
-        # Only (re)fire discovery for agents actually present in this snapshot;
-        # retained agents were already announced and stay set up.
-        for agent in fresh_agents.values():
-            ssh_info = ssh_info_by_agent.get(str(agent.agent_id))
-            self._fire_discovered(agent.agent_id, ssh_info, str(agent.provider_name))
+    def _record_incremental_event(self, event: DiscoveryEvent) -> None:
+        """Log a discovery error (if any) and bump the resolver's last-event time for a non-snapshot event.
 
-    def _build_agents_result_locked(self) -> ParsedAgentsResult:
-        """Snapshot the current agent/ssh/host-state maps into a ParsedAgentsResult.
-
-        Must be called while ``self._lock`` is held: it reads the shared mutable
-        maps. Callers push the result to the resolver *after* releasing the lock.
-        Centralizing this keeps the per-event handlers from each re-deriving (and
-        having to re-thread every new resolver-snapshot field through) the same
-        merged view.
+        Incremental events (agent/host discovered or destroyed, SSH info, errors)
+        are not snapshots, so they advance only ``last_event_at`` -- the
+        per-provider snapshot freshness is bumped solely by ``update_providers``.
         """
-        agent_ids = tuple(AgentId(aid) for aid in self._agent_host_map)
-        ssh_info_by_agent = {
-            aid: self._ssh_by_host_id[hid] for aid, hid in self._agent_host_map.items() if hid in self._ssh_by_host_id
+        if isinstance(event, DiscoveryErrorEvent):
+            self._error_log_suppressor.log_discovery_error_event(event)
+        self.resolver.record_discovery_event_received(datetime.now(timezone.utc))
+
+    def _build_agents_result(self) -> ParsedAgentsResult:
+        """Project the aggregator's agents + hosts (joined with SSH info) into a ParsedAgentsResult.
+
+        The aggregator is the source of truth for agent / host membership and host
+        lifecycle state. SSH info is tracked here (the aggregator does not model
+        it) and joined onto each agent via its host id.
+        """
+        agents = self._aggregator.get_agents()
+        hosts = self._aggregator.get_hosts()
+        with self._lock:
+            ssh_by_host_id = dict(self._ssh_by_host_id)
+        ssh_info_by_agent_id = {
+            str(agent.agent_id): ssh_by_host_id[str(agent.host_id)]
+            for agent in agents
+            if str(agent.host_id) in ssh_by_host_id
         }
-        discovered = tuple(self._discovered_agents.values())
-        host_state_snapshot = dict(self._host_state_by_host_id)
+        host_state_by_host_id = {str(host.host_id): host.host_state for host in hosts if host.host_state is not None}
+        # Capture every known host's normalized name (regardless of whether its state
+        # is known) so the resolver's display-name fallback and host-name collision
+        # checks have it.
+        host_name_by_host_id = {str(host.host_id): str(host.host_name) for host in hosts}
         return ParsedAgentsResult(
-            agent_ids=agent_ids,
-            discovered_agents=discovered,
-            ssh_info_by_agent_id=ssh_info_by_agent,
-            host_state_by_host_id=host_state_snapshot,
+            agent_ids=tuple(agent.agent_id for agent in agents),
+            discovered_agents=tuple(agents),
+            ssh_info_by_agent_id=ssh_info_by_agent_id,
+            host_state_by_host_id=host_state_by_host_id,
+            host_name_by_host_id=host_name_by_host_id,
         )
 
-    def _handle_host_ssh_info(self, event: HostSSHInfoEvent) -> None:
+    def _push_agents_view(self) -> None:
+        """Push the aggregator's current agents / hosts view into the resolver."""
+        self.resolver.update_agents(self._build_agents_result())
+
+    def _fire_membership_delta(self, delta: AggregatorDelta) -> None:
+        """Fire destroyed / discovered callbacks for the agents the delta removed or added.
+
+        A removed agent also has its accumulated service map cleared from both this
+        consumer and the resolver. A discovered agent's SSH info is looked up from
+        its host (populated by a prior ``HostSSHInfoEvent``, if any). A removed
+        host's cached SSH info is forgotten so the map does not grow without bound.
+        """
+        agent_by_id = self._aggregator.get_agent_by_id()
+        for host_id_str in delta.removed_host_ids:
+            with self._lock:
+                self._ssh_by_host_id.pop(host_id_str, None)
+        for agent_id_str in delta.removed_agent_ids:
+            agent_id = AgentId(agent_id_str)
+            with self._lock:
+                self._services_by_agent.pop(agent_id_str, None)
+            self.resolver.update_services(agent_id, {})
+            self._fire_destroyed(agent_id)
+        for agent_id_str in delta.added_agent_ids:
+            agent = agent_by_id.get(agent_id_str)
+            if agent is None:
+                continue
+            self._fire_discovered(agent.agent_id, self._ssh_for_host(str(agent.host_id)), str(agent.provider_name))
+
+    def _record_host_ssh_info(self, event: HostSSHInfoEvent) -> None:
+        """Store the SSH connection info carried by a HostSSHInfoEvent, keyed by host id."""
         ssh_info = RemoteSSHInfo(
             user=event.ssh.user, host=event.ssh.host, port=event.ssh.port, key_path=event.ssh.key_path
         )
-        host_id_str = str(event.host_id)
         with self._lock:
-            self._ssh_by_host_id[host_id_str] = ssh_info
-            agents_on_host = [AgentId(aid) for aid, hid in self._agent_host_map.items() if hid == host_id_str]
-            agents_result = self._build_agents_result_locked()
-        self.resolver.update_agents(agents_result)
-        for agent_id in agents_on_host:
-            self._fire_discovered(agent_id, ssh_info, self._provider_name_for_agent(agent_id))
+            self._ssh_by_host_id[str(event.host_id)] = ssh_info
 
-    def _handle_host_discovered(self, event: HostDiscoveryEvent) -> None:
-        if event.host.host_state is None:
-            return
-        with self._lock:
-            self._host_state_by_host_id[str(event.host.host_id)] = event.host.host_state
-            agents_result = self._build_agents_result_locked()
-        self.resolver.update_agents(agents_result)
+    def _refire_discovered_for_host(self, host_id_str: str) -> None:
+        """Re-announce every agent on a host, carrying the host's now-known SSH info."""
+        ssh_info = self._ssh_for_host(host_id_str)
+        for agent in self._aggregator.get_agents():
+            if str(agent.host_id) == host_id_str:
+                self._fire_discovered(agent.agent_id, ssh_info, str(agent.provider_name))
 
-    def _handle_agent_discovered(self, event: AgentDiscoveryEvent) -> None:
-        agent = event.agent
-        aid_str = str(agent.agent_id)
+    def _ssh_for_host(self, host_id_str: str) -> RemoteSSHInfo | None:
+        """Return the SSH connection info recorded for ``host_id_str``, or None."""
         with self._lock:
-            self._agent_host_map[aid_str] = str(agent.host_id)
-            self._discovered_agents[aid_str] = agent
-            ssh_info = self._ssh_by_host_id.get(str(agent.host_id))
-            agents_result = self._build_agents_result_locked()
-        self.resolver.update_agents(agents_result)
-        self._fire_discovered(agent.agent_id, ssh_info, str(agent.provider_name))
-
-    def _handle_agent_destroyed(self, agent_id: AgentId) -> None:
-        aid_str = str(agent_id)
-        with self._lock:
-            self._discovered_agents.pop(aid_str, None)
-            self._agent_host_map.pop(aid_str, None)
-            self._services_by_agent.pop(aid_str, None)
-            agents_result = self._build_agents_result_locked()
-        self.resolver.update_agents(agents_result)
-        self.resolver.update_services(agent_id, {})
-        self._fire_destroyed(agent_id)
-
-    def _provider_name_for_agent(self, agent_id: AgentId) -> str:
-        with self._lock:
-            agent = self._discovered_agents.get(str(agent_id))
-        if agent is None:
-            return "unknown"
-        return str(agent.provider_name)
+            return self._ssh_by_host_id.get(host_id_str)
 
     def _fire_discovered(
         self,
@@ -702,25 +622,7 @@ def start_mngr_forward(
     dropped.
     """
     preauth_cookie = secrets.token_urlsafe(_PREAUTH_TOKEN_LENGTH)
-    command: list[str] = [
-        config.mngr_binary,
-        "forward",
-        "--host",
-        "127.0.0.1",
-        "--service",
-        config.service,
-        # Tail the shared discovery log written by the single `mngr observe` under
-        # `mngr latchkey forward` rather than spawning a second discovery observer.
-        "--observe-via-file",
-        "--preauth-cookie",
-        preauth_cookie,
-        "--format",
-        "jsonl",
-    ]
-    for include in config.agent_include:
-        command.extend(["--agent-include", include])
-    for spec in config.reverse_specs:
-        command.extend(["--reverse", spec])
+    command = _build_forward_command(config, preauth_cookie)
     env = dict(os.environ)
     env["MNGR_HOST_DIR"] = str(config.mngr_host_dir)
     logger.info("Spawning `mngr forward` subprocess: {}", " ".join(_redact_secrets(command)))
@@ -738,6 +640,34 @@ def start_mngr_forward(
     consumer = EnvelopeStreamConsumer(resolver=resolver)
     consumer.attach(process)
     return consumer, preauth_cookie
+
+
+def _build_forward_command(config: ForwardSubprocessConfig, preauth_cookie: str) -> list[str]:
+    """Build the ``mngr forward`` argv for the subprocess minds spawns."""
+    command: list[str] = [
+        config.mngr_binary,
+        "forward",
+        "--host",
+        "127.0.0.1",
+        "--service",
+        config.service,
+        # Tail the shared discovery log written by the single `mngr observe` under
+        # `mngr latchkey forward` rather than spawning a second discovery observer.
+        "--observe-via-file",
+        "--preauth-cookie",
+        preauth_cookie,
+        "--format",
+        "jsonl",
+    ]
+    # TLS + HTTP/2 so the workspace origin is not capped by Chromium's
+    # per-origin HTTP/1.1 connection limit. The Electron shell trusts the
+    # proxy's self-signed cert for its loopback origins.
+    command.append("--use-http2")
+    for include in config.agent_include:
+        command.extend(["--agent-include", include])
+    for spec in config.reverse_specs:
+        command.extend(["--reverse", spec])
+    return command
 
 
 def _redact_secrets(command: list[str]) -> list[str]:

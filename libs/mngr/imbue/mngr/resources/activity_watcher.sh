@@ -49,6 +49,12 @@ log() {
 
 DATA_JSON_PATH="$HOST_DATA_DIR/data.json"
 HOST_LOCK_PATH="$HOST_DATA_DIR/host_lock"
+# Monotonic acquisition counter beside the lock file. Every actor that acquires the
+# host lock to mutate the host increments it under the flock (the remote SSH holder
+# in mngr, and this watcher when it takes the host down). A remote holder that
+# reconnects after a dropped connection reads it to detect that idle-shutdown claimed
+# the host in the gap. Kept in sync with _HOST_LOCK_GENERATION_FILENAME in host.py.
+GENERATION_PATH="$HOST_DATA_DIR/host_lock.generation"
 BOOT_ACTIVITY_PATH="$HOST_DATA_DIR/activity/boot"
 SHUTDOWN_SCRIPT="$HOST_DATA_DIR/commands/shutdown.sh"
 # Check every 15 seconds to detect idle quickly while minimizing overhead
@@ -272,6 +278,50 @@ get_max_activity_mtime() {
     echo "$max_mtime"
 }
 
+# Increment the acquisition counter under the currently-held host lock (fd 9). Must
+# be called only while holding the flock so the read-modify-write is serialized
+# against other acquirers. Mirrors the remote lock command's increment in host.py.
+increment_host_lock_generation() {
+    local current
+    current=$(cat "$GENERATION_PATH" 2>/dev/null || echo 0)
+    # A non-integer or missing counter resets to a clean increment from 0.
+    case "$current" in
+        ''|*[!0-9]*) current=0 ;;
+    esac
+    printf '%s\n' "$((current + 1))" > "$GENERATION_PATH"
+}
+
+# Acquire the host lock, record the acquisition in the generation counter, and run
+# the shutdown script while holding the lock. Skips (returns 0 without shutting down)
+# if the shutdown script is missing or another actor holds the lock -- the latter
+# means a create/start grabbed the host since the probe at the top of the loop, so we
+# must not take it down. On a successful shutdown it exits the watcher.
+shutdown_host_with_lock() {
+    local stop_reason="$1"
+    if [ ! -x "$SHUTDOWN_SCRIPT" ]; then
+        echo "Shutdown script not found or not executable: $SHUTDOWN_SCRIPT"
+        log_warn "Shutdown script not found or not executable"
+        return 0
+    fi
+    # Hold the lock across the shutdown so no create/start can slip in mid-shutdown.
+    # fd 9 is released when the watcher exits (on success) or when this shell returns.
+    exec 9>"$HOST_LOCK_PATH"
+    if ! flock -n 9; then
+        exec 9>&-
+        log "Skipping shutdown: host lock is held by another actor"
+        return 0
+    fi
+    increment_host_lock_generation
+    if [ -n "$stop_reason" ]; then
+        log "Calling shutdown script ($stop_reason): $SHUTDOWN_SCRIPT"
+        "$SHUTDOWN_SCRIPT" "$stop_reason"
+    else
+        log "Calling shutdown script: $SHUTDOWN_SCRIPT"
+        "$SHUTDOWN_SCRIPT"
+    fi
+    exit 0
+}
+
 main() {
     log "Activity watcher starting for $HOST_DATA_DIR"
     log "Data JSON path: $DATA_JSON_PATH"
@@ -322,17 +372,9 @@ main() {
         # This takes precedence over idle timeout to ensure clean shutdown before
         # external timeout (e.g., Modal sandbox timeout) kills the host
         if check_max_host_age; then
-            # Call shutdown script if it exists
-            if [ -x "$SHUTDOWN_SCRIPT" ]; then
-                log "Calling shutdown script due to max host age: $SHUTDOWN_SCRIPT"
-                "$SHUTDOWN_SCRIPT"
-                # Exit after calling shutdown (the script should handle the actual shutdown)
-                exit 0
-            else
-                echo "Shutdown script not found or not executable: $SHUTDOWN_SCRIPT"
-                log_warn "Shutdown script not found or not executable"
-                # Continue monitoring in case the script appears later
-            fi
+            # Acquire the lock, bump the generation counter, and shut down (or skip if
+            # the lock is now held / the script is missing, then keep monitoring).
+            shutdown_host_with_lock ""
         fi
 
         # Read activity sources early -- needed by both the session check and
@@ -347,14 +389,7 @@ main() {
         # since that means the host should never be automatically shut down.
         if [ -n "$activity_sources" ] && ! has_running_agent_sessions; then
             log "No agent tmux sessions found with prefix '$(get_tmux_session_prefix)'"
-            if [ -x "$SHUTDOWN_SCRIPT" ]; then
-                log "Calling shutdown script with STOPPED (no agents running): $SHUTDOWN_SCRIPT"
-                "$SHUTDOWN_SCRIPT" STOPPED
-                exit 0
-            else
-                echo "Shutdown script not found or not executable: $SHUTDOWN_SCRIPT"
-                log_warn "Shutdown script not found or not executable"
-            fi
+            shutdown_host_with_lock STOPPED
         fi
 
         # Check if data.json exists
@@ -395,18 +430,9 @@ main() {
         # Check if we're past the idle deadline
         if [ "$current_time" -ge "$idle_deadline" ]; then
             log "Host is idle (last activity: $max_mtime, deadline: $idle_deadline, now: $current_time)"
-
-            # Call shutdown script if it exists
-            if [ -x "$SHUTDOWN_SCRIPT" ]; then
-                log "Calling shutdown script: $SHUTDOWN_SCRIPT"
-                "$SHUTDOWN_SCRIPT"
-                # Exit after calling shutdown (the script should handle the actual shutdown)
-                exit 0
-            else
-                echo "Shutdown script not found or not executable: $SHUTDOWN_SCRIPT"
-                log_warn "Shutdown script not found or not executable"
-                # Continue monitoring in case the script appears later
-            fi
+            # Acquire the lock, bump the generation counter, and shut down (or skip if
+            # the lock is now held / the script is missing, then keep monitoring).
+            shutdown_host_with_lock ""
         fi
 
         sleep "$CHECK_INTERVAL"

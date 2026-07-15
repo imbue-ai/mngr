@@ -12,7 +12,6 @@ from imbue.mngr.e2e.conftest import E2eSession
 from imbue.skitwright.expect import expect
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(300)
@@ -62,7 +61,6 @@ def test_create_and_rename_agent(e2e: E2eSession) -> None:
     expect(exec_result.stdout).to_contain("sleep 100104")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(300)
@@ -83,7 +81,7 @@ def test_rename_dry_run_does_not_rename(e2e: E2eSession) -> None:
     expect(dry_run_result.stdout).to_contain("Would rename agent: my-task -> renamed-task")
 
     list_result = e2e.run(
-        "mngr list --format json",
+        "mngr list --provider local --format json",
         comment="Verify the agent still has its original name (dry-run did not mutate)",
     )
     expect(list_result).to_succeed()

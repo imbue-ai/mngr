@@ -172,7 +172,7 @@ def enable_sharing_via_cloudflare(
         raise SharingError(f"Failed to create or fetch the tunnel: {exc}") from exc
     if tunnel.token is None:
         raise SharingError("Tunnel created but the connector did not return a Cloudflare token.")
-    inject_tunnel_token_into_agent(agent_id, tunnel.token.get_secret_value())
+    inject_tunnel_token_into_agent(agent_id, tunnel.token.get_secret_value(), cli.mngr_caller)
 
     try:
         cli.add_service(

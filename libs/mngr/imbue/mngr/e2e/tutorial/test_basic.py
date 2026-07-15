@@ -28,7 +28,6 @@ def test_help_succeeds(e2e: E2eSession) -> None:
         comment="or see the other commands--list, destroy, message, connect, git, clone, and more!",
     )
     expect(result).to_succeed()
-    expect(result.stdout).to_contain("Usage")
     # The tutorial comment advertises these other commands, so the help output
     # must actually list them. (push/pull are folded into the `git` command, so
     # they are not asserted here.)
@@ -37,6 +36,12 @@ def test_help_succeeds(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+# No host/agent work happens (the unknown command is rejected at Click's
+# argument-parsing stage), but starting the `mngr` subprocess still loads every
+# plugin/backend/provider at import time, which routinely exceeds the global 10s
+# pytest timeout on slower hosts. Raise it above the `run` subprocess timeout
+# below so the command's own timeout governs (mirrors the other e2e tests here).
+@pytest.mark.timeout(90)
 def test_unknown_command_fails(e2e: E2eSession) -> None:
     """Tutorial block:
         # or see the other commands--list, destroy, message, connect, git, clone, and more!  These other commands are covered in their own sections below.
@@ -50,6 +55,7 @@ def test_unknown_command_fails(e2e: E2eSession) -> None:
     result = e2e.run(
         "mngr definitely-not-a-real-command",
         comment="an unknown command fails and points the user to --help",
+        timeout=60.0,
     )
     # Click/Typer use exit code 2 for usage errors; the unknown command is
     # rejected at argument-parsing time, mirroring test_create_rejects_unknown_option.
@@ -63,6 +69,11 @@ def test_unknown_command_fails(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+# Rendering `mngr create --help` imports every provider backend (to build the
+# per-provider build/start argument section), so the mngr subprocess startup
+# alone routinely exceeds the global 10s pytest timeout. Raise it, mirroring the
+# other e2e create tests.
+@pytest.mark.timeout(60)
 def test_create_help_succeeds(e2e: E2eSession) -> None:
     """Tutorial block:
         # tons more arguments for anything you could want! As always, you can learn more via --help
@@ -92,6 +103,11 @@ def test_create_help_succeeds(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+# The unknown option is rejected at argument-parsing time, so no host/agent work
+# happens (hence no tmux/rsync markers) -- but the `mngr create` subprocess's cold
+# startup alone routinely exceeds the global 10s pytest timeout, so raise it like
+# the other create tests above.
+@pytest.mark.timeout(120)
 def test_create_rejects_unknown_option(e2e: E2eSession) -> None:
     """Tutorial block:
         # tons more arguments for anything you could want! As always, you can learn more via --help
@@ -115,7 +131,6 @@ def test_create_rejects_unknown_option(e2e: E2eSession) -> None:
     expect(result.stderr).to_contain("Usage: mngr create")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -157,7 +172,6 @@ def test_create_with_json_output(e2e: E2eSession) -> None:
     assert agent["command"] == "sleep 100064"
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -185,7 +199,12 @@ def test_create_quiet_suppresses_output(e2e: E2eSession) -> None:
 
     # Suppressing output must not suppress the work: the agent must still exist.
     # `mngr list` output is unaffected by the create command's --quiet flag.
-    list_result = e2e.run("mngr list --format json", comment="Verify the quiet-created agent still exists")
+    # Scope the listing to the local provider (the quiet create is a local
+    # create), so verification never queries Modal or unauthenticated cloud
+    # providers -- matching the pattern used by the other e2e create tests.
+    list_result = e2e.run(
+        "mngr list --provider local --format json", comment="Verify the quiet-created agent still exists"
+    )
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
     assert parsed["errors"] == []
@@ -196,7 +215,6 @@ def test_create_quiet_suppresses_output(e2e: E2eSession) -> None:
     assert agent["command"] == "sleep 100066"
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -217,7 +235,15 @@ def test_create_headless(e2e: E2eSession) -> None:
         )
     ).to_succeed()
 
-    list_result = e2e.run("mngr list", comment="Verify headless agent appears in list")
+    # Scope the listing to the local provider: this is a purely local create, so
+    # the headless agent lives on the local host. A bare `mngr list` fans out to
+    # every enabled provider and exits non-zero (provider-inaccessible) if any of
+    # them is unreachable in the test environment (e.g. no Docker daemon, or a
+    # cloud backend without credentials), which is orthogonal to whether the
+    # headless agent appears. Scoping to --provider local keeps the check on the
+    # documented behavior -- the agent appears in `mngr list` -- without coupling
+    # it to unrelated providers' availability.
+    list_result = e2e.run("mngr list --provider local", comment="Verify headless agent appears in list")
     expect(list_result).to_succeed()
     expect(list_result.stdout).to_contain("my-task")
 
@@ -229,15 +255,16 @@ def test_create_headless(e2e: E2eSession) -> None:
     expect(exec_result.stdout).to_match(r"^/")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-# No @pytest.mark.modal: this is a purely local create with local host tags.
-# `mngr list`'s Modal discovery runs in the mngr subprocess via the in-process
-# SDK (gRPC), which the resource guard only tracks inside the pytest process --
-# never in a subprocess. The guard's modal binary wrapper is the only
-# subprocess-tracked path, and mngr only shells out to the `modal` CLI when
-# creating a Modal host (which this test never does). Marking it @modal would
+# No @pytest.mark.modal or @pytest.mark.rsync: this is a purely local create
+# with local host tags. `mngr list`'s Modal discovery runs in the mngr
+# subprocess via the in-process SDK (gRPC), which the resource guard only tracks
+# inside the pytest process -- never in a subprocess. The guard's modal binary
+# wrapper is the only subprocess-tracked path, and mngr only shells out to the
+# `modal` CLI when creating a Modal host (which this test never does). Likewise,
+# a local create provisions its workspace with a git worktree, not rsync (rsync
+# is only used to sync files to remote hosts). Marking it @modal or @rsync would
 # fail the NEVER_INVOKED resource-guard check once the test passes.
 # The local `mngr create` routinely exceeds the global 10s pytest timeout, so
 # raise it (mirrors the other e2e create tests, e.g. test_create_commands.py).

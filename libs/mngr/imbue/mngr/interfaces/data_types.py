@@ -30,6 +30,8 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
@@ -609,6 +611,15 @@ class AgentDetails(FrozenModel):
     state: AgentLifecycleState = Field(
         description="Agent lifecycle state (STOPPED/RUNNING/WAITING/REPLACED/RUNNING_UNKNOWN_AGENT_TYPE/DONE/UNKNOWN)"
     )
+    pid: int | None = Field(
+        default=None,
+        description=(
+            "PID of the agent's main process (e.g. claude) in its host's PID namespace, "
+            "populated when the agent is running; None for stopped agents. Only watchable "
+            "in-process (e.g. via psutil) when the host is the local machine (its provider "
+            "is 'local')."
+        ),
+    )
     url: str | None = Field(default=None, description="Agent URL (reported)")
     start_time: datetime | None = Field(default=None, description="Last start time (reported)")
     runtime_seconds: float | None = Field(default=None, description="Runtime in seconds")
@@ -730,3 +741,32 @@ class HostLifecycleOptions(FrozenModel):
             else default_idle_timeout_seconds,
             activity_sources=resolved_activity_sources,
         )
+
+
+class BoundedProviderDiscoveryResult(FrozenModel):
+    """Result of a per-host-bounded provider discovery poll.
+
+    ``hosts`` and ``agents`` are the items that were read within their per-host
+    sub-provider timeout. ``unknown_host_ids`` / ``unknown_agent_ids`` mark items
+    whose individual read exceeded that timeout: they are omitted from ``hosts`` /
+    ``agents`` and surfaced as explicitly unknown (distinct from being destroyed,
+    which is an absence, and from a fully-errored provider). Consumers retain an
+    unknown item's previously-known state rather than dropping it.
+    """
+
+    hosts: tuple[DiscoveredHost, ...] = Field(description="Hosts read within the per-host timeout")
+    agents: tuple[DiscoveredAgent, ...] = Field(description="Agents read within the per-host timeout")
+    # Per-host SSH info the streaming discovery poller re-emits as ``HOST_SSH_INFO`` events.
+    # A remote provider that knows a host's SSH endpoint at discovery time populates this so
+    # consumers that tunnel to the host (e.g. the minds system_interface forward) get the
+    # endpoint from the streaming path, not only from an occasional full ``mngr list``. Empty
+    # for providers that surface no SSH info (local hosts, or providers that don't populate it).
+    host_ssh_infos: tuple[tuple[HostId, SSHInfo], ...] = Field(
+        default=(), description="Per-host SSH info to emit as HOST_SSH_INFO events"
+    )
+    unknown_host_ids: tuple[HostId, ...] = Field(
+        default=(), description="Hosts whose read exceeded the per-host timeout (state explicitly unknown)"
+    )
+    unknown_agent_ids: tuple[AgentId, ...] = Field(
+        default=(), description="Agents whose read exceeded the per-agent timeout (state explicitly unknown)"
+    )

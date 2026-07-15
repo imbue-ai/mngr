@@ -30,9 +30,14 @@ def test_plugin_disable_enable_roundtrip(e2e: E2eSession) -> None:
     # claude must start out enabled, otherwise the roundtrip below is vacuous
     assert [p for p in plugins_before if p["name"] == "claude"][0]["enabled"] == "true"
 
-    # Disable a plugin
+    # Disable a plugin. Write to the local scope: the e2e fixture seeds the
+    # project-scope settings.local.toml with is_allowed_in_pytest = true, so the
+    # flag lands in a config file that already opts into the pytest guard. The
+    # default project-scope settings.toml is deliberately left unseeded by the
+    # fixture, so writing there would create a config without the opt-in and the
+    # next mngr command would refuse to load it.
     disable_result = e2e.run(
-        "mngr plugin disable claude",
+        "mngr plugin disable claude --scope local",
         comment="Disable the claude plugin",
     )
     expect(disable_result).to_succeed()
@@ -48,9 +53,9 @@ def test_plugin_disable_enable_roundtrip(e2e: E2eSession) -> None:
     assert len(claude_plugins) == 1
     assert claude_plugins[0]["enabled"] == "false"
 
-    # Re-enable it
+    # Re-enable it (same local scope the disable above wrote to).
     enable_result = e2e.run(
-        "mngr plugin enable claude",
+        "mngr plugin enable claude --scope local",
         comment="Re-enable the claude plugin",
     )
     expect(enable_result).to_succeed()
@@ -73,7 +78,10 @@ def test_plugin_disable_enable_roundtrip(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.timeout(60)
+# Five sequential mngr invocations (disable, create, list, enable, list), each
+# paying full CLI startup (~20s via the dev shim's `uv run`), so this needs the
+# same headroom as test_plugin_disable_enable_roundtrip rather than a 60s cap.
+@pytest.mark.timeout(300)
 def test_plugin_disable_affects_create(e2e: E2eSession) -> None:
     """Disabling a plugin removes its agent type and gates ``mngr create``.
 
@@ -83,8 +91,14 @@ def test_plugin_disable_affects_create(e2e: E2eSession) -> None:
     from the active agent-type list. Re-enabling makes both succeed again: the
     claude agent type reappears in the active list.
     """
-    # Disable the claude plugin so its agent type should be unavailable
-    expect(e2e.run("mngr plugin disable claude", comment="Disable claude plugin")).to_succeed()
+    # Disable the claude plugin so its agent type should be unavailable.
+    # Target the local scope: the e2e fixture seeds settings.local.toml with
+    # is_allowed_in_pytest = true, and `plugin disable` preserves that opt-in
+    # while adding [plugins.claude] enabled = false. The default project scope
+    # would instead write a fresh settings.toml with no opt-in, so the pytest
+    # config guard -- not the disabled-plugin gate -- would abort the next
+    # command, masking the behavior this test is meant to verify.
+    expect(e2e.run("mngr plugin disable claude --scope local", comment="Disable claude plugin")).to_succeed()
 
     # Attempting to create a claude agent should fail
     create_result = e2e.run(
@@ -116,7 +130,10 @@ def test_plugin_disable_affects_create(e2e: E2eSession) -> None:
     assert "claude" not in disabled_agent_types, disabled_agent_types
 
     # Re-enabling the plugin must succeed (also lets teardown clean up normally).
-    expect(e2e.run("mngr plugin enable claude", comment="Re-enable claude for cleanup")).to_succeed()
+    # Enable in the same (local) scope the disable was written to, so the
+    # [plugins.claude] enabled = false entry is flipped back rather than left in
+    # place with a redundant enabled = true added at a different scope.
+    expect(e2e.run("mngr plugin enable claude --scope local", comment="Re-enable claude for cleanup")).to_succeed()
 
     # After re-enabling, the claude agent type is available again, so a fresh
     # create would no longer be gated.

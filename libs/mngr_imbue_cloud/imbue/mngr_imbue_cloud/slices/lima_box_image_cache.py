@@ -56,8 +56,15 @@ class LimaBoxImageCache(BoxImageCacheInterface):
         return rc == 0
 
     def try_acquire_build_lock(self, image_tag: str) -> bool:
+        # `mkdir -p` the cache dir first: on a box whose prep predates the
+        # current cache dir name, a bare `mkdir <lock>` would fail on the
+        # missing parent and read as "lock held" forever.
         lock = self._lock_path(image_tag)
-        rc, _out, _err = self._run(f"mkdir {shlex.quote(lock)}", timeout=_SHORT_TIMEOUT_SECONDS, label="cache-lock")
+        rc, _out, _err = self._run(
+            f"mkdir -p {shlex.quote(self.cache_dir)} && mkdir {shlex.quote(lock)}",
+            timeout=_SHORT_TIMEOUT_SECONDS,
+            label="cache-lock",
+        )
         if rc == 0:
             return True
         # The lock dir exists; reclaim it only if it is older than the build TTL (its
@@ -106,7 +113,7 @@ class LimaBoxImageCache(BoxImageCacheInterface):
             raise BoxImageCacheError(f"unexpected df output for {self.cache_dir}: {out.strip()!r}") from exc
         if available_bytes < required_bytes:
             raise BoxImageCacheError(
-                f"insufficient disk on box for the FCT image tar: need {required_bytes} bytes, "
+                f"insufficient disk on box for the DEFAULT_WORKSPACE_TEMPLATE image tar: need {required_bytes} bytes, "
                 f"have {available_bytes} free in {self.cache_dir}"
             )
 

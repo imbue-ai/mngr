@@ -39,10 +39,12 @@ from imbue.minds.desktop_client.region_preference import GeoLocationCache
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
+from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.workspace_operations import InMemoryWorkspaceOperationRegistry
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationRegistryInterface
 from imbue.minds.primitives import OutputFormat
+from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 
@@ -93,6 +95,9 @@ class DesktopClientState(MutableModel):
     session_store: MultiAccountSessionStore | None = Field(
         default=None, frozen=True, description="Multi-account session store"
     )
+    sync_scheduler: WorkspaceSyncScheduler | None = Field(
+        default=None, frozen=True, description="Background workspace-record sync loop (kicked on auth changes)"
+    )
     request_inbox: RequestInbox | None = Field(
         default=None, description="Immutable pending-request inbox (reassigned)"
     )
@@ -117,6 +122,11 @@ class DesktopClientState(MutableModel):
         default=None, frozen=True, description="App-global discovery-pipeline health watchdog"
     )
     mngr_binary: str = Field(default="mngr", frozen=True, description="Path/name of the mngr binary to shell out to")
+    mngr_caller: MngrCaller | None = Field(
+        default=None,
+        frozen=True,
+        description="Warm-process mngr CLI caller for in-request invocations (get-help /assist); tests inject a fake",
+    )
     mngr_host_dir: Path = Field(
         default_factory=lambda: Path.home() / ".mngr", frozen=True, description="MNGR_HOST_DIR"
     )

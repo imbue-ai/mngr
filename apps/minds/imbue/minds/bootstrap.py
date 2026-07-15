@@ -142,27 +142,16 @@ def mngr_prefix_for(root_name: str) -> str:
     return "{}-".format(root_name)
 
 
-def _aws_credentials_plausibly_configured() -> bool:
-    """Cheap heuristic for whether boto3 would find AWS credentials, without importing boto3.
-
-    Mirrors the legs of boto3's default credential chain that apply on a
-    developer laptop (``AWS_*`` env vars, ``AWS_PROFILE``, ``~/.aws`` files) --
-    minds runs on the user's machine, not on EC2, so the IMDS leg is
-    irrelevant. Gates whether the per-region ``[providers.aws-<region>]`` blocks
-    are written: writing them with no credentials present would make every
-    ``mngr list`` fan out to dead AWS providers and log a provider-unavailable
-    error per region.
-    """
-    if os.environ.get("AWS_ACCESS_KEY_ID") or os.environ.get("AWS_PROFILE"):
-        return True
-    aws_dir = Path.home() / ".aws"
-    return (aws_dir / "credentials").is_file() or (aws_dir / "config").is_file()
-
-
 def _desired_aws_provider_names() -> tuple[str, ...]:
-    """Return the ``aws-<region>`` provider names minds should configure, or () when AWS is unconfigured."""
-    if not _aws_credentials_plausibly_configured():
-        return ()
+    """Return the ``aws-<region>`` provider names minds should configure.
+
+    Always all of ``CONFIGURED_AWS_REGIONS``, regardless of whether AWS
+    credentials are present: installed providers are enabled by default, and a
+    credential-less region surfaces as a per-provider discovery error (shown in
+    the providers panel) rather than being silently absent. Repeated
+    unauthorized-provider log noise is handled by the stream consumers'
+    error-log suppression, not by hiding the provider.
+    """
     return tuple(f"{_AWS_PROVIDER_NAME_PREFIX}{region}" for region in CONFIGURED_AWS_REGIONS)
 
 
@@ -171,16 +160,38 @@ def _existing_aws_provider_names(providers_mapping: Mapping[str, object]) -> set
     return {name for name in providers_mapping if name.startswith(_AWS_PROVIDER_NAME_PREFIX)}
 
 
+def _existing_is_enabled(providers_section: Table, provider_name: str) -> bool | None:
+    """Return a provider block's panel-toggled ``is_enabled`` if present and boolean, else None.
+
+    ``is_enabled`` is the one user-owned field in the minds-written provider
+    blocks (the providers panel's Disable toggle writes it), so rewrites carry
+    an existing boolean value over rather than re-pinning it.
+    """
+    block = providers_section.get(provider_name)
+    if not isinstance(block, Mapping):
+        return None
+    is_enabled = block.get("is_enabled")
+    return is_enabled if isinstance(is_enabled, bool) else None
+
+
 def _write_aws_provider_blocks(providers_section: Table, desired_names: tuple[str, ...]) -> None:
     """Rewrite the ``[providers.aws-<region>]`` blocks so they exactly match ``desired_names``.
 
-    Removes any stale ``aws-<region>`` blocks (AWS credentials removed, or
-    ``CONFIGURED_AWS_REGIONS`` changed) and (re)writes one block per desired
-    name, pinning the backend to ``aws``, the region to the name's suffix, and
-    the gVisor/runsc hardening knobs that mirror the ovh/vultr bake settings.
+    Removes any stale ``aws-<region>`` blocks (``CONFIGURED_AWS_REGIONS``
+    changed) and (re)writes one block per desired name, pinning the backend to
+    ``aws``, the region to the name's suffix, and the gVisor/runsc hardening
+    knobs that mirror the ovh/vultr bake settings. ``is_enabled`` is the one
+    user-owned field in these blocks (the providers panel's Disable toggle
+    writes it), so an existing value is carried over rather than re-pinned.
     """
+    # Capture panel-toggled enablement before rewriting, so a user's Disable
+    # survives the re-pin of the minds-controlled fields.
+    is_enabled_by_name: dict[str, bool] = {}
     for name in tuple(providers_section):
         if name.startswith(_AWS_PROVIDER_NAME_PREFIX):
+            existing_is_enabled = _existing_is_enabled(providers_section, name)
+            if existing_is_enabled is not None:
+                is_enabled_by_name[name] = existing_is_enabled
             del providers_section[name]
     for name in desired_names:
         region = name[len(_AWS_PROVIDER_NAME_PREFIX) :]
@@ -191,11 +202,18 @@ def _write_aws_provider_blocks(providers_section: Table, desired_names: tuple[st
         block["install_gvisor_runtime"] = _AWS_INSTALL_GVISOR_RUNTIME
         block["docker_runtime"] = _AWS_DOCKER_RUNTIME
         block["default_start_args"] = list(_AWS_DEFAULT_START_ARGS)
+        if name in is_enabled_by_name:
+            block["is_enabled"] = is_enabled_by_name[name]
         providers_section[name] = block
 
 
-def _ensure_mngr_settings(root_name: str) -> None:
+def _ensure_mngr_settings(root_name: str) -> bool:
     """Ensure the mngr settings.toml has minds-side overrides configured.
+
+    Returns ``True`` when the settings file was actually (re)written -- the
+    provider set visible to a running ``mngr observe`` changed, so callers
+    that hold a supervisor handle should bounce the observe child (mirroring
+    ``set_imbue_cloud_provider_for_account``'s return contract).
 
     Disables the ``recursive`` plugin for every ``mngr`` subprocess minds
     spawns. ``mngr_recursive``'s ``on_host_created`` hook injects the
@@ -232,18 +250,18 @@ def _ensure_mngr_settings(root_name: str) -> None:
     mngr_host_dir = mngr_host_dir_for(root_name)
     root_config_path = mngr_host_dir / "config.toml"
     if not root_config_path.exists():
-        return
+        return False
     root_config = tomllib.loads(root_config_path.read_text())
     profile_id = root_config.get("profile")
     if not profile_id:
-        return
+        return False
     settings_dir = mngr_host_dir / "profiles" / profile_id
     if not settings_dir.exists():
-        return
+        return False
     settings_path = settings_dir / "settings.toml"
 
     # The per-region AWS provider blocks minds should currently have configured
-    # (one per region when AWS credentials are present, none otherwise).
+    # (always one per configured region, whether or not AWS credentials exist).
     desired_aws_names = _desired_aws_provider_names()
 
     if settings_path.exists():
@@ -253,6 +271,7 @@ def _ensure_mngr_settings(root_name: str) -> None:
         recursive_plugin = plugins.get("recursive", {})
         default_imbue_cloud = providers.get(_IMBUE_CLOUD_BACKEND_NAME, {})
         default_aws = providers.get(_AWS_BACKEND_NAME, {})
+        modal_provider = providers.get(_MODAL_PROVIDER_NAME, {})
         if (
             recursive_plugin.get("enabled") is False
             and "ssh" not in providers
@@ -261,12 +280,22 @@ def _ensure_mngr_settings(root_name: str) -> None:
             and default_aws.get("backend") == _AWS_BACKEND_NAME
             and default_aws.get("is_enabled") is False
             and _existing_aws_provider_names(providers) == set(desired_aws_names)
+            # The Modal (Direct) block must already be present AND persistent,
+            # else fall through and rewrite it. The is_persistent check matters:
+            # an older build wrote is_persistent=false, which makes Modal create
+            # an ephemeral app that nukes the sandbox the moment `mngr create`
+            # exits -- this catches + overwrites that stale value. is_enabled is
+            # deliberately NOT checked: it is the user-owned field (the providers
+            # panel's Disable toggle writes it), so a disabled block is a valid
+            # desired shape, not drift to correct.
+            and modal_provider.get("mode") == _MODAL_MODE_DIRECT
+            and modal_provider.get("is_persistent") is True
         ):
             # Already in the desired shape -- recursive disabled, no stale
             # ssh provider section, default imbue_cloud + aws instances
             # suppressed -- no need to rewrite + fsync.
             _cleanup_legacy_dynamic_hosts(root_name)
-            return
+            return False
         doc = tomlkit.loads(settings_path.read_text())
     else:
         doc = tomlkit.document()
@@ -301,12 +330,21 @@ def _ensure_mngr_settings(root_name: str) -> None:
     default_aws_block["is_enabled"] = False
     providers_section[_AWS_BACKEND_NAME] = default_aws_block
 
-    # Write one ``[providers.aws-<region>]`` block per configured region (when
-    # AWS credentials are present), so ``mngr create @host.aws-<region>`` and
-    # ``mngr list`` discovery both resolve the region-specific provider. When no
-    # AWS credentials are configured, ``desired_aws_names`` is empty and any
-    # stale blocks are removed.
+    # Write one ``[providers.aws-<region>]`` block per configured region, so
+    # ``mngr create @host.aws-<region>`` and ``mngr list`` discovery both
+    # resolve the region-specific provider. Written whether or not AWS
+    # credentials exist: a credential-less region errors visibly in discovery
+    # (and the providers panel) instead of being silently absent.
     _write_aws_provider_blocks(providers_section, desired_aws_names)
+
+    # ``[providers.modal]`` (DIRECT) for the "Modal (1-day ephemeral) - Direct"
+    # compute option. Always written; uses the local Modal token at create time.
+    # As with the AWS blocks, a panel-toggled ``is_enabled`` is carried over
+    # rather than re-pinned, so a user's Disable survives the rewrite.
+    existing_modal_is_enabled = _existing_is_enabled(providers_section, _MODAL_PROVIDER_NAME)
+    providers_section[_MODAL_PROVIDER_NAME] = _build_modal_provider_block(
+        is_enabled=True if existing_modal_is_enabled is None else existing_modal_is_enabled,
+    )
 
     plugins_section = doc.setdefault("plugins", tomlkit.table())
     recursive_block = tomlkit.table()
@@ -319,6 +357,7 @@ def _ensure_mngr_settings(root_name: str) -> None:
     tmp_path.rename(settings_path)
     logger.debug("Updated mngr settings at {} with minds-side overrides", settings_path)
     _cleanup_legacy_dynamic_hosts(root_name)
+    return True
 
 
 def _cleanup_legacy_dynamic_hosts(root_name: str) -> None:
@@ -407,8 +446,14 @@ def apply_bootstrap() -> None:
     # loading the client config.
 
 
-def reconcile_imbue_cloud_providers_from_sessions(connector_url: str, *, root_name: str | None = None) -> None:
+def reconcile_imbue_cloud_providers_from_sessions(connector_url: str, *, root_name: str | None = None) -> bool:
     """Re-register ``[providers.imbue_cloud_<slug>]`` for every active session.
+
+    Returns ``True`` when any settings write happened (the minds-side
+    overrides, or a per-account block), so a caller not already restarting
+    the observe process can bounce it. ``minds run`` restarts the latchkey
+    forward supervisor unconditionally right after this call, so it does not
+    need the flag today.
 
     The mngr_imbue_cloud plugin owns the SuperTokens session list -- emails
     live in ``<host_dir>/profiles/<profile>/providers/imbue_cloud/sessions/accounts.json``,
@@ -438,23 +483,23 @@ def reconcile_imbue_cloud_providers_from_sessions(connector_url: str, *, root_na
     # MINDS_ROOT_NAME (mngr profile dir doesn't exist yet). Re-run here
     # so existing users who never re-signin still get the suppression
     # block on their next minds startup.
-    _ensure_mngr_settings(root_name)
+    is_modified = _ensure_mngr_settings(root_name)
     accounts_path = _imbue_cloud_accounts_path(root_name)
     if accounts_path is None or not accounts_path.is_file():
-        return
+        return is_modified
     try:
         raw = accounts_path.read_text()
     except OSError as e:
         logger.warning("Could not read imbue_cloud accounts index {}: {}", accounts_path, e)
-        return
+        return is_modified
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as e:
         logger.warning("Malformed imbue_cloud accounts index {}: {}", accounts_path, e)
-        return
+        return is_modified
     entries = data.get("entries") if isinstance(data, dict) else None
     if not isinstance(entries, list):
-        return
+        return is_modified
     for entry in entries:
         if not isinstance(entry, dict):
             continue
@@ -465,17 +510,19 @@ def reconcile_imbue_cloud_providers_from_sessions(connector_url: str, *, root_na
             # Reconcile only fills in missing blocks; it must not re-enable a
             # provider that the user previously disabled via the providers
             # panel. Re-enable happens only on an explicit signin event.
-            set_imbue_cloud_provider_for_account(
+            is_account_modified = set_imbue_cloud_provider_for_account(
                 email,
                 connector_url=connector_url,
                 root_name=root_name,
                 force_enable=False,
             )
+            is_modified = is_modified or is_account_modified
         except BootstrapError as e:
             # Bad email format (e.g. ``""``) -- log and keep going so a
             # single corrupt session entry doesn't block reconciliation
             # for the others.
             logger.warning("Skipping imbue_cloud provider registration for {!r}: {}", email, e)
+    return is_modified
 
 
 def read_active_profile_dir(mngr_host_dir: Path) -> Path | None:
@@ -522,7 +569,7 @@ _IMBUE_CLOUD_BACKEND_NAME: Final[str] = "imbue_cloud"
 
 # Runtime knobs written into each per-account ``[providers.imbue_cloud_<slug>]``
 # block so the imbue_cloud slow (rebuild) path runs the agent container under
-# gVisor with the runsc hardening args. These mirror the forever-claude-template
+# gVisor with the runsc hardening args. These mirror the default-workspace-template
 # ``[providers.ovh]`` bake settings; ``ImbueCloudProviderConfig`` (which extends
 # ``VpsProviderConfig``) forwards them onto the delegated vps_docker
 # provider, and ``install_gvisor_runtime`` also drives the slow path's SSH
@@ -536,7 +583,7 @@ _IMBUE_CLOUD_DEFAULT_START_ARGS: Final[tuple[str, ...]] = ("--workdir=/", "--sec
 # ``[providers.aws-<region>]`` block. The AWS provider is region-locked per
 # instance (EC2's API is per-region), so minds writes one block per
 # ``CONFIGURED_AWS_REGIONS`` entry and the create address selects the right one.
-# The gVisor/runsc settings mirror the forever-claude-template ``[providers.ovh]``
+# The gVisor/runsc settings mirror the default-workspace-template ``[providers.ovh]``
 # / ``[providers.vultr]`` bake settings so the EC2 outer host runs the agent in a
 # runsc-hardened container; the matching ``docker run`` start args live in the
 # template ``[create_templates.aws]``.
@@ -544,8 +591,40 @@ _AWS_BACKEND_NAME: Final[str] = "aws"
 _AWS_DOCKER_RUNTIME: Final[str] = "runsc"
 _AWS_INSTALL_GVISOR_RUNTIME: Final[bool] = True
 _AWS_PROVIDER_NAME_PREFIX: Final[str] = "aws-"
+
+# The single ``[providers.modal]`` instance for "Modal (1-day ephemeral)" (DIRECT
+# mode): the local machine authenticates to Modal with its own token
+# (``modal token new``). Written unconditionally at startup so the option works
+# as soon as a token exists; if none is present the provider just reports
+# unavailable during discovery. Sizing (2 CPU / 4 GB) and the 24h sandbox timeout
+# come from the ModalProviderConfig defaults; only ``is_persistent`` is forced.
+_MODAL_BACKEND_NAME: Final[str] = "modal"
+_MODAL_PROVIDER_NAME: Final[str] = "modal"
+_MODAL_MODE_DIRECT: Final[str] = "DIRECT"
+
+
+def _build_modal_provider_block(is_enabled: bool) -> Table:
+    """Build the ``[providers.modal]`` block (DIRECT mode).
+
+    ``is_persistent=True`` is set EXPLICITLY (not inherited): each ``mngr create``
+    is a one-shot subprocess, and a non-persistent (ephemeral) Modal app would
+    terminate the sandbox the instant that subprocess exits. Setting it explicitly
+    also lets the idempotency check below detect (and overwrite) a stale
+    ``is_persistent = false`` left by an older build. Sizing + 24h sandbox timeout
+    come from the ModalProviderConfig defaults. ``is_enabled`` is the user-owned
+    field: callers pass the existing value (or True for a fresh block) so a
+    panel-toggled Disable is never reset by a rewrite.
+    """
+    block = tomlkit.table()
+    block["backend"] = _MODAL_BACKEND_NAME
+    block["mode"] = _MODAL_MODE_DIRECT
+    block["is_enabled"] = is_enabled
+    block["is_persistent"] = True
+    return block
+
+
 # EC2 instance size for minds AWS workspaces. The mngr_aws default (t3.small,
-# 2 GB) is too small for the full forever-claude-template build (uv sync + npm
+# 2 GB) is too small for the full default-workspace-template build (uv sync + npm
 # ci/build OOMs/thrashes on 2 GB); minds workspaces default to t3.large (8 GB).
 _AWS_DEFAULT_INSTANCE_TYPE: Final[str] = "t3.large"
 # Mount /run as a tmpfs in the AWS workspace container. mngr_aws leaves the
@@ -657,10 +736,13 @@ def set_imbue_cloud_provider_for_account(
     """
     if root_name is None:
         root_name = resolve_minds_root_name()
-    _ensure_mngr_settings(root_name)
+    # Fold the minds-side-overrides write into the returned "modified" flag: if
+    # this call (rather than the startup bootstrap) is what first landed the
+    # suppression/AWS blocks, the observe process needs a bounce for them too.
+    is_settings_modified = _ensure_mngr_settings(root_name)
     settings_path = _resolve_active_settings_path(root_name)
     if settings_path is None:
-        return False
+        return is_settings_modified
     provider_name = imbue_cloud_provider_name_for_account(email)
     if settings_path.exists():
         doc = tomlkit.loads(settings_path.read_text())
@@ -680,7 +762,7 @@ def set_imbue_cloud_provider_for_account(
         and existing.get("install_gvisor_runtime") == _IMBUE_CLOUD_INSTALL_GVISOR_RUNTIME
         and existing.get("default_start_args") == list(_IMBUE_CLOUD_DEFAULT_START_ARGS)
     ):
-        return False
+        return is_settings_modified
     new_block = tomlkit.table()
     new_block["backend"] = _IMBUE_CLOUD_BACKEND_NAME
     new_block["account"] = email
@@ -733,7 +815,7 @@ def list_disabled_provider_names(*, root_name: str | None = None) -> list[str]:
     """Return provider names that minds' active settings file marks ``is_enabled = false``.
 
     Used by the providers panel to enumerate the disabled set (which discovery
-    skips and so are absent from the FullDiscoverySnapshotEvent). Reads only
+    skips and so are absent from the per-provider discovery snapshots). Reads only
     minds' active settings file -- providers defined only in mngr's own
     settings.toml with is_enabled=false are not surfaced here. Returns an
     empty list when the file does not exist yet (fresh install).

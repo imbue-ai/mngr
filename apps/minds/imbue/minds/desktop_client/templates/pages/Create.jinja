@@ -1,4 +1,4 @@
-{#def git_url, branch, host_name, launch_modes, selected_launch_mode, ai_providers, selected_ai_provider, backup_providers, selected_backup_provider, backup_encryption_methods, selected_backup_encryption_method, backup_api_key_env, has_saved_backup_password, accounts, default_account_id, anthropic_api_key, error_message, region_options_by_launch_mode, region_selected_by_launch_mode, selected_preset="remote", start_advanced=False, color="#0b292b" #}
+{#def git_url, branch, host_name, launch_modes, selected_launch_mode, ai_providers, selected_ai_provider, docker_runtimes, selected_docker_runtime, backup_providers, selected_backup_provider, backup_api_key_env, accounts, default_account_id, anthropic_api_key, error_message, region_options_by_launch_mode, region_selected_by_launch_mode, selected_preset="remote", start_advanced=False, color="#0b292b" #}
 {#
   Workspace creation form.
 
@@ -23,6 +23,7 @@
 {% set _default_restic_env = "# see docs linked above for available options\n# for example:\nRESTIC_REPOSITORY=s3:s3.amazonaws.com/<bucket_name>\nAWS_ACCESS_KEY_ID=\nAWS_SECRET_ACCESS_KEY=\n" %}
 {% set _scripts %}
 <script src="/_static/api_errors.js"></script>
+<script src="/_static/sync_status_banner.js" defer></script>
 <script>
   (function() {
     // The remote (Imbue Cloud) preset needs an Imbue account. When a signed-out
@@ -52,28 +53,25 @@
     var apiKeyInput = document.getElementById('anthropic_api_key');
     var launchModeError = document.getElementById('launch-mode-account-error');
     var awsCredentialsNote = document.getElementById('aws-credentials-note');
+    var modalDirectNote = document.getElementById('modal-direct-note');
     var aiProviderError = document.getElementById('ai-provider-account-error');
     var backupSelect = document.getElementById('backup_provider');
     var backupApiKeyRow = document.getElementById('backup-api-key-row');
-    var backupEncryptionRow = document.getElementById('backup-encryption-row');
-    var backupEncryptionSelect = document.getElementById('backup_encryption_method');
-    var backupMasterPasswordRow = document.getElementById('backup-master-password-row');
-    var backupMasterPasswordInput = document.getElementById('backup_master_password');
     var backupProviderError = document.getElementById('backup-provider-account-error');
     var submitBtn = document.getElementById('create-submit');
     var regionRow = document.getElementById('region-row');
     var regionSelect = document.getElementById('region');
+    var runtimeRow = document.getElementById('runtime-row');
+    var runtimeSelect = document.getElementById('runtime');
     var presetCards = document.querySelectorAll('[data-preset]');
     var accountError = document.getElementById('account-error');
-    // Inputs read when building the create request body (some -- master password,
-    // save-password -- only exist when no shared backup password is saved yet).
+    // Inputs read when building the create request body.
     var gitUrlInput = document.getElementById('git_url');
     var branchInput = document.getElementById('branch');
     var hostNameInput = document.getElementById('host_name');
     var hostNameError = document.getElementById('host-name-error');
     var colorInput = document.getElementById('create-color-input');
     var backupApiKeyEnvInput = document.getElementById('backup_api_key_env');
-    var backupSavePasswordInput = document.getElementById('backup_save_password');
     var createError = document.getElementById('create-error');
     // The field highlighted by the last create error, cleared before the next try.
     var lastErrorField = null;
@@ -88,8 +86,8 @@
     // Each preset fills the advanced selects with its compute / AI / backup
     // defaults. These mirror the per-account defaults the server applies.
     var PRESETS = {
-      remote: {launch_mode: 'IMBUE_CLOUD', ai_provider: 'IMBUE_CLOUD', backup_provider: 'IMBUE_CLOUD', backup_encryption_method: 'NO_PASSWORD'},
-      local:  {launch_mode: 'LIMA', ai_provider: 'SUBSCRIPTION', backup_provider: 'CONFIGURE_LATER', backup_encryption_method: 'NO_PASSWORD'}
+      remote: {launch_mode: 'IMBUE_CLOUD', ai_provider: 'IMBUE_CLOUD', backup_provider: 'IMBUE_CLOUD'},
+      local:  {launch_mode: 'LIMA', ai_provider: 'SUBSCRIPTION', backup_provider: 'CONFIGURE_LATER'}
     };
 
     function applyPreset(name) {
@@ -98,7 +96,6 @@
       launchSelect.value = preset.launch_mode;
       aiProviderSelect.value = preset.ai_provider;
       backupSelect.value = preset.backup_provider;
-      backupEncryptionSelect.value = preset.backup_encryption_method;
     }
 
     function selectedPreset() {
@@ -341,11 +338,13 @@
         account_id: accountSelect.value,
         anthropic_api_key: fieldValue(apiKeyInput).trim(),
         backup_provider: backupSelect.value,
-        backup_encryption_method: backupEncryptionSelect.value,
         backup_api_key_env: fieldValue(backupApiKeyEnvInput),
-        backup_master_password: fieldValue(backupMasterPasswordInput),
-        backup_save_password: backupSavePasswordInput ? backupSavePasswordInput.checked : false,
-        region: fieldValue(regionSelect)
+        region: fieldValue(regionSelect),
+        // The container runtime only applies to the local Docker provider; the
+        // select is disabled for every other compute provider, so omit it then
+        // (JSON.stringify drops undefined keys) and let the server pick its
+        // platform default.
+        runtime: runtimeSelect.disabled ? undefined : runtimeSelect.value
       };
       fetch('/api/v1/workspaces', {
         method: 'POST',
@@ -456,6 +455,15 @@
       regionRow.classList.remove('hidden');
     }
 
+    function updateRuntime() {
+      // The container-runtime select only applies to the local Docker provider;
+      // every other compute provider pins its own runtime. Hide + disable it
+      // otherwise so no runtime value is submitted.
+      var isDocker = launchSelect.value === 'DOCKER';
+      runtimeRow.classList.toggle('hidden', !isDocker);
+      runtimeSelect.disabled = !isDocker;
+    }
+
     function update() {
       var hasAccount = accountSelect.value !== '';
 
@@ -471,20 +479,15 @@
       apiKeyInput.required = isApiKey;
 
       var backupValue = backupSelect.value;
-      var isBackupConfigured = backupValue === 'IMBUE_CLOUD' || backupValue === 'API_KEY';
       var isBackupApiKey = backupValue === 'API_KEY';
       backupApiKeyRow.classList.toggle('hidden', !isBackupApiKey);
-      backupEncryptionRow.classList.toggle('hidden', !isBackupConfigured);
-
-      var isMasterPassword = isBackupConfigured && backupEncryptionSelect.value === 'MASTER_PASSWORD';
-      if (backupMasterPasswordRow) backupMasterPasswordRow.classList.toggle('hidden', !isMasterPassword);
-      if (backupMasterPasswordInput) backupMasterPasswordInput.required = isMasterPassword;
 
       var launchInvalid = !hasAccount && launchSelect.value === 'IMBUE_CLOUD';
       var aiInvalid = !hasAccount && aiProviderSelect.value === 'IMBUE_CLOUD';
       var backupInvalid = !hasAccount && backupValue === 'IMBUE_CLOUD';
       launchModeError.classList.toggle('hidden', !launchInvalid);
       if (awsCredentialsNote) awsCredentialsNote.classList.toggle('hidden', launchSelect.value !== 'AWS');
+      if (modalDirectNote) modalDirectNote.classList.toggle('hidden', launchSelect.value !== 'MODAL');
       aiProviderError.classList.toggle('hidden', !aiInvalid);
       backupProviderError.classList.toggle('hidden', !backupInvalid);
 
@@ -497,13 +500,13 @@
       submitBtn.disabled = false;
 
       updateRegion();
+      updateRuntime();
     }
 
     accountSelect.addEventListener('change', onAccountChange);
     launchSelect.addEventListener('change', update);
     aiProviderSelect.addEventListener('change', update);
     backupSelect.addEventListener('change', update);
-    backupEncryptionSelect.addEventListener('change', update);
 
     hostNameInput.addEventListener('input', scheduleHostNameValidation);
     // Provider / account / region changes move the goalposts for "taken", so
@@ -625,11 +628,18 @@
               or <code>AWS_PROFILE</code>, or <code>~/.aws/credentials</code>).
               Pick a region below.
             </p>
+            <p id="modal-direct-note" class="hidden mt-1 type-helper text-tertiary">
+              Modal creates sandboxes from this machine using your own Modal token.
+              If you haven't authenticated yet, install the CLI and log in:
+              <code>uv tool install modal</code>, then <code>modal token new</code>
+              (or set <code>MODAL_TOKEN_ID</code> / <code>MODAL_TOKEN_SECRET</code>).
+              Sandboxes are ephemeral (~1 day) -- testing only.
+            </p>
           </div>
           <Select id="launch_mode" name="launch_mode" width="w-48">
             {% for mode in launch_modes %}
               <option value="{{ mode.value }}"{% if mode.value == selected_launch_mode %} selected{% endif %}
-                      {% if mode.value == 'IMBUE_CLOUD' %}data-requires-account="true"{% endif %}>{{ mode.value | lower }}</option>
+                      {% if mode.value == 'IMBUE_CLOUD' %}data-requires-account="true"{% endif %}>{% if mode.value == 'MODAL' %}Modal (1-day ephemeral){% else %}{{ mode.value | lower }}{% endif %}</option>
             {% endfor %}
           </Select>
         </div>
@@ -677,30 +687,6 @@
                     :value="backup_api_key_env if backup_api_key_env else _default_restic_env" />
         </div>
 
-        <div id="backup-encryption-row" class="mt-2 hidden">
-          <div class="flex items-center justify-between gap-3">
-            <FormLabel target="backup_encryption_method" inline>Backup encryption method</FormLabel>
-            <Select id="backup_encryption_method" name="backup_encryption_method" width="w-48">
-              {% for method in backup_encryption_methods %}
-                <option value="{{ method.value }}"{% if method.value == selected_backup_encryption_method %} selected{% endif %}>{{ method.value | lower }}</option>
-              {% endfor %}
-            </Select>
-          </div>
-        </div>
-
-        <div id="backup-master-password-row" class="mt-2 hidden">
-          <FormLabel target="backup_master_password">Backup master password</FormLabel>
-          {% if has_saved_backup_password %}
-            <p class="type-helper text-secondary">A saved backup password will be used for this workspace.</p>
-          {% else %}
-            <TextInput type="password" name="backup_master_password" id="backup_master_password"
-                       placeholder="remember this -- backups are unrecoverable without it" />
-            <label class="mt-2 flex items-center gap-2 type-helper text-secondary">
-              <input type="checkbox" id="backup_save_password" name="backup_save_password" value="1" />
-              Save this password for all my workspaces
-            </label>
-          {% endif %}
-        </div>
       </div>
 
       <div id="region-row" class="hidden">
@@ -710,6 +696,17 @@
             <p class="mt-1 type-helper text-tertiary">Where the machine is created. If a region is out of capacity, try another.</p>
           </div>
           <Select id="region" name="region" width="w-48"></Select>
+        </div>
+      </div>
+
+      <div id="runtime-row" class="hidden">
+        <div class="flex items-center justify-between gap-3">
+          <FormLabel target="runtime" inline>Container runtime</FormLabel>
+          <Select id="runtime" name="runtime" width="w-48">
+            {% for rt in docker_runtimes %}
+              <option value="{{ rt.value }}"{% if rt.value == selected_docker_runtime %} selected{% endif %}>{{ rt.value | lower }}</option>
+            {% endfor %}
+          </Select>
         </div>
       </div>
 

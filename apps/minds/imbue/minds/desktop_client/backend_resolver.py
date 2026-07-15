@@ -39,6 +39,11 @@ REQUESTS_EVENT_SOURCE_NAME: Final[str] = "requests"
 # is the ``AgentName``-typed form built from it.
 SYSTEM_SERVICES_AGENT_NAME: Final[str] = "system-services"
 
+# Agent label that holds the workspace's arbitrary human-readable display name.
+# It lives on the ``system-services`` (primary) agent. The host's normalized
+# slug name lives on the host itself, not in a label.
+WORKSPACE_DISPLAY_NAME_LABEL: Final[str] = "workspace_display_name"
+
 
 class AgentDisplayInfo(FrozenModel):
     """Display-oriented information about an agent for UI rendering."""
@@ -84,7 +89,7 @@ class BackendResolverInterface(MutableModel, ABC):
         """Return all known agent IDs."""
 
     def list_known_workspace_ids(self) -> tuple[AgentId, ...]:
-        """Return agent IDs that have the workspace=true label.
+        """Return agent IDs that are primary workspace agents (the ``is_primary`` label).
 
         Default implementation returns all known agent IDs (no filtering).
         Subclasses with access to agent labels should override this.
@@ -146,6 +151,17 @@ class BackendResolverInterface(MutableModel, ABC):
         Default implementation is a no-op.
         """
 
+    def set_workspace_name_override(self, agent_id: AgentId, display_name: str, host_name: str | None) -> None:
+        """Optimistically override a workspace's name until discovery confirms it.
+
+        Lets a UI-initiated rename flip :meth:`get_workspace_name` (and
+        :meth:`get_host_name` when the slug changed) immediately, instead of
+        waiting for the next discovery snapshot to re-read the renamed labels.
+        The override is dropped once discovery agrees with it or a short TTL
+        elapses. ``host_name`` is None for a display-only rename (unchanged slug).
+        Default implementation is a no-op.
+        """
+
     @abstractmethod
     def list_services_for_agent(self, agent_id: AgentId) -> tuple[ServiceName, ...]:
         """Return all known service names for an agent, sorted alphabetically."""
@@ -169,10 +185,18 @@ class BackendResolverInterface(MutableModel, ABC):
         return None
 
     def get_workspace_name(self, agent_id: AgentId) -> str | None:
-        """Return the workspace label value for an agent, or None.
+        """Return the workspace's human-readable display name, or None.
 
         Default implementation returns None.
         Subclasses with access to agent labels should override this.
+        """
+        return None
+
+    def get_host_name(self, agent_id: AgentId) -> str | None:
+        """Return the normalized host name (slug) of the agent's host, or None.
+
+        Default implementation returns None. Subclasses fed by discovery
+        should override this. Used for per-provider host-name collision checks.
         """
         return None
 
@@ -226,15 +250,24 @@ class BackendResolverInterface(MutableModel, ABC):
         return {}
 
     def get_freshness_timestamps(self) -> tuple[datetime | None, datetime | None]:
-        """Return ``(last_event_at, last_full_snapshot_at)`` from discovery.
+        """Return ``(last_event_at, aggregate_last_snapshot_at)`` from discovery.
 
-        Default implementation returns ``(None, None)`` (resolvers without
-        discovery have no freshness to report); ``MngrCliBackendResolver``
-        overrides it. ``None`` for the last full snapshot means discovery has
-        not (recently) confirmed state, so callers that gate on freshness treat
-        it as stale.
+        The aggregate snapshot time is the most recent per-provider snapshot
+        across all providers. Default implementation returns ``(None, None)``
+        (resolvers without discovery have no freshness to report);
+        ``MngrCliBackendResolver`` overrides it. ``None`` for the aggregate means
+        discovery has not (recently) confirmed state, so callers that gate on
+        freshness treat it as stale.
         """
         return None, None
+
+    def get_last_snapshot_at_for_provider(self, provider_name: ProviderInstanceName) -> datetime | None:
+        """Return the most recent snapshot time for one provider, or None when it has none.
+
+        Default implementation returns None (resolvers without discovery have
+        no per-provider freshness); ``MngrCliBackendResolver`` overrides it.
+        """
+        return None
 
 
 class StaticBackendResolver(BackendResolverInterface):
@@ -290,6 +323,10 @@ class ParsedAgentsResult(FrozenModel):
         default_factory=dict,
         description="Host lifecycle state keyed by host ID string, for hosts whose state is known",
     )
+    host_name_by_host_id: Mapping[str, str] = Field(
+        default_factory=dict,
+        description="Normalized host name (slug) keyed by host ID string, for hosts whose name is known",
+    )
 
 
 def parse_agents_from_json(json_output: str | None) -> ParsedAgentsResult:
@@ -310,6 +347,7 @@ def parse_agents_from_json(json_output: str | None) -> ParsedAgentsResult:
     agent_ids: list[AgentId] = []
     ssh_info_by_id: dict[str, RemoteSSHInfo] = {}
     host_state_by_host_id: dict[str, HostState] = {}
+    host_name_by_host_id: dict[str, str] = {}
 
     for agent in agents:
         agent_id_str = agent.get("id")
@@ -328,6 +366,10 @@ def parse_agents_from_json(json_output: str | None) -> ParsedAgentsResult:
                 host_state_by_host_id[host_id_value] = HostState(state_value)
             except ValueError:
                 logger.warning("Unknown host state {!r} for host {}", state_value, host_id_value)
+
+        name_value = host.get("name")
+        if isinstance(host_id_value, str) and isinstance(name_value, str):
+            host_name_by_host_id[host_id_value] = name_value
 
         ssh = host.get("ssh")
         if ssh is None:
@@ -348,6 +390,7 @@ def parse_agents_from_json(json_output: str | None) -> ParsedAgentsResult:
         agent_ids=tuple(agent_ids),
         ssh_info_by_agent_id=ssh_info_by_id,
         host_state_by_host_id=host_state_by_host_id,
+        host_name_by_host_id=host_name_by_host_id,
     )
 
 
@@ -519,6 +562,21 @@ class _HostStateOverride(FrozenModel):
     set_at_monotonic: float = Field(description="time.monotonic() when the override was set, for TTL expiry")
 
 
+_WORKSPACE_NAME_OVERRIDE_TTL_SECONDS: Final[float] = 90.0
+
+
+class _WorkspaceNameOverride(FrozenModel):
+    """A short-lived optimistic workspace name set by a UI-initiated rename."""
+
+    display_name: str = Field(
+        description="The optimistic human-readable display name to report until discovery confirms it"
+    )
+    host_name: str | None = Field(
+        description="The optimistic normalized host-name slug, or None when only the display name changed"
+    )
+    set_at_monotonic: float = Field(description="time.monotonic() when the override was set, for TTL expiry")
+
+
 class MngrCliBackendResolver(BackendResolverInterface):
     """Resolves backend URLs from continuously-updated state.
 
@@ -543,14 +601,19 @@ class MngrCliBackendResolver(BackendResolverInterface):
     _agents_result: ParsedAgentsResult = PrivateAttr(default_factory=ParsedAgentsResult)
     _services_by_agent: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
     _initial_discovery_done: bool = PrivateAttr(default=False)
-    _providers: tuple[DiscoveredProvider, ...] = PrivateAttr(default=())
+    _provider_by_name: dict[ProviderInstanceName, DiscoveredProvider] = PrivateAttr(default_factory=dict)
     _error_by_provider_name: dict[ProviderInstanceName, DiscoveryError] = PrivateAttr(default_factory=dict)
     # Timestamp (UTC) of the most recently received discovery event of any kind.
-    # Used by the providers panel's "time since last discovery event" counter.
+    # Used by the providers panel's "time since last discovery event" counter and
+    # by the discovery-health watchdog's stall detection.
     _last_event_at: datetime | None = PrivateAttr(default=None)
-    # Timestamp (UTC) of the most recently received FullDiscoverySnapshotEvent.
-    # Used by the providers panel's "time since last full discovery event" counter.
-    _last_full_snapshot_at: datetime | None = PrivateAttr(default=None)
+    # Most recent per-provider snapshot time, keyed by provider name. Each provider
+    # is discovered on its own decoupled loop and emits its own snapshot, so
+    # freshness is tracked per provider rather than via a single global snapshot:
+    # the aggregate (max across providers) backs the providers panel's "time since
+    # last full discovery event" counter, while a workspace's recovery redirect
+    # gates on its own provider's entry.
+    _last_snapshot_at_by_provider: dict[ProviderInstanceName, datetime] = PrivateAttr(default_factory=dict)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _on_change_callbacks: list[Callable[[], None]] = PrivateAttr(default_factory=list)
     _on_request_callbacks: list[Callable[[str, str], None]] = PrivateAttr(default_factory=list)
@@ -560,6 +623,10 @@ class MngrCliBackendResolver(BackendResolverInterface):
     # transition the user just triggered -- never DESTROYED -- so it cannot affect
     # the DESTROYED-only filtering in ``list_active_workspace_ids``.
     _host_state_override_by_host_id: dict[str, _HostStateOverride] = PrivateAttr(default_factory=dict)
+    # agent_id_str -> a short-lived optimistic workspace name set by a UI-initiated
+    # rename, masking discovery in ``get_workspace_name`` / ``get_host_name`` until
+    # discovery re-reads the renamed labels (or the TTL elapses). Guarded by _lock.
+    _workspace_name_override_by_agent_id: dict[str, _WorkspaceNameOverride] = PrivateAttr(default_factory=dict)
     # host_id_str -> the agents last completely enumerated on that host (the
     # in-memory image of the persisted last-good topology). Updated under
     # _lock by update_agents; read by get_system_services_agent_id as the
@@ -643,6 +710,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
             self._agents_result = result
             self._initial_discovery_done = True
             self._sweep_host_state_overrides_locked(result.host_state_by_host_id)
+            self._sweep_workspace_name_overrides_locked()
             if self._merge_last_good_topology_locked(result.discovered_agents) and path is not None:
                 topology_to_write = _LastGoodAgentTopology(agents_by_host=dict(self._last_good_agents_by_host))
         if path is not None and topology_to_write is not None:
@@ -666,6 +734,28 @@ class MngrCliBackendResolver(BackendResolverInterface):
                 or (now - override.set_at_monotonic) > _HOST_STATE_OVERRIDE_TTL_SECONDS
             ):
                 del self._host_state_override_by_host_id[host_id_str]
+
+    def _sweep_workspace_name_overrides_locked(self) -> None:
+        """Drop name overrides that the current snapshot has confirmed or that have expired.
+
+        Reads ``self._agents_result`` (already replaced with the fresh snapshot by
+        the caller), so an override is dropped once discovery reports the same
+        display name (and host name, if the slug changed). Keeps the map bounded to
+        genuinely-still-pending renames without firing on-change itself -- the
+        surrounding ``update_agents`` already fires once. Must hold ``self._lock``.
+        """
+        now = time.monotonic()
+        for agent_id_str in tuple(self._workspace_name_override_by_agent_id):
+            override = self._workspace_name_override_by_agent_id[agent_id_str]
+            agent_id = AgentId(agent_id_str)
+            display_agrees = self._discovery_workspace_display_name_locked(agent_id) == override.display_name
+            host_agrees = (
+                override.host_name is None or self._discovery_host_name_locked(agent_id) == override.host_name
+            )
+            if (display_agrees and host_agrees) or (
+                now - override.set_at_monotonic
+            ) > _WORKSPACE_NAME_OVERRIDE_TTL_SECONDS:
+                del self._workspace_name_override_by_agent_id[agent_id_str]
 
     def _merge_last_good_topology_locked(self, agents: tuple[DiscoveredAgent, ...]) -> bool:
         """Fold a fresh discovery snapshot into the last-good per-host topology.
@@ -692,34 +782,48 @@ class MngrCliBackendResolver(BackendResolverInterface):
 
     def update_providers(
         self,
-        providers: tuple[DiscoveredProvider, ...],
-        error_by_provider_name: Mapping[ProviderInstanceName, DiscoveryError],
-        last_full_snapshot_at: datetime,
+        provider_name: ProviderInstanceName,
+        provider: DiscoveredProvider | None,
+        error: DiscoveryError | None,
+        last_snapshot_at: datetime,
     ) -> None:
-        """Replace provider state from a FullDiscoverySnapshotEvent. Thread-safe.
+        """Merge one provider's discovery snapshot into provider state. Thread-safe.
 
-        Updates both ``_last_event_at`` and ``_last_full_snapshot_at`` to
-        ``last_full_snapshot_at`` since a full snapshot is also a discovery
-        event. Incremental events update ``_last_event_at`` only, via
-        :meth:`record_discovery_event_received`.
+        Per-provider MERGE, not a wholesale replace: a ``ProviderDiscoverySnapshotEvent``
+        is authoritative only for ``provider_name``, so this touches just that
+        provider's entry in the providers list, its error state, and its
+        last-snapshot time, leaving every other provider untouched (a snapshot for
+        one provider must never erase another provider's error). A provider that
+        errored this poll (``provider`` is None, ``error`` set) keeps any prior
+        ``DiscoveredProvider`` entry -- the panel renders it from the error map --
+        and records its error; a clean poll clears any prior error for it.
+        ``_last_event_at`` is bumped to the latest snapshot time since a snapshot is
+        also a discovery event. Incremental events update ``_last_event_at`` only,
+        via :meth:`record_discovery_event_received`.
         """
         with self._lock:
-            self._providers = tuple(providers)
-            self._error_by_provider_name = dict(error_by_provider_name)
-            self._last_full_snapshot_at = last_full_snapshot_at
-            self._last_event_at = last_full_snapshot_at
+            if provider is not None:
+                self._provider_by_name[provider_name] = provider
+            if error is not None:
+                self._error_by_provider_name[provider_name] = error
+            else:
+                self._error_by_provider_name.pop(provider_name, None)
+            self._last_snapshot_at_by_provider[provider_name] = last_snapshot_at
+            if self._last_event_at is None or last_snapshot_at > self._last_event_at:
+                self._last_event_at = last_snapshot_at
         self._fire_on_change()
 
     def record_discovery_event_received(self, event_at: datetime) -> None:
         """Bump ``_last_event_at`` for an incremental (non-snapshot) discovery event."""
         with self._lock:
-            self._last_event_at = event_at
+            if self._last_event_at is None or event_at > self._last_event_at:
+                self._last_event_at = event_at
         self._fire_on_change()
 
     def list_providers(self) -> tuple[DiscoveredProvider, ...]:
-        """Return the providers from the most recent full discovery snapshot."""
+        """Return the providers from the most recent per-provider discovery snapshots."""
         with self._lock:
-            return self._providers
+            return tuple(self._provider_by_name.values())
 
     def get_provider_errors(self) -> dict[ProviderInstanceName, DiscoveryError]:
         """Return errored providers keyed by provider name."""
@@ -727,9 +831,21 @@ class MngrCliBackendResolver(BackendResolverInterface):
             return dict(self._error_by_provider_name)
 
     def get_freshness_timestamps(self) -> tuple[datetime | None, datetime | None]:
-        """Return ``(last_event_at, last_full_snapshot_at)`` for the providers panel."""
+        """Return ``(last_event_at, aggregate_last_snapshot_at)`` for the providers panel.
+
+        The aggregate is the most recent per-provider snapshot time across all
+        providers (``None`` until any snapshot has arrived). Callers that need the
+        freshness of a *single* workspace's provider must use
+        :meth:`get_last_snapshot_at_for_provider` instead.
+        """
         with self._lock:
-            return self._last_event_at, self._last_full_snapshot_at
+            aggregate = max(self._last_snapshot_at_by_provider.values(), default=None)
+            return self._last_event_at, aggregate
+
+    def get_last_snapshot_at_for_provider(self, provider_name: ProviderInstanceName) -> datetime | None:
+        """Return the most recent snapshot time for ``provider_name``, or None if it has none yet."""
+        with self._lock:
+            return self._last_snapshot_at_by_provider.get(provider_name)
 
     def update_services(self, agent_id: AgentId, services: dict[str, str]) -> None:
         """Replace the known services for a single agent. Thread-safe."""
@@ -766,14 +882,13 @@ class MngrCliBackendResolver(BackendResolverInterface):
     def list_known_workspace_ids(self) -> tuple[AgentId, ...]:
         """Return agent IDs that are primary workspace agents.
 
-        Filters for agents with both ``workspace`` and ``is_primary`` labels.
-        Includes workspaces on DESTROYED hosts; see the interface docstring.
+        Filters for agents with the ``is_primary`` label (the per-host
+        services agent that identifies a workspace). Includes workspaces on
+        DESTROYED hosts; see the interface docstring.
         """
         with self._lock:
             return tuple(
-                agent.agent_id
-                for agent in self._agents_result.discovered_agents
-                if "workspace" in agent.labels and "is_primary" in agent.labels
+                agent.agent_id for agent in self._agents_result.discovered_agents if "is_primary" in agent.labels
             )
 
     def list_active_workspace_ids(self) -> tuple[AgentId, ...]:
@@ -790,27 +905,24 @@ class MngrCliBackendResolver(BackendResolverInterface):
             return tuple(
                 agent.agent_id
                 for agent in self._agents_result.discovered_agents
-                if "workspace" in agent.labels
-                and "is_primary" in agent.labels
+                if "is_primary" in agent.labels
                 and host_state_by_host_id.get(str(agent.host_id)) is not HostState.DESTROYED
             )
 
     def list_restorable_workspace_ids(self) -> tuple[AgentId, ...]:
         """Union of live primary-workspace agents and last-good workspace agents.
 
-        The live set is the ``workspace`` + ``is_primary`` agents in the current
-        snapshot (host state aside -- a restore view declines to drop on absence,
-        not on DESTROYED). The last-good set is the persisted topology's
-        system-services agents (the minds' primary agents, which carry those
-        labels live). Unioning them means a workspace that exists but hasn't been
+        The live set is the ``is_primary`` agents in the current snapshot (host
+        state aside -- a restore view declines to drop on absence, not on
+        DESTROYED). The last-good set is the persisted topology's
+        system-services agents (the minds' primary agents, which carry that
+        label live). Unioning them means a workspace that exists but hasn't been
         re-discovered this session yet -- a slow provider on cold start -- stays
         recognized, so its window isn't dropped before discovery catches up.
         """
         with self._lock:
             ids: set[AgentId] = {
-                agent.agent_id
-                for agent in self._agents_result.discovered_agents
-                if "workspace" in agent.labels and "is_primary" in agent.labels
+                agent.agent_id for agent in self._agents_result.discovered_agents if "is_primary" in agent.labels
             }
             for records in self._last_good_agents_by_host.values():
                 for record in records:
@@ -855,13 +967,74 @@ class MngrCliBackendResolver(BackendResolverInterface):
         if existed:
             self._fire_on_change()
 
-    def get_workspace_name(self, agent_id: AgentId) -> str | None:
-        """Return the workspace label value for an agent, or None."""
+    def set_workspace_name_override(self, agent_id: AgentId, display_name: str, host_name: str | None) -> None:
+        """Optimistically override ``agent_id``'s workspace name until discovery confirms it; fires on-change."""
         with self._lock:
-            for agent in self._agents_result.discovered_agents:
-                if agent.agent_id == agent_id:
-                    return agent.labels.get("workspace")
+            self._workspace_name_override_by_agent_id[str(agent_id)] = _WorkspaceNameOverride(
+                display_name=display_name, host_name=host_name, set_at_monotonic=time.monotonic()
+            )
+        self._fire_on_change()
+
+    def _fresh_workspace_name_override_locked(self, agent_id_str: str) -> _WorkspaceNameOverride | None:
+        """Return the still-fresh name override for an agent, dropping it if its TTL has elapsed. Must hold self._lock."""
+        override = self._workspace_name_override_by_agent_id.get(agent_id_str)
+        if override is None:
             return None
+        if (time.monotonic() - override.set_at_monotonic) > _WORKSPACE_NAME_OVERRIDE_TTL_SECONDS:
+            del self._workspace_name_override_by_agent_id[agent_id_str]
+            return None
+        return override
+
+    def get_workspace_name(self, agent_id: AgentId) -> str | None:
+        """Return the workspace's human-readable display name, or None.
+
+        Prefers a fresh optimistic override (set by a UI-initiated rename) over
+        discovery so a just-renamed workspace shows its new name immediately.
+        Otherwise reads the ``workspace_display_name`` label, falling back to the
+        host name for legacy workspaces created before the display label existed.
+        The host name (the normalized slug) is the canonical name; only the
+        display label may diverge from it.
+        """
+        with self._lock:
+            discovery_name = self._discovery_workspace_display_name_locked(agent_id)
+            override = self._fresh_workspace_name_override_locked(str(agent_id))
+            if override is None or discovery_name == override.display_name:
+                return discovery_name
+            return override.display_name
+
+    def _discovery_workspace_display_name_locked(self, agent_id: AgentId) -> str | None:
+        """Return the display name from the discovery snapshot alone (ignoring any override). Must hold self._lock."""
+        for agent in self._agents_result.discovered_agents:
+            if agent.agent_id == agent_id:
+                display_name = agent.labels.get(WORKSPACE_DISPLAY_NAME_LABEL)
+                if display_name:
+                    return display_name
+                # Backwards-compat fallback for workspaces created before the
+                # display label existed. Removable ~Sept 2026.
+                return self._agents_result.host_name_by_host_id.get(str(agent.host_id))
+        return None
+
+    def get_host_name(self, agent_id: AgentId) -> str | None:
+        """Return the normalized host name (slug) of the agent's host, or None.
+
+        Prefers a fresh optimistic override (set by a UI-initiated rename that
+        changed the slug) over discovery. This is the canonical, per-provider-
+        unique name used for collision checks -- distinct from the human-readable
+        display name returned by :meth:`get_workspace_name`.
+        """
+        with self._lock:
+            discovery_host_name = self._discovery_host_name_locked(agent_id)
+            override = self._fresh_workspace_name_override_locked(str(agent_id))
+            if override is None or override.host_name is None or discovery_host_name == override.host_name:
+                return discovery_host_name
+            return override.host_name
+
+    def _discovery_host_name_locked(self, agent_id: AgentId) -> str | None:
+        """Return the host name from the discovery snapshot alone (ignoring any override). Must hold self._lock."""
+        for agent in self._agents_result.discovered_agents:
+            if agent.agent_id == agent_id:
+                return self._agents_result.host_name_by_host_id.get(str(agent.host_id))
+        return None
 
     def get_agent_label(self, agent_id: AgentId, label_key: str) -> str | None:
         """Return the value of an arbitrary mngr label for an agent, or None."""
