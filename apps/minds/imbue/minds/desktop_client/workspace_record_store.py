@@ -48,11 +48,13 @@ from imbue.minds.desktop_client import dek_store
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backup_env_store import read_canonical_env
 from imbue.minds.desktop_client.backup_env_store import write_canonical_env
+from imbue.minds.desktop_client.destroying import has_destroying_marker
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudSyncConflictCliError
 from imbue.minds.errors import WorkspaceSyncError
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import ProviderInstanceName
 
 _RECORDS_DIRNAME = "workspace_records"
 _LEGACY_ASSOCIATIONS_FILENAME = "workspace_associations.json"
@@ -1076,6 +1078,7 @@ class WorkspaceRecordStore(MutableModel):
                                 "discovery yet); keeping the legacy file for a retry",
                                 agent_id,
                             )
+                self._resurrect_locally_hosted_tombstones(user_id, resolver)
                 self._refresh_local_metadata(user_id, account_email, resolver)
                 self._tombstone_definitively_absent(user_id, account_email, resolver)
                 self.push_dirty(user_id, account_email)
@@ -1195,19 +1198,62 @@ class WorkspaceRecordStore(MutableModel):
             with self._lock:
                 self._set_record_unlocked(user_id, merged)
 
+    def _resurrect_locally_hosted_tombstones(self, user_id: str, resolver: BackendResolverInterface) -> None:
+        """Re-activate this device's tombstoned rows whose workspace is live in local discovery.
+
+        The inverse safety net for the absent-host tombstone pass: a row
+        tombstoned while its provider was slow to report (the startup race the
+        per-provider snapshot gate narrows but cannot fully close for rows
+        tombstoned by earlier versions) leaves a live workspace silently
+        de-associated. A DESTROYED row hosted by this device whose agent is
+        among the ACTIVE ids -- not merely the known ids, which retain
+        genuinely-destroyed hosts for the provider's grace window -- is proof
+        the tombstone was premature. Rows with a destroy in flight (or
+        recently finished) are skipped: the destroy flow tombstones the record
+        before the host actually goes down, and that window must not undo it.
+        """
+        if not resolver.has_completed_initial_discovery():
+            return
+        if not self.device_id:
+            return
+        active_ids = {str(aid) for aid in resolver.list_active_workspace_ids()}
+        for record in self.list_records(user_id):
+            if record.state != RECORD_STATE_DESTROYED or record.hosting_device_id != self.device_id:
+                continue
+            if record.agent_id not in active_ids:
+                continue
+            if has_destroying_marker(AgentId(record.agent_id), self.paths):
+                continue
+            logger.info(
+                "Re-activating workspace record {} ({}): its host is live in local discovery",
+                record.agent_id,
+                record.display_name,
+            )
+            resurrected = record.model_copy_update(
+                to_update(record.field_ref().state, RECORD_STATE_ACTIVE),
+                to_update(record.field_ref().is_dirty, True),
+            )
+            with self._lock:
+                self._set_record_unlocked(user_id, resurrected)
+
     def _tombstone_definitively_absent(
         self, user_id: str, account_email: str, resolver: BackendResolverInterface
     ) -> None:
         """Tombstone this device's ACTIVE rows whose host is definitively gone locally.
 
         Definitively absent means: discovery completed, the record's provider
-        did not error this poll, and the workspace is not among the known ids
-        (which still include DESTROYED-but-lingering hosts, so the provider's
-        grace window is honored). Cloud rows are skipped -- their lifecycle is
-        driven by lease state, and any device may see them. Rows with an empty
-        provider_kind are skipped too: those are create-path seeds discovery
-        has never enriched, so "absent from discovery" says nothing about the
-        host (the create just finished and the next poll hasn't seen it yet).
+        has produced at least one snapshot AND did not error this poll, and
+        the workspace is not among the known ids (which still include
+        DESTROYED-but-lingering hosts, so the provider's grace window is
+        honored). The per-provider snapshot gate matters because a provider
+        that is merely slow after startup is indistinguishable from a healthy
+        one via the error map alone -- a host missing from a listing that
+        never happened is not evidence of anything. Cloud rows are skipped --
+        their lifecycle is driven by lease state, and any device may see them.
+        Rows with an empty provider_kind are skipped too: those are
+        create-path seeds discovery has never enriched, so "absent from
+        discovery" says nothing about the host (the create just finished and
+        the next poll hasn't seen it yet).
         """
         if not resolver.has_completed_initial_discovery():
             return
@@ -1225,6 +1271,14 @@ class WorkspaceRecordStore(MutableModel):
             if not record.provider_kind:
                 continue
             if record.agent_id in known_ids or record.provider_kind in errored_providers:
+                continue
+            try:
+                record_provider_name = ProviderInstanceName(record.provider_kind)
+            except ValueError:
+                # A provider name this install cannot even represent has
+                # certainly never produced a snapshot here.
+                continue
+            if resolver.get_last_snapshot_at_for_provider(record_provider_name) is None:
                 continue
             logger.info(
                 "Tombstoning workspace record {} ({}): host no longer exists on this device",
