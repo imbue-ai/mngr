@@ -1,0 +1,3 @@
+Fixed a ~60s hang on app launch and on quit when the local Docker daemon is unresponsive. Minds starts and stops an mngr Docker "state container" around its lifecycle; if the Docker daemon was wedged (its socket accepts connections but never replies -- e.g. Docker Desktop still starting up, resuming from sleep, or stuck), each `docker start`/`docker stop` blocked until its 60-second command timeout, delaying the backend coming up (launch) and the app closing (quit).
+
+Launch and quit now probe daemon reachability first (`docker version`, bounded to 5 seconds) and skip the state-container operation when the daemon is unreachable, wedged, or absent. A healthy daemon answers in well under a second, so normal launches are unaffected.
