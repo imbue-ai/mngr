@@ -255,16 +255,26 @@ def derive_openssh_public_key_line(private_key_text: str) -> str | None:
     The materializer must write ``ssh_key.pub`` alongside the private key:
     mngr's ``load_or_create_ssh_keypair`` regenerates the whole pair when
     either half is missing, which would silently clobber a materialized key.
+
+    Both container formats found in mngr profiles are handled: traditional /
+    PKCS#8 PEM (mngr's client keypairs are PEM RSA keys, ``-----BEGIN RSA
+    PRIVATE KEY-----``) and the OpenSSH format (``-----BEGIN OPENSSH PRIVATE
+    KEY-----``) -- ``cryptography`` needs a different loader for each.
     """
-    try:
-        private_key = serialization.load_ssh_private_key(private_key_text.encode("utf-8"), password=None)
-    except (ValueError, TypeError, UnsupportedAlgorithm) as e:
-        logger.warning("Could not parse a synced SSH private key: {}", e)
-        return None
-    public_bytes = private_key.public_key().public_bytes(
-        encoding=serialization.Encoding.OpenSSH, format=serialization.PublicFormat.OpenSSH
-    )
-    return public_bytes.decode("utf-8")
+    key_bytes = private_key_text.encode("utf-8")
+    last_error: Exception | None = None
+    for load_private_key in (serialization.load_pem_private_key, serialization.load_ssh_private_key):
+        try:
+            private_key = load_private_key(key_bytes, password=None)
+        except (ValueError, TypeError, UnsupportedAlgorithm) as e:
+            last_error = e
+            continue
+        public_bytes = private_key.public_key().public_bytes(
+            encoding=serialization.Encoding.OpenSSH, format=serialization.PublicFormat.OpenSSH
+        )
+        return public_bytes.decode("utf-8")
+    logger.warning("Could not parse a synced SSH private key: {}", last_error)
+    return None
 
 
 def merge_known_hosts_text(existing_text: str | None, synced_text: str | None) -> str | None:

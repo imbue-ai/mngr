@@ -5,6 +5,7 @@ from uuid import uuid4
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 from imbue.imbue_common.model_update import to_update
 from imbue.minds.config.data_types import WorkspacePaths
@@ -572,7 +573,7 @@ def test_merge_known_hosts_text_writes_synced_entries_into_an_empty_file() -> No
     assert merge_known_hosts_text("", synced) == synced
 
 
-def test_derive_openssh_public_key_line_roundtrips_a_generated_key() -> None:
+def test_derive_openssh_public_key_line_roundtrips_an_openssh_format_key() -> None:
     private_key = ed25519.Ed25519PrivateKey.generate()
     private_text = private_key.private_bytes(
         encoding=serialization.Encoding.PEM,
@@ -585,6 +586,26 @@ def test_derive_openssh_public_key_line_roundtrips_a_generated_key() -> None:
         .decode("utf-8")
     )
 
+    assert derive_openssh_public_key_line(private_text) == expected_public
+
+
+def test_derive_openssh_public_key_line_roundtrips_mngrs_traditional_pem_rsa_key() -> None:
+    # The exact flavor mngr's generate_ssh_keypair writes for client keys:
+    # RSA in traditional PEM ("-----BEGIN RSA PRIVATE KEY-----"), which needs
+    # the PEM loader, not the OpenSSH one.
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    private_text = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.TraditionalOpenSSL,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode("utf-8")
+    expected_public = (
+        private_key.public_key()
+        .public_bytes(encoding=serialization.Encoding.OpenSSH, format=serialization.PublicFormat.OpenSSH)
+        .decode("utf-8")
+    )
+
+    assert private_text.startswith("-----BEGIN RSA PRIVATE KEY-----")
     assert derive_openssh_public_key_line(private_text) == expected_public
 
 

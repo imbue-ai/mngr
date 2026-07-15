@@ -15,7 +15,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import ed25519
+from cryptography.hazmat.primitives.asymmetric import rsa
 from pydantic import SecretStr
 
 from imbue.minds.bootstrap import imbue_cloud_provider_name_for_account
@@ -247,10 +247,15 @@ def _make_profiled_device(
 
 
 def _generate_test_ssh_private_key() -> str:
-    private_key = ed25519.Ed25519PrivateKey.generate()
+    """A traditional-PEM RSA key, the exact flavor mngr's ``generate_ssh_keypair`` produces.
+
+    2048 bits (vs mngr's 4096) keeps test key generation fast; the container
+    format is what the materializer's parser must handle.
+    """
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     return private_key.private_bytes(
         encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.OpenSSH,
+        format=serialization.PrivateFormat.TraditionalOpenSSL,
         encryption_algorithm=serialization.NoEncryption(),
     ).decode("utf-8")
 
@@ -317,7 +322,7 @@ def test_unlock_materializes_cloud_row_ssh_material_on_a_fresh_install(tmp_path:
     assert (key_path.stat().st_mode & 0o777) == 0o600
     # The derived public half exists (mngr regenerates the pair when it is missing).
     public_text = (key_dir_b / "ssh_key.pub").read_text()
-    assert public_text.startswith("ssh-ed25519 ")
+    assert public_text.startswith("ssh-rsa ")
     assert known_hosts_line in (key_dir_b / "known_hosts").read_text()
     # Idempotent: unchanged material reports nothing written.
     assert store_b.materialize_account_synced_secrets(_USER_ID, _EMAIL) is False
