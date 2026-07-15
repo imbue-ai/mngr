@@ -69,10 +69,16 @@ def build_probe_shell_command(services_agent_id: AgentId | None = None) -> str:
     The services agent id is passed to the inner script as ``argv[1]`` so its
     agent-process scan knows which ``MNGR_AGENT_ID`` marker to look for; when
     None the scan is skipped and that probe answers unknown.
+
+    ``mngr exec`` sources the target agent's env file into the shell that runs
+    this command, and that file exports ``MNGR_AGENT_ID=<services_agent_id>`` --
+    the very marker the scan looks for. The leading ``unset`` strips it from the
+    shell (and thus from every process the pipeline spawns) so the scan cannot
+    match the probe's own processes and report a stopped agent as running.
     """
     encoded = base64.b64encode(_get_probe_python_script().encode("utf-8")).decode("ascii")
     agent_arg = f" {shlex.quote(str(services_agent_id))}" if services_agent_id is not None else ""
-    return f"echo '{PROBE_SENTINEL}' && echo {encoded} | base64 -d | python3 -{agent_arg}"
+    return f"unset MNGR_AGENT_ID && echo '{PROBE_SENTINEL}' && echo {encoded} | base64 -d | python3 -{agent_arg}"
 
 
 def build_probe_argv(mngr_binary: str, services_agent_id: AgentId) -> list[str]:
@@ -474,10 +480,12 @@ def _agent_processes_inner_command(services_agent_id: AgentId | None) -> str:
     system-services agent is still running. ``grep -l`` prints the matching
     ``/proc/<pid>/environ`` paths; ``-z`` treats the NUL-separated environ
     entries as lines so ``^`` anchors each variable name; ``-a`` forces text
-    matching on the binary-looking file.
+    matching on the binary-looking file. The leading ``unset`` matters when this
+    is re-run through ``mngr exec``, which sources the agent's env file into the
+    shell: without it the grep process itself carries the marker and self-matches.
     """
     agent_token = str(services_agent_id) if services_agent_id is not None else "<system-services-agent>"
-    return f'grep -laz "^MNGR_AGENT_ID={agent_token}" /proc/[0-9]*/environ'
+    return f'unset MNGR_AGENT_ID && grep -laz "^MNGR_AGENT_ID={agent_token}" /proc/[0-9]*/environ'
 
 
 def _build_services_agent_running_probe(

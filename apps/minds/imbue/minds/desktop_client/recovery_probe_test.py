@@ -116,9 +116,16 @@ def test_build_probe_argv_targets_services_agent_with_timeout_and_no_start() -> 
 
 
 def test_build_probe_argv_passes_agent_id_to_the_inner_script() -> None:
-    """The inner script's agent-process scan needs the agent id as its argv[1]."""
+    """The inner script's agent-process scan needs the agent id as its argv[1].
+
+    The command must also unset MNGR_AGENT_ID first: ``mngr exec`` sources the
+    services agent's env file (which exports that exact marker) into the shell,
+    so without the unset the scan would match the probe's own python3 process
+    and report a stopped agent as running.
+    """
     argv = build_probe_argv("/usr/local/bin/mngr", _SERVICES_AGENT_ID)
     shell_command = argv[3]
+    assert shell_command.startswith("unset MNGR_AGENT_ID && ")
     assert shell_command.endswith(f"| python3 - {_SERVICES_AGENT_ID}")
 
 
