@@ -3,6 +3,8 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from imbue.imbue_common.model_update import to_update
 from imbue.minds.config.data_types import WorkspacePaths
@@ -18,6 +20,8 @@ from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_DESTR
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
 from imbue.minds.desktop_client.workspace_record_store import collect_ssh_key_material
+from imbue.minds.desktop_client.workspace_record_store import derive_openssh_public_key_line
+from imbue.minds.desktop_client.workspace_record_store import merge_known_hosts_text
 from imbue.minds.errors import WorkspaceSyncError
 from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.primitives import AgentId
@@ -542,3 +546,47 @@ def test_collect_ssh_key_material_finds_per_host_keys(tmp_path: Path) -> None:
 
 def test_collect_ssh_key_material_returns_none_when_uninitialized(tmp_path: Path) -> None:
     assert collect_ssh_key_material(tmp_path / "missing", "lima", "host-x") == (None, None)
+
+
+def test_merge_known_hosts_text_appends_only_missing_lines() -> None:
+    existing = "[1.2.3.4]:22 ssh-ed25519 AAAA-pinned\n"
+    synced = "[1.2.3.4]:22 ssh-ed25519 AAAA-pinned\n[1.2.3.4]:2222 ssh-ed25519 AAAA-outer\n"
+
+    merged = merge_known_hosts_text(existing, synced)
+
+    assert merged == "[1.2.3.4]:22 ssh-ed25519 AAAA-pinned\n[1.2.3.4]:2222 ssh-ed25519 AAAA-outer\n"
+
+
+def test_merge_known_hosts_text_returns_none_when_nothing_new() -> None:
+    existing = "[1.2.3.4]:22 ssh-ed25519 AAAA-pinned\n"
+
+    assert merge_known_hosts_text(existing, existing) is None
+    assert merge_known_hosts_text(existing, None) is None
+    assert merge_known_hosts_text(existing, "\n   \n") is None
+
+
+def test_merge_known_hosts_text_writes_synced_entries_into_an_empty_file() -> None:
+    synced = "[9.9.9.9]:22 ssh-ed25519 AAAA-new\n"
+
+    assert merge_known_hosts_text(None, synced) == synced
+    assert merge_known_hosts_text("", synced) == synced
+
+
+def test_derive_openssh_public_key_line_roundtrips_a_generated_key() -> None:
+    private_key = ed25519.Ed25519PrivateKey.generate()
+    private_text = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.OpenSSH,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode("utf-8")
+    expected_public = (
+        private_key.public_key()
+        .public_bytes(encoding=serialization.Encoding.OpenSSH, format=serialization.PublicFormat.OpenSSH)
+        .decode("utf-8")
+    )
+
+    assert derive_openssh_public_key_line(private_text) == expected_public
+
+
+def test_derive_openssh_public_key_line_returns_none_for_garbage() -> None:
+    assert derive_openssh_public_key_line("not a key at all") is None

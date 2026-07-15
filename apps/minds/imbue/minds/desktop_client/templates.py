@@ -222,6 +222,11 @@ class RemoteWorkspaceTile(FrozenModel):
     accent: str = Field(description="Accent color hex")
     location: str = Field(description="Where it lives (the other device's label, or a provider name)")
     host_id: str = Field(description="The record's host id (drives remove-from-list)")
+    state: str = Field(
+        default="",
+        description="Derived access state: '' (plain), 'connecting', 'unreachable', or 'error'",
+    )
+    state_detail: str | None = Field(default=None, description="Failure detail for the 'error' state (chip tooltip)")
 
 
 # -- Page renderers --

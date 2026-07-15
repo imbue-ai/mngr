@@ -12,6 +12,7 @@ outage, or any sync / crypto / file error) can never kill the loop.
 """
 
 import threading
+from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from enum import auto
@@ -74,6 +75,14 @@ class WorkspaceSyncScheduler(MutableModel):
     record_store: WorkspaceRecordStore = Field(frozen=True, description="The sync engine the loop drives")
     session_store: MultiAccountSessionStore = Field(frozen=True, description="Source of the signed-in account list")
     resolver: BackendResolverInterface = Field(frozen=True, description="Discovery view records are built from")
+    on_ssh_material_written: Callable[[], None] | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "Invoked after a pass materializes new/changed SSH material, so the app "
+            "can bounce discovery instead of waiting for the next poll"
+        ),
+    )
     _kick_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     _stop_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     _initial_sync_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
@@ -121,6 +130,16 @@ class WorkspaceSyncScheduler(MutableModel):
         convert_legacy_password_files(self.record_store.paths, list(accounts.keys()))
         is_pull_ok_by_user_id = self.record_store.reconcile(accounts, self.resolver)
         self._resolve_initial_syncs(tracked_user_ids, accounts, is_pull_ok_by_user_id)
+        # Materialize synced secrets (backup envs + cloud-row SSH material)
+        # into their local consumers for every unlocked account. Compare-and-
+        # write, so this self-heals deleted/corrupt files every pass.
+        is_ssh_material_written = False
+        for user_id, account_email in accounts.items():
+            is_ssh_material_written = (
+                self.record_store.materialize_account_synced_secrets(user_id, account_email) or is_ssh_material_written
+            )
+        if is_ssh_material_written and self.on_ssh_material_written is not None:
+            self.on_ssh_material_written()
 
     def _resolve_initial_syncs(
         self,

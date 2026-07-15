@@ -7,6 +7,8 @@ from collections.abc import Callable
 from collections.abc import Collection
 from collections.abc import Iterator
 from collections.abc import Mapping
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -26,6 +28,7 @@ from werkzeug.middleware.dispatcher import DispatcherMiddleware
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
+from imbue.minds.bootstrap import imbue_cloud_provider_name_for_account
 from imbue.minds.bootstrap import is_imbue_cloud_provider_enabled_for_account
 from imbue.minds.bootstrap import list_disabled_provider_names
 from imbue.minds.config.data_types import ClientEnvConfig
@@ -97,6 +100,7 @@ from imbue.minds.desktop_client.sharing_handler import is_share_ready_from_edge_
 from imbue.minds.desktop_client.state import DesktopClientState
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.state import set_state
+from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
 from imbue.minds.desktop_client.supertokens_routes import create_supertokens_blueprint
 from imbue.minds.desktop_client.supertokens_routes import signout_user_via_plugin
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
@@ -130,7 +134,9 @@ from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import pick_unused_create_color
 from imbue.minds.desktop_client.workspace_create import default_region_for_provider_with_config
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
+from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
+from imbue.minds.desktop_client.workspace_record_store import is_cloud_provider_kind
 from imbue.minds.errors import InvalidJsonBodyError
 from imbue.minds.errors import SyncCryptoError
 from imbue.minds.errors import WorkspaceSyncError
@@ -143,6 +149,7 @@ from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.minds.utils.sentry.core import latchkey_forward_sentry_consent_path
 from imbue.minds.utils.sentry.core import write_latchkey_forward_sentry_consent
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 
 _PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
@@ -571,16 +578,27 @@ def _handle_sync_unlock() -> Response:
     locked_user_ids = record_store.locked_account_user_ids([str(account.user_id) for account in accounts])
     unlocked: list[str] = []
     still_locked: list[str] = []
+    is_ssh_material_written = False
     for account in accounts:
         if str(account.user_id) not in locked_user_ids:
             continue
         if record_store.unlock_account(str(account.user_id), str(account.email), password):
             unlocked.append(str(account.email))
+            # Materialize this account's synced secrets synchronously (local
+            # crypto + file writes) so the page reload right after unlock
+            # already renders its cloud workspaces as "connecting" instead of
+            # waiting a beat for the async pass.
+            is_ssh_material_written = (
+                record_store.materialize_account_synced_secrets(str(account.user_id), str(account.email))
+                or is_ssh_material_written
+            )
         else:
             still_locked.append(str(account.email))
     scheduler = get_state().sync_scheduler
     if unlocked and scheduler is not None:
         scheduler.kick()
+    if is_ssh_material_written:
+        bounce_latchkey_forward_supervisor(get_state().latchkey_forward_supervisor)
     if not unlocked and still_locked:
         return make_response(
             status_code=200,
@@ -829,6 +847,47 @@ def _handle_welcome_page() -> Response:
     return make_html_response(content=html)
 
 
+def _compute_cloud_tile_state(
+    backend_resolver: BackendResolverInterface,
+    record_store: WorkspaceRecordStore,
+    account_email: str,
+    record: ReplicaRecord,
+) -> tuple[str, str | None]:
+    """Derive the access state for one cloud row that is not in local discovery.
+
+    Everything is computed from current facts (key-file presence and mtime,
+    the provider's latest snapshot, the in-memory materialization error) --
+    no stored flags:
+
+    - ``""`` (plain remote): chips are suppressed while the account's provider
+      block is disabled, and nothing is shown before any key is materialized
+      (locked account / no synced key).
+    - ``"error"``: the last materialization attempt failed (detail in tooltip).
+    - ``"connecting"``: a key exists but no healthy provider snapshot has
+      arrived since it appeared -- discovery has not had its chance yet.
+    - ``"unreachable"``: a healthy snapshot newer than the key lacks the host
+      (the lease expired/was released, or the key does not grant access).
+    """
+    if not is_imbue_cloud_provider_enabled_for_account(account_email):
+        return "", None
+    error_detail = record_store.ssh_material_errors().get(record.agent_id)
+    if error_detail is not None:
+        return "error", error_detail
+    key_path = record_store.imbue_cloud_host_ssh_key_path(account_email, record.host_id)
+    if key_path is None or not key_path.is_file():
+        return "", None
+    provider_name = ProviderInstanceName(imbue_cloud_provider_name_for_account(account_email))
+    last_snapshot_at = backend_resolver.get_last_snapshot_at_for_provider(provider_name)
+    is_provider_errored = provider_name in backend_resolver.get_provider_errors()
+    try:
+        key_appeared_at = datetime.fromtimestamp(key_path.stat().st_mtime, timezone.utc)
+    except OSError:
+        return "", None
+    if last_snapshot_at is None or last_snapshot_at <= key_appeared_at or is_provider_errored:
+        return "connecting", None
+    return "unreachable", None
+
+
 def _collect_remote_workspace_tiles(
     backend_resolver: BackendResolverInterface,
     session_store: MultiAccountSessionStore | None,
@@ -855,6 +914,11 @@ def _collect_remote_workspace_tiles(
                 continue
             seen_agent_ids.add(record.agent_id)
             location = record.device_label or record.provider_kind or "another device"
+            state, state_detail = ("", None)
+            if is_cloud_provider_kind(record.provider_kind):
+                state, state_detail = _compute_cloud_tile_state(
+                    backend_resolver, session_store.record_store, str(account.email), record
+                )
             tiles.append(
                 RemoteWorkspaceTile(
                     agent_id=record.agent_id,
@@ -862,9 +926,23 @@ def _collect_remote_workspace_tiles(
                     accent=record.color or DEFAULT_WORKSPACE_COLOR,
                     location=location,
                     host_id=record.host_id,
+                    state=state,
+                    state_detail=state_detail,
                 )
             )
     return tiles
+
+
+def _build_remote_tile_states(
+    backend_resolver: BackendResolverInterface,
+    session_store: MultiAccountSessionStore | None,
+) -> dict[str, str]:
+    """``agent_id -> derived state`` for every remote tile (the SSE drift payload).
+
+    A rendered remote tile whose id vanishes from this map (it flipped into
+    local discovery) or whose state changed makes the landing page reload.
+    """
+    return {tile.agent_id: tile.state for tile in _collect_remote_workspace_tiles(backend_resolver, session_store)}
 
 
 def _collect_locked_account_emails(session_store: MultiAccountSessionStore | None) -> list[str]:
@@ -1342,6 +1420,7 @@ def _handle_chrome_events() -> Response:
             paths: WorkspacePaths | None = get_state().api_v1_paths
             last_workspace_data = _build_workspace_list(backend_resolver, session_store)
             last_destroying_ids = _destroying_agent_ids(paths, backend_resolver)
+            last_remote_states = _build_remote_tile_states(backend_resolver, session_store)
             has_accounts = bool(session_store and session_store.list_accounts())
             # The agent ids the shell may restore windows to: live workspaces plus
             # any from the persisted last-good topology not yet re-discovered this
@@ -1356,6 +1435,7 @@ def _handle_chrome_events() -> Response:
                         "destroying_agent_ids": last_destroying_ids,
                         "has_accounts": has_accounts,
                         "restorable_workspace_ids": last_restorable_ids,
+                        "remote_workspace_states": last_remote_states,
                     }
                 )
             )
@@ -1500,15 +1580,22 @@ def _handle_chrome_events() -> Response:
                 # update below -- no separate liveness channel needed.
                 current_data = _build_workspace_list(backend_resolver, session_store)
                 current_destroying_ids = _destroying_agent_ids(paths, backend_resolver)
-                if current_data != last_workspace_data or current_destroying_ids != last_destroying_ids:
+                current_remote_states = _build_remote_tile_states(backend_resolver, session_store)
+                if (
+                    current_data != last_workspace_data
+                    or current_destroying_ids != last_destroying_ids
+                    or current_remote_states != last_remote_states
+                ):
                     last_workspace_data = current_data
                     last_destroying_ids = current_destroying_ids
+                    last_remote_states = current_remote_states
                     yield "data: {}\n\n".format(
                         json.dumps(
                             {
                                 "type": "workspaces",
                                 "workspaces": current_data,
                                 "destroying_agent_ids": current_destroying_ids,
+                                "remote_workspace_states": current_remote_states,
                             }
                         )
                     )

@@ -80,6 +80,7 @@ from imbue.minds.desktop_client.server import desktop_client_runtime
 from imbue.minds.desktop_client.server import serve_desktop_client
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
+from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.system_interface_health import should_enroll_suspect_for_backend_failure
@@ -401,6 +402,11 @@ def run(
         record_store=workspace_record_store,
         session_store=session_store,
         resolver=backend_resolver,
+        # Newly-materialized SSH material (a cloud workspace unlocked/synced
+        # from another install) is picked up lazily by discovery; bouncing the
+        # observe child makes the workspace reachable now instead of on the
+        # next poll.
+        on_ssh_material_written=lambda: bounce_latchkey_forward_supervisor(latchkey_forward_supervisor),
     )
     sync_scheduler.start(root_concurrency_group)
     response_events = load_response_events(data_directory)

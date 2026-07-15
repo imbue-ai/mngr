@@ -11,6 +11,17 @@
     var rendered = (document.querySelector('[data-landing-agent-ids]') || {}).dataset || {};
     var renderedIds = (rendered.landingAgentIds || '').split(',').filter(function (s) { return s.length > 0; });
     var renderedSet = new Set(renderedIds);
+    // Remote-tile derived states as rendered ("agentId=state" pairs; state may
+    // be empty). The SSE workspaces event carries the live map; any drift --
+    // a state change, a tile flipping into local discovery, a new remote
+    // record -- reloads so the tiles re-render.
+    var renderedRemoteStates = {};
+    (rendered.landingRemoteStates || '').split(',').forEach(function (pair) {
+      if (!pair) return;
+      var separatorIdx = pair.indexOf('=');
+      if (separatorIdx < 0) return;
+      renderedRemoteStates[pair.slice(0, separatorIdx)] = pair.slice(separatorIdx + 1);
+    });
 
     var healthStatusByAgent = {};
 
@@ -599,6 +610,19 @@
           location.reload();
           return;
         }
+        if (data.remote_workspace_states) {
+          var liveRemoteStates = data.remote_workspace_states;
+          var remoteDiffers = Object.keys(renderedRemoteStates).some(function (id) {
+            return liveRemoteStates[id] !== renderedRemoteStates[id];
+          }) || Object.keys(liveRemoteStates).some(function (id) {
+            return !(id in renderedRemoteStates);
+          });
+          if (remoteDiffers) {
+            es.close();
+            location.reload();
+            return;
+          }
+        }
         // Same set of rows: apply each shutdown-capable mind's liveness in place
         // (it rides the workspace entry now, not a separate event).
         data.workspaces.forEach(function (w) {
@@ -675,7 +699,7 @@
 <Base title="Workspaces" scripts={{ _scripts }}>
   <PageContainer>
     {% if agent_ids or remote_workspaces %}
-      <div class="flex items-center justify-between mb-4" data-landing-agent-ids="{{ ((agent_ids | map('string') | list) + (remote_workspaces | map(attribute='agent_id') | list)) | join(',') }}">
+      <div class="flex items-center justify-between mb-4" data-landing-agent-ids="{{ ((agent_ids | map('string') | list) + (remote_workspaces | map(attribute='agent_id') | list)) | join(',') }}" data-landing-remote-states="{% for remote in remote_workspaces %}{{ remote.agent_id }}={{ remote.state }}{% if not loop.last %},{% endif %}{% endfor %}">
         <h1 class="type-heading text-primary">Workspaces</h1>
         <ButtonLink href="/create" variant="primary">Create</ButtonLink>
       </div>
@@ -809,6 +833,17 @@
                 :data-agent-id="remote.agent_id">
             <span class="flex-1 font-semibold text-secondary pl-1">{{ remote.name }}</span>
             <span class="inline-flex items-center px-2 py-0.5 rounded-md type-label bg-fill-subtle text-secondary">on {{ remote.location }}</span>
+            {# Derived access state for cloud rows: connecting (synced key
+               materialized, discovery hasn't resolved it yet), unreachable
+               (a healthy snapshot lacks the host), or a materialization
+               error (detail in the tooltip). Plain rows render no chip. #}
+            {% if remote.state == 'connecting' %}
+              <span class="inline-flex items-center px-2 py-0.5 rounded-md type-label bg-fill-subtle text-secondary">connecting&hellip;</span>
+            {% elif remote.state == 'unreachable' %}
+              <span class="inline-flex items-center px-2 py-0.5 rounded-md type-label bg-fill-subtle text-important">unreachable</span>
+            {% elif remote.state == 'error' %}
+              <span class="inline-flex items-center px-2 py-0.5 rounded-md type-label bg-fill-subtle text-important" data-tooltip="{{ remote.state_detail or 'Could not apply the synced access material.' }}">sync error</span>
+            {% endif %}
             <span class="landing-backup-badge inline-flex items-center px-2 py-0.5 rounded-md type-label" style="display:none"></span>
             <Link href="#" class="landing-backup-download hidden cursor-pointer" extra="type-helper">download</Link>
             <Button variant="ghost" size="icon"

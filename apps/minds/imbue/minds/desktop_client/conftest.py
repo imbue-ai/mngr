@@ -297,7 +297,9 @@ def make_resolver_with_data(
                 host_id=HostId(a.get("host", {}).get("id", _FIXED_TEST_HOST_ID)),
                 agent_id=AgentId(a["id"]),
                 agent_name=AgentName(a.get("name", a["id"])),
-                provider_name=ProviderInstanceName("local"),
+                # Honor a per-agent provider instance name (e.g. an imbue_cloud
+                # account instance for cloud-row tests); else the local default.
+                provider_name=ProviderInstanceName(a.get("provider", "local")),
                 certified_data={"labels": a.get("labels", {})},
             )
             for a in raw.get("agents", [])
