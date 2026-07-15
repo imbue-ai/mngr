@@ -753,7 +753,7 @@ def test_container_running_probe_reads_state_from_discovery_snapshot() -> None:
 
 
 def test_services_agent_probe_outputs_the_resolved_agent_id() -> None:
-    probe = _probe_for(_response(services_agent_id=_SERVICES_AGENT_ID), "system-services agent")
+    probe = _probe_for(_response(services_agent_id=_SERVICES_AGENT_ID), "system-services agent registered")
     assert probe.command == "(system-services agent from the discovery snapshot)"
     assert probe.output == str(_SERVICES_AGENT_ID)
 
