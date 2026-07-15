@@ -92,6 +92,7 @@ from imbue.minds.primitives import OutputFormat
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.minds.utils.output import emit_event
 from imbue.minds.utils.sentry.core import latchkey_forward_sentry_consent_path
+from imbue.minds.utils.sentry.core import resolve_anonymous_user_id
 from imbue.minds.utils.sentry.core import resolve_latchkey_forward_sentry_env
 from imbue.minds.utils.sentry.core import resolve_sentry_environment
 from imbue.minds.utils.sentry.core import setup_sentry
@@ -206,11 +207,16 @@ def run(
     # project; development never uploads attachments regardless. The release id (desktop app version)
     # and git sha come from the Electron launcher via env vars, falling back to the in-repo
     # package.json / "unknown" for bare source runs (see imbue.minds.build_info).
+    # The anonymous user id (no PII) is persisted per install and attached to every event so Sentry
+    # can count the distinct installs affected by each issue. The same value is shared with the
+    # detached ``mngr latchkey forward`` daemon (below) so both processes count as one install.
+    anonymous_user_id = resolve_anonymous_user_id(data_directory)
     setup_sentry(
         environment=resolve_sentry_environment(),
         release_id=resolve_release_id(),
         git_commit_sha=resolve_git_sha(),
         log_folder=paths.log_dir,
+        anonymous_user_id=anonymous_user_id,
         is_error_reporting_enabled=minds_config.get_report_unexpected_errors,
         is_log_inclusion_enabled=minds_config.get_include_error_logs,
     )
@@ -313,7 +319,8 @@ def run(
             # consent lives in the file (written just below and on every change), not in the env,
             # so a grant/revoke reaches the running daemon live.
             **resolve_latchkey_forward_sentry_env(
-                consent_file_path=latchkey_forward_sentry_consent_path(data_directory)
+                consent_file_path=latchkey_forward_sentry_consent_path(data_directory),
+                anonymous_user_id=anonymous_user_id,
             ),
         },
     )
