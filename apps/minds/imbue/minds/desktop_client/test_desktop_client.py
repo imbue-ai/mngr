@@ -1299,7 +1299,7 @@ def test_settings_modal_requires_auth(tmp_path: Path) -> None:
 
 def test_settings_modal_renders_app_settings_in_overlay(tmp_path: Path) -> None:
     """GET /settings/modal renders the same app-level settings sections as the
-    /settings page (Connectors, Error reporting, Backup password) inside the
+    /settings page (Connectors, Error reporting, Master password) inside the
     centered overlay chrome (backdrop + closeModal-based dismissal), with no
     "back to workspaces" link."""
     client, auth_store = _create_test_client_with_stores(tmp_path)
@@ -1309,7 +1309,7 @@ def test_settings_modal_renders_app_settings_in_overlay(tmp_path: Path) -> None:
     body = response.text
     # The shared sections (AppSettingsSections.jinja) and their external shell JS.
     assert "Connectors" in body
-    assert "Backup password" in body
+    assert "Master password" in body
     assert 'id="report-errors-toggle"' in body
     assert "/_static/app_settings.js" in body
     # The modal drops the back link (X + backdrop click dismiss instead).

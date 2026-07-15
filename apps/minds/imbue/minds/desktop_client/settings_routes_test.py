@@ -125,7 +125,7 @@ def test_settings_page_lists_granted_connector(tmp_path: Path) -> None:
     assert response.status_code == 200
     body = response.text
     # The permission sections are back on the app-level settings page.
-    for section in ("Connectors", "Local files", "Workspaces", "Error reporting", "Backup password"):
+    for section in ("Connectors", "Local files", "Workspaces", "Error reporting", "Master password"):
         assert section in body
     # The granted connector renders with its workspace + permission label.
     assert "Slack" in body
