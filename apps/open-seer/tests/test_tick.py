@@ -293,6 +293,9 @@ def test_build_create_command_shape(monkeypatch):
     settings = [cmd[i + 1] for i, arg in enumerate(cmd) if arg == "-S"]
     assert "agent_types.claude.auto_allow_permissions=true" in settings
     assert "agent_types.claude.auto_dismiss_dialogs=true" in settings
+    # The sweep needs mngr on its host to spawn fixers; generic images lack it.
+    provisions = [cmd[i + 1] for i, arg in enumerate(cmd) if arg == "--extra-provision-command"]
+    assert any("imbue-mngr" in p for p in provisions)
     # Its own host: the cron container dies as soon as the tick returns.
     assert cmd[cmd.index("--provider") + 1] == "modal"
     assert "--new-host" in cmd

@@ -69,7 +69,7 @@ SWEEP_PASS_ENV = (
     "SENTRY_AUTH_TOKEN",
     "SENTRY_ORG",
     "SENTRY_PROJECT_PREFIX",
-    "SENTRY_TEAM",
+    "SENTRY_ASSIGNEE",
     "GITHUB_TOKEN",
     "TARGET_REPO",
     "ANTHROPIC_API_KEY",
@@ -77,6 +77,13 @@ SWEEP_PASS_ENV = (
     "OPEN_SEER_MAX_FIXERS",
     "OPEN_SEER_DRY_RUN",
     "OPEN_SEER_ENABLED",
+)
+# Installs mngr on the sweep's fresh host if the image lacks it (the sweep
+# needs mngr to spawn fixers). Idempotent; installs uv first when absent.
+MNGR_INSTALL_COMMAND = (
+    "command -v mngr >/dev/null 2>&1 || { "
+    "command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh; "
+    'PATH="$HOME/.local/bin:$PATH" uv tool install --quiet imbue-mngr; }'
 )
 # Force-updates existing branches and creates new ones; deletes nothing
 # (non-empty source side — a deletion refspec has an empty source).
@@ -189,6 +196,11 @@ def build_create_command(name: str, message: str) -> list[str]:
         "--yes",
         "--idle-timeout",
         SWEEP_IDLE_TIMEOUT,
+        # The sweep spawns fixers with mngr, but generic agent hosts do not
+        # ship it (only the open-seer image does). Idempotent: no-op when
+        # mngr is already present.
+        "--extra-provision-command",
+        MNGR_INSTALL_COMMAND,
     ]
     if provider == "modal":
         # Modal-only build arg: raises the sandbox's hard max lifetime past
