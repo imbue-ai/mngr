@@ -24,7 +24,9 @@ export DISPLAY=:99
 Xvfb :99 -screen 0 "${DESKTOP_RESOLUTION:-1920x1080x24}" -nolisten tcp &
 sleep 1
 openbox &
-x11vnc -display :99 -forever -shared -nopw -quiet -listen localhost -rfbport 5900 &
+# -defer/-wait bound the framebuffer poll/encode rate (~25fps) -- the encoder is the main
+# idle-view CPU cost under software rendering.
+x11vnc -display :99 -forever -shared -nopw -quiet -listen localhost -rfbport 5900 -defer 40 -wait 40 &
 websockify --web=/usr/share/novnc 0.0.0.0:6080 localhost:5900 &
 dbus-uuidgen --ensure
 cd /work/mngr/apps/minds

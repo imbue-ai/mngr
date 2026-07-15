@@ -338,23 +338,11 @@ def launch_batch(*, name: str, config: dict, anthropic_key: str, port: str) -> d
             live.set(cid, "ERR -- {}".format(str(exc)[:60]))
             return {"case": cid, "ok": False, "error": str(exc)}
 
-    # Concurrent creates race ONLY on the one-time creation of the Modal env. If the env already has
-    # a workspace it exists, so we fan out all at once. Otherwise prime one solo (that create makes
-    # the env), then fan the rest.
-    try:
-        env_exists = len(_list_workspaces(port)) > 0
-    except (urllib.error.URLError, OSError):
-        env_exists = False
-    to_create = list(prepared)
-    results = []
-    if not env_exists:
-        print("\n>> new Modal env -- priming 1 workspace, then fanning:", flush=True)
-        results.append(_create(*to_create.pop(0)))
-    else:
-        print("\n>> creating {} workspace(s) in parallel:".format(len(to_create)), flush=True)
-    if to_create:
-        with ThreadPoolExecutor(max_workers=min(8, len(to_create))) as pool:
-            results.extend(pool.map(lambda pair: _create(*pair), to_create))
+    # The batch's Modal env was created explicitly at launch preflight (the atomic name claim), so
+    # every create can fan out concurrently -- no implicit-env-creation race, no serial priming.
+    print("\n>> creating {} workspace(s) in parallel:".format(len(prepared)), flush=True)
+    with ThreadPoolExecutor(max_workers=min(8, len(prepared))) as pool:
+        results = list(pool.map(lambda pair: _create(*pair), prepared))
 
     ok = sum(1 for r in results if r.get("ok"))
     print("\n" + "=" * 66, flush=True)

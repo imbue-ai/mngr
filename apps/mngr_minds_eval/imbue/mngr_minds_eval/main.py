@@ -195,17 +195,14 @@ def main() -> None:
                         batch, env["MINDS_EVAL_BUCKET"], box_mod.modal_env_name(batch)
                     )
                 )
-            env_exists = box_mod.modal_env_exists(batch)
-            if env_exists:
-                sys.exit(
-                    "Modal env {} already exists -- eval names are unique; pick a new name (or delete "
-                    "that env first: TERM=dumb uv run python scripts/modal_nuke.py -e {} --force, then "
-                    "TERM=dumb uv run modal environment delete {})".format(
-                        box_mod.modal_env_name(batch), box_mod.modal_env_name(batch), box_mod.modal_env_name(batch)
-                    )
-                )
-            if env_exists is None:
-                print(">> WARNING: could not list Modal envs; relying on the S3 uniqueness check", flush=True)
+            # Atomically claim the name by creating the batch's Modal env now: fails out if it
+            # already exists, and pre-creating it lets every workspace create fan out concurrently
+            # (no implicit-env-creation race, so no serial priming).
+            try:
+                print(">> claiming Modal env {} ...".format(box_mod.modal_env_name(batch)), flush=True)
+                box_mod.create_modal_env(batch)
+            except box_mod.BoxError as exc:
+                sys.exit(str(exc))
             container = box_mod.ensure(config["mngr_branch"], user_id=batch)
             # The box IS this batch's computer and it is up NOW -- print its desktop before the
             # creates run, so you can enter it and watch the workspaces appear as they are made.

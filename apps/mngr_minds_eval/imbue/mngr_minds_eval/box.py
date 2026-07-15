@@ -13,7 +13,6 @@ its Modal SSH keypair) is shared across ALL boxes (`evaluator`), so any box can 
 
 from __future__ import annotations
 
-import json
 import os
 import socket
 import subprocess
@@ -31,8 +30,11 @@ AWS_ENV = Path.home() / ".minds-eval" / "aws.env"
 MNGR_PROFILE = "evaluator"
 SHARED_MODAL_KEYS = Path.home() / ".minds-eval" / "modal-profile" / "providers" / "modal"
 ROOT_CONFIG_FILE = Path.home() / ".minds-eval" / "mngr-root-config.toml"
-# Cap the box's memory so a runaway process can't take down the whole Docker VM.
-BOX_MEMORY = "8g"
+# Cap the box's memory and CPUs so a runaway box (or software-rendered desktop under load) can't
+# take down the whole Docker VM. NOTE: the cap must stay BELOW the Docker VM's total memory
+# (Docker Desktop defaults to 8GB -- raise it in Settings > Resources).
+BOX_MEMORY = "6g"
+BOX_CPUS = "6"
 # noVNC's fixed port INSIDE a desktop box; published to a free host port at `docker run`.
 NOVNC_PORT_IN_BOX = "6080"
 
@@ -89,24 +91,31 @@ def modal_env_name(user_id: str, minds_env: str = "staging") -> str:
     return "minds-{}-{}".format(minds_env, user_id)
 
 
-def modal_env_exists(user_id: str, minds_env: str = "staging") -> bool | None:
-    """Whether the batch's Modal env already exists (the launch preflight: eval names are unique, so
-    a pre-existing env means a name collision). None when the listing can't be read -- the caller
-    decides whether to proceed on the S3 check alone. TERM=dumb because modal 1.4.x bleeds ANSI
-    codes into `--json` output even when piped."""
-    target = modal_env_name(user_id, minds_env)
+class ModalEnvExistsError(BoxError):
+    """The batch's Modal env already exists -- the eval name was used before."""
+
+
+def create_modal_env(user_id: str, minds_env: str = "staging") -> str:
+    """Create the batch's Modal env explicitly, as an ATOMIC claim on the eval name: `modal
+    environment create` fails if the env exists, which is the uniqueness preflight. Pre-creating it
+    also lets every workspace create fan out concurrently (no implicit-env-creation race, so no
+    serial 'prime one workspace first'). Returns the env name. TERM=dumb because modal 1.4.x bleeds
+    ANSI codes into piped output."""
+    env_name = modal_env_name(user_id, minds_env)
     child_env = {**os.environ, "TERM": "dumb"}
-    result = _run(["uv", "run", "modal", "environment", "list", "--json"], cwd=str(APP_DIR.parents[1]), env=child_env)
+    result = _run(
+        ["uv", "run", "modal", "environment", "create", env_name], cwd=str(APP_DIR.parents[1]), env=child_env
+    )
     if result.returncode != 0:
-        return None
-    try:
-        rows = json.loads(result.stdout)
-    except ValueError:
-        return None
-    if not isinstance(rows, list):
-        return None
-    names = {str(row.get("name") or row.get("Name") or "") for row in rows if isinstance(row, dict)}
-    return target in names
+        detail = ((result.stderr or "") + (result.stdout or "")).strip()
+        if "already exists" in detail.lower():
+            raise ModalEnvExistsError(
+                "Modal env {} already exists -- eval names are unique; pick a new name (or delete it: "
+                "TERM=dumb uv run python scripts/modal_nuke.py -e {} --force && "
+                "TERM=dumb uv run modal environment delete {})".format(env_name, env_name, env_name)
+            )
+        raise BoxError("could not create Modal env {}: {}".format(env_name, detail[:300]))
+    return env_name
 
 
 def container_name(user_id: str, ref: str) -> str:
@@ -183,6 +192,8 @@ def ensure(mngr_branch: str, *, user_id: str, ref: str = "", minds_env: str = "s
         BOX_MEMORY,
         "--memory-swap",
         BOX_MEMORY,
+        "--cpus",
+        BOX_CPUS,
         # Chromium/Electron uses /dev/shm heavily; docker's 64MB default makes renderers crash.
         "--shm-size",
         "1g",
