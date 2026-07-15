@@ -30,7 +30,7 @@ def test_prevent_while_true() -> None:
 
 
 def test_prevent_time_sleep() -> None:
-    rc.check_time_sleep(_DIR, snapshot(5))
+    rc.check_time_sleep(_DIR, snapshot(6))
 
 
 def test_prevent_global_keyword() -> None:
@@ -38,7 +38,7 @@ def test_prevent_global_keyword() -> None:
 
 
 def test_prevent_bare_print() -> None:
-    rc.check_bare_print(_DIR, snapshot(50))
+    rc.check_bare_print(_DIR, snapshot(51))
 
 
 # --- Exception handling ---

@@ -1,17 +1,14 @@
 """The box: a full Minds computer in Docker, pinned to an exact mngr SHA and one Modal env.
 
-A box runs in one of two modes (same image, switched by BOX_MODE at `docker run`):
+Every box is a desktop: the real Minds Electron app on a virtual display (Xvfb), streamed to the
+browser via noVNC -- ONE published port per box, no host-side tunnels, no port shuttling. You enter
+the computer and use Minds natively (multiple workspace windows and all). `launch` execs the create
+flow INSIDE the box (the CLI discovers the app's API port from in there), so the same box that
+creates a batch is the one you watch it in, and `visit-batch` reuses it by name.
 
-- headless -- `minds run` serving the Minds HTTP API on MINDS_BARE_PORT. Used by `launch` to create
-  a batch's workspaces, then torn down; the workspaces self-complete on Modal.
-- desktop  -- the real Minds Electron app on a virtual display (Xvfb), streamed to the browser via
-  noVNC. Used by `visit-batch`: you enter the box's desktop and use Minds natively -- open any of
-  the batch's workspaces as windows. One published port (noVNC); no host-side tunnels.
-
-Each box is scoped to ONE Modal env via MNGR__PROVIDERS__MODAL__USER_ID (per-batch: the sanitized
-batch id), so its discovery only ever sees that batch's workspaces -- small, fast, never OOMs.
-The mngr profile (and its Modal SSH keypair) is shared across ALL boxes (`evaluator`), so a visit
-box can open workspaces a launch box created.
+Each box is scoped to ONE Modal env via MNGR__PROVIDERS__MODAL__USER_ID (the batch name), so its
+discovery only ever sees that batch's workspaces -- small, fast, never OOMs. The mngr profile (and
+its Modal SSH keypair) is shared across ALL boxes (`evaluator`), so any box can open any workspace.
 """
 
 from __future__ import annotations
@@ -76,15 +73,6 @@ def is_running(container: str) -> bool:
     return _run(["docker", "inspect", "-f", "{{.State.Running}}", container]).stdout.strip() == "true"
 
 
-def port_of(container: str) -> str:
-    """The Minds API port of a HEADLESS box (used by launch to create workspaces inside it)."""
-    result = _run(["docker", "exec", container, "printenv", "MINDS_BARE_PORT"])
-    port = result.stdout.strip()
-    if not port:
-        raise BoxError("container {!r} is not a headless minds box (no MINDS_BARE_PORT)".format(container))
-    return port
-
-
 def sanitize_user_id(text: str) -> str:
     """A batch id -> a Modal user_id (lowercase alnum + dashes, bounded length). The Modal env is
     named minds-<minds_env>-<user_id>, and Modal env names are restrictive."""
@@ -121,10 +109,10 @@ def modal_env_exists(user_id: str, minds_env: str = "staging") -> bool | None:
     return target in names
 
 
-def container_name(user_id: str, ref: str, desktop: bool) -> str:
-    """Box container name -- encodes the env (user_id), the exact mngr SHA, and the mode, so a
-    running box of this name IS the right computer for that batch. Reuse is idempotent."""
-    return "minds-box-{}-{}{}".format(user_id, ref[:12], "-desktop" if desktop else "")
+def container_name(user_id: str, ref: str) -> str:
+    """Box container name -- encodes the env (user_id) and the exact mngr SHA, so a running box of
+    this name IS the right computer for that batch. Reuse is idempotent."""
+    return "minds-box-{}-{}".format(user_id, ref[:12])
 
 
 def novnc_url(container: str) -> str:
@@ -137,13 +125,13 @@ def novnc_url(container: str) -> str:
     return "http://localhost:{}/vnc.html?autoconnect=true&resize=scale".format(port)
 
 
-def ensure(mngr_branch: str, *, user_id: str, ref: str = "", desktop: bool = False, minds_env: str = "staging") -> str:
-    """Build + boot a box for (mngr ref, Modal user_id, mode); return its container name.
+def ensure(mngr_branch: str, *, user_id: str, ref: str = "", minds_env: str = "staging") -> str:
+    """Build + boot the box for (mngr ref, Modal user_id); return its container name.
 
-    ref defaults to the branch's current remote tip. The container name encodes env + SHA + mode,
-    so if it is already running it is exactly the right computer -- reuse it."""
+    ref defaults to the branch's current remote tip. The container name encodes env + SHA, so if it
+    is already running it is exactly the right computer -- reuse it."""
     ref = ref or remote_tip(mngr_branch)
-    container = container_name(user_id, ref, desktop)
+    container = container_name(user_id, ref)
     if is_running(container):
         print(">> reusing box {} @ mngr {}".format(container, ref[:12]), flush=True)
         return container
@@ -212,30 +200,23 @@ def ensure(mngr_branch: str, *, user_id: str, ref: str = "", desktop: bool = Fal
         "MNGR__PROVIDERS__MODAL__USER_ID={}".format(user_id),
         "-e",
         "MINDS_BOX_MNGR_REF={}".format(ref),
+        # Marks "we are inside a box" for the re-invoked CLI (main.IN_BOX).
+        "-e",
+        "MINDS_EVAL_IN_BOX=1",
     ]
-    if desktop:
-        host_port = _free_port()
-        command += ["-e", "BOX_MODE=desktop", "-p", "{}:{}".format(host_port, NOVNC_PORT_IN_BOX)]
-        ready_port = host_port
-        print(">> starting desktop box {} (noVNC on {})".format(container, host_port), flush=True)
-    else:
-        api_port = _free_port()
-        command += ["-e", "BOX_MODE=headless", "-e", "MINDS_BARE_PORT={}".format(api_port)]
-        command += ["-p", "{}:{}".format(api_port, api_port)]
-        ready_port = api_port
-        print(">> starting headless box {} (Minds API on {})".format(container, api_port), flush=True)
-    command.append(tag)
+    host_port = _free_port()
+    command += ["-p", "{}:{}".format(host_port, NOVNC_PORT_IN_BOX), tag]
+    print(">> starting box {} (noVNC on {})".format(container, host_port), flush=True)
 
     run = _run(command)
     if run.returncode != 0:
         raise BoxError("docker run failed: {}".format((run.stderr or "").strip()[:300]))
-    _await_ready(container, ready_port)
+    _await_ready(container, host_port)
     return container
 
 
 def _await_ready(container: str, port: int, tries: int = 100) -> None:
-    """Poll until the box serves HTTP on the given published port (the Minds API for a headless box,
-    the noVNC page for a desktop box)."""
+    """Poll until the box serves HTTP on its published noVNC port."""
     import time
     import urllib.error
     import urllib.request

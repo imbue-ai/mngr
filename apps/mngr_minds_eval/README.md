@@ -11,13 +11,12 @@ as windows, natively.
 
 ## How it fits together
 
-- **The box** — a Docker container that is a full Minds computer, pinned to an exact mngr SHA.
-  One image, two run modes:
-  - *headless*: `minds run` serving the Minds HTTP API. Used by `launch` to create a batch's
-    workspaces, then torn down (the workspaces self-complete on Modal).
-  - *desktop*: the real Minds Electron app on a virtual display (Xvfb + openbox), streamed to your
-    browser via noVNC. Used by `visit-batch`: one published port, you enter a real desktop and use
-    Minds natively — multiple workspace windows and all. No host-side tunnels.
+- **The box** — a Docker container that is a full Minds computer, pinned to an exact mngr SHA:
+  the real Minds app on a virtual desktop (Xvfb + openbox), streamed to your browser via noVNC.
+  One published port per box, no tunnels, no port shuttling — you enter the computer and use Minds
+  natively (multiple workspace windows and all). `launch` creates the batch's workspaces *inside*
+  that computer (the CLI discovers the app's API from within the container) and leaves it running
+  for you to watch; `visit-batch` reuses the same computer by name, or reboots it later.
 - **Workspaces** — always Modal sandboxes. Never run in the box.
 - **The eval name IS the batch** — unique, hard requirement. It names the S3 prefix and the
   batch's own Modal env (`minds-staging-<name>`, via the Modal provider's `user_id`); `launch`
@@ -53,10 +52,11 @@ minds-evals box --mngr-branch main --user-id dev
 ```
 
 `launch` first verifies the eval name is unused (no such S3 batch, no such Modal env — it fails
-out otherwise), then builds/boots a headless box for the batch (pinned to the branch tip SHA),
-creates the workspaces inside it, then removes the box — the workspaces self-run on Modal and write to S3.
-`visit-batch` reads the batch's recorded `(mngr_sha, modal env)` from S3, boots a desktop box that
-IS that computer, and prints a noVNC URL. `list-batches`/`inspect`/`evaluate` only read S3.
+out otherwise), then builds/boots the batch's computer (pinned to the branch tip SHA), creates the
+workspaces inside it, and prints its desktop URL — enter it to watch the batch run; the workspaces
+self-run on Modal and write to S3 regardless. `visit-batch` reuses that same computer by name if it
+is still up, or reads `(mngr_sha, modal env)` from S3 and reboots it exactly. `list-batches`/
+`inspect`/`evaluate` only read S3. Remove a box any time with `docker rm -f <box>`.
 
 ## Eval config (`--config`)
 
@@ -126,8 +126,8 @@ batch-average row) is printed. Add a new evaluation by appending a function to `
 
 1. Reads the batch's `config.json` from S3 → the mngr branch, the **exact SHA**, and the batch's
    Modal env.
-2. Builds/boots a **desktop box** at that SHA with that env (reused if already running — the
-   container name encodes env + SHA + mode).
+2. Builds/boots the batch's box at that SHA with that env (reused if already running — the
+   container name encodes env + SHA).
 3. Prints a noVNC URL. Open it: a real Linux desktop running the actual Minds app, whose discovery
    sees exactly that batch's workspaces. Open them as windows, read the conversations, poke around.
 
@@ -159,7 +159,7 @@ status.py          list-batches / inspect / case_report (S3 reads only)
 evaluate.py        evaluate: pull transcripts, score (avg_word_count + LLM scores), write to S3
 anthropic_call.py  one plain Anthropic Messages call (the LLM-graded evals)
 s3_store.py        S3 layout, creds file, batch/case prefixes
-docker/            Dockerfile + entrypoint.sh (one image; headless `minds run` or Xvfb+noVNC desktop)
+docker/            Dockerfile + entrypoint.sh (the box: Xvfb + noVNC + the Minds app)
 ```
 
 ## Notes

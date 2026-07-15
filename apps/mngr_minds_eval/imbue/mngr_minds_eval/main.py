@@ -1,7 +1,9 @@
 """minds-evals -- launch, inspect, evaluate, and visit Minds eval batches.
 
-Host-native CLI. Each batch gets its own Modal env; boxes are full Minds computers in Docker
-(headless for creating, a browser-accessible desktop for visiting).
+Host-native CLI. Each batch gets its own Modal env, and every box is a full Minds computer in
+Docker: the real Minds app on a virtual desktop, streamed to your browser via noVNC (one published
+port, no tunnels). `launch` creates the batch's workspaces inside that computer and leaves it
+running for you to watch; `visit-batch` reuses or reboots the same computer later.
 
   minds-evals launch trio --config eval-config.json   # create a batch (one workspace per case)
   minds-evals list-batches                        # S3 only
@@ -28,17 +30,13 @@ from pathlib import Path
 from imbue.mngr_minds_eval import box as box_mod
 from imbue.mngr_minds_eval import evaluate as evaluate_mod
 from imbue.mngr_minds_eval import launch as launch_mod
+from imbue.mngr_minds_eval import minds_client
 from imbue.mngr_minds_eval import s3_store
 from imbue.mngr_minds_eval import status as status_mod
 
-DEFAULT_PORT_ENV = "MINDS_BARE_PORT"
-# Set inside a headless box (docker run -e); its absence means we are on the host.
-IN_BOX = bool(os.environ.get(DEFAULT_PORT_ENV))
+# Set inside every box (docker run -e); its absence means we are on the host.
+IN_BOX = bool(os.environ.get("MINDS_EVAL_IN_BOX"))
 _CONFIG_IN_BOX = "/work/eval-config.json"
-
-
-def _port() -> str:
-    return os.environ.get(DEFAULT_PORT_ENV, "8420")
 
 
 def _check_aws() -> dict:
@@ -65,7 +63,7 @@ def _point_arg_to_box(argv: list[str], local: Path, box_path: str) -> list[str]:
 
 
 def _run_in_container(container: str, argv: list[str], *, upload: tuple[Path, str] | None = None) -> int:
-    """Re-run this same command inside an already-running headless box; return its exit code.
+    """Re-run this same command inside an already-running box; return its exit code.
     upload = (local_path, box_path) copies a file in and rewrites its arg (the eval config)."""
     if upload is not None:
         local, box_path = upload
@@ -164,14 +162,14 @@ def main() -> None:
             sys.exit("batch {} predates per-batch Modal envs -- relaunch it to make it visitable".format(args.batch))
         if not ref:
             print(">> batch has no recorded mngr sha; using the current tip of {}".format(branch), flush=True)
-        container = box_mod.ensure(branch, user_id=user_id, ref=ref, desktop=True)
+        container = box_mod.ensure(branch, user_id=user_id, ref=ref)
         _print_desktop_urls(container)
         return
 
     if args.command == "box":
         if IN_BOX:
             parser.error("run `box` from the host, not inside a box")
-        container = box_mod.ensure(args.mngr_branch, user_id=box_mod.sanitize_user_id(args.user_id), desktop=True)
+        container = box_mod.ensure(args.mngr_branch, user_id=box_mod.sanitize_user_id(args.user_id))
         _print_desktop_urls(container)
         return
 
@@ -208,18 +206,19 @@ def main() -> None:
                 )
             if env_exists is None:
                 print(">> WARNING: could not list Modal envs; relying on the S3 uniqueness check", flush=True)
-            container = box_mod.ensure(config["mngr_branch"], user_id=batch, desktop=False)
+            container = box_mod.ensure(config["mngr_branch"], user_id=batch)
             returncode = _run_in_container(container, sys.argv[1:], upload=(args.config, _CONFIG_IN_BOX))
             if returncode == 0:
-                # The launch box's job is done -- the workspaces self-complete on Modal and write to
-                # S3. Visiting spins a fresh desktop box, so nothing needs to stay running.
-                box_mod._run(["docker", "rm", "-f", container])
-                print("\n  inspect:  minds-evals inspect {}".format(batch), flush=True)
-                print("  visit:    minds-evals visit-batch {}".format(batch), flush=True)
+                # The box stays up: it IS this batch's computer -- enter it to watch the workspaces
+                # run. visit-batch reuses it by name (or reboots it after you remove it).
+                _print_desktop_urls(container)
+                print("  inspect:  minds-evals inspect {}".format(batch), flush=True)
             else:
-                print("\n  launch failed -- the box was kept for debugging: docker logs {}".format(container))
+                print("\n  launch failed -- see: docker logs {}".format(container))
             sys.exit(returncode)
-        launch_mod.launch_batch(name=batch, config=config, anthropic_key=args.anthropic_key, port=_port())
+        # Inside the box: the Minds app booted its backend on a port of its choosing -- find it.
+        port = minds_client.discover_api_port()
+        launch_mod.launch_batch(name=batch, config=config, anthropic_key=args.anthropic_key, port=port)
         return
 
 

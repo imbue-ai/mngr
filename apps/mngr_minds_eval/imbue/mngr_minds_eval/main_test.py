@@ -80,8 +80,7 @@ def test_box_naming_and_env_derivation() -> None:
     assert box.sanitize_user_id(name) == name
     assert box.modal_env_name(name) == "minds-staging-trio"
     ref = "38f9311059b9deadbeef0000"
-    assert box.container_name(name, ref, desktop=False) == "minds-box-trio-38f9311059b9"
-    assert box.container_name(name, ref, desktop=True) == "minds-box-trio-38f9311059b9-desktop"
+    assert box.container_name(name, ref) == "minds-box-trio-38f9311059b9"
 
 
 def test_sanitize_user_id_edge_cases() -> None:

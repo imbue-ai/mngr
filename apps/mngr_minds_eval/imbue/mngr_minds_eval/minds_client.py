@@ -3,6 +3,7 @@ POST-then-poll workspace-creation logic lives in exactly one place."""
 
 from __future__ import annotations
 
+import http.client
 import json
 import time
 import urllib.error
@@ -36,6 +37,46 @@ def post_json(url: str, payload: dict) -> tuple[int, dict]:
 def get_json(url: str) -> dict:
     with urllib.request.urlopen(url, timeout=30) as response:
         return json.loads(response.read().decode())
+
+
+def _listening_ports() -> list[int]:
+    """Ports in LISTEN state on this machine's loopback/any interfaces, from /proc/net/tcp{,6}
+    (Linux only -- we only ever call this inside the box)."""
+    ports: set[int] = set()
+    for table in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            lines = open(table).read().splitlines()[1:]
+        except OSError:
+            continue
+        for line in lines:
+            fields = line.split()
+            # fields[1] = local "ADDR:PORT" in hex; fields[3] = state (0A = LISTEN)
+            if len(fields) > 3 and fields[3] == "0A":
+                try:
+                    ports.add(int(fields[1].rsplit(":", 1)[1], 16))
+                except (ValueError, IndexError):
+                    continue
+    return sorted(ports)
+
+
+def discover_api_port(timeout: float = 300.0) -> str:
+    """Find the Minds backend's API port from INSIDE the box. The desktop app's backend picks a
+    random free port at boot, so we probe every listening port for /api/v1/workspaces until one
+    answers like Minds. Retries until `timeout` -- the Electron app may still be booting when the
+    launch CLI is exec'd in."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        for port in _listening_ports():
+            try:
+                with urllib.request.urlopen("{}/api/v1/workspaces".format(api_base(str(port))), timeout=2) as resp:
+                    data = json.loads(resp.read().decode())
+            except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError):
+                # Not HTTP (x11vnc/websockify), not Minds, or not up yet -- keep probing.
+                continue
+            if isinstance(data, dict) and "workspaces" in data:
+                return str(port)
+        time.sleep(3)
+    raise CreateError("could not find the Minds API inside the box (is the Minds app still booting?)")
 
 
 def create_and_wait(
