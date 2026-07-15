@@ -249,7 +249,10 @@ def run_in_box(sandbox, argv: list[str], extra_env: dict[str, str] | None = None
     command = "cd /work/mngr && uv run --package mngr-minds-eval minds-evals " + " ".join(
         "'{}'".format(a.replace("'", "'\\''")) for a in argv
     )
-    process = sandbox.exec("bash", "-lc", command, env=extra_env or {})
+    # Belt-and-braces: assert in-box identity explicitly rather than relying on exec inheriting
+    # the sandbox's create-time env.
+    env = {"MINDS_EVAL_IN_BOX": "1", **(extra_env or {})}
+    process = sandbox.exec("bash", "-lc", command, env=env)
     for line in process.stdout:
         print(line, end="", flush=True)
     return process.wait()
