@@ -15,8 +15,6 @@ import shutil
 import subprocess
 import sys
 import threading
-import time
-import urllib.error
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -77,12 +75,6 @@ class _Live:
                 sys.stdout.write("\033[K  {:<24} {}\n".format(cid[:24], st))
             self._drawn = len(self._rows)
             sys.stdout.flush()
-
-
-# create/poll and the HTTP helpers live in minds_client (shared with workspace).
-_api_base = minds_client.api_base
-_post_json = minds_client.post_json
-_get_json = minds_client.get_json
 
 
 # A case's prompts are sent one per turn. A literal string is sent verbatim; this sentinel makes the
@@ -201,52 +193,6 @@ def _prepare_clone(case: dict, case_config: dict) -> Path:
     return clone
 
 
-def _list_workspaces(port: str) -> list[dict]:
-    listing = _get_json("{}/api/v1/workspaces".format(_api_base(port)))
-    return [w for w in listing.get("workspaces", []) if w.get("agent_id")]
-
-
-def _destroy_and_wait(port: str, agent_id: str, label: str, timeout: float = 600.0, quiet: bool = False) -> bool:
-    """POST destroy and poll until done. Returns True on confirmed teardown. Each destroy removes the
-    Modal sandbox AND its host record from the environment, so the host name frees up."""
-
-    def _say(msg: str) -> None:
-        if not quiet:
-            print(msg, flush=True)
-
-    status, body = _post_json("{}/api/v1/workspaces/{}/destroy".format(_api_base(port), agent_id), {})
-    if status != 202:
-        _say("  [ERR ] {}: {}".format(label, str(body)[:150]))
-        return False
-    operation_id = body.get("operation_id", agent_id)
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            info = _get_json("{}/api/v1/workspaces/operations/destroy/{}".format(_api_base(port), operation_id))
-        except (urllib.error.URLError, OSError):
-            time.sleep(4)
-            continue
-        if info.get("is_done"):
-            _say("  [OK  ] destroyed {}".format(label))
-            return True
-        time.sleep(4)
-    _say("  [WARN] {} did not confirm destroy in time".format(label))
-    return False
-
-
-def destroy_existing_workspace(port: str, host_name: str, quiet: bool = False) -> None:
-    """Idempotent create: if a workspace with this host name already exists (a re-run with the same
-    name, or an interrupted prior run), destroy it first -- the name is registered in the Modal
-    environment and survives box restarts, so only an actual destroy clears it."""
-    try:
-        existing = _list_workspaces(port)
-    except (urllib.error.URLError, OSError):
-        return
-    match = next((w for w in existing if (w.get("name") or "").lower() == host_name.lower()), None)
-    if match is not None:
-        _destroy_and_wait(port, match["agent_id"], host_name, quiet=quiet)
-
-
 def launch_batch(*, name: str, config: dict, anthropic_key: str, port: str) -> dict:
     env = s3_store.load_aws_env()
     client = s3_store.make_client(env)
@@ -320,8 +266,6 @@ def launch_batch(*, name: str, config: dict, anthropic_key: str, port: str) -> d
     def _create(case: dict, clone: Path) -> dict:
         cid = case["id"]
         host_name = "EVAL-{}-CASE-{}".format(eval_name, cid)
-        live.set(cid, "clearing old name")
-        destroy_existing_workspace(port, host_name, quiet=True)  # idempotent: re-run with same name works
         try:
             agent_id = workspace.create_workspace(
                 port=port,
