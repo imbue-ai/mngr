@@ -208,10 +208,13 @@ def _get_mngr_forward_origin() -> str:
     """Build the bare-origin URL of the ``mngr forward`` plugin.
 
     Used by templates to construct ``/goto/<agent>/`` URLs that target the
-    plugin (which owns subdomain forwarding) rather than minds.
+    plugin (which owns subdomain forwarding) rather than minds. minds always
+    runs the proxy with TLS + HTTP/2, so the scheme is ``https`` and the
+    rendered links reach it rather than failing a plaintext request against
+    the TLS listener.
     """
     port = get_state().mngr_forward_port or 8421
-    return f"http://localhost:{port}"
+    return f"https://localhost:{port}"
 
 
 def _get_is_mac() -> bool:
@@ -2435,9 +2438,9 @@ def create_desktop_client(
     The agent-subdomain forwarding lives in the ``mngr_forward`` plugin
     (``libs/mngr_forward``) now; this app only serves minds-specific routes
     on the bare origin (login, landing, accounts, workspace settings,
-    sharing, agent create / destroy). Workspace links go to
-    ``http://localhost:<mngr_forward_port>/goto/<agent>/`` instead of being
-    routed in-process.
+    sharing, agent create / destroy). Workspace links go to the proxy's
+    ``localhost:<mngr_forward_port>/goto/<agent>/`` route (``https`` when the
+    proxy serves HTTP/2, else ``http``) instead of being routed in-process.
 
     ``envelope_stream_consumer`` feeds discovery events into
     ``backend_resolver`` and is also the bounce target for ``SIGHUP``-style

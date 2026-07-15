@@ -8,6 +8,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.sentry.core import MAX_SENTRY_LIST_SIZE
 from imbue.imbue_common.sentry.core import setup_sentry
 from imbue.imbue_common.sentry.data_types import LogAttachmentGroup
+from imbue.mngr.utils.logging import SENTRY_IGNORED_STDLIB_LOGGER_PATTERNS
 
 # The ``service`` tag / ``server_name`` distinguishing ``mngr latchkey forward``
 # events from the other Imbue Python processes (e.g. the minds backend) that
@@ -195,4 +196,9 @@ def setup_forward_sentry(log_folder: Path) -> None:
         is_error_reporting_enabled=lambda: read_forward_sentry_consent(consent_file_path).report_unexpected_errors,
         is_log_inclusion_enabled=lambda: read_forward_sentry_consent(consent_file_path).include_error_logs,
         s3_attachment_bucket=config.s3_attachment_bucket,
+        # The daemon reverse-tunnels the gateway into every agent via paramiko; its transport thread
+        # logs ``Error reading SSH protocol banner`` (and similar) at ERROR whenever a target goes
+        # offline and the health check retries. Ignore those stdlib loggers so Sentry is not flooded
+        # with already-handled connection-failure noise -- exactly the flood this daemon produced.
+        ignored_loggers=SENTRY_IGNORED_STDLIB_LOGGER_PATTERNS,
     )

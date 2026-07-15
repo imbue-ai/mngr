@@ -34,6 +34,7 @@ from sentry_sdk import get_current_scope
 from sentry_sdk.consts import EndpointType
 from sentry_sdk.envelope import Envelope
 from sentry_sdk.integrations import Integration
+from sentry_sdk.integrations.logging import ignore_logger
 from sentry_sdk.integrations.stdlib import StdlibIntegration
 from sentry_sdk.types import Event
 from sentry_sdk.types import Hint
@@ -503,6 +504,19 @@ def _before_send_wrapper(
         raise
 
 
+def _register_ignored_loggers(ignored_loggers: Sequence[str]) -> None:
+    """Tell the default ``LoggingIntegration`` to drop records from the given stdlib loggers.
+
+    ``ignore_logger`` mutates a module-level registry the integration reads live (via ``fnmatch``),
+    so each name may be a glob and the effect applies to both events and breadcrumbs. Needed because
+    the integration patches ``logging.Logger.callHandlers`` at the class level and thus captures a
+    logger's ERROR records as events even when that logger has ``propagate=False`` -- which would
+    otherwise flood Sentry with handled third-party noise (e.g. paramiko SSH banner errors).
+    """
+    for ignored_logger in ignored_loggers:
+        ignore_logger(ignored_logger)
+
+
 def fixup_release_id(release_id: str) -> str:
     """
     For pre-release release candidate versions, Sentry requires the release ID to be in the semver format.
@@ -537,6 +551,13 @@ def setup_sentry(
     # ``is_log_inclusion_enabled``.
     s3_attachment_bucket: str | None = None,
     extra_tags: Mapping[str, str] | None = None,
+    # Glob patterns (matched via ``fnmatch``) for stdlib logger names whose records must never
+    # become Sentry events or breadcrumbs. The default ``LoggingIntegration`` patches
+    # ``logging.Logger.callHandlers`` at the class level, so it captures ERROR-level stdlib records
+    # as events even for loggers whose ``propagate`` is disabled. Callers that already route a noisy
+    # third-party logger's output elsewhere (e.g. mngr redirects paramiko/pyinfra into loguru) pass
+    # those logger names here so Sentry drops the raw records instead of flooding on handled noise.
+    ignored_loggers: Sequence[str] = (),
 ) -> None:
     """Sets up the main Sentry instance for this process.
 
@@ -612,6 +633,8 @@ def setup_sentry(
         transport=ImbueSentryHttpTransport,
     )
     logger.info("Sentry initialized")
+
+    _register_ignored_loggers(ignored_loggers)
 
     # The S3 attachment uploader is initialized whenever a bucket is configured. Whether
     # logs/tracebacks are actually collected and uploaded is decided live per-event by

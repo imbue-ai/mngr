@@ -124,7 +124,6 @@ from imbue.minds.desktop_client.sharing_handler import get_sharing_status
 from imbue.minds.desktop_client.sharing_handler import is_probeable_share_url
 from imbue.minds.desktop_client.sharing_handler import probe_share_url_readiness
 from imbue.minds.desktop_client.state import get_state
-from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.templates import FALLBACK_BRANCH
 from imbue.minds.desktop_client.templates import normalize_host_name_slug
@@ -147,8 +146,10 @@ from imbue.minds.errors import MngrCommandError
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
+from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import ServiceName
+from imbue.minds.primitives import default_docker_runtime
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -553,6 +554,13 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
         ai_provider = AIProvider(str(body.get("ai_provider", AIProvider.SUBSCRIPTION.value)))
     except ValueError:
         return _json_error(f"Invalid ai_provider: {body.get('ai_provider')!r}", 400)
+    # Docker container runtime (runc vs gVisor's runsc); only consumed for
+    # LaunchMode.DOCKER. Defaults to the platform-appropriate value so macOS
+    # (no gVisor) gets runc and Linux gets the hardened runsc.
+    try:
+        docker_runtime = DockerRuntime(str(body.get("runtime", default_docker_runtime().value)))
+    except ValueError:
+        return _json_error(f"Invalid runtime: {body.get('runtime')!r}", 400)
     try:
         backup_provider = BackupProvider(str(body.get("backup_provider", BackupProvider.CONFIGURE_LATER.value)))
     except ValueError:
@@ -657,6 +665,7 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
         on_created=on_created,
         backup_request=backup_request,
         color=color,
+        docker_runtime=docker_runtime,
         original_minds_version=(branch_or_tag or branch or FALLBACK_BRANCH),
     )
     return OperationHandleResponse(operation_id=str(creation_id), kind="create"), 202
@@ -893,22 +902,20 @@ def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, i
         return _json_error("Workspace restart is unavailable in this configuration", 503)
 
     handle = OperationHandleResponse(operation_id=str(parsed_id), kind="restart")
-    # An auto-dispatched recovery restart (fired by the recovery page off its tier
-    # classification) can race the workspace's own self-recovery: the host-health
-    # probe that picks the tier runs a slow in-container exec, and the background
-    # probe loop can flip the tracker back to HEALTHY while that exec is still in
-    # flight. Restarting a workspace that already recovered is pure harm -- it
-    # bounces a healthy backend for nothing -- so skip it and let the recovery
-    # page's refresh 302 the user back to the workspace. A manual restart carries
-    # no marker and always proceeds; the user explicitly asked.
-    if bool(body.get("auto_dispatched", False)) and tracker.get_health(parsed_id) == AgentHealth.HEALTHY:
-        logger.info(
-            "Skipping auto-dispatched {} restart for {}: workspace already recovered to HEALTHY "
-            "before the recovery probe completed",
-            scope,
-            parsed_id,
-        )
-        return handle, 202
+    # A recovery-page auto-dispatch can race the workspace's own self-recovery
+    # (the host-health probe that picks the restart tier is slow), but no guard
+    # is needed here: the auto-dispatched host tier runs only ``mngr start``
+    # (``host_already_stopped`` skips the stop step), and ``mngr start`` targets
+    # only STOPPED agents and starts the host idempotently -- against a
+    # self-recovered workspace the whole restart degrades to a no-op. A veto
+    # keyed on tracker health would misfire here: the tracker reports
+    # default-HEALTHY for never-probed workspaces (e.g. a host offline since
+    # before this process started), so it would silently drop the cold-boot
+    # those workspaces need.
+    # The services tier (an in-place stop+start of the system-services agent)
+    # is NOT a no-op against a self-recovered interface; its narrow race window
+    # (evidence gathered seconds earlier, cost bounded to a brief interface
+    # blip) is deliberately left unguarded: that tier is slated for removal.
     # Serialize with the backup operations: ``registry.start`` below replaces
     # the workspace's record, so a RUNNING backup update/configure must be
     # rejected here (its worker's terminal complete/fail would corrupt the
@@ -1005,6 +1012,10 @@ def _handle_create_operation_status(operation_id: str) -> CreateOperationStatusR
         # redirects without reconstructing it client-side.
         redirect_url=info.redirect_url,
         error=info.error,
+        # Machine-readable failure classification (e.g. GITHUB_AUTH_REQUIRED for a
+        # private/nonexistent GitHub repo); the creating page reveals static
+        # guidance for kinds it knows about.
+        error_kind=str(info.error_kind) if info.error_kind is not None else None,
     )
 
 

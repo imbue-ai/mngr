@@ -1,0 +1,1 @@
+Removed the superfluous `@pytest.mark.rsync` mark from the `test_event_follow` e2e tutorial test. The test creates a local command agent in a git repository, which syncs via a git worktree rather than rsync, so the mark was flagged by the resource guard as declared-but-never-invoked.

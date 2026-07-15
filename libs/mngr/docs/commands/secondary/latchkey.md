@@ -211,7 +211,10 @@ Long-running foreground process that:
 
 1. Initializes the configured ``Latchkey`` (version-checks the binary,
    adopts or discards any pre-existing detached gateway record).
-2. Eagerly spawns the shared ``latchkey gateway`` subprocess.
+2. Eagerly spawns the shared ``latchkey gateway`` subprocess and
+   supervises it: a background health check respawns it (reusing its
+   original port) if the subprocess dies mid-session, so a crashed
+   gateway does not silently take agent traffic down.
 3. Spawns ``mngr observe --discovery-only --quiet`` and, for every
    agent discovered, opens a reverse SSH tunnel that bridges the
    agent's ``127.0.0.1:AGENT_SIDE_LATCHKEY_PORT`` to the host-side

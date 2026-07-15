@@ -20,6 +20,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelError
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
+from imbue.mngr_latchkey.cli import _run_gateway_health_check_loop
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import CredentialStatus
 from imbue.mngr_latchkey.core import LATCHKEY_MIN_VERSION
@@ -590,6 +591,94 @@ def test_stop_gateway_clears_in_memory_state(tmp_path: Path) -> None:
         manager.stop_gateway()
         assert not manager.is_gateway_running
         # Idempotent no-op so the CG has nothing left to wait for when it exits.
+        manager.stop_gateway()
+
+
+def test_is_gateway_running_reflects_subprocess_liveness(tmp_path: Path) -> None:
+    """``is_gateway_running`` must track actual subprocess liveness, not just a tracked record.
+
+    A gateway whose subprocess exited unexpectedly (a crash, with no
+    ``stop_gateway`` to clear the record) must read as not-running so the
+    supervisor's gateway health check knows to respawn it.
+    """
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        port = manager.start_gateway(cg)
+        assert manager.is_gateway_running
+        assert _wait_for_listening("127.0.0.1", port)
+
+        # Simulate an unexpected gateway death: kill the subprocess directly,
+        # leaving the tracked record in place (unlike ``stop_gateway``).
+        running = manager._running_gateway
+        assert running is not None
+        running.process.terminate()
+
+        assert not manager.is_gateway_running
+        manager.stop_gateway()
+
+
+def test_start_gateway_respawns_dead_gateway_on_same_port(tmp_path: Path) -> None:
+    """A crashed gateway is respawned on its original port so agent reverse tunnels stay valid."""
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        original_port = manager.start_gateway(cg)
+        assert _wait_for_listening("127.0.0.1", original_port)
+        running_before = manager._running_gateway
+        assert running_before is not None
+        first_process = running_before.process
+
+        # Kill the subprocess to simulate a crash, then re-ensure the gateway.
+        first_process.terminate()
+        assert not manager.is_gateway_running
+
+        respawned_port = manager.start_gateway(cg)
+        assert respawned_port == original_port
+        assert manager.is_gateway_running
+        running_after = manager._running_gateway
+        assert running_after is not None
+        assert running_after.process is not first_process
+        assert _wait_for_listening("127.0.0.1", respawned_port)
+        manager.stop_gateway()
+
+
+def test_gateway_health_check_loop_respawns_dead_gateway(tmp_path: Path) -> None:
+    """The supervisor's gateway health-check loop respawns a crashed gateway on its original port."""
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        original_port = manager.start_gateway(cg)
+        assert _wait_for_listening("127.0.0.1", original_port)
+
+        # Run the health-check loop in the background on a fast cadence.
+        shutdown_event = threading.Event()
+        loop_thread = threading.Thread(
+            target=_run_gateway_health_check_loop,
+            args=(shutdown_event, manager, cg, 0.05),
+            name="test-gateway-health-check",
+            daemon=True,
+        )
+        loop_thread.start()
+        try:
+            # Simulate a crash: kill the subprocess, leaving the tracked record in place.
+            running = manager._running_gateway
+            assert running is not None
+            running.process.terminate()
+
+            # The loop must notice and respawn the gateway on the same port.
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and not manager.is_gateway_running:
+                threading.Event().wait(timeout=_POLL_INTERVAL_SECONDS)
+            assert manager.is_gateway_running
+            assert _wait_for_listening("127.0.0.1", original_port)
+        finally:
+            shutdown_event.set()
+            loop_thread.join(timeout=5.0)
+        assert not loop_thread.is_alive()
         manager.stop_gateway()
 
 
@@ -1182,17 +1271,20 @@ def test_remote_state_watch_handler_routes_credential_and_permission_changes(
             plugin_data_dir=handler.latchkey.plugin_data_dir,
             known_remote_host_ids=handler._known_remote_host_ids,
             on_credentials_changed=handler._sync_credentials_to_all_known_hosts,
-            on_host_permissions_changed=handler._sync_permissions_to_host,
+            on_host_permissions_changed=handler._sync_full_state_to_host,
         )
 
         # A change to the credentials file pushes credentials (only) to all hosts.
         event_handler.dispatch(FileModifiedEvent(str(credentials_path)))
         assert handler._synced == [(host_id_str, False, True)]
 
-        # A change to a host's permissions file pushes permissions (only) to that host.
+        # A change to a host's permissions file pushes the full state
+        # (permissions, then credentials) to that host: the permissions
+        # determine which services' credentials ship, so a grant/revocation
+        # must also refresh the VPS credential store.
         handler._synced.clear()
         event_handler.dispatch(FileModifiedEvent(str(permissions_path)))
-        assert handler._synced == [(host_id_str, True, False)]
+        assert handler._synced == [(host_id_str, True, True)]
 
         # An unrelated path (e.g. the forward supervisor record) is ignored.
         handler._synced.clear()

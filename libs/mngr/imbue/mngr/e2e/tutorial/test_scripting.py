@@ -9,7 +9,6 @@ from imbue.mngr.e2e.conftest import E2eSession
 from imbue.skitwright.expect import expect
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(180)
@@ -31,13 +30,19 @@ def test_create_headless_no_connect_message(e2e: E2eSession) -> None:
     ).to_succeed()
 
     # Verify the agent was actually created and is discoverable, not just that
-    # the headless create command exited 0.
-    list_result = e2e.run("mngr list", comment="verify the headless agent appears in the list")
+    # the headless create command exited 0. The headless create defaults to the
+    # local provider, so scope `mngr list` to `--provider local` (matching the
+    # rest of the e2e suite): a bare `mngr list` also queries enabled cloud
+    # providers (e.g. AWS), which are unconfigured in the isolated test
+    # environment and would make the listing exit non-zero for reasons unrelated
+    # to this headless create.
+    list_result = e2e.run("mngr list --provider local", comment="verify the headless agent appears in the list")
     expect(list_result).to_succeed()
     expect(list_result.stdout).to_contain("my-task")
 
 
 @pytest.mark.release
+@pytest.mark.timeout(180)
 def test_config_set_headless_globally(e2e: E2eSession) -> None:
     """Tutorial block:
         # or set headless globally
@@ -53,11 +58,15 @@ def test_config_set_headless_globally(e2e: E2eSession) -> None:
     # file does not exist yet, so loading it isn't blocked by the test harness's
     # is_allowed_in_pytest opt-in guard (which would reject the freshly-written
     # file on any later `mngr` invocation in this repo).
-    path_result = e2e.run("mngr config path --scope project", comment="locate the project config file")
+    #
+    # The `mngr` subprocess cold-start can exceed the 10s global pytest timeout,
+    # so this test overrides that marker (@pytest.mark.timeout above) and gives
+    # each subprocess matching headroom past the 30s default.
+    path_result = e2e.run("mngr config path --scope project", comment="locate the project config file", timeout=120.0)
     expect(path_result).to_succeed()
     project_config_path = Path(path_result.stdout.strip())
 
-    set_result = e2e.run("mngr config set headless true", comment="set headless globally")
+    set_result = e2e.run("mngr config set headless true", comment="set headless globally", timeout=120.0)
     expect(set_result).to_succeed()
     # The set command reports the scope and file it wrote to.
     expect(set_result.stdout).to_contain("Set headless = true in project")
@@ -69,6 +78,7 @@ def test_config_set_headless_globally(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+@pytest.mark.timeout(60)
 def test_config_set_rejects_unknown_key(e2e: E2eSession) -> None:
     """Tutorial block:
         # or set headless globally
@@ -101,6 +111,14 @@ def test_config_set_rejects_unknown_key(e2e: E2eSession) -> None:
         f"Rejected write must not modify {project_config_path}: {contents_before!r} -> {contents_after!r}"
     )
     assert contents_after is None or "definitely_not_a_real_setting" not in contents_after
+
+    # Validation only rejects unknown fields; the value's *type* is not checked,
+    # since it goes through model_construct. So setting a known key to a value of
+    # the wrong type (a bool field to a non-bool string) is accepted and exits 0.
+    wrong_type_result = e2e.run(
+        "mngr config set headless notabool", comment="a wrong-type value for a known key is accepted"
+    )
+    expect(wrong_type_result).to_succeed()
 
 
 @pytest.mark.release
@@ -251,7 +269,13 @@ def test_usage_wait_and_create(e2e: E2eSession) -> None:
     expect(result.stdout).to_contain("Timed out")
 
     # Verify the concrete effect: the gated create was skipped, so no `chore`
-    # agent exists.
-    listing = e2e.run("mngr list --format json", comment="confirm the gated create was skipped", timeout=120.0)
+    # agent exists. Scope discovery to the always-reachable local provider so
+    # the check does not depend on cloud-provider credentials -- an unscoped
+    # `mngr list` enumerates every enabled provider and exits non-zero
+    # (EXIT_CODE_PROVIDER_INACCESSIBLE) when a bundled-but-unconfigured provider
+    # such as AWS lacks credentials, which is unrelated to this test's scope.
+    listing = e2e.run(
+        "mngr list --provider local --format json", comment="confirm the gated create was skipped", timeout=120.0
+    )
     expect(listing).to_succeed()
     expect(listing.stdout).not_to_contain("chore")

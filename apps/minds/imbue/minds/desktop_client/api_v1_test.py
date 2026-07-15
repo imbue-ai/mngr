@@ -21,6 +21,7 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
+from imbue.minds.desktop_client.agent_creator import CreationErrorKind
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
@@ -43,7 +44,6 @@ from imbue.minds.desktop_client.imbue_cloud_cli import TunnelInfo
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
-from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.templates import status_text_for
 from imbue.minds.desktop_client.workspace_operations import OPERATION_LOG_SENTINEL
@@ -51,6 +51,7 @@ from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKi
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import CreationId
+from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.testing import stub_mngr_host_dir
 from imbue.minds.utils.testing import RecordingMngrCaller
@@ -112,6 +113,7 @@ class _RecordingAgentCreator(AgentCreator):
         on_created: Callable[[AgentId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
         color: str | None = None,
+        docker_runtime: DockerRuntime = DockerRuntime.RUNC,
         original_minds_version: str = "",
     ) -> CreationId:
         self._last_call = {
@@ -126,6 +128,7 @@ class _RecordingAgentCreator(AgentCreator):
             "region": region,
             "anthropic_api_key": anthropic_api_key,
             "color": color,
+            "docker_runtime": docker_runtime,
             "original_minds_version": original_minds_version,
         }
         return CreationId()
@@ -513,6 +516,44 @@ def test_create_operation_status_includes_status_text(
     assert body["kind"] == "create"
     assert body["status_text"] == status_text_for(str(AgentCreationStatus.INITIALIZING), launch_mode=LaunchMode.DOCKER)
     assert body["status_text"]
+    # An in-flight (non-failed) creation carries no failure classification.
+    assert body["error_kind"] is None
+
+
+def test_create_operation_status_carries_error_kind_for_classified_failures(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    # A failed creation whose error was classified (e.g. a private GitHub repo
+    # the local git credentials cannot see) reports the machine-readable kind
+    # alongside the error message; the creating page gates its static sign-in
+    # guidance on it.
+    creation_id = CreationId()
+    creator = _StatusReportingAgentCreator(
+        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+        system_interface_health_tracker=SystemInterfaceHealthTracker(),
+        fixed_info=AgentCreationInfo(
+            creation_id=creation_id,
+            status=AgentCreationStatus.FAILED,
+            launch_mode=LaunchMode.DOCKER,
+            error="git clone failed:\nfatal: could not read Username for 'https://github.com'",
+            error_kind=CreationErrorKind.GITHUB_AUTH_REQUIRED,
+        ),
+    )
+    client = _client_with_agent_creator(
+        tmp_path, root_concurrency_group, notification_dispatcher, agent_creator=creator
+    )
+
+    response = client.get(f"/api/v1/workspaces/operations/create/{creation_id}", headers=_auth_header())
+
+    assert response.status_code == 200
+    body = json.loads(response.data)
+    assert body["status"] == "FAILED"
+    assert body["error"]
+    assert body["error_kind"] == "GITHUB_AUTH_REQUIRED"
 
 
 def test_create_workspace_full_surface_returns_202_and_threads_fields(
@@ -539,6 +580,7 @@ def test_create_workspace_full_surface_returns_202_and_threads_fields(
             "launch_mode": "DOCKER",
             "ai_provider": "SUBSCRIPTION",
             "backup_provider": "CONFIGURE_LATER",
+            "runtime": "RUNSC",
         },
     )
 
@@ -549,6 +591,7 @@ def test_create_workspace_full_surface_returns_202_and_threads_fields(
     assert str(creator.last_call["host_name"]) == "my-mind"
     assert str(creator.last_call["color"]) == "#0b292b"
     assert str(creator.last_call["branch"]) == "main"
+    assert creator.last_call["docker_runtime"] == DockerRuntime.RUNSC
 
 
 def test_create_workspace_requires_api_key_for_api_key_provider(
@@ -1558,40 +1601,68 @@ def test_workspace_restart_requires_bearer(tmp_path: Path) -> None:
     assert response.status_code == 401
 
 
-def test_auto_dispatched_restart_skipped_when_workspace_already_recovered(
+def _wait_for_restart_worker_and_get_status(client: FlaskClient, agent_id: AgentId) -> dict[str, Any]:
+    """Drain the restart worker's log queue to its terminal sentinel, then fetch the status.
+
+    Waits for the dispatched restart worker to finish (condition-based, no arbitrary
+    sleeps) and returns the parsed body of the typed restart-operation resource,
+    asserting the resource responds 200.
+    """
+    registry = get_state(client.application).workspace_operation_registry
+    log_queue = registry.get_log_queue(agent_id)
+    assert log_queue is not None
+    deadline = time.monotonic() + 15.0
+    while time.monotonic() < deadline:
+        if log_queue.get(timeout=15.0) == OPERATION_LOG_SENTINEL:
+            break
+    status_resp = client.get(f"/api/v1/workspaces/operations/restart/{agent_id}", headers=_auth_header())
+    assert status_resp.status_code == 200
+    return json.loads(status_resp.data)
+
+
+def test_restart_dispatches_for_never_probed_workspace(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:
-    """An auto-dispatched recovery restart must no-op once the workspace recovered.
+    """A recovery-page dispatch for a never-probed workspace must actually restart.
 
-    The recovery page's host-health probe is slow, so the background probe loop can
-    flip the tracker back to HEALTHY while it is in flight; firing the queued
-    restart then would bounce a healthy backend. With the ``auto_dispatched``
-    marker the endpoint must skip the restart -- leaving the tracker HEALTHY rather
-    than transitioning it to RESTARTING -- so the recovery page's refresh simply
-    sends the user back to the now-healthy workspace. A manual restart (no marker)
-    always proceeds.
+    A workspace whose host has been offline since before this process started is
+    never enrolled as a probe suspect, so the tracker reports default-HEALTHY for
+    it. A veto keyed on that reading would drop the recovery page's cold-boot
+    dispatch (host scope + ``host_already_stopped``), stranding the workspace on
+    the loader forever. The dispatch must proceed to a real restart operation --
+    self-recovery races are absorbed by ``mngr start`` only targeting STOPPED
+    agents, not by an endpoint-side veto.
     """
     agent_id = AgentId()
-    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    services_id = AgentId()
+    resolver = _resolver_with_services_agent(agent_id, services_id)
+    fake_mngr = _write_fake_mngr(tmp_path / "bin")
     tracker = SystemInterfaceHealthTracker()
     client = _build_client(
         tmp_path,
         resolver,
         root_concurrency_group=root_concurrency_group,
+        mngr_binary=fake_mngr,
+        mngr_host_dir=tmp_path / "host",
         system_interface_health_tracker=tracker,
     )
 
-    # Tracker reports HEALTHY for this workspace (it recovered / was never enrolled).
+    # Tracker has no record for this workspace (never probed): the dispatch must
+    # still go through rather than being vetoed off the default-HEALTHY reading.
     response = client.post(
         f"/api/v1/workspaces/{agent_id}/restart",
         headers=_auth_header(),
-        json={"scope": "services", "auto_dispatched": True},
+        json={"scope": "host", "host_already_stopped": True},
     )
 
     assert response.status_code == 202
     assert json.loads(response.data) == {"operation_id": str(agent_id), "kind": "restart"}
-    # The guard returned before mark_restarting, so no restart was dispatched.
-    assert tracker.get_health(agent_id) == AgentHealth.HEALTHY
+
+    # Confirm a real restart operation ran to DONE (with no mngr_forward_port
+    # wired, a clean dispatch counts as success).
+    body = _wait_for_restart_worker_and_get_status(client, agent_id)
+    assert body["kind"] == "restart"
+    assert body["status"] == "DONE"
 
 
 def test_workspace_restart_registers_operation_reaching_done(
@@ -1619,19 +1690,7 @@ def test_workspace_restart_registers_operation_reaching_done(
     )
     assert dispatch.status_code == 202
 
-    # Wait for the worker to finish by draining its log queue to the terminal
-    # sentinel (condition-based, no arbitrary sleeps).
-    registry = get_state(client.application).workspace_operation_registry
-    log_queue = registry.get_log_queue(agent_id)
-    assert log_queue is not None
-    deadline = time.monotonic() + 15.0
-    while time.monotonic() < deadline:
-        if log_queue.get(timeout=15.0) == OPERATION_LOG_SENTINEL:
-            break
-
-    status_resp = client.get(f"/api/v1/workspaces/operations/restart/{agent_id}", headers=_auth_header())
-    assert status_resp.status_code == 200
-    body = json.loads(status_resp.data)
+    body = _wait_for_restart_worker_and_get_status(client, agent_id)
     assert body["kind"] == "restart"
     assert body["is_done"] is True
     assert body["status"] == "DONE"

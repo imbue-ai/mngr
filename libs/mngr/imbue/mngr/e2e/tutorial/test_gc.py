@@ -42,13 +42,21 @@ def test_gc_default(e2e: E2eSession) -> None:
         )
     ).to_succeed()
 
-    result = e2e.run("mngr gc", comment="garbage collect all unused resources")
+    # gc scans every provider over the network (including the Modal environment
+    # bootstrapped above), which takes longer than the default 30s run budget;
+    # give it the same headroom the other gc tests in this file use.
+    result = e2e.run("mngr gc", comment="garbage collect all unused resources", timeout=90.0)
     expect(result).to_succeed()
     expect(result.stdout).to_contain("Garbage Collection Results")
 
     # gc must only clean *unused* resources: the still-active agent and its
-    # Modal host must survive a default gc run.
-    list_after = e2e.run("mngr list", comment="verify the active agent survived gc")
+    # Modal host must survive a default gc run. Scope the listing to the Modal
+    # provider (the one the agent lives on): a bare `mngr list` also probes every
+    # other enabled provider and aborts (exit 6) on any that are unreachable in
+    # this environment (e.g. AWS without credentials), which is unrelated to
+    # whether the agent survived gc. Like gc, this list queries Modal over the
+    # network, so give it headroom past the default 30s run budget.
+    list_after = e2e.run("mngr list --provider modal", comment="verify the active agent survived gc", timeout=60.0)
     expect(list_after).to_succeed()
     expect(list_after.stdout).to_contain("my-task")
 
@@ -88,8 +96,13 @@ def test_gc_dry_run(e2e: E2eSession) -> None:
     expect(result.stdout).to_contain("Garbage Collection (Dry Run)")
 
     # The whole point of --dry-run is that it changes nothing: the active agent
-    # and its Modal host must still be present after the dry run.
-    list_after = e2e.run("mngr list", comment="verify the dry run destroyed nothing")
+    # and its Modal host must still be present after the dry run. Scope the
+    # verification to the Modal provider named in the scope: a bare `mngr list`
+    # fans out to every registered provider backend and, by design, exits
+    # non-zero when any enabled provider is unauthenticated (e.g. an AWS backend
+    # without credentials in the test environment) -- a condition orthogonal to
+    # whether the dry run preserved the Modal agent.
+    list_after = e2e.run("mngr list --provider modal", comment="verify the dry run destroyed nothing")
     expect(list_after).to_succeed()
     expect(list_after.stdout).to_contain("dry-run-task")
 
@@ -132,13 +145,22 @@ def test_gc_provider_modal(e2e: E2eSession) -> None:
     )
     expect(result).to_succeed()
     # The running agent's machine is active, so gc must not tear it down: it
-    # should still be listed after garbage collection.
-    list_after = e2e.run("mngr list --format json", comment="confirm the Modal agent survived gc", timeout=60.0)
+    # should still be listed after garbage collection. Scope the listing to the
+    # Modal provider (matching the sibling create-modal tests): an unfiltered
+    # `mngr list` reaches out to every enabled provider, so an unrelated
+    # provider that is enabled-but-unavailable in this environment (e.g. AWS
+    # with no credentials) would make it exit non-zero, and a match under
+    # --provider modal inherently confirms the surviving agent still lives on
+    # the Modal-backed host.
+    list_after = e2e.run(
+        "mngr list --provider modal --format json", comment="confirm the Modal agent survived gc", timeout=60.0
+    )
     expect(list_after).to_succeed()
     expect(list_after.stdout).to_contain("gc-modal-task")
 
 
 @pytest.mark.release
+@pytest.mark.timeout(60)
 def test_gc_background_watch(e2e: E2eSession) -> None:
     """Tutorial block:
         # if you wanted, you could disable automatic garbage collection on destroy by setting the appropriate setting:

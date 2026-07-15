@@ -1,3 +1,4 @@
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Generator
@@ -17,6 +18,7 @@ from imbue.mngr.cli.connect import connect
 from imbue.mngr.cli.destroy import destroy
 from imbue.mngr.cli.events import events
 from imbue.mngr.cli.exec import exec_command
+from imbue.mngr.cli.extras import _CLAUDE_CODE_PLUGINS
 from imbue.mngr.cli.extras import extras
 from imbue.mngr.cli.gc import gc
 from imbue.mngr.cli.help import help_command
@@ -29,6 +31,7 @@ from imbue.mngr.cli.rsync import rsync_command
 from imbue.mngr.cli.snapshot import snapshot
 from imbue.mngr.cli.start import start
 from imbue.mngr.cli.stop import stop
+from imbue.mngr.cli.testing import write_stub_claude_cli
 from imbue.mngr.cli.transcript import transcript
 from imbue.mngr.config.data_types import CreateCliOptions
 from imbue.mngr.main import cli
@@ -212,6 +215,23 @@ def create_test_agent(
 
     for session_name in created_sessions:
         cleanup_tmux_session(session_name)
+
+
+@pytest.fixture
+def stub_claude_on_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Prepend a stub ``claude`` CLI to PATH that reports every known plugin as installed.
+
+    Extras CLI tests that reach the claude-plugin status probe through the real
+    command path use this so they never spawn the real ``claude`` (a Node
+    process whose startup on a contended CI sandbox trips the global 10s
+    offload pytest-timeout). Reporting all plugins installed also makes the
+    install flow short-circuit before its interactive-terminal check, so the
+    tests behave identically with or without a TTY. Returns the stub's bin dir.
+    """
+    bin_dir = tmp_path / "stub-claude-bin"
+    write_stub_claude_cli(bin_dir, installed_plugin_ids=[plugin.install_ref for plugin in _CLAUDE_CODE_PLUGINS])
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    return bin_dir
 
 
 @pytest.fixture
