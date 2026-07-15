@@ -679,9 +679,15 @@ def _find_earliest_snapshot_window_start(events_path: Path) -> datetime | None:
     For each provider, a ``DISCOVERY_PROVIDER`` snapshot is authoritative back to its
     ``discovery_started_at`` (when its read began), which is *earlier* than its own line
     position (written at ``discovery_finished_at``). So the value here is the minimum,
-    across every provider's *latest* snapshot, of that snapshot's ``discovery_started_at``
-    -- plus the latest legacy ``DISCOVERY_FULL`` snapshot's own timestamp, for historical
-    logs. Returns None when the file holds no snapshot at all.
+    across every provider's *latest* snapshot, of that snapshot's ``discovery_started_at``.
+
+    The legacy ``DISCOVERY_FULL`` timestamp participates only when the file holds no
+    per-provider snapshot at all (a pure pre-migration log). Nothing writes
+    ``DISCOVERY_FULL`` anymore and consumers drop its content, so once any per-provider
+    snapshot exists the full line is pure history; letting it participate in the minimum
+    would permanently pin the replay window at the last pre-migration write, replaying
+    days of stale events on every attach. Returns None when the file holds no snapshot
+    of either kind.
     """
     latest_start_by_provider: dict[str, datetime] = {}
     latest_full_started_at: datetime | None = None
@@ -708,12 +714,9 @@ def _find_earliest_snapshot_window_start(events_path: Path) -> datetime | None:
             else:
                 pass
 
-    candidate_starts = list(latest_start_by_provider.values())
-    if latest_full_started_at is not None:
-        candidate_starts.append(latest_full_started_at)
-    if not candidate_starts:
-        return None
-    return min(candidate_starts)
+    if latest_start_by_provider:
+        return min(latest_start_by_provider.values())
+    return latest_full_started_at
 
 
 def _find_offset_of_first_event_at_or_after(events_path: Path, start: datetime) -> int:
@@ -752,10 +755,11 @@ def find_discovery_snapshot_replay_offset(events_path: Path) -> int:
 
     Returns the offset of the first event line at or after the earliest
     ``discovery_started_at`` among every provider's latest ``DISCOVERY_PROVIDER`` snapshot
-    (and the latest legacy ``DISCOVERY_FULL`` snapshot's timestamp). Returns 0 when the
-    file is absent or holds no snapshot (read the whole file). Starting a little early is
-    harmless: per-provider snapshots reset only their own provider, and the per-item span
-    rule keeps a stale snapshot from clobbering newer in-span events.
+    (falling back to the latest legacy ``DISCOVERY_FULL`` timestamp only when no
+    per-provider snapshot exists). Returns 0 when the file is absent or holds no snapshot
+    (read the whole file). Starting a little early is harmless: per-provider snapshots
+    reset only their own provider, and the per-item span rule keeps a stale snapshot from
+    clobbering newer in-span events.
     """
     if not events_path.exists():
         return 0
