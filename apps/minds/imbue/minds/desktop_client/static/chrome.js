@@ -256,7 +256,15 @@
     var pageCrumb = document.getElementById('page-crumb');
     var backBtn = document.getElementById('back-btn');
     var isWorkspace = ctx.kind === 'workspace';
+    var prevCrumbAgentId = currentCrumbAgentId;
     currentCrumbAgentId = isWorkspace ? ctx.agentId : null;
+    // Browser mode: keep the inline switcher's current-row highlight in sync
+    // with the breadcrumb workspace (so a workspace's settings / sharing screen
+    // still marks that workspace current). Electron's sidebar is a separate
+    // view, primed over the accent-changed IPC. Re-render only on change.
+    if (!isElectron && currentCrumbAgentId !== prevCrumbAgentId && lastWorkspaces) {
+      renderWorkspaces(lastWorkspaces);
+    }
     if (wsCrumb) wsCrumb.hidden = !isWorkspace;
     if (isWorkspace) {
       var cached = accentByAgentId[ctx.agentId];
@@ -588,7 +596,7 @@
         // Unlike the Electron sidebar (delegated listeners) this view wires
         // the click per-row, so attach it to the built element.
         var row = window.mindsSidebarRow.buildRow(w, {
-          isCurrent: w.id === currentTitleAgentId,
+          isCurrent: w.id === currentCrumbAgentId,
           withOpenNew: false,
         });
         row.addEventListener('click', function (e) {

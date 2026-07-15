@@ -13,3 +13,7 @@ Reworked the desktop app's titlebar and navigation to match the minds-options mo
 - The macOS traffic lights now stay visible (as the inactive grey) when a minds window is not the focused window, instead of vanishing -- Electron hides them on blur when a custom traffic-light position is set, so visibility is now re-asserted on focus and blur.
 
 - The workspace switcher menu opens shifted left so each row's workspace-name text lines up directly under the breadcrumb's workspace-name text.
+
+- The home screen's "Minds Settings" and account launchers now open their modals. They post through the content relay, but the main process didn't recognize the shell view (which renders the home screen over a parked workspace) as an event source, so the IPC was silently dropped; the shell view is now included when resolving a sender's window.
+
+- The workspace switcher now highlights the workspace you're currently in even on that workspace's own settings or sharing screens (it keys the current-row marker off the active workspace scope, not just the workspace whose content is displayed).

@@ -253,7 +253,12 @@ function getBundleFromEvent(event) {
   const senderId = event.sender.id;
   for (const b of bundles) {
     if (b.window.isDestroyed()) continue;
-    const views = [b.chromeView, b.contentView, b.modalView];
+    // Include the shellView: minds pages (Home, Create, ...) render there when
+    // layered over a parked workspace, and their content-relay-preload posts
+    // (e.g. the home-screen Minds Settings / account launchers) arrive from it.
+    // Omitting it made getBundleFromEvent return null, so the `if (sender)`
+    // guards on those IPC handlers silently dropped the message.
+    const views = [b.chromeView, b.contentView, b.shellView, b.modalView];
     for (const v of views) {
       if (!v) continue;
       if (v.webContents.isDestroyed()) continue;
@@ -1153,6 +1158,10 @@ function primeOverlayFrames(bundle) {
     sendToOverlayFrames(bundle, 'chrome-event', { type: 'system_interface_status', agent_id: agentId, status });
   }
   sendToOverlayFrames(bundle, 'current-workspace-changed', bundle.currentWorkspaceId);
+  // The workspace switcher highlights the workspace whose SCOPE is active --
+  // including its settings / sharing screens, where ``currentWorkspaceId`` is
+  // null -- so it keys the current row off the accent-source agent id.
+  sendToOverlayFrames(bundle, 'accent-changed', bundle.currentAccentAgentId || null);
 }
 
 // Create the per-bundle overlay view and load the warm host page. Called once
@@ -1810,6 +1819,9 @@ function updateBundleAccentAgentId(bundle, agentId) {
   if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
     bundle.chromeView.webContents.send('accent-changed', normalized);
   }
+  // Also reach the open workspace switcher (an overlay iframe) so its current-row
+  // highlight follows the active workspace scope, e.g. onto its settings screen.
+  sendToOverlayFrames(bundle, 'accent-changed', normalized);
 }
 
 function filterRestorableUrls(state, knownAgentIdsSet) {

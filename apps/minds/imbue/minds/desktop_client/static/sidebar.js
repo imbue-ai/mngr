@@ -5,7 +5,13 @@
 // chrome.js embedded menu handles the same job inline.
 (function () {
   var isElectron = !!window.minds;
+  // The workspace whose CONTENT is displayed (narrow: null on its settings /
+  // sharing screens). ``currentScopeAgentId`` is the wider accent-source
+  // workspace -- the one whose scope is active, including those screens -- and
+  // is what the current-row highlight keys off so opening a mind's settings
+  // still marks that mind as current.
   var currentWorkspaceId = null;
+  var currentScopeAgentId = null;
   var lastWorkspaces = [];
 
   // ``mngr forward`` plugin's bare origin (e.g. ``http://localhost:8421``).
@@ -68,7 +74,7 @@
         // context-menu are handled by the delegated document listeners below.
         container.appendChild(
           window.mindsSidebarRow.buildRow(w, {
-            isCurrent: w.id === currentWorkspaceId,
+            isCurrent: w.id === (currentScopeAgentId || currentWorkspaceId),
             withOpenNew: true,
           }),
         );
@@ -129,6 +135,15 @@
   if (isElectron && window.minds.onCurrentWorkspaceChanged) {
     window.minds.onCurrentWorkspaceChanged(function (agentId) {
       currentWorkspaceId = agentId || null;
+      renderWorkspaces(lastWorkspaces);
+    });
+  }
+
+  // The accent-source workspace (the active scope, including a workspace's
+  // settings / sharing screens) drives which row is marked current.
+  if (isElectron && window.minds.onAccentChanged) {
+    window.minds.onAccentChanged(function (agentId) {
+      currentScopeAgentId = agentId || null;
       renderWorkspaces(lastWorkspaces);
     });
   }
