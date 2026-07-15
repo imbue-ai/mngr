@@ -9,7 +9,7 @@ dependencies = [
     "click>=8.0",
     "click-option-group>=0.5.6",
     "tenacity>=8.0",
-    "urwid_readline>=0.14",
+    "urwid-readline>=0.14",
 ]
 
 [project.entry-points.mngr]
