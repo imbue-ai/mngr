@@ -814,8 +814,9 @@ def build_host_health_response(
 
     ``probe_exec_attempted`` is True when the batched in-container ``mngr exec``
     was actually launched (it is skipped when the provider has a surfaced error,
-    no services agent id is known, or the host is trustworthily observed not
-    running). ``probe_timed_out`` is True when that exec was killed by its own
+    no services agent id is known, or the still-flowing discovery stream reads
+    the host as anything but RUNNING; a stalled stream attempts it regardless of
+    the recorded state). ``probe_timed_out`` is True when that exec was killed by its own
     timeout rather than exiting -- it observed nothing, so a negative verdict off
     it would be unfounded (INDETERMINATE). An attempted exec that *completed*
     without producing the sentinel is direct evidence the container is
