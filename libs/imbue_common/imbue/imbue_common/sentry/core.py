@@ -845,8 +845,9 @@ class ErrorAttachmentsS3Uploader(MutableModel):
     """Collects (and uploads) the log files + traceback attached to an error report.
 
     The set of log files is driven by ``log_attachment_groups``: each group's glob
-    is matched under the process's log folder, the newest matches are kept, and
-    immutable groups (e.g. rotated logs) are uploaded once and their S3 key cached.
+    is matched under the process's log folder (or the group's ``base_dir``, when
+    set), the newest matches are kept, and immutable groups (e.g. rotated logs)
+    are uploaded once and their S3 key cached.
     """
 
     # The per-process log layout to attach. Empty means only the (logsite)
