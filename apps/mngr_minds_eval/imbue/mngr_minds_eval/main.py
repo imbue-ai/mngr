@@ -207,12 +207,13 @@ def main() -> None:
             if env_exists is None:
                 print(">> WARNING: could not list Modal envs; relying on the S3 uniqueness check", flush=True)
             container = box_mod.ensure(config["mngr_branch"], user_id=batch)
+            # The box IS this batch's computer and it is up NOW -- print its desktop before the
+            # creates run, so you can enter it and watch the workspaces appear as they are made.
+            _print_desktop_urls(container)
             returncode = _run_in_container(container, sys.argv[1:], upload=(args.config, _CONFIG_IN_BOX))
             if returncode == 0:
-                # The box stays up: it IS this batch's computer -- enter it to watch the workspaces
-                # run. visit-batch reuses it by name (or reboots it after you remove it).
-                _print_desktop_urls(container)
-                print("  inspect:  minds-evals inspect {}".format(batch), flush=True)
+                print("\n  inspect:  minds-evals inspect {}".format(batch), flush=True)
+                print("  enter its computer any time:  minds-evals visit-batch {}".format(batch), flush=True)
             else:
                 print("\n  launch failed -- see: docker logs {}".format(container))
             sys.exit(returncode)
