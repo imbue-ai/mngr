@@ -1,0 +1,1 @@
+Added the `@pytest.mark.rsync` resource-guard mark to the `mngr ask` release test (`test_ask_simple_query`), which invokes rsync internally when preserving agent logs. This resolves the resource-guard failure so the end-to-end round-trip test passes.

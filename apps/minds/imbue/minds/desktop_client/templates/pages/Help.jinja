@@ -221,14 +221,14 @@
   })();
 </script>
 {% endset %}
-<OverlaySurface title="Get help" scripts={{ _scripts }}>
+<OverlaySurface title="Ran into a bug?" scripts={{ _scripts }}>
   <div id="help-backdrop"
        class="fixed inset-0 bg-surface-overlay flex items-center justify-center p-4"
        onclick="onHelpBackdropClick(event)">
     <div id="help-dialog"
          class="relative w-full max-w-md max-h-[90vh] overflow-y-auto bg-surface-primary rounded-lg border border-default shadow-overlay">
       <div class="flex items-center justify-between px-4 h-[44px] border-b border-default">
-        <h1 class="type-section text-primary">Get help</h1>
+        <h1 class="type-section text-primary">Ran into a bug?</h1>
         <button type="button" aria-label="Close" id="help-close-btn" data-tooltip="Close"
                 class="inline-flex items-center justify-center w-6 h-6 rounded-md text-tertiary hover:text-primary hover:bg-fill-hover cursor-pointer">
           <Icon16 name="close" />
@@ -243,7 +243,7 @@
           {% if workspace_name %}An agent in workspace <span class="font-semibold">{{ workspace_name }}</span> wants to submit this report:{% else %}An agent in this workspace wants to submit this report:{% endif %}
         </p>
         {% else %}
-        <p class="type-body text-primary mb-4">Seems like you're running into a problem &mdash; we can help.</p>
+        <p class="type-body text-primary mb-4">Here's how we can help:</p>
         {% endif %}
 
         {# The have-an-agent-help / report-a-bug choice is hidden for an agent escalation (we are

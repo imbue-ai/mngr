@@ -25,7 +25,6 @@ def _create_my_task(e2e: E2eSession, sleep_value: int) -> None:
     ).to_succeed()
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -51,7 +50,6 @@ def test_troubleshoot_check_agent_state(e2e: E2eSession) -> None:
     expect(result.stdout).to_contain("local")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -98,7 +96,6 @@ def test_troubleshoot_recent_events_missing_agent(e2e: E2eSession) -> None:
     expect(result.stderr).to_contain("Could not find agent")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -146,7 +143,6 @@ def test_troubleshoot_follow_events_unknown_agent(e2e: E2eSession) -> None:
     expect(result.stderr).to_contain("no-such-agent")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(60)
@@ -176,7 +172,6 @@ def test_troubleshoot_transcript_for_errors(e2e: E2eSession) -> None:
     expect(result.stderr).to_contain("does not produce a common transcript")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -211,7 +206,6 @@ def test_troubleshoot_host_diagnostics(e2e: E2eSession) -> None:
     assert "Filesystem" in df_result.stdout, f"df -h did not report a filesystem table:\n{df_result.stdout}"
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -279,16 +273,26 @@ def test_troubleshoot_destroy_and_recreate_modal(e2e: E2eSession) -> None:
 
     # The agent should exist on a modal host before we destroy it. Capture the
     # host name so we can confirm the recreate lands on a genuinely fresh host.
-    before = e2e.run("mngr list --format json", comment="confirm my-task exists before destroy")
+    # Scope discovery to the modal provider: this test is exclusively about the
+    # modal destroy/recreate cycle, so an unrelated provider that happens to be
+    # unreachable in the test environment (e.g. a Docker daemon that is not
+    # running) must not make these observation commands exit non-zero.
+    before = e2e.run("mngr list --provider modal --format json", comment="confirm my-task exists before destroy")
     expect(before).to_succeed()
     agents_before = [a for a in json.loads(before.stdout)["agents"] if a["name"] == "my-task"]
     assert len(agents_before) == 1, f"expected exactly one my-task before destroy, got {agents_before}"
     original_host = agents_before[0]["host"]["name"]
 
-    expect(e2e.run("mngr destroy my-task --force", comment="destroy")).to_succeed()
+    # `mngr destroy --force` runs a full post-destroy garbage collection that
+    # walks the modal provider (terminating the sandbox and sweeping orphaned
+    # snapshots/volumes) over the network, which routinely exceeds the default
+    # 30s per-command timeout, so give it the same generous window as create.
+    expect(e2e.run("mngr destroy my-task --force", comment="destroy", timeout=180.0)).to_succeed()
 
     # After destroy the agent (and its now-empty host) must be gone.
-    after_destroy = e2e.run("mngr list --format json", comment="confirm my-task is gone after destroy")
+    after_destroy = e2e.run(
+        "mngr list --provider modal --format json", comment="confirm my-task is gone after destroy"
+    )
     expect(after_destroy).to_succeed()
     names_after_destroy = [a["name"] for a in json.loads(after_destroy.stdout)["agents"]]
     assert "my-task" not in names_after_destroy, f"my-task should be gone after destroy, saw {names_after_destroy}"
@@ -303,7 +307,7 @@ def test_troubleshoot_destroy_and_recreate_modal(e2e: E2eSession) -> None:
 
     # The recreate must bring my-task back, and on a brand-new host (the old one
     # was destroyed), not by silently resurrecting the destroyed host.
-    after = e2e.run("mngr list --format json", comment="confirm my-task is back after recreate")
+    after = e2e.run("mngr list --provider modal --format json", comment="confirm my-task is back after recreate")
     expect(after).to_succeed()
     agents_after = [a for a in json.loads(after.stdout)["agents"] if a["name"] == "my-task"]
     assert len(agents_after) == 1, f"expected exactly one my-task after recreate, got {agents_after}"
@@ -311,8 +315,15 @@ def test_troubleshoot_destroy_and_recreate_modal(e2e: E2eSession) -> None:
     assert recreated_host != original_host, f"recreate should land on a fresh host, but reused {original_host!r}"
 
 
+# NOTE: deliberately NOT marked @pytest.mark.modal. `mngr gc` reaches Modal only
+# through the in-process gRPC SDK inside the `mngr` subprocess, whose resource
+# guard is a pytest-process monkeypatch that does not cross into that subprocess.
+# The only subprocess-visible modal guard is the `modal` CLI PATH wrapper, and gc
+# never shells out to that CLI (only create/deploy do); it discovers Modal via the
+# SDK and gracefully skips it when the per-user environment is empty. Marking this
+# @pytest.mark.modal would therefore always fail the "marked but never invoked
+# modal" guard check, exactly as documented for `mngr list`/`mngr observe`.
 @pytest.mark.release
-@pytest.mark.modal
 @pytest.mark.timeout(120)
 def test_troubleshoot_gc_dry_run_then_gc(e2e: E2eSession) -> None:
     """Tutorial block:

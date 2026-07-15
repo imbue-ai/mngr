@@ -1,0 +1,1 @@
+- Gave the `mngr list --host-label` malformed-input e2e test (`test_list_host_label_filter_invalid_format`) an explicit 60s timeout so it is no longer flaky under the default 10s per-test timeout. The command correctly rejects a `--host-label` value without `=` before any provider discovery, but mngr's CLI cold-start overhead alone sits right at the 10s boundary.

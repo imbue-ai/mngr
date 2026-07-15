@@ -1,0 +1,1 @@
+Fixed the `test_list_filter_invalid_cel` e2e tutorial test so it no longer trips the default 10s pytest timeout: a subprocess `mngr list` against a fresh Modal environment needs longer than that to start up and report the invalid-CEL error. Added an explicit `@pytest.mark.timeout(60)`, matching the lightest sibling e2e tests.

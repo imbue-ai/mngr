@@ -1,0 +1,1 @@
+Tests: the `test_list_format_json_recap` e2e tutorial test now carries `@pytest.mark.timeout(180)`, matching its identical sibling `test_list_format_jsonl_recap`. `mngr list` performs slow in-process Modal discovery when credentials are present, which exceeds the 10s default and previously made the test time out spuriously.

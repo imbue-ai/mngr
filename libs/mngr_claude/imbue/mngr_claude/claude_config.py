@@ -612,11 +612,11 @@ def build_readiness_hooks_config() -> dict[str, Any]:
 
     - SessionStart: creates 'session_started' file AND tracks the current session ID
       (writes to claude_session_id and appends to claude_session_id_history). Also
-      signals the tmux wait-for channel that ``mngr message`` waits on, but ONLY
-      when the session start was triggered by ``/clear`` or ``/compact``. These
-      are TUI-local slash commands that do NOT trigger UserPromptSubmit, so
-      without this signal ``mngr message agent -m /clear`` would time out at
-      ``enter_submission_timeout_seconds`` even though /clear actually executed.
+      signals the tmux wait-for channel that OLDER mngr versions wait on, but ONLY
+      when the session start was triggered by ``/clear`` or ``/compact`` (TUI-local
+      slash commands that do NOT trigger UserPromptSubmit). Current mngr confirms
+      sends from durable evidence and never listens on the channel; the signal is
+      kept only for old senders and is scheduled for removal.
       Filtering on source ensures normal startup/resume don't fire stale signals.
       Finally, on ``startup``/``resume`` it clears the 'active' and
       'permissions_waiting' markers (see below): a fresh Claude process is not
@@ -650,8 +650,9 @@ def build_readiness_hooks_config() -> dict[str, Any]:
       did not run, so consumers can treat such a tail as idle rather than
       "still working". Deliberately NOT touched on compact (mid-turn).
 
-    The tmux wait-for signal on UserPromptSubmit allows instant detection of
-    message submission without polling.
+    The tmux wait-for signals (UserPromptSubmit, and SessionStart for
+    /clear//compact) are kept ONLY for older mngr senders; current mngr
+    confirms sends from durable evidence and never listens on the channel.
     """
     return {
         "hooks": {
@@ -683,13 +684,13 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                             ),
                         },
                         {
-                            # /clear and /compact do not trigger UserPromptSubmit
-                            # (they are TUI-local commands), so without this hook
-                            # `mngr message agent -m /clear` would time out at
-                            # `enter_submission_timeout_seconds` even though /clear
-                            # ran successfully. Mirror the UserPromptSubmit signal
-                            # here, gated on source so that normal startup/resume
-                            # don't fire stale signals.
+                            # FIXME: remove this hook once released senders no
+                            #  longer wait on the mngr-submit channel. Current
+                            #  mngr confirms sends from durable evidence and
+                            #  never listens here; the signal is kept ONLY so
+                            #  older mngr versions messaging a newly created
+                            #  agent still confirm /clear and /compact (which
+                            #  do not trigger UserPromptSubmit).
                             "type": "command",
                             "command": (
                                 SESSION_GUARD + "_MNGR_HOOK_INPUT=$(cat);"
@@ -737,6 +738,15 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                             + """touch "$MNGR_AGENT_STATE_DIR/active" && rm -f "$MNGR_AGENT_STATE_DIR/permissions_waiting" && mkdir -p $MNGR_HOST_DIR/events/mngr/activity && echo '{"source": "mngr/activity", "type": "activity", "event_id": "'"evt-$(head -c 16 /dev/urandom | xxd -p)"'", "timestamp": "'"$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z")"'"}' >> $MNGR_HOST_DIR/events/mngr/activity/events.jsonl""",
                         },
                         {
+                            # FIXME: remove this hook once released senders no
+                            #  longer wait on the mngr-submit channel. Current
+                            #  mngr confirms sends from durable evidence (see
+                            #  ClaudeAgent._build_submission_evidence_probes)
+                            #  and never listens here; the signal is kept ONLY
+                            #  so older mngr versions messaging a newly created
+                            #  agent still confirm submissions. Note that tmux
+                            #  LATCHES a signal fired with no waiter, which is
+                            #  exactly why current mngr stopped trusting it.
                             "type": "command",
                             "command": SESSION_GUARD
                             + "tmux wait-for -S \"mngr-submit-$(tmux display-message -p '#S')\" 2>/dev/null || true",

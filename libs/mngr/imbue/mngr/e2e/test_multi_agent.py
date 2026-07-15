@@ -7,11 +7,18 @@ import pytest
 from imbue.mngr.e2e.conftest import E2eSession
 from imbue.skitwright.expect import expect
 
+# Each `mngr` invocation pays a fixed startup cost (the CLI eagerly imports every
+# provider plugin, pulling in heavy cloud SDKs) that can approach the 30s default
+# per-command timeout on slow CI/sandbox filesystems. This test issues ten
+# commands back to back, so give each one generous headroom and raise the
+# whole-test cap accordingly.
+_COMMAND_TIMEOUT_SECONDS = 90.0
+_TEST_TIMEOUT_SECONDS = 600
 
-@pytest.mark.rsync
+
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(300)
+@pytest.mark.timeout(_TEST_TIMEOUT_SECONDS)
 def test_multiple_agents_coexist(e2e: E2eSession) -> None:
     """Verify that three agents created concurrently coexist as independent, isolated entities.
 
@@ -26,10 +33,20 @@ def test_multiple_agents_coexist(e2e: E2eSession) -> None:
             e2e.run(
                 f"mngr create {name} --type command --no-ensure-clean --no-connect -- sleep {sleep_seconds}",
                 comment=f"Create {name}",
+                timeout=_COMMAND_TIMEOUT_SECONDS,
             )
         ).to_succeed()
 
-    list_result = e2e.run("mngr list", comment="Verify all three agents appear")
+    # Scope discovery to the local provider (where these agents live). An
+    # unqualified `mngr list` scans every enabled provider backend, and any
+    # cloud backend without credentials in the environment (e.g. aws) makes the
+    # command exit non-zero with EXIT_CODE_PROVIDER_INACCESSIBLE even though the
+    # local agents are all listed -- noise unrelated to this test's scope. The
+    # sibling e2e tests (test_config, test_errors) scope local-agent checks the
+    # same way.
+    list_result = e2e.run(
+        "mngr list --provider local", comment="Verify all three agents appear", timeout=_COMMAND_TIMEOUT_SECONDS
+    )
     expect(list_result).to_succeed()
     for name in ["agent-a", "agent-b", "agent-c"]:
         expect(list_result.stdout).to_match(rf"{name}\s+(RUNNING|WAITING)")
@@ -39,6 +56,7 @@ def test_multiple_agents_coexist(e2e: E2eSession) -> None:
         exec_result = e2e.run(
             f"mngr exec {name} 'echo {name}'",
             comment=f"Exec on {name}",
+            timeout=_COMMAND_TIMEOUT_SECONDS,
         )
         expect(exec_result).to_succeed()
         expect(exec_result.stdout).to_contain(name)
@@ -52,6 +70,7 @@ def test_multiple_agents_coexist(e2e: E2eSession) -> None:
         pwd_result = e2e.run(
             f"mngr exec {name} pwd",
             comment=f"Report working directory of {name}",
+            timeout=_COMMAND_TIMEOUT_SECONDS,
         )
         expect(pwd_result).to_succeed()
         # `mngr exec` interleaves the command output with a trailing status line
@@ -63,7 +82,6 @@ def test_multiple_agents_coexist(e2e: E2eSession) -> None:
     assert len(set(work_dirs.values())) == 3, f"agents must occupy distinct working directories: {work_dirs}"
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(300)

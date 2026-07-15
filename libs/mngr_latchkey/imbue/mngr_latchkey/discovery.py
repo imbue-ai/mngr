@@ -31,11 +31,16 @@ import os
 import threading
 from collections.abc import Callable
 from pathlib import Path
+from typing import Final
 
 import paramiko
 from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
+from watchdog.events import FileCreatedEvent
+from watchdog.events import FileDeletedEvent
+from watchdog.events import FileModifiedEvent
+from watchdog.events import FileMovedEvent
 from watchdog.events import FileSystemEvent
 from watchdog.events import FileSystemEventHandler
 from watchdog.events import FileSystemMovedEvent
@@ -72,6 +77,28 @@ from imbue.mngr_latchkey.store import permissions_path_for_host
 # giving up (it is a daemon thread, so the process can exit regardless).
 _OBSERVER_STOP_TIMEOUT_SECONDS: float = 5.0
 
+# The only watchdog event types that represent an actual mutation of a file
+# (its content or its presence). This is an allowlist rather than a blocklist
+# because watchdog dispatches more than mutations: on Linux (inotify) it also
+# emits read-lifecycle events -- ``FileOpenedEvent`` (IN_OPEN) and
+# ``FileClosedNoWriteEvent`` (IN_CLOSE_NOWRITE) -- for every *read* of a
+# watched file. The sync callbacks themselves read the watched files
+# (``sync_permissions`` reads the host permissions file; ``sync_credentials``
+# re-reads it and spawns latchkey CLI subprocesses that open the credentials
+# store), so reacting to read events created a self-sustaining feedback loop
+# of full VPS re-syncs, one every ~6s, for the lifetime of the supervisor.
+# Restricting dispatch to these mutation events makes the watcher's own reads
+# (and any other process's reads) inert. ``FileClosedEvent`` (IN_CLOSE_WRITE)
+# is deliberately absent: a write that changes content always also emits
+# ``FileModifiedEvent``, so including it would only double-fire syncs.
+# Directory events (``Dir*``) are separate classes and are excluded too.
+_MUTATION_EVENT_TYPES: Final[tuple[type[FileSystemEvent], ...]] = (
+    FileCreatedEvent,
+    FileDeletedEvent,
+    FileModifiedEvent,
+    FileMovedEvent,
+)
+
 
 class _LatchkeyStateChangeHandler(FrozenModel, FileSystemEventHandler):
     """watchdog handler that routes credential / per-host-permission file changes to sync callbacks.
@@ -84,7 +111,10 @@ class _LatchkeyStateChangeHandler(FrozenModel, FileSystemEventHandler):
     filesystem event; it matches the changed path against the local credentials
     file and each currently-known remote host's permissions file and fires the
     corresponding callback. Unrelated paths (gateway logs, ``.tmp`` atomic-write
-    siblings, unknown hosts) are ignored.
+    siblings, unknown hosts) are ignored, and so are all non-mutation event
+    types (see ``_MUTATION_EVENT_TYPES``) -- in particular the read-lifecycle
+    events inotify emits when the sync itself reads these files, which would
+    otherwise re-trigger the sync forever.
     """
 
     credentials_path: Path = Field(description="Absolute path of the local encrypted credentials file")
@@ -98,7 +128,10 @@ class _LatchkeyStateChangeHandler(FrozenModel, FileSystemEventHandler):
     )
 
     def dispatch(self, event: FileSystemEvent) -> None:
-        if event.is_directory:
+        # Allowlist of genuine mutations; everything else (read-lifecycle
+        # events, close-after-write duplicates, directory events) is inert.
+        # See ``_MUTATION_EVENT_TYPES`` for why this must be an allowlist.
+        if not isinstance(event, _MUTATION_EVENT_TYPES):
             return
         # A move reports both src and dest; an atomic write (tmp -> rename)
         # surfaces the real file as the move dest, so consider both.
@@ -430,9 +463,12 @@ class LatchkeyDiscoveryHandler(MutableModel):
         First syncs every currently-known remote host (permissions, then
         credentials -- order matters). Then starts a ``watchdog`` observer that
         pushes credentials to every known remote host whenever the local
-        credentials file changes, and pushes a single host's permissions
-        whenever that host's permissions file changes. (Newly-provisioned hosts
-        get their initial sync inline in the provisioning path.)
+        credentials file changes, and pushes a single host's full state
+        (permissions, then credentials) whenever that host's permissions file
+        changes -- the permissions determine which services' credentials ship,
+        so a permissions change must re-sync the credentials too. (Newly-
+        provisioned hosts get their initial sync inline in the provisioning
+        path.)
 
         The observer's health is supervised on a *checked* CG strand: if it
         stops for any reason other than ``shutdown_event`` being set, that is a
@@ -452,7 +488,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
             plugin_data_dir=data_dir,
             known_remote_host_ids=self._known_remote_host_ids,
             on_credentials_changed=self._sync_credentials_to_all_known_hosts,
-            on_host_permissions_changed=self._sync_permissions_to_host,
+            on_host_permissions_changed=self._sync_full_state_to_host,
         )
         observer = Observer()
         # The credentials file sits at the latchkey-directory root; the per-host
@@ -515,12 +551,22 @@ class LatchkeyDiscoveryHandler(MutableModel):
         for host_id_str, provider_name in remote_hosts.items():
             self._sync_state_to_host(host_id_str, provider_name, do_permissions=False, do_credentials=True)
 
-    def _sync_permissions_to_host(self, host_id_str: str) -> None:
+    def _sync_full_state_to_host(self, host_id_str: str) -> None:
+        """Sync one host's permissions *and* credentials (used on a permissions change).
+
+        A permissions change does not just alter the file that gets copied to
+        the VPS -- it also changes which services' credentials the host may
+        hold (``sync_credentials`` resolves the shipped subset from the
+        permissions file). Syncing only the permissions would leave the VPS
+        credential store stale: a newly-granted service's credentials would be
+        missing, and a revoked service's credentials would linger. So a
+        permissions change triggers the full sync, permissions first.
+        """
         with self._remote_hosts_lock:
             provider_name = self._remote_host_provider_by_id.get(host_id_str)
         if provider_name is None:
             return
-        self._sync_state_to_host(host_id_str, provider_name, do_permissions=True, do_credentials=False)
+        self._sync_state_to_host(host_id_str, provider_name, do_permissions=True, do_credentials=True)
 
     def _sync_state_to_host(
         self,

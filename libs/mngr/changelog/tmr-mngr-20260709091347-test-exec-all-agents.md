@@ -1,0 +1,1 @@
+Corrected the "run a command on all agents" tutorial example: `mngr exec -a "whoami"` no longer works because the `-a`/`--all` flag was removed from multi-target commands in favor of the stdin-pipe form. The tutorial (and its e2e test) now show `mngr list --ids | mngr exec - "whoami"`, matching the documented way to fan a command out across every agent.
