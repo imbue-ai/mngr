@@ -1258,8 +1258,9 @@ def tail_discovery_events_file(
     Tolerates the file being absent when called (the tail loop waits for it to appear)
     and being truncated/rotated while tailing (it resets and re-reads). On attach it
     replays from :func:`find_discovery_snapshot_replay_offset` -- the earliest offset
-    that still includes every provider's latest per-provider snapshot (and any legacy
-    full snapshot) -- so a consumer attaching mid-stream is populated immediately
+    that still includes every provider's latest per-provider snapshot (or, for a pure
+    pre-migration log, the legacy full snapshot) -- so a consumer attaching mid-stream
+    is populated immediately
     without re-reading the whole file. The dedup set keeps a later real snapshot from
     double-emitting.
     """
