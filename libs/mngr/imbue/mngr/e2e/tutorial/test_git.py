@@ -15,7 +15,6 @@ def _create_my_task(e2e: E2eSession, sleep_value: int) -> None:
     ).to_succeed()
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(60)
@@ -59,7 +58,6 @@ def test_list_fields_original_branch(e2e: E2eSession) -> None:
     expect(result.stdout).to_contain("No agents found")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -85,7 +83,6 @@ def test_list_fields_original_branch_with_agent(e2e: E2eSession) -> None:
     expect(result.stdout).to_contain("mngr/my-task")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 def test_exec_git_status_short(e2e: E2eSession) -> None:
@@ -115,7 +112,6 @@ def test_exec_git_status_short(e2e: E2eSession) -> None:
     )
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(60)
@@ -141,7 +137,6 @@ def test_exec_git_log(e2e: E2eSession) -> None:
     expect(result.stdout).to_match(r"(?m)^\s*[0-9a-f]{7,40} \S")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -167,7 +162,6 @@ def test_message_commit_request(e2e: E2eSession) -> None:
     expect(msg_result.stdout).to_contain("Successfully sent message to 1 agent(s)")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 def test_exec_force_commit(e2e: E2eSession) -> None:
@@ -213,7 +207,6 @@ def test_exec_force_commit(e2e: E2eSession) -> None:
     assert "wip_file.txt" not in status_result.stdout, status_result.stdout
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -238,14 +231,16 @@ def test_exec_all_git_status(e2e: E2eSession) -> None:
     )
     expect(result).to_succeed()
     # Verify the fan-out actually reached the agent rather than merely exiting
-    # 0: mngr reports the per-agent outcome (e.g. "Command succeeded on agent
-    # my-task") in the output.
-    assert "my-task" in result.stdout, f"expected my-task in fan-out output, got: {result.stdout!r}"
+    # 0: mngr reports the per-agent outcome ("Command succeeded on agent
+    # my-task") in the output, naming the agent the command ran on.
+    assert "Command succeeded on agent my-task" in result.stdout, (
+        f"expected the per-agent outcome for my-task in fan-out output, got: {result.stdout!r}"
+    )
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.timeout(120)
 def test_git_merge_agent_branch(e2e: E2eSession) -> None:
     """Tutorial block:
         # merge the agent's work like normal if the agent is local:
@@ -276,7 +271,6 @@ def test_git_merge_agent_branch(e2e: E2eSession) -> None:
     expect(merged.stdout).to_contain("agent-change")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -318,10 +312,8 @@ def test_exec_git_push_then_merge(e2e: E2eSession) -> None:
     expect(merge_result.stdout).to_contain("Already up to date")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
 @pytest.mark.timeout(60)
 def test_destroy_remove_created_branch_inline(e2e: E2eSession) -> None:
     """Tutorial block:

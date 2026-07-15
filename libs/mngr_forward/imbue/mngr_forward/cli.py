@@ -10,6 +10,8 @@ import subprocess
 import threading
 import time
 import webbrowser
+from collections.abc import Awaitable
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -22,6 +24,7 @@ from loguru import logger
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.primitives import NonNegativeInt
 from imbue.imbue_common.primitives import PositiveInt
+from imbue.imbue_common.pure import pure
 from imbue.mngr.api.discovery_events import get_discovery_events_path
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
@@ -416,16 +419,96 @@ def _build_hypercorn_config(listen_socket: socket.socket, use_http2: bool) -> Co
     return config
 
 
+# How long a TLS teardown may wait for the peer's close_notify reply before
+# the connection is force-closed. asyncio's default (30s) keeps every
+# abandoned connection's task alive for the full wait; a loopback peer that
+# has not answered within a few seconds is gone.
+_SSL_SHUTDOWN_TIMEOUT_SECONDS: Final[float] = 5.0
+
+# The exact message asyncio's sslproto puts on the TimeoutError it raises when
+# the close_notify reply never arrives (stable since Python 3.11).
+_SSL_SHUTDOWN_TIMED_OUT_MESSAGE: Final[str] = "SSL shutdown timed out"
+
+
+class _BoundedSSLShutdownEventLoop(asyncio.SelectorEventLoop):
+    """Event loop that bounds server-side TLS shutdown waits to a few seconds.
+
+    hypercorn's ``asyncio.start_server`` call does not expose asyncio's
+    ``ssl_shutdown_timeout`` option, so the only seam for shortening the 30s
+    default is the loop's SSL transport factory. ``_make_ssl_transport`` is
+    private CPython API: the override therefore only rewrites the stdlib's
+    "use the default" sentinel (``None``) when that keyword is actually
+    present, so a future signature change degrades to the stdlib default
+    instead of breaking connection accepts.
+    """
+
+    ssl_shutdown_timeout_seconds: float = _SSL_SHUTDOWN_TIMEOUT_SECONDS
+
+    def _make_ssl_transport(self, *args: Any, **kwargs: Any) -> Any:
+        if "ssl_shutdown_timeout" in kwargs and kwargs["ssl_shutdown_timeout"] is None:
+            kwargs["ssl_shutdown_timeout"] = self.ssl_shutdown_timeout_seconds
+        return super()._make_ssl_transport(*args, **kwargs)  # ty: ignore[unresolved-attribute]
+
+
+@pure
+def _is_benign_tls_teardown_error(exception: BaseException | None) -> bool:
+    """True for per-connection TLS noise that should not reach the log as an error.
+
+    Covers ``ssl.SSLError`` (handshake failures -- hypercorn's own runner drops
+    these, and we replace its exception handler by running the loop ourselves)
+    and the ``TimeoutError`` asyncio raises when a peer abandons a connection
+    without answering ``close_notify``. hypercorn's ``TCPServer._close``
+    catches the other already-gone connection errors but not that
+    ``TimeoutError``, so it would otherwise escape ``client_connected_cb`` and
+    be logged as an alarming unhandled-exception traceback.
+    """
+    is_handshake_failure = isinstance(exception, ssl.SSLError)
+    is_abandoned_shutdown = isinstance(exception, TimeoutError) and _SSL_SHUTDOWN_TIMED_OUT_MESSAGE in str(exception)
+    return is_handshake_failure or is_abandoned_shutdown
+
+
+def _handle_serve_loop_exception(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+    """Loop exception handler: drop benign TLS teardown noise, defer the rest."""
+    exception = context.get("exception")
+    if _is_benign_tls_teardown_error(exception):
+        logger.debug("Dropped benign TLS teardown error from an abandoned connection: {!r}", exception)
+        return
+    loop.default_exception_handler(context)
+
+
+def _run_serve_loop(
+    app: Any,
+    config: Config,
+    loop_factory: Callable[[], asyncio.AbstractEventLoop],
+    shutdown_trigger: Callable[..., Awaitable[Any]] | None,
+) -> None:
+    """Run hypercorn on a loop from ``loop_factory``, dropping benign TLS teardown noise.
+
+    ``shutdown_trigger=None`` makes hypercorn install its own SIGINT/SIGTERM
+    handlers (which requires running on the main thread); tests pass an
+    explicit trigger instead so they can stop the server from another thread.
+    """
+    with asyncio.Runner(loop_factory=loop_factory) as runner:
+        runner.get_loop().set_exception_handler(_handle_serve_loop_exception)
+        runner.run(hypercorn_serve(app, config, shutdown_trigger=shutdown_trigger))
+
+
 def _serve_forward_app(app: Any, listen_socket: socket.socket, use_http2: bool) -> None:
     """Serve the forward app over the already-bound ``listen_socket`` via hypercorn.
 
-    ``shutdown_trigger`` defaults to ``None``, which makes hypercorn install its
-    own SIGINT/SIGTERM handlers -- matching the SIGTERM->graceful behaviour
+    Passes ``shutdown_trigger=None``, which makes hypercorn install its own
+    SIGINT/SIGTERM handlers -- matching the SIGTERM->graceful behaviour
     minds' ``terminate()`` relies on. Must run on the main thread so the loop can
     install those signal handlers.
+
+    The loop carries two TLS teardown adjustments hypercorn does not expose
+    (both matter only with ``--use-http2``): the SSL shutdown wait is bounded to
+    seconds instead of asyncio's 30s default, and the benign teardown errors of
+    abandoned connections are dropped rather than logged as unhandled-exception
+    tracebacks.
     """
     config = _build_hypercorn_config(listen_socket, use_http2)
-    asyncio.run(hypercorn_serve(app, config))
+    _run_serve_loop(app, config, loop_factory=_BoundedSSLShutdownEventLoop, shutdown_trigger=None)
 
 
 def _validate_options(opts: ForwardCliOptions) -> None:

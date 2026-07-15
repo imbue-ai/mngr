@@ -21,6 +21,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: The imbue_cloud fast path now matches on the **repository** as well as the branch/tag, so it can no longer adopt a pool host running different code than the request asked for. A new `repo_identity.canonicalize_repo_source` normalizes remote URL forms (ssh/https, `.git`, trailing slash, host case) and resolves a local path to its `origin` remote; applied identically at bake time and request time. `admin pool create` no longer accepts hand-typed identity in `--attributes`; it derives canonical `repo_url` + `repo_branch_or_tag` from the bake source, which is now exactly one of `--from-tag <tag>` (production) or `--workspace-dir <dir>` (dev).
 - Added: A 32 GiB swapfile is now provisioned on bare-metal boxes by `admin server prep`.
 - Added: `mngr imbue_cloud admin server order --dry-run` — builds and prices a non-committal OVH cart, prints the real price preview plus derived server specs and slice count, then deletes the cart without ordering. No charge, no interactive prompt, no DB write. Takes precedence over `--yes`, so `--dry-run --yes` never charges.
+- Added: Agent listings populate `AgentDetails.pid` (the agent's main-process PID in the remote host's PID namespace), extracted from the same already-collected tmux/ps probe data.
 
 ### Changed
 

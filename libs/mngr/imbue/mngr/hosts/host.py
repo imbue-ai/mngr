@@ -29,11 +29,6 @@ from pydantic import Field
 from pydantic import ValidationError
 from pyinfra.api.command import StringCommand
 from pyinfra.connectors.util import CommandOutput
-from tenacity import retry
-from tenacity import retry_if_exception
-from tenacity import stop_after_attempt
-from tenacity import wait_chain
-from tenacity import wait_fixed
 
 from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.errors import ProcessTimeoutError
@@ -71,6 +66,8 @@ from imbue.mngr.hosts.offline_host import BaseHost
 from imbue.mngr.hosts.offline_host import apply_rename_to_agent_data
 from imbue.mngr.hosts.outer_host import ActiveRemoteLock
 from imbue.mngr.hosts.outer_host import OuterHost
+from imbue.mngr.hosts.outer_host import is_transient_ssh_error
+from imbue.mngr.hosts.outer_host import retry_on_transient_ssh_error
 from imbue.mngr.hosts.tmux import TmuxSessionTarget
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -173,48 +170,6 @@ def _increment_local_generation_counter(generation_file_path: Path) -> None:
     except (FileNotFoundError, ValueError):
         current_counter = 0
     generation_file_path.write_text(f"{current_counter + 1}\n")
-
-
-@pure
-def _is_transient_ssh_error(exception: BaseException) -> bool:
-    """Check if the exception is a transient SSH connection error worth retrying.
-
-    Matches:
-    - OSError with "Socket is closed" (stale socket from pyinfra)
-    - SSHException (e.g. "SSH session not active" when transport dies),
-      including ChannelException (server refused to open a new channel,
-      e.g. MaxSessions limit -- the transport may still be alive)
-    - EOFError (remote end closed connection)
-    - TimeoutError (pyinfra read_output_buffers timeout when the remote
-      sshd is reloaded mid-command, e.g. during cloud-init bootstrap).
-      Note: ``TimeoutError`` is an OSError subclass on Python 3, so this
-      check must precede any narrower OSError handling.
-    """
-    if isinstance(exception, OSError) and "Socket is closed" in str(exception):
-        return True
-    if isinstance(exception, SSHException):
-        return True
-    if isinstance(exception, EOFError):
-        return True
-    if isinstance(exception, TimeoutError):
-        return True
-    return False
-
-
-# Shared retry decorator for file operations that encounter transient SSH
-# connection errors.  Retries after (0, 1, 3, 6) seconds for a total
-# backoff window of ~10 seconds.
-_retry_on_transient_ssh_error = retry(
-    retry=retry_if_exception(_is_transient_ssh_error),
-    stop=stop_after_attempt(5),
-    wait=wait_chain(
-        wait_fixed(0),
-        wait_fixed(1),
-        wait_fixed(3),
-        wait_fixed(6),
-    ),
-    reraise=True,
-)
 
 
 def _get_ssh_transport(pyinfra_host: Any) -> Transport | None:
@@ -1009,7 +964,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 active_lock.channel.close()
             logger.trace("Released host lock (over SSH)")
 
-    @_retry_on_transient_ssh_error
+    @retry_on_transient_ssh_error
     def _open_remote_lock_channel(self, lock_file_path: Path, timeout_seconds: float | None) -> tuple[Channel, int]:
         """Open an SSH channel that holds the remote host flock, retrying transient SSH failures.
 
@@ -1033,7 +988,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         try:
             channel = transport.open_session()
         except (OSError, EOFError, SSHException) as e:
-            if _is_transient_ssh_error(e):
+            if is_transient_ssh_error(e):
                 logger.debug("Transient SSH error opening host-lock channel: {}, disconnecting for retry", e)
                 self.connector.host.disconnect()
             raise
@@ -1044,7 +999,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 token = _wait_for_remote_lock_acquired(channel)
             is_lock_acquired = True
         except (OSError, EOFError, SSHException) as e:
-            if _is_transient_ssh_error(e):
+            if is_transient_ssh_error(e):
                 logger.debug("Transient SSH error acquiring host lock: {}, disconnecting for retry", e)
                 self.connector.host.disconnect()
             raise

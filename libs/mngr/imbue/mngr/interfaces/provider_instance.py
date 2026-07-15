@@ -217,6 +217,8 @@ def _build_agent_details_from_online_agent(
     # Compute plugin-specific fields from field generators
     plugin_data = _compute_plugin_fields(field_generators, agent, host)
 
+    lifecycle = agent.probe_lifecycle()
+
     return AgentDetails(
         id=agent.id,
         name=agent.name,
@@ -226,7 +228,8 @@ def _build_agent_details_from_online_agent(
         initial_branch=agent.get_created_branch_name(),
         create_time=agent.create_time,
         start_on_boot=agent.get_is_start_on_boot(),
-        state=agent.get_lifecycle_state(),
+        state=lifecycle.state,
+        pid=lifecycle.pid,
         url=agent.get_reported_url(),
         start_time=start_time,
         runtime_seconds=runtime_seconds,

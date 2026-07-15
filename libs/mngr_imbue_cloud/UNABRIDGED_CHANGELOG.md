@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-14
+
+Agent listings from this provider now populate `AgentDetails.pid` (the agent's main process PID in the remote host's PID namespace), extracted from the same already-collected tmux/ps probe data.
+
 ## 2026-07-13
 
 Fixed the imbue_cloud "husk" bug, where a transiently-unreachable leased workspace (a sleep/wifi blip or a brief box outage) would lose its agent labels and disappear from consumers that filter on them -- most importantly the minds sidebar's `is_primary` guard, which dropped the workspace and made a restart 404 with "Unknown workspace".

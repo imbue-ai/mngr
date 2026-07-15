@@ -20,6 +20,7 @@ from typing import Any
 from typing import Callable
 from typing import ClassVar
 from typing import Final
+from typing import assert_never
 
 import click
 from loguru import logger
@@ -37,7 +38,11 @@ from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
 from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
-from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
+from imbue.mngr.agents.tui_utils import SubmissionConfirmationPolicy
+from imbue.mngr.agents.tui_utils import SubmissionEvidenceProbe
+from imbue.mngr.agents.tui_utils import build_changed_token_probe
+from imbue.mngr.agents.tui_utils import build_file_mtime_token_command
+from imbue.mngr.agents.tui_utils import build_normalized_message_probe
 from imbue.mngr.agents.update_policy import AgentUpdatePolicy
 from imbue.mngr.agents.update_policy import is_self_update_disabled
 from imbue.mngr.api.preservation import PreservedItem
@@ -310,6 +315,11 @@ class ClaudeAgentConfig(AgentTypeConfig):
         default=False,
         description="When True, adds a PermissionRequest hook that auto-allows all permission dialogs. "
         "This means Claude Code will never pause for permission approval.",
+    )
+    auto_disable_questions: bool = Field(
+        default=False,
+        description="When True, adds `--disallowed-tools AskUserQuestion` to the agent invocation to "
+        "prevent it from ever asking questions (which can cause the agent to get blocked)",
     )
     settings_overrides: Annotated[dict[str, Any], SettingsPatchField()] = Field(
         default_factory=dict,
@@ -1524,8 +1534,8 @@ class ClaudeCoreAgent(
         Always provisioned (per :class:`HasTranscriptMixin`): the streamer
         tails Claude's native session JSONL into
         ``logs/claude_transcript/events.jsonl``, which feeds both the
-        common-transcript converter and the enqueue-marker fallback in
-        ``_build_accept_marker_command``. The background orchestrator that
+        common-transcript converter and the submission-evidence probes in
+        ``_build_submission_evidence_probes``. The background orchestrator that
         supervises this streamer is provisioned separately by
         ``_provision_claude_always_on_scripts``.
         """
@@ -2189,11 +2199,28 @@ class ClaudeAgent(
     # signal for every send path.
     TUI_READY_INDICATOR = "❯"
 
-    # Path template for the transcript event log that the acceptance-marker
-    # probe (see _build_accept_marker_command) reads as the fallback source when
-    # the UserPromptSubmit hook misfires. The embedded $MNGR_AGENT_STATE_DIR is
-    # evaluated on the host by the env prefix the probe carries. Claude-specific.
-    _QUEUE_LOG_PATH_TEMPLATE: ClassVar[str] = "$MNGR_AGENT_STATE_DIR/logs/claude_transcript/events.jsonl"
+    # Path expression for mngr's always-provisioned raw mirror of Claude's
+    # session JSONL, read by the submission-evidence probes. The embedded
+    # $MNGR_AGENT_STATE_DIR is evaluated on the host by the env prefix each
+    # probe carries. Claude-specific.
+    _RAW_TRANSCRIPT_PATH_EXPRESSION: ClassVar[str] = '"$MNGR_AGENT_STATE_DIR/logs/claude_transcript/events.jsonl"'
+
+    # jq filter extracting the decoded text of records that prove a message was
+    # accepted: ``queue-operation``/``enqueue`` events (recorded the instant
+    # input is queued while a turn runs) and ``user`` records (direct
+    # submissions). ``fromjson?`` skips partial or corrupt lines, and decoding
+    # through jq unescapes JSON (``\n``, ``\uXXXX``, ...) so the normalized
+    # output is directly comparable with a normalized message probe.
+    _ACCEPTED_MESSAGE_TEXT_JQ_FILTER: ClassVar[str] = (
+        "fromjson? "
+        '| select((.type == "queue-operation" and .operation == "enqueue") or .type == "user") '
+        "| (.content // .message.content // empty) "
+        '| if type == "array" then (map(.text? // "") | join(" ")) else tostring end'
+    )
+
+    # Content probes shorter than this (after normalization) match too easily to
+    # carry identity, so such messages fall back to any-accepted-record probes.
+    _MIN_CONTENT_PROBE_LENGTH: ClassVar[int] = 3
 
     _DIALOG_INDICATORS: tuple[DialogIndicator, ...] = (
         TrustDialogIndicator(),
@@ -2203,39 +2230,134 @@ class ClaudeAgent(
         CostThresholdDialogIndicator(),
     )
 
-    def _build_accept_marker_command(self) -> str:
-        """Shell snippet printing the latest enqueue timestamp from Claude's transcript log.
+    def _build_native_transcript_path_expression(self) -> str:
+        """Shell path expression for Claude Code's own session JSONL.
 
-        Claude's transcript event log records an ``enqueue`` event (an
-        ``"operation":"enqueue"`` JSONL line) the instant a message enters its
-        queue. This prints that event's ISO-8601 ``timestamp`` (empty if none
-        yet) -- the lexicographically-monotonic "message accepted" token that
-        ``send_enter_via_tmux_wait_for_hook`` baselines before Enter and watches
-        for a newer value, confirming submission the moment the message is
-        accepted rather than waiting on the (possibly slow) UserPromptSubmit
-        hook. The Claude-specific log schema lives here so ``tui_utils`` stays
-        agent-neutral; the env prefix evaluates the embedded
-        ``$MNGR_AGENT_STATE_DIR`` on the host, and the backslash-escaped quotes
-        are interpreted by the inner ``bash -c`` that runs the probe.
+        Resolved on the host at poll time: ``$CLAUDE_CONFIG_DIR`` (falling back
+        to ``~/.claude``) comes from the agent env, and the session id is
+        re-read from the ``claude_session_id`` marker on every poll so a
+        mid-window ``/clear`` cannot strand the probe on a dead session file.
+        The project dir segment uses the same encoder as session adoption.
+        """
+        encoded_project_dir = encode_claude_project_dir_name(self._resolve_work_dir_on_host())
+        return (
+            '"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/'
+            + encoded_project_dir
+            + '/$( cat "$MNGR_AGENT_STATE_DIR/claude_session_id" 2>/dev/null ).jsonl"'
+        )
+
+    def _build_transcript_size_baseline_command(self, file_path_expression: str) -> str:
+        """Shell snippet printing the transcript's byte size (empty when missing).
+
+        An empty baseline makes the poll scan from offset 0, so a transcript
+        that first appears mid-window is still searched from its beginning.
         """
         env_command_prefix = self.host.build_source_env_prefix(self)
-        return (
-            f"{env_command_prefix} cat {self._QUEUE_LOG_PATH_TEMPLATE} 2>/dev/null "
-            f'| grep "\\"operation\\":\\"enqueue\\"," | tail -n 1 | jq -r .timestamp 2>/dev/null'
+        return f"{env_command_prefix} wc -c < {file_path_expression} 2>/dev/null | tr -d '[:space:]'"
+
+    def _build_content_evidence_probe(
+        self, name: str, file_path_expression: str, normalized_probe: str
+    ) -> SubmissionEvidenceProbe:
+        """Probe confirming when the message's normalized tail appears in newly appended records."""
+        env_command_prefix = self.host.build_source_env_prefix(self)
+        poll_command = (
+            f"{env_command_prefix} tail -c +$(( ${{base:-0}} + 1 )) {file_path_expression} 2>/dev/null "
+            f"| jq -R -r {shlex.quote(self._ACCEPTED_MESSAGE_TEXT_JQ_FILTER)} 2>/dev/null "
+            "| tr -cd '[:alnum:]' | tr '[:upper:]' '[:lower:]' "
+            f"| grep -q -F {shlex.quote(normalized_probe)} && echo found"
+        )
+        return SubmissionEvidenceProbe(
+            name=name,
+            baseline_command=self._build_transcript_size_baseline_command(file_path_expression),
+            poll_command=poll_command,
         )
 
-    def _send_enter_and_validate(self, tmux_target: TmuxWindowTarget) -> None:
-        # Claude wires a UserPromptSubmit hook that fires `tmux wait-for -S`
-        # on the per-session channel; wait for it. If the hook misfires
-        # (occasionally happens while another message is being processed),
-        # fall back to checking the transcript log for a fresh enqueue.
-        send_enter_via_tmux_wait_for_hook(
-            self,
-            tmux_target,
-            wait_channel=f"mngr-submit-{self.session_name}",
-            timeout_seconds=self.enter_submission_timeout_seconds,
-            accept_marker_command=self._build_accept_marker_command(),
+    def _build_any_accepted_record_probe(self, name: str, file_path_expression: str) -> SubmissionEvidenceProbe:
+        """Probe confirming when ANY accepted-message record is appended past the baseline.
+
+        Used when the message itself carries no matchable content (an
+        emoji-only message, or a slash command under the relaxed policy).
+        """
+        env_command_prefix = self.host.build_source_env_prefix(self)
+        poll_command = (
+            f"{env_command_prefix} tail -c +$(( ${{base:-0}} + 1 )) {file_path_expression} 2>/dev/null "
+            f"| jq -R -r {shlex.quote(self._ACCEPTED_MESSAGE_TEXT_JQ_FILTER)} 2>/dev/null "
+            "| grep -q '[[:alnum:]]' && echo found"
         )
+        return SubmissionEvidenceProbe(
+            name=name,
+            baseline_command=self._build_transcript_size_baseline_command(file_path_expression),
+            poll_command=poll_command,
+        )
+
+    def _build_submission_evidence_probes(
+        self, message: str, policy: SubmissionConfirmationPolicy
+    ) -> Sequence[SubmissionEvidenceProbe]:
+        """Build Claude's durable submission evidence.
+
+        Content is verified against BOTH the native session JSONL and mngr's
+        raw copy -- evidence in either confirms, so a dead transcript watcher
+        or an unexpected config-dir layout cannot alone produce a false
+        delivery failure. Every artifact used here (transcript logs, the
+        ``claude_session_id`` and ``active`` markers) also exists on agents
+        created by older mngr versions, so probes work without reprovisioning.
+        """
+        raw_expression = self._RAW_TRANSCRIPT_PATH_EXPRESSION
+        native_expression = self._build_native_transcript_path_expression()
+        match policy:
+            case SubmissionConfirmationPolicy.STRICT:
+                normalized_probe = build_normalized_message_probe(message)
+                if len(normalized_probe) >= self._MIN_CONTENT_PROBE_LENGTH:
+                    return [
+                        self._build_content_evidence_probe("content-raw-transcript", raw_expression, normalized_probe),
+                        self._build_content_evidence_probe(
+                            "content-native-transcript", native_expression, normalized_probe
+                        ),
+                    ]
+                return [
+                    self._build_any_accepted_record_probe("any-record-raw-transcript", raw_expression),
+                    self._build_any_accepted_record_probe("any-record-native-transcript", native_expression),
+                ]
+            case SubmissionConfirmationPolicy.RELAXED:
+                # Slash commands are TUI-local: /clear and /compact surface as a
+                # session-id change (written by the SessionStart hook), other
+                # commands at best as transcript records or an active-marker
+                # touch. Any of these counts; none is required.
+                env_command_prefix = self.host.build_source_env_prefix(self)
+                session_id_token_command = (
+                    f'{env_command_prefix} cat "$MNGR_AGENT_STATE_DIR/claude_session_id" 2>/dev/null'
+                )
+                active_marker_token_command = (
+                    f"{env_command_prefix} {{ "
+                    + build_file_mtime_token_command('"$MNGR_AGENT_STATE_DIR/active"')
+                    + " ; }"
+                )
+                return [
+                    build_changed_token_probe("session-id", session_id_token_command),
+                    build_changed_token_probe("active-marker", active_marker_token_command),
+                    self._build_any_accepted_record_probe("any-record-raw-transcript", raw_expression),
+                    self._build_any_accepted_record_probe("any-record-native-transcript", native_expression),
+                ]
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    def _detect_preexisting_input_text(self, pane_content: str) -> str | None:
+        """Detect leftover text on Claude Code's input row (the ``❯`` prompt line).
+
+        Scans from the bottom of the pane for the last line carrying the input
+        prompt glyph and reports any text after it -- typically a previously
+        stranded, never-submitted message that the new paste would append to.
+        The dim placeholder Claude renders in an empty input box (``Try "..."``)
+        is excluded so routine sends don't warn.
+        """
+        for line in reversed(pane_content.splitlines()):
+            stripped_line = line.strip()
+            if stripped_line.startswith(self.TUI_READY_INDICATOR):
+                leftover_text = stripped_line[len(self.TUI_READY_INDICATOR) :].strip()
+                if leftover_text == "" or leftover_text.startswith('Try "'):
+                    return None
+                return leftover_text
+        return None
 
     def get_live_output_path(self) -> Path:
         """Return the path to this agent's response-streaming buffer file.
@@ -2360,6 +2482,9 @@ class ClaudeAgent(
         # (Claude is last-wins) -- the accepted, documented limitation of that mode.
         cli_args = self.agent_config.cli_args
         all_extra_args = cli_args + quote_agent_args(agent_args)
+        # Claude appends & unions repeated --disallowed-tools flags.
+        if self.agent_config.auto_disable_questions:
+            all_extra_args = all_extra_args + ("--disallowed-tools", "AskUserQuestion")
         args_str = " ".join(all_extra_args) if all_extra_args else ""
 
         # Read the latest session ID from the tracking file written by the SessionStart hook.
