@@ -927,6 +927,27 @@ def test_wizard_default_agent_type_returns_none_when_non_interactive() -> None:
     )
 
 
+def test_config_wizard_includes_default_agent_type_step(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """`mngr config wizard` runs end-to-end and walks the default-agent-type step.
+
+    The unit tests above cover ``_wizard_default_agent_type`` in isolation; this
+    asserts the step is actually wired into the ``config wizard`` command. The
+    test env has no controlling terminal (the placeholder agent type keeps the
+    available list non-empty, so the step reaches its non-interactive branch
+    rather than short-circuiting on "no agent types"), so the step prints its
+    "set it later" guidance instead of launching the picker -- a deterministic
+    signal that the wizard reached it.
+    """
+    result = cli_runner.invoke(config, ["wizard"], obj=plugin_manager, catch_exceptions=False)
+    assert result.exit_code == 0, f"output={result.output!r} exception={result.exception!r}"
+    assert "mngr config wizard" in result.output
+    # The default-agent-type step's own guidance line -- unique to that step.
+    assert "mngr config set commands.create.type" in result.output
+
+
 # =============================================================================
 # config wizard: docker host-volume isolation step
 # =============================================================================
