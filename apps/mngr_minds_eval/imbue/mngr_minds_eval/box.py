@@ -30,10 +30,12 @@ AWS_ENV = Path.home() / ".minds-eval" / "aws.env"
 MNGR_PROFILE = "evaluator"
 SHARED_MODAL_KEYS = Path.home() / ".minds-eval" / "modal-profile" / "providers" / "modal"
 ROOT_CONFIG_FILE = Path.home() / ".minds-eval" / "mngr-root-config.toml"
-# Cap the box's memory and CPUs so a runaway box (or software-rendered desktop under load) can't
-# take down the whole Docker VM. NOTE: the cap must stay BELOW the Docker VM's total memory
-# (Docker Desktop defaults to 8GB -- raise it in Settings > Resources).
-BOX_MEMORY = "6g"
+# Cap the box's memory and CPUs so a runaway box can't take down the whole Docker VM. Memory
+# scales with BATCH SIZE: minds' discovery/forward runs a heavyweight event-follower subprocess per
+# workspace in the env (~200-300MB each), plus the Electron desktop (~1.5-2GB, more per open
+# workspace window) -- a 9-case box genuinely needs ~10GB. NOTE: keep the cap below the Docker VM's
+# total memory (Docker Desktop defaults to 8GB -- raise it in Settings > Resources; 20GB works).
+BOX_MEMORY = "12g"
 BOX_CPUS = "6"
 # noVNC's fixed port INSIDE a desktop box; published to a free host port at `docker run`.
 NOVNC_PORT_IN_BOX = "6080"
