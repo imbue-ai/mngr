@@ -9,6 +9,7 @@ const { runEnvSetup } = require('./env-setup');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
 const { decideStartupRoute } = require('./startup-routing');
 const { computeBundleViewBounds } = require('./view-layout');
+const { createReadyGate } = require('./ready-gate');
 
 // Tee console output into ~/.minds/logs/electron.log and record uncaught
 // main-process failures BEFORE anything else runs, so startup output (including
@@ -113,6 +114,19 @@ let appMenuInstalled = false;
 
 let backendBaseUrl = null;
 let mngrForwardBaseUrl = null;
+// Signalled once the mngr_forward preauth session cookie has been written to the
+// cookie stores (see handleMngrForwardStarted). Startup workspace-restore
+// navigation waits on this so a restored ``agent-<id>.localhost`` view never
+// reaches the proxy before its bare-origin session cookie exists -- which would
+// 302 it to the plugin's terminal-oriented "Sign in" page. minds always
+// pre-sets the cookie, so landing there is always a race, never a real
+// login-required state; the plugin page is correct for CLI users, so the guard
+// lives here in the consumer rather than in the plugin.
+const mngrForwardCookieGate = createReadyGate();
+// Bounded so a missing mngr_forward_started event never hangs startup: after
+// this the restore proceeds with today's (pre-fix) behaviour rather than
+// blocking. Normally the event arrives before restore, so the wait is instant.
+const MNGR_FORWARD_COOKIE_WAIT_MS = 5000;
 let workspaceList = []; // [{id, name, account}]
 // Persistent set of agent ids we have ever seen in the chrome SSE's
 // ``destroying_agent_ids`` payload. Used to decide whether a workspace
@@ -3084,6 +3098,12 @@ async function startBackendWithRetry() {
         // titlebar accent is re-derived from its restored content URL by
         // ``loadUrlIntoBundleContentView`` (which ``openNewWindow`` calls too),
         // so no separately-persisted accent is needed.
+        //
+        // Wait for the mngr_forward preauth cookie first: restored workspace
+        // views navigate straight to the proxy, and reaching it before the
+        // bare-origin cookie is written 302's them to the plugin "Sign in"
+        // page (see mngrForwardCookieGate).
+        await mngrForwardCookieGate.waitUntilReady(MNGR_FORWARD_COOKIE_WAIT_MS);
         const [first, ...rest] = restorable;
         restoreWindowBounds(initialBundle, first);
         loadUrlIntoBundleContentView(initialBundle, toRestoredContentUrl(first));
@@ -3203,6 +3223,9 @@ async function handleMngrForwardStarted(event) {
   const preauth = event.preauth_cookie;
   if (!port || !preauth) {
     console.warn('[startup] mngr_forward_started missing port or preauth_cookie:', event);
+    // Nothing to pre-set: release restore rather than making it wait out the
+    // full timeout for a cookie that will never be written.
+    mngrForwardCookieGate.markReady();
     return;
   }
   // The proxy serves TLS + HTTP/2, so the origin is https and the session
@@ -3229,6 +3252,9 @@ async function handleMngrForwardStarted(event) {
   } catch (err) {
     console.warn('[startup] Failed to set mngr_forward_session cookie:', err);
   }
+  // Release startup restore whether or not the set succeeded: a failed set
+  // won't get better by waiting, so degrade to proceeding.
+  mngrForwardCookieGate.markReady();
 }
 
 
