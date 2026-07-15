@@ -4,6 +4,8 @@ import json
 import tempfile
 from pathlib import Path
 
+from imbue.mngr_minds_eval import box
+from imbue.mngr_minds_eval import main
 from imbue.mngr_minds_eval import s3_store
 from imbue.mngr_minds_eval import workspace
 from imbue.mngr_minds_eval.launch import load_config
@@ -73,3 +75,35 @@ def test_load_config_validates_required_keys() -> None:
             raise AssertionError("expected SystemExit on missing mngr_branch")
         except SystemExit:
             pass
+
+
+def test_box_naming_and_env_derivation() -> None:
+    # A real batch id -> a Modal-safe user id, a bounded env name, and a mode-tagged container name.
+    batch = "combined_20260715-005237-076811"
+    user_id = box.sanitize_user_id(batch)
+    assert user_id == "combined-20260715-005237-076811"
+    env = box.modal_env_name(user_id)
+    assert env == "minds-staging-combined-20260715-005237-076811"
+    assert len(env) <= 64
+    ref = "38f9311059b9deadbeef0000"
+    assert box.container_name(user_id, ref, desktop=False) == "minds-box-{}-38f9311059b9".format(user_id)
+    assert box.container_name(user_id, ref, desktop=True) == "minds-box-{}-38f9311059b9-desktop".format(user_id)
+
+
+def test_sanitize_user_id_edge_cases() -> None:
+    # Weird characters collapse to single dashes; overlong input is capped; garbage-only input raises.
+    assert box.sanitize_user_id("My Batch!!__(v2)") == "my-batch-v2"
+    assert len(box.sanitize_user_id("x" * 100)) <= 40
+    try:
+        box.sanitize_user_id("___")
+        raise AssertionError("expected BoxError for a garbage-only id")
+    except box.BoxError:
+        pass
+
+
+def test_point_arg_to_box_rewrites_all_forms() -> None:
+    local = Path("eval-config.json")
+    dest = "/work/eval-config.json"
+    argv = ["launch", "--config", "./eval-config.json", "--config=eval-config.json", "--other", "x"]
+    out = main._point_arg_to_box(argv, local, dest)
+    assert out == ["launch", "--config", dest, "--config={}".format(dest), "--other", "x"]
