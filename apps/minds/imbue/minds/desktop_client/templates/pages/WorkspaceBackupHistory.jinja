@@ -19,8 +19,7 @@
     <div id="backup-history-page" data-agent-id="{{ agent_id }}">
       <h1 class="type-heading text-primary">Backup history</h1>
       <p class="type-helper text-tertiary mb-6">
-        Every backup of <span class="font-semibold">{{ ws_name }}</span>, newest first.
-        <Link href={{ "/workspace/" ~ agent_id ~ "/settings" }}>Back to settings</Link>
+        Every backup of <span class="font-semibold">{{ ws_name }}</span>.
       </p>
 
       <p id="history-status" class="type-body text-secondary mb-4">Loading backup history...</p>
@@ -37,6 +36,10 @@
           <Button variant="secondary" id="history-prev-btn">&larr; Newer</Button>
           <Button variant="secondary" id="history-next-btn">Older &rarr;</Button>
         </div>
+      </div>
+
+      <div class="mt-8">
+        <Link href={{ "/workspace/" ~ agent_id ~ "/settings" }} extra="type-helper">&larr; Back to settings</Link>
       </div>
     </div>
   </PageContainer>

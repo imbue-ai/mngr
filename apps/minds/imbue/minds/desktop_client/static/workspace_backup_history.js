@@ -87,11 +87,10 @@
       });
   }
 
-  // One table row: absolute time + "Latest" badge on the repository's newest
-  // snapshot, Download / Restore actions. Unlike the settings page's compact
-  // table this page shows the full date, with the relative age as secondary
-  // text. (Snapshot size is deliberately not shown -- see the settings-page
-  // table in workspace_backups.js.)
+  // One table row, identical to the settings page's "Recent backups" table
+  // (workspace_backups.js): relative time (exact local time on hover), a
+  // "Latest" badge on the repository's newest snapshot, and Download /
+  // Restore actions. (Snapshot size is deliberately not shown.)
   function buildSnapshotRow(snapshot, isLatest, isFirst) {
     var row = document.createElement('div');
     row.className = 'flex items-center gap-4 px-4 py-3'
@@ -103,13 +102,9 @@
 
     var timeEl = document.createElement('span');
     timeEl.className = 'type-body text-primary';
-    timeEl.textContent = new Date(snapshot.time).toLocaleString();
+    timeEl.textContent = relativeAgo(snapshot.time);
+    timeEl.title = new Date(snapshot.time).toLocaleString();
     timeCell.appendChild(timeEl);
-
-    var agoEl = document.createElement('span');
-    agoEl.className = 'type-helper text-tertiary';
-    agoEl.textContent = relativeAgo(snapshot.time);
-    timeCell.appendChild(agoEl);
 
     if (isLatest) {
       // Same green pill as the settings page / landing page badges.
