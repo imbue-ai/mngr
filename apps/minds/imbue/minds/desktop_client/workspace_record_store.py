@@ -262,18 +262,18 @@ def derive_openssh_public_key_line(private_key_text: str) -> str | None:
     KEY-----``) -- ``cryptography`` needs a different loader for each.
     """
     key_bytes = private_key_text.encode("utf-8")
-    last_error: Exception | None = None
+    loader_errors: list[str] = []
     for load_private_key in (serialization.load_pem_private_key, serialization.load_ssh_private_key):
         try:
             private_key = load_private_key(key_bytes, password=None)
         except (ValueError, TypeError, UnsupportedAlgorithm) as e:
-            last_error = e
+            loader_errors.append(f"{load_private_key.__name__}: {e}")
             continue
         public_bytes = private_key.public_key().public_bytes(
             encoding=serialization.Encoding.OpenSSH, format=serialization.PublicFormat.OpenSSH
         )
         return public_bytes.decode("utf-8")
-    logger.warning("Could not parse a synced SSH private key: {}", last_error)
+    logger.warning("Could not parse a synced SSH private key: {}", "; ".join(loader_errors))
     return None
 
 
