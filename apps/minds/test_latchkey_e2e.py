@@ -139,9 +139,14 @@ _POLL_INTERVAL_SECONDS: Final[float] = 3.0
 
 # Marker prefixing the HTTP status code in the secondary-gateway probes, so
 # the status is extractable from ``mngr exec`` output even if mngr adds its
-# own lines around the remote command's stdout.
+# own lines around the remote command's stdout. The pattern deliberately
+# excludes ``000``: that is curl's ``%{http_code}`` placeholder for "no HTTP
+# transaction completed" (e.g. connection refused while the reverse tunnel is
+# still being provisioned), which the pollers must treat as not-yet-reachable
+# rather than as a response. The probes cannot key off exit codes instead:
+# ``mngr exec`` does not reliably propagate the remote command's exit status.
 _HTTP_STATUS_MARKER: Final[str] = "LK_E2E_HTTP_STATUS:"
-_HTTP_STATUS_PATTERN: Final[re.Pattern[str]] = re.compile(re.escape(_HTTP_STATUS_MARKER) + r"(\d{3})")
+_HTTP_STATUS_PATTERN: Final[re.Pattern[str]] = re.compile(re.escape(_HTTP_STATUS_MARKER) + r"([1-9]\d{2})")
 
 
 def _require(condition: bool, message: str) -> None:
@@ -647,24 +652,25 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
                 },
                 "/permissions/self",
             )
+            # Content-based success check ("mngr exec" does not reliably
+            # propagate the remote exit status): the body of a successful
+            # /permissions/self read always carries the baseline
+            # ``latchkey-self`` scope rule that authorized the read itself.
             desktop_self = _poll_workspace_probe(
                 env,
                 repo,
                 agent_address,
                 desktop_self_command,
-                is_success=lambda result: result.returncode == 0,
+                is_success=lambda result: "latchkey-self" in result.stdout,
                 timeout=_DESKTOP_GATEWAY_REACHABLE_TIMEOUT_SECONDS,
-            )
-            assert desktop_self.returncode == 0, (
-                f"desktop gateway /permissions/self never succeeded from the workspace:\n"
-                f"stdout:\n{desktop_self.stdout}\nstderr:\n{desktop_self.stderr}\n"
-                f"forward log:\n{forward_log_path.read_text()}"
             )
             # The agent's own permissions view is the canonical host file: the
             # baseline carries the ``latchkey-self`` scope rule (the grant that
             # allowed this very /permissions/self read).
             assert "latchkey-self" in desktop_self.stdout, (
-                f"unexpected /permissions/self body from the desktop gateway:\n{desktop_self.stdout}"
+                f"desktop gateway /permissions/self never succeeded from the workspace:\n"
+                f"stdout:\n{desktop_self.stdout}\nstderr:\n{desktop_self.stderr}\n"
+                f"forward log:\n{forward_log_path.read_text()}"
             )
 
             # -- (b) the secondary (VPS-resident) gateway is reachable from inside the workspace --
@@ -682,8 +688,7 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
                 repo,
                 agent_address,
                 vps_gateway_probe_command,
-                is_success=lambda result: result.returncode == 0
-                and _HTTP_STATUS_PATTERN.search(result.stdout) is not None,
+                is_success=lambda result: _HTTP_STATUS_PATTERN.search(result.stdout) is not None,
                 timeout=_VPS_GATEWAY_REACHABLE_TIMEOUT_SECONDS,
             )
             good_password_status_match = _HTTP_STATUS_PATTERN.search(vps_gateway_probe.stdout)
