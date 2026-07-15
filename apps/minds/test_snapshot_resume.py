@@ -69,9 +69,6 @@ from imbue.mngr.config.pre_readers import find_profile_dir_lightweight
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.utils.testing import get_short_random_string
 
-_START_DOCKERD_SCRIPT: Final[Path] = Path("/code/mngr/libs/mngr/imbue/mngr/resources/start-dockerd.sh")
-_DOCKERD_STARTUP_TIMEOUT_SECONDS: Final[int] = 180
-
 # The minds workspace container name prefix (mngr names docker hosts
 # ``{mngr_prefix}-{host_name}`` and minds defaults to the ``minds-staging``
 # prefix at snapshot time). The docker provider also keeps a singleton
@@ -250,38 +247,14 @@ def running_workspace() -> Iterator[_ResumedWorkspace]:
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _ensure_dockerd_after_snapshot_resume() -> None:
-    """Bring ``dockerd`` back up in a snapshot-resumed sandbox.
+def _ensure_dockerd_after_snapshot_resume(snapshot_sandbox_dockerd: None) -> None:
+    """Every test in this module needs the snapshot sandbox's dockerd back up.
 
-    ``sandbox.snapshot_filesystem`` only captures the disk, not running
-    processes -- so a sandbox booted from the minds-workspace snapshot
-    has ``/var/lib/docker`` populated (with the stopped workspace
-    container's image layers + on-disk state) but no ``dockerd`` running.
-    Re-run the same script the snapshot itself used to bring dockerd up,
-    so subsequent ``docker`` invocations in these tests can talk to the
-    daemon.
-
-    Mirrors ``_ensure_dockerd_for_release`` in
-    ``libs/mngr/imbue/mngr/conftest.py`` but for our snapshot's script
-    location (the release image lives at ``/start-dockerd.sh``; the
-    snapshot tree puts the same script at its in-tree path).
+    The actual bring-up lives in the shared ``snapshot_sandbox_dockerd``
+    session fixture in ``conftest.py`` (also used by ``test_sync_e2e.py``);
+    this module-autouse wrapper preserves the original apply-to-all behavior
+    for the resume sanity tests.
     """
-    docker_info = subprocess.run(["docker", "info"], capture_output=True)
-    if docker_info.returncode == 0:
-        return
-
-    if not _START_DOCKERD_SCRIPT.is_file():
-        raise FileNotFoundError(
-            f"start-dockerd.sh not found at {_START_DOCKERD_SCRIPT}; this fixture is "
-            "only useful inside a sandbox booted from scripts/snapshot_minds_e2e_state.py."
-        )
-
-    subprocess.run(["chmod", "+x", str(_START_DOCKERD_SCRIPT)], check=True, timeout=5)
-    subprocess.run(
-        [str(_START_DOCKERD_SCRIPT)],
-        check=True,
-        timeout=_DOCKERD_STARTUP_TIMEOUT_SECONDS,
-    )
 
 
 # @pytest.mark.docker tells the host-side pytest resource guard that this
@@ -516,9 +489,14 @@ def _prepare_electron_workspace_inputs(tmp_path: Path, monkeypatch: pytest.Monke
     ensure_minds_env_defaults(setenv=monkeypatch.setenv)
     # No Modal creds here, so silence the Electron-spawned mngr's Modal discovery.
     monkeypatch.setenv("MNGR__PROVIDERS__MODAL__IS_ENABLED", "false")
-    # DEFAULT_WORKSPACE_TEMPLATE pins docker_runtime = "runsc" (gVisor), absent in CI / the sandbox;
-    # override to the default runtime (DEFAULT_WORKSPACE_TEMPLATE names this exact escape-hatch env var).
-    monkeypatch.setenv("MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME", "runc")
+    # Pin the local-docker workspace to runc; gVisor (runsc) is absent in CI /
+    # the sandbox. MINDS_DOCKER_RUNTIME_DEFAULT pins the create form / API default
+    # to runc so minds never stacks the `docker_runsc` create-template -- the only
+    # way runsc gets selected, now that the pinned DEFAULT_WORKSPACE_TEMPLATE `docker` template already
+    # defaults to runc. (A provider-config env var like
+    # MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME cannot help: an explicitly stacked
+    # template's docker_runtime outranks it.)
+    monkeypatch.setenv("MINDS_DOCKER_RUNTIME_DEFAULT", "RUNC")
     # The Electron-spawned mngr loads two project-config trees under
     # PYTEST_CURRENT_TEST: the host-side config (a throwaway opted-in copy built
     # here) and the DEFAULT_WORKSPACE_TEMPLATE worktree. The DEFAULT_WORKSPACE_TEMPLATE worktree is materialized ahead of time
@@ -834,7 +812,8 @@ def test_backup_enable_repair_and_destination_change_on_resumed_workspace(
     """Enable backups, repair a corrupted env, and change the destination -- minds-side, for real.
 
     Drives the actual provisioning entry points from the sandbox host: real
-    `restic init` + `restic key add` against local repositories, and real
+    `restic init` against local repositories (keyed by the per-workspace
+    password), and real
     `mngr exec` injection/rotation of `runtime/secrets/restic.env` inside the
     resumed workspace container.
     """

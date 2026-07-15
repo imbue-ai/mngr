@@ -1,15 +1,27 @@
-{#def agent_ids, agent_accents, mngr_forward_origin, is_discovering, agent_names, destroying_status_by_agent_id, shutdown_capable_agent_ids, mind_liveness_by_agent_id, agent_providers={} #}
+{#def agent_ids, agent_accents, mngr_forward_origin, is_discovering, agent_names, destroying_status_by_agent_id, shutdown_capable_agent_ids, mind_liveness_by_agent_id, agent_providers={}, remote_workspaces=[], locked_account_emails=[] #}
 {#
   Landing page: list of accessible workspaces with per-row health and backup
   status. Subscribes to the chrome SSE so the page reloads
   when a destroy completes (or any other workspace-list change lands).
 #}
 {% set _scripts %}
+<script src="/_static/sync_status_banner.js" defer></script>
 <script>
   (function () {
     var rendered = (document.querySelector('[data-landing-agent-ids]') || {}).dataset || {};
     var renderedIds = (rendered.landingAgentIds || '').split(',').filter(function (s) { return s.length > 0; });
     var renderedSet = new Set(renderedIds);
+    // Remote-tile derived states as rendered ("agentId=state" pairs; state may
+    // be empty). The SSE workspaces event carries the live map; any drift --
+    // a state change, a tile flipping into local discovery, a new remote
+    // record -- reloads so the tiles re-render.
+    var renderedRemoteStates = {};
+    (rendered.landingRemoteStates || '').split(',').forEach(function (pair) {
+      if (!pair) return;
+      var separatorIdx = pair.indexOf('=');
+      if (separatorIdx < 0) return;
+      renderedRemoteStates[pair.slice(0, separatorIdx)] = pair.slice(separatorIdx + 1);
+    });
 
     var healthStatusByAgent = {};
 
@@ -662,6 +674,19 @@
           location.reload();
           return;
         }
+        if (data.remote_workspace_states) {
+          var liveRemoteStates = data.remote_workspace_states;
+          var remoteDiffers = Object.keys(renderedRemoteStates).some(function (id) {
+            return liveRemoteStates[id] !== renderedRemoteStates[id];
+          }) || Object.keys(liveRemoteStates).some(function (id) {
+            return !(id in renderedRemoteStates);
+          });
+          if (remoteDiffers) {
+            es.close();
+            location.reload();
+            return;
+          }
+        }
         // Same set of rows: apply each shutdown-capable mind's liveness in place
         // (it rides the workspace entry now, not a separate event).
         data.workspaces.forEach(function (w) {
@@ -680,16 +705,90 @@
       applyMindLiveness(agentId, mindLivenessByAgent[agentId]);
     });
     connect();
+
+    window.landingSyncUnlock = function () {
+      var input = document.getElementById('sync-unlock-password');
+      var errorEl = document.getElementById('sync-unlock-error');
+      var btn = document.getElementById('sync-unlock-btn');
+      if (!input) return;
+      if (btn) btn.disabled = true;
+      if (errorEl) errorEl.classList.add('hidden');
+      fetch('/_chrome/sync-unlock', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: input.value }),
+      }).then(function (resp) {
+        return resp.json().then(function (data) { return { status: resp.status, data: data || {} }; });
+      }).then(function (res) {
+        if (btn) btn.disabled = false;
+        if (res.status === 200 && res.data.ok) {
+          window.location.reload();
+          return;
+        }
+        if (errorEl) {
+          errorEl.textContent = res.data.error || 'That password did not unlock any account.';
+          errorEl.classList.remove('hidden');
+        }
+      }).catch(function () {
+        if (btn) btn.disabled = false;
+        if (errorEl) {
+          errorEl.textContent = 'The unlock request failed (network error).';
+          errorEl.classList.remove('hidden');
+        }
+      });
+    };
+
+    window.landingRemoveRecord = function (ev, button) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      var hostId = button.getAttribute('data-remove-host-id');
+      if (!hostId) return;
+      button.disabled = true;
+      fetch('/_chrome/workspaces/remove-record', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host_id: hostId }),
+      }).then(function (resp) {
+        if (resp.ok) {
+          var row = button.closest('[data-agent-id]');
+          if (row) row.remove();
+          return;
+        }
+        button.disabled = false;
+      }).catch(function () { button.disabled = false; });
+    };
   })();
 </script>
 {% endset %}
 <Base title="Workspaces" scripts={{ _scripts }}>
   <PageContainer>
-    {% if agent_ids %}
-      <div class="flex items-center justify-between mb-4" data-landing-agent-ids="{{ agent_ids | map('string') | join(',') }}">
+    {% if agent_ids or remote_workspaces %}
+      <div class="flex items-center justify-between mb-4" data-landing-agent-ids="{{ ((agent_ids | map('string') | list) + (remote_workspaces | map(attribute='agent_id') | list)) | join(',') }}" data-landing-remote-states="{% for remote in remote_workspaces %}{{ remote.agent_id }}={{ remote.state }}{% if not loop.last %},{% endif %}{% endfor %}">
         <h1 class="type-heading text-primary">Workspaces</h1>
         <ButtonLink href="/create" variant="primary">Create</ButtonLink>
       </div>
+
+      {% if locked_account_emails %}
+      {# New-device unlock banner: a bundle exists for these accounts but this
+         device has no key yet. Unlocking installs the account's sync key so
+         synced secrets (backup credentials, host keys) become usable here. #}
+      <Notice class="mb-4" id="sync-unlock-banner">
+        <div class="flex flex-col gap-2">
+          <span class="type-body text-primary">
+            Enter your master password to unlock synced workspaces for
+            {{ locked_account_emails | join(', ') }}.
+          </span>
+          <div class="flex items-center gap-2">
+            <input type="password" id="sync-unlock-password" autocomplete="current-password"
+                   placeholder="master password"
+                   class="h-[34px] px-3 rounded-full type-body bg-surface-secondary text-primary">
+            <Button variant="secondary" id="sync-unlock-btn"
+                    onclick="window.landingSyncUnlock()">Unlock</Button>
+          </div>
+          <p id="sync-unlock-error" class="hidden type-helper text-important" role="alert"></p>
+        </div>
+      </Notice>
+      {% endif %}
 
       <div class="flex flex-col gap-1.5">
         {% for agent_id in agent_ids %}
@@ -783,6 +882,42 @@
               </Button>
             </Card>
           {% endif %}
+        {% endfor %}
+
+        {# Workspaces known only from synced records (hosted on another device,
+           or otherwise not in local discovery). Greyed and non-clickable --
+           their hosts aren't reachable from here -- but backup status and
+           download still work via the synced credentials, and the X removes
+           the record for good. #}
+        {% for remote in remote_workspaces %}
+          {% set remote_accent_style = "--workspace-accent: " ~ remote.accent ~ ";" %}
+          <Card layout="row"
+                extra="accent-spine relative overflow-hidden opacity-60"
+                :style="remote_accent_style"
+                :data-agent-id="remote.agent_id">
+            <span class="flex-1 font-semibold text-secondary pl-1">{{ remote.name }}</span>
+            <span class="inline-flex items-center px-2 py-0.5 rounded-md type-label bg-fill-subtle text-secondary">on {{ remote.location }}</span>
+            {# Derived access state for cloud rows: connecting (synced key
+               materialized, discovery hasn't resolved it yet), unreachable
+               (a healthy snapshot lacks the host), or a materialization
+               error (detail in the tooltip). Plain rows render no chip. #}
+            {% if remote.state == 'connecting' %}
+              <span class="inline-flex items-center px-2 py-0.5 rounded-md type-label bg-fill-subtle text-secondary">connecting&hellip;</span>
+            {% elif remote.state == 'unreachable' %}
+              <span class="inline-flex items-center px-2 py-0.5 rounded-md type-label bg-fill-subtle text-important">unreachable</span>
+            {% elif remote.state == 'error' %}
+              <span class="inline-flex items-center px-2 py-0.5 rounded-md type-label bg-fill-subtle text-important" data-tooltip="{{ remote.state_detail or 'Could not apply the synced access material.' }}">sync error</span>
+            {% endif %}
+            <span class="landing-backup-badge inline-flex items-center px-2 py-0.5 rounded-md type-label" style="display:none"></span>
+            <Link href="#" class="landing-backup-download hidden cursor-pointer" extra="type-helper">download</Link>
+            <Button variant="ghost" size="icon"
+                    onclick="window.landingRemoveRecord(event, this)"
+                    :data-remove-host-id="remote.host_id"
+                    data-tooltip="Remove from this list"
+                    aria-label="Remove from this list">
+              <Icon16 name="close" />
+            </Button>
+          </Card>
         {% endfor %}
       </div>
     {% else %}

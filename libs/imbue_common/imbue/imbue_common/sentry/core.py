@@ -6,6 +6,7 @@ import sys
 import threading
 import time
 import traceback
+import uuid
 from collections import defaultdict
 from collections.abc import Callable
 from collections.abc import Collection
@@ -527,6 +528,56 @@ def fixup_release_id(release_id: str) -> str:
     return re.sub(r"(\d+\.\d+\.\d+)rc(\d+)", r"\1-rc.\2", release_id)
 
 
+# A persisted anonymous user id is a 32-char lowercase hex string (``uuid4().hex``). Kept opaque and
+# free of any PII: it exists only so Sentry can count distinct affected installs per issue.
+_ANONYMOUS_USER_ID_PATTERN = re.compile(r"[0-9a-f]{32}")
+
+
+def get_or_create_anonymous_user_id(id_file_path: Path) -> str:
+    """Read (or create-and-persist) a stable, random anonymous user id at ``id_file_path``.
+
+    The id is a random ``uuid4`` hex string carrying no PII. It is attached to every Sentry event
+    (via ``sentry_sdk.set_user``) so Sentry can report the number of distinct installs affected by a
+    given issue -- letting us tell a rare bug that hits many users apart from a noisy one that hits a
+    single user.
+
+    When the file is absent it is created atomically with ``O_EXCL`` so two processes racing on first
+    launch (e.g. the minds backend and the Electron main process) converge on a single id: the loser
+    of the race sees ``FileExistsError`` and reads the winner's value. A file that exists but holds a
+    blank/malformed value is overwritten atomically (temp file + rename) with a freshly generated id.
+    """
+    for _attempt in range(2):
+        try:
+            existing = id_file_path.read_text().strip()
+            does_file_exist = True
+        except OSError:
+            existing = ""
+            does_file_exist = False
+        if _ANONYMOUS_USER_ID_PATTERN.fullmatch(existing):
+            return existing
+        new_id = uuid.uuid4().hex
+        id_file_path.parent.mkdir(parents=True, exist_ok=True)
+        if does_file_exist:
+            # The file exists but holds a corrupt/blank value: overwrite it atomically. (This is not a
+            # first-launch race -- the file already existed -- so there is no id to converge on.)
+            tmp_path = id_file_path.with_suffix(".tmp")
+            tmp_path.write_text(new_id)
+            tmp_path.rename(id_file_path)
+            return new_id
+        try:
+            # File absent: ``x`` (O_EXCL) fails if another process created it first; then we loop and
+            # read that process's value so racing processes converge on a single id.
+            with open(id_file_path, "x") as id_file:
+                id_file.write(new_id)
+            return new_id
+        except FileExistsError:
+            continue
+    # Extremely unlikely: the file kept appearing/vanishing between our read and create on both
+    # attempts. Fall back to an in-memory id so reporting still carries *some* user rather than
+    # crashing setup.
+    return uuid.uuid4().hex
+
+
 def setup_sentry(
     dsn: str,
     # The Sentry environment label (e.g. ``production`` / ``staging`` / ``development``). Which Sentry
@@ -541,6 +592,12 @@ def setup_sentry(
     # ``mngr-latchkey-forward``). Recorded as the ``service`` tag and the event
     # ``server_name``.
     service_name: str,
+    # A stable, randomly-generated anonymous user id (no PII) attached to every event via
+    # ``sentry_sdk.set_user`` so Sentry can count the distinct installs affected by each issue. The
+    # caller persists this (see ``get_or_create_anonymous_user_id``) and shares one value across all
+    # processes of a single install (the minds backend, the ``mngr latchkey forward`` daemon, and the
+    # JS frontends) so an install is counted once regardless of which process reported the event.
+    user_id: str,
     log_attachment_groups: Sequence[LogAttachmentGroup],
     integrations: Sequence[Integration],
     is_error_reporting_enabled: Callable[[], bool],
@@ -645,8 +702,11 @@ def setup_sentry(
     else:
         logger.info("Sentry S3 attachment uploads disabled (no bucket configured)")
 
-    # We deliberately do not call ``sentry_sdk.set_user`` (and keep
-    # ``send_default_pii=False``) so error reports carry no user PII for now.
+    # Attach the anonymous user id to every event. It is a random, opaque id (no PII), so
+    # ``send_default_pii`` stays False (no IP / cookies / real identity collected); only this id is
+    # sent, purely so Sentry can count the number of distinct installs affected by each issue.
+    scope = get_current_scope()
+    scope.set_user({"id": user_id})
 
     # Bind the log-attachment uploader for this process's log layout, and register it (so manual bug
     # reports can reach it) plus the loguru handler that turns errors/exceptions into Sentry events.
@@ -678,7 +738,6 @@ def setup_sentry(
         diagnose=False,
         format=SENTRY_LOG_FORMAT,
     )
-    scope = get_current_scope()
     scope.set_context(
         _SENTRY_CONFIG_CONTEXT_KEY,
         # need to cast to `dict` to make PyCharm happy

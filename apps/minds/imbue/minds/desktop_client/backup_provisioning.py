@@ -8,19 +8,20 @@ entry point can be re-applied to any already-created host later.
 
 The key idea: minds initializes the restic repository itself (from the
 machine running minds) and gives each workspace its own random repository
-password, so the workspace never holds the user's master password and
-carries no repo-init logic. Concretely, enabling backups:
+password -- the repo's single key. Disaster recovery does not need a repo
+"master key": the canonical env (and therefore the random password) syncs
+inside the account's encrypted workspace record, unlocked by the master
+password via the account DEK (see ``dek_store``). Concretely, enabling
+backups:
 
 1. resolves the repository URL + backend credentials (``IMBUE_CLOUD``:
    create/reuse a per-workspace R2 bucket + readwrite key; ``API_KEY``:
    from the user's free-form env block),
-2. generates a random per-workspace ``RESTIC_PASSWORD``,
-3. ``restic init``s the repo using the user's master password (which may be
-   empty),
-4. ``restic key add``s the random per-workspace password,
-5. writes the canonical ``restic.env`` (repo + creds + random password) to
+2. generates a random per-workspace ``RESTIC_PASSWORD`` and ``restic init``s
+   the repo with it,
+3. writes the canonical ``restic.env`` (repo + creds + random password) to
    the minds-side store (see ``backup_env_store``), and
-6. injects that whole file into the workspace at
+4. injects that whole file into the workspace at
    ``runtime/secrets/restic.env`` via ``mngr exec``.
 
 ``CONFIGURE_LATER`` is a no-op. Re-provisioning is idempotent: if a
@@ -37,7 +38,6 @@ from typing import Final
 
 from loguru import logger
 from pydantic import Field
-from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
@@ -81,14 +81,6 @@ class BackupSetupRequest(FrozenModel):
     """The inputs needed to configure backups for one host."""
 
     backup_provider: BackupProvider = Field(description="Which backup provider to configure")
-    master_password: SecretStr | None = Field(
-        default=None,
-        description=(
-            "The user's master/recovery password used (only) to `restic init` the repo. None means "
-            "the master password is empty -- the repo is initialized with an empty password. "
-            "This is never written into the workspace; the workspace gets its own random password."
-        ),
-    )
     api_key_env_text: str = Field(
         default="",
         description=(
@@ -339,7 +331,7 @@ def configure_backups_for_host(
         return
 
     with log_span("Configuring {} backups for agent {}", request.backup_provider.value, agent_id):
-        # restic must be available on the minds machine to init the repo + add the key.
+        # restic must be available on the minds machine to init the repo.
         restic_cli.ensure_restic_available()
 
         # Idempotent re-provision: the canonical env is the source of truth.
@@ -353,21 +345,13 @@ def configure_backups_for_host(
         repository, backend_env = _resolve_repository_and_backend_env(
             request, host_id, imbue_cloud_cli=imbue_cloud_cli
         )
-        master_password = request.master_password.get_secret_value() if request.master_password is not None else None
         workspace_password = generate_workspace_password()
 
-        # Initialize the repo with the master (or empty) password, then add the
-        # random per-workspace password as an additional key. The workspace only
-        # ever receives the random password.
+        # Initialize the repo with the workspace's own random password -- its
+        # single key. Cross-device and disaster-recovery access come from the
+        # synced (encrypted) canonical env, not from extra repo keys.
         restic_cli.init_repo(
-            repository=repository, backend_env=backend_env, password=master_password, parent_cg=parent_cg
-        )
-        restic_cli.add_password_key(
-            repository=repository,
-            backend_env=backend_env,
-            existing_password=master_password,
-            new_password=workspace_password,
-            parent_cg=parent_cg,
+            repository=repository, backend_env=backend_env, password=workspace_password, parent_cg=parent_cg
         )
 
         canonical_env = build_canonical_env_content(
@@ -443,8 +427,8 @@ def change_backup_destination_for_host(
     Archives the existing canonical env minds-side (the old repository stays
     reachable through the archive), then runs the ordinary idempotent
     provisioning against the new inputs: new random per-workspace password,
-    ``restic init`` with the master (or empty) password, ``restic key add``,
-    canonical env write, and injection (which rotates the workspace copy).
+    ``restic init`` keyed solely by that password, canonical env write, and
+    injection (which rotates the workspace copy).
     Existing snapshots stay in the old repository; the new destination starts
     fresh.
     """

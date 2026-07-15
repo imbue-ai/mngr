@@ -42,4 +42,6 @@ else
     fi
 fi
 
-exec uv run --project "$uv_project" mngr "$@"
+# --all-packages is load-bearing: the workspace root does not depend on imbue-mngr
+# or its plugins, so uv would otherwise leave their dependencies uninstalled.
+exec uv run --all-packages --project "$uv_project" mngr "$@"

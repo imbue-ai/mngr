@@ -1,10 +1,21 @@
+import json
 from pathlib import Path
 
+import pytest
+
+from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
+from imbue.minds.desktop_client.conftest import make_resolver_with_data
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.session_store import derive_user_id_prefix
+from imbue.minds.errors import WorkspaceSyncError
+from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
+
+_AGENT_A = str(AgentId.generate())
+_AGENT_B = str(AgentId.generate())
 
 
 def _make_store_with_users(
@@ -17,6 +28,19 @@ def _make_store_with_users(
         cli.add_account(user_id=user_id, email=email, display_name=display_name)
     store = make_session_store_for_test(tmp_path, cli=cli)
     return store, cli
+
+
+def _resolver_for_agents(*agent_ids: str) -> MngrCliBackendResolver:
+    """Build a resolver where each agent lives on its own host (distinct host_ids)."""
+    agents = [
+        {
+            "id": agent_id,
+            "labels": {"is_primary": "true"},
+            "host": {"id": str(HostId.generate()), "name": agent_id[:12]},
+        }
+        for agent_id in agent_ids
+    ]
+    return make_resolver_with_data(agents_json=json.dumps({"agents": agents}))
 
 
 def test_add_and_load_session(tmp_path: Path) -> None:
@@ -65,20 +89,24 @@ def test_remove_account_disappears_after_invalidate(tmp_path: Path) -> None:
 
 
 def test_associate_and_disassociate_workspace(tmp_path: Path) -> None:
-    """Workspace association and disassociation persist on disk."""
-    store, _cli = _make_store_with_users(tmp_path, [("user-1", "a@b.com", None)])
+    """Association creates a workspace record; disassociation removes it."""
+    store, cli = _make_store_with_users(tmp_path, [("user-1", "a@b.com", None)])
+    resolver = _resolver_for_agents(_AGENT_A, _AGENT_B)
 
-    store.associate_workspace("user-1", "agent-aaa")
-    store.associate_workspace("user-1", "agent-bbb")
+    store.associate_workspace("user-1", _AGENT_A, resolver)
+    store.associate_workspace("user-1", _AGENT_B, resolver)
 
     session = store.get_session("user-1")
     assert session is not None
-    assert session.workspace_ids == ["agent-aaa", "agent-bbb"]
+    assert sorted(session.workspace_ids) == sorted([_AGENT_A, _AGENT_B])
+    # The records landed on the (fake) connector.
+    assert len(cli.sync_records_by_email["a@b.com"]) == 2
 
-    store.disassociate_workspace("user-1", "agent-aaa")
+    store.disassociate_workspace("user-1", _AGENT_A)
     session = store.get_session("user-1")
     assert session is not None
-    assert session.workspace_ids == ["agent-bbb"]
+    assert session.workspace_ids == [_AGENT_B]
+    assert len(cli.sync_records_by_email["a@b.com"]) == 1
 
 
 def test_get_account_for_workspace(tmp_path: Path) -> None:
@@ -87,14 +115,15 @@ def test_get_account_for_workspace(tmp_path: Path) -> None:
         tmp_path,
         [("user-1", "one@example.com", None), ("user-2", "two@example.com", None)],
     )
-    store.associate_workspace("user-1", "agent-aaa")
-    store.associate_workspace("user-2", "agent-bbb")
+    resolver = _resolver_for_agents(_AGENT_A, _AGENT_B)
+    store.associate_workspace("user-1", _AGENT_A, resolver)
+    store.associate_workspace("user-2", _AGENT_B, resolver)
 
-    account = store.get_account_for_workspace("agent-aaa")
+    account = store.get_account_for_workspace(_AGENT_A)
     assert account is not None
     assert account.email == "one@example.com"
 
-    account = store.get_account_for_workspace("agent-bbb")
+    account = store.get_account_for_workspace(_AGENT_B)
     assert account is not None
     assert account.email == "two@example.com"
 
@@ -104,12 +133,66 @@ def test_get_account_for_workspace(tmp_path: Path) -> None:
 def test_duplicate_associate_is_idempotent(tmp_path: Path) -> None:
     """Associating the same workspace twice doesn't create duplicates."""
     store, _cli = _make_store_with_users(tmp_path, [("user-1", "a@b.com", None)])
-    store.associate_workspace("user-1", "agent-aaa")
-    store.associate_workspace("user-1", "agent-aaa")
+    resolver = _resolver_for_agents(_AGENT_A)
+    store.associate_workspace("user-1", _AGENT_A, resolver)
+    store.associate_workspace("user-1", _AGENT_A, resolver)
 
     session = store.get_session("user-1")
     assert session is not None
-    assert session.workspace_ids == ["agent-aaa"]
+    assert session.workspace_ids == [_AGENT_A]
+
+
+def test_associate_while_offline_raises(tmp_path: Path) -> None:
+    """Settings-page association requires connectivity and fails cleanly offline."""
+    store, cli = _make_store_with_users(tmp_path, [("user-1", "a@b.com", None)])
+    cli.is_sync_offline = True
+    resolver = _resolver_for_agents(_AGENT_A)
+
+    with pytest.raises(WorkspaceSyncError):
+        store.associate_workspace("user-1", _AGENT_A, resolver)
+    assert store.get_account_for_workspace(_AGENT_A) is None
+
+
+def test_associate_created_workspace_seeds_a_queued_record(tmp_path: Path) -> None:
+    """The create-path association seeds a record with form metadata (no resolver needed)."""
+    store, cli = _make_store_with_users(tmp_path, [("user-1", "a@b.com", None)])
+
+    store.associate_created_workspace(
+        user_id="user-1",
+        agent_id="agent-new",
+        host_id="host-new",
+        display_name="my new workspace",
+        color="#112233",
+        is_cloud_row=False,
+    )
+
+    session = store.get_session("user-1")
+    assert session is not None
+    assert session.workspace_ids == ["agent-new"]
+    pushed = cli.sync_records_by_email["a@b.com"]["host-new"]
+    assert pushed["display_name"] == "my new workspace"
+    assert pushed["color"] == "#112233"
+    assert pushed["hosting_device_id"] == "device-test"
+
+
+def test_associate_created_workspace_queues_offline(tmp_path: Path) -> None:
+    """A connector outage never fails creation: the record queues locally."""
+    store, cli = _make_store_with_users(tmp_path, [("user-1", "a@b.com", None)])
+    cli.is_sync_offline = True
+
+    store.associate_created_workspace(
+        user_id="user-1",
+        agent_id="agent-new",
+        host_id="host-new",
+        display_name="ws",
+        color=None,
+        is_cloud_row=False,
+    )
+
+    session = store.get_session("user-1")
+    assert session is not None
+    assert session.workspace_ids == ["agent-new"]
+    assert "a@b.com" not in cli.sync_records_by_email
 
 
 def test_get_user_info(tmp_path: Path) -> None:
@@ -124,15 +207,6 @@ def test_get_user_info(tmp_path: Path) -> None:
     assert info.email == "test@example.com"
     assert info.display_name == "Test User"
     assert str(info.user_id_prefix) == "abcd123456789abc"
-
-
-def test_corrupt_associations_file_returns_empty(tmp_path: Path) -> None:
-    """A corrupt workspace_associations.json doesn't break list_accounts."""
-    store, _cli = _make_store_with_users(tmp_path, [("user-1", "a@b.com", None)])
-    (tmp_path / "workspace_associations.json").write_text("not valid json {{{")
-    accounts = store.list_accounts()
-    assert len(accounts) == 1
-    assert accounts[0].workspace_ids == []
 
 
 def test_is_any_signed_in(tmp_path: Path) -> None:
@@ -151,10 +225,11 @@ def test_derive_user_id_prefix() -> None:
     assert str(prefix) == "abcd123456789abc"
 
 
-def test_disassociate_from_nonexistent_user_is_noop(tmp_path: Path) -> None:
-    """Disassociating from a user with no associations does nothing."""
+def test_disassociate_from_unknown_user_raises(tmp_path: Path) -> None:
+    """Disassociating for a user that isn't signed in raises (no account to resolve)."""
     store, _cli = _make_store_with_users(tmp_path, [])
-    store.disassociate_workspace("nonexistent-user", "agent-xyz")
+    with pytest.raises(WorkspaceSyncError):
+        store.disassociate_workspace("nonexistent-user", "agent-xyz")
 
 
 def test_disassociate_nonexistent_workspace_is_noop(tmp_path: Path) -> None:
@@ -166,16 +241,12 @@ def test_disassociate_nonexistent_workspace_is_noop(tmp_path: Path) -> None:
     assert session.workspace_ids == []
 
 
-def test_associate_for_unsigned_user_writes_disk_but_not_listed(tmp_path: Path) -> None:
-    """Disk associations are independent of signed-in identity.
-
-    Associating an agent_id with a user_id that isn't signed in persists
-    the association, but list_accounts (driven by the plugin's auth
-    list) won't include the user. This mirrors the post-signout state
-    where workspace_ids linger until the user signs back in.
-    """
+def test_associate_for_unsigned_user_raises(tmp_path: Path) -> None:
+    """Associating with a user_id that isn't signed in raises instead of writing state."""
     store, _cli = _make_store_with_users(tmp_path, [])
-    store.associate_workspace("nonexistent-user", "agent-xyz")
+    resolver = _resolver_for_agents(_AGENT_A)
+    with pytest.raises(WorkspaceSyncError):
+        store.associate_workspace("nonexistent-user", _AGENT_A, resolver)
     assert store.list_accounts() == []
 
 
@@ -198,45 +269,48 @@ def test_get_user_info_nonexistent_returns_none(tmp_path: Path) -> None:
 
 
 def test_has_signed_in_before_with_associations(tmp_path: Path) -> None:
-    """has_signed_in_before returns True once the associations file exists."""
-    store, _cli = _make_store_with_users(tmp_path, [])
+    """has_signed_in_before returns True once any workspace record exists."""
+    store, cli = _make_store_with_users(tmp_path, [])
     assert not store.has_signed_in_before()
-    store.associate_workspace("user-1", "agent-x")
+    cli.add_account(user_id="user-1", email="a@b.com")
+    store.invalidate_identity_cache()
+    store.associate_created_workspace(
+        user_id="user-1", agent_id="agent-x", host_id="host-x", display_name="x", color=None, is_cloud_row=False
+    )
     assert store.has_signed_in_before()
 
 
 def test_has_signed_in_before_when_plugin_reports_account(tmp_path: Path) -> None:
-    """has_signed_in_before is True even with no associations file when the plugin has a session."""
+    """has_signed_in_before is True even with no records when the plugin has a session."""
     store, _cli = _make_store_with_users(tmp_path, [("user-1", "a@b.com", None)])
     assert store.has_signed_in_before()
 
 
+def test_has_signed_in_before_with_legacy_files(tmp_path: Path) -> None:
+    """A pre-sync install's legacy files still count as having signed in."""
+    store, _cli = _make_store_with_users(tmp_path, [])
+    (tmp_path / "workspace_associations.json").write_text("{}")
+    assert store.has_signed_in_before()
+
+
+def test_has_signed_in_before_with_retired_legacy_files(tmp_path: Path) -> None:
+    """Legacy files renamed aside by the one-shot conversion still count as having signed in."""
+    store, _cli = _make_store_with_users(tmp_path, [])
+    assert not store.has_signed_in_before()
+    (tmp_path / "sessions.json.pre-sync").write_text("{}")
+    assert store.has_signed_in_before()
+
+
 def test_persistence_across_store_instances(tmp_path: Path) -> None:
-    """Workspace associations written by one store instance are readable by another."""
+    """Workspace records written by one store instance are readable by another."""
     cli = make_fake_imbue_cloud_cli()
     cli.add_account(user_id="user-1", email="persist@test.com")
     store1 = make_session_store_for_test(tmp_path, cli=cli)
-    store1.associate_workspace("user-1", "agent-xyz")
+    resolver = _resolver_for_agents(_AGENT_A)
+    store1.associate_workspace("user-1", _AGENT_A, resolver)
 
     store2 = make_session_store_for_test(tmp_path, cli=cli)
     session = store2.get_session("user-1")
     assert session is not None
     assert session.email == "persist@test.com"
-    assert session.workspace_ids == ["agent-xyz"]
-
-
-def test_legacy_sessions_file_migration_reads_workspace_ids(tmp_path: Path) -> None:
-    """The legacy ~/.minds/sessions.json shape is read for workspace_ids on first run."""
-    legacy = tmp_path / "sessions.json"
-    legacy.write_text(
-        '{"user-legacy": {"user_id": "user-legacy", "email": "old@example.com",'
-        ' "display_name": null, "workspace_ids": ["agent-old"]}}'
-    )
-    cli = make_fake_imbue_cloud_cli()
-    cli.add_account(user_id="user-legacy", email="old@example.com")
-    store = make_session_store_for_test(tmp_path, cli=cli)
-
-    session = store.get_session("user-legacy")
-    assert session is not None
-    assert session.email == "old@example.com"
-    assert session.workspace_ids == ["agent-old"]
+    assert session.workspace_ids == [_AGENT_A]

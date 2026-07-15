@@ -2123,9 +2123,11 @@ name = "imbue-common"
 version = "0.1.20"
 source = { editable = "libs/imbue_common" }
 dependencies = [
+    { name = "argon2-cffi" },
     { name = "boto3" },
     { name = "click" },
     { name = "cowsay-python" },
+    { name = "cryptography" },
     { name = "httpx" },
     { name = "loguru" },
     { name = "pydantic" },
@@ -2141,9 +2143,11 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "argon2-cffi", specifier = ">=23.1" },
     { name = "boto3", specifier = ">=1.34" },
     { name = "click", specifier = ">=8.0" },
     { name = "cowsay-python", specifier = ">=1.0.2" },
+    { name = "cryptography", specifier = ">=42.0" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "inline-snapshot", marker = "extra == 'dev'", specifier = ">=0.13" },
     { name = "loguru", specifier = ">=0.7" },
@@ -2202,7 +2206,7 @@ requires-dist = [
     { name = "packaging", specifier = ">=21.0" },
     { name = "paramiko", specifier = ">=3.0" },
     { name = "pluggy", specifier = ">=1.5.0" },
-    { name = "psutil", specifier = ">=5.9" },
+    { name = "psutil", specifier = ">=7.2" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pygtail", specifier = ">=0.14.0" },
     { name = "pyinfra", specifier = ">=3.0" },

@@ -136,6 +136,7 @@ def setup_command_context(
     is_format_template_supported: bool = False,
     strict: bool | None = None,
     silent_unknown_fields: bool = False,
+    max_log_size_mb: int | None = None,
 ) -> tuple[MngrContext, OutputOptions, TCommandOptions]:
     """Set up config and logging for a command.
 
@@ -150,6 +151,11 @@ def setup_command_context(
     config fields and unknown provider backends (used by ``mngr plugin add``,
     where the config is expected to reference plugins that are not yet
     installed). Only takes effect when ``strict=False``.
+
+    ``max_log_size_mb`` pins this command's rotated-log size cap (in MB),
+    overriding ``config.logging.max_log_size_mb``. Long-running daemons that
+    write to a dedicated ``--log-file`` use this to keep a smaller cap than the
+    general mngr default. ``None`` keeps the config value.
 
     The resolved LoggingConfig (with CLI overrides applied) is stored on the
     click context at ctx.meta["logging_config"] for callers that need logging
@@ -294,6 +300,7 @@ def setup_command_context(
         log_file=opts.log_file,
         log_commands=opts.log_commands,
         config=mngr_ctx.config,
+        max_log_size_mb=max_log_size_mb,
     )
 
     # Reject format templates on commands that don't support them
@@ -346,11 +353,17 @@ def parse_output_options(
     log_file: str | None,
     log_commands: bool | None,
     config: MngrConfig,
+    max_log_size_mb: int | None = None,
 ) -> tuple[OutputOptions, LoggingConfig]:
     """Parse output-related CLI options. CLI flags can override config values.
 
     Returns a tuple of (OutputOptions, resolved LoggingConfig). The resolved
     LoggingConfig contains the TOML defaults with CLI overrides applied.
+
+    ``max_log_size_mb`` lets a command pin its own rotated-log size cap instead
+    of inheriting ``config.logging.max_log_size_mb`` (used by long-running
+    daemons that write to a dedicated ``--log-file`` and want a smaller cap than
+    the general mngr default). ``None`` keeps the config value.
 
     If output_format is a built-in format name (human, json, jsonl), it is parsed
     as an OutputFormat enum. Otherwise it is treated as a format template string:
@@ -393,7 +406,7 @@ def parse_output_options(
     resolved_logging_config = LoggingConfig(
         file_level=config.logging.file_level,
         log_dir=config.logging.log_dir,
-        max_log_size_mb=config.logging.max_log_size_mb,
+        max_log_size_mb=max_log_size_mb if max_log_size_mb is not None else config.logging.max_log_size_mb,
         console_level=console_level,
         log_file_path=log_file_path,
         is_logging_commands=is_log_commands,

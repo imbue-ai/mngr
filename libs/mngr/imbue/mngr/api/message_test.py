@@ -1,15 +1,23 @@
+from collections.abc import Callable
 from pathlib import Path
+from threading import Lock
 
 import pytest
 
+from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.base_agent import SendKeysAgent
 from imbue.mngr.api.create import CreateAgentOptions
 from imbue.mngr.api.find import find_all_agents
 from imbue.mngr.api.message import MessageResult
+from imbue.mngr.api.message import _send_message_to_agent
 from imbue.mngr.api.message import send_message_to_agents
+from imbue.mngr.cli.testing import create_test_agent
+from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.hosts.host import Host
+from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
@@ -18,6 +26,7 @@ from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.utils.polling import wait_for
 
 
 def test_message_result_initializes_with_empty_lists() -> None:
@@ -140,10 +149,11 @@ def test_send_message_to_agents_fails_for_stopped_agent(
     # Clean up
     host.destroy_agent(agent)
 
-    # Should have failed because agent has no tmux session
+    # Should have failed because the agent is not running (no tmux session)
     assert len(result.failed_agents) == 1
     assert result.failed_agents[0][0] == "stopped-test"
-    assert "no tmux session" in result.failed_agents[0][1]
+    assert "not running" in result.failed_agents[0][1]
+    assert "STOPPED" in result.failed_agents[0][1]
 
 
 @pytest.mark.tmux
@@ -194,6 +204,144 @@ def test_send_message_to_agents_starts_stopped_agent_when_start_desired(
     assert "start-test" in result.successful_agents
     assert "start-test" in success_agents
     assert len(error_agents) == 0
+
+
+@pytest.mark.tmux
+# real agent setup/teardown plus a stop-and-restart can exceed the 10s default.
+@pytest.mark.timeout(30)
+def test_send_message_to_agents_revives_done_agent_when_start_desired(
+    temp_work_dir: Path,
+    temp_mngr_ctx: MngrContext,
+    local_provider: LocalProviderInstance,
+) -> None:
+    """Messaging a DONE agent must revive it, not type the message into the husk shell.
+
+    A DONE agent is one whose main process died (here: a ctrl-c, standing in for a
+    crash or an OOM shed) while tmux kept the session open on a bare shell. This is
+    distinct from STOPPED (no session at all). Because ``start_agents``
+    short-circuits on an existing session, reviving a DONE agent requires tearing
+    the husk down first -- otherwise the message is delivered into the leftover
+    shell and silently lost. This guards the OOM revival path, which relies on a
+    later message restarting a shed agent.
+    """
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, Host)
+
+    agent = host.create_agent_state(
+        work_dir_path=temp_work_dir,
+        options=CreateAgentOptions(
+            name=AgentName("revive-done-test"),
+            agent_type=AgentTypeName("generic"),
+            command=CommandString("sleep 847271"),
+        ),
+    )
+    host.start_agents([agent.id])
+
+    # Confirm the agent is live before we kill its process.
+    wait_for(
+        lambda: agent.get_lifecycle_state() in (AgentLifecycleState.RUNNING, AgentLifecycleState.WAITING),
+        error_message="Expected agent to be running before killing its process",
+    )
+
+    # Kill the agent's process but leave the tmux session up, exactly as a ctrl-c
+    # (or an OOM shed of the main process) would: the pane drops back to its shell,
+    # so the agent reports DONE rather than STOPPED.
+    session_name = temp_mngr_ctx.config.agent_session_name(agent.name)
+    window_name = temp_mngr_ctx.config.tmux.primary_window_name
+    window_target = TmuxWindowTarget(session_name=session_name, window=window_name)
+    host.execute_idempotent_command(
+        f"tmux send-keys -t {window_target.as_shell_arg()} C-c",
+        timeout_seconds=5.0,
+    )
+    wait_for(
+        lambda: agent.get_lifecycle_state() == AgentLifecycleState.DONE,
+        error_message="Expected agent lifecycle state to be DONE after killing its process",
+    )
+
+    matches = find_all_agents(
+        addresses=(),
+        filter_all=True,
+        target_state=None,
+        mngr_ctx=temp_mngr_ctx,
+    )
+
+    error_agents: list[tuple[str, str]] = []
+    result = send_message_to_agents(
+        mngr_ctx=temp_mngr_ctx,
+        message_content="Welcome back",
+        agents_to_message=matches,
+        is_start_desired=True,
+        on_error=lambda name, err: error_agents.append((name, err)),
+    )
+
+    # The decisive check: the DONE husk was torn down and the agent relaunched, so
+    # a fresh process is running again. With the bug, the agent would stay DONE
+    # (the message having been typed into the dead shell).
+    wait_for(
+        lambda: agent.get_lifecycle_state() in (AgentLifecycleState.RUNNING, AgentLifecycleState.WAITING),
+        error_message="Expected the DONE agent to be revived to a running state after messaging",
+    )
+
+    # Clean up
+    host.destroy_agent(agent)
+
+    assert "revive-done-test" in result.successful_agents
+    assert error_agents == []
+
+
+class _ReviveFailingAgent(BaseAgent[AgentTypeConfig]):
+    """Test agent that reports DONE and whose revive fails with AgentStartError."""
+
+    def get_lifecycle_state(self) -> AgentLifecycleState:
+        return AgentLifecycleState.DONE
+
+    def wait_for_ready_signal(
+        self,
+        is_creating: bool,
+        start_action: Callable[[], None],
+        timeout: float | None = None,
+    ) -> None:
+        raise AgentStartError(str(self.name), "agent did not become ready")
+
+
+def test_send_message_records_failure_when_revive_fails(
+    temp_work_dir: Path,
+    local_provider: LocalProviderInstance,
+) -> None:
+    """A failed revive must land in failed_agents, not vanish into a host-level log.
+
+    If reviving a DONE agent raises (e.g. the ready-wait times out), the failure has
+    to be recorded against the agent so `mngr message --start` reports it and exits
+    non-zero, instead of exiting 0 with the agent missing from both result lists.
+    """
+    agent = create_test_agent(
+        local_provider,
+        temp_work_dir,
+        agent_config=None,
+        agent_type=None,
+        extra_data=None,
+        agent_class=_ReviveFailingAgent,
+    )
+
+    result = MessageResult()
+    errors: list[tuple[str, str]] = []
+    _send_message_to_agent(
+        agent=agent,
+        host=agent.host,
+        message_content="hello",
+        result=result,
+        result_lock=Lock(),
+        error_behavior=ErrorBehavior.CONTINUE,
+        is_start_desired=True,
+        on_success=None,
+        on_error=lambda name, error: errors.append((name, error)),
+    )
+
+    assert result.successful_agents == []
+    assert result.failed_agents == [
+        (str(agent.name), f"Failed to start agent {agent.name}: agent did not become ready")
+    ]
+    assert errors == result.failed_agents
 
 
 @pytest.mark.tmux

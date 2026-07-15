@@ -44,10 +44,7 @@ cd apps/minds && pnpm install && cd ../..
 # 2. (Once) Stand up a DEFAULT_WORKSPACE_TEMPLATE worktree at .external_worktrees/default-workspace-template/
 #    on a branch named after your current mngr branch (so template-side
 #    edits stay parallel-named). Required by `just minds-start`.
-git -C ~/project/default-workspace-template worktree add \
-    -b "$(git rev-parse --abbrev-ref HEAD)" \
-    "$PWD/.external_worktrees/default-workspace-template" \
-    origin/main   # base branch/tag; origin/main is the safe default
+just default-workspace-template-worktree   # clones default_workspace_template on the current mngr branch; set DEFAULT_WORKSPACE_TEMPLATE_DIR to speed it up
 
 # 3. (Once) Bootstrap your personal dev env. Pick a name like
 #    "dev-<your-user>" (convention; the DevEnvName validator requires the
@@ -158,7 +155,7 @@ Slice bakes (`minds pool create`, `just bake-slice-{dev,prod}`) read secrets fro
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
-| `MINDS_WORKSPACE_GIT_URL` | Template repo path/URL for the create-form | `<repo>/.external_worktrees/default-workspace-template/` if it exists, else `~/project/default-workspace-template` |
+| `MINDS_WORKSPACE_GIT_URL` | Template repo path/URL for the create-form | `<repo>/.external_worktrees/default-workspace-template/` (create it with `just default-workspace-template-worktree`); `just minds-start` sets this. Absent it, `templates.py` falls back to the default-workspace-template remote URL |
 | `MINDS_WORKSPACE_BRANCH` | Default git branch for the template | The DEFAULT_WORKSPACE_TEMPLATE path's current branch (matches your mngr branch when you set up the worktree on a parallel-named branch) |
 
 The desktop client reads these in `apps/minds/imbue/minds/desktop_client/templates.py`.
@@ -211,8 +208,12 @@ If a recipe is broken or you want to run something the recipes don't cover, here
 
 ### Create the DEFAULT_WORKSPACE_TEMPLATE worktree by hand
 
+Normally `just default-workspace-template-worktree` does this for you (clones default_workspace_template into
+`.external_worktrees/default-workspace-template` on the current mngr branch). To do it
+by hand from your own default_workspace_template clone instead:
+
 ```bash
-cd ~/project/default-workspace-template
+cd "${DEFAULT_WORKSPACE_TEMPLATE_DIR:-$HOME/project/default-workspace-template}"
 git worktree add /path/to/mngr/worktree/.external_worktrees/default-workspace-template -b <branch-name> origin/main
 ```
 

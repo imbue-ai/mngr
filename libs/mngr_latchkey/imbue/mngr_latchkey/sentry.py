@@ -34,6 +34,9 @@ MNGR_LATCHKEY_SENTRY_ENVIRONMENT_ENV_VAR = "MNGR_LATCHKEY_SENTRY_ENVIRONMENT"
 MNGR_LATCHKEY_SENTRY_S3_BUCKET_ENV_VAR = "MNGR_LATCHKEY_SENTRY_S3_BUCKET"
 MNGR_LATCHKEY_SENTRY_RELEASE_ENV_VAR = "MNGR_LATCHKEY_SENTRY_RELEASE"
 MNGR_LATCHKEY_SENTRY_GIT_SHA_ENV_VAR = "MNGR_LATCHKEY_SENTRY_GIT_SHA"
+# The stable, randomly-generated anonymous user id (no PII) minds persists per install and shares
+# with the daemon so both processes' events count as one install in Sentry's per-issue user counts.
+MNGR_LATCHKEY_SENTRY_USER_ID_ENV_VAR = "MNGR_LATCHKEY_SENTRY_USER_ID"
 # Path to the JSON consent file the embedder writes (and rewrites whenever the user toggles
 # consent). The daemon reads it live on every event, so a grant/revoke takes effect without
 # respawning the daemon. Absent/unreadable file -> reporting and log inclusion both off.
@@ -115,6 +118,9 @@ class ForwardSentryConfig(FrozenModel):
     environment_name: str = Field(description="The Sentry environment label (e.g. ``production``/``staging``).")
     release_id: str = Field(description="Release version the running code was cut from (inherited from the embedder).")
     git_commit_sha: str = Field(description="Git SHA the running code was cut from (inherited from the embedder).")
+    user_id: str = Field(
+        description="Anonymous user id (no PII) inherited from the embedder so events count as one install in Sentry."
+    )
     s3_attachment_bucket: str | None = Field(
         description="S3 bucket for log/traceback attachments, or ``None`` when the environment has no bucket."
     )
@@ -128,15 +134,18 @@ def resolve_forward_sentry_config() -> ForwardSentryConfig | None:
 
     Returns ``None`` (and logs why) when the daemon is not configured for Sentry -- i.e. when run
     standalone rather than spawned by an embedder, so the required env vars are absent. Unlike minds,
-    the daemon has no fallback for the DSN / environment / release id / git sha: they are required to
-    be supplied via env vars, so a partial/misconfigured environment disables reporting rather than
-    inventing placeholder values. The S3 bucket and consent file are optional (an empty bucket means
+    the daemon has no fallback for the DSN / environment / release id / git sha / anonymous user id:
+    they are required to be supplied via env vars, so a partial/misconfigured environment disables
+    reporting rather than inventing placeholder values. In particular the anonymous user id is
+    inherited from minds (never generated here) so the daemon's events count as the same install as
+    minds' own events. The S3 bucket and consent file are optional (an empty bucket means
     no uploads; an absent consent file means no reporting until the embedder writes one).
     """
     dsn = os.environ.get(MNGR_LATCHKEY_SENTRY_DSN_ENV_VAR, "").strip()
     environment_name = os.environ.get(MNGR_LATCHKEY_SENTRY_ENVIRONMENT_ENV_VAR, "").strip()
     release_id = os.environ.get(MNGR_LATCHKEY_SENTRY_RELEASE_ENV_VAR, "").strip()
     git_commit_sha = os.environ.get(MNGR_LATCHKEY_SENTRY_GIT_SHA_ENV_VAR, "").strip()
+    user_id = os.environ.get(MNGR_LATCHKEY_SENTRY_USER_ID_ENV_VAR, "").strip()
 
     missing_env_var_names = [
         name
@@ -145,6 +154,7 @@ def resolve_forward_sentry_config() -> ForwardSentryConfig | None:
             (MNGR_LATCHKEY_SENTRY_ENVIRONMENT_ENV_VAR, environment_name),
             (MNGR_LATCHKEY_SENTRY_RELEASE_ENV_VAR, release_id),
             (MNGR_LATCHKEY_SENTRY_GIT_SHA_ENV_VAR, git_commit_sha),
+            (MNGR_LATCHKEY_SENTRY_USER_ID_ENV_VAR, user_id),
         )
         if not value
     ]
@@ -162,6 +172,7 @@ def resolve_forward_sentry_config() -> ForwardSentryConfig | None:
         environment_name=environment_name,
         release_id=release_id,
         git_commit_sha=git_commit_sha,
+        user_id=user_id,
         s3_attachment_bucket=bucket or None,
         consent_file_path=Path(consent_file) if consent_file else None,
     )
@@ -189,6 +200,7 @@ def setup_forward_sentry(log_folder: Path) -> None:
         git_commit_sha=config.git_commit_sha,
         log_folder=log_folder,
         service_name=_FORWARD_SENTRY_SERVICE_NAME,
+        user_id=config.user_id,
         log_attachment_groups=_FORWARD_LOG_ATTACHMENT_GROUPS,
         # The daemon is not a web app: it needs no Flask (or other) integration
         # beyond Sentry's default integrations.
