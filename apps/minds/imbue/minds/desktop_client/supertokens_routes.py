@@ -27,6 +27,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.bootstrap import set_imbue_cloud_provider_for_account
 from imbue.minds.bootstrap import unset_imbue_cloud_provider_for_account
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthSession
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.minds_config import MindsConfig
@@ -37,6 +38,7 @@ from imbue.minds.desktop_client.responses import safe_local_redirect_path
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.session_store import UserInfo
 from imbue.minds.desktop_client.state import get_state
+from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.templates_auth import render_auth_page
 from imbue.minds.desktop_client.templates_auth import render_check_email_page
 from imbue.minds.desktop_client.templates_auth import render_forgot_password_page
@@ -541,6 +543,7 @@ def _run_oauth_subprocess(
     flow_id: str,
     imbue_cloud_cli: ImbueCloudCli,
     session_store: MultiAccountSessionStore,
+    sync_scheduler: WorkspaceSyncScheduler | None,
     minds_config: MindsConfig | None,
     output_format: OutputFormat,
     latchkey_forward_supervisor: LatchkeyForwardSupervisor | None,
@@ -573,8 +576,68 @@ def _run_oauth_subprocess(
         )
         return
 
+    # The signin itself is complete at this point (the plugin subprocess wrote
+    # the session to disk). Anything that goes wrong while mirroring it into
+    # the desktop client must still resolve the flow status -- the frontend
+    # long-polls it, so an unresolved crash here would leave the user stuck on
+    # the "waiting for the browser" page forever. Nothing is caught: a
+    # mirroring crash propagates to the CG's ObservableThread (which logs it),
+    # while the finally block flips a still-"running" status to "error".
+    try:
+        _mirror_oauth_signin_result(
+            result=result,
+            session_store=session_store,
+            sync_scheduler=sync_scheduler,
+            minds_config=minds_config,
+            output_format=output_format,
+            latchkey_forward_supervisor=latchkey_forward_supervisor,
+            connector_url=connector_url,
+        )
+        _record_oauth_status(
+            flow_id,
+            _OAuthFlowStatus(
+                state="done",
+                user_id=str(result.user_id),
+                email=str(result.email),
+                display_name=result.display_name,
+                deadline=time.monotonic() + _OAUTH_FLOW_TTL_SECONDS,
+            ),
+        )
+    finally:
+        latest_status = _read_oauth_status(flow_id)
+        if latest_status is not None and latest_status.state == "running":
+            _record_oauth_status(
+                flow_id,
+                _OAuthFlowStatus(
+                    state="error",
+                    error=(
+                        f"Signed in as {result.email}, but applying the signin locally failed; "
+                        "see the desktop client logs for details."
+                    ),
+                    deadline=time.monotonic() + _OAUTH_FLOW_TTL_SECONDS,
+                ),
+            )
+
+
+def _mirror_oauth_signin_result(
+    result: ImbueCloudAuthSession,
+    session_store: MultiAccountSessionStore,
+    sync_scheduler: WorkspaceSyncScheduler | None,
+    minds_config: MindsConfig | None,
+    output_format: OutputFormat,
+    latchkey_forward_supervisor: LatchkeyForwardSupervisor | None,
+    connector_url: str,
+) -> None:
+    """Mirror a completed plugin OAuth signin into the desktop client.
+
+    Runs on the OAuth background thread, so every dependency is passed in
+    explicitly -- there is no Flask app context to resolve state from (that
+    is why this kicks the scheduler directly instead of going through
+    ``_kick_sync_scheduler``, whose ``get_state()`` needs an app context).
+    """
     session_store.invalidate_identity_cache()
-    _kick_sync_scheduler()
+    if sync_scheduler is not None:
+        sync_scheduler.kick()
     if minds_config is not None and minds_config.get_default_account_id() is None:
         minds_config.set_default_account_id(str(result.user_id))
 
@@ -592,17 +655,6 @@ def _run_oauth_subprocess(
             "email": str(result.email),
         },
         output_format,
-    )
-
-    _record_oauth_status(
-        flow_id,
-        _OAuthFlowStatus(
-            state="done",
-            user_id=str(result.user_id),
-            email=str(result.email),
-            display_name=result.display_name,
-            deadline=time.monotonic() + _OAUTH_FLOW_TTL_SECONDS,
-        ),
     )
 
 
@@ -627,6 +679,7 @@ def _handle_oauth_redirect(provider_id: str) -> Response:
     output_format = _get_output_format()
     minds_config: MindsConfig | None = state.minds_config
     latchkey_forward_supervisor: LatchkeyForwardSupervisor | None = state.latchkey_forward_supervisor
+    sync_scheduler: WorkspaceSyncScheduler | None = state.sync_scheduler
     root_cg: ConcurrencyGroup | None = state.root_concurrency_group
     if imbue_cloud_cli is None:
         return _json_response({"status": "ERROR", "error": "imbue_cloud_cli is not configured"}, 503)
@@ -647,6 +700,7 @@ def _handle_oauth_redirect(provider_id: str) -> Response:
             "flow_id": flow_id,
             "imbue_cloud_cli": imbue_cloud_cli,
             "session_store": session_store,
+            "sync_scheduler": sync_scheduler,
             "minds_config": minds_config,
             "output_format": output_format,
             "latchkey_forward_supervisor": latchkey_forward_supervisor,

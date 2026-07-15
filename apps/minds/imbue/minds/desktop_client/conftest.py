@@ -18,6 +18,7 @@ from imbue.minds.desktop_client.backend_resolver import ServiceLogRecord
 from imbue.minds.desktop_client.backend_resolver import parse_agents_from_json
 from imbue.minds.desktop_client.backend_resolver import parse_service_log_records
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthAccount
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthSession
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudSyncConflictCliError
@@ -57,9 +58,23 @@ class FakeImbueCloudCli(ImbueCloudCli):
 
     mngr_caller: MngrCaller = Field(default_factory=RecordingMngrCaller)
     accounts_to_return: list[ImbueCloudAuthAccount] = Field(default_factory=list)
+    oauth_session_to_return: ImbueCloudAuthSession | None = Field(
+        default=None, description="Session auth_oauth returns; raises ImbueCloudCliError when unset"
+    )
 
     def auth_list(self) -> list[ImbueCloudAuthAccount]:
         return list(self.accounts_to_return)
+
+    def auth_oauth(
+        self,
+        account: str,
+        provider_id: str,
+        callback_port: int | None = None,
+        no_browser: bool = False,
+    ) -> ImbueCloudAuthSession:
+        if self.oauth_session_to_return is None:
+            raise ImbueCloudCliError("auth oauth: no fake OAuth session configured on FakeImbueCloudCli")
+        return self.oauth_session_to_return
 
     def set_accounts(self, accounts: list[ImbueCloudAuthAccount]) -> None:
         self.accounts_to_return = list(accounts)
