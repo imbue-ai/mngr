@@ -5,18 +5,21 @@
 Launch a batch of persona cases as **self-completing** Modal workspaces: each sandbox drives its own
 multi-turn conversation, snapshots `/mngr` to S3 after each turn (restic), and uploads its
 transcript at the end. Results are read back from S3, so the launching machine does not need to
-stay on. Afterwards, `visit-batch` rebuilds the **exact computer** the batch ran on — a Docker box
-running the real Minds desktop app, streamed to your browser — and you open the batch's workspaces
-as windows, natively.
+stay on. Afterwards, `visit-batch` rebuilds the **exact computer** the batch ran on — a Modal
+sandbox running the real Minds desktop app, streamed to your browser — and you open the batch's
+workspaces as windows, natively. **Nothing runs on your machine**: no Docker, no local builds, no
+port mappings — the CLI only makes API calls and prints https URLs.
 
 ## How it fits together
 
-- **The box** — a Docker container that is a full Minds computer, pinned to an exact mngr SHA:
-  the real Minds app on a virtual desktop (Xvfb + openbox), streamed to your browser via noVNC.
-  One published port per box, no tunnels, no port shuttling — you enter the computer and use Minds
-  natively (multiple workspace windows and all). `launch` creates the batch's workspaces *inside*
-  that computer (the CLI discovers the app's API from within the container) and leaves it running
-  for you to watch; `visit-batch` reuses the same computer by name, or reboots it later.
+- **The box** — a **Modal sandbox** that is a full Minds computer, pinned to an exact mngr SHA:
+  the real Minds app on a virtual desktop (Xvfb + openbox), streamed to your browser via noVNC
+  through Modal's encrypted tunnel — one `https://…modal.host` URL, usable from any machine, **no
+  auth** (the URL's randomness is the only lock). The image is built from `docker/Dockerfile` on
+  Modal's builders (cached per SHA). `launch` creates the batch's workspaces *inside* that computer
+  (the CLI discovers the app's API from within the sandbox) and leaves it running for you to watch;
+  `visit-batch` finds the same computer again by tag, or reboots it. Boxes self-terminate after 8h
+  (they bill while alive); `stop <name>` kills one early — the workspaces live on regardless.
 - **Workspaces** — always Modal sandboxes. Never run in the box.
 - **The eval name IS the batch** — unique, hard requirement. It names the S3 prefix and the
   batch's own Modal env (`minds-staging-<name>`, via the Modal provider's `user_id`); `launch`
@@ -44,11 +47,14 @@ minds-evals inspect combined
 # score a finished batch (S3 + Anthropic only, no box); writes results back to S3
 ANTHROPIC_API_KEY=sk-ant-... minds-evals evaluate combined
 
-# rebuild the batch's exact Minds computer and enter its desktop in your browser
+# the batch's exact Minds computer, in your browser
 minds-evals visit-batch combined
 
+# terminate the batch's box sandbox early (its workspaces live on)
+minds-evals stop combined
+
 # dev utility: a desktop box on any mngr branch tip (Modal env minds-staging-<user-id>)
-minds-evals box --mngr-branch main --user-id dev
+minds-evals box --mngr-branch main --user-id minh
 ```
 
 `launch` first verifies the eval name is unused (no such S3 batch, no such Modal env — it fails
@@ -131,9 +137,9 @@ batch-average row) is printed. Add a new evaluation by appending a function to `
 3. Prints a noVNC URL. Open it: a real Linux desktop running the actual Minds app, whose discovery
    sees exactly that batch's workspaces. Open them as windows, read the conversations, poke around.
 
-The Minds app inside the box reaches its workspaces itself (mngr forward on the container's own
-loopback) — nothing is tunnelled through your host. When you're done: `docker rm -f <box>` (the
-URL printout includes the exact command).
+The Minds app inside the box reaches its workspaces itself (mngr forward on the sandbox's own
+loopback) — nothing touches your machine. When you're done: `minds-evals stop <batch>` (or just let
+the 8h timeout reap it).
 
 ## S3 layout
 
@@ -151,7 +157,7 @@ URL printout includes the exact command).
 
 ```
 main.py            argparse dispatch; re-invokes launch inside the headless box
-box.py             the box: build at an exact SHA, run headless or desktop, per-batch Modal env
+box.py             the box: a Modal sandbox (image built on Modal from docker/Dockerfile) per batch env
 minds_client.py    the Minds create API (POST + poll) -- used by launch
 launch.py          batch: prep clone (+ vendor mngr + slot test_case_metadata.json), create per case
 workspace.py       create one Modal workspace (build_payload + create_workspace) -- the create path
@@ -159,7 +165,7 @@ status.py          list-batches / inspect / case_report (S3 reads only)
 evaluate.py        evaluate: pull transcripts, score (avg_word_count + LLM scores), write to S3
 anthropic_call.py  one plain Anthropic Messages call (the LLM-graded evals)
 s3_store.py        S3 layout, creds file, batch/case prefixes
-docker/            Dockerfile + entrypoint.sh (the box: Xvfb + noVNC + the Minds app)
+docker/            Dockerfile + entrypoint.sh -- the box IMAGE SOURCE, built on Modal's builders
 ```
 
 ## Notes

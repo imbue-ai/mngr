@@ -14,6 +14,12 @@ export MINDS_LATCHKEY_BINARY=/work/mngr/apps/minds/node_modules/.bin/latchkey
 echo ">> activating minds env: ${MINDS_ENV:-staging}"
 eval "$(uv run minds env activate "${MINDS_ENV:-staging}")"
 
+# Pin the shared mngr profile (its Modal SSH keypair dir is a mounted, persistent modal.Volume --
+# the first box seeds the keypair, every later box reuses it).
+mkdir -p "${MNGR_HOST_DIR:-/root/.minds-staging/mngr}"
+CONFIG_FILE="${MNGR_HOST_DIR:-/root/.minds-staging/mngr}/config.toml"
+[ -f "$CONFIG_FILE" ] || echo 'profile = "evaluator"' > "$CONFIG_FILE"
+
 # The box IS a computer: a virtual display + window manager, streamed to the browser via noVNC,
 # running the real Minds Electron app (dev mode: it spawns its own backend internally -- on a port
 # of its choosing -- and inherits this environment, including the box's Modal env). Everything

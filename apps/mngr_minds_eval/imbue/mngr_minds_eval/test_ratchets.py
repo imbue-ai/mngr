@@ -38,7 +38,7 @@ def test_prevent_global_keyword() -> None:
 
 
 def test_prevent_bare_print() -> None:
-    rc.check_bare_print(_DIR, snapshot(51))
+    rc.check_bare_print(_DIR, snapshot(49))
 
 
 # --- Exception handling ---
@@ -68,7 +68,7 @@ def test_prevent_silent_decode_error_catches() -> None:
 
 
 def test_prevent_inline_imports() -> None:
-    rc.check_inline_imports(_DIR, snapshot(5))
+    rc.check_inline_imports(_DIR, snapshot(3))
 
 
 def test_prevent_relative_imports() -> None:
@@ -148,7 +148,7 @@ def test_prevent_num_prefix() -> None:
 
 
 def test_prevent_trailing_comments() -> None:
-    rc.check_trailing_comments(_DIR, snapshot(22))
+    rc.check_trailing_comments(_DIR, snapshot(16))
 
 
 def test_prevent_init_docstrings() -> None:
@@ -237,7 +237,7 @@ def test_prevent_bare_urwid_tty_signal_keys() -> None:
 
 
 def test_prevent_direct_subprocess() -> None:
-    rc.check_direct_subprocess(_DIR, snapshot(5))
+    rc.check_direct_subprocess(_DIR, snapshot(2))
 
 
 def test_prevent_bare_tmux_targets() -> None:

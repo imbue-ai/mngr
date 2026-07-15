@@ -1,29 +1,26 @@
-"""minds-evals -- launch, inspect, evaluate, and visit Minds eval batches.
+"""minds-evals -- launch, inspect, evaluate, and visit Minds eval batches. Everything on Modal.
 
-Host-native CLI. Each batch gets its own Modal env, and every box is a full Minds computer in
-Docker: the real Minds app on a virtual desktop, streamed to your browser via noVNC (one published
-port, no tunnels). `launch` creates the batch's workspaces inside that computer and leaves it
-running for you to watch; `visit-batch` reuses or reboots the same computer later.
+Host-native CLI; your machine only makes API calls. Each batch gets its own Modal env, and every
+box is a full Minds computer running as a Modal sandbox: the real Minds app on a virtual desktop,
+streamed to your browser through Modal's encrypted tunnel (one https URL, works from anywhere).
+`launch` creates the batch's workspaces inside that computer and leaves it running for you to
+watch; `visit-batch` finds or reboots the same computer later; `stop` kills it early.
 
-  minds-evals launch trio --config eval-config.json   # create a batch (one workspace per case)
-  minds-evals list-batches                        # S3 only
-  minds-evals inspect trio                    # per-case state, S3 only
-  minds-evals evaluate trio                   # score finished cases (ANTHROPIC_API_KEY)
-  minds-evals visit-batch trio                # rebuild the batch's exact computer, enter it
-  minds-evals box --mngr-branch main              # dev utility: a desktop box on a branch tip
+  minds-evals launch trio --config eval-config.json   (create a batch: one workspace per case)
+  minds-evals list-batches / inspect trio / evaluate trio   (S3-only reads + scoring)
+  minds-evals visit-batch trio                        (the batch's computer, in your browser)
+  minds-evals stop trio                               (terminate the batch's box; workspaces live on)
+  minds-evals box --mngr-branch main                  (dev utility: a desktop box on a branch tip)
 
 Launched runs self-complete: the in-sandbox eval worker drives the conversation, snapshots /mngr
-per turn (restic -> S3), and uploads the transcript -- so results are retrieved from S3 and the
-launching machine does not need to stay on. `visit-batch` reads the batch's recorded mngr SHA and
-Modal env from S3, boots a desktop box that IS that computer, and prints a noVNC URL: you enter a
-real desktop running the Minds app and open the batch's workspaces as windows.
+per turn (restic -> S3), and uploads the transcript -- so results are retrieved from S3 and no box
+needs to stay alive for them.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -34,7 +31,7 @@ from imbue.mngr_minds_eval import minds_client
 from imbue.mngr_minds_eval import s3_store
 from imbue.mngr_minds_eval import status as status_mod
 
-# Set inside every box (docker run -e); its absence means we are on the host.
+# Set inside every box sandbox (see box._box_env); its absence means we are on the host.
 IN_BOX = bool(os.environ.get("MINDS_EVAL_IN_BOX"))
 _CONFIG_IN_BOX = "/work/eval-config.json"
 
@@ -62,35 +59,9 @@ def _point_arg_to_box(argv: list[str], local: Path, box_path: str) -> list[str]:
     return out
 
 
-def _run_in_container(container: str, argv: list[str], *, upload: tuple[Path, str] | None = None) -> int:
-    """Re-run this same command inside an already-running box; return its exit code.
-    upload = (local_path, box_path) copies a file in and rewrites its arg (the eval config)."""
-    if upload is not None:
-        local, box_path = upload
-        subprocess.run(["docker", "cp", str(local), "{}:{}".format(container, box_path)], check=True)
-        argv = _point_arg_to_box(argv, local, box_path)
-    command = ["docker", "exec", "-i"]
-    if sys.stdout.isatty():
-        command.append("-t")
-    command += [
-        "-e",
-        "ANTHROPIC_API_KEY={}".format(os.environ.get("ANTHROPIC_API_KEY", "")),
-        "-w",
-        "/work/mngr",
-        container,
-        "uv",
-        "run",
-        "--package",
-        "mngr-minds-eval",
-        "minds-evals",
-        *argv,
-    ]
-    return subprocess.run(command).returncode
-
-
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="minds-evals", description="Launch, inspect, evaluate, and visit eval batches."
+        prog="minds-evals", description="Launch, inspect, evaluate, and visit eval batches (all on Modal)."
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -112,20 +83,27 @@ def _build_parser() -> argparse.ArgumentParser:
     p_eval = sub.add_parser("evaluate", help="score a finished batch (from S3; needs ANTHROPIC_API_KEY)")
     p_eval.add_argument("batch", help="the eval name")
 
-    p_visit = sub.add_parser("visit-batch", help="rebuild a batch's exact Minds computer and enter its desktop")
+    p_visit = sub.add_parser("visit-batch", help="the batch's exact Minds computer, in your browser")
     p_visit.add_argument("batch", help="the eval name (see list-batches)")
+
+    p_stop = sub.add_parser("stop", help="terminate a batch's box sandbox (its workspaces live on)")
+    p_stop.add_argument("batch", help="the eval name (or a box user-id)")
 
     p_box = sub.add_parser("box", help="dev utility: boot a desktop box on an mngr branch tip")
     p_box.add_argument("--mngr-branch", required=True)
-    p_box.add_argument("--user-id", default="dev", help="Modal env suffix for this box (default: dev)")
+    p_box.add_argument("--user-id", default="minh", help="Modal env suffix for this box (default: minh)")
     return parser
 
 
-def _print_desktop_urls(container: str) -> None:
-    url = box_mod.novnc_url(container)
-    print("\n  enter the computer:  {}".format(url), flush=True)
+def _print_desktop_urls(sandbox) -> None:
+    print("\n  enter the computer:  {}".format(box_mod.novnc_url(sandbox)), flush=True)
     print("  (a real desktop running the Minds app; if the screen is blank, give it ~30s)", flush=True)
-    print("  when done:  docker rm -f {}".format(container), flush=True)
+    print(
+        "  box sandbox: {}  (auto-dies in {}h; stop early with: minds-evals stop <name>)".format(
+            sandbox.object_id, box_mod.BOX_TIMEOUT_HOURS
+        ),
+        flush=True,
+    )
 
 
 def main() -> None:
@@ -147,6 +125,19 @@ def main() -> None:
         evaluate_mod.evaluate_batch(args.batch)
         return
 
+    if args.command == "stop":
+        sandbox = box_mod.find_box(args.batch)
+        if sandbox is None:
+            sys.exit("no running box for {!r}".format(args.batch))
+        sandbox.terminate()
+        print(
+            "terminated box {} for {!r} (its workspaces live on; visit-batch reboots it)".format(
+                sandbox.object_id, args.batch
+            ),
+            flush=True,
+        )
+        return
+
     if args.command == "visit-batch":
         env = _check_aws()
         client = s3_store.make_client(env)
@@ -162,28 +153,30 @@ def main() -> None:
             sys.exit("batch {} predates per-batch Modal envs -- relaunch it to make it visitable".format(args.batch))
         if not ref:
             print(">> batch has no recorded mngr sha; using the current tip of {}".format(branch), flush=True)
-        container = box_mod.ensure(branch, user_id=user_id, ref=ref)
-        _print_desktop_urls(container)
+        sandbox = box_mod.ensure(branch, user_id=user_id, ref=ref)
+        _print_desktop_urls(sandbox)
         return
 
     if args.command == "box":
         if IN_BOX:
             parser.error("run `box` from the host, not inside a box")
-        container = box_mod.ensure(args.mngr_branch, user_id=box_mod.sanitize_user_id(args.user_id))
-        _print_desktop_urls(container)
+        sandbox = box_mod.ensure(args.mngr_branch, user_id=box_mod.sanitize_user_id(args.user_id))
+        _print_desktop_urls(sandbox)
         return
 
     if args.command == "launch":
         env = _check_aws()
-        # Validate the name and the config template on the host before any box is touched. The name
-        # is the batch id: it IS the S3 prefix and the Modal env.
+        # Validate the name and the config template on the host before any sandbox is touched. The
+        # name is the batch id: it IS the S3 prefix and the Modal env.
         batch = launch_mod.validate_name(args.name)
+        # load_config validates the template shape up front.
         config = launch_mod.load_config(args.config)
         if not args.anthropic_key:
             parser.error("set ANTHROPIC_API_KEY (or --anthropic-key)")
         if not IN_BOX:
-            # Eval names are unique, hard requirement: fail out if the batch already exists in S3
-            # or its Modal env already exists (either means this name was used before).
+            # Eval names are unique, hard requirement: the S3 batch must not exist, and creating the
+            # batch's Modal env is an atomic claim (fails out on a collision). Pre-creating the env
+            # also lets every workspace create fan out concurrently.
             client = s3_store.make_client(env)
             if (
                 s3_store.get_json(client, env["MINDS_EVAL_BUCKET"], "{}/{}".format(batch, s3_store.BATCH_CONFIG_NAME))
@@ -195,24 +188,23 @@ def main() -> None:
                         batch, env["MINDS_EVAL_BUCKET"], box_mod.modal_env_name(batch)
                     )
                 )
-            # Atomically claim the name by creating the batch's Modal env now: fails out if it
-            # already exists, and pre-creating it lets every workspace create fan out concurrently
-            # (no implicit-env-creation race, so no serial priming).
             try:
                 print(">> claiming Modal env {} ...".format(box_mod.modal_env_name(batch)), flush=True)
                 box_mod.create_modal_env(batch)
             except box_mod.BoxError as exc:
                 sys.exit(str(exc))
-            container = box_mod.ensure(config["mngr_branch"], user_id=batch)
+            sandbox = box_mod.ensure(config["mngr_branch"], user_id=batch)
             # The box IS this batch's computer and it is up NOW -- print its desktop before the
             # creates run, so you can enter it and watch the workspaces appear as they are made.
-            _print_desktop_urls(container)
-            returncode = _run_in_container(container, sys.argv[1:], upload=(args.config, _CONFIG_IN_BOX))
+            _print_desktop_urls(sandbox)
+            box_mod.write_file(sandbox, _CONFIG_IN_BOX, args.config.read_text())
+            argv = _point_arg_to_box(sys.argv[1:], args.config, _CONFIG_IN_BOX)
+            returncode = box_mod.run_in_box(sandbox, argv, {"ANTHROPIC_API_KEY": args.anthropic_key})
             if returncode == 0:
                 print("\n  inspect:  minds-evals inspect {}".format(batch), flush=True)
                 print("  enter its computer any time:  minds-evals visit-batch {}".format(batch), flush=True)
             else:
-                print("\n  launch failed -- see: docker logs {}".format(container))
+                print("\n  launch failed -- see: modal sandbox logs {}".format(sandbox.object_id), flush=True)
             sys.exit(returncode)
         # Inside the box: the Minds app booted its backend on a port of its choosing -- find it.
         port = minds_client.discover_api_port()
