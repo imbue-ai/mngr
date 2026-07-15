@@ -15,10 +15,19 @@ echo ">> activating minds env: ${MINDS_ENV:-staging}"
 eval "$(uv run minds env activate "${MINDS_ENV:-staging}")"
 
 # Pin the shared mngr profile (its Modal SSH keypair dir is a mounted, persistent modal.Volume --
-# the first box seeds the keypair, every later box reuses it).
+# the first box seeds the keypairs, every later box reuses them).
 mkdir -p "${MNGR_HOST_DIR:-/root/.minds-staging/mngr}"
 CONFIG_FILE="${MNGR_HOST_DIR:-/root/.minds-staging/mngr}/config.toml"
 [ -f "$CONFIG_FILE" ] || echo 'profile = "evaluator"' > "$CONFIG_FILE"
+
+# Seed BOTH mngr Modal keypairs NOW, serially, before Minds ever runs. mngr generates them lazily
+# on first use, and parallel workspace creates on a fresh keys dir race that generation -- two
+# creates mint two different HOST keys, one wins the dir, and every sandbox baked with the loser
+# fails "Host key does not match". Pre-seeding means mngr always finds existing keys.
+KEYS_DIR="${MNGR_HOST_DIR:-/root/.minds-staging/mngr}/profiles/evaluator/providers/modal"
+mkdir -p "$KEYS_DIR"
+[ -f "$KEYS_DIR/modal_ssh_key" ] || ssh-keygen -t ed25519 -N "" -q -f "$KEYS_DIR/modal_ssh_key"
+[ -f "$KEYS_DIR/host_key" ] || ssh-keygen -t ed25519 -N "" -q -f "$KEYS_DIR/host_key"
 
 # The box IS a computer: a virtual display + window manager, streamed to the browser via noVNC,
 # running the real Minds Electron app (dev mode: it spawns its own backend internally -- on a port
