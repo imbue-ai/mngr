@@ -31,12 +31,18 @@
     banner = document.createElement('div');
     banner.id = BANNER_ID;
     banner.setAttribute('role', 'status');
+    // Fixed overlay: the host pages use very different body layouts (the
+    // create form flex-centers the whole body, the landing list stacks), so
+    // an in-flow element cannot reliably span the top. A fixed strip is
+    // layout-independent and the banner is transient, so briefly overlaying
+    // the page's top padding is fine.
     banner.style.cssText =
-      'position: sticky; top: 0; z-index: 50; display: none; align-items: center; gap: 8px;' +
+      'position: fixed; top: 0; left: 0; right: 0; z-index: 50; display: none; align-items: center; gap: 8px;' +
       'padding: 8px 16px; background: var(--c-surface-secondary, #f0f0f0);' +
-      'border-bottom: 1px solid var(--c-border-primary, rgba(128,128,128,0.25));';
+      'border-bottom: 1px solid var(--c-border-primary, rgba(128,128,128,0.25));' +
+      'box-shadow: 0 1px 4px rgba(0,0,0,0.08);';
     banner.className = 'type-body text-primary';
-    document.body.insertBefore(banner, document.body.firstChild);
+    document.body.appendChild(banner);
     return banner;
   }
 
@@ -70,9 +76,12 @@
   }
 
   function render(accounts) {
-    // On the landing page the tiles a DONE banner points at are already on
-    // screen; auto-dismiss so it doesn't linger on later pages either.
-    if (window.location.pathname === '/') {
+    // When the workspace list itself is on screen, the tiles a DONE banner
+    // points at are already visible; auto-dismiss so it doesn't linger on
+    // later pages either. Keyed on the list's DOM marker, NOT the URL: "/"
+    // also renders the create form when there are no workspaces yet (exactly
+    // the state this banner exists for).
+    if (document.querySelector('[data-landing-agent-ids]')) {
       accounts.forEach(function (entry) {
         if (entry.state === 'DONE') dismiss(entry.user_id);
       });
