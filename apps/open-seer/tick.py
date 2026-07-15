@@ -75,15 +75,36 @@ SWEEP_PASS_ENV = (
     "ANTHROPIC_API_KEY",
     "CLAUDE_CODE_OAUTH_TOKEN",
     "OPEN_SEER_MAX_FIXERS",
+    "OPEN_SEER_FIXER_PROVIDER",
     "OPEN_SEER_DRY_RUN",
     "OPEN_SEER_ENABLED",
 )
-# Installs mngr on the sweep's fresh host if the image lacks it (the sweep
-# needs mngr to spawn fixers). Idempotent; installs uv first when absent.
-MNGR_INSTALL_COMMAND = (
+# Tools every open-seer agent host needs. The deployed image ships all of
+# them, making these no-ops there; a generic host image ships none. Each
+# command is idempotent. The sweep skill re-installs mngr from workspace
+# wheels when the repo carries them (exact dev builds beat the PyPI release).
+GH_VERSION = "2.96.0"
+BETTERLEAKS_VERSION = "1.6.1"
+KINGFISHER_VERSION = "1.106.0"
+HOST_PROVISION_COMMANDS = (
+    # mngr + its claude plugin, so the sweep can spawn and manage fixers.
     "command -v mngr >/dev/null 2>&1 || { "
     "command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh; "
-    'PATH="$HOME/.local/bin:$PATH" uv tool install --quiet imbue-mngr; }'
+    'PATH="$HOME/.local/bin:$PATH" uv tool install --quiet imbue-mngr --with imbue-mngr-claude; }',
+    # gh, for roster derivation and fixer PRs.
+    "command -v gh >/dev/null 2>&1 || { "
+    'arch="$(uname -m)"; case "$arch" in x86_64) arch=amd64 ;; aarch64) arch=arm64 ;; esac; '
+    f'curl -fsSL "https://github.com/cli/cli/releases/download/v{GH_VERSION}/gh_{GH_VERSION}_linux_$arch.tar.gz" '
+    f'| tar -xz --strip-components=2 -C /usr/local/bin "gh_{GH_VERSION}_linux_$arch/bin/gh"; }}',
+    # Secrets-gate scanners, for fixers that share this host (local provider).
+    "command -v betterleaks >/dev/null 2>&1 || { "
+    'arch="$(uname -m)"; case "$arch" in x86_64) arch=x64 ;; aarch64) arch=arm64 ;; esac; '
+    f'curl -fsSL "https://github.com/betterleaks/betterleaks/releases/download/v{BETTERLEAKS_VERSION}/betterleaks_{BETTERLEAKS_VERSION}_linux_$arch.tar.gz" '
+    "| tar -xz -C /usr/local/bin betterleaks; }",
+    "command -v kingfisher >/dev/null 2>&1 || { "
+    'arch="$(uname -m)"; case "$arch" in x86_64) arch=x64 ;; aarch64) arch=arm64 ;; esac; '
+    f'curl -fsSL "https://github.com/mongodb/kingfisher/releases/download/v{KINGFISHER_VERSION}/kingfisher-linux-$arch.tgz" '
+    "| tar -xz -C /usr/local/bin kingfisher; }",
 )
 # Force-updates existing branches and creates new ones; deletes nothing
 # (non-empty source side — a deletion refspec has an empty source).
@@ -196,12 +217,9 @@ def build_create_command(name: str, message: str) -> list[str]:
         "--yes",
         "--idle-timeout",
         SWEEP_IDLE_TIMEOUT,
-        # The sweep spawns fixers with mngr, but generic agent hosts do not
-        # ship it (only the open-seer image does). Idempotent: no-op when
-        # mngr is already present.
-        "--extra-provision-command",
-        MNGR_INSTALL_COMMAND,
     ]
+    for provision in HOST_PROVISION_COMMANDS:
+        cmd += ["--extra-provision-command", provision]
     if provider == "modal":
         # Modal-only build arg: raises the sandbox's hard max lifetime past
         # the 15-minute provider default. Other providers (docker for local
