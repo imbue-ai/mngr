@@ -4,7 +4,9 @@ Reworked the desktop app's titlebar and navigation to match the minds-options mo
 
 - The home screen gained bottom-left launchers ("Minds Settings" and the signed-in account email, or "Log in") that open centered modals on the shared overlay surface in Electron; the full-page /settings and /accounts routes remain as browser-mode fallbacks.
 
-- The Minds Settings surface shows the same app-level settings as the full /settings page -- Connectors, Local files, Workspaces (cross-workspace delegation), Error reporting, and Master password -- as a left-nav + panel layout inside a widened centered modal. The home-screen launcher opens it as a centered overlay with no "back to workspaces" link (dismissed via the X or a backdrop click); the full-page /settings route remains as the browser-mode fallback.
+- The Minds Settings surface shows the same app-level settings as the full /settings page -- Connectors, Local files, Workspaces (cross-workspace delegation), Error reporting, and Master password -- as a left-nav + panel layout inside a widened centered modal. The home-screen launcher opens it as a centered overlay with no "back to workspaces" link (dismissed via the X or a backdrop click); the full-page /settings route remains as the browser-mode fallback. The modal is a fixed height (85% of the window) so switching sections never resizes it.
+
+- The centered Minds Settings and Manage Accounts modals render on the shared OverlaySurface wrapper (like the other overlay pages), so they drop the reserved classic-scrollbar gutter and their dim backdrops paint all the way to the window edge.
 
 - Pending permission requests are shown in the inbox side popup: an inbox button in the titlebar's top-right (with a pending-request count badge) opens a master/detail overlay that lists every pending request with its full Approve/Deny form. A new pending request auto-opens the inbox (gated by the auto-open setting); notification, workspace-relay, and deep-link opens land pre-selected on the target request. The per-workspace Connections view, and its connectors / shared-files / workspace-delegation list, were dropped.
 

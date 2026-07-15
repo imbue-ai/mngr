@@ -18,9 +18,12 @@ from imbue.minds.desktop_client.templates import render_chrome_page
 from imbue.minds.desktop_client.templates import render_create_form
 from imbue.minds.desktop_client.templates import render_creating_page
 from imbue.minds.desktop_client.templates import render_dev_styleguide_page
+from imbue.minds.desktop_client.templates import render_help_page
+from imbue.minds.desktop_client.templates import render_inbox_page
 from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
+from imbue.minds.desktop_client.templates import render_overlay_host_page
 from imbue.minds.desktop_client.templates import render_recovery_page
 from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
@@ -818,6 +821,27 @@ def test_render_chrome_page_shows_window_controls_on_non_mac() -> None:
     assert "min-btn" in html
     assert "max-btn" in html
     assert "close-btn" in html
+
+
+def test_edge_to_edge_surfaces_opt_out_of_scrollbar_gutter() -> None:
+    """Regression: with classic (always-visible) scrollbars on macOS, the
+    global ``html { scrollbar-gutter: stable }`` rule reserved a 15px gutter
+    on the edge-to-edge chrome/overlay surfaces that nothing painted, so
+    tooltips were clipped mid-label and modal dim backdrops stopped short of
+    the window's right edge. Those surfaces must opt out via the
+    ``no-scrollbar-gutter`` class on the html element, and app.css must
+    define the opt-out rule."""
+    css = _TOKENS_CSS_PATH.read_text()
+    assert "html.no-scrollbar-gutter" in css
+    opted_out = '<html lang="en" class="no-scrollbar-gutter">'
+    assert opted_out in render_chrome_page()
+    assert opted_out in render_overlay_host_page()
+    assert opted_out in render_sidebar_page()
+    assert opted_out in render_help_page(include_logs_setting=False, workspace_agent_id="")
+    assert opted_out in render_inbox_page(cards=())
+    # Normal scrolling content pages keep the reserved gutter so their layout
+    # doesn't shift sideways when a classic scrollbar appears.
+    assert '<html lang="en">' in render_landing_page(accessible_agent_ids=())
 
 
 def test_render_sidebar_page_contains_workspace_list() -> None:

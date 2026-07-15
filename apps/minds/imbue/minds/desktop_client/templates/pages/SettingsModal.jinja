@@ -29,10 +29,9 @@
   })();
 </script>
 {% endset %}
-<Base title="Minds Settings"
-      body_class="bg-transparent text-primary font-sans antialiased"
-      body_style="-webkit-app-region: no-drag;"
-      scripts={{ _scripts }}>
+<OverlaySurface title="Minds Settings"
+                body_style="-webkit-app-region: no-drag;"
+                scripts={{ _scripts }}>
   <div id="settings-modal-backdrop" class="fixed inset-0 flex items-center justify-center bg-surface-overlay p-4">
     {# Fixed height (not max-height): the card fills 85% of the window
        regardless of how much each section holds, so switching tabs never
@@ -52,4 +51,4 @@
       </div>
     </div>
   </div>
-</Base>
+</OverlaySurface>

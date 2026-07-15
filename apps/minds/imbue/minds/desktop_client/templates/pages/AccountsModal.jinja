@@ -62,10 +62,9 @@
   })();
 </script>
 {% endset %}
-<Base title="Manage Accounts"
-      body_class="bg-transparent text-primary font-sans antialiased"
-      body_style="-webkit-app-region: no-drag;"
-      scripts={{ _scripts }}>
+<OverlaySurface title="Manage Accounts"
+                body_style="-webkit-app-region: no-drag;"
+                scripts={{ _scripts }}>
   <div id="accounts-modal-backdrop" class="fixed inset-0 flex items-center justify-center bg-surface-overlay p-4">
     <div class="relative bg-surface-primary rounded-lg shadow-overlay max-w-lg w-full p-8 max-h-[85vh] overflow-y-auto text-left">
       <DialogCloseButton onclick="dismissAccountsModal()" />
@@ -111,4 +110,4 @@
       </div>
     </div>
   </div>
-</Base>
+</OverlaySurface>
