@@ -1,6 +1,7 @@
 help:
     @just --list
 
+[group("mngr build")]
 build target:
   @if [ -d "apps/{{target}}" ]; then \
     uvx --from build pyproject-build --installer=uv --outdir=dist --wheel apps/{{target}}; \
@@ -41,6 +42,7 @@ _generate-release-dockerfile:
     cat "$extras" >> "$out"
 
 # Run tests on Modal via Offload
+[group("mngr test")]
 test-offload args="":
     #!/bin/bash
     set -ueo pipefail
@@ -60,6 +62,7 @@ test-offload args="":
     fi
 
 # Run acceptance tests on Modal via Offload
+[group("mngr test")]
 test-offload-acceptance args="":
     #!/bin/bash
     set -ueo pipefail
@@ -86,6 +89,7 @@ test-offload-acceptance args="":
         --env "GITHUB_REF_NAME=${GITHUB_REF_NAME:-}" {{args}} || [[ $? -eq 2 ]]
 
 # Run release tests on Modal via Offload (with Docker-in-Docker)
+[group("mngr test")]
 test-offload-release args="":
     #!/bin/bash
     set -ueo pipefail
@@ -130,6 +134,7 @@ test-offload-release args="":
 # /var/lib/docker tree baked in -- so offload skips its normal image-
 # setup phase entirely and boots straight from the snapshot via
 # ``--override-image-id`` (offload v0.9.6+).
+[group("minds test")]
 test-offload-minds-snapshot snapshot_image_id args="":
     #!/bin/bash
     set -ueo pipefail
@@ -179,9 +184,11 @@ _parallel := "-n 4 --dist=worksteal --max-worker-restart=0"
 # (which runs the opposite filter). A later -m on CLI overrides this.
 _skip_acceptance_and_release := "-m 'not acceptance and not release and not minds_deployment and not minds_services and not minds_snapshot_resume'"
 
+[group("mngr test")]
 test-unit:
   uv run pytest {{_parallel}} {{_skip_acceptance_and_release}} --cov-report=html --ignore-glob="**/test_*.py" --cov-fail-under=36
 
+[group("mngr test")]
 test-integration:
   uv run pytest {{_parallel}} {{_skip_acceptance_and_release}} --cov-report=html --cov-fail-under=80
 
@@ -196,33 +203,40 @@ test-integration:
 # The recipe's default `-m 'not acceptance and not release'` can be
 # overridden by supplying a `-m` inside args (later CLI -m wins).
 # Fast local iteration: forwards args to pytest. No coverage, xdist-parallel.
+[group("mngr test")]
 test-quick args="":
   uv run pytest {{_parallel}} {{_skip_acceptance_and_release}} --no-cov {{args}}
 
 # Regenerate the code-derived agent capability matrix doc (libs/mngr/docs/concepts/agent_capabilities.md)
+[group("mngr dev")]
 regenerate-agent-capabilities-doc:
   uv run python scripts/make_agent_capabilities_doc.py
 
+[group("mngr test")]
 test-acceptance:
   # when running these locally, we set the max duration super high just so that we don't fail (which makes it harder to see the errors)
   PYTEST_MAX_DURATION_SECONDS=600 uv run pytest {{_parallel}} --no-cov -m "not release"
 
+[group("mngr test")]
 test-release:
   # when running these locally, we set the max duration super high just so that we don't fail (which makes it harder to see the errors)
   PYTEST_MAX_DURATION_SECONDS=1200 uv run pytest {{_parallel}} --no-cov -m "acceptance or not acceptance"
 
 # Generate test timings for pytest-split (run periodically to keep timings up to date. Runs all acceptance and release)
+[group("mngr test")]
 test-timings:
   # when running these locally, we set the max duration super high just so that we don't fail (which makes it harder to see the errors)
   PYTEST_MAX_DURATION_SECONDS=6000 uv run pytest --no-cov -n 0 -m "acceptance or not acceptance" --store-durations
 
 # useful for running against a single test, regardless of how it is marked
+[group("mngr test")]
 test target:
   PYTEST_MAX_DURATION_SECONDS=600 uv run pytest -sv --no-cov -n 0 -m "acceptance or not acceptance" "{{target}}"
 
 # Run the opt-in live Claude Agent SDK tests (libs/mngr_robinhood). These make real,
 # paid API calls and are excluded from every CI run. ANTHROPIC_API_KEY must already be
 # exported (e.g. `set -a; source .env; set +a`). Pass extra pytest args via `args`.
+[group("mngr test")]
 test-sdk-live args="":
   RUN_SDK_LIVE_TESTS=1 PYTEST_MAX_DURATION_SECONDS=2400 uv run pytest -sv --no-cov -n 0 -o timeout=900 -m sdk_live libs/mngr_robinhood {{args}}
 
@@ -235,6 +249,7 @@ test-sdk-live args="":
 #   just tmr-minds --provider modal --env ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY"
 
 # mngr release suite (scoped to libs/mngr; the apps/minds tree is a separate variant).
+[group("mngr test")]
 tmr-mngr *args:
   uv run --project libs/mngr_tmr mngr tmr libs/mngr --name tmr-mngr {{args}} -- -m 'release and not docker and not docker_sdk'
 
@@ -246,6 +261,7 @@ tmr-mngr *args:
 #     (litellm, etc.); each deployment test mints its own ephemeral env.
 #
 # minds release suite (the apps/minds tree), with the minds-tailored mapper prompt.
+[group("minds test")]
 tmr-minds *args:
   uv run --project libs/mngr_tmr mngr tmr apps/minds --name tmr-minds --mapper-prompt apps/minds/tmr/mapper.j2 {{args}} -- -m 'release and not minds_deployment and not minds_services and not minds_snapshot_resume'
 
@@ -254,27 +270,33 @@ tmr-minds *args:
 # and apps/minds/deployment_tests/README.md for the full design + usage.
 
 # Full run: shared env stand-up + sequential pytest x2 + teardown.
+[group("minds test")]
 minds-test-deployment *args:
   uv run python apps/minds/scripts/test_deployments.py run {{args}}
 
 # Wipe everything from prior runs that the ledger still tracks as active or leaked.
+[group("minds test")]
 minds-test-deployment-cleanup:
   uv run python apps/minds/scripts/test_deployments.py cleanup
 
 # Local iterate: stand up one shared env + print a ready-to-paste pytest command.
+[group("minds test")]
 minds-test-deployment-up role="default":
   uv run python apps/minds/scripts/test_deployments.py up "{{role}}"
 
 # Local iterate: tear down whatever `minds-test-deployment-up` last stood up.
+[group("minds test")]
 minds-test-deployment-down role="default":
   uv run python apps/minds/scripts/test_deployments.py down "{{role}}"
 
 # Point minds_services tests at an already-deployed dev env (e.g. dev-josh).
+[group("minds test")]
 minds-test-services-against env_name *tests:
   uv run python apps/minds/scripts/test_deployments.py services-against "{{env_name}}" {{tests}}
 
 # Run only the minds_deployment pytest batch (each test mints its own ephemeral env).
 # No shared env stand-up, no mail.tm account -- fast iteration for the deploy tests.
+[group("minds test")]
 minds-test-deployment-only *tests:
   uv run python apps/minds/scripts/test_deployments.py deployment-only {{tests}}
 
@@ -293,6 +315,7 @@ minds-test-deployment-only *tests:
 # The test itself only consumes the DEFAULT_WORKSPACE_TEMPLATE worktree (erroring if absent), so this
 # recipe first materializes it (paired DEFAULT_WORKSPACE_TEMPLATE branch + vendored mngr) unless an
 # operator worktree is already present, mirroring the CI snapshot bake.
+[group("minds test")]
 minds-test-electron *args: minds-css
   uv run python -c 'from imbue.minds.desktop_client.default_workspace_template_worktree import materialize_paired_default_workspace_template_worktree; materialize_paired_default_workspace_template_worktree()'
   xvfb-run -a uv run pytest apps/minds/test_snapshot_resume.py::test_create_apikey_workspace_and_chat_via_electron -v --no-cov --cov-fail-under=0 {{args}}
@@ -310,6 +333,7 @@ minds-test-electron *args: minds-css
 # agent..."); run `just sync-vendor-mngr .external_worktrees/default-workspace-template`
 # first (the minds-dev-workflow does this on every startup).
 # Screenshots of each step land in /tmp/minds-electron-flow/.
+[group("minds test")]
 minds-test-electron-flow *args: minds-css
   xvfb-run -a uv run --package minds python apps/minds/scripts/electron_full_flow_e2e.py {{args}}
 
@@ -319,6 +343,7 @@ minds-test-electron-flow *args: minds-css
 # `prestart` hook builds it once, then `watch:css` keeps it fresh), and
 # packaged builds compile it in scripts/build.js, so normally you do not need
 # to invoke this recipe -- use it after nuking static/ or to force a rebuild.
+[group("minds build")]
 minds-css:
   bash -c '. apps/minds/scripts/select_node_version.sh && cd apps/minds && pnpm run build:css'
 
@@ -331,6 +356,7 @@ alias dwt-worktree := default-workspace-template-worktree
 # deletion of any other clone/cache) and needs no configuration.
 # Set DEFAULT_WORKSPACE_TEMPLATE_DIR (gitignored apps/minds/.env or your shell) to a local default_workspace_template clone to
 # make the clone fast -- purely a speed hint, no lasting dependency is created.
+[group("minds install")]
 default-workspace-template-worktree branch="" base="origin/main":
     bash scripts/default_workspace_template_worktree.sh "{{branch}}" "{{base}}"
 
@@ -344,6 +370,7 @@ default-workspace-template-worktree branch="" base="origin/main":
 # between verification and merge. The recipe archives HEAD, replaces vendor/mngr/
 # with that snapshot, and commits in DEFAULT_WORKSPACE_TEMPLATE. Does not push. Aborts if DEFAULT_WORKSPACE_TEMPLATE is dirty.
 # Full release flow: apps/minds/docs/release.md.
+[group("minds dev")]
 sync-vendor-mngr default_workspace_template="":
     #!/bin/bash
     set -ueo pipefail
@@ -407,6 +434,7 @@ sync-vendor-mngr default_workspace_template="":
 # ~/.minds-<env>/client.toml + secrets.toml. For staging / production
 # (which require --yes-i-mean-<tier>) this only pushes Vault secrets
 # to Modal and runs `modal deploy`; no local files change.
+[group("minds ops")]
 deploy *args:
     uv run minds env deploy {{args}}
 
@@ -448,6 +476,7 @@ deploy *args:
 # shell's default node. Run this once before `just minds-start`; `minds-start`
 # points here when node_modules is missing. Never installs Node (errors with a
 # hint if the pinned version isn't available via nvm).
+[group("minds install")]
 minds-install:
     #!/bin/bash
     set -ueo pipefail
@@ -466,6 +495,7 @@ minds-install:
 # Refuses to start if another minds-start is already running in this
 # worktree (PID file under /tmp keyed by worktree path). Use `just
 # minds-stop` to kill the running instance first.
+[group("minds dev")]
 minds-start branch="" default_workspace_template="":
     #!/bin/bash
     set -ueo pipefail
@@ -606,6 +636,7 @@ minds-start branch="" default_workspace_template="":
 # minds-start). In the form's advanced settings, pick the SAME region the
 # slice was baked in -- region is a hard match and is never relaxed. Stop it
 # with `just minds-stop` (shared PID file, keyed by worktree path).
+[group("minds dev")]
 minds-start-cloud:
     #!/bin/bash
     set -ueo pipefail
@@ -680,6 +711,7 @@ minds-start-cloud:
 # if electron hasn't reached its main process yet (rare startup race), and
 # to SIGKILLing specific surviving PIDs if the graceful path doesn't
 # finish within 10s.
+[group("minds dev")]
 minds-stop:
     #!/bin/bash
     set -ueo pipefail
@@ -744,6 +776,7 @@ minds-stop:
     rm -f "$pid_file"
 
 # Build the minds desktop client distributable (slow; uses todesktop).
+[group("minds build")]
 minds-build:
     #!/bin/bash
     set -ueo pipefail
@@ -761,6 +794,7 @@ minds-build:
 # Requires an activated minds env: reads MNGR_HOST_DIR from the shell
 # (set by `minds env activate`). Refuses without activation so this
 # recipe never silently targets the wrong env's docker keys.
+[group("minds dev")]
 propagate-changes agent_name:
     #!/bin/bash
     set -ueo pipefail
@@ -813,6 +847,7 @@ propagate-changes agent_name:
 #
 # Requires an activated minds env: reads MNGR_HOST_DIR / MNGR_PREFIX from
 # the shell (set by `minds env activate`).
+[group("minds dev")]
 forward-system-interface agent_name:
     #!/bin/bash
     set -ueo pipefail
@@ -887,6 +922,7 @@ forward-system-interface agent_name:
 # and prints a pre-filled URL for a fine-grained PAT scoped to it. See
 # .claude/skills/new-default-workspace-template-clone/SKILL.md for the rationale.
 # Create a new private personal repo from default-workspace-template.
+[group("minds install")]
 create-new-mind-repo repo_name parent_dir="$HOME/project":
     #!/bin/bash
     set -ueo pipefail
@@ -1018,6 +1054,7 @@ create-new-mind-repo repo_name parent_dir="$HOME/project":
 # workspace_dir resolves: explicit arg, else DEFAULT_WORKSPACE_TEMPLATE_DIR (shell or gitignored
 # apps/minds/.env), else the .external_worktrees/default-workspace-template checkout
 # that `just default-workspace-template-worktree` creates. No personal path baked in.
+[group("minds ops")]
 bake-slice-dev region workspace_dir="" count="1" *extra_args:
     #!/usr/bin/env bash
     set -ueo pipefail
@@ -1044,6 +1081,7 @@ bake-slice-dev region workspace_dir="" count="1" *extra_args:
 # Production slice bake from an exact DEFAULT_WORKSPACE_TEMPLATE tag (strict; content provably equals the
 # tag). Pass `--dry-run` through extra args first to confirm server selection +
 # per-slice sizing without baking.
+[group("minds ops")]
 bake-slice-prod region tag count="1" *extra_args:
     uv run minds pool create \
         --count "{{count}}" \
@@ -1056,15 +1094,18 @@ bake-slice-prod region tag count="1" *extra_args:
 # so this is a one-shot. Activate first: eval "$(uv run minds env activate <name>)" and
 # `vault login`. Use `minds paid remove`/`list` for the other operations.
 #   just add-paid-email someone@example.com
+[group("minds ops")]
 add-paid-email email:
     uv run minds paid add "{{email}}"
 
 # List pool_hosts rows for the activated minds env (read-only).
+[group("minds ops")]
 list-pool-hosts:
     uv run minds pool list
 
 # List bare-metal servers (per-server + fleet slot accounting) for the activated
 # minds env (read-only; DSN resolved from the env, no manual exports).
+[group("minds ops")]
 list-servers:
     uv run minds server list
 
@@ -1075,6 +1116,7 @@ list-servers:
 # under the old dir name do not need a re-prep for production --from-tag bakes.
 #
 #   just prep-server <bare-metal-server-id>
+[group("minds ops")]
 prep-server server_id *extra_args:
     uv run minds server prep --server-id "{{server_id}}" {{extra_args}}
 
@@ -1088,6 +1130,7 @@ prep-server server_id *extra_args:
 # Vault + the host_pool DB + ssh-keyscan, not Modal) and `vault login`.
 #
 #   eval "$(uv run minds env activate staging)" && just backfill-pool-host-keys
+[group("minds ops")]
 backfill-pool-host-keys:
     uv run minds pool backfill-host-keys
 
@@ -1103,6 +1146,7 @@ backfill-pool-host-keys:
 # slice VM when its lease ends. `minds env destroy` tears down a whole env's
 # unleased slices. This recipe is the manual escape hatch (e.g. retiring the old
 # `available` rows after baking a new pool generation).
+[group("minds ops")]
 destroy-pool-hosts *args:
     uv run minds pool destroy {{args}}
 
@@ -1110,6 +1154,7 @@ destroy-pool-hosts *args:
 # --minor mngr`, or `just release --watch`. See scripts/release.py's header for
 # the full interface.
 # Selectively bump and publish changed packages to PyPI.
+[group("mngr build")]
 release *args:
     uv run scripts/release.py {{args}}
 
@@ -1119,6 +1164,7 @@ release *args:
 # redeploy after editing scripts/changelog_consolidation_prompt.md or
 # scripts/changelog_deploy.sh.
 # (Re)deploy the nightly changelog-consolidation schedule from current source.
+[group("mngr dev")]
 changelog-deploy:
     bash scripts/changelog_deploy.sh
 
@@ -1128,6 +1174,7 @@ changelog-deploy:
 # (no `uv run`) because the gate is deliberately stdlib-only: no `uv sync`,
 # matching how the `check-changelog` CI job invokes it.
 # Check that this branch has a changelog entry per project it touches.
+[group("mngr dev")]
 check-changelog:
     python -m scripts.check_changelog_entries
 
@@ -1137,6 +1184,7 @@ check-changelog:
 # name and mngr namespace are kept in sync with that module by hand, as in
 # changelog_deploy.sh.
 # Trigger an on-demand changelog-consolidation run to consolidate pending entries.
+[group("mngr dev")]
 changelog-trigger:
     #!/bin/bash
     set -ueo pipefail
