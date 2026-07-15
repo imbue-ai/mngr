@@ -285,7 +285,7 @@ def launch_batch(*, name: str, config: dict, anthropic_key: str, port: str) -> d
     # The batch's Modal env was created explicitly at launch preflight (the atomic name claim), so
     # every create can fan out concurrently -- no implicit-env-creation race, no serial priming.
     print("\n>> creating {} workspace(s) in parallel:".format(len(prepared)), flush=True)
-    with ThreadPoolExecutor(max_workers=min(8, len(prepared))) as pool:
+    with ThreadPoolExecutor(max_workers=min(10, len(prepared))) as pool:
         results = list(pool.map(lambda pair: _create(*pair), prepared))
 
     ok = sum(1 for r in results if r.get("ok"))

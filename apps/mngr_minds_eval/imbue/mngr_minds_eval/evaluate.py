@@ -163,7 +163,7 @@ def evaluate_batch(batch: str) -> None:
     print(">> evaluating {}/{} finished case(s) in {} ...".format(len(finished), len(rows), batch), flush=True)
     per_case: dict[str, dict] = {}
     errors: dict[str, str] = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(finished))) as pool:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(10, len(finished))) as pool:
         futures = {pool.submit(evaluate_single_case, client, bucket, r["prefix"]): r["id"] for r in finished}
         for future in concurrent.futures.as_completed(futures):
             case_id = futures[future]
