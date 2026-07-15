@@ -573,12 +573,9 @@ def _service_unavailable_response(request: Request) -> Response:
     request library surfaces a real error instead of null from an unparseable
     plain-text body.
     """
-    accept = request.headers.get("accept", "")
-    if "text/html" in accept:
+    if "text/html" in request.headers.get("accept", ""):
         return HTMLResponse(content=_SERVICE_UNAVAILABLE_HTML, status_code=503)
-    if "application/json" in accept:
-        return JSONResponse(status_code=503, content={"detail": "Backend not yet available"})
-    return Response(status_code=503, content="Backend not yet available")
+    return _backend_error_response(request, status_code=503, detail="Backend not yet available")
 
 
 # -- Subdomain handlers ---------------------------------------------------
