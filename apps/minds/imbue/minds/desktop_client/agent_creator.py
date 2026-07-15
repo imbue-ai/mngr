@@ -1518,7 +1518,7 @@ class AgentCreator(MutableModel):
         branch_or_tag: str = "",
         region: str = "",
         anthropic_api_key: str = "",
-        on_created: Callable[[AgentId], None] | None = None,
+        on_created: Callable[[AgentId, HostId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
         color: str | None = None,
         docker_runtime: DockerRuntime = DockerRuntime.RUNC,
@@ -1551,10 +1551,12 @@ class AgentCreator(MutableModel):
         ask for.
 
         When ``on_created`` is provided, it is called with the canonical
-        ``AgentId`` once ``mngr create`` returns (immediately before the
-        status flips to ``DONE``). The id is parsed from the inner
-        ``mngr create``'s JSONL ``"event": "created"`` line, not pre-generated;
-        for imbue_cloud agents it's the leased pool host's pre-baked id.
+        ``AgentId`` and ``HostId`` once ``mngr create`` returns (immediately
+        after the status flips to ``DONE``, so consumers can rely on the
+        published canonical id). Both ids are parsed from the
+        inner ``mngr create``'s JSONL ``"event": "created"`` line, not
+        pre-generated; for imbue_cloud agents they are the leased pool
+        host's pre-baked ids.
 
         Returns a ``CreationId`` immediately for tracking the in-flight
         creation. Use ``get_creation_info()`` to poll status (and read
@@ -1665,7 +1667,7 @@ class AgentCreator(MutableModel):
         branch_or_tag: str = "",
         region: str = "",
         anthropic_api_key: str = "",
-        on_created: Callable[[AgentId], None] | None = None,
+        on_created: Callable[[AgentId, HostId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
         color: str | None = None,
         docker_runtime: DockerRuntime = DockerRuntime.RUNC,
@@ -2004,7 +2006,7 @@ class AgentCreator(MutableModel):
                     self._redirect_urls[cid_str] = redirect_url
 
                 if on_created is not None:
-                    on_created(canonical_id)
+                    on_created(canonical_id, canonical_host_id)
 
                 # Configure restic backups asynchronously on a detached
                 # thread (mirrors the Cloudflare tunnel-token path): bucket

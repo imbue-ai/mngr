@@ -24,6 +24,7 @@ from imbue.imbue_common.sentry.core import _make_automatic_reporting_gate
 from imbue.imbue_common.sentry.core import _register_ignored_loggers
 from imbue.imbue_common.sentry.core import add_extra_info_hook
 from imbue.imbue_common.sentry.core import fixup_release_id
+from imbue.imbue_common.sentry.core import get_or_create_anonymous_user_id
 from imbue.imbue_common.sentry.core import register_attachments_uploader
 from imbue.imbue_common.sentry.core import submit_manual_bug_report
 from imbue.imbue_common.sentry.data_types import LogAttachmentGroup
@@ -43,6 +44,35 @@ _ROTATED_LOG_GROUP = LogAttachmentGroup(
 )
 def test_fixup_release_id_normalizes_release_candidates(release_id: str, expected: str) -> None:
     assert fixup_release_id(release_id) == expected
+
+
+def test_get_or_create_anonymous_user_id_creates_and_persists_a_hex_id(tmp_path: Path) -> None:
+    id_file_path = tmp_path / "anonymous_user_id"
+    user_id = get_or_create_anonymous_user_id(id_file_path)
+    # A 32-char lowercase hex string (uuid4().hex), persisted verbatim to the file.
+    assert len(user_id) == 32 and all(char in "0123456789abcdef" for char in user_id)
+    assert id_file_path.read_text() == user_id
+
+
+def test_get_or_create_anonymous_user_id_is_stable_across_calls(tmp_path: Path) -> None:
+    id_file_path = tmp_path / "anonymous_user_id"
+    first = get_or_create_anonymous_user_id(id_file_path)
+    second = get_or_create_anonymous_user_id(id_file_path)
+    assert first == second
+
+
+def test_get_or_create_anonymous_user_id_regenerates_a_malformed_file(tmp_path: Path) -> None:
+    id_file_path = tmp_path / "anonymous_user_id"
+    id_file_path.write_text("not-a-valid-id")
+    user_id = get_or_create_anonymous_user_id(id_file_path)
+    assert len(user_id) == 32 and all(char in "0123456789abcdef" for char in user_id)
+    assert id_file_path.read_text() == user_id
+
+
+def test_get_or_create_anonymous_user_id_creates_parent_directory(tmp_path: Path) -> None:
+    id_file_path = tmp_path / "nested" / "dir" / "anonymous_user_id"
+    user_id = get_or_create_anonymous_user_id(id_file_path)
+    assert id_file_path.read_text() == user_id
 
 
 def test_collect_external_attachments_groups_logs_by_configured_glob(tmp_path: Path) -> None:
@@ -217,6 +247,36 @@ def test_add_extra_info_hook_collects_traceback_when_log_inclusion_enabled() -> 
     event: Event = {"extra": {}}
     _result_event, _hint, callbacks = add_extra_info_hook(event, {}, is_log_inclusion_enabled=lambda: True)
     assert len(callbacks) == 1
+
+
+def test_scope_user_id_is_attached_to_events_even_with_send_default_pii_off() -> None:
+    # The feature relies on an explicitly-set anonymous user id being sent to Sentry even though
+    # send_default_pii is False (which only suppresses auto-collected PII like IP addresses). Verify
+    # the id set on the scope (exactly what setup_sentry does) lands on a captured event's user.
+    captured_events: list[Event] = []
+
+    class _CapturingTransport(Transport):
+        def capture_envelope(self, envelope: Envelope) -> None:
+            event = envelope.get_event()
+            if event is not None:
+                captured_events.append(event)
+
+    client = Client(
+        dsn="https://public@example.com/1",
+        transport=_CapturingTransport(),
+        default_integrations=False,
+        auto_enabling_integrations=False,
+        send_default_pii=False,
+    )
+    with isolation_scope() as scope:
+        scope.set_client(client)
+        scope.set_user({"id": "0123456789abcdef0123456789abcdef"})
+        sentry_sdk.capture_event({"message": "boom"})
+        client.flush()
+
+    assert len(captured_events) == 1
+    user = cast(dict, captured_events[0]["user"])
+    assert user["id"] == "0123456789abcdef0123456789abcdef"
 
 
 def test_submit_manual_bug_report_sends_tagged_event_even_when_reporting_disabled() -> None:
