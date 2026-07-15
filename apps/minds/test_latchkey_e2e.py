@@ -354,7 +354,9 @@ def _build_release_env(
     env["MNGR_PROJECT_CONFIG_DIR"] = str(settings_dir)
     env["MNGR_HOST_DIR"] = str(tmp_path / "mngr_home")
     env["HOME"] = str(home)
-    env["MNGR_LATCHKEY_DIRECTORY"] = str(tmp_path / "latchkey")
+    latchkey_directory = tmp_path / "latchkey"
+    latchkey_directory.mkdir(parents=True, exist_ok=True)
+    env["MNGR_LATCHKEY_DIRECTORY"] = str(latchkey_directory)
     env["MNGR_LATCHKEY_BINARY"] = str(latchkey_binary)
     env["PATH"] = f"{shim_dir}{os.pathsep}{env['PATH']}"
     return env
@@ -643,8 +645,9 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
                 f"forward log:\n{forward_log_path.read_text()}"
             )
             # The agent's own permissions view is the canonical host file: the
-            # baseline grants the gateway-self endpoints under latchkey-self.invalid.
-            assert "latchkey-self.invalid" in desktop_self.stdout, (
+            # baseline carries the ``latchkey-self`` scope rule (the grant that
+            # allowed this very /permissions/self read).
+            assert "latchkey-self" in desktop_self.stdout, (
                 f"unexpected /permissions/self body from the desktop gateway:\n{desktop_self.stdout}"
             )
 
