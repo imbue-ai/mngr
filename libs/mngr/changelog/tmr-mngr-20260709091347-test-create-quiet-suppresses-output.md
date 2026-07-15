@@ -1,1 +1,0 @@
-Fixed the `test_create_quiet_suppresses_output` e2e test: it now scopes its verification listing to `mngr list --provider local` (matching the other e2e create tests) so it never queries unauthenticated cloud providers, and dropped the spurious `@pytest.mark.rsync` mark (a `--no-connect` local create does not invoke rsync).

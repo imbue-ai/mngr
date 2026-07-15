@@ -20,6 +20,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Fixed
 
 - Fixed: `PREVENT_TRAILING_COMMENTS` ratchet no longer misfires on `PR #NNNN` references inside comment or docstring prose. The unanchored pattern treated the `#` of a PR number as a trailing comment; a negative lookbehind now exempts a `#` immediately preceded by `PR `, alongside the existing hex-color and `ty: ignore` exemptions.
+- Fixed: Inline-function ratchet (`find_inline_functions`) double-counted a function nested two or more levels deep — it walked every `FunctionDef` and descended into all descendants, emitting a doubly-nested function once per ancestor. Nested defs are now keyed by source position and counted once (across the monorepo only `apps/minds` sees a change, from 9 to 7).
 
 ## [v0.1.20] - 2026-06-13
 

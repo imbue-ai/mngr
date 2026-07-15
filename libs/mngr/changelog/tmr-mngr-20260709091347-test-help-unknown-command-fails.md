@@ -1,1 +1,0 @@
-Gave the `test_help_unknown_command_fails` e2e release test a 60s timeout override so it no longer races the 10s default while mngr's CLI starts up (the command itself already fails correctly, naming the unknown command and pointing back to `--help`).

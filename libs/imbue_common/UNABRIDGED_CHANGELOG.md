@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-14
+
+Fixed the inline-function ratchet (`find_inline_functions`) double-counting a function nested two or more levels deep. It walked every `FunctionDef` in a file, including nested ones, and descended into all of each one's descendants, so a function with two enclosing functions was emitted once per ancestor. The recorded count therefore overstated the real number of inline functions. Nested defs are now collected keyed by source position and counted once. Only projects that actually nest functions two deep are affected; across the whole monorepo the sole recorded count that changes is `apps/minds` (from 9 to 7 before any code change).
+
 ## 2026-07-13
 
 The trailing-comments ratchet (PREVENT_TRAILING_COMMENTS) no longer misfires on `PR #NNNN` references inside comment or docstring prose. The unanchored pattern treated the `#` of a PR number as a trailing comment (even on comment-only lines, since a match can start mid-line); a negative lookbehind now exempts a `#` immediately preceded by `PR `, alongside the existing hex-color and `ty: ignore` exemptions.

@@ -1,1 +1,0 @@
-Strengthened the release test for `mngr dependencies --install auto` so it also asserts the command runs the check/install flow to completion (no unhandled crash), not just that it reached the dependency reporting stage.

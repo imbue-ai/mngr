@@ -1,1 +1,0 @@
-Fixed the `test_tips_transcript_tail_assistant` e2e release test, which was failing under the default 10-second pytest timeout while the real `mngr create` setup step was still running. It now carries an explicit `@pytest.mark.timeout(120)` marker like its sibling release tests, giving the create and transcript-read commands enough headroom.

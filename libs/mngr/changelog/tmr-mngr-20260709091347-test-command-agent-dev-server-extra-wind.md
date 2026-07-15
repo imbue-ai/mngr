@@ -1,1 +1,0 @@
-Removed a superfluous `@pytest.mark.rsync` mark from the `test_command_agent_dev_server_extra_windows` e2e tutorial test. The test exercises a purely local command agent (with an extra tmux window) and never invokes rsync, so the resource guard was failing it for carrying a mark it did not use.

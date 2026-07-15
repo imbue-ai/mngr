@@ -1,1 +1,0 @@
-Removed a superfluous `@pytest.mark.rsync` marker from the `test_message_commit_request` git tutorial e2e test. The test only exercises `mngr create` and `mngr msg`, neither of which invokes rsync, so the resource guard failed the test for a mark it never used. Only `mngr exec`-based sibling tests genuinely need the rsync mark.

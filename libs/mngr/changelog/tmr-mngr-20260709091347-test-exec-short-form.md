@@ -1,1 +1,0 @@
-Fixed the `test_exec_short_form` e2e tutorial test: removed the superfluous `@pytest.mark.rsync` mark (the local command agent in a git project never invokes rsync, so the resource guard flagged the mark as never invoked), and tightened its assertion to verify `git status` reports the agent's own `mngr/my-task` branch rather than any "On branch" line.

@@ -1,1 +1,0 @@
-Fixed the custom-agent-type tutorial e2e test (`test_create_custom_yolo_agent_type`) so it simulates the in-editor project-config edit with a direct file append (opting the freshly created project config into the pytest run) instead of `mngr config set`, which the pytest config-loading guard rejected on the un-opted-in project config.

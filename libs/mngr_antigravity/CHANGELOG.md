@@ -13,6 +13,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Changed
 
 - Changed: `settings_overrides` now folds onto the base with a principled merge (matching mngr_claude): a bare key assigns with a recursive narrowing guard, and a top-level `__mngr_merge` map declares per-key `extend` (merge onto the base) or `assign` (replace without the guard). Raw `__extend` / `__assign` suffix keys are rejected — `__mngr_merge` is ignored by vanilla antigravity so the generated `settings.json` stays clean. Previously `settings_overrides` replaced top-level keys wholesale with no guard.
+- Changed: `mngr message` to an antigravity agent now confirms submission by polling the `active` marker (maintained by mngr's statusLine command on every busy sample) advancing past its pre-Enter state, instead of the tmux `wait-for` signal — which latched a stale signal fired with no waiter and could instantly false-confirm a later send (and kill its pending Enter keystroke). The marker exists on agents created by older mngr versions, so no reprovisioning is needed.
 
 ## [v0.1.8] - 2026-06-18
 

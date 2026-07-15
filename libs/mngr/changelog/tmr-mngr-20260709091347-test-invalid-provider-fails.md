@@ -1,1 +1,0 @@
-Raised the per-test timeout on the `test_invalid_provider_fails` e2e release test. It runs two full `mngr` subprocesses, each of which pays a fixed interpreter startup cost that can exceed the default 10s per-test timeout even though the command logic fails fast; the test now allows extra headroom, matching its sibling error-path tests.

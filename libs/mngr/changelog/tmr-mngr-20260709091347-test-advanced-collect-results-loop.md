@@ -1,1 +1,0 @@
-- Removed the superfluous `@pytest.mark.rsync` mark from the `test_advanced_collect_results_loop` e2e tutorial test. The test creates local `--type command` agents and only exercises `mngr exec`, which never invokes rsync, so the resource guard failed the otherwise-passing test.

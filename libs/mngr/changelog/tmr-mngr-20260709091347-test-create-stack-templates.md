@@ -1,1 +1,0 @@
-Strengthened the `test_create_stack_templates` e2e tutorial test to observe the concrete effect of stacking `--template modal-big --template with-tests` -- it now confirms the agent runs in-place (modal-big's `transfer=none` applied) rather than only asserting the create command exited 0.
