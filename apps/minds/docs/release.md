@@ -17,7 +17,7 @@ Both repos release from **`main`**. Neither `main` is branch-protected, so a PR 
 | Repo | Carries | Open a PR? |
 |---|---|---|
 | `mngr` | version bump (`apps/minds/package.json`), `FALLBACK_BRANCH` (`templates.py`), any mngr/minds code | Optional. Traditional CI on an inert bump is redundant with a green `main`, so a PR adds little — open one for a record, or when the branch also carries mngr/minds code you want CI/review on. |
-| `default-workspace-template` | `vendor/mngr/` archived from the green mngr SHA, plus any consumer (`system_interface`) changes that vendor requires | Yes — as a **CI surface, not a review**. A pure vendor refresh isn't read, but a PR is the only way to run `ci.yml`'s `test` job (`uv sync` + `system_interface` tests) on the branch, which catches a `uv`-resolution or `system_interface` break fast on a big vendor jump. (You *can* skip it and lean on launch-to-msg, which covers the same end-to-end, just slower.) |
+| `default-workspace-template` | `vendor/mngr/` archived from the green mngr SHA, plus any consumer (`system_interface`) changes that vendor requires | **No**, for a pure vendor refresh — never PR'd. Land it directly on `main` (step 6); `ci.yml`'s `test` job (`uv sync` + `system_interface` tests) then runs on that `main` push as a post-merge backstop, and launch-to-msg (step 4) already covers the same `uv`-resolution / `system_interface` breakage end-to-end before you tag. Open a PR **only** when a `system_interface` consumer fix rides along — that code needs review + pre-merge CI, so isolate it in its own commit. |
 
 **Vendor-match invariant.** DEFAULT_WORKSPACE_TEMPLATE `vendor/mngr` must be the `git archive` of the *exact* mngr SHA it's paired with — the `commit_sha` you verify and the mngr SHA you tag. The binary runs the mngr SHA; the in-VM agent imports `vendor/mngr`. If they diverge, the agent's mngr can mismatch the binary's API (how the `system_interface` → `send_message_to_agents` break slipped in). Re-archive whenever the mngr SHA changes. When iterating on CI this means dispatching a `template_ref` whose `vendor/mngr` is synced to the SHA you're building — never DEFAULT_WORKSPACE_TEMPLATE `main`, which lags: a stale vendor silently rejects a field the binary renamed, so the in-VM agent never starts and the e2e wedges at "Waiting for initial chat agent…" (looks like a frontend hang, is really vendor skew; seen for `use_env_config_dir` → `isolate_local_config_dir`). `just sync-vendor-mngr` produces a matching DEFAULT_WORKSPACE_TEMPLATE branch.
 
@@ -50,15 +50,15 @@ Set these once for the whole session — later steps assume them:
 
 ## What actually gates a release (vs. confirmation)
 
-Three things must hold; only two need *new* CI:
+Three things must hold; launch-to-msg is the only *new* pre-merge gate:
 
 1. **The binary built from the release SHA works end-to-end** — `minds-launch-to-msg.yml` (step 4). `main` never runs this, so it is the release's only unique verification and its wall-clock long pole. Start it as early as possible.
-2. **The DEFAULT_WORKSPACE_TEMPLATE PR's `test` job is green** (step 2) — real signal: it refreshes `vendor/mngr` (and may carry a `system_interface` fix), so a `uv`-resolution or stale-API break surfaces here. `ci.yml` only runs on a PR or on `main`, so this needs the DEFAULT_WORKSPACE_TEMPLATE branch opened as a PR (a CI surface, not a review).
+2. **The `vendor/mngr` refresh doesn't break `uv` resolution or `system_interface`** — covered end-to-end by launch-to-msg (item 1), and by `ci.yml`'s `test` job when the refresh lands on DEFAULT_WORKSPACE_TEMPLATE `main` (`ci.yml` runs on push to `main`, a post-merge backstop). A pure vendor refresh is **not** PR'd (see "The two release branches"); only a `system_interface` consumer fix riding along warrants a PR, for its own review + CI.
 3. **`vendor/mngr` equals the tagged mngr SHA** — proved by reproduction (the step-6 `git ls-tree` blob-hash comparison), not by CI.
 
 *Not* new signal: **traditional CI on a version-bump-only mngr branch.** Bumping `version` + `FALLBACK_BRANCH` can't change test behavior — no test asserts the version literal or that `FALLBACK_BRANCH` resolves to an existing tag — so a green `main` already covers it. Let those jobs run as a backstop; don't serialize behind them. (When the mngr branch *also* carries mngr/minds code, its CI is real signal — gate on it.)
 
-**So don't run the steps strictly in series.** Once `main` is green and the bump commit exists, the release SHA (`GREEN_MNGR_SHA` = mngr release-branch HEAD) is fixed: cut the DEFAULT_WORKSPACE_TEMPLATE branch (step 3) and fire launch-to-msg (step 4) right away, and let both branches' traditional CI finish in parallel. The numbering below is dependency order, not "wait for each."
+**So don't run the steps strictly in series.** Once `main` is green and the bump commit exists, the release SHA (`GREEN_MNGR_SHA` = mngr release-branch HEAD) is fixed: cut the DEFAULT_WORKSPACE_TEMPLATE branch (step 3) and fire launch-to-msg (step 4) right away. The mngr branch's traditional CI (if you opened a PR) runs in parallel; the vendor refresh's `test` job runs post-merge on DEFAULT_WORKSPACE_TEMPLATE `main`. The numbering below is dependency order, not "wait for each."
 
 ## Procedure
 
@@ -66,9 +66,9 @@ Three things must hold; only two need *new* CI:
 
 For an iteration of the same version, skip. To bump: set `apps/minds/package.json` `version` (e.g. `0.3.1`) and `templates.py` `FALLBACK_BRANCH` to `"minds-v0.3.1"`. This bakes in a tag that doesn't exist until step 7 — fine, because step 4 overrides the DEFAULT_WORKSPACE_TEMPLATE ref via `template_ref`, so the tag is only hit in step 8.
 
-### 2. Traditional CI on both branches (parallel, not a serial gate)
+### 2. Traditional CI (parallel, not a serial gate)
 
-`ci.yml` runs only on PRs (any branch) and on push to `main` — **a bare branch push triggers nothing**, so open a branch as a PR when you want its CI. Gate on the **DEFAULT_WORKSPACE_TEMPLATE** PR's `test` job (`uv sync --all-packages` + root/`system_interface` pytest — exactly what a bad vendor refresh trips). The **mngr** branch's suites (`test-offload`, `test-docker`, `test-offload-acceptance`) are real signal only if it carries mngr/minds code; for a version-bump-only branch they're redundant with a green `main` (see "What actually gates a release"), so a PR there is optional. The release SHA — `GREEN_MNGR_SHA` — is the mngr release-branch HEAD (`main` + the bump commit) and doesn't depend on any of this finishing.
+`ci.yml` runs only on PRs (any branch) and on push to `main` — **a bare branch push triggers nothing**. The **DEFAULT_WORKSPACE_TEMPLATE** vendor refresh is **not** opened as a PR: land it on `main` (step 6) and its `test` job (`uv sync --all-packages` + root/`system_interface` pytest — exactly what a bad vendor refresh trips) runs on that `main` push as a post-merge backstop, while launch-to-msg (step 4) already covers the same end-to-end before you tag. The **mngr** branch's suites (`test-offload`, `test-docker`, `test-offload-acceptance`) are real signal only if it carries mngr/minds code; for a version-bump-only branch they're redundant with a green `main` (see "What actually gates a release"), so a PR there is optional. The release SHA — `GREEN_MNGR_SHA` — is the mngr release-branch HEAD (`main` + the bump commit) and doesn't depend on any of this finishing.
 
 ### 3. Refresh DEFAULT_WORKSPACE_TEMPLATE `vendor/mngr` from the green mngr SHA (DEFAULT_WORKSPACE_TEMPLATE branch)
 
