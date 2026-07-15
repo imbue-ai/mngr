@@ -1,0 +1,1 @@
+- Registered the new `apps/mngr_minds_eval` project in the root pytest coverage config (`--cov=imbue.mngr_minds_eval`) and in `uv.lock` (workspace member via the existing `apps/*` glob).
