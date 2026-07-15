@@ -28,7 +28,6 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.minds.bootstrap import is_imbue_cloud_provider_enabled_for_account
 from imbue.minds.bootstrap import list_disabled_provider_names
-from imbue.minds.build_info import resolve_release_id
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
@@ -63,6 +62,9 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.permission_overview import PermissionOverviewError
+from imbue.minds.desktop_client.latchkey.permission_overview import build_file_sharing_overview
+from imbue.minds.desktop_client.latchkey.permission_overview import build_permission_overview
+from imbue.minds.desktop_client.latchkey.permission_overview import build_workspace_overview
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_file_sharing_for_all_workspaces
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_file_sharing_for_workspace
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_for_all_workspaces
@@ -407,45 +409,6 @@ def _handle_error_reporting_settings() -> Response:
         if "include_logs" in body:
             minds_config.set_include_error_logs(bool(body["include_logs"]))
         _sync_latchkey_forward_sentry_consent(minds_config)
-    return make_response(status_code=200, content='{"ok": true}', media_type="application/json")
-
-
-def _handle_appearance_settings() -> Response:
-    """Persist the dark-mode toggle from the settings UI (POST /_chrome/appearance).
-
-    The theme is applied server-side on every page render (Base.jinja), so the
-    change takes effect on the next render of every surface; the settings UI
-    also flips its own document live.
-    """
-    if not _is_request_authenticated():
-        return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
-    body = request.get_json(silent=True, force=True)
-    if not isinstance(body, dict):
-        return make_response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
-    minds_config: MindsConfig | None = get_state().minds_config
-    if minds_config is not None:
-        minds_config.set_dark_mode(bool(body.get("dark_mode", False)))
-    return make_response(status_code=200, content='{"ok": true}', media_type="application/json")
-
-
-def _handle_default_region_setting() -> Response:
-    """Persist the default Imbue Cloud region from the settings UI (POST /_chrome/default-region).
-
-    Writes the same per-provider region preference the create form reads (and
-    writes back on each create), so the picked region pre-selects the create
-    form's region field for Imbue Cloud workspaces.
-    """
-    if not _is_request_authenticated():
-        return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
-    body = request.get_json(silent=True, force=True)
-    if not isinstance(body, dict):
-        return make_response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
-    region = str(body.get("region") or "")
-    if region not in known_regions_for_provider(IMBUE_CLOUD_PROVIDER_KEY):
-        return make_response(status_code=400, content='{"error": "Unknown region"}', media_type="application/json")
-    minds_config: MindsConfig | None = get_state().minds_config
-    if minds_config is not None:
-        minds_config.set_region(IMBUE_CLOUD_PROVIDER_KEY, region)
     return make_response(status_code=200, content='{"ok": true}', media_type="application/json")
 
 
@@ -1736,19 +1699,55 @@ def _build_app_settings_context() -> dict[str, Any]:
     """Build the shared render kwargs for the app-level settings surfaces.
 
     Used by both the full settings page (browser-mode fallback) and the
-    centered settings modal, which render the same shared sections.
+    centered settings modal, which render the same shared sections: the
+    permission overview (connectors / file sharing / workspace delegation
+    held across all active workspaces), the per-machine error-reporting
+    toggles, and the backup master-password section.
     """
     minds_config: MindsConfig | None = get_state().minds_config
-    geo_cache: GeoLocationCache | None = get_state().geo_location_cache
     paths: WorkspacePaths | None = get_state().api_v1_paths
+
+    services_overview: list[object] = []
+    file_sharing_grants: list[object] = []
+    workspace_delegation_grants: list[object] = []
+    permissions_unavailable = False
+    handler = _find_predefined_permission_handler()
+    if handler is not None:
+        try:
+            services_overview = list(
+                build_permission_overview(
+                    backend_resolver=get_state().backend_resolver,
+                    gateway_client=handler.gateway_client,
+                    services_catalog=handler.services_catalog,
+                    latchkey=handler.latchkey,
+                )
+            )
+            file_sharing_grants = list(
+                build_file_sharing_overview(
+                    backend_resolver=get_state().backend_resolver,
+                    gateway_client=handler.gateway_client,
+                    latchkey=handler.latchkey,
+                )
+            )
+            workspace_delegation_grants = list(
+                build_workspace_overview(
+                    backend_resolver=get_state().backend_resolver,
+                    gateway_client=handler.gateway_client,
+                    latchkey=handler.latchkey,
+                )
+            )
+        except LatchkeyGatewayClientError as e:
+            logger.warning("Could not build permission overview for settings: {}", e)
+            permissions_unavailable = True
+
     return {
         "report_unexpected_errors": minds_config.get_report_unexpected_errors() if minds_config else False,
         "include_error_logs": minds_config.get_include_error_logs() if minds_config else False,
+        "services_overview": services_overview,
+        "file_sharing_grants": file_sharing_grants,
+        "workspace_delegation_grants": workspace_delegation_grants,
+        "permissions_unavailable": permissions_unavailable,
         "has_saved_backup_password": has_saved_backup_password(paths) if paths is not None else False,
-        "dark_mode": minds_config.get_dark_mode() if minds_config else False,
-        "region_options": list(known_regions_for_provider(IMBUE_CLOUD_PROVIDER_KEY)),
-        "region_selected": default_region_for_provider_with_config(IMBUE_CLOUD_PROVIDER_KEY, minds_config, geo_cache),
-        "app_version": resolve_release_id(),
     }
 
 
@@ -1756,10 +1755,10 @@ def _handle_settings_page() -> Response:
     """Render the app-level settings page (GET /settings).
 
     The full-page browser-mode fallback for the centered settings modal
-    (GET /settings/modal): Appearance, error reporting, default region,
-    backup password, and About -- all per-machine device settings seeded
-    from ``MindsConfig``. Requires the same local session as the rest of
-    the app; it is not account-scoped.
+    (GET /settings/modal): Connectors, Local files, Workspace delegation,
+    Error reporting, and Backup password -- all per-machine / app-level
+    settings. Requires the same local session as the rest of the app; it is
+    not account-scoped.
     """
     if not _is_request_authenticated():
         return make_response(status_code=403, content="Not authenticated")
@@ -1770,7 +1769,9 @@ def _handle_settings_modal() -> Response:
     """Render the centered "Minds Settings" modal page (GET /settings/modal).
 
     Served into the shared modal WebContentsView; opened from the home
-    screen's bottom-left "Minds Settings" launcher.
+    screen's bottom-left "Minds Settings" launcher and the workspace
+    switcher's "Minds Settings" entry. Shows the same sections as the full
+    settings page, minus the "back to workspaces" link.
     """
     if not _is_request_authenticated():
         return make_response(status_code=403, content="Not authenticated")
@@ -2593,8 +2594,6 @@ def create_desktop_client(
     app.add_url_rule("/consent", view_func=_handle_consent_page)
     app.add_url_rule("/consent", view_func=_handle_consent_submit, methods=["POST"])
     app.add_url_rule("/_chrome/error-reporting", view_func=_handle_error_reporting_settings, methods=["POST"])
-    app.add_url_rule("/_chrome/appearance", view_func=_handle_appearance_settings, methods=["POST"])
-    app.add_url_rule("/_chrome/default-region", view_func=_handle_default_region_setting, methods=["POST"])
     app.add_url_rule("/_chrome/backup-password", view_func=_handle_backup_password_change, methods=["POST"])
     app.add_url_rule("/help", view_func=_handle_help_page)
     app.add_url_rule("/help/report", view_func=_handle_help_report, methods=["POST"])

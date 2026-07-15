@@ -108,10 +108,15 @@ def _plugin_dir(tmp_path: Path) -> Path:
     return Latchkey(latchkey_directory=tmp_path, latchkey_binary="/nonexistent").plugin_data_dir
 
 
-def test_settings_page_no_longer_hosts_permission_sections(tmp_path: Path) -> None:
-    """Connector / permission management is no longer in the app-level Settings
-    page; it keeps only the device settings."""
+def test_settings_page_lists_granted_connector(tmp_path: Path) -> None:
+    """The app-level Settings page hosts the permission sections: a granted
+    connector shows up with its workspace and permissions, alongside the
+    device settings (error reporting, backup password)."""
     agent, host = str(AgentId()), HostId()
+    save_permissions(
+        permissions_path_for_host(_plugin_dir(tmp_path), host),
+        LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-read-all"]},)),
+    )
     handler = _build_handler(tmp_path)
     client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
 
@@ -119,10 +124,38 @@ def test_settings_page_no_longer_hosts_permission_sections(tmp_path: Path) -> No
 
     assert response.status_code == 200
     body = response.text
-    assert "data-settings-nav" not in body
-    assert "Workspace delegation" not in body
-    for label in ("Dark mode", "Report unexpected errors", "Backup password", "Version"):
-        assert label in body
+    # The permission sections are back on the app-level settings page.
+    for section in ("Connectors", "Local files", "Workspaces", "Error reporting", "Backup password"):
+        assert section in body
+    # The granted connector renders with its workspace + permission label.
+    assert "Slack" in body
+    assert "My Workspace" in body
+    assert "slack-read-all" in body
+    assert 'data-service-name="slack"' in body
+    # The full page keeps its "back to workspaces" link (the modal drops it).
+    assert "Back to workspaces" in body
+
+
+def test_settings_modal_lists_granted_connector_without_back_link(tmp_path: Path) -> None:
+    """The centered settings modal renders the same permission sections as the
+    full page, minus the "back to workspaces" link."""
+    agent, host = str(AgentId()), HostId()
+    save_permissions(
+        permissions_path_for_host(_plugin_dir(tmp_path), host),
+        LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-read-all"]},)),
+    )
+    handler = _build_handler(tmp_path)
+    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
+
+    response = client.get("/settings/modal")
+
+    assert response.status_code == 200
+    body = response.text
+    assert "Connectors" in body
+    assert "slack-read-all" in body
+    assert 'data-service-name="slack"' in body
+    assert "Back to workspaces" not in body
+    assert 'id="settings-modal-backdrop"' in body
 
 
 def test_revoke_service_for_workspace_removes_rule(tmp_path: Path) -> None:

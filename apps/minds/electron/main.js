@@ -3388,32 +3388,6 @@ ipcMain.on('open-accounts', (event) => {
   if (sender) openAccountsModal(sender);
 });
 
-// The settings UI persisted a dark-mode change: repaint every window's other
-// surfaces. The chrome view and the overlay host (which also flips its
-// mounted modal iframes; see overlay.js) flip their document classes off the
-// chrome-event; minds-served content pages reload so the server-rendered
-// theme class (Base.jinja) takes effect. Workspace content (the foreign
-// dockview UI on its own origin) is deliberately untouched.
-ipcMain.on('appearance-changed', (_event, isDark) => {
-  const dark = !!isDark;
-  for (const b of bundles) {
-    if (b.window.isDestroyed()) continue;
-    if (b.chromeView && !b.chromeView.webContents.isDestroyed()) {
-      try {
-        b.chromeView.webContents.send('chrome-event', { type: 'appearance', is_dark: dark });
-      } catch { /* noop */ }
-    }
-    sendToOverlayFrames(b, 'chrome-event', { type: 'appearance', is_dark: dark });
-    const cv = b.contentView;
-    if (cv && !cv.webContents.isDestroyed() && !parseWorkspaceId(cv.webContents.getURL())) {
-      try { cv.webContents.reload(); } catch { /* noop */ }
-    }
-    if (b.shellView && !b.shellView.webContents.isDestroyed()) {
-      try { b.shellView.webContents.reload(); } catch { /* noop */ }
-    }
-  }
-});
-
 ipcMain.on('close-modal', (event) => {
   closeModal(getBundleFromEvent(event));
 });

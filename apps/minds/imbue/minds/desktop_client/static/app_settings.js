@@ -1,40 +1,10 @@
 // Interactivity for the app-level ("Minds") settings sections
-// (templates/SettingsSections.jinja), shared by the centered settings modal
-// and the full-page browser-mode fallback. Binds by element id, so the
-// sections component must appear at most once per page.
+// (templates/AppSettingsSections.jinja), shared by the centered settings
+// modal and the full-page browser-mode fallback. Binds by element id /
+// class, so the sections component must appear at most once per page. There
+// is no left-nav here (the sections render as a single vertical stack), so
+// there is no section-switching to wire.
 (function () {
-  // -- Appearance (dark mode) ----------------------------------------------
-  //
-  // The theme is a persisted per-machine setting rendered server-side on the
-  // document root (Base.jinja), so pages painted after the POST land in the
-  // new theme automatically. This page is toggled live; in Electron the
-  // notifyAppearanceChanged bridge tells the main process to repaint the
-  // other views of every window (chrome titlebar + any minds content page).
-  var darkToggle = document.getElementById('dark-mode-toggle');
-  if (darkToggle) {
-    darkToggle.addEventListener('change', function () {
-      var enabled = darkToggle.checked;
-      document.documentElement.classList.toggle('dark', enabled);
-      fetch('/_chrome/appearance', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ dark_mode: enabled }),
-      })
-        .then(function (resp) {
-          if (!resp.ok) throw new Error('HTTP ' + resp.status);
-          if (window.minds && window.minds.notifyAppearanceChanged) {
-            window.minds.notifyAppearanceChanged(enabled);
-          }
-        })
-        .catch(function () {
-          // Persisting failed -- revert the optimistic flip so the checkbox
-          // reflects what will actually render on the next page load.
-          darkToggle.checked = !enabled;
-          document.documentElement.classList.toggle('dark', !enabled);
-        });
-    });
-  }
-
   // -- Error reporting toggles ----------------------------------------------
   var reportToggle = document.getElementById('report-errors-toggle');
   var logsRow = document.getElementById('include-logs-row');
@@ -70,32 +40,144 @@
     });
   }
 
-  // -- Default region ---------------------------------------------------------
-  var regionSelect = document.getElementById('default-region-select');
-  var regionError = document.getElementById('default-region-error');
-  if (regionSelect) {
-    regionSelect.addEventListener('change', function () {
-      if (regionError) regionError.classList.add('hidden');
-      fetch('/_chrome/default-region', {
+  // -- Permission revocation -------------------------------------------
+  var revokeDialog = document.getElementById('revoke-dialog');
+  var revokeTitle = document.getElementById('revoke-dialog-title');
+  var revokeBody = document.getElementById('revoke-dialog-body');
+  var revokeCancelBtn = document.getElementById('revoke-cancel-btn');
+  var revokeConfirmBtn = document.getElementById('revoke-confirm-btn');
+  var revokeErrorEl = document.getElementById('revoke-error');
+  var pendingRevoke = null;
+
+  function openRevokeDialog(title, body, request) {
+    pendingRevoke = request;
+    revokeTitle.textContent = title;
+    revokeBody.textContent = body;
+    if (revokeErrorEl) revokeErrorEl.classList.add('hidden');
+    revokeConfirmBtn.disabled = false;
+    revokeDialog.classList.remove('hidden');
+  }
+  function closeRevokeDialog() {
+    pendingRevoke = null;
+    revokeDialog.classList.add('hidden');
+  }
+  if (revokeDialog) {
+    revokeCancelBtn.addEventListener('click', closeRevokeDialog);
+    revokeDialog.addEventListener('click', function (e) {
+      if (e.target === revokeDialog) closeRevokeDialog();
+    });
+    revokeConfirmBtn.addEventListener('click', function () {
+      if (!pendingRevoke) return;
+      revokeConfirmBtn.disabled = true;
+      fetch(pendingRevoke.url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ region: regionSelect.value }),
+        body: JSON.stringify(pendingRevoke.body),
       })
         .then(function (resp) {
-          if (resp.ok) return;
-          if (regionError) {
-            regionError.textContent = 'Could not save the default region (HTTP ' + resp.status + ')';
-            regionError.classList.remove('hidden');
+          if (resp.ok) {
+            window.location.reload();
+            return;
+          }
+          revokeConfirmBtn.disabled = false;
+          if (revokeErrorEl) {
+            revokeErrorEl.textContent = 'Could not revoke (HTTP ' + resp.status + ')';
+            revokeErrorEl.classList.remove('hidden');
           }
         })
         .catch(function () {
-          if (regionError) {
-            regionError.textContent = 'Could not save the default region (network error)';
-            regionError.classList.remove('hidden');
+          revokeConfirmBtn.disabled = false;
+          if (revokeErrorEl) {
+            revokeErrorEl.textContent = 'Could not revoke (network error)';
+            revokeErrorEl.classList.remove('hidden');
           }
         });
     });
   }
+
+  document.querySelectorAll('.revoke-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var serviceSection = btn.closest('[data-service-name]');
+      var card = btn.closest('[data-workspace-agent-id]');
+      var serviceLabel = serviceSection.getAttribute('data-service-label');
+      var workspaceName = card.getAttribute('data-workspace-name');
+      openRevokeDialog(
+        'Revoke ' + serviceLabel + ' access?',
+        'This removes ' + workspaceName + "'s " + serviceLabel + ' permissions. The agent can request them again later.',
+        {
+          url: '/settings/permissions/revoke',
+          body: {
+            workspace_agent_id: card.getAttribute('data-workspace-agent-id'),
+            service_name: serviceSection.getAttribute('data-service-name'),
+          },
+        }
+      );
+    });
+  });
+
+  document.querySelectorAll('.remove-all-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var serviceSection = btn.closest('[data-service-name]');
+      var serviceLabel = serviceSection.getAttribute('data-service-label');
+      openRevokeDialog(
+        'Remove all ' + serviceLabel + ' authorizations?',
+        'This removes ' + serviceLabel + ' permissions from every workspace. Agents can request them again later.',
+        {
+          url: '/settings/permissions/revoke-all',
+          body: { service_name: serviceSection.getAttribute('data-service-name') },
+        }
+      );
+    });
+  });
+
+  // File-sharing revocation (own section, own endpoints; no service name).
+  document.querySelectorAll('.revoke-fs-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var card = btn.closest('[data-workspace-agent-id]');
+      var workspaceName = card.getAttribute('data-workspace-name');
+      openRevokeDialog(
+        'Revoke file sharing?',
+        'This removes ' + workspaceName + "'s shared file access. The agent can request it again later.",
+        {
+          url: '/settings/permissions/file-sharing/revoke',
+          body: { workspace_agent_id: card.getAttribute('data-workspace-agent-id') },
+        }
+      );
+    });
+  });
+
+  document.querySelectorAll('.remove-all-fs-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      openRevokeDialog(
+        'Remove all file sharing?',
+        'This removes shared file access from every workspace. Agents can request it again later.',
+        { url: '/settings/permissions/file-sharing/revoke-all', body: {} }
+      );
+    });
+  });
+
+  // Cross-workspace management revocation: one verb, for one granting
+  // workspace, across every target it covers. The granting workspace is
+  // carried by the enclosing group; the verb by the row.
+  document.querySelectorAll('.revoke-verb-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var group = btn.closest('[data-workspace-agent-id]');
+      var row = btn.closest('[data-verb-permission]');
+      var workspaceName = group.getAttribute('data-workspace-name');
+      var verbLabel = row.getAttribute('data-verb-label');
+      openRevokeDialog(
+        'Revoke ' + verbLabel + ' access?',
+        'This removes ' + workspaceName + "'s " + verbLabel + ' access to other workspaces. The agent can request it again later.',
+        {
+          url: '/settings/permissions/workspace/revoke',
+          body: {
+            workspace_agent_id: group.getAttribute('data-workspace-agent-id'),
+            verb: row.getAttribute('data-verb-permission'),
+          },
+        }
+      );
+    });
+  });
 
   // -- Backup master password change ------------------------------------
   // Synchronous POST: the server rekeys every existing backed-up

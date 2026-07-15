@@ -25,13 +25,16 @@
                 src=/_static/foo.js over inline JS.
 #}
 <!DOCTYPE html>
-{# The dark theme is a persisted per-machine user setting (Minds Settings ->
-   Appearance), applied server-side on the document root so every page paints
-   in the right theme with no flash and no client-side storage. #}
-<html lang="en" class="{{ 'dark' if is_dark_mode() else '' }}">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <title>{{ title }}</title>
+  <script>
+    // Apply the persisted theme before first paint (no flash). The styleguide
+    // dev toggle writes localStorage['minds-theme'] = 'dark' | 'light'; the
+    // formal light/dark UX lands in a later stage. Absent flag => light.
+    try { if (localStorage.getItem('minds-theme') === 'dark') document.documentElement.classList.add('dark'); } catch (e) {}
+  </script>
   {# Frontend (browser) Sentry error reporting. Emitted only when reporting is
      enabled and a real DSN is configured for the environment; the payload is
      resolved by the backend (imbue/minds/utils/sentry/frontend.py). Loaded

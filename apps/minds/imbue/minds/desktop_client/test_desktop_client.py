@@ -41,8 +41,6 @@ from imbue.minds.desktop_client.help_modal_requests import OpenHelpRequest
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
-from imbue.minds.desktop_client.region_preference import IMBUE_CLOUD_PROVIDER_KEY
-from imbue.minds.desktop_client.region_preference import known_regions_for_provider
 from imbue.minds.desktop_client.request_events import LatchkeyPredefinedPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
@@ -1249,18 +1247,23 @@ def test_settings_modal_requires_auth(tmp_path: Path) -> None:
     assert response.status_code == 403
 
 
-def test_settings_modal_renders_device_settings_in_overlay(tmp_path: Path) -> None:
-    """GET /settings/modal renders the shared device-settings sections inside
-    the centered overlay chrome (backdrop + closeModal-based dismissal)."""
+def test_settings_modal_renders_app_settings_in_overlay(tmp_path: Path) -> None:
+    """GET /settings/modal renders the same app-level settings sections as the
+    /settings page (Connectors, Error reporting, Backup password) inside the
+    centered overlay chrome (backdrop + closeModal-based dismissal), with no
+    "back to workspaces" link."""
     client, auth_store = _create_test_client_with_stores(tmp_path)
     _authenticate_client(client, auth_store)
     response = client.get("/settings/modal")
     assert response.status_code == 200
     body = response.text
-    # The shared sections (SettingsSections.jinja) and their external shell JS.
-    assert 'id="dark-mode-toggle"' in body
+    # The shared sections (AppSettingsSections.jinja) and their external shell JS.
+    assert "Connectors" in body
+    assert "Backup password" in body
     assert 'id="report-errors-toggle"' in body
     assert "/_static/app_settings.js" in body
+    # The modal drops the back link (X + backdrop click dismiss instead).
+    assert "Back to workspaces" not in body
     # Modal chrome: dim backdrop over a transparent body, dismissed through
     # the Electron modal host (with a plain-page fallback).
     assert 'id="settings-modal-backdrop"' in body
@@ -1630,37 +1633,6 @@ def test_set_default_account(tmp_path: Path) -> None:
 
     config = MindsConfig(data_dir=tmp_path)
     assert config.get_default_account_id() == "user-default-123"
-
-
-def test_appearance_toggle_persists_dark_mode(tmp_path: Path) -> None:
-    """POST /_chrome/appearance persists the dark-mode setting, which the
-    next page render applies on the document root."""
-    client, auth_store = _create_test_client_with_stores(tmp_path)
-    _authenticate_client(client, auth_store)
-    response = client.post("/_chrome/appearance", json={"dark_mode": True})
-    assert response.status_code == 200
-    assert MindsConfig(data_dir=tmp_path).get_dark_mode() is True
-
-    page = client.get("/settings")
-    assert '<html lang="en" class="dark">' in page.text
-
-    response = client.post("/_chrome/appearance", json={"dark_mode": False})
-    assert response.status_code == 200
-    assert MindsConfig(data_dir=tmp_path).get_dark_mode() is False
-
-
-def test_default_region_setting_persists_and_validates(tmp_path: Path) -> None:
-    """POST /_chrome/default-region writes the imbue_cloud region preference
-    (the one the create form pre-selects) and rejects unknown regions."""
-    client, auth_store = _create_test_client_with_stores(tmp_path)
-    _authenticate_client(client, auth_store)
-    known = known_regions_for_provider(IMBUE_CLOUD_PROVIDER_KEY)
-    response = client.post("/_chrome/default-region", json={"region": known[-1]})
-    assert response.status_code == 200
-    assert MindsConfig(data_dir=tmp_path).get_region(IMBUE_CLOUD_PROVIDER_KEY) == known[-1]
-
-    response = client.post("/_chrome/default-region", json={"region": "not-a-region"})
-    assert response.status_code == 400
 
 
 # -- error-reporting consent + settings tests --

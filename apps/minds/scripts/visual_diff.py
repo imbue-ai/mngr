@@ -381,11 +381,8 @@ def _build_scenarios() -> list[Scenario]:
             builder=lambda: render_app_settings_page(
                 report_unexpected_errors=True,
                 include_error_logs=False,
+                permissions_unavailable=False,
                 has_saved_backup_password=True,
-                dark_mode=False,
-                region_options=["US-EAST-VA", "US-WEST-OR"],
-                region_selected="US-EAST-VA",
-                app_version="0.0.0-visualdiff",
             ),
         ),
         Scenario(
@@ -393,11 +390,8 @@ def _build_scenarios() -> list[Scenario]:
             builder=lambda: render_settings_modal_page(
                 report_unexpected_errors=False,
                 include_error_logs=False,
+                permissions_unavailable=False,
                 has_saved_backup_password=False,
-                dark_mode=True,
-                region_options=["US-EAST-VA", "US-WEST-OR"],
-                region_selected="US-WEST-OR",
-                app_version="0.0.0-visualdiff",
             ),
         ),
         Scenario(

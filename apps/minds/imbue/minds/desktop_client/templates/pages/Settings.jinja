@@ -1,27 +1,27 @@
-{#def report_unexpected_errors=false, include_error_logs=false, has_saved_backup_password=false, dark_mode=false, region_options=[], region_selected="", app_version="" #}
+{#def report_unexpected_errors=false, include_error_logs=false, services_overview=[], file_sharing_grants=[], workspace_delegation_grants=[], permissions_unavailable=false, has_saved_backup_password=false #}
 {#
   App-level ("Minds") settings as a full page: the browser-mode fallback for
   the centered settings modal (pages.SettingsModal) the Electron shell shows.
-  Both render the same shared sections (templates/SettingsSections.jinja):
-  Appearance (dark mode), Error reporting, Account default region, Backup
-  password, and About -- all per-machine device settings.
-
-  Connector / permission management is per-workspace now and lives on each
-  workspace's Connections view, not here.
+  Both render the same shared sections (templates/AppSettingsSections.jinja):
+  Connectors, Local files, Workspace delegation, Error reporting, and Backup
+  password -- all per-machine / app-level settings (the app, not any single
+  workspace, owns permissions). See AppSettingsSections.jinja for the section
+  docs and the permission-overview model shapes.
 #}
 {% set _scripts %}
 <script src="/_static/app_settings.js" defer></script>
 {% endset %}
 <Base title="Settings" scripts={{ _scripts }}>
   <PageContainer>
-    <h1 class="type-heading-lg text-primary mb-6">Settings</h1>
-    <SettingsSections
+    <h1 class="type-heading-lg text-primary mb-8">Settings</h1>
+    <AppSettingsSections
       :report_unexpected_errors="report_unexpected_errors"
       :include_error_logs="include_error_logs"
-      :has_saved_backup_password="has_saved_backup_password"
-      :dark_mode="dark_mode"
-      :region_options="region_options"
-      :region_selected="region_selected"
-      :app_version="app_version" />
+      :services_overview="services_overview"
+      :file_sharing_grants="file_sharing_grants"
+      :workspace_delegation_grants="workspace_delegation_grants"
+      :permissions_unavailable="permissions_unavailable"
+      :has_saved_backup_password="has_saved_backup_password" />
+    <div class="mt-8"><Link href="/" extra="type-helper">&larr; Back to workspaces</Link></div>
   </PageContainer>
 </Base>

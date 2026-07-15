@@ -72,11 +72,6 @@ contextBridge.exposeInMainWorld('minds', {
   openAccounts: () => ipcRenderer.send('open-accounts'),
   openSigninModal: (returnTo) => ipcRenderer.send('open-signin-modal', returnTo),
 
-  // Fired by the settings UI after persisting the dark-mode toggle so main
-  // can repaint every window's other views (chrome titlebar, minds content
-  // pages) in the new theme.
-  notifyAppearanceChanged: (isDark) => ipcRenderer.send('appearance-changed', isDark),
-
   // Overlay surface (the always-warm modal WebContentsView host page,
   // /_chrome/overlay). The overlay manager (/_static/overlay.js) receives
   // show/hide commands from main via ``onOverlayCommand`` and reports the
