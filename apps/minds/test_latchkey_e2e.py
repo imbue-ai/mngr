@@ -85,6 +85,7 @@ from imbue.mngr_latchkey.encryption_key import encryption_key_path
 from imbue.mngr_latchkey.remote_gateway import INNER_PORT
 from imbue.mngr_latchkey.remote_gateway import LATCHKEY_VERSION
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
+from imbue.mngr_latchkey.store import forward_events_log_path
 from imbue.mngr_latchkey.store import load_permissions
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
@@ -509,7 +510,7 @@ def _forward_diagnostics(latchkey_directory: Path, forward_log_path: Path) -> st
     from the assertion message.
     """
     sections = [f"forward console log:\n{forward_log_path.read_text()}"]
-    events_path = plugin_data_dir(latchkey_directory) / "events.jsonl"
+    events_path = forward_events_log_path(plugin_data_dir(latchkey_directory))
     if events_path.is_file():
         error_lines: list[str] = []
         for line in events_path.read_text().splitlines():
@@ -667,9 +668,16 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
 
             # -- Step 4: run the forward supervisor (gateway + discovery + provisioning + sync) --
             forward_log_path = tmp_path / "latchkey-forward.log"
+            # ``--log-file`` mirrors how the production supervisor spawns the
+            # forward process: it routes the structured JSONL log (the only
+            # place provisioning exceptions carry their type+message) to the
+            # plugin data dir, where _forward_diagnostics reads it back on
+            # failure. Without it the structured log lands in the host-dir
+            # default location instead.
+            events_log_path = forward_events_log_path(plugin_data_dir(latchkey_directory))
             with forward_log_path.open("wb") as forward_log:
                 forward_process = subprocess.Popen(
-                    ["mngr", "latchkey", "forward", *latchkey_flags],
+                    ["mngr", "latchkey", "forward", *latchkey_flags, "--log-file", str(events_log_path)],
                     stdout=forward_log,
                     stderr=subprocess.STDOUT,
                     cwd=str(repo),
