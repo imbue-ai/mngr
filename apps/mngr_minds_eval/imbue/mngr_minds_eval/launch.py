@@ -136,23 +136,28 @@ def load_config(config_path: Path) -> dict:
     if not config_path.is_file():
         raise SystemExit("no such config file: {}".format(config_path))
     config = json.loads(config_path.read_text())
-    for key in ("name", "mngr_branch", "personas"):
+    for key in ("mngr_branch", "personas"):
         if not config.get(key):
             raise SystemExit("eval config is missing required key: {!r}".format(key))
-    # The name IS the batch identity: the S3 prefix and the Modal env (minds-staging-<name>) both
-    # key on it, and launch preflights that neither exists yet. Require it to already be a valid
-    # Modal user_id (lowercase alnum + dashes, <=40) so no sanitization can alias two names.
-    name = str(config["name"])
-    if name != box_mod.sanitize_user_id(name) or len(name) > 40:
-        raise SystemExit(
-            "eval config: 'name' must be lowercase letters/digits/dashes, at most 40 chars "
-            "(got {!r}) -- it names the batch's S3 prefix and Modal env".format(name)
-        )
+    if config.get("name"):
+        print(">> note: 'name' in the config is ignored -- the batch name is given on the command line", flush=True)
     try:
         normalize_cases(config["personas"])  # validate case shape now, on the host
     except ValueError as exc:
         raise SystemExit("eval config: {}".format(exc)) from exc
     return config
+
+
+def validate_name(name: str) -> str:
+    """The batch name IS the batch identity: the S3 prefix and the Modal env (minds-staging-<name>)
+    both key on it, and launch preflights that neither exists yet. Require it to already be a valid
+    Modal user_id (lowercase alnum + dashes, <=40) so no sanitization can alias two names."""
+    if name != box_mod.sanitize_user_id(name) or len(name) > 40:
+        raise SystemExit(
+            "batch name must be lowercase letters/digits/dashes, at most 40 chars (got {!r}) -- "
+            "it names the batch's S3 prefix and Modal env".format(name)
+        )
+    return name
 
 
 def _ensure_base(fct_repo: str, fct_branch: str) -> None:
@@ -242,12 +247,12 @@ def destroy_existing_workspace(port: str, host_name: str, quiet: bool = False) -
         _destroy_and_wait(port, match["agent_id"], host_name, quiet=quiet)
 
 
-def launch_batch(*, config: dict, anthropic_key: str, port: str) -> dict:
+def launch_batch(*, name: str, config: dict, anthropic_key: str, port: str) -> dict:
     env = s3_store.load_aws_env()
     client = s3_store.make_client(env)
     bucket = env["MINDS_EVAL_BUCKET"]
 
-    eval_name = config["name"]
+    eval_name = validate_name(name)
     fct_repo = config.get("fct_repo", DEFAULT_FCT_REPO)
     fct_branch = config.get("fct_branch", DEFAULT_FCT_BRANCH)
     cases = normalize_cases(config["personas"])
@@ -272,6 +277,7 @@ def launch_batch(*, config: dict, anthropic_key: str, port: str) -> dict:
         "{}/{}".format(batch, s3_store.BATCH_CONFIG_NAME),
         {
             **config,
+            "name": eval_name,
             "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "restic_password": restic_password,
             "mngr_sha": os.environ.get("MINDS_BOX_MNGR_REF", ""),

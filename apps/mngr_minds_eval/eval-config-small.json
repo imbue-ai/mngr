@@ -1,5 +1,4 @@
 {
-  "name": "trio",
   "mngr_branch": "main",
   "fct_branch": "minds-eval-autosend",
   "timeout_seconds": 3600,

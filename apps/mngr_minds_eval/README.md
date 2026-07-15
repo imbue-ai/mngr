@@ -35,8 +35,8 @@ One-time: an S3 bucket and a bucket-scoped IAM key at `~/.minds-eval/aws.env`. S
 ## Commands
 
 ```
-# run an eval batch (one self-completing workspace per case) from a single config file
-ANTHROPIC_API_KEY=sk-ant-... minds-evals launch --config eval-config.json
+# run an eval batch (one self-completing workspace per case): a unique name + a config template
+ANTHROPIC_API_KEY=sk-ant-... minds-evals launch combined --config eval-config.json
 
 # status, straight from S3 -- no box, works any time from anywhere
 minds-evals list-batches
@@ -60,12 +60,12 @@ IS that computer, and prints a noVNC URL. `list-batches`/`inspect`/`evaluate` on
 
 ## Eval config (`--config`)
 
-A single json, stored verbatim in S3 as the batch config (plus `created_at`, `restic_password`,
-`mngr_sha`, `modal_user_id`, `modal_env`). See `eval-config.json`:
+A reusable **template** — the batch name is given on the command line, not in the file. Stored
+verbatim in S3 as the batch config (plus `name`, `created_at`, `restic_password`, `mngr_sha`,
+`modal_user_id`, `modal_env`). See `eval-config.json`:
 
 ```json
 {
-  "name": "combined",
   "mngr_branch": "main",
   "fct_branch": "minds-eval-autosend",
   "timeout_seconds": 3600,
@@ -83,8 +83,8 @@ different numbers of turns. Each entry is either:
   transcript-so-far + the case's `persona` to the Anthropic API (using the key `launch` was given)
   and sends back a short casual reply. It cannot be the first entry (nothing to decide from yet).
 
-`name` must be lowercase letters/digits/dashes (max 40) and **globally unique** — it is the S3
-prefix and the Modal env name. `fct_branch`/`fct_repo` are optional (default the
+The launch-time `name` must be lowercase letters/digits/dashes (max 40) and **globally unique** —
+it is the S3 prefix and the Modal env name. `fct_branch`/`fct_repo` are optional (default the
 workspace-template branch that carries the eval worker). `fct_branch` must carry the worker or the sandbox boots but never self-runs.
 `timeout_seconds` is optional (default 3600 = 1h): a per-case wall-clock budget — a run that
 exceeds it self-terminates.

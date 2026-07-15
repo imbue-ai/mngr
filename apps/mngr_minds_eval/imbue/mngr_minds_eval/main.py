@@ -3,7 +3,7 @@
 Host-native CLI. Each batch gets its own Modal env; boxes are full Minds computers in Docker
 (headless for creating, a browser-accessible desktop for visiting).
 
-  minds-evals launch --config eval-config.json    # create a batch (one workspace per case)
+  minds-evals launch trio --config eval-config.json   # create a batch (one workspace per case)
   minds-evals list-batches                        # S3 only
   minds-evals inspect trio                    # per-case state, S3 only
   minds-evals evaluate trio                   # score finished cases (ANTHROPIC_API_KEY)
@@ -96,12 +96,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_launch = sub.add_parser("launch", help="launch an eval batch from a single config json")
+    p_launch = sub.add_parser("launch", help="launch an eval batch: a unique name + a config template")
+    p_launch.add_argument("name", help="unique batch name (lowercase/digits/dashes) -- the S3 prefix and Modal env")
     p_launch.add_argument(
         "--config",
         required=True,
         type=Path,
-        help="eval config json: {name, mngr_branch, fct_branch?, fct_repo?, timeout_seconds?, personas:[...]}",
+        help="eval config json: {mngr_branch, fct_branch?, fct_repo?, timeout_seconds?, personas:[...]}",
     )
     p_launch.add_argument("--anthropic-key", default=os.environ.get("ANTHROPIC_API_KEY", ""))
 
@@ -176,13 +177,13 @@ def main() -> None:
 
     if args.command == "launch":
         env = _check_aws()
-        # load_config validates on the host before any box is touched (incl. that the name is a
-        # valid batch id: it IS the S3 prefix and the Modal env).
+        # Validate the name and the config template on the host before any box is touched. The name
+        # is the batch id: it IS the S3 prefix and the Modal env.
+        batch = launch_mod.validate_name(args.name)
         config = launch_mod.load_config(args.config)
         if not args.anthropic_key:
             parser.error("set ANTHROPIC_API_KEY (or --anthropic-key)")
         if not IN_BOX:
-            batch = config["name"]
             # Eval names are unique, hard requirement: fail out if the batch already exists in S3
             # or its Modal env already exists (either means this name was used before).
             client = s3_store.make_client(env)
@@ -218,7 +219,7 @@ def main() -> None:
             else:
                 print("\n  launch failed -- the box was kept for debugging: docker logs {}".format(container))
             sys.exit(returncode)
-        launch_mod.launch_batch(config=config, anthropic_key=args.anthropic_key, port=_port())
+        launch_mod.launch_batch(name=batch, config=config, anthropic_key=args.anthropic_key, port=_port())
         return
 
 

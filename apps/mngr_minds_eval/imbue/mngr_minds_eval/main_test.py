@@ -10,6 +10,7 @@ from imbue.mngr_minds_eval import s3_store
 from imbue.mngr_minds_eval import workspace
 from imbue.mngr_minds_eval.launch import load_config
 from imbue.mngr_minds_eval.launch import normalize_cases
+from imbue.mngr_minds_eval.launch import validate_name
 
 _ENV = {
     "AWS_ACCESS_KEY_ID": "AK",
@@ -102,15 +103,24 @@ def test_point_arg_to_box_rewrites_all_forms() -> None:
     assert out == ["launch", "--config", dest, "--config={}".format(dest), "--other", "x"]
 
 
-def test_load_config_rejects_invalid_names() -> None:
-    # The name IS the batch id (S3 prefix + Modal env), so it must already be a valid Modal
-    # user_id: lowercase alnum + dashes, at most 40 chars.
+def test_validate_name_rejects_invalid_names() -> None:
+    # The name IS the batch id (S3 prefix + Modal env): lowercase alnum + dashes, at most 40 chars.
+    assert validate_name("trio") == "trio"
     for bad in ("My Eval", "x" * 41, "UPPER", "under_score"):
-        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
-            json.dump({"name": bad, "mngr_branch": "main", "personas": [{"id": "a", "prompts": ["hi"]}]}, f)
-            path = Path(f.name)
         try:
-            load_config(path)
+            validate_name(bad)
             raise AssertionError("expected SystemExit for name {!r}".format(bad))
         except SystemExit as exc:
             assert "lowercase" in str(exc)
+
+
+def test_load_config_requires_template_keys() -> None:
+    # The config is a reusable template: no 'name' (given at launch); branch + personas required.
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+        json.dump({"personas": [{"id": "a", "prompts": ["hi"]}]}, f)
+        path = Path(f.name)
+    try:
+        load_config(path)
+        raise AssertionError("expected SystemExit for a config without mngr_branch")
+    except SystemExit as exc:
+        assert "mngr_branch" in str(exc)
