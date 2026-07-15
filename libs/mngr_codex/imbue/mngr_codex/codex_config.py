@@ -78,6 +78,14 @@ SESSIONS_RELATIVE_PATH: str = Path(*CODEX_HOME_RELATIVE_PATH, "sessions").as_pos
 _CONFIG_FILENAME: str = "config.toml"
 _AUTH_FILENAME: str = "auth.json"
 _HOOKS_FILENAME: str = "hooks.json"
+# codex reads a global ``AGENTS.md`` from ``CODEX_HOME`` and concatenates it
+# *before* the project-root ``AGENTS.md`` (user/global instructions, then a
+# ``--- project-doc ---`` separator, then the project doc). We use it as codex's
+# private system-prompt channel -- the repo commits codex-only instructions at
+# ``<repo>/.codex/AGENTS.md`` (a path codex never reads) and provisioning copies
+# them here, so they reach codex without polluting the shared project ``AGENTS.md``
+# that every other harness also reads.
+_GLOBAL_INSTRUCTIONS_FILENAME: str = "AGENTS.md"
 # First-run NUX gate: codex skips the personality-migration prompt when this
 # marker file exists (it auto-writes one on a fresh home with no sessions, but
 # seeding it makes the silent-launch behavior explicit and order-independent).
@@ -104,6 +112,16 @@ def get_codex_auth_path(codex_home: Path) -> Path:
 def get_codex_hooks_path(codex_home: Path) -> Path:
     """Return the ``hooks.json`` path under ``codex_home``."""
     return codex_home / _HOOKS_FILENAME
+
+
+def get_codex_global_instructions_path(codex_home: Path) -> Path:
+    """Return codex's global ``AGENTS.md`` (user-scope instructions) path under ``codex_home``."""
+    return codex_home / _GLOBAL_INSTRUCTIONS_FILENAME
+
+
+def get_repo_codex_instructions_path(work_dir: Path) -> Path:
+    """Return the repo-committed codex instruction source at ``<work_dir>/.codex/AGENTS.md``."""
+    return work_dir / ".codex" / _GLOBAL_INSTRUCTIONS_FILENAME
 
 
 def get_codex_personality_migration_path(codex_home: Path) -> Path:
