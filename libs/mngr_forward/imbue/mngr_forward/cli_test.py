@@ -1,27 +1,44 @@
-"""Tests for ``mngr forward``'s CLI option validation.
+"""Tests for ``mngr forward``'s CLI helpers.
 
-These tests stub out heavy dependencies (the FastAPI app + uvicorn loop)
-by inspecting only the option-validation phase via direct calls to the
-helpers. End-to-end CLI invocation is exercised by the acceptance test.
+Covers option validation (direct calls to the validation helpers, without
+building the FastAPI app or a CLI process) and the hypercorn serving layer's
+TLS teardown behavior (serve-loop exception handling plus an end-to-end
+abandoned-connection repro over a loopback socket). End-to-end CLI invocation
+is exercised by the acceptance test.
 """
 
+# asyncio is normally banned, but this file tests the event-loop-level TLS
+# teardown behavior of `mngr forward`'s hypercorn serving path, which can only
+# be exercised from inside an asyncio loop.
+import asyncio
 import os
 import socket
 import ssl
+import threading
 
 import click
 import pytest
 from hypercorn.config import Config
+from hypercorn.typing import ASGIReceiveCallable
+from hypercorn.typing import ASGISendCallable
+from hypercorn.typing import Scope
+from loguru import logger
 
 from imbue.imbue_common.primitives import NonNegativeInt
 from imbue.imbue_common.primitives import PositiveInt
+from imbue.mngr.utils.polling import poll_for_value
+from imbue.mngr.utils.polling import wait_for
 from imbue.mngr_forward.cli import ForwardCliOptions
+from imbue.mngr_forward.cli import _BoundedSSLShutdownEventLoop
 from imbue.mngr_forward.cli import _DEFAULT_PORT
+from imbue.mngr_forward.cli import _SSL_SHUTDOWN_TIMED_OUT_MESSAGE
 from imbue.mngr_forward.cli import _bind_listen_socket
 from imbue.mngr_forward.cli import _build_hypercorn_config
 from imbue.mngr_forward.cli import _build_strategy
 from imbue.mngr_forward.cli import _filter_snapshot
+from imbue.mngr_forward.cli import _handle_serve_loop_exception
 from imbue.mngr_forward.cli import _parse_reverse_specs
+from imbue.mngr_forward.cli import _run_serve_loop
 from imbue.mngr_forward.cli import _validate_options
 from imbue.mngr_forward.data_types import ForwardAgentSnapshot
 from imbue.mngr_forward.data_types import ForwardListSnapshot
@@ -239,3 +256,148 @@ def test_filter_snapshot_supports_host_id_and_name_filter() -> None:
     assert tuple(entry.agent_id for entry in by_host.agents) == (TEST_AGENT_ID_1,)
     by_name = _filter_snapshot(snapshot, include=(), exclude=("agent.name == 'alpha'",))
     assert tuple(entry.agent_id for entry in by_name.agents) == (TEST_AGENT_ID_2,)
+
+
+def _asyncio_error_records(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [record.getMessage() for record in caplog.records if record.name == "asyncio"]
+
+
+def _serve_loop_asyncio_error_records(
+    caplog: pytest.LogCaptureFixture, message: str, exception: BaseException
+) -> list[str]:
+    """Run the serve-loop exception handler on a fresh loop; return asyncio ERROR records."""
+    loop = asyncio.new_event_loop()
+    try:
+        with caplog.at_level("ERROR", logger="asyncio"):
+            _handle_serve_loop_exception(loop, {"message": message, "exception": exception})
+    finally:
+        loop.close()
+    return _asyncio_error_records(caplog)
+
+
+def test_serve_loop_exception_handler_drops_ssl_shutdown_timeout(caplog: pytest.LogCaptureFixture) -> None:
+    """The TimeoutError of an abandoned TLS teardown must not reach asyncio's default handler."""
+    records = _serve_loop_asyncio_error_records(
+        caplog, "Unhandled exception in client_connected_cb", TimeoutError("SSL shutdown timed out")
+    )
+    assert records == []
+
+
+def test_serve_loop_exception_handler_drops_ssl_errors(caplog: pytest.LogCaptureFixture) -> None:
+    """TLS handshake failures are dropped, matching hypercorn's own runner behavior."""
+    records = _serve_loop_asyncio_error_records(
+        caplog, "SSL handshake failed", ssl.SSLError(1, "TLSV1_ALERT_UNKNOWN_CA")
+    )
+    assert records == []
+
+
+def test_serve_loop_exception_handler_delegates_unrelated_errors(caplog: pytest.LogCaptureFixture) -> None:
+    """Anything that is not benign TLS teardown noise still reaches the default handler."""
+    records = _serve_loop_asyncio_error_records(caplog, "something exploded in a task", RuntimeError("kaboom-7c1f"))
+    assert any("something exploded in a task" in message for message in records)
+
+
+def test_serve_loop_exception_handler_delegates_other_timeouts(caplog: pytest.LogCaptureFixture) -> None:
+    """Only the SSL-shutdown TimeoutError is suppressed; other timeouts must stay visible."""
+    records = _serve_loop_asyncio_error_records(caplog, "some other timeout", TimeoutError("read timed out"))
+    assert any("some other timeout" in message for message in records)
+
+
+class _FastSSLShutdownEventLoop(_BoundedSSLShutdownEventLoop):
+    """Serve loop with a sub-second TLS shutdown bound so the test stays fast."""
+
+    ssl_shutdown_timeout_seconds: float = 0.4
+
+
+async def _lifespan_only_asgi_app(scope: Scope, receive: ASGIReceiveCallable, send: ASGISendCallable) -> None:
+    """Minimal ASGI app for serving-layer tests; no HTTP request is ever made."""
+    assert scope["type"] == "lifespan"
+    await receive()
+    await send({"type": "lifespan.startup.complete"})
+    await receive()
+    await send({"type": "lifespan.shutdown.complete"})
+
+
+def _run_tls_server_until_stopped(config: Config, stop_serving: threading.Event) -> None:
+    """Serve the dummy app through the production serve loop until the event is set."""
+
+    async def _stop_trigger() -> None:
+        while not stop_serving.is_set():
+            await asyncio.sleep(0.05)
+
+    _run_serve_loop(
+        _lifespan_only_asgi_app, config, loop_factory=_FastSSLShutdownEventLoop, shutdown_trigger=_stop_trigger
+    )
+
+
+def _connect_tls_client_when_listening(port: int) -> ssl.SSLSocket:
+    """Open a TLS client connection (cert checks off), retrying until the server listens."""
+    client_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    client_context.check_hostname = False
+    client_context.verify_mode = ssl.CERT_NONE
+
+    def _try_connect() -> ssl.SSLSocket | None:
+        try:
+            raw_socket = socket.create_connection(("127.0.0.1", port), timeout=5.0)
+        except ConnectionRefusedError:
+            return None
+        return client_context.wrap_socket(raw_socket, server_hostname="localhost")
+
+    tls_socket, _, _ = poll_for_value(_try_connect, timeout=10.0, poll_interval=0.05)
+    assert tls_socket is not None, "the TLS server never started listening"
+    return tls_socket
+
+
+def test_abandoned_tls_connection_is_torn_down_quickly_and_quietly(caplog: pytest.LogCaptureFixture) -> None:
+    """End-to-end repro of the --use-http2 teardown noise (GitHub issue 2455).
+
+    A TLS client completes a handshake and then goes silent, never answering
+    the server's close_notify. The serve loop must force-close the connection
+    within the bounded SSL shutdown wait (not asyncio's 30s default), and the
+    escaping TimeoutError must be dropped instead of surfacing as an
+    "Unhandled exception in client_connected_cb" traceback.
+    """
+    listen_socket = _bind_listen_socket("127.0.0.1", 0)
+    listen_port = listen_socket.getsockname()[1]
+    config = _build_hypercorn_config(listen_socket, use_http2=True)
+    # Shrink the keep-alive so the server initiates the close (and thereby the
+    # TLS shutdown) shortly after the client goes idle.
+    config.keep_alive_timeout = 0.25
+
+    stop_serving = threading.Event()
+    suppressed_messages: list[str] = []
+    sink_id = logger.add(suppressed_messages.append, level="DEBUG")
+    server_thread = threading.Thread(
+        target=_run_tls_server_until_stopped,
+        args=(config, stop_serving),
+        name="forward-tls-teardown-test-server",
+        daemon=True,
+    )
+
+    def _is_teardown_suppressed() -> bool:
+        return any(_SSL_SHUTDOWN_TIMED_OUT_MESSAGE in message for message in tuple(suppressed_messages))
+
+    with caplog.at_level("ERROR", logger="asyncio"):
+        server_thread.start()
+        try:
+            client_socket = _connect_tls_client_when_listening(listen_port)
+            try:
+                # If the 30s stdlib shutdown timeout were still in effect, or
+                # the teardown error were not routed through the suppression
+                # path, this wait would time out.
+                wait_for(
+                    condition=_is_teardown_suppressed,
+                    timeout=10.0,
+                    poll_interval=0.05,
+                    error_message="the abandoned TLS connection was not torn down within the bounded wait",
+                )
+            finally:
+                client_socket.close()
+        finally:
+            stop_serving.set()
+            server_thread.join(timeout=10.0)
+            logger.remove(sink_id)
+            listen_socket.close()
+
+    assert not server_thread.is_alive()
+    assert _asyncio_error_records(caplog) == []

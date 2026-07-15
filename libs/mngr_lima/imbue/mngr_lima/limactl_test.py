@@ -2,8 +2,10 @@ from pathlib import Path
 
 import pytest
 
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr_lima.errors import LimaCommandError
 from imbue.mngr_lima.errors import LimaInstanceNameTooLongError
 from imbue.mngr_lima.limactl import LimaSshConfig
 from imbue.mngr_lima.limactl import _LIMA_SOCKET_PATH_OVERHEAD
@@ -12,7 +14,10 @@ from imbue.mngr_lima.limactl import _strip_ssh_config_quotes
 from imbue.mngr_lima.limactl import host_name_from_instance_name
 from imbue.mngr_lima.limactl import lima_instance_name
 from imbue.mngr_lima.limactl import lima_instance_name_from_host_id
+from imbue.mngr_lima.limactl import limactl_list
+from imbue.mngr_lima.limactl import limactl_shell
 from imbue.mngr_lima.limactl import resolve_lima_home
+from imbue.mngr_lima.testing import install_fake_limactl
 
 
 def _lima_socket_path_length(instance_name: str, lima_home: Path) -> int:
@@ -97,6 +102,56 @@ def test_strip_ssh_config_quotes() -> None:
     assert _strip_ssh_config_quotes('"127.0.0.1"') == "127.0.0.1"
     assert _strip_ssh_config_quotes('"/path/with spaces/key"') == "/path/with spaces/key"
     assert _strip_ssh_config_quotes("  60022  ") == "60022"
+
+
+def test_limactl_list_raises_lima_command_error_on_nonzero_exit(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A crashing ``limactl list`` surfaces as LimaCommandError, not a raw ProcessError.
+
+    Regression guard: every limactl invocation funnels through ``_run_limactl``, which
+    translates the ConcurrencyGroup ProcessError raised on a non-zero exit into the
+    domain LimaCommandError its callers catch. Without that translation the raw
+    ProcessError would slip past every caller that only catches LimaCommandError --
+    exactly how a limactl startup crash leaked out of discovery as an unclassified error.
+    """
+    bin_dir = tmp_path / "bin"
+    install_fake_limactl(bin_dir, 'echo "panic: user: unknown userid 501" >&2\nexit 2\n', monkeypatch)
+
+    with pytest.raises(LimaCommandError):
+        limactl_list(temp_mngr_ctx.concurrency_group)
+
+
+def test_limactl_shell_returns_stdout_on_success(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """limactl_shell returns the command's stdout when the invocation succeeds."""
+    bin_dir = tmp_path / "bin"
+    install_fake_limactl(bin_dir, 'echo "cloud-init done"\nexit 0\n', monkeypatch)
+
+    assert limactl_shell(temp_mngr_ctx.concurrency_group, "some-instance", "true").strip() == "cloud-init done"
+
+
+def test_limactl_shell_raises_lima_command_error_when_limactl_fails(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A limactl that cannot reach the instance surfaces as LimaCommandError rather than
+    a silently-returned non-zero exit code the caller may ignore.
+
+    This is the consistency fix for the one helper that previously never raised: a
+    limactl startup crash mid-command is now reported like every other limactl failure.
+    """
+    bin_dir = tmp_path / "bin"
+    install_fake_limactl(bin_dir, 'echo "panic: user: unknown userid 501" >&2\nexit 2\n', monkeypatch)
+
+    with pytest.raises(LimaCommandError):
+        limactl_shell(temp_mngr_ctx.concurrency_group, "some-instance", "true")
 
 
 def test_lima_ssh_config() -> None:

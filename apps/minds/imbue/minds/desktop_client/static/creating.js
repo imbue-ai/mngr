@@ -15,6 +15,7 @@
   var creationFailed = false;
   var redirectUrl = null;
   var creationError = '';
+  var creationErrorKind = '';
 
   // ---- Loading screen: progress bar + rotating hints ----
   var TIPS = [
@@ -68,6 +69,17 @@
     if (failureView) failureView.classList.remove('hidden');
     var msgEl = document.getElementById('error-message');
     if (msgEl) msgEl.textContent = creationError || 'unknown error';
+    // Reveal extra static guidance for recognized failure kinds (a private
+    // repo on github.com, or on another git host). The copy lives hidden in
+    // the template; the backend only classifies.
+    var authHelpId =
+      creationErrorKind === 'GITHUB_AUTH_REQUIRED' ? 'github-auth-help'
+      : creationErrorKind === 'GIT_AUTH_REQUIRED' ? 'git-auth-help'
+      : null;
+    if (authHelpId) {
+      var authHelp = document.getElementById(authHelpId);
+      if (authHelp) authHelp.classList.remove('hidden');
+    }
     // The prominent error box now carries the message, so clear the faint
     // footer caption to avoid showing it twice.
     var stage = document.getElementById('stage');
@@ -116,8 +128,8 @@
   // the SSE 'done' event can be missed on a page reload (the log queue may
   // already be drained), so we poll the operation status. SSE is used only for
   // the live log stream. The create operation reports
-  // {status, is_done, redirect_url, error}; redirect_url is the absolute
-  // /goto/<agent>/ URL the server builds once the workspace is ready.
+  // {status, is_done, redirect_url, error, error_kind}; redirect_url is the
+  // absolute /goto/<agent>/ URL the server builds once the workspace is ready.
   var statusPoll = null;
   function applyStatus(data) {
     if (!data) return;
@@ -128,6 +140,7 @@
     } else if (data.status === 'FAILED') {
       creationFailed = true;
       creationError = data.error || 'unknown error';
+      creationErrorKind = data.error_kind || '';
       showFailure();
       if (statusPoll) { clearInterval(statusPoll); statusPoll = null; }
     } else if (data.status_text && !creationFailed) {

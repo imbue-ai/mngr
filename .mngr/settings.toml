@@ -6,6 +6,11 @@ default_destroyed_host_persisted_seconds = 10
 test-results = "COPY"
 ".reviewer/settings.local.json" = "COPY"
 "CLAUDE.local.md" = "COPY"
+# Copy the gitignored per-user minds env (holds DEFAULT_WORKSPACE_TEMPLATE_DIR) into each agent so
+# `just default-workspace-template-worktree` / `bake-slice-dev` can reuse a local default_workspace_template clone. Skipped
+# silently when absent; DEFAULT_WORKSPACE_TEMPLATE_DIR is a same-host path, harmless on remote hosts
+# (default_workspace_template_worktree.sh guards on the dir existing before using it as a clone reference).
+"apps/minds/.env" = "COPY"
 
 [pre_command_scripts]
 create = ["""bash -c './scripts/make_tar_of_repo.sh `cat .mngr/image_commit_hash` .mngr/dev/build'"""]

@@ -38,14 +38,24 @@ def test_config_with_unknown_keys_non_strict(minimal_install_env: MinimalInstall
 
     env = {**minimal_install_env.env, "MNGR_ALLOW_UNKNOWN_CONFIG": "1"}
     mngr_bin = str(minimal_install_env.venv_dir / "bin" / "mngr")
+    # Use a config-loading command that does not depend on any provider backend
+    # (e.g. Docker) so the assertion isolates the config-parsing behavior the
+    # docstring scopes: the unknown key is warned about but does not abort the
+    # load. `config get headless` reads a known scalar and exits 0 once config
+    # loads successfully.
     result = subprocess.run(
-        [mngr_bin, "list"],
+        [mngr_bin, "config", "get", "headless"],
         capture_output=True,
         text=True,
         cwd=minimal_install_env.repo_dir,
         env=env,
         timeout=30,
     )
+    # "not fatal": config loading succeeded, so the command exits 0.
     assert result.returncode == 0, (
-        f"mngr list should succeed with MNGR_ALLOW_UNKNOWN_CONFIG=1:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+        f"config loading should succeed with MNGR_ALLOW_UNKNOWN_CONFIG=1:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    # "warned": the unknown key is surfaced as a warning rather than swallowed.
+    assert "future_feature" in result.stderr, (
+        f"Expected a warning naming the unknown field 'future_feature':\nstdout: {result.stdout}\nstderr: {result.stderr}"
     )

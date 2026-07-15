@@ -40,6 +40,7 @@ from imbue.mngr.api.find import ensure_host_started
 from imbue.mngr.api.find import get_host_from_list_by_id
 from imbue.mngr.api.find import resolve_host_location_address
 from imbue.mngr.api.gc import register_generated_source_dir
+from imbue.mngr.api.message import send_message_with_resend_guidance
 from imbue.mngr.api.providers import get_local_host
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.cli.address_params import NEW_AGENT_LOCATION
@@ -66,7 +67,6 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
-from imbue.mngr.interfaces.agent import require_interactive_agent
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.host import AgentDataOptions
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
@@ -1016,7 +1016,7 @@ def _create_agent(
                     elif setup.initial_message is not None:
                         # Send initial message directly (from --message or --message-file)
                         logger.info("Sending message to agent")
-                        require_interactive_agent(agent).send_message(setup.initial_message)
+                        send_message_with_resend_guidance(agent, setup.initial_message, "reused and running")
                     else:
                         pass
 
@@ -1251,7 +1251,7 @@ def _handle_editor_message(
             return
 
         logger.info("Sending edited message...")
-        require_interactive_agent(agent).send_message(edited_message)
+        send_message_with_resend_guidance(agent, edited_message, "created and running")
         logger.debug("Message sent successfully")
 
 

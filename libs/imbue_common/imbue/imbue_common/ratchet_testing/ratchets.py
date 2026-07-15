@@ -235,24 +235,29 @@ def find_inline_functions(
     for file_path in file_paths:
         func_def_nodes = get_ast_nodes_of_type(file_path, ast.FunctionDef)
 
+        # ast.walk from every FunctionDef reaches a function nested N deep once per
+        # ancestor, so collect the nested defs keyed by source position to count each once.
+        nested_by_position: dict[tuple[int, int], ast.FunctionDef] = {}
         for node in func_def_nodes:
-            # Walk within each FunctionDef to find nested functions
             for inner_node in ast.walk(node):
                 if inner_node is not node and isinstance(inner_node, ast.FunctionDef):
-                    # Skip decorator wrapper functions that use @functools.wraps
-                    if _has_functools_wraps_decorator(inner_node):
-                        continue
+                    nested_by_position[(inner_node.lineno, inner_node.col_offset)] = inner_node
 
-                    start_line = LineNumber(inner_node.lineno)
-                    end_line = LineNumber(inner_node.end_lineno if inner_node.end_lineno else inner_node.lineno)
+        for inner_node in nested_by_position.values():
+            # Skip decorator wrapper functions that use @functools.wraps
+            if _has_functools_wraps_decorator(inner_node):
+                continue
 
-                    chunk = RatchetMatchChunk(
-                        file_path=file_path,
-                        matched_content=f"inline function '{inner_node.name}' at line {start_line}",
-                        start_line=start_line,
-                        end_line=end_line,
-                    )
-                    chunks.append(chunk)
+            start_line = LineNumber(inner_node.lineno)
+            end_line = LineNumber(inner_node.end_lineno if inner_node.end_lineno else inner_node.lineno)
+
+            chunk = RatchetMatchChunk(
+                file_path=file_path,
+                matched_content=f"inline function '{inner_node.name}' at line {start_line}",
+                start_line=start_line,
+                end_line=end_line,
+            )
+            chunks.append(chunk)
 
     sorted_chunks = sorted(chunks, key=lambda c: (str(c.file_path), c.start_line))
     return tuple(sorted_chunks)

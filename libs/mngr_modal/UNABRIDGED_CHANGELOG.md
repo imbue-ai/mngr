@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-14
+
+Agent listings from this provider now populate `AgentDetails.pid` (the agent's main process PID in the remote host's PID namespace), extracted from the same already-collected tmux/ps probe data.
+
+Test-only: mark the Modal snapshot acceptance test (`test_snapshot_create_then_list_on_modal`) as known-flaky. It sporadically fails while waiting for sshd on a freshly-booted Modal host ("Error reading SSH protocol banner"), which is Modal-side boot timing rather than a defect in the snapshot code.
+
 ## 2026-07-08
 
 `discover_hosts_and_agents` now reads a **running** host's agents **live** off the sandbox instead of only from the state volume. Agents created *inside* the sandbox (for example the user's workspace agent) are never written to the outer state volume -- only host-side agents like `system-services` are -- so resolving from the volume alone left `mngr destroy` / `mngr start` unable to find a live in-sandbox agent (`Agent not found`), and minds' teardown spun on "Destroying..." forever. Offline hosts still resolve from the volume, and if the live read fails the host falls back to the volume so it still lists. This mirrors the VPS (aws/vultr) providers, which already read running hosts live.

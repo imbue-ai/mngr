@@ -1,1 +1,0 @@
-Test-only: mark the Modal snapshot acceptance test (`test_snapshot_create_then_list_on_modal`) as known-flaky. It sporadically fails while waiting for sshd on a freshly-booted Modal host ("Error reading SSH protocol banner"), which is Modal-side boot timing rather than a defect in the snapshot code.

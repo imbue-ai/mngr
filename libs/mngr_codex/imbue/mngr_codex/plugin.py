@@ -94,7 +94,10 @@ from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_di
 from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.agents.installation import verify_pinned_cli_version
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
-from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
+from imbue.mngr.agents.tui_utils import SubmissionConfirmationPolicy
+from imbue.mngr.agents.tui_utils import SubmissionEvidenceProbe
+from imbue.mngr.agents.tui_utils import build_changed_token_probe
+from imbue.mngr.agents.tui_utils import build_file_mtime_token_command
 from imbue.mngr.api.preservation import PreservedItem
 from imbue.mngr.api.preservation import adopt_sessions
 from imbue.mngr.api.preservation import build_transcript_preserved_items
@@ -113,7 +116,6 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import classify_waiting_reason
 from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.common import symlink_on_host
-from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import CliBackedAgentMixin
 from imbue.mngr.interfaces.agent import HasAutoInstallMixin
@@ -152,7 +154,6 @@ from imbue.mngr_codex.codex_config import SET_ACTIVE_MARKER_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import SUBAGENTS_DIRNAME
 from imbue.mngr_codex.codex_config import SUBAGENT_STARTED_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import SUBAGENT_STOPPED_SCRIPT_NAME
-from imbue.mngr_codex.codex_config import SUBMIT_WAIT_CHANNEL_PREFIX
 from imbue.mngr_codex.codex_config import build_codex_config
 from imbue.mngr_codex.codex_config import build_codex_hooks_config
 from imbue.mngr_codex.codex_config import extract_latest_codex_version
@@ -391,22 +392,28 @@ class CodexAgent(
         is_blocked_on_permission = self._check_file_exists(self._get_agent_dir() / PERMISSIONS_WAITING_FILENAME)
         return _resolve_lifecycle_state_for_permission(base_state, is_blocked_on_permission)
 
-    def _send_enter_and_validate(self, tmux_target: TmuxWindowTarget) -> None:
-        # codex's UserPromptSubmit hook (set_active_marker.sh) fires
-        # ``tmux wait-for -S mngr-submit-<session>`` *after* it sets the ``active``
-        # marker, so waiting on that channel both confirms the message was
-        # submitted and guarantees the agent reads as RUNNING by the time this
-        # returns -- closing the race where a caller checks lifecycle state before
-        # the turn registers. No queue-log fallback (claude's misfire workaround):
-        # codex's raw transcript is the rollout JSONL, not the enqueue-event log
-        # that fallback greps, and the foreground-registered waiter already avoids
-        # the signal-vs-waiter race.
-        send_enter_via_tmux_wait_for_hook(
-            self,
-            tmux_target,
-            wait_channel=f"{SUBMIT_WAIT_CHANNEL_PREFIX}{self.session_name}",
-            timeout_seconds=self.enter_submission_timeout_seconds,
+    def _build_submission_evidence_probes(
+        self, message: str, policy: SubmissionConfirmationPolicy
+    ) -> Sequence[SubmissionEvidenceProbe]:
+        """Confirm submission via the ``active`` marker advancing past its pre-Enter state.
+
+        codex's UserPromptSubmit hook (set_active_marker.sh) sets the ``active``
+        marker the moment a prompt opens a turn, so the marker appearing (or its
+        mtime advancing) is durable evidence the message was accepted -- the
+        same timing as the tmux wait-for signal the hook also fires (which mngr
+        no longer trusts: an unconsumed signal latches on the tmux server and
+        would instantly false-confirm a later send). The marker also confirms
+        that the agent reads as RUNNING by the time the send returns. codex
+        records no enqueue-style event (its raw transcript is the rollout
+        JSONL), so the marker is the only per-submission evidence, for slash
+        commands and normal messages alike; it exists on agents created by
+        older mngr versions too.
+        """
+        env_command_prefix = self.host.build_source_env_prefix(self)
+        active_marker_token_command = (
+            f"{env_command_prefix} {{ " + build_file_mtime_token_command('"$MNGR_AGENT_STATE_DIR/active"') + " ; }"
         )
+        return [build_changed_token_probe("active-marker", active_marker_token_command)]
 
     @property
     def is_common_transcript_enabled(self) -> bool:
