@@ -16,6 +16,8 @@ box can open workspaces a launch box created.
 
 from __future__ import annotations
 
+import json
+import os
 import socket
 import subprocess
 from pathlib import Path
@@ -97,6 +99,26 @@ def sanitize_user_id(text: str) -> str:
 
 def modal_env_name(user_id: str, minds_env: str = "staging") -> str:
     return "minds-{}-{}".format(minds_env, user_id)
+
+
+def modal_env_exists(user_id: str, minds_env: str = "staging") -> bool | None:
+    """Whether the batch's Modal env already exists (the launch preflight: eval names are unique, so
+    a pre-existing env means a name collision). None when the listing can't be read -- the caller
+    decides whether to proceed on the S3 check alone. TERM=dumb because modal 1.4.x bleeds ANSI
+    codes into `--json` output even when piped."""
+    target = modal_env_name(user_id, minds_env)
+    child_env = {**os.environ, "TERM": "dumb"}
+    result = _run(["uv", "run", "modal", "environment", "list", "--json"], cwd=str(APP_DIR.parents[1]), env=child_env)
+    if result.returncode != 0:
+        return None
+    try:
+        rows = json.loads(result.stdout)
+    except ValueError:
+        return None
+    if not isinstance(rows, list):
+        return None
+    names = {str(row.get("name") or row.get("Name") or "") for row in rows if isinstance(row, dict)}
+    return target in names
 
 
 def container_name(user_id: str, ref: str, desktop: bool) -> str:

@@ -20,12 +20,8 @@ _ENV = {
 
 
 def test_s3_prefixes() -> None:
-    assert s3_store.batch_prefix("web1", "20260713-101500") == "web1_20260713-101500"
-    assert s3_store.split_batch("web1_20260713-101500") == ("web1", "20260713-101500")
-    assert s3_store.case_prefix("web1_S", "web1", "todo") == "web1_S/web1_todo"
-    assert (
-        s3_store.restic_repo_url(_ENV, "web1_S/web1_todo") == "s3:s3.us-east-1.amazonaws.com/b/web1_S/web1_todo/restic"
-    )
+    assert s3_store.case_prefix("web1", "web1", "todo") == "web1/web1_todo"
+    assert s3_store.restic_repo_url(_ENV, "web1/web1_todo") == "s3:s3.us-east-1.amazonaws.com/b/web1/web1_todo/restic"
 
 
 def test_launch_case_payload_is_modal_apikey_configure_later() -> None:
@@ -78,16 +74,13 @@ def test_load_config_validates_required_keys() -> None:
 
 
 def test_box_naming_and_env_derivation() -> None:
-    # A real batch id -> a Modal-safe user id, a bounded env name, and a mode-tagged container name.
-    batch = "combined_20260715-005237-076811"
-    user_id = box.sanitize_user_id(batch)
-    assert user_id == "combined-20260715-005237-076811"
-    env = box.modal_env_name(user_id)
-    assert env == "minds-staging-combined-20260715-005237-076811"
-    assert len(env) <= 64
+    # The eval NAME is the batch identity: env and container names key on it directly.
+    name = "trio"
+    assert box.sanitize_user_id(name) == name
+    assert box.modal_env_name(name) == "minds-staging-trio"
     ref = "38f9311059b9deadbeef0000"
-    assert box.container_name(user_id, ref, desktop=False) == "minds-box-{}-38f9311059b9".format(user_id)
-    assert box.container_name(user_id, ref, desktop=True) == "minds-box-{}-38f9311059b9-desktop".format(user_id)
+    assert box.container_name(name, ref, desktop=False) == "minds-box-trio-38f9311059b9"
+    assert box.container_name(name, ref, desktop=True) == "minds-box-trio-38f9311059b9-desktop"
 
 
 def test_sanitize_user_id_edge_cases() -> None:
@@ -109,17 +102,15 @@ def test_point_arg_to_box_rewrites_all_forms() -> None:
     assert out == ["launch", "--config", dest, "--config={}".format(dest), "--other", "x"]
 
 
-def test_load_config_rejects_long_names() -> None:
-    # A long name would truncate the unique timestamp out of the 40-char Modal user_id cap,
-    # landing two same-name launches in ONE Modal env.
-    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
-        json.dump(
-            {"name": "x" * 17, "mngr_branch": "main", "personas": [{"id": "a", "prompts": ["hi"]}]},
-            f,
-        )
-        path = Path(f.name)
-    try:
-        load_config(path)
-        raise AssertionError("expected SystemExit for a 17-char name")
-    except SystemExit as exc:
-        assert "16 characters" in str(exc)
+def test_load_config_rejects_invalid_names() -> None:
+    # The name IS the batch id (S3 prefix + Modal env), so it must already be a valid Modal
+    # user_id: lowercase alnum + dashes, at most 40 chars.
+    for bad in ("My Eval", "x" * 41, "UPPER", "under_score"):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump({"name": bad, "mngr_branch": "main", "personas": [{"id": "a", "prompts": ["hi"]}]}, f)
+            path = Path(f.name)
+        try:
+            load_config(path)
+            raise AssertionError("expected SystemExit for name {!r}".format(bad))
+        except SystemExit as exc:
+            assert "lowercase" in str(exc)

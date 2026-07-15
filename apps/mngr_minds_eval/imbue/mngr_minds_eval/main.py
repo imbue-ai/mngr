@@ -5,9 +5,9 @@ Host-native CLI. Each batch gets its own Modal env; boxes are full Minds compute
 
   minds-evals launch --config eval-config.json    # create a batch (one workspace per case)
   minds-evals list-batches                        # S3 only
-  minds-evals inspect combined_20260715-...       # per-case state, S3 only
-  minds-evals evaluate combined_20260715-...      # score finished cases (ANTHROPIC_API_KEY)
-  minds-evals visit-batch combined_20260715-...   # rebuild the batch's exact computer, enter it
+  minds-evals inspect trio                    # per-case state, S3 only
+  minds-evals evaluate trio                   # score finished cases (ANTHROPIC_API_KEY)
+  minds-evals visit-batch trio                # rebuild the batch's exact computer, enter it
   minds-evals box --mngr-branch main              # dev utility: a desktop box on a branch tip
 
 Launched runs self-complete: the in-sandbox eval worker drives the conversation, snapshots /mngr
@@ -20,7 +20,6 @@ real desktop running the Minds app and open the batch's workspaces as windows.
 from __future__ import annotations
 
 import argparse
-import datetime
 import os
 import subprocess
 import sys
@@ -40,11 +39,6 @@ _CONFIG_IN_BOX = "/work/eval-config.json"
 
 def _port() -> str:
     return os.environ.get(DEFAULT_PORT_ENV, "8420")
-
-
-def _utc_stamp() -> str:
-    # Microseconds so two launches in the same wall-clock second don't collide on one batch prefix.
-    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
 
 
 def _check_aws() -> dict:
@@ -110,19 +104,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="eval config json: {name, mngr_branch, fct_branch?, fct_repo?, timeout_seconds?, personas:[...]}",
     )
     p_launch.add_argument("--anthropic-key", default=os.environ.get("ANTHROPIC_API_KEY", ""))
-    # --stamp is internal: the host sets it when re-invoking launch inside the box.
-    p_launch.add_argument("--stamp", default="", help=argparse.SUPPRESS)
 
     sub.add_parser("list-batches", help="list eval batches in S3")
 
     p_inspect = sub.add_parser("inspect", help="per-case status of a batch (from S3)")
-    p_inspect.add_argument("batch", help="<eval>_<datetime>")
+    p_inspect.add_argument("batch", help="the eval name")
 
     p_eval = sub.add_parser("evaluate", help="score a finished batch (from S3; needs ANTHROPIC_API_KEY)")
-    p_eval.add_argument("batch", help="<eval>_<datetime>")
+    p_eval.add_argument("batch", help="the eval name")
 
     p_visit = sub.add_parser("visit-batch", help="rebuild a batch's exact Minds computer and enter its desktop")
-    p_visit.add_argument("batch", help="<eval>_<datetime> (see list-batches)")
+    p_visit.add_argument("batch", help="the eval name (see list-batches)")
 
     p_box = sub.add_parser("box", help="dev utility: boot a desktop box on an mngr branch tip")
     p_box.add_argument("--mngr-branch", required=True)
@@ -183,19 +175,40 @@ def main() -> None:
         return
 
     if args.command == "launch":
-        _check_aws()
-        # load_config validates on the host before any box is touched.
+        env = _check_aws()
+        # load_config validates on the host before any box is touched (incl. that the name is a
+        # valid batch id: it IS the S3 prefix and the Modal env).
         config = launch_mod.load_config(args.config)
         if not args.anthropic_key:
             parser.error("set ANTHROPIC_API_KEY (or --anthropic-key)")
         if not IN_BOX:
-            stamp = _utc_stamp()
-            batch = s3_store.batch_prefix(config["name"], stamp)
-            user_id = box_mod.sanitize_user_id(batch)
-            container = box_mod.ensure(config["mngr_branch"], user_id=user_id, desktop=False)
-            returncode = _run_in_container(
-                container, sys.argv[1:] + ["--stamp", stamp], upload=(args.config, _CONFIG_IN_BOX)
-            )
+            batch = config["name"]
+            # Eval names are unique, hard requirement: fail out if the batch already exists in S3
+            # or its Modal env already exists (either means this name was used before).
+            client = s3_store.make_client(env)
+            if (
+                s3_store.get_json(client, env["MINDS_EVAL_BUCKET"], "{}/{}".format(batch, s3_store.BATCH_CONFIG_NAME))
+                is not None
+            ):
+                sys.exit(
+                    "batch {!r} already exists in s3://{}/ -- eval names are unique; pick a new name "
+                    "(or delete the old batch prefix and its Modal env {} first)".format(
+                        batch, env["MINDS_EVAL_BUCKET"], box_mod.modal_env_name(batch)
+                    )
+                )
+            env_exists = box_mod.modal_env_exists(batch)
+            if env_exists:
+                sys.exit(
+                    "Modal env {} already exists -- eval names are unique; pick a new name (or delete "
+                    "that env first: TERM=dumb uv run python scripts/modal_nuke.py -e {} --force, then "
+                    "TERM=dumb uv run modal environment delete {})".format(
+                        box_mod.modal_env_name(batch), box_mod.modal_env_name(batch), box_mod.modal_env_name(batch)
+                    )
+                )
+            if env_exists is None:
+                print(">> WARNING: could not list Modal envs; relying on the S3 uniqueness check", flush=True)
+            container = box_mod.ensure(config["mngr_branch"], user_id=batch, desktop=False)
+            returncode = _run_in_container(container, sys.argv[1:], upload=(args.config, _CONFIG_IN_BOX))
             if returncode == 0:
                 # The launch box's job is done -- the workspaces self-complete on Modal and write to
                 # S3. Visiting spins a fresh desktop box, so nothing needs to stay running.
@@ -205,9 +218,7 @@ def main() -> None:
             else:
                 print("\n  launch failed -- the box was kept for debugging: docker logs {}".format(container))
             sys.exit(returncode)
-        if not args.stamp:
-            parser.error("--stamp is required inside the box (the host sets it)")
-        launch_mod.launch_batch(config=config, anthropic_key=args.anthropic_key, port=_port(), stamp=args.stamp)
+        launch_mod.launch_batch(config=config, anthropic_key=args.anthropic_key, port=_port())
         return
 
 

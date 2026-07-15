@@ -7,6 +7,7 @@ drives restic itself. The run self-completes and everything is retrievable from 
 
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import secrets
@@ -138,13 +139,14 @@ def load_config(config_path: Path) -> dict:
     for key in ("name", "mngr_branch", "personas"):
         if not config.get(key):
             raise SystemExit("eval config is missing required key: {!r}".format(key))
-    # The batch's Modal user_id is sanitize_user_id("<name>_<stamp>") capped at 40 chars. The
-    # 23-char timestamp tail is what makes two same-name launches land in DIFFERENT Modal envs --
-    # so the name must be short enough that the cap never truncates the stamp away.
-    if len(str(config["name"])) > 16:
+    # The name IS the batch identity: the S3 prefix and the Modal env (minds-staging-<name>) both
+    # key on it, and launch preflights that neither exists yet. Require it to already be a valid
+    # Modal user_id (lowercase alnum + dashes, <=40) so no sanitization can alias two names.
+    name = str(config["name"])
+    if name != box_mod.sanitize_user_id(name) or len(name) > 40:
         raise SystemExit(
-            "eval config: 'name' must be at most 16 characters (got {!r}) -- it is combined with a "
-            "launch timestamp to form the batch's unique Modal env".format(config["name"])
+            "eval config: 'name' must be lowercase letters/digits/dashes, at most 40 chars "
+            "(got {!r}) -- it names the batch's S3 prefix and Modal env".format(name)
         )
     try:
         normalize_cases(config["personas"])  # validate case shape now, on the host
@@ -240,7 +242,7 @@ def destroy_existing_workspace(port: str, host_name: str, quiet: bool = False) -
         _destroy_and_wait(port, match["agent_id"], host_name, quiet=quiet)
 
 
-def launch_batch(*, config: dict, anthropic_key: str, port: str, stamp: str) -> dict:
+def launch_batch(*, config: dict, anthropic_key: str, port: str) -> dict:
     env = s3_store.load_aws_env()
     client = s3_store.make_client(env)
     bucket = env["MINDS_EVAL_BUCKET"]
@@ -249,7 +251,9 @@ def launch_batch(*, config: dict, anthropic_key: str, port: str, stamp: str) -> 
     fct_repo = config.get("fct_repo", DEFAULT_FCT_REPO)
     fct_branch = config.get("fct_branch", DEFAULT_FCT_BRANCH)
     cases = normalize_cases(config["personas"])
-    batch = s3_store.batch_prefix(eval_name, stamp)
+    # The name IS the batch: S3 prefix and Modal env both key on it (uniqueness preflighted on the
+    # host before this runs).
+    batch = eval_name
 
     print("=" * 66, flush=True)
     print("  EVAL BATCH  {}".format(batch), flush=True)
@@ -268,7 +272,7 @@ def launch_batch(*, config: dict, anthropic_key: str, port: str, stamp: str) -> 
         "{}/{}".format(batch, s3_store.BATCH_CONFIG_NAME),
         {
             **config,
-            "created_at": stamp,
+            "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "restic_password": restic_password,
             "mngr_sha": os.environ.get("MINDS_BOX_MNGR_REF", ""),
             "modal_user_id": user_id,

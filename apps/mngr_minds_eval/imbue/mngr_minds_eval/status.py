@@ -16,9 +16,9 @@ def list_batches() -> None:
     print("{:<40} {:>6}  {}".format("BATCH (pass this to inspect)", "CASES", "CREATED"))
     for batch in batches:
         config = s3_store.get_json(client, env["MINDS_EVAL_BUCKET"], "{}/{}".format(batch, s3_store.BATCH_CONFIG_NAME))
-        _, stamp = s3_store.split_batch(batch)
+        created = str(config.get("created_at") or "?")[:19] if config else "?"
         cases = len(config.get("personas", [])) if config else 0
-        print("{:<40} {:>6}  {}".format(batch, cases or "?", stamp))
+        print("{:<40} {:>6}  {}".format(batch, cases or "?", created))
     print("\ninspect a batch:  minds-evals inspect <BATCH>")
 
 
@@ -28,7 +28,7 @@ def case_report(client, bucket: str, batch: str) -> tuple[dict | None, list[dict
     config = s3_store.get_json(client, bucket, "{}/{}".format(batch, s3_store.BATCH_CONFIG_NAME))
     if config is None:
         return None, []
-    eval_name = config.get("name") or s3_store.split_batch(batch)[0]
+    eval_name = config.get("name") or batch
     rows = []
     for index, case in enumerate(config.get("personas", [])):
         # Same id derivation launch used when writing, so id-less personas still resolve to their prefix.

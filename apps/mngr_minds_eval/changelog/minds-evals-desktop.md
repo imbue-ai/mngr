@@ -7,3 +7,5 @@
 - `visit-batch <batch>` rebuilds the exact computer a batch ran on: it reads the recorded `(mngr_branch, mngr_sha, modal env)` from S3, boots a desktop box that IS that machine, and prints a noVNC URL -- you enter a real desktop running the Minds app whose discovery sees exactly that batch's workspaces, and open them as native windows. The Minds app reaches its workspaces itself (mngr forward on the container's own loopback); nothing is tunnelled through the host.
 
 - The `evaluator` mngr profile (and its Modal SSH keypair, persisted at `~/.minds-eval/modal-profile/`) is shared across all boxes, so a visit box can open workspaces a launch box created.
+
+- Eval names are now globally unique and ARE the batch identity: the S3 prefix and the Modal env (`minds-staging-<name>`) key on the name alone (no launch timestamp). `launch` preflights both -- it fails out if the name already exists as an S3 batch or as a Modal env -- and `load_config` requires the name to be a valid Modal user id (lowercase alnum + dashes, max 40 chars) so no sanitization can alias two names. Added `eval-config-small.json` (3 cases, name `trio`) for quick end-to-end runs.

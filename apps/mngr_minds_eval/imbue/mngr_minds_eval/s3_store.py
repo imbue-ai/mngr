@@ -62,10 +62,6 @@ def make_client(env: dict):
     )
 
 
-def batch_prefix(eval_name: str, stamp: str) -> str:
-    return "{}_{}".format(eval_name, stamp)
-
-
 def case_prefix(batch: str, eval_name: str, case_name: str) -> str:
     return "{}/{}_{}".format(batch, eval_name, case_name)
 
@@ -97,17 +93,11 @@ def get_json(client, bucket: str, key: str) -> dict | None:
 
 
 def list_batches(client, bucket: str) -> list[str]:
-    """Top-level batch folders, newest first. Sorted by the embedded UTC timestamp, NOT the whole
-    `<name>_<stamp>` string -- otherwise ordering is only chronological within a single eval name."""
+    """Top-level batch folders (batch = the unique eval name), alphabetical. The caller can order by
+    creation time from each batch's config (created_at)."""
     paginator = client.get_paginator("list_objects_v2")
     names: set[str] = set()
     for page in paginator.paginate(Bucket=bucket, Delimiter="/"):
         for common in page.get("CommonPrefixes", []):
             names.add(common["Prefix"].rstrip("/"))
-    return sorted(names, key=lambda b: split_batch(b)[1], reverse=True)
-
-
-def split_batch(batch: str) -> tuple[str, str]:
-    """'web1_20260713-101500' -> ('web1', '20260713-101500')."""
-    name, _, stamp = batch.rpartition("_")
-    return (name, stamp) if name else (batch, "")
+    return sorted(names)
