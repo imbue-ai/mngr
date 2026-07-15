@@ -287,6 +287,12 @@ def test_build_create_command_shape(monkeypatch):
     monkeypatch.delenv("OPEN_SEER_SWEEP_PROVIDER", raising=False)
     cmd = tick.build_create_command("sweep-20260710123456", "/sentry-sweep []")
     assert cmd[:3] == ["mngr", "create", "sweep-20260710123456"]
+    # Fresh namespaces have no create-type default; the spawn must not rely on one.
+    assert cmd[cmd.index("--type") + 1] == "claude"
+    # Unattended: nobody is watching to approve permission dialogs.
+    settings = [cmd[i + 1] for i, arg in enumerate(cmd) if arg == "-S"]
+    assert "agent_types.claude.auto_allow_permissions=true" in settings
+    assert "agent_types.claude.auto_dismiss_dialogs=true" in settings
     # Its own host: the cron container dies as soon as the tick returns.
     assert cmd[cmd.index("--provider") + 1] == "modal"
     assert "--new-host" in cmd
@@ -308,6 +314,9 @@ def test_build_create_command_provider_override(monkeypatch):
     monkeypatch.setenv("OPEN_SEER_SWEEP_PROVIDER", "docker")
     cmd = tick.build_create_command("sweep-1", "/sentry-sweep []")
     assert cmd[cmd.index("--provider") + 1] == "docker"
+    # The sandbox-lifetime build arg is modal-only; docker rejects unknown
+    # build args, so it must be absent for other providers.
+    assert "-b" not in cmd
 
 
 # --- spawn path ------------------------------------------------------------------

@@ -170,6 +170,17 @@ def build_create_command(name: str, message: str) -> list[str]:
         "mngr",
         "create",
         name,
+        # Explicit agent type: a fresh namespace has no commands.create.type
+        # default, and `mngr create` errors without one.
+        "--type",
+        "claude",
+        # Unattended: the sweep runs with nobody watching, so permission
+        # dialogs must auto-allow and startup dialogs must auto-dismiss —
+        # otherwise the agent hangs forever on its first shell command.
+        "-S",
+        "agent_types.claude.auto_allow_permissions=true",
+        "-S",
+        "agent_types.claude.auto_dismiss_dialogs=true",
         "--provider",
         provider,
         "--new-host",
@@ -178,9 +189,12 @@ def build_create_command(name: str, message: str) -> list[str]:
         "--yes",
         "--idle-timeout",
         SWEEP_IDLE_TIMEOUT,
-        "-b",
-        f"--timeout={SWEEP_SANDBOX_TIMEOUT_SECONDS}",
     ]
+    if provider == "modal":
+        # Modal-only build arg: raises the sandbox's hard max lifetime past
+        # the 15-minute provider default. Other providers (docker for local
+        # testing) reject unknown build args.
+        cmd += ["-b", f"--timeout={SWEEP_SANDBOX_TIMEOUT_SECONDS}"]
     for var in SWEEP_PASS_ENV:
         cmd += ["--pass-env", var]
     cmd += ["--message", message]
