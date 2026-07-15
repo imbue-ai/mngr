@@ -496,6 +496,42 @@ def _grant_scope_in_host_permissions(latchkey_directory: Path, host_id: str) -> 
     return permissions_path
 
 
+def _forward_diagnostics(latchkey_directory: Path, forward_log_path: Path) -> str:
+    """Assemble the forward supervisor's console log plus its structured error records.
+
+    The console capture only carries bare "Unhandled exception in thread"
+    lines: the forward's console sink does not render exception text. The
+    structured ``events.jsonl`` in the plugin data dir records each error's
+    exception *type and message* (``exception.value`` -- e.g. a
+    ``RemoteGatewayError`` embeds the failing remote command's stderr), which
+    names the failing provisioning step even though the full traceback is not
+    persisted. Surface both so a provisioning failure is diagnosable straight
+    from the assertion message.
+    """
+    sections = [f"forward console log:\n{forward_log_path.read_text()}"]
+    events_path = plugin_data_dir(latchkey_directory) / "events.jsonl"
+    if events_path.is_file():
+        error_lines: list[str] = []
+        for line in events_path.read_text().splitlines():
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if record.get("level") not in ("ERROR", "CRITICAL"):
+                continue
+            error_lines.append(
+                f"{record.get('timestamp')} [{record.get('function')}:{record.get('line')}] "
+                f"{record.get('message')}  EXC: {json.dumps(record.get('exception'))}"
+            )
+        if error_lines:
+            # The provisioning retry loop repeats the same failure every
+            # discovery cycle; the most recent records carry the story.
+            sections.append(
+                "forward structured ERROR records (events.jsonl, most recent last):\n" + "\n".join(error_lines[-30:])
+            )
+    return "\n\n".join(sections)
+
+
 def _exec_in_workspace(
     env: dict[str, str], cwd: Path, agent_address: str, command: str
 ) -> subprocess.CompletedProcess[str]:
@@ -670,7 +706,7 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
             assert "latchkey-self" in desktop_self.stdout, (
                 f"desktop gateway /permissions/self never succeeded from the workspace:\n"
                 f"stdout:\n{desktop_self.stdout}\nstderr:\n{desktop_self.stderr}\n"
-                f"forward log:\n{forward_log_path.read_text()}"
+                f"{_forward_diagnostics(latchkey_directory, forward_log_path)}"
             )
 
             # -- (b) the secondary (VPS-resident) gateway is reachable from inside the workspace --
@@ -695,7 +731,7 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
             assert good_password_status_match is not None, (
                 f"secondary gateway never became reachable on 127.0.0.1:{INNER_PORT} inside the workspace:\n"
                 f"stdout:\n{vps_gateway_probe.stdout}\nstderr:\n{vps_gateway_probe.stderr}\n"
-                f"forward log:\n{forward_log_path.read_text()}"
+                f"{_forward_diagnostics(latchkey_directory, forward_log_path)}"
             )
             # The listener is the latchkey gateway wired with the desktop-derived
             # password: a wrong password must be answered differently.
@@ -742,7 +778,7 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
             assert permissions_synced, (
                 f"granting {_GRANTED_SCOPE} locally never propagated to {_VPS_PERMISSIONS_PATH} on the VPS; "
                 f"last content:\n{_run_on_vps(ssh_config_path, f'cat {_VPS_PERMISSIONS_PATH}').stdout}\n"
-                f"forward log:\n{forward_log_path.read_text()}"
+                f"{_forward_diagnostics(latchkey_directory, forward_log_path)}"
             )
             credentials_synced = poll_until(
                 lambda: _run_on_vps(ssh_config_path, f"test -f {_VPS_CREDENTIALS_PATH}").returncode == 0,
@@ -751,7 +787,7 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
             )
             assert credentials_synced, (
                 f"granting {_GRANTED_SCOPE} locally never shipped the credential bundle to "
-                f"{_VPS_CREDENTIALS_PATH} on the VPS\nforward log:\n{forward_log_path.read_text()}"
+                f"{_VPS_CREDENTIALS_PATH} on the VPS\n{_forward_diagnostics(latchkey_directory, forward_log_path)}"
             )
         finally:
             # Best-effort teardown, most-dependent first: workspace, forward
