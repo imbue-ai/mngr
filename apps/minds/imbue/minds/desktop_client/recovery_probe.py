@@ -263,8 +263,8 @@ _QUESTION_PLUGIN_RESOLVER: Final[str] = "Has the system interface registered wit
 class _InContainerProbe(FrozenModel):
     """Internal: parsed payload from the in-container batched probe.
 
-    Not exposed in the endpoint response; folded into probes 3-6 by
-    ``_build_probes_from_in_container``. ``sentinel_seen`` is the single
+    Not exposed in the endpoint response; folded into probes 3-7 by the
+    per-probe builders. ``sentinel_seen`` is the single
     bit that distinguishes "probe ran" from "ssh dead" -- without it,
     every other field is None.
     """
@@ -533,7 +533,7 @@ def _build_system_interface_probe(
     mngr_binary: str,
     services_agent_id: AgentId | None,
 ) -> Probe:
-    """Probe 4: is the system_interface service RUNNING under supervisord?
+    """Probe 5: is the system_interface service RUNNING under supervisord?
 
     The dispatch tier consults the underlying supervisord state (not this
     probe's collapsed answer): STARTING/BACKOFF means supervisord is already
@@ -610,7 +610,7 @@ def _build_port_listening_probe(
     mngr_binary: str,
     services_agent_id: AgentId | None,
 ) -> Probe:
-    """Probe 5: scan /proc/net/tcp{,6} for a LISTEN socket on the inner port."""
+    """Probe 6: scan /proc/net/tcp{,6} for a LISTEN socket on the inner port."""
     port = in_container.inner_port
     inner = _port_listening_inner_command(port if port is not None else 0)
     command = _mngr_exec_command(mngr_binary, services_agent_id, inner)
@@ -643,7 +643,7 @@ def _build_curl_probe(
     mngr_binary: str,
     services_agent_id: AgentId | None,
 ) -> Probe:
-    """Probe 6: does the inner web server answer GET / inside the container?"""
+    """Probe 7: does the inner web server answer GET / inside the container?"""
     port = in_container.inner_port
     inner = _curl_inner_command(port if port is not None else 0)
     command = _mngr_exec_command(mngr_binary, services_agent_id, inner)
@@ -663,7 +663,7 @@ def _build_curl_probe(
 
 
 def _build_plugin_resolver_probe(plugin_resolver_services: dict[str, str]) -> Probe:
-    """Probe 7: mngr_forward plugin's resolver snapshot for this agent."""
+    """Probe 8: mngr_forward plugin's resolver snapshot for this agent."""
     if plugin_resolver_services:
         lines = [f"{k} = {v}" for k, v in plugin_resolver_services.items()]
         return Probe(
