@@ -190,7 +190,7 @@
   //
   // The left cluster's shape is a pure function of the content view's current
   // URL: a workspace-scoped screen shows the "/ workspace-name" breadcrumb
-  // plus the Workspace / Connections / Workspace Settings icon-tabs (with the
+  // plus the Workspace / Workspace Settings icon-tabs (with the
   // tab for the visible screen highlighted); a non-workspace full page shows
   // a "/ page-name" crumb and, for pages that opted in, the contextual back
   // arrow; the home screen shows just the home button. Electron pushes the
@@ -199,12 +199,8 @@
   // ``navigateContent`` seeds the context optimistically for those).
   var lastContentUrl = null;
   // The workspace named in the breadcrumb (null outside workspace context).
-  // Drives the switcher menu's target and the Connections badge scope.
+  // Drives the switcher menu's target.
   var currentCrumbAgentId = null;
-  // Per-workspace pending-request entries from the latest SSE ``requests``
-  // payload: [{id, workspace_agent_id}]. The Connections icon-tab badge
-  // counts the entries belonging to the breadcrumb's workspace.
-  var lastRequestEntries = [];
 
   function classifyContent(urlString) {
     var parsed;
@@ -219,8 +215,6 @@
     if (m) return { kind: 'workspace', agentId: m[1], activeTab: 'workspace' };
     m = path.match(/^\/goto\/(agent-[a-f0-9]+)(?:\/|$)/i);
     if (m) return { kind: 'workspace', agentId: m[1], activeTab: 'workspace' };
-    m = path.match(/^\/workspace\/(agent-[a-f0-9]+)\/connections(?:\/|$)/i);
-    if (m) return { kind: 'workspace', agentId: m[1], activeTab: 'connections' };
     m = path.match(/^\/workspace\/(agent-[a-f0-9]+)(?:\/|$)/i);
     if (m) return { kind: 'workspace', agentId: m[1], activeTab: 'settings' };
     // Sharing is reached from workspace settings, so it gets the back arrow.
@@ -240,15 +234,9 @@
     return { kind: 'home' };
   }
 
-  function updateConnectionsBadge() {
-    var badge = document.getElementById('connections-badge');
+  function updateRequestsBadge(count) {
+    var badge = document.getElementById('requests-badge');
     if (!badge) return;
-    var count = 0;
-    if (currentCrumbAgentId) {
-      lastRequestEntries.forEach(function (entry) {
-        if (entry && entry.workspace_agent_id === currentCrumbAgentId) count += 1;
-      });
-    }
     if (count > 0) {
       // The badge is the Badge.jinja count pill; mirror its 99+ cap here.
       badge.textContent = count > 99 ? '99+' : String(count);
@@ -256,7 +244,8 @@
     } else {
       // Hide via the native `hidden` attribute, not a `hidden` class: the pill
       // bakes in `inline-flex`, which beats the `.hidden` utility in the
-      // cascade. The `[hidden]` base rule is `display: none !important`.
+      // cascade (so a `hidden` class would leave a stray "0" showing). The
+      // `[hidden]` base rule is `display: none !important`, which wins.
       badge.hidden = true;
     }
   }
@@ -275,7 +264,7 @@
       // Fall back to the raw agent id until the SSE workspace list lands
       // (the 'workspaces' handler re-runs this once names are known).
       if (nameEl) nameEl.textContent = (cached && cached.name) || ctx.agentId;
-      ['workspace', 'connections', 'settings'].forEach(function (tab) {
+      ['workspace', 'settings'].forEach(function (tab) {
         var btn = document.getElementById('ws-tab-' + tab);
         if (!btn) return;
         var isActive = ctx.activeTab === tab;
@@ -291,7 +280,6 @@
       if (crumbName) crumbName.textContent = ctx.pageLabel || '';
     }
     if (backBtn) backBtn.hidden = !ctx.showBack;
-    updateConnectionsBadge();
   }
 
   // Toggle the titlebar's self-theming scope. ``.titlebar-surface`` re-bases the
@@ -389,11 +377,16 @@
   document.getElementById('ws-tab-workspace').onclick = function () {
     if (currentCrumbAgentId) selectWorkspace(currentCrumbAgentId);
   };
-  document.getElementById('ws-tab-connections').onclick = function () {
-    if (currentCrumbAgentId) navigateContent('/workspace/' + currentCrumbAgentId + '/connections');
-  };
   document.getElementById('ws-tab-settings').onclick = function () {
     if (currentCrumbAgentId) navigateContent('/workspace/' + currentCrumbAgentId + '/settings');
+  };
+
+  document.getElementById('requests-toggle').onclick = function () {
+    // ``keep_open=1`` marks this as an intentional open of the whole inbox,
+    // so resolving a request advances to the next pending one rather than
+    // dismissing the window (notification-driven opens omit it and close).
+    if (isElectron) window.minds.toggleInbox();
+    else navigateContent('/inbox?keep_open=1');
   };
 
   if (isElectron) {
@@ -419,10 +412,6 @@
   // by Chrome.jinja), which is the same script the overlay's modal pages use.
 
   // -- Title + URL tracking -------------------------------------------------
-  function refreshAuthStatus() {
-    fetch('/auth/api/status').then(function (r) { return r.json(); }).then(updateAuthUI).catch(function () {});
-  }
-
   if (isElectron) {
     // The titlebar's breadcrumb / icon-tabs / contextual back arrow track the
     // content view's URL, which main pushes on every navigation (and replays
@@ -433,12 +422,6 @@
         applyTitlebarContext();
       });
     }
-    // The account row that refreshAuthStatus would update lives inside the
-    // inline #sidebar-backdrop, which is display:none in Electron mode --
-    // the visible copy renders inside the shared modal WebContentsView when
-    // it is loaded with /_chrome/sidebar, and the sidebar.js running there
-    // subscribes to its own content-url-changed IPC and re-fetches
-    // /auth/api/status.
     // In Electron mode the current workspace is authoritative via IPC: main.js
     // tracks the active workspace per bundle (handles both /goto/<id>/ URLs and
     // post-redirect agent-<id>.localhost subdomains) and pushes it here. Deriving
@@ -500,33 +483,8 @@
         if (workspaceChanged) renderWorkspaces(lastWorkspaces);
       } catch (e) {}
     }, 500);
-    document.getElementById('content-frame').addEventListener('load', refreshAuthStatus);
   }
 
-  // -- Auth status (drives the in-sidebar account row) ----------------------
-  //
-  // Browser mode renders the floating sidebar inline (this script owns it),
-  // so we also keep the "Manage account(s)" / "Log in" label up-to-date here
-  // by toggling the same DOM the Electron sidebar.js uses. In Electron mode
-  // the sidebar lives in its own WebContentsView with its own copy of this
-  // logic; the writes below land on the inline #sidebar-account, which
-  // lives inside the display:none #sidebar-backdrop and so isn't
-  // user-visible. The main process drives the separate view.
-  var signedIn = false;
-  function updateAuthUI(data) {
-    signedIn = !!(data && data.signedIn);
-    var label = document.getElementById('sidebar-account-label');
-    var btn = document.getElementById('sidebar-account');
-    if (!label || !btn) return;
-    if (signedIn) {
-      label.textContent = 'Manage account(s)';
-      btn.title = data.email || 'Manage accounts';
-    } else {
-      label.textContent = 'Log in';
-      btn.title = 'Sign in to your account';
-    }
-  }
-  refreshAuthStatus();
   // Paint the initial titlebar context (home state until the first content
   // URL push / poll tick lands).
   applyTitlebarContext();
@@ -535,15 +493,6 @@
   if (!isElectron) {
     var newWsBtn = document.getElementById('sidebar-new-workspace');
     if (newWsBtn) newWsBtn.onclick = function () { navigateContent('/create'); closeSidebar(); };
-    var settingsBtn = document.getElementById('sidebar-settings');
-    if (settingsBtn) settingsBtn.onclick = function () { navigateContent('/settings'); closeSidebar(); };
-    var accountBtn = document.getElementById('sidebar-account');
-    if (accountBtn) {
-      accountBtn.onclick = function () {
-        navigateContent(signedIn ? '/accounts' : '/auth/login');
-        closeSidebar();
-      };
-    }
   }
 
   // The report-a-bug button opens the help modal (report a bug). Pass the currently-displayed
@@ -572,12 +521,11 @@
   // The workspace (the cross-origin content iframe) can ask the shell to show
   // a permission request by posting `{type:'minds:open-request-modal',
   // requestId}` to `window.parent`. In Electron this is handled by the content
-  // view's relay preload + main process (which lands on the owning
-  // workspace's Connections view); in browser mode we navigate the content
-  // iframe there directly, resolving the owning workspace from the latest SSE
-  // request entries. Only honour messages from the content iframe itself, and
-  // only well-formed server-issued ids (`evt-<uuid hex>`), so arbitrary pages
-  // cannot drive navigation.
+  // view's relay preload + main process (which opens the inbox modal pre-
+  // selected on the target); in browser mode there is no overlay, so we
+  // navigate the content iframe to the inbox page instead. Only honour
+  // messages from the content iframe itself, and only well-formed server-
+  // issued ids (`evt-<uuid hex>`), so arbitrary pages cannot drive navigation.
   if (!isElectron) {
     window.addEventListener('message', function (e) {
       var frame = document.getElementById('content-frame');
@@ -587,16 +535,7 @@
       if (data.type === 'minds:open-request-modal') {
         var requestId = data.requestId;
         if (typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(requestId)) return;
-        var owning = null;
-        lastRequestEntries.forEach(function (entry) {
-          if (!owning && entry && String(entry.id) === requestId && entry.workspace_agent_id) {
-            owning = entry.workspace_agent_id;
-          }
-        });
-        // Fall back to the workspace currently displayed (the sender).
-        if (!owning) owning = currentTitleAgentId;
-        if (!owning) return;
-        navigateContent('/workspace/' + encodeURIComponent(owning) + '/connections?selected=' + encodeURIComponent(requestId));
+        navigateContent('/inbox?selected=' + encodeURIComponent(requestId));
         return;
       }
       // Error pages (e.g. the recovery page) ask to open the get-help / report-a-bug
@@ -718,11 +657,7 @@
         // may only now be known (cold start, rename).
         applyTitlebarContext();
       }
-      if (data.type === 'auth_status') updateAuthUI(data);
-      if (data.type === 'requests') {
-        lastRequestEntries = Array.isArray(data.requests) ? data.requests : [];
-        updateConnectionsBadge();
-      }
+      if (data.type === 'requests') updateRequestsBadge(data.count);
       if (data.type === 'system_interface_status') handleSystemInterfaceStatus(data.agent_id, data.status);
       if (data.type === 'appearance') {
         // The dark-mode setting changed (settings modal / page). Server-side

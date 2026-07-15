@@ -990,9 +990,9 @@ class _AllAgentsKnownStaticResolver(StaticBackendResolver):
 
 
 def test_build_requests_payload_empty_inbox() -> None:
-    """An empty inbox yields a zero count, no pending ids, and no entries."""
+    """An empty inbox yields a zero count and no pending ids."""
     resolver = _AllAgentsKnownStaticResolver(url_by_agent_and_service={})
-    expected = {"count": 0, "request_ids": [], "requests": []}
+    expected = {"count": 0, "request_ids": []}
     assert _build_requests_payload(None, resolver) == expected
     assert _build_requests_payload(RequestInbox(), resolver) == expected
 
@@ -1007,11 +1007,6 @@ def test_build_requests_payload_carries_pending_ids() -> None:
     payload = _build_requests_payload(RequestInbox().add_request(event), resolver)
     assert payload["count"] == 1
     assert payload["request_ids"] == [str(event.event_id)]
-    # Each pending request also carries a per-workspace entry so the titlebar
-    # badge and the notification click-through can attribute it.
-    (entry,) = payload["requests"]
-    assert entry["id"] == str(event.event_id)
-    assert set(entry) == {"id", "kind_label", "ws_name", "display_name", "workspace_agent_id"}
 
 
 def test_build_requests_payload_distinguishes_equal_count_different_contents() -> None:
@@ -1311,33 +1306,42 @@ def test_workspace_settings_shows_unassociated_workspace(tmp_path: Path) -> None
     assert "associated with an account" in response.text.lower()
 
 
-def test_connections_requires_auth(tmp_path: Path) -> None:
-    """The workspace connections page requires authentication."""
+def test_inbox_requires_auth(tmp_path: Path) -> None:
+    """The inbox page requires authentication."""
     client, _ = _create_test_client_with_stores(tmp_path)
-    response = client.get(f"/workspace/{AgentId()}/connections")
-    assert response.status_code == 403
+    response = client.get("/inbox")
+    assert response.status_code == 200
+    assert "Not authenticated" in response.text
 
 
-def test_connections_empty_state(tmp_path: Path) -> None:
-    """With nothing pending or granted, the page shows the connectors empty
-    state and no "Waiting on you" section."""
+def test_inbox_empty_state(tmp_path: Path) -> None:
+    """With no pending requests, the inbox renders the empty-state placeholder
+    and applies the ``is-empty`` body class for the centered-message layout."""
     client, auth_store = _create_test_client_with_stores(tmp_path)
     _authenticate_client(client, auth_store)
-    response = client.get(f"/workspace/{AgentId()}/connections")
+    response = client.get("/inbox")
     assert response.status_code == 200
     body = response.text
-    assert "Waiting on you" not in body
-    assert "No connectors have been added yet" in body
-    # Interactivity lives in the external Connections shell script.
-    assert "/_static/workspace_connections.js" in body
+    assert "No pending requests" in body
+    # The ``is-empty`` class must be on the ``inbox-body`` element itself.
+    # The substring appears unconditionally inside the page's <style> block
+    # (rules keyed on ``inbox-body.is-empty``), so target the opening tag's
+    # attribute span specifically.
+    tag_start = body.find('id="inbox-body"')
+    tag_end = body.find(">", tag_start)
+    assert tag_start != -1
+    assert "is-empty" in body[tag_start:tag_end]
+    # Should not include any inbox-card markup when empty.
+    assert 'class="inbox-card' not in body
 
 
-class _ConnectionsStubLatchkeyHandler(RequestEventHandler):
-    """Minimal LATCHKEY_PERMISSION handler used by the connections tests.
+class _InboxStubLatchkeyHandler(RequestEventHandler):
+    """Minimal LATCHKEY_PERMISSION handler used by the inbox tests.
 
     Produces a deterministic fragment that echoes the request's
-    rationale so the tests can assert on the rendered request cards
-    without standing up the real latchkey gateway/catalog machinery.
+    rationale so the master/detail tests can assert on the right pane's
+    contents without standing up the real latchkey gateway/catalog
+    machinery.
     """
 
     def handles_request_type(self) -> str:
@@ -1368,39 +1372,23 @@ class _ConnectionsStubLatchkeyHandler(RequestEventHandler):
         return make_response(content='{"outcome": "DENIED"}', media_type="application/json")
 
 
-class _NamedWorkspaceStaticResolver(StaticBackendResolver):
-    """Resolves every configured agent as a named, host-resolvable workspace.
-
-    The connections page attributes each pending request to its owning
-    workspace through the shared workspace name (requests are filed by the
-    ``system-services`` sibling agent in production); these tests file the
-    request under the primary agent itself, so name resolution maps it
-    straight back.
-    """
-
-    def get_agent_display_info(self, agent_id: AgentId) -> AgentDisplayInfo | None:
-        return AgentDisplayInfo(agent_name=str(agent_id), host_id="localhost")
-
-    def get_workspace_name(self, agent_id: AgentId) -> str | None:
-        return f"ws-{agent_id}"
-
-
-def _build_connections_test_app(
+def _build_inbox_test_app(
     tmp_path: Path,
     request_inbox: RequestInbox,
-    agent_id: str,
 ) -> tuple[FlaskClient, FileAuthStore]:
     """Build an authenticated test client wired with a stub latchkey handler.
 
-    The stub returns a fragment that echoes the rationale so the tests can
-    assert on the request cards without standing up the real latchkey
-    gateway/catalog machinery. The resolver knows ``agent_id`` as a named
-    workspace so pending requests attribute to it.
+    The stub returns a fragment that echoes the rationale so the master/
+    detail tests can assert on the right pane's contents without
+    standing up the real latchkey gateway/catalog machinery.
     """
     auth_store = FileAuthStore(data_directory=tmp_path / "auth")
     session_store = make_session_store_for_test(tmp_path)
     minds_config = MindsConfig(data_dir=tmp_path)
-    backend_resolver = _NamedWorkspaceStaticResolver(url_by_agent_and_service={agent_id: {}})
+    # The inbox display hides requests whose agent can't be resolved to a
+    # host; these tests exercise the running-workspace case, so use a
+    # resolver that treats every agent as known.
+    backend_resolver = _AllAgentsKnownStaticResolver(url_by_agent_and_service={})
     app = create_desktop_client(
         auth_store=auth_store,
         backend_resolver=backend_resolver,
@@ -1409,102 +1397,208 @@ def _build_connections_test_app(
         minds_config=minds_config,
         request_inbox=request_inbox,
         paths=WorkspacePaths(data_dir=tmp_path),
-        request_event_handlers=(_ConnectionsStubLatchkeyHandler(),),
+        request_event_handlers=(_InboxStubLatchkeyHandler(),),
     )
     client = app.test_client()
     _authenticate_client(client, auth_store)
     return client, auth_store
 
 
-def test_connections_renders_pending_request_details(tmp_path: Path) -> None:
-    """Pending requests render as "Waiting on you" cards holding the full
-    detail fragment (composed server-side)."""
+def test_inbox_master_detail_renders_first_pending_by_default(tmp_path: Path) -> None:
+    """With pending requests but no ``?selected``, the inbox auto-selects the
+    first (most-recent) pending item and renders its detail in the right pane."""
     agent_id = str(AgentId())
     event = create_latchkey_predefined_permission_request_event(
         agent_id=agent_id, scope="slack-api", rationale="Need to post status updates"
     )
     request_inbox = RequestInbox().add_request(event)
-    client, _ = _build_connections_test_app(tmp_path, request_inbox, agent_id)
+    client, _ = _build_inbox_test_app(tmp_path, request_inbox)
 
-    response = client.get(f"/workspace/{agent_id}/connections")
+    response = client.get("/inbox")
     assert response.status_code == 200
     body = response.text
-    assert "Waiting on you" in body
+
+    # The list contains a card with the event's id as a data attribute.
     assert f'data-request-id="{event.event_id}"' in body
+    # The empty-state placeholder must not be present when the inbox has
+    # pending items.
+    assert "No pending requests" not in body
+    # The right-pane detail fragment was composed server-side and includes
+    # the rationale.
     assert "Need to post status updates" in body
 
 
-def test_connections_only_shows_own_workspace_requests(tmp_path: Path) -> None:
-    """A request belonging to another workspace does not render on this
-    workspace's connections page."""
-    agent_id = str(AgentId())
-    other_agent_id = str(AgentId())
-    event = create_latchkey_predefined_permission_request_event(
-        agent_id=other_agent_id, scope="slack-api", rationale="for someone else"
-    )
-    request_inbox = RequestInbox().add_request(event)
-    client, _ = _build_connections_test_app(tmp_path, request_inbox, agent_id)
-
-    response = client.get(f"/workspace/{agent_id}/connections")
-    assert response.status_code == 200
-    assert "for someone else" not in response.text
-
-
-def test_connections_marks_selected_request(tmp_path: Path) -> None:
-    """``?selected=<id>`` highlights the target request card; other cards
-    stay unhighlighted."""
+def test_inbox_preselects_query_param(tmp_path: Path) -> None:
+    """``?selected=<id>`` of a pending request renders that detail."""
     agent_id = str(AgentId())
     first = create_latchkey_predefined_permission_request_event(
         agent_id=agent_id, scope="slack-api", rationale="first request"
     )
     second = create_latchkey_predefined_permission_request_event(
-        agent_id=agent_id, scope="github-api", rationale="second request"
+        agent_id=agent_id, scope="slack-api", rationale="second request"
     )
     request_inbox = RequestInbox().add_request(first).add_request(second)
-    client, _ = _build_connections_test_app(tmp_path, request_inbox, agent_id)
+    client, _ = _build_inbox_test_app(tmp_path, request_inbox)
 
-    response = client.get(f"/workspace/{agent_id}/connections?selected={first.event_id}")
+    # Request the earlier event (not the most-recent default).
+    response = client.get(f"/inbox?selected={first.event_id}")
     assert response.status_code == 200
     body = response.text
-    # Both cards render; only the selected one carries ``is-selected``.
+    # The selected card carries the ``is-selected`` class.
+    assert "is-selected" in body
+    assert f'data-request-id="{first.event_id}"' in body
+    # The server-rendered detail shows the selected request's rationale, not
+    # the default-first-pending one.
     assert "first request" in body
-    assert "second request" in body
-    selected_tag_start = body.index(f'id="request-{first.event_id}"')
-    selected_tag = body[body.rindex("<div", 0, selected_tag_start) : body.index(">", selected_tag_start)]
-    assert "is-selected" in selected_tag
-    other_tag_start = body.index(f'id="request-{second.event_id}"')
-    other_tag = body[body.rindex("<div", 0, other_tag_start) : body.index(">", other_tag_start)]
-    assert "is-selected" not in other_tag
+    assert "second request" not in body
 
 
-def test_connections_ignores_stale_selected(tmp_path: Path) -> None:
-    """``?selected=<unknown id>`` renders the page normally with no highlight."""
+def test_inbox_stale_selected_renders_unavailable(tmp_path: Path) -> None:
+    """``?selected=<unknown_id>`` keeps the list intact and surfaces an
+    unavailable message in the right pane."""
     agent_id = str(AgentId())
     event = create_latchkey_predefined_permission_request_event(
         agent_id=agent_id, scope="slack-api", rationale="ongoing"
     )
     request_inbox = RequestInbox().add_request(event)
-    client, _ = _build_connections_test_app(tmp_path, request_inbox, agent_id)
+    client, _ = _build_inbox_test_app(tmp_path, request_inbox)
 
-    response = client.get(f"/workspace/{agent_id}/connections?selected=evt-unknown-id")
+    response = client.get("/inbox?selected=evt-unknown-id")
     assert response.status_code == 200
     body = response.text
-    assert "ongoing" in body
-    # No card is highlighted (``is-selected`` appears only in the page's
-    # unconditional <style> rules, never on a card tag).
-    card_tag_start = body.index(f'id="request-{event.event_id}"')
-    card_tag = body[body.rindex("<div", 0, card_tag_start) : body.index(">", card_tag_start)]
-    assert "is-selected" not in card_tag
+    # The right pane shows the "no longer available" message...
+    assert "no longer available" in body
+    # ...but the list still includes the legitimate pending card so the
+    # user can pick another item.
+    assert f'data-request-id="{event.event_id}"' in body
 
 
-def test_inbox_routes_removed(tmp_path: Path) -> None:
-    """The old inbox drawer routes no longer exist."""
+def test_inbox_list_fragment_returns_just_the_list(tmp_path: Path) -> None:
+    """``GET /inbox/list`` returns the left-list fragment without a full HTML doc."""
+    agent_id = str(AgentId())
+    event = create_latchkey_predefined_permission_request_event(
+        agent_id=agent_id, scope="slack-api", rationale="for testing"
+    )
+    request_inbox = RequestInbox().add_request(event)
+    client, _ = _build_inbox_test_app(tmp_path, request_inbox)
+
+    response = client.get("/inbox/list")
+    assert response.status_code == 200
+    body = response.text
+    assert f'data-request-id="{event.event_id}"' in body
+    # Fragment-only: no <html>, no <body>, no backdrop.
+    assert "<html" not in body
+    assert "<body" not in body
+    assert "inbox-backdrop" not in body
+
+
+def test_inbox_list_fragment_empty_returns_placeholder(tmp_path: Path) -> None:
+    """``GET /inbox/list`` with no pending requests returns the placeholder."""
     client, auth_store = _create_test_client_with_stores(tmp_path)
     _authenticate_client(client, auth_store)
-    assert client.get("/inbox").status_code == 404
-    assert client.get("/inbox/list").status_code == 404
-    assert client.get("/inbox/detail/evt-anything").status_code == 404
-    assert client.post("/_chrome/requests-auto-open", json={"enabled": False}).status_code == 404
+    response = client.get("/inbox/list")
+    assert response.status_code == 200
+    body = response.text
+    assert "inbox-empty-placeholder" in body
+    assert "No pending requests" in body
+
+
+def test_inbox_detail_fragment_returns_just_the_detail(tmp_path: Path) -> None:
+    """``GET /inbox/detail/<id>`` returns the right-pane fragment."""
+    agent_id = str(AgentId())
+    event = create_latchkey_predefined_permission_request_event(
+        agent_id=agent_id, scope="slack-api", rationale="detail testing"
+    )
+    request_inbox = RequestInbox().add_request(event)
+    client, _ = _build_inbox_test_app(tmp_path, request_inbox)
+
+    response = client.get(f"/inbox/detail/{event.event_id}")
+    assert response.status_code == 200
+    body = response.text
+    assert "detail testing" in body
+    # Fragment-only: no <html>, no backdrop, no inbox shell JS.
+    assert "<html" not in body
+    assert "inbox-backdrop" not in body
+    # The fragment must not include the shell's permissions-form submit
+    # JS or its escape/backdrop handlers; those live in the inbox page.
+    assert 'addEventListener("keydown"' not in body
+    assert "submitPermissionDeny = function" not in body
+
+
+def test_inbox_detail_fragment_for_unknown_id_returns_unavailable_200(tmp_path: Path) -> None:
+    """An unknown id resolves to the "no longer available" fragment with HTTP 200
+    so the inbox shell JS can innerHTML-swap the response directly."""
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    response = client.get("/inbox/detail/evt-nonexistent-id")
+    assert response.status_code == 200
+    assert "no longer available" in response.text
+
+
+def test_inbox_auto_open_checkbox_reflects_config(tmp_path: Path) -> None:
+    """The header checkbox is pre-checked when the config has auto-open enabled."""
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    # Default (no config write): auto-open is True, checkbox is checked.
+    response = client.get("/inbox")
+    body = response.text
+    assert 'id="inbox-auto-open"' in body
+    assert "checked" in body[body.find('id="inbox-auto-open"') : body.find(">", body.find('id="inbox-auto-open"'))]
+
+    # Flip the setting to False and confirm the checkbox renders unchecked.
+    config = MindsConfig(data_dir=tmp_path)
+    config.set_auto_open_requests_panel(False)
+    response = client.get("/inbox")
+    body = response.text
+    tag_start = body.find('id="inbox-auto-open"')
+    tag_end = body.find(">", tag_start)
+    assert "checked" not in body[tag_start:tag_end]
+
+
+def test_inbox_shell_reapplies_selection_after_list_refresh(tmp_path: Path) -> None:
+    """The inbox shell JS re-applies the highlight after an SSE-driven list refresh.
+
+    Regression guard: ``/inbox/list`` is selection-agnostic and always
+    renders with ``selected_id=""``. When an SSE ``requests`` event arrives
+    and ``fetchListFragment()`` rebuilds the list innerHTML, the previously
+    highlighted card loses its ``.is-selected`` class. If the selection is
+    still in the new pending set, the shell must call
+    ``setSelectedCard(currentId)`` to restore the highlight; otherwise the
+    user sees their selection visibly disappear despite not changing it.
+    """
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    response = client.get("/inbox")
+    assert response.status_code == 200
+    body = response.text
+    # The SSE handler must call setSelectedCard(currentId) in the
+    # "selection still pending" branch.
+    assert "setSelectedCard(currentId)" in body
+
+
+def test_inbox_shell_disables_both_buttons_and_spins_during_approval(tmp_path: Path) -> None:
+    """While an approval runs in the background the shell must give a clear
+    signal: a busy helper that disables BOTH buttons and reveals the Approve
+    spinner, invoked when the grant is submitted.
+
+    Regression guard for the "scary" no-feedback approval: the user needs to
+    see that work is happening (browser sign-in, follow-up grant, etc.) and
+    must not be able to double-submit or deny mid-flight.
+    """
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    response = client.get("/inbox")
+    assert response.status_code == 200
+    body = response.text
+    # The busy helper disables both buttons and toggles the spinner/label.
+    assert "function setApproveBusy(isBusy)" in body
+    assert 'document.getElementById("permissions-deny-btn")' in body
+    assert 'document.getElementById("permissions-approve-spinner")' in body
+    # Submitting the grant enters the busy state.
+    assert "setApproveBusy(true)" in body
+    # Non-resolving outcomes (failure, manual credentials, errors) clear it
+    # so the user can retry.
+    assert "setApproveBusy(false)" in body
 
 
 def test_old_requests_panel_route_removed(tmp_path: Path) -> None:

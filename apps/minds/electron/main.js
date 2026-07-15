@@ -81,6 +81,13 @@ const CONTENT_INSET = 4;
 const CONTENT_CORNER_RADIUS = 12;
 const CONTENT_PARTITION = 'persist:workspace-content';
 
+// Coalesce rapid SSE-triggered list refreshes when the inbox modal is open. A
+// burst of requests events (count 1 -> 2 -> 3 within a few ms) would otherwise
+// re-post the chrome-event multiple times in flight; the inbox shell would
+// queue several /inbox/list fetches and waste backend HTTP load by
+// (open windows) x (events).
+const INBOX_LIST_REFRESH_DEBOUNCE_MS = 50;
+
 // -- Per-window bundle registry --
 const bundles = new Set();
 const mruWindows = []; // most recently focused first
@@ -114,16 +121,7 @@ const latestChromeState = {
   authStatus: null, // most recent auth_status payload
   requestCount: 0,  // most recent pending-request count
   requestIds: [],   // most recent ordered list of pending request ids
-  // Most recent per-request entries ({id, workspace_agent_id, ws_name,
-  // kind_label, display_name}) -- drives the per-workspace Connections badge
-  // and attributes new-request notifications to the right workspace.
-  requestEntries: [],
 };
-// Whether any ``requests`` payload has arrived since app start. The very
-// first payload is a snapshot of requests that may have been pending for
-// days; notifying about each of those on every launch would be spam, so
-// notifications only fire for ids that appear AFTER the snapshot.
-let hasSeenRequestsPayload = false;
 
 const chromeSseAbortRef = { current: null };
 // Holds the in-flight connection's ``finish`` resolver so a forced reconnect
@@ -541,6 +539,10 @@ function wireBundleWindowEvents(bundle) {
     // set and we must not overwrite it with a progressively shrinking snapshot
     // as the teardown closes each window.
     if (!isShuttingDown) saveSessionState();
+    if (bundle.inboxListReloadTimer) {
+      clearTimeout(bundle.inboxListReloadTimer);
+      bundle.inboxListReloadTimer = null;
+    }
     const views = [bundle.chromeView, bundle.contentView, bundle.shellView, bundle.modalView];
     for (const view of views) {
       if (!view) continue;
@@ -594,6 +596,7 @@ function createBundle() {
     // rect). Gates updateBundleBounds so a resize doesn't clobber that rect with
     // the full-window modal bounds.
     tooltipVisible: false,
+    inboxListReloadTimer: null,
     // Minds-page view layered over a parked workspace (see createShellView).
     shellView: null,
     currentContentUrl: null,
@@ -1081,6 +1084,7 @@ function overlayIdForUrl(url) {
     return null;
   }
   if (pathname === '/_chrome/sidebar') return 'sidebar';
+  if (pathname === '/inbox') return 'inbox';
   if (pathname === '/help') return 'help';
   if (pathname === '/auth/signin-modal') return 'signin';
   if (pathname === '/settings/modal') return 'settings';
@@ -1143,7 +1147,6 @@ function primeOverlayFrames(bundle) {
     type: 'requests',
     count: latestChromeState.requestCount,
     request_ids: latestChromeState.requestIds,
-    requests: latestChromeState.requestEntries,
   });
   for (const [agentId, status] of systemInterfaceStatusByAgent) {
     if (!status || status === 'healthy') continue;
@@ -1267,49 +1270,15 @@ function closeModal(bundle) {
   // Tell the warm overlay host to hide its overlays. The host page itself stays
   // loaded (warm) so the next open is instant; only the hosted iframes hide.
   sendOverlayCommand(bundle, { type: 'hide-all' });
+  if (bundle.inboxListReloadTimer) {
+    clearTimeout(bundle.inboxListReloadTimer);
+    bundle.inboxListReloadTimer = null;
+  }
 }
 
-// Build a workspace's Connections page URL, optionally deep-linked to (and
-// highlighting) one pending request.
-function connectionsUrlFor(workspaceAgentId, requestId) {
-  if (!backendBaseUrl || !workspaceAgentId) return null;
-  let url = `${backendBaseUrl}/workspace/${encodeURIComponent(workspaceAgentId)}/connections`;
-  if (requestId) url += '?selected=' + encodeURIComponent(requestId);
-  return url;
-}
-
-// Land the user on a workspace's Connections view: prefer the window already
-// showing that workspace, else the most recent window. Used by new-request
-// notification clicks and the workspace-content deep links that used to open
-// the inbox drawer.
-function openConnectionsForRequest(workspaceAgentId, requestId) {
-  const url = connectionsUrlFor(workspaceAgentId, requestId);
-  if (!url) return;
-  const target = findBundleForWorkspace(workspaceAgentId) || getMostRecentWindow();
-  if (!target || target.window.isDestroyed()) return;
-  focusBundle(target);
-  routeContentNavigation(target, url);
-}
-
-// Resolve a pending request id to its owning workspace's primary agent id via
-// the latest SSE entries; falls back to empty when unknown.
-function workspaceAgentIdForRequest(requestId) {
-  const entry = (latestChromeState.requestEntries || []).find(
-    (e) => e && String(e.id) === String(requestId),
-  );
-  return entry ? String(entry.workspace_agent_id || '') : '';
-}
-
-function showPermissionRequestNotification(entry) {
-  const wsName = entry.ws_name ? String(entry.ws_name) : 'a workspace';
-  const notification = new Notification({
-    title: `Permission request — ${wsName}`,
-    body: entry.display_name ? String(entry.display_name) : 'An agent is asking for a permission.',
-  });
-  notification.on('click', () => {
-    openConnectionsForRequest(String(entry.workspace_agent_id || ''), String(entry.id || ''));
-  });
-  notification.show();
+function inboxUrlFor(query) {
+  if (!backendBaseUrl) return null;
+  return backendBaseUrl + '/inbox' + (query || '');
 }
 
 // Local path a successful sign-in should land on. Must start with a single
@@ -1342,6 +1311,36 @@ function openMindsSettingsModal(bundle) {
 function openAccountsModal(bundle) {
   if (!bundle || bundle.window.isDestroyed() || !backendBaseUrl) return;
   openModal(bundle, backendBaseUrl + '/accounts/modal');
+}
+
+function isInboxModalOpen(bundle) {
+  if (!bundle || !bundle.modalVisible) return false;
+  if (!bundle.modalUrl) return false;
+  // Compare path only -- the query (?selected=) may differ between auto-open
+  // and selection-driven loads.
+  try {
+    const u = new URL(bundle.modalUrl);
+    return u.pathname === '/inbox';
+  } catch {
+    return false;
+  }
+}
+
+function openInbox(bundle, query) {
+  if (!bundle || bundle.window.isDestroyed()) return;
+  const url = inboxUrlFor(query || '');
+  if (!url) return;
+  openModal(bundle, url);
+}
+
+function toggleInbox(bundle) {
+  if (!bundle || bundle.window.isDestroyed()) return;
+  if (isInboxModalOpen(bundle)) closeModal(bundle);
+  // ``keep_open=1`` marks this as an intentional open of the whole inbox
+  // (the Requests button), so resolving a request advances to the next
+  // pending one rather than dismissing the window. Notification-click and
+  // auto-open paths omit it, so they close after Approve/Deny.
+  else openInbox(bundle, '?keep_open=1');
 }
 
 // -- Get-help modal (per-bundle) --
@@ -1392,6 +1391,25 @@ function toggleHelp(bundle, agentId, assistAvailable) {
   if (!bundle || bundle.window.isDestroyed()) return;
   if (isHelpModalOpen(bundle)) closeModal(bundle);
   else openHelp(bundle, agentId, undefined, assistAvailable);
+}
+
+// Coalesce rapid SSE-triggered chrome-event posts so the inbox shell
+// doesn't queue several /inbox/list fetches when a burst of requests
+// events arrives in quick succession.
+function scheduleInboxListRefresh(bundle, evt) {
+  if (!bundle || bundle.window.isDestroyed()) return;
+  if (!isInboxModalOpen(bundle)) return;
+  if (bundle.inboxListReloadTimer) {
+    clearTimeout(bundle.inboxListReloadTimer);
+  }
+  bundle.inboxListReloadTimer = setTimeout(() => {
+    bundle.inboxListReloadTimer = null;
+    if (!bundle || bundle.window.isDestroyed()) return;
+    if (!bundle.modalView || !bundle.modalVisible) return;
+    if (bundle.modalView.webContents.isDestroyed()) return;
+    // Per-frame so the event reaches the inbox iframe, not just the host frame.
+    sendToOverlayFrames(bundle, 'chrome-event', evt);
+  }, INBOX_LIST_REFRESH_DEBOUNCE_MS);
 }
 
 function sendCurrentWorkspaceToBundleViews(bundle) {
@@ -1943,27 +1961,39 @@ function handleChromeSSEEvent(evt) {
   } else if (evt.type === 'requests') {
     const prevIds = latestChromeState.requestIds || [];
     const newIds = Array.isArray(evt.request_ids) ? evt.request_ids.map(String) : [];
-    const entries = Array.isArray(evt.requests) ? evt.requests : [];
-    // Diff the pending *set* (ordered ids), not the count: notifications key
-    // off a genuinely new id appearing (a count increase is blind to
-    // replacements), so approving/denying one request never re-notifies
-    // about another that was already pending.
+    const newCount = evt.count || 0;
+    // Backend defaults auto_open to true; treat a missing field the same way.
+    const autoOpen = evt.auto_open !== false;
+    // Diff the pending *set* (ordered ids), not the count, so a swap at
+    // constant size still refreshes the inbox list. Auto-open keys off a
+    // genuinely new id appearing (not a count increase, which is blind to
+    // replacements), so approving/denying never reopens an inbox the user
+    // closed.
     const prevSet = new Set(prevIds);
-    const isInitialSnapshot = !hasSeenRequestsPayload;
-    hasSeenRequestsPayload = true;
+    const hasNewRequest = newIds.some((id) => !prevSet.has(id));
+    const idsChanged = newIds.length !== prevIds.length || hasNewRequest;
     latestChromeState.requestIds = newIds;
-    latestChromeState.requestCount = evt.count || 0;
-    latestChromeState.requestEntries = entries;
-    // A new pending request surfaces as an OS notification (no auto-open);
-    // clicking it lands on the owning workspace's Connections view with the
-    // request highlighted. The connect-time snapshot is skipped -- its
-    // requests may have been pending for days, and re-notifying about all of
-    // them on every app launch would be spam (the per-workspace Connections
-    // badge still shows them).
-    if (!isInitialSnapshot) {
-      for (const entry of entries) {
-        if (!entry || prevSet.has(String(entry.id))) continue;
-        showPermissionRequestNotification(entry);
+    latestChromeState.requestCount = newCount;
+    const shouldAutoOpen = autoOpen && hasNewRequest;
+    // When the inbox modal is already open in a bundle, forward the
+    // chrome-event to its shell JS (debounced) so the master list
+    // re-fetches its fragment; otherwise, on a genuinely new id, open it.
+    //
+    // The auto-open is gated on ``!b.modalVisible`` (not just
+    // ``!isInboxModalOpen``) because the sidebar now shares ``modalView``:
+    // auto-opening the inbox while the sidebar (or any other modal) is open
+    // would ``loadURL`` the inbox over it, silently yanking the user's open
+    // menu out from under them. When a modal is already up we leave it
+    // alone; the titlebar requests badge still updates live (via the
+    // broadcastChromeEvent below), and the next genuinely-new request (or
+    // the user closing the modal and clicking the bell) surfaces the inbox.
+    if (idsChanged || shouldAutoOpen) {
+      for (const b of bundles) {
+        if (shouldAutoOpen && !b.modalVisible) {
+          openInbox(b, '');
+        } else if (isInboxModalOpen(b)) {
+          scheduleInboxListRefresh(b, evt);
+        }
       }
     }
   } else if (evt.type === 'open_help') {
@@ -2031,7 +2061,6 @@ function primeViewWithCachedChromeState(bundle, wc) {
     type: 'requests',
     count: latestChromeState.requestCount,
     request_ids: latestChromeState.requestIds,
-    requests: latestChromeState.requestEntries,
   });
   // Replay the latest non-healthy system-interface status for each agent so a
   // freshly (re)loaded chrome/sidebar view re-learns which workspaces are
@@ -3241,6 +3270,10 @@ ipcMain.on('toggle-sidebar', (event, anchor) => {
   toggleSidebar(getBundleFromEvent(event), anchor);
 });
 
+ipcMain.on('toggle-inbox', (event) => {
+  toggleInbox(getBundleFromEvent(event));
+});
+
 ipcMain.on('toggle-help', (event, agentId, assistAvailable) => {
   toggleHelp(getBundleFromEvent(event), agentId, assistAvailable);
 });
@@ -3289,28 +3322,24 @@ ipcMain.on('open-workspace-in-new-window', (event, agentId) => {
 
 ipcMain.on('navigate-to-request', (event, _agentId, eventId) => {
   if (!eventId) return;
-  // Land on the owning workspace's Connections view with the request
-  // highlighted. The owning workspace is resolved from the latest SSE
-  // entries, falling back to the sender's own displayed workspace. The
-  // sender-supplied agent id is deliberately ignored: it names the
-  // requesting sibling agent (``system-services``), not the primary
-  // (homepage) agent id the Connections URL keys on.
+  // Open the inbox modal pre-selected on the target request. Keeps the user's
+  // workspace exactly as they left it -- closing the inbox returns them to
+  // their work with no context lost, and no window switching. The
+  // sender-supplied agent id is deliberately ignored: the inbox is global.
   const sender = getBundleFromEvent(event);
-  const wsId = workspaceAgentIdForRequest(eventId) || (sender && sender.currentWorkspaceId) || '';
-  openConnectionsForRequest(wsId, String(eventId));
+  if (sender) openInbox(sender, '?selected=' + encodeURIComponent(eventId));
 });
 
-// Open a workspace's Connections view pre-selected on a request on behalf of
-// the (otherwise unprivileged) workspace content view. Only
-// content-relay-preload.js can emit this channel -- the page itself never
-// sees ipcRenderer -- and it does so only for an allowlisted
-// `minds:open-request-modal` postMessage. We re-validate the id here (never
-// trust the renderer) before building the URL.
+// Open the inbox modal pre-selected on a request on behalf of the (otherwise
+// unprivileged) workspace content view. Only content-relay-preload.js can
+// emit this channel -- the page itself never sees ipcRenderer -- and it does
+// so only for an allowlisted `minds:open-request-modal` postMessage. We
+// re-validate the id here (never trust the renderer) before building the
+// `/inbox?selected=<id>` URL.
 ipcMain.on('open-request-modal', (event, requestId) => {
   if (typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(requestId)) return;
   const sender = getBundleFromEvent(event);
-  const wsId = workspaceAgentIdForRequest(requestId) || (sender && sender.currentWorkspaceId) || '';
-  openConnectionsForRequest(wsId, requestId);
+  if (sender) openInbox(sender, '?selected=' + encodeURIComponent(requestId));
 });
 
 // Open the get-help / report-a-bug modal on behalf of the (otherwise

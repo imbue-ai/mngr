@@ -1,8 +1,8 @@
 // Electron workspace-switcher page: loaded into the shared modal
 // WebContentsView when the user opens the switcher from the titlebar
-// breadcrumb. Renders the floating menu (workspace list + "New workspace" +
-// "Manage account(s)"). Clicks + context menus go through window.minds IPC.
-// In browser mode the chrome.js embedded menu handles the same job inline.
+// breadcrumb. Renders the floating menu (workspace list + "New workspace").
+// Clicks + context menus go through window.minds IPC. In browser mode the
+// chrome.js embedded menu handles the same job inline.
 (function () {
   var isElectron = !!window.minds;
   var currentWorkspaceId = null;
@@ -90,25 +90,6 @@
       navigate('/create');
       return;
     }
-    if (e.target.closest('#sidebar-settings')) {
-      // Centered settings modal in Electron (swapping this switcher iframe
-      // for the modal); the full-page fallback in a browser.
-      if (isElectron && window.minds.openMindsSettings) window.minds.openMindsSettings();
-      else navigate('/settings');
-      return;
-    }
-    if (e.target.closest('#sidebar-account')) {
-      // In Electron the account entry opens the centered overlay modals
-      // (swapping this switcher iframe for the modal); browser mode
-      // navigates to the full-page fallbacks.
-      if (isElectron && window.minds.openAccounts) {
-        if (signedIn) window.minds.openAccounts();
-        else window.minds.openSigninModal('/');
-      } else {
-        navigate(signedIn ? '/accounts' : '/auth/login');
-      }
-      return;
-    }
     handleRowClick(e.target);
   });
 
@@ -150,38 +131,6 @@
       currentWorkspaceId = agentId || null;
       renderWorkspaces(lastWorkspaces);
     });
-  }
-
-  // -- Auth status ----------------------------------------------------------
-  //
-  // The /_chrome/events SSE stream pushes workspace updates but not auth
-  // transitions, so we poll /auth/api/status on load (and whenever the
-  // workspace content URL changes, since a sign-in / sign-out happens in
-  // that view). Mirrors chrome.js's behavior for the browser-mode chrome.
-  var signedIn = false;
-  function updateAccountUI(data) {
-    var label = document.getElementById('sidebar-account-label');
-    var btn = document.getElementById('sidebar-account');
-    if (!label || !btn) return;
-    if (data && data.signedIn) {
-      signedIn = true;
-      label.textContent = 'Manage account(s)';
-      btn.title = data.email || 'Manage accounts';
-    } else {
-      signedIn = false;
-      label.textContent = 'Log in';
-      btn.title = 'Sign in to your account';
-    }
-  }
-  function refreshAuthStatus() {
-    fetch('/auth/api/status')
-      .then(function (r) { return r.json(); })
-      .then(updateAccountUI)
-      .catch(function () {});
-  }
-  refreshAuthStatus();
-  if (isElectron && window.minds.onContentURLChange) {
-    window.minds.onContentURLChange(refreshAuthStatus);
   }
 
   function handleChromeEvent(data) {

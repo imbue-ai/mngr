@@ -1,10 +1,10 @@
 {#def agent_id, request_id, ws_name, rationale, file_path, access, access_human_label, display_name, allowed_roots_json="[]", home_dir="", mngr_forward_origin #}
 {#
-  Latchkey file-sharing permission request fragment. Rendered inside a
-  request card on the workspace Connections page. Provides a single hidden checked
+  Latchkey file-sharing permission request fragment. Rendered inside the
+  inbox modal's right pane. Provides a single hidden checked
   ``name="permissions"`` input so the Approve button enables on first
-  paint (file sharing has no per-permission choice). Form submission JS lives in the
-  Connections shell, scoped to the enclosing card.
+  paint (file sharing has no per-permission choice). Chrome and form
+  submission JS live in the inbox shell.
 #}
 <div class="permissions-detail">
   <PermissionsHeader :display_name="display_name" :ws_name="ws_name" :agent_id="agent_id" :rationale="rationale" />
@@ -26,7 +26,7 @@
     </p>
     {# Editable share path. The input is pre-filled with the path the
        agent requested; the user may change it (paste or native file
-       picker) before approving. The Connections shell's ``browseForSharePath``
+       picker) before approving. The inbox shell's ``browseForSharePath``
        opens the OS file dialog and writes the chosen path back here, and
        its ``updateApproveState`` keeps Approve disabled while the field
        is empty. #}
@@ -46,7 +46,7 @@
         </span>
       {% endif %}
     </div>
-    {# ``data-allowed-roots`` carries the WebDAV mount roots so the Connections
+    {# ``data-allowed-roots`` carries the WebDAV mount roots so the inbox
        shell can flag (and block Approve on) a path outside them as the
        user types or picks one -- the same roots the server validates
        against. #}
@@ -56,8 +56,8 @@
                :data-allowed-roots="allowed_roots_json"
                :data-home-dir="home_dir"
                extra="font-mono type-body"
-               oninput="window.updateApproveState && window.updateApproveState(this)" />
-    {# Shown by the Connections shell only when the field holds a non-empty path
+               oninput="window.updateApproveState && window.updateApproveState()" />
+    {# Shown by the inbox shell only when the field holds a non-empty path
        that is outside the shared roots. #}
     <p id="file-sharing-path-hint" class="hidden mt-1.5 type-helper text-warning">
       This path isn't inside a folder Minds can share (your home folder or the system
@@ -77,11 +77,11 @@
       <Button id="file-sharing-browse-file-btn"
               variant="secondary"
               extra="hidden"
-              onclick="window.browseForSharePath && window.browseForSharePath(this, 'file')">Choose file…</Button>
+              onclick="window.browseForSharePath && window.browseForSharePath('file')">Choose file…</Button>
       <Button id="file-sharing-browse-folder-btn"
               variant="secondary"
               extra="hidden"
-              onclick="window.browseForSharePath && window.browseForSharePath(this, 'directory')">Choose folder…</Button>
+              onclick="window.browseForSharePath && window.browseForSharePath('directory')">Choose folder…</Button>
     </div>
     {# Hidden checked input named ``permissions`` so the base dialog's
        updateApproveState treats this fragment as "has a selection":

@@ -72,6 +72,8 @@ from imbue.minds.desktop_client.templates import render_create_form
 from imbue.minds.desktop_client.templates import render_creating_page
 from imbue.minds.desktop_client.templates import render_destroying_page
 from imbue.minds.desktop_client.templates import render_dev_styleguide_page
+from imbue.minds.desktop_client.templates import render_inbox_page
+from imbue.minds.desktop_client.templates import render_inbox_unavailable_fragment
 from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
@@ -80,7 +82,6 @@ from imbue.minds.desktop_client.templates import render_settings_page as render_
 from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_welcome_page
-from imbue.minds.desktop_client.templates import render_workspace_connections
 from imbue.minds.desktop_client.templates import render_workspace_settings
 from imbue.minds.desktop_client.templates_auth import render_auth_page
 from imbue.minds.desktop_client.templates_auth import render_check_email_page
@@ -407,37 +408,14 @@ def _build_scenarios() -> list[Scenario]:
                 enabled_by_user_id={str(account_a.user_id): True, str(account_b.user_id): False},
             ),
         ),
-        # -- Workspace connections ----------------------------------------
+        # -- Inbox --------------------------------------------------------
         Scenario(
-            name="workspace_connections_empty",
-            builder=lambda: render_workspace_connections(agent_id=str(agent_a), ws_name="alpha"),
+            name="inbox_unavailable_fragment",
+            builder=lambda: render_inbox_unavailable_fragment(message="This request was already granted."),
         ),
         Scenario(
-            name="workspace_connections_pending",
-            builder=lambda: render_workspace_connections(
-                agent_id=str(agent_a),
-                ws_name="alpha",
-                pending_requests=[
-                    {
-                        "id": "evt-00000000000000000000000000000001",
-                        "kind_label": "permission",
-                        "display_name": "Slack",
-                        "title": "Connect Slack",
-                        "description": "I want to summarize today's messages.",
-                        "detail_html": render_predefined_permission_dialog(
-                            agent_id=str(agent_a),
-                            request_id="req-00000000000000000000000000000001",
-                            ws_name="alpha",
-                            rationale="I want to summarize today's messages.",
-                            service=slack_service,
-                            checked_permissions=("slack-read",),
-                            will_open_browser=True,
-                            mngr_forward_origin="http://localhost:8421",
-                        ),
-                    }
-                ],
-                selected_id="evt-00000000000000000000000000000001",
-            ),
+            name="inbox_empty",
+            builder=lambda: render_inbox_page(cards=[], selected_id="", detail_html="", is_empty=True),
         ),
         # -- Dev styleguide ----------------------------------------------
         Scenario(name="dev_styleguide", builder=render_dev_styleguide_page),

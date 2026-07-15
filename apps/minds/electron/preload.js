@@ -36,6 +36,9 @@ contextBridge.exposeInMainWorld('minds', {
   // (anchor a 38px-tall element at the top-left, nudged 24px left and 2px below it).
   toggleSidebar: (anchor) => ipcRenderer.send('toggle-sidebar', anchor),
 
+  // Requests inbox modal (opened from the titlebar's inbox button).
+  toggleInbox: () => ipcRenderer.send('toggle-inbox'),
+
   // Get-help modal (report a bug). ``agentId`` is the currently-displayed
   // workspace id (or '' on a general screen) so the help page can scope its
   // report to that workspace; it is packed into the help page URL by main.

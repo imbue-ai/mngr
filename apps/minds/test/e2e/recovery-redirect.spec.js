@@ -42,11 +42,11 @@ const HARNESS_HTML = `<!DOCTYPE html><html><body data-mngr-forward-origin="http:
   <div id="ws-crumb" hidden>
     <button id="workspace-switcher-btn"><span id="workspace-switcher-name"></span></button>
     <button id="ws-tab-workspace"></button>
-    <button id="ws-tab-connections"><span id="connections-badge" hidden></span></button>
     <button id="ws-tab-settings"></button>
   </div>
   <div id="page-crumb" hidden><span id="page-crumb-name"></span></div>
   <button id="min-btn"></button><button id="max-btn"></button><button id="close-btn"></button>
+  <button id="requests-toggle"><span id="requests-badge" hidden></span></button>
   <button id="help-toggle"></button>
   <iframe id="content-frame"></iframe>
   <div id="sidebar-backdrop"></div><div id="sidebar-workspaces"></div>

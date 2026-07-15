@@ -70,9 +70,9 @@ If the backend exits unexpectedly, every open window switches to the error scree
 
 Each workspace (`/forwarding/{agent-id}/...`) can live in its own window. Uniqueness is enforced across the app: at most one window per workspace.
 
-- **Open in a new window** (from the workspace switcher -- the titlebar breadcrumb's workspace-name menu): right-click a workspace entry for a native `Open in new window` context menu, or click the hover-revealed icon on the right of the row. Both are suppressed on the entry matching the window's current workspace.
+- **Open in a new window** (from the sidebar): right-click a workspace entry for a native `Open in new window` context menu, or click the hover-revealed icon on the right of the row. Both are suppressed on the entry matching the window's current workspace.
 - **Open a blank window**: cmd+N / ctrl+N, `File > New Window`, or the macOS dock menu. Opens a window on the backend's home page (`/`).
-- **Plain switcher click**: navigates the current window to that workspace -- unless some other window is already on it, in which case that window is focused and the sender is untouched.
+- **Plain sidebar click**: navigates the current window to that workspace -- unless some other window is already on it, in which case that window is focused and the sender is untouched.
 - **Notifications** pointing at `/forwarding/{X}/...` focus the existing window for workspace `X`, or open a new one. Non-workspace notification URLs and `auth_required` events navigate the most-recently-focused window.
 - **Session restore**: on quit, every open window's content URL is recorded to `~/.<MINDS_ROOT_NAME>/window-state.json` (as `{ windows: [{ url, x, y, width, height, displayId }, ...] }`). On next launch (after the backend is ready) one window is reopened per recorded URL, and each window's titlebar accent is re-derived from that restored URL (see below) -- the accent is not separately persisted. URLs pointing at workspaces that no longer exist are silently dropped. (Older files that still carry a per-window `lastWorkspaceAgentId` field are accepted and the field ignored.)
 
@@ -163,8 +163,8 @@ deploy-time secrets flow through HCP Vault.
 ### Configuration file
 
 `~/.<root>/config.toml` is optional and holds user-personal
-preferences only, e.g. the default account for new workspaces, the
-dark-mode theme, and the default Imbue Cloud region. It carries no tier-bound
+preferences only (the default account for new workspaces, the
+auto-open behavior for the inbox). It carries no tier-bound
 URL -- env selection happens via `MINDS_CLIENT_CONFIG_PATH` /
 `--config-file` as described above.
 

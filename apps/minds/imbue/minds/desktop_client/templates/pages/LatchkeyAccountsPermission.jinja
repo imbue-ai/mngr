@@ -1,10 +1,10 @@
 {#def agent_id, request_id, ws_name, rationale, display_name="Account access", mngr_forward_origin #}
 {#
-  Latchkey accounts permission request fragment. Rendered inside a request
-  card on the workspace Connections page. The accounts read grant is all-or-nothing with no
+  Latchkey accounts permission request fragment. Rendered inside the inbox
+  modal's right pane. The accounts read grant is all-or-nothing with no
   parameters, so -- like the file-sharing fragment -- it provides a single
   hidden checked ``name="permissions"`` input so the Approve button enables on
-  first paint. Form submission JS lives in the Connections shell, scoped to the enclosing card.
+  first paint. Chrome and form submission JS live in the inbox shell.
 #}
 <div class="permissions-detail">
   <PermissionsHeader :display_name="display_name" :ws_name="ws_name" :agent_id="agent_id" :rationale="rationale" />

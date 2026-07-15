@@ -46,19 +46,22 @@
       body_attrs={{ _body_attrs }}
       scripts={{ _scripts }}>
   {# Two flex sections: a growing left cluster (breadcrumb + workspace
-     icon-tabs) and a right cluster (bug report + non-mac window controls).
-     There is no centered page title -- the breadcrumb names the context.
-     macOS reserves the traffic-light strip with a fixed ``shrink-0`` spacer
-     div. Non-mac draws its own min/max/close at the right.
+     icon-tabs) and a right cluster (requests inbox + bug report + non-mac
+     window controls). There is no centered page title -- the breadcrumb
+     names the context. macOS reserves the traffic-light strip with a fixed
+     ``shrink-0`` spacer div. Non-mac draws its own min/max/close at the right.
 
      Left-cluster anatomy (chrome.js drives visibility per content URL):
        #back-btn      contextual back arrow, shown only on pages that opt in
                       (e.g. the create form) -- plain history back.
        #home-btn      "(icon) Minds", always visible; navigates Home.
-       #ws-crumb      "/ workspace-name (chevron)" + the three icon-tabs,
-                      shown on workspace-scoped screens. The name button
+       #ws-crumb      "/ workspace-name (chevron)" + the two icon-tabs
+                      (Workspace, Workspace Settings), shown on
+                      workspace-scoped screens. The name button
                       (#workspace-switcher-btn) opens the workspace switcher
                       menu anchored beneath itself.
+       #requests-toggle  right-cluster inbox button (always visible) with a
+                      pending-request count badge; opens the inbox popup.
        #page-crumb    "/ page-name" for non-workspace full pages (create,
                       browser-mode settings/accounts/auth fallbacks). #}
   <div id="minds-titlebar"
@@ -83,10 +86,6 @@
         </TitlebarButton>
         <span class="type-label text-tertiary px-0.5" aria-hidden="true">/</span>
         <TitlebarButton id="ws-tab-workspace" aria-label="Workspace" data-tooltip="Workspace"><Icon16 name="panels-top-left" /></TitlebarButton>
-        <TitlebarButton id="ws-tab-connections" aria-label="Connections" data-tooltip="Connections" extra="gap-[3px]">
-          <Icon16 name="cable" />
-          <Badge :count="0" id="connections-badge" hidden />
-        </TitlebarButton>
         <TitlebarButton id="ws-tab-settings" aria-label="Workspace Settings" data-tooltip="Workspace Settings"><Icon16 name="settings" /></TitlebarButton>
       </div>
       <div id="page-crumb" class="flex items-center gap-0.5 min-w-0" hidden>
@@ -95,6 +94,10 @@
       </div>
     </div>
     <div class="flex items-center justify-end shrink-0">
+      <TitlebarButton id="requests-toggle" aria-label="Requests" data-tooltip="Requests" extra="gap-[3px]">
+        <Icon16 name="inbox" />
+        <Badge :count="0" id="requests-badge" hidden />
+      </TitlebarButton>
       <TitlebarButton id="help-toggle" aria-label="Report a bug" data-tooltip="Report a bug"><Icon16 name="bug" /></TitlebarButton>
       <div class="flex {% if is_mac %}hidden{% endif %}">
         <TitlebarButton variant="control" id="min-btn" aria-label="Minimize" data-tooltip="Minimize"><Icon12 name="minimize" /></TitlebarButton>

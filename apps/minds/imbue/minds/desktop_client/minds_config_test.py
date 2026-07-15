@@ -15,6 +15,7 @@ def test_default_values_when_no_file(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     assert config.get_default_account_id() is None
     assert config.get_dark_mode() is False
+    assert config.get_auto_open_requests_panel() is True
 
 
 def test_set_and_get_default_account_id(tmp_path: Path) -> None:
@@ -62,6 +63,16 @@ def test_set_and_get_dark_mode(tmp_path: Path) -> None:
 
     config.set_dark_mode(False)
     assert config.get_dark_mode() is False
+
+
+def test_set_and_get_auto_open_requests_panel(tmp_path: Path) -> None:
+    """Setting auto_open_requests_panel persists correctly."""
+    config = _make_config(tmp_path)
+    config.set_auto_open_requests_panel(False)
+    assert config.get_auto_open_requests_panel() is False
+
+    config.set_auto_open_requests_panel(True)
+    assert config.get_auto_open_requests_panel() is True
 
 
 def test_error_reporting_settings_default_off(tmp_path: Path) -> None:

@@ -232,7 +232,7 @@ class _HostKnownStaticResolver(StaticBackendResolver):
         return AgentDisplayInfo(agent_name=str(agent_id), host_id=str(self.fixed_host_id))
 
     def get_workspace_name(self, agent_id: AgentId) -> str | None:
-        # A name per known agent so the connections page attributes each
+        # A name per known agent so the inbox attributes each
         # pending request to its workspace (via the shared workspace name).
         if agent_id not in self.known_agent_ids:
             return None
@@ -290,7 +290,7 @@ def test_get_permission_request_page_pre_checks_agent_requested_permissions(tmp_
     handler = _make_recording_handler(tmp_path)
     client = _build_authenticated_client(tmp_path, handler, inbox, agent_id=agent_id)
 
-    response = client.get(f"/workspace/{agent_id}/connections")
+    response = client.get(f"/inbox/detail/{request.event_id}")
 
     assert response.status_code == 200
     body = response.text
@@ -312,7 +312,7 @@ def test_get_permission_request_page_pre_checks_agent_requested_permissions(tmp_
     # user confirms / interacts with the form).
     assert 'id="permissions-approve-btn"' in body
     assert "disabled" in body
-    # The form carries the elements the Connections shell toggles while an
+    # The form carries the elements the inbox shell toggles while an
     # approval runs in the background so the user sees work is happening
     # and can't double-submit or deny mid-flight: an id on Deny, plus a
     # hidden spinner + a label span inside Approve. The spinner uses the
@@ -329,7 +329,7 @@ def test_get_permission_request_page_labels_wildcard_permission_as_all(tmp_path:
     The underlying checkbox value stays ``any`` (Detent's wildcard that
     is actually stored / submitted), but the user-facing label reads
     ``all`` for clarity. The wildcard checkbox is also tagged with
-    ``data-wildcard`` so the Connections shell can make it mutually exclusive
+    ``data-wildcard`` so the inbox shell can make it mutually exclusive
     with the specific permissions.
     """
     agent_id = AgentId()
@@ -343,7 +343,7 @@ def test_get_permission_request_page_labels_wildcard_permission_as_all(tmp_path:
     handler = _make_recording_handler(tmp_path)
     client = _build_authenticated_client(tmp_path, handler, inbox, agent_id=agent_id)
 
-    response = client.get(f"/workspace/{agent_id}/connections")
+    response = client.get(f"/inbox/detail/{request.event_id}")
 
     assert response.status_code == 200
     body = response.text
@@ -360,14 +360,14 @@ def test_get_permission_request_page_labels_wildcard_permission_as_all(tmp_path:
     assert ">any</code>" not in body
 
 
-def test_connections_hides_requests_whose_host_cannot_be_resolved(tmp_path: Path) -> None:
+def test_inbox_page_hides_requests_whose_host_cannot_be_resolved(tmp_path: Path) -> None:
     """A pending request from an agent the resolver no longer knows is hidden.
 
     When a workspace is stopped, its agent drops out of discovery, so the
     backend resolver can no longer map the agent to a host/workspace. The
-    UI would otherwise fall back to rendering the raw agent id (a
-    meaningless 16-char hex string). Such requests are filtered out --
-    only the request whose agent is still resolvable shows.
+    inbox would otherwise fall back to rendering the raw agent id (a
+    meaningless 16-char hex string). Such requests are filtered out of the
+    inbox list -- only the request whose agent is still resolvable shows.
     """
     known_agent = AgentId()
     stopped_agent = AgentId()
@@ -388,7 +388,7 @@ def test_connections_hides_requests_whose_host_cannot_be_resolved(tmp_path: Path
     # The resolver knows only ``known_agent``; ``stopped_agent`` resolves to None.
     client = _build_authenticated_client(tmp_path, handler, inbox, agent_id=known_agent)
 
-    response = client.get(f"/workspace/{known_agent}/connections")
+    response = client.get("/inbox")
 
     assert response.status_code == 200
     body = response.text
@@ -428,7 +428,6 @@ def test_requests_payload_excludes_unresolvable_hosts(tmp_path: Path) -> None:
     assert [str(req.event_id) for req in displayable] == [str(visible_request.event_id)]
     assert payload["count"] == 1
     assert payload["request_ids"] == [str(visible_request.event_id)]
-    assert [entry["id"] for entry in payload["requests"]] == [str(visible_request.event_id)]
 
 
 def test_get_permission_request_page_shows_descriptions_when_present(tmp_path: Path) -> None:
@@ -444,7 +443,7 @@ def test_get_permission_request_page_shows_descriptions_when_present(tmp_path: P
     handler = _make_recording_handler(tmp_path)
     client = _build_authenticated_client(tmp_path, handler, inbox, agent_id=agent_id)
 
-    response = client.get(f"/workspace/{agent_id}/connections")
+    response = client.get(f"/inbox/detail/{request.event_id}")
 
     assert response.status_code == 200
     body = response.text
@@ -473,7 +472,7 @@ def test_get_permission_request_page_renders_no_pre_checks_when_request_and_exis
     handler = _make_recording_handler(tmp_path)
     client = _build_authenticated_client(tmp_path, handler, inbox, agent_id=agent_id)
 
-    response = client.get(f"/workspace/{agent_id}/connections")
+    response = client.get(f"/inbox/detail/{request.event_id}")
 
     assert response.status_code == 200
     body = response.text
@@ -629,10 +628,10 @@ def test_post_permission_deny_calls_handler_and_resolves_inbox(tmp_path: Path) -
     assert final_inbox.get_pending_count() == 0
 
 
-def test_connections_page_drops_request_after_resolution(tmp_path: Path) -> None:
-    """A granted/denied request no longer renders on the connections page.
+def test_inbox_page_drops_request_after_resolution(tmp_path: Path) -> None:
+    """A granted/denied request no longer renders in the inbox.
 
-    The granted request lingers in the append-only log, so the page handler
+    The granted request lingers in the append-only log, so the inbox handler
     must detect the recorded response and drop the card (its re-submittable
     grant/deny form included) instead of re-rendering it.
     """
@@ -650,10 +649,9 @@ def test_connections_page_drops_request_after_resolution(tmp_path: Path) -> None
     deny = client.post(f"/requests/{request.event_id}/deny")
     assert deny.status_code == 200
 
-    page = client.get(f"/workspace/{agent_id}/connections")
+    page = client.get("/inbox")
     assert page.status_code == 200
     body = page.text
-    assert "Waiting on you" not in body
     # The actionable form must be gone so it cannot be submitted again.
     assert 'id="permissions-approve-btn"' not in body
     assert 'action="/requests/' not in body
@@ -750,7 +748,7 @@ def test_get_permission_request_page_pre_checks_existing_grants(tmp_path: Path) 
     handler = _make_recording_handler(tmp_path)
     client = _build_authenticated_client(tmp_path, handler, inbox, agent_id=agent_id, host_id=host_id)
 
-    response = client.get(f"/workspace/{agent_id}/connections")
+    response = client.get(f"/inbox/detail/{request.event_id}")
 
     assert response.status_code == 200
     body = response.text
@@ -788,7 +786,7 @@ def test_get_permission_request_page_pre_checks_union_of_existing_and_requested(
     handler = _make_recording_handler(tmp_path)
     client = _build_authenticated_client(tmp_path, handler, inbox, agent_id=agent_id, host_id=host_id)
 
-    response = client.get(f"/workspace/{agent_id}/connections")
+    response = client.get(f"/inbox/detail/{request.event_id}")
 
     assert response.status_code == 200
     body = response.text

@@ -1,12 +1,12 @@
 {#def agent_id, request_id, ws_name, rationale, display_name, verbs, checked_permissions, target_workspace_id, target_workspace_name, show_target_choice, mngr_forward_origin #}
 {#
   Latchkey cross-workspace (``minds-workspaces``) permission request fragment.
-  Rendered inside a request card on the workspace Connections page. The verbs split into two
+  Rendered inside the inbox modal's right pane. The verbs split into two
   clearly-labeled groups: "general" (non-targeted) permissions that apply
   across all workspaces (list/read, create), and "workspace-specific"
   (targeted) permissions that act on a single workspace (destroy / lifecycle /
   backups-export / ssh / ...). Each group pre-checks the verbs the agent
-  requested. Form submission JS lives in the Connections shell, scoped to the enclosing card, and operates
+  requested. Chrome and form submission JS live in the inbox shell and operate
   on the shared element ids (#permissions-form, #permissions-approve-btn, ...).
 
   The workspace-specific group is always shown. Its target radio depends on the

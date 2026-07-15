@@ -204,16 +204,16 @@ def test_render_request_detail_fragment_has_editable_path_and_browse(tmp_path: P
     )
     # The path is editable: an input named ``file_path`` pre-filled with
     # the requested path, plus separate file / folder pickers keyed for
-    # the Connections shell.
+    # the inbox shell.
     assert 'name="file_path"' in body
     assert 'id="file-sharing-path-input"' in body
     assert 'value="/home/user/important.txt"' in body
     assert 'id="file-sharing-browse-file-btn"' in body
     assert 'id="file-sharing-browse-folder-btn"' in body
-    assert "browseForSharePath(this, &#39;file&#39;)" in body or "browseForSharePath(this, 'file')" in body
+    assert "browseForSharePath(&#39;file&#39;)" in body or "browseForSharePath('file')" in body
     assert (
-        "browseForSharePath(this, &#39;directory&#39;)" in body
-        or "browseForSharePath(this, 'directory')" in body
+        "browseForSharePath(&#39;directory&#39;)" in body
+        or "browseForSharePath('directory')" in body
     )
 
 
@@ -692,19 +692,18 @@ def test_deny_still_writes_response_when_gateway_delete_fails(tmp_path: Path) ->
 # -- Wiring through the Flask dispatcher --
 
 
-def test_connections_page_dispatches_to_handler(tmp_path: Path) -> None:
-    """The connections page renders a file-sharing event via FileSharingGrantHandler."""
+def test_inbox_detail_route_dispatches_to_handler(tmp_path: Path) -> None:
+    """GET /inbox/detail/<id> for a file-sharing event routes to FileSharingGrantHandler."""
     handler, _sender = _make_file_sharing_handler(tmp_path, lambda r: httpx.Response(200))
-    requester = AgentId()
     event = create_latchkey_file_sharing_permission_request_event(
-        agent_id=str(requester),
+        agent_id=str(AgentId()),
         path="/home/user/x.txt",
         access="READ",
         rationale="r",
     )
     inbox = RequestInbox().add_request(event)
-    client = _build_authenticated_client(tmp_path, handler, inbox, known_agent=requester)
+    client = _build_authenticated_client(tmp_path, handler, inbox)
 
-    response = client.get(f"/workspace/{requester}/connections")
+    response = client.get(f"/inbox/detail/{event.event_id}")
     assert response.status_code == 200
     assert "/home/user/x.txt" in response.text

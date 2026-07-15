@@ -590,7 +590,7 @@ def test_render_chrome_page_contains_titlebar() -> None:
 
 
 def test_render_chrome_page_contains_workspace_crumb_and_icon_tabs() -> None:
-    # The breadcrumb block ("/ workspace-name (chevron)") and the three
+    # The breadcrumb block ("/ workspace-name (chevron)") and the two
     # workspace icon-tabs render hidden; chrome.js shows them on
     # workspace-scoped screens. The switcher button anchors the workspace
     # menu beneath itself.
@@ -598,8 +598,10 @@ def test_render_chrome_page_contains_workspace_crumb_and_icon_tabs() -> None:
     assert 'id="ws-crumb"' in html
     assert 'id="workspace-switcher-btn"' in html
     assert 'id="ws-tab-workspace"' in html
-    assert 'id="ws-tab-connections"' in html
     assert 'id="ws-tab-settings"' in html
+    # The Connections icon-tab was removed; pending permission requests are
+    # served by the titlebar's inbox popup instead.
+    assert 'id="ws-tab-connections"' not in html
     assert 'id="page-crumb"' in html
     # Visibility is driven through the native ``hidden`` attribute (the blocks
     # carry flex display classes that would beat a ``hidden`` class).
@@ -647,14 +649,15 @@ def test_render_chrome_page_titlebar_reserves_mac_traffic_lights_with_spacer() -
     assert "w-[72px]" not in html_other
 
 
-def test_render_chrome_page_connections_badge_is_inline_count() -> None:
-    # The Connections icon-tab's pending-request badge is the Badge count pill
-    # sat inline beside the plug icon (gap-[3px] row), not a dot overlapping
-    # the icon's corner: it carries the type-badge pill role and no absolute
-    # positioning (chrome.js fills the count text + toggles the native
-    # `hidden` attribute, scoped to the breadcrumb's workspace).
+def test_render_chrome_page_requests_badge_is_inline_count() -> None:
+    # The titlebar's inbox button (right cluster) carries the pending-request
+    # badge: the Badge count pill sat inline beside the inbox icon (gap-[3px]
+    # row), not a dot overlapping the icon's corner. It carries the type-badge
+    # pill role and no absolute positioning (chrome.js fills the count text +
+    # toggles the native `hidden` attribute from the global SSE requests count).
     html = render_chrome_page()
-    assert 'id="connections-badge"' in html
+    assert 'id="requests-toggle"' in html
+    assert 'id="requests-badge"' in html
     assert "type-badge" in html
     assert "gap-[3px]" in html
     # No corner overlay: the badge no longer pins itself to the top-right.
@@ -662,8 +665,8 @@ def test_render_chrome_page_connections_badge_is_inline_count() -> None:
     # Hidden at rest via the native `hidden` ATTRIBUTE, not a `hidden` class: the
     # pill bakes in `inline-flex`, which beats the `.hidden` utility, so a class
     # would leave a stray "0" showing. Match the bare attribute on the pill.
-    assert 'id="connections-badge" hidden>' in html
-    assert 'id="connections-badge" class="hidden"' not in html
+    assert 'id="requests-badge" hidden>' in html
+    assert 'id="requests-badge" class="hidden"' not in html
 
 
 def test_render_chrome_page_drops_title_swatch_and_seam_border() -> None:
@@ -701,16 +704,16 @@ def test_render_chrome_page_crumbs_use_type_label_tokens() -> None:
     assert 'id="page-crumb-name" class="type-label text-primary' in html
 
 
-def test_render_chrome_page_account_button_lives_in_sidebar() -> None:
-    # The titlebar no longer carries an account button (``id="user-btn"``); the
-    # "Manage account(s)" / "Log in" entry now lives in the floating sidebar
-    # alongside the workspace list and the "New workspace" CTA. The titlebar
-    # accent color therefore doesn't have to repaint the account button -- the
-    # sidebar's own dark background is constant.
+def test_render_chrome_page_switcher_menu_has_only_new_workspace() -> None:
+    # The titlebar carries no account button (``id="user-btn"``). The floating
+    # switcher menu's bottom section was trimmed to just the "New workspace"
+    # CTA: the "Minds Settings" and "Manage account(s)" / "Log in" entries were
+    # removed (Minds Settings is still reachable from the home screen).
     html = render_chrome_page()
     assert 'id="user-btn"' not in html
-    assert 'id="sidebar-account"' in html
-    assert 'id="sidebar-account-label"' in html
+    assert 'id="sidebar-new-workspace"' in html
+    assert 'id="sidebar-settings"' not in html
+    assert 'id="sidebar-account"' not in html
 
 
 def test_render_chrome_page_content_iframe_uses_12px_rounded_corners() -> None:
@@ -761,16 +764,12 @@ def test_render_sidebar_page_contains_workspace_list() -> None:
     assert 'id="sidebar-menu"' in html
     # SidebarBottom.jinja is rendered inside the floating menu in both
     # Chrome.jinja (browser mode) and Sidebar.jinja (the switcher page loaded
-    # into the shared modal WebContentsView in Electron). It carries the
-    # "New workspace" CTA, the "Minds Settings" entry (which opens the
-    # centered settings modal in Electron), and the "Manage account(s)" /
-    # "Log in" entry; the label is updated dynamically by sidebar.js from
-    # /auth/api/status.
+    # into the shared modal WebContentsView in Electron). It now carries only
+    # the "New workspace" CTA; the "Minds Settings" and "Manage account(s)" /
+    # "Log in" entries were removed.
     assert 'id="sidebar-new-workspace"' in html
-    assert 'id="sidebar-settings"' in html
-    assert "Minds Settings" in html
-    assert 'id="sidebar-account"' in html
-    assert 'id="sidebar-account-label"' in html
+    assert 'id="sidebar-settings"' not in html
+    assert 'id="sidebar-account"' not in html
 
 
 def test_render_sidebar_page_position_tracks_trigger_anchor() -> None:
