@@ -304,12 +304,6 @@ class CloudAccountCreateRequest(ApiRequestModel):
     )
 
 
-class CloudAccountPatchRequest(ApiRequestModel):
-    """Body for renaming a cloud account's display alias."""
-
-    alias: str = Field(min_length=1, description="New display alias")
-
-
 class CloudAccountSummary(FrozenModel):
     """One registered bring-your-own cloud account."""
 
@@ -318,12 +312,6 @@ class CloudAccountSummary(FrozenModel):
     backend: str = Field(description="Cloud backend (e.g. 'aws')")
     region: str = Field(description="The account's current default region")
     identifier: str = Field(description="Masked credential hint (e.g. 'AKIA…F5X2'); never the secret")
-
-
-class CloudAccountsResponse(FrozenModel):
-    """All registered bring-your-own cloud accounts."""
-
-    accounts: tuple[CloudAccountSummary, ...] = Field(description="Registered accounts")
 
 
 class CloudAccountPrepareResponse(FrozenModel):

@@ -28,7 +28,6 @@ from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
-from imbue.minds.desktop_client.region_preference import AWS_PROVIDER_KEY
 from imbue.minds.desktop_client.region_preference import GeoLocationCache
 from imbue.minds.desktop_client.region_preference import IMBUE_CLOUD_PROVIDER_KEY
 from imbue.minds.desktop_client.region_preference import VULTR_PROVIDER_KEY
@@ -49,15 +48,14 @@ from imbue.mngr.primitives import AgentId
 def region_provider_key_for_launch_mode(launch_mode: LaunchMode) -> str | None:
     """Map a compute launch mode to its region-config provider key, or None if region-less.
 
-    Only ``IMBUE_CLOUD``, ``VULTR``, and ``AWS`` place a host in a chosen
-    region; ``DOCKER`` / ``LIMA`` run locally and have no region.
+    Only ``IMBUE_CLOUD`` and ``VULTR`` offer an ambient region choice at create
+    time; ``DOCKER`` / ``LIMA`` run locally, and the cloud modes (AWS / GCP /
+    AZURE) are bring-your-own-account with placement pinned per account entry.
     """
     if launch_mode is LaunchMode.IMBUE_CLOUD:
         return IMBUE_CLOUD_PROVIDER_KEY
     if launch_mode is LaunchMode.VULTR:
         return VULTR_PROVIDER_KEY
-    if launch_mode is LaunchMode.AWS:
-        return AWS_PROVIDER_KEY
     return None
 
 

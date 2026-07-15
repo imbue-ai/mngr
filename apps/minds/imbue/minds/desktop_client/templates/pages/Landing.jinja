@@ -365,9 +365,48 @@
         }
         row.appendChild(btn);
 
+        if (entry.is_cloud_account) {
+          // Bring-your-own account: deletable here (the create page only adds).
+          // Disabled while workspaces exist -- render-time UX from the same
+          // discovery snapshot; the DELETE route's 409 remains the authority.
+          var delBtn = document.createElement('button');
+          delBtn.className = 'px-2 py-1 type-helper rounded-md border border-default bg-surface-primary hover:bg-fill-hover text-important';
+          delBtn.textContent = 'Delete';
+          var count = entry.workspace_count || 0;
+          if (count > 0) {
+            delBtn.disabled = true;
+            delBtn.className += ' opacity-50 cursor-not-allowed';
+            delBtn.title = 'In use by ' + count + ' workspace' + (count === 1 ? '' : 's') + ' — destroy them first.';
+          } else {
+            delBtn.onclick = function () { deleteCloudAccount(entry.name); };
+          }
+          row.appendChild(delBtn);
+        }
+
         list.appendChild(row);
       });
       renderedProviders = entries;
+    }
+
+    function deleteCloudAccount(name) {
+      var ok = window.confirm('Delete "' + name + '" from minds? The stored keys are forgotten. '
+        + 'Your cloud resources (and anything created outside minds) are untouched.');
+      if (!ok) return;
+      fetch('/api/v1/desktop/cloud-accounts/' + encodeURIComponent(name), { method: 'DELETE' })
+        .then(function (r) {
+          return r.json().then(function (data) { return { ok: r.ok, data: data || {} }; });
+        })
+        .then(function (res) {
+          if (!res.ok) {
+            window.alert(res.data.error || 'Could not delete the account.');
+            return;
+          }
+          // The delete bounces discovery; the panel refreshes over the SSE.
+          // Drop the row optimistically in the meantime.
+          renderedProviders = (renderedProviders || []).filter(function (e) { return e.name !== name; });
+          renderProviders({ providers: renderedProviders });
+        })
+        .catch(function () { window.alert('Could not delete the account.'); });
     }
 
     function toggleProvider(name, isEnabled) {

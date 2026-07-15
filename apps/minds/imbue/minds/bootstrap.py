@@ -21,7 +21,6 @@ import tomlkit
 from loguru import logger
 from tomlkit.items import Table
 
-from imbue.minds.primitives import CONFIGURED_AWS_REGIONS
 from imbue.minds.primitives import DEFAULT_AZURE_VM_SIZE
 from imbue.minds.primitives import DEFAULT_GCP_MACHINE_TYPE
 
@@ -144,24 +143,6 @@ def mngr_prefix_for(root_name: str) -> str:
     return "{}-".format(root_name)
 
 
-def _desired_aws_provider_names() -> tuple[str, ...]:
-    """Return the ``aws-<region>`` provider names minds should configure.
-
-    Always all of ``CONFIGURED_AWS_REGIONS``, regardless of whether AWS
-    credentials are present: installed providers are enabled by default, and a
-    credential-less region surfaces as a per-provider discovery error (shown in
-    the providers panel) rather than being silently absent. Repeated
-    unauthorized-provider log noise is handled by the stream consumers'
-    error-log suppression, not by hiding the provider.
-    """
-    return tuple(f"{_AWS_PROVIDER_NAME_PREFIX}{region}" for region in CONFIGURED_AWS_REGIONS)
-
-
-def _existing_aws_provider_names(providers_mapping: Mapping[str, object]) -> set[str]:
-    """Return the set of ``aws-<region>`` provider names currently present in a providers mapping."""
-    return {name for name in providers_mapping if name.startswith(_AWS_PROVIDER_NAME_PREFIX)}
-
-
 def _existing_is_enabled(providers_section: Table, provider_name: str) -> bool | None:
     """Return a provider block's panel-toggled ``is_enabled`` if present and boolean, else None.
 
@@ -174,39 +155,6 @@ def _existing_is_enabled(providers_section: Table, provider_name: str) -> bool |
         return None
     is_enabled = block.get("is_enabled")
     return is_enabled if isinstance(is_enabled, bool) else None
-
-
-def _write_aws_provider_blocks(providers_section: Table, desired_names: tuple[str, ...]) -> None:
-    """Rewrite the ``[providers.aws-<region>]`` blocks so they exactly match ``desired_names``.
-
-    Removes any stale ``aws-<region>`` blocks (``CONFIGURED_AWS_REGIONS``
-    changed) and (re)writes one block per desired name, pinning the backend to
-    ``aws``, the region to the name's suffix, and the gVisor/runsc hardening
-    knobs that mirror the ovh/vultr bake settings. ``is_enabled`` is the one
-    user-owned field in these blocks (the providers panel's Disable toggle
-    writes it), so an existing value is carried over rather than re-pinned.
-    """
-    # Capture panel-toggled enablement before rewriting, so a user's Disable
-    # survives the re-pin of the minds-controlled fields.
-    is_enabled_by_name: dict[str, bool] = {}
-    for name in tuple(providers_section):
-        if name.startswith(_AWS_PROVIDER_NAME_PREFIX):
-            existing_is_enabled = _existing_is_enabled(providers_section, name)
-            if existing_is_enabled is not None:
-                is_enabled_by_name[name] = existing_is_enabled
-            del providers_section[name]
-    for name in desired_names:
-        region = name[len(_AWS_PROVIDER_NAME_PREFIX) :]
-        block = tomlkit.table()
-        block["backend"] = _AWS_BACKEND_NAME
-        block["default_region"] = region
-        block["default_instance_type"] = _AWS_DEFAULT_INSTANCE_TYPE
-        block["install_gvisor_runtime"] = _AWS_INSTALL_GVISOR_RUNTIME
-        block["docker_runtime"] = _AWS_DOCKER_RUNTIME
-        block["default_start_args"] = list(_AWS_DEFAULT_START_ARGS)
-        if name in is_enabled_by_name:
-            block["is_enabled"] = is_enabled_by_name[name]
-        providers_section[name] = block
 
 
 def _ensure_mngr_settings(root_name: str) -> bool:
@@ -262,10 +210,6 @@ def _ensure_mngr_settings(root_name: str) -> bool:
         return False
     settings_path = settings_dir / "settings.toml"
 
-    # The per-region AWS provider blocks minds should currently have configured
-    # (always one per configured region, whether or not AWS credentials exist).
-    desired_aws_names = _desired_aws_provider_names()
-
     if settings_path.exists():
         existing = tomllib.loads(settings_path.read_text())
         providers = existing.get("providers", {})
@@ -287,7 +231,7 @@ def _ensure_mngr_settings(root_name: str) -> bool:
             and default_gcp.get("is_enabled") is False
             and default_azure.get("backend") == _AZURE_BACKEND_NAME
             and default_azure.get("is_enabled") is False
-            and _existing_aws_provider_names(providers) == set(desired_aws_names)
+            and not any(name.startswith(_AWS_PROVIDER_NAME_PREFIX) for name in providers)
             # The Modal (Direct) block must already be present AND persistent,
             # else fall through and rewrite it. The is_persistent check matters:
             # an older build wrote is_persistent=false, which makes Modal create
@@ -354,7 +298,14 @@ def _ensure_mngr_settings(root_name: str) -> bool:
     # resolve the region-specific provider. Written whether or not AWS
     # credentials exist: a credential-less region errors visibly in discovery
     # (and the providers panel) instead of being silently absent.
-    _write_aws_provider_blocks(providers_section, desired_aws_names)
+    # Remove any ambient ``[providers.aws-<region>]`` blocks earlier builds
+    # wrote (the machine-credential AWS path was a prototype; bring-your-own
+    # ``byo-aws-<slug>`` accounts are now the only AWS path in minds). Same
+    # legacy-cleanup shape as the ssh-provider removal above. mngr CLI users'
+    # own settings are unaffected -- this is minds' profile settings file.
+    for name in tuple(providers_section):
+        if name.startswith(_AWS_PROVIDER_NAME_PREFIX):
+            del providers_section[name]
 
     # ``[providers.modal]`` (DIRECT) for the "Modal (1-day ephemeral) - Direct"
     # compute option. Always written; uses the local Modal token at create time.
@@ -598,10 +549,8 @@ _IMBUE_CLOUD_DOCKER_RUNTIME: Final[str] = "runsc"
 _IMBUE_CLOUD_INSTALL_GVISOR_RUNTIME: Final[bool] = True
 _IMBUE_CLOUD_DEFAULT_START_ARGS: Final[tuple[str, ...]] = ("--workdir=/", "--security-opt=no-new-privileges")
 
-# Backend name + container-hardening knobs written into each per-region
-# ``[providers.aws-<region>]`` block. The AWS provider is region-locked per
-# instance (EC2's API is per-region), so minds writes one block per
-# ``CONFIGURED_AWS_REGIONS`` entry and the create address selects the right one.
+# Backend name + container-hardening knobs written into each bring-your-own
+# ``[providers.byo-aws-<slug>]`` account block (the only AWS path in minds).
 # The gVisor/runsc settings mirror the default-workspace-template ``[providers.ovh]``
 # / ``[providers.vultr]`` bake settings so the EC2 outer host runs the agent in a
 # runsc-hardened container; the matching ``docker run`` start args live in the
@@ -929,19 +878,12 @@ def unset_imbue_cloud_provider_for_account(email: str, *, root_name: str | None 
 # A "cloud account" is one ``[providers.byo-<backend>-<slug>]`` block in the
 # active settings.toml, holding the user's pasted credentials plus the same
 # hardening knobs the ambient per-region blocks get. The ``byo-`` prefix keeps
-# these outside ``_write_aws_provider_blocks``'s ``aws-*`` reconcile (which
-# deletes and rewrites its prefix on every boot), so accounts survive restarts.
-# The display alias lives in a sidecar TOML (not the provider block --
-# ``ProviderInstanceConfig`` forbids unknown fields), keyed by block name, so
-# renaming an alias never renames the provider instance (which would orphan the
-# hosts created under it).
+# these outside the boot reconciler's ``aws-*`` legacy cleanup (which deletes
+# that prefix on every boot), so accounts survive restarts. The display name is
+# derived from the block-name slug; no separate alias store exists
+# (``ProviderInstanceConfig`` forbids unknown fields on the block itself).
 _BYO_PROVIDER_NAME_PREFIX: Final[str] = "byo-"
 _BYO_SUPPORTED_BACKENDS: Final[tuple[str, ...]] = ("aws", "gcp", "azure")
-
-
-def _cloud_account_aliases_path(root_name: str) -> Path:
-    """Return the sidecar TOML mapping account block names to display aliases."""
-    return minds_data_dir_for(root_name) / "cloud_account_aliases.toml"
 
 
 def _slugify_cloud_account_alias(alias: str) -> str:
@@ -955,33 +897,6 @@ def _slugify_cloud_account_alias(alias: str) -> str:
 def cloud_account_provider_name(backend: str, alias: str) -> str:
     """Return the provider block name for a new cloud account (``byo-<backend>-<slug>``)."""
     return f"{_BYO_PROVIDER_NAME_PREFIX}{backend}-{_slugify_cloud_account_alias(alias)}"
-
-
-def _read_cloud_account_aliases(root_name: str) -> dict[str, str]:
-    """Read the block-name -> display-alias sidecar; empty when absent/unparseable."""
-    path = _cloud_account_aliases_path(root_name)
-    if not path.exists():
-        return {}
-    try:
-        parsed = tomllib.loads(path.read_text())
-    except tomllib.TOMLDecodeError:
-        logger.warning("Unparseable cloud account aliases file at {}; ignoring", path)
-        return {}
-    return {name: alias for name, alias in parsed.items() if isinstance(alias, str)}
-
-
-def _write_cloud_account_alias(root_name: str, provider_name: str, alias: str | None) -> None:
-    """Set (or, with ``None``, remove) one display alias in the sidecar file."""
-    path = _cloud_account_aliases_path(root_name)
-    doc = tomlkit.loads(path.read_text()) if path.exists() else tomlkit.document()
-    if alias is None:
-        if provider_name not in doc:
-            return
-        del doc[provider_name]
-    else:
-        doc[provider_name] = alias
-    # Generic tmp+rename TOML writer despite its name -- same guarantees needed here.
-    _atomic_write_settings(path, doc)
 
 
 def set_cloud_account_provider(
@@ -1047,7 +962,6 @@ def set_cloud_account_provider(
             block[key] = value
     providers[provider_name] = block
     _atomic_write_settings(settings_path, doc)
-    _write_cloud_account_alias(root_name, provider_name, alias)
     logger.info("Cloud account {} ({}) registered in {}", provider_name, backend, settings_path)
     return provider_name
 
@@ -1068,7 +982,6 @@ def list_cloud_account_providers(*, root_name: str | None = None) -> list[dict[s
     providers = parsed.get("providers")
     if not isinstance(providers, dict):
         return []
-    aliases = _read_cloud_account_aliases(root_name)
     accounts: list[dict[str, str]] = []
     for raw_name, raw_block in sorted(providers.items()):
         # ``isinstance(providers, dict)`` narrows only to dict[object, object];
@@ -1081,7 +994,9 @@ def list_cloud_account_providers(*, root_name: str | None = None) -> list[dict[s
         accounts.append(
             {
                 "name": name,
-                "alias": aliases.get(name, name),
+                # Display name = the slug of the user's chosen alias (the part
+                # after ``byo-<backend>-``); no separate alias store exists.
+                "alias": name.split("-", 2)[2] if name.count("-") >= 2 else name,
                 "backend": str(block.get("backend", "")),
                 # GCE is zonal: the GCP block pins default_zone, not default_region.
                 "region": str(block.get("default_region") or block.get("default_zone") or ""),
@@ -1114,21 +1029,6 @@ def _cloud_account_identifier(block: Mapping[str, object]) -> str:
     return ""
 
 
-def set_cloud_account_alias(provider_name: str, alias: str, *, root_name: str | None = None) -> bool:
-    """Update the display alias of an existing cloud account (sidecar only).
-
-    The provider block name is deliberately left untouched: it is the mngr
-    provider-instance name existing hosts were created under. Returns ``False``
-    when no such account exists.
-    """
-    if root_name is None:
-        root_name = resolve_minds_root_name()
-    if not any(account["name"] == provider_name for account in list_cloud_account_providers(root_name=root_name)):
-        return False
-    _write_cloud_account_alias(root_name, provider_name, alias)
-    return True
-
-
 def delete_cloud_account_provider(provider_name: str, *, root_name: str | None = None) -> bool:
     """Remove a cloud account block (and its alias) from minds' settings.
 
@@ -1150,6 +1050,5 @@ def delete_cloud_account_provider(provider_name: str, *, root_name: str | None =
         return False
     del providers[provider_name]
     _atomic_write_settings(settings_path, doc)
-    _write_cloud_account_alias(root_name, provider_name, None)
     logger.info("Cloud account {} removed from {}", provider_name, settings_path)
     return True

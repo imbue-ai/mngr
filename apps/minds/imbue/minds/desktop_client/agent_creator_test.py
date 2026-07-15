@@ -389,14 +389,15 @@ def test_build_mngr_create_command_forwards_region_for_vultr() -> None:
     assert "--vultr-region=lhr" in command
 
 
-def test_build_mngr_create_command_aws_address_encodes_region() -> None:
-    """AWS selects the region-specific provider via the ``aws-<region>`` address suffix."""
+def test_build_mngr_create_command_aws_address_encodes_cloud_account() -> None:
+    """AWS is bring-your-own-account: the address selects the account's block."""
     command = _build_mngr_create_command(
         launch_mode=LaunchMode.AWS,
         host_name=HostName("hello"),
         region="us-west-2",
+        cloud_account="byo-aws-mine",
     )
-    assert "system-services@hello.aws-us-west-2" in command
+    assert "system-services@hello.byo-aws-mine" in command
     assert "aws" in command
     assert "--template" in command
 
@@ -406,16 +407,18 @@ def test_build_mngr_create_command_forwards_region_for_aws() -> None:
         launch_mode=LaunchMode.AWS,
         host_name=HostName("hello"),
         region="eu-west-1",
+        cloud_account="byo-aws-mine",
     )
-    # AWS confirms the placement with a matching --aws-region build arg.
+    # AWS confirms the account's pinned placement with a matching build arg.
     assert "--aws-region=eu-west-1" in command
 
 
-def test_build_mngr_create_command_aws_requires_region() -> None:
-    with pytest.raises(MngrCommandError, match="AWS mode requires a region"):
+def test_build_mngr_create_command_aws_requires_cloud_account() -> None:
+    with pytest.raises(MngrCommandError, match="AWS mode requires a cloud account"):
         _build_mngr_create_command(
             launch_mode=LaunchMode.AWS,
             host_name=HostName("hello"),
+            region="us-west-2",
         )
 
 
@@ -426,14 +429,17 @@ def test_provider_instance_name_for_launch_local_backends() -> None:
     assert provider_instance_name_for_launch(LaunchMode.VULTR) == "vultr"
 
 
-def test_provider_instance_name_for_launch_aws_is_per_region() -> None:
-    """AWS is region-locked per provider instance (``aws-<region>``)."""
-    assert provider_instance_name_for_launch(LaunchMode.AWS, region="us-west-2") == "aws-us-west-2"
+def test_provider_instance_name_for_launch_aws_uses_cloud_account() -> None:
+    """AWS resolves only through a bring-your-own account block name."""
+    assert (
+        provider_instance_name_for_launch(LaunchMode.AWS, region="us-west-2", cloud_account="byo-aws-mine")
+        == "byo-aws-mine"
+    )
 
 
-def test_provider_instance_name_for_launch_aws_requires_region() -> None:
-    with pytest.raises(MngrCommandError, match="AWS mode requires a region"):
-        provider_instance_name_for_launch(LaunchMode.AWS)
+def test_provider_instance_name_for_launch_aws_requires_cloud_account() -> None:
+    with pytest.raises(MngrCommandError, match="AWS mode requires a cloud account"):
+        provider_instance_name_for_launch(LaunchMode.AWS, region="us-west-2")
 
 
 def test_provider_instance_name_for_launch_imbue_cloud_is_per_account() -> None:

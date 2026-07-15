@@ -34,12 +34,14 @@ from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CONFIGURED_AWS_INSTANCE_TYPES
+from imbue.minds.primitives import CONFIGURED_AWS_REGIONS
 from imbue.minds.primitives import CONFIGURED_AZURE_REGIONS
 from imbue.minds.primitives import CONFIGURED_AZURE_VM_SIZES
 from imbue.minds.primitives import CONFIGURED_GCP_MACHINE_TYPES
 from imbue.minds.primitives import CONFIGURED_GCP_ZONES
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import DEFAULT_AWS_INSTANCE_TYPE
+from imbue.minds.primitives import DEFAULT_AWS_REGION
 from imbue.minds.primitives import DEFAULT_AZURE_REGION
 from imbue.minds.primitives import DEFAULT_AZURE_VM_SIZE
 from imbue.minds.primitives import DEFAULT_GCP_MACHINE_TYPE
@@ -541,10 +543,15 @@ def render_create_form(
             "AZURE": DEFAULT_AZURE_VM_SIZE,
         },
         byo_region_options={
+            "AWS": list(CONFIGURED_AWS_REGIONS),
             "GCP": list(CONFIGURED_GCP_ZONES),
             "AZURE": list(CONFIGURED_AZURE_REGIONS),
         },
-        byo_region_selected={"GCP": DEFAULT_GCP_ZONE, "AZURE": DEFAULT_AZURE_REGION},
+        byo_region_selected={
+            "AWS": DEFAULT_AWS_REGION,
+            "GCP": DEFAULT_GCP_ZONE,
+            "AZURE": DEFAULT_AZURE_REGION,
+        },
         selected_preset=effective_preset,
         start_advanced=start_advanced,
         color=color,

@@ -571,12 +571,10 @@ def provider_instance_name_for_launch(
         case LaunchMode.VULTR:
             return "vultr"
         case LaunchMode.AWS:
-            # AWS is region-locked per provider instance (EC2's API is per-region),
-            # so minds writes one ``[providers.aws-<region>]`` block per configured
-            # region at startup. The region is required.
-            if not region:
-                raise MngrCommandError("AWS mode requires a region")
-            return f"aws-{region}"
+            # BYO-only (like GCP/AZURE): the ambient per-region ``aws-<region>``
+            # path was removed from minds; the ``cloud_account`` short-circuit
+            # above is the only way to resolve an AWS provider instance.
+            raise MngrCommandError("AWS mode requires a cloud account")
         case LaunchMode.IMBUE_CLOUD:
             if not imbue_cloud_account:
                 raise MngrCommandError("IMBUE_CLOUD mode requires imbue_cloud_account")

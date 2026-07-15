@@ -51,7 +51,6 @@
     var apiKeyRow = document.getElementById('api-key-row');
     var apiKeyInput = document.getElementById('anthropic_api_key');
     var launchModeError = document.getElementById('launch-mode-account-error');
-    var awsCredentialsNote = document.getElementById('aws-credentials-note');
     var modalDirectNote = document.getElementById('modal-direct-note');
     var aiProviderError = document.getElementById('ai-provider-account-error');
     var backupSelect = document.getElementById('backup_provider');
@@ -544,7 +543,6 @@
       var aiInvalid = !hasAccount && aiProviderSelect.value === 'IMBUE_CLOUD';
       var backupInvalid = !hasAccount && backupValue === 'IMBUE_CLOUD';
       launchModeError.classList.toggle('hidden', !launchInvalid);
-      if (awsCredentialsNote) awsCredentialsNote.classList.toggle('hidden', launchSelect.value !== 'AWS');
       if (modalDirectNote) modalDirectNote.classList.toggle('hidden', launchSelect.value !== 'MODAL');
       // BYO accounts: the placement (region / GCE zone) is pinned per account
       // entry -- discovery is region/zone-bound, so a moved pin would orphan the
@@ -576,7 +574,20 @@
     }
 
     accountSelect.addEventListener('change', onAccountChange);
-    launchSelect.addEventListener('change', update);
+    // The "add X account..." dropdown entries are actions, not selections:
+    // picking one reverts the select to its previous value and opens the
+    // add-account dialog for that backend. Track the last real selection.
+    var lastLaunchValue = launchSelect.value;
+    launchSelect.addEventListener('change', function () {
+      if (launchSelect.value.indexOf('ADD:') === 0) {
+        var backend = launchSelect.value.slice(4);
+        launchSelect.value = lastLaunchValue;
+        caOpenModalForBackend(backend);
+        return;
+      }
+      lastLaunchValue = launchSelect.value;
+      update();
+    });
     aiProviderSelect.addEventListener('change', update);
     backupSelect.addEventListener('change', update);
 
@@ -589,12 +600,9 @@
 
     // ---- Bring-your-own cloud accounts modal ------------------------------
     var caModal = document.getElementById('cloud-accounts-modal');
-    var caListView = document.getElementById('ca-list-view');
     var caFormView = document.getElementById('ca-form-view');
     var caProgressView = document.getElementById('ca-progress-view');
     var caResultView = document.getElementById('ca-result-view');
-    var caTableBody = document.getElementById('ca-table-body');
-    var caEmpty = document.getElementById('ca-empty');
     var caBackend = document.getElementById('ca-backend');
     var caAlias = document.getElementById('ca-alias');
     var caAccessKeyId = document.getElementById('ca-access-key-id');
@@ -615,7 +623,7 @@
     var caPrepareInFlight = false;
 
     function caShowView(view) {
-      var views = [caListView, caFormView, caProgressView, caResultView];
+      var views = [caFormView, caProgressView, caResultView];
       for (var i = 0; i < views.length; i++) views[i].classList.toggle('hidden', views[i] !== view);
     }
 
@@ -632,107 +640,13 @@
       if (!opt) {
         opt = document.createElement('option');
         opt.value = caOptionValue(acct.name);
-        launchSelect.appendChild(opt);
+        // Keep the three trailing "add X account..." entries last.
+        var firstAdd = launchSelect.querySelector('option[value^="ADD:"]');
+        launchSelect.insertBefore(opt, firstAdd);
       }
       opt.setAttribute('data-backend', acct.backend.toUpperCase());
       opt.setAttribute('data-default-region', acct.region);
       opt.textContent = acct.alias + ' (' + acct.backend.toUpperCase() + ' account)';
-    }
-
-    function caRenderRow(acct) {
-      var tr = document.createElement('tr');
-      tr.className = 'border-b border-default';
-      // The alias cell keeps a reference: Rename swaps it to an inline input
-      // (window.prompt is unsupported in Electron renderers -- it throws).
-      var aliasTd = document.createElement('td');
-      aliasTd.className = 'py-2 pr-2';
-      aliasTd.textContent = acct.alias;
-      tr.appendChild(aliasTd);
-      var cells = [acct.backend.toUpperCase(), acct.identifier, acct.region];
-      for (var i = 0; i < cells.length; i++) {
-        var td = document.createElement('td');
-        td.className = 'py-2 pr-2';
-        td.textContent = cells[i];
-        tr.appendChild(td);
-      }
-      var actions = document.createElement('td');
-      actions.className = 'py-2 whitespace-nowrap text-right';
-      var renameBtn = document.createElement('button');
-      renameBtn.type = 'button';
-      renameBtn.className = 'underline type-helper text-tertiary hover:text-primary mr-3 cursor-pointer';
-      renameBtn.textContent = 'Rename';
-      renameBtn.addEventListener('click', function () {
-        if (aliasTd.querySelector('input')) return;
-        var input = document.createElement('input');
-        input.type = 'text';
-        input.value = acct.alias;
-        input.className = 'w-full bg-transparent border border-default rounded-md px-1 py-0.5 type-body';
-        aliasTd.textContent = '';
-        aliasTd.appendChild(input);
-        input.focus();
-        input.select();
-        var done = false;
-        function finish(save) {
-          if (done) return;
-          done = true;
-          var alias = input.value.trim();
-          if (!save || alias === '' || alias === acct.alias) {
-            aliasTd.textContent = acct.alias;
-            return;
-          }
-          fetch('/api/v1/desktop/cloud-accounts/' + encodeURIComponent(acct.name), {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ alias: alias })
-          }).then(function (r) {
-            if (r.ok) caLoadAccounts();
-            else aliasTd.textContent = acct.alias;
-          }).catch(function () { aliasTd.textContent = acct.alias; });
-        }
-        input.addEventListener('keydown', function (e) {
-          if (e.key === 'Enter') finish(true);
-          else if (e.key === 'Escape') finish(false);
-        });
-        input.addEventListener('blur', function () { finish(true); });
-      });
-      var deleteBtn = document.createElement('button');
-      deleteBtn.type = 'button';
-      deleteBtn.className = 'underline type-helper text-important cursor-pointer';
-      deleteBtn.textContent = 'Remove';
-      deleteBtn.addEventListener('click', function () {
-        if (!confirm('Remove "' + acct.alias + '" from minds? Your cloud resources and any stopped machines are untouched; minds just forgets the keys.')) return;
-        fetch('/api/v1/desktop/cloud-accounts/' + encodeURIComponent(acct.name), { method: 'DELETE' })
-          .then(function (r) {
-            return r.json().then(function (data) { return { ok: r.ok, data: data || {} }; });
-          })
-          .then(function (res) {
-            if (!res.ok) { alert(res.data.error || 'Could not remove the account.'); return; }
-            var opt = caFindOption(acct.name);
-            if (opt) {
-              if (launchSelect.value === caOptionValue(acct.name)) { launchSelect.value = 'AWS'; update(); }
-              opt.remove();
-            }
-            caLoadAccounts();
-          });
-      });
-      actions.appendChild(renameBtn);
-      actions.appendChild(deleteBtn);
-      tr.appendChild(actions);
-      return tr;
-    }
-
-    function caLoadAccounts() {
-      fetch('/api/v1/desktop/cloud-accounts', { headers: { 'Accept': 'application/json' } })
-        .then(function (r) { return r.ok ? r.json() : { accounts: [] }; })
-        .then(function (data) {
-          var accounts = data.accounts || [];
-          caTableBody.innerHTML = '';
-          for (var i = 0; i < accounts.length; i++) {
-            caTableBody.appendChild(caRenderRow(accounts[i]));
-            caUpsertLaunchOption(accounts[i]);
-          }
-          caEmpty.classList.toggle('hidden', accounts.length > 0);
-        });
     }
 
     function caPopulateRegions() {
@@ -828,6 +742,7 @@
           var acct = res.data.account;
           caUpsertLaunchOption(acct);
           launchSelect.value = caOptionValue(acct.name);
+          lastLaunchValue = launchSelect.value;
           update();
           scheduleHostNameValidation();
           caResultHeading.textContent = 'Account ready';
@@ -861,9 +776,14 @@
       });
     }
 
-    function caOpenModal() {
-      caLoadAccounts();
-      caShowView(caListView);
+    function caOpenModalForBackend(backend) {
+      // Opened from the dropdown's "add X account..." entries: land directly
+      // on the add-form with that backend preselected (no list view exists;
+      // account management lives in the providers panel on the home screen).
+      caBackend.value = backend;
+      caUpdateBackendFields();
+      caFormError.classList.add('hidden');
+      caShowView(caFormView);
       caModal.classList.remove('hidden');
     }
 
@@ -872,20 +792,10 @@
       caModal.classList.add('hidden');
     }
 
-    document.getElementById('open-cloud-accounts').addEventListener('click', caOpenModal);
-    document.getElementById('ca-close-btn').addEventListener('click', caCloseModal);
-    document.getElementById('ca-add-btn').addEventListener('click', function () {
-      caUpdateBackendFields();
-      caFormError.classList.add('hidden');
-      caShowView(caFormView);
-    });
-    document.getElementById('ca-form-back-btn').addEventListener('click', function () { caShowView(caListView); });
+    document.getElementById('ca-form-back-btn').addEventListener('click', caCloseModal);
     document.getElementById('ca-form-submit-btn').addEventListener('click', caSubmitAccount);
     caResultBackBtn.addEventListener('click', function () { caShowView(caFormView); });
-    document.getElementById('ca-result-done-btn').addEventListener('click', function () {
-      caLoadAccounts();
-      caShowView(caListView);
-    });
+    document.getElementById('ca-result-done-btn').addEventListener('click', caCloseModal);
     // Backdrop click closes (except mid-prepare); clicks inside the card don't.
     caModal.addEventListener('click', function (event) {
       if (event.target === caModal) caCloseModal();
@@ -998,12 +908,6 @@
         <div class="flex items-start justify-between gap-3">
           <div>
             <FormLabel target="launch_mode" inline>Compute provider</FormLabel>
-            <p id="aws-credentials-note" class="hidden mt-1 type-helper text-tertiary">
-              AWS credentials are read from this machine's environment
-              (<code>AWS_ACCESS_KEY_ID</code> / <code>AWS_SECRET_ACCESS_KEY</code>,
-              or <code>AWS_PROFILE</code>, or <code>~/.aws/credentials</code>).
-              Pick a region below.
-            </p>
             <p id="modal-direct-note" class="hidden mt-1 type-helper text-tertiary">
               Modal creates sandboxes from this machine using your own Modal token.
               If you haven't authenticated yet, install the CLI and log in:
@@ -1013,10 +917,10 @@
             </p>
           </div>
           <Select id="launch_mode" name="launch_mode" width="w-48">
-            {# GCP / AZURE are BYO-only (no ambient credentials path in minds),
-               so they are not offered as plain modes -- only via the account
-               options below. #}
-            {% for mode in launch_modes %}{% if mode.value not in ('GCP', 'AZURE') %}
+            {# The cloud modes (AWS / GCP / AZURE) are bring-your-own-account
+               only, so they are not offered as plain modes -- each configured
+               account appears as its own option below. #}
+            {% for mode in launch_modes %}{% if mode.value not in ('AWS', 'GCP', 'AZURE') %}
               <option value="{{ mode.value }}"{% if mode.value == selected_launch_mode %} selected{% endif %}
                       {% if mode.value == 'IMBUE_CLOUD' %}data-requires-account="true"{% endif %}>{% if mode.value == 'MODAL' %}Modal (1-day ephemeral){% else %}{{ mode.value | lower }}{% endif %}</option>
             {% endif %}{% endfor %}
@@ -1027,14 +931,15 @@
               <option value="BYO:{{ acct.name }}" data-backend="{{ acct.backend | upper }}"
                       data-default-region="{{ acct.region }}">{{ acct.alias }} ({{ acct.backend | upper }} account)</option>
             {% endfor %}
+            {# Action entries: picking one opens the add-account dialog for that
+               backend (the JS reverts the selection; these are never submitted). #}
+            <option value="ADD:aws">add AWS account&hellip;</option>
+            <option value="ADD:gcp">add GCP account&hellip;</option>
+            <option value="ADD:azure">add Azure account&hellip;</option>
           </Select>
         </div>
         <p id="launch-mode-account-error" class="hidden mt-1 type-helper text-warning text-right">imbue_cloud requires a selected account.</p>
         <p id="byo-region-note" class="hidden mt-1 type-helper text-tertiary"></p>
-        <p class="mt-1 type-helper text-tertiary text-right">
-          Want to use your own AWS / GCP / Azure account?
-          <button type="button" id="open-cloud-accounts" class="underline hover:text-primary cursor-pointer">Configure</button>
-        </p>
       </div>
 
       <div>
@@ -1143,41 +1048,15 @@
   </form>
 
   {# ---- Bring-your-own cloud accounts modal ----
-     Three mutually-exclusive views inside one overlay (list / add-form /
-     preparing / result), toggled by JS. The preparing view deliberately has
-     no close or back control: `mngr <backend> prepare` is creating real cloud
-     resources and must not look abandonable mid-flight. #}
+     Three mutually-exclusive views inside one overlay (add-form / preparing /
+     result), opened by the compute dropdown's "add X account..." entries
+     directly at the form. Account deletion lives in the providers panel on
+     the home screen. The preparing view deliberately has no close or back
+     control: `mngr <backend> prepare` is creating real cloud resources and
+     must not look abandonable mid-flight. #}
   <Modal id="cloud-accounts-modal" card_extra="!max-w-xl text-left">
-    {# List view: the accounts table + add button. #}
-    <div id="ca-list-view">
-      <div class="flex items-center justify-between mb-4">
-        <span class="type-heading text-primary">Your cloud accounts</span>
-        <Button variant="secondary" id="ca-add-btn">+ Add new account</Button>
-      </div>
-      <p class="type-helper text-tertiary mb-3">
-        Workspaces created on these accounts run on machines in your own cloud, billed to you.
-        Removing an account here only makes minds forget the keys -- it never touches your cloud resources.
-      </p>
-      <table class="w-full type-body text-primary">
-        <thead>
-          <tr class="type-helper text-tertiary text-left border-b border-default">
-            <th class="py-1 pr-2 font-normal">Alias</th>
-            <th class="py-1 pr-2 font-normal">Provider</th>
-            <th class="py-1 pr-2 font-normal">Key</th>
-            <th class="py-1 pr-2 font-normal">Region</th>
-            <th class="py-1 font-normal"></th>
-          </tr>
-        </thead>
-        <tbody id="ca-table-body"></tbody>
-      </table>
-      <p id="ca-empty" class="hidden type-helper text-tertiary mt-3">No accounts yet. Add one to create workspaces on your own cloud.</p>
-      <div class="flex justify-end mt-6">
-        <Button variant="secondary" id="ca-close-btn">Close</Button>
-      </div>
-    </div>
-
-    {# Add-account form view. #}
-    <div id="ca-form-view" class="hidden">
+    {# Add-account form view (the modal's landing view). #}
+    <div id="ca-form-view">
       <span class="type-heading text-primary">Add a cloud account</span>
       <div class="mt-3 flex items-center justify-between gap-3">
         <FormLabel target="ca-backend" inline>Provider</FormLabel>
@@ -1256,7 +1135,7 @@
       </div>
       <p id="ca-form-error" class="hidden mt-3 type-helper text-important"></p>
       <div class="flex justify-between mt-6">
-        <Button variant="secondary" id="ca-form-back-btn">&larr; Back</Button>
+        <Button variant="secondary" id="ca-form-back-btn">Cancel</Button>
         <Button variant="primary" id="ca-form-submit-btn">Save &amp; prepare account</Button>
       </div>
     </div>

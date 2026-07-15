@@ -47,7 +47,6 @@ from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.minds.bootstrap import BootstrapError
 from imbue.minds.bootstrap import delete_cloud_account_provider
 from imbue.minds.bootstrap import list_cloud_account_providers
-from imbue.minds.bootstrap import set_cloud_account_alias
 from imbue.minds.bootstrap import set_cloud_account_provider
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client import backup_status
@@ -81,10 +80,8 @@ from imbue.minds.desktop_client.api_models import BackupSnapshotSummary
 from imbue.minds.desktop_client.api_models import BackupVerificationToggleRequest
 from imbue.minds.desktop_client.api_models import BugReportRequest
 from imbue.minds.desktop_client.api_models import CloudAccountCreateRequest
-from imbue.minds.desktop_client.api_models import CloudAccountPatchRequest
 from imbue.minds.desktop_client.api_models import CloudAccountPrepareResponse
 from imbue.minds.desktop_client.api_models import CloudAccountSummary
-from imbue.minds.desktop_client.api_models import CloudAccountsResponse
 from imbue.minds.desktop_client.api_models import CreateOperationStatusResponse
 from imbue.minds.desktop_client.api_models import CreateWorkspaceRequest
 from imbue.minds.desktop_client.api_models import DestroyOperationStatusResponse
@@ -602,9 +599,10 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
             # A known size for a sized mode: passes through to the create command.
             pass
     cloud_account = str(body.get("cloud_account", "")).strip()
-    if launch_mode in (LaunchMode.GCP, LaunchMode.AZURE) and not cloud_account:
-        # BYO-only modes: without an account the create would fail minutes
-        # later in the background thread with an opaque provider error.
+    if launch_mode in (LaunchMode.AWS, LaunchMode.GCP, LaunchMode.AZURE) and not cloud_account:
+        # BYO-only modes (all three clouds): without an account the create
+        # would fail minutes later in the background thread with an opaque
+        # provider error. Ambient machine-credential AWS was removed from minds.
         return _json_field_error(f"{launch_mode.value} requires a configured cloud account.", "cloud_account")
     matching = None
     if cloud_account:
@@ -1877,14 +1875,6 @@ def _cloud_account_summary(account: dict[str, str]) -> CloudAccountSummary:
 
 
 @require_api_or_cookie_auth
-@API_SPEC.validate(resp=json_response_model(CloudAccountsResponse))
-def _handle_list_cloud_accounts() -> CloudAccountsResponse | Response:
-    """List the registered bring-your-own cloud accounts."""
-    accounts = tuple(_cloud_account_summary(a) for a in list_cloud_account_providers())
-    return CloudAccountsResponse(accounts=accounts)
-
-
-@require_api_or_cookie_auth
 @API_SPEC.validate(json=CloudAccountCreateRequest, resp=json_response_model(CloudAccountPrepareResponse))
 def _handle_create_cloud_account() -> CloudAccountPrepareResponse | Response:
     """Register a bring-your-own cloud account and run `mngr <backend> prepare` on it.
@@ -1978,19 +1968,6 @@ def _handle_create_cloud_account() -> CloudAccountPrepareResponse | Response:
     # desktop_control.set_provider_enabled's bounce-on-change.
     bounce_latchkey_forward_supervisor(get_state().latchkey_forward_supervisor)
     return CloudAccountPrepareResponse(account=_cloud_account_summary(matching))
-
-
-@require_api_or_cookie_auth
-@API_SPEC.validate(json=CloudAccountPatchRequest, resp=json_response_model(OkResponse))
-def _handle_patch_cloud_account(account_name: str) -> OkResponse | Response:
-    """Rename a cloud account's display alias (the block name stays stable)."""
-    body = request.get_json(silent=True, force=True) or {}
-    alias = str(body.get("alias", "")).strip()
-    if not alias:
-        return _json_field_error("Alias must not be empty.", "alias")
-    if not set_cloud_account_alias(account_name, alias):
-        return _json_error(f"Unknown cloud account {account_name!r}.", 404)
-    return OkResponse(ok=True)
 
 
 @require_api_or_cookie_auth
@@ -2290,14 +2267,7 @@ def create_api_v1_blueprint() -> Blueprint:
     # Desktop namespace (cookie-or-bearer; no agent verb, so deny-all at the gateway).
     blueprint.add_url_rule("/desktop/providers/<provider_name>", view_func=_handle_patch_provider, methods=["PATCH"])
     # Bring-your-own cloud accounts (pasted credentials + prepare).
-    blueprint.add_url_rule("/desktop/cloud-accounts", view_func=_handle_list_cloud_accounts, methods=["GET"])
     blueprint.add_url_rule("/desktop/cloud-accounts", view_func=_handle_create_cloud_account, methods=["POST"])
-    blueprint.add_url_rule(
-        "/desktop/cloud-accounts/<account_name>",
-        view_func=_handle_patch_cloud_account,
-        endpoint="patch_cloud_account",
-        methods=["PATCH"],
-    )
     blueprint.add_url_rule(
         "/desktop/cloud-accounts/<account_name>",
         view_func=_handle_delete_cloud_account,
