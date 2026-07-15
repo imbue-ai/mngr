@@ -245,14 +245,6 @@ class RestartWorkspaceRequest(ApiRequestModel):
     host_already_stopped: bool | None = Field(
         default=None, description="Skip the redundant stop step when the host is known stopped"
     )
-    auto_dispatched: bool | None = Field(
-        default=None,
-        description=(
-            "Set by the recovery page's automatic tier dispatch (not a manual restart). When the workspace has "
-            "already self-recovered to HEALTHY before the slow host-health probe finished, an auto-dispatched "
-            "restart is skipped rather than bouncing a healthy backend; a manual restart always proceeds."
-        ),
-    )
 
 
 class EnableSharingRequest(ApiRequestModel):

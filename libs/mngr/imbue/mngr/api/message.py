@@ -20,6 +20,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import HostOfflineError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import SendMessageError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import require_interactive_agent
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -248,3 +249,20 @@ def _send_message_to_agent(
             on_error(agent_name, error_msg)
         if error_behavior == ErrorBehavior.ABORT:
             raise MngrError(error_msg) from e
+
+
+def send_message_with_resend_guidance(agent: AgentInterface, message: str, situation: str) -> None:
+    """Send a message, framing a delivery failure so the caller knows the agent itself is fine.
+
+    Used by the create-with-initial-message and resume paths, where a failed
+    send would otherwise read as the whole command failing: the agent is up
+    and healthy, only the message was not delivered.
+    """
+    try:
+        require_interactive_agent(agent).send_message(message)
+    except SendMessageError as e:
+        raise SendMessageError(
+            e.agent_name,
+            f"{e.reason}\n\nThe agent is up ({situation}), but the message was NOT delivered. "
+            f"Resend it with: mngr message {agent.name}",
+        ) from e
