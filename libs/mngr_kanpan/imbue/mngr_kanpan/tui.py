@@ -1079,8 +1079,8 @@ def _make_reply_edit(caption: tuple[str, str]) -> ReadlineEdit:
 
     ``ReadlineEdit`` ships the readline keymap (Ctrl-A/E/W/K/U, Meta-B/F/D, etc.)
     but binds word ops only to Meta+letter and Shift+arrow, not the Option/Ctrl +
-    arrow chords many terminals emit; those are added here so word movement and
-    deletion work however the terminal encodes them. ``enter`` and a boundary
+    arrow chords many terminals emit; those are added here so word movement
+    works however the terminal encodes it. ``enter`` and a boundary
     ``left`` are left unbound so they bubble to the panel (send / return-to-board).
     """
     edit = ReadlineEdit(caption=caption, multiline=False)
