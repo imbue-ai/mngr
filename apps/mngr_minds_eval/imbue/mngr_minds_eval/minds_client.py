@@ -94,18 +94,15 @@ def create_and_wait(
         if on_stage and stage and stage != last_stage:
             on_stage(stage)
             last_stage = stage
+        # minds only surfaces the agent_id in the operation status once the whole create is done (its
+        # readiness probe included), so we wait for is_done -- there is no earlier "created" signal here.
+        if info.get("is_done"):
+            agent_id = info.get("agent_id")
+            if not isinstance(agent_id, str):
+                raise CreateError("create finished without an agent_id: {}".format(info))
+            return agent_id
         if info.get("error"):
             raise CreateError(str(info["error"]))
-        # Return at the "created" milestone -- agent_id assigned, sandbox up, services booting -- rather
-        # than blocking on minds' readiness probe (which runs for up to ~300s AFTER the workspace is
-        # already created and shows in the UI). The workspace finishes booting on its own; open it with
-        # view-modal-workspace when you're ready. A create that genuinely fails reports `error` (checked
-        # above) or never assigns an agent_id, so early-return doesn't mask real failures.
-        agent_id = info.get("agent_id")
-        if isinstance(agent_id, str) and agent_id:
-            return agent_id
-        if info.get("is_done"):
-            raise CreateError("create finished without an agent_id: {}".format(info))
         time.sleep(4)
     raise CreateError("timed out waiting for workspace create")
 

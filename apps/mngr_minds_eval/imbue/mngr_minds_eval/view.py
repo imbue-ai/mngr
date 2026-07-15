@@ -143,5 +143,18 @@ def view_modal_workspace(name: str, *, box: str = "", new_box_on_mngr_branch: st
     )
     if result.returncode != 0:
         raise SystemExit("ssh tunnel to {} failed: {}".format(name, (result.stderr or "").strip()[:300]))
+
+    # The tunnel can open before the workspace's UI (:8000) is actually serving -- a freshly-created
+    # sandbox is still booting its services. Probe once so we can tell the user the truth instead of
+    # handing over a URL that shows "connection reset". The tunnel stays valid either way, so once the
+    # UI comes up a plain reload works.
+    probe = box_mod._run(
+        ["curl", "-s", "-m", "6", "-o", "/dev/null", "-w", "%{http_code}", "http://127.0.0.1:{}/".format(local_port)]
+    )
+    serving = probe.returncode == 0 and probe.stdout.strip() not in ("", "000")
     print("\n  {} is viewable at:  http://localhost:{}/".format(name, local_port), flush=True)
-    print("  (background SSH tunnel to the sandbox; kill the ssh process to close it)", flush=True)
+    if serving:
+        print("  (background SSH tunnel to the sandbox; kill the ssh process to close it)", flush=True)
+    else:
+        print("  NOTE: its UI isn't serving yet -- the sandbox is still booting, so the page will show", flush=True)
+        print("  'connection reset' for a minute or two. Just reload once it's up; the tunnel stays open.", flush=True)
