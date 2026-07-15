@@ -1,4 +1,6 @@
 import json
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -425,8 +427,20 @@ def test_reconcile_tombstones_definitively_absent_local_rows(paths: WorkspacePat
     # make_resolver_with_data runs update_agents, which marks initial discovery complete.
     resolver = make_resolver_with_data(agents_json=make_agents_json(AgentId.generate(), host_name="other"))
 
+    # Before the record's provider has produced a single snapshot, absence is
+    # not evidence: the row must survive (the slow-first-poll startup race).
     store.reconcile({user_id: _EMAIL}, resolver)
+    assert store.list_records(user_id)[0].state == RECORD_STATE_ACTIVE
 
+    # Once the provider has reported a snapshot that lacks the host, the
+    # absence is definitive and the row tombstones.
+    resolver.update_providers(
+        provider_name=ProviderInstanceName("local"),
+        provider=None,
+        error=None,
+        last_snapshot_at=datetime.now(timezone.utc),
+    )
+    store.reconcile({user_id: _EMAIL}, resolver)
     assert store.list_records(user_id)[0].state == RECORD_STATE_DESTROYED
 
 
@@ -611,3 +625,73 @@ def test_derive_openssh_public_key_line_roundtrips_mngrs_traditional_pem_rsa_key
 
 def test_derive_openssh_public_key_line_returns_none_for_garbage() -> None:
     assert derive_openssh_public_key_line("not a key at all") is None
+
+
+def test_reconcile_resurrects_a_locally_hosted_tombstone_whose_workspace_is_live(paths: WorkspacePaths) -> None:
+    """A DESTROYED row hosted here whose agent is live in discovery was tombstoned
+    prematurely (e.g. by an install predating the per-provider snapshot gate) --
+    the reconcile must re-activate and push it."""
+    cli = make_fake_imbue_cloud_cli()
+    store = _make_store(paths, cli)
+    user_id = _user_id()
+    live_agent = AgentId.generate()
+    tombstoned = ReplicaRecord(
+        host_id="host-back",
+        agent_id=str(live_agent),
+        display_name="docker-2",
+        provider_kind="local",
+        hosting_device_id="device-test-1",
+        state=RECORD_STATE_DESTROYED,
+    )
+    cli.sync_records_by_email[_EMAIL] = {"host-back": tombstoned.to_wire(4)}
+    resolver = make_resolver_with_data(agents_json=make_agents_json(live_agent, host_name="docker-2"))
+
+    store.reconcile({user_id: _EMAIL}, resolver)
+
+    record = store.list_records(user_id)[0]
+    assert record.state == RECORD_STATE_ACTIVE
+    assert record.is_dirty is False
+    assert cli.sync_records_by_email[_EMAIL]["host-back"]["state"] == RECORD_STATE_ACTIVE
+
+
+def test_reconcile_never_resurrects_while_a_destroy_is_in_flight(paths: WorkspacePaths) -> None:
+    """The destroy flow tombstones the record before the host actually goes down;
+    a reconcile in that window must not undo the tombstone."""
+    cli = make_fake_imbue_cloud_cli()
+    store = _make_store(paths, cli)
+    user_id = _user_id()
+    doomed_agent = AgentId.generate()
+    tombstoned = ReplicaRecord(
+        host_id="host-doomed",
+        agent_id=str(doomed_agent),
+        provider_kind="local",
+        hosting_device_id="device-test-1",
+        state=RECORD_STATE_DESTROYED,
+    )
+    cli.sync_records_by_email[_EMAIL] = {"host-doomed": tombstoned.to_wire(2)}
+    (paths.data_dir / "destroying" / str(doomed_agent)).mkdir(parents=True)
+    resolver = make_resolver_with_data(agents_json=make_agents_json(doomed_agent, host_name="doomed"))
+
+    store.reconcile({user_id: _EMAIL}, resolver)
+
+    assert store.list_records(user_id)[0].state == RECORD_STATE_DESTROYED
+
+
+def test_reconcile_never_resurrects_other_device_tombstones(paths: WorkspacePaths) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    store = _make_store(paths, cli)
+    user_id = _user_id()
+    foreign_agent = AgentId.generate()
+    tombstoned = ReplicaRecord(
+        host_id="host-foreign",
+        agent_id=str(foreign_agent),
+        provider_kind="local",
+        hosting_device_id="device-someone-else",
+        state=RECORD_STATE_DESTROYED,
+    )
+    cli.sync_records_by_email[_EMAIL] = {"host-foreign": tombstoned.to_wire(2)}
+    resolver = make_resolver_with_data(agents_json=make_agents_json(foreign_agent, host_name="foreign"))
+
+    store.reconcile({user_id: _EMAIL}, resolver)
+
+    assert store.list_records(user_id)[0].state == RECORD_STATE_DESTROYED
