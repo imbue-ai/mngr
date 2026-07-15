@@ -1,1 +1,0 @@
-Fixed the `test_event_default` tutorial e2e test, which was incorrectly marked `@pytest.mark.rsync`. The test creates a local agent inside a git repo, which uses the `git-worktree` transfer mode and never invokes the `rsync` binary, so the resource guard failed the test for carrying a mark it never exercised. Removed the spurious `rsync` mark.

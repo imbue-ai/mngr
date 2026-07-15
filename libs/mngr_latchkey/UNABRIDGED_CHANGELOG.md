@@ -4,6 +4,18 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-14
+
+Update Latchkey to include support for GitHub's GraphQL API.
+
+Fixed an endless remote-sync feedback loop in the `mngr latchkey forward` supervisor's remote-state watcher.
+
+The watchdog handler that keeps a remote (VPS) host's latchkey credentials and permissions in sync reacted to *every* filesystem event on the watched files. On Linux, watchdog's inotify observer also dispatches read-lifecycle events (`FileOpenedEvent` / `FileClosedNoWriteEvent`) whenever a watched file is merely read -- and the sync itself reads those files (`sync_permissions` reads the host permissions file; `sync_credentials` re-reads it and spawns latchkey CLI subprocesses that open the credentials store). Each sync therefore re-triggered the next one, producing a full VPS re-sync (SSH upload plus a `latchkey auth re-encrypt` subprocess) roughly every 6 seconds for the supervisor's entire lifetime, even though neither file was ever modified.
+
+`_LatchkeyStateChangeHandler.dispatch` now allowlists genuine mutation events only (`FileCreatedEvent`, `FileDeletedEvent`, `FileModifiedEvent`, `FileMovedEvent`), so reads -- including the sync's own -- are inert. `FileClosedEvent` (IN_CLOSE_WRITE) is also excluded since a content-changing write always emits `FileModifiedEvent` as well, and reacting to both would double-fire syncs.
+
+A change to a host's permissions file now syncs that host's full latchkey state (permissions, then credentials) to the VPS instead of permissions only. The permissions determine which services' credentials ship to the host, so a grant must deliver the newly-allowed service's credentials and a revocation must remove the no-longer-allowed ones -- previously the VPS credential store stayed stale until the next supervisor restart or a separate credentials-file change.
+
 ## 2026-07-13
 
 The `mngr latchkey forward` daemon now tells Sentry to ignore the paramiko/pyinfra stdlib loggers. The daemon reverse-tunnels the shared gateway into every agent via paramiko; when a target went offline and the health check retried, paramiko's transport thread logged the connection-reset failure at ERROR level, and Sentry's default logging integration captured each one as an event. Those events were not even rate-limited (the stdlib records carry no exception info or fingerprint), so a handful of users produced tens of thousands of Sentry events. The daemon now drops that already-handled noise while still reporting genuine failures raised through loguru.

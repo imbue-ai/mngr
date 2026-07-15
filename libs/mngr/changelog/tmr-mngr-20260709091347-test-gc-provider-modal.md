@@ -1,1 +1,0 @@
-Fixed the `test_gc_provider_modal` e2e tutorial test so its post-gc listing is scoped to the Modal provider (`mngr list --provider modal --format json`). An unfiltered `mngr list` reaches every enabled provider, so an enabled-but-unavailable provider (e.g. AWS with no credentials) made the test exit non-zero for reasons unrelated to the Modal agent it was verifying.

@@ -1,1 +1,0 @@
-Fixed the `test_templates_setup_via_config_edit` e2e release test: added a 120s timeout (the `mngr create` step exceeded the 10s default), dropped the spurious `@pytest.mark.modal` mark (the template is substituted with `transfer="none"` for the local test, so modal is never invoked), and added a check that `mngr config edit` actually creates the project config file on disk.

@@ -1,3 +1,0 @@
-Tests: fix the `test_exec_on_error_continue` e2e tutorial test. It was marked `@pytest.mark.rsync`, but exec on a local `command` agent (and creating one over a git repo, which uses git transfer rather than rsync) never invokes rsync, so the resource guard failed the otherwise-passing test. Removed the superfluous mark.
-
-Tests: made the same test run the exact tutorial command (`git log --oneline -5`) instead of `git log --oneline -5 || true`. The agent's work_dir is always the fixture git repo, so `git log` succeeds and returns the fixture history; the `|| true` masked the very failure behavior the block is about and diverged from the documented tutorial command.

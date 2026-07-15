@@ -1,1 +1,0 @@
-Added the missing `@pytest.mark.timeout(60)` marker to the `test_plugin_list_fields` e2e tutorial test so it no longer trips the 10s default per-test timeout on the ~10s `mngr` cold-start, matching the other subprocess-driven e2e tests in that file.

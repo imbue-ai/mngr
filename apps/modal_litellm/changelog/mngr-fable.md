@@ -1,1 +1,0 @@
-Add `claude-fable-5` to the LiteLLM proxy model list with inline pricing ($10 / $50 per 1M input / output tokens, cache write 1.25e-5, cache read 1e-6, mirrored from litellm's price map), so workspaces using imbue_cloud virtual keys can run Claude Fable 5 with correct cost tracking.

@@ -1,1 +1,0 @@
-Added the missing `@pytest.mark.timeout(600)` marker to the `test_transcript_assistant_only` e2e test. Without it the test inherited the global 10s function timeout and was killed mid-`mngr create`, unlike its sibling transcript tests which all set the 600s timeout.

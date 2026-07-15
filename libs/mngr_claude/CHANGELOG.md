@@ -11,6 +11,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: `update_policy` field on the claude agent type (`AUTO` / `ASK` / `NEVER`, default `NEVER`) governs Claude Code's background auto-updater via `DISABLE_AUTOUPDATER=1`. **Behavior change:** local claude agents now disable the auto-updater by default; previously the per-agent config inherited your `~/.claude.json` `autoUpdates` value. Set `update_policy = "AUTO"` to opt back in. Ignored in shared (`isolate_local_config_dir = false`) mode.
 - Added: `version` field pins a specific Claude Code version.
 - Added: When creating a local claude agent on macOS, if mngr detects you authenticate Claude Code with a claude.ai subscription (OAuth credentials) and config-dir isolation is enabled, it warns that the isolated agent's credentials will go stale and prints the exact command to disable isolation.
+- Added: `auto_disable_questions` field on `ClaudeAgentConfig` — when true, appends `--disallowed-tools AskUserQuestion` so unattended agents can't block on questions (recent Claude Code releases no longer treat AskUserQuestion as a permission prompt, so `auto_allow_permissions` alone no longer covers it). Preserves any existing `--disallowed-tools` in `cli_args`.
 
 ### Changed
 
@@ -21,6 +22,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: Shared Claude config mode (`isolate_local_config_dir = false`) now dismisses the cosmetic startup dialogs (trust, onboarding, effort callout, cost threshold) directly in your default Claude config and honors `auto_dismiss_dialogs`, so they no longer intercept automated input. Previously shared mode left the config untouched, so a fresh `~/.claude.json` re-triggered the trust/onboarding screens on every agent. mngr never accepts bypass-permissions mode via the global config.
 - Changed: `mngr create` no longer requires `.claude/settings.local.json` to be gitignored across the board (now enforced only by the `claude_subagent_proxy` plugin when it actually rewrites the file).
 - Changed: A user-supplied `--settings` in `cli_args` / `agent_args` now passes through to `claude` verbatim. In `use_env_config_dir` mode (which uses a private managed `--settings` file) a user-supplied `--settings` is now rejected at provision with a `UserInputError`.
+- Changed: `mngr message` to a claude agent now confirms submission by finding the message's own content in claude's durable transcripts (both the native session JSONL and mngr's raw `logs/claude_transcript/events.jsonl` copy), instead of the tmux `wait-for` signal — whose latch-on-unconsumed-signal semantics could cause a send to report success for a message that was never submitted. Emoji-only / punctuation messages fall back to observing any new enqueue/user record; slash commands (`/clear`, `/compact`, …) use a relaxed policy that never hard-fails. Existing agents are fully supported without reprovisioning.
 
 ### Fixed
 

@@ -1,1 +1,0 @@
-Fixed the `test_list_jq_filter` e2e tutorial test so it reliably passes: dropped the superfluous `@pytest.mark.modal` (the `mngr list` read path never shells out to the `modal` CLI, so the mark tripped the resource guard's "marked but never invoked" check) and gave the test a generous timeout to accommodate the slow Modal gRPC discovery round-trip.

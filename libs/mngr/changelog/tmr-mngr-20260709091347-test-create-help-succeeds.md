@@ -1,1 +1,0 @@
-Raised the per-test timeout on the `mngr create --help` e2e tutorial test. Rendering that help imports every provider backend to build the per-provider build/start argument section, so the mngr subprocess startup routinely exceeds the global 10s pytest timeout; the test now uses `@pytest.mark.timeout(60)` like the other e2e create tests.

@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-14
+
+`mngr forward --use-http2`: abandoned TLS connections no longer dump an "Unhandled exception in client_connected_cb / TimeoutError: SSL shutdown timed out" traceback to stderr, and are now force-closed after a bounded few-second wait instead of holding a per-connection task open for asyncio's full 30-second SSL shutdown timeout. The serve loop bounds the wait for the peer's close_notify reply (hypercorn does not expose asyncio's ssl_shutdown_timeout) and drops the benign teardown errors of already-dead connections (the SSL-shutdown TimeoutError and TLS handshake failures) instead of logging them as unhandled exceptions.
+
 ## 2026-07-13
 
 Add a `--use-http2` flag to `mngr forward` that terminates TLS and negotiates HTTP/2 (via ALPN) for the workspace origin instead of serving plain HTTP/1.1.

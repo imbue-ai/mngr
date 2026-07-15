@@ -1,1 +1,0 @@
-Fixed the `test_event_tail` e2e tutorial test: removed its spurious `@pytest.mark.rsync` mark. A local agent created in a git repository on the same host uses git-worktree transfer, not rsync, so the resource guard correctly flagged the test as marked-but-unused. (The sibling event tests share the same incorrect mark; a FIXME notes the suite-wide cleanup.)

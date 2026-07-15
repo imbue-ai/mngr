@@ -1,3 +1,0 @@
-Tests: the `mngr observe --discovery-only` tutorial e2e test (`test_observe_discovery_only`) no longer carries `@pytest.mark.modal`. Like the fresh-environment `mngr list` filter tests, discovery-only observe reaches the Modal provider via the in-process gRPC SDK (invisible to the resource guard across the mngr subprocess boundary) and never shells out to the `modal` CLI, so the mark tripped the guard's "marked but never invoked" check.
-
-Tests: the same test now masks only the `timeout`-expiry exit (124) to a clean pass instead of a blanket `|| true`, so it still fails if `mngr observe` crashes early with any other exit code -- verifying the command actually starts and streams without error rather than merely that a `|| true` pipeline exited 0.
