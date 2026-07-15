@@ -1322,7 +1322,8 @@ def _handle_peek_key(state: _KanpanState, key: str) -> bool | None:
         _submit_peek_reply(state)
         return True
     # Optional Agent-View back gesture: Left on an empty reply returns to the board.
-    # (Left only reaches here when the reply Edit is at column 0, i.e. empty.)
+    # (Left only reaches here when the reply Edit is at column 0, which can also
+    # happen with text present -- hence the explicit emptiness check.)
     if key == "left" and state.peek_left_returns_to_board:
         if state.peek_input is not None and not state.peek_input.get_edit_text():
             _close_peek(state)
