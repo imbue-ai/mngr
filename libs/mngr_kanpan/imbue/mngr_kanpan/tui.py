@@ -1302,9 +1302,14 @@ def _on_peek_reply_poll(
             state.peek_pending_replies = pending
         state.peek_reply_error = detail
         _set_peek_body(state)
+    elif state.peek_agent_name is not None:
+        # Another agent's panel now occupies the footer slot (hiding the footer), so its
+        # error line is the only visible surface; name the failed agent to keep the two apart.
+        state.peek_reply_error = f"{agent_name}: {detail}"
+        _set_peek_body(state)
     else:
-        # The panel has closed (or moved to another agent), so the restored footer is
-        # visible again and is the right place for the failure notice.
+        # The panel has closed, so the restored footer is visible again and is the
+        # right place for the failure notice.
         _show_transient_message(state, f"  Reply to {agent_name} failed: {detail}")
 
 

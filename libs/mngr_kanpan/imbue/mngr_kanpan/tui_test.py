@@ -2143,6 +2143,25 @@ def test_on_peek_reply_poll_failure_after_close_shows_transient() -> None:
     assert "delivery timed out" in state.transient_message
 
 
+def test_on_peek_reply_poll_failure_with_other_agent_peeked_renders_in_panel() -> None:
+    state = _make_state()
+    state.loop = _make_mock_loop()
+    _build_peek_panel(state)
+    state.peek_agent_name = AgentName("agent-b")
+    state.peek_pending_replies = ["draft to b"]
+    future = _make_reply_result(returncode=1, stderr="agent not running\n")
+    _on_peek_reply_poll(state.loop, (state, future, AgentName("agent-a"), "my reply"))
+    # agent-b's panel hides the footer, so the failure renders in the panel body,
+    # named so it cannot be misread as agent-b's failure.
+    body = str(state.peek_body_text.text)
+    assert "reply failed" in body
+    assert "agent-a" in body
+    assert "agent not running" in body
+    assert state.transient_message is None
+    # agent-b's own pending echoes are untouched.
+    assert state.peek_pending_replies == ["draft to b"]
+
+
 def test_submit_then_transcript_refresh_keeps_reply_error_visible() -> None:
     state = _make_state()
     state.loop = _make_mock_loop()
