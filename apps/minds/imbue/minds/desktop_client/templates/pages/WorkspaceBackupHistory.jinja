@@ -6,10 +6,12 @@
   The table is fed one page at a time from
   GET /api/v1/workspaces/<id>/backups/snapshots?offset=&limit= (newest-first,
   paginated server-side so a long history is never loaded all at once).
-  workspace_backup_history.js owns the row markup, the empty / error states,
-  and the Newer/Older pagination controls; only the shells live here.
+  workspace_backup_history.js owns the empty / error states and the
+  Newer/Older pagination controls; the row markup is shared with the settings
+  page's "Recent backups" table via backup_table.js. Only the shells live here.
 #}
 {% set _scripts %}
+<script src="/_static/backup_table.js" defer></script>
 <script src="/_static/workspace_backup_history.js" defer></script>
 {% endset %}
 <Base title={{ "Backups: " ~ ws_name }}
