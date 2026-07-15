@@ -35,6 +35,7 @@ from fastapi import Request
 from fastapi import WebSocket
 from fastapi import WebSocketDisconnect
 from fastapi.responses import HTMLResponse
+from fastapi.responses import JSONResponse
 from fastapi.responses import Response
 from fastapi.responses import StreamingResponse
 from jinja2 import Environment
@@ -238,6 +239,7 @@ async def _forward_backend_to_client(
     client_websocket: WebSocket,
     backend_ws: ClientConnection,
     agent_id: AgentId,
+    envelope_writer: EnvelopeWriter,
 ) -> None:
     try:
         async for msg in backend_ws:
@@ -246,9 +248,58 @@ async def _forward_backend_to_client(
             else:
                 await client_websocket.send_bytes(msg)
     except websockets.exceptions.ConnectionClosed:
+        # An abnormal backend close (the SPA's only live channel dying, e.g.
+        # after the container restarts) surfaces here. Emit the same
+        # mid-stream-EOF signal the SSE path uses so a consumer learns the
+        # backend died even when the websocket was the only open channel.
         logger.debug("Backend WebSocket closed for {}", agent_id)
+        _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.SSE_EOF, None)
     except RuntimeError as e:
         logger.trace("Client WebSocket send error (likely post-disconnect): {}", e)
+
+
+async def _forward_until_either_side_closes(
+    client_websocket: WebSocket,
+    backend_ws: ClientConnection,
+    agent_id: AgentId,
+    envelope_writer: EnvelopeWriter,
+) -> None:
+    """Pump both directions until either finishes, cancel the other, close the client socket.
+
+    ``asyncio.gather`` would leave the browser-facing socket open forever when
+    the backend dies: ``_forward_backend_to_client`` returns on the backend's
+    ConnectionClosed, but ``_forward_client_to_backend`` stays blocked on
+    ``client_websocket.receive()`` (the browser's /api/ws socket is
+    server-to-client only), so gather never returns, the browser never sees
+    ``onclose``, never reconnects, and the UI freezes. Finishing as soon as the
+    first pump ends, cancelling the other, and closing the client socket lets
+    the browser observe the disconnect and reconnect.
+    """
+    client_to_backend_task = asyncio.create_task(
+        _forward_client_to_backend(client_websocket=client_websocket, backend_ws=backend_ws)
+    )
+    backend_to_client_task = asyncio.create_task(
+        _forward_backend_to_client(
+            client_websocket=client_websocket,
+            backend_ws=backend_ws,
+            agent_id=agent_id,
+            envelope_writer=envelope_writer,
+        )
+    )
+    _done, pending = await asyncio.wait(
+        (client_to_backend_task, backend_to_client_task), return_when=asyncio.FIRST_COMPLETED
+    )
+    for task in pending:
+        task.cancel()
+    # Retrieve every task's outcome (including the CancelledError of the pump we
+    # just cancelled) so none is left as an unretrieved-exception warning.
+    await asyncio.gather(client_to_backend_task, backend_to_client_task, return_exceptions=True)
+    try:
+        await client_websocket.close()
+    except RuntimeError:
+        # The client may have already initiated the close (a client-side
+        # disconnect), in which case starlette raises on a second close.
+        logger.trace("Client WebSocket already closing during teardown for {}", agent_id)
 
 
 # -- HTTP/WS tunnel helpers -----------------------------------------------
@@ -357,14 +408,14 @@ async def _forward_workspace_http(
             return _service_unavailable_response(request)
         except httpx.ReadError:
             _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.SSE_EOF, None)
-            return Response(status_code=502, content="Backend connection lost")
+            return _backend_error_response(request, status_code=502, detail="Backend connection lost")
         except httpx.TimeoutException:
             # A wedged-but-listening backend produces a TimeoutException
             # rather than ConnectError. Surface this as CONNECT_ERROR so a
             # consumer still treats the agent as failing, matching the
             # behaviour for a backend that returns a 504.
             _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None)
-            return Response(status_code=504, content="Backend stream timed out")
+            return _backend_error_response(request, status_code=504, detail="Backend stream timed out")
 
         async def _stream() -> AsyncGenerator[bytes, None]:
             try:
@@ -403,14 +454,14 @@ async def _forward_workspace_http(
         # mid-response failure (same shape as SSE_EOF on the streaming path),
         # not a connect-time failure.
         _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.SSE_EOF, None)
-        return Response(status_code=502, content="Backend connection lost")
+        return _backend_error_response(request, status_code=502, detail="Backend connection lost")
     except httpx.TimeoutException:
         # A wedged-but-listening backend produces a TimeoutException rather
         # than ConnectError. Surface this as CONNECT_ERROR so a consumer still
         # treats the agent as failing, matching the behaviour for a backend
         # that returns a 504.
         _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None)
-        return Response(status_code=504, content="Backend timed out")
+        return _backend_error_response(request, status_code=504, detail="Backend timed out")
 
     if not 200 <= backend_response.status_code < 300:
         # Any non-2xx response is surfaced as a single ``ERROR_RESPONSE`` signal
@@ -448,6 +499,24 @@ def _emit_backend_failure(
         envelope_writer.emit_system_interface_backend_failure(payload)
     except (OSError, ValueError) as e:
         logger.trace("Could not emit system_interface_backend_failure envelope for {}: {}", agent_id, e)
+
+
+def _accepts_json(request: Request) -> bool:
+    return "application/json" in request.headers.get("accept", "")
+
+
+def _backend_error_response(request: Request, status_code: int, detail: str) -> Response:
+    """Return a backend-failure body as JSON when the caller accepts JSON, else plain text.
+
+    A frontend whose request library parses the response as JSON (e.g. Mithril,
+    which sets ``xhr.responseType='json'``) reads ``null`` off a non-JSON body
+    and constructs ``Error(null)`` -- whose ``.message`` is the literal string
+    ``"null"`` that then surfaces to the user. Returning ``{"detail": ...}`` for
+    JSON callers lets them recover a real error message instead.
+    """
+    if _accepts_json(request):
+        return JSONResponse(status_code=status_code, content={"detail": detail})
+    return Response(status_code=status_code, content=detail)
 
 
 # The proxy loader: the canonical "Loading workspace" page that re-attempts the
@@ -499,11 +568,16 @@ def _service_unavailable_response(request: Request) -> Response:
     where any consumer is listening. For browsers that hit the plugin
     directly (including users landing here mid-restart), we serve a styled
     loading page that polls the workspace in the background and reloads once
-    it answers, so the experience is not a blank flash.
+    it answers, so the experience is not a blank flash. JSON callers (e.g. an
+    already-loaded SPA's API request) get a ``{"detail": ...}`` body so their
+    request library surfaces a real error instead of null from an unparseable
+    plain-text body.
     """
-    accepts_html = "text/html" in request.headers.get("accept", "")
-    if accepts_html:
+    accept = request.headers.get("accept", "")
+    if "text/html" in accept:
         return HTMLResponse(content=_SERVICE_UNAVAILABLE_HTML, status_code=503)
+    if "application/json" in accept:
+        return JSONResponse(status_code=503, content={"detail": "Backend not yet available"})
     return Response(status_code=503, content="Backend not yet available")
 
 
@@ -710,9 +784,11 @@ async def _handle_workspace_forward_websocket(
         )
         async with backend_ws_conn as backend_ws:
             await websocket.accept(subprotocol=backend_ws.subprotocol)
-            await asyncio.gather(
-                _forward_client_to_backend(client_websocket=websocket, backend_ws=backend_ws),
-                _forward_backend_to_client(client_websocket=websocket, backend_ws=backend_ws, agent_id=agent_id),
+            await _forward_until_either_side_closes(
+                client_websocket=websocket,
+                backend_ws=backend_ws,
+                agent_id=agent_id,
+                envelope_writer=envelope_writer,
             )
     except (
         ConnectionRefusedError,

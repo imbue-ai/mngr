@@ -6,8 +6,12 @@ test, not here. This file covers the deterministic auth + routing
 surfaces using ``starlette.testclient.TestClient``.
 """
 
+import contextlib
 import io
 import json
+import threading
+from collections.abc import Callable
+from collections.abc import Iterator
 from pathlib import Path
 
 import httpx
@@ -15,6 +19,8 @@ import pytest
 from fastapi import FastAPI
 from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
+from websockets.sync.server import ServerConnection
+from websockets.sync.server import serve as run_backend_websocket_server
 
 from imbue.mngr.primitives import AgentId
 from imbue.mngr_forward.auth import FileAuthStore
@@ -1101,3 +1107,297 @@ def test_subdomain_forward_websocket_emits_failure_on_ssh_tunnel_setup_error(tmp
     payload = envelope["payload"]
     assert payload["type"] == "system_interface_backend_failure"
     assert payload["reason"] == "CONNECT_ERROR"
+
+
+# -- WebSocket forward teardown (backend dies mid-session) tests -----------
+
+
+def _close_backend_websocket_abnormally(connection: ServerConnection) -> None:
+    # Simulate the container dying mid-session: an abnormal (non-1000) close
+    # makes the proxy's backend->client pump raise ConnectionClosedError.
+    connection.close(code=1011, reason="backend gone")
+
+
+def _close_backend_websocket_normally(connection: ServerConnection) -> None:
+    # Returning closes the connection with a normal (1000) code, i.e. a
+    # graceful backend shutdown rather than a crash.
+    del connection
+
+
+@contextlib.contextmanager
+def _running_backend_websocket_server(handler: Callable[[ServerConnection], None]) -> Iterator[int]:
+    """Run a real websocket server on an ephemeral loopback port for the forward proxy to dial."""
+    server = run_backend_websocket_server(handler, "127.0.0.1", 0)
+    backend_port = server.socket.getsockname()[1]
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    try:
+        yield backend_port
+    finally:
+        server.shutdown()
+        server_thread.join(timeout=5)
+
+
+def _make_ws_forward_app(
+    tmp_path: Path,
+    agent_id: AgentId,
+    preauth: str,
+    backend_port: int,
+) -> tuple[FastAPI, io.StringIO]:
+    auth_store = FileAuthStore(data_directory=tmp_path)
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    resolver.add_known_agent(agent_id)
+    resolver.update_services(agent_id, {"system_interface": f"http://127.0.0.1:{backend_port}"})
+    envelope_output = io.StringIO()
+    app = create_forward_app(
+        auth_store=auth_store,
+        resolver=resolver,
+        tunnel_manager=SSHTunnelManager(),
+        envelope_writer=EnvelopeWriter(output=envelope_output),
+        listen_host="127.0.0.1",
+        listen_port=18421,
+        preauth_cookie_value=preauth,
+        # The backend runs on real host loopback in this test, so opt in to
+        # dialing it (production remote agents reach loopback via an SSH tunnel).
+        allow_host_loopback=True,
+    )
+    return app, envelope_output
+
+
+@pytest.mark.timeout(30)
+def test_subdomain_forward_websocket_closes_client_and_emits_failure_when_backend_drops(
+    tmp_path: Path,
+) -> None:
+    """A backend websocket that dies mid-session must close the browser-facing
+    socket and emit an ``SSE_EOF`` failure.
+
+    Regression test for the frozen-UI bug: ``asyncio.gather`` left the
+    client->backend pump blocked forever on ``client_websocket.receive()`` once
+    the backend->client pump returned, so the browser-facing socket was never
+    closed, the SPA never saw ``onclose``, and it never reconnected. The
+    coordinator now finishes as soon as either pump ends and cancels the other,
+    so the client socket closes promptly (the 30s timeout turns a regression
+    back into a failure rather than a hang). The ``SSE_EOF`` envelope is what
+    lets a consumer learn the backend died when the websocket was the only open
+    channel.
+    """
+    agent_id = AgentId()
+    preauth = "preauth-ws-backend-drop"
+    with _running_backend_websocket_server(_close_backend_websocket_abnormally) as backend_port:
+        app, envelope_output = _make_ws_forward_app(tmp_path, agent_id, preauth, backend_port)
+        with TestClient(app, base_url=f"http://{agent_id}.localhost:18421") as client:
+            with pytest.raises(WebSocketDisconnect):
+                with client.websocket_connect(
+                    f"ws://{agent_id}.localhost:18421/api/ws",
+                    headers={"cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}"},
+                ) as websocket:
+                    # Blocks until the proxy closes the client socket after the
+                    # backend drops; with the old gather this would hang forever.
+                    websocket.receive_text()
+
+    lines = _envelope_lines(envelope_output)
+    assert len(lines) == 1
+    payload = json.loads(lines[0])["payload"]
+    assert payload["type"] == "system_interface_backend_failure"
+    assert payload["reason"] == "SSE_EOF"
+
+
+@pytest.mark.timeout(30)
+def test_subdomain_forward_websocket_closes_client_without_failure_on_graceful_backend_close(
+    tmp_path: Path,
+) -> None:
+    """A graceful backend close still tears down the browser-facing socket, but
+    must NOT emit a backend-failure envelope (a normal shutdown is not a failure
+    signal a consumer should treat as the agent being stuck).
+    """
+    agent_id = AgentId()
+    preauth = "preauth-ws-backend-graceful"
+    with _running_backend_websocket_server(_close_backend_websocket_normally) as backend_port:
+        app, envelope_output = _make_ws_forward_app(tmp_path, agent_id, preauth, backend_port)
+        with TestClient(app, base_url=f"http://{agent_id}.localhost:18421") as client:
+            with pytest.raises(WebSocketDisconnect):
+                with client.websocket_connect(
+                    f"ws://{agent_id}.localhost:18421/api/ws",
+                    headers={"cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}"},
+                ) as websocket:
+                    websocket.receive_text()
+
+    assert _envelope_lines(envelope_output) == []
+
+
+# -- JSON vs plain-text error body (Accept-header branching) tests ---------
+
+
+def test_subdomain_forward_returns_json_503_for_json_accept_on_connect_failure(tmp_path: Path) -> None:
+    """A JSON caller (e.g. the SPA's message POST) gets a parseable ``{"detail": ...}``
+    503 when the backend is unreachable.
+
+    This is the direct fix for the ``Failed to send message: null`` alert: a
+    frontend whose request library parses the body as JSON reads ``null`` off a
+    plain-text error and surfaces the literal string ``"null"``. A JSON body
+    lets it recover a real ``error.response.detail`` instead.
+    """
+    agent_id = AgentId()
+    preauth = "preauth-json-503"
+    captured: list[httpx.Request] = []
+    app, _env_out, mock_client = _make_forward_app_with_capture(
+        tmp_path,
+        captured,
+        agent_id,
+        preauth,
+        raise_error=httpx.ConnectError,
+    )
+
+    with TestClient(app, base_url=f"http://{agent_id}.localhost:18421", follow_redirects=False) as client:
+        app.state.http_client = mock_client
+        response = client.post(
+            "/api/agents/agent-deadbeef/message",
+            headers={
+                "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}",
+                "accept": "application/json",
+            },
+        )
+
+    assert response.status_code == 503
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json() == {"detail": "Backend not yet available"}
+
+
+def test_subdomain_forward_returns_plain_text_503_for_non_json_non_html_accept(tmp_path: Path) -> None:
+    """A caller that accepts neither HTML nor JSON still gets the plain-text 503 body."""
+    agent_id = AgentId()
+    preauth = "preauth-plain-503"
+    captured: list[httpx.Request] = []
+    app, _env_out, mock_client = _make_forward_app_with_capture(
+        tmp_path,
+        captured,
+        agent_id,
+        preauth,
+        raise_error=httpx.ConnectError,
+    )
+
+    with TestClient(app, base_url=f"http://{agent_id}.localhost:18421", follow_redirects=False) as client:
+        app.state.http_client = mock_client
+        response = client.get(
+            "/api/state",
+            headers={
+                "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}",
+                "accept": "text/plain",
+            },
+        )
+
+    assert response.status_code == 503
+    assert "application/json" not in response.headers.get("content-type", "")
+    assert response.text == "Backend not yet available"
+
+
+def test_subdomain_forward_returns_json_502_for_json_accept_on_read_error(tmp_path: Path) -> None:
+    """A mid-response backend drop (ReadError) returns a JSON 502 for JSON callers."""
+    agent_id = AgentId()
+    preauth = "preauth-json-502"
+    captured: list[httpx.Request] = []
+    app, _env_out, mock_client = _make_forward_app_with_capture(
+        tmp_path,
+        captured,
+        agent_id,
+        preauth,
+        raise_error=httpx.ReadError,
+    )
+
+    with TestClient(app, base_url=f"http://{agent_id}.localhost:18421", follow_redirects=False) as client:
+        app.state.http_client = mock_client
+        response = client.get(
+            "/api/state",
+            headers={
+                "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}",
+                "accept": "application/json",
+            },
+        )
+
+    assert response.status_code == 502
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json() == {"detail": "Backend connection lost"}
+
+
+def test_subdomain_forward_returns_plain_text_502_for_non_json_accept_on_read_error(tmp_path: Path) -> None:
+    """A non-JSON caller keeps the plain-text 502 body on a mid-response drop."""
+    agent_id = AgentId()
+    preauth = "preauth-plain-502"
+    captured: list[httpx.Request] = []
+    app, _env_out, mock_client = _make_forward_app_with_capture(
+        tmp_path,
+        captured,
+        agent_id,
+        preauth,
+        raise_error=httpx.ReadError,
+    )
+
+    with TestClient(app, base_url=f"http://{agent_id}.localhost:18421", follow_redirects=False) as client:
+        app.state.http_client = mock_client
+        response = client.get(
+            "/api/state",
+            headers={
+                "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}",
+                "accept": "text/plain",
+            },
+        )
+
+    assert response.status_code == 502
+    assert "application/json" not in response.headers.get("content-type", "")
+    assert response.text == "Backend connection lost"
+
+
+def test_subdomain_forward_returns_json_504_for_json_accept_on_timeout(tmp_path: Path) -> None:
+    """A wedged-but-listening backend (TimeoutException) returns a JSON 504 for JSON callers."""
+    agent_id = AgentId()
+    preauth = "preauth-json-504"
+    captured: list[httpx.Request] = []
+    app, _env_out, mock_client = _make_forward_app_with_capture(
+        tmp_path,
+        captured,
+        agent_id,
+        preauth,
+        raise_error=httpx.ConnectTimeout,
+    )
+
+    with TestClient(app, base_url=f"http://{agent_id}.localhost:18421", follow_redirects=False) as client:
+        app.state.http_client = mock_client
+        response = client.get(
+            "/api/state",
+            headers={
+                "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}",
+                "accept": "application/json",
+            },
+        )
+
+    assert response.status_code == 504
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json() == {"detail": "Backend timed out"}
+
+
+def test_subdomain_forward_returns_plain_text_504_for_non_json_accept_on_timeout(tmp_path: Path) -> None:
+    """A non-JSON caller keeps the plain-text 504 body on a wedged backend."""
+    agent_id = AgentId()
+    preauth = "preauth-plain-504"
+    captured: list[httpx.Request] = []
+    app, _env_out, mock_client = _make_forward_app_with_capture(
+        tmp_path,
+        captured,
+        agent_id,
+        preauth,
+        raise_error=httpx.ConnectTimeout,
+    )
+
+    with TestClient(app, base_url=f"http://{agent_id}.localhost:18421", follow_redirects=False) as client:
+        app.state.http_client = mock_client
+        response = client.get(
+            "/api/state",
+            headers={
+                "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}",
+                "accept": "text/plain",
+            },
+        )
+
+    assert response.status_code == 504
+    assert "application/json" not in response.headers.get("content-type", "")
+    assert response.text == "Backend timed out"
