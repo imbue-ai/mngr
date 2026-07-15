@@ -359,11 +359,14 @@ def test_resumed_workspace_registered_expected_services(running_workspace: _Resu
 
     The app-watcher / bootstrap respawns the standard services on restart and
     each registers its port into ``runtime/applications.toml``; the core set
-    (system_interface, web, terminal) must be present.
+    (system_interface, terminal, browser) must be present. This mirrors the
+    default-workspace-template's supervised services that register a port
+    (its PR #270 removed the blank example ``web`` service, so ``web`` is no
+    longer part of the set).
     """
     result = _exec_in_container(running_workspace.container_name, "cat /code/runtime/applications.toml", timeout=30)
     assert result.returncode == 0, f"Could not read runtime/applications.toml: {result.stderr}"
-    for service_name in ("system_interface", "web", "terminal"):
+    for service_name in ("system_interface", "terminal", "browser"):
         assert service_name in result.stdout, (
             f"Service {service_name!r} not registered in applications.toml after resume:\n{result.stdout}"
         )

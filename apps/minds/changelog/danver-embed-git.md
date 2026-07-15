@@ -5,3 +5,5 @@ The backend child environment now exports the git environment contract (`GIT_EXE
 `scripts/ensure-binaries.js` now replaces stale git payloads on dev machines via a `.dugite-tag` marker, and a new acceptance test (`test_bundled_git.py`) proves the payload end-to-end on the current platform, including a hermetic HTTPS clone through `git-remote-https` against a local TLS server. Unit tests in `scripts/build_test.py` guard the manifest schema and its consistency with the downloader.
 
 Documentation: `docs/desktop-app.md` now describes the managed payload accurately (the previous text about copying git from the build machine was stale) and gains an "Updating the bundled git" runbook. The design lives in `specs/minds-managed-git/concise.md`.
+
+Unrelated test fix picked up in this PR: `test_snapshot_resume.py::test_resumed_workspace_registered_expected_services` now expects the core registered services to be `system_interface`, `terminal`, and `browser` -- default-workspace-template PR #270 removed the blank example `web` service, so snapshots built after it no longer register `web`.
