@@ -3,8 +3,10 @@
 Powers the workspace-recovery page's diagnostics list. The endpoint reads
 the outer host/provider state from the passive discovery resolver (a single
 sampler shared with the rest of minds -- no synchronous ``mngr list``) and
-runs a batched in-container probe via ``mngr exec`` only when that outer
-state is healthy, then returns a flat list of named probes -- each capturing
+runs a batched in-container probe via ``mngr exec`` when that outer state is
+healthy -- or when the discovery stream itself has stalled, making the exec's
+outcome the only direct evidence available -- then returns a flat list of
+named probes, each capturing
 the question asked, the command (or pseudo-command label) that produced the
 data, the raw output captured, and a derived yes/no/unknown answer.
 
