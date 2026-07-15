@@ -65,8 +65,9 @@ from supertokens_python.recipe.emailpassword.syncio import send_reset_password_e
 from supertokens_python.recipe.emailpassword.syncio import sign_in as ep_sign_in
 from supertokens_python.recipe.emailpassword.syncio import sign_up as ep_sign_up
 from supertokens_python.recipe.emailpassword.syncio import update_email_or_password
-from supertokens_python.recipe.emailverification import EmailVerificationClaim
+from supertokens_python.recipe.emailverification.interfaces import CreateEmailVerificationTokenOkResult
 from supertokens_python.recipe.emailverification.interfaces import VerifyEmailUsingTokenOkResult
+from supertokens_python.recipe.emailverification.syncio import create_email_verification_token
 from supertokens_python.recipe.emailverification.syncio import is_email_verified
 from supertokens_python.recipe.emailverification.syncio import send_email_verification_email
 from supertokens_python.recipe.emailverification.syncio import verify_email_using_token
@@ -1618,13 +1619,12 @@ def _authenticate_supertokens(
 
     try:
         # Pass ``override_global_claim_validators=lambda *_: []`` so the
-        # session getter does NOT auto-reject unverified-email tokens at
-        # the validator step. We want our own explicit
-        # ``if not is_verified: raise "Email not verified"`` below to
-        # fire instead, so the operator-facing error message tells the
-        # user what to fix (the SDK's default rejection surfaces as a
-        # generic ``SuperTokensSessionError`` → "Invalid token", which
-        # is misleading).
+        # session getter does NOT auto-reject based on the token's
+        # email-verification claim. We determine verification ourselves from a
+        # live core lookup below (see the ``email_getter`` call), and raise a
+        # clear "Email not verified" only when the email is genuinely
+        # unverified (the SDK's default rejection surfaces as a generic
+        # ``SuperTokensSessionError`` → "Invalid token", which is misleading).
         session = session_getter(
             access_token=token,
             anti_csrf_check=False,
@@ -1636,16 +1636,22 @@ def _authenticate_supertokens(
     if session is None:
         raise HTTPException(status_code=401, detail="Invalid or expired SuperTokens session")
 
-    # Reject tokens where the email is not verified
-    payload = session.get_access_token_payload()
-    is_verified = EmailVerificationClaim.get_value_from_payload(payload)
-    if not is_verified:
-        raise HTTPException(status_code=401, detail="Email not verified")
-
     user_id = session.get_user_id()
     # Derive 16-char hex prefix from UUID
     user_id_prefix = user_id.replace("-", "")[:_USER_ID_PREFIX_LENGTH]
+
+    # Resolve the verified email live from the core rather than trusting the
+    # token's cached email-verification claim. That claim is baked into the
+    # access token at login and cannot reflect a verification that happened
+    # afterwards -- e.g. a user who was just added to the paid list (and thus
+    # auto-verified) would keep getting rejected until their token refreshed.
+    # ``email_getter`` returns an email only for a *verified* login method, so a
+    # ``None`` result means "no verified email" and we reject. The core lookup
+    # already ran here on every authenticated request, so gating on it instead
+    # of on the token claim adds no extra round trip on the success path.
     email = email_getter(user_id)
+    if email is None:
+        raise HTTPException(status_code=401, detail="Email not verified")
 
     return AdminAuth(username=user_id_prefix, email=email)
 
@@ -2913,6 +2919,10 @@ def add_paid_email(request: Request, body: PaidListEntryRequest) -> dict[str, ob
         require_paid_admin_key(request)
         email = _normalize_paid_email(body.value)
         _activate_paid_entry("paid_emails", "email", email)
+        # If this email already has an account, verify it now so the just-granted
+        # paid access is not blocked by an unverified email. Best-effort: never
+        # let a verification hiccup fail the paid-list write.
+        _mark_paid_email_verified_best_effort(email)
         return {"status": "added", "email": email}
 
 
@@ -4067,6 +4077,47 @@ def _build_session_tokens(user_id: str) -> SessionTokens:
     )
 
 
+def _mark_email_verified(recipe_user_id: RecipeUserId, email: str) -> None:
+    """Force-verify an email without the user clicking a link.
+
+    Mints a verification token and immediately consumes it. A no-op when the
+    email is already verified (the SDK then returns an already-verified result
+    that carries no token to consume).
+    """
+    token_result = create_email_verification_token(
+        tenant_id=_AUTH_TENANT_ID,
+        recipe_user_id=recipe_user_id,
+        email=email,
+    )
+    if isinstance(token_result, CreateEmailVerificationTokenOkResult):
+        verify_email_using_token(tenant_id=_AUTH_TENANT_ID, token=token_result.token)
+
+
+def _mark_paid_email_verified_best_effort(email: str) -> None:
+    """Mark any existing account for ``email`` verified, swallowing failures.
+
+    Called when an email is added to the paid list so a user who already signed
+    up (but never verified) is not left locked out of the paid access they were
+    just granted. Purely best-effort: SuperTokens being unconfigured or
+    unreachable must never fail the paid-list write, and an email with no
+    account yet is simply a no-op (that user is auto-verified at signup
+    instead).
+    """
+    if not os.environ.get("SUPERTOKENS_CONNECTION_URI"):
+        return
+    try:
+        users = list_users_by_account_info(
+            tenant_id=_AUTH_TENANT_ID,
+            account_info=AccountInfoInput(email=email),
+        )
+        for user in users:
+            for login_method in user.login_methods:
+                if login_method.email == email and not login_method.verified:
+                    _mark_email_verified(recipe_user_id=login_method.recipe_user_id, email=email)
+    except (SuperTokensSessionError, SuperTokensGeneralError) as exc:
+        logger.warning("Failed to auto-verify paid email %s: %s", email, exc)
+
+
 def _require_supertokens_configured() -> None:
     if not os.environ.get("SUPERTOKENS_CONNECTION_URI"):
         raise HTTPException(status_code=503, detail="SuperTokens not configured on the server")
@@ -4098,13 +4149,30 @@ def auth_signup(body: SignUpRequest) -> AuthResponse:
 
             user = result.user
             recipe_user_id = user.login_methods[0].recipe_user_id if user.login_methods else RecipeUserId(user.id)
+
+            # Paid users skip the email-verification round trip: mark the new
+            # account verified up front (before minting the session, so its very
+            # first token already carries the verified claim) and don't send a
+            # verification email. A paid-list lookup failure falls back to the
+            # normal verify-by-email flow rather than failing the signup.
+            # ``KeyError`` covers an unset ``DATABASE_URL`` (pool DB not
+            # configured); ``psycopg2.Error`` covers a connect/query failure.
+            try:
+                is_paid = is_email_paid(email)
+            except (psycopg2.Error, KeyError) as exc:
+                logger.warning("Paid-list lookup failed during signup for %s; treating as not paid: %s", email, exc)
+                is_paid = False
+            if is_paid:
+                _mark_email_verified(recipe_user_id=recipe_user_id, email=email)
+
             tokens = _build_session_tokens(user.id)
-            send_email_verification_email(
-                tenant_id=_AUTH_TENANT_ID,
-                user_id=user.id,
-                recipe_user_id=recipe_user_id,
-                email=email,
-            )
+            if not is_paid:
+                send_email_verification_email(
+                    tenant_id=_AUTH_TENANT_ID,
+                    user_id=user.id,
+                    recipe_user_id=recipe_user_id,
+                    email=email,
+                )
         except (SuperTokensSessionError, SuperTokensGeneralError) as exc:
             logger.error("SuperTokens SDK error during signup", exc_info=exc)
             return AuthResponse(status="ERROR", message="Auth backend unavailable")
@@ -4112,7 +4180,7 @@ def auth_signup(body: SignUpRequest) -> AuthResponse:
             status="OK",
             user=AuthUser(user_id=user.id, email=email),
             tokens=tokens,
-            needs_email_verification=True,
+            needs_email_verification=not is_paid,
         )
 
 
