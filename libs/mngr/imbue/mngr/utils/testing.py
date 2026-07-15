@@ -734,15 +734,24 @@ def mngr_agent_cleanup(
     *,
     env: dict[str, str] | None = None,
     disable_plugins: Sequence[str] = (),
+    destroy_timeout: float = 180.0,
 ) -> Generator[None, None, None]:
-    """Context manager that destroys a mngr agent on exit (via subprocess)."""
+    """Context manager that destroys a mngr agent on exit (via subprocess).
+
+    ``destroy_timeout`` bounds the teardown ``mngr destroy`` call. It defaults
+    higher than ``run_mngr_subprocess``'s own default because destroy performs
+    full provider discovery plus garbage collection, which completes in tens of
+    seconds when warm but can take substantially longer on a cold sandbox; the
+    default 120s was tight enough to intermittently fail otherwise-passing
+    release tests during teardown.
+    """
     try:
         yield
     finally:
         args = ["destroy", agent_name, "--force"]
         for plugin in disable_plugins:
             args.extend(["--disable-plugin", plugin])
-        run_mngr_subprocess(*args, env=env)
+        run_mngr_subprocess(*args, env=env, timeout=destroy_timeout)
 
 
 def capture_tmux_pane_contents(target: TmuxWindowTarget) -> str:

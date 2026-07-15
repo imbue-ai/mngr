@@ -1,0 +1,1 @@
+Scoped the leftover-agent verification in the `test_create_rejects_malformed_label` e2e test to `--provider local`, so it no longer couples to the availability of unrelated remote providers (matching the other e2e create tests).

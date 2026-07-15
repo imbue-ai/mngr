@@ -1,0 +1,1 @@
+Fixed the e2e tutorial fixture so `[agent_types.codex] check_installation = false` is actually written to the local-scope settings, matching what the codex tutorial tests document. This stops `mngr create ... codex` from attempting `npm i -g @openai/codex` during provisioning on hosts without npm, which was failing `test_create_codex_positional`.

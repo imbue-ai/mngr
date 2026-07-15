@@ -124,6 +124,13 @@ def test_command_agent_data_pipeline(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
+# This test issues two sequential mngr invocations (create, list) plus a couple
+# of fast shell/tmux commands. Each mngr call pays the full mngr CLI startup
+# cost, which balloons under the contended sandboxes the release suite runs in
+# (a single invocation can take ~20-25s), so the per-test budget must comfortably
+# cover the whole sequence (the sibling command-agent tests use 300s for the same
+# reason). Without this marker the test inherits the global 10s pytest-timeout.
+@pytest.mark.timeout(300)
 def test_command_agent_dev_server_extra_windows(e2e: E2eSession) -> None:
     """Tutorial block:
         # run a dev server with extra tmux windows for logs
@@ -147,6 +154,7 @@ def test_command_agent_dev_server_extra_windows(e2e: E2eSession) -> None:
         e2e.run(
             'mngr create dev-env --type command -w logs="tail -f /tmp/mngr-app.log" --no-ensure-clean --no-connect -- sleep 100992',
             comment="dev server with extra tmux window for logs",
+            timeout=90.0,
         )
     ).to_succeed()
 
@@ -154,7 +162,11 @@ def test_command_agent_dev_server_extra_windows(e2e: E2eSession) -> None:
     # it stays fast and does not reach out to remote providers (this agent runs
     # purely locally; the Modal command-agent path is covered by
     # test_command_agent_batch_job_modal).
-    list_result = e2e.run("mngr list --provider local --format json", comment="Verify the dev-env agent was created")
+    list_result = e2e.run(
+        "mngr list --provider local --format json",
+        comment="Verify the dev-env agent was created",
+        timeout=90.0,
+    )
     expect(list_result).to_succeed()
     agents = json.loads(list_result.stdout)["agents"]
     matching = [a for a in agents if a["name"] == "dev-env"]

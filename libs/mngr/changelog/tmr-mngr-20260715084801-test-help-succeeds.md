@@ -1,0 +1,1 @@
+Raised the pytest timeout on the `mngr --help` e2e test (`test_help_succeeds`) so the slow mngr subprocess cold-start (loading every plugin/backend/provider) no longer trips the global 10s pytest timeout, matching the other e2e tests in the same module.

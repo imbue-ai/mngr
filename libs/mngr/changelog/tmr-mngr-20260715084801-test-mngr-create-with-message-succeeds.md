@@ -1,0 +1,1 @@
+Made the `mngr_agent_cleanup` test helper's teardown `mngr destroy` more robust by raising its default timeout from 120s to 180s. Destroy performs full provider discovery plus garbage collection, which is fast when warm but can exceed 120s on a cold sandbox, intermittently failing otherwise-passing release tests during teardown.

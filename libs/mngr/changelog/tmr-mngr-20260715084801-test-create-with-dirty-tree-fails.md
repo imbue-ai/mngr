@@ -1,0 +1,1 @@
+Gave the `test_create_with_dirty_tree_fails` e2e test a 120s timeout so it no longer trips the default 10s per-test timeout on `mngr` subprocess interpreter-startup overhead, matching the other error-path tests in the suite.

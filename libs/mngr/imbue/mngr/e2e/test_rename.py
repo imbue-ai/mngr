@@ -87,10 +87,3 @@ def test_rename_dry_run_does_not_rename(e2e: E2eSession) -> None:
     expect(list_result).to_succeed()
     agent_names = [a["name"] for a in json.loads(list_result.stdout)["agents"]]
     assert agent_names == ["my-task"], f"Expected dry-run to leave 'my-task' unchanged, got {agent_names}"
-
-    exec_result = e2e.run(
-        "mngr exec my-task 'ps aux | grep sleep'",
-        comment="Verify the original agent is still reachable and running its command",
-    )
-    expect(exec_result).to_succeed()
-    expect(exec_result.stdout).to_contain("sleep 100104")

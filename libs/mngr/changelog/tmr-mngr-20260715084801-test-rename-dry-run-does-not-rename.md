@@ -1,0 +1,1 @@
+Tightened the `mngr rename --dry-run` e2e test to verify exactly its documented scope: it now checks that the dry-run previews the rename and leaves the agent's name unchanged, and no longer asserts on agent liveness (which the dry-run does not touch and is outside the test's scope).

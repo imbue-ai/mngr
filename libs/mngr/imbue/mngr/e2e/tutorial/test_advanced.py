@@ -402,7 +402,13 @@ def test_tips_exec_filtered_hosts(e2e: E2eSession) -> None:
         timeout=120.0,
     )
     expect(result).to_succeed()
-    expect(result.stdout).to_contain(agent_id)
+    # The command has two halves; verify each distinct effect the scope names.
+    # `echo $MNGR_AGENT_ID` emits a standalone line equal to the host's id...
+    output_lines = [line.strip() for line in result.stdout.splitlines()]
+    assert agent_id in output_lines, (
+        f"expected a standalone echoed $MNGR_AGENT_ID line {agent_id!r}, got: {result.stdout!r}"
+    )
+    # ...and `env | sort` dumps the host's env, which includes its MNGR_AGENT_ID.
     expect(result.stdout).to_contain(f"MNGR_AGENT_ID={agent_id}")
 
 

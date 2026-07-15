@@ -758,6 +758,14 @@ def e2e(
         "\n"
         "[commands.connect]\n"
         'connect_command = "mngr-e2e-connect"\n'
+        "\n"
+        # Skip the codex install check so `mngr create ... codex` provisioning does
+        # not try to `npm i -g @openai/codex` on hosts without a codex binary (or
+        # npm). The codex tutorial tests only assert on positional/`--type` agent-type
+        # resolution, not on a real codex run (that is covered by the mngr_codex
+        # release test), so no e2e test needs the install check enabled.
+        "[agent_types.codex]\n"
+        "check_installation = false\n"
     )
 
     # NOTE: the project-scope ``settings.toml`` is deliberately NOT seeded here.

@@ -14,6 +14,11 @@ from imbue.skitwright.expect import expect
 
 
 @pytest.mark.release
+# Rendering `mngr --help` loads every plugin/backend/provider at import time when
+# the mngr subprocess starts, which routinely exceeds the global 10s pytest
+# timeout on slower hosts. Raise it above the `run` subprocess timeout (30s) so
+# the command's own timeout governs (mirrors the other e2e tests here).
+@pytest.mark.timeout(60)
 def test_help_succeeds(e2e: E2eSession) -> None:
     """Tutorial block:
         # or see the other commands--list, destroy, message, connect, git, clone, and more!  These other commands are covered in their own sections below.
@@ -320,8 +325,12 @@ def test_create_rejects_malformed_label(e2e: E2eSession) -> None:
     expect(result.stderr).to_contain("KEY=VALUE")
 
     # The malformed input must be rejected before any agent is created -- nothing
-    # should be left behind in the listing.
-    list_result = e2e.run("mngr list --format json", comment="Verify no agent was created")
+    # should be left behind in the listing. Scope the listing to the local
+    # provider: the rejected create is a purely local create, so a leftover agent
+    # would live on the local host. A bare `mngr list` fans out to every enabled
+    # provider and exits non-zero if any is unreachable in the test environment,
+    # which is orthogonal to the scope -- matching the other e2e create tests.
+    list_result = e2e.run("mngr list --provider local --format json", comment="Verify no agent was created")
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
     assert [a for a in parsed["agents"] if a["name"] == "my-task"] == []

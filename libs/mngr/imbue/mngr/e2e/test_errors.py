@@ -88,6 +88,12 @@ def test_create_duplicate_name_fails(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+# This test runs two full `mngr` subprocesses (`create` then `list`). Each
+# invocation pays a fixed ~10s+ interpreter startup cost (importing the provider
+# backend SDKs registered at import time), which alone can exceed the default
+# 10s per-test timeout even though the clean-tree guard fails fast. Allow extra
+# headroom so the timeout reflects real misbehavior, not startup overhead.
+@pytest.mark.timeout(120)
 def test_create_with_dirty_tree_fails(e2e: E2eSession) -> None:
     """`mngr create` without --no-ensure-clean in a dirty git tree aborts at the clean-tree
     guard: stderr cites the uncommitted changes and points to --no-ensure-clean, and the
