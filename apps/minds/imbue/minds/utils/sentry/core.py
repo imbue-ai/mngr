@@ -250,8 +250,8 @@ def _external_log_attachment_groups(
     The detached ``mngr latchkey forward`` daemon (which runs discovery and the
     reverse tunnels) logs into the latchkey plugin data dir, and the shared
     discovery event stream persists under the mngr host dir -- both essential
-    for diagnosing discovery/replay problems, and previously absent from bug
-    reports because the sweep only covered the flat minds log folder.
+    for diagnosing discovery/replay problems, and both outside the flat minds
+    log folder that the default sweep covers.
     """
     return (
         # The daemon's structured loguru log (mutable -- re-upload on every report).
