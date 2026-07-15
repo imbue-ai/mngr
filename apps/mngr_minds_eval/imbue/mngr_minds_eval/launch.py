@@ -278,6 +278,8 @@ def launch_batch(*, config: dict, anthropic_key: str, port: str, stamp: str) -> 
             "case_name": case["id"],
             "persona": case["persona"],
             "prompts": case["prompts"],  # one per turn; a literal is sent verbatim, DECIDE_FROM_PERSONA is role-played
+            # per-case wall-clock budget (default 1h); past it the in-sandbox worker marks the run timed_out
+            "timeout_seconds": config.get("timeout_seconds", 3600),
             "s3_bucket": bucket,
             "s3_prefix": case_pref,
             "restic_repository": s3_store.restic_repo_url(env, case_pref),

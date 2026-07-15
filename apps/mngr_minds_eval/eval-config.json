@@ -2,6 +2,7 @@
   "name": "combined",
   "mngr_branch": "minds-eval",
   "fct_branch": "minds-eval-autosend",
+  "timeout_seconds": 3600,
   "personas": [
     {
       "id": "todo-app",

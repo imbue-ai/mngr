@@ -147,10 +147,15 @@ def evaluate_batch(batch: str) -> None:
     if config is None:
         raise SystemExit("no such batch: {} (try: minds-evals list-batches)".format(batch))
 
-    finished = [r for r in rows if r["state"] and r["state"].get("test_state") == "finished"]
-    unfinished = [r["id"] for r in rows if r not in finished]
+    finished = [r for r in rows if (r["state"] or {}).get("test_state") == "finished"]
+    timed_out = [r["id"] for r in rows if (r["state"] or {}).get("test_state") == "timed_out"]
+    still_running = [r["id"] for r in rows if (r["state"] or {}).get("test_state") not in ("finished", "timed_out")]
     if not finished:
-        raise SystemExit("no finished cases to evaluate in {} ({} still running)".format(batch, len(rows)))
+        raise SystemExit(
+            "no finished cases to evaluate in {} ({} still running, {} timed out)".format(
+                batch, len(still_running), len(timed_out)
+            )
+        )
 
     # Each successful case overwrites its own case_eval_results.json below, and the batch aggregate is
     # rewritten at the end -- so a re-run recomputes cleanly WITHOUT a pre-delete that would destroy
@@ -175,7 +180,11 @@ def evaluate_batch(batch: str) -> None:
     # A row per case in config order; None -> N/A (case not finished yet, or its eval errored).
     display_rows = [(row["id"], per_case.get(row["id"])) for row in rows]
     _print_table(display_rows, batch_results)
-    notes = ["not finished: {}".format(", ".join(unfinished))] if unfinished else []
+    notes = []
+    if still_running:
+        notes.append("not finished: {}".format(", ".join(still_running)))
+    if timed_out:
+        notes.append("timed out: {}".format(", ".join(timed_out)))
     notes += ["eval error for {}: {}".format(case_id, message) for case_id, message in errors.items()]
     if notes:
         print("  N/A -- " + "; ".join(notes), flush=True)
