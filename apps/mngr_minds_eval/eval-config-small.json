@@ -1,0 +1,39 @@
+{
+  "name": "trio",
+  "mngr_branch": "main",
+  "fct_branch": "minds-eval-autosend",
+  "timeout_seconds": 3600,
+  "personas": [
+    {
+      "id": "todo-app",
+      "persona": "Non-technical founder who wants a working web app fast.",
+      "prompts": [
+        "Build me a simple to-do list web app: add tasks, mark them complete, delete them, and keep them saved in the browser between reloads. Then tell me how to open it.",
+        "Sounds good.",
+        "Sounds good.",
+        "DECIDE_FROM_PERSONA",
+        "DECIDE_FROM_PERSONA"
+      ]
+    },
+    {
+      "id": "landing-page",
+      "persona": "Solo founder launching a product.",
+      "prompts": [
+        "Build a clean single-page marketing site for a product called 'Focus' with a hero headline, three feature cards, and an email signup form. Show me how to run it locally.",
+        "Sounds good.",
+        "DECIDE_FROM_PERSONA",
+        "DECIDE_FROM_PERSONA"
+      ]
+    },
+    {
+      "id": "greeting",
+      "persona": "",
+      "prompts": [
+        "hi what can you do",
+        "Sounds good.",
+        "DECIDE_FROM_PERSONA",
+        "DECIDE_FROM_PERSONA"
+      ]
+    }
+  ]
+}

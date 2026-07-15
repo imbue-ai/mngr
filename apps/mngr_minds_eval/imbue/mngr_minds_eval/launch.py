@@ -138,6 +138,14 @@ def load_config(config_path: Path) -> dict:
     for key in ("name", "mngr_branch", "personas"):
         if not config.get(key):
             raise SystemExit("eval config is missing required key: {!r}".format(key))
+    # The batch's Modal user_id is sanitize_user_id("<name>_<stamp>") capped at 40 chars. The
+    # 23-char timestamp tail is what makes two same-name launches land in DIFFERENT Modal envs --
+    # so the name must be short enough that the cap never truncates the stamp away.
+    if len(str(config["name"])) > 16:
+        raise SystemExit(
+            "eval config: 'name' must be at most 16 characters (got {!r}) -- it is combined with a "
+            "launch timestamp to form the batch's unique Modal env".format(config["name"])
+        )
     try:
         normalize_cases(config["personas"])  # validate case shape now, on the host
     except ValueError as exc:

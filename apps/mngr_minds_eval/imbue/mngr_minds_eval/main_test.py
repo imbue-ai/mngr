@@ -107,3 +107,19 @@ def test_point_arg_to_box_rewrites_all_forms() -> None:
     argv = ["launch", "--config", "./eval-config.json", "--config=eval-config.json", "--other", "x"]
     out = main._point_arg_to_box(argv, local, dest)
     assert out == ["launch", "--config", dest, "--config={}".format(dest), "--other", "x"]
+
+
+def test_load_config_rejects_long_names() -> None:
+    # A long name would truncate the unique timestamp out of the 40-char Modal user_id cap,
+    # landing two same-name launches in ONE Modal env.
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+        json.dump(
+            {"name": "x" * 17, "mngr_branch": "main", "personas": [{"id": "a", "prompts": ["hi"]}]},
+            f,
+        )
+        path = Path(f.name)
+    try:
+        load_config(path)
+        raise AssertionError("expected SystemExit for a 17-char name")
+    except SystemExit as exc:
+        assert "16 characters" in str(exc)
