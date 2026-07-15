@@ -68,6 +68,7 @@ from pathlib import Path
 from typing import Final
 
 import pytest
+from loguru import logger
 
 from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.polling import poll_until
@@ -255,13 +256,28 @@ Subsystem sftp {_sftp_server_path()}
         _require(is_up, f"root sshd failed to start listening on {_VPS_SSH_HOST}:{port}")
         yield port, host_key_path
     finally:
-        # sudo forwards SIGTERM to the sshd it runs; fall back to a hard kill.
-        process.terminate()
+        # The spawned pair (sudo + sshd) runs as root, so a plain
+        # ``process.terminate()`` from this non-root test process would fail
+        # with EPERM. Deliver SIGTERM through sudo instead; sudo forwards it
+        # to the sshd it runs. If that fails to bring it down, locate the
+        # surviving sshd by its unique per-test config path and kill those
+        # exact PIDs (never a broad pattern).
+        subprocess.run(["sudo", "-n", "kill", str(process.pid)], capture_output=True, text=True, timeout=30)
         try:
             process.wait(timeout=10)
         except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
+            surviving = subprocess.run(
+                ["pgrep", "-f", str(sshd_config_path)], capture_output=True, text=True, timeout=30
+            )
+            for pid in surviving.stdout.split():
+                subprocess.run(["sudo", "-n", "kill", "-9", pid], capture_output=True, text=True, timeout=30)
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                # Best-effort teardown must not raise (it would mask the
+                # test's own failure); a lingering loopback-only sshd on a
+                # throwaway machine is tolerable, but say so loudly.
+                logger.warning("root sshd (pid {}) could not be torn down; it may linger until reboot", process.pid)
 
 
 def _write_ssh_client_setup(home: Path, private_key: Path, host_key_path: Path, port: int) -> Path:
