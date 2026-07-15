@@ -65,5 +65,9 @@ def create_workspace(
         on_stage = _print_stage
     agent_id = minds_client.create_and_wait(port, payload, on_stage=on_stage)
     if on_stage is None and not quiet:
-        print("  workspace up: {} (agent {})".format(name or "<auto>", agent_id), flush=True)
+        print(
+            "  {} created (agent {}) -- still booting; open it in ~1 min with:\n"
+            "    minds-evals view-modal-workspace {}".format(name or "<auto>", agent_id, name or "<name>"),
+            flush=True,
+        )
     return agent_id
