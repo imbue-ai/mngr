@@ -21,6 +21,11 @@ eval "$(uv run minds env activate "${MINDS_ENV:-staging}")"
 # which discovers the backend port by probing the container's own listeners).
 echo ">> desktop: Xvfb + noVNC + Minds (Electron)"
 export DISPLAY=:99
+# A restarted container still has the previous boot's X lock/socket in its writable layer;
+# Xvfb refuses to start over them, which took the whole desktop down on `docker restart`.
+rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
+# System dbus socket (Electron probes it; silences the startup error).
+mkdir -p /run/dbus && (dbus-daemon --system --fork 2>/dev/null || true)
 Xvfb :99 -screen 0 "${DESKTOP_RESOLUTION:-1920x1080x24}" -nolisten tcp &
 sleep 1
 openbox &
