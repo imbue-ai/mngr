@@ -11,6 +11,8 @@ tests.
 import json
 import os
 import time
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -33,6 +35,7 @@ from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import ProviderInstanceName
 
 _USER_ID = "11111111-2222-3333-4444-555555555555"
 _EMAIL = "sync-user@example.com"
@@ -215,7 +218,15 @@ def test_scheduler_pass_converts_legacy_state_and_tombstones_absent_rows(tmp_pat
     assert _EMAIL in cli.sync_bundle_by_email
 
     # The workspace disappears locally (definitively absent) -> tombstoned.
+    # Absence only counts once the record's provider has produced a snapshot
+    # (a provider that never reported proves nothing), so seed one.
     empty_resolver = make_resolver_with_data(agents_json=json.dumps({"agents": []}))
+    empty_resolver.update_providers(
+        provider_name=ProviderInstanceName("local"),
+        provider=None,
+        error=None,
+        last_snapshot_at=datetime.now(timezone.utc),
+    )
     scheduler_after = WorkspaceSyncScheduler(record_store=store, session_store=session, resolver=empty_resolver)
     scheduler_after.run_one_pass()
     assert cli.sync_records_by_email[_EMAIL][str(host_id)]["state"] == "destroyed"
