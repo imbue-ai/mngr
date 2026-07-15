@@ -26,16 +26,6 @@
     el.classList.toggle('hidden', !isShown);
   }
 
-  function formatBytes(n) {
-    if (n === null || n === undefined) return '--';
-    if (n < 1024) return n + ' B';
-    var units = ['KB', 'MB', 'GB', 'TB'];
-    var value = n / 1024;
-    var i = 0;
-    while (value >= 1024 && i < units.length - 1) { value /= 1024; i += 1; }
-    return (value < 10 ? value.toFixed(1) : Math.round(value)) + ' ' + units[i];
-  }
-
   function relativeAgo(iso) {
     var then = Date.parse(iso);
     if (isNaN(then)) return '';
@@ -98,9 +88,10 @@
   }
 
   // One table row: absolute time + "Latest" badge on the repository's newest
-  // snapshot, size, Download / Restore actions. Unlike the settings page's
-  // compact table this page shows the full date, with the relative age as
-  // secondary text.
+  // snapshot, Download / Restore actions. Unlike the settings page's compact
+  // table this page shows the full date, with the relative age as secondary
+  // text. (Snapshot size is deliberately not shown -- see the settings-page
+  // table in workspace_backups.js.)
   function buildSnapshotRow(snapshot, isLatest, isFirst) {
     var row = document.createElement('div');
     row.className = 'flex items-center gap-4 px-4 py-3'
@@ -128,11 +119,6 @@
       timeCell.appendChild(latestBadge);
     }
     row.appendChild(timeCell);
-
-    var sizeEl = document.createElement('span');
-    sizeEl.className = 'type-body text-secondary shrink-0';
-    sizeEl.textContent = formatBytes(snapshot.total_size_bytes);
-    row.appendChild(sizeEl);
 
     var actions = document.createElement('div');
     actions.className = 'flex items-center gap-4 shrink-0';
