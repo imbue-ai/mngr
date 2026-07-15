@@ -908,11 +908,11 @@ class ErrorAttachmentsS3Uploader(MutableModel):
     def _collect_group_uploads(
         self,
         uploads: dict[tuple[str, str], _UploadCallback | None],
-        logs_folder: Path,
+        group_folder: Path,
         group: LogAttachmentGroup,
     ) -> None:
         key_suffix = f".{COMPRESSED_LOG_EXTENSION}" if group.is_compressed else ""
-        for log_file in _n_newest_files(logs_folder.glob(group.glob), n=group.max_file_count):
+        for log_file in _n_newest_files(group_folder.glob(group.glob), n=group.max_file_count):
             if group.is_immutable:
                 with self._lock:
                     existing_key = self._immutable_logs_keys.get(log_file)
