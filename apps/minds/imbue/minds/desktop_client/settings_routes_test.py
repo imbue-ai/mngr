@@ -158,6 +158,18 @@ def test_settings_modal_lists_granted_connector_without_back_link(tmp_path: Path
     assert 'id="settings-modal-backdrop"' in body
 
 
+def test_settings_page_empty_state_when_no_grants(tmp_path: Path) -> None:
+    agent, host = str(AgentId()), HostId()
+    handler = _build_handler(tmp_path)
+    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Workspace"})
+
+    response = client.get("/settings")
+
+    assert response.status_code == 200
+    # Each category now has its own empty state.
+    assert "No connectors have been added yet." in response.text
+
+
 def test_revoke_service_for_workspace_removes_rule(tmp_path: Path) -> None:
     agent, host = str(AgentId()), HostId()
     path = permissions_path_for_host(_plugin_dir(tmp_path), host)

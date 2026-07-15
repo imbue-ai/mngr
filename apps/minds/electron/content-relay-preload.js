@@ -56,6 +56,14 @@ window.addEventListener('message', (event) => {
     ipcRenderer.send('open-help', typeof agentId === 'string' ? agentId : '');
     return;
   }
+  // Crash page (crashed.html) Reload button: ask the main process to re-load the
+  // workspace URL that was showing when this content view's renderer died,
+  // spawning a fresh renderer. No payload -- the main process holds the pre-crash
+  // URL, so a foreign page can't smuggle a navigation target through this channel.
+  if (data.type === 'minds:reload-crashed-view') {
+    ipcRenderer.send('reload-crashed-view');
+    return;
+  }
   // Sign-in: open the shared modal overlay loaded with the sign-in page (so
   // it covers the whole window, including the title bar). ``returnTo`` is an
   // optional local path a successful sign-in should land on; it is validated

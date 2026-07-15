@@ -179,12 +179,12 @@
     });
   });
 
-  // -- Backup master password change ------------------------------------
-  // Synchronous POST: the server rekeys every existing backed-up
-  // workspace's repository, then answers with per-workspace results.
+  // -- Sync master password change ---------------------------------------
+  // Synchronous POST: the server rewraps each signed-in account's sync key
+  // (and pushes/clears the synced secrets), then answers with per-account
+  // results. Workspace backup repositories are never touched.
   var newPasswordInput = document.getElementById('backup-new-password');
   var confirmPasswordInput = document.getElementById('backup-new-password-confirm');
-  var savePasswordCheckbox = document.getElementById('backup-change-save-password');
   var changeBtn = document.getElementById('backup-change-password-btn');
   var changeSpinner = document.getElementById('backup-change-spinner');
   var changeError = document.getElementById('backup-change-error');
@@ -202,21 +202,19 @@
     changeResults.appendChild(li);
   }
 
-  function renderRotationResults(results, isAllOk) {
+  function renderChangeResults(results, isAllOk) {
     changeResults.textContent = '';
     if (!results || results.length === 0) {
-      appendResultLine(isAllOk
-        ? 'Master password updated. No existing workspaces had backups to rekey.'
-        : 'The master password change failed.');
+      appendResultLine('The master password change failed.');
     } else {
       results.forEach(function (entry) {
         appendResultLine(entry.is_ok
-          ? (entry.workspace_name + ': rekeyed')
-          : (entry.workspace_name + ': FAILED - ' + (entry.error || 'unknown error')));
+          ? (entry.account + ': updated')
+          : (entry.account + ': FAILED - ' + (entry.error || 'unknown error')));
       });
       appendResultLine(isAllOk
-        ? 'Master password updated everywhere.'
-        : 'Master password updated; re-run the change to retry the failed workspaces.');
+        ? 'Master password updated for every account.'
+        : 'Re-run the change to retry the failed accounts.');
     }
     changeResults.classList.remove('hidden');
   }
@@ -236,7 +234,6 @@
       body: JSON.stringify({
         new_password: newPasswordInput.value,
         new_password_confirm: confirmPasswordInput.value,
-        save_password: savePasswordCheckbox.checked,
       }),
     })
       .then(function (resp) {
@@ -251,7 +248,7 @@
         }
         newPasswordInput.value = '';
         confirmPasswordInput.value = '';
-        renderRotationResults(res.data.results, res.data.ok);
+        renderChangeResults(res.data.results, res.data.ok);
       })
       .catch(function () {
         changeBtn.disabled = false;

@@ -1,4 +1,4 @@
-{#def report_unexpected_errors=false, include_error_logs=false, services_overview=[], file_sharing_grants=[], workspace_delegation_grants=[], permissions_unavailable=false, has_saved_backup_password=false #}
+{#def report_unexpected_errors=false, include_error_logs=false, services_overview=[], file_sharing_grants=[], workspace_delegation_grants=[], permissions_unavailable=false, is_master_password_set=false #}
 {#
   Centered "Minds Settings" modal page, hosted in the desktop client's shared
   modal WebContentsView (the same overlay layer as the sign-in modal) so it
@@ -44,7 +44,7 @@
         :file_sharing_grants="file_sharing_grants"
         :workspace_delegation_grants="workspace_delegation_grants"
         :permissions_unavailable="permissions_unavailable"
-        :has_saved_backup_password="has_saved_backup_password" />
+        :is_master_password_set="is_master_password_set" />
     </div>
   </div>
 </Base>

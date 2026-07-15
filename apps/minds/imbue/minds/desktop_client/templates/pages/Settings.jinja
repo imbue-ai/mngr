@@ -1,9 +1,9 @@
-{#def report_unexpected_errors=false, include_error_logs=false, services_overview=[], file_sharing_grants=[], workspace_delegation_grants=[], permissions_unavailable=false, has_saved_backup_password=false #}
+{#def report_unexpected_errors=false, include_error_logs=false, services_overview=[], file_sharing_grants=[], workspace_delegation_grants=[], permissions_unavailable=false, is_master_password_set=false #}
 {#
   App-level ("Minds") settings as a full page: the browser-mode fallback for
   the centered settings modal (pages.SettingsModal) the Electron shell shows.
   Both render the same shared sections (templates/AppSettingsSections.jinja):
-  Connectors, Local files, Workspace delegation, Error reporting, and Backup
+  Connectors, Local files, Workspace delegation, Error reporting, and Master
   password -- all per-machine / app-level settings (the app, not any single
   workspace, owns permissions). See AppSettingsSections.jinja for the section
   docs and the permission-overview model shapes.
@@ -21,7 +21,7 @@
       :file_sharing_grants="file_sharing_grants"
       :workspace_delegation_grants="workspace_delegation_grants"
       :permissions_unavailable="permissions_unavailable"
-      :has_saved_backup_password="has_saved_backup_password" />
+      :is_master_password_set="is_master_password_set" />
     <div class="mt-8"><Link href="/" extra="type-helper">&larr; Back to workspaces</Link></div>
   </PageContainer>
 </Base>

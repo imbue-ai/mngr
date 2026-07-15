@@ -75,6 +75,23 @@ class ImbueCloudBucketLimitError(ImbueCloudBucketError):
     """Raised when the account is already at the per-account bucket cap."""
 
 
+class ImbueCloudSyncError(ImbueCloudError):
+    """Raised when a workspace-record / key-bundle sync operation fails."""
+
+
+class ImbueCloudSyncConflictError(ImbueCloudSyncError):
+    """Raised on a 409 from a record push (revision CAS or active-agent conflict).
+
+    ``stored_record`` carries the server's current row (as a plain dict) when
+    the conflict was a revision CAS failure, so the caller can merge and retry;
+    it is None for an active-agent uniqueness conflict.
+    """
+
+    def __init__(self, message: str, stored_record: dict[str, object] | None) -> None:
+        super().__init__(message)
+        self.stored_record = stored_record
+
+
 class OvhCatalogPricingError(ImbueCloudError):
     """Raised when an OVH catalog plan or add-on cannot be priced (missing entry or no month-to-month price)."""
 

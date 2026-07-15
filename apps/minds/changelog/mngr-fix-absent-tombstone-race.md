@@ -1,0 +1,3 @@
+Fixed synced workspaces being silently de-associated by a startup race: the absent-host tombstone pass could tombstone a workspace record while its provider was merely slow to produce its first discovery listing (e.g. a stopped lima VM right after app start), pushing a spurious "destroyed" state to the connector. The pass now requires the record's specific provider to have produced at least one snapshot before treating absence as evidence.
+
+Added the inverse safety net: a tombstoned record hosted by this install whose workspace is live in local discovery is automatically re-activated and re-pushed (self-healing rows tombstoned by the old race), guarded so an in-flight destroy or a genuinely-destroyed host lingering in discovery is never resurrected.

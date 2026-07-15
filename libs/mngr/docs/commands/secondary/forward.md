@@ -63,6 +63,7 @@ mngr forward [OPTIONS]
 | `--preauth-cookie` | text | Pre-shared cookie value accepted in lieu of an OTP-issued cookie. | None |
 | `--open-browser`, `--no-open-browser` | boolean | Open the printed login URL in the system browser. | `False` |
 | `--allow-host-loopback` | boolean | Permit dialing host loopback (localhost / 127.0.0.0/8 / ::1) when an agent's registered URL is loopback and no SSH tunnel exists. Off by default: any agent whose SSH info hasn't been published returns a 502 instead of silently serving whatever else is bound to that port on the host. Pass this flag only for setups that intentionally run agents directly on the host. | `False` |
+| `--use-http2` | boolean | Terminate TLS and negotiate HTTP/2 (via ALPN) instead of serving plain HTTP/1.1. Removes Chromium's ~6-connection-per-origin ceiling for the workspace UI. The proxy generates a fresh self-signed cert at startup, so only clients that trust it (the minds desktop app) should enable this; a human browser will see a cert warning. | `False` |
 
 ## Examples
 

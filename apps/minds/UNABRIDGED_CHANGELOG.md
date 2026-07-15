@@ -4,6 +4,88 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-14
+
+Reframed the titlebar help entry point around bug reporting. The trigger now shows a bug glyph (instead of the question-mark "help" circle) with the tooltip "Ran into a bug?", and the modal it opens is retitled "Ran into a bug?" with a short lead-in ("Here's how we can help:") above the fix-or-report options.
+
+The two paths inside are unchanged -- when opened from a live workspace you can still have an agent try to fix the problem (the default there), or report the bug to Imbue -- only the entry point's icon and copy changed. Added a `bug` glyph to the 16x16 icon set.
+
+Fixed a workspace whose host was offline since before the app started being stranded on "Loading workspace" forever: the recovery page's automatic cold-boot dispatch was silently skipped whenever the health tracker had never probed the workspace (the tracker reports HEALTHY by default for agents it has no record of, and the restart endpoint's "already recovered" veto misread that default as a confirmed recovery). The same misfire delayed offline-host restarts on docker until a later STUCK-triggered reprobe.
+
+The endpoint-side veto (and the `auto_dispatched` request marker that drove it) is removed entirely. For the host tier -- the only tier dispatched for an offline host -- the race the veto guarded against (a workspace self-recovering while the recovery page's slow host-health probe is in flight) is absorbed by `mngr start` itself: the auto-dispatched host restart skips the stop step and `mngr start` only targets STOPPED agents (and starts the host idempotently), so a restart dispatched against a live workspace degrades to a no-op. The services tier's stop+start does not have that property; its narrow self-recovery race window is deliberately accepted because that tier is slated for removal.
+
+Persist the Electron main process's logs and recover gracefully when a workspace view's renderer crashes.
+
+- The Electron main process now tees all of its console output (and any uncaught exception / unhandled rejection) into a new `~/.minds/logs/electron.log`, so main-process problems are durably diagnosable instead of vanishing in packaged builds.
+
+- Both `electron.log` and the backend's `minds.log` now rotate at 100MB (keeping the 10 newest rotations, gzipped) instead of growing without bound.
+
+- Bug reports upload the current `minds.log` and `electron.log` plus the most recent gzipped rotation of each, under accurate names (`backend_logs` / `electron_logs`), and a report filed while the backend is down now attaches both logs.
+
+- When a workspace's content view crashes (e.g. its renderer is killed over a long sleep), the app now shows an "Aw, Snap!"-style crash page with the crash reason and a Reload button, rather than a blank white screen that only a manual Home-and-back would fix. Reload is manual (no auto-reload) to avoid crash loops. The page uses a white background with the distressed Minds head logo and a "Bummer" heading.
+
+- The window's other two views now recover from renderer death too: if the chrome (titlebar) renderer dies it shows a compact in-titlebar error strip with a Reload button (leaving the workspace content running) instead of a blank bar, and if the overlay/menu renderer dies it is silently reloaded so the next sidebar/inbox/help open works.
+
+- Out-of-memory renderer deaths (`oom`, in any of the three views) are now reported to Sentry automatically (subject to the existing error-reporting opt-in) and labeled by which view died, so these failures are visible without waiting for a manual bug report. Native renderer crashes already flow to Sentry as minidumps, and sleep/external kills (`killed`) are deliberately left unreported (unactionable and noisy) but remain in `electron.log`.
+
+Update Latchkey to include support for GitHub's GraphQL API.
+
+Re-trimmed the inline-function ratchet count from 9 to 7 after a shared-checker bug fix stopped double-counting a doubly-nested function. No minds source changed; the two removed counts were the same function counted once per enclosing function.
+
+Creating a workspace from a private (or nonexistent) GitHub repository URL now shows helpful guidance instead of just a raw git error. When any clone of a github.com URL fails (deliberately no matching of git's error text -- a failed GitHub clone is overwhelmingly an access problem, and the raw error stays visible alongside), the creating page explains that the repository looks private, recommends signing in with the GitHub CLI (`gh auth login`, with a link to the official quickstart), and offers the alternative of cloning the repository locally and entering its path in the form instead.
+
+The desktop client's local `git clone` of the workspace source now runs with `GIT_TERMINAL_PROMPT=0`, so cloning a repository this computer has no credentials for fails fast with a clear error instead of hanging on a credential prompt (mirroring the earlier fix in the default-workspace-template bootstrap's git calls).
+
+Non-GitHub git remotes get the same treatment without the GitHub-specific advice: a failed clone of a git URL on another host (or an ssh remote) is classified `GIT_AUTH_REQUIRED`, and the creating page shows the same "looks private / make sure your git credentials are set up, or clone it locally and use a path" guidance, minus the `gh auth login` recommendation (which only fits github.com). A local path or unrecognized source still shows just the raw error.
+
+The create-operation status API (`GET /api/v1/workspaces/operations/create/<id>`) gained an optional `error_kind` field carrying a machine-readable failure classification (`GITHUB_AUTH_REQUIRED` or `GIT_AUTH_REQUIRED`) alongside the human-readable `error` message.
+
+`propagate_changes` now tells you to create a missing default-workspace-template worktree with `just default-workspace-template-worktree` rather than a hardcoded `cd ~/project/default-workspace-template && git worktree add ...`. The `bake-slice-dev` workspace dir (documented in `docs/host-pool-setup.md`) now resolves from the explicit arg, else `DEFAULT_WORKSPACE_TEMPLATE_DIR`, else the `.external_worktrees/default-workspace-template` checkout -- no `~/project/...` path baked in.
+
+`.env.example` documents that `DEFAULT_WORKSPACE_TEMPLATE_DIR` is now read by `just default-workspace-template-worktree` and `just bake-slice-dev` (not only `sync-vendor-mngr`), and that `apps/minds/.env` is copied into each mngr agent worktree.
+
+New `apps/minds/CLAUDE.md` gives minds-scoped guidance for developing default-workspace-template (dwt) from the mngr checkout via `just default-workspace-template-worktree` -- kept out of the repo-root `CLAUDE.md` so minds specifics do not leak into mngr's top-level instructions.
+
+## 2026-07-13
+
+Serve the workspace UI over HTTP/2 to fix the hang that occurred once enough streaming tabs were open in one workspace.
+
+The whole workspace origin was previously served over plain HTTP/1.1, which Chromium caps at ~6 held-open connections per origin. Once a workspace had that many long-lived streams (one SSE per open chat tab, plus any `/service/` app's own streams), the pool was exhausted and every further request -- including the plain GETs that bootstrap a new terminal or app iframe -- queued indefinitely, hanging the UI even though the backend was healthy.
+
+Minds now runs its single `mngr forward` proxy with `--use-http2`, so the workspace origin terminates TLS and negotiates HTTP/2 (which multiplexes many streams over one connection). The Python readiness/recovery probes and the `/goto/` redirect URLs flip to `https` in lockstep, and the Electron shell builds `https`/`wss` workspace URLs, marks the `mngr_forward_session` cookie `Secure`, and silently trusts the proxy's ephemeral self-signed cert for its loopback origins (`localhost`, `*.localhost`, `127.0.0.1`) in the workspace-content session only -- every real https origin still gets Chromium's normal verification. The minds bare-origin backend (Home/Create/chrome/sidebar and its `minds_session` cookie) stays plain HTTP; the app deliberately runs a mixed http/https transport, which is not mixed-content-blocked.
+
+The recovery page no longer renders a restart verdict for a workspace whose host could not be observed during discovery. Previously, an unreachable imbue_cloud host surfaced as CRASHED, which the recovery classifier read as a trusted "container is down" observation: it classified HOST_OFFLINE and auto-dispatched an unattended host restart -- a restart that is doomed by construction, because restarting routes over the same outer SSH that is unreachable.
+
+With the imbue_cloud provider now surfacing unreachable hosts as UNKNOWN, the dispatch-tier classifier treats a host state that answers neither "running" nor "offline" (UNKNOWN, transitional states like STARTING, or an absent host state) as non-evidence, the same way it treats a timed-out probe: it classifies INDETERMINATE, so the page shows the live "Reconnecting" state, keeps checking, and offers no restart -- returning the user to the workspace automatically the moment it answers.
+
+The consent-gated HOST_UNRESPONSIVE verdict is now reserved for containers that were actually observed running but cannot be reached inside: an observed RUNNING claim whose in-container exec cleanly failed, and the UNAUTHENTICATED state, which providers emit for a running container whose inner SSH is unreachable (e.g. its sshd died). For that dead-sshd case the consent-gated host restart is the engineered recovery (its stop step is not skipped, so the stop/start relaunches sshd) -- preserving the behavior introduced for the docker provider in PR #2247. HOST_OFFLINE (unattended restart) still requires an actual observation that the container is stopped.
+
+Known remaining ambiguity, still deferred (originally flagged in PR #2247): imbue_cloud also reuses UNAUTHENTICATED for an outer-SSH authentication rejection, where the offered restart fails on the same auth error. Distinguishing "running but inner SSH dead" from "outer auth rejected" needs a dedicated provider state (e.g. UNREACHABLE), which is a provider-vocabulary change spanning imbue_cloud, docker, mngr_wait, and docs.
+
+- The Docker compute provider now picks its container runtime per platform
+  instead of always using gVisor (`runsc`). The create form gained an advanced
+  "Container runtime" setting (runc vs runsc) that defaults to runc on macOS
+  (where gVisor is unavailable) and runsc on Linux, and can be overridden per
+  workspace. macOS users no longer need the
+  `MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME=runc` environment-variable workaround
+  to create a local Docker workspace.
+
+- Under the hood, selecting runsc stacks a new `docker_runsc` create-template
+  overlay (in default-workspace-template) on top of the shared `docker` template,
+  so the gVisor choice is the only difference between the two runtimes and the
+  runc path -- the default -- is now what runs on macOS.
+
+- The create-form/API runtime default now honors a `MINDS_DOCKER_RUNTIME_DEFAULT`
+  environment override. It is unset in real deployments (so Linux still defaults
+  to runsc) and is set to `RUNC` by the e2e/snapshot test paths, whose Docker
+  daemon has no gVisor -- this is the layer that decides whether the create
+  stacks `docker_runsc` at all, which the mngr provider-config env var cannot
+  undo once the template is explicitly stacked.
+
+The minds backend now tells Sentry to ignore the paramiko/pyinfra stdlib loggers. The backend brokers cross-workspace reverse SSH tunnels through the same paramiko machinery, so handled SSH connection-failure noise logged at ERROR by paramiko would otherwise be captured by Sentry's default logging integration and flood the project with un-rate-limited events. Genuine, actionable failures still reach Sentry as typed exceptions logged through loguru.
+
+Increased the discovery-health watchdog's producer-stall threshold from 35s to 180s. The previous value sat only a few seconds above the healthy interval between discovery snapshots (mngr's default per-provider poll interval is 30s, and a single slow-but-alive provider can legitimately take up to ~150s between snapshots), so a merely-slow producer could be misread as stalled and trigger spurious supervisor bounces/restarts (each of which re-provisions every managed host). The new threshold clears the worst-case healthy cadence, so only a producer emitting literally nothing trips the watchdog, as intended. Also corrected the accompanying inline documentation, which incorrectly described the discovery cadence as ~10s.
+
 ## 2026-07-11
 
 The forever-claude-template repo is being renamed to default-workspace-template (with the `fct`/`FCT` shorthand expanded to `default_workspace_template`/`DEFAULT_WORKSPACE_TEMPLATE` forms).

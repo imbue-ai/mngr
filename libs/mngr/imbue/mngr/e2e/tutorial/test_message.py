@@ -22,9 +22,9 @@ def _create_sleep_agents(e2e: E2eSession, names_and_sleeps: list[tuple[str, int]
         ).to_succeed()
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.timeout(120)
 def test_message_one_agent(e2e: E2eSession) -> None:
     """Tutorial block:
         # send a message to a specific agent
@@ -48,6 +48,11 @@ def test_message_one_agent(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+# A single `mngr message` invocation still pays the full CLI startup cost, which
+# can exceed the default 10s func-only timeout on slower filesystems. Give it
+# headroom (the no-op path does no network/tmux/rsync work, so it is otherwise
+# fast).
+@pytest.mark.timeout(60)
 def test_message_nonexistent_agent(e2e: E2eSession) -> None:
     """Tutorial block:
         # send a message to a specific agent
@@ -67,7 +72,6 @@ def test_message_nonexistent_agent(e2e: E2eSession) -> None:
     expect(result.stdout).not_to_contain("Message sent to:")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(180)
@@ -93,7 +97,6 @@ def test_message_short_form(e2e: E2eSession) -> None:
     expect(result.stdout).to_contain("Successfully sent message to 1 agent(s)")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -123,7 +126,6 @@ def test_message_multiple_agents_by_name(e2e: E2eSession) -> None:
     expect(result.stdout).to_contain("Successfully sent message to 3 agent(s)")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -194,7 +196,6 @@ def test_message_filtered_via_stdin(e2e: E2eSession) -> None:
     expect(pipe_result.stdout).not_to_contain("Successfully sent message")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 # Happy-path counterpart to test_message_filtered_via_stdin: here the filter
@@ -202,6 +203,11 @@ def test_message_filtered_via_stdin(e2e: E2eSession) -> None:
 # is actually delivered. The tutorial block uses a modal filter as its example,
 # but creating modal agents is slow, so this test filters on the local provider
 # instead -- the stdin-piping mechanism being illustrated is identical.
+#
+# Marked tmux (the local command agents run under tmux, and delivery sends keys
+# to their sessions) but NOT rsync: messaging local agents never syncs files to
+# a remote host, so rsync is never invoked and the resource guard would flag a
+# superfluous rsync mark.
 @pytest.mark.timeout(180)
 def test_message_filtered_via_stdin_delivers_to_matching_agents(e2e: E2eSession) -> None:
     """Tutorial block:
@@ -221,12 +227,23 @@ def test_message_filtered_via_stdin_delivers_to_matching_agents(e2e: E2eSession)
     # on the local provider). `--ids` emits internal agent ids (one per line),
     # not the human names, so assert on the count of matched ids here and defer
     # the name-level check to the delivery output below.
+    #
+    # We deliberately do NOT assert the standalone list command exits 0. `mngr
+    # list` runs the full provider-discovery path across every enabled backend,
+    # and the test environment enables cloud backends (e.g. aws) whose default
+    # instances have no credentials. Those raise a provider-unavailable error --
+    # by design, so an unconfigured provider stays visible rather than silently
+    # vanishing -- which makes the whole command exit non-zero (exit code 6,
+    # EXIT_CODE_PROVIDER_INACCESSIBLE). That exit code reflects unrelated
+    # unconfigured providers, not the filter half under test: the `--include`
+    # filter still emits exactly the matching local ids on stdout, which is all
+    # this precondition needs. Asserting a clean exit here would test provider
+    # reachability, which is outside this test's scope (the delivery half).
     list_result = e2e.run(
         "mngr list --include 'host.provider == \"local\"' --ids",
         comment="list the ids of agents matching the filter",
         timeout=60.0,
     )
-    expect(list_result).to_succeed()
     matched_ids = [line for line in list_result.stdout.splitlines() if line.strip()]
     assert len(matched_ids) == 2, f"expected the filter to match the 2 local agents, got: {matched_ids!r}"
 
@@ -242,10 +259,9 @@ def test_message_filtered_via_stdin_delivers_to_matching_agents(e2e: E2eSession)
     expect(pipe_result.stdout).to_contain("Successfully sent message")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
+@pytest.mark.timeout(120)
 def test_message_on_error_continue(e2e: E2eSession) -> None:
     """Tutorial block:
         # control error handling when messaging multiple agents
@@ -261,9 +277,19 @@ def test_message_on_error_continue(e2e: E2eSession) -> None:
     listed agent and the command exits 0.
     """
     _create_sleep_agents(e2e, [("my-task", 100306)])
-    expect(
-        e2e.run(
-            'mngr list --ids | mngr msg - -m "Status update please" --on-error continue',
-            comment="control error handling when messaging multiple agents",
-        )
-    ).to_succeed()
+    # The unfiltered `mngr list --ids` enumerates every enabled provider. In the
+    # e2e env the AWS provider is enabled but has no credentials, so its
+    # credential probe runs for a while before reporting the provider as
+    # unreachable -- comfortably longer than the default 30s command timeout.
+    # Give the pipeline extra headroom so that probe does not trip the timeout.
+    pipe_result = e2e.run(
+        'mngr list --ids | mngr msg - -m "Status update please" --on-error continue',
+        comment="control error handling when messaging multiple agents",
+        timeout=90.0,
+    )
+    # `--on-error continue` attempts every listed agent rather than aborting, so
+    # the pipeline must actually deliver to the one listed agent (not silently
+    # no-op) and exit 0.
+    expect(pipe_result).to_succeed()
+    expect(pipe_result.stdout).to_contain("Message sent to: my-task")
+    expect(pipe_result.stdout).to_contain("Successfully sent message")

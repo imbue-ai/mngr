@@ -27,14 +27,17 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
+from imbue.minds.desktop_client.agent_creator import CreationErrorKind
 from imbue.minds.desktop_client.agent_creator import _CreateEventCapture
 from imbue.minds.desktop_client.agent_creator import _build_mngr_create_command
 from imbue.minds.desktop_client.agent_creator import _is_git_worktree
+from imbue.minds.desktop_client.agent_creator import _is_github_https_url
 from imbue.minds.desktop_client.agent_creator import _is_local_path
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials_in_text
 from imbue.minds.desktop_client.agent_creator import _rsync_worktree_over_clone
 from imbue.minds.desktop_client.agent_creator import checkout_branch
+from imbue.minds.desktop_client.agent_creator import classify_creation_error
 from imbue.minds.desktop_client.agent_creator import clone_git_repo
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
@@ -53,6 +56,7 @@ from imbue.minds.errors import MngrCommandError
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
+from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
 from imbue.minds.primitives import LaunchMode
@@ -60,6 +64,8 @@ from imbue.minds.utils.secret_redaction import redact_secret_env_assignments
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
+from imbue.mngr_forward.tls import build_server_ssl_context
+from imbue.mngr_forward.tls import generate_self_signed_cert
 from imbue.mngr_latchkey.agent_setup import SECRET_LATCHKEY_ENV_VAR_NAMES
 
 
@@ -122,6 +128,72 @@ def test_is_local_path_recognises_relative_and_absolute_paths() -> None:
     assert _is_local_path("~/foo")
     assert not _is_local_path("https://example.com/foo")
     assert not _is_local_path("git@github.com:user/repo.git")
+
+
+def test_is_github_https_url_matches_only_github_http_urls() -> None:
+    assert _is_github_https_url("https://github.com/acme/private-repo.git")
+    assert _is_github_https_url("http://www.github.com/acme/private-repo")
+    assert not _is_github_https_url("https://gitlab.example.com/acme/repo.git")
+    assert not _is_github_https_url("git@github.com:acme/repo.git")
+    assert not _is_github_https_url("ssh://git@github.com/acme/repo.git")
+    assert not _is_github_https_url("/local/path/to/repo")
+    # A github.com path segment on another host must not match.
+    assert not _is_github_https_url("https://evil.example.com/github.com/acme/repo")
+
+
+def test_classify_creation_error_flags_any_failed_github_clone() -> None:
+    """ANY failed clone of a github.com source classifies -- no matching of
+    git's error text (deliberately: substring matching is brittle, and a
+    failed github clone is overwhelmingly an access problem the guidance
+    covers, while the raw error stays visible alongside it)."""
+    url = "https://github.com/acme/private-repo.git"
+    failures = (
+        "git clone failed:\nfatal: could not read Username for 'https://github.com': terminal prompts disabled",
+        "git clone failed:\nfatal: Authentication failed for 'https://github.com/acme/private-repo.git/'",
+        "git fetch failed:\nremote: Repository not found.\n"
+        "fatal: repository 'https://github.com/acme/private-repo.git/' not found",
+        "git clone failed:\nfatal: unable to access 'https://github.com/acme/repo.git/': "
+        "Could not resolve host: github.com",
+    )
+    for message in failures:
+        assert classify_creation_error(url, GitCloneError(message)) is CreationErrorKind.GITHUB_AUTH_REQUIRED, message
+
+
+def test_classify_creation_error_flags_non_github_remotes_generically() -> None:
+    """A failed clone of a non-github REMOTE git source classifies as the
+    generic GIT_AUTH_REQUIRED (same access guidance, without the GitHub-CLI
+    advice) -- covering another host over https and scp-style ssh remotes."""
+    error = GitCloneError(
+        "git clone failed:\nfatal: Authentication failed for 'https://gitlab.example.com/acme/repo.git/'"
+    )
+    assert (
+        classify_creation_error("https://gitlab.example.com/acme/repo.git", error)
+        is CreationErrorKind.GIT_AUTH_REQUIRED
+    )
+    assert (
+        classify_creation_error("git@gitlab.example.com:acme/repo.git", error) is CreationErrorKind.GIT_AUTH_REQUIRED
+    )
+    assert (
+        classify_creation_error("ssh://git@gitlab.example.com/acme/repo.git", error)
+        is CreationErrorKind.GIT_AUTH_REQUIRED
+    )
+
+
+def test_classify_creation_error_ignores_local_paths_and_bare_input() -> None:
+    """A clone failure on a local path is not an access problem, and a bare
+    non-remote string is not a recognizable remote -- neither classifies."""
+    error = GitCloneError("git clone failed:\nfatal: repository not found")
+    assert classify_creation_error("/local/path/to/repo", error) is None
+    assert classify_creation_error("./relative/repo", error) is None
+    assert classify_creation_error("~/repo", error) is None
+    assert classify_creation_error("just-a-name", error) is None
+
+
+def test_classify_creation_error_ignores_non_clone_errors() -> None:
+    """Only clone failures classify; a downstream mngr failure that happens to
+    echo an auth-shaped string must not trigger the clone guidance."""
+    error = MngrCommandError("mngr create failed:\nfatal: could not read Username for 'https://github.com'")
+    assert classify_creation_error("https://github.com/acme/repo.git", error) is None
 
 
 def test_redact_url_credentials_strips_userinfo_for_schemed_urls() -> None:
@@ -492,6 +564,51 @@ def test_build_mngr_create_command_ignores_region_for_docker() -> None:
     assert "region=" not in joined and "vultr-region" not in joined
 
 
+def test_build_mngr_create_command_docker_runsc_stacks_gvisor_overlay() -> None:
+    """``DockerRuntime.RUNSC`` stacks the ``docker_runsc`` overlay on the docker template.
+
+    The overlay reuses the docker template body and only flips the provider's
+    container runtime to runsc, so the host runs under gVisor.
+    """
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.DOCKER,
+        host_name=HostName("hello"),
+        docker_runtime=DockerRuntime.RUNSC,
+    )
+    # The base docker template is always present; the runsc overlay is stacked
+    # immediately after it.
+    assert command.count("--template") >= 3
+    docker_idx = command.index("docker")
+    assert command[docker_idx - 1] == "--template"
+    runsc_idx = command.index("docker_runsc")
+    assert command[runsc_idx - 1] == "--template"
+    # Order matters: the overlay must come AFTER the base so its provider
+    # setting wins the stack.
+    assert runsc_idx > docker_idx
+
+
+def test_build_mngr_create_command_docker_runc_omits_gvisor_overlay() -> None:
+    """``DockerRuntime.RUNC`` (the docker template's default) adds no extra template."""
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.DOCKER,
+        host_name=HostName("hello"),
+        docker_runtime=DockerRuntime.RUNC,
+    )
+    assert "docker" in command
+    assert "docker_runsc" not in command
+
+
+@pytest.mark.parametrize("docker_runtime", [DockerRuntime.RUNC, DockerRuntime.RUNSC])
+def test_build_mngr_create_command_runtime_ignored_for_non_docker(docker_runtime: DockerRuntime) -> None:
+    """The runsc overlay is docker-only -- other launch modes never receive it."""
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.LIMA,
+        host_name=HostName("hello"),
+        docker_runtime=docker_runtime,
+    )
+    assert "docker_runsc" not in command
+
+
 def test_build_mngr_create_command_omits_latchkey_when_env_is_empty() -> None:
     """Empty / ``None`` ``latchkey_env`` opts the host out of latchkey wiring entirely."""
     for latchkey_env in (None, {}):
@@ -805,6 +922,44 @@ def test_clone_git_repo_raises_on_missing_branch(tmp_path: Path) -> None:
         clone_git_repo(GitUrl("file://{}".format(origin)), dest, branch=GitBranch("nonexistent"))
 
 
+class _AlwaysUnauthorizedHandler(BaseHTTPRequestHandler):
+    """Answers every request with 401 + a Basic challenge, like a private remote."""
+
+    def do_GET(self) -> None:
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="test"')
+        self.end_headers()
+
+    def log_message(self, format: str, *args: object) -> None:
+        del format, args
+
+
+@pytest.mark.timeout(30)
+def test_clone_git_repo_fails_fast_with_auth_shaped_error_when_remote_requires_auth(tmp_path: Path) -> None:
+    """A remote that answers with an auth challenge fails the clone quickly and
+    with an authentication-shaped error, instead of hanging on a credential
+    prompt: ``clone_git_repo`` runs git with terminal prompting disabled.
+
+    The exact message varies with the machine's credential setup (no helper:
+    "could not read Username ... terminal prompts disabled"; a helper that
+    supplies rejected credentials: "Authentication failed"), so the assertion
+    accepts either shape.
+    """
+    server = HTTPServer(("127.0.0.1", 0), _AlwaysUnauthorizedHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = GitUrl("http://127.0.0.1:{}/acme/private-repo.git".format(server.server_address[1]))
+        dest = tmp_path / "clone"
+        with pytest.raises(GitCloneError) as exc_info:
+            clone_git_repo(url, dest)
+        message = str(exc_info.value)
+        assert "terminal prompts disabled" in message or "Authentication failed" in message, message
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
 def test_clone_then_checkout_branch_accepts_full_commit_sha(tmp_path: Path) -> None:
     """``clone_git_repo(branch=<40-hex sha>)`` works -- the previous
     ``git clone --branch <sha>`` rejected SHAs outright.
@@ -938,6 +1093,13 @@ def _start_scripted_server(not_ready_count: int) -> tuple[HTTPServer, threading.
         {"not_ready_count": not_ready_count, "request_count": 0, "lock": threading.Lock()},
     )
     server = HTTPServer(("127.0.0.1", 0), handler_cls)
+    # The readiness probe dials the proxy over https (minds always runs it with
+    # HTTP/2), so the stand-in server must speak TLS to match -- otherwise the
+    # probe's TLS handshake fails against a plain-HTTP socket. Reuse the proxy's
+    # own self-signed cert helpers so the test exercises the real https path.
+    cert_pem, key_pem = generate_self_signed_cert()
+    ssl_context = build_server_ssl_context(cert_pem, key_pem)
+    server.socket = ssl_context.wrap_socket(server.socket, server_side=True)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     port = server.server_address[1]
@@ -1119,6 +1281,40 @@ def test_probe_workspace_through_plugin_surfaces_non_200_status() -> None:
         )
 
     assert status == 503
+
+
+def test_probe_workspace_uses_https_scheme() -> None:
+    """The loopback probe dials https, matching the TLS + HTTP/2 proxy.
+
+    The probe must hit the same transport the proxy speaks; a mismatch would
+    make every readiness probe fail the TLS handshake (or hit a closed http
+    port).
+    """
+    captured: list[httpx.Request] = []
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, text="ok")
+
+    with httpx.Client(transport=httpx.MockTransport(_capture)) as client:
+        probe_workspace_through_plugin(
+            mngr_forward_port=18999,
+            preauth_cookie="any-preauth",
+            agent_id=AgentId.generate(),
+            probe_timeout_seconds=0.5,
+            client=client,
+        )
+
+    assert captured[0].url.scheme == "https"
+    assert captured[0].url.host == "127.0.0.1"
+
+
+def test_build_redirect_url_uses_https_scheme(tmp_path) -> None:
+    """The /goto redirect URL the UI navigates to uses the proxy's https scheme."""
+    creator = _make_test_creator(tmp_path, mngr_forward_port=8421)
+    aid = AgentId.generate()
+    url = creator._build_redirect_url(aid)
+    assert url == f"https://localhost:8421/goto/{aid}/"
 
 
 def test_wait_for_workspace_ready_publishes_anyway_on_timeout(tmp_path) -> None:

@@ -1,4 +1,4 @@
-{#def report_unexpected_errors=false, include_error_logs=false, services_overview=[], file_sharing_grants=[], workspace_delegation_grants=[], permissions_unavailable=false, has_saved_backup_password=false #}
+{#def report_unexpected_errors=false, include_error_logs=false, services_overview=[], file_sharing_grants=[], workspace_delegation_grants=[], permissions_unavailable=false, is_master_password_set=false #}
 {#
   The app-level ("Minds") settings sections, shared verbatim between the
   centered settings modal (pages.SettingsModal, the Electron overlay surface)
@@ -13,7 +13,8 @@
     - Local files: file-sharing (WebDAV) grants per workspace.
     - Workspaces: cross-workspace-management (delegation) grants.
     - Error reporting: the per-machine error-reporting toggles.
-    - Backup password: the shared backup master-password change flow.
+    - Master password: the sync master-password change flow (rewraps each
+      signed-in account's sync key).
 
   All are per-machine / app-level (not account-scoped); the app, not any
   single workspace, owns permissions. The ``services_overview`` /
@@ -195,28 +196,27 @@
     </label>
   </section>
 
-  {# -- Backup password: the shared backup master-password change flow. -- #}
+  {# -- Master password: the sync master-password change flow. Rewraps each
+     signed-in account's sync key; workspace backup repositories are untouched. -- #}
   <section data-settings-section="backups">
-    <h2 class="type-heading-lg text-primary mb-2">Backup password</h2>
+    <h2 class="type-heading-lg text-primary mb-2">Master password</h2>
     <p class="type-body text-secondary mb-6">
-      The shared recovery password for all workspace backups (initially empty). Changing it
-      rekeys the backup repository of every existing workspace; destroyed workspaces keep
-      their old password.{% if has_saved_backup_password %} A copy is currently saved on this device.{% endif %}
+      Protects the synced copy of your workspaces' access keys and backup credentials
+      (initially empty -- nothing secret syncs until one is set). You'll type it once on
+      each new device to unlock your workspaces there.
+      {% if is_master_password_set %} A master password is currently set.{% else %} No master
+      password is set yet, so only workspace names and metadata sync.{% endif %}
     </p>
     <div class="flex flex-col gap-2 max-w-md">
       <input type="password" id="backup-new-password" autocomplete="new-password"
-             placeholder="new master password (empty is allowed)"
+             placeholder="new master password (empty disables secret sync)"
              class="h-[34px] px-3 rounded-full type-body bg-surface-secondary text-primary">
       <input type="password" id="backup-new-password-confirm" autocomplete="new-password"
              placeholder="repeat the new master password"
              class="h-[34px] px-3 rounded-full type-body bg-surface-secondary text-primary">
-      <label class="type-helper text-secondary flex items-center gap-2">
-        <input type="checkbox" id="backup-change-save-password">
-        Save this password so you don't have to retype it
-      </label>
       <div class="flex items-center gap-2">
         <Button variant="secondary" id="backup-change-password-btn">Change master password</Button>
-        <span id="backup-change-spinner" class="hidden type-section text-secondary">Rekeying workspaces...</span>
+        <span id="backup-change-spinner" class="hidden type-section text-secondary">Updating accounts...</span>
       </div>
       <p id="backup-change-error" class="hidden type-body text-important" role="alert"></p>
       <ul id="backup-change-results" class="hidden type-helper text-secondary list-disc pl-4" aria-live="polite"></ul>

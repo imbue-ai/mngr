@@ -1,23 +1,30 @@
 """Click entry point for ``mngr forward``."""
 
+import asyncio
+import os
 import secrets
 import signal
 import socket
+import ssl
 import subprocess
 import threading
 import time
 import webbrowser
+from collections.abc import Awaitable
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from typing import Final
 
 import click
-import uvicorn
+from hypercorn.asyncio import serve as hypercorn_serve
+from hypercorn.config import Config
 from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.primitives import NonNegativeInt
 from imbue.imbue_common.primitives import PositiveInt
+from imbue.imbue_common.pure import pure
 from imbue.mngr.api.discovery_events import get_discovery_events_path
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
@@ -46,6 +53,9 @@ from imbue.mngr_forward.service_map_cache import ServiceMapCache
 from imbue.mngr_forward.snapshot import mngr_list_snapshot
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_forward.stream_manager import ForwardStreamManager
+from imbue.mngr_forward.tls import InMemoryTLSConfig
+from imbue.mngr_forward.tls import build_server_ssl_context
+from imbue.mngr_forward.tls import generate_self_signed_cert
 
 _DEFAULT_HOST: Final[str] = "127.0.0.1"
 _DEFAULT_PORT: Final[int] = 8421
@@ -71,6 +81,7 @@ class ForwardCliOptions(CommonCliOptions):
     preauth_cookie: str | None = None
     open_browser: bool = False
     allow_host_loopback: bool = False
+    use_http2: bool = False
 
 
 def _parse_reverse_specs(raw: tuple[str, ...]) -> tuple[ReverseTunnelSpec, ...]:
@@ -112,8 +123,8 @@ def _bind_listen_socket(host: str, requested_port: int | None) -> socket.socket:
       ``click.ClickException`` is raised -- a caller that picked a specific
       port did so deliberately, so silently moving would hide a real conflict.
 
-    The returned socket is bound but not listening; uvicorn calls ``listen()``
-    on it via ``loop.create_server``.
+    The returned socket is bound but not listening; hypercorn calls
+    ``listen()`` on it via ``asyncio.start_server`` after the fd handoff.
     """
     family = socket.AF_INET6 if ":" in host else socket.AF_INET
     sock = socket.socket(family=family)
@@ -237,6 +248,17 @@ def _bind_listen_socket(host: str, requested_port: int | None) -> socket.socket:
         "the host. Pass this flag only for setups that intentionally run agents directly on the host."
     ),
 )
+@click.option(
+    "--use-http2",
+    is_flag=True,
+    default=False,
+    help=(
+        "Terminate TLS and negotiate HTTP/2 (via ALPN) instead of serving plain HTTP/1.1. "
+        "Removes Chromium's ~6-connection-per-origin ceiling for the workspace UI. The proxy "
+        "generates a fresh self-signed cert at startup, so only clients that trust it (the minds "
+        "desktop app) should enable this; a human browser will see a cert warning."
+    ),
+)
 @add_common_options
 @click.pass_context
 def forward(ctx: click.Context, **kwargs: Any) -> None:
@@ -318,7 +340,8 @@ def forward(ctx: click.Context, **kwargs: Any) -> None:
     one_time_code = OneTimeCode(secrets.token_urlsafe(_OTP_LENGTH))
     auth_store.add_one_time_code(code=one_time_code)
     login_host = "localhost" if opts.host in {"127.0.0.1", "0.0.0.0", "::1", "::"} else opts.host
-    login_url = f"http://{login_host}:{listen_port}/login?one_time_code={one_time_code}"
+    scheme = "https" if opts.use_http2 else "http"
+    login_url = f"{scheme}://{login_host}:{listen_port}/login?one_time_code={one_time_code}"
 
     logger.info("Login URL (one-time use): {}", login_url)
     envelope_writer.emit_login_url(login_url)
@@ -346,20 +369,146 @@ def forward(ctx: click.Context, **kwargs: Any) -> None:
         preauth_cookie_value=opts.preauth_cookie,
         on_listening=_on_listening,
         allow_host_loopback=opts.allow_host_loopback,
+        use_http2=opts.use_http2,
     )
 
     try:
-        # Hand uvicorn the socket we already bound rather than a host/port
-        # pair, so there is no window between resolving the port and the
-        # server claiming it (and no chance uvicorn binds a different one).
-        server = uvicorn.Server(uvicorn.Config(app, timeout_graceful_shutdown=1, log_level="warning"))
-        server.run(sockets=[listen_socket])
+        _serve_forward_app(app, listen_socket, use_http2=opts.use_http2)
     finally:
         listen_socket.close()
         if stream_manager is not None:
             stream_manager.stop()
         tunnel_manager.cleanup()
         envelope_writer.close()
+
+
+def _build_hypercorn_config(listen_socket: socket.socket, use_http2: bool) -> Config:
+    """Build the hypercorn ``Config`` for serving over the already-bound socket.
+
+    When ``use_http2`` is set the config carries an in-memory TLS context
+    (HTTP/2 negotiated via ALPN); otherwise it is plain HTTP/1.1, matching the
+    previous uvicorn behaviour. The bound-but-not-listening socket is handed off
+    by file descriptor (``fd://``): hypercorn's ``asyncio.start_server`` performs
+    the ``listen()``, so there is no window where a different server could claim
+    the port. hypercorn closes the fd it wraps on shutdown, so we hand it a
+    ``os.dup`` of the socket's fd and let the caller's ``finally`` close the
+    original -- avoiding a double close.
+    """
+    config: Config
+    if use_http2:
+        try:
+            cert_pem, key_pem = generate_self_signed_cert()
+            ssl_context = build_server_ssl_context(cert_pem, key_pem)
+        except (ValueError, ssl.SSLError, OSError) as e:
+            # Naming TLS/HTTP-2 setup explicitly here makes the failure
+            # diagnosable: minds' `wait_for_listening` will otherwise just time
+            # out with no indication that the cert/context was the cause.
+            logger.error("mngr forward TLS/HTTP-2 setup failed (cert generation or SSL context): {}", e)
+            raise
+        config = InMemoryTLSConfig(ssl_context)
+    else:
+        config = Config()
+
+    dup_fd = os.dup(listen_socket.fileno())
+    config.bind = [f"fd://{dup_fd}"]
+    # Match the previous uvicorn settings: 1s graceful drain and warning-level
+    # logging (so hypercorn's per-connection "Running on ..." info line is
+    # suppressed).
+    config.graceful_timeout = 1.0
+    config.loglevel = "WARNING"
+    return config
+
+
+# How long a TLS teardown may wait for the peer's close_notify reply before
+# the connection is force-closed. asyncio's default (30s) keeps every
+# abandoned connection's task alive for the full wait; a loopback peer that
+# has not answered within a few seconds is gone.
+_SSL_SHUTDOWN_TIMEOUT_SECONDS: Final[float] = 5.0
+
+# The exact message asyncio's sslproto puts on the TimeoutError it raises when
+# the close_notify reply never arrives (stable since Python 3.11).
+_SSL_SHUTDOWN_TIMED_OUT_MESSAGE: Final[str] = "SSL shutdown timed out"
+
+
+class _BoundedSSLShutdownEventLoop(asyncio.SelectorEventLoop):
+    """Event loop that bounds server-side TLS shutdown waits to a few seconds.
+
+    hypercorn's ``asyncio.start_server`` call does not expose asyncio's
+    ``ssl_shutdown_timeout`` option, so the only seam for shortening the 30s
+    default is the loop's SSL transport factory. ``_make_ssl_transport`` is
+    private CPython API: the override therefore only rewrites the stdlib's
+    "use the default" sentinel (``None``) when that keyword is actually
+    present, so a future signature change degrades to the stdlib default
+    instead of breaking connection accepts.
+    """
+
+    ssl_shutdown_timeout_seconds: float = _SSL_SHUTDOWN_TIMEOUT_SECONDS
+
+    def _make_ssl_transport(self, *args: Any, **kwargs: Any) -> Any:
+        if "ssl_shutdown_timeout" in kwargs and kwargs["ssl_shutdown_timeout"] is None:
+            kwargs["ssl_shutdown_timeout"] = self.ssl_shutdown_timeout_seconds
+        return super()._make_ssl_transport(*args, **kwargs)  # ty: ignore[unresolved-attribute]
+
+
+@pure
+def _is_benign_tls_teardown_error(exception: BaseException | None) -> bool:
+    """True for per-connection TLS noise that should not reach the log as an error.
+
+    Covers ``ssl.SSLError`` (handshake failures -- hypercorn's own runner drops
+    these, and we replace its exception handler by running the loop ourselves)
+    and the ``TimeoutError`` asyncio raises when a peer abandons a connection
+    without answering ``close_notify``. hypercorn's ``TCPServer._close``
+    catches the other already-gone connection errors but not that
+    ``TimeoutError``, so it would otherwise escape ``client_connected_cb`` and
+    be logged as an alarming unhandled-exception traceback.
+    """
+    is_handshake_failure = isinstance(exception, ssl.SSLError)
+    is_abandoned_shutdown = isinstance(exception, TimeoutError) and _SSL_SHUTDOWN_TIMED_OUT_MESSAGE in str(exception)
+    return is_handshake_failure or is_abandoned_shutdown
+
+
+def _handle_serve_loop_exception(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+    """Loop exception handler: drop benign TLS teardown noise, defer the rest."""
+    exception = context.get("exception")
+    if _is_benign_tls_teardown_error(exception):
+        logger.debug("Dropped benign TLS teardown error from an abandoned connection: {!r}", exception)
+        return
+    loop.default_exception_handler(context)
+
+
+def _run_serve_loop(
+    app: Any,
+    config: Config,
+    loop_factory: Callable[[], asyncio.AbstractEventLoop],
+    shutdown_trigger: Callable[..., Awaitable[Any]] | None,
+) -> None:
+    """Run hypercorn on a loop from ``loop_factory``, dropping benign TLS teardown noise.
+
+    ``shutdown_trigger=None`` makes hypercorn install its own SIGINT/SIGTERM
+    handlers (which requires running on the main thread); tests pass an
+    explicit trigger instead so they can stop the server from another thread.
+    """
+    with asyncio.Runner(loop_factory=loop_factory) as runner:
+        runner.get_loop().set_exception_handler(_handle_serve_loop_exception)
+        runner.run(hypercorn_serve(app, config, shutdown_trigger=shutdown_trigger))
+
+
+def _serve_forward_app(app: Any, listen_socket: socket.socket, use_http2: bool) -> None:
+    """Serve the forward app over the already-bound ``listen_socket`` via hypercorn.
+
+    Passes ``shutdown_trigger=None``, which makes hypercorn install its own
+    SIGINT/SIGTERM handlers -- matching the SIGTERM->graceful behaviour
+    minds' ``terminate()`` relies on. Must run on the main thread so the loop can
+    install those signal handlers.
+
+    The loop carries two TLS teardown adjustments hypercorn does not expose
+    (both matter only with ``--use-http2``): the SSL shutdown wait is bounded to
+    seconds instead of asyncio's 30s default, and the benign teardown errors of
+    abandoned connections are dropped rather than logged as unhandled-exception
+    tracebacks.
+    """
+    config = _build_hypercorn_config(listen_socket, use_http2)
+    _run_serve_loop(app, config, loop_factory=_BoundedSSLShutdownEventLoop, shutdown_trigger=None)
 
 
 def _validate_options(opts: ForwardCliOptions) -> None:

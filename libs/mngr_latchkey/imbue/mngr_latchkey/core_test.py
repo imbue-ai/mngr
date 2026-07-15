@@ -1271,17 +1271,20 @@ def test_remote_state_watch_handler_routes_credential_and_permission_changes(
             plugin_data_dir=handler.latchkey.plugin_data_dir,
             known_remote_host_ids=handler._known_remote_host_ids,
             on_credentials_changed=handler._sync_credentials_to_all_known_hosts,
-            on_host_permissions_changed=handler._sync_permissions_to_host,
+            on_host_permissions_changed=handler._sync_full_state_to_host,
         )
 
         # A change to the credentials file pushes credentials (only) to all hosts.
         event_handler.dispatch(FileModifiedEvent(str(credentials_path)))
         assert handler._synced == [(host_id_str, False, True)]
 
-        # A change to a host's permissions file pushes permissions (only) to that host.
+        # A change to a host's permissions file pushes the full state
+        # (permissions, then credentials) to that host: the permissions
+        # determine which services' credentials ship, so a grant/revocation
+        # must also refresh the VPS credential store.
         handler._synced.clear()
         event_handler.dispatch(FileModifiedEvent(str(permissions_path)))
-        assert handler._synced == [(host_id_str, True, False)]
+        assert handler._synced == [(host_id_str, True, True)]
 
         # An unrelated path (e.g. the forward supervisor record) is ignored.
         handler._synced.clear()

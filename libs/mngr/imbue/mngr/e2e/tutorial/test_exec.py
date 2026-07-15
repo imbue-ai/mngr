@@ -15,13 +15,14 @@ def _create_my_task(e2e: E2eSession, sleep_value: int) -> None:
         e2e.run(
             f"mngr create my-task --type command --no-ensure-clean --no-connect -- sleep {sleep_value}",
             comment=f"create my-task (sleep {sleep_value})",
+            timeout=90.0,
         )
     ).to_succeed()
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.timeout(120)
 def test_exec_basic(e2e: E2eSession) -> None:
     """Tutorial block:
         # run a command on a specific agent's host
@@ -50,7 +51,6 @@ def test_exec_basic(e2e: E2eSession) -> None:
     expect(result.stdout).to_contain("total")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -65,36 +65,44 @@ def test_exec_short_form(e2e: E2eSession) -> None:
     proving git ran in the work_dir rather than exec just exiting 0.
     """
     _create_my_task(e2e, 100401)
-    # ``my-task`` is a local command agent, so neither create nor exec ever
-    # provisions a Modal environment -- there is no @pytest.mark.modal because
-    # the modal resource guard is never tripped (the modal CLI is only invoked
-    # via environment_create when creating a remote/Modal-backed agent).
+    # ``my-task`` is a local command agent in a git project, so neither create
+    # nor exec ever provisions a Modal environment or transfers files via rsync
+    # -- there is no @pytest.mark.modal or @pytest.mark.rsync because neither
+    # resource guard is tripped (the modal CLI is only invoked via
+    # environment_create for a remote/Modal-backed agent, and rsync only for a
+    # non-git project's file sync).
     result = e2e.run('mngr x my-task "git status"', comment="short form")
     expect(result).to_succeed()
     # ``mngr x`` is the documented short form of ``mngr exec``; verify it
     # actually ran git inside the agent's work_dir by observing real git
     # status output rather than relying solely on the exit code. The agent
-    # runs on its own ``mngr/my-task`` branch, which git status reports.
-    expect(result.stdout).to_contain("On branch")
+    # runs on its own ``mngr/my-task`` branch (the default branch name for an
+    # agent), which git status reports on its "On branch" line.
+    expect(result.stdout).to_contain("On branch mngr/my-task")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
+@pytest.mark.timeout(120)
 def test_exec_all_agents(e2e: E2eSession) -> None:
     """Tutorial block:
         # run a command on all agents
-        mngr exec -a "whoami"
+        mngr list --ids | mngr exec - "whoami"
 
     Scope: `mngr exec -a "<cmd>"` targets all agents at once (rather than a named
     agent) and runs the command against them, exiting 0.
     """
     _create_my_task(e2e, 100402)
-    expect(e2e.run('mngr exec -a "whoami"', comment="run a command on all agents")).to_succeed()
+    result = e2e.run('mngr list --ids | mngr exec - "whoami"', comment="run a command on all agents")
+    expect(result).to_succeed()
+    # Exit 0 alone is insufficient: exec short-circuits to a clean exit when its
+    # stdin agent list is empty. Confirm the command actually ran against the
+    # enumerated agent -- exec emits "Command succeeded on agent <name>" only for
+    # a result it truly executed -- so this proves "-" targeted all agents rather
+    # than exec no-op'ing on empty input.
+    expect(result.stdout).to_contain("Command succeeded on agent")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -123,7 +131,6 @@ def test_exec_as_other_user(e2e: E2eSession) -> None:
     expect(result.stdout).to_match(r"(?m)^\s*\d+\s*$")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(300)
@@ -151,7 +158,6 @@ def test_exec_cwd(e2e: E2eSession) -> None:
     expect(default_result.stdout).not_to_match(r"(?m)^/tmp$")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(300)
@@ -180,7 +186,6 @@ def test_exec_cwd_nonexistent(e2e: E2eSession) -> None:
     expect(result.stdout).not_to_match(r"(?m)^/tmp/")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -207,7 +212,6 @@ def test_exec_timeout(e2e: E2eSession) -> None:
     expect(result.stdout).to_contain("done")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -237,7 +241,6 @@ def test_exec_timeout_enforced(e2e: E2eSession) -> None:
     expect(result.stdout).not_to_contain("Command succeeded")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(180)
@@ -264,9 +267,9 @@ def test_exec_with_start(e2e: E2eSession) -> None:
     expect(result.stdout).to_contain("ID=")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.timeout(120)
 def test_exec_no_start(e2e: E2eSession) -> None:
     """Tutorial block:
         # and you can disable auto-starting as well (fails if agent is stopped):
@@ -285,12 +288,12 @@ def test_exec_no_start(e2e: E2eSession) -> None:
     result = e2e.run(
         'mngr exec my-task --no-start "cat /etc/os-release"',
         comment="disable auto-starting",
+        timeout=90.0,
     )
     expect(result).to_succeed()
     expect(result.stdout).to_contain("NAME=")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 def test_exec_on_error_continue(e2e: E2eSession) -> None:
@@ -306,10 +309,11 @@ def test_exec_on_error_continue(e2e: E2eSession) -> None:
     actually executed on the host rather than exec just exiting 0.
     """
     _create_my_task(e2e, 100408)
-    # `git log` may fail in the agent's workdir if there's no git history;
-    # --on-error continue lets the test succeed regardless.
+    # The agent's work_dir is the fixture git repo, so `git log` succeeds and
+    # returns its history. `--on-error continue` would try every listed agent
+    # even if some failed; here the single agent succeeds, so the run exits 0.
     result = e2e.run(
-        'mngr list --ids | mngr exec - --on-error continue "git log --oneline -5 || true"',
+        'mngr list --ids | mngr exec - --on-error continue "git log --oneline -5"',
         comment="control error handling when running on multiple agents",
     )
     expect(result).to_succeed()

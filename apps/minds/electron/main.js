@@ -3,18 +3,27 @@ const todesktop = require('@todesktop/runtime');
 const path = require('path');
 const fs = require('fs');
 const paths = require('./paths');
+const { initElectronLogging } = require('./logger');
 const { initSentry, captureManualReport, isLogInclusionEnabled } = require('./sentry');
 const { runEnvSetup } = require('./env-setup');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
 const { decideStartupRoute } = require('./startup-routing');
 const { computeBundleViewBounds } = require('./view-layout');
 
+// Tee console output into ~/.minds/logs/electron.log and record uncaught
+// main-process failures BEFORE anything else runs, so startup output (including
+// Sentry init and any early crash) is durably captured on disk.
+initElectronLogging();
+
 // Initialize Sentry as early as possible so errors thrown during main-process
 // startup (window creation, env setup, backend spawn) are captured. The SDK is
 // always initialized but only sends when the user has enabled error reporting
 // (the report_unexpected_errors setting, read live per event) -- see
-// electron/sentry.js.
-initSentry();
+// electron/sentry.js. ``rendererNameForWebContents`` labels renderer-death events
+// by which of the window's three views died (it's a hoisted declaration, so
+// referencing it here before its definition is fine; it's only invoked at crash
+// time, long after ``bundles`` is populated).
+initSentry({ getRendererName: rendererNameForWebContents });
 
 // Only init the auto-updater in packaged builds: in dev, electron.autoUpdater
 // is undefined on macOS, so todesktop's constructor throws.
@@ -80,6 +89,15 @@ const CONTENT_INSET = 4;
 // be ~8px and a smaller inner would be more concentric.
 const CONTENT_CORNER_RADIUS = 12;
 const CONTENT_PARTITION = 'persist:workspace-content';
+
+// Local crash page shown in the content view when its renderer process dies.
+const CRASHED_PAGE_FILE = path.join(__dirname, 'crashed.html');
+
+// Local crash page shown in the chrome (titlebar) view when its renderer process
+// dies. Unlike the content crash page it is a compact strip: only the top ~38px
+// of the chrome view is visible (the content view overlays the rest), so the page
+// anchors its message + Reload button to that titlebar-height band.
+const CHROME_CRASHED_PAGE_FILE = path.join(__dirname, 'chrome-crashed.html');
 
 // Coalesce rapid SSE-triggered list refreshes when the inbox modal is open. A
 // burst of requests events (count 1 -> 2 -> 3 within a few ms) would otherwise
@@ -194,6 +212,18 @@ function toAbsoluteUrl(url) {
   return url;
 }
 
+// Whether ``url`` is our local content-view crash page (crashed.html). The
+// navigation handlers use this to skip treating the crash page as real workspace
+// content (which would clobber the pre-crash URL / workspace id we need to reload).
+function isCrashPageUrl(url) {
+  if (!url || !url.startsWith('file://')) return false;
+  try {
+    return decodeURIComponent(new URL(url).pathname).endsWith('/crashed.html');
+  } catch {
+    return false;
+  }
+}
+
 // Classify a URL as "external" -- i.e. something that should open in the
 // user's default browser rather than inside the app. All in-app navigation
 // (the minds backend, the mngr_forward plugin, and every
@@ -266,6 +296,23 @@ function getBundleFromEvent(event) {
     }
   }
   return null;
+}
+
+// Map a webContents to the name of the bundle view it backs
+// (``chrome`` / ``content`` / ``modal``), or undefined if it isn't one of ours.
+// Passed to Sentry.init as ``getRendererName`` so the childProcess integration's
+// renderer-death events are labeled by which view died. A renderer that is gone
+// is not yet destroyed, so its stable ``id`` is still readable here.
+function rendererNameForWebContents(contents) {
+  if (!contents) return undefined;
+  const id = contents.id;
+  for (const b of bundles) {
+    if (b.window.isDestroyed()) continue;
+    if (b.chromeView && !b.chromeView.webContents.isDestroyed() && b.chromeView.webContents.id === id) return 'chrome';
+    if (b.contentView && !b.contentView.webContents.isDestroyed() && b.contentView.webContents.id === id) return 'content';
+    if (b.modalView && !b.modalView.webContents.isDestroyed() && b.modalView.webContents.id === id) return 'modal';
+  }
+  return undefined;
 }
 
 function getMostRecentWindow() {
@@ -629,6 +676,16 @@ function createBundle() {
     // a restored window re-derives it from its saved content URL.
     currentAccentAgentId: null,
     preErrorUrl: null,
+    // Content-view renderer-crash recovery. ``isContentCrashed`` is true while
+    // the local crash page (crashed.html) is showing in the content view;
+    // ``crashedFromUrl`` is the workspace URL that was displayed when the
+    // renderer died, re-loaded when the user clicks Reload on the crash page.
+    isContentCrashed: false,
+    crashedFromUrl: null,
+    // Chrome (titlebar) view renderer-crash recovery. True while the compact
+    // chrome-crashed.html strip is showing in the chrome view; cleared when the
+    // user clicks Reload (reloadCrashedChromeView) and the chrome reloads /_chrome.
+    isChromeCrashed: false,
     isErrorState: false,
     isLoadingState: true,
     isQuittingState: false,
@@ -650,6 +707,37 @@ function createBundle() {
     primeViewWithCachedChromeState(bundle, chromeView.webContents);
   });
 
+  // When the chrome (titlebar) view's renderer dies -- it runs in a separate
+  // process from the content view and can be reaped independently over a long
+  // sleep -- Electron leaves a blank, dead titlebar with no recovery affordance.
+  // Show a compact local crash strip with a Reload button instead. Only the top
+  // ~38px of the chrome view is visible (the content view overlays the rest), so
+  // chrome-crashed.html anchors its UI to that band. Never navigate synchronously
+  // inside this handler (electron#19887); defer to a later tick. Mirrors the
+  // content view's render-process-gone handling (wireContentViewEvents).
+  chromeView.webContents.on('render-process-gone', (_e, details) => {
+    const reason = details && details.reason;
+    const exitCode = details && typeof details.exitCode === 'number' ? details.exitCode : null;
+    // A clean exit is intentional teardown (window close), not a crash.
+    if (reason === 'clean-exit') return;
+    if (isShuttingDown || bundle.window.isDestroyed()) return;
+    // The full-app error takeover owns the chrome view (it loads shell.html there)
+    // and drives its own retry; don't fight it with a titlebar crash strip.
+    if (bundle.isErrorState) return;
+    if (bundle.chromeView !== chromeView || chromeView.webContents.isDestroyed()) return;
+    console.error(`[chrome-crash] chrome (titlebar) view renderer gone (reason=${reason}, exitCode=${exitCode})`);
+    bundle.isChromeCrashed = true;
+    setImmediate(() => {
+      if (bundle.window.isDestroyed()) return;
+      if (bundle.chromeView !== chromeView || chromeView.webContents.isDestroyed()) return;
+      // A real reload (or another crash) since then superseded this.
+      if (!bundle.isChromeCrashed) return;
+      chromeView.webContents.loadFile(CHROME_CRASHED_PAGE_FILE).catch((err) => {
+        console.error('[chrome-crash] failed to load crash page:', err && err.message);
+      });
+    });
+  });
+
   wireContentViewEvents(bundle, contentView);
   registerShortcutsFor(bundle, chromeView.webContents);
   registerShortcutsFor(bundle, contentView.webContents);
@@ -668,6 +756,14 @@ function wireContentViewEvents(bundle, contentView) {
   // Called from both createBundle and prepareAllWindowsForRetry (which rebuilds
   // the contentView that showErrorInAllWindows tore down).
   const onContentNavigate = (url, httpResponseCode) => {
+    // Loading the local crash page is not a real content navigation: skip all
+    // state updates so ``currentContentUrl`` / ``currentWorkspaceId`` keep
+    // pointing at the pre-crash workspace (which Reload re-loads).
+    if (isCrashPageUrl(url)) return;
+    // A genuine navigation clears any pending crash state (e.g. the user hit
+    // Home from the crash page, or Reload succeeded).
+    bundle.isContentCrashed = false;
+    bundle.crashedFromUrl = null;
     if (!bundle.isErrorState) {
       bundle.currentContentUrl = url;
       bundle.preErrorUrl = url;
@@ -723,6 +819,49 @@ function wireContentViewEvents(bundle, contentView) {
 
   contentView.webContents.on('did-navigate', (_e, url, httpResponseCode) => onContentNavigate(url, httpResponseCode));
   contentView.webContents.on('did-navigate-in-page', (_e, url) => onContentNavigate(url));
+
+  // When the content view's renderer process dies (e.g. killed by the OS over a
+  // long sleep, or an OOM), Electron leaves the view painting its pinned-white
+  // background with no way to recover except manual Home-and-back navigation.
+  // Show a local crash page instead, with a Reload button. We never navigate
+  // synchronously inside this handler -- loadURL/loadFile here can crash the
+  // whole app (electron#19887) -- so the navigation is deferred to a later tick.
+  contentView.webContents.on('render-process-gone', (_e, details) => {
+    const reason = details && details.reason;
+    const exitCode = details && typeof details.exitCode === 'number' ? details.exitCode : null;
+    // A clean exit is an intentional teardown (window close, error-takeover
+    // view destroy, navigation swap), not a crash -- ignore it.
+    if (reason === 'clean-exit') return;
+    if (isShuttingDown || bundle.window.isDestroyed()) return;
+    // The full-app error takeover owns the screen and tears the content view
+    // down itself; don't fight it with a content-only crash page.
+    if (bundle.isErrorState) return;
+    if (bundle.contentView !== contentView || contentView.webContents.isDestroyed()) return;
+    console.error(
+      `[content-crash] workspace content view renderer gone ` +
+        `(reason=${reason}, exitCode=${exitCode}, url=${bundle.currentContentUrl || 'unknown'})`
+    );
+    bundle.isContentCrashed = true;
+    bundle.crashedFromUrl = bundle.currentContentUrl;
+    const crashedAgentId = bundle.currentWorkspaceId || '';
+    setImmediate(() => {
+      if (bundle.window.isDestroyed()) return;
+      if (bundle.contentView !== contentView || contentView.webContents.isDestroyed()) return;
+      // A real navigation (or another crash) since the crash superseded this.
+      if (!bundle.isContentCrashed) return;
+      contentView.webContents
+        .loadFile(CRASHED_PAGE_FILE, {
+          query: {
+            reason: reason || 'unknown',
+            exitCode: exitCode === null ? '' : String(exitCode),
+            workspace: crashedAgentId,
+          },
+        })
+        .catch((err) => {
+          console.error('[content-crash] failed to load crash page:', err && err.message);
+        });
+    });
+  });
 
   // Enforce workspace uniqueness at the Electron level so it applies to EVERY
   // path that can drive the content view to a /forwarding/X/ URL (landing-page
@@ -1223,6 +1362,26 @@ function createBundleOverlayView(bundle) {
       } catch { /* noop */ }
     }
   });
+  // When the overlay host's renderer dies (it runs in a separate process and can
+  // be reaped over a long sleep like the other views), there is nothing visible to
+  // recover -- the overlay is hidden whenever no modal is open. So we just reset any
+  // open-modal state and silently reload the warm host, so the next sidebar / inbox /
+  // help open lands on a fresh page instead of a dead one. Defer the reload a tick
+  // (never navigate synchronously in this handler -- electron#19887).
+  modal.webContents.on('render-process-gone', (_e, details) => {
+    const reason = details && details.reason;
+    if (reason === 'clean-exit') return;
+    if (isShuttingDown || bundle.window.isDestroyed()) return;
+    if (bundle.modalView !== modal || modal.webContents.isDestroyed()) return;
+    const exitCode = details && typeof details.exitCode === 'number' ? details.exitCode : null;
+    console.error(`[overlay-crash] overlay host view renderer gone (reason=${reason}, exitCode=${exitCode})`);
+    if (bundle.modalVisible) closeModal(bundle);
+    setImmediate(() => {
+      if (bundle.window.isDestroyed()) return;
+      if (bundle.modalView !== modal || modal.webContents.isDestroyed()) return;
+      loadOverlayHost(bundle);
+    });
+  });
   // Auto-open DevTools for dev-time inspection, matching the content view; gated
   // on the same env var so a single switch covers all surfaces.
   if (process.env.MINDS_OPEN_DEVTOOLS === '1') {
@@ -1470,6 +1629,39 @@ function loadUrlIntoBundleContentView(bundle, url) {
   updateBundleAccentAgentId(bundle, parseAccentSourceAgentId(url));
   if (bundle.contentView && !bundle.contentView.webContents.isDestroyed() && url) {
     bundle.contentView.webContents.loadURL(url);
+  }
+}
+
+// Re-load the workspace URL that was showing when the content view's renderer
+// crashed (spawning a fresh renderer). Falls back to Home if the pre-crash URL
+// is unknown. Driven by the crash page's Reload button via the reload-crashed-view
+// IPC relay. Stateless: if the reload crashes again, the crash page reappears.
+function reloadCrashedContentView(bundle) {
+  if (!bundle || bundle.window.isDestroyed()) return;
+  if (!bundle.contentView || bundle.contentView.webContents.isDestroyed()) return;
+  const target = bundle.crashedFromUrl || (backendBaseUrl ? backendBaseUrl + '/' : null);
+  if (!target) return;
+  // Clear crash state before loading so the ensuing did-navigate is processed
+  // as a normal content navigation.
+  bundle.isContentCrashed = false;
+  bundle.crashedFromUrl = null;
+  loadUrlIntoBundleContentView(bundle, target);
+}
+
+// Reload the chrome (titlebar) view after its renderer crashed, spawning a fresh
+// renderer. Driven by chrome-crashed.html's Reload button via the reload-chrome
+// IPC. Reloads /_chrome (or shell.html before the backend is up, matching the
+// normal chrome-load choice); the chrome view's did-finish-load re-primes it from
+// the cached chrome state, so the bar returns fully populated. Stateless: if the
+// reload crashes again, the crash strip reappears.
+function reloadCrashedChromeView(bundle) {
+  if (!bundle || bundle.window.isDestroyed()) return;
+  if (!bundle.chromeView || bundle.chromeView.webContents.isDestroyed()) return;
+  bundle.isChromeCrashed = false;
+  if (backendBaseUrl) {
+    bundle.chromeView.webContents.loadURL(backendBaseUrl + '/_chrome');
+  } else {
+    bundle.chromeView.webContents.loadFile(path.join(__dirname, 'shell.html'));
   }
 }
 
@@ -3207,6 +3399,31 @@ function handleNotification(event) {
 //
 // Mirrors the cookie into the workspace content partition so any
 // chrome/iframe / WebContentsView using that partition is authenticated too.
+// Loopback hosts the `mngr forward` proxy serves under its self-signed cert:
+// the bare `localhost` origin, the `agent-<id>.localhost` workspace subdomains
+// (`*.localhost`), and the `127.0.0.1` IP host. Every other host must fall
+// through to Chromium's normal verification.
+function isLoopbackHostname(hostname) {
+  return hostname === 'localhost' || hostname.endsWith('.localhost') || hostname === '127.0.0.1';
+}
+
+// Trust the proxy's ephemeral self-signed cert for its loopback origins, in the
+// workspace-content partition only. The proxy regenerates the cert every
+// startup and only minds' own loopback origins use it, so there is no OS trust
+// store or CA to install; every real https origin still gets Chromium's default
+// verification (cb(-3)). Registered only when the proxy actually serves TLS.
+function trustLoopbackCertsForWorkspaceContent() {
+  const contentSession = session.fromPartition(CONTENT_PARTITION);
+  contentSession.setCertificateVerifyProc((request, callback) => {
+    if (isLoopbackHostname(request.hostname)) {
+      callback(0); // trust
+    } else {
+      callback(-3); // defer to Chromium's default verification
+    }
+  });
+  console.log('[startup] Trusting self-signed loopback certs for workspace content (HTTP/2 on)');
+}
+
 async function handleMngrForwardStarted(event) {
   const port = event.mngr_forward_port;
   const preauth = event.preauth_cookie;
@@ -3214,10 +3431,13 @@ async function handleMngrForwardStarted(event) {
     console.warn('[startup] mngr_forward_started missing port or preauth_cookie:', event);
     return;
   }
-  const url = `http://localhost:${port}`;
+  // The proxy serves TLS + HTTP/2, so the origin is https and the session
+  // cookie must be Secure (a Secure cookie is only sent over https).
+  const url = `https://localhost:${port}`;
   // Cache the plugin origin so workspaceUrlForAgent() can build /goto/ URLs
   // against the correct port (the plugin, not minds).
   mngrForwardBaseUrl = url;
+  trustLoopbackCertsForWorkspaceContent();
   const baseSpec = {
     url,
     name: 'mngr_forward_session',
@@ -3225,6 +3445,7 @@ async function handleMngrForwardStarted(event) {
     httpOnly: true,
     sameSite: 'lax',
     path: '/',
+    secure: true,
   };
   try {
     await session.defaultSession.cookies.set(baseSpec);
@@ -3362,6 +3583,22 @@ ipcMain.on('open-request-modal', (event, requestId) => {
 ipcMain.on('open-help', (event, agentId) => {
   const scopedAgentId = typeof agentId === 'string' && /^agent-[a-f0-9]{1,64}$/i.test(agentId) ? agentId : '';
   openHelp(getBundleFromEvent(event), scopedAgentId);
+});
+
+// Reload the crashed content view on behalf of the crash page (crashed.html).
+// Only content-relay-preload.js can emit this channel, and only for an
+// allowlisted `minds:reload-crashed-view` postMessage. No payload -- the target
+// URL is the shell's own record of the pre-crash workspace, never the renderer's.
+ipcMain.on('reload-crashed-view', (event) => {
+  reloadCrashedContentView(getBundleFromEvent(event));
+});
+
+// Reload the crashed chrome (titlebar) view on behalf of chrome-crashed.html's
+// Reload button. The chrome view runs the trusted first-party preload bridge, so
+// this is a direct channel (no content-relay indirection). No payload -- the
+// reload target is the shell's own /_chrome, never anything from the renderer.
+ipcMain.on('reload-chrome', (event) => {
+  reloadCrashedChromeView(getBundleFromEvent(event));
 });
 
 // Open the sign-in modal in the shared overlay. Senders: the content relay

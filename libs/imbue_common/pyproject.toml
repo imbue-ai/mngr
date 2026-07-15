@@ -16,8 +16,10 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
 ]
 dependencies = [
+    "argon2-cffi>=23.1",
     "boto3>=1.34",
     "click>=8.0",
+    "cryptography>=42.0",
     "cowsay-python>=1.0.2",
     "httpx>=0.27",
     "loguru>=0.7",

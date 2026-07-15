@@ -130,6 +130,9 @@ contextBridge.exposeInMainWorld('minds', {
   // Actions
   retry: () => ipcRenderer.send('retry'),
   openLogFile: () => ipcRenderer.send('open-log-file'),
+  // Reload the chrome (titlebar) view after its renderer crashed -- the Reload
+  // button on the local chrome-crashed.html strip.
+  reloadChrome: () => ipcRenderer.send('reload-chrome'),
 
   // Window controls
   minimize: () => ipcRenderer.send('window-minimize'),
