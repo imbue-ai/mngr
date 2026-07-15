@@ -134,8 +134,11 @@ minds policy layer (`apps/minds`):
     found (currently unlogged), plus the worker-spawn failure in `api_v1.py`.
 
 - `api_v1.py` + `api_models.py`: restart route accepts only `scope: "host"`
-  (400 for `"services"`); request-model description updated; the
-  `auto_dispatched`+HEALTHY skip guard and restart dedup are unchanged.
+  (400 for `"services"`); request-model description updated; the restart dedup
+  is unchanged. (The `auto_dispatched`+HEALTHY skip guard this plan originally
+  left untouched was removed on main while this branch was in flight -- an
+  auto-dispatched cold-boot degrades to a no-op via `mngr start` targeting only
+  STOPPED agents, so no endpoint-side veto is needed.)
 
 - stop flow: after a successful STOP, the backend broadcasts a one-shot
   `workspace_stopped` chrome SSE event (emitted from the
@@ -201,7 +204,8 @@ minds policy layer (`apps/minds`):
     UNKNOWN; empty/unrecognized container state -> UNKNOWN, not CRASHED.
   - lima: status "Unknown" -> UNKNOWN; "Broken" -> CRASHED.
 - API tests: restart with `scope: "services"` -> 400; `scope: "host"` -> 202
-  and the worker runs the host sequence; auto_dispatched skip guard intact.
+  and the worker runs the host sequence; a dispatch for a never-probed
+  workspace still proceeds (no health-keyed veto).
 - Restart-failure reporting: each of the five failure branches emits exactly
   one `logger.error` per attempt (assert via log capture).
 - Stop/window-close: stopping via the v1 API emits `workspace_stopped` on the
