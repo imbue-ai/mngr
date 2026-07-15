@@ -473,15 +473,29 @@ deploy *args:
 # Install the minds desktop client's node deps (electron, etc.) using the Node
 # version apps/minds pins in apps/minds/.nvmrc -- selected via
 # select_node_version.sh so pnpm's engine-strict check passes regardless of the
-# shell's default node. Run this once before `just minds-start`; `minds-start`
-# points here when node_modules is missing. Never installs Node (errors with a
-# hint if the pinned version isn't available via nvm).
+# shell's default node. Installs the pinned pnpm (engines.pnpm in
+# apps/minds/package.json) into that Node when missing or mismatched: npm
+# globals are per-Node-version under nvm, so a fresh Node install has no pnpm.
+# Run this once before `just minds-start`; `minds-start` points here when
+# node_modules is missing. Never installs Node itself (errors with a hint if
+# the pinned version isn't available via nvm).
 [group("minds install")]
 minds-install:
     #!/bin/bash
     set -ueo pipefail
     . apps/minds/scripts/select_node_version.sh || exit 2
-    cd apps/minds && pnpm install
+    # The version check must run from apps/minds: pnpm resolves the nearest
+    # package.json above the cwd and self-switches to its packageManager pin,
+    # so checking from the repo root (which has no package.json) can report an
+    # unrelated pnpm version from a directory above the repo.
+    cd apps/minds
+    required_pnpm="$(node -p "require('./package.json').engines.pnpm")"
+    current_pnpm="$(pnpm --version 2>/dev/null || true)"
+    if [ "$current_pnpm" != "$required_pnpm" ]; then
+        echo "Installing pnpm@${required_pnpm} into the selected Node ($(node --version))"
+        npm install --global "pnpm@${required_pnpm}"
+    fi
+    pnpm install
 
 # Override branch / default_workspace_template (DEFAULT_WORKSPACE_TEMPLATE worktree path) via positional args (just has no
 # name=value form for recipe params -- pass them in order):
