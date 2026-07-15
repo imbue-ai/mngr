@@ -1,0 +1,1 @@
+Added the `mngr imbue_cloud sync ...` transport CLI (records pull/push/delete, scrub-secrets, bundle pull/push/delete) plus the matching connector-client methods and wire models. Pure transport for the minds workspace-sync feature: the plugin never encrypts, decrypts, or interprets the secret payloads. Push commands accept `--input-file` so payloads never ride a command line.

@@ -80,11 +80,16 @@ from imbue.minds.desktop_client.server import desktop_client_runtime
 from imbue.minds.desktop_client.server import serve_desktop_client
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
+from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
+from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.system_interface_health import should_enroll_suspect_for_backend_failure
 from imbue.minds.desktop_client.templates import DEFAULT_WORKSPACE_TEMPLATE_GIT_URL
 from imbue.minds.desktop_client.templates import FALLBACK_BRANCH
 from imbue.minds.desktop_client.templates import is_local_workspace_defaults_opt_in
+from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
+from imbue.minds.desktop_client.workspace_record_store import read_device_id
+from imbue.minds.desktop_client.workspace_record_store import read_device_label
 from imbue.minds.envs.docker_cleanup import DockerCleanupError
 from imbue.minds.envs.docker_cleanup import start_active_env_state_container
 from imbue.minds.primitives import OneTimeCode
@@ -390,7 +395,27 @@ def run(
         mngr_caller=mngr_caller,
         connector_url=client_env_config.connector_url,
     )
-    session_store = MultiAccountSessionStore(data_dir=data_directory, cli=imbue_cloud_cli)
+    workspace_record_store = WorkspaceRecordStore(
+        paths=paths,
+        mngr_host_dir=mngr_host_dir,
+        cli=imbue_cloud_cli,
+        device_id=read_device_id(mngr_host_dir),
+        device_label=read_device_label(),
+    )
+    session_store = MultiAccountSessionStore(
+        data_dir=data_directory, cli=imbue_cloud_cli, record_store=workspace_record_store
+    )
+    sync_scheduler = WorkspaceSyncScheduler(
+        record_store=workspace_record_store,
+        session_store=session_store,
+        resolver=backend_resolver,
+        # Newly-materialized SSH material (a cloud workspace unlocked/synced
+        # from another install) is picked up lazily by discovery; bouncing the
+        # observe child makes the workspace reachable now instead of on the
+        # next poll.
+        on_ssh_material_written=lambda: bounce_latchkey_forward_supervisor(latchkey_forward_supervisor),
+    )
+    sync_scheduler.start(root_concurrency_group)
     response_events = load_response_events(data_directory)
     request_inbox = RequestInbox()
     for resp in response_events:
@@ -570,6 +595,7 @@ def run(
         minds_api_key=minds_api_key,
         latchkey_forward_supervisor=latchkey_forward_supervisor,
         discovery_health_watchdog=discovery_health_watchdog,
+        sync_scheduler=sync_scheduler,
     )
 
     # Background loop driving the discovery-pipeline watchdog: polls snapshot

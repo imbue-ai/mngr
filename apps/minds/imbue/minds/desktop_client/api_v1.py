@@ -38,7 +38,6 @@ from flask import Response
 from flask import request
 from loguru import logger
 from pydantic import Field
-from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroupError
@@ -410,6 +409,22 @@ def _check_backup_service_safely(
         return backup_verification.BackupServiceCheck(state=backup_verification.BackupServiceCheckState.UNKNOWN)
 
 
+def _materialize_env_from_record_if_missing(paths: WorkspacePaths, parsed_id: AgentId) -> None:
+    """Best-effort: write the backup env from the workspace's synced record.
+
+    Lets backup status / export work for workspaces this device never
+    provisioned (hosted on another device, or destroyed elsewhere), provided
+    the account is unlocked here. A miss is fine -- the caller degrades to
+    the ordinary not-configured behavior.
+    """
+    session_store = get_state().session_store
+    if session_store is None or session_store.record_store is None:
+        return
+    if has_canonical_env(paths, parsed_id):
+        return
+    session_store.record_store.materialize_env_from_record(str(parsed_id))
+
+
 @require_api_or_cookie_auth
 @API_SPEC.validate(resp=json_response_model(WorkspaceBackupsResponse))
 def _handle_workspace_backups(agent_id: str) -> WorkspaceBackupsResponse | Response:
@@ -426,6 +441,7 @@ def _handle_workspace_backups(agent_id: str) -> WorkspaceBackupsResponse | Respo
     paths: WorkspacePaths | None = state.api_v1_paths
     if paths is None:
         return _json_error("Backups are not configured", 501)
+    _materialize_env_from_record_if_missing(paths, parsed_id)
 
     check_results: list[backup_verification.BackupServiceCheck] = []
     resolver = state.backend_resolver
@@ -477,6 +493,7 @@ def _handle_workspace_backup_export(agent_id: str, snapshot_id: str) -> Response
     paths: WorkspacePaths | None = get_state().api_v1_paths
     if paths is None:
         return _json_error("Backups are not configured", 501)
+    _materialize_env_from_record_if_missing(paths, parsed_id)
     backend_resolver = get_state().backend_resolver
     info = backend_resolver.get_agent_display_info(parsed_id)
     host_id = info.host_id if info is not None else str(parsed_id)
@@ -526,7 +543,6 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
 
     Backup provisioning and Cloudflare tunnel injection match the desktop UI's
     create flow: the optional ``backup_*`` fields (``backup_provider``,
-    ``backup_master_password``, ``backup_save_password``,
     ``backup_api_key_env``) build the same restic
     setup request, and -- when an ``account_id`` is given -- the same
     post-creation callback associates the peer with the account and injects a
@@ -565,10 +581,6 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
         backup_provider = BackupProvider(str(body.get("backup_provider", BackupProvider.CONFIGURE_LATER.value)))
     except ValueError:
         return _json_error(f"Invalid backup_provider: {body.get('backup_provider')!r}", 400)
-    # Wrapped in SecretStr immediately so the plaintext never rides a local
-    # that could end up in a log or an error message.
-    backup_master_password = SecretStr(str(body.get("backup_master_password") or ""))
-    is_save_backup_password = bool(body.get("backup_save_password", False))
     backup_api_key_env = str(body.get("backup_api_key_env", ""))
     account_id = str(body.get("account_id", "")).strip()
     anthropic_api_key = str(body.get("anthropic_api_key", "")).strip()
@@ -620,19 +632,16 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
     if account_id and session_store is not None:
         account_email = session_store.get_account_email(account_id) or ""
 
-    # Build the same restic setup request the create form builds (validates the
-    # master password against the stored hash; optionally saves the plaintext
-    # convenience copy). Fail fast on a bad config.
+    # Build the same restic setup request the create form builds. Fail fast on
+    # a bad config. No password is involved: repositories are keyed by each
+    # workspace's own random password.
     backup_request, backup_error = build_backup_request_or_error(
         backup_provider=backup_provider,
-        typed_master_password=backup_master_password,
-        is_save_password=is_save_backup_password,
         api_key_env=backup_api_key_env,
         account_email=account_email,
-        paths=agent_creator.paths,
     )
     if backup_error is not None:
-        return _json_field_error(backup_error, "backup_master_password")
+        return _json_field_error(backup_error, "backup_api_key_env")
 
     # For imbue_cloud compute the lease needs the resolved template version
     # (the latest semver tag when no branch was given), matching the form path.
@@ -646,7 +655,9 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
     # and persists the chosen region -- exactly as the create form does.
     minds_config = get_state().minds_config
     region = resolve_effective_region(launch_mode, submitted_region, minds_config, get_state().geo_location_cache)
-    on_created = build_create_on_created_callback(account_id, minds_config, launch_mode, region)
+    on_created = build_create_on_created_callback(
+        account_id, minds_config, launch_mode, region, display_name=host_name or resolved_host_name, color=color
+    )
 
     creation_id = agent_creator.start_creation(
         git_url,
@@ -1189,11 +1200,8 @@ def _handle_backup_service_configure(agent_id: str) -> tuple[OperationHandleResp
 
     backup_request, error_message = build_backup_request_or_error(
         backup_provider=backup_provider,
-        typed_master_password=SecretStr(str(body.get("master_password") or "")),
-        is_save_password=bool(body.get("save_password", False)),
         api_key_env=str(body.get("api_key_env", "")),
         account_email=account_email,
-        paths=paths,
     )
     if backup_request is None or error_message is not None:
         return _json_error(error_message or "Invalid backup configuration", 400)

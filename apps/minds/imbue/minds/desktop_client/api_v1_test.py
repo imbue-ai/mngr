@@ -56,6 +56,7 @@ from imbue.minds.primitives import LaunchMode
 from imbue.minds.testing import stub_mngr_host_dir
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 _TEST_KEY = "test-minds-api-key"
@@ -110,7 +111,7 @@ class _RecordingAgentCreator(AgentCreator):
         branch_or_tag: str = "",
         region: str = "",
         anthropic_api_key: str = "",
-        on_created: Callable[[AgentId], None] | None = None,
+        on_created: Callable[[AgentId, HostId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
         color: str | None = None,
         docker_runtime: DockerRuntime = DockerRuntime.RUNC,
@@ -952,7 +953,14 @@ def _associated_session_store(
     """Build a session store with one signed-in account that owns ``agent_id``."""
     cli.add_account(user_id=user_id, email=email)
     store = make_session_store_for_test(tmp_path / "sessions", cli=cli)
-    store.associate_workspace(user_id, str(agent_id))
+    store.associate_created_workspace(
+        user_id=user_id,
+        agent_id=str(agent_id),
+        host_id=str(HostId.generate()),
+        display_name="",
+        color=None,
+        is_cloud_row=False,
+    )
     return store
 
 

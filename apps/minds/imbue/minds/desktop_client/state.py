@@ -39,6 +39,7 @@ from imbue.minds.desktop_client.region_preference import GeoLocationCache
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
+from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.workspace_operations import InMemoryWorkspaceOperationRegistry
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationRegistryInterface
@@ -93,6 +94,9 @@ class DesktopClientState(MutableModel):
     )
     session_store: MultiAccountSessionStore | None = Field(
         default=None, frozen=True, description="Multi-account session store"
+    )
+    sync_scheduler: WorkspaceSyncScheduler | None = Field(
+        default=None, frozen=True, description="Background workspace-record sync loop (kicked on auth changes)"
     )
     request_inbox: RequestInbox | None = Field(
         default=None, description="Immutable pending-request inbox (reassigned)"
