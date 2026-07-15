@@ -601,6 +601,25 @@ def _handle_sync_unlock() -> Response:
     )
 
 
+def _handle_sync_initial_status() -> Response:
+    """Report first-fetch progress for just-signed-in accounts (GET /_chrome/sync-initial-status).
+
+    Backs the post-signin banner: each entry is an account that signed in on
+    this device with no locally synced records yet -- PENDING while the first
+    record fetch is in flight, FAILED when the last pass errored (the loop
+    retries), or DONE with the fetched workspace count.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
+    scheduler = get_state().sync_scheduler
+    statuses = scheduler.list_initial_sync_statuses() if scheduler is not None else []
+    return make_response(
+        status_code=200,
+        content=json.dumps({"accounts": [status.model_dump(mode="json") for status in statuses]}),
+        media_type="application/json",
+    )
+
+
 def _handle_remove_workspace_record() -> Response:
     """Remove a synced workspace record outright (POST /_chrome/workspaces/remove-record).
 
@@ -2754,6 +2773,7 @@ def create_desktop_client(
     app.add_url_rule("/_chrome/error-reporting", view_func=_handle_error_reporting_settings, methods=["POST"])
     app.add_url_rule("/_chrome/backup-password", view_func=_handle_backup_password_change, methods=["POST"])
     app.add_url_rule("/_chrome/sync-unlock", view_func=_handle_sync_unlock, methods=["POST"])
+    app.add_url_rule("/_chrome/sync-initial-status", view_func=_handle_sync_initial_status, methods=["GET"])
     app.add_url_rule("/_chrome/workspaces/remove-record", view_func=_handle_remove_workspace_record, methods=["POST"])
     app.add_url_rule("/help", view_func=_handle_help_page)
     app.add_url_rule("/help/report", view_func=_handle_help_report, methods=["POST"])

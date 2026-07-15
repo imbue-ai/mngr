@@ -227,7 +227,9 @@ def _store_session_from_auth_result(
     """
     assert result.user is not None, "AuthResult missing user"
     session_store.invalidate_identity_cache()
-    _kick_sync_scheduler()
+    scheduler = get_state().sync_scheduler
+    if scheduler is not None:
+        scheduler.note_account_signin(str(result.user.user_id), str(result.user.email))
     minds_config: MindsConfig | None = get_state().minds_config
     if minds_config is not None and minds_config.get_default_account_id() is None:
         minds_config.set_default_account_id(result.user.user_id)
@@ -637,7 +639,7 @@ def _mirror_oauth_signin_result(
     """
     session_store.invalidate_identity_cache()
     if sync_scheduler is not None:
-        sync_scheduler.kick()
+        sync_scheduler.note_account_signin(str(result.user_id), str(result.email))
     if minds_config is not None and minds_config.get_default_account_id() is None:
         minds_config.set_default_account_id(str(result.user_id))
 

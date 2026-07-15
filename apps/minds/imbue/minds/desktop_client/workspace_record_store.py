@@ -526,15 +526,21 @@ class WorkspaceRecordStore(MutableModel):
         with self._lock:
             self._drop_record_unlocked(user_id, host_id)
 
-    def pull(self, user_id: str, account_email: str) -> None:
-        """Merge the server's records into the replica (local dirty rows win until pushed)."""
+    def pull(self, user_id: str, account_email: str) -> bool:
+        """Merge the server's records into the replica (local dirty rows win until pushed).
+
+        Returns True when the server was reached and its records merged; False
+        when sync is unconfigured or the connector was unreachable, so callers
+        can distinguish "the account has no records" from "the records could
+        not be fetched".
+        """
         if self.cli is None:
-            return
+            return False
         try:
             wire_records = self.cli.sync_records_pull(account_email)
         except ImbueCloudCliError as e:
             logger.warning("Could not pull workspace records for {}: {}", account_email, e)
-            return
+            return False
         with self._lock:
             self._load_unlocked()
             by_host = self._records_by_user_id.setdefault(user_id, {})
@@ -552,6 +558,7 @@ class WorkspaceRecordStore(MutableModel):
                 if host_id not in server_host_ids and not by_host[host_id].is_dirty:
                     del by_host[host_id]
             self._save_unlocked(user_id)
+        return True
 
     def push_dirty(self, user_id: str, account_email: str) -> None:
         for record in self.list_records(user_id):
@@ -729,20 +736,25 @@ class WorkspaceRecordStore(MutableModel):
         self,
         accounts: dict[str, str],
         resolver: BackendResolverInterface,
-    ) -> None:
+    ) -> dict[str, bool]:
         """The post-discovery sync pass for every signed-in account.
 
         ``accounts`` maps user_id -> account email. Steps per account: pull,
         migrate legacy associations into records (one-shot), refresh metadata
         for locally-hosted rows whose name/color changed, push dirty rows, and
         tombstone rows whose host is definitively absent from local discovery.
+
+        Returns per-account pull success (user_id -> True when the connector
+        was reached), so the scheduler's initial-sync tracking can distinguish
+        "the account has no records" from "the records could not be fetched".
         """
         with log_span("Reconciling workspace records"):
             legacy = self.read_legacy_associations()
             is_legacy_fully_converted = True
+            is_pull_ok_by_user_id: dict[str, bool] = {}
             for user_id, account_email in accounts.items():
                 self._ensure_bundle_uploaded(user_id, account_email)
-                self.pull(user_id, account_email)
+                is_pull_ok_by_user_id[user_id] = self.pull(user_id, account_email)
                 for agent_id in legacy.get(user_id, []):
                     if self.find_active_record(agent_id) is None:
                         record = self.build_record_from_resolver(user_id, agent_id, resolver)
@@ -772,6 +784,7 @@ class WorkspaceRecordStore(MutableModel):
                 )
             if legacy and accounts and is_legacy_fully_converted:
                 self._retire_legacy_associations()
+            return is_pull_ok_by_user_id
 
     def _ensure_bundle_uploaded(self, user_id: str, account_email: str) -> None:
         """Upload this device's key-bundle mirror when the server has none.

@@ -5,6 +5,7 @@
   when a destroy completes (or any other workspace-list change lands).
 #}
 {% set _scripts %}
+<script src="/_static/sync_status_banner.js" defer></script>
 <script>
   (function () {
     var rendered = (document.querySelector('[data-landing-agent-ids]') || {}).dataset || {};
