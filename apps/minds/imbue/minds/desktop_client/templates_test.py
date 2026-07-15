@@ -7,6 +7,8 @@ import pytest
 
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.minds.desktop_client import templates as _templates_module
+from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
+from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.templates import CATALOG
 from imbue.minds.desktop_client.templates import DEFAULT_EXPECTED_CREATION_DURATION_SECONDS
 from imbue.minds.desktop_client.templates import expected_creation_duration_seconds
@@ -14,6 +16,7 @@ from imbue.minds.desktop_client.templates import make_unique_host_name
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
 from imbue.minds.desktop_client.templates import render_create_form
+from imbue.minds.desktop_client.templates import render_creating_page
 from imbue.minds.desktop_client.templates import render_dev_styleguide_page
 from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
@@ -29,6 +32,7 @@ from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
 from imbue.minds.desktop_client.workspace_color import normalize_workspace_color
 from imbue.minds.desktop_client.workspace_color import pick_unused_create_color
 from imbue.minds.primitives import AIProvider
+from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
@@ -451,6 +455,51 @@ def test_render_create_form_start_advanced_opens_advanced_view() -> None:
 def test_render_create_form_shows_error_message_when_supplied() -> None:
     html = render_create_form(error_message="Imbue cloud requires an account.")
     assert "Imbue cloud requires an account." in html
+
+
+def test_render_creating_page_carries_hidden_github_auth_guidance() -> None:
+    """The creating page ships the private-repo guidance as static, hidden
+    content: creating.js reveals it only when the create-operation status
+    reports error_kind GITHUB_AUTH_REQUIRED. It must name the GitHub CLI sign-in
+    command, link the official docs, and offer the local-path alternative."""
+    creation_id = CreationId()
+    info = AgentCreationInfo(
+        creation_id=creation_id,
+        status=AgentCreationStatus.INITIALIZING,
+        launch_mode=LaunchMode.DOCKER,
+    )
+    html = render_creating_page(creation_id=creation_id, info=info)
+    assert 'id="github-auth-help"' in html
+    assert "gh auth login" in html
+    assert "https://docs.github.com/en/github-cli/github-cli/quickstart" in html
+    assert "path in the form instead of the URL" in html
+    # Hidden on first paint -- the block only shows for the classified failure.
+    guidance_index = html.index('id="github-auth-help"')
+    tag_end = html.index(">", guidance_index)
+    assert "hidden" in html[guidance_index:tag_end]
+
+
+def test_render_creating_page_carries_hidden_generic_git_auth_guidance() -> None:
+    """The creating page also ships generic (non-GitHub) git-auth guidance,
+    revealed for error_kind GIT_AUTH_REQUIRED. It offers the local-path
+    alternative but must NOT name the GitHub CLI (which only fits github.com)."""
+    creation_id = CreationId()
+    info = AgentCreationInfo(
+        creation_id=creation_id,
+        status=AgentCreationStatus.INITIALIZING,
+        launch_mode=LaunchMode.DOCKER,
+    )
+    html = render_creating_page(creation_id=creation_id, info=info)
+    assert 'id="git-auth-help"' in html
+    assert "path in the form instead of the URL" in html
+    # Hidden on first paint.
+    guidance_index = html.index('id="git-auth-help"')
+    tag_end = html.index(">", guidance_index)
+    assert "hidden" in html[guidance_index:tag_end]
+    # The generic block must not carry the GitHub-CLI advice. Scope the check
+    # to this block (the sibling github-auth-help block legitimately has it).
+    block_end = html.index("</div>", guidance_index)
+    assert "gh auth login" not in html[guidance_index:block_end]
 
 
 def test_render_create_form_honors_workspace_env_vars_when_opted_in(monkeypatch: pytest.MonkeyPatch) -> None:

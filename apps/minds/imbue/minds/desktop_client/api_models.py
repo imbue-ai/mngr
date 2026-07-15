@@ -79,6 +79,13 @@ class CreateOperationStatusResponse(FrozenModel):
     agent_id: str | None = Field(default=None, description="The created workspace agent id, once known")
     redirect_url: str | None = Field(default=None, description="Absolute /goto/<agent>/ URL to navigate to when done")
     error: str | None = Field(default=None, description="Failure message, when the creation failed")
+    error_kind: str | None = Field(
+        default=None,
+        description=(
+            "Machine-readable failure classification (e.g. GITHUB_AUTH_REQUIRED), set when the "
+            "failure is recognized; the creating page gates extra static guidance on it"
+        ),
+    )
 
 
 class DestroyOperationStatusResponse(FrozenModel):
