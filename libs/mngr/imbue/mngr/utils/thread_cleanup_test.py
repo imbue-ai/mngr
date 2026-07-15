@@ -9,6 +9,7 @@ fresh Hub (and everything the task referenced) is stranded on every call.
 import gc
 
 import gevent
+import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.utils.thread_cleanup import mngr_executor
@@ -28,6 +29,13 @@ def _run_one_discovery_like_poll() -> None:
         future.result()
 
 
+# The 30 executor spinups (each starting 4 worker threads) and the full-heap
+# gc.collect()/gc.get_objects() probes take ~5s even on an idle machine, so on a
+# contended runner this can cross the suite-wide 10s timeout. Give it headroom
+# (a real leak still fails the growth assertion, just later) and let offload
+# retry it as a known-flaky test.
+@pytest.mark.flaky
+@pytest.mark.timeout(30)
 def test_worker_hubs_do_not_accumulate_across_polls() -> None:
     """Each poll spins up worker threads that create gevent hubs; cleanup must
     free them so repeated polls do not strand a hub (and its retained object

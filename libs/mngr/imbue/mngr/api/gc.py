@@ -809,24 +809,8 @@ def _get_orphaned_work_dirs(host: OnlineHostInterface, provider_name: ProviderIn
     work_dir_infos = []
     for work_dir_str in orphaned_work_dirs:
         work_dir_path = Path(work_dir_str)
-        # Get size if possible
-        size = SizeBytes(0)
-        try:
-            result = host.execute_idempotent_command(f"du -sb {shlex.quote(str(work_dir_path))} | cut -f1")
-            if result.success and result.stdout.strip():
-                size = SizeBytes(int(result.stdout.strip()))
-        except (ValueError, OSError):
-            # If we can't get the size, use 0
-            pass
-
-        # Get creation time from the directory
-        created_at = datetime.now(timezone.utc)
-        try:
-            stat_result = host.execute_idempotent_command(f"stat -c %Y {shlex.quote(str(work_dir_path))}")
-            if stat_result.success and stat_result.stdout.strip():
-                created_at = datetime.fromtimestamp(int(stat_result.stdout.strip()), tz=timezone.utc)
-        except (ValueError, OSError):
-            pass
+        size = host.get_directory_size(work_dir_path)
+        created_at = host.get_file_mtime(work_dir_path) or datetime.now(timezone.utc)
 
         work_dir_infos.append(
             WorkDirInfo(
@@ -1008,21 +992,8 @@ def _local_branches_not_on_any_remote_on_host(host: OnlineHostInterface, repo_pa
 def _build_source_dir_info(
     host: OnlineHostInterface, provider_name: ProviderInstanceName, source_path: Path
 ) -> WorkDirInfo:
-    size = SizeBytes(0)
-    try:
-        result = host.execute_idempotent_command(f"du -sb {shlex.quote(str(source_path))} | cut -f1")
-        if result.success and result.stdout.strip():
-            size = SizeBytes(int(result.stdout.strip()))
-    except (ValueError, OSError):
-        pass
-
-    created_at = datetime.now(timezone.utc)
-    try:
-        stat_result = host.execute_idempotent_command(f"stat -c %Y {shlex.quote(str(source_path))}")
-        if stat_result.success and stat_result.stdout.strip():
-            created_at = datetime.fromtimestamp(int(stat_result.stdout.strip()), tz=timezone.utc)
-    except (ValueError, OSError):
-        pass
+    size = host.get_directory_size(source_path)
+    created_at = host.get_file_mtime(source_path) or datetime.now(timezone.utc)
 
     return WorkDirInfo(
         path=source_path,

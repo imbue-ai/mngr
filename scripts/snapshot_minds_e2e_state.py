@@ -96,7 +96,7 @@ _RUNC_VERSION: Final[str] = "v1.3.0"
 # Keep these in sync with apps/minds/.nvmrc and apps/minds/package.json engines.
 _NODE_VERSION: Final[str] = "24.15.0"
 _PNPM_VERSION: Final[str] = "10.33.4"
-_CLAUDE_CODE_VERSION: Final[str] = "2.1.160"
+_CLAUDE_CODE_VERSION: Final[str] = "2.1.207"
 
 # In-sandbox entrypoint that invokes the shared e2e workspace runner the
 # pytest test also uses, but without the test's mngr-destroy cleanup. The
@@ -139,15 +139,18 @@ _IN_SANDBOX_RUNNER_PROGRAM: Final[str] = textwrap.dedent(
     # Snapshot builds are test infrastructure, not a real install, so they
     # must not count toward Latchkey's usage.
     _write_to_os_environ("LATCHKEY_DISABLE_COUNTING", "1")
-    # DEFAULT_WORKSPACE_TEMPLATE's [providers.docker] block sets docker_runtime = "runsc" to harden
-    # the agent container with gVisor, but the dockerd inside this Modal
-    # vm_runtime sandbox only has the default runc registered, so
-    # `docker run --runtime runsc` fails with "unknown or invalid runtime
-    # name: runsc". Force runc here -- the Modal VM is already the isolation
-    # boundary for this throwaway snapshot. Mirrors the same override the
-    # pytest path applies in
-    # apps/minds/test_snapshot_resume.py::test_create_apikey_workspace_and_chat_via_electron.
-    _write_to_os_environ("MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME", "runc")
+    # Force the local-docker workspace to runc: the dockerd inside this Modal
+    # vm_runtime sandbox only has the default runc registered (no gVisor), so a
+    # runsc container fails with "unknown or invalid runtime name: runsc". The
+    # Modal VM is already the isolation boundary for this throwaway snapshot, so
+    # gVisor buys nothing here. MINDS_DOCKER_RUNTIME_DEFAULT pins the create form
+    # / API default to runc so minds never stacks the `docker_runsc`
+    # create-template -- the only way runsc gets selected, now that the pinned DEFAULT_WORKSPACE_TEMPLATE
+    # `docker` template already defaults to runc. (A provider-config env var like
+    # MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME cannot help here: an explicitly
+    # stacked template's docker_runtime outranks it.) Mirrors the pytest path in
+    # apps/minds/test_snapshot_resume.py.
+    _write_to_os_environ("MINDS_DOCKER_RUNTIME_DEFAULT", "RUNC")
     # The paired DEFAULT_WORKSPACE_TEMPLATE worktree was materialized on the runner and baked into the
     # image at ``.external_worktrees/default-workspace-template``; resolve it
     # (errors loudly if the bake did not stage it).

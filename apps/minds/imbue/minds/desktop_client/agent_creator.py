@@ -63,6 +63,7 @@ from imbue.minds.lima_image.primitives import get_current_image_arch
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
+from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
 from imbue.minds.primitives import LaunchMode
@@ -94,6 +95,11 @@ _MNGR_FORWARD_SESSION_COOKIE_NAME: Final[str] = "mngr_forward_session"
 # assumption about which app that is or which routes it implements.
 _WORKSPACE_PROBE_PATH: Final[str] = "/"
 
+# Scheme of the `mngr forward` proxy origin. minds always runs the proxy with
+# `--use-http2`, so it terminates TLS and the probe/redirect URLs the Python
+# side builds are always `https`.
+_MNGR_FORWARD_SCHEME: Final[str] = "https"
+
 
 def make_workspace_probe_client(preauth_cookie: str, probe_timeout_seconds: float) -> httpx.Client:
     """Construct a reusable httpx.Client preconfigured for workspace probes.
@@ -101,11 +107,17 @@ def make_workspace_probe_client(preauth_cookie: str, probe_timeout_seconds: floa
     Callers that probe in a tight poll loop should construct one of these and
     pass it to ``probe_workspace_through_plugin`` on each iteration, instead
     of letting the helper construct a one-shot client per call.
+
+    The proxy serves TLS (HTTP/2), so cert verification is disabled: these
+    probes dial ``127.0.0.1`` with a ``Host: agent-<hex>.localhost`` header, so
+    hostname verification could never pass, and the cert is a self-signed
+    ephemeral one the probe is not positioned to validate anyway. Loopback-only.
     """
     return httpx.Client(
         timeout=probe_timeout_seconds,
         follow_redirects=False,
         cookies={_MNGR_FORWARD_SESSION_COOKIE_NAME: preauth_cookie},
+        verify=False,
     )
 
 
@@ -151,7 +163,7 @@ def probe_workspace_through_plugin(
     one-shot client is constructed for this single probe -- fine for
     one-off / sporadic callers but wasteful in a loop.
     """
-    probe_url = f"http://127.0.0.1:{mngr_forward_port}{_WORKSPACE_PROBE_PATH}"
+    probe_url = f"{_MNGR_FORWARD_SCHEME}://127.0.0.1:{mngr_forward_port}{_WORKSPACE_PROBE_PATH}"
     host_header = f"{agent_id}.localhost"
     if client is not None:
         return _probe_once(client, probe_url, host_header)
@@ -208,6 +220,32 @@ class AgentCreationStatus(UpperCaseStrEnum):
     FAILED = auto()
 
 
+class CreationErrorKind(UpperCaseStrEnum):
+    """Machine-readable classification of a creation failure.
+
+    Carried alongside the human-readable ``error`` message so the creating
+    page can gate extra static guidance on the failure *type* instead of
+    substring-matching the message client-side. Only failure kinds that
+    change what the UI shows get a value here; unclassified failures carry
+    no kind and the UI shows just the error message.
+    """
+
+    # The clone of a github.com workspace source failed. By far the most
+    # common cause: the repo is private (or does not exist -- GitHub
+    # deliberately answers both the same way, to avoid leaking which private
+    # repos exist) and none of this machine's git credentials can see it, so
+    # the creating page shows GitHub sign-in guidance alongside the raw error.
+    # The clone mechanism is git, but the problem we surface is GitHub access.
+    GITHUB_AUTH_REQUIRED = auto()
+
+    # The clone of a NON-github remote git source (a URL on another host, or an
+    # ssh remote) failed -- same likely cause (private/nonexistent, no usable
+    # credentials on this machine) and same guidance, minus the GitHub-CLI
+    # advice, which only fits github.com. The creating page shows generic
+    # git-credentials guidance for this kind.
+    GIT_AUTH_REQUIRED = auto()
+
+
 class AgentCreationInfo(FrozenModel):
     """Snapshot of agent creation state, returned to callers for status polling.
 
@@ -243,6 +281,13 @@ class AgentCreationInfo(FrozenModel):
     )
     redirect_url: str | None = Field(default=None, description="URL to redirect to when creation is done")
     error: str | None = Field(default=None, description="Error message, set when status is FAILED")
+    error_kind: CreationErrorKind | None = Field(
+        default=None,
+        description=(
+            "Machine-readable classification of the failure, set alongside ``error`` when the "
+            "failure is recognized (see ``classify_creation_error``); ``None`` otherwise"
+        ),
+    )
 
 
 def extract_repo_name(git_url: str) -> str:
@@ -270,6 +315,63 @@ def _is_local_path(repo_source: str) -> bool:
     if "://" in repo_source:
         return False
     return repo_source.startswith(("/", "./", "../", "~"))
+
+
+def _is_github_https_url(repo_source: str) -> bool:
+    """Check if a repo source is an http(s) URL on github.com.
+
+    Gates the private-repo failure classification (and the sign-in guidance
+    the creating page shows for it, which recommends the GitHub CLI) to
+    sources where that guidance is actually correct.
+    """
+    parts = urlsplit(repo_source)
+    if parts.scheme not in ("http", "https"):
+        return False
+    return parts.hostname in ("github.com", "www.github.com")
+
+
+def _is_remote_git_source(repo_source: str) -> bool:
+    """Check if a repo source is a REMOTE git source (a URL or ssh remote).
+
+    True for any ``scheme://`` URL (https/http/ssh/git) and for scp-style ssh
+    remotes (``user@host:path``). False for local paths and for bare strings
+    that are neither -- so a clone failure on a local path (not an access
+    problem) or on garbage input does not get the "you need access" guidance.
+    """
+    if "://" in repo_source:
+        return True
+    # scp-style ssh remote, e.g. git@gitlab.example.com:group/repo.git. The
+    # host part (before the first ':') must contain no '/', which distinguishes
+    # it from a local path like ``./a:b``.
+    return bool(re.match(r"^[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+:", repo_source))
+
+
+def classify_creation_error(repo_source: str, error: Exception) -> CreationErrorKind | None:
+    """Classify a creation failure into a ``CreationErrorKind``, when recognizable.
+
+    Recognizes two cases, both for a failed clone (``GitCloneError``) of a
+    REMOTE git source -- the likely cause is the same (private/nonexistent,
+    no usable credentials on this machine). Deliberately no matching of git's
+    error text (git has no structured error output, and substring matching is
+    brittle across git versions and locales): a remote clone that failed at
+    all is overwhelmingly an access problem, and the creating page's guidance
+    covers it while the raw git error stays visible right above for anything
+    rarer.
+
+    - ``https://github.com/...`` -> ``GITHUB_AUTH_REQUIRED`` (guidance names
+      the GitHub CLI, which only fits github.com https).
+    - any other remote git source (a URL on another host, or an ssh remote)
+      -> ``GIT_AUTH_REQUIRED`` (generic git-credentials guidance, no GitHub CLI).
+
+    A local path or unrecognized input returns ``None`` (just the raw error).
+    """
+    if not isinstance(error, GitCloneError):
+        return None
+    if _is_github_https_url(repo_source):
+        return CreationErrorKind.GITHUB_AUTH_REQUIRED
+    if _is_remote_git_source(repo_source):
+        return CreationErrorKind.GIT_AUTH_REQUIRED
+    return None
 
 
 def _redact_url_credentials(url: str) -> str:
@@ -335,6 +437,26 @@ def _is_git_worktree(repo_dir: Path) -> bool:
     return dot_git.is_file()
 
 
+def _git_noninteractive_env() -> dict[str, str]:
+    """Environment for the desktop client's git calls: never prompt for credentials.
+
+    Git prompts for a username/password on the controlling terminal when a
+    remote needs auth and no credential is available -- but the desktop client
+    has no terminal for the user to answer on, and when minds is launched from
+    a dev shell the prompt would hang the creation thread forever. With
+    ``GIT_TERMINAL_PROMPT=0``, cloning a repo this machine lacks credentials
+    for fails fast with git's stable "could not read Username ... terminal
+    prompts disabled" error instead of hanging. Credential helpers (e.g. the
+    macOS keychain) still work as usual -- only interactive terminal
+    prompting is disabled.
+
+    Deliberately a small per-file copy of the same one-line helper the default
+    workspace template's ``bootstrap.manager`` and ``runtime_backup.runner``
+    carry (same name, same body), rather than a shared cross-package import.
+    """
+    return {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+
+
 def clone_git_repo(
     git_url: GitUrl,
     clone_dir: Path,
@@ -393,6 +515,8 @@ def clone_git_repo(
     # which would otherwise leak tokens from credentialed URLs into logs.
     redacted_on_output = _RedactingOutputCallback(inner=on_output) if on_output is not None else None
 
+    git_env = _git_noninteractive_env()
+
     # All steps run under the same child concurrency group so cancellation is
     # uniform; the failure is raised AFTER the `with cg` block to keep
     # GitCloneError from being wrapped in a ConcurrencyExceptionGroup. For the
@@ -419,6 +543,7 @@ def clone_git_repo(
                 cwd=clone_dir,
                 is_checked_after=False,
                 on_output=redacted_on_output,
+                env=git_env,
             )
             if result.returncode != 0:
                 stderr = result.stderr.strip()
@@ -581,6 +706,7 @@ def _build_mngr_create_command(
     region: str | None = None,
     latchkey_env: Mapping[str, str] | None = None,
     color: str | None = None,
+    docker_runtime: DockerRuntime = DockerRuntime.RUNC,
     original_minds_version: str | None = None,
     original_branch: str | None = None,
     prebaked_lima_image_qcow2_path: Path | None = None,
@@ -594,7 +720,10 @@ def _build_mngr_create_command(
     id anyway, and pre-generating one led to bugs (e.g. keying gateway
     state under a fictional id).
 
-    DOCKER mode: --template main --template docker (runs in Docker container)
+    DOCKER mode: --template main --template docker (runs in a Docker container);
+        for ``docker_runtime == RUNSC`` the gVisor overlay is stacked on top
+        (--template docker_runsc) so the container runs under runsc. RUNC is the
+        docker template's default, so it adds no extra template.
     LIMA mode: --template main --template lima (runs in Lima VM)
     VULTR mode: --template main --template vultr (runs in Docker on a Vultr VPS)
     AWS mode: --new-host on the aws-<region> provider, --template main
@@ -743,6 +872,11 @@ def _build_mngr_create_command(
     match launch_mode:
         case LaunchMode.DOCKER:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "docker"])
+            if docker_runtime is DockerRuntime.RUNSC:
+                # gVisor overlay: reuses the docker template body and only flips
+                # the container runtime to runsc. runc is the docker template's
+                # default, so RUNC needs no extra template.
+                mngr_command.extend(["--template", "docker_runsc"])
             mngr_command.extend(_remote_host_env_flags())
         case LaunchMode.LIMA:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "lima"])
@@ -971,6 +1105,7 @@ def run_mngr_create(
     anthropic_base_url: str | None = None,
     latchkey_env: Mapping[str, str] | None = None,
     color: str | None = None,
+    docker_runtime: DockerRuntime = DockerRuntime.RUNC,
     original_minds_version: str | None = None,
     original_branch: str | None = None,
     prebaked_lima_image_qcow2_path: Path | None = None,
@@ -1011,6 +1146,7 @@ def run_mngr_create(
         region=region,
         latchkey_env=latchkey_env,
         color=color,
+        docker_runtime=docker_runtime,
         original_minds_version=original_minds_version,
         original_branch=original_branch,
         prebaked_lima_image_qcow2_path=prebaked_lima_image_qcow2_path,
@@ -1148,6 +1284,7 @@ class _MngrCreateAttemptParams(FrozenModel):
     anthropic_base_url: str | None
     parent_cg: ConcurrencyGroup | None
     color: str | None
+    docker_runtime: DockerRuntime
     original_minds_version: str | None
     original_branch: str | None
     # Resolved ready pre-baked Lima qcow2 path (issue 2306), or None to build in-VM.
@@ -1186,6 +1323,7 @@ def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams
         anthropic_api_key=params.anthropic_api_key,
         anthropic_base_url=params.anthropic_base_url,
         color=params.color,
+        docker_runtime=params.docker_runtime,
         original_minds_version=params.original_minds_version,
         original_branch=params.original_branch,
         prebaked_lima_image_qcow2_path=params.prebaked_lima_image_qcow2_path,
@@ -1361,6 +1499,7 @@ class AgentCreator(MutableModel):
     _canonical_agent_ids: dict[str, AgentId] = PrivateAttr(default_factory=dict)
     _redirect_urls: dict[str, str] = PrivateAttr(default_factory=dict)
     _errors: dict[str, str] = PrivateAttr(default_factory=dict)
+    _error_kinds: dict[str, CreationErrorKind] = PrivateAttr(default_factory=dict)
     _launch_modes: dict[str, LaunchMode] = PrivateAttr(default_factory=dict)
     _host_names: dict[str, str] = PrivateAttr(default_factory=dict)
     _log_queues: dict[str, queue.Queue[str]] = PrivateAttr(default_factory=dict)
@@ -1379,9 +1518,10 @@ class AgentCreator(MutableModel):
         branch_or_tag: str = "",
         region: str = "",
         anthropic_api_key: str = "",
-        on_created: Callable[[AgentId], None] | None = None,
+        on_created: Callable[[AgentId, HostId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
         color: str | None = None,
+        docker_runtime: DockerRuntime = DockerRuntime.RUNC,
         original_minds_version: str = "",
     ) -> CreationId:
         """Start creating an agent from a git URL or local path in a background thread.
@@ -1398,6 +1538,10 @@ class AgentCreator(MutableModel):
         - ``SUBSCRIPTION`` -- inject neither; the user signs in to Claude
           interactively in the workspace.
 
+        ``docker_runtime`` selects the container runtime for
+        ``LaunchMode.DOCKER`` (runc vs gVisor's runsc); it is ignored by every
+        other launch mode, which pin their own runtime.
+
         For ``LaunchMode.IMBUE_CLOUD``, the agent runs on a leased pool host
         via the ``imbue_cloud_<account-slug>`` provider; the plugin's
         ``ImbueCloudProvider.create_host`` runs the lease + SSH bootstrap
@@ -1407,10 +1551,12 @@ class AgentCreator(MutableModel):
         ask for.
 
         When ``on_created`` is provided, it is called with the canonical
-        ``AgentId`` once ``mngr create`` returns (immediately before the
-        status flips to ``DONE``). The id is parsed from the inner
-        ``mngr create``'s JSONL ``"event": "created"`` line, not pre-generated;
-        for imbue_cloud agents it's the leased pool host's pre-baked id.
+        ``AgentId`` and ``HostId`` once ``mngr create`` returns (immediately
+        after the status flips to ``DONE``, so consumers can rely on the
+        published canonical id). Both ids are parsed from the
+        inner ``mngr create``'s JSONL ``"event": "created"`` line, not
+        pre-generated; for imbue_cloud agents they are the leased pool
+        host's pre-baked ids.
 
         Returns a ``CreationId`` immediately for tracking the in-flight
         creation. Use ``get_creation_info()`` to poll status (and read
@@ -1459,6 +1605,7 @@ class AgentCreator(MutableModel):
                 on_created,
                 backup_request,
                 color,
+                docker_runtime,
                 original_minds_version,
             ),
             daemon=True,
@@ -1498,6 +1645,7 @@ class AgentCreator(MutableModel):
                 host_name=self._host_names.get(cid_str, ""),
                 redirect_url=self._redirect_urls.get(cid_str),
                 error=self._errors.get(cid_str),
+                error_kind=self._error_kinds.get(cid_str),
             )
 
     def get_log_queue(self, creation_id: CreationId) -> queue.Queue[str] | None:
@@ -1519,9 +1667,10 @@ class AgentCreator(MutableModel):
         branch_or_tag: str = "",
         region: str = "",
         anthropic_api_key: str = "",
-        on_created: Callable[[AgentId], None] | None = None,
+        on_created: Callable[[AgentId, HostId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
         color: str | None = None,
+        docker_runtime: DockerRuntime = DockerRuntime.RUNC,
         original_minds_version: str = "",
     ) -> None:
         """Background thread that resolves the repo source and creates an mngr agent.
@@ -1772,6 +1921,7 @@ class AgentCreator(MutableModel):
                     anthropic_base_url=effective_anthropic_base_url,
                     parent_cg=self.root_concurrency_group,
                     color=color,
+                    docker_runtime=docker_runtime,
                     original_minds_version=original_minds_version or None,
                     original_branch=branch or None,
                     prebaked_lima_image_qcow2_path=prebaked_lima_image_qcow2_path,
@@ -1856,7 +2006,7 @@ class AgentCreator(MutableModel):
                     self._redirect_urls[cid_str] = redirect_url
 
                 if on_created is not None:
-                    on_created(canonical_id)
+                    on_created(canonical_id, canonical_host_id)
 
                 # Configure restic backups asynchronously on a detached
                 # thread (mirrors the Cloudflare tunnel-token path): bucket
@@ -1882,9 +2032,12 @@ class AgentCreator(MutableModel):
         except (GitCloneError, GitOperationError, MngrCommandError, ImbueCloudCliError, ValueError, OSError) as e:
             logger.opt(exception=e).error("Failed to create agent for creation {}", creation_id)
             log_queue.put("[minds] ERROR: {}".format(e))
+            error_kind = classify_creation_error(repo_source, e)
             with self._lock:
                 self._statuses[cid_str] = AgentCreationStatus.FAILED
                 self._errors[cid_str] = str(e)
+                if error_kind is not None:
+                    self._error_kinds[cid_str] = error_kind
         finally:
             log_queue.put(LOG_SENTINEL)
 
@@ -2005,7 +2158,7 @@ class AgentCreator(MutableModel):
         """
         if self.mngr_forward_port == 0:
             return f"/goto/{agent_id}/"
-        return f"http://localhost:{self.mngr_forward_port}/goto/{agent_id}/"
+        return f"{_MNGR_FORWARD_SCHEME}://localhost:{self.mngr_forward_port}/goto/{agent_id}/"
 
     def _wait_for_workspace_ready(self, agent_id: AgentId, log_queue: queue.Queue[str]) -> None:
         """Poll the agent's system_interface through the plugin until it responds 200.

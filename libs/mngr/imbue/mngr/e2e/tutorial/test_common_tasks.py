@@ -11,7 +11,6 @@ from imbue.mngr.e2e.conftest import E2eSession
 from imbue.skitwright.expect import expect
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(300)
@@ -51,7 +50,13 @@ def test_recipe_launch_check_cleanup(e2e: E2eSession) -> None:
             comment="1. create an agent for the task",
         )
     ).to_succeed()
-    expect(e2e.run("mngr list --running", comment="2. check what agents are running")).to_succeed()
+    # Scope the listing to the local provider (matching the local command-agent
+    # stand-in): a bare `mngr list --running` also queries remote provider
+    # backends (e.g. aws, docker) that are enabled by default but unreachable in
+    # the isolated e2e profile (no cloud credentials, no docker daemon), so it
+    # would exit non-zero for reasons unrelated to the launch->check->cleanup
+    # recipe under test.
+    expect(e2e.run("mngr list --running --provider local", comment="2. check what agents are running")).to_succeed()
     # The recipe's modal claude agent is actively working (state RUNNING) when
     # listed, but the idle `sleep` stand-in reports WAITING, so `mngr list
     # --running` above is legitimately empty. Confirm the agent really is up and
@@ -84,8 +89,10 @@ def test_recipe_launch_check_cleanup(e2e: E2eSession) -> None:
     branch_result = e2e.run("git branch --list mngr/fix-bug", comment="verify the created branch was removed")
     expect(branch_result.stdout).to_be_empty()
     # Destroy must also remove the agent itself, not just its branch: it should
-    # no longer be listed, and resolving it by name should now fail.
-    final_listing = e2e.run("mngr list", comment="confirm the agent is gone after cleanup")
+    # no longer be listed, and resolving it by name should now fail. Scope to the
+    # local provider for the same reason as step 2's listing (a bare `mngr list`
+    # would query unreachable remote backends in the isolated e2e profile).
+    final_listing = e2e.run("mngr list --provider local", comment="confirm the agent is gone after cleanup")
     expect(final_listing).to_succeed()
     expect(final_listing.stdout).not_to_contain("fix-bug")
     expect(e2e.run("mngr exec fix-bug pwd", comment="verify the destroyed agent can no longer be reached")).to_fail()

@@ -383,6 +383,15 @@ def list_destroying(
     return records
 
 
+def has_destroying_marker(agent_id: AgentId, paths: WorkspacePaths) -> bool:
+    """Whether a destroy has been requested for this workspace (marker dir exists).
+
+    Cheaper than :func:`read_destroying` when only "is a destroy in flight or
+    recently finished?" matters (e.g. the record-resurrection guard).
+    """
+    return _destroying_dir(paths, agent_id).exists()
+
+
 def delete_destroying(agent_id: AgentId, paths: WorkspacePaths) -> bool:
     """Remove ``<paths.data_dir>/destroying/<agent_id>/``. Idempotent.
 

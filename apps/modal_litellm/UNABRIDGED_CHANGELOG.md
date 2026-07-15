@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-14
+
+Add `claude-fable-5` to the LiteLLM proxy model list with inline pricing ($10 / $50 per 1M input / output tokens, cache write 1.25e-5, cache read 1e-6, mirrored from litellm's price map), so workspaces using imbue_cloud virtual keys can run Claude Fable 5 with correct cost tracking.
+
 ## 2026-07-01
 
 Added a new async/await ratchet (`test_prevent_async_await`) that freezes the current amount of `async def` / `await` usage in this project and fails if new async code is added. We strongly prefer synchronous code: it is far easier to debug, and our software is intentionally low-scale, so async provides no benefit. Existing usage is grandfathered in at its current count; the count can only decrease.

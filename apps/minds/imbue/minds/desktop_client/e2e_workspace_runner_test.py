@@ -70,6 +70,17 @@ def test_wait_returns_when_workspace_url_reached() -> None:
     _wait_for_workspace_ready_or_failure(cast(Page, page), timeout_seconds=5)
 
 
+def test_wait_returns_for_https_workspace_url() -> None:
+    """The workspace origin is https when the proxy serves TLS + HTTP/2 (the default).
+
+    The ready-check must recognize that scheme, not just http -- otherwise the
+    waiter never sees the workspace as ready and times out even though it loaded.
+    """
+    https_ready_url = "https://agent-deadbeef.localhost:8421/"
+    page = _FakePage(urls=[https_ready_url], is_visible_results=[False])
+    _wait_for_workspace_ready_or_failure(cast(Page, page), timeout_seconds=5)
+
+
 def test_wait_raises_with_surfaced_error_on_failure_view() -> None:
     page = _FakePage(
         urls=[_PENDING_URL],
