@@ -68,8 +68,14 @@ def _read_fake_mngr_invocations(mngr_binary: str) -> list[str]:
     return log_path.read_text().splitlines()
 
 
-def _resolver_with_system_services(workspace_agent: AgentId, services_agent: AgentId) -> MngrCliBackendResolver:
-    """Build a resolver where the workspace agent and system-services agent share a host."""
+def _resolver_with_system_services(
+    workspace_agent: AgentId, services_agent: AgentId, host_state: HostState | None = None
+) -> MngrCliBackendResolver:
+    """Build a resolver where the workspace agent and system-services agent share a host.
+
+    ``host_state`` records an observed lifecycle state for that shared host in
+    the snapshot; None leaves the host state undiscovered.
+    """
     host_id = HostId.generate()
     resolver = MngrCliBackendResolver()
     resolver.update_agents(
@@ -89,6 +95,7 @@ def _resolver_with_system_services(workspace_agent: AgentId, services_agent: Age
                     provider_name=ProviderInstanceName("docker"),
                 ),
             ),
+            host_state_by_host_id=({str(host_id): host_state} if host_state is not None else {}),
         )
     )
     return resolver
@@ -715,29 +722,7 @@ def test_probe_skips_exec_for_a_trusted_not_running_host(tmp_path: Path) -> None
     """
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
-    host_id = HostId.generate()
-    resolver = MngrCliBackendResolver()
-    resolver.update_agents(
-        ParsedAgentsResult(
-            agent_ids=(workspace_agent, services_agent),
-            discovered_agents=(
-                DiscoveredAgent(
-                    host_id=host_id,
-                    agent_id=workspace_agent,
-                    agent_name=AgentName("ws-agent"),
-                    provider_name=ProviderInstanceName("docker"),
-                    certified_data={"labels": {"workspace": "true", "is_primary": "true"}},
-                ),
-                DiscoveredAgent(
-                    host_id=host_id,
-                    agent_id=services_agent,
-                    agent_name=AgentName("system-services"),
-                    provider_name=ProviderInstanceName("docker"),
-                ),
-            ),
-            host_state_by_host_id={str(host_id): HostState.STOPPED},
-        )
-    )
+    resolver = _resolver_with_system_services(workspace_agent, services_agent, host_state=HostState.STOPPED)
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
     onset = _drive_to_stuck_with_onset(tracker, workspace_agent)
     _set_provider_snapshot_at(resolver, "docker", onset + timedelta(seconds=1))
