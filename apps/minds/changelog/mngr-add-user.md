@@ -1,1 +1,0 @@
-Fixed a flaky snapshot-resume test (`test_resumed_workspace_registered_expected_services`): after resume the app-watcher registers services into `runtime/applications.toml` asynchronously, so the test now polls until `system_interface`, `web`, and `terminal` are all present instead of reading the file once (which could race a service that registered a moment later).

@@ -83,7 +83,6 @@ _SYSTEM_INTERFACE_PORT: Final[int] = 8000
 _MNGR_START_TIMEOUT_SECONDS: Final[int] = 300
 _SYSTEM_INTERFACE_READY_TIMEOUT_SECONDS: Final[int] = 120
 _PROBE_TIMEOUT_SECONDS: Final[int] = 120
-_SERVICES_REGISTERED_TIMEOUT_SECONDS: Final[int] = 120
 
 # mngr lifecycle states that mean the agent's tmux window is alive (as opposed
 # to STOPPED / DONE). The system-services agent's window-0 command is
@@ -185,27 +184,6 @@ def _wait_for_system_interface_up(container_name: str) -> bool:
     return (
         _exec_in_container(container_name, poll, timeout=_SYSTEM_INTERFACE_READY_TIMEOUT_SECONDS + 30).returncode == 0
     )
-
-
-def _wait_for_services_registered(container_name: str, service_names: tuple[str, ...]) -> str:
-    """Poll runtime/applications.toml inside the container until every expected service appears.
-
-    After resume the app-watcher respawns services asynchronously, each writing
-    its port into applications.toml, so a single read can race a service that
-    registers a moment later. Poll (in shell inside ``docker exec``, so the test
-    never calls ``time.sleep``) until all expected names are present or the
-    deadline passes, then return the final file contents so the caller can
-    assert with a useful message either way.
-    """
-    presence_checks = " && ".join(f'grep -q {name} "$f"' for name in service_names)
-    poll = (
-        "f=/code/runtime/applications.toml; "
-        "for i in $(seq 1 40); do "
-        f'if [ -f "$f" ] && {presence_checks}; then break; fi; '
-        "sleep 3; done; "
-        'cat "$f" 2>/dev/null'
-    )
-    return _exec_in_container(container_name, poll, timeout=_SERVICES_REGISTERED_TIMEOUT_SECONDS + 30).stdout
 
 
 def _wait_for_system_interface_down(container_name: str) -> bool:
@@ -381,15 +359,13 @@ def test_resumed_workspace_registered_expected_services(running_workspace: _Resu
 
     The app-watcher / bootstrap respawns the standard services on restart and
     each registers its port into ``runtime/applications.toml``; the core set
-    (system_interface, web, terminal) must be present. Registration is
-    asynchronous after resume, so poll until all appear rather than reading once
-    (a single read races a service that registers a moment later).
+    (system_interface, web, terminal) must be present.
     """
-    expected_services = ("system_interface", "web", "terminal")
-    applications_toml = _wait_for_services_registered(running_workspace.container_name, expected_services)
-    for service_name in expected_services:
-        assert service_name in applications_toml, (
-            f"Service {service_name!r} not registered in applications.toml after resume:\n{applications_toml}"
+    result = _exec_in_container(running_workspace.container_name, "cat /code/runtime/applications.toml", timeout=30)
+    assert result.returncode == 0, f"Could not read runtime/applications.toml: {result.stderr}"
+    for service_name in ("system_interface", "web", "terminal"):
+        assert service_name in result.stdout, (
+            f"Service {service_name!r} not registered in applications.toml after resume:\n{result.stdout}"
         )
 
 
