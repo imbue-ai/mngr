@@ -1217,14 +1217,68 @@ def _handle_backup_service_update(agent_id: str) -> tuple[OperationHandleRespons
 @require_api_or_cookie_auth
 @API_SPEC.validate(resp=json_response_model(EmptyResponse))
 def _handle_backup_service_update_cancel(agent_id: str) -> EmptyResponse | Response:
-    """Cancel a waiting backup update (only effective before it starts mutating)."""
+    """Cancel a waiting backup update or restore (only effective before it starts mutating)."""
     parsed_id = AgentId(agent_id)
     registry = get_state().workspace_operation_registry
     record = registry.get(parsed_id)
-    if record is None or record.kind != WorkspaceOperationKind.BACKUP_UPDATE:
+    if record is None or record.kind not in (
+        WorkspaceOperationKind.BACKUP_UPDATE,
+        WorkspaceOperationKind.BACKUP_RESTORE,
+    ):
         return _json_error(f"No backup update operation for {agent_id}", 404)
     registry.request_cancel(parsed_id)
     return EmptyResponse()
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(json=BackupServiceUpdateRequest, resp=json_response_model(OperationHandleResponse, status_code=202))
+def _handle_workspace_backup_restore(agent_id: str, snapshot_id: str) -> tuple[OperationHandleResponse, int] | Response:
+    """Dispatch an in-place restore of the workspace to one snapshot; return a handle to poll.
+
+    Body: ``{"stop_chats"?: bool}`` -- same contract as the update route (the
+    "Stop all chats and retry" flow sets it). One tracked operation runs per
+    workspace at a time; ``start_if_idle`` rejects a second dispatch (of any
+    kind, including a double-pressed Restore) with a 409 rather than stacking.
+    """
+    context = _resolve_backup_route_context(agent_id)
+    if isinstance(context, Response):
+        return context
+    parsed_id, paths, parent_cg = context
+    state = get_state()
+    registry = state.workspace_operation_registry
+    if not has_canonical_env(paths, parsed_id):
+        return _json_error(f"Backups are not configured for {agent_id}", 409)
+
+    body = request.get_json(silent=True, force=True) or {}
+    is_stop_chats = bool(body.get("stop_chats", False))
+    if not registry.start_if_idle(parsed_id, WorkspaceOperationKind.BACKUP_RESTORE, datetime.now(timezone.utc)):
+        existing = registry.get(parsed_id)
+        kind_note = f" ({existing.kind.value})" if existing is not None else ""
+        return _json_error(f"Another operation{kind_note} is already running for {agent_id}", 409)
+    try:
+        parent_cg.start_new_thread(
+            target=backup_update_module.run_backup_restore_sequence,
+            kwargs={
+                "agent_id": parsed_id,
+                "paths": paths,
+                "registry": registry,
+                "parent_cg": parent_cg,
+                "snapshot_id": snapshot_id,
+                "is_stop_chats": is_stop_chats,
+            },
+            name=f"backup-restore-{parsed_id}",
+            daemon=True,
+            is_checked=False,
+            on_failure=backup_update_module.BackupWorkerFailureHandler(
+                workspace_agent_id=parsed_id, registry=registry
+            ),
+        )
+    except (OSError, RuntimeError, ConcurrencyGroupError) as exc:
+        logger.warning("Failed to spawn backup restore worker for {}: {}", parsed_id, exc)
+        message = f"Could not start the backup restore worker: {exc}"
+        registry.fail(parsed_id, message)
+        return _json_error(message, 503)
+    return OperationHandleResponse(operation_id=str(parsed_id), kind="backup_restore"), 202
 
 
 @require_api_or_cookie_auth
@@ -1378,12 +1432,13 @@ def _handle_backup_verification_toggle(agent_id: str) -> EmptyResponse | Respons
 @require_api_or_cookie_auth
 @API_SPEC.validate(resp=json_response_model(BackupOperationStatusResponse))
 def _handle_backup_operation_status(operation_id: str) -> BackupOperationStatusResponse | Response:
-    """Report the status of a backup update/configure operation (the id is the workspace agent id)."""
+    """Report the status of a backup update/configure/restore operation (the id is the workspace agent id)."""
     parsed_id = AgentId(operation_id)
     record = get_state().workspace_operation_registry.get(parsed_id)
     if record is None or record.kind not in (
         WorkspaceOperationKind.BACKUP_UPDATE,
         WorkspaceOperationKind.BACKUP_CONFIGURE,
+        WorkspaceOperationKind.BACKUP_RESTORE,
     ):
         return _json_error(f"Unknown operation {operation_id}", 404)
     blocked_chats: tuple[str, ...] = ()
@@ -2011,6 +2066,11 @@ def create_api_v1_blueprint() -> Blueprint:
     blueprint.add_url_rule(
         "/workspaces/<agent_id>/backups/<snapshot_id>/export",
         view_func=_handle_workspace_backup_export,
+        methods=["POST"],
+    )
+    blueprint.add_url_rule(
+        "/workspaces/<agent_id>/backups/<snapshot_id>/restore",
+        view_func=_handle_workspace_backup_restore,
         methods=["POST"],
     )
 

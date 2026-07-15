@@ -8,7 +8,10 @@
 //     "Stop chats and try again" follow-up when running chats block it and
 //     a Cancel that works while the update is still waiting),
 //   - "Change storage location" (enable, change destination, or disable
-//     via the "None" provider; same tracked-operation polling).
+//     via the "None" provider; same tracked-operation polling),
+//   - per-row "Restore" in the Recent backups table (confirm dialog, then an
+//     in-place restore as a tracked operation; same polling, same
+//     "Stop chats and try again" follow-up as the update).
 //
 // Conditional buttons are shown/hidden via their wrapper spans (a `hidden`
 // class directly on a Button loses to its inline-flex display class).
@@ -46,8 +49,20 @@
   var viewAllLink = document.getElementById('backup-view-all');
   var viewAllLabel = document.getElementById('backup-view-all-label');
 
+  var restoreDialog = document.getElementById('restore-dialog');
+  var restoreDialogTime = document.getElementById('restore-dialog-time');
+  var restoreCancelBtn = document.getElementById('restore-cancel-btn');
+  var restoreConfirmBtn = document.getElementById('restore-confirm-btn');
+  // The snapshot the open restore dialog is about.
+  var pendingRestoreSnapshotId = null;
+
   // The latest known verification state, driving the Enable/Disable label.
   var isVerificationEnabled = true;
+
+  // What "Stop chats and try again" retries: set by whichever chat-gated
+  // operation (update or restore) was dispatched last, so the retry re-runs
+  // that same operation with stop_chats.
+  var retryWithStopChats = null;
 
   var RECENT_LIMIT = 5;
 
@@ -128,9 +143,16 @@
     }
 
     setShown(historyCard, true);
+    // Restore execs into the workspace, so it needs the workspace running;
+    // downloads work regardless (restic runs on this machine).
+    var restoreConfig = entry.check_state === 'OFFLINE'
+      ? { disabledReason: 'This workspace is offline; start it to restore a backup.' }
+      : { onRestore: openRestoreDialog };
     snapshots.slice(0, RECENT_LIMIT).forEach(function (snapshot, index) {
       // Row markup is shared with the full-history page (backup_table.js).
-      historyEl.appendChild(window.mindsBackupTable.buildSnapshotRow(agentId, snapshot, index === 0, index === 0));
+      historyEl.appendChild(
+        window.mindsBackupTable.buildSnapshotRow(agentId, snapshot, index === 0, index === 0, restoreConfig)
+      );
     });
 
     // The footer is pointless when the table already shows everything, so it
@@ -260,14 +282,19 @@
 
   // -- Tracked operation driving (update + configure/disable share the poller)
 
-  // Cancel only affects a still-waiting backup *update* (the cancel route
-  // 404s for configure operations, which have no waiting phase), so the
+  // Cancel only affects a still-waiting backup update or restore (the cancel
+  // route 404s for configure operations, which have no waiting phase), so the
   // Cancel button is shown only for cancellable operations.
   function setOperationRunning(isRunning, isCancellable) {
     spinner.classList.toggle('hidden', !isRunning);
     updateBtn.disabled = isRunning;
     configureSubmitBtn.disabled = isRunning;
     stopChatsBtn.disabled = isRunning;
+    // Only the live restore buttons (text-accent); the offline-disabled ones
+    // must stay disabled when the operation ends.
+    section.querySelectorAll('.backup-restore-btn.text-accent').forEach(function (btn) {
+      btn.disabled = isRunning;
+    });
     setShown(cancelBtnWrap, isRunning && isCancellable);
     if (!isRunning) progressEl.classList.add('hidden');
   }
@@ -306,7 +333,7 @@
         if (op.blocked_chats && op.blocked_chats.length > 0) {
           showError(
             'Chats are running in this workspace (' + op.blocked_chats.join(', ') +
-            '). Stop them before updating the backup service; they resume on your next message.'
+            '). Stop them before continuing; they resume on your next message.'
           );
           setShown(stopChatsBtnWrap, true);
           return;
@@ -343,16 +370,49 @@
       });
   }
 
+  function startUpdate(isStopChats) {
+    retryWithStopChats = function () { startUpdate(true); };
+    startOperation('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backup-service/update', { stop_chats: isStopChats }, true);
+  }
+
+  function startRestore(snapshotId, isStopChats) {
+    retryWithStopChats = function () { startRestore(snapshotId, true); };
+    startOperation(
+      '/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backups/' + encodeURIComponent(snapshotId) + '/restore',
+      { stop_chats: isStopChats },
+      true
+    );
+  }
+
   updateBtn.addEventListener('click', function () {
-    startOperation('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backup-service/update', { stop_chats: false }, true);
+    startUpdate(false);
   });
   stopChatsBtn.addEventListener('click', function () {
     setShown(stopChatsBtnWrap, false);
-    startOperation('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backup-service/update', { stop_chats: true }, true);
+    if (retryWithStopChats) retryWithStopChats();
   });
+  // The cancel route also cancels a waiting restore (same operation slot).
   cancelBtn.addEventListener('click', function () {
     fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backup-service/update/cancel', { method: 'POST' })
       .catch(function () {});
+  });
+
+  // -- Restore confirmation dialog -------------------------------------------
+
+  function openRestoreDialog(snapshot) {
+    pendingRestoreSnapshotId = snapshot.snapshot_id;
+    restoreDialogTime.textContent = new Date(snapshot.time).toLocaleString();
+    restoreDialog.classList.remove('hidden');
+  }
+  restoreCancelBtn.addEventListener('click', function () {
+    restoreDialog.classList.add('hidden');
+  });
+  restoreDialog.addEventListener('click', function (e) {
+    if (e.target === restoreDialog) restoreDialog.classList.add('hidden');
+  });
+  restoreConfirmBtn.addEventListener('click', function () {
+    restoreDialog.classList.add('hidden');
+    if (pendingRestoreSnapshotId) startRestore(pendingRestoreSnapshotId, false);
   });
 
   // -- Configure form (enable / change destination / disable) ---------------

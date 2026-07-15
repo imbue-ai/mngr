@@ -3,9 +3,11 @@
 // paginated server-side so a long history is never loaded all at once) and
 // drives the Newer/Older pagination controls.
 //
-// The row markup (including the per-snapshot Download flow and the inert
-// Restore placeholder) is shared with the settings page's "Recent backups"
-// table via window.mindsBackupTable (backup_table.js).
+// The row markup (including the per-snapshot Download flow) is shared with
+// the settings page's "Recent backups" table via window.mindsBackupTable
+// (backup_table.js). Restore is hosted on the settings page only (its
+// confirm dialog and operation progress live there), so this page's Restore
+// buttons are disabled and point the user at settings.
 (function () {
   var page = document.getElementById('backup-history-page');
   if (!page) return;

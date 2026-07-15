@@ -104,6 +104,22 @@ def test_render_workspace_settings_view_all_links_to_backup_history_page() -> No
     assert f"/workspace/{_AGENT_A}/backups" in html
 
 
+def test_render_workspace_settings_carries_the_restore_dialog() -> None:
+    # The restore confirmation dialog ships in the page markup; the ids are
+    # load-bearing (workspace_backups.js fills the time and drives the flow).
+    html = render_workspace_settings(
+        agent_id=str(_AGENT_A),
+        ws_name="ws",
+        current_account=None,
+        accounts=(),
+        servers=(),
+    )
+    assert 'id="restore-dialog"' in html
+    assert 'id="restore-dialog-time"' in html
+    assert 'id="restore-cancel-btn"' in html
+    assert 'id="restore-confirm-btn"' in html
+
+
 def test_render_workspace_backup_history_page_shell() -> None:
     # The page is a shell filled client-side: it must carry the agent id for
     # workspace_backup_history.js, load that script, and link back to settings.

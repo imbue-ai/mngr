@@ -1,6 +1,6 @@
 """Self-contained python3 scripts minds runs inside a workspace via ``mngr exec``.
 
-Three scripts, all stdlib-only (they run under the workspace's system python3
+Four scripts, all stdlib-only (they run under the workspace's system python3
 with no access to minds code), all parameterized via argv and all reporting a
 single marker-prefixed JSON line on stdout so the caller can parse a verdict
 out of arbitrarily noisy output:
@@ -19,6 +19,11 @@ out of arbitrarily noisy output:
   ``libs/host_backup`` at the target tag, commit ``backup-update: <tag>``,
   ``uv sync``, restart the service, verify it comes back, and auto-rollback
   (``git revert``) on failure. Optionally stops running chats first.
+- the *restore* script: rewinds the whole host dir to a chosen restic
+  snapshot -- gate on chats/ticks, stop the backup service, take a
+  ``pre-restore`` safety snapshot (so any restore is undoable), restore the
+  snapshot into a staging dir, swap it into place (preserving the current
+  ``restic.env``), ``uv sync``, and restart every supervisord service.
 
 The scripts are shipped base64-encoded through the shell (the base64 alphabet
 contains no shell-significant characters), decoded and piped into ``python3 -``
@@ -33,6 +38,7 @@ from typing import Final
 CHECK_RESULT_MARKER: Final[str] = "MINDS_BACKUP_CHECK_JSON:"
 GATE_RESULT_MARKER: Final[str] = "MINDS_BACKUP_GATE_JSON:"
 UPDATE_RESULT_MARKER: Final[str] = "MINDS_BACKUP_UPDATE_JSON:"
+RESTORE_RESULT_MARKER: Final[str] = "MINDS_BACKUP_RESTORE_JSON:"
 
 # The one repository backup-service code is fetched from. minds owns the
 # ``official`` remote on every workspace: the scripts create it (or repoint it)
@@ -51,6 +57,7 @@ import base64 as _b64
 import hashlib as _hashlib
 import json as _json
 import os as _os
+import shutil as _shutil
 import subprocess as _subprocess
 import sys as _sys
 import time as _time
@@ -67,11 +74,21 @@ TICK_COMPLETION_TYPES = (
     "TICK_ERROR",
     "SNAPSHOT_FAILED",
 )
+# minds already waited (unboundedly, cancellably) for a quiet workspace before
+# dispatching a mutating script; this bounded wait only covers a tick that
+# started in between, and must stay well inside the caller's outer exec
+# timeout so a structured "timed out waiting" payload beats the exec being
+# killed.
+TICK_WAIT_TIMEOUT_SECONDS = 900.0
+TICK_POLL_SECONDS = 5.0
+SERVICE_VERIFY_TIMEOUT_SECONDS = 60.0
 
 
-def _run(argv, timeout=60):
+def _run(argv, timeout=60, cwd=None, env=None):
     try:
-        return _subprocess.run(argv, capture_output=True, text=True, check=False, timeout=timeout)
+        return _subprocess.run(
+            argv, capture_output=True, text=True, check=False, timeout=timeout, cwd=cwd, env=env
+        )
     except (OSError, _subprocess.TimeoutExpired) as e:
         completed = _subprocess.CompletedProcess(argv, returncode=127)
         completed.stdout = ""
@@ -326,6 +343,50 @@ def _is_backup_tick_in_flight(agent_id):
     return bool(started - finished)
 
 
+def _gate_chats_and_wait_for_tick(agent_id, is_stop_chats):
+    """Gate a mutating script: no RUNNING chats (optionally stop them), no in-flight tick.
+
+    Returns (status, extra, detail) with status in ok | blocked | failed;
+    ``extra`` carries payload fields (e.g. running_chats) for the result.
+    """
+    chats, gate_error = _list_running_chats()
+    if chats is None:
+        return "failed", {}, "cannot determine running chats: %s" % gate_error
+    if chats and is_stop_chats:
+        for chat_name in chats:
+            stopped = _run(["uv", "run", "mngr", "stop", chat_name], timeout=180)
+            if stopped.returncode != 0:
+                detail = "could not stop chat %s: %s" % (
+                    chat_name,
+                    (stopped.stderr or stopped.stdout).strip()[-300:],
+                )
+                return "failed", {}, detail
+        chats, gate_error = _list_running_chats()
+        if chats is None:
+            return "failed", {}, "cannot re-check running chats: %s" % gate_error
+    if chats:
+        return "blocked", {"running_chats": chats}, "chat agents are running"
+    wait_deadline = _time.monotonic() + TICK_WAIT_TIMEOUT_SECONDS
+    while _is_backup_tick_in_flight(agent_id):
+        if _time.monotonic() >= wait_deadline:
+            return "failed", {}, "timed out waiting for the in-flight backup tick to finish"
+        _time.sleep(TICK_POLL_SECONDS)
+    return "ok", {}, ""
+
+
+def _wait_for_backup_service_running(timeout_seconds=SERVICE_VERIFY_TIMEOUT_SECONDS):
+    """Poll until the host-backup program reads RUNNING; return "" or an error detail."""
+    deadline = _time.monotonic() + timeout_seconds
+    last_detail = ""
+    while _time.monotonic() < deadline:
+        state, detail = _service_state()
+        last_detail = detail
+        if state == "running":
+            return ""
+        _time.sleep(2.0)
+    return "host-backup did not reach RUNNING: %s" % last_detail
+
+
 def _emit(marker, payload):
     _sys.stdout.write(marker + _json.dumps(payload) + "\n")
     _sys.stdout.flush()
@@ -386,14 +447,6 @@ _main()
 BACKUP_APPLY_UPDATE_SCRIPT: Final[str] = (
     _SCRIPT_PREAMBLE
     + r"""
-# minds already waited (unboundedly, cancellably) for a quiet workspace before
-# dispatching this script; this bounded wait only covers a tick that started in
-# between, and must stay well inside the caller's outer exec timeout so the
-# structured "timed out waiting" payload beats the exec being killed.
-_TICK_WAIT_TIMEOUT_SECONDS = 900.0
-_TICK_POLL_SECONDS = 5.0
-_SERVICE_VERIFY_TIMEOUT_SECONDS = 60.0
-
 
 def _git(args, timeout=120):
     return _run(["git"] + GIT_IDENTITY + list(args), timeout=timeout)
@@ -403,15 +456,7 @@ def _restart_and_verify_service():
     restarted = _run(["supervisorctl", "restart", "host-backup"], timeout=120)
     if restarted.returncode != 0:
         return "supervisorctl restart failed: %s" % (restarted.stderr or restarted.stdout).strip()[-500:]
-    deadline = _time.monotonic() + _SERVICE_VERIFY_TIMEOUT_SECONDS
-    last_detail = ""
-    while _time.monotonic() < deadline:
-        state, detail = _service_state()
-        last_detail = detail
-        if state == "running":
-            return ""
-        _time.sleep(2.0)
-    return "host-backup did not reach RUNNING: %s" % last_detail
+    return _wait_for_backup_service_running()
 
 
 def _finish(result, status, detail=""):
@@ -443,29 +488,12 @@ def _main():
         "stash_conflict": False,
     }
 
-    # Gate: no actively-RUNNING chat agents in this work_dir (optionally stop them).
-    chats, gate_error = _list_running_chats()
-    if chats is None:
-        _finish(result, "failed", "cannot determine running chats: %s" % gate_error)
-    if chats and is_stop_chats:
-        for chat_name in chats:
-            stopped = _run(["uv", "run", "mngr", "stop", chat_name], timeout=180)
-            if stopped.returncode != 0:
-                _finish(result, "failed", "could not stop chat %s: %s" % (chat_name, (stopped.stderr or stopped.stdout).strip()[-300:]))
-        chats, gate_error = _list_running_chats()
-        if chats is None:
-            _finish(result, "failed", "cannot re-check running chats: %s" % gate_error)
-    if chats:
-        result["running_chats"] = chats
-        _finish(result, "blocked", "chat agents are running")
-
-    # Wait out any in-flight backup tick (minds already waited; this is a
-    # bounded belt against a tick starting between its poll and this run).
-    wait_deadline = _time.monotonic() + _TICK_WAIT_TIMEOUT_SECONDS
-    while _is_backup_tick_in_flight(agent_id):
-        if _time.monotonic() >= wait_deadline:
-            _finish(result, "failed", "timed out waiting for the in-flight backup tick to finish")
-        _time.sleep(_TICK_POLL_SECONDS)
+    # Gate: no actively-RUNNING chat agents in this work_dir (optionally
+    # stopping them first), then wait out any in-flight backup tick.
+    gate_status, gate_extra, gate_detail = _gate_chats_and_wait_for_tick(agent_id, is_stop_chats)
+    result.update(gate_extra)
+    if gate_status != "ok":
+        _finish(result, gate_status, gate_detail)
 
     # Resolve the target tag before touching anything.
     tag, tag_error = _resolve_target_tag(version)
@@ -534,6 +562,192 @@ def _main():
         _finish(result, "failed", failure_detail)
 
     _pop_stash_into(result)
+    _finish(result, "ok")
+
+
+_main()
+"""
+)
+
+
+# Rewinds the whole host dir (/mngr) to one restic snapshot, in place.
+# Parameterized via argv: --agent-id, --snapshot-id, and optionally
+# --stop-chats. Verdict statuses: ok | blocked (running chats) | failed.
+BACKUP_RESTORE_SCRIPT: Final[str] = (
+    _SCRIPT_PREAMBLE
+    + r"""
+_RESTIC_TIMEOUT_SECONDS = 3000.0
+_STAGING_DIR_NAME = ".minds-restore-staging"
+# Mirrors the host_backup service's default excludes: the safety snapshot must
+# look like every hourly snapshot (regenerable trees excluded), or it would be
+# slower and larger than any backup ever taken.
+_SAFETY_SNAPSHOT_EXCLUDES = (
+    "**/.venv",
+    "**/node_modules",
+    "**/__pycache__",
+    "**/.pytest_cache",
+    "**/.ruff_cache",
+    "**/target",
+    "**/dist",
+    "**/build",
+    "**/.next",
+    "**/.cache",
+    "**/" + _STAGING_DIR_NAME,
+)
+
+
+def _finish(result, status, detail=""):
+    result["status"] = status
+    if detail:
+        result["detail"] = detail
+    _emit("MINDS_BACKUP_RESTORE_JSON:", result)
+    _sys.exit(0)
+
+
+def _parse_env_lines(content):
+    env_map = {}
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, _, value = stripped.partition("=")
+        env_map[key.strip()] = value.strip()
+    return env_map
+
+
+def _restic(args, env_map, timeout=_RESTIC_TIMEOUT_SECONDS):
+    env = dict(_os.environ)
+    env.update(env_map)
+    return _run(["restic"] + list(args), timeout=timeout, env=env)
+
+
+# Abort before the swap: bring the backup service back up, then report.
+# (A comment, not a docstring: this body lives inside an r-triple-double-quoted
+# literal, so it must not contain triple double quotes itself.)
+def _fail_and_resume_backups(result, detail):
+    _run(["supervisorctl", "start", "host-backup"], timeout=120)
+    _finish(result, "failed", detail)
+
+
+def _main():
+    agent_id = _arg_value("--agent-id")
+    snapshot_id = _arg_value("--snapshot-id")
+    is_stop_chats = _has_flag("--stop-chats")
+    result = {"schema": 1, "safety_snapshot_taken": False, "swapped": False}
+    if not snapshot_id:
+        _finish(result, "failed", "no --snapshot-id provided")
+
+    # Everything that needs the current workspace code (`uv run mngr`) must
+    # run before the swap replaces the code dir this process started in.
+    gate_status, gate_extra, gate_detail = _gate_chats_and_wait_for_tick(agent_id, is_stop_chats)
+    result.update(gate_extra)
+    if gate_status != "ok":
+        _finish(result, gate_status, gate_detail)
+
+    code_dir = _os.path.realpath(_os.getcwd())
+    host_dir = _os.path.realpath(_os.environ.get("MNGR_HOST_DIR", "/mngr"))
+    env_path = _os.path.join(code_dir, RESTIC_ENV_PATH)
+    try:
+        with open(env_path, "rb") as env_file:
+            env_content = env_file.read()
+    except OSError as e:
+        _finish(result, "failed", "cannot read %s: %s" % (RESTIC_ENV_PATH, e))
+    env_map = _parse_env_lines(env_content.decode("utf-8", "replace"))
+    if not env_map.get("RESTIC_REPOSITORY"):
+        _finish(result, "failed", "%s has no RESTIC_REPOSITORY" % RESTIC_ENV_PATH)
+
+    # Park the backup service so no hourly tick races the restore. Best-effort:
+    # an already-stopped (or missing) service must not abort the restore.
+    _run(["supervisorctl", "stop", "host-backup"], timeout=120)
+
+    # Resolve the chosen snapshot's recorded root before mutating anything.
+    listed = _restic(["snapshots", snapshot_id, "--json"], env_map, timeout=120)
+    if listed.returncode != 0:
+        detail = "restic could not find snapshot %s: %s" % (snapshot_id, (listed.stderr or listed.stdout).strip()[-500:])
+        _fail_and_resume_backups(result, detail)
+    try:
+        entries = _json.loads(listed.stdout)
+    except ValueError:
+        entries = None
+    if not isinstance(entries, list) or not entries or not entries[0].get("paths"):
+        _fail_and_resume_backups(result, "restic returned no usable metadata for snapshot %s" % snapshot_id)
+    snapshot_root = entries[0]["paths"][0]
+
+    # Safety snapshot of the current state, so this restore is itself undoable.
+    backup_args = ["backup", host_dir, "--tag", "pre-restore"]
+    for pattern in _SAFETY_SNAPSHOT_EXCLUDES:
+        backup_args += ["--exclude", pattern]
+    backed_up = _restic(backup_args, env_map)
+    if backed_up.returncode != 0:
+        detail = "pre-restore safety snapshot failed: %s" % (backed_up.stderr or backed_up.stdout).strip()[-500:]
+        _fail_and_resume_backups(result, detail)
+    result["safety_snapshot_taken"] = True
+
+    # Restore into a staging dir first: nothing is deleted until the whole
+    # snapshot has downloaded successfully.
+    staging_dir = _os.path.join(host_dir, _STAGING_DIR_NAME)
+    _shutil.rmtree(staging_dir, ignore_errors=True)
+    restored = _restic(["restore", snapshot_id, "--target", staging_dir], env_map)
+    if restored.returncode != 0:
+        _shutil.rmtree(staging_dir, ignore_errors=True)
+        detail = "restic restore failed: %s" % (restored.stderr or restored.stdout).strip()[-500:]
+        _fail_and_resume_backups(result, detail)
+    source_root = _os.path.join(staging_dir, snapshot_root.lstrip("/"))
+    if not _os.path.isdir(source_root):
+        _shutil.rmtree(staging_dir, ignore_errors=True)
+        _fail_and_resume_backups(result, "restored tree is missing the snapshot root %s" % snapshot_root)
+
+    # Swap: clear the host dir (except staging) and move the restored entries
+    # in. This deletes the dir this process was started from, so leave it
+    # first; rename within one filesystem is instant, keeping the
+    # inconsistent window to the deletes.
+    _os.chdir("/")
+    try:
+        for name in _os.listdir(host_dir):
+            if name == _STAGING_DIR_NAME:
+                continue
+            path = _os.path.join(host_dir, name)
+            if _os.path.islink(path) or not _os.path.isdir(path):
+                _os.remove(path)
+            else:
+                _shutil.rmtree(path)
+        for name in _os.listdir(source_root):
+            _os.rename(_os.path.join(source_root, name), _os.path.join(host_dir, name))
+    except OSError as e:
+        detail = (
+            "the in-place swap failed midway (%s); the workspace may be incomplete -- "
+            "run the restore again (a pre-restore safety snapshot was already taken)" % e
+        )
+        _finish(result, "failed", detail)
+    _shutil.rmtree(staging_dir, ignore_errors=True)
+    result["swapped"] = True
+
+    # The snapshot carries whatever restic.env it had at backup time (possibly
+    # none); the current credentials must keep working, so write them back.
+    try:
+        _os.makedirs(_os.path.dirname(env_path), exist_ok=True)
+        with open(env_path, "wb") as env_file:
+            env_file.write(env_content)
+    except OSError as e:
+        _finish(result, "failed", "restored, but could not re-write %s: %s" % (RESTIC_ENV_PATH, e))
+
+    # Backups exclude regenerable trees (.venv etc.), so rebuild dependencies
+    # before the services come back.
+    synced = _run(["uv", "sync"], timeout=900, cwd=code_dir)
+    if synced.returncode != 0:
+        detail = "restored, but uv sync failed: %s" % (synced.stderr or synced.stdout).strip()[-800:]
+        _finish(result, "failed", detail)
+
+    # Every supervisord service now runs code/state from before the swap;
+    # bounce them all onto the restored tree (this also brings host-backup
+    # back from the stop above -- `restart all` starts stopped programs too).
+    restarted = _run(["supervisorctl", "restart", "all"], timeout=300)
+    if restarted.returncode != 0:
+        detail = "restored, but restarting services failed: %s" % (restarted.stderr or restarted.stdout).strip()[-500:]
+        _finish(result, "failed", detail)
+    verify_detail = _wait_for_backup_service_running()
+    if verify_detail:
+        _finish(result, "failed", "restored, but %s" % verify_detail)
     _finish(result, "ok")
 
 

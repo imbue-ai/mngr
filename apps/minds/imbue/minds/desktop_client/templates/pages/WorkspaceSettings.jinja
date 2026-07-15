@@ -342,6 +342,22 @@
         </div>
       </Modal>
 
+      {# Restore confirmation, opened by a Restore link in the Recent backups
+         table (workspace_backups.js fills the time and drives the flow). #}
+      <Modal id="restore-dialog">
+        <h2 class="type-heading text-primary mb-3">Restore this backup?</h2>
+        <p class="type-body text-primary mb-4">
+          This workspace will be rewound to the backup from
+          <strong id="restore-dialog-time"></strong>. Everything changed since
+          then will be replaced. A backup of the current state is taken first,
+          so you can undo this by restoring that backup.
+        </p>
+        <div class="flex justify-end gap-3">
+          <Button variant="secondary" id="restore-cancel-btn">Cancel</Button>
+          <Button variant="danger" id="restore-confirm-btn">Restore</Button>
+        </div>
+      </Modal>
+
       <div class="mt-8">
         <Link href="/" extra="type-helper">&larr; Back to workspaces</Link>
       </div>

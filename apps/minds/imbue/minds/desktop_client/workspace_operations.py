@@ -42,6 +42,7 @@ class WorkspaceOperationKind(UpperCaseStrEnum):
     RESTART = auto()
     BACKUP_UPDATE = auto()
     BACKUP_CONFIGURE = auto()
+    BACKUP_RESTORE = auto()
 
 
 class WorkspaceOperationStatus(UpperCaseStrEnum):

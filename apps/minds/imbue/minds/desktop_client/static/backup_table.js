@@ -73,7 +73,13 @@
   // tinted. (Snapshot size is deliberately not shown: the workspace's restic
   // may predate the per-snapshot size summary, so there is no reliable size
   // to display.)
-  function buildSnapshotRow(agentId, snapshot, isLatest, isFirst) {
+  //
+  // restoreConfig controls the Restore action:
+  //   { onRestore: fn }            -- live button; fn(snapshot) runs on click
+  //   { disabledReason: string }   -- disabled, with the reason as tooltip
+  //   null/undefined               -- disabled, pointing at the settings page
+  //     (the full-history page does not host the restore flow)
+  function buildSnapshotRow(agentId, snapshot, isLatest, isFirst, restoreConfig) {
     var row = document.createElement('div');
     row.className = 'flex items-center gap-4 px-4 py-3'
       + (isFirst ? '' : ' border-t border-default')
@@ -89,7 +95,6 @@
     timeCell.appendChild(timeEl);
 
     if (isLatest) {
-      // Same green pill as the landing page's "Backed up ..." badge.
       var latestBadge = document.createElement('span');
       latestBadge.className = 'inline-flex items-center px-2 py-0.5 rounded-md type-label bg-success/15 text-success';
       latestBadge.textContent = 'Latest';
@@ -110,14 +115,20 @@
     });
     actions.appendChild(download);
 
-    // In-place restore is not built yet; the button is shown but inert so the
-    // design is visible without implying a working action.
     var restore = document.createElement('button');
     restore.type = 'button';
-    restore.disabled = true;
-    restore.className = 'type-body text-tertiary cursor-not-allowed bg-transparent border-0 p-0';
-    restore.title = 'In-place restore is coming soon';
     restore.textContent = 'Restore';
+    restore.className = 'backup-restore-btn bg-transparent border-0 p-0 type-body';
+    if (restoreConfig && restoreConfig.onRestore) {
+      restore.classList.add('text-accent', 'cursor-pointer', 'disabled:opacity-40', 'disabled:cursor-not-allowed');
+      restore.addEventListener('click', function () {
+        restoreConfig.onRestore(snapshot);
+      });
+    } else {
+      restore.disabled = true;
+      restore.classList.add('text-tertiary', 'cursor-not-allowed');
+      restore.title = (restoreConfig && restoreConfig.disabledReason) || 'Restore from the settings page';
+    }
     actions.appendChild(restore);
 
     row.appendChild(actions);

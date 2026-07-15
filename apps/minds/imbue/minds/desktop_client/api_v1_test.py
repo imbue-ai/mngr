@@ -1993,6 +1993,93 @@ def test_backup_service_update_cancel_flags_a_running_update(tmp_path: Path) -> 
     assert registry.is_cancel_requested(agent_id) is True
 
 
+def test_backup_restore_unknown_workspace_returns_404(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    resolver = make_resolver_with_data(make_agents_json(AgentId()))
+    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
+
+    response = client.post(
+        f"/api/v1/workspaces/{AgentId()}/backups/abc123/restore", headers=_auth_header(), json={}
+    )
+
+    assert response.status_code == 404
+
+
+def test_backup_restore_unconfigured_workspace_returns_409(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    # Without a canonical restic.env there is no repository to restore from,
+    # so the dispatch is rejected up front instead of spawning a worker.
+    agent_id = AgentId()
+    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
+
+    response = client.post(
+        f"/api/v1/workspaces/{agent_id}/backups/abc123/restore", headers=_auth_header(), json={}
+    )
+
+    assert response.status_code == 409
+    assert "not configured" in json.loads(response.data)["error"]
+    # No operation record was created.
+    assert get_state(client.application).workspace_operation_registry.get(agent_id) is None
+
+
+def test_backup_restore_conflicts_with_a_running_operation(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    # Any RUNNING operation (including a double-pressed restore) makes a
+    # second dispatch a 409 instead of stacking a second worker.
+    agent_id = AgentId()
+    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
+    write_canonical_env(
+        WorkspacePaths(data_dir=tmp_path / "minds"),
+        agent_id,
+        "RESTIC_REPOSITORY=/tmp/repo\nRESTIC_PASSWORD=pw\n",
+    )
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.BACKUP_RESTORE, datetime.now(timezone.utc))
+
+    response = client.post(
+        f"/api/v1/workspaces/{agent_id}/backups/abc123/restore", headers=_auth_header(), json={}
+    )
+
+    assert response.status_code == 409
+    assert "BACKUP_RESTORE" in json.loads(response.data)["error"]
+    record = registry.get(agent_id)
+    assert record is not None
+    assert record.kind == WorkspaceOperationKind.BACKUP_RESTORE
+
+
+def test_backup_service_update_cancel_flags_a_running_restore(tmp_path: Path) -> None:
+    # The shared cancel route also covers a waiting restore (same slot, same
+    # cancellable waiting phase).
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.BACKUP_RESTORE, datetime.now(timezone.utc))
+
+    response = client.post(f"/api/v1/workspaces/{agent_id}/backup-service/update/cancel", headers=_auth_header())
+
+    assert response.status_code == 200
+    assert registry.is_cancel_requested(agent_id) is True
+
+
+def test_backup_operation_status_reports_a_restore(tmp_path: Path) -> None:
+    # A BACKUP_RESTORE record is visible through the shared backup operations
+    # endpoint (the settings page polls it with the same code as update).
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.BACKUP_RESTORE, datetime.now(timezone.utc))
+
+    body = json.loads(client.get(f"/api/v1/workspaces/operations/backup/{agent_id}", headers=_auth_header()).data)
+
+    assert body["kind"] == "backup_restore"
+    assert body["status"] == "RUNNING"
+
+
 def test_backup_service_configure_rejects_configure_later_and_invalid_providers(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:

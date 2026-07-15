@@ -49,7 +49,9 @@ from imbue.minds.desktop_client.backup_verification import BackupServiceProblem
 from imbue.minds.desktop_client.backup_verification import check_backup_service_for_workspace
 from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_APPLY_UPDATE_SCRIPT
 from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_GATE_PROBE_SCRIPT
+from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_RESTORE_SCRIPT
 from imbue.minds.desktop_client.backup_workspace_scripts import GATE_RESULT_MARKER
+from imbue.minds.desktop_client.backup_workspace_scripts import RESTORE_RESULT_MARKER
 from imbue.minds.desktop_client.backup_workspace_scripts import UPDATE_RESULT_MARKER
 from imbue.minds.desktop_client.backup_workspace_scripts import build_workspace_script_command
 from imbue.minds.desktop_client.backup_workspace_scripts import extract_marker_json
@@ -81,6 +83,11 @@ _GATE_POLL_INTERVAL_SECONDS: Final[float] = 10.0
 # runs of up to 900s each, plus restarts/verifies and the revert) so the
 # script's structured failure payload always beats the exec timeout.
 _APPLY_EXEC_TIMEOUT_SECONDS: Final[float] = 3600.0
+# The restore script's dominant costs are two restic passes (safety snapshot
+# + restore, up to 3000s each in-script) plus its tick wait (900s) and a
+# `uv sync` (900s); the ceiling must exceed their sum so the script's
+# structured failure payload always beats the exec timeout.
+_RESTORE_EXEC_TIMEOUT_SECONDS: Final[float] = 9000.0
 
 # Problems that mean the update itself did not converge (operation fails).
 # NOT_CONFIGURED is deliberately absent: enabling backups is the configure
@@ -270,6 +277,99 @@ def _wait_for_quiet_workspace(
         registry.wait_for_cancel(agent_id, _GATE_POLL_INTERVAL_SECONDS)
     registry.fail(agent_id, "Cancelled before any changes were made.")
     return False
+
+
+def run_backup_restore_sequence(
+    *,
+    agent_id: AgentId,
+    paths: WorkspacePaths,
+    registry: WorkspaceOperationRegistryInterface,
+    parent_cg: ConcurrencyGroup | None,
+    snapshot_id: str,
+    is_stop_chats: bool,
+) -> None:
+    """Worker-thread entry point: restore one workspace to one restic snapshot, in place.
+
+    The caller has already registered the operation (``registry.start``); this
+    function ends it via ``registry.complete`` / ``registry.fail``.
+    """
+    try:
+        _run_restore_phases(
+            agent_id=agent_id,
+            paths=paths,
+            registry=registry,
+            parent_cg=parent_cg,
+            snapshot_id=snapshot_id,
+            is_stop_chats=is_stop_chats,
+        )
+    except BackupProvisioningError as exc:
+        logger.warning("Backup restore for {} failed: {}", agent_id, exc)
+        registry.fail(agent_id, str(exc))
+
+
+def _run_restore_phases(
+    *,
+    agent_id: AgentId,
+    paths: WorkspacePaths,
+    registry: WorkspaceOperationRegistryInterface,
+    parent_cg: ConcurrencyGroup | None,
+    snapshot_id: str,
+    is_stop_chats: bool,
+) -> None:
+    # Phase 1: gate + wait (cancellable; nothing has been mutated yet). Same
+    # gate as the update: running chats block, an in-flight tick is waited out.
+    registry.append_log(agent_id, "Checking for running chats and in-progress backups...")
+    if not _wait_for_quiet_workspace(
+        agent_id=agent_id,
+        registry=registry,
+        parent_cg=parent_cg,
+        is_stop_chats=is_stop_chats,
+    ):
+        return
+
+    # Phase 2: one exec runs the whole restore (safety snapshot / restore to
+    # staging / swap / uv sync / restart services) and reports a verdict.
+    registry.append_log(
+        agent_id, "Backing up the current state, then restoring the selected backup. This can take a while..."
+    )
+    restore_command = build_workspace_script_command(
+        BACKUP_RESTORE_SCRIPT,
+        ("--agent-id", str(agent_id), "--snapshot-id", snapshot_id) + (("--stop-chats",) if is_stop_chats else ()),
+    )
+    restore_result = run_mngr_exec_on_agent(
+        agent_id, restore_command, parent_cg=parent_cg, timeout_seconds=_RESTORE_EXEC_TIMEOUT_SECONDS
+    )
+    payload = extract_marker_json(restore_result.stdout, RESTORE_RESULT_MARKER)
+    if payload is None:
+        detail = (restore_result.stderr or restore_result.stdout).strip()[-800:]
+        registry.fail(agent_id, f"The restore script produced no result: {detail}")
+        return
+    status = str(payload.get("status", "failed"))
+    if status == "blocked":
+        running_chats = payload.get("running_chats")
+        chat_names = ",".join(str(name) for name in running_chats) if isinstance(running_chats, list) else ""
+        registry.fail(agent_id, f"{BLOCKED_BY_RUNNING_CHATS_PREFIX}{chat_names}")
+        return
+    if status != "ok":
+        detail = str(payload.get("detail", "unknown failure"))
+        safety_note = (
+            " A safety backup of the pre-restore state was taken first."
+            if payload.get("safety_snapshot_taken")
+            else ""
+        )
+        registry.fail(agent_id, f"{detail}{safety_note}")
+        return
+    registry.append_log(
+        agent_id, "Restored the backup, reinstalled dependencies, and restarted the workspace services."
+    )
+
+    # Phase 3: the swap wrote back the pre-restore restic.env, but re-inject
+    # the canonical copy anyway so the workspace ends converged even if the
+    # env had drifted before the restore.
+    if has_canonical_env(paths, agent_id):
+        registry.append_log(agent_id, "Re-injecting backup credentials...")
+        reinject_canonical_env(agent_id=agent_id, paths=paths, parent_cg=parent_cg)
+    registry.complete(agent_id)
 
 
 def run_backup_configure_sequence(
