@@ -89,9 +89,7 @@ class FrontendSentryConfig(FrozenModel):
         }
 
 
-def resolve_frontend_sentry_config(
-    is_error_reporting_enabled: bool, anonymous_user_id: str
-) -> FrontendSentryConfig:
+def resolve_frontend_sentry_config(is_error_reporting_enabled: bool, anonymous_user_id: str) -> FrontendSentryConfig:
     """Resolve the frontend Sentry config for the current process.
 
     ``is_error_reporting_enabled`` is the user's ``report_unexpected_errors``
@@ -114,9 +112,7 @@ def resolve_frontend_sentry_config(
     )
 
 
-def frontend_sentry_browser_payload(
-    is_error_reporting_enabled: bool, anonymous_user_id: str
-) -> dict[str, str] | None:
+def frontend_sentry_browser_payload(is_error_reporting_enabled: bool, anonymous_user_id: str) -> dict[str, str] | None:
     """Browser-ready Sentry payload for the current process, or ``None`` if off.
 
     ``is_error_reporting_enabled`` is the user's ``report_unexpected_errors``
