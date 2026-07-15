@@ -1,0 +1,1 @@
+Removed the spurious `@pytest.mark.rsync` mark from the `test_exec_branch_show_current` git tutorial e2e test. The test never invokes rsync, so the resource guard was failing it; the test only exercises `mngr exec` running `git branch --show-current`.

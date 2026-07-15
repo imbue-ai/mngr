@@ -1,0 +1,1 @@
+- Fixed the `test_advanced_create_reuse_modal` e2e tutorial test: its post-create verification queries now scope `mngr list` to `--provider modal`, so they no longer fan out to every enabled provider (in particular the unconfigured AWS provider, whose unreachable-provider handling stalled the query past its timeout).

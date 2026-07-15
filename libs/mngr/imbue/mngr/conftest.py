@@ -193,6 +193,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[4]
 _WORKSPACE_PACKAGES = (
     _REPO_ROOT / "libs" / "imbue_common",
     _REPO_ROOT / "libs" / "concurrency_group",
+    _REPO_ROOT / "libs" / "overlay",
     _REPO_ROOT / "libs" / "resource_guards",
     _REPO_ROOT / "libs" / "mngr",
 )
@@ -339,6 +340,17 @@ def minimal_install_env(
 
     repo_dir = tmp_path / "repo"
     init_git_repo(repo_dir)
+
+    # Disable the docker provider at project scope. mngr enables docker by
+    # default, so `mngr list` would otherwise try to reach a Docker daemon and
+    # exit non-zero when none is running. These install tests are selected with
+    # `-m "not docker"`, so they must not depend on an ambient Docker daemon;
+    # disabling the provider keeps the empty-state list commands hermetic.
+    config_dir = repo_dir / f".{mngr_test_root_name}"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "settings.local.toml").write_text(
+        "is_allowed_in_pytest = true\n\n[providers.docker]\nis_enabled = false\n"
+    )
 
     return MinimalInstallEnv(venv_dir=isolated_mngr_venv, env=env, repo_dir=repo_dir)
 

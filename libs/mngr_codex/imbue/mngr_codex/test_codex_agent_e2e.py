@@ -31,6 +31,7 @@ import pytest
 from imbue.mngr.agents.agent_release_testing import AgentReleaseContext
 from imbue.mngr.agents.agent_release_testing import AgentReleaseProfile
 from imbue.mngr.agents.agent_release_testing import run_agent_release_lifecycle
+from imbue.mngr.agents.agent_release_testing import run_message_delivery_journey
 from imbue.mngr.utils.testing import get_subprocess_test_env
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import run_mngr_subprocess
@@ -151,3 +152,19 @@ def test_codex_agent_full_lifecycle(tmp_path: Path) -> None:
     store truly resumed, so it would fail if resume/adopt were a no-op.
     """
     run_agent_release_lifecycle(_CodexReleaseProfile(), tmp_path)
+
+
+@pytest.mark.release
+@pytest.mark.tmux
+@pytest.mark.rsync
+@pytest.mark.timeout(900)
+def test_codex_message_delivery_journey(tmp_path: Path) -> None:
+    """Drive the evidence-confirmed send pipeline through its racey delivery scenarios.
+
+    codex confirms sends via its ``active`` marker (set by the UserPromptSubmit
+    hook), so this proves the marker-probe path: idle delivery, send-while-busy
+    (confirmation may wait for the running turn to dequeue the prompt), rapid
+    sequential sends, and a long buffer-pasted message -- each delivered
+    exactly once.
+    """
+    run_message_delivery_journey(_CodexReleaseProfile(), tmp_path)

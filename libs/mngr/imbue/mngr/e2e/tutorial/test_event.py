@@ -30,9 +30,11 @@ def _parse_jsonl_events(stdout: str) -> list[dict[str, object]]:
 
 def _create_my_task(e2e: E2eSession, sleep_value: int) -> None:
     # Use the default (local) provider, matching the provider-agnostic tutorial.
-    # A local agent runs inside a local tmux session (`tmux` mark) and rsyncs its
-    # work dir into place (`rsync` mark). The default provider never touches
-    # Modal, so these tests deliberately do NOT carry the `modal` mark.
+    # A local agent runs inside a local tmux session (`tmux` mark). Because the
+    # e2e workspace is a git repo, create resolves the work dir to a git worktree
+    # (`git worktree add`), which never shells out to rsync -- so these tests do
+    # NOT carry the `rsync` mark. The default provider never touches Modal, so
+    # they deliberately do NOT carry the `modal` mark either.
     expect(
         e2e.run(
             f"mngr create my-task --type command --no-ensure-clean --no-connect -- sleep {sleep_value}",
@@ -42,7 +44,6 @@ def _create_my_task(e2e: E2eSession, sleep_value: int) -> None:
     ).to_succeed()
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -73,7 +74,6 @@ def test_event_default(e2e: E2eSession) -> None:
             assert field in event, f"Event missing guaranteed field {field!r}: {event!r}"
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -97,7 +97,6 @@ def test_event_follow(e2e: E2eSession) -> None:
     expect(result).to_have_exit_code(124)
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -128,7 +127,6 @@ def test_event_follow_filter_source(e2e: E2eSession) -> None:
     expect(result.stdout).to_be_empty()
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -154,10 +152,10 @@ def test_event_tail(e2e: E2eSession) -> None:
             assert field in event, f"Event missing guaranteed field {field!r}: {event!r}"
 
 
-# Creating a local command agent (rsync + tmux) plus reading its events takes
-# well over the default 10s pytest-timeout; give it ample headroom. The agent is
-# created locally, so this test never invokes modal (no @pytest.mark.modal).
-@pytest.mark.rsync
+# Creating a local command agent (git worktree + tmux) plus reading its events
+# takes well over the default 10s pytest-timeout; give it ample headroom. The
+# agent is created locally, so this test never invokes modal (no
+# @pytest.mark.modal).
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -197,7 +195,10 @@ def test_event_head(e2e: E2eSession) -> None:
     )
 
 
-@pytest.mark.rsync
+# No `rsync` mark: this test's `mngr event ... --head --tail` fails during
+# argument validation before any events are read, and creating the local
+# command agent against a git repo uses a git worktree (not rsync). rsync is
+# therefore never invoked, so declaring the mark would trip the resource guard.
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -223,7 +224,6 @@ def test_event_head_conflicts_with_tail(e2e: E2eSession) -> None:
     expect(result.stdout).to_be_empty()
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -259,7 +259,10 @@ def test_event_include_filter(e2e: E2eSession) -> None:
     assert {event["event_id"] for event in filtered_events} <= unfiltered_ids
 
 
-@pytest.mark.rsync
+# This test exercises the unhappy path: the invalid CEL expression is rejected
+# during filter parsing, *before* any event is read, so the event stream is
+# never synced from the agent and rsync is never invoked. Hence, unlike the
+# other event tests, this one deliberately does NOT carry the `rsync` mark.
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)

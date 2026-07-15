@@ -11,7 +11,6 @@ from imbue.mngr.e2e.conftest import E2eSession
 from imbue.skitwright.expect import expect
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 # This test runs three sequential mngr operations (create, list, exec), each of
@@ -141,8 +140,13 @@ def test_create_in_place(e2e: E2eSession) -> None:
 # `modal` CLI binary -- the only cross-process-tracked path -- is never invoked
 # for local agents). With the mark, the guard's NEVER_INVOKED check fails the
 # test; without it there is no tracked Modal usage, so no BLOCKED violation.
+#
+# No @pytest.mark.rsync either: both agents use the default git-worktree transfer
+# in a clean source repo, so `mngr create` finds no untracked/modified files to
+# copy and skips the extra-file rsync entirely ("no files to transfer"). The
+# rsync resource guard fails a test that carries the mark but never invokes
+# rsync, so marking this test rsync would be a superfluous-mark violation.
 @pytest.mark.timeout(120)
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 def test_create_short_forms(e2e: E2eSession) -> None:
@@ -247,9 +251,13 @@ def test_create_codex_agent(e2e: E2eSession) -> None:
     assert matching[0]["type"] == "codex", f"expected codex type, got: {matching[0]}"
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+# No @pytest.mark.rsync: this test creates a worktree agent from a *clean* source
+# repo with default transfer options, so `_transfer_extra_files` finds no
+# untracked/modified/gitignored files to copy and never shells out to rsync. The
+# test's scope is purely `--` argument forwarding, which is unrelated to file
+# transfer, so the mark would be a spurious NEVER_INVOKED resource-guard failure.
 # This test runs two sequential mngr operations (create, list), each performing
 # full provider discovery, so the default 10s pytest-timeout is too tight.
 @pytest.mark.timeout(120)
@@ -326,7 +334,6 @@ def test_create_agent_args_require_dash_separator(e2e: E2eSession) -> None:
     assert matching == [], f"Expected no 'my-task' agent after the rejected create, got: {matching}"
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -347,8 +354,13 @@ def test_create_named_agent(e2e: E2eSession) -> None:
         )
     ).to_succeed()
 
-    # Verify the agent appears with the exact name we specified
-    list_result = e2e.run("mngr list --format json", comment="Verify agent appears with exact name")
+    # Verify the agent appears with the exact name we specified. Scope the listing
+    # to the local provider (the agent was created there): a bare `mngr list`
+    # enumerates every enabled provider and exits non-zero if any is unauthenticated
+    # (e.g. AWS with no credentials in the test environment), which is unrelated to
+    # this test's naming scope. The rest of the e2e suite scopes to --provider local
+    # for the same reason.
+    list_result = e2e.run("mngr list --provider local --format json", comment="Verify agent appears with exact name")
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
     agents = parsed["agents"]
@@ -424,7 +436,6 @@ def test_create_unnamed_agent_gets_random_name(e2e: E2eSession) -> None:
     )
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -476,7 +487,6 @@ def test_create_with_json_output(e2e: E2eSession) -> None:
     assert agent["state"] in ("RUNNING", "WAITING"), f"Expected agent to be running, got state: {agent['state']}"
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -516,9 +526,13 @@ def test_create_with_quiet_output(e2e: E2eSession) -> None:
     assert matching[0]["state"] in ("RUNNING", "WAITING")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+# No @pytest.mark.rsync: `--transfer=git-mirror` transfers the repository via
+# git, not rsync (the tutorial block itself notes rsync is used only "if you're
+# not in a git repo", and this test runs inside a git repo). The rsync resource
+# guard's NEVER_INVOKED check therefore fails the test if the mark is present.
+#
 # No @pytest.mark.modal: this test only creates a local (`--type command`) agent
 # with a git-mirror transfer (a local git operation) and runs `mngr list`. As
 # documented on test_create_short_forms, `mngr list` reaches Modal only via the
@@ -544,8 +558,12 @@ def test_create_copy(e2e: E2eSession) -> None:
         )
     ).to_succeed()
 
-    # Verify the agent was created and resolve its work_dir.
-    list_result = e2e.run("mngr list --format json", comment="Verify the agent appears in the list")
+    # Verify the agent was created and resolve its work_dir. Scope the listing to
+    # the local provider (the git-mirror agent is created locally): a bare
+    # `mngr list` does a full provider scan and exits non-zero if any *enabled*
+    # provider is unreachable (e.g. no Docker daemon, or an installed cloud
+    # backend with no credentials), which is unrelated to what this test checks.
+    list_result = e2e.run("mngr list --provider local --format json", comment="Verify the agent appears in the list")
     expect(list_result).to_succeed()
     agents = json.loads(list_result.stdout)["agents"]
     matching = [a for a in agents if a["name"] == "my-task"]

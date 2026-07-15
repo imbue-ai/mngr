@@ -1,0 +1,1 @@
+Tests: drop the spurious `@pytest.mark.rsync` from the `mngr msg agent-1 agent-2 agent-3` e2e tutorial test. The test creates local git-worktree command agents and delivers over tmux, so rsync is never invoked; the resource guard was failing the otherwise-passing test with a "marked rsync but never invoked rsync" violation. The tmux mark (genuinely exercised) is retained.

@@ -1,9 +1,6 @@
 """Unit tests for tui_utils."""
 
-import os
-import signal
-import subprocess
-import time
+import shlex
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -12,16 +9,19 @@ import pydantic
 import pytest
 
 from imbue.mngr.agents.base_agent import BaseAgent
-from imbue.mngr.agents.tui_utils import _PERL_TIMEOUT
-from imbue.mngr.agents.tui_utils import _TIMEOUT_FUNCTION
-from imbue.mngr.agents.tui_utils import _build_signal_only_command
-from imbue.mngr.agents.tui_utils import _build_signal_or_marker_command
+from imbue.mngr.agents.mock_host_test import ScriptedHost
+from imbue.mngr.agents.tui_utils import SubmissionEvidenceProbe
 from imbue.mngr.agents.tui_utils import _check_paste_content
 from imbue.mngr.agents.tui_utils import _normalize_for_match
-from imbue.mngr.agents.tui_utils import send_enter_and_poll_for_cleared_indicator
-from imbue.mngr.agents.tui_utils import send_enter_best_effort
+from imbue.mngr.agents.tui_utils import _parse_confirmation_output
+from imbue.mngr.agents.tui_utils import build_changed_token_probe
+from imbue.mngr.agents.tui_utils import build_confirmation_command
+from imbue.mngr.agents.tui_utils import build_file_mtime_token_command
+from imbue.mngr.agents.tui_utils import build_normalized_message_probe
+from imbue.mngr.agents.tui_utils import is_slash_command_message
+from imbue.mngr.agents.tui_utils import raise_for_unconfirmed_submission
 from imbue.mngr.agents.tui_utils import send_enter_keystroke
-from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
+from imbue.mngr.agents.tui_utils import submit_message_and_confirm
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
@@ -76,112 +76,268 @@ def test_check_paste_content_long_message_uses_tail() -> None:
     assert _check_paste_content(pane, message) is True
 
 
+def test_build_normalized_message_probe_uses_normalized_tail() -> None:
+    assert build_normalized_message_probe("Hello, World!") == "helloworld"
+    tail = "b" * 60
+    assert build_normalized_message_probe("x" * 100 + tail) == tail
+    assert build_normalized_message_probe("!!! ???") == ""
+
+
+def test_is_slash_command_message() -> None:
+    assert is_slash_command_message("/clear") is True
+    assert is_slash_command_message("  /compact keep the summary short") is True
+    assert is_slash_command_message("please run /clear for me") is False
+    assert is_slash_command_message("hello") is False
+
+
 # =========================================================================
-# Send-Enter strategies via in-memory probe agent
+# Probe constructors
+# =========================================================================
+
+
+def test_build_changed_token_probe_uses_same_command_for_baseline_and_poll() -> None:
+    probe = build_changed_token_probe("marker", "cat /tmp/token 2>/dev/null")
+    assert probe.name == "marker"
+    assert probe.baseline_command == probe.poll_command == "cat /tmp/token 2>/dev/null"
+
+
+def test_build_file_mtime_token_command_covers_gnu_and_bsd_stat() -> None:
+    """The token command must work on both Linux (stat -c) and macOS (stat -f)."""
+    command = build_file_mtime_token_command('"$MARKER"')
+    assert 'stat -c %y "$MARKER"' in command
+    assert 'stat -f %Fm "$MARKER"' in command
+
+
+# =========================================================================
+# Confirmation-command generation
+# =========================================================================
+
+
+_FAKE_TARGET = TmuxWindowTarget(session_name="probe-target", window=0)
+
+
+def _make_probes() -> tuple[SubmissionEvidenceProbe, ...]:
+    return (
+        SubmissionEvidenceProbe(
+            name="content probe",
+            baseline_command="wc -c < /tmp/evidence 2>/dev/null",
+            poll_command="tail -c +$(( ${base:-0} + 1 )) /tmp/evidence 2>/dev/null | grep -q -F needle && echo found",
+        ),
+        build_changed_token_probe("marker", "cat /tmp/marker-token 2>/dev/null"),
+    )
+
+
+def test_confirmation_command_sends_enter_after_baselines_and_before_polling() -> None:
+    """The ordering invariant of the whole engine: baselines -> Enter -> poll loop.
+
+    Confirmation may never be evaluated before Enter was sent (the historical
+    stale-signal bug confirmed before Enter and then killed the pending
+    keystroke), and baselines must be captured before Enter so this
+    submission's evidence reads as a change.
+    """
+    command = build_confirmation_command(
+        tmux_target=_FAKE_TARGET, probes=_make_probes(), normalized_pane_probe="needle", window_seconds=5
+    )
+    baseline_idx = command.index("base_0=")
+    enter_idx = command.index("tmux send-keys -t =probe-target:0 Enter")
+    loop_idx = command.index("while :")
+    poll_idx = command.index("cur_0=")
+    assert baseline_idx < enter_idx < loop_idx < poll_idx
+
+
+def test_confirmation_command_has_no_background_jobs_or_traps() -> None:
+    """The script must be strictly sequential.
+
+    Background jobs plus an EXIT trap are what allowed the old implementation
+    to kill the pending Enter keystroke after a spurious early confirmation.
+    """
+    command = build_confirmation_command(
+        tmux_target=_FAKE_TARGET, probes=_make_probes(), normalized_pane_probe="needle", window_seconds=5
+    )
+    assert " & " not in command
+    assert " &\n" not in command
+    assert "trap" not in command
+    assert "wait-for" not in command
+
+
+def test_confirmation_command_embeds_probe_names_quoted() -> None:
+    command = build_confirmation_command(
+        tmux_target=_FAKE_TARGET, probes=_make_probes(), normalized_pane_probe="needle", window_seconds=5
+    )
+    assert "'content probe'" in command
+
+
+def test_confirmation_command_gates_retries_on_pane_content() -> None:
+    command = build_confirmation_command(
+        tmux_target=_FAKE_TARGET, probes=_make_probes(), normalized_pane_probe="needle", window_seconds=5
+    )
+    assert "capture-pane" in command
+    assert "*needle*" in command
+
+
+def test_confirmation_command_retries_unconditionally_without_pane_probe() -> None:
+    """A message that normalizes to nothing cannot be recognized in the pane."""
+    command = build_confirmation_command(
+        tmux_target=_FAKE_TARGET, probes=_make_probes(), normalized_pane_probe="", window_seconds=5
+    )
+    assert "capture-pane" not in command
+
+
+# =========================================================================
+# Output parsing
+# =========================================================================
+
+
+def test_parse_confirmation_output_reads_confirming_probe() -> None:
+    outcome = _parse_confirmation_output("MNGR_CONFIRMED marker\n")
+    assert outcome.is_confirmed is True
+    assert outcome.confirming_probe_name == "marker"
+
+
+def test_parse_confirmation_output_collects_retries_and_diagnostics() -> None:
+    stdout = (
+        "MNGR_ENTER_RETRY 3\n"
+        "MNGR_ENTER_RETRY 10\n"
+        "MNGR_UNCONFIRMED\n"
+        "MNGR_PROBE content base=[123] final=[]\n"
+        "unrelated noise\n"
+    )
+    outcome = _parse_confirmation_output(stdout)
+    assert outcome.is_confirmed is False
+    assert outcome.enter_retry_offsets == (3, 10)
+    assert outcome.probe_diagnostics == ("content base=[123] final=[]",)
+
+
+def test_parse_confirmation_output_handles_empty_output() -> None:
+    outcome = _parse_confirmation_output("")
+    assert outcome.is_confirmed is False
+    assert outcome.confirming_probe_name is None
+
+
+# =========================================================================
+# submit_message_and_confirm via in-memory probe agent
 # =========================================================================
 
 
 class _ProbeAgent(BaseAgent[AgentTypeConfig]):
-    """In-memory BaseAgent that captures host commands and synthesizes pane content.
-
-    Overrides only what the strategy helpers touch via the agent: the host's
-    ``execute_stateful_command`` (replaced by a recording stub) and the
-    private ``_capture_pane_content`` / ``_check_pane_contains`` methods.
-    """
+    """In-memory BaseAgent that captures host commands and synthesizes pane content."""
 
     captured_commands: list[str] = pydantic.Field(default_factory=list)
-    pane_capture_count: int = pydantic.Field(default=0)
-    always_missing_indicator: bool = pydantic.Field(default=False)
 
     def _capture_pane_content(self, tmux_target: TmuxWindowTarget, include_scrollback: bool = False) -> str | None:
-        self.pane_capture_count += 1
-        if self.always_missing_indicator:
-            return "user typed message but Enter was swallowed"
-        return "input row cleared -- probe-cleared visible"
-
-    def _check_pane_contains(self, tmux_target: TmuxWindowTarget, text: str) -> bool:
-        content = self._capture_pane_content(tmux_target)
-        return content is not None and text in content
+        return "pane still shows the typed message"
 
 
-class _RecorderHost(pydantic.BaseModel):
-    """In-memory host stub: records each command and returns a configurable result."""
-
-    captured: list[str] = pydantic.Field(default_factory=list)
-    succeed: bool = True
-
-    def execute_stateful_command(self, command: str, **_: object) -> CommandResult:
-        self.captured.append(command)
-        if self.succeed:
-            return CommandResult(stdout="", stderr="", success=True)
-        return CommandResult(stdout="", stderr="boom", success=False)
-
-
-def _make_probe(*, command_succeeds: bool = True, always_missing_indicator: bool = False) -> _ProbeAgent:
-    host = _RecorderHost(succeed=command_succeeds)
+def _make_probe_agent(*scripted_results: CommandResult) -> _ProbeAgent:
+    host = ScriptedHost(scripted_results=list(scripted_results))
     return _ProbeAgent.model_construct(
         id=AgentId.generate(),
         name=AgentName("probe"),
         agent_type=AgentTypeName("probe"),
         host=host,
         captured_commands=host.captured,
-        always_missing_indicator=always_missing_indicator,
     )
 
 
 def test_send_enter_keystroke_runs_tmux_send_keys() -> None:
-    agent = _make_probe()
-    send_enter_keystroke(agent, TmuxWindowTarget(session_name="probe-target", window=0))
+    agent = _make_probe_agent()
+    send_enter_keystroke(agent, _FAKE_TARGET)
     assert agent.captured_commands == ["tmux send-keys -t =probe-target:0 Enter"]
 
 
 def test_send_enter_keystroke_raises_on_command_failure() -> None:
-    agent = _make_probe(command_succeeds=False)
+    agent = _make_probe_agent(CommandResult(stdout="", stderr="boom", success=False))
     with pytest.raises(SendMessageError, match="tmux send-keys Enter failed"):
-        send_enter_keystroke(agent, TmuxWindowTarget(session_name="probe-target", window=0))
+        send_enter_keystroke(agent, _FAKE_TARGET)
 
 
-def test_send_enter_best_effort_sends_single_keystroke() -> None:
-    agent = _make_probe()
-    send_enter_best_effort(agent, TmuxWindowTarget(session_name="probe-target", window=0))
-    assert agent.captured_commands == ["tmux send-keys -t =probe-target:0 Enter"]
-
-
-def test_send_enter_and_poll_returns_when_indicator_appears() -> None:
-    agent = _make_probe()
-    send_enter_and_poll_for_cleared_indicator(
-        agent, TmuxWindowTarget(session_name="probe-target", window=0), cleared_indicator="probe-cleared"
+def test_submit_and_confirm_returns_confirmed_outcome() -> None:
+    agent = _make_probe_agent(CommandResult(stdout="MNGR_CONFIRMED marker\n", stderr="", success=True))
+    outcome = submit_message_and_confirm(
+        agent=agent, tmux_target=_FAKE_TARGET, message="hello", probes=_make_probes(), timeout_seconds=5.0
     )
-    assert agent.captured_commands == ["tmux send-keys -t =probe-target:0 Enter"]
-    assert agent.pane_capture_count >= 1
+    assert outcome.is_confirmed is True
+    assert outcome.confirming_probe_name == "marker"
+    # One host round-trip for the whole confirmation window.
+    assert len(agent.captured_commands) == 1
+
+
+def test_submit_and_confirm_returns_unconfirmed_outcome_on_timeout() -> None:
+    agent = _make_probe_agent(
+        CommandResult(stdout="MNGR_UNCONFIRMED\nMNGR_PROBE marker base=[] final=[]\n", stderr="", success=False)
+    )
+    outcome = submit_message_and_confirm(
+        agent=agent, tmux_target=_FAKE_TARGET, message="hello", probes=_make_probes(), timeout_seconds=5.0
+    )
+    assert outcome.is_confirmed is False
+    assert outcome.probe_diagnostics == ("marker base=[] final=[]",)
 
 
 @pytest.mark.allow_warnings
-def test_send_enter_and_poll_retries_when_indicator_missing() -> None:
-    """If the indicator never reappears, retry the keystroke before raising.
+def test_submit_and_confirm_surfaces_abnormal_script_abort_in_diagnostics() -> None:
+    """A script that dies without printing its own timeout marker is not a normal timeout.
 
-    Marked allow_warnings because the final timeout path intentionally logs a
-    captured pane snapshot via logger.error before raising.
+    stdout carries neither MNGR_CONFIRMED nor MNGR_UNCONFIRMED, so the script
+    aborted abnormally (e.g. a broken probe command crashed bash); the outcome
+    must stay unconfirmed AND carry the script's stderr so the real error
+    reaches the strict-failure diagnostics instead of being discarded.
     """
-    agent = _make_probe(always_missing_indicator=True)
-    with pytest.raises(SendMessageError, match="Timeout waiting for TUI input prompt to clear"):
-        send_enter_and_poll_for_cleared_indicator(
-            agent,
-            TmuxWindowTarget(session_name="probe-target", window=0),
-            cleared_indicator="probe-cleared",
-            max_attempts=2,
-            per_attempt_timeout_seconds=0.1,
+    agent = _make_probe_agent(
+        CommandResult(stdout="", stderr="bash: syntax error near unexpected token", success=False)
+    )
+    outcome = submit_message_and_confirm(
+        agent=agent, tmux_target=_FAKE_TARGET, message="hello", probes=_make_probes(), timeout_seconds=5.0
+    )
+    assert outcome.is_confirmed is False
+    assert any("aborted abnormally" in diagnostic for diagnostic in outcome.probe_diagnostics)
+    assert any("syntax error" in diagnostic for diagnostic in outcome.probe_diagnostics)
+
+
+def test_submit_and_confirm_raises_when_enter_cannot_be_sent() -> None:
+    agent = _make_probe_agent(CommandResult(stdout="MNGR_ENTER_FAILED\n", stderr="no such session", success=False))
+    with pytest.raises(SendMessageError, match="tmux send-keys Enter failed"):
+        submit_message_and_confirm(
+            agent=agent, tmux_target=_FAKE_TARGET, message="hello", probes=_make_probes(), timeout_seconds=5.0
         )
-    assert agent.captured_commands == ["tmux send-keys -t =probe-target:0 Enter"] * 2
+
+
+def test_submit_and_confirm_degrades_to_plain_enter_without_probes() -> None:
+    agent = _make_probe_agent()
+    outcome = submit_message_and_confirm(
+        agent=agent, tmux_target=_FAKE_TARGET, message="hello", probes=(), timeout_seconds=5.0
+    )
+    assert outcome.is_confirmed is False
+    assert agent.captured_commands == ["tmux send-keys -t =probe-target:0 Enter"]
+
+
+@pytest.mark.allow_warnings
+def test_raise_for_unconfirmed_submission_includes_diagnostics() -> None:
+    """The strict-failure error carries the probe diagnostics, retry history, and pane."""
+    agent = _make_probe_agent(
+        CommandResult(
+            stdout="MNGR_ENTER_RETRY 3\nMNGR_UNCONFIRMED\nMNGR_PROBE marker base=[a] final=[a]\n",
+            stderr="",
+            success=False,
+        )
+    )
+    outcome = submit_message_and_confirm(
+        agent=agent, tmux_target=_FAKE_TARGET, message="hello", probes=_make_probes(), timeout_seconds=5.0
+    )
+    with pytest.raises(SendMessageError) as exc_info:
+        raise_for_unconfirmed_submission(agent=agent, tmux_target=_FAKE_TARGET, outcome=outcome, timeout_seconds=5.0)
+    error_text = str(exc_info.value)
+    assert "marker base=[a] final=[a]" in error_text
+    assert "[3]" in error_text
+    assert "pane still shows the typed message" in error_text
 
 
 # =========================================================================
-# Signal-hook strategy via real tmux
+# Real-tmux engine tests
 # =========================================================================
 
 
 @pytest.fixture
-def signal_agent(
+def tmux_probe_agent(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
 ) -> _ProbeAgent:
@@ -191,7 +347,7 @@ def signal_agent(
     work_dir.mkdir()
     return _ProbeAgent.model_construct(
         id=AgentId.generate(),
-        name=AgentName("signal-probe"),
+        name=AgentName("engine-probe"),
         agent_type=AgentTypeName("probe"),
         work_dir=work_dir,
         create_time=datetime.now(timezone.utc),
@@ -203,258 +359,64 @@ def signal_agent(
 
 
 @pytest.mark.tmux
-def test_send_enter_via_hook_returns_when_signal_received(signal_agent: _ProbeAgent) -> None:
-    """The wait-for-hook strategy returns when the channel is signaled."""
-    session_name = f"{signal_agent.mngr_ctx.config.prefix}{signal_agent.name}"
+def test_engine_confirms_when_enter_actually_executes(tmux_probe_agent: _ProbeAgent, tmp_path: Path) -> None:
+    """Evidence appears exactly when Enter executes -> the engine confirms.
+
+    The tmux session runs bash; the typed text is a command that writes the
+    evidence file, so the changed-token probe can only confirm if Enter was
+    genuinely delivered and consumed -- the engine's core promise.
+    """
+    session_name = f"{tmux_probe_agent.mngr_ctx.config.prefix}{tmux_probe_agent.name}"
     tmux_target = TmuxWindowTarget(session_name=session_name, window=0)
-    wait_channel = f"mngr-submit-{session_name}"
+    evidence_path = tmp_path / "evidence-token"
+    probe = build_changed_token_probe("evidence-file", f"cat '{evidence_path}' 2>/dev/null")
 
-    signal_agent.host.execute_idempotent_command(
-        f"tmux new-session -d -s '{session_name}' 'bash'",
-        timeout_seconds=5.0,
+    tmux_probe_agent.host.execute_idempotent_command(
+        f"tmux new-session -d -s '{session_name}' 'bash'", timeout_seconds=5.0
     )
-
     try:
-        # Simulate the UserPromptSubmit hook firing the wait-for after a short delay.
-        signal_agent.host.execute_idempotent_command(
-            f"( sleep 0.1 && tmux wait-for -S '{wait_channel}' ) &",
+        typed_command = f"echo token-36284 > '{evidence_path}'"
+        tmux_probe_agent.host.execute_idempotent_command(
+            f"tmux send-keys -t '={session_name}:0' -l -- {shlex.quote(typed_command)}",
+            timeout_seconds=5.0,
+        )
+        outcome = submit_message_and_confirm(
+            agent=tmux_probe_agent,
+            tmux_target=tmux_target,
+            message=typed_command,
+            probes=(probe,),
+            timeout_seconds=10.0,
+        )
+        assert outcome.is_confirmed is True
+        assert outcome.confirming_probe_name == "evidence-file"
+        assert evidence_path.read_text().strip() == "token-36284"
+    finally:
+        tmux_probe_agent.host.execute_idempotent_command(
+            f"tmux kill-session -t '={session_name}' 2>/dev/null", timeout_seconds=5.0
+        )
+
+
+@pytest.mark.tmux
+def test_engine_reports_unconfirmed_when_no_evidence_appears(tmux_probe_agent: _ProbeAgent, tmp_path: Path) -> None:
+    """With no evidence source ever changing, the engine reports unconfirmed after the window."""
+    session_name = f"{tmux_probe_agent.mngr_ctx.config.prefix}{tmux_probe_agent.name}"
+    tmux_target = TmuxWindowTarget(session_name=session_name, window=0)
+    never_written = tmp_path / "never-written-token"
+    probe = build_changed_token_probe("evidence-file", f"cat '{never_written}' 2>/dev/null")
+
+    tmux_probe_agent.host.execute_idempotent_command(
+        f"tmux new-session -d -s '{session_name}' 'bash'", timeout_seconds=5.0
+    )
+    try:
+        outcome = submit_message_and_confirm(
+            agent=tmux_probe_agent,
+            tmux_target=tmux_target,
+            message="text that is not in the pane 36284",
+            probes=(probe,),
             timeout_seconds=1.0,
         )
-
-        send_enter_via_tmux_wait_for_hook(
-            signal_agent,
-            tmux_target,
-            wait_channel=wait_channel,
-            timeout_seconds=2.0,
-            accept_marker_command=None,
-        )
+        assert outcome.is_confirmed is False
     finally:
-        signal_agent.host.execute_idempotent_command(
-            f"tmux kill-session -t '={session_name}' 2>/dev/null",
-            timeout_seconds=5.0,
+        tmux_probe_agent.host.execute_idempotent_command(
+            f"tmux kill-session -t '={session_name}' 2>/dev/null", timeout_seconds=5.0
         )
-
-
-@pytest.mark.tmux
-@pytest.mark.allow_warnings
-def test_send_enter_via_hook_raises_on_timeout(signal_agent: _ProbeAgent) -> None:
-    """The wait-for-hook strategy raises SendMessageError on timeout."""
-    session_name = f"{signal_agent.mngr_ctx.config.prefix}{signal_agent.name}"
-    tmux_target = TmuxWindowTarget(session_name=session_name, window=0)
-    wait_channel = f"mngr-submit-never-signaled-{session_name}"
-
-    signal_agent.host.execute_idempotent_command(
-        f"tmux new-session -d -s '{session_name}' 'bash'",
-        timeout_seconds=5.0,
-    )
-
-    try:
-        with pytest.raises(SendMessageError, match="Timeout waiting for message submission signal"):
-            send_enter_via_tmux_wait_for_hook(
-                signal_agent,
-                tmux_target,
-                wait_channel=wait_channel,
-                timeout_seconds=0.2,
-                accept_marker_command=None,
-            )
-    finally:
-        signal_agent.host.execute_idempotent_command(
-            f"tmux kill-session -t '={session_name}' 2>/dev/null",
-            timeout_seconds=5.0,
-        )
-
-
-# === Submission command builders ===
-
-_TARGET = TmuxWindowTarget(session_name="sess", window=0)
-
-
-@pytest.mark.parametrize(
-    "command",
-    [
-        _build_signal_only_command(2.0, "chan", _TARGET),
-        _build_signal_or_marker_command(2.0, "chan", _TARGET, "printf ''"),
-    ],
-)
-def test_submission_commands_never_require_a_timeout_binary(command: str) -> None:
-    """Both builders run on the agent's host, which for a local agent is the user's machine.
-
-    That host may be macOS, which ships no ``timeout``, so every use of it has to
-    be guarded by a probe with a fallback behind it.
-    """
-    assert "command -v timeout" in command
-    assert "Time::HiRes" in command
-
-
-@pytest.mark.parametrize(
-    "command",
-    [
-        _build_signal_only_command(2.0, "chan", _TARGET),
-        _build_signal_or_marker_command(2.0, "chan", _TARGET, "printf ''"),
-    ],
-)
-def test_submission_commands_wait_on_the_channel_and_send_to_the_target(command: str) -> None:
-    """The channel reaches ``tmux wait-for`` and the target reaches ``tmux send-keys``, not vice versa."""
-    assert "chan" in command
-    assert _TARGET.as_shell_arg() in command
-    channel_index = command.index("chan")
-    target_index = command.index(_TARGET.as_shell_arg())
-    assert channel_index < target_index
-
-
-def _run_perl_timeout(arguments: str) -> subprocess.CompletedProcess[str]:
-    """Run the perl fallback directly, so the assertions hold on a host that also has ``timeout``."""
-    return subprocess.run(["bash", "-c", f"{_PERL_TIMEOUT} {arguments}"], capture_output=True, text=True, timeout=60)
-
-
-def _is_killed_by_the_alarm(result: subprocess.CompletedProcess[str]) -> bool:
-    """SIGALRM reads as ``-SIGALRM`` when bash ``exec``-ed perl, and as ``128 + SIGALRM`` when a shell outlived it."""
-    return result.returncode in (-signal.SIGALRM, 128 + signal.SIGALRM)
-
-
-@pytest.mark.parametrize("seconds", [0.5, 1.0])
-def test_perl_fallback_kills_a_command_that_outlives_its_deadline(seconds: float) -> None:
-    """A sub-second deadline is the interesting case.
-
-    The whole-second ``alarm`` would round it down to ``alarm(0)``, which cancels the
-    timer outright, so ``sleep 30`` would run to completion and report success.
-    """
-    start_time = time.monotonic()
-    result = _run_perl_timeout(f"{seconds} sleep 30")
-    assert _is_killed_by_the_alarm(result)
-    assert time.monotonic() - start_time < 10.0
-
-
-def test_perl_fallback_passes_through_the_command_s_own_exit_status() -> None:
-    """``exec`` replaces perl, so a command that finishes first reports its own status."""
-    assert _run_perl_timeout('10 sh -c "exit 7"').returncode == 7
-
-
-def test_perl_fallback_fails_when_the_command_cannot_be_exec_ed() -> None:
-    """A failed ``exec`` returns to perl, which would otherwise run off the end and exit 0."""
-    assert _run_perl_timeout("5 /nonexistent-binary-for-this-test").returncode == 127
-
-
-@pytest.mark.parametrize("seconds", [0.5, 30.0])
-def test_timeout_function_runs_the_command_under_whichever_deadline_the_host_has(seconds: float) -> None:
-    """The exit status differs by branch (``timeout`` gives 124, perl 142), so only the outcome is asserted."""
-    script = f"{_TIMEOUT_FUNCTION} _timeout {seconds} sh -c 'sleep 5; exit 0'"
-    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60)
-    expired = seconds < 5
-    assert (result.returncode != 0) is expired
-
-
-@pytest.mark.tmux
-def test_send_enter_via_hook_confirms_on_the_hook_when_the_marker_never_advances(
-    signal_agent: _ProbeAgent,
-) -> None:
-    """With a marker command, a submission that records no marker still confirms via the hook.
-
-    This is the shape of Claude's ``/clear`` and ``/compact``: the TUI fires the
-    submit hook but never enqueues a model turn, so the acceptance marker never
-    moves and only the hook can confirm.
-    """
-    session_name = f"{signal_agent.mngr_ctx.config.prefix}{signal_agent.name}"
-    tmux_target = TmuxWindowTarget(session_name=session_name, window=0)
-    wait_channel = f"mngr-submit-marker-never-moves-{session_name}"
-
-    signal_agent.host.execute_idempotent_command(
-        f"tmux new-session -d -s '{session_name}' 'bash'",
-        timeout_seconds=5.0,
-    )
-    try:
-        signal_agent.host.execute_idempotent_command(
-            f"( sleep 0.1 && tmux wait-for -S '{wait_channel}' ) &",
-            timeout_seconds=1.0,
-        )
-        send_enter_via_tmux_wait_for_hook(
-            signal_agent,
-            tmux_target,
-            wait_channel=wait_channel,
-            timeout_seconds=3.0,
-            # A constant token never sorts after its own baseline, so the marker
-            # can never be what confirms this submission.
-            accept_marker_command="printf 'frozen-marker'",
-        )
-    finally:
-        signal_agent.host.execute_idempotent_command(
-            f"tmux kill-session -t '={session_name}' 2>/dev/null",
-            timeout_seconds=5.0,
-        )
-
-
-def _run_with_failing_tmux(command: str, tmp_path: Path) -> subprocess.CompletedProcess[str]:
-    """Run a built submission command with a ``tmux`` on PATH that fails immediately."""
-    shim_dir = tmp_path / "failing_tmux_bin"
-    shim_dir.mkdir()
-    tmux_shim = shim_dir / "tmux"
-    tmux_shim.write_text("#!/bin/sh\nexit 1\n")
-    tmux_shim.chmod(0o755)
-    env = dict(os.environ)
-    env["PATH"] = f"{shim_dir}{os.pathsep}{env['PATH']}"
-    return subprocess.run(command, shell=True, capture_output=True, text=True, env=env, timeout=60)
-
-
-@pytest.mark.parametrize(
-    "command",
-    [
-        _build_signal_only_command(0.5, "chan", _TARGET),
-        _build_signal_or_marker_command(0.5, "chan", _TARGET, "printf 'frozen'"),
-    ],
-)
-def test_submission_command_fails_when_tmux_itself_fails(command: str, tmp_path: Path) -> None:
-    """A ``tmux wait-for`` that errors out (no server, dead session) is not a submission.
-
-    A killed ``tmux wait-for`` exits 0, so the deadline is tracked separately; the
-    wait status still has to be honored, or an unreachable tmux reports success.
-    """
-    result = _run_with_failing_tmux(command, tmp_path)
-    assert result.returncode != 0, f"reported success though tmux failed: {result.stdout!r}"
-
-
-def _run_built_command_against_real_tmux(
-    command: str, *, fire_signal_after_seconds: float | None
-) -> subprocess.CompletedProcess[str]:
-    """Run a built submission command against the test's isolated tmux server.
-
-    The autouse tmux-isolation fixture already points ``TMUX_TMPDIR`` at a private
-    server, so the bare ``tmux`` calls here and in the script never reach a real
-    one. Creates the send-keys target session, optionally fires the hook after a
-    delay, and returns the finished process.
-    """
-    subprocess.run(
-        ["tmux", "new-session", "-d", "-s", _TARGET.session_name, "bash"],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-    firing: subprocess.Popen[bytes] | None = None
-    if fire_signal_after_seconds is not None:
-        firing = subprocess.Popen(f"sleep {fire_signal_after_seconds} && tmux wait-for -S chan", shell=True)
-    try:
-        return subprocess.run(command, shell=True, capture_output=True, text=True, timeout=30)
-    finally:
-        if firing is not None:
-            firing.wait(timeout=10)
-        subprocess.run(
-            ["tmux", "kill-session", "-t", f"={_TARGET.session_name}"],
-            capture_output=True,
-            timeout=10,
-        )
-
-
-@pytest.mark.tmux
-def test_signal_only_script_exits_zero_when_the_hook_fires() -> None:
-    """The generated script confirms (exit 0) once the hook fires its wait-for channel."""
-    command = _build_signal_only_command(5.0, "chan", _TARGET)
-    result = _run_built_command_against_real_tmux(command, fire_signal_after_seconds=0.3)
-    assert result.returncode == 0, f"script did not confirm the fired hook: {result.stderr!r}"
-
-
-@pytest.mark.tmux
-def test_signal_only_script_exits_nonzero_at_the_deadline() -> None:
-    """With no hook, the generated script fails once the sleep-then-kill deadline passes."""
-    command = _build_signal_only_command(0.5, "chan", _TARGET)
-    result = _run_built_command_against_real_tmux(command, fire_signal_after_seconds=None)
-    assert result.returncode != 0, f"script reported success though no hook fired: {result.stdout!r}"

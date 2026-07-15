@@ -21,6 +21,7 @@ from imbue.skitwright.expect import expect
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.rsync
+@pytest.mark.timeout(120)
 def test_create_with_source_path(e2e: E2eSession, tmp_path: Path) -> None:
     """Tutorial block:
         # by default, the agent uses the data from its current git repo (if any) or folder, but you can specify a different source:
@@ -55,7 +56,6 @@ def test_create_with_source_path(e2e: E2eSession, tmp_path: Path) -> None:
     expect(cat_result.stdout).to_contain("hello from source")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -178,7 +178,6 @@ def test_create_with_source_path_no_git(e2e: E2eSession, tmp_path: Path) -> None
     expect(is_git_result.stdout).to_contain("NO_GIT")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -226,7 +225,6 @@ def test_create_default_branch(e2e: E2eSession) -> None:
     assert main_commit_result.stdout.strip() == branch_commit_result.stdout.strip()
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -289,7 +287,6 @@ def test_create_default_branch_distinct_per_agent(e2e: E2eSession) -> None:
     assert second_commit_result.stdout.strip() == base_commit
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 def test_create_with_custom_branch_pattern(e2e: E2eSession) -> None:
@@ -317,6 +314,10 @@ def test_create_with_custom_branch_pattern(e2e: E2eSession) -> None:
     expect(branch_result).to_succeed()
     expect(branch_result.stdout).to_contain("feature/my-task")
 
+    # The custom ":feature/*" pattern *overrides* the default ":mngr/*", so the
+    # default mngr/my-task branch must not have been created alongside it.
+    assert "mngr/my-task" not in branch_result.stdout
+
     # Verify the agent's worktree is actually on the feature branch
     worktree_branch = e2e.run(
         "mngr exec my-task 'git rev-parse --abbrev-ref HEAD'",
@@ -337,9 +338,9 @@ def test_create_with_custom_branch_pattern(e2e: E2eSession) -> None:
     assert feature_commit_result.stdout.strip() == head_commit_result.stdout.strip()
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.timeout(120)
 def test_create_with_base_branch(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can also specify a different base branch (instead of the current branch):
@@ -424,7 +425,6 @@ def test_create_with_nonexistent_base_branch(e2e: E2eSession) -> None:
     expect(branch_result.stdout).not_to_contain("mngr/my-task")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 def test_create_with_explicit_branch_name(e2e: E2eSession) -> None:
@@ -451,10 +451,14 @@ def test_create_with_explicit_branch_name(e2e: E2eSession) -> None:
     # default ":mngr/*" pattern must NOT have produced an mngr/my-task branch.
     assert "mngr/my-task" not in branch_result.stdout
 
-    # Verify the agent's worktree is actually on the explicit branch
+    # Verify the agent's worktree is actually on the explicit branch. The
+    # `mngr exec` call uses a generous timeout because it re-runs agent/provider
+    # discovery, which can exceed the 30s default when the machine is under load
+    # (e.g. running release tests back-to-back locally).
     agent_branch_result = e2e.run(
         "mngr exec my-task 'git rev-parse --abbrev-ref HEAD'",
         comment="Verify the agent worktree is on the explicit branch",
+        timeout=60.0,
     )
     expect(agent_branch_result).to_succeed()
     expect(agent_branch_result.stdout).to_contain("feature/my-task")
