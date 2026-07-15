@@ -19,6 +19,7 @@ from imbue.mngr_latchkey.remote_gateway import LATCHKEY_VERSION
 from imbue.mngr_latchkey.remote_gateway import OUTER_PORT
 from imbue.mngr_latchkey.remote_gateway import RemoteGatewayError
 from imbue.mngr_latchkey.remote_gateway import _GATEWAY_PROGRAM_NAME
+from imbue.mngr_latchkey.remote_gateway import _MINIMUM_NODE_MAJOR_VERSION
 from imbue.mngr_latchkey.remote_gateway import _TUNNEL_PROGRAM_NAME
 from imbue.mngr_latchkey.remote_gateway import _build_supervisor_program_config
 from imbue.mngr_latchkey.remote_gateway import _ensure_container_tunnel_keypair
@@ -136,7 +137,11 @@ def test_ensure_latchkey_installed_gates_each_component_behind_a_presence_check(
     _ensure_latchkey_installed(outer)
     command = _stub(outer).recorded[0].command
     assert "command -v curl" in command
-    assert "command -v node" in command
+    # Node.js is gated behind a *version* probe, not mere presence: a
+    # preinstalled distro node (e.g. Debian bookworm's 18.x) exists but cannot
+    # run the pinned latchkey/npm, so it must trigger the NodeSource install.
+    assert "node --version" in command
+    assert f'[ "$_node_major" -lt {_MINIMUM_NODE_MAJOR_VERSION} ]' in command
     assert "command -v npm" in command
     # supervisord supervises the gateway + tunnel; installed only when missing,
     # and its init service is enabled so it auto-starts on boot.
