@@ -20,6 +20,10 @@ from supertokens_python.recipe.emailpassword.interfaces import SignInOkResult as
 from supertokens_python.recipe.emailpassword.interfaces import SignUpOkResult as EPSignUpOkResult
 from supertokens_python.recipe.emailpassword.interfaces import UpdateEmailOrPasswordOkResult
 from supertokens_python.recipe.emailpassword.interfaces import WrongCredentialsError
+from supertokens_python.recipe.emailverification.interfaces import (
+    CreateEmailVerificationTokenEmailAlreadyVerifiedError,
+)
+from supertokens_python.recipe.emailverification.interfaces import CreateEmailVerificationTokenOkResult
 from supertokens_python.recipe.emailverification.interfaces import VerifyEmailUsingTokenOkResult
 from supertokens_python.recipe.emailverification.types import EmailVerificationUser
 from supertokens_python.recipe.thirdparty.interfaces import ManuallyCreateOrUpdateUserOkResult
@@ -510,6 +514,7 @@ class FakeSuperTokensBackend:
             "send_reset_password_email": self.send_reset_password_email,
             "consume_password_reset_token": self.consume_password_reset_token,
             "update_email_or_password": self.update_email_or_password,
+            "create_email_verification_token": self.create_email_verification_token,
             "verify_email_using_token": self.verify_email_using_token,
             "get_provider": self.get_provider,
             "manually_create_or_update_user": self.manually_create_or_update_user,
@@ -763,6 +768,24 @@ class FakeSuperTokensBackend:
         if password is not None:
             account.password = password
         return UpdateEmailOrPasswordOkResult()
+
+    def create_email_verification_token(
+        self,
+        *,
+        tenant_id: str,
+        recipe_user_id: RecipeUserId,
+        email: str,
+        user_context: dict[str, Any] | None = None,
+    ) -> CreateEmailVerificationTokenOkResult | CreateEmailVerificationTokenEmailAlreadyVerifiedError:
+        del tenant_id, user_context
+        self._raise_if_configured("create_email_verification_token")
+        user_id = recipe_user_id.get_as_string()
+        account = self.accounts_by_id.get(user_id)
+        if account is not None and account.is_verified:
+            return CreateEmailVerificationTokenEmailAlreadyVerifiedError()
+        token = f"verify-{secrets.token_hex(8)}"
+        self.verification_tokens[token] = (user_id, email)
+        return CreateEmailVerificationTokenOkResult(token=token)
 
     def verify_email_using_token(
         self,

@@ -358,12 +358,15 @@ def test_resumed_workspace_registered_expected_services(running_workspace: _Resu
     """After resume, the bootstrap re-registered the core services in applications.toml.
 
     The app-watcher / bootstrap respawns the standard services on restart and
-    each registers its port into ``runtime/applications.toml``; the core set
-    (system_interface, terminal) must be present. The snapshot is baked from
-    the default-workspace-template's ``main``, so the expected set tracks that
-    branch's supervisord.conf -- the blank example ``web`` service was removed
-    from the template (default-workspace-template PR #270) and must not be
-    expected here.
+    each registers its port into ``runtime/applications.toml``; the always-on
+    core services (``system_interface`` and ``terminal``) must be present.
+
+    ``web`` was intentionally dropped: default-workspace-template removed the
+    blank example web service (its ``[program:web]`` supervisord entry and the
+    ``libs/web_server`` scaffold), so it no longer registers. ``browser`` does
+    autostart now, but it is memory-heavy and expendable (earlyoom can shed it
+    under pressure), so requiring it would make this test flaky -- we only
+    assert the services guaranteed to survive a resume.
     """
     result = _exec_in_container(running_workspace.container_name, "cat /code/runtime/applications.toml", timeout=30)
     assert result.returncode == 0, f"Could not read runtime/applications.toml: {result.stderr}"
