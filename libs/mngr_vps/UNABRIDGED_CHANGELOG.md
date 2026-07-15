@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-14
+
+Agent listings from this provider now populate `AgentDetails.pid` (the agent's main process PID in the remote host's PID namespace), extracted from the same already-collected tmux/ps probe data.
+
 ## 2026-07-11
 
 The forever-claude-template repo is being renamed to default-workspace-template (with the `fct`/`FCT` shorthand expanded to `default_workspace_template`/`DEFAULT_WORKSPACE_TEMPLATE` forms).

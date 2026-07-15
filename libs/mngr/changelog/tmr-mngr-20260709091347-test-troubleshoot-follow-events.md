@@ -1,1 +1,0 @@
-Removed the superfluous `@pytest.mark.rsync` mark from the release test `test_troubleshoot_follow_events`. A local command agent created in a git repo uses `git worktree` (transfer mode `GIT_WORKTREE`), which never invokes rsync, so the mark tripped the resource guard's "marked but never invoked" check. This is a test-only change with no user-visible effect on `mngr` behavior.

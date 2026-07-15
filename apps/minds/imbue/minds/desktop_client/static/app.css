@@ -315,6 +315,23 @@
 html {
   scrollbar-gutter: stable;
 }
+/*
+ * Opt-out for the edge-to-edge chrome / overlay surfaces (the chrome
+ * titlebar page, the overlay host, and the modal pages hosted in it).
+ * These paint fixed full-viewport layers and never scroll at the
+ * document level, but with classic (always-visible) scrollbars the
+ * reserved gutter shrinks the initial containing block by 15px, so
+ * nothing paints the window's right edge: tooltips get clipped
+ * mid-label, modal dim backdrops stop short of the edge (twice over for
+ * a modal iframe inside the overlay host -- a 30px un-dimmed strip),
+ * and the titlebar's right-aligned buttons shift inward. The class must
+ * sit on the html element because the gutter belongs to the viewport
+ * scroller: overlay-view pages get it from the OverlaySurface wrapper,
+ * and the chrome page passes it via Base's ``html_class``.
+ */
+html.no-scrollbar-gutter {
+  scrollbar-gutter: auto;
+}
 
 .accent-spine::before {
   content: '';

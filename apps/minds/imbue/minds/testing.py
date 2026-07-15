@@ -3,8 +3,11 @@ from pathlib import Path
 from typing import Final
 
 import pytest
+from pydantic import Field
+from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.bootstrap import mngr_host_dir_for
 
 _GIT_TEST_ENV_KEYS: Final[dict[str, str]] = {
@@ -166,3 +169,35 @@ def tag_newer_release_content(repo: Path, *, removed_file: str | None = None) ->
     run_git_for_backup_test(repo, "commit", "-q", "-m", "release content")
     run_git_for_backup_test(repo, "tag", "minds-v2.0.0")
     run_git_for_backup_test(repo, "checkout", "-q", "main")
+
+
+# -- Workspace-sync e2e (snapshot sandbox + real connector env) ---------------
+#
+# The sync e2e release tests (apps/minds/test_sync_e2e.py) run in the
+# minds-snapshot offload sandbox against a real per-run CI connector env.
+# The env's coordinates + admin secrets are forwarded into the sandbox as
+# env vars (only on run_minds_release_tests CI runs); these helpers hold the
+# contract in one place so the conftest fixture and any future consumer agree.
+
+SYNC_E2E_CONNECTOR_URL_ENV: Final[str] = "MINDS_SYNC_E2E_CONNECTOR_URL"
+SYNC_E2E_LITELLM_URL_ENV: Final[str] = "MINDS_SYNC_E2E_LITELLM_URL"
+SYNC_E2E_SUPERTOKENS_URI_ENV: Final[str] = "MINDS_SYNC_E2E_SUPERTOKENS_CONNECTION_URI"
+SYNC_E2E_SUPERTOKENS_API_KEY_ENV: Final[str] = "MINDS_SYNC_E2E_SUPERTOKENS_API_KEY"
+
+
+class SyncE2EEnv(FrozenModel):
+    """Coordinates + admin secrets of the real connector env the sync e2e tests target."""
+
+    connector_url: str = Field(description="Base URL of the deployed remote_service_connector")
+    litellm_proxy_url: str = Field(description="Base URL of the deployed litellm proxy")
+    supertokens_connection_uri: SecretStr = Field(description="SuperTokens core URI for admin user provisioning")
+    supertokens_api_key: SecretStr = Field(description="SuperTokens core admin api-key")
+
+
+class SyncE2EAccount(FrozenModel):
+    """A per-test, pre-verified, paid account on the sync e2e connector env."""
+
+    email: str = Field(description="Unique per-test address under the env's seeded paid domain")
+    password: SecretStr = Field(description="The account's sign-in password (typed into the real UI)")
+    user_id: str = Field(description="SuperTokens user id (used for teardown and record assertions)")
+    access_token: SecretStr = Field(description="A session JWT for read-only connector polling from the test")

@@ -79,6 +79,12 @@ ENV_LATCHKEY_BINARY: Final[str] = "MNGR_LATCHKEY_BINARY"
 # supplied via CLI flag, env var, or ``settings.toml``.
 _DEFAULT_LATCHKEY_DIRECTORY: Final[Path] = Path("~/.mngr/latchkey")
 
+# Rotated-log size cap (in MB) for the forward supervisor's dedicated
+# ``events.jsonl`` (pointed at via ``--log-file``). Smaller than the general
+# mngr default so this long-running daemon's log stays bounded, matching the
+# 10MB cap the minds desktop client uses for its own rotated logs.
+_FORWARD_LOG_MAX_SIZE_MB: Final[int] = 10
+
 # How often the supervisor's gateway health check polls the shared
 # ``latchkey gateway`` subprocess's liveness. A dead gateway takes all agent
 # traffic down, so we detect it quickly; the poll itself is cheap (a
@@ -492,6 +498,7 @@ def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
         command_name="latchkey.forward",
         command_class=_ForwardCliOptions,
         is_format_template_supported=False,
+        max_log_size_mb=_FORWARD_LOG_MAX_SIZE_MB,
     )
 
     # No parent-death watcher: ``LatchkeyForwardSupervisor`` spawns us

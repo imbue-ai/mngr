@@ -1,1 +1,0 @@
-Fixed the `test_config_edit` e2e tutorial test, which wrongly assumed the e2e fixture pre-seeds the project `settings.toml`. The fixture deliberately leaves it unseeded so the test exercises genuine first-use behavior, where `mngr config edit` creates the file from a template before opening it in `$EDITOR`.

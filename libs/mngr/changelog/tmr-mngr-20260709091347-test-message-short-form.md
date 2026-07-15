@@ -1,1 +1,0 @@
-Removed the incorrect `@pytest.mark.rsync` mark from the `mngr msg` short-form e2e tutorial test. Delivering a message to a local agent goes through its tmux session and never invokes rsync, so the mark tripped the resource guard ("marked but never invoked").

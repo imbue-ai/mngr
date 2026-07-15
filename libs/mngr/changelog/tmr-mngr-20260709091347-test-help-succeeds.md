@@ -1,1 +1,0 @@
-Tightened the `test_help_succeeds` e2e tutorial test to verify exactly its documented scope: removed an out-of-scope assertion that the `mngr --help` output contains "Usage", since the scope only calls for a zero exit code and the advertised subcommands (create, list, destroy, message, connect, clone).

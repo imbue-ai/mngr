@@ -1,1 +1,0 @@
-Removed the superfluous `@pytest.mark.rsync` mark from the `test_exec_force_commit` e2e tutorial test. The test exercises a local git-based agent, whose `mngr exec` never invokes rsync, so the resource guard failed the test for carrying a mark it never used.

@@ -1,1 +1,0 @@
-Removed the superfluous `@pytest.mark.rsync` from the `test_exec_cwd` e2e tutorial test. The `mngr exec --cwd` flow never invokes rsync (command agents are created via the git-mirror path), so the mark tripped the resource guard's "marked but never invoked" check.

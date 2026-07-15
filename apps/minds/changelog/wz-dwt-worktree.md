@@ -1,5 +1,0 @@
-`propagate_changes` now tells you to create a missing default-workspace-template worktree with `just default-workspace-template-worktree` rather than a hardcoded `cd ~/project/default-workspace-template && git worktree add ...`. The `bake-slice-dev` workspace dir (documented in `docs/host-pool-setup.md`) now resolves from the explicit arg, else `DEFAULT_WORKSPACE_TEMPLATE_DIR`, else the `.external_worktrees/default-workspace-template` checkout -- no `~/project/...` path baked in.
-
-`.env.example` documents that `DEFAULT_WORKSPACE_TEMPLATE_DIR` is now read by `just default-workspace-template-worktree` and `just bake-slice-dev` (not only `sync-vendor-mngr`), and that `apps/minds/.env` is copied into each mngr agent worktree.
-
-New `apps/minds/CLAUDE.md` gives minds-scoped guidance for developing default-workspace-template (dwt) from the mngr checkout via `just default-workspace-template-worktree` -- kept out of the repo-root `CLAUDE.md` so minds specifics do not leak into mngr's top-level instructions.

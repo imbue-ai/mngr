@@ -1,1 +1,0 @@
-Removed a stale `@pytest.mark.rsync` mark from the `test_connect_by_name` e2e tutorial test. Connecting to a local agent execs `tmux attach` directly and never invokes rsync, so the mark (a leftover from when the test connected to a remote Modal agent) tripped the resource guard and failed the test.

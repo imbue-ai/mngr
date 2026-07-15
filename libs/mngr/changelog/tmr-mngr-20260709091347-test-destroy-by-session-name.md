@@ -1,1 +1,0 @@
-Gave the `test_destroy_by_session_name` e2e release test an explicit `@pytest.mark.timeout(60)` so it no longer flakes against the default 10s pytest timeout. The single `mngr destroy --session` invocation takes longer than 10s on a cold start, which is well within the 60s budget every other test in the file already uses.

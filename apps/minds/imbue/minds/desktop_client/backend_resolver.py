@@ -261,6 +261,14 @@ class BackendResolverInterface(MutableModel, ABC):
         """
         return None, None
 
+    def get_last_snapshot_at_for_provider(self, provider_name: ProviderInstanceName) -> datetime | None:
+        """Return the most recent snapshot time for one provider, or None when it has none.
+
+        Default implementation returns None (resolvers without discovery have
+        no per-provider freshness); ``MngrCliBackendResolver`` overrides it.
+        """
+        return None
+
 
 class StaticBackendResolver(BackendResolverInterface):
     """Resolves backend URLs from a static mapping provided at construction time.

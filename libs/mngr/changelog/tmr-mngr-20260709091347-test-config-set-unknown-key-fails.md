@@ -1,1 +1,0 @@
-Fixed the `test_config_set_unknown_key_fails` e2e tutorial test so its persistence check no longer assumes the e2e fixture pre-seeds the project `settings.toml`. The fixture deliberately does not seed that file, so a rejected `config set` never creates it; the test now reads the file back tolerating its absence and asserts the rejected key was never persisted.

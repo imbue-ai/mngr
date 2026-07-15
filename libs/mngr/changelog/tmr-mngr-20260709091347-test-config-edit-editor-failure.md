@@ -1,1 +1,0 @@
-Fixed a flaky failure in the `test_config_edit_editor_failure` e2e release test: a single `mngr config edit` cold start takes ~10s, which exceeds the default 10s func-only timeout, so the test now carries `@pytest.mark.timeout(60)` like its sibling `config edit` tests. No user-visible change.

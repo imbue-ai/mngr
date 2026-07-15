@@ -1,3 +1,0 @@
-Fixed the e2e tutorial test suite so `mngr list` no longer fails during tests: the shared e2e fixture now disables the credential-backed cloud VPS providers (aws, azure, gcp, imbue_cloud, ovh, vultr, lima) that are installed as workspace packages but have no credentials in the test environment. Previously each registered a default provider instance that discovery tried to reach, surfacing an inaccessible-provider error and making `mngr list` exit non-zero.
-
-Also removed an incorrect `@pytest.mark.rsync` from the `--connect-command` create test: creating a local agent from a git repo uses the git-worktree transfer mode, which never invokes rsync, so the mark tripped the resource guard's never-invoked check.

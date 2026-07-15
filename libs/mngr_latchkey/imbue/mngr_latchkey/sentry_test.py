@@ -9,6 +9,7 @@ from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_ENVIRONMENT_ENV_VAR
 from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_GIT_SHA_ENV_VAR
 from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_RELEASE_ENV_VAR
 from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_S3_BUCKET_ENV_VAR
+from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_USER_ID_ENV_VAR
 from imbue.mngr_latchkey.sentry import read_forward_sentry_consent
 from imbue.mngr_latchkey.sentry import resolve_forward_sentry_config
 
@@ -20,6 +21,7 @@ def _set_required_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(MNGR_LATCHKEY_SENTRY_ENVIRONMENT_ENV_VAR, "staging")
     monkeypatch.setenv(MNGR_LATCHKEY_SENTRY_RELEASE_ENV_VAR, "1.2.3")
     monkeypatch.setenv(MNGR_LATCHKEY_SENTRY_GIT_SHA_ENV_VAR, "abc123")
+    monkeypatch.setenv(MNGR_LATCHKEY_SENTRY_USER_ID_ENV_VAR, "0123456789abcdef0123456789abcdef")
 
 
 def test_resolve_returns_none_when_not_configured(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -28,6 +30,7 @@ def test_resolve_returns_none_when_not_configured(monkeypatch: pytest.MonkeyPatc
         MNGR_LATCHKEY_SENTRY_ENVIRONMENT_ENV_VAR,
         MNGR_LATCHKEY_SENTRY_RELEASE_ENV_VAR,
         MNGR_LATCHKEY_SENTRY_GIT_SHA_ENV_VAR,
+        MNGR_LATCHKEY_SENTRY_USER_ID_ENV_VAR,
     ):
         monkeypatch.delenv(name, raising=False)
     assert resolve_forward_sentry_config() is None
@@ -44,6 +47,7 @@ def test_resolve_returns_config_when_fully_configured(monkeypatch: pytest.Monkey
     assert config.environment_name == "staging"
     assert config.release_id == "1.2.3"
     assert config.git_commit_sha == "abc123"
+    assert config.user_id == "0123456789abcdef0123456789abcdef"
     assert config.s3_attachment_bucket == "traceback-uploads-staging"
     assert config.consent_file_path == consent_path
 
@@ -65,6 +69,7 @@ def test_resolve_defaults_bucket_and_consent_file_to_none(monkeypatch: pytest.Mo
         MNGR_LATCHKEY_SENTRY_ENVIRONMENT_ENV_VAR,
         MNGR_LATCHKEY_SENTRY_RELEASE_ENV_VAR,
         MNGR_LATCHKEY_SENTRY_GIT_SHA_ENV_VAR,
+        MNGR_LATCHKEY_SENTRY_USER_ID_ENV_VAR,
     ],
 )
 def test_resolve_returns_none_when_required_env_var_missing(

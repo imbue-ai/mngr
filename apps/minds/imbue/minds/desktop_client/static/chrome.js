@@ -528,6 +528,8 @@
           withOpenNew: false,
         });
         row.addEventListener('click', function (e) {
+          // Rows for workspaces on another device are informational only.
+          if (w.is_remote) return;
           if (e.target.closest('[data-open-settings]')) {
             navigateContent('/workspace/' + w.id + '/settings');
             closeSidebar();

@@ -42,6 +42,11 @@ _USER_ID_FILENAME: Final[str] = "user_id"
 
 _DOCKER_CMD_TIMEOUT_SECONDS: Final[float] = 60.0
 
+# A wedged Docker daemon (socket present but unresponsive) makes a docker command
+# block until its full timeout; a liveness probe bounded to this shorter timeout
+# lets state-container ops skip fast instead of hanging for the command timeout.
+_DOCKER_DAEMON_PROBE_TIMEOUT_SECONDS: Final[float] = 5.0
+
 
 class DockerCleanupError(MindError):
     """Raised when a present Docker state container / volume cannot be removed."""
@@ -87,6 +92,7 @@ def _run_docker_command(
     *,
     parent_concurrency_group: ConcurrencyGroup,
     scope_name: str,
+    timeout: float = _DOCKER_CMD_TIMEOUT_SECONDS,
 ) -> FinishedProcess:
     """Run one ``docker`` subprocess to completion in its own CG scope, returning the result *after* the CG exits.
 
@@ -108,7 +114,7 @@ def _run_docker_command(
         try:
             result = cg.run_process_to_completion(
                 command=command,
-                timeout=_DOCKER_CMD_TIMEOUT_SECONDS,
+                timeout=timeout,
                 is_checked_after=False,
                 env=dict(os.environ),
             )
@@ -118,6 +124,29 @@ def _run_docker_command(
         raise setup_error
     assert result is not None
     return result
+
+
+def _is_docker_daemon_reachable(
+    parent_concurrency_group: ConcurrencyGroup,
+    *,
+    timeout: float = _DOCKER_DAEMON_PROBE_TIMEOUT_SECONDS,
+) -> bool:
+    """Whether the Docker daemon answers ``docker version`` within ``timeout``.
+
+    False for a missing docker CLI, an unreachable daemon, or a *wedged* daemon
+    (socket present but unresponsive). Gating a state-container op on this bounds
+    the wedged-daemon case to the probe timeout instead of the command timeout.
+    """
+    try:
+        probe = _run_docker_command(
+            ["docker", "version", "--format", "{{.Server.Version}}"],
+            parent_concurrency_group=parent_concurrency_group,
+            scope_name="docker-daemon-probe",
+            timeout=timeout,
+        )
+    except ProcessSetupError:
+        return False
+    return probe.returncode == 0 and not probe.is_timed_out
 
 
 def remove_state_container(
@@ -133,8 +162,12 @@ def remove_state_container(
     a success. But when the container is present and ``docker rm`` fails,
     this raises :class:`DockerCleanupError` so a real failure surfaces.
     """
-    # Probe for the container. This also distinguishes "no docker daemon"
-    # (skip) from "container already gone" (success).
+    if not _is_docker_daemon_reachable(parent_concurrency_group):
+        logger.info("Docker daemon unavailable; skipping state-container cleanup for {}", container_name)
+        return
+
+    # Probe for the container. This distinguishes "container already gone"
+    # (success) from a present container to remove.
     try:
         inspect_result = _run_docker_command(
             ["docker", "container", "inspect", container_name],
@@ -201,6 +234,10 @@ def stop_state_container(
     already stopped is a success. A present, running container that fails to
     stop raises :class:`DockerCleanupError`.
     """
+    if not _is_docker_daemon_reachable(parent_concurrency_group):
+        logger.info("Docker daemon unavailable; skipping state-container stop for {}", container_name)
+        return
+
     try:
         stop_result = _run_docker_command(
             ["docker", "stop", container_name],
@@ -275,6 +312,10 @@ def start_state_container(
     is a success -- it is created lazily on the first ``mngr create``. A present
     container that fails to start raises :class:`DockerCleanupError`.
     """
+    if not _is_docker_daemon_reachable(parent_concurrency_group):
+        logger.info("Docker daemon unavailable; skipping state-container start for {}", container_name)
+        return
+
     try:
         start_result = _run_docker_command(
             ["docker", "start", container_name],

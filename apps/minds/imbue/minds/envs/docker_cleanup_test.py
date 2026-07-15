@@ -8,6 +8,7 @@ import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.envs.docker_cleanup import DockerCleanupError
+from imbue.minds.envs.docker_cleanup import _is_docker_daemon_reachable
 from imbue.minds.envs.docker_cleanup import _is_docker_daemon_unavailable
 from imbue.minds.envs.docker_cleanup import cleanup_env_state_container
 from imbue.minds.envs.docker_cleanup import read_profile_user_id
@@ -35,19 +36,49 @@ def _write_profile(mngr_host_dir: Path, *, profile_id: str, user_id: str) -> Non
     (profile_dir / "user_id").write_text(f"{user_id}\n")
 
 
-def _install_fake_docker(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, exit_code: int, stderr: str) -> None:
+def _install_fake_docker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    exit_code: int,
+    stderr: str,
+    is_daemon_reachable: bool = True,
+) -> None:
     """Put a fake ``docker`` on PATH that prints ``stderr`` and exits ``exit_code``.
 
     Lets the cleanup functions be exercised against a controlled ``docker``
     failure (e.g. a reachable-but-paused daemon) with no real daemon, so the
-    tests are fast and deterministic.
+    tests are fast and deterministic. ``docker version`` (the daemon-reachability
+    probe) succeeds when ``is_daemon_reachable``, so a reachable daemon that
+    refuses the op still reaches the op's failure.
     """
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
     docker = bin_dir / "docker"
-    docker.write_text(f"#!/bin/sh\nprintf '%s' {shlex.quote(stderr)} 1>&2\nexit {exit_code}\n")
+    version_branch = 'if [ "$1" = "version" ]; then echo 28.0.0; exit 0; fi\n' if is_daemon_reachable else ""
+    docker.write_text(f"#!/bin/sh\n{version_branch}printf '%s' {shlex.quote(stderr)} 1>&2\nexit {exit_code}\n")
     docker.chmod(0o755)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+
+def _install_recording_docker(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, version_script: str) -> Path:
+    """Put a fake ``docker`` on PATH that appends every invocation's argv to a log it returns.
+
+    ``version_script`` is the shell body for the ``docker version`` branch --
+    ``exit 0`` (reachable), ``exit 1`` (unreachable), or ``sleep N`` (wedged);
+    every other subcommand succeeds. The returned calls-log path lets a test
+    assert which subcommands were (never) attempted.
+    """
+    bin_dir = tmp_path / "fake-bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    calls_log = bin_dir / "calls.log"
+    docker = bin_dir / "docker"
+    docker.write_text(
+        f'#!/bin/sh\necho "$@" >> {shlex.quote(str(calls_log))}\nif [ "$1" = "version" ]; then {version_script}; fi\nexit 0\n'
+    )
+    docker.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    return calls_log
 
 
 # "Docker Desktop is manually paused" is a reachable daemon that *refuses* the
@@ -180,6 +211,52 @@ def test_start_state_container_daemon_unavailable_message_is_noop(
     start_state_container(
         container_name=f"minds-staging-docker-state-{uuid4().hex}", parent_concurrency_group=_root_cg
     )
+
+
+def test_is_docker_daemon_reachable_true_when_version_succeeds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, _root_cg: ConcurrencyGroup
+) -> None:
+    _install_recording_docker(monkeypatch, tmp_path, version_script="exit 0")
+    assert _is_docker_daemon_reachable(_root_cg) is True
+
+
+def test_is_docker_daemon_reachable_false_when_daemon_unreachable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, _root_cg: ConcurrencyGroup
+) -> None:
+    _install_recording_docker(monkeypatch, tmp_path, version_script="exit 1")
+    assert _is_docker_daemon_reachable(_root_cg) is False
+
+
+def test_is_docker_daemon_reachable_false_when_daemon_wedged(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, _root_cg: ConcurrencyGroup
+) -> None:
+    # A wedged daemon accepts the socket connection but never replies, so
+    # ``docker version`` hangs. The probe must give up at its timeout and report
+    # unreachable instead of blocking for the full command timeout -- the launch
+    # / quit hang this fixes.
+    _install_recording_docker(monkeypatch, tmp_path, version_script="sleep 30; exit 0")
+    assert _is_docker_daemon_reachable(_root_cg, timeout=0.5) is False
+
+
+def test_start_state_container_skips_without_attempting_start_when_daemon_unreachable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, _root_cg: ConcurrencyGroup
+) -> None:
+    # The launch-time fix: an unreachable daemon short-circuits before
+    # ``docker start``, so a stuck daemon can never block the container start.
+    calls_log = _install_recording_docker(monkeypatch, tmp_path, version_script="exit 1")
+    start_state_container(
+        container_name=f"minds-staging-docker-state-{uuid4().hex}", parent_concurrency_group=_root_cg
+    )
+    assert "start" not in (calls_log.read_text() if calls_log.exists() else "")
+
+
+def test_stop_state_container_skips_without_attempting_stop_when_daemon_unreachable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, _root_cg: ConcurrencyGroup
+) -> None:
+    # The quit-time fix: the same short-circuit before ``docker stop``.
+    calls_log = _install_recording_docker(monkeypatch, tmp_path, version_script="exit 1")
+    stop_state_container(container_name=f"minds-staging-docker-state-{uuid4().hex}", parent_concurrency_group=_root_cg)
+    assert "stop" not in (calls_log.read_text() if calls_log.exists() else "")
 
 
 @pytest.mark.acceptance
