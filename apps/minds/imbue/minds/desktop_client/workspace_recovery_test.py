@@ -29,6 +29,7 @@ from imbue.minds.desktop_client.workspace_recovery import _build_mngr_stop_argv
 from imbue.minds.desktop_client.workspace_recovery import _is_discovery_fresh
 from imbue.minds.desktop_client.workspace_recovery import _provider_error_message_for_workspace
 from imbue.minds.desktop_client.workspace_recovery import is_recovery_classification_trustworthy
+from imbue.minds.desktop_client.workspace_recovery import is_workspace_discovery_stalled
 from imbue.minds.desktop_client.workspace_recovery import probe_workspace_health
 from imbue.minds.desktop_client.workspace_recovery import run_restart_sequence
 from imbue.mngr.api.discovery_events import DiscoveryError
@@ -539,6 +540,27 @@ def test_classification_trustworthiness_is_scoped_to_the_workspaces_own_provider
     assert is_recovery_classification_trustworthy(resolver, tracker, agent_id) is True
 
 
+def test_discovery_stalled_when_no_snapshot_or_snapshot_is_old() -> None:
+    """Discovery is stalled when the workspace's provider has no (or only an old) snapshot.
+
+    This is the dead-producer condition (e.g. the ``mngr latchkey forward``
+    supervisor died): the onset-based freshness gate can never open again, so the
+    probe path uses this predicate to stop waiting and gather direct evidence.
+    """
+    resolver = MngrCliBackendResolver()
+    agent_id = AgentId.generate()
+    _register_workspace_agent(resolver, agent_id, "docker")
+
+    # No snapshot for the provider at all: stalled.
+    assert is_workspace_discovery_stalled(resolver, agent_id) is True
+    # A recent snapshot: flowing normally.
+    _set_provider_snapshot_at(resolver, "docker", datetime.now(timezone.utc))
+    assert is_workspace_discovery_stalled(resolver, agent_id) is False
+    # Several missed polls (providers poll every 30s): stalled.
+    _set_provider_snapshot_at(resolver, "docker", datetime.now(timezone.utc) - timedelta(minutes=5))
+    assert is_workspace_discovery_stalled(resolver, agent_id) is True
+
+
 def test_classification_trustworthiness_without_onset_falls_back_to_age() -> None:
     """Without a recorded onset, trustworthiness falls back to the absolute-age freshness check.
 
@@ -645,4 +667,92 @@ def test_probe_pairs_the_classified_host_state_with_the_freshness_gate(tmp_path:
     # Two reads happened: the pre-exec gate read (RUNNING, so the exec ran) and
     # the classification-time read (STOPPED).
     assert resolver._host_state_reads >= 2
+    assert response.dispatch_tier == DispatchTier.HOST_OFFLINE
+
+
+def test_probe_attempts_exec_and_resolves_when_discovery_is_stalled(tmp_path: Path) -> None:
+    """With a stalled discovery stream, the probe gathers direct evidence instead of waiting.
+
+    The dead-producer dead-end: no snapshot for the workspace's provider means
+    the resolver has no (trusted) host state and the freshness gate can never
+    open, so the old behavior re-classified INDETERMINATE forever. The probe must
+    attempt the in-container exec despite the host not reading RUNNING; the
+    exec's completed failure (the stub exits 0 with no sentinel) then resolves to
+    the consent-gated HOST_UNRESPONSIVE, whose restart also revives a genuinely
+    stopped container.
+    """
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    resolver = _resolver_with_system_services(workspace_agent, services_agent)
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    _drive_to_stuck_with_onset(tracker, workspace_agent)
+    # No provider snapshot is ever recorded: discovery is stalled.
+    assert is_workspace_discovery_stalled(resolver, workspace_agent) is True
+
+    mngr_binary = _write_fake_mngr(tmp_path)
+    with ConcurrencyGroup(name="test-probe-stalled") as cg:
+        response = probe_workspace_health(
+            workspace_agent,
+            backend_resolver=resolver,
+            tracker=tracker,
+            mngr_binary=mngr_binary,
+            mngr_host_dir=tmp_path,
+            concurrency_group=cg,
+            envelope_stream_consumer=None,
+        )
+
+    exec_invocations = [line for line in _read_fake_mngr_invocations(mngr_binary) if line.startswith("exec ")]
+    assert exec_invocations, "the exec probe must be attempted when discovery is stalled"
+    assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
+
+
+def test_probe_skips_exec_for_a_trusted_not_running_host(tmp_path: Path) -> None:
+    """With discovery flowing and the host trustworthily observed STOPPED, no exec fires.
+
+    The doomed-round-trip guard: a fresh post-onset snapshot already answers the
+    question, so the probe classifies HOST_OFFLINE (unattended restart) without
+    paying the exec's provider round-trip.
+    """
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    host_id = HostId.generate()
+    resolver = MngrCliBackendResolver()
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(workspace_agent, services_agent),
+            discovered_agents=(
+                DiscoveredAgent(
+                    host_id=host_id,
+                    agent_id=workspace_agent,
+                    agent_name=AgentName("ws-agent"),
+                    provider_name=ProviderInstanceName("docker"),
+                    certified_data={"labels": {"workspace": "true", "is_primary": "true"}},
+                ),
+                DiscoveredAgent(
+                    host_id=host_id,
+                    agent_id=services_agent,
+                    agent_name=AgentName("system-services"),
+                    provider_name=ProviderInstanceName("docker"),
+                ),
+            ),
+            host_state_by_host_id={str(host_id): HostState.STOPPED},
+        )
+    )
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    onset = _drive_to_stuck_with_onset(tracker, workspace_agent)
+    _set_provider_snapshot_at(resolver, "docker", onset + timedelta(seconds=1))
+
+    mngr_binary = _write_fake_mngr(tmp_path)
+    with ConcurrencyGroup(name="test-probe-skip-exec") as cg:
+        response = probe_workspace_health(
+            workspace_agent,
+            backend_resolver=resolver,
+            tracker=tracker,
+            mngr_binary=mngr_binary,
+            mngr_host_dir=tmp_path,
+            concurrency_group=cg,
+            envelope_stream_consumer=None,
+        )
+
+    assert _read_fake_mngr_invocations(mngr_binary) == []
     assert response.dispatch_tier == DispatchTier.HOST_OFFLINE

@@ -89,6 +89,35 @@ report).
 - `mngr` CLI behavior for `UNREACHABLE` hosts matches `UNKNOWN` semantics:
   listed by default, never GC'd (gc only destroys CRASHED/FAILED/DESTROYED).
 
+Refinements from live testing (2026-07-15, testing on the branch build found
+both stuck cases were caused by a dead discovery producer -- the
+`mngr latchkey forward` supervisor died mid-session, so no post-onset snapshot
+could ever land and the freshness gate never opened):
+
+- An in-container exec probe that *completes* without reaching the container
+  (nonzero exit or clean exit with no sentinel -- dead inner sshd, container
+  not actually running) is direct fresh evidence and classifies the
+  consent-gated HOST_UNRESPONSIVE without waiting on the snapshot-freshness
+  gate. A probe *timeout* still classifies INDETERMINATE (it observed nothing;
+  the macOS-sleep protection). A trusted post-onset `STOPPED`/`CRASHED`
+  observation still wins over a completed exec failure, keeping the unattended
+  HOST_OFFLINE restart.
+
+- The exec probe is attempted not only when the host reads RUNNING but also
+  whenever the workspace's provider has produced no discovery snapshot for
+  over 90s (`is_workspace_discovery_stalled`, three missed 30s polls): with
+  discovery down, the exec's outcome is the only direct evidence available,
+  and it resolves the page to HEALTHY or the consent-gated verdict instead of
+  an indefinite "Reconnecting". With discovery flowing, a trusted not-running
+  state still skips the doomed exec round-trip.
+
+- The diagnostics list gains "Is the system-services agent running?": the
+  in-container script scans `/proc/*/environ` for the agent's `MNGR_AGENT_ID`
+  marker (the same marker mngr's stop path kills by), so a stopped
+  system-services agent is named as the cause rather than leaving only
+  downstream supervisorctl connection errors. Purely diagnostic; the dispatch
+  tier never branches on it.
+
 ## Changes
 
 mngr layer (`libs/mngr`, `libs/mngr_imbue_cloud`, `libs/mngr_lima`):

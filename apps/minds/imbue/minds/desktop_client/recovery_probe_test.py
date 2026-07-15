@@ -36,6 +36,7 @@ def _response(
     provider_label: str = "",
     mngr_exec_command: str = "",
     probe_timed_out: bool = False,
+    probe_exec_attempted: bool = False,
     classification_is_trustworthy: bool = True,
 ) -> HostHealthResponse:
     """Call ``build_host_health_response`` with resolver-sourced defaults.
@@ -52,6 +53,7 @@ def _response(
         provider_label=provider_label,
         mngr_exec_command=mngr_exec_command,
         probe_timed_out=probe_timed_out,
+        probe_exec_attempted=probe_exec_attempted,
         classification_is_trustworthy=classification_is_trustworthy,
     )
 
@@ -113,6 +115,13 @@ def test_build_probe_argv_targets_services_agent_with_timeout_and_no_start() -> 
     assert "--quiet" in argv
 
 
+def test_build_probe_argv_passes_agent_id_to_the_inner_script() -> None:
+    """The inner script's agent-process scan needs the agent id as its argv[1]."""
+    argv = build_probe_argv("/usr/local/bin/mngr", _SERVICES_AGENT_ID)
+    shell_command = argv[3]
+    assert shell_command.endswith(f"| python3 - {_SERVICES_AGENT_ID}")
+
+
 # --- per-probe answers ----------------------------------------------------
 
 
@@ -160,6 +169,40 @@ def test_services_agent_registered_probe_yes_when_id_resolved() -> None:
 def test_services_agent_registered_probe_unknown_when_id_not_known() -> None:
     response = _response(services_agent_id=None)
     assert _answer(response, "system-services agent registered") == ProbeAnswer.UNKNOWN
+
+
+def test_services_agent_running_probe_yes_when_agent_processes_found() -> None:
+    """Live MNGR_AGENT_ID-tagged processes mean the system-services agent is running."""
+    response = _response(in_container_stdout=_probe_stdout({"agent_processes": "42 supervisord\n43 claude"}))
+    probe = _probe_for(response, "system-services agent running")
+    assert probe.answer == ProbeAnswer.YES
+    assert probe.output == "42 supervisord\n43 claude"
+
+
+def test_services_agent_running_probe_no_when_no_agent_processes_survive() -> None:
+    """An empty scan means ``mngr stop system-services`` (or a crash) took the agent down.
+
+    This is the row that names the cause when the supervisord probes can only
+    report connection errors: supervisord died *because* the agent it runs under
+    was stopped.
+    """
+    response = _response(in_container_stdout=_probe_stdout({"agent_processes": ""}))
+    probe = _probe_for(response, "system-services agent running")
+    assert probe.answer == ProbeAnswer.NO
+    assert probe.output == f"(no live process carries MNGR_AGENT_ID={_SERVICES_AGENT_ID})"
+
+
+def test_services_agent_running_probe_unknown_when_scan_skipped_or_errored() -> None:
+    """No scan result (old script, no agent id) or a scan error cannot claim NO."""
+    skipped = _response(in_container_stdout=_probe_stdout({}))
+    assert _answer(skipped, "system-services agent running") == ProbeAnswer.UNKNOWN
+    errored = _response(in_container_stdout=_probe_stdout({"agent_processes_error": "PermissionError(...)"}))
+    assert _answer(errored, "system-services agent running") == ProbeAnswer.UNKNOWN
+
+
+def test_services_agent_running_probe_unknown_when_probe_did_not_run() -> None:
+    response = _response(in_container_stdout=None)
+    assert _answer(response, "system-services agent running") == ProbeAnswer.UNKNOWN
 
 
 def test_can_run_commands_probe_no_when_sentinel_absent() -> None:
@@ -470,6 +513,93 @@ def test_dispatch_tier_stale_snapshot_does_not_downgrade_offline_verdict_to_a_re
     """
     response = _response(host_state="STOPPED", in_container_stdout=None, classification_is_trustworthy=False)
     assert response.dispatch_tier == DispatchTier.INDETERMINATE
+
+
+def test_dispatch_tier_host_unresponsive_when_completed_exec_fails_despite_stale_snapshot() -> None:
+    """An exec that completed without the sentinel resolves the tier even with no fresh snapshot.
+
+    The dead-inner-sshd case with a stalled discovery producer: no snapshot taken
+    after the outage onset will ever land, so the freshness gate can never open --
+    but the exec itself ran to completion and failed, which is a direct fresh
+    observation that we cannot get into the container. Waiting on the gate here
+    parked the page on "Reconnecting" forever; the completed failure must yield
+    the consent-gated HOST_UNRESPONSIVE instead.
+    """
+    response = _response(
+        host_state="RUNNING",
+        in_container_stdout=None,
+        probe_exec_attempted=True,
+        classification_is_trustworthy=False,
+    )
+    assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
+
+
+def test_dispatch_tier_host_unresponsive_when_completed_exec_fails_with_no_host_state() -> None:
+    """A completed exec failure needs no host-state observation at all.
+
+    A stopped container under a stalled discovery producer: the resolver's host
+    state is absent (or stale) and can never be re-certified, but the attempted
+    exec completed and failed -- enough for the consent-gated verdict, whose
+    restart also revives a genuinely stopped container.
+    """
+    response = _response(
+        host_state="",
+        in_container_stdout=None,
+        probe_exec_attempted=True,
+        classification_is_trustworthy=False,
+    )
+    assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
+
+
+def test_dispatch_tier_timeout_stays_indeterminate_even_for_an_attempted_exec() -> None:
+    """A timed-out exec observed nothing: the attempted flag must not upgrade it.
+
+    The macOS-sleep case again: the exec was attempted but its window spanned a
+    suspend, so the timeout is absence of evidence -- INDETERMINATE, never the
+    unresponsive verdict.
+    """
+    response = _response(
+        host_state="RUNNING",
+        in_container_stdout=None,
+        probe_timed_out=True,
+        probe_exec_attempted=True,
+        classification_is_trustworthy=False,
+    )
+    assert response.dispatch_tier == DispatchTier.INDETERMINATE
+
+
+def test_dispatch_tier_trusted_offline_state_beats_a_completed_exec_failure() -> None:
+    """A trusted STOPPED observation keeps the unattended HOST_OFFLINE restart.
+
+    When discovery re-observed the host post-onset and read it STOPPED, the
+    exec's failure is just the expected consequence of a stopped container; the
+    trusted observation earns the unattended restart rather than downgrading to
+    the consent-gated verdict.
+    """
+    response = _response(
+        host_state="STOPPED",
+        in_container_stdout=None,
+        probe_exec_attempted=True,
+        classification_is_trustworthy=True,
+    )
+    assert response.dispatch_tier == DispatchTier.HOST_OFFLINE
+
+
+def test_dispatch_tier_trusted_unknown_state_falls_through_to_completed_exec_failure() -> None:
+    """A trusted UNKNOWN state says nothing; the completed exec failure still resolves.
+
+    UNKNOWN means the host was unobservable during discovery, which carries no
+    verdict of its own -- but an exec that completed without reaching the
+    container is direct evidence, so the page renders the consent-gated verdict
+    instead of checking forever.
+    """
+    response = _response(
+        host_state="UNKNOWN",
+        in_container_stdout=None,
+        probe_exec_attempted=True,
+        classification_is_trustworthy=True,
+    )
+    assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
 
 
 def test_dispatch_tier_healthy_direct_evidence_beats_a_stale_snapshot() -> None:

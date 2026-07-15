@@ -63,10 +63,16 @@ def _get_probe_python_script() -> str:
     return _PROBE_SCRIPT_PATH.read_text(encoding="utf-8")
 
 
-def build_probe_shell_command() -> str:
-    """Return the shell command minds passes to ``mngr exec``."""
+def build_probe_shell_command(services_agent_id: AgentId | None = None) -> str:
+    """Return the shell command minds passes to ``mngr exec``.
+
+    The services agent id is passed to the inner script as ``argv[1]`` so its
+    agent-process scan knows which ``MNGR_AGENT_ID`` marker to look for; when
+    None the scan is skipped and that probe answers unknown.
+    """
     encoded = base64.b64encode(_get_probe_python_script().encode("utf-8")).decode("ascii")
-    return f"echo '{PROBE_SENTINEL}' && echo {encoded} | base64 -d | python3"
+    agent_arg = f" {shlex.quote(str(services_agent_id))}" if services_agent_id is not None else ""
+    return f"echo '{PROBE_SENTINEL}' && echo {encoded} | base64 -d | python3 -{agent_arg}"
 
 
 def build_probe_argv(mngr_binary: str, services_agent_id: AgentId) -> list[str]:
@@ -80,7 +86,7 @@ def build_probe_argv(mngr_binary: str, services_agent_id: AgentId) -> list[str]:
         mngr_binary,
         "exec",
         str(services_agent_id),
-        build_probe_shell_command(),
+        build_probe_shell_command(services_agent_id),
         "--timeout",
         str(int(PROBE_TIMEOUT_SECONDS)),
         "--no-start",
@@ -139,22 +145,24 @@ class DispatchTier(str, Enum):
     """We lack trustworthy evidence to classify, so no verdict or restart is safe.
 
     Either the in-container probe timed out (it observed nothing -- absence of
-    evidence, not evidence the workspace is down), or the discovery snapshot
-    backing the host state predates the outage onset (a pre-outage snapshot still
-    reads the stale host state, e.g. a just-stopped container still shows RUNNING),
-    or the snapshot itself carries no observation of the container (host state
-    UNKNOWN -- the host was unobservable during discovery -- or a
-    transitional/absent state, e.g. STOPPING, which settles to STOPPED a
-    moment later), or supervisord inside the container reports the interface
-    mid-self-heal (STARTING/BACKOFF -- supervisord is already fixing it).
+    evidence, not evidence the workspace is down), or supervisord inside the
+    container reports the interface mid-self-heal (STARTING/BACKOFF --
+    supervisord is already fixing it), or the exec probe was never attempted and
+    the host state carries no trusted verdict: the discovery snapshot backing it
+    predates the outage onset (a pre-outage snapshot still reads the stale host
+    state, e.g. a just-stopped container still shows RUNNING) or the snapshot
+    carries no observation of the container (host state UNKNOWN -- the host was
+    unobservable during discovery -- or a transitional/absent state, e.g.
+    STOPPING, which settles to STOPPED a moment later).
     A negative verdict or an auto-dispatched restart off such non-evidence is
     exactly the misclassification this tier avoids. The recovery page renders a
     live "reconnecting" state and keeps checking: the cheap liveness poll returns
     the user home the instant the workspace answers, and a later probe that
-    *completes* against a *fresh* snapshot resolves to a real tier if the
-    workspace is genuinely down. Direct in-container evidence (a live GET / 200)
-    still short-circuits to HEALTHY even here -- positive evidence is trusted
-    regardless of snapshot freshness."""
+    *completes* resolves to a real tier if the workspace is genuinely down (a
+    completed exec is direct evidence even when discovery has stalled and no
+    fresh snapshot will ever land). Direct in-container evidence (a live GET /
+    200) still short-circuits to HEALTHY even here -- positive evidence is
+    trusted regardless of snapshot freshness."""
 
     HOST_OFFLINE = "host_offline"
     """Container is offline -- restart the host (no live work to interrupt)."""
@@ -165,15 +173,17 @@ class DispatchTier(str, Enum):
     click.
 
     Covers three observations: exec reached the container but the interface does
-    not answer GET / with 200 (and supervisord is not mid-self-heal); an observed
-    RUNNING claim whose exec cleanly failed, including the UNAUTHENTICATED state
-    -- which providers report when the container was observed running but inner
-    SSH is unreachable (e.g. its sshd died; see PR #2247), where the consent-gated
-    restart is the engineered recovery (the stop step is not skipped, so the
-    relaunch brings sshd back); and the FAILED host state (a failed-to-create
-    host, where an unattended ``mngr start`` mostly re-fails, so the restart is
-    consent-gated too). A host state that answers neither "running" nor "offline"
-    is non-evidence and classifies INDETERMINATE instead.
+    not answer GET / with 200 (and supervisord is not mid-self-heal); an exec
+    that *completed* without reaching the container (a dead inner sshd, a
+    container that turned out not to be running -- direct fresh evidence that
+    needs no snapshot corroboration, including the UNAUTHENTICATED state, which
+    providers report when the container was observed running but inner SSH is
+    unreachable; see PR #2247 -- the consent-gated restart is the engineered
+    recovery, since the stop step is not skipped the relaunch brings sshd back);
+    and the FAILED host state (a failed-to-create host, where an unattended
+    ``mngr start`` mostly re-fails, so the restart is consent-gated too). A host
+    state that answers neither "running" nor "offline", with no completed exec
+    to consult, is non-evidence and classifies INDETERMINATE instead.
     """
 
     BACKEND_UNREACHABLE = "backend_unreachable"
@@ -234,6 +244,7 @@ class HostHealthResponse(FrozenModel):
 _QUESTION_CONTAINER_RUNNING: Final[str] = "Is the workspace's container running?"
 _QUESTION_SERVICES_AGENT_REGISTERED: Final[str] = "Is the system-services agent registered?"
 _QUESTION_CAN_RUN_COMMANDS_INSIDE: Final[str] = "Can we run a command inside the container?"
+_QUESTION_SERVICES_AGENT_RUNNING: Final[str] = "Is the system-services agent running?"
 _QUESTION_SYSTEM_INTERFACE_RUNNING: Final[str] = "Is the system_interface service running under supervisord?"
 _QUESTION_PORT_LISTENING: Final[str] = "Is anything listening on the system-interface inner port?"
 _QUESTION_CURL_OK: Final[str] = "Does the inner web server answer GET / inside the container?"
@@ -261,6 +272,8 @@ class _InContainerProbe(FrozenModel):
     port_listener_error: str | None = Field(default=None)
     curl_status: str | None = Field(default=None)
     curl_error: str | None = Field(default=None)
+    agent_processes: str | None = Field(default=None)
+    agent_processes_error: str | None = Field(default=None)
 
 
 def _parse_in_container_probe(stdout: str | None) -> _InContainerProbe:
@@ -303,6 +316,8 @@ def _parse_in_container_probe(stdout: str | None) -> _InContainerProbe:
         port_listener_error=_coerce_optional_str(payload.get("port_listener_error")),
         curl_status=_coerce_optional_str(payload.get("curl_status")),
         curl_error=_coerce_optional_str(payload.get("curl_error")),
+        agent_processes=_coerce_optional_str(payload.get("agent_processes")),
+        agent_processes_error=_coerce_optional_str(payload.get("agent_processes_error")),
     )
 
 
@@ -449,6 +464,49 @@ def _build_can_run_commands_probe(in_container: _InContainerProbe, mngr_exec_com
         output=output,
         answer=answer,
     )
+
+
+def _agent_processes_inner_command(services_agent_id: AgentId | None) -> str:
+    """In-container scan for live processes carrying the agent's env marker.
+
+    Every process an agent launches inherits ``MNGR_AGENT_ID=<id>`` (mngr's own
+    stop path finds agent processes by this exact marker), so a match means the
+    system-services agent is still running. ``grep -l`` prints the matching
+    ``/proc/<pid>/environ`` paths; ``-z`` treats the NUL-separated environ
+    entries as lines so ``^`` anchors each variable name; ``-a`` forces text
+    matching on the binary-looking file.
+    """
+    agent_token = str(services_agent_id) if services_agent_id is not None else "<system-services-agent>"
+    return f'grep -laz "^MNGR_AGENT_ID={agent_token}" /proc/[0-9]*/environ'
+
+
+def _build_services_agent_running_probe(
+    in_container: _InContainerProbe,
+    mngr_binary: str,
+    services_agent_id: AgentId | None,
+) -> Probe:
+    """Probe 4: does any live process carry the system-services agent's env marker?
+
+    Purely diagnostic (the dispatch tier never branches on it): when supervisord
+    probes error out because ``mngr stop system-services`` took the whole agent
+    down, this row names that cause directly instead of leaving only the
+    downstream supervisorctl failures.
+    """
+    command = _mngr_exec_command(mngr_binary, services_agent_id, _agent_processes_inner_command(services_agent_id))
+    if not in_container.sentinel_seen:
+        output, answer = "(in-container probe did not run)", ProbeAnswer.UNKNOWN
+    elif in_container.agent_processes_error is not None:
+        output, answer = f"error: {in_container.agent_processes_error}", ProbeAnswer.UNKNOWN
+    elif in_container.agent_processes is None:
+        # The scan was skipped: the probe script received no agent id (or an old
+        # script version without the scan answered).
+        output, answer = "(agent-process scan did not run)", ProbeAnswer.UNKNOWN
+    elif in_container.agent_processes.strip():
+        output, answer = in_container.agent_processes, ProbeAnswer.YES
+    else:
+        agent_token = str(services_agent_id) if services_agent_id is not None else "<system-services-agent>"
+        output, answer = f"(no live process carries MNGR_AGENT_ID={agent_token})", ProbeAnswer.NO
+    return Probe(question=_QUESTION_SERVICES_AGENT_RUNNING, command=command, output=output, answer=answer)
 
 
 def _supervisorctl_status_inner_command() -> str:
@@ -623,6 +681,7 @@ def _classify_dispatch_tier(
     supervisor_state: str | None,
     provider_error_message: str | None,
     probe_timed_out: bool,
+    probe_exec_attempted: bool,
     classification_is_trustworthy: bool,
 ) -> DispatchTier:
     """Derive the dispatch tier from the probe answers, the raw host state, and evidence quality.
@@ -645,22 +704,33 @@ def _classify_dispatch_tier(
       keep checking (INDETERMINATE). Any other non-200 is the consent-gated
       HOST_UNRESPONSIVE: the page's liveness poll still sends the user home the
       moment the interface self-heals, so no restart fires without a click.
-    * INDETERMINATE when we have no direct in-container evidence AND cannot trust a
-      negative verdict: the probe timed out (it observed *nothing* -- a timeout is
-      absence of evidence, not evidence of a down workspace), or no discovery
-      snapshot taken at/after the outage onset backs the host state (a pre-outage
-      snapshot still reads the stale host state).
-    * The trusted host-state verdicts, branching on the *raw* state rather than
-      the collapsed "is it running?" probe answer, because observed-not-running
-      states diverge in treatment: STOPPED / CRASHED -> HOST_OFFLINE (nothing
-      live to interrupt, restart runs unattended); FAILED -> HOST_UNRESPONSIVE
-      (an unattended start on a failed-to-create host mostly re-fails, so
-      consent-gate it); UNREACHABLE -> BACKEND_UNREACHABLE (the host rejected
-      this machine's access; a restart routes through the same rejected
-      credential); RUNNING / UNAUTHENTICATED -> HOST_UNRESPONSIVE (observed
-      running but the exec could not get inside). Anything else -- UNKNOWN,
-      transitional states like STOPPING, or an absent state -- is non-evidence:
-      keep checking (INDETERMINATE).
+    * INDETERMINATE when the exec probe timed out: it observed *nothing* (a
+      timeout is absence of evidence, not evidence of a down workspace -- e.g. a
+      probe whose window spanned a laptop sleep). The page keeps checking and a
+      later probe that *completes* resolves to a real tier.
+    * The trusted host-state verdicts, when a discovery snapshot taken at/after
+      the outage onset backs the host state. These branch on the *raw* state
+      rather than the collapsed "is it running?" probe answer, because
+      observed-not-running states diverge in treatment: STOPPED / CRASHED ->
+      HOST_OFFLINE (nothing live to interrupt, restart runs unattended); FAILED
+      -> HOST_UNRESPONSIVE (an unattended start on a failed-to-create host
+      mostly re-fails, so consent-gate it); UNREACHABLE -> BACKEND_UNREACHABLE
+      (the host rejected this machine's access; a restart routes through the
+      same rejected credential); RUNNING / UNAUTHENTICATED -> HOST_UNRESPONSIVE
+      (observed running but the exec could not get inside). A trusted UNKNOWN /
+      transitional / absent state says nothing either way and falls through.
+    * HOST_UNRESPONSIVE when the exec probe was attempted and *completed*
+      without ever reaching the in-container script (a nonzero exit or a clean
+      exit with no sentinel -- e.g. the container's sshd is dead, or the
+      container is not running at all). Unlike a timeout, a completed failure is
+      a direct fresh observation that we cannot get into the container, so it
+      needs no snapshot corroboration. This is what resolves the page when
+      discovery itself has stalled (no snapshot at/after the onset will ever
+      land): the verdict is consent-gated, so no restart fires without a click,
+      and the liveness poll still sends the user home on self-recovery.
+    * INDETERMINATE otherwise: no provider error, no in-container observation,
+      no timeout, no trusted host state, and no completed exec -- nothing to
+      base a verdict on, so render no verdict and keep checking.
     """
     if provider_error_message is not None:
         return DispatchTier.BACKEND_UNREACHABLE
@@ -677,28 +747,27 @@ def _classify_dispatch_tier(
         if supervisor_state in _SELF_HEALING_SUPERVISOR_STATES:
             return DispatchTier.INDETERMINATE
         return DispatchTier.HOST_UNRESPONSIVE
-    # No direct in-container evidence: every remaining tier is a *negative*
-    # verdict that leans on the discovery snapshot's host state. We can only trust
-    # such a verdict when the probe actually completed (a timeout observed nothing)
-    # and a snapshot taken at/after the outage onset backs it. Absent either, we
-    # have no trustworthy negative evidence -- surface INDETERMINATE so the
-    # recovery page keeps checking (and the cheap liveness poll can still send the
-    # user home) rather than rendering a verdict or auto-dispatching a restart.
-    if probe_timed_out or not classification_is_trustworthy:
+    if probe_timed_out:
         return DispatchTier.INDETERMINATE
-    upper_state = host_state.upper()
-    if upper_state == _UNREACHABLE_STATE:
-        return DispatchTier.BACKEND_UNREACHABLE
-    if upper_state in _AUTO_RESTART_OFFLINE_STATES:
-        return DispatchTier.HOST_OFFLINE
-    if upper_state == _FAILED_STATE:
+    if classification_is_trustworthy:
+        upper_state = host_state.upper()
+        if upper_state == _UNREACHABLE_STATE:
+            return DispatchTier.BACKEND_UNREACHABLE
+        if upper_state in _AUTO_RESTART_OFFLINE_STATES:
+            return DispatchTier.HOST_OFFLINE
+        if upper_state == _FAILED_STATE:
+            return DispatchTier.HOST_UNRESPONSIVE
+        if upper_state in _OBSERVED_RUNNING_STATES:
+            return DispatchTier.HOST_UNRESPONSIVE
+        # A trusted UNKNOWN / transitional (e.g. STOPPING) / absent state carries
+        # no verdict of its own; fall through to the completed-exec evidence.
+    if probe_exec_attempted:
+        # The exec completed without reaching the in-container script (a timeout
+        # returned above): direct fresh evidence the container is unreachable,
+        # independent of snapshot freshness. Consent-gated, never an auto-restart.
         return DispatchTier.HOST_UNRESPONSIVE
-    if upper_state in _OBSERVED_RUNNING_STATES:
-        return DispatchTier.HOST_UNRESPONSIVE
-    # The snapshot carries no observation of the container (host state UNKNOWN,
-    # transitional -- e.g. STOPPING, which settles to STOPPED a moment later --
-    # or absent). That is non-evidence, same as a timed-out probe: render no
-    # verdict and offer no restart -- keep checking.
+    # No observation at all (the exec was not attempted and the snapshot carries
+    # no trusted verdict): render no verdict and offer no restart -- keep checking.
     return DispatchTier.INDETERMINATE
 
 
@@ -712,6 +781,7 @@ def build_host_health_response(
     provider_error_message: str | None = None,
     provider_label: str = "",
     probe_timed_out: bool = False,
+    probe_exec_attempted: bool = False,
     classification_is_trustworthy: bool = True,
 ) -> HostHealthResponse:
     """Assemble the host-health response (probes + dispatch tier) from raw inputs.
@@ -732,12 +802,17 @@ def build_host_health_response(
     ``unreachable_reason``. ``provider_label`` is the friendly provider name for
     that page's title.
 
-    ``probe_timed_out`` is True when the in-container ``mngr exec`` was killed by
-    its own timeout rather than exiting cleanly -- it observed nothing, so a
-    negative verdict off it would be unfounded. ``classification_is_trustworthy``
-    is False when the host state read here comes from a discovery snapshot that
-    predates the outage onset (so it may be stale). Either one, absent direct
-    in-container evidence, yields the INDETERMINATE tier.
+    ``probe_exec_attempted`` is True when the batched in-container ``mngr exec``
+    was actually launched (it is skipped when the provider has a surfaced error,
+    no services agent id is known, or the host is trustworthily observed not
+    running). ``probe_timed_out`` is True when that exec was killed by its own
+    timeout rather than exiting -- it observed nothing, so a negative verdict off
+    it would be unfounded (INDETERMINATE). An attempted exec that *completed*
+    without producing the sentinel is direct evidence the container is
+    unreachable and classifies HOST_UNRESPONSIVE regardless of snapshot
+    freshness. ``classification_is_trustworthy`` is False when the host state
+    read here comes from a discovery snapshot that predates the outage onset (so
+    it may be stale), which suppresses the host-state verdicts.
     """
     in_container = _parse_in_container_probe(in_container_stdout)
     exec_cmd = mngr_exec_command or "(mngr exec <system-services-agent>)"
@@ -745,6 +820,7 @@ def build_host_health_response(
         _build_container_running_probe(host_state),
         _build_services_agent_registered_probe(services_agent_id),
         _build_can_run_commands_probe(in_container, exec_cmd),
+        _build_services_agent_running_probe(in_container, mngr_binary, services_agent_id),
         _build_system_interface_probe(in_container, mngr_binary, services_agent_id),
         _build_port_listening_probe(in_container, mngr_binary, services_agent_id),
         _build_curl_probe(in_container, mngr_binary, services_agent_id),
@@ -756,7 +832,13 @@ def build_host_health_response(
         else None
     )
     dispatch_tier = _classify_dispatch_tier(
-        probes, host_state, supervisor_state, provider_error_message, probe_timed_out, classification_is_trustworthy
+        probes,
+        host_state,
+        supervisor_state,
+        provider_error_message,
+        probe_timed_out,
+        probe_exec_attempted,
+        classification_is_trustworthy,
     )
     is_backend_unreachable = dispatch_tier == DispatchTier.BACKEND_UNREACHABLE
     # BACKEND_UNREACHABLE has two sources: a provider-level discovery error
