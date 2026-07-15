@@ -185,7 +185,7 @@ def test_parse_restic_snapshots_parses_fields_summary_and_tags() -> None:
         "tags": ["hourly"],
         "id": "aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff6666aaaa7777bbbb8888",
         "short_id": "aaaa1111",
-        "summary": {"total_bytes_processed": 4096}
+        "summary": {"total_size": 4096}
       }
     ]"""
 
