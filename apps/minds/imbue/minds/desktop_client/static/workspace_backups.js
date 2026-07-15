@@ -77,7 +77,7 @@
     var latest = latestSnapshotTime(entry.snapshots);
     if (latest) return 'Last backup: ' + new Date(latest).toLocaleString();
     if (!entry.is_configured) return 'Backups are not configured.';
-    if (entry.snapshots_error) return 'Backup status unknown.';
+    if (entry.snapshots_error) return 'Could not read backup status.';
     return 'No successful backup yet.';
   }
 
@@ -91,6 +91,16 @@
     problemsEl.classList.add('hidden');
     versionsEl.classList.add('hidden');
     setShown(updateBtnWrap, false);
+
+    // The snapshot listing runs on this machine (unlike the service check,
+    // which execs into the workspace), so its failure is surfaced separately
+    // and regardless of the check outcome.
+    if (entry.snapshots_error) {
+      var snapshotErrorLi = document.createElement('li');
+      snapshotErrorLi.textContent = 'Could not read backup status from this machine: ' + entry.snapshots_error;
+      problemsEl.appendChild(snapshotErrorLi);
+      problemsEl.classList.remove('hidden');
+    }
 
     if (entry.check_state === 'DISABLED') {
       statusLine.textContent += ' Backup service verification is disabled for this workspace.';

@@ -6,8 +6,9 @@
 // It keeps the latest per-workspace verdict and notifies subscribers so rows
 // can add/remove the backup warning badge.
 //
-// The badge appears only when a problem is detected (check_state PROBLEMS);
-// OFFLINE / DISABLED / UNKNOWN / OK all render nothing.
+// The badge appears when a problem is detected (check_state PROBLEMS) or the
+// snapshot listing failed on this machine (snapshots_error); OFFLINE /
+// DISABLED / UNKNOWN / OK with a working listing all render nothing.
 (function () {
   var PROBLEM_LABELS = {
     NOT_CONFIGURED: 'backups are not configured',
@@ -23,11 +24,19 @@
   var listeners = [];
 
   function warningText(entry) {
-    if (entry.check_state !== 'PROBLEMS') return null;
-    var parts = (entry.problems || []).map(function (problem) {
-      return PROBLEM_LABELS[problem] || problem;
-    });
-    if (parts.length === 0) return 'Backup problem detected.';
+    var parts = [];
+    if (entry.check_state === 'PROBLEMS') {
+      parts = (entry.problems || []).map(function (problem) {
+        return PROBLEM_LABELS[problem] || problem;
+      });
+      if (parts.length === 0) parts = ['a backup problem was detected'];
+    }
+    // The snapshot listing runs on this machine, so its failure is a real
+    // backup problem even when the in-workspace service check passes.
+    if (entry.snapshots_error) {
+      parts.push('the backup status could not be read from this machine');
+    }
+    if (parts.length === 0) return null;
     var text = parts.join('; ');
     return 'Backup warning: ' + text.charAt(0).toUpperCase() + text.slice(1) + '.';
   }
