@@ -1,14 +1,17 @@
 {#def report_unexpected_errors=false, include_error_logs=false, services_overview=[], file_sharing_grants=[], workspace_delegation_grants=[], permissions_unavailable=false, is_master_password_set=false #}
 {#
-  The app-level ("Minds") settings sections, shared verbatim between the
-  centered settings modal (pages.SettingsModal, the Electron overlay surface)
-  and the full-page browser-mode fallback (pages.Settings). Rendered as a
-  single vertical stack (no left nav, all sections visible), so it drops into
-  a modal card or a page container unchanged. Interactivity lives in
-  /_static/app_settings.js, which binds by the element ids / classes below,
-  so this component must appear at most once per page.
+  The app-level ("Minds") settings, shared verbatim between the centered
+  settings modal (pages.SettingsModal, the Electron overlay surface) and the
+  full-page browser-mode fallback (pages.Settings). Two columns: a left nav
+  that switches between subsections and a right pane showing the active one
+  (like the /settings page has always had). Interactivity lives in
+  /_static/app_settings.js, which binds by the ids / classes below (the
+  ``data-settings-nav`` buttons + ``data-settings-panel`` sections for the
+  nav switching, plus the error-reporting toggles, revoke dialogs, and the
+  master-password change flow), so this component must appear at most once
+  per page.
 
-  These are the same app-level settings the /settings page has always hosted:
+  Sections (grouped Permissions / Other):
     - Connectors: predefined-service grants held across all active workspaces.
     - Local files: file-sharing (WebDAV) grants per workspace.
     - Workspaces: cross-workspace-management (delegation) grants.
@@ -17,211 +20,245 @@
       signed-in account's sync key).
 
   All are per-machine / app-level (not account-scoped); the app, not any
-  single workspace, owns permissions. The ``services_overview`` /
+  single workspace, owns permissions. ``services_overview`` /
   ``file_sharing_grants`` / ``workspace_delegation_grants`` are the
   permission-overview models built by the route; ``permissions_unavailable``
   is True when the latchkey gateway could not be reached.
 #}
-<div class="flex flex-col gap-8">
-  {# -- Connectors (predefined / catalog services the agent connects to) -- #}
-  <section data-settings-section="connectors">
-    <h2 class="type-heading-lg text-primary mb-2">Connectors</h2>
-    <p class="type-body text-secondary mb-6">
-      Third-party services your agents have connected to. To connect a new one, just ask an
-      agent in a workspace to use it. Revoking here removes access -- your saved sign-in is
-      kept, so agents can reconnect later.
-    </p>
-    {% if permissions_unavailable %}
-      <Notice variant="warn">
-        Connectors can't be loaded right now.
-        Try again in a moment.
-      </Notice>
-    {% elif services_overview %}
-      <div class="flex flex-col gap-8">
-        {% for service in services_overview %}
-          {% set ws_count = service.workspace_grants | length %}
-          <div data-service-name="{{ service.service_name }}" data-service-label="{{ service.display_name }}">
-            <div class="flex items-center justify-between gap-3 mb-3">
-              <h3 class="type-heading text-primary">
-                {{ service.display_name }}
-                <span class="type-helper text-tertiary font-normal">&middot; {{ ws_count }} workspace{{ '' if ws_count == 1 else 's' }}</span>
-              </h3>
-              <Button variant="ghost" size="md" class="remove-all-btn">Revoke all</Button>
-            </div>
-            <div class="grid grid-cols-2 gap-3">
-              {% for grant in service.workspace_grants %}
-                <div class="minds-card p-4 flex flex-col gap-3"
-                     data-workspace-agent-id="{{ grant.workspace_agent_id }}"
-                     data-workspace-name="{{ grant.workspace_name }}">
-                  <div class="flex items-center gap-2">
-                    <span class="w-2.5 h-2.5 rounded-full shrink-0" style="background-color: {{ grant.color }}"></span>
-                    <span class="type-body font-semibold text-primary truncate">{{ grant.workspace_name }}</span>
-                  </div>
-                  <div>
-                    <p class="type-helper text-tertiary mb-1">Allowed</p>
-                    <div class="flex flex-wrap gap-1">
-                      {% for perm in grant.permissions %}
-                        <code class="code-pill"{% if perm.description %} data-tooltip="{{ perm.description }}"{% endif %}>{{ perm.label }}</code>
-                      {% endfor %}
-                    </div>
-                  </div>
-                  <div class="mt-auto">
-                    <Button variant="secondary" size="md" class="revoke-btn">Revoke</Button>
-                  </div>
-                </div>
-              {% endfor %}
-            </div>
-          </div>
-        {% endfor %}
-      </div>
-    {% else %}
-      <Notice variant="info">No connectors have been added yet.</Notice>
-    {% endif %}
-  </section>
+<div class="flex gap-8 items-start">
+  {# Left nav. Grouped into non-interactive section eyebrows ("Permissions" /
+     "Other") that carry no ``data-settings-nav`` (the page script ignores
+     them). Nav entries share identical base classes (notably no
+     ``bg-transparent``, which would beat the toggled-on ``bg-fill-hover``);
+     ``selectSection`` in app_settings.js toggles active state. #}
+  <nav class="w-44 shrink-0 flex flex-col gap-0.5" aria-label="Settings sections">
+    <p class="type-section text-tertiary px-2 mb-1">Permissions</p>
+    <button type="button" data-settings-nav="connectors"
+            class="flex items-center h-8 px-2 rounded-md cursor-pointer type-body text-left border-0 hover:text-primary hover:bg-fill-hover bg-fill-hover text-primary">
+      Connectors
+    </button>
+    <button type="button" data-settings-nav="file-sharing"
+            class="flex items-center h-8 px-2 rounded-md cursor-pointer type-body text-left border-0 hover:text-primary hover:bg-fill-hover text-secondary">
+      Local files
+    </button>
+    <button type="button" data-settings-nav="workspace-delegation"
+            class="flex items-center h-8 px-2 rounded-md cursor-pointer type-body text-left border-0 hover:text-primary hover:bg-fill-hover text-secondary">
+      Workspaces
+    </button>
+    <p class="type-section text-tertiary px-2 mt-4 mb-1">Other</p>
+    <button type="button" data-settings-nav="error-reporting"
+            class="flex items-center h-8 px-2 rounded-md cursor-pointer type-body text-left border-0 hover:text-primary hover:bg-fill-hover text-secondary">
+      Error reporting
+    </button>
+    <button type="button" data-settings-nav="backups"
+            class="flex items-center h-8 px-2 rounded-md cursor-pointer type-body text-left border-0 hover:text-primary hover:bg-fill-hover text-secondary">
+      Master password
+    </button>
+  </nav>
 
-  {# -- Local files (file sharing) -- #}
-  <section data-settings-section="file-sharing">
-    <div class="flex items-center justify-between gap-3 mb-2">
-      <h2 class="type-heading-lg text-primary">Local files</h2>
-      {% if file_sharing_grants %}
-        <Button variant="ghost" size="md" class="remove-all-fs-btn">Revoke all</Button>
-      {% endif %}
-    </div>
-    <p class="type-body text-secondary mb-6">
-      Files and folders on this machine that your agents can read or write. To share a new
-      location, ask an agent in a workspace to access it or to write data in there.
-      Revoking removes access; agents can ask again later.
-    </p>
-    {% if permissions_unavailable %}
-      <Notice variant="warn">
-        File sharing can't be loaded right now.
-        Try again in a moment.
-      </Notice>
-    {% elif file_sharing_grants %}
-      <div class="flex flex-col gap-3">
-        {% for grant in file_sharing_grants %}
-          <div class="minds-card p-4 flex flex-col gap-3"
-               data-workspace-agent-id="{{ grant.workspace_agent_id }}"
-               data-workspace-name="{{ grant.workspace_name }}">
-            <div class="flex items-center justify-between gap-3">
-              <div class="flex items-center gap-2 min-w-0">
-                <span class="w-2.5 h-2.5 rounded-full shrink-0" style="background-color: {{ grant.color }}"></span>
-                <span class="type-body font-semibold text-primary truncate">{{ grant.workspace_name }}</span>
+  <div class="flex-1 min-w-0">
+    {# -- Connectors (predefined / catalog services the agent connects to) -- #}
+    <section data-settings-panel="connectors">
+      <h2 class="type-heading-lg text-primary mb-2">Connectors</h2>
+      <p class="type-body text-secondary mb-6">
+        Third-party services your agents have connected to. To connect a new one, just ask an
+        agent in a workspace to use it. Revoking here removes access -- your saved sign-in is
+        kept, so agents can reconnect later.
+      </p>
+      {% if permissions_unavailable %}
+        <Notice variant="warn">
+          Connectors can't be loaded right now.
+          Try again in a moment.
+        </Notice>
+      {% elif services_overview %}
+        <div class="flex flex-col gap-8">
+          {% for service in services_overview %}
+            {% set ws_count = service.workspace_grants | length %}
+            <div data-service-name="{{ service.service_name }}" data-service-label="{{ service.display_name }}">
+              <div class="flex items-center justify-between gap-3 mb-3">
+                <h3 class="type-heading text-primary">
+                  {{ service.display_name }}
+                  <span class="type-helper text-tertiary font-normal">&middot; {{ ws_count }} workspace{{ '' if ws_count == 1 else 's' }}</span>
+                </h3>
+                <Button variant="ghost" size="md" class="remove-all-btn">Revoke all</Button>
               </div>
-              <Button variant="secondary" size="md" class="revoke-fs-btn">Revoke</Button>
-            </div>
-            <div>
-              <p class="type-helper text-tertiary mb-1">Allowed</p>
-              <div class="flex flex-col gap-1">
-                {% for shared in grant.paths %}
-                  <div class="flex items-center justify-between gap-3">
-                    <code class="code-pill truncate min-w-0" data-tooltip="{{ shared.path }}">{{ shared.path }}</code>
-                    <span class="type-helper text-secondary shrink-0">{{ shared.access_label }}</span>
+              <div class="grid grid-cols-2 gap-3">
+                {% for grant in service.workspace_grants %}
+                  <div class="minds-card p-4 flex flex-col gap-3"
+                       data-workspace-agent-id="{{ grant.workspace_agent_id }}"
+                       data-workspace-name="{{ grant.workspace_name }}">
+                    <div class="flex items-center gap-2">
+                      <span class="w-2.5 h-2.5 rounded-full shrink-0" style="background-color: {{ grant.color }}"></span>
+                      <span class="type-body font-semibold text-primary truncate">{{ grant.workspace_name }}</span>
+                    </div>
+                    <div>
+                      <p class="type-helper text-tertiary mb-1">Allowed</p>
+                      <div class="flex flex-wrap gap-1">
+                        {% for perm in grant.permissions %}
+                          <code class="code-pill"{% if perm.description %} data-tooltip="{{ perm.description }}"{% endif %}>{{ perm.label }}</code>
+                        {% endfor %}
+                      </div>
+                    </div>
+                    <div class="mt-auto">
+                      <Button variant="secondary" size="md" class="revoke-btn">Revoke</Button>
+                    </div>
                   </div>
                 {% endfor %}
               </div>
             </div>
-          </div>
-        {% endfor %}
-      </div>
-    {% else %}
-      <Notice variant="info">No files are being shared with agents yet.</Notice>
-    {% endif %}
-  </section>
+          {% endfor %}
+        </div>
+      {% else %}
+        <Notice variant="info">No connectors have been added yet.</Notice>
+      {% endif %}
+    </section>
 
-  {# -- Workspaces (cross-workspace delegation), grouped by granting workspace -- #}
-  <section data-settings-section="workspace-delegation">
-    <h2 class="type-heading-lg text-primary mb-2">Workspaces</h2>
-    <p class="type-body text-secondary mb-6">
-      Access you've granted agents in one workspace to manage other workspaces (listing,
-      creating, destroying, SSH, health checks, and more), grouped by the workspace being
-      managed. To grant more, ask an agent to perform the operation on the target workspace.
-      Revoking removes it; agents can ask again later.
-    </p>
-    {% if permissions_unavailable %}
-      <Notice variant="warn">
-        Workspace delegation can't be loaded right now.
-        Try again in a moment.
-      </Notice>
-    {% elif workspace_delegation_grants %}
-      <div class="flex flex-col gap-8">
-        {% for grant in workspace_delegation_grants %}
-          <div data-workspace-agent-id="{{ grant.workspace_agent_id }}" data-workspace-name="{{ grant.workspace_name }}">
-            <h3 class="type-heading text-primary flex items-center gap-2 mb-1">
-              <span class="w-2.5 h-2.5 rounded-full shrink-0" style="background-color: {{ grant.color }}"></span>
-              <span class="truncate">{{ grant.workspace_name }}</span>
-            </h3>
-            <p class="type-helper text-tertiary mb-2">Allowed</p>
-            <div class="flex flex-col">
-              {% for verb in grant.verbs %}
-                <div class="flex items-center justify-between gap-3 py-1.5 border-b border-subtle"
-                     data-verb-permission="{{ verb.verb_permission }}" data-verb-label="{{ verb.label }}">
-                  <div class="flex items-center gap-2 min-w-0 flex-wrap">
-                    <code class="code-pill" data-tooltip="{{ verb.description }}">{{ verb.label }}</code>
-                    <span class="type-helper text-tertiary">on:</span>
-                    <span class="type-body text-secondary truncate">{{ "All workspaces" if verb.is_all_workspaces else verb.target_names | join(", ") }}</span>
-                  </div>
-                  <Button variant="ghost" size="md" class="revoke-verb-btn shrink-0">Revoke</Button>
+    {# -- Local files (file sharing) -- #}
+    <section data-settings-panel="file-sharing" class="hidden">
+      <div class="flex items-center justify-between gap-3 mb-2">
+        <h2 class="type-heading-lg text-primary">Local files</h2>
+        {% if file_sharing_grants %}
+          <Button variant="ghost" size="md" class="remove-all-fs-btn">Revoke all</Button>
+        {% endif %}
+      </div>
+      <p class="type-body text-secondary mb-6">
+        Files and folders on this machine that your agents can read or write. To share a new
+        location, ask an agent in a workspace to access it or to write data in there.
+        Revoking removes access; agents can ask again later.
+      </p>
+      {% if permissions_unavailable %}
+        <Notice variant="warn">
+          File sharing can't be loaded right now.
+          Try again in a moment.
+        </Notice>
+      {% elif file_sharing_grants %}
+        <div class="flex flex-col gap-3">
+          {% for grant in file_sharing_grants %}
+            <div class="minds-card p-4 flex flex-col gap-3"
+                 data-workspace-agent-id="{{ grant.workspace_agent_id }}"
+                 data-workspace-name="{{ grant.workspace_name }}">
+              <div class="flex items-center justify-between gap-3">
+                <div class="flex items-center gap-2 min-w-0">
+                  <span class="w-2.5 h-2.5 rounded-full shrink-0" style="background-color: {{ grant.color }}"></span>
+                  <span class="type-body font-semibold text-primary truncate">{{ grant.workspace_name }}</span>
                 </div>
-              {% endfor %}
+                <Button variant="secondary" size="md" class="revoke-fs-btn">Revoke</Button>
+              </div>
+              <div>
+                <p class="type-helper text-tertiary mb-1">Allowed</p>
+                <div class="flex flex-col gap-1">
+                  {% for shared in grant.paths %}
+                    <div class="flex items-center justify-between gap-3">
+                      <code class="code-pill truncate min-w-0" data-tooltip="{{ shared.path }}">{{ shared.path }}</code>
+                      <span class="type-helper text-secondary shrink-0">{{ shared.access_label }}</span>
+                    </div>
+                  {% endfor %}
+                </div>
+              </div>
             </div>
-          </div>
-        {% endfor %}
-      </div>
-    {% else %}
-      <Notice variant="info">No workspace management has been delegated to agents yet.</Notice>
-    {% endif %}
-  </section>
+          {% endfor %}
+        </div>
+      {% else %}
+        <Notice variant="info">No files are being shared with agents yet.</Notice>
+      {% endif %}
+    </section>
 
-  {# -- Error reporting -- #}
-  <section data-settings-section="error-reporting">
-    <h2 class="type-heading-lg text-primary mb-2">Error reporting</h2>
-    <p class="type-body text-secondary mb-3">Applies to this device, regardless of which account is signed in.</p>
-    <label class="flex items-start justify-between gap-3 py-3 border-b border-subtle cursor-pointer">
-      <span>
-        <span class="type-body text-primary font-semibold">Report unexpected errors</span>
-        <span class="block type-helper text-tertiary">Send a report to Imbue when something goes wrong.</span>
-      </span>
-      <input type="checkbox" id="report-errors-toggle" class="mt-1 shrink-0"
-             {% if report_unexpected_errors %}checked{% endif %}>
-    </label>
-    <label id="include-logs-row"
-           class="flex items-start justify-between gap-3 py-3 border-b border-subtle cursor-pointer {% if not report_unexpected_errors %}hidden{% endif %}">
-      <span>
-        <span class="type-body text-primary font-semibold">Include logs</span>
-        <span class="block type-helper text-tertiary">Attach recent log files to help diagnose the problem.</span>
-      </span>
-      <input type="checkbox" id="include-logs-toggle" class="mt-1 shrink-0"
-             {% if include_error_logs %}checked{% endif %}>
-    </label>
-  </section>
+    {# -- Workspaces (cross-workspace delegation), grouped by granting workspace -- #}
+    <section data-settings-panel="workspace-delegation" class="hidden">
+      <h2 class="type-heading-lg text-primary mb-2">Workspaces</h2>
+      <p class="type-body text-secondary mb-6">
+        Access you've granted agents in one workspace to manage other workspaces (listing,
+        creating, destroying, SSH, health checks, and more), grouped by the workspace being
+        managed. To grant more, ask an agent to perform the operation on the target workspace.
+        Revoking removes it; agents can ask again later.
+      </p>
+      {% if permissions_unavailable %}
+        <Notice variant="warn">
+          Workspace delegation can't be loaded right now.
+          Try again in a moment.
+        </Notice>
+      {% elif workspace_delegation_grants %}
+        <div class="flex flex-col gap-8">
+          {% for grant in workspace_delegation_grants %}
+            <div data-workspace-agent-id="{{ grant.workspace_agent_id }}" data-workspace-name="{{ grant.workspace_name }}">
+              <h3 class="type-heading text-primary flex items-center gap-2 mb-1">
+                <span class="w-2.5 h-2.5 rounded-full shrink-0" style="background-color: {{ grant.color }}"></span>
+                <span class="truncate">{{ grant.workspace_name }}</span>
+              </h3>
+              <p class="type-helper text-tertiary mb-2">Allowed</p>
+              <div class="flex flex-col">
+                {% for verb in grant.verbs %}
+                  <div class="flex items-center justify-between gap-3 py-1.5 border-b border-subtle"
+                       data-verb-permission="{{ verb.verb_permission }}" data-verb-label="{{ verb.label }}">
+                    <div class="flex items-center gap-2 min-w-0 flex-wrap">
+                      <code class="code-pill" data-tooltip="{{ verb.description }}">{{ verb.label }}</code>
+                      <span class="type-helper text-tertiary">on:</span>
+                      <span class="type-body text-secondary truncate">{{ "All workspaces" if verb.is_all_workspaces else verb.target_names | join(", ") }}</span>
+                    </div>
+                    <Button variant="ghost" size="md" class="revoke-verb-btn shrink-0">Revoke</Button>
+                  </div>
+                {% endfor %}
+              </div>
+            </div>
+          {% endfor %}
+        </div>
+      {% else %}
+        <Notice variant="info">No workspace management has been delegated to agents yet.</Notice>
+      {% endif %}
+    </section>
 
-  {# -- Master password: the sync master-password change flow. Rewraps each
-     signed-in account's sync key; workspace backup repositories are untouched. -- #}
-  <section data-settings-section="backups">
-    <h2 class="type-heading-lg text-primary mb-2">Master password</h2>
-    <p class="type-body text-secondary mb-6">
-      Protects the synced copy of your workspaces' access keys and backup credentials
-      (initially empty -- nothing secret syncs until one is set). You'll type it once on
-      each new device to unlock your workspaces there.
-      {% if is_master_password_set %} A master password is currently set.{% else %} No master
-      password is set yet, so only workspace names and metadata sync.{% endif %}
-    </p>
-    <div class="flex flex-col gap-2 max-w-md">
-      <input type="password" id="backup-new-password" autocomplete="new-password"
-             placeholder="new master password (empty disables secret sync)"
-             class="h-[34px] px-3 rounded-full type-body bg-surface-secondary text-primary">
-      <input type="password" id="backup-new-password-confirm" autocomplete="new-password"
-             placeholder="repeat the new master password"
-             class="h-[34px] px-3 rounded-full type-body bg-surface-secondary text-primary">
-      <div class="flex items-center gap-2">
-        <Button variant="secondary" id="backup-change-password-btn">Change master password</Button>
-        <span id="backup-change-spinner" class="hidden type-section text-secondary">Updating accounts...</span>
+    {# -- Error reporting -- #}
+    <section data-settings-panel="error-reporting" class="hidden">
+      <h2 class="type-heading-lg text-primary mb-2">Error reporting</h2>
+      <p class="type-body text-secondary mb-3">Applies to this device, regardless of which account is signed in.</p>
+      <label class="flex items-start justify-between gap-3 py-3 border-b border-subtle cursor-pointer">
+        <span>
+          <span class="type-body text-primary font-semibold">Report unexpected errors</span>
+          <span class="block type-helper text-tertiary">Send a report to Imbue when something goes wrong.</span>
+        </span>
+        <input type="checkbox" id="report-errors-toggle" class="mt-1 shrink-0"
+               {% if report_unexpected_errors %}checked{% endif %}>
+      </label>
+      <label id="include-logs-row"
+             class="flex items-start justify-between gap-3 py-3 border-b border-subtle cursor-pointer {% if not report_unexpected_errors %}hidden{% endif %}">
+        <span>
+          <span class="type-body text-primary font-semibold">Include logs</span>
+          <span class="block type-helper text-tertiary">Attach recent log files to help diagnose the problem.</span>
+        </span>
+        <input type="checkbox" id="include-logs-toggle" class="mt-1 shrink-0"
+               {% if include_error_logs %}checked{% endif %}>
+      </label>
+    </section>
+
+    {# -- Master password: the sync master-password change flow. Rewraps each
+       signed-in account's sync key; workspace backup repositories are untouched.
+       Its inputs live in the DOM regardless of the active tab so the page
+       script can wire them. -- #}
+    <section data-settings-panel="backups" class="hidden">
+      <h2 class="type-heading-lg text-primary mb-2">Master password</h2>
+      <p class="type-body text-secondary mb-6">
+        Protects the synced copy of your workspaces' access keys and backup credentials
+        (initially empty -- nothing secret syncs until one is set). You'll type it once on
+        each new device to unlock your workspaces there.
+        {% if is_master_password_set %} A master password is currently set.{% else %} No master
+        password is set yet, so only workspace names and metadata sync.{% endif %}
+      </p>
+      <div class="flex flex-col gap-2 max-w-md">
+        <input type="password" id="backup-new-password" autocomplete="new-password"
+               placeholder="new master password (empty disables secret sync)"
+               class="h-[34px] px-3 rounded-full type-body bg-surface-secondary text-primary">
+        <input type="password" id="backup-new-password-confirm" autocomplete="new-password"
+               placeholder="repeat the new master password"
+               class="h-[34px] px-3 rounded-full type-body bg-surface-secondary text-primary">
+        <div class="flex items-center gap-2">
+          <Button variant="secondary" id="backup-change-password-btn">Change master password</Button>
+          <span id="backup-change-spinner" class="hidden type-section text-secondary">Updating accounts...</span>
+        </div>
+        <p id="backup-change-error" class="hidden type-body text-important" role="alert"></p>
+        <ul id="backup-change-results" class="hidden type-helper text-secondary list-disc pl-4" aria-live="polite"></ul>
       </div>
-      <p id="backup-change-error" class="hidden type-body text-important" role="alert"></p>
-      <ul id="backup-change-results" class="hidden type-helper text-secondary list-disc pl-4" aria-live="polite"></ul>
-    </div>
-  </section>
+    </section>
+  </div>
 </div>
 
 <Modal id="revoke-dialog" card_extra="text-left">

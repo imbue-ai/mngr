@@ -1,10 +1,43 @@
 // Interactivity for the app-level ("Minds") settings sections
 // (templates/AppSettingsSections.jinja), shared by the centered settings
 // modal and the full-page browser-mode fallback. Binds by element id /
-// class, so the sections component must appear at most once per page. There
-// is no left-nav here (the sections render as a single vertical stack), so
-// there is no section-switching to wire.
+// class, so the sections component must appear at most once per page.
 (function () {
+  // -- Left-nav subsection switching ---------------------------------------
+  var navButtons = document.querySelectorAll('[data-settings-nav]');
+  var panels = document.querySelectorAll('[data-settings-panel]');
+  if (navButtons.length && panels.length) {
+    function selectSection(name) {
+      navButtons.forEach(function (btn) {
+        var isActive = btn.getAttribute('data-settings-nav') === name;
+        btn.classList.toggle('bg-fill-hover', isActive);
+        btn.classList.toggle('text-primary', isActive);
+        btn.classList.toggle('text-secondary', !isActive);
+      });
+      panels.forEach(function (panel) {
+        panel.classList.toggle('hidden', panel.getAttribute('data-settings-panel') !== name);
+      });
+      // Remember the active section in the URL hash so a revoke's reload (or a
+      // manual refresh of the full page) restores the same tab instead of
+      // snapping to the first. Harmless in the modal iframe.
+      try { history.replaceState(null, '', '#' + name); } catch (e) {}
+    }
+    navButtons.forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        selectSection(btn.getAttribute('data-settings-nav'));
+      });
+    });
+    // Restore the active section from the URL hash on load (survives the
+    // reload a revoke triggers). Falls back to the markup default (Connectors).
+    var sectionNames = Array.prototype.map.call(navButtons, function (btn) {
+      return btn.getAttribute('data-settings-nav');
+    });
+    var initialSection = (window.location.hash || '').replace(/^#/, '');
+    if (sectionNames.indexOf(initialSection) !== -1) {
+      selectSection(initialSection);
+    }
+  }
+
   // -- Error reporting toggles ----------------------------------------------
   var reportToggle = document.getElementById('report-errors-toggle');
   var logsRow = document.getElementById('include-logs-row');
