@@ -223,6 +223,11 @@ pnpm install        # Install Electron and ToDesktop CLI
 pnpm start          # Launch the Electron app in dev mode
 ```
 
+**Note:** for the full dev loop (env activation, syncing your live mngr
+tree into the workspace template), prefer `just minds-install` and
+`just minds-start` from the repo root -- see "Getting started" in the
+[minds README](../README.md).
+
 In dev mode, the Electron app skips `uv sync` and uses the monorepo's workspace venv directly (via `uv run --package minds` from the repo root). This means all mngr plugins (claude, modal, etc.) are available without any extra setup, and changes to the Python code are picked up immediately on restart.
 
 ### Building for distribution

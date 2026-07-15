@@ -14,8 +14,47 @@ The minds app creates and manages persistent Claude agents running in Docker con
 ## Getting started
 
 minds ships as a desktop app (Electron, packaged via ToDesktop; see
-[docs/desktop-app.md](./docs/desktop-app.md)). To run it from source in this
-monorepo, activate a minds env and start the dev client:
+[docs/desktop-app.md](./docs/desktop-app.md)). The sections below cover
+running it from source in this monorepo.
+
+### First-time setup
+
+There is no single command that installs everything: the toolchain and
+environment steps need interactive input (version-manager setup, browser
+auth), so run these once, in order. Each `just` recipe fails with an
+actionable hint if a prerequisite is missing.
+
+1. Install the pinned Node.js and pnpm versions (`engine-strict` rejects
+   any others; see "Installing the pinned toolchain" in
+   [docs/desktop-app.md](./docs/desktop-app.md)), then install the
+   Electron dependencies:
+
+   ```bash
+   just minds-install
+   ```
+
+2. Create the default-workspace-template worktree that the dev client
+   launches against:
+
+   ```bash
+   just default-workspace-template-worktree
+   ```
+
+3. Bootstrap your personal dev environment. This provisions per-developer
+   cloud resources and is interactive; see "Bootstrap a brand-new dev env"
+   in [docs/environments.md](./docs/environments.md) for what it creates:
+
+   ```bash
+   eval "$(uv run minds env activate --create --deploy dev-<your-user>)"
+   uv run minds env deploy
+   ```
+
+4. Have Docker running if you want local workspaces (each one is a Docker
+   container).
+
+### Running the app
+
+In each fresh shell, activate a minds env and start the dev client:
 
 ```bash
 eval "$(uv run minds env activate <name>)"   # e.g. dev-<your-user>
