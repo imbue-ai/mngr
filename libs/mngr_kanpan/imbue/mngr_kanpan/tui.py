@@ -923,7 +923,7 @@ def _attach_to_focused_agent(state: _KanpanState) -> None:  # pragma: no cover
         loop.start()
         loop.screen.clear()
         # Force an immediate repaint so the board returns at once instead of waiting for
-        # the next refresh, which left the detach output on screen -- the "stuck" exit.
+        # the next refresh, which would leave the detach output on screen.
         loop.draw_screen()
 
     if result.returncode != 0:
