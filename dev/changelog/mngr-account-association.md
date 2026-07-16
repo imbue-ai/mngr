@@ -1,3 +1,0 @@
-Added `specs/workspace-sync/spec.md`: the design record for end-to-end-encrypted cross-device sync of workspace metadata and secrets (workspace records on the connector, per-account DEKs wrapped by the master password, metadata-only tier for empty passwords, and the one-shot migration off the legacy local files).
-
-The `test-minds-snapshot` CI job now (on `run_minds_release_tests` runs) resolves the per-run CI env's coordinates and SuperTokens admin secrets and forwards them into the offload sandbox as `MINDS_SYNC_E2E_*` env vars, so the new workspace-sync e2e tests can target the real connector; the snapshot offload per-test timeout was raised to 2400s for the lifecycle test.

@@ -1,1 +1,0 @@
-- Changed: the `mngr latchkey forward` supervisor now caps its dedicated rotated `events.jsonl` log at 10MB (down from the general mngr default of 100MB), matching the 10MB cap the minds desktop client uses for its own rotated logs. Older rotated copies are still pruned to the newest 10.

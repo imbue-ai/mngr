@@ -598,58 +598,47 @@ def test_authenticate_supertokens_returns_admin_auth_with_user_id_prefix(
     assert result.email == "alice@example.com"
 
 
-def test_authenticate_supertokens_returns_admin_auth_with_none_email_when_lookup_returns_none(
+def test_authenticate_supertokens_raises_401_when_no_verified_email(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A successful auth with no resolvable email leaves ``AdminAuth.email`` as None."""
-    user_id = "a1b2c3d4-e5f6-7890-abcd-1234567890ab"
-    monkeypatch.setenv("SUPERTOKENS_CONNECTION_URI", "https://st.example.com")
-    result = _authenticate_supertokens(
-        "valid-token",
-        session_getter=lambda **kwargs: _FakeSession(user_id, email_verified=True),
-        email_getter=lambda _user_id: None,
-    )
-    assert isinstance(result, AdminAuth)
-    assert result.email is None
+    """When the live lookup finds no verified email, auth is rejected with 401.
 
-
-def test_authenticate_supertokens_raises_401_when_email_not_verified(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When the email is not verified, raises 401."""
+    ``email_getter`` (``_default_email_getter`` in production) returns None both
+    when the user has no email and when their only emails are unverified; either
+    way the caller has proven no verified identity, so the guard denies access.
+    """
     user_id = "a1b2c3d4-e5f6-7890-abcd-1234567890ab"
     monkeypatch.setenv("SUPERTOKENS_CONNECTION_URI", "https://st.example.com")
     with pytest.raises(HTTPException) as exc_info:
         _authenticate_supertokens(
             "valid-token",
-            session_getter=lambda **kwargs: _FakeSession(user_id, email_verified=False),
-            email_getter=lambda _user_id: "alice@example.com",
-        )
-    assert exc_info.value.status_code == 401
-    assert "verified" in exc_info.value.detail
-
-
-def test_authenticate_supertokens_raises_401_when_email_verification_claim_missing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When the email verification claim is absent from the payload, raises 401."""
-    monkeypatch.setenv("SUPERTOKENS_CONNECTION_URI", "https://st.example.com")
-
-    class _SessionNoClaim:
-        def get_user_id(self) -> str:
-            return "a1b2c3d4-e5f6-7890-abcd-1234567890ab"
-
-        def get_access_token_payload(self) -> dict[str, object]:
-            return {}
-
-    with pytest.raises(HTTPException) as exc_info:
-        _authenticate_supertokens(
-            "valid-token",
-            session_getter=lambda **kwargs: _SessionNoClaim(),
+            session_getter=lambda **kwargs: _FakeSession(user_id, email_verified=True),
             email_getter=lambda _user_id: None,
         )
     assert exc_info.value.status_code == 401
     assert "verified" in exc_info.value.detail
+
+
+def test_authenticate_supertokens_ignores_stale_unverified_token_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A token minted while unverified still authenticates once the core reports the email verified.
+
+    The access token carries a cached ``email_verified=False`` claim, but the
+    live ``email_getter`` lookup returns a verified email (e.g. the user was
+    just added to the paid list and auto-verified). The guard must trust the
+    live result, not the stale token claim, so the request succeeds without the
+    user having to refresh their token first.
+    """
+    user_id = "a1b2c3d4-e5f6-7890-abcd-1234567890ab"
+    monkeypatch.setenv("SUPERTOKENS_CONNECTION_URI", "https://st.example.com")
+    result = _authenticate_supertokens(
+        "stale-token",
+        session_getter=lambda **kwargs: _FakeSession(user_id, email_verified=False),
+        email_getter=lambda _user_id: "alice@example.com",
+    )
+    assert isinstance(result, AdminAuth)
+    assert result.email == "alice@example.com"
 
 
 def test_authenticate_supertokens_raises_401_when_connection_uri_not_set() -> None:
@@ -929,6 +918,48 @@ def test_auth_signup_returns_error_on_sdk_outage(monkeypatch: pytest.MonkeyPatch
         "tokens": None,
         "needs_email_verification": False,
     }
+
+
+def _install_paid_pool_backend(monkeypatch: pytest.MonkeyPatch, *paid_emails: str) -> FakePoolBackend:
+    """Install a fake pool backend (so ``is_email_paid`` works) seeding the given paid emails."""
+    monkeypatch.setenv("MINDS_PAID_LIST_CACHE_TTL_SECONDS", "0")
+    pool_backend = make_fake_pool_backend()
+    for paid_email in paid_emails:
+        pool_backend.add_paid_email(paid_email)
+    pool_backend.install_on_app_module(app_mod, monkeypatch)
+    return pool_backend
+
+
+def test_auth_signup_paid_email_is_auto_verified(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A paid user's email/password signup is auto-verified: no email sent, account already verified."""
+    st_backend = _install_fake_supertokens(monkeypatch)
+    _install_paid_pool_backend(monkeypatch, "paid@example.com")
+    client = TestClient(web_app, raise_server_exceptions=False)
+
+    resp = client.post("/auth/signup", json={"email": "paid@example.com", "password": "password123"})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "OK"
+    # The paid account skips the verification round trip entirely.
+    assert body["needs_email_verification"] is False
+    assert st_backend.sent_verification_emails == []
+    assert st_backend.accounts_by_email["paid@example.com"].is_verified is True
+
+
+def test_auth_signup_unpaid_email_still_requires_verification(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-paid signup keeps the verify-by-email flow (control for the paid case)."""
+    st_backend = _install_fake_supertokens(monkeypatch)
+    _install_paid_pool_backend(monkeypatch, "someone-else@example.com")
+    client = TestClient(web_app, raise_server_exceptions=False)
+
+    resp = client.post("/auth/signup", json={"email": "free@example.com", "password": "password123"})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["needs_email_verification"] is True
+    assert len(st_backend.sent_verification_emails) == 1
+    assert st_backend.accounts_by_email["free@example.com"].is_verified is False
 
 
 def test_auth_signin_happy_path_with_verified_email(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2380,6 +2411,49 @@ def test_add_paid_email_then_gate_allows(monkeypatch: pytest.MonkeyPatch) -> Non
     assert client.get("/hosts", headers=_admin_headers()).status_code == 403
     client.post("/paid/emails/add", json={"value": _ADMIN_STUB_EMAIL}, headers=_paid_admin_headers())
     assert client.get("/hosts", headers=_admin_headers()).status_code == 200
+
+
+def test_add_paid_email_verifies_existing_unverified_account(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Adding an email to the paid list verifies a pre-existing (unverified) account for it."""
+    client, _pool_backend = _make_paid_crud_test_client(monkeypatch)
+    st_backend = make_fake_supertokens_backend()
+    st_backend.install_on_app_module(app_mod, monkeypatch)
+    # A user who signed up earlier but never verified their email.
+    st_backend.sign_up(tenant_id="public", email="waiting@example.com", password="password123")
+    assert st_backend.accounts_by_email["waiting@example.com"].is_verified is False
+
+    resp = client.post("/paid/emails/add", json={"value": "waiting@example.com"}, headers=_paid_admin_headers())
+
+    assert resp.status_code == 200
+    assert st_backend.accounts_by_email["waiting@example.com"].is_verified is True
+
+
+def test_add_paid_email_with_no_existing_account_is_a_noop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Adding a paid email with no matching account still succeeds; there is nothing to verify."""
+    client, _pool_backend = _make_paid_crud_test_client(monkeypatch)
+    st_backend = make_fake_supertokens_backend()
+    st_backend.install_on_app_module(app_mod, monkeypatch)
+
+    resp = client.post("/paid/emails/add", json={"value": "nobody@example.com"}, headers=_paid_admin_headers())
+
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "added", "email": "nobody@example.com"}
+    assert "nobody@example.com" not in st_backend.accounts_by_email
+
+
+def test_add_paid_email_succeeds_when_supertokens_uninitialized(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A SuperTokens outage during the auto-verify side effect must not fail the paid-list write.
+
+    No SuperTokens fake is installed, so the real (uninitialized) SDK raises when
+    the handler tries to look the account up; that error must be swallowed and
+    the paid-list add must still succeed.
+    """
+    client, _pool_backend = _make_paid_crud_test_client(monkeypatch)
+
+    resp = client.post("/paid/emails/add", json={"value": "someone@example.com"}, headers=_paid_admin_headers())
+
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "added", "email": "someone@example.com"}
 
 
 @pytest.mark.parametrize("bad_value", ["", "   ", "has space", "foo@bar.com"])

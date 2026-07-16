@@ -102,6 +102,8 @@ from imbue.minds.utils.sentry.core import resolve_latchkey_forward_sentry_env
 from imbue.minds.utils.sentry.core import resolve_sentry_environment
 from imbue.minds.utils.sentry.core import setup_sentry
 from imbue.minds.utils.sentry.core import write_latchkey_forward_sentry_consent
+from imbue.mngr.api.discovery_events import get_discovery_events_dir
+from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.parent_process import start_grandparent_death_watcher
@@ -216,6 +218,13 @@ def run(
     # can count the distinct installs affected by each issue. The same value is shared with the
     # detached ``mngr latchkey forward`` daemon (below) so both processes count as one install.
     anonymous_user_id = resolve_anonymous_user_id(data_directory)
+    # Resolved up front (and reused below for the state container + the ``mngr forward``
+    # consumer): the Sentry attachment sweep needs the discovery events dir under it.
+    mngr_host_dir_str = os.environ.get("MNGR_HOST_DIR")
+    mngr_host_dir = Path(mngr_host_dir_str).expanduser() if mngr_host_dir_str else (Path.home() / ".mngr")
+    # Built before Sentry setup so the attachment sweep knows the latchkey plugin
+    # data dir (the detached ``mngr latchkey forward`` daemon's logs live there).
+    latchkey = _build_latchkey(data_directory=data_directory)
     setup_sentry(
         environment=resolve_sentry_environment(),
         release_id=resolve_release_id(),
@@ -224,6 +233,8 @@ def run(
         anonymous_user_id=anonymous_user_id,
         is_error_reporting_enabled=minds_config.get_report_unexpected_errors,
         is_log_inclusion_enabled=minds_config.get_include_error_logs,
+        latchkey_plugin_data_dir=latchkey.plugin_data_dir,
+        discovery_events_dir=get_discovery_events_dir(MngrConfig(default_host_dir=mngr_host_dir)),
     )
     client_config_path = config_file
     client_env_config = load_client_config(client_config_path)
@@ -251,7 +262,6 @@ def run(
     backend_resolver = MngrCliBackendResolver(
         last_good_agents_path=paths.data_dir / "last_good_agent_topology.json",
     )
-    latchkey = _build_latchkey(data_directory=data_directory)
     latchkey.initialize()
 
     # Mint a fresh central minds API key for this process. The same
@@ -266,11 +276,6 @@ def run(
 
     root_concurrency_group = ConcurrencyGroup(name="minds-run")
     root_concurrency_group.__enter__()
-
-    # Resolved up front: needed both to restart the docker state container just
-    # below and by the ``mngr forward`` consumer further down.
-    mngr_host_dir_str = os.environ.get("MNGR_HOST_DIR")
-    mngr_host_dir = Path(mngr_host_dir_str).expanduser() if mngr_host_dir_str else (Path.home() / ".mngr")
 
     # Restart this env's mngr docker *state* container before the discovery
     # producer spawns. The quit flow stops it (``stop_active_env_state_container``)

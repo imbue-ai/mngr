@@ -1,1 +1,0 @@
-Release minds v0.3.7: bump the app version and the baked default-workspace-template tag (`FALLBACK_BRANCH`) to `minds-v0.3.7`. This release pairs the current mngr `main` with a default-workspace-template snapshot that includes the earlyoom OOM-prioritization changes.

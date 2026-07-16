@@ -1,1 +1,0 @@
-- Changed: the Electron-written rotated logs (`electron.log` and `minds.log`) now rotate at 10MB instead of 100MB, matching the Python backend's jsonl sink so all of minds' logs share a consistent 10MB cap. The newest 10 rotated copies are still kept.
