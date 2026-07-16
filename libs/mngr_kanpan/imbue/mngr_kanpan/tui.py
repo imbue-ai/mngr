@@ -1535,18 +1535,18 @@ def _on_custom_command_poll(
 
 
 def _refresh_stamp(seconds_ago: float, fetch_seconds: float | None) -> str:
-    """Relative footer stamp for the last full refresh, e.g. `  refreshed 5m ago`.
+    """Relative footer stamp for the last full refresh, e.g. `  Refreshed 5m ago`.
 
     The fetch duration only shows in the just-now window, so it fades once stale.
     """
     if seconds_ago < _STAMP_JUST_NOW_SECONDS:
         took = f" \u00b7 {fetch_seconds:.1f}s" if fetch_seconds is not None else ""
-        return f"  refreshed just now{took}"
+        return f"  Refreshed just now{took}"
     if seconds_ago < 60:
-        return f"  refreshed {int(seconds_ago)}s ago"
+        return f"  Refreshed {int(seconds_ago)}s ago"
     if seconds_ago < 3600:
-        return f"  refreshed {int(seconds_ago // 60)}m ago"
-    return f"  refreshed {int(seconds_ago // 3600)}h ago"
+        return f"  Refreshed {int(seconds_ago // 60)}m ago"
+    return f"  Refreshed {int(seconds_ago // 3600)}h ago"
 
 
 def _update_refresh_stamp(state: _KanpanState) -> None:

@@ -2009,17 +2009,17 @@ def test_write_terminal_title_emits_osc_zero() -> None:
 
 
 def test_refresh_stamp_just_now_includes_fetch_duration() -> None:
-    assert _refresh_stamp(3.0, 2.84) == "  refreshed just now \u00b7 2.8s"
+    assert _refresh_stamp(3.0, 2.84) == "  Refreshed just now \u00b7 2.8s"
 
 
 def test_refresh_stamp_just_now_without_duration() -> None:
-    assert _refresh_stamp(3.0, None) == "  refreshed just now"
+    assert _refresh_stamp(3.0, None) == "  Refreshed just now"
 
 
 def test_refresh_stamp_ages_and_drops_duration() -> None:
-    assert _refresh_stamp(32.0, 2.8) == "  refreshed 32s ago"
-    assert _refresh_stamp(300.0, 2.8) == "  refreshed 5m ago"
-    assert _refresh_stamp(7300.0, 2.8) == "  refreshed 2h ago"
+    assert _refresh_stamp(32.0, 2.8) == "  Refreshed 32s ago"
+    assert _refresh_stamp(300.0, 2.8) == "  Refreshed 5m ago"
+    assert _refresh_stamp(7300.0, 2.8) == "  Refreshed 2h ago"
 
 
 def test_update_refresh_stamp_noop_before_first_refresh() -> None:
@@ -2035,7 +2035,7 @@ def test_stamp_tick_updates_footer_and_reschedules() -> None:
     scheduled: list[float] = []
     loop = SimpleNamespace(set_alarm_in=lambda delay, cb, data: scheduled.append(delay))
     _on_stamp_tick(cast(Any, loop), state)
-    assert state.steady_footer_text.startswith("  refreshed ")
+    assert state.steady_footer_text.startswith("  Refreshed ")
     assert state.steady_footer_text.endswith(" ago")
     assert scheduled == [10.0]
 
