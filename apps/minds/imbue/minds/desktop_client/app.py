@@ -128,6 +128,7 @@ from imbue.minds.desktop_client.templates import render_recovery_page
 from imbue.minds.desktop_client.templates import render_settings_modal_page
 from imbue.minds.desktop_client.templates import render_settings_page
 from imbue.minds.desktop_client.templates import render_sharing_editor
+from imbue.minds.desktop_client.templates import render_sharing_modal_page
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_welcome_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
@@ -2684,6 +2685,36 @@ def _handle_sharing_page(
     return make_html_response(content=html)
 
 
+def _handle_sharing_modal(
+    agent_id: str,
+    service_name: str,
+) -> Response:
+    """Render the sharing editor as the centered overlay modal (Electron; the full page is the browser fallback).
+
+    Same context as :func:`_handle_sharing_page`; the empty ``redirect_url``
+    (via the template default) makes the Associate flow reload in place, which
+    is the modal-safe behavior.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+
+    backend_resolver = get_state().backend_resolver
+    ws_name, account_email, has_account, accounts = _resolve_ws_name_and_account(
+        agent_id,
+        backend_resolver,
+    )
+
+    html = render_sharing_modal_page(
+        agent_id=agent_id,
+        service_name=service_name,
+        has_account=has_account,
+        accounts=accounts,
+        ws_name=ws_name,
+        account_email=account_email,
+    )
+    return make_html_response(content=html)
+
+
 _SHARE_READINESS_PROBE_TIMEOUT_SECONDS: Final[float] = 4.0
 
 
@@ -2998,8 +3029,11 @@ def create_desktop_client(
     app.add_url_rule("/requests/<request_id>/grant", view_func=_handle_request_grant, methods=["POST"])
     app.add_url_rule("/requests/<request_id>/deny", view_func=_handle_request_deny, methods=["POST"])
 
-    # Sharing editor routes (used by both request approval and direct editing)
+    # Sharing editor routes (used by both request approval and direct editing).
+    # /modal is the same editor hosted in the shared overlay surface (Electron);
+    # the plain route stays as the browser-mode full page.
     app.add_url_rule("/sharing/<agent_id>/<service_name>", view_func=_handle_sharing_page)
+    app.add_url_rule("/sharing/<agent_id>/<service_name>/modal", view_func=_handle_sharing_modal)
 
     # Agent creation routes. The create form now submits to POST
     # /api/v1/workspaces and /creating/<id> polls the v1 operations resource, so

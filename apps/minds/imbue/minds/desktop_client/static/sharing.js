@@ -17,6 +17,10 @@
   function setHeading(isEnabled) {
     var h = document.getElementById('page-heading');
     if (!h) return;
+    // The modal heading (data-plain-links) renders names as plain text: a
+    // link there would navigate the overlay iframe to a full page and strand
+    // the app inside the modal. The full page keeps its links.
+    var plainLinks = h.dataset.plainLinks === 'true';
     h.textContent = '';
     h.appendChild(document.createTextNode(isEnabled ? '' : 'Share '));
 
@@ -27,19 +31,27 @@
 
     h.appendChild(document.createTextNode(isEnabled ? ' shared in ' : ' in '));
 
-    var link = document.createElement('a');
-    link.href = mngrForwardOrigin + '/goto/' + agentId + '/';
-    link.className = 'text-accent hover:underline';
-    link.textContent = wsName;
-    h.appendChild(link);
+    if (plainLinks) {
+      h.appendChild(document.createTextNode(wsName));
+    } else {
+      var link = document.createElement('a');
+      link.href = mngrForwardOrigin + '/goto/' + agentId + '/';
+      link.className = 'text-accent hover:underline';
+      link.textContent = wsName;
+      h.appendChild(link);
+    }
 
     if (accountEmail) {
       h.appendChild(document.createTextNode(' ('));
-      var acctLink = document.createElement('a');
-      acctLink.href = '/accounts';
-      acctLink.className = 'text-accent hover:underline';
-      acctLink.textContent = accountEmail;
-      h.appendChild(acctLink);
+      if (plainLinks) {
+        h.appendChild(document.createTextNode(accountEmail));
+      } else {
+        var acctLink = document.createElement('a');
+        acctLink.href = '/accounts';
+        acctLink.className = 'text-accent hover:underline';
+        acctLink.textContent = accountEmail;
+        h.appendChild(acctLink);
+      }
       h.appendChild(document.createTextNode(')'));
     }
 
@@ -217,7 +229,10 @@
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ emails: getFinalEmails() }),
     })
-      .then(function () { window.location.href = '/sharing/' + agentId + '/' + serviceName; })
+      // Reload in place (never navigate to the full page URL): this script
+      // also runs inside the sharing modal's overlay iframe, where a
+      // navigation to /sharing/... would strand the app inside the modal.
+      .then(function () { window.location.reload(); })
       .catch(function (err) { showError('Could not save sharing changes: ' + err.message); setSubmitting(false); });
   };
 
@@ -225,7 +240,7 @@
     clearError();
     setSubmitting(true);
     requestWithErrorCheck('/api/v1/workspaces/' + agentId + '/sharing/' + serviceName, { method: 'DELETE' })
-      .then(function () { window.location.href = '/sharing/' + agentId + '/' + serviceName; })
+      .then(function () { window.location.reload(); })
       .catch(function (err) { showError('Could not disable sharing: ' + err.message); setSubmitting(false); });
   };
 

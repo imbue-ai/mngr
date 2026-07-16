@@ -221,6 +221,28 @@
   }
   // -- End color picker ---------------------------------------------------
 
+  // -- Manage sharing -------------------------------------------------------
+  //
+  // In the desktop shell the sharing editor opens as a centered overlay modal
+  // (via the content relay's allowlisted postMessage channel -- this page runs
+  // in the content view, which has no window.minds bridge); the links' hrefs
+  // stay as the browser-mode full-page fallback.
+  if (navigator.userAgent.indexOf('Electron') !== -1) {
+    var sharingLinks = document.querySelectorAll('a[data-sharing-service]');
+    for (var j = 0; j < sharingLinks.length; j++) {
+      (function (link) {
+        link.addEventListener('click', function (event) {
+          event.preventDefault();
+          window.postMessage({
+            type: 'minds:open-sharing-modal',
+            agentId: agentId,
+            serviceName: link.getAttribute('data-sharing-service'),
+          }, '*');
+        });
+      })(sharingLinks[j]);
+    }
+  }
+
   var disassociateBtn = document.getElementById('disassociate-btn');
   if (disassociateBtn) {
     disassociateBtn.addEventListener('click', function () {

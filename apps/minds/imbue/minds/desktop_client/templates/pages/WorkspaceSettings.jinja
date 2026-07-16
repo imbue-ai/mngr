@@ -210,7 +210,10 @@
         {% for server in servers %}
           <Card layout="row-spread">
             <span class="font-semibold">{{ server }}</span>
-            <ButtonLink href={{ "/sharing/" ~ agent_id ~ "/" ~ server }} variant="secondary">Manage sharing</ButtonLink>
+            {# data-sharing-service lets workspace_settings.js intercept the
+               click in Electron and open the centered sharing modal instead;
+               the href stays as the browser-mode fallback. #}
+            <ButtonLink href={{ "/sharing/" ~ agent_id ~ "/" ~ server }} data-sharing-service="{{ server }}" variant="secondary">Manage sharing</ButtonLink>
           </Card>
         {% endfor %}
         </div>

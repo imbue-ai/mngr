@@ -20,6 +20,13 @@ const REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 // stop-host URL the main process builds. The main process re-validates.
 const AGENT_ID_PATTERN = /^agent-[a-f0-9]{1,64}$/i;
 
+// Sharing-server names come from the workspace-settings page's server list
+// (mngr-discovered service names). Accept only a conservative charset +
+// length so a malicious page cannot smuggle path or query characters into
+// the `/sharing/<agent>/<service>/modal` URL the main process builds. The
+// main process re-validates with the same pattern.
+const SERVICE_NAME_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
+
 // #rrggbb lowercase hex (the canonical form ``normalize_workspace_color``
 // emits). Accepts only the strict shape so a malicious page can't paint
 // the titlebar with arbitrary CSS values via the preview channel.
@@ -89,6 +96,18 @@ window.addEventListener('message', (event) => {
   }
   if (data.type === 'minds:open-accounts') {
     ipcRenderer.send('open-accounts');
+    return;
+  }
+  // Workspace-settings "Manage sharing": open the sharing editor as a
+  // centered modal in the shared overlay. Both ids are validated to
+  // conservative server-issued shapes so a foreign page can't smuggle
+  // path/query characters into the /sharing URL the main process builds.
+  if (data.type === 'minds:open-sharing-modal') {
+    const agentId = data.agentId;
+    const serviceName = data.serviceName;
+    if (typeof agentId !== 'string' || !AGENT_ID_PATTERN.test(agentId)) return;
+    if (typeof serviceName !== 'string' || !SERVICE_NAME_PATTERN.test(serviceName)) return;
+    ipcRenderer.send('open-sharing-modal', agentId, serviceName);
     return;
   }
   // Landing-page Stop button: ask the main process to show a native

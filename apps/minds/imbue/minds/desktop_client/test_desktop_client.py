@@ -1354,6 +1354,80 @@ def test_accounts_modal_lists_logged_in_accounts(tmp_path: Path) -> None:
     assert "Add account" in body
 
 
+def _create_sharing_test_client(tmp_path: Path) -> tuple[FlaskClient, FileAuthStore, str]:
+    """Client whose session store has a workspace associated with a signed-in account.
+
+    The sharing editor only renders its editor body (rather than the Associate
+    prompt) when the workspace has an account, so the association is seeded
+    through a record store over the same data dir before the app's own store
+    is built.
+    """
+    agent_id = str(AgentId.generate())
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-share-1", email="sharer@example.com")
+    seed_store = make_session_store_for_test(tmp_path, cli=cli)
+    seed_store.associate_created_workspace(
+        user_id="user-share-1",
+        agent_id=agent_id,
+        host_id=str(HostId.generate()),
+        display_name="my-workspace",
+        color=None,
+        is_cloud_row=False,
+    )
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
+    return client, auth_store, agent_id
+
+
+def test_sharing_modal_requires_auth(tmp_path: Path) -> None:
+    """The centered sharing modal page requires authentication."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/sharing/agent-0123abc/web/modal")
+    assert response.status_code == 403
+
+
+def test_sharing_modal_renders_editor_in_overlay(tmp_path: Path) -> None:
+    """GET /sharing/<id>/<svc>/modal renders the shared sharing-editor body
+    inside the centered overlay chrome (backdrop + closeModal-based dismissal).
+    Nothing in the modal may navigate the overlay iframe to a full page: the
+    heading names are plain text (no /goto or /accounts links) and Cancel
+    dismisses the modal instead of linking back to workspace settings."""
+    client, auth_store, agent_id = _create_sharing_test_client(tmp_path)
+    _authenticate_client(client, auth_store)
+    response = client.get(f"/sharing/{agent_id}/web/modal")
+    assert response.status_code == 200
+    body = response.text
+    # The shared editor body (SharingEditor.jinja) and its external JS.
+    assert 'id="sharing-config"' in body
+    assert "/_static/sharing.js" in body
+    # Modal chrome: dim backdrop over a transparent body, dismissed through
+    # the Electron modal host (with a plain-page fallback).
+    assert 'id="sharing-modal-backdrop"' in body
+    assert "window.minds.closeModal" in body
+    # The heading is plain text -- no workspace /goto link, no /accounts link --
+    # and sharing.js keeps its rebuilt heading link-free via data-plain-links.
+    assert "/goto/" not in body
+    assert 'href="/accounts"' not in body
+    assert 'data-plain-links="true"' in body
+    # Cancel dismisses the modal; there is no ButtonLink back to settings.
+    assert f'href="/workspace/{agent_id}/settings"' not in body
+    assert "dismissSharingModal()" in body
+
+
+def test_sharing_page_renders_full_page_fallback(tmp_path: Path) -> None:
+    """The full /sharing page (the browser-mode fallback) still renders the
+    editor with its linked heading and the Cancel link to workspace settings."""
+    client, auth_store, agent_id = _create_sharing_test_client(tmp_path)
+    _authenticate_client(client, auth_store)
+    response = client.get(f"/sharing/{agent_id}/web")
+    assert response.status_code == 200
+    body = response.text
+    assert 'id="sharing-config"' in body
+    assert "/_static/sharing.js" in body
+    assert f"/goto/{agent_id}/" in body
+    assert f'href="/workspace/{agent_id}/settings"' in body
+    assert 'id="sharing-modal-backdrop"' not in body
+
+
 def test_workspace_settings_page_requires_auth(tmp_path: Path) -> None:
     """The workspace settings page requires authentication."""
     client, _ = _create_test_client_with_stores(tmp_path)
@@ -1731,7 +1805,8 @@ def test_landing_does_not_bounce_to_welcome_when_signed_in(tmp_path: Path) -> No
     _authenticate_client(client, auth_store)
     response = client.get("/")
     assert response.status_code == 200
-    assert "Help improve Minds" in response.text  # consent still unanswered, not the splash
+    # Consent still unanswered, so the consent screen shows (not the splash).
+    assert "Help improve Minds" in response.text
 
 
 def test_landing_shows_consent_screen_after_account_choice_when_unanswered(tmp_path: Path) -> None:

@@ -34,4 +34,6 @@ Reworked the desktop app's titlebar and navigation to match the minds-options mo
 
 - The workspace switcher now highlights the workspace you're currently in even on that workspace's own settings or sharing screens (it keys the current-row marker off the active workspace scope, not just the workspace whose content is displayed).
 
+- The sharing editor now opens as a centered popup on the shared overlay surface when launched from Workspace Settings' "Manage sharing" buttons in the desktop app (dismissed via Cancel, the X, or a backdrop click; the popup's workspace/account names are plain text so nothing can navigate the overlay). The full /sharing page remains as the browser-mode fallback, and saving/disabling sharing now reloads the editor in place instead of re-navigating to it.
+
 - The titlebar breadcrumb no longer flashes the raw agent id in place of the workspace name: accent updates from the workspace-settings color picker preserved only the accent (dropping the cached name until the next discovery tick), and a cache miss fell back to the agent id. The breadcrumb now keeps the displayed name across accent updates and shows a brief ellipsis placeholder (never the id) for a workspace whose name hasn't arrived yet.

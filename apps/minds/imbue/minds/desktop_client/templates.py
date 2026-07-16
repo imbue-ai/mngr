@@ -1712,6 +1712,35 @@ def render_sharing_editor(
 
 
 @pure
+def render_sharing_modal_page(
+    agent_id: str,
+    service_name: str,
+    initial_emails: list[str] | None = None,
+    has_account: bool = True,
+    accounts: Sequence[object] | None = None,
+    ws_name: str = "",
+    account_email: str = "",
+) -> str:
+    """Render the centered sharing-editor modal page (``GET /sharing/<agent_id>/<service_name>/modal``).
+
+    Hosted in the shared modal WebContentsView; shows the same editor body as
+    :func:`render_sharing_editor` (the full-page browser fallback), minus the
+    linked heading and the Cancel-to-workspace-settings link (the modal is
+    dismissed via Cancel, its X, or a backdrop click).
+    """
+    return CATALOG.render(
+        "pages.SharingModal",
+        agent_id=agent_id,
+        service_name=service_name,
+        initial_emails=initial_emails or [],
+        has_account=has_account,
+        accounts=accounts or [],
+        ws_name=ws_name,
+        account_email=account_email,
+    )
+
+
+@pure
 def render_workspace_settings(
     agent_id: str,
     ws_name: str,

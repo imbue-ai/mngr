@@ -1,0 +1,75 @@
+{#def agent_id, service_name, ws_name="", account_email="", initial_emails=[], has_account=True, accounts=[] #}
+{#
+  Centered sharing-editor modal page, hosted in the desktop client's shared
+  modal WebContentsView (the same overlay layer as the Minds Settings modal)
+  so it covers the whole window including the title bar. Opened from
+  Workspace Settings' "Manage sharing" buttons; the full /sharing page stays
+  as the browser-mode fallback.
+
+  Shows the same editor body as the full page (templates/SharingEditor.jinja).
+  The heading renders the workspace / account names as PLAIN TEXT -- never
+  links: a link here would navigate this overlay iframe to a full page and
+  strand the app inside the modal (the heading carries data-plain-links so
+  sharing.js keeps its rebuilt heading link-free too). There is no
+  Cancel-to-workspace-settings link -- Cancel, the X (top right), and a
+  backdrop click all dismiss the modal. Escape is handled by the Electron
+  main process for any modal-view page.
+#}
+{% set _scripts %}
+<script>
+  (function () {
+    var backdrop = document.getElementById("sharing-modal-backdrop");
+    // The agent id rides on a data attribute (not interpolated into this
+    // script) so the template never templates JS.
+    var settingsPath = "/workspace/" + (backdrop ? backdrop.dataset.agentId : "") + "/settings";
+    window.dismissSharingModal = function () {
+      if (window.minds && window.minds.closeModal) window.minds.closeModal();
+      else window.location.href = settingsPath;
+    };
+    if (backdrop) {
+      backdrop.addEventListener("click", function (e) {
+        if (e.target === backdrop) window.dismissSharingModal();
+      });
+    }
+    // The Associate prompt's "Sign in or create an account" link must not
+    // navigate this overlay iframe to the full-page auth flow (a sign-in
+    // completed there would strand the whole app inside the modal). Land it
+    // in the content view and dismiss (or, as a standalone page, navigate).
+    var signinLink = document.querySelector('a[href="/auth/login"]');
+    if (signinLink) {
+      signinLink.addEventListener("click", function (e) {
+        e.preventDefault();
+        if (window.minds && window.minds.navigateContent) window.minds.navigateContent("/auth/login");
+        else window.location.href = "/auth/login";
+      });
+    }
+  })();
+</script>
+{% endset %}
+<OverlaySurface title="Sharing"
+                body_style="-webkit-app-region: no-drag;"
+                scripts={{ _scripts }}>
+  <div id="sharing-modal-backdrop" data-agent-id="{{ agent_id }}" class="fixed inset-0 flex items-center justify-center bg-surface-overlay p-4">
+    {# Capped height (not fixed like the settings modal): the editor is
+       short, so the card hugs its content and scrolls only if the access
+       list outgrows the window. #}
+    <div class="relative bg-surface-primary rounded-lg shadow-overlay max-w-2xl w-full p-8 max-h-[85vh] overflow-y-auto text-left">
+      <DialogCloseButton onclick="dismissSharingModal()" />
+      <h1 id="page-heading" data-plain-links="true" class="type-heading-lg text-primary">
+        Share <code class="code-pill">{{ service_name }}</code>
+        in {{ ws_name or agent_id }}
+        {%- if account_email %} ({{ account_email }}){% endif %}?
+      </h1>
+
+      <SharingEditor
+        :agent_id="agent_id"
+        :service_name="service_name"
+        :ws_name="ws_name"
+        :account_email="account_email"
+        :initial_emails="initial_emails"
+        :has_account="has_account"
+        :accounts="accounts"
+        :is_modal="True" />
+    </div>
+  </div>
+</OverlaySurface>

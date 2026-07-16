@@ -1233,6 +1233,7 @@ function overlayIdForUrl(url) {
   if (pathname === '/auth/signin-modal') return 'signin';
   if (pathname === '/settings/modal') return 'settings';
   if (pathname === '/accounts/modal') return 'accounts';
+  if (/^\/sharing\/agent-[a-f0-9]+\/[^/]+\/modal$/i.test(pathname)) return 'sharing';
   return null;
 }
 
@@ -1483,6 +1484,17 @@ function openMindsSettingsModal(bundle) {
 function openAccountsModal(bundle) {
   if (!bundle || bundle.window.isDestroyed() || !backendBaseUrl) return;
   openModal(bundle, backendBaseUrl + '/accounts/modal');
+}
+
+// Open the sharing editor as a centered modal in the shared overlay. Both ids
+// are validated to conservative server-issued shapes (mirroring the content
+// relay's allowlist; never trust the renderer) before being packed into the
+// /sharing/<agent>/<service>/modal URL.
+function openSharingModal(bundle, agentId, serviceName) {
+  if (!bundle || bundle.window.isDestroyed() || !backendBaseUrl) return;
+  if (typeof agentId !== 'string' || !/^agent-[a-f0-9]{1,64}$/i.test(agentId)) return;
+  if (typeof serviceName !== 'string' || !/^[A-Za-z0-9._-]{1,64}$/.test(serviceName)) return;
+  openModal(bundle, backendBaseUrl + '/sharing/' + agentId + '/' + serviceName + '/modal');
 }
 
 function isInboxModalOpen(bundle) {
@@ -3639,6 +3651,15 @@ ipcMain.on('open-minds-settings', (event) => {
 ipcMain.on('open-accounts', (event) => {
   const sender = getBundleFromEvent(event);
   if (sender) openAccountsModal(sender);
+});
+
+// Open the sharing-editor modal on behalf of the (otherwise unprivileged)
+// workspace-settings page in the content view. Only content-relay-preload.js
+// can emit this channel (for an allowlisted `minds:open-sharing-modal`
+// postMessage); openSharingModal re-validates both ids.
+ipcMain.on('open-sharing-modal', (event, agentId, serviceName) => {
+  const sender = getBundleFromEvent(event);
+  if (sender) openSharingModal(sender, agentId, serviceName);
 });
 
 ipcMain.on('close-modal', (event) => {
