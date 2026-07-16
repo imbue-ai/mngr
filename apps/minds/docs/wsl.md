@@ -81,6 +81,17 @@ Follow the normal from-source flow (clone, `uv sync --all-packages`), plus:
 
 ## Launching the desktop app
 
+CRITICAL: WSLg windows only appear in the Windows session that STARTED the
+WSL instance. If WSL was first started headlessly (an SSH session, a boot-time
+scheduled task), every GUI window renders into WSLg's compositor with no
+RemoteApp bridge to any visible desktop -- apps run, `xdotool` sees their
+windows, but nothing appears on screen. From your interactive (RDP or
+console) session, run `wsl --shutdown` and start WSL again from that session;
+verify the attachment with `tasklist /fi "IMAGENAME eq msrdc.exe"`, which
+must show msrdc in YOUR session id. Re-run any keepalive task afterwards --
+joining an already-running instance does not re-home WSLg, so the keepalive
+keeps the instance alive without stealing the display.
+
 The normal dev flow works once the display and runtime pieces above are in
 place -- run it under tmux (see the daemonization note below) with the WSLg
 X display:
