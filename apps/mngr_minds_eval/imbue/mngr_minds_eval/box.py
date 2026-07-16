@@ -15,6 +15,7 @@ BOX_TIMEOUT_HOURS (they bill while alive); `minds-evals stop <name>` kills one e
 
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 import tempfile
@@ -150,6 +151,21 @@ def _box_env(user_id: str, ref: str, minds_env: str) -> dict[str, str | None]:
     return env
 
 
+def _plugin_tree_hash() -> str:
+    """A stable hash of everything the image COPYs from the plugin (the overlaid CLI + entrypoint),
+    embedded in the dockerfile so plugin changes always produce a new image."""
+    digest = hashlib.sha256()
+    files = sorted(
+        list((APP_DIR / "imbue").rglob("*.py"))
+        + [APP_DIR / "docker" / "entrypoint.sh", APP_DIR / "pyproject.toml", APP_DIR / "README.md"]
+    )
+    for path in files:
+        if path.is_file() and "__pycache__" not in str(path):
+            digest.update(str(path.relative_to(APP_DIR)).encode())
+            digest.update(path.read_bytes())
+    return digest.hexdigest()[:16]
+
+
 def _tags(user_id: str, ref: str) -> dict[str, str]:
     return {"minds-eval-box": user_id, "mngr-ref": ref[:12]}
 
@@ -193,12 +209,15 @@ def ensure(mngr_branch: str, *, user_id: str, ref: str = "", minds_env: str = "s
         ),
         flush=True,
     )
-    # Bake branch+ref into the Dockerfile TEXT (not just build args): Modal keys its image cache
-    # on the dockerfile definition, and with args-only variation every branch cache-hit the first
-    # branch's image -- a box would then RUN the wrong mngr while its env claimed the right one.
+    # Bake branch+ref AND a hash of the plugin source into the Dockerfile TEXT (not just build
+    # args/context): Modal keys its image cache on the dockerfile definition, and with args-only
+    # variation every branch cache-hit the first branch's image -- a box would then RUN the wrong
+    # mngr while its env claimed the right one. The plugin-tree hash likewise forces a rebuild
+    # whenever the overlaid CLI code changes, so boxes never run a stale in-box CLI.
     dockerfile = (APP_DIR / "docker" / "Dockerfile").read_text()
     dockerfile = dockerfile.replace("ARG MNGR_BRANCH=main", "ARG MNGR_BRANCH={}".format(mngr_branch))
     dockerfile = dockerfile.replace("ARG MNGR_REF=unset", "ARG MNGR_REF={}".format(ref))
+    dockerfile = "# plugin-tree: {}\n{}".format(_plugin_tree_hash(), dockerfile)
     pinned = Path(tempfile.gettempdir()) / "minds-box-Dockerfile-{}".format(ref[:12])
     pinned.write_text(dockerfile)
     image = modal.Image.from_dockerfile(
