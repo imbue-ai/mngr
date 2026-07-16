@@ -169,6 +169,38 @@ def _vendor_mngr(clone: Path) -> None:
     _sh(*args)
 
 
+def vendored_clone(repo: str, branch: str, label: str) -> Path:
+    """A local template clone whose vendor/mngr is overwritten with the BOX's /work/mngr (and
+    committed, since mngr clones from the local repo): a workspace created from this clone runs the
+    box's exact mngr internally too. Used by `box --vendor-box-mngr`; launch's per-case clones do
+    the same thing via _prepare_clone."""
+    CLONES_DIR.mkdir(parents=True, exist_ok=True)
+    clone = CLONES_DIR / label
+    if clone.exists():
+        shutil.rmtree(clone)
+    args = ["git", "clone"]
+    if branch:
+        args += ["--branch", branch]
+    _sh(*args, repo, str(clone))
+    _vendor_mngr(clone)
+    _sh("git", "-C", str(clone), "add", "-A")
+    _sh(
+        "git",
+        "-C",
+        str(clone),
+        "-c",
+        "user.email=eval@minds",
+        "-c",
+        "user.name=minds-eval",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "vendor box mngr",
+    )
+    return clone
+
+
 def _prepare_clone(case: dict, case_config: dict) -> Path:
     clone = CLONES_DIR / case["id"]
     if clone.exists():

@@ -96,6 +96,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_box.add_argument("--dwt-link", default="", help="also create ONE workspace from this template repo/path")
     p_box.add_argument("--dwt-branch", default="", help="template branch for --dwt-link (blank = repo default)")
     p_box.add_argument("--workspace-name", default="", help="host name for the --dwt-link workspace (blank = auto)")
+    p_box.add_argument(
+        "--vendor-box-mngr",
+        action="store_true",
+        help="overwrite the workspace's vendor/mngr with the box's mngr (so --mngr-branch governs BOTH)",
+    )
     return parser
 
 
@@ -166,11 +171,17 @@ def main() -> None:
             # The in-box leg of --dwt-link: find the Minds app's API and create the one workspace.
             if not args.dwt_link:
                 parser.error("run `box` from the host, not inside a box")
+            link, branch = args.dwt_link, args.dwt_branch
+            if args.vendor_box_mngr:
+                # The committed vendor/mngr subtree is release-pinned; overwrite it with THIS box's
+                # mngr so the workspace's internal tooling runs the same code --mngr-branch asked for.
+                clone = launch_mod.vendored_clone(args.dwt_link, args.dwt_branch, args.workspace_name or "adhoc")
+                link, branch = str(clone), ""
             try:
                 workspace.create_workspace(
                     port=minds_client.discover_api_port(),
-                    fct_link=args.dwt_link,
-                    fct_branch=args.dwt_branch,
+                    fct_link=link,
+                    fct_branch=branch,
                     name=args.workspace_name,
                     anthropic_key=os.environ.get("ANTHROPIC_API_KEY", ""),
                 )
@@ -179,6 +190,8 @@ def main() -> None:
             return
         if args.dwt_link and not os.environ.get("ANTHROPIC_API_KEY"):
             parser.error("--dwt-link creates an api_key workspace -- set ANTHROPIC_API_KEY")
+        if args.vendor_box_mngr and not args.dwt_link:
+            parser.error("--vendor-box-mngr only makes sense with --dwt-link")
         sandbox = box_mod.ensure(args.mngr_branch, user_id=box_mod.sanitize_user_id(args.user_id))
         _print_desktop_urls(sandbox)
         if args.dwt_link:
