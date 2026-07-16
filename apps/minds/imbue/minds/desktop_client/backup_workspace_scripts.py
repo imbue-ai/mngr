@@ -758,12 +758,16 @@ def _main():
             else:
                 _shutil.rmtree(path)
         for name in _os.listdir(source_root):
+            # A snapshot taken while an earlier restore was staging (the
+            # hourly backup does not exclude the staging dir) carries a stale
+            # staging dir of its own. It is garbage by definition, and moving
+            # it onto the live staging dir would fail (rename onto a
+            # non-empty directory) -- skip it.
+            if name == _STAGING_DIR_NAME:
+                continue
             _os.rename(_os.path.join(source_root, name), _os.path.join(host_dir, name))
     except OSError as e:
-        detail = (
-            "the in-place swap failed midway (%s); the workspace may be incomplete -- "
-            "run the restore again (a pre-restore safety snapshot was already taken)" % e
-        )
+        detail = "the in-place swap failed midway (%s); the workspace may be incomplete -- run the restore again." % e
         _finish(result, "failed", detail)
     result["swapped"] = True
 

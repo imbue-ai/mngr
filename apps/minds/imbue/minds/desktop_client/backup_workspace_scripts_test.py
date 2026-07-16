@@ -663,6 +663,39 @@ def test_restore_script_rewinds_host_dir_and_takes_a_safety_snapshot(tmp_path: P
 
 
 @pytest.mark.timeout(120)
+def test_restore_script_skips_a_stale_staging_dir_carried_inside_the_snapshot(tmp_path: Path) -> None:
+    # The hourly backup does not exclude the staging dir, so a snapshot taken
+    # while an earlier restore was staging carries a stale
+    # .minds-restore-staging of its own. The swap must skip it: it is garbage,
+    # and moving it onto the live staging dir fails (rename onto a non-empty
+    # directory), which used to abort the restore midway.
+    host, code, restic_repo = _make_restore_workspace(tmp_path)
+    stale_staging = host / ".minds-restore-staging"
+    (stale_staging / "leftovers").mkdir(parents=True)
+    (stale_staging / "leftovers" / "old.txt").write_text("from an interrupted restore\n")
+    _restic_for_test(restic_repo, "backup", str(host))
+    snapshot_id = _snapshot_entries(restic_repo)[0]["id"]
+    shutil.rmtree(stale_staging)
+    (code / "file.txt").write_text("version 2\n")
+
+    stub_bin = _stub_bin_with_restic(tmp_path)
+    run = _run_script(
+        code,
+        BACKUP_RESTORE_SCRIPT,
+        _restore_args(restic_repo, snapshot_id),
+        extra_path=stub_bin,
+        env_overrides={"MNGR_HOST_DIR": str(host)},
+    )
+    payload = extract_marker_json(run["stdout"], RESTORE_RESULT_MARKER)
+    assert payload is not None, run
+    assert payload["status"] == "ok", payload
+    assert payload["swapped"] is True
+    assert (code / "file.txt").read_text() == "version 1\n"
+    # Neither the live staging dir nor the snapshot's stale one survives.
+    assert not (host / ".minds-restore-staging").exists()
+
+
+@pytest.mark.timeout(120)
 def test_restore_script_descends_into_the_nested_host_dir_of_a_volume_level_snapshot(tmp_path: Path) -> None:
     # On btrfs providers the hourly backup snapshots the whole unified host
     # volume: the snapshot root carries volume-level `agents/` +
