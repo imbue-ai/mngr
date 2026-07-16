@@ -57,6 +57,12 @@ _ENTER_RETRY_OFFSETS_SECONDS: Final[tuple[int, ...]] = (3, 10, 30)
 # Length of the normalized message tail used to gate Enter retries on pane
 # content (and, by convention, used by content probes such as Claude's).
 NORMALIZED_PROBE_MAX_LENGTH: Final[int] = 60
+# How long to keep observing the pane after a send has been confirmed delivered before
+# concluding that no blocking dialog appeared -- a selector (e.g. Claude's /model
+# confirmation) can render a beat after the input is accepted. Also used as the per-accept
+# poll window while clearing chained dialogs. A module-level constant for now; may become
+# user-configurable later.
+POST_SUBMIT_DIALOG_OBSERVE_SECONDS: Final[float] = 2.0
 
 # Markers printed by the remote confirmation script and parsed by
 # _parse_confirmation_output. Kept obscure enough not to collide with probe

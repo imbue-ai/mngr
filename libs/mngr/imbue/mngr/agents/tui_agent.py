@@ -157,32 +157,47 @@ class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
                 probes=probes,
                 timeout_seconds=timeout_seconds,
             )
-            if outcome.is_confirmed:
-                return
-            if len(probes) == 0:
-                # No evidence exists for this agent type; the send was a
-                # best-effort Enter and there is nothing to confirm against.
-                logger.debug("Agent type supplies no submission evidence; Enter sent best-effort")
-                return
-            if policy == SubmissionConfirmationPolicy.STRICT:
-                raise_for_unconfirmed_submission(
-                    agent=self,
-                    tmux_target=self.tmux_target,
-                    outcome=outcome,
-                    timeout_seconds=timeout_seconds,
-                )
-            else:
-                logger.warning(
-                    "Sent {!r} to agent {} but observed no submission evidence within {:.0f}s; "
-                    "slash commands are best-effort, so the send is reported as successful",
-                    message,
-                    self.name,
-                    timeout_seconds,
-                )
-                self.record_message_delivery_event(
-                    "relaxed_send_unconfirmed",
-                    f"no submission evidence within {timeout_seconds:.0f}s for message: {message!r}",
-                )
+            if not outcome.is_confirmed:
+                if len(probes) == 0:
+                    # No evidence exists for this agent type; the send was a
+                    # best-effort Enter and there is nothing to confirm against.
+                    logger.debug("Agent type supplies no submission evidence; Enter sent best-effort")
+                elif policy == SubmissionConfirmationPolicy.STRICT:
+                    # Not delivered: raise (never reaches the post-submit dialog check below).
+                    raise_for_unconfirmed_submission(
+                        agent=self,
+                        tmux_target=self.tmux_target,
+                        outcome=outcome,
+                        timeout_seconds=timeout_seconds,
+                    )
+                else:
+                    logger.warning(
+                        "Sent {!r} to agent {} but observed no submission evidence within {:.0f}s; "
+                        "slash commands are best-effort, so the send is reported as successful",
+                        message,
+                        self.name,
+                        timeout_seconds,
+                    )
+                    self.record_message_delivery_event(
+                        "relaxed_send_unconfirmed",
+                        f"no submission evidence within {timeout_seconds:.0f}s for message: {message!r}",
+                    )
+
+            # Reached only when the message was delivered/best-effort-sent (a strict-unconfirmed
+            # send raises above and never gets here): make sure the submitted input did not open a
+            # blocking dialog that leaves the agent stuck. Subclasses that can detect such dialogs
+            # override this; the default is a no-op.
+            self._run_post_submit_dialog_check(self.tmux_target)
+
+    def _run_post_submit_dialog_check(self, tmux_target: TmuxWindowTarget) -> None:
+        """Handle any blocking dialog opened by the just-submitted message.
+
+        Called after a send has been delivered/confirmed. Default is a no-op.
+        Subclasses (e.g. Claude) detect an interactive selector the submitted
+        input may have opened and either auto-accept it or raise
+        ``MessageDeliveredButBlockedError`` so the caller learns the agent is
+        blocked even though the message itself landed.
+        """
 
     def wait_for_ready_signal(
         self, is_creating: bool, start_action: Callable[[], None], timeout: float | None = None
