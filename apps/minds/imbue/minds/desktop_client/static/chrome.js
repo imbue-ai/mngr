@@ -224,7 +224,9 @@
     if (m) return { kind: 'workspace', agentId: m[1], activeTab: null };
     m = path.match(/^\/agents\/(agent-[a-f0-9]+)\/recovery(?:\/|$)/i);
     if (m) return { kind: 'workspace', agentId: m[1], activeTab: null };
-    if (path === '/create') return { kind: 'page', pageLabel: 'New workspace', showBack: true };
+    // No back arrow on the create form: the titlebar home button is the
+    // escape (back to the workspace list / welcome splash).
+    if (path === '/create') return { kind: 'page', pageLabel: 'New workspace' };
     if (/^\/creating\//.test(path)) return { kind: 'page', pageLabel: 'New workspace' };
     // Browser-mode full-page fallbacks (Electron shows these as modals).
     if (path === '/settings') return { kind: 'page', pageLabel: 'Settings', showBack: true };
