@@ -10,7 +10,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execSync, execFileSync } = require('child_process');
-const { downloadGit, downloadUv, downloadRestic, download, assertTreeFitsUploadBudget } = require('./download-binaries.js');
+const { downloadGit, downloadUv, downloadRestic, download, assertTreeFitsUploadBudget, assertUploadFitsToDesktopLimit } = require('./download-binaries.js');
 
 const ROOT = path.resolve(__dirname, '..');
 const RESOURCES_DIR = path.join(ROOT, 'resources');
@@ -614,19 +614,25 @@ async function main() {
   bundleClientConfig();
   bakeBuildInfo();
 
-  // Fail at build time -- not at ToDesktop upload time -- if the staged
-  // resources would blow the upload budget once a symlink-following zip
-  // materializes them (the launch-to-msg 701MB regression, 2026-07).
-  const uploadSizeLimitMb = require(path.join(ROOT, 'todesktop.js')).uploadSizeLimit;
-  const { realBytes, archivedBytes, symlinkCount } = assertTreeFitsUploadBudget(RESOURCES_DIR, {
-    uploadSizeLimitMb,
+  // Fail at build time -- not at ToDesktop upload time -- if the app-source
+  // upload would blow todesktop.js's uploadSizeLimit. The estimate mirrors
+  // the CLI's composition (appFiles glob + extraResources priced whole; see
+  // estimateToDesktopUploadBytes), which is what actually hit 701MB in the
+  // 2026-07 launch-to-msg runs when resources/ uploaded twice.
+  const todesktopConfig = require(path.join(ROOT, 'todesktop.js'));
+  const { appFilesBytes, extraBytes, totalBytes } = assertUploadFitsToDesktopLimit(ROOT, todesktopConfig);
+  console.log(
+    `estimated ToDesktop upload: ${(totalBytes / 1e6).toFixed(1)}MB ` +
+    `(app files ${(appFilesBytes / 1e6).toFixed(1)}MB + extraResources/icon ${(extraBytes / 1e6).toFixed(1)}MB) ` +
+    `against the ${todesktopConfig.uploadSizeLimit}MB limit`,
+  );
+  // Separately: the shipped payload must stay symlink-free so downstream
+  // symlink-dereferencing copiers (electron-builder's extraResources copy)
+  // cannot balloon the final app.
+  assertTreeFitsUploadBudget(RESOURCES_DIR, {
+    uploadSizeLimitMb: todesktopConfig.uploadSizeLimit,
     label: 'resources/',
   });
-  console.log(
-    `resources/ zips to ${(archivedBytes / (1024 * 1024)).toFixed(1)}MB ` +
-    `(${(realBytes / (1024 * 1024)).toFixed(1)}MB on disk, ${symlinkCount} symlinks) ` +
-    `against the ${uploadSizeLimitMb}MB ToDesktop upload limit`,
-  );
 
   console.log('\nBuild complete!');
   console.log(`Resources directory: ${RESOURCES_DIR}`);

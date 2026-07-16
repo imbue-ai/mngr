@@ -661,12 +661,14 @@ def test_measure_tree_as_archived_prices_symlinks_at_target_size(tmp_path: Path)
 
 
 def test_assert_tree_fits_upload_budget_fails_on_symlink_inflation(tmp_path: Path) -> None:
-    """The build guard must fail a tree whose symlinks materialize past the threshold.
+    """The payload guard must fail a tree whose symlinks would materialize past the threshold.
 
-    Uses a sparse 100MB target (instant to create) with two symlinks: 200MB of
-    materialization against a 100MB real payload is exactly the regression
-    signature, and must fail even though the tree is nowhere near the total
-    upload limit. A symlink-free tree of the same size must pass.
+    ToDesktop prices symlinks harmlessly, but downstream symlink-dereferencing
+    copiers (electron-builder's extraResources copy into the final app) would
+    materialize a full copy per link. Uses a sparse 100MB target (instant to
+    create) with two symlinks: 200MB of materialization against a 100MB real
+    payload must fail even far below the upload limit; a symlink-free tree of
+    the same size must pass.
     """
     tree_root = tmp_path / "tree"
     tree_root.mkdir()
@@ -681,7 +683,7 @@ def test_assert_tree_fits_upload_budget_fails_on_symlink_inflation(tmp_path: Pat
     )
     inflated = _run_download_binaries_function(guard_expression, str(tree_root))
     assert inflated.returncode != 0, "the guard must fail on 200MB of symlink materialization"
-    assert "materialize" in inflated.stderr and "uploadSizeLimit" in inflated.stderr
+    assert "materialize" in inflated.stderr and "shims" in inflated.stderr
 
     (tree_root / "copy-one").unlink()
     (tree_root / "copy-two").unlink()
@@ -708,7 +710,132 @@ def test_build_pipeline_keeps_payload_shim_and_budget_guards() -> None:
         "failed conversion is never tagged as a complete payload"
     )
     build_text = (APP_ROOT / "scripts" / "build.js").read_text()
+    assert "assertUploadFitsToDesktopLimit(ROOT" in build_text, (
+        "build.js must estimate the WHOLE ToDesktop app-source upload (appFiles + "
+        "extraResources) against uploadSizeLimit -- a resources/-only check passed at "
+        "371MB while the real upload was 701MB (2026-07 launch-to-msg failures)"
+    )
     assert "assertTreeFitsUploadBudget(RESOURCES_DIR" in build_text, (
-        "build.js must assert the staged resources fit the ToDesktop upload budget "
-        "(see the 2026-07 launch-to-msg 701MB upload failure)"
+        "build.js must keep the payload symlink-inflation guard so downstream "
+        "symlink-dereferencing copiers cannot balloon the final app"
+    )
+
+
+def test_estimate_todesktop_upload_mirrors_cli_composition(tmp_path: Path) -> None:
+    """The upload estimator must reproduce @todesktop/cli's selection rules.
+
+    App files drop node_modules/.git at any depth, .gitignore files, symlinks,
+    and appFiles-excluded prefixes; extraResources are priced whole (lstat) on
+    top, even when the same directory is excluded from app files. These are
+    exactly the semantics that made resources/ upload twice (701MB, 2026-07),
+    so the estimator asserting them is what keeps the build-time guard honest.
+    """
+    app_root = tmp_path / "app"
+    (app_root / "electron").mkdir(parents=True)
+    (app_root / "electron" / "main.js").write_bytes(b"m" * 1_000)
+    (app_root / "node_modules" / "dep").mkdir(parents=True)
+    (app_root / "node_modules" / "dep" / "big.js").write_bytes(b"n" * 50_000)
+    (app_root / "nested").mkdir()
+    (app_root / "nested" / "node_modules").mkdir()
+    (app_root / "nested" / "node_modules" / "inner.js").write_bytes(b"n" * 40_000)
+    (app_root / ".gitignore").write_bytes(b"resources/\n")
+    (app_root / "electron" / "main-link.js").symlink_to("main.js")
+    resources_dir = app_root / "resources"
+    (resources_dir / "latchkey" / "node_modules").mkdir(parents=True)
+    (resources_dir / "latchkey" / "node_modules" / "dep.js").write_bytes(b"r" * 30_000)
+    (resources_dir / "payload.bin").write_bytes(b"r" * 20_000)
+    icon = app_root / "icon.png"
+    icon.write_bytes(b"i" * 500)
+
+    config = {
+        "appFiles": ["**", "!resources/**"],
+        "extraResources": [{"from": "resources/", "to": "."}],
+        "icon": "./icon.png",
+        "uploadSizeLimit": 600,
+    }
+    result = _run_download_binaries_function(
+        "console.log(JSON.stringify(db.estimateToDesktopUploadBytes(process.argv[2], JSON.parse("
+        + json.dumps(json.dumps(config))
+        + "))));",
+        str(app_root),
+    )
+    assert result.returncode == 0, f"estimator failed:\nstderr:\n{result.stderr}"
+    estimate = json.loads(result.stdout)
+    # App files: electron/main.js (1000) plus icon.png (500) -- the icon
+    # matches '**' AND uploads again to icons/, mirroring the real CLI.
+    # node_modules at both depths, the symlink, the .gitignore file, and
+    # resources/** are all out.
+    assert estimate["appFilesBytes"] == 1_500
+    # Extra: the whole resources tree INCLUDING its nested node_modules
+    # (30000 + 20000) plus the 500-byte icon again.
+    assert estimate["extraBytes"] == 50_500
+    assert estimate["totalBytes"] == 52_000
+
+
+def test_estimate_todesktop_upload_rejects_unsupported_globs(tmp_path: Path) -> None:
+    """Unsupported appFiles shapes must throw rather than silently mis-estimate.
+
+    The estimator only models the glob shapes this repo uses ('**' and
+    '!<dir>/**'); anything fancier must fail loudly so the guard is extended
+    together with todesktop.js instead of drifting from the real zip.
+    """
+    app_root = tmp_path / "app"
+    app_root.mkdir()
+    (app_root / "main.js").write_bytes(b"m")
+    config = {"appFiles": ["dist/**"], "uploadSizeLimit": 600}
+    result = _run_download_binaries_function(
+        "db.estimateToDesktopUploadBytes(process.argv[2], JSON.parse(" + json.dumps(json.dumps(config)) + "));",
+        str(app_root),
+    )
+    assert result.returncode != 0
+    assert "only understands" in result.stderr
+
+
+def test_assert_upload_fits_todesktop_limit_enforces_the_limit(tmp_path: Path) -> None:
+    """The whole-upload guard must fail past uploadSizeLimit and pass under it.
+
+    Uses a sparse file so a >limit tree is instant to create. The passing case
+    re-runs with a limit above the tree size.
+    """
+    app_root = tmp_path / "app"
+    app_root.mkdir()
+    (app_root / "main.js").write_bytes(b"m" * 1_000)
+    sparse = app_root / "huge.bin"
+    sparse.touch()
+    os.truncate(sparse, 700 * 1_000_000)
+
+    def run_with_limit(limit_mb: int) -> subprocess.CompletedProcess[str]:
+        config = {"uploadSizeLimit": limit_mb}
+        return _run_download_binaries_function(
+            "db.assertUploadFitsToDesktopLimit(process.argv[2], JSON.parse(" + json.dumps(json.dumps(config)) + "));",
+            str(app_root),
+        )
+
+    over = run_with_limit(600)
+    assert over.returncode != 0, "700MB of app files must fail a 600MB limit"
+    assert "uploadSizeLimit" in over.stderr
+    under = run_with_limit(800)
+    assert under.returncode == 0, f"700MB of app files must pass an 800MB limit:\nstderr:\n{under.stderr}"
+
+
+def test_todesktop_config_excludes_resources_from_app_files() -> None:
+    """Drift guard: resources/ must stay excluded from the app-files upload.
+
+    resources/ travels whole via extraResources (which is also the only way
+    its nested latchkey node_modules reaches the builder -- the app-files glob
+    always strips **/node_modules). If the exclusion is dropped, the tree
+    uploads twice and the app-source upload returns to ~700MB against the
+    600MB limit.
+    """
+    config = _load_todesktop_config()
+    app_files = config.get("appFiles")
+    assert app_files is not None and "!resources/**" in app_files, (
+        "todesktop.js appFiles must exclude resources/** -- it already uploads whole "
+        "via extraResources, and without the exclusion the upload doubles (701MB, 2026-07)"
+    )
+    assert "**" in app_files, "todesktop.js appFiles must still include '**' for the app code"
+    extra_resource_sources = [entry["from"] for entry in config.get("extraResources", [])]
+    assert "resources/" in extra_resource_sources, (
+        "todesktop.js must keep uploading resources/ via extraResources; the appFiles "
+        "exclusion assumes that channel delivers the staged binaries to the builder"
     )

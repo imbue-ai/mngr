@@ -557,17 +557,20 @@ function measureTreeAsArchived(rootDir) {
 }
 
 // Symlink materialization above this is treated as a regression of the class
-// that broke the 2026-07 launch-to-msg build (142 payload symlinks zipped as
-// ~480MB of git-binary copies). Legitimate symlinks in resources/ are tiny
-// (lima's share/doc templates dir), so a generous threshold keeps false
-// positives out while still failing long before the upload limit is at risk.
+// that hit the 2026-07 launch-to-msg builds. ToDesktop itself prices
+// symlinks harmlessly (its app-files glob drops them; get-folder-size lstats
+// them), but symlink-DEREFERENCING copiers downstream -- electron-builder's
+// extraResources copy into the final .app, naive cpSync/rsync mirrors --
+// would materialize a full copy per link (~480MB for the raw dugite payload).
+// Legitimate symlinks in resources/ are tiny (lima's share/doc templates
+// dir), so a generous threshold keeps false positives out.
 const MAX_SYMLINK_INFLATION_BYTES = 64 * 1024 * 1024;
 
 /**
- * Fail the build if `rootDir`, measured as a symlink-following archive,
- * either inflates by more than MAX_SYMLINK_INFLATION_BYTES over its real
- * size or alone exceeds the whole ToDesktop upload budget. Warn when it
- * consumes most of the budget. Returns the measurement for logging.
+ * Fail the build if `rootDir` would balloon past MAX_SYMLINK_INFLATION_BYTES
+ * when copied by anything that dereferences symlinks (see the constant's
+ * comment), or if even its real size alone exceeds the whole ToDesktop
+ * upload budget. Returns the measurement for logging.
  */
 function assertTreeFitsUploadBudget(rootDir, { uploadSizeLimitMb, label }) {
   const measurement = measureTreeAsArchived(rootDir);
@@ -576,28 +579,122 @@ function assertTreeFitsUploadBudget(rootDir, { uploadSizeLimitMb, label }) {
   const asMb = (bytes) => (bytes / (1024 * 1024)).toFixed(1);
   if (inflationBytes > MAX_SYMLINK_INFLATION_BYTES) {
     throw new Error(
-      `${label} contains ${symlinkCount} symlinks that a symlink-following archiver ` +
-      `(ToDesktop's app-source zip) would materialize into +${asMb(inflationBytes)}MB ` +
-      `(${asMb(realBytes)}MB real -> ${asMb(archivedBytes)}MB zipped), risking the ` +
-      `${uploadSizeLimitMb}MB uploadSizeLimit in todesktop.js. Replace the offending ` +
-      `symlinks with shims (see convertGitPayloadSymlinksToShims) instead of raising the limit.`,
+      `${label} contains ${symlinkCount} symlinks that a symlink-dereferencing copier ` +
+      `(e.g. electron-builder's extraResources copy into the final app) would materialize ` +
+      `into +${asMb(inflationBytes)}MB (${asMb(realBytes)}MB real -> ${asMb(archivedBytes)}MB ` +
+      `copied). Replace the offending symlinks with shims ` +
+      `(see convertGitPayloadSymlinksToShims) instead of shipping them.`,
     );
   }
   const limitBytes = uploadSizeLimitMb * 1024 * 1024;
-  if (archivedBytes > limitBytes) {
+  if (realBytes > limitBytes) {
     throw new Error(
-      `${label} alone zips to ${asMb(archivedBytes)}MB, over the ${uploadSizeLimitMb}MB ` +
+      `${label} alone is ${asMb(realBytes)}MB, over the ${uploadSizeLimitMb}MB ` +
       `uploadSizeLimit in todesktop.js -- the ToDesktop upload cannot succeed. ` +
       `Shrink the staged binaries before raising the limit.`,
     );
   }
-  if (archivedBytes > limitBytes * 0.75) {
-    console.warn(
-      `[download-binaries] WARNING: ${label} zips to ${asMb(archivedBytes)}MB, over 75% of the ` +
-      `${uploadSizeLimitMb}MB ToDesktop uploadSizeLimit; app code and node_modules ride on top of this.`,
+  return measurement;
+}
+
+/**
+ * Estimate the ToDesktop app-source upload in bytes, mirroring how
+ * @todesktop/cli@1.23 composes it (dist/cli.js, uploadApplicationSource):
+ *
+ * - App files: every regular file under the app root matching `appFiles`
+ *   (default `['**']`), always minus `node_modules` and `.git` at any depth
+ *   and minus `.gitignore` files. Symlinks contribute NOTHING here -- the
+ *   CLI globs with `followSymbolicLinks: false, onlyFiles: true`, which
+ *   drops them. NOTE: gitignored *content* is NOT excluded; only the
+ *   `.gitignore` files themselves are.
+ * - `extraResources` / `extraContentFiles`: each `from` is uploaded whole
+ *   and priced via get-folder-size (lstat, so symlinks at link size),
+ *   REGARDLESS of the appFiles globs. This is why resources/ must be
+ *   excluded from appFiles or the whole tree uploads twice (the 701MB
+ *   launch-to-msg failures, 2026-07).
+ * - Icons / entitlements: individual small files; the icon is counted for
+ *   completeness, the rest is noise.
+ *
+ * Only the appFiles shapes this repo uses are supported: a positive `**`
+ * plus `!<dir>/**` exclusions. Any other shape throws, so the estimate can
+ * never silently diverge from the real zip's selection semantics.
+ */
+function estimateToDesktopUploadBytes(appRoot, todesktopConfig) {
+  const appFilesGlobs = todesktopConfig.appFiles || ['**'];
+  const excludedPrefixes = [];
+  for (const glob of appFilesGlobs) {
+    if (glob === '**') continue;
+    const exclusionMatch = /^!([A-Za-z0-9._/-]+)\/\*\*$/.exec(glob);
+    if (exclusionMatch) {
+      excludedPrefixes.push(exclusionMatch[1] + '/');
+      continue;
+    }
+    throw new Error(
+      `estimateToDesktopUploadBytes only understands '**' and '!<dir>/**' appFiles ` +
+      `patterns; got ${JSON.stringify(glob)}. Extend the estimator alongside todesktop.js.`,
     );
   }
-  return measurement;
+
+  let appFilesBytes = 0;
+  const walkAppFiles = (dir, relativePrefix) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name === 'node_modules' || entry.name === '.git') continue;
+      const relativePath = relativePrefix + entry.name;
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) {
+        if (excludedPrefixes.some((prefix) => (relativePath + '/').startsWith(prefix))) continue;
+        walkAppFiles(path.join(dir, entry.name), relativePath + '/');
+      } else if (entry.isFile()) {
+        if (entry.name === '.gitignore') continue;
+        if (excludedPrefixes.some((prefix) => relativePath.startsWith(prefix))) continue;
+        appFilesBytes += fs.lstatSync(path.join(dir, entry.name)).size;
+      }
+    }
+  };
+  walkAppFiles(appRoot, '');
+
+  let extraBytes = 0;
+  const extraEntries = [
+    ...(todesktopConfig.extraResources || []),
+    ...(todesktopConfig.extraContentFiles || []),
+  ];
+  for (const { from } of extraEntries) {
+    const fromPath = path.resolve(appRoot, from);
+    const stats = fs.lstatSync(fromPath);
+    extraBytes += stats.isDirectory() ? measureTreeAsArchived(fromPath).realBytes : stats.size;
+  }
+  if (todesktopConfig.icon) {
+    extraBytes += fs.lstatSync(path.resolve(appRoot, todesktopConfig.icon)).size;
+  }
+  return { appFilesBytes, extraBytes, totalBytes: appFilesBytes + extraBytes };
+}
+
+/**
+ * Fail the build if the estimated ToDesktop app-source upload exceeds
+ * todesktop.js's `uploadSizeLimit`; warn when it consumes most of it.
+ * Returns the estimate for logging.
+ */
+function assertUploadFitsToDesktopLimit(appRoot, todesktopConfig) {
+  const uploadSizeLimitMb = todesktopConfig.uploadSizeLimit;
+  const estimate = estimateToDesktopUploadBytes(appRoot, todesktopConfig);
+  // The CLI compares against uploadSizeLimit * 1e6 (decimal megabytes).
+  const limitBytes = uploadSizeLimitMb * 1e6;
+  const asMb = (bytes) => (bytes / 1e6).toFixed(1);
+  if (estimate.totalBytes > limitBytes) {
+    throw new Error(
+      `estimated ToDesktop app-source upload is ${asMb(estimate.totalBytes)}MB ` +
+      `(app files ${asMb(estimate.appFilesBytes)}MB + extraResources/icon ${asMb(estimate.extraBytes)}MB), ` +
+      `over the ${uploadSizeLimitMb}MB uploadSizeLimit in todesktop.js. Trim what uploads ` +
+      `(appFiles exclusions, staged binaries) rather than raising the limit.`,
+    );
+  }
+  if (estimate.totalBytes > limitBytes * 0.85) {
+    console.warn(
+      `[download-binaries] WARNING: estimated ToDesktop upload ${asMb(estimate.totalBytes)}MB is over ` +
+      `85% of the ${uploadSizeLimitMb}MB uploadSizeLimit in todesktop.js.`,
+    );
+  }
+  return estimate;
 }
 
 /**
@@ -642,6 +739,8 @@ beforeInstall.download = download;
 beforeInstall.convertGitPayloadSymlinksToShims = convertGitPayloadSymlinksToShims;
 beforeInstall.measureTreeAsArchived = measureTreeAsArchived;
 beforeInstall.assertTreeFitsUploadBudget = assertTreeFitsUploadBudget;
+beforeInstall.estimateToDesktopUploadBytes = estimateToDesktopUploadBytes;
+beforeInstall.assertUploadFitsToDesktopLimit = assertUploadFitsToDesktopLimit;
 module.exports = beforeInstall;
 
 if (require.main === module) {
