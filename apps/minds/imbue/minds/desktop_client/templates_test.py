@@ -81,6 +81,20 @@ def test_render_landing_page_has_open_in_new_window_button_before_settings() -> 
     assert html.index("window.landingOpenInNewWindow") < html.index(f"/workspace/{_AGENT_A}/settings")
 
 
+def test_render_landing_page_backup_badge_ships_tooltip_attr_for_load_time_wiring() -> None:
+    # The backup badge starts empty and only turns into an error pill (with a
+    # per-workspace failure message) at runtime. tooltip_triggers.js wires its
+    # hover handlers ONCE at load, over the elements that carry data-tooltip at
+    # that moment (it is not event-delegated), so the badge must ship the
+    # attribute -- empty is fine -- in its initial markup. Without it the badge
+    # is never wired and the error-state tooltip added later silently never
+    # fires. Guarding the attribute's presence protects that non-obvious link.
+    html = render_landing_page(accessible_agent_ids=(_AGENT_A,))
+    badge_tag = re.search(r'<span class="landing-backup-badge[^>]*>', html)
+    assert badge_tag is not None, "landing backup badge span not found"
+    assert "data-tooltip" in badge_tag.group(0)
+
+
 def test_render_workspace_settings_data_agent_id_interpolates() -> None:
     html = render_workspace_settings(
         agent_id=str(_AGENT_A),

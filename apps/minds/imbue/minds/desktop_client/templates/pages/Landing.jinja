@@ -422,6 +422,8 @@
         text = 'Backed up ' + relativeAgo(status.last_success_at); tone = 'bg-success/15 text-success';
       } else if (state === 'NEVER') {
         text = 'Backup pending'; tone = 'bg-warning/15 text-warning';
+      } else if (state === 'ERROR') {
+        text = 'Backup status unavailable'; tone = 'bg-warning/15 text-warning';
       } else if (state === 'UNKNOWN') {
         text = 'Backup status unknown'; tone = 'bg-fill-subtle text-secondary';
       } else {
@@ -434,6 +436,16 @@
       }
       badge.textContent = text;
       badge.className = BACKUP_BADGE_BASE + tone;
+      // The badge's generic label only says something is wrong; the specific
+      // failure rides a hover tooltip, set only in the error state. The base
+      // markup carries an empty data-tooltip so tooltip_triggers wires the hover
+      // once at load (it is not event-delegated); here we vary its value, and an
+      // empty value is a no-op in the trigger, so non-error states show nothing.
+      if (state === 'ERROR') {
+        badge.setAttribute('data-tooltip', 'Could not read backup status from this machine: ' + (status.error || 'unknown error'));
+      } else {
+        badge.setAttribute('data-tooltip', '');
+      }
       // Show via inline display, clearing any `display:none` a prior
       // clearBackupChecking set (a `.hidden` class can't hide this inline-flex
       // pill, so we drive visibility through style.display).
@@ -497,6 +509,8 @@
       document.querySelectorAll('.landing-backup-badge').forEach(function (badge) {
         badge.textContent = BACKUP_CHECKING_TEXT;
         badge.className = BACKUP_BADGE_BASE + 'bg-fill-subtle text-secondary';
+        // Drop any error tooltip from a prior cycle while re-checking.
+        badge.setAttribute('data-tooltip', '');
         badge.style.display = '';
       });
     }
@@ -519,7 +533,7 @@
     // map "has snapshots" -> BACKED_UP (last_success = newest snapshot's time)
     // and "no snapshots" -> the create-time fallback ("Created N ago" / "No
     // backups"). This keeps applyBackupBadge's visual output equivalent.
-    function deriveBackupStatus(snapshots, createTime, isBackingUp) {
+    function deriveBackupStatus(snapshots, createTime, isBackingUp, snapshotsError) {
       var latestTime = null;
       if (snapshots && snapshots.length > 0) {
         var latest = snapshots.reduce(function (a, b) {
@@ -535,6 +549,13 @@
       }
       if (latestTime) {
         return { state: 'BACKED_UP', last_success_at: latestTime };
+      }
+      // A failed listing with no readable snapshots is a real problem, not "no
+      // backups yet": surface it as an error rather than falling through to the
+      // create-time "No backups" fallback, so the row does not masquerade as
+      // simply un-backed-up (the specifics ride the badge's hover tooltip).
+      if (snapshotsError) {
+        return { state: 'ERROR', error: snapshotsError };
       }
       return { created_at: createTime || null };
     }
@@ -563,7 +584,7 @@
             return response.ok ? response.json() : null;
           }).catch(function () { return null; }).then(function (data) {
             var snapshots = (data && data.snapshots) || [];
-            applyBackupBadge(agentId, deriveBackupStatus(snapshots, createTimeByAgent[agentId], data && data.is_backing_up));
+            applyBackupBadge(agentId, deriveBackupStatus(snapshots, createTimeByAgent[agentId], data && data.is_backing_up, data && data.snapshots_error));
           }).catch(function (err) {
             console.error('Backup status fetch failed for', agentId, err);
           }).then(finishOne);
@@ -770,7 +791,7 @@
               {% if provider_label %}
                 <span class="landing-provider-badge inline-flex items-center px-2 py-0.5 rounded-md type-label bg-fill-subtle text-secondary">{{ provider_label }}</span>
               {% endif %}
-              <span class="landing-backup-badge inline-flex items-center px-2 py-0.5 rounded-md type-label" style="display:none"></span>
+              <span class="landing-backup-badge inline-flex items-center px-2 py-0.5 rounded-md type-label" data-tooltip="" style="display:none"></span>
               <Link href="#" class="landing-backup-download hidden cursor-pointer" extra="type-helper">download</Link>
               <span class="landing-mind-state-badge inline-flex items-center px-2 py-0.5 rounded-md type-label" style="display:none"></span>
               <span class="landing-health-badge inline-flex items-center px-2 py-0.5 rounded-md type-label" style="display:none"></span>
@@ -844,7 +865,7 @@
             {% elif remote.state == 'error' %}
               <span class="inline-flex items-center px-2 py-0.5 rounded-md type-label bg-fill-subtle text-important" data-tooltip="{{ remote.state_detail or 'Could not apply the synced access material.' }}">sync error</span>
             {% endif %}
-            <span class="landing-backup-badge inline-flex items-center px-2 py-0.5 rounded-md type-label" style="display:none"></span>
+            <span class="landing-backup-badge inline-flex items-center px-2 py-0.5 rounded-md type-label" data-tooltip="" style="display:none"></span>
             <Link href="#" class="landing-backup-download hidden cursor-pointer" extra="type-helper">download</Link>
             <Button variant="ghost" size="icon"
                     onclick="window.landingRemoveRecord(event, this)"

@@ -3,3 +3,5 @@ Fixed dev-mode (run-from-source) minds never finding the bundled restic binary: 
 The dev and packaged backend spawn env blocks in `electron/backend.js` now share a single `commonEnv` object for their mode-independent variables, so a variable added for one mode can no longer be silently missing from the other (the drift that caused the restic bug).
 
 Backup status read failures are now surfaced in the UI instead of being folded into an empty snapshot list: the workspace settings backup section shows the actual error ("Could not read backup status from this machine: ..."), and the sidebar/chrome backup warning badge also fires when the snapshot listing fails, not only on in-workspace service-check problems.
+
+The landing page's per-workspace backup badge now shows a distinct error state ("Backup status unavailable", in the warning style) when the snapshot listing fails, instead of silently reading as "No backups". Hovering the badge reveals the specific failure ("Could not read backup status from this machine: ..."), so a workspace that has backups but whose status can't be read no longer masquerades as un-backed-up.
