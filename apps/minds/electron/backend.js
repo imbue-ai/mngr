@@ -226,10 +226,8 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
       const configFileArgs = bundledClientConfig ? ['--config-file', bundledClientConfig] : [];
 
       // Env entries the Python backend needs in both spawn modes. Keep every
-      // mode-independent variable here: when the two modes maintained separate
-      // literals, a var added to one was silently missing from the other
-      // (MINDS_RESTIC_BINARY was absent in dev mode this way, breaking backup
-      // status for run-from-source builds).
+      // mode-independent variable here rather than in the per-mode literals, so
+      // a variable added for one mode cannot be silently missing from the other.
       const commonEnv = {
         ...process.env,
         MINDS_ELECTRON: '1',
