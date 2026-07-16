@@ -62,7 +62,6 @@ from imbue.mngr_kanpan.tui import _FieldCellMarkupFn
 from imbue.mngr_kanpan.tui import _FieldCellTextFn
 from imbue.mngr_kanpan.tui import _KanpanInputHandler
 from imbue.mngr_kanpan.tui import _KanpanState
-from imbue.mngr_kanpan.tui import _LegendText
 from imbue.mngr_kanpan.tui import _assemble_column_defs
 from imbue.mngr_kanpan.tui import _batch_item_label
 from imbue.mngr_kanpan.tui import _build_agent_row
@@ -87,7 +86,6 @@ from imbue.mngr_kanpan.tui import _field_cell_markup
 from imbue.mngr_kanpan.tui import _field_cell_text
 from imbue.mngr_kanpan.tui import _find_entry_by_name
 from imbue.mngr_kanpan.tui import _finish_batch_execution
-from imbue.mngr_kanpan.tui import _fit_legend_markup
 from imbue.mngr_kanpan.tui import _flatten_markup_to_attr
 from imbue.mngr_kanpan.tui import _focus_row_by_name
 from imbue.mngr_kanpan.tui import _format_section_heading
@@ -105,11 +103,13 @@ from imbue.mngr_kanpan.tui import _make_reply_edit
 from imbue.mngr_kanpan.tui import _on_batch_item_poll
 from imbue.mngr_kanpan.tui import _on_peek_capture_poll
 from imbue.mngr_kanpan.tui import _on_peek_reply_poll
+from imbue.mngr_kanpan.tui import _on_stamp_tick
 from imbue.mngr_kanpan.tui import _on_transient_expire
 from imbue.mngr_kanpan.tui import _peek_body_lines
 from imbue.mngr_kanpan.tui import _peek_body_markup
 from imbue.mngr_kanpan.tui import _prune_orphaned_marks
 from imbue.mngr_kanpan.tui import _refresh_display
+from imbue.mngr_kanpan.tui import _refresh_stamp
 from imbue.mngr_kanpan.tui import _render_footer
 from imbue.mngr_kanpan.tui import _resolve_section_order
 from imbue.mngr_kanpan.tui import _run_shell_command
@@ -123,6 +123,7 @@ from imbue.mngr_kanpan.tui import _unmark_all
 from imbue.mngr_kanpan.tui import _unmark_focused
 from imbue.mngr_kanpan.tui import _update_mark_count_footer
 from imbue.mngr_kanpan.tui import _update_peek_header
+from imbue.mngr_kanpan.tui import _update_refresh_stamp
 from imbue.mngr_kanpan.tui import _update_row_mark
 from imbue.mngr_kanpan.tui import _update_snapshot_mute
 from imbue.mngr_kanpan.tui import _write_terminal_title
@@ -2007,42 +2008,36 @@ def test_write_terminal_title_emits_osc_zero() -> None:
     assert out.getvalue() == "\x1b]0;kanpan\x07"
 
 
-def test_fit_legend_markup_wide_shows_everything() -> None:
-    markup = _fit_legend_markup([("space", "peek")], [("q", "quit"), ("?", "help")], 200, "k", "t", "  ")
-    text = "".join(part[1] for part in markup)
-    assert "space" in text
-    assert "…" not in text
-    assert text.endswith("?: help")
+def test_refresh_stamp_just_now_includes_fetch_duration() -> None:
+    assert _refresh_stamp(3.0, 2.84) == "  refreshed just now \u00b7 2.8s"
 
 
-def test_fit_legend_markup_narrow_hides_bindings_behind_overflow_keeping_tail() -> None:
-    bindings = [("space", "peek"), ("enter", "attach"), ("r", "refresh"), ("p", "mark push")]
-    markup = _fit_legend_markup(bindings, [("q", "quit"), ("?", "help")], 40, "k", "t", "  ")
-    text = "".join(part[1] for part in markup)
-    assert len(text) <= 40
-    assert "…" in text
-    assert "attach" not in text
-    assert "q: quit" in text
-    assert "?: help" in text
+def test_refresh_stamp_just_now_without_duration() -> None:
+    assert _refresh_stamp(3.0, None) == "  refreshed just now"
 
 
-def test_fit_legend_markup_tiny_width_keeps_only_tail() -> None:
-    markup = _fit_legend_markup([("space", "peek")], [("q", "quit")], 14, "k", "t", "  ")
-    assert "".join(part[1] for part in markup) == "…  q: quit"
+def test_refresh_stamp_ages_and_drops_duration() -> None:
+    assert _refresh_stamp(32.0, 2.8) == "  refreshed 32s ago"
+    assert _refresh_stamp(300.0, 2.8) == "  refreshed 5m ago"
+    assert _refresh_stamp(7300.0, 2.8) == "  refreshed 2h ago"
 
 
-def test_legend_text_refits_to_render_width() -> None:
-    legend = _LegendText(
-        [("space", "peek"), ("enter", "attach"), ("r", "refresh"), ("p", "mark push"), ("d", "mark delete")],
-        [("q", "quit"), ("?", "help")],
-    )
-    wide = legend.render((120,)).text[0].decode("utf-8")
-    assert "refresh" in wide
-    assert "…" not in wide
-    narrow = legend.render((40,)).text[0].decode("utf-8")
-    assert "…" in narrow
-    assert "attach" not in narrow
-    assert "help" in narrow
+def test_update_refresh_stamp_noop_before_first_refresh() -> None:
+    state = _make_state()
+    state.steady_footer_text = "  Loading..."
+    _update_refresh_stamp(state)
+    assert state.steady_footer_text == "  Loading..."
+
+
+def test_stamp_tick_updates_footer_and_reschedules() -> None:
+    state = _make_state()
+    state.last_refresh_time = 1.0
+    scheduled: list[float] = []
+    loop = SimpleNamespace(set_alarm_in=lambda delay, cb, data: scheduled.append(delay))
+    _on_stamp_tick(cast(Any, loop), state)
+    assert state.steady_footer_text.startswith("  refreshed ")
+    assert state.steady_footer_text.endswith(" ago")
+    assert scheduled == [10.0]
 
 
 def test_question_mark_opens_help_overlay_and_any_close_key_restores_board() -> None:

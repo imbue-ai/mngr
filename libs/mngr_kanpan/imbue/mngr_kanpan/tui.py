@@ -7,7 +7,6 @@ from collections.abc import Sequence
 from concurrent.futures import Future
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from datetime import timezone
 from typing import Any
 from typing import assert_never
 
@@ -104,17 +103,20 @@ _TITLE_STACK_POP: str = "\x1b[23;0t"
 # Within a legend binding (`enter: attach`), NBSP keeps the key and its
 # description on one line, so a narrow footer wraps between bindings only.
 _LEGEND_NBSP: str = "\u00a0"
-# Stands in for the bindings hidden when the footer legend is too narrow.
-_LEGEND_OVERFLOW: str = "\u2026"
 # Space between legend bindings, shared by the footer and the peek hint.
 _LEGEND_SEPARATOR: str = "  "
+# The refresh stamp shows the fetch duration for this long, then ages to `5m ago`.
+_STAMP_JUST_NOW_SECONDS: float = 10.0
+# How often the relative refresh stamp re-renders while the board is idle.
+_STAMP_TICK_SECONDS: float = 10.0
 
 PALETTE = [
     ("header", "white", "dark blue"),
+    # The footer is a full-width blue belt separating the board from the terminal.
     ("footer", "white", "dark blue"),
-    # Keys inside legends (`enter: attach`), visually distinct from their descriptions.
+    # Keys inside the footer legend, visually distinct from their descriptions.
     ("footer_key", "yellow,bold", "dark blue"),
-    # Same role as footer_key for default-background contexts (the ? overlay).
+    # Key accent for default-background legends (the peek hint and the ? overlay).
     ("help_key", "dark cyan,bold", ""),
     ("reversed", "standout", ""),
     # Agent states: only RUNNING and WAITING-needing-attention get color
@@ -385,6 +387,8 @@ class _KanpanState(MutableModel):
     commands: dict[str, KanpanCommand] = {}
     # Monotonic timestamp of the last completed refresh (for cooldown logic)
     last_refresh_time: float = 0.0
+    # Fetch duration of the last full refresh, shown briefly in the stamp.
+    last_fetch_seconds: float | None = None
     # Whether the current in-flight refresh is local-only (no GitHub API)
     refresh_is_local_only: bool = False
     # Handle for the pending deferred refresh alarm (None if no alarm is pending)
@@ -1144,76 +1148,6 @@ def _legend_markup(
     return markup
 
 
-def _legend_unit_width(binding: tuple[str, str]) -> int:
-    """Rendered width of one `key: description` legend unit."""
-    key, description = binding
-    return len(key) + 2 + len(description)
-
-
-def _fit_legend_markup(
-    bindings: Sequence[tuple[str, str]],
-    tail: Sequence[tuple[str, str]],
-    maxcol: int,
-    key_attr: str,
-    text_attr: str,
-    separator: str,
-) -> list[str | tuple[Hashable, str]]:
-    """Legend markup fitted to ``maxcol``: greedy prefix of ``bindings``, then ``tail``.
-
-    ``tail`` (e.g. `q: quit  ?: help`) is always shown. When not every binding
-    fits, the hidden ones are represented by a dim ``…`` before the tail.
-    """
-    sep_width = len(separator)
-    tail_width = sum(_legend_unit_width(b) for b in tail) + sep_width * max(len(tail) - 1, 0)
-    total_width = tail_width + sum(_legend_unit_width(b) + sep_width for b in bindings)
-    if total_width <= maxcol:
-        shown = list(bindings)
-        hidden = False
-    else:
-        shown = []
-        hidden = True
-        used = tail_width + sep_width + len(_LEGEND_OVERFLOW)
-        for binding in bindings:
-            width = _legend_unit_width(binding) + sep_width
-            if used + width > maxcol:
-                break
-            shown.append(binding)
-            used += width
-    markup = _legend_markup(shown, key_attr, text_attr, separator)
-    if hidden:
-        if markup:
-            markup.append((text_attr, separator))
-        markup.append((text_attr, _LEGEND_OVERFLOW))
-    if markup:
-        markup.append((text_attr, separator))
-    markup.extend(_legend_markup(tail, key_attr, text_attr, separator))
-    return markup
-
-
-class _LegendText(Text):
-    """Key legend that refits its bindings to the actual width at render time.
-
-    Never wraps: whole `key: description` units are dropped (behind ``…``) when
-    the footer is too narrow, and the tail bindings stay visible at any width.
-    """
-
-    def __init__(self, bindings: Sequence[tuple[str, str]], tail: Sequence[tuple[str, str]]) -> None:
-        self._bindings = list(bindings)
-        self._tail = list(tail)
-        self._fitted_maxcol = -1
-        super().__init__("", align="right", wrap="clip")
-
-    def render(self, size: tuple[int, ...], focus: bool = False) -> TextCanvas:
-        (maxcol,) = size
-        if maxcol != self._fitted_maxcol:
-            self._fitted_maxcol = maxcol
-            # Reserve a 2-column right margin so the legend does not touch the edge.
-            self.set_text(
-                _fit_legend_markup(self._bindings, self._tail, maxcol - 2, "footer_key", "footer", _LEGEND_SEPARATOR)
-            )
-        return super().render((maxcol,), focus)
-
-
 def _build_help_overlay(state: _KanpanState) -> Any:
     """A bordered panel over the board listing every key binding, sized to its content.
 
@@ -1280,10 +1214,7 @@ def _build_peek_panel(state: _KanpanState) -> LineBox:
     """Build the peek panel (a bordered box shown in place of the footer) and stash its parts."""
     state.peek_body_text = Text("", wrap="space")
     state.peek_input = _make_reply_edit(("peek_user", PEEK_REPLY_PROMPT))
-    hint = AttrMap(
-        Text(_legend_markup([("enter", "send"), ("esc", "close")], "footer_key", "footer", _LEGEND_SEPARATOR)),
-        "footer",
-    )
+    hint = Text(_legend_markup([("enter", "send"), ("esc", "close")], "help_key", "peek_hint", _LEGEND_SEPARATOR))
     inner = Pile(
         [
             state.peek_body_text,
@@ -1597,6 +1528,36 @@ def _on_custom_command_poll(
         loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_custom_command_poll, data)
 
 
+def _refresh_stamp(seconds_ago: float, fetch_seconds: float | None) -> str:
+    """Relative footer stamp for the last full refresh, e.g. `  refreshed 5m ago`.
+
+    The fetch duration only shows in the just-now window, so it fades once stale.
+    """
+    if seconds_ago < _STAMP_JUST_NOW_SECONDS:
+        took = f" \u00b7 {fetch_seconds:.1f}s" if fetch_seconds is not None else ""
+        return f"  refreshed just now{took}"
+    if seconds_ago < 60:
+        return f"  refreshed {int(seconds_ago)}s ago"
+    if seconds_ago < 3600:
+        return f"  refreshed {int(seconds_ago // 60)}m ago"
+    return f"  refreshed {int(seconds_ago // 3600)}h ago"
+
+
+def _update_refresh_stamp(state: _KanpanState) -> None:
+    """Recompute the steady footer text from the time of the last full refresh."""
+    if not state.last_refresh_time:
+        return
+    seconds_ago = time.monotonic() - state.last_refresh_time
+    state.steady_footer_text = _refresh_stamp(seconds_ago, state.last_fetch_seconds)
+
+
+def _on_stamp_tick(loop: MainLoop, state: _KanpanState) -> None:
+    """Alarm callback: age the relative refresh stamp and re-render the footer."""
+    _update_refresh_stamp(state)
+    _render_footer(state)
+    loop.set_alarm_in(_STAMP_TICK_SECONDS, _on_stamp_tick, state)
+
+
 def _marks_footer_text(state: _KanpanState) -> str:
     """Build the footer text summarizing the currently marked agents."""
     counts: dict[str, int] = {}
@@ -1800,12 +1761,9 @@ def _finish_refresh(loop: MainLoop, state: _KanpanState) -> None:
     _refresh_display(state)
     _prune_orphaned_marks(state)
 
-    now = datetime.now(tz=timezone.utc).strftime("%H:%M:%S")
-    if state.snapshot is not None:
-        elapsed = f"{state.snapshot.fetch_time_seconds:.1f}s"
-        state.steady_footer_text = f"  Last refresh: {now} (took {elapsed})"
-    else:
-        state.steady_footer_text = f"  Last refresh: {now}"
+    if state.snapshot is not None and not was_local_only:
+        state.last_fetch_seconds = state.snapshot.fetch_time_seconds
+    _update_refresh_stamp(state)
     _render_footer(state)
 
     if failed:
@@ -2355,9 +2313,8 @@ def run_kanpan(
     data_sources = collect_data_sources(mngr_ctx)
     initial_cached_fields = load_field_cache(mngr_ctx, data_sources)
 
-    # Footer key legend, most-used first: when the footer is narrow the tail of this
-    # list disappears behind `…` (the `?` overlay still lists everything), while the
-    # `legend_tail` bindings stay visible at any width.
+    # The footer legend shows only the core bindings; everything else (builtin
+    # commands, marks, configured shell commands) is listed by the `?` overlay.
     mark_keys = {_BUILTIN_COMMAND_KEY_UNMARK}
     mark_bindings = [
         (key, cmd.name) for key, cmd in commands.items() if _mark_color(cmd) is not None or key in mark_keys
@@ -2368,12 +2325,19 @@ def run_kanpan(
     ]
     legend_bindings = [("space", "peek"), ("enter", "attach"), *action_bindings, *mark_bindings]
     legend_tail = [("q", "quit"), ("?", "help")]
+    footer_legend = [("space", "peek"), ("enter", "attach"), ("q", "quit"), ("?", "more keys")]
 
     footer_left_text = Text("  Loading...")
     footer_left_attr = AttrMap(footer_left_text, "footer")
-    footer_right = _LegendText(legend_bindings, legend_tail)
-    footer_items: list[Any] = [("pack", footer_left_attr), AttrMap(footer_right, "footer")]
-    footer_columns = Columns(footer_items, dividechars=1)
+    footer_right = Text(
+        [*_legend_markup(footer_legend, "footer_key", "footer", _LEGEND_SEPARATOR), ("footer", "  ")],
+        align="right",
+        wrap="clip",
+    )
+    footer_items: list[Any] = [("pack", footer_left_attr), footer_right]
+    # One AttrMap over the whole row keeps the belt continuous (no unpainted gap
+    # between the left status and the right legend).
+    footer_columns = AttrMap(Columns(footer_items, dividechars=1), "footer")
     footer = Pile([Divider(), footer_columns])
 
     is_filtered = bool(include_filters or exclude_filters)
@@ -2432,6 +2396,7 @@ def run_kanpan(
 
         # Initial data load with spinner
         _start_refresh(loop, state)
+        loop.set_alarm_in(_STAMP_TICK_SECONDS, _on_stamp_tick, state)
 
         screen.write(_TITLE_STACK_PUSH)
         _write_terminal_title(screen, TERMINAL_TITLE)
