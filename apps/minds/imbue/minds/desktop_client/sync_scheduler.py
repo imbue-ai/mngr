@@ -42,6 +42,13 @@ _SYNC_TICK_SECONDS = 60.0
 # How often the loop re-checks for the first complete discovery snapshot
 # before the first reconcile can run.
 _DISCOVERY_POLL_SECONDS = 2.0
+# How long :meth:`WorkspaceSyncScheduler.stop` waits for an in-flight pass to
+# finish before giving up. Shutdown stops this loop before it tears down the
+# shared mngr caller, so a pass that is mid-``mngr`` call must be allowed to
+# complete (otherwise its next call would race the caller's teardown). Bounded
+# so a wedged pass cannot stall shutdown indefinitely; it matches the root
+# concurrency group's own shutdown budget.
+_STOP_WAIT_TIMEOUT_SECONDS = 10.0
 
 
 class InitialSyncState(UpperCaseStrEnum):
@@ -85,6 +92,7 @@ class WorkspaceSyncScheduler(MutableModel):
     )
     _kick_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     _stop_event: threading.Event = PrivateAttr(default_factory=threading.Event)
+    _exited_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     _initial_sync_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _initial_sync_by_user_id: dict[str, InitialSyncStatus] = PrivateAttr(default_factory=dict)
 
@@ -92,9 +100,21 @@ class WorkspaceSyncScheduler(MutableModel):
         """Request an immediate sync pass (sign-in/out, password change, association)."""
         self._kick_event.set()
 
-    def stop(self) -> None:
+    def stop(self, wait_timeout_seconds: float = _STOP_WAIT_TIMEOUT_SECONDS) -> None:
+        """Signal the loop to exit and block until the in-flight pass (if any) finishes.
+
+        Setting ``_stop_event`` wakes the loop from its inter-pass wait, but it
+        cannot interrupt a pass already running. Callers rely on this method to
+        establish an ordering guarantee at shutdown: once it returns (barring a
+        wedged pass that exceeds ``wait_timeout_seconds``), no ``run_one_pass``
+        is in flight, so the shared mngr caller can be torn down without a pass
+        racing it. Safe to call before :meth:`start` (the wait returns
+        immediately since no loop has run).
+        """
         self._stop_event.set()
         self._kick_event.set()
+        if not self._exited_event.wait(timeout=wait_timeout_seconds):
+            logger.warning("workspace-record sync loop did not stop within {}s", wait_timeout_seconds)
 
     def note_account_signin(self, user_id: str, email: str) -> None:
         """Track a just-signed-in account whose records are not local yet, then kick a pass.
@@ -210,20 +230,27 @@ class WorkspaceSyncScheduler(MutableModel):
             self._mark_pending_initial_syncs_failed(str(e))
 
     def _loop(self) -> None:
-        # The first pass waits for a complete discovery snapshot so records
-        # can be built with real metadata (names, providers, host ids).
-        while not self._stop_event.is_set() and not self.resolver.has_completed_initial_discovery():
-            self._stop_event.wait(_DISCOVERY_POLL_SECONDS)
-        while not self._stop_event.is_set():
-            # Clear BEFORE the pass: a kick arriving mid-pass then stays set,
-            # so the wait below returns immediately and the request is served
-            # by the next pass instead of being lost.
-            self._kick_event.clear()
-            self.run_one_pass_guarded()
-            self._kick_event.wait(_SYNC_TICK_SECONDS)
+        # ``_exited_event`` is what :meth:`stop` blocks on, so it must be set on
+        # every exit path (clean stop or an unexpected escape) -- otherwise a
+        # shutdown would wait out the full timeout for a loop that is gone.
+        try:
+            # The first pass waits for a complete discovery snapshot so records
+            # can be built with real metadata (names, providers, host ids).
+            while not self._stop_event.is_set() and not self.resolver.has_completed_initial_discovery():
+                self._stop_event.wait(_DISCOVERY_POLL_SECONDS)
+            while not self._stop_event.is_set():
+                # Clear BEFORE the pass: a kick arriving mid-pass then stays set,
+                # so the wait below returns immediately and the request is served
+                # by the next pass instead of being lost.
+                self._kick_event.clear()
+                self.run_one_pass_guarded()
+                self._kick_event.wait(_SYNC_TICK_SECONDS)
+        finally:
+            self._exited_event.set()
 
     def start(self, concurrency_group: ConcurrencyGroup) -> None:
         """Start the daemon loop on the app's root concurrency group."""
+        self._exited_event.clear()
         concurrency_group.start_new_thread(
             target=self._loop,
             name="workspace-record-sync",

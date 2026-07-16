@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-15
+
+Added the `mngr imbue_cloud sync ...` transport CLI (records pull/push/delete, scrub-secrets, bundle pull/push/delete) plus the matching connector-client methods and wire models. Pure transport for the minds workspace-sync feature: the plugin never encrypts, decrypts, or interprets the secret payloads. Push commands accept `--input-file` so payloads never ride a command line.
+
 ## 2026-07-14
 
 Agent listings from this provider now populate `AgentDetails.pid` (the agent's main process PID in the remote host's PID namespace), extracted from the same already-collected tmux/ps probe data.
