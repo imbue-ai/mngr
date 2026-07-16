@@ -1,3 +1,1 @@
 Bug reports now attach the detached `mngr latchkey forward` daemon's logs (`events.jsonl` and `latchkey_forward.log` from the latchkey plugin data dir) and the shared mngr discovery event stream (`events.jsonl`), alongside the existing flat minds logs. These are where provider discovery actually logs and where the startup replay reads from, and their absence made discovery bugs (e.g. destroyed workspaces reappearing at startup) undiagnosable from a bug report alone.
-
-The snapshot-resume e2e test's expected core service set now matches the current default-workspace-template (`browser` instead of the removed blank `web` example service).
