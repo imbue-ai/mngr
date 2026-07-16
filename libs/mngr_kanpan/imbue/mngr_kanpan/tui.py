@@ -26,6 +26,7 @@ from urwid.widget.frame import Frame
 from urwid.widget.line_box import LineBox
 from urwid.widget.listbox import ListBox
 from urwid.widget.listbox import SimpleFocusListWalker
+from urwid.widget.overlay import Overlay
 from urwid.widget.pile import Pile
 from urwid.widget.text import Text
 from urwid_readline import ReadlineEdit
@@ -102,13 +103,17 @@ _TITLE_STACK_POP: str = "\x1b[23;0t"
 # Within a legend binding (`enter: attach`), NBSP keeps the key and its
 # description on one line, so a narrow footer wraps between bindings only.
 _LEGEND_NBSP: str = "\u00a0"
+# Stands in for the bindings hidden when the footer legend is too narrow.
+_LEGEND_OVERFLOW: str = "\u2026"
+# Space between legend bindings, shared by the footer and the peek hint.
+_LEGEND_SEPARATOR: str = "  "
 
 PALETTE = [
     ("header", "white", "dark blue"),
     ("footer", "white", "dark blue"),
     # Keys inside legends (`enter: attach`), visually distinct from their descriptions.
     ("footer_key", "yellow,bold", "dark blue"),
-    ("peek_hint_key", "light gray", ""),
+    ("peek_hint_key", "yellow,bold", ""),
     ("reversed", "standout", ""),
     # Agent states: only RUNNING and WAITING-needing-attention get color
     ("state_running", "light green", ""),
@@ -431,6 +436,10 @@ class _KanpanState(MutableModel):
     # Single-worker executor for replies, so several queued replies reach the agent
     # in submission order and their `mngr message` pastes cannot interleave.
     peek_reply_executor: ThreadPoolExecutor | None = None
+    # Every key binding shown by the `?` overlay, in display order.
+    legend_bindings: list[tuple[str, str]] = []
+    # The `?` overlay widget while it is open (None otherwise).
+    help_overlay: Any = None
 
 
 class _KanpanInputHandler(MutableModel):
@@ -442,10 +451,18 @@ class _KanpanInputHandler(MutableModel):
         """Handle keyboard input. Returns True if handled, None to pass through."""
         if isinstance(key, tuple):
             return None
+        # While the help overlay is open it owns the keyboard.
+        if self.state.help_overlay is not None:
+            if key in ("?", "esc", "q"):
+                _close_help(self.state)
+            return True
         # While the peek panel is open it owns the keyboard; printable keys have
         # already been consumed by its reply Edit before reaching here.
         if self.state.peek_agent_name is not None:
             return _handle_peek_key(self.state, key)
+        if key == "?":
+            _open_help(self.state)
+            return True
         if key == " ":
             _toggle_peek(self.state)
             return True
@@ -1125,6 +1142,112 @@ def _legend_markup(
     return markup
 
 
+def _legend_unit_width(binding: tuple[str, str]) -> int:
+    """Rendered width of one `key: description` legend unit."""
+    key, description = binding
+    return len(key) + 2 + len(description)
+
+
+def _fit_legend_markup(
+    bindings: Sequence[tuple[str, str]],
+    tail: Sequence[tuple[str, str]],
+    maxcol: int,
+    key_attr: str,
+    text_attr: str,
+    separator: str,
+) -> list[str | tuple[Hashable, str]]:
+    """Legend markup fitted to ``maxcol``: greedy prefix of ``bindings``, then ``tail``.
+
+    ``tail`` (e.g. `q: quit  ?: help`) is always shown. When not every binding
+    fits, the hidden ones are represented by a dim ``…`` before the tail.
+    """
+    sep_width = len(separator)
+    tail_width = sum(_legend_unit_width(b) for b in tail) + sep_width * max(len(tail) - 1, 0)
+    total_width = tail_width + sum(_legend_unit_width(b) + sep_width for b in bindings)
+    if total_width <= maxcol:
+        shown = list(bindings)
+        hidden = False
+    else:
+        shown = []
+        hidden = True
+        used = tail_width + sep_width + len(_LEGEND_OVERFLOW)
+        for binding in bindings:
+            width = _legend_unit_width(binding) + sep_width
+            if used + width > maxcol:
+                break
+            shown.append(binding)
+            used += width
+    markup = _legend_markup(shown, key_attr, text_attr, separator)
+    if hidden:
+        if markup:
+            markup.append((text_attr, separator))
+        markup.append((text_attr, _LEGEND_OVERFLOW))
+    if markup:
+        markup.append((text_attr, separator))
+    markup.extend(_legend_markup(tail, key_attr, text_attr, separator))
+    return markup
+
+
+class _LegendText(Text):
+    """Key legend that refits its bindings to the actual width at render time.
+
+    Never wraps: whole `key: description` units are dropped (behind ``…``) when
+    the footer is too narrow, and the tail bindings stay visible at any width.
+    """
+
+    def __init__(self, bindings: Sequence[tuple[str, str]], tail: Sequence[tuple[str, str]]) -> None:
+        self._bindings = list(bindings)
+        self._tail = list(tail)
+        self._fitted_maxcol = -1
+        super().__init__("", align="right", wrap="clip")
+
+    def render(self, size: tuple[int, ...], focus: bool = False) -> TextCanvas:
+        (maxcol,) = size
+        if maxcol != self._fitted_maxcol:
+            self._fitted_maxcol = maxcol
+            # Reserve a 2-column right margin so the legend does not touch the edge.
+            self.set_text(
+                _fit_legend_markup(self._bindings, self._tail, maxcol - 2, "footer_key", "footer", _LEGEND_SEPARATOR)
+            )
+        return super().render((maxcol,), focus)
+
+
+def _build_help_overlay(state: _KanpanState) -> Any:
+    """A centered box over the board listing every key binding."""
+    key_width = max((len(key) for key, _ in state.legend_bindings), default=1)
+    rows: list[AttrMap | Text] = [
+        Text([("footer_key", key.ljust(key_width)), ("peek_hint", "  "), description])
+        for key, description in state.legend_bindings
+    ]
+    listbox: ListBox = ListBox(SimpleFocusListWalker(rows))
+    box = LineBox(
+        listbox,
+        title="Keys",
+        title_align="left",
+        tlcorner="╭",
+        trcorner="╮",
+        blcorner="╰",
+        brcorner="╯",
+    )
+    height = min(len(rows) + 2, 20)
+    return Overlay(box, state.frame, align="center", width=("relative", 50), valign="middle", height=height)
+
+
+def _open_help(state: _KanpanState) -> None:
+    """Show the key-binding overlay (`?`); a second `?` or Esc closes it."""
+    if state.loop is None or state.help_overlay is not None:
+        return
+    state.help_overlay = _build_help_overlay(state)
+    state.loop.widget = state.help_overlay
+
+
+def _close_help(state: _KanpanState) -> None:
+    if state.loop is None or state.help_overlay is None:
+        return
+    state.help_overlay = None
+    state.loop.widget = state.frame
+
+
 def _write_terminal_title(screen: BaseScreen, title: str) -> None:
     """Set the terminal window/icon title (OSC 0) through the urwid screen."""
     if isinstance(screen, Screen):
@@ -1136,7 +1259,7 @@ def _build_peek_panel(state: _KanpanState) -> LineBox:
     """Build the peek panel (a bordered box shown in place of the footer) and stash its parts."""
     state.peek_body_text = Text("", wrap="space")
     state.peek_input = _make_reply_edit(("peek_user", PEEK_REPLY_PROMPT))
-    hint = Text(_legend_markup([("enter", "send"), ("esc", "close")], "peek_hint_key", "peek_hint", "   ·   "))
+    hint = Text(_legend_markup([("enter", "send"), ("esc", "close")], "peek_hint_key", "peek_hint", _LEGEND_SEPARATOR))
     inner = Pile(
         [
             state.peek_body_text,
@@ -2208,7 +2331,9 @@ def run_kanpan(
     data_sources = collect_data_sources(mngr_ctx)
     initial_cached_fields = load_field_cache(mngr_ctx, data_sources)
 
-    # Build footer keybindings
+    # Footer key legend, most-used first: when the footer is narrow the tail of this
+    # list disappears behind `…` (the `?` overlay still lists everything), while the
+    # `legend_tail` bindings stay visible at any width.
     mark_keys = {_BUILTIN_COMMAND_KEY_UNMARK}
     mark_bindings = [
         (key, cmd.name) for key, cmd in commands.items() if _mark_color(cmd) is not None or key in mark_keys
@@ -2217,19 +2342,12 @@ def run_kanpan(
     action_bindings = [
         (key, cmd.name) for key, cmd in commands.items() if _mark_color(cmd) is None and key not in mark_keys
     ]
-    action_bindings.append(("space", "peek"))
-    action_bindings.append(("enter", "attach"))
-    action_bindings.append(("q", "quit"))
-    keybindings = [
-        *_legend_markup(mark_bindings, "footer_key", "footer", "  "),
-        ("footer", "  |  "),
-        *_legend_markup(action_bindings, "footer_key", "footer", "  "),
-        ("footer", "  "),
-    ]
+    legend_bindings = [("space", "peek"), ("enter", "attach"), *action_bindings, *mark_bindings]
+    legend_tail = [("q", "quit"), ("?", "help")]
 
     footer_left_text = Text("  Loading...")
     footer_left_attr = AttrMap(footer_left_text, "footer")
-    footer_right = Text(keybindings, align="right")
+    footer_right = _LegendText(legend_bindings, legend_tail)
     footer_items: list[Any] = [("pack", footer_left_attr), AttrMap(footer_right, "footer")]
     footer_columns = Columns(footer_items, dividechars=1)
     footer = Pile([Divider(), footer_columns])
@@ -2274,6 +2392,7 @@ def run_kanpan(
         include_filters=include_filters,
         exclude_filters=exclude_filters,
         section_order=section_order,
+        legend_bindings=[*legend_bindings, *legend_tail],
     )
 
     input_handler = _KanpanInputHandler(state=state)

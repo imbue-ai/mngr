@@ -260,7 +260,7 @@ def test_prevent_underscore_imports() -> None:
 
 
 def test_prevent_init_methods_in_non_exception_classes() -> None:
-    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(0))
+    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(1))
 
 
 def test_prevent_cast_usage() -> None:

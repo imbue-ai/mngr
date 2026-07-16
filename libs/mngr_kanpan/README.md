@@ -4,6 +4,8 @@ All-seeing agent tracker. The name combines Sino-Japanese 看 (*kan*, "to look",
 
 Launch with `mngr kanpan`. Requires the `gh` CLI to be installed and authenticated.
 
+The footer shows the most-used key bindings that fit the current width; press `?` for an overlay listing every binding (including your configured commands). `Esc` closes it.
+
 ## Attach, peek, and reply
 
 Interact with an agent without leaving the board:

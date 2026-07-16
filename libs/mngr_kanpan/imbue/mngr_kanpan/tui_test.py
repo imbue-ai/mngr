@@ -62,6 +62,7 @@ from imbue.mngr_kanpan.tui import _FieldCellMarkupFn
 from imbue.mngr_kanpan.tui import _FieldCellTextFn
 from imbue.mngr_kanpan.tui import _KanpanInputHandler
 from imbue.mngr_kanpan.tui import _KanpanState
+from imbue.mngr_kanpan.tui import _LegendText
 from imbue.mngr_kanpan.tui import _assemble_column_defs
 from imbue.mngr_kanpan.tui import _batch_item_label
 from imbue.mngr_kanpan.tui import _build_agent_row
@@ -86,6 +87,7 @@ from imbue.mngr_kanpan.tui import _field_cell_markup
 from imbue.mngr_kanpan.tui import _field_cell_text
 from imbue.mngr_kanpan.tui import _find_entry_by_name
 from imbue.mngr_kanpan.tui import _finish_batch_execution
+from imbue.mngr_kanpan.tui import _fit_legend_markup
 from imbue.mngr_kanpan.tui import _flatten_markup_to_attr
 from imbue.mngr_kanpan.tui import _focus_row_by_name
 from imbue.mngr_kanpan.tui import _format_section_heading
@@ -2003,6 +2005,59 @@ def test_write_terminal_title_emits_osc_zero() -> None:
     out = io.StringIO()
     _write_terminal_title(Screen(output=out), "kanpan")
     assert out.getvalue() == "\x1b]0;kanpan\x07"
+
+
+def test_fit_legend_markup_wide_shows_everything() -> None:
+    markup = _fit_legend_markup([("space", "peek")], [("q", "quit"), ("?", "help")], 200, "k", "t", "  ")
+    text = "".join(part[1] for part in markup)
+    assert "space" in text
+    assert "…" not in text
+    assert text.endswith("?: help")
+
+
+def test_fit_legend_markup_narrow_hides_bindings_behind_overflow_keeping_tail() -> None:
+    bindings = [("space", "peek"), ("enter", "attach"), ("r", "refresh"), ("p", "mark push")]
+    markup = _fit_legend_markup(bindings, [("q", "quit"), ("?", "help")], 40, "k", "t", "  ")
+    text = "".join(part[1] for part in markup)
+    assert len(text) <= 40
+    assert "…" in text
+    assert "attach" not in text
+    assert "q: quit" in text
+    assert "?: help" in text
+
+
+def test_fit_legend_markup_tiny_width_keeps_only_tail() -> None:
+    markup = _fit_legend_markup([("space", "peek")], [("q", "quit")], 14, "k", "t", "  ")
+    assert "".join(part[1] for part in markup) == "…  q: quit"
+
+
+def test_legend_text_refits_to_render_width() -> None:
+    legend = _LegendText(
+        [("space", "peek"), ("enter", "attach"), ("r", "refresh"), ("p", "mark push"), ("d", "mark delete")],
+        [("q", "quit"), ("?", "help")],
+    )
+    wide = legend.render((120,)).text[0].decode("utf-8")
+    assert "refresh" in wide
+    assert "…" not in wide
+    narrow = legend.render((40,)).text[0].decode("utf-8")
+    assert "…" in narrow
+    assert "attach" not in narrow
+    assert "help" in narrow
+
+
+def test_question_mark_opens_help_overlay_and_any_close_key_restores_board() -> None:
+    state = _make_state()
+    state.legend_bindings = [("space", "peek"), ("q", "quit"), ("?", "help")]
+    state.loop = SimpleNamespace(widget=state.frame)
+    handler = _KanpanInputHandler(state=state)
+    assert handler("?") is True
+    assert state.help_overlay is not None
+    assert state.loop.widget is state.help_overlay
+    assert handler("x") is True
+    assert state.help_overlay is not None
+    assert handler("esc") is True
+    assert state.help_overlay is None
+    assert state.loop.widget is state.frame
 
 
 def test_update_peek_header_names_agent() -> None:
