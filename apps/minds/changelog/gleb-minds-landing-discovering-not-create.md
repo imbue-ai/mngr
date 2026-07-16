@@ -1,0 +1,7 @@
+Fix an intermittent bug where restarting the minds app (especially via a ToDesktop auto-update) could drop a user with existing workspaces onto the terminal "create a new workspace" screen instead of their workspace list.
+
+On a cold start, discovery marks itself "complete" on the first event from the first provider. If that arrives before the provider hosting the user's workspace has surfaced it, the landing handler (`/`) previously saw an empty live workspace list and fell through to the create form, a terminal page with no auto-refresh -- stranding the user.
+
+The landing fallback now consults `list_restorable_workspace_ids()` (the live primary agents unioned with the persisted last-good topology). When that set is non-empty -- we know workspaces exist even though a partial cold-start snapshot hasn't re-surfaced them -- it renders the auto-refreshing "Discovering agents..." page (which self-heals into the workspace list) instead of the create form. The create form is now only shown when discovery has completed and nothing anywhere (live, remote, or last-good) says a workspace exists, i.e. a genuine first-run user.
+
+As defense-in-depth, the create form, when it is the landing fallback at `/`, now also subscribes to the chrome SSE and navigates to `/` the moment a workspace appears, so a user shown the form on a cold-start race is taken to their workspace list. The explicit `/create` page keeps its previous behavior (no self-heal SSE) so a deliberate "create another workspace" flow is never bounced away by existing workspaces.
