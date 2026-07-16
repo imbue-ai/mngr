@@ -40,8 +40,16 @@
   var apiKeyEnvInput = document.getElementById('backup-api-key-env-input');
   var configureSubmitBtn = document.getElementById('backup-configure-submit-btn');
 
+  var historyCard = document.getElementById('backup-history-card');
+  var historyEl = document.getElementById('backup-history');
+  var historyEmptyEl = document.getElementById('backup-history-empty');
+  var viewAllLink = document.getElementById('backup-view-all');
+  var viewAllLabel = document.getElementById('backup-view-all-label');
+
   // The latest known verification state, driving the Enable/Disable label.
   var isVerificationEnabled = true;
+
+  var RECENT_LIMIT = 5;
 
   // Plain-language problem descriptions; each ends with what to do about it.
   // "Update backup software" fixes all of the fixable ones, so they all point
@@ -84,7 +92,58 @@
     return 'No successful backup yet.';
   }
 
+  // -- Backup history list --------------------------------------------------
+
+  // Render the "Recent backups" table from the /backups entry. Independent of
+  // the verification check_state -- the snapshot list comes from restic run on
+  // this machine, so it renders even when the workspace is offline. Only the
+  // newest RECENT_LIMIT snapshots are shown; the "View all backups" footer
+  // links to the paginated full-history page and only appears when there are
+  // more snapshots than the table shows.
+  function renderHistory(entry) {
+    historyEl.textContent = '';
+    setShown(historyCard, false);
+    historyEmptyEl.classList.add('hidden');
+
+    if (!entry.is_configured) {
+      historyEmptyEl.textContent = 'Backups are turned off for this workspace. Use "Change storage location" to turn them on.';
+      historyEmptyEl.classList.remove('hidden');
+      return;
+    }
+    if (entry.snapshots_error) {
+      historyEmptyEl.textContent = "Couldn't load your backup history right now.";
+      historyEmptyEl.classList.remove('hidden');
+      return;
+    }
+    // restic lists snapshots oldest first; the table wants newest at the top.
+    var snapshots = (entry.snapshots || []).slice().sort(function (a, b) {
+      return Date.parse(b.time) - Date.parse(a.time);
+    });
+    if (snapshots.length === 0) {
+      historyEmptyEl.textContent = entry.is_backing_up
+        ? 'Backing up now... the first backup will appear shortly.'
+        : 'No backups yet. The first backup runs within the hour.';
+      historyEmptyEl.classList.remove('hidden');
+      return;
+    }
+
+    setShown(historyCard, true);
+    snapshots.slice(0, RECENT_LIMIT).forEach(function (snapshot, index) {
+      historyEl.appendChild(window.mindsBackupTable.buildSnapshotRow(agentId, snapshot, index === 0, index === 0));
+    });
+
+    // The footer only appears when there are more snapshots than rows -- and
+    // then says how many. Visibility is driven via style.display because a
+    // `hidden` class would lose to the anchor's own `flex` display utility.
+    var hasMore = snapshots.length > RECENT_LIMIT;
+    viewAllLink.style.display = hasMore ? '' : 'none';
+    if (hasMore) viewAllLabel.textContent = 'View all ' + snapshots.length + ' backups';
+  }
+
   function renderEntry(entry) {
+    // History renders regardless of the verification check_state early-returns
+    // below, so drive it up front.
+    renderHistory(entry);
     statusLine.textContent = snapshotText(entry);
     isVerificationEnabled = !!entry.is_verification_enabled;
     verificationBtn.textContent = isVerificationEnabled ? 'Disable' : 'Enable';

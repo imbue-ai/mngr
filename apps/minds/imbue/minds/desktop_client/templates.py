@@ -1742,6 +1742,21 @@ def render_workspace_settings(
     )
 
 
+@pure
+def render_workspace_backup_history(agent_id: str, ws_name: str) -> str:
+    """Render the full backup-history page for one workspace.
+
+    The page is a shell: ``static/workspace_backup_history.js`` reads the
+    agent id from the page's ``data-agent-id`` attribute and fills the table
+    one page at a time from the paginated snapshots API.
+    """
+    return CATALOG.render(
+        "pages.WorkspaceBackupHistory",
+        agent_id=agent_id,
+        ws_name=ws_name,
+    )
+
+
 # -- Dev styleguide --
 
 

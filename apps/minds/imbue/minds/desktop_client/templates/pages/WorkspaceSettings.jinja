@@ -18,6 +18,7 @@
 {% set _scripts %}
 <script src="/_static/workspace_accent.js" defer></script>
 <script src="/_static/workspace_settings.js" defer></script>
+<script src="/_static/backup_table.js" defer></script>
 <script src="/_static/workspace_backups.js" defer></script>
 <script>
   (function() {
@@ -221,6 +222,23 @@
       <SectionHeader divider>Backups</SectionHeader>
       <div id="backup-section">
         <p id="backup-status-line" class="type-body text-secondary mb-4">Loading backup status...</p>
+
+        {# Recent backups: renderHistory in workspace_backups.js builds the rows
+           inside #backup-history from the /backups response's snapshot list
+           (works even when the workspace is offline). The "View all backups"
+           footer only appears when there are more snapshots than the table
+           shows (JS drives it via style.display) and navigates to the paginated
+           full-history page. #}
+        <h3 class="type-label text-secondary mb-2">Recent backups</h3>
+        <p id="backup-history-empty" class="hidden type-body text-secondary mb-4"></p>
+        <div id="backup-history-card" class="minds-card hidden overflow-hidden mb-6 p-0">
+          <div id="backup-history"></div>
+          <a id="backup-view-all" href={{ "/workspace/" ~ agent_id ~ "/backups" }} style="display: none"
+             class="flex items-center gap-1 px-4 py-3 border-t border-default type-body font-semibold text-primary no-underline hover:bg-fill-subtle cursor-pointer">
+            <span id="backup-view-all-label">View all backups</span>
+            <span aria-hidden="true">&rarr;</span>
+          </a>
+        </div>
 
         {# Operation controls shared by the update and storage-change actions.
            Conditional buttons are wrapped in plain spans because a `hidden`
