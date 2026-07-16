@@ -20,6 +20,8 @@ Reworked the desktop app's titlebar and navigation to match the minds-options mo
 
 - On launch the app no longer tries to restore a workspace window whose workspace no longer exists (which showed the "unresponsive" recovery page); when nothing is known to exist yet, workspace windows are dropped and the app lands on the home screen. Non-workspace screens (home, settings) still restore as before.
 
+- The onboarding flow is now a committed choice: the sign-up / log-in pages no longer show a titlebar back arrow, and while the user is signed out with no workspaces the titlebar home button returns to the welcome splash (Sign Up / Log In / Continue without an account) instead of the create form. Only after signing in or explicitly choosing "Continue without an account" (now routed through /welcome/skip) does home lead to the workspace list. The choice is per-run, matching the cold-start routing that lands a functionally-empty app on the splash.
+
 - On screens with no workspace accent (home, settings, sign-in) the titlebar now uses a subtle neutral grey instead of pure white/black, so the inactive (unfocused) macOS traffic lights stay visible instead of washing out against a same-colored strip. Accent-tinted workspace titlebars are unchanged.
 
 - The home screen's "Minds Settings" and account launchers now open their modals. They post through the content relay, but the main process didn't recognize the shell view (which renders the home screen over a parked workspace) as an event source, so the IPC was silently dropped; the shell view is now included when resolving a sender's window.

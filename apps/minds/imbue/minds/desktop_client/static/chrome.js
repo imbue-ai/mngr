@@ -229,7 +229,10 @@
     // Browser-mode full-page fallbacks (Electron shows these as modals).
     if (path === '/settings') return { kind: 'page', pageLabel: 'Settings', showBack: true };
     if (path === '/accounts') return { kind: 'page', pageLabel: 'Accounts', showBack: true };
-    if (/^\/auth(?:\/|$)/.test(path)) return { kind: 'page', pageLabel: 'Sign in', showBack: true };
+    // No back arrow on the auth pages: the onboarding flow (welcome splash ->
+    // sign up / log in) is escaped via the titlebar home button, which lands
+    // back on the splash until an account option is chosen.
+    if (/^\/auth(?:\/|$)/.test(path)) return { kind: 'page', pageLabel: 'Sign in' };
     if (path === '/help') return { kind: 'page', pageLabel: 'Get help', showBack: true };
     return { kind: 'home' };
   }

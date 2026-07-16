@@ -827,6 +827,22 @@ def _handle_welcome_page() -> Response:
     return make_html_response(content=html)
 
 
+def _handle_welcome_skip() -> Response:
+    """Record the "Continue without an account" choice and land on home.
+
+    Setting ``is_account_setup_skipped`` stops the home route's bounce back
+    to the welcome splash (see ``_handle_landing_page``), so from here on the
+    titlebar home button lands on the workspace list / create form. The flag
+    is per-run; a fresh cold start of a functionally-empty app shows the
+    splash again (matching the startup routing).
+    """
+    if not _is_request_authenticated():
+        html = render_login_page()
+        return make_html_response(content=html)
+    get_state().is_account_setup_skipped = True
+    return make_response(status_code=303, headers={"Location": "/"})
+
+
 def _account_launcher_context(session_store: MultiAccountSessionStore | None) -> tuple[str, int]:
     """Resolve the home screen's bottom-left account launcher label.
 
@@ -961,6 +977,25 @@ def _handle_landing_page() -> Response:
     if not _is_request_authenticated():
         html = render_login_page()
         return make_html_response(content=html)
+
+    # Until the user resolves the welcome splash's account choice (sign up /
+    # log in / continue without an account), the home route bounces back to
+    # the splash: a signed-out user with no workspaces who hasn't explicitly
+    # skipped is mid-onboarding, and the titlebar home button (which always
+    # navigates "/") must return them to the choice rather than the create
+    # form. Gated on completed discovery so a workspace-owning user isn't
+    # bounced while providers are still enumerating, and skipped entirely
+    # when accounts aren't configured (session_store is None).
+    landing_resolver = get_state().backend_resolver
+    onboarding_session_store = get_state().session_store
+    if (
+        not get_state().is_account_setup_skipped
+        and onboarding_session_store is not None
+        and landing_resolver.has_completed_initial_discovery()
+        and not landing_resolver.list_active_workspace_ids()
+        and not onboarding_session_store.list_accounts()
+    ):
+        return make_response(status_code=302, headers={"Location": "/welcome"})
 
     # The error-reporting consent screen sits just after login: once the user is authenticated but
     # has not yet answered it, show it here before the landing content (the Electron content view and
@@ -2914,6 +2949,7 @@ def create_desktop_client(
     app.add_url_rule("/help/report", view_func=_handle_help_report, methods=["POST"])
     app.add_url_rule("/help/assist", view_func=_handle_help_assist, methods=["POST"])
     app.add_url_rule("/welcome", view_func=_handle_welcome_page)
+    app.add_url_rule("/welcome/skip", view_func=_handle_welcome_skip)
     app.add_url_rule("/login", view_func=_handle_login)
     app.add_url_rule("/authenticate", view_func=_handle_authenticate)
     app.add_url_rule("/", view_func=_handle_landing_page)

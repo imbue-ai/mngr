@@ -1697,10 +1697,37 @@ def test_landing_shows_login_not_consent_when_unauthenticated(tmp_path: Path) ->
     assert "Login" in response.text
 
 
-def test_landing_shows_consent_screen_after_login_when_unanswered(tmp_path: Path) -> None:
-    """Once authenticated, "/" shows the consent screen until it is answered."""
+def test_landing_bounces_to_welcome_until_account_choice(tmp_path: Path) -> None:
+    """Signed out with no workspaces, "/" bounces to the welcome splash until an option is chosen.
+
+    The titlebar home button always navigates "/", so this is what sends a
+    mid-onboarding user (e.g. on the sign-up page) back to the Sign Up /
+    Log In / Continue-without-an-account choice instead of the create form.
+    """
     client, auth_store = _create_test_client_with_stores(tmp_path)
     _authenticate_client(client, auth_store)
+    response = client.get("/")
+    assert response.status_code == 302
+    assert response.headers["location"] == "/welcome"
+
+
+def test_landing_does_not_bounce_to_welcome_when_signed_in(tmp_path: Path) -> None:
+    """With a signed-in account, "/" renders the landing directly (no welcome bounce)."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="user@example.com", is_active=True)
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
+    _authenticate_client(client, auth_store)
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "Help improve Minds" in response.text  # consent still unanswered, not the splash
+
+
+def test_landing_shows_consent_screen_after_account_choice_when_unanswered(tmp_path: Path) -> None:
+    """After the account choice (here: skip), "/" shows the consent screen until it is answered."""
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    skip = client.get("/welcome/skip")
+    assert skip.status_code == 303
     response = client.get("/")
     assert response.status_code == 200
     assert "Help improve Minds" in response.text
@@ -1708,22 +1735,27 @@ def test_landing_shows_consent_screen_after_login_when_unanswered(tmp_path: Path
 
 
 def test_welcome_continue_without_account_routes_through_consent(tmp_path: Path) -> None:
-    """ "Continue without an account" sends the user to "/" so the consent screen is offered.
+    """ "Continue without an account" records the skip, then "/" offers the consent screen.
 
-    Reporting is not gated behind an Imbue account: the account-less skip path lands on "/", whose
-    handler shows the "Help improve Minds" consent screen (when unanswered) before the create form.
+    Reporting is not gated behind an Imbue account: the account-less skip path goes through
+    "/welcome/skip" (recording the choice so the home route stops bouncing to the splash) and
+    redirects to "/", whose handler shows the "Help improve Minds" consent screen (when
+    unanswered) before the create form.
     """
     client, auth_store = _create_test_client_with_stores(tmp_path)
     _authenticate_client(client, auth_store)
     welcome = client.get("/welcome")
     assert welcome.status_code == 200
     # Isolate the full opening <a> tag that carries the skip-account id, regardless of
-    # attribute order, and assert it links to "/" (the consent-bearing landing route)
-    # rather than straight to "/create".
+    # attribute order, and assert it links to the skip route (which redirects to the
+    # consent-bearing landing route) rather than straight to "/create".
     before, after = welcome.text.split('id="skip-account-btn"', 1)
     skip_tag = before.rsplit("<a", 1)[1] + after.split(">", 1)[0]
-    assert 'href="/"' in skip_tag
-    # Following that link while consent is unanswered shows the consent screen.
+    assert 'href="/welcome/skip"' in skip_tag
+    # Following that link redirects to "/", which shows the consent screen while unanswered.
+    skip = client.get("/welcome/skip")
+    assert skip.status_code == 303
+    assert skip.headers["location"] == "/"
     landing = client.get("/")
     assert "Help improve Minds" in landing.text
 
@@ -1766,8 +1798,12 @@ def test_consent_submit_records_choices_and_unblocks_landing(tmp_path: Path) -> 
     assert config.get_report_unexpected_errors() is True
     assert config.get_include_error_logs() is True
 
-    # With consent answered, the authenticated "/" no longer shows the consent screen.
+    # With consent answered (and the account choice made, so "/" renders the
+    # landing rather than bouncing to the welcome splash), the authenticated
+    # "/" no longer shows the consent screen.
+    client.get("/welcome/skip")
     landing = client.get("/")
+    assert landing.status_code == 200
     assert "Help improve Minds" not in landing.text
 
 
