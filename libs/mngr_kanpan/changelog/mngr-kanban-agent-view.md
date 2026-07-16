@@ -12,4 +12,6 @@ Added agent-view style interaction to the kanpan board, so you can work with an 
 
 - The footer is a single continuous blue belt (no gap between its two sides): on the left a relative refresh stamp -- `Refreshed just now · 3.2s` right after a refresh, aging to `Refreshed 32s ago` / `Refreshed 5m ago` (the fetch duration only shows while fresh) -- and on the right the command keys one forgets -- `r: refresh  m: mute  d: mark delete  x: execute  q: quit  ?: more keys` -- with the keys highlighted. Everything else (`space` peek, `enter` attach, marks, configured shell commands) is listed by the `?` overlay: a bordered, padded panel anchored above the footer's `?`, keys accented in their own column; `Esc` (or `?` again) closes it. The peek panel's `enter: send · esc: close` hint is quiet in-panel text, tucked into the bottom right, with the same key accent.
 
+- Fixed: the row focus highlight is now one continuous band across muted and stale cells; inverting their dim gray used to punch dark holes in it.
+
 - Kanpan sets the terminal title (`kanpan`) while running: it re-takes the title after you detach from an attached agent session (which sets its own), and restores the previous title on exit in terminals that support the title stack.
