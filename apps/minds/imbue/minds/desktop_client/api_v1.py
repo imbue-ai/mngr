@@ -136,6 +136,7 @@ from imbue.minds.desktop_client.workspace_lifecycle import MindHostAction
 from imbue.minds.desktop_client.workspace_lifecycle import perform_mind_host_action
 from imbue.minds.desktop_client.workspace_operations import OPERATION_LOG_SENTINEL
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
+from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationRecord
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
 from imbue.minds.desktop_client.workspace_recovery import RestartWorkerFailureHandler
 from imbue.minds.desktop_client.workspace_recovery import probe_workspace_health
@@ -1008,9 +1009,7 @@ def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, i
         and existing_operation.status == WorkspaceOperationStatus.RUNNING
         and existing_operation.kind != WorkspaceOperationKind.RESTART
     ):
-        return _json_error(
-            f"Another operation ({existing_operation.kind.value}) is already running for {agent_id}", 409
-        )
+        return _operation_conflict_error(existing_operation)
     # A restart already in flight for this workspace -- don't stack a second
     # worker racing the first's stop/start commands. mark_restarting decides the
     # RESTARTING transition under its own lock and reports whether this caller won
@@ -1149,6 +1148,25 @@ def _handle_restart_operation_status(operation_id: str) -> RestartOperationStatu
 # -- Backup service verification + management routes --
 
 
+# Plain-language names for the running operation in conflict (409) messages;
+# the raw enum values (BACKUP_RESTORE etc.) surface verbatim in the UI.
+_OPERATION_CONFLICT_PHRASES: Final[dict[WorkspaceOperationKind, str]] = {
+    WorkspaceOperationKind.RESTART: "A restart",
+    WorkspaceOperationKind.BACKUP_UPDATE: "A backup software update",
+    WorkspaceOperationKind.BACKUP_CONFIGURE: "A backup settings change",
+    WorkspaceOperationKind.BACKUP_RESTORE: "A restore",
+}
+
+
+def _operation_conflict_error(existing: WorkspaceOperationRecord | None) -> Response:
+    """409 for a dispatch that lost to an already-running operation on the same workspace."""
+    phrase = _OPERATION_CONFLICT_PHRASES.get(existing.kind, "Another operation") if existing is not None else "Another operation"
+    return _json_error(
+        f"{phrase} is already in progress for this workspace. Wait for it to finish before starting another operation.",
+        409,
+    )
+
+
 def _resolve_backup_route_context(agent_id: str) -> "tuple[AgentId, WorkspacePaths, ConcurrencyGroup] | Response":
     """Shared 404/503 gating for the backup-service mutation routes."""
     parsed_id = AgentId(agent_id)
@@ -1185,9 +1203,7 @@ def _handle_backup_service_update(agent_id: str) -> tuple[OperationHandleRespons
     # Atomic check-and-claim (like restart's mark_restarting): two concurrent
     # requests must not both spawn workers mutating the same workspace.
     if not registry.start_if_idle(parsed_id, WorkspaceOperationKind.BACKUP_UPDATE, datetime.now(timezone.utc)):
-        existing = registry.get(parsed_id)
-        kind_note = f" ({existing.kind.value})" if existing is not None else ""
-        return _json_error(f"Another operation{kind_note} is already running for {agent_id}", 409)
+        return _operation_conflict_error(registry.get(parsed_id))
     try:
         parent_cg.start_new_thread(
             target=backup_update_module.run_backup_update_sequence,
@@ -1252,9 +1268,7 @@ def _handle_workspace_backup_restore(agent_id: str, snapshot_id: str) -> tuple[O
     body = request.get_json(silent=True, force=True) or {}
     is_stop_chats = bool(body.get("stop_chats", False))
     if not registry.start_if_idle(parsed_id, WorkspaceOperationKind.BACKUP_RESTORE, datetime.now(timezone.utc)):
-        existing = registry.get(parsed_id)
-        kind_note = f" ({existing.kind.value})" if existing is not None else ""
-        return _json_error(f"Another operation{kind_note} is already running for {agent_id}", 409)
+        return _operation_conflict_error(registry.get(parsed_id))
     try:
         parent_cg.start_new_thread(
             target=backup_update_module.run_backup_restore_sequence,
@@ -1304,7 +1318,7 @@ def _handle_backup_service_configure(agent_id: str) -> tuple[OperationHandleResp
     # race-free claim is the start_if_idle below.
     existing = registry.get(parsed_id)
     if existing is not None and existing.status == WorkspaceOperationStatus.RUNNING:
-        return _json_error(f"Another operation ({existing.kind.value}) is already running for {agent_id}", 409)
+        return _operation_conflict_error(existing)
 
     body = request.get_json(silent=True, force=True) or {}
     try:
@@ -1330,9 +1344,7 @@ def _handle_backup_service_configure(agent_id: str) -> tuple[OperationHandleResp
 
     is_destination_change = has_canonical_env(paths, parsed_id)
     if not registry.start_if_idle(parsed_id, WorkspaceOperationKind.BACKUP_CONFIGURE, datetime.now(timezone.utc)):
-        claimed = registry.get(parsed_id)
-        kind_note = f" ({claimed.kind.value})" if claimed is not None else ""
-        return _json_error(f"Another operation{kind_note} is already running for {agent_id}", 409)
+        return _operation_conflict_error(registry.get(parsed_id))
     registry.append_log(
         parsed_id, "Changing the backup destination..." if is_destination_change else "Enabling backups..."
     )
@@ -1383,9 +1395,7 @@ def _handle_backup_service_disable(agent_id: str) -> tuple[OperationHandleRespon
     state = get_state()
     registry = state.workspace_operation_registry
     if not registry.start_if_idle(parsed_id, WorkspaceOperationKind.BACKUP_CONFIGURE, datetime.now(timezone.utc)):
-        existing = registry.get(parsed_id)
-        kind_note = f" ({existing.kind.value})" if existing is not None else ""
-        return _json_error(f"Another operation{kind_note} is already running for {agent_id}", 409)
+        return _operation_conflict_error(registry.get(parsed_id))
     registry.append_log(parsed_id, "Disabling backups...")
     try:
         parent_cg.start_new_thread(

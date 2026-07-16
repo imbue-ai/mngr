@@ -1929,7 +1929,7 @@ def test_backup_service_update_conflicts_with_a_running_operation(
     response = client.post(f"/api/v1/workspaces/{agent_id}/backup-service/update", headers=_auth_header(), json={})
 
     assert response.status_code == 409
-    assert "RESTART" in json.loads(response.data)["error"]
+    assert "restart is already in progress" in json.loads(response.data)["error"]
     # The dispatch did not replace the running record.
     record = registry.get(agent_id)
     assert record is not None
@@ -1958,7 +1958,7 @@ def test_workspace_restart_conflicts_with_a_running_backup_operation(
     )
 
     assert response.status_code == 409
-    assert "BACKUP_UPDATE" in json.loads(response.data)["error"]
+    assert "backup software update is already in progress" in json.loads(response.data)["error"]
     # The running backup operation's record was not replaced.
     record = registry.get(agent_id)
     assert record is not None
@@ -2046,7 +2046,7 @@ def test_backup_restore_conflicts_with_a_running_operation(
     )
 
     assert response.status_code == 409
-    assert "BACKUP_RESTORE" in json.loads(response.data)["error"]
+    assert "restore is already in progress" in json.loads(response.data)["error"]
     record = registry.get(agent_id)
     assert record is not None
     assert record.kind == WorkspaceOperationKind.BACKUP_RESTORE

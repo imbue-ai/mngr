@@ -13,6 +13,10 @@
 //     in-place restore as a tracked operation; same polling, same
 //     "Stop chats and try again" follow-up as the update).
 //
+// On load the page re-attaches to an operation that is already RUNNING for
+// this workspace (started in a previous page session), restoring the working
+// state, log stream, and Cancel button.
+//
 // Conditional buttons are shown/hidden via their wrapper spans (a `hidden`
 // class directly on a Button loses to its inline-flex display class).
 (function () {
@@ -154,6 +158,9 @@
         window.mindsBackupTable.buildSnapshotRow(agentId, snapshot, index === 0, index === 0, restoreConfig)
       );
     });
+    // Rows rendered while an operation is running must come out disabled,
+    // exactly as setOperationRunning left the previous rows.
+    if (isOperationRunning) disableLiveRestoreButtons(true);
 
     // The footer is pointless when the table already shows everything, so it
     // only appears when there are more snapshots than rows -- and then says
@@ -282,21 +289,30 @@
 
   // -- Tracked operation driving (update + configure/disable share the poller)
 
+  // Whether an operation is currently running, so history rows rendered while
+  // it runs (refreshHealth races the reattach check below) come out disabled.
+  var isOperationRunning = false;
+
   // Cancel only affects a still-waiting backup update or restore (the cancel
   // route 404s for configure operations, which have no waiting phase), so the
   // Cancel button is shown only for cancellable operations.
   function setOperationRunning(isRunning, isCancellable) {
+    isOperationRunning = isRunning;
     spinner.classList.toggle('hidden', !isRunning);
     updateBtn.disabled = isRunning;
     configureSubmitBtn.disabled = isRunning;
     stopChatsBtn.disabled = isRunning;
-    // Only the live restore buttons (text-accent); the offline-disabled ones
-    // must stay disabled when the operation ends.
-    section.querySelectorAll('.backup-restore-btn.text-accent').forEach(function (btn) {
-      btn.disabled = isRunning;
-    });
+    disableLiveRestoreButtons(isRunning);
     setShown(cancelBtnWrap, isRunning && isCancellable);
     if (!isRunning) progressEl.classList.add('hidden');
+  }
+
+  // Only the live restore buttons (text-accent); the offline-disabled ones
+  // must stay disabled when the operation ends.
+  function disableLiveRestoreButtons(isDisabled) {
+    section.querySelectorAll('.backup-restore-btn.text-accent').forEach(function (btn) {
+      btn.disabled = isDisabled;
+    });
   }
 
   function streamOperationLogs() {
@@ -335,7 +351,10 @@
             'Chats are running in this workspace (' + op.blocked_chats.join(', ') +
             '). Stop them before continuing; they resume on your next message.'
           );
-          setShown(stopChatsBtnWrap, true);
+          // The retry closure only exists when this page session dispatched
+          // the operation; a reattached poller cannot re-run it (it does not
+          // know the original request), so it offers no retry button.
+          setShown(stopChatsBtnWrap, !!retryWithStopChats);
           return;
         }
         showError(op.error || 'The backup operation failed.');
@@ -442,5 +461,27 @@
     startOperation('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backup-service/configure', body, false);
   });
 
+  // -- Init -------------------------------------------------------------------
+
+  // An operation started in a previous page session may still be running
+  // (restores and updates take minutes and outlive navigations); without this
+  // check a fresh load would show idle buttons over a busy workspace, and any
+  // click would just bounce off the 409 conflict guard. Re-attach: restore the
+  // working state and resume the log stream and status polling as if this
+  // page had dispatched it.
+  function reattachToRunningOperation() {
+    fetch('/api/v1/workspaces/operations/backup/' + encodeURIComponent(agentId))
+      .then(function (resp) { return resp.ok ? resp.json() : null; })
+      .then(function (op) {
+        if (!op || op.status !== 'RUNNING') return;
+        var isCancellable = op.kind === 'backup_update' || op.kind === 'backup_restore';
+        setOperationRunning(true, isCancellable);
+        streamOperationLogs();
+        pollOperation();
+      })
+      .catch(function () { /* no running operation to reattach to */ });
+  }
+
+  reattachToRunningOperation();
   refreshHealth();
 })();
