@@ -584,13 +584,11 @@
         container.appendChild(header);
       }
       groups[key].forEach(function (w) {
-        // Shared row builder. Browser mode has no multi-window concept, so
-        // withOpenNew:false (the current row still gets its settings gear).
-        // Unlike the Electron sidebar (delegated listeners) this view wires
-        // the click per-row, so attach it to the built element.
+        // Shared row builder (each local row gets its settings gear). Unlike
+        // the Electron sidebar (delegated listeners) this view wires the click
+        // per-row, so attach it to the built element.
         var row = window.mindsSidebarRow.buildRow(w, {
           isCurrent: w.id === currentCrumbAgentId,
-          withOpenNew: false,
         });
         row.addEventListener('click', function (e) {
           // Rows for workspaces on another device are informational only.

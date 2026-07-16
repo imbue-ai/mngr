@@ -35,12 +35,6 @@
     navigate(mngrForwardOrigin + '/goto/' + agentId + '/');
   }
 
-  function openInNewWindow(agentId) {
-    if (isElectron && window.minds.openWorkspaceInNewWindow) {
-      window.minds.openWorkspaceInNewWindow(agentId);
-    }
-  }
-
   function openWorkspaceSettings(agentId) {
     navigate('/workspace/' + agentId + '/settings');
   }
@@ -68,14 +62,12 @@
         container.appendChild(header);
       }
       groups[key].forEach(function (w) {
-        // The row markup lives in the shared builder; this view passes
-        // withOpenNew:true (Electron supports multi-window) and lets the
+        // The row markup lives in the shared builder; this view lets the
         // parent container's flex gap own the spacing. Clicks / hover /
         // context-menu are handled by the delegated document listeners below.
         container.appendChild(
           window.mindsSidebarRow.buildRow(w, {
             isCurrent: w.id === (currentScopeAgentId || currentWorkspaceId),
-            withOpenNew: true,
           }),
         );
       });
@@ -87,7 +79,6 @@
     if (!row) return;
     var agentId = row.getAttribute('data-agent-id');
     if (!agentId) return;
-    if (target.closest('[data-open-new]')) { openInNewWindow(agentId); return; }
     if (target.closest('[data-open-settings]')) { openWorkspaceSettings(agentId); return; }
     selectWorkspace(agentId);
   }
