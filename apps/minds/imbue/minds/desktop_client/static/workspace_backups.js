@@ -43,9 +43,6 @@
   // The latest known verification state, driving the Enable/Disable label.
   var isVerificationEnabled = true;
 
-  // Plain-language problem descriptions; each ends with what to do about it.
-  // "Update backup software" fixes all of the fixable ones, so they all point
-  // there.
   var PROBLEM_LABELS = {
     NOT_CONFIGURED: 'Backups are turned off for this workspace. Use "Change storage location" to turn them on.',
     CODE_OUTDATED: 'The backup software in this workspace is out of date. Click "Update backup software" to fix this.',
@@ -106,17 +103,14 @@
       statusLine.textContent += ' This workspace is offline; its backups will be checked when it is back online.';
       return;
     }
-    // One friendly sentence instead of the old installed/minimum/target
-    // triple: whether an update is available is the only thing a user can act
-    // on (the CODE_OUTDATED problem below covers "too old to work").
-    if (entry.installed_version) {
-      if (entry.update_target_version && entry.update_target_version !== entry.installed_version) {
-        versionsEl.textContent =
-          'Backup software version: ' + entry.installed_version +
-          ' (an update to ' + entry.update_target_version + ' is available).';
-      } else {
-        versionsEl.textContent = 'Backup software version: ' + entry.installed_version + '.';
-      }
+    var versionParts = [];
+    if (entry.installed_version) versionParts.push('Installed backup service: ' + entry.installed_version);
+    if (entry.minimum_version) versionParts.push('minimum required: ' + entry.minimum_version);
+    if (entry.update_target_version && entry.update_target_version !== entry.minimum_version) {
+      versionParts.push('update installs: ' + entry.update_target_version);
+    }
+    if (versionParts.length > 0) {
+      versionsEl.textContent = versionParts.join(' / ');
       versionsEl.classList.remove('hidden');
     }
     // The update is an idempotent converge, so the button is always offered
