@@ -13,6 +13,7 @@ from imbue.minds.utils.sentry.core import SentryDeployEnvironment
 from imbue.minds.utils.sentry.core import _MINDS_LOG_ATTACHMENT_GROUPS
 from imbue.minds.utils.sentry.core import _S3_ATTACHMENT_BUCKET_BY_ENVIRONMENT
 from imbue.minds.utils.sentry.core import _SENTRY_DSN_BY_ENVIRONMENT
+from imbue.minds.utils.sentry.core import _external_log_attachment_groups
 from imbue.minds.utils.sentry.core import latchkey_forward_sentry_consent_path
 from imbue.minds.utils.sentry.core import resolve_anonymous_user_id
 from imbue.minds.utils.sentry.core import resolve_latchkey_forward_sentry_env
@@ -166,3 +167,54 @@ def test_collect_external_attachments_classifies_flat_minds_log_layout(tmp_path:
     assert len(groups["electron_rotated_logs"]) == 1
     # one callback per upload: traceback + the six log files.
     assert len(callbacks) == 7
+
+
+def test_collect_external_attachments_sweeps_latchkey_and_discovery_dirs(tmp_path: Path) -> None:
+    # The latchkey forward daemon's logs (structured jsonl + raw stdout/stderr capture)
+    # and the shared discovery event stream live outside the flat minds logs dir; the
+    # external groups must sweep those directories without touching the minds log folder.
+    logs_folder = tmp_path / "logs"
+    logs_folder.mkdir()
+    (logs_folder / "minds-events.jsonl").write_text("live\n")
+    latchkey_dir = tmp_path / "latchkey" / "mngr_latchkey"
+    latchkey_dir.mkdir(parents=True)
+    (latchkey_dir / "events.jsonl").write_text("daemon-structured\n")
+    (latchkey_dir / "latchkey_forward.log").write_text("daemon-raw\n")
+    discovery_dir = tmp_path / "mngr" / "events" / "mngr" / "discovery"
+    discovery_dir.mkdir(parents=True)
+    (discovery_dir / "events.jsonl").write_text("discovery\n")
+
+    uploader = ErrorAttachmentsS3Uploader(
+        log_attachment_groups=_MINDS_LOG_ATTACHMENT_GROUPS
+        + _external_log_attachment_groups(latchkey_dir, discovery_dir)
+    )
+    try:
+        raise ValueError("boom")
+    except ValueError as exception:
+        groups, callbacks = uploader.collect_external_attachments(exception=exception, logs_folder=logs_folder)
+
+    assert set(groups) == {"", "live_logs", "latchkey_live_logs", "latchkey_raw_logs", "discovery_events"}
+    assert len(groups["latchkey_live_logs"]) == 1
+    assert len(groups["latchkey_raw_logs"]) == 1
+    assert len(groups["discovery_events"]) == 1
+    # one callback per upload: traceback + the four log files.
+    assert len(callbacks) == 5
+
+
+def test_collect_external_attachments_tolerates_missing_external_dirs(tmp_path: Path) -> None:
+    # First launch: the latchkey plugin dir / discovery dir may not exist yet; the sweep
+    # must simply match nothing rather than fail the error report.
+    logs_folder = tmp_path / "logs"
+    logs_folder.mkdir()
+    (logs_folder / "minds-events.jsonl").write_text("live\n")
+
+    uploader = ErrorAttachmentsS3Uploader(
+        log_attachment_groups=_MINDS_LOG_ATTACHMENT_GROUPS
+        + _external_log_attachment_groups(tmp_path / "no-latchkey", tmp_path / "no-discovery")
+    )
+    try:
+        raise ValueError("boom")
+    except ValueError as exception:
+        groups, _callbacks = uploader.collect_external_attachments(exception=exception, logs_folder=logs_folder)
+
+    assert set(groups) == {"", "live_logs"}
