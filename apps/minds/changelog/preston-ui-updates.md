@@ -29,3 +29,5 @@ Reworked the desktop app's titlebar and navigation to match the minds-options mo
 - The home screen's "Minds Settings" and account launchers now open their modals. They post through the content relay, but the main process didn't recognize the shell view (which renders the home screen over a parked workspace) as an event source, so the IPC was silently dropped; the shell view is now included when resolving a sender's window.
 
 - The workspace switcher now highlights the workspace you're currently in even on that workspace's own settings or sharing screens (it keys the current-row marker off the active workspace scope, not just the workspace whose content is displayed).
+
+- The titlebar breadcrumb no longer flashes the raw agent id in place of the workspace name: accent updates from the workspace-settings color picker preserved only the accent (dropping the cached name until the next discovery tick), and a cache miss fell back to the agent id. The breadcrumb now keeps the displayed name across accent updates and shows a brief ellipsis placeholder (never the id) for a workspace whose name hasn't arrived yet.

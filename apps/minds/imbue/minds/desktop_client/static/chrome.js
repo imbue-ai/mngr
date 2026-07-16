@@ -282,9 +282,20 @@
     if (isWorkspace) {
       var cached = accentByAgentId[ctx.agentId];
       var nameEl = document.getElementById('workspace-switcher-name');
-      // Fall back to the raw agent id until the SSE workspace list lands
-      // (the 'workspaces' handler re-runs this once names are known).
-      if (nameEl) nameEl.textContent = (cached && cached.name) || ctx.agentId;
+      // Never show the raw agent id in the breadcrumb. When the cache has no
+      // name yet (fresh workspace before the first SSE tick), keep whatever
+      // name is already displayed for this same agent; otherwise show a
+      // placeholder until the 'workspaces' handler re-runs this with the
+      // name.
+      if (nameEl) {
+        var knownName = cached && cached.name;
+        if (knownName) {
+          nameEl.textContent = knownName;
+        } else if (nameEl.dataset.agentId !== ctx.agentId || !nameEl.textContent) {
+          nameEl.textContent = '…';
+        }
+        nameEl.dataset.agentId = ctx.agentId;
+      }
       ['workspace', 'settings'].forEach(function (tab) {
         var btn = document.getElementById('ws-tab-' + tab);
         if (!btn) return;
@@ -642,8 +653,13 @@
         // settings POST -> mngr label -> SSE round-trip lands -- so we update
         // the cache entry here and repaint immediately.
         if (data.agent_id && data.accent) {
+          // Update the accent WITHOUT dropping the cached name: replacing the
+          // whole entry left it name-less, so the next titlebar re-render fell
+          // back to the raw agent id until the following SSE tick.
+          var prevEntry = accentByAgentId[data.agent_id];
           accentByAgentId[data.agent_id] = {
             accent: data.accent,
+            name: (prevEntry && prevEntry.name) || null,
           };
           applyTitleAccent(data.agent_id);
         }
