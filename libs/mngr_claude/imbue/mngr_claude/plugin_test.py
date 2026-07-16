@@ -1778,7 +1778,7 @@ def test_wait_for_ready_signal_auto_accepts_startup_selector(
     )
     # session_started is absent while the selector is up (position 0) and present after one accept.
     agent.session_started_ready_at_position = 1
-    agent.wait_for_ready_signal(is_tui_ready_awaited=True, start_action=lambda: None, timeout=0.3)
+    agent.wait_for_ready_signal(is_readiness_awaited=True, start_action=lambda: None, timeout=0.3)
     assert agent.enter_press_count == 1
 
 
@@ -1793,7 +1793,7 @@ def test_wait_for_ready_signal_raises_dialog_detected_when_startup_selector_pers
     # session_started never appears (the selector keeps blocking it).
     agent.session_started_ready_at_position = 99
     with pytest.raises(DialogDetectedError):
-        agent.wait_for_ready_signal(is_tui_ready_awaited=True, start_action=lambda: None, timeout=0.3)
+        agent.wait_for_ready_signal(is_readiness_awaited=True, start_action=lambda: None, timeout=0.3)
     assert agent.enter_press_count == 0
 
 

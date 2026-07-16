@@ -6,4 +6,4 @@
 
 Blocked agents are reported separately from failed ones in the human, JSON, and JSONL output. Internally this adds a `MessageDeliveredButBlockedError` and a `blocked_agents` list on the message result; interactive TUI agents gain a post-submit hook (a no-op by default) that runs after a send is confirmed, which the Claude plugin uses to detect and auto-accept (or surface) a dialog opened by the just-sent message.
 
-Internal: the agent `wait_for_ready_signal` parameter `is_creating` was renamed to `is_tui_ready_awaited` (it gates whether the call waits for the TUI ready indicator). No behavior change.
+Internal: the agent `wait_for_ready_signal` parameter `is_creating` was renamed to `is_readiness_awaited` (it gates whether the call waits for the agent's readiness signal -- the TUI ready indicator, or a launch/session sentinel). No behavior change.
