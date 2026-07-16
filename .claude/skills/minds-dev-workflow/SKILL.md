@@ -37,6 +37,10 @@ When you click "Create" in the desktop client with a LOCAL-Docker provider, the 
 
 ## Quick start (first time and every time)
 
+> **First time on this machine?** Install the one-time prerequisites in
+> `apps/minds/docs/dev-setup.md` first (Docker, Node/pnpm, GNU rsync, GitHub
+> access, Vault login, Modal profile) -- the steps below assume they're in place.
+
 ```bash
 # 1. (Once) Install electron deps.
 cd apps/minds && pnpm install && cd ../..

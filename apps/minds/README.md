@@ -14,26 +14,14 @@ The minds app creates and manages persistent Claude agents running in Docker con
 ## Getting started
 
 minds ships as a desktop app (Electron, packaged via ToDesktop; see
-[docs/desktop-app.md](./docs/desktop-app.md)). To run it from source in this
-monorepo, activate a minds env and start the dev client:
+[docs/desktop-app.md](./docs/desktop-app.md)).
 
-```bash
-eval "$(uv run minds env activate <name>)"   # e.g. dev-<your-user>
-just minds-start
-```
-
-> **macOS: install GNU rsync first.** `just minds-start` syncs your working
-> tree into the default-workspace-template worktree using
-> `rsync --filter=':- .gitignore'`, a GNU rsync feature. Recent macOS ships
-> Apple's `openrsync` as `/usr/bin/rsync`, which doesn't support it, so the
-> sync fails. Install GNU rsync and make sure it comes first on `PATH`:
->
-> ```bash
-> brew install rsync
-> rsync --version | head -1   # must NOT say "openrsync"
-> ```
-
-Then visit the login URL printed in the terminal to create your first agent.
+To run it from source for development, follow the setup guide
+**[docs/dev-setup.md](./docs/dev-setup.md)**: install the one-time
+prerequisites (Docker, Node/pnpm, GNU rsync, GitHub access, Vault, Modal),
+then the `minds-dev-workflow` skill takes you through first-time bootstrap and
+the every-startup launch. You create your first agent from the login URL the
+app prints on startup.
 
 ## How it works
 
