@@ -27,6 +27,7 @@ from imbue.minds.desktop_client.templates import render_overlay_host_page
 from imbue.minds.desktop_client.templates import render_recovery_page
 from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
+from imbue.minds.desktop_client.templates import render_workspace_backup_history
 from imbue.minds.desktop_client.templates import render_workspace_settings
 from imbue.minds.desktop_client.templates import resolve_create_host_name
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
@@ -90,6 +91,71 @@ def test_render_workspace_settings_data_agent_id_interpolates() -> None:
         servers=(),
     )
     assert f'data-agent-id="{_AGENT_A}"' in html
+    assert "{{" not in html
+
+
+def test_render_workspace_settings_view_all_links_to_backup_history_page() -> None:
+    # The "View all N backups" footer navigates to the paginated full-history
+    # page (workspace_backups.js only toggles its visibility and count).
+    html = render_workspace_settings(
+        agent_id=str(_AGENT_A),
+        ws_name="ws",
+        current_account=None,
+        accounts=(),
+        servers=(),
+    )
+    assert f"/workspace/{_AGENT_A}/backups" in html
+
+
+def test_render_workspace_settings_carries_the_restore_dialog() -> None:
+    # The restore confirmation dialog ships in the page markup; the ids are
+    # load-bearing (workspace_backups.js fills the time and drives the flow).
+    html = render_workspace_settings(
+        agent_id=str(_AGENT_A),
+        ws_name="ws",
+        current_account=None,
+        accounts=(),
+        servers=(),
+    )
+    assert 'id="restore-dialog"' in html
+    assert 'id="restore-dialog-time"' in html
+    assert 'id="restore-cancel-btn"' in html
+    assert 'id="restore-confirm-btn"' in html
+
+
+def test_render_workspace_settings_puts_the_operation_strip_below_the_backups_table() -> None:
+    # Every backup operation (restore, update, storage change) reports
+    # through one shared strip -- spinner, Cancel, stop-chats retry,
+    # progress, errors -- placed right below the Recent backups table where
+    # restores are launched, not inside the "Fix backup problems" section.
+    html = render_workspace_settings(
+        agent_id=str(_AGENT_A),
+        ws_name="ws",
+        current_account=None,
+        accounts=(),
+        servers=(),
+    )
+    for element_id in (
+        "backup-operation-strip",
+        "backup-op-spinner",
+        "backup-cancel-btn",
+        "backup-stop-chats-btn",
+        "backup-op-progress",
+        "backup-error",
+    ):
+        assert f'id="{element_id}"' in html
+    assert html.index('id="backup-history-card"') < html.index('id="backup-operation-strip"')
+    assert html.index('id="backup-operation-strip"') < html.index('id="backup-configure"')
+
+
+def test_render_workspace_backup_history_page_shell() -> None:
+    # The page is a shell filled client-side: it must carry the agent id for
+    # workspace_backup_history.js, load that script, and link back to settings.
+    html = render_workspace_backup_history(agent_id=str(_AGENT_A), ws_name="my-workspace")
+    assert f'data-agent-id="{_AGENT_A}"' in html
+    assert "workspace_backup_history.js" in html
+    assert f"/workspace/{_AGENT_A}/settings" in html
+    assert "my-workspace" in html
     assert "{{" not in html
 
 

@@ -1,14 +1,25 @@
 // Backup section of the workspace settings page: shows the combined
 // snapshot status + backup-service verification breakdown from this
 // workspace's /api/v1/workspaces/<id>/backups, and drives the actions:
-//   - the verification Enable/Disable button (top of the section: the whole
-//     breakdown below it only exists while verification is on),
-//   - "Update backup service" (one idempotent converge; tracked operation
+//   - the health-checks ("verification") Enable/Disable button (the whole
+//     problem/version breakdown only exists while it is on),
+//   - "Update backup software" (one idempotent converge; tracked operation
 //     polled at /api/v1/workspaces/operations/backup/<id>, with a
-//     "Stop all chats and retry" follow-up when running chats block it and
+//     "Stop chats and try again" follow-up when running chats block it and
 //     a Cancel that works while the update is still waiting),
-//   - "Configure backups..." (enable, change destination, or disable via the
-//     "None" provider; same tracked-operation polling).
+//   - "Change storage location" (enable, change destination, or disable
+//     via the "None" provider; same tracked-operation polling),
+//   - per-row "Restore" in the Recent backups table (confirm dialog, then an
+//     in-place restore as a tracked operation; same polling, same
+//     "Stop chats and try again" follow-up as the update).
+//
+// On load the page re-attaches to an operation that is already RUNNING for
+// this workspace (started in a previous page session), restoring the working
+// state, log stream, and Cancel button.
+//
+// All operations report through one shared strip below the Recent backups
+// table (#backup-operation-strip): a spinner naming the operation, Cancel,
+// "Stop chats and try again", the progress line, and errors.
 //
 // Conditional buttons are shown/hidden via their wrapper spans (a `hidden`
 // class directly on a Button loses to its inline-flex display class).
@@ -18,6 +29,7 @@
   var agentId = document.getElementById('workspace-settings').dataset.agentId;
 
   var statusLine = document.getElementById('backup-status-line');
+  var operationStrip = document.getElementById('backup-operation-strip');
   var versionsEl = document.getElementById('backup-versions');
   var problemsEl = document.getElementById('backup-problems');
   var updateBtn = document.getElementById('backup-update-btn');
@@ -40,28 +52,64 @@
   var apiKeyEnvInput = document.getElementById('backup-api-key-env-input');
   var configureSubmitBtn = document.getElementById('backup-configure-submit-btn');
 
+  var historyCard = document.getElementById('backup-history-card');
+  var historyEl = document.getElementById('backup-history');
+  var historyEmptyEl = document.getElementById('backup-history-empty');
+  var viewAllLink = document.getElementById('backup-view-all');
+  var viewAllLabel = document.getElementById('backup-view-all-label');
+
+  var restoreDialog = document.getElementById('restore-dialog');
+  var restoreDialogTime = document.getElementById('restore-dialog-time');
+  var restoreCancelBtn = document.getElementById('restore-cancel-btn');
+  var restoreConfirmBtn = document.getElementById('restore-confirm-btn');
+  // The snapshot the open restore dialog is about.
+  var pendingRestoreSnapshotId = null;
+
   // The latest known verification state, driving the Enable/Disable label.
   var isVerificationEnabled = true;
 
+  // What "Stop chats and try again" retries: set by whichever chat-gated
+  // operation (update or restore) was dispatched last, so the retry re-runs
+  // that same operation with stop_chats.
+  var retryWithStopChats = null;
+
+  var RECENT_LIMIT = 5;
+
+  // Plain-language problem descriptions; each ends with what to do about it.
+  // "Update backup software" (the button right below this list) fixes all of
+  // the fixable ones, so they all point there.
   var PROBLEM_LABELS = {
-    NOT_CONFIGURED: 'Backups are not configured for this workspace.',
-    CODE_OUTDATED: 'The backup service code is outdated.',
-    ENV_MISSING: 'The backup credentials file is missing on the workspace.',
-    ENV_MISMATCH: "The workspace's backup credentials don't match the expected configuration.",
-    SERVICE_NOT_RUNNING: 'The backup service is not running.',
-    UNVERIFIABLE: 'The backup service could not be verified.',
+    NOT_CONFIGURED: 'Backups are turned off for this workspace. Use "Change storage location" to turn them on.',
+    CODE_OUTDATED: 'The backup software in this workspace is out of date. Click "Update backup software" to fix this.',
+    ENV_MISSING: 'This workspace has lost its backup storage settings. Click "Update backup software" to restore them.',
+    ENV_MISMATCH: 'This workspace is set up to back up somewhere different than expected. Click "Update backup software" to fix this.',
+    SERVICE_NOT_RUNNING: 'The backup software in this workspace is not running. Click "Update backup software" to restart it.',
+    UNVERIFIABLE: "minds couldn't check on this workspace's backups. Click \"Update backup software\" to reset them.",
   };
 
   function setShown(el, isShown) {
     if (el) el.classList.toggle('hidden', !isShown);
   }
 
+  // The operation strip (below the Recent backups table) hosts the named
+  // spinner, Cancel, "Stop chats and try again", progress line, and errors
+  // for every backup operation. It only takes up space while it has
+  // something to show.
+  function syncOperationStrip() {
+    var isAnyVisible = [spinner, progressEl, errorEl, stopChatsBtnWrap, cancelBtnWrap].some(function (el) {
+      return el && !el.classList.contains('hidden');
+    });
+    setShown(operationStrip, isAnyVisible);
+  }
+
   function showError(message) {
     errorEl.textContent = message;
     errorEl.classList.remove('hidden');
+    syncOperationStrip();
   }
   function clearError() {
     errorEl.classList.add('hidden');
+    syncOperationStrip();
   }
 
   function latestSnapshotTime(snapshots) {
@@ -81,7 +129,70 @@
     return 'No successful backup yet.';
   }
 
+  // -- Backup history list --------------------------------------------------
+
+  // Render the "Recent backups" table from the /backups entry. Independent of
+  // the verification check_state below -- the snapshot list comes from restic
+  // run on this machine, so it renders even when the workspace is offline. Only
+  // the newest RECENT_LIMIT snapshots are shown; the "View all backups" footer
+  // links to the paginated full-history page and only appears when there are
+  // more snapshots than the table shows.
+  function renderHistory(entry) {
+    historyEl.textContent = '';
+    setShown(historyCard, false);
+    historyEmptyEl.classList.add('hidden');
+
+    if (!entry.is_configured) {
+      historyEmptyEl.textContent = 'Backups are turned off for this workspace. Use "Change storage location" to turn them on.';
+      historyEmptyEl.classList.remove('hidden');
+      return;
+    }
+    if (entry.snapshots_error) {
+      historyEmptyEl.textContent = "Couldn't load your backup history right now.";
+      historyEmptyEl.classList.remove('hidden');
+      return;
+    }
+    // restic lists snapshots oldest first; the table wants newest at the top.
+    var snapshots = (entry.snapshots || []).slice().sort(function (a, b) {
+      return Date.parse(b.time) - Date.parse(a.time);
+    });
+    if (snapshots.length === 0) {
+      historyEmptyEl.textContent = entry.is_backing_up
+        ? 'Backing up now... the first backup will appear shortly.'
+        : 'No backups yet. The first backup runs within the hour.';
+      historyEmptyEl.classList.remove('hidden');
+      return;
+    }
+
+    setShown(historyCard, true);
+    // Restore execs into the workspace, so it needs the workspace running;
+    // downloads work regardless (restic runs on this machine).
+    var restoreConfig = entry.check_state === 'OFFLINE'
+      ? { disabledReason: 'This workspace is offline; start it to restore a backup.' }
+      : { onRestore: openRestoreDialog };
+    snapshots.slice(0, RECENT_LIMIT).forEach(function (snapshot, index) {
+      // Row markup is shared with the full-history page (backup_table.js).
+      historyEl.appendChild(
+        window.mindsBackupTable.buildSnapshotRow(agentId, snapshot, index === 0, index === 0, restoreConfig)
+      );
+    });
+    // Rows rendered while an operation is running must come out disabled,
+    // exactly as setOperationRunning left the previous rows.
+    if (isOperationRunning) disableLiveRestoreButtons(true);
+
+    // The footer is pointless when the table already shows everything, so it
+    // only appears when there are more snapshots than rows -- and then says
+    // how many. Visibility is driven via style.display because a `hidden`
+    // class would lose to the anchor's own `flex` display utility.
+    var hasMore = snapshots.length > RECENT_LIMIT;
+    viewAllLink.style.display = hasMore ? '' : 'none';
+    if (hasMore) viewAllLabel.textContent = 'View all ' + snapshots.length + ' backups';
+  }
+
   function renderEntry(entry) {
+    // History renders regardless of the verification check_state early-returns
+    // below, so drive it up front.
+    renderHistory(entry);
     statusLine.textContent = snapshotText(entry);
     isVerificationEnabled = !!entry.is_verification_enabled;
     verificationBtn.textContent = isVerificationEnabled ? 'Disable' : 'Enable';
@@ -100,17 +211,20 @@
       return;
     }
     if (entry.check_state === 'OFFLINE') {
-      statusLine.textContent += ' The workspace is offline; its backup service will be verified when it is back.';
+      statusLine.textContent += ' This workspace is offline; its backups will be checked when it is back online.';
       return;
     }
-    var versionParts = [];
-    if (entry.installed_version) versionParts.push('Installed backup service: ' + entry.installed_version);
-    if (entry.minimum_version) versionParts.push('minimum required: ' + entry.minimum_version);
-    if (entry.update_target_version && entry.update_target_version !== entry.minimum_version) {
-      versionParts.push('update installs: ' + entry.update_target_version);
-    }
-    if (versionParts.length > 0) {
-      versionsEl.textContent = versionParts.join(' / ');
+    // One friendly sentence instead of the old installed/minimum/target
+    // triple: whether an update is available is the only thing a user can
+    // act on (the CODE_OUTDATED problem below covers "too old to work").
+    if (entry.installed_version) {
+      if (entry.update_target_version && entry.update_target_version !== entry.installed_version) {
+        versionsEl.textContent =
+          'Backup software version: ' + entry.installed_version +
+          ' (an update to ' + entry.update_target_version + ' is available).';
+      } else {
+        versionsEl.textContent = 'Backup software version: ' + entry.installed_version + '.';
+      }
       versionsEl.classList.remove('hidden');
     }
     // The update is an idempotent converge, so the button is always offered
@@ -193,16 +307,43 @@
 
   // -- Tracked operation driving (update + configure/disable share the poller)
 
-  // Cancel only affects a still-waiting backup *update* (the cancel route
-  // 404s for configure operations, which have no waiting phase), so the
-  // Cancel button is shown only for cancellable operations.
-  function setOperationRunning(isRunning, isCancellable) {
+  // Whether an operation is currently running, so history rows rendered while
+  // it runs (refreshHealth races the reattach check below) come out disabled.
+  var isOperationRunning = false;
+  // The table row button of an in-flight restore, relabeled "Restoring...".
+  var restoringRowBtn = null;
+
+  // Cancel only affects a still-waiting backup update or restore (the cancel
+  // route 404s for configure operations, which have no waiting phase), so the
+  // Cancel button is shown only for cancellable operations. ``label`` names
+  // the operation in the strip's spinner ("Restoring the backup from ...").
+  function setOperationRunning(isRunning, isCancellable, label) {
+    isOperationRunning = isRunning;
+    if (isRunning) spinner.textContent = label || 'Working...';
     spinner.classList.toggle('hidden', !isRunning);
     updateBtn.disabled = isRunning;
     configureSubmitBtn.disabled = isRunning;
     stopChatsBtn.disabled = isRunning;
+    disableLiveRestoreButtons(isRunning);
     setShown(cancelBtnWrap, isRunning && isCancellable);
-    if (!isRunning) progressEl.classList.add('hidden');
+    if (!isRunning) {
+      progressEl.classList.add('hidden');
+      // A failed restore does not re-render the table (refreshHealth only
+      // runs on success), so put the marked row's label back explicitly.
+      if (restoringRowBtn) {
+        restoringRowBtn.textContent = 'Restore';
+        restoringRowBtn = null;
+      }
+    }
+    syncOperationStrip();
+  }
+
+  // Only the live restore buttons (text-accent); the offline-disabled ones
+  // must stay disabled when the operation ends.
+  function disableLiveRestoreButtons(isDisabled) {
+    section.querySelectorAll('.backup-restore-btn.text-accent').forEach(function (btn) {
+      btn.disabled = isDisabled;
+    });
   }
 
   function streamOperationLogs() {
@@ -239,9 +380,13 @@
         if (op.blocked_chats && op.blocked_chats.length > 0) {
           showError(
             'Chats are running in this workspace (' + op.blocked_chats.join(', ') +
-            '). Stop them before updating the backup service; they resume on your next message.'
+            '). Stop them before continuing; they resume on your next message.'
           );
-          setShown(stopChatsBtnWrap, true);
+          // The retry closure only exists when this page session dispatched
+          // the operation; a reattached poller cannot re-run it (it does not
+          // know the original request), so it offers no retry button.
+          setShown(stopChatsBtnWrap, !!retryWithStopChats);
+          syncOperationStrip();
           return;
         }
         showError(op.error || 'The backup operation failed.');
@@ -251,9 +396,9 @@
       .catch(function () { setTimeout(pollOperation, 2000); });
   }
 
-  function startOperation(url, body, isCancellable) {
+  function startOperation(url, body, isCancellable, label) {
     clearError();
-    setOperationRunning(true, isCancellable);
+    setOperationRunning(true, isCancellable, label);
     fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -276,16 +421,61 @@
       });
   }
 
+  function startUpdate(isStopChats) {
+    retryWithStopChats = function () { startUpdate(true); };
+    startOperation(
+      '/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backup-service/update',
+      { stop_chats: isStopChats },
+      true,
+      'Updating backup software...'
+    );
+  }
+
+  function startRestore(snapshotId, isStopChats, timeText) {
+    retryWithStopChats = function () { startRestore(snapshotId, true, timeText); };
+    startOperation(
+      '/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backups/' + encodeURIComponent(snapshotId) + '/restore',
+      { stop_chats: isStopChats },
+      true,
+      timeText ? 'Restoring the backup from ' + timeText + '...' : 'Restoring a backup...'
+    );
+    // Mark the row the restore came from, right where the user clicked.
+    var rowBtn = section.querySelector('.backup-restore-btn[data-snapshot-id="' + snapshotId + '"]');
+    if (rowBtn) {
+      rowBtn.textContent = 'Restoring...';
+      restoringRowBtn = rowBtn;
+    }
+  }
+
   updateBtn.addEventListener('click', function () {
-    startOperation('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backup-service/update', { stop_chats: false }, true);
+    startUpdate(false);
   });
   stopChatsBtn.addEventListener('click', function () {
     setShown(stopChatsBtnWrap, false);
-    startOperation('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backup-service/update', { stop_chats: true }, true);
+    if (retryWithStopChats) retryWithStopChats();
   });
+  // The cancel route also cancels a waiting restore (same operation slot).
   cancelBtn.addEventListener('click', function () {
     fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backup-service/update/cancel', { method: 'POST' })
       .catch(function () {});
+  });
+
+  // -- Restore confirmation dialog -------------------------------------------
+
+  function openRestoreDialog(snapshot) {
+    pendingRestoreSnapshotId = snapshot.snapshot_id;
+    restoreDialogTime.textContent = new Date(snapshot.time).toLocaleString();
+    restoreDialog.classList.remove('hidden');
+  }
+  restoreCancelBtn.addEventListener('click', function () {
+    restoreDialog.classList.add('hidden');
+  });
+  restoreDialog.addEventListener('click', function (e) {
+    if (e.target === restoreDialog) restoreDialog.classList.add('hidden');
+  });
+  restoreConfirmBtn.addEventListener('click', function () {
+    restoreDialog.classList.add('hidden');
+    if (pendingRestoreSnapshotId) startRestore(pendingRestoreSnapshotId, false, restoreDialogTime.textContent);
   });
 
   // -- Configure form (enable / change destination / disable) ---------------
@@ -305,15 +495,46 @@
   // account's sync key (see the app-level Settings page).
   configureSubmitBtn.addEventListener('click', function () {
     if (providerSelect.value === 'NONE') {
-      startOperation('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backup-service/disable', {}, false);
+      startOperation(
+        '/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backup-service/disable', {}, false,
+        'Turning backups off...'
+      );
       return;
     }
     var body = {
       backup_provider: providerSelect.value,
       api_key_env: apiKeyEnvInput ? apiKeyEnvInput.value : '',
     };
-    startOperation('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backup-service/configure', body, false);
+    startOperation(
+      '/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backup-service/configure', body, false,
+      'Saving backup settings...'
+    );
   });
 
+  // -- Init -------------------------------------------------------------------
+
+  // An operation started in a previous page session may still be running
+  // (restores and updates take minutes and outlive navigations); without this
+  // check a fresh load would show idle buttons over a busy workspace, and any
+  // click would just bounce off the 409 conflict guard. Re-attach: restore the
+  // working state and resume the log stream and status polling as if this
+  // page had dispatched it.
+  function reattachToRunningOperation() {
+    fetch('/api/v1/workspaces/operations/backup/' + encodeURIComponent(agentId))
+      .then(function (resp) { return resp.ok ? resp.json() : null; })
+      .then(function (op) {
+        if (!op || op.status !== 'RUNNING') return;
+        var isCancellable = op.kind === 'backup_update' || op.kind === 'backup_restore';
+        var label = op.kind === 'backup_restore' ? 'Restoring a backup...'
+          : op.kind === 'backup_update' ? 'Updating backup software...'
+          : 'Changing backup settings...';
+        setOperationRunning(true, isCancellable, label);
+        streamOperationLogs();
+        pollOperation();
+      })
+      .catch(function () { /* no running operation to reattach to */ });
+  }
+
+  reattachToRunningOperation();
   refreshHealth();
 })();

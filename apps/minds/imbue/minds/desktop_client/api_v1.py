@@ -90,6 +90,7 @@ from imbue.minds.desktop_client.api_models import SharingToggleResponse
 from imbue.minds.desktop_client.api_models import SshConnectionResponse
 from imbue.minds.desktop_client.api_models import StopStateContainerResponse
 from imbue.minds.desktop_client.api_models import UpgradeMergeSummary
+from imbue.minds.desktop_client.api_models import WorkspaceBackupSnapshotsPageResponse
 from imbue.minds.desktop_client.api_models import WorkspaceBackupsResponse
 from imbue.minds.desktop_client.api_models import WorkspaceLifecycleResponse
 from imbue.minds.desktop_client.api_models import WorkspaceListResponse
@@ -135,6 +136,7 @@ from imbue.minds.desktop_client.workspace_lifecycle import MindHostAction
 from imbue.minds.desktop_client.workspace_lifecycle import perform_mind_host_action
 from imbue.minds.desktop_client.workspace_operations import OPERATION_LOG_SENTINEL
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
+from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationRecord
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
 from imbue.minds.desktop_client.workspace_recovery import RestartWorkerFailureHandler
 from imbue.minds.desktop_client.workspace_recovery import probe_workspace_health
@@ -478,6 +480,73 @@ def _handle_workspace_backups(agent_id: str) -> WorkspaceBackupsResponse | Respo
         update_target_version=backup_verification.update_target_backup_tag(),
         check_detail=check.detail,
         is_verification_enabled=is_backup_verification_enabled(paths, parsed_id),
+    )
+
+
+# Page-size bounds for the paged snapshot-history route. The default matches
+# what the backup-history page shows per page; the cap keeps a single response
+# (and the JSON the browser must hold) bounded no matter what the caller asks.
+_SNAPSHOT_PAGE_DEFAULT_LIMIT: Final[int] = 20
+_SNAPSHOT_PAGE_MAX_LIMIT: Final[int] = 100
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(resp=json_response_model(WorkspaceBackupSnapshotsPageResponse))
+def _handle_workspace_backup_snapshots(agent_id: str) -> WorkspaceBackupSnapshotsPageResponse | Response:
+    """One page of a workspace's snapshot history, newest-first.
+
+    Query params: ``offset`` (default 0) and ``limit`` (default 20, capped),
+    both clamped rather than rejected. Unlike the full ``/backups`` route this
+    skips the backup-service check and the repository lock probe, so paging
+    through history is a single restic listing per request and works even when
+    the workspace is offline or destroyed.
+    """
+    parsed_id = AgentId(agent_id)
+    state = get_state()
+    paths: WorkspacePaths | None = state.api_v1_paths
+    if paths is None:
+        return _json_error("Backups are not configured", 501)
+    _materialize_env_from_record_if_missing(paths, parsed_id)
+
+    # ``type=int`` makes Flask return the default for unparseable values, so
+    # both params only need range clamping here.
+    offset = max(0, request.args.get("offset", default=0, type=int))
+    requested_limit = request.args.get("limit", default=_SNAPSHOT_PAGE_DEFAULT_LIMIT, type=int)
+    limit = min(max(1, requested_limit), _SNAPSHOT_PAGE_MAX_LIMIT)
+
+    if not has_canonical_env(paths, parsed_id):
+        return WorkspaceBackupSnapshotsPageResponse(
+            agent_id=str(parsed_id), is_configured=False, total=0, offset=offset, limit=limit
+        )
+    try:
+        snapshots = backup_status.list_workspace_snapshots(
+            paths, parsed_id, parent_cg=state.root_concurrency_group
+        )
+    except BackupProvisioningError as e:
+        logger.warning("Backup snapshot page listing failed for {}: {}", parsed_id, e)
+        return WorkspaceBackupSnapshotsPageResponse(
+            agent_id=str(parsed_id), is_configured=True, total=0, offset=offset, limit=limit, error=str(e)
+        )
+    ordered = sorted(snapshots, key=lambda snapshot: snapshot.time, reverse=True)
+    page = ordered[offset : offset + limit]
+    return WorkspaceBackupSnapshotsPageResponse(
+        agent_id=str(parsed_id),
+        is_configured=True,
+        total=len(ordered),
+        offset=offset,
+        limit=limit,
+        snapshots=tuple(
+            BackupSnapshotSummary(
+                snapshot_id=snapshot.snapshot_id,
+                short_id=snapshot.short_id,
+                time=snapshot.time.isoformat(),
+                paths=tuple(snapshot.paths),
+                hostname=snapshot.hostname,
+                tags=tuple(snapshot.tags),
+                total_size_bytes=snapshot.total_size_bytes,
+            )
+            for snapshot in page
+        ),
     )
 
 
@@ -940,9 +1009,7 @@ def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, i
         and existing_operation.status == WorkspaceOperationStatus.RUNNING
         and existing_operation.kind != WorkspaceOperationKind.RESTART
     ):
-        return _json_error(
-            f"Another operation ({existing_operation.kind.value}) is already running for {agent_id}", 409
-        )
+        return _operation_conflict_error(existing_operation)
     # A restart already in flight for this workspace -- don't stack a second
     # worker racing the first's stop/start commands. mark_restarting decides the
     # RESTARTING transition under its own lock and reports whether this caller won
@@ -1081,6 +1148,25 @@ def _handle_restart_operation_status(operation_id: str) -> RestartOperationStatu
 # -- Backup service verification + management routes --
 
 
+# Plain-language names for the running operation in conflict (409) messages;
+# the raw enum values (BACKUP_RESTORE etc.) surface verbatim in the UI.
+_OPERATION_CONFLICT_PHRASES: Final[dict[WorkspaceOperationKind, str]] = {
+    WorkspaceOperationKind.RESTART: "A restart",
+    WorkspaceOperationKind.BACKUP_UPDATE: "A backup software update",
+    WorkspaceOperationKind.BACKUP_CONFIGURE: "A backup settings change",
+    WorkspaceOperationKind.BACKUP_RESTORE: "A restore",
+}
+
+
+def _operation_conflict_error(existing: WorkspaceOperationRecord | None) -> Response:
+    """409 for a dispatch that lost to an already-running operation on the same workspace."""
+    phrase = _OPERATION_CONFLICT_PHRASES.get(existing.kind, "Another operation") if existing is not None else "Another operation"
+    return _json_error(
+        f"{phrase} is already in progress for this workspace. Wait for it to finish before starting another operation.",
+        409,
+    )
+
+
 def _resolve_backup_route_context(agent_id: str) -> "tuple[AgentId, WorkspacePaths, ConcurrencyGroup] | Response":
     """Shared 404/503 gating for the backup-service mutation routes."""
     parsed_id = AgentId(agent_id)
@@ -1117,9 +1203,7 @@ def _handle_backup_service_update(agent_id: str) -> tuple[OperationHandleRespons
     # Atomic check-and-claim (like restart's mark_restarting): two concurrent
     # requests must not both spawn workers mutating the same workspace.
     if not registry.start_if_idle(parsed_id, WorkspaceOperationKind.BACKUP_UPDATE, datetime.now(timezone.utc)):
-        existing = registry.get(parsed_id)
-        kind_note = f" ({existing.kind.value})" if existing is not None else ""
-        return _json_error(f"Another operation{kind_note} is already running for {agent_id}", 409)
+        return _operation_conflict_error(registry.get(parsed_id))
     try:
         parent_cg.start_new_thread(
             target=backup_update_module.run_backup_update_sequence,
@@ -1149,14 +1233,66 @@ def _handle_backup_service_update(agent_id: str) -> tuple[OperationHandleRespons
 @require_api_or_cookie_auth
 @API_SPEC.validate(resp=json_response_model(EmptyResponse))
 def _handle_backup_service_update_cancel(agent_id: str) -> EmptyResponse | Response:
-    """Cancel a waiting backup update (only effective before it starts mutating)."""
+    """Cancel a waiting backup update or restore (only effective before it starts mutating)."""
     parsed_id = AgentId(agent_id)
     registry = get_state().workspace_operation_registry
     record = registry.get(parsed_id)
-    if record is None or record.kind != WorkspaceOperationKind.BACKUP_UPDATE:
+    if record is None or record.kind not in (
+        WorkspaceOperationKind.BACKUP_UPDATE,
+        WorkspaceOperationKind.BACKUP_RESTORE,
+    ):
         return _json_error(f"No backup update operation for {agent_id}", 404)
     registry.request_cancel(parsed_id)
     return EmptyResponse()
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(json=BackupServiceUpdateRequest, resp=json_response_model(OperationHandleResponse, status_code=202))
+def _handle_workspace_backup_restore(agent_id: str, snapshot_id: str) -> tuple[OperationHandleResponse, int] | Response:
+    """Dispatch an in-place restore of the workspace to one snapshot; return a handle to poll.
+
+    Body: ``{"stop_chats"?: bool}`` -- same contract as the update route (the
+    "Stop all chats and retry" flow sets it). One tracked operation runs per
+    workspace at a time; ``start_if_idle`` rejects a second dispatch (of any
+    kind, including a double-pressed Restore) with a 409 rather than stacking.
+    """
+    context = _resolve_backup_route_context(agent_id)
+    if isinstance(context, Response):
+        return context
+    parsed_id, paths, parent_cg = context
+    state = get_state()
+    registry = state.workspace_operation_registry
+    if not has_canonical_env(paths, parsed_id):
+        return _json_error(f"Backups are not configured for {agent_id}", 409)
+
+    body = request.get_json(silent=True, force=True) or {}
+    is_stop_chats = bool(body.get("stop_chats", False))
+    if not registry.start_if_idle(parsed_id, WorkspaceOperationKind.BACKUP_RESTORE, datetime.now(timezone.utc)):
+        return _operation_conflict_error(registry.get(parsed_id))
+    try:
+        parent_cg.start_new_thread(
+            target=backup_update_module.run_backup_restore_sequence,
+            kwargs={
+                "agent_id": parsed_id,
+                "paths": paths,
+                "registry": registry,
+                "parent_cg": parent_cg,
+                "snapshot_id": snapshot_id,
+                "is_stop_chats": is_stop_chats,
+            },
+            name=f"backup-restore-{parsed_id}",
+            daemon=True,
+            is_checked=False,
+            on_failure=backup_update_module.BackupWorkerFailureHandler(
+                workspace_agent_id=parsed_id, registry=registry
+            ),
+        )
+    except (OSError, RuntimeError, ConcurrencyGroupError) as exc:
+        logger.warning("Failed to spawn backup restore worker for {}: {}", parsed_id, exc)
+        message = f"Could not start the backup restore worker: {exc}"
+        registry.fail(parsed_id, message)
+        return _json_error(message, 503)
+    return OperationHandleResponse(operation_id=str(parsed_id), kind="backup_restore"), 202
 
 
 @require_api_or_cookie_auth
@@ -1182,7 +1318,7 @@ def _handle_backup_service_configure(agent_id: str) -> tuple[OperationHandleResp
     # race-free claim is the start_if_idle below.
     existing = registry.get(parsed_id)
     if existing is not None and existing.status == WorkspaceOperationStatus.RUNNING:
-        return _json_error(f"Another operation ({existing.kind.value}) is already running for {agent_id}", 409)
+        return _operation_conflict_error(existing)
 
     body = request.get_json(silent=True, force=True) or {}
     try:
@@ -1208,9 +1344,7 @@ def _handle_backup_service_configure(agent_id: str) -> tuple[OperationHandleResp
 
     is_destination_change = has_canonical_env(paths, parsed_id)
     if not registry.start_if_idle(parsed_id, WorkspaceOperationKind.BACKUP_CONFIGURE, datetime.now(timezone.utc)):
-        claimed = registry.get(parsed_id)
-        kind_note = f" ({claimed.kind.value})" if claimed is not None else ""
-        return _json_error(f"Another operation{kind_note} is already running for {agent_id}", 409)
+        return _operation_conflict_error(registry.get(parsed_id))
     registry.append_log(
         parsed_id, "Changing the backup destination..." if is_destination_change else "Enabling backups..."
     )
@@ -1261,9 +1395,7 @@ def _handle_backup_service_disable(agent_id: str) -> tuple[OperationHandleRespon
     state = get_state()
     registry = state.workspace_operation_registry
     if not registry.start_if_idle(parsed_id, WorkspaceOperationKind.BACKUP_CONFIGURE, datetime.now(timezone.utc)):
-        existing = registry.get(parsed_id)
-        kind_note = f" ({existing.kind.value})" if existing is not None else ""
-        return _json_error(f"Another operation{kind_note} is already running for {agent_id}", 409)
+        return _operation_conflict_error(registry.get(parsed_id))
     registry.append_log(parsed_id, "Disabling backups...")
     try:
         parent_cg.start_new_thread(
@@ -1310,12 +1442,13 @@ def _handle_backup_verification_toggle(agent_id: str) -> EmptyResponse | Respons
 @require_api_or_cookie_auth
 @API_SPEC.validate(resp=json_response_model(BackupOperationStatusResponse))
 def _handle_backup_operation_status(operation_id: str) -> BackupOperationStatusResponse | Response:
-    """Report the status of a backup update/configure operation (the id is the workspace agent id)."""
+    """Report the status of a backup update/configure/restore operation (the id is the workspace agent id)."""
     parsed_id = AgentId(operation_id)
     record = get_state().workspace_operation_registry.get(parsed_id)
     if record is None or record.kind not in (
         WorkspaceOperationKind.BACKUP_UPDATE,
         WorkspaceOperationKind.BACKUP_CONFIGURE,
+        WorkspaceOperationKind.BACKUP_RESTORE,
     ):
         return _json_error(f"Unknown operation {operation_id}", 404)
     blocked_chats: tuple[str, ...] = ()
@@ -1936,8 +2069,18 @@ def create_api_v1_blueprint() -> Blueprint:
     blueprint.add_url_rule("/workspaces/<agent_id>/version", view_func=_handle_workspace_version, methods=["GET"])
     blueprint.add_url_rule("/workspaces/<agent_id>/backups", view_func=_handle_workspace_backups, methods=["GET"])
     blueprint.add_url_rule(
+        "/workspaces/<agent_id>/backups/snapshots",
+        view_func=_handle_workspace_backup_snapshots,
+        methods=["GET"],
+    )
+    blueprint.add_url_rule(
         "/workspaces/<agent_id>/backups/<snapshot_id>/export",
         view_func=_handle_workspace_backup_export,
+        methods=["POST"],
+    )
+    blueprint.add_url_rule(
+        "/workspaces/<agent_id>/backups/<snapshot_id>/restore",
+        view_func=_handle_workspace_backup_restore,
         methods=["POST"],
     )
 

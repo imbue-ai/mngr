@@ -4,22 +4,29 @@ The scripts are executed exactly as they are on a workspace -- through the
 base64 shell command via ``bash -c`` -- with a stub ``uv`` / ``supervisorctl``
 placed on PATH so the mngr-list gate and the service restart behave like a
 healthy (or deliberately broken) workspace without any real infrastructure.
+The restore-script tests additionally run against a real local restic repo.
 """
 
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
+
+import pytest
 
 from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_APPLY_UPDATE_SCRIPT
 from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_CHECK_SCRIPT
 from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_GATE_PROBE_SCRIPT
+from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_RESTORE_SCRIPT
 from imbue.minds.desktop_client.backup_workspace_scripts import CHECK_RESULT_MARKER
 from imbue.minds.desktop_client.backup_workspace_scripts import GATE_RESULT_MARKER
 from imbue.minds.desktop_client.backup_workspace_scripts import OFFICIAL_REMOTE_URL
+from imbue.minds.desktop_client.backup_workspace_scripts import RESTORE_RESULT_MARKER
 from imbue.minds.desktop_client.backup_workspace_scripts import UPDATE_RESULT_MARKER
 from imbue.minds.desktop_client.backup_workspace_scripts import build_workspace_script_command
 from imbue.minds.desktop_client.backup_workspace_scripts import extract_marker_json
+from imbue.minds.desktop_client.restic_cli import _get_restic_binary
 from imbue.minds.testing import run_git_for_backup_test
 from imbue.minds.testing import tag_newer_release_content
 from imbue.minds.testing import write_stub_supervisorctl
@@ -39,12 +46,21 @@ def _make_workspace_repo(tmp_path: Path) -> Path:
     return repo
 
 
-def _run_script(repo: Path, script: str, args: tuple[str, ...], *, extra_path: Path | None = None) -> dict:
+def _run_script(
+    repo: Path,
+    script: str,
+    args: tuple[str, ...],
+    *,
+    extra_path: Path | None = None,
+    env_overrides: dict[str, str] | None = None,
+) -> dict:
     command = build_workspace_script_command(script, args)
     env = dict(os.environ)
     if extra_path is not None:
         env["PATH"] = f"{extra_path}:{env['PATH']}"
     env.pop("MNGR_AGENT_STATE_DIR", None)
+    if env_overrides:
+        env.update(env_overrides)
     result = subprocess.run(
         ["bash", "-c", command], cwd=repo, capture_output=True, text=True, check=False, timeout=300, env=env
     )
@@ -314,6 +330,37 @@ def test_gate_probe_detects_in_flight_backup_tick(tmp_path: Path) -> None:
     assert payload["backup_tick_in_flight"] is True
 
 
+def test_gate_probe_ignores_a_stale_dead_tick_once_a_newer_tick_finished(tmp_path: Path) -> None:
+    # A tick killed mid-flight (e.g. by a service restart) never writes its
+    # completion event. Once a newer tick has started and finished, the dead
+    # tick must not read as in flight -- ticks run serially, so only the most
+    # recently started tick can be.
+    repo = _make_workspace_repo(tmp_path)
+    host_dir = tmp_path / "host"
+    events_path = host_dir / "agents" / "agent-x" / "events" / "backup" / "events.jsonl"
+    events_path.parent.mkdir(parents=True)
+    events_path.write_text(
+        json.dumps({"type": "BACKUP_STARTED", "tick_id": "dead-tick"})
+        + "\n"
+        + json.dumps({"type": "BACKUP_STARTED", "tick_id": "t2"})
+        + "\n"
+        + json.dumps({"type": "RESTIC_BACKUP_SUCCEEDED", "tick_id": "t2"})
+        + "\n"
+    )
+    stub_bin = _make_stub_bin(tmp_path)
+    command = build_workspace_script_command(BACKUP_GATE_PROBE_SCRIPT, ("--agent-id", "agent-x"))
+    env = dict(os.environ)
+    env["PATH"] = f"{stub_bin}:{env['PATH']}"
+    env["MNGR_HOST_DIR"] = str(host_dir)
+    env.pop("MNGR_AGENT_STATE_DIR", None)
+    result = subprocess.run(
+        ["bash", "-c", command], cwd=repo, capture_output=True, text=True, check=False, timeout=120, env=env
+    )
+    payload = extract_marker_json(result.stdout, GATE_RESULT_MARKER)
+    assert payload is not None, result.stdout + result.stderr
+    assert payload["backup_tick_in_flight"] is False
+
+
 # --- apply update script ---
 
 
@@ -433,3 +480,224 @@ def test_apply_update_skips_commit_when_content_already_matches(tmp_path: Path) 
     assert payload["status"] == "ok"
     assert payload["committed"] is False
     assert run_git_for_backup_test(repo, "log", "-1", "--format=%s").strip() == "initial"
+
+
+# --- restore script against a real local restic repo ---
+
+_RESTIC_TEST_PASSWORD = "restore-test-password"
+
+
+def _restic_for_test(restic_repo: Path, *args: str) -> str:
+    """Run real restic against the test repo; return stdout."""
+    env = dict(os.environ)
+    env.update({"RESTIC_REPOSITORY": str(restic_repo), "RESTIC_PASSWORD": _RESTIC_TEST_PASSWORD})
+    result = subprocess.run(
+        [_get_restic_binary(), *args], capture_output=True, text=True, check=True, timeout=120, env=env
+    )
+    return result.stdout
+
+
+def _make_restore_workspace(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """A host dir shaped like /mngr (code repo + restic.env) and an initialized local restic repo.
+
+    Returns (host_dir, code_dir, restic_repo). ``resolve()``d paths so the
+    snapshot's recorded absolute path matches what the script computes via
+    realpath (macOS tmp dirs live behind a /var -> /private/var symlink).
+    """
+    host = (tmp_path / "host").resolve()
+    code = host / "code"
+    code.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "-b", "main", str(code)], check=True, capture_output=True, timeout=60)
+    backup_dir = code / "libs" / "host_backup"
+    backup_dir.mkdir(parents=True)
+    (backup_dir / "service.py").write_text("VERSION = 1\n")
+    (code / "file.txt").write_text("version 1\n")
+    restic_repo = (tmp_path / "restic-repo").resolve()
+    env_path = code / "runtime" / "secrets" / "restic.env"
+    env_path.parent.mkdir(parents=True)
+    env_path.write_text(f"RESTIC_REPOSITORY={restic_repo}\nRESTIC_PASSWORD={_RESTIC_TEST_PASSWORD}\n")
+    run_git_for_backup_test(code, "add", "-A")
+    run_git_for_backup_test(code, "commit", "-q", "-m", "initial")
+    _restic_for_test(restic_repo, "init")
+    return host, code, restic_repo
+
+
+def _stub_bin_with_restic(tmp_path: Path, agents_json: str | None = None) -> Path:
+    """The usual uv/supervisorctl stub dir, plus the real restic on PATH."""
+    if agents_json is None:
+        stub_bin = _make_stub_bin(tmp_path)
+    else:
+        stub_bin = _make_stub_bin(tmp_path, agents_json=agents_json)
+    restic_path = shutil.which(_get_restic_binary())
+    assert restic_path is not None, "restic binary not found; run `pnpm build` in apps/minds/"
+    restic_link = stub_bin / "restic"
+    if not restic_link.exists():
+        os.symlink(restic_path, restic_link)
+    return stub_bin
+
+
+def _snapshot_entries(restic_repo: Path) -> list[dict]:
+    entries = json.loads(_restic_for_test(restic_repo, "snapshots", "--json"))
+    assert isinstance(entries, list)
+    return entries
+
+
+@pytest.mark.timeout(120)
+def test_restore_script_rewinds_host_dir_and_takes_a_safety_snapshot(tmp_path: Path) -> None:
+    host, code, restic_repo = _make_restore_workspace(tmp_path)
+    _restic_for_test(restic_repo, "backup", str(host))
+    snapshot_id = _snapshot_entries(restic_repo)[0]["id"]
+
+    # Work done after the snapshot: a changed file, a new file, and a changed
+    # restic.env (the current env must survive the restore; the files must not).
+    (code / "file.txt").write_text("version 2\n")
+    (code / "extra.txt").write_text("added after the snapshot\n")
+    env_path = code / "runtime" / "secrets" / "restic.env"
+    current_env = env_path.read_text() + "# current credentials marker\n"
+    env_path.write_text(current_env)
+
+    stub_bin = _stub_bin_with_restic(tmp_path)
+    run = _run_script(
+        code,
+        BACKUP_RESTORE_SCRIPT,
+        ("--agent-id", "agent-x", "--snapshot-id", snapshot_id),
+        extra_path=stub_bin,
+        env_overrides={"MNGR_HOST_DIR": str(host)},
+    )
+    payload = extract_marker_json(run["stdout"], RESTORE_RESULT_MARKER)
+    assert payload is not None, run
+    assert payload["status"] == "ok", payload
+    assert payload["safety_snapshot_taken"] is True
+    assert payload["swapped"] is True
+
+    # The host dir is back at the snapshot's content...
+    assert (code / "file.txt").read_text() == "version 1\n"
+    assert not (code / "extra.txt").exists()
+    # ...except the restic.env, which keeps the *current* credentials.
+    assert env_path.read_text() == current_env
+    # No staging dir left behind.
+    assert not (host / ".minds-restore-staging").exists()
+    # A pre-restore safety snapshot of the pre-swap state exists (it carries
+    # the changed content, so this restore is itself undoable).
+    safety = [entry for entry in _snapshot_entries(restic_repo) if "pre-restore" in (entry.get("tags") or [])]
+    assert len(safety) == 1
+
+
+@pytest.mark.timeout(120)
+def test_restore_script_descends_into_the_nested_host_dir_of_a_volume_level_snapshot(tmp_path: Path) -> None:
+    # On btrfs providers the hourly backup snapshots the whole unified host
+    # volume: the snapshot root carries volume-level `agents/` +
+    # `host_state.json` next to a `host_dir/` child that holds the actual
+    # workspace. The restore must swap in that nested host_dir, not the
+    # volume-level entries.
+    host, code, restic_repo = _make_restore_workspace(tmp_path)
+    volume = (tmp_path / "volume").resolve()
+    volume.mkdir()
+    shutil.copytree(host, volume / "host_dir")
+    (volume / "host_dir" / "code" / "file.txt").write_text("volume snapshot content\n")
+    (volume / "agents").mkdir()
+    (volume / "host_state.json").write_text("{}\n")
+    _restic_for_test(restic_repo, "backup", str(volume))
+    snapshot_id = _snapshot_entries(restic_repo)[0]["id"]
+
+    (code / "file.txt").write_text("current content\n")
+    env_path = code / "runtime" / "secrets" / "restic.env"
+    current_env = env_path.read_text()
+
+    stub_bin = _stub_bin_with_restic(tmp_path)
+    run = _run_script(
+        code,
+        BACKUP_RESTORE_SCRIPT,
+        ("--agent-id", "agent-x", "--snapshot-id", snapshot_id),
+        extra_path=stub_bin,
+        env_overrides={"MNGR_HOST_DIR": str(host)},
+    )
+    payload = extract_marker_json(run["stdout"], RESTORE_RESULT_MARKER)
+    assert payload is not None, run
+    assert payload["status"] == "ok", payload
+    assert payload["swapped"] is True
+    # The nested host_dir's content landed at the host dir root...
+    assert (code / "file.txt").read_text() == "volume snapshot content\n"
+    assert env_path.read_text() == current_env
+    # ...and the volume-level entries were discarded, not swapped in.
+    assert not (host / "host_state.json").exists()
+    assert not (host / "host_dir").exists()
+
+
+@pytest.mark.timeout(120)
+def test_restore_script_refuses_a_snapshot_with_no_code_checkout(tmp_path: Path) -> None:
+    host, code, restic_repo = _make_restore_workspace(tmp_path)
+    junk = (tmp_path / "junk").resolve()
+    junk.mkdir()
+    (junk / "unrelated.txt").write_text("not a workspace\n")
+    _restic_for_test(restic_repo, "backup", str(junk))
+    snapshot_id = _snapshot_entries(restic_repo)[0]["id"]
+    (code / "file.txt").write_text("version 2\n")
+
+    stub_bin = _stub_bin_with_restic(tmp_path)
+    run = _run_script(
+        code,
+        BACKUP_RESTORE_SCRIPT,
+        ("--agent-id", "agent-x", "--snapshot-id", snapshot_id),
+        extra_path=stub_bin,
+        env_overrides={"MNGR_HOST_DIR": str(host)},
+    )
+    payload = extract_marker_json(run["stdout"], RESTORE_RESULT_MARKER)
+    assert payload is not None, run
+    assert payload["status"] == "failed"
+    assert payload["swapped"] is False
+    detail = payload["detail"]
+    assert isinstance(detail, str)
+    assert "no code/ checkout" in detail
+    # The host dir was not touched and no staging dir was left behind.
+    assert (code / "file.txt").read_text() == "version 2\n"
+    assert not (host / ".minds-restore-staging").exists()
+
+
+@pytest.mark.timeout(120)
+def test_restore_script_is_blocked_by_running_chats_and_mutates_nothing(tmp_path: Path) -> None:
+    host, code, restic_repo = _make_restore_workspace(tmp_path)
+    _restic_for_test(restic_repo, "backup", str(host))
+    snapshot_id = _snapshot_entries(restic_repo)[0]["id"]
+    (code / "file.txt").write_text("version 2\n")
+
+    stub_bin = _stub_bin_with_restic(tmp_path, agents_json=_running_chat_agents_json(code))
+    run = _run_script(
+        code,
+        BACKUP_RESTORE_SCRIPT,
+        ("--agent-id", "agent-x", "--snapshot-id", snapshot_id),
+        extra_path=stub_bin,
+        env_overrides={"MNGR_HOST_DIR": str(host)},
+    )
+    payload = extract_marker_json(run["stdout"], RESTORE_RESULT_MARKER)
+    assert payload is not None, run
+    assert payload["status"] == "blocked"
+    assert payload["running_chats"] == ["chat-1"]
+    assert (code / "file.txt").read_text() == "version 2\n"
+    # No safety snapshot was taken either -- the gate fires before any mutation.
+    assert len(_snapshot_entries(restic_repo)) == 1
+
+
+@pytest.mark.timeout(120)
+def test_restore_script_fails_cleanly_for_an_unknown_snapshot(tmp_path: Path) -> None:
+    host, code, restic_repo = _make_restore_workspace(tmp_path)
+    _restic_for_test(restic_repo, "backup", str(host))
+    (code / "file.txt").write_text("version 2\n")
+
+    stub_bin = _stub_bin_with_restic(tmp_path)
+    run = _run_script(
+        code,
+        BACKUP_RESTORE_SCRIPT,
+        ("--agent-id", "agent-x", "--snapshot-id", "ffffffff"),
+        extra_path=stub_bin,
+        env_overrides={"MNGR_HOST_DIR": str(host)},
+    )
+    payload = extract_marker_json(run["stdout"], RESTORE_RESULT_MARKER)
+    assert payload is not None, run
+    assert payload["status"] == "failed"
+    assert payload["safety_snapshot_taken"] is False
+    detail = payload["detail"]
+    assert isinstance(detail, str)
+    assert "ffffffff" in detail
+    # Nothing was mutated.
+    assert (code / "file.txt").read_text() == "version 2\n"
