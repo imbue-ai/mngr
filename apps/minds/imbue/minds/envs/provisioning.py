@@ -78,6 +78,7 @@ from imbue.minds.envs.per_env_deploy import delete_modal_secret
 from imbue.minds.envs.per_env_deploy import deploy_litellm_proxy
 from imbue.minds.envs.per_env_deploy import deploy_remote_service_connector
 from imbue.minds.envs.per_env_deploy import ensure_modal_env
+from imbue.minds.envs.per_env_deploy import modal_token_reprovision_hint
 from imbue.minds.envs.per_env_deploy import per_env_connector_url
 from imbue.minds.envs.per_env_deploy import per_env_litellm_proxy_url
 from imbue.minds.envs.per_env_deploy import push_per_env_modal_secret
@@ -1467,11 +1468,9 @@ def _assert_deploy_url_matches(*, actual: AnyUrl, expected: AnyUrl, app: str, mo
             f"workspace {actual_workspace!r}, not deploy.toml's modal_workspace "
             f"{modal_workspace!r}: `minds env activate --deploy` only checks that a "
             f"[{modal_workspace}] profile section exists in ~/.modal.toml, not that its "
-            f"token belongs to that workspace. Mint a token for the right workspace with "
-            f"`modal token new --profile {modal_workspace}` (select the {modal_workspace!r} "
-            f"workspace in the browser), then re-activate and re-run. If the workspaces do "
-            f"match, the URL formula in `per_env_deploy.py` is stale or Modal changed its "
-            f"hostname scheme."
+            f"token belongs to that workspace. {modal_token_reprovision_hint(modal_workspace)} "
+            f"If the workspaces do match, the URL formula in `per_env_deploy.py` is stale or "
+            f"Modal changed its hostname scheme."
         )
     raise ModalDeployError(
         f"`modal deploy` URL mismatch for {app!r}: computed {expected_str!r} but Modal "

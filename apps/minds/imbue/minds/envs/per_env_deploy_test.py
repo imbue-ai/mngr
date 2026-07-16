@@ -13,6 +13,7 @@ from pydantic import SecretStr
 from imbue.minds.envs.per_env_deploy import _modal_profile_token_workspace
 from imbue.minds.envs.per_env_deploy import _select_deployed_app_id
 from imbue.minds.envs.per_env_deploy import compute_per_env_overrides
+from imbue.minds.envs.per_env_deploy import modal_token_reprovision_hint
 from imbue.minds.envs.per_env_deploy import modal_token_workspace_mismatch_message
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.envs.providers.neon_db import NeonProjectRecord
@@ -113,6 +114,12 @@ def test_modal_profile_token_workspace_returns_none_when_absent_or_malformed() -
     # Row present but missing / empty workspace.
     assert _modal_profile_token_workspace([{"name": "minds-dev"}], "minds-dev") is None
     assert _modal_profile_token_workspace([{"name": "minds-dev", "workspace": ""}], "minds-dev") is None
+
+
+def test_modal_token_reprovision_hint_names_the_profile() -> None:
+    hint = modal_token_reprovision_hint("minds-dev")
+    assert "modal token new --profile minds-dev" in hint
+    assert "'minds-dev'" in hint
 
 
 def test_modal_token_workspace_mismatch_message_flags_wrong_workspace() -> None:

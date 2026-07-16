@@ -928,6 +928,20 @@ def active_modal_token_workspace(profile: str, *, parent_cg: ConcurrencyGroup) -
 
 
 @pure
+def modal_token_reprovision_hint(modal_workspace: str) -> str:
+    """The copy-pasteable fix when a Modal profile's token is bound to the wrong workspace.
+
+    Single source of the reprovision guidance shared by the deploy preflight
+    (:func:`modal_token_workspace_mismatch_message`) and the deploy-time URL
+    assertion (``provisioning._assert_deploy_url_matches``).
+    """
+    return (
+        f"Mint a token for the right workspace with `modal token new --profile {modal_workspace}` "
+        f"(select the {modal_workspace!r} workspace in the browser), then re-activate and re-run."
+    )
+
+
+@pure
 def modal_token_workspace_mismatch_message(modal_workspace: str, token_workspace: str | None) -> str | None:
     """Operator-facing error if ``token_workspace`` contradicts ``modal_workspace``, else None.
 
@@ -943,9 +957,8 @@ def modal_token_workspace_mismatch_message(modal_workspace: str, token_workspace
         f"The Modal profile {modal_workspace!r} (pinned via MODAL_PROFILE) holds a token bound to "
         f"workspace {token_workspace!r}, not {modal_workspace!r} -- deploying would misroute every "
         f"`modal` call to the wrong workspace. `minds env activate --deploy` only checks that the "
-        f"[{modal_workspace}] profile section exists, not its token's workspace. Mint a token for the "
-        f"right workspace with `modal token new --profile {modal_workspace}` (select the "
-        f"{modal_workspace!r} workspace), then re-activate and re-run. Verify with `modal profile list`."
+        f"[{modal_workspace}] profile section exists, not its token's workspace. "
+        f"{modal_token_reprovision_hint(modal_workspace)} Verify with `modal profile list`."
     )
 
 
