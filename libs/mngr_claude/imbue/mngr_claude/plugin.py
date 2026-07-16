@@ -2616,7 +2616,7 @@ class ClaudeAgent(
         send_enter_keystroke(self, tmux_target)
 
     def wait_for_ready_signal(
-        self, is_creating: bool, start_action: Callable[[], None], timeout: float | None = None
+        self, is_tui_ready_awaited: bool, start_action: Callable[[], None], timeout: float | None = None
     ) -> None:
         """Wait for the agent to become ready, executing start_action then polling.
 
@@ -2632,9 +2632,14 @@ class ClaudeAgent(
         session_started_path = self._get_agent_dir() / "session_started"
 
         with log_span("Waiting for session_started file (timeout={}s)", timeout):
-            # Run the start action (e.g., start the agent)
+            # Run the start action, but always skip the base class's generic TUI-ready wait
+            # (is_tui_ready_awaited=False): Claude's authoritative readiness signal is the
+            # session_started marker polled below, a stronger signal than the input-prompt glyph.
+            # Leaving the generic wait on would, for a freshly created agent, block for the full
+            # timeout if a startup dialog suppressed the column-0 prompt -- never reaching the
+            # dialog auto-accept fallback further down.
             with log_span("Calling start_action..."):
-                super().wait_for_ready_signal(is_creating, start_action, timeout)
+                super().wait_for_ready_signal(is_tui_ready_awaited=False, start_action=start_action, timeout=timeout)
 
             # Poll for the session_started file (created by SessionStart hook)
             if poll_until(

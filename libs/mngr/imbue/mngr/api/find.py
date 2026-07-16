@@ -374,7 +374,7 @@ def ensure_agent_started(agent: AgentInterface, host: OnlineHostInterface, is_st
         if is_start_desired:
             logger.info("Agent {} is stopped, starting it", agent.name)
             agent.wait_for_ready_signal(
-                is_creating=False,
+                is_tui_ready_awaited=False,
                 start_action=lambda: host.start_agents([agent.id]),
                 timeout=agent.get_ready_timeout_seconds(),
             )
@@ -429,7 +429,7 @@ def revive_done_agent(agent: AgentInterface, host: OnlineHostInterface) -> None:
     """
     logger.info("Agent {} is DONE with a lingering tmux session; restarting it", agent.name)
     agent.wait_for_ready_signal(
-        is_creating=False,
+        is_tui_ready_awaited=False,
         start_action=lambda: start_agents_locked(host, [agent.id], is_restart=True),
         timeout=agent.get_ready_timeout_seconds(),
     )

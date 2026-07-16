@@ -326,7 +326,7 @@ class OpenCodeAgent(
         return _resolve_lifecycle_state_for_permission(base_state, is_blocked_on_permission)
 
     def wait_for_ready_signal(
-        self, is_creating: bool, start_action: Callable[[], None], timeout: float | None = None
+        self, is_tui_ready_awaited: bool, start_action: Callable[[], None], timeout: float | None = None
     ) -> None:
         """Start the agent and, on creation, wait for the launch script's readiness sentinel.
 
@@ -337,8 +337,8 @@ class OpenCodeAgent(
         footer. The sentinel is cleared by the launch script before each (re)start,
         so a stale one can't make this return early.
         """
-        super().wait_for_ready_signal(is_creating, start_action, timeout)
-        if not is_creating:
+        super().wait_for_ready_signal(is_tui_ready_awaited, start_action, timeout)
+        if not is_tui_ready_awaited:
             return
         effective_timeout = timeout if timeout is not None else _READY_TIMEOUT_SECONDS
         sentinel_path = self._get_agent_dir() / READY_SENTINEL_FILENAME

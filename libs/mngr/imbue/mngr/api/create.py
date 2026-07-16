@@ -403,7 +403,7 @@ def create(
                         else mngr_ctx.config.agent_ready_timeout
                     )
                     agent.wait_for_ready_signal(
-                        is_creating=True,
+                        is_tui_ready_awaited=True,
                         start_action=lambda: host.start_agents([agent.id]),
                         timeout=timeout,
                     )

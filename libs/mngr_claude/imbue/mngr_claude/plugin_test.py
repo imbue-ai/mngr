@@ -1553,6 +1553,9 @@ class _ScriptedPaneClaudeAgent(ClaudeAgent):
     pane_position: int = Field(default=0)
     enter_press_count: int = Field(default=0)
     recorded_events: list[tuple[str, str]] = Field(default_factory=list)
+    # The session_started marker is treated as present once the scripted pane has advanced to (or
+    # past) this position (i.e. after enough Enter-accepts). A large value means it never appears.
+    session_started_ready_at_position: int = Field(default=0)
 
     def _capture_pane_content(self, tmux_target: TmuxWindowTarget, include_scrollback: bool = False) -> str | None:
         return self.scripted_panes[min(self.pane_position, len(self.scripted_panes) - 1)]
@@ -1563,6 +1566,13 @@ class _ScriptedPaneClaudeAgent(ClaudeAgent):
 
     def record_message_delivery_event(self, event_type: str, detail: str) -> None:
         self.recorded_events.append((event_type, detail))
+
+    def _check_file_exists(self, path: Path) -> bool:
+        # Gate only the session_started readiness marker on pane progress; delegate everything else
+        # (e.g. the permissions_waiting marker) to the real local-filesystem check.
+        if str(path).endswith("session_started"):
+            return self.pane_position >= self.session_started_ready_at_position
+        return super()._check_file_exists(path)
 
 
 def _make_scripted_agent(
@@ -1748,6 +1758,43 @@ def test_send_message_routes_delivered_but_blocked_to_blocked_agents(
     assert [name for name, _error in result.blocked_agents] == ["test-agent"]
     assert result.failed_agents == []
     assert result.successful_agents == []
+
+
+def test_wait_for_ready_signal_auto_accepts_startup_selector(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """On the create path, a selector blocking startup is auto-accepted so readiness then signals.
+
+    This exercises the fix that runs the startup dialog auto-accept even for a freshly created
+    agent: ClaudeAgent skips the base class's generic TUI-ready wait (which would otherwise hang if
+    the selector suppressed the column-0 prompt) and relies on the session_started marker, which
+    here appears only after the selector is accepted.
+    """
+    config = ClaudeAgentConfig(
+        check_installation=False, preserve_sessions_on_destroy=False, auto_accept_preflight_prompt_depth=5
+    )
+    agent = _make_scripted_agent(
+        local_provider, tmp_path, temp_mngr_ctx, [_MODEL_SELECTOR_PANE, _CLEARED_PANE], config
+    )
+    # session_started is absent while the selector is up (position 0) and present after one accept.
+    agent.session_started_ready_at_position = 1
+    agent.wait_for_ready_signal(is_tui_ready_awaited=True, start_action=lambda: None, timeout=0.3)
+    assert agent.enter_press_count == 1
+
+
+def test_wait_for_ready_signal_raises_dialog_detected_when_startup_selector_persists_at_depth_zero(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """With auto-accept disabled, a selector blocking startup surfaces as DialogDetectedError."""
+    config = ClaudeAgentConfig(
+        check_installation=False, preserve_sessions_on_destroy=False, auto_accept_preflight_prompt_depth=0
+    )
+    agent = _make_scripted_agent(local_provider, tmp_path, temp_mngr_ctx, [_MODEL_SELECTOR_PANE], config)
+    # session_started never appears (the selector keeps blocking it).
+    agent.session_started_ready_at_position = 99
+    with pytest.raises(DialogDetectedError):
+        agent.wait_for_ready_signal(is_tui_ready_awaited=True, start_action=lambda: None, timeout=0.3)
+    assert agent.enter_press_count == 0
 
 
 def _make_hooks_test_agent(

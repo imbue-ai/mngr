@@ -200,16 +200,16 @@ class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
         """
 
     def wait_for_ready_signal(
-        self, is_creating: bool, start_action: Callable[[], None], timeout: float | None = None
+        self, is_tui_ready_awaited: bool, start_action: Callable[[], None], timeout: float | None = None
     ) -> None:
-        """Run the start action; on creation, also wait for the TUI ready indicator.
+        """Run the start action; when ``is_tui_ready_awaited``, also wait for the TUI ready indicator.
 
-        ``send_message`` independently waits for readiness, so this create-path
-        wait only matters for agents created without an initial message (where
-        ``send_message`` is never called). When a message follows, the readiness
-        check in ``send_message`` is a no-op because the indicator is already
-        present, so there is no awkward double-wait.
+        Callers pass ``is_tui_ready_awaited=True`` when creating an agent and ``False`` when
+        starting/resuming one. ``send_message`` independently waits for readiness, so this wait only
+        matters for agents created without an initial message (where ``send_message`` is never
+        called). When a message follows, the readiness check in ``send_message`` is a no-op because
+        the indicator is already present, so there is no awkward double-wait.
         """
-        super().wait_for_ready_signal(is_creating, start_action, timeout)
-        if is_creating:
+        super().wait_for_ready_signal(is_tui_ready_awaited, start_action, timeout)
+        if is_tui_ready_awaited:
             wait_for_tui_ready(self, self.tmux_target, self.get_tui_ready_indicator())

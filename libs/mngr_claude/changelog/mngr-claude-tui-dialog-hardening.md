@@ -8,4 +8,4 @@ Two new `[agent_types.claude]` settings, both defaulting to `0` (off):
 
 Detection is structural (a `────` rule line followed by an indented `❯`-arrow numbered option), so it also catches new/unknown confirmation dialogs, including in the pre-send preflight check. Each auto-accept is logged and recorded as an agent event capturing the selector text.
 
-Also fixed a latent bug: the Claude readiness/leftover-input checks matched the `❯` glyph anywhere, so an open selector's indented option line could be mistaken for the input prompt. Both are now anchored to a line that begins with `❯` at column 0.
+Also fixed a latent bug: the Claude readiness/leftover-input checks matched the `❯` glyph anywhere, so an open selector's indented option line could be mistaken for the input prompt. Both are now anchored to a line that begins with `❯` at column 0. Because of that anchoring, agent startup now relies on Claude's own `session_started` signal (skipping the generic TUI-ready wait) so that a selector blocking startup is auto-accepted (up to `auto_accept_preflight_prompt_depth`) instead of hanging on the create path.

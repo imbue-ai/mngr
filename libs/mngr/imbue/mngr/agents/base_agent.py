@@ -394,7 +394,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     def wait_for_ready_signal(
-        self, is_creating: bool, start_action: Callable[[], None], timeout: float | None = None
+        self, is_tui_ready_awaited: bool, start_action: Callable[[], None], timeout: float | None = None
     ) -> None:
         """Wait for the agent to become ready, executing start_action while listening.
 

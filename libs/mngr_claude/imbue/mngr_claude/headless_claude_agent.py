@@ -303,7 +303,7 @@ class HeadlessClaude(ClaudeCoreAgent, BaseHeadlessAgent[ClaudeAgentConfig]):
         self.host.write_text_file(prompt_path, initial_message)
 
     def wait_for_ready_signal(
-        self, is_creating: bool, start_action: Callable[[], None], timeout: float | None = None
+        self, is_tui_ready_awaited: bool, start_action: Callable[[], None], timeout: float | None = None
     ) -> None:
         raise NotImplementedError(
             "HeadlessClaude agents do not support wait_for_ready_signal. "

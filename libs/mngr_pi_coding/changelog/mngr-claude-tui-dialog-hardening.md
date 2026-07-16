@@ -1,0 +1,1 @@
+Internal refactor only (no user-visible or behavior change): the shared agent `wait_for_ready_signal` parameter `is_creating` was renamed to `is_tui_ready_awaited` (part of the mngr Claude TUI-dialog hardening work). The pi agent still waits for its `pi_session_started` readiness sentinel exactly as before; only the parameter name changed.
