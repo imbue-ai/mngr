@@ -1,1 +1,0 @@
-Added the workspace-sync remote-access design record: `specs/workspace-sync/remote-access.md` (how synced SSH material is materialized so cloud workspaces are fully accessible from any unlocked installation), linked from `specs/workspace-sync/spec.md`, plus the planning blueprint under `blueprint/remote-workspace-ssh-access/`.

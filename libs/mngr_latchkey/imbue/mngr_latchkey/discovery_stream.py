@@ -50,6 +50,7 @@ from imbue.mngr.api.discovery_log_suppression import DiscoveryErrorLogSuppressor
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import SSHInfo
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_latchkey.core import LatchkeyError
@@ -86,8 +87,11 @@ _OBSERVE_BOUNCE_ERRORS: Final = (
 # transition that matters to the plugin. Tuples instead of bespoke
 # pydantic types so test doubles can pass arbitrary callables without
 # having to subclass the production discovery handler (which carries
-# its own required fields).
-OnAgentDiscoveredCallback = Callable[[AgentId, HostId, RemoteSSHInfo | None, str], None]
+# its own required fields). The trailing ``HostState | None`` is the
+# host's last-known lifecycle state (``None`` when discovery has not
+# observed it yet), so the handler can tell a running agent apart from
+# a stopped/paused one without a second round-trip.
+OnAgentDiscoveredCallback = Callable[[AgentId, HostId, RemoteSSHInfo | None, str, HostState | None], None]
 OnAgentDestroyedCallback = Callable[[AgentId], None]
 
 
@@ -286,17 +290,30 @@ class DiscoveryStreamConsumer(MutableModel):
         # ``LatchkeyDiscoveryHandler`` can set up the reverse tunnel now that
         # SSH info is finally available. The aggregator is the authoritative
         # record of which agents are currently on this host.
+        host_state = self._host_state_for(event.host_id)
         agents_on_host = [agent for agent in self._aggregator.get_agents() if str(agent.host_id) == host_id_str]
         for agent in agents_on_host:
-            self._safely_call_discovered(agent.agent_id, agent.host_id, ssh_info, str(agent.provider_name))
+            self._safely_call_discovered(agent.agent_id, agent.host_id, ssh_info, str(agent.provider_name), host_state)
 
     def _fire_discovered(self, agent: DiscoveredAgent) -> None:
         ssh_info = self._ssh_for_host(agent.host_id)
-        self._safely_call_discovered(agent.agent_id, agent.host_id, ssh_info, str(agent.provider_name))
+        host_state = self._host_state_for(agent.host_id)
+        self._safely_call_discovered(agent.agent_id, agent.host_id, ssh_info, str(agent.provider_name), host_state)
 
     def _ssh_for_host(self, host_id: HostId) -> RemoteSSHInfo | None:
         with self._lock:
             return self._ssh_by_host_id.get(str(host_id))
+
+    def _host_state_for(self, host_id: HostId) -> HostState | None:
+        """Return the host's last-known lifecycle state, or ``None`` if not yet observed.
+
+        Read back from the aggregator (the authoritative membership view), which
+        retains each ``DiscoveredHost`` -- including its ``host_state`` -- across
+        events. ``None`` means either no snapshot has carried this host yet or
+        the owning provider does not populate state.
+        """
+        host = self._aggregator.get_host_by_id().get(str(host_id))
+        return host.host_state if host is not None else None
 
     def _safely_call_discovered(
         self,
@@ -304,10 +321,11 @@ class DiscoveryStreamConsumer(MutableModel):
         host_id: HostId,
         ssh_info: RemoteSSHInfo | None,
         provider_name: str,
+        host_state: HostState | None,
     ) -> None:
         for callback in self._on_agent_discovered_callbacks:
             try:
-                callback(agent_id, host_id, ssh_info, provider_name)
+                callback(agent_id, host_id, ssh_info, provider_name, host_state)
             except (OSError, RuntimeError, ValueError) as e:
                 logger.warning("on_agent_discovered callback failed for {}: {}", agent_id, e)
 

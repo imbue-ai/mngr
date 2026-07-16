@@ -845,8 +845,9 @@ class ErrorAttachmentsS3Uploader(MutableModel):
     """Collects (and uploads) the log files + traceback attached to an error report.
 
     The set of log files is driven by ``log_attachment_groups``: each group's glob
-    is matched under the process's log folder, the newest matches are kept, and
-    immutable groups (e.g. rotated logs) are uploaded once and their S3 key cached.
+    is matched under the process's log folder (or the group's ``base_dir``, when
+    set), the newest matches are kept, and immutable groups (e.g. rotated logs)
+    are uploaded once and their S3 key cached.
     """
 
     # The per-process log layout to attach. Empty means only the (logsite)
@@ -892,9 +893,11 @@ class ErrorAttachmentsS3Uploader(MutableModel):
             key = get_s3_upload_key("logsite_traceback_with_vars", ".txt")
             uploads[("", key)] = partial(self._upload_traceback_cb, key=key, exception=exception)
 
-        if logs_folder:
-            for group in self.log_attachment_groups:
-                self._collect_group_uploads(uploads, logs_folder, group)
+        for group in self.log_attachment_groups:
+            group_folder = group.base_dir if group.base_dir is not None else logs_folder
+            if group_folder is None:
+                continue
+            self._collect_group_uploads(uploads, group_folder, group)
 
         grouped_uris: defaultdict[str, list[str | None]] = defaultdict(list)
         for group_name, key in uploads.keys():
@@ -906,11 +909,11 @@ class ErrorAttachmentsS3Uploader(MutableModel):
     def _collect_group_uploads(
         self,
         uploads: dict[tuple[str, str], _UploadCallback | None],
-        logs_folder: Path,
+        group_folder: Path,
         group: LogAttachmentGroup,
     ) -> None:
         key_suffix = f".{COMPRESSED_LOG_EXTENSION}" if group.is_compressed else ""
-        for log_file in _n_newest_files(logs_folder.glob(group.glob), n=group.max_file_count):
+        for log_file in _n_newest_files(group_folder.glob(group.glob), n=group.max_file_count):
             if group.is_immutable:
                 with self._lock:
                     existing_key = self._immutable_logs_keys.get(log_file)

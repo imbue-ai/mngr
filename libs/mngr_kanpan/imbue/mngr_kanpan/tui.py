@@ -7,13 +7,14 @@ from collections.abc import Sequence
 from concurrent.futures import Future
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from datetime import timezone
 from typing import Any
 from typing import assert_never
 
 from loguru import logger
 from pydantic import ConfigDict
 from urwid.canvas import TextCanvas
+from urwid.display.common import BaseScreen
+from urwid.display.raw import Screen
 from urwid.event_loop.abstract_loop import ExitMainLoop
 from urwid.event_loop.main_loop import MainLoop
 from urwid.widget.attr_map import AttrMap
@@ -21,19 +22,25 @@ from urwid.widget.columns import Columns
 from urwid.widget.divider import Divider
 from urwid.widget.filler import Filler
 from urwid.widget.frame import Frame
+from urwid.widget.line_box import LineBox
 from urwid.widget.listbox import ListBox
 from urwid.widget.listbox import SimpleFocusListWalker
+from urwid.widget.overlay import Overlay
+from urwid.widget.padding import Padding
 from urwid.widget.pile import Pile
 from urwid.widget.text import Text
+from urwid_readline import ReadlineEdit
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
+from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.cli.urwid_utils import create_urwid_screen_preserving_terminal
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.utils.logging import CLEAR_SCREEN
 from imbue.mngr_kanpan.data_source import BoolField
 from imbue.mngr_kanpan.data_source import FIELD_MUTED
 from imbue.mngr_kanpan.data_source import FieldValue
@@ -82,9 +89,35 @@ SPINNER_FRAMES: tuple[str, ...] = ("|", "/", "-", "\\")
 SPINNER_INTERVAL_SECONDS: float = 0.15
 TRANSIENT_MESSAGE_SECONDS: float = 3.0
 
+# Peek panel: how many trailing transcript lines to show, and how often to refresh
+# while the panel is open.
+PEEK_BODY_HEIGHT: int = 14
+PEEK_REFRESH_SECONDS: float = 2.0
+PEEK_REPLY_PROMPT: str = "› "
+
+TERMINAL_TITLE: str = "kanpan"
+# XTWINOPS title stack: push the previous title on entry, pop it back on exit
+# (terminals without title-stack support ignore these).
+_TITLE_STACK_PUSH: str = "\x1b[22;0t"
+_TITLE_STACK_POP: str = "\x1b[23;0t"
+# Within a legend binding (`enter: attach`), NBSP keeps the key and its
+# description on one line, so a narrow footer wraps between bindings only.
+_LEGEND_NBSP: str = "\u00a0"
+# Space between legend bindings, shared by the footer and the peek hint.
+_LEGEND_SEPARATOR: str = "  "
+# The refresh stamp shows the fetch duration for this long, then ages to `5m ago`.
+_STAMP_JUST_NOW_SECONDS: float = 10.0
+# How often the relative refresh stamp re-renders while the board is idle.
+_STAMP_TICK_SECONDS: float = 10.0
+
 PALETTE = [
     ("header", "white", "dark blue"),
+    # The footer is a full-width blue belt separating the board from the terminal.
     ("footer", "white", "dark blue"),
+    # Keys inside the footer legend, visually distinct from their descriptions.
+    ("footer_key", "yellow,bold", "dark blue"),
+    # Key accent for default-background legends (the peek hint and the ? overlay).
+    ("help_key", "dark cyan,bold", ""),
     ("reversed", "standout", ""),
     # Agent states: only RUNNING and WAITING-needing-attention get color
     ("state_running", "light green", ""),
@@ -104,15 +137,21 @@ PALETTE = [
     ("check_pending", "yellow", ""),
     ("check_pending_focus", "yellow,standout", ""),
     ("muted", "dark gray", ""),
-    ("muted_focus", "dark gray,standout", ""),
+    # Plain standout (not dark gray + standout): the focused row must be one
+    # continuous highlight band; inverting dim gray would punch dark holes in it.
+    ("muted_focus", "standout", ""),
     ("section_muted", "dark gray", ""),
     # Stale: applied per-cell when a field's `created` is older than
     # `staleness_threshold_seconds`. Same color as muted so the visual
     # language is "this is de-emphasized."
     ("stale", "dark gray", ""),
-    ("stale_focus", "dark gray,standout", ""),
+    ("stale_focus", "standout", ""),
     ("error_text", "light red", ""),
     ("notification", "white", "dark magenta"),
+    # Peek panel
+    ("peek_hint", "dark gray", ""),
+    # Your own messages/replies, marked with `›`.
+    ("peek_user", "dark blue", ""),
 ]
 
 # Display order: most mature first (like Linear), muted always last
@@ -350,6 +389,8 @@ class _KanpanState(MutableModel):
     commands: dict[str, KanpanCommand] = {}
     # Monotonic timestamp of the last completed refresh (for cooldown logic)
     last_refresh_time: float = 0.0
+    # Fetch duration of the last full refresh, shown briefly in the stamp.
+    last_fetch_seconds: float | None = None
     # Whether the current in-flight refresh is local-only (no GitHub API)
     refresh_is_local_only: bool = False
     # Handle for the pending deferred refresh alarm (None if no alarm is pending)
@@ -360,6 +401,7 @@ class _KanpanState(MutableModel):
     refresh_interval_seconds: float = DEFAULT_REFRESH_INTERVAL_SECONDS
     retry_cooldown_seconds: float = 60.0
     staleness_threshold_seconds: float = DEFAULT_STALENESS_THRESHOLD_SECONDS
+    # When true, Left on an empty reply closes the peek panel (Agent-View back gesture).
     # Palette attr names for mark indicators (e.g. "mark_d", "mark_p")
     mark_attr_names: tuple[str, ...] = ()
     # Column definitions (from data sources)
@@ -373,6 +415,38 @@ class _KanpanState(MutableModel):
     # CEL filter expressions passed from CLI
     include_filters: tuple[str, ...] = ()
     exclude_filters: tuple[str, ...] = ()
+    # --- Peek panel (None name => panel closed) ---
+    # Name of the agent currently shown in the peek panel.
+    peek_agent_name: AgentName | None = None
+    # Original frame footer (keybinding bar), restored when the panel closes.
+    saved_footer: Any = None
+    # Widgets owned by the open panel (set while peek_agent_name is not None).
+    peek_box: Any = None
+    peek_body_text: Any = None
+    peek_input: Any = None
+    # Last clean `mngr transcript` stdout (see _run_transcript) shown in the panel.
+    peek_transcript: str = ""
+    # Replies sent but not yet echoed back by the transcript, shown optimistically.
+    peek_pending_replies: list[str] = []
+    # In-flight transcript read for the peeked agent, polled by the peek alarm.
+    peek_capture_future: Future[subprocess.CompletedProcess[str]] | None = None
+    # Handle for the pending live-refresh alarm (None if none scheduled).
+    peek_alarm: Any = None
+    # Most recent `mngr message` reply send; each send is watched by its own poll alarm.
+    peek_reply_future: Future[subprocess.CompletedProcess[str]] | None = None
+    # Failure detail of the most recent reply send, rendered in the panel body ("" if none).
+    peek_reply_error: str = ""
+    # Executor for peek transcript reads. Kept separate from the shared `executor`
+    # so a read cannot freeze a board refresh, and from the reply executor so a slow
+    # reply does not stall the live body refresh.
+    peek_executor: ThreadPoolExecutor | None = None
+    # Single-worker executor for replies, so several queued replies reach the agent
+    # in submission order and their `mngr message` pastes cannot interleave.
+    peek_reply_executor: ThreadPoolExecutor | None = None
+    # Every key binding shown by the `?` overlay, in display order.
+    legend_bindings: list[tuple[str, str]] = []
+    # The `?` overlay widget while it is open (None otherwise).
+    help_overlay: Any = None
 
 
 class _KanpanInputHandler(MutableModel):
@@ -384,6 +458,21 @@ class _KanpanInputHandler(MutableModel):
         """Handle keyboard input. Returns True if handled, None to pass through."""
         if isinstance(key, tuple):
             return None
+        # While the help overlay is open it owns the keyboard.
+        if self.state.help_overlay is not None:
+            if key in ("?", "esc", "q"):
+                _close_help(self.state)
+            return True
+        # While the peek panel is open it owns the keyboard; printable keys have
+        # already been consumed by its reply Edit before reaching here.
+        if self.state.peek_agent_name is not None:
+            return _handle_peek_key(self.state, key)
+        if key == "?":
+            _open_help(self.state)
+            return True
+        if key == " ":
+            _toggle_peek(self.state)
+            return True
         if key in ("q", "ctrl c"):
             raise ExitMainLoop()
         if key == "U":
@@ -392,6 +481,9 @@ class _KanpanInputHandler(MutableModel):
         cmd = self.state.commands.get(key)
         if cmd is not None:
             _dispatch_command(self.state, key, cmd)
+            return True
+        if key == "enter":
+            _attach_to_focused_agent(self.state)
             return True
         if key == "up":
             if _is_focus_on_first_selectable(self.state):
@@ -836,6 +928,566 @@ def _on_mute_persist_poll(loop: MainLoop, data: tuple[_KanpanState, Future[bool]
         loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_mute_persist_poll, data)
 
 
+def _attach_to_focused_agent(state: _KanpanState) -> None:  # pragma: no cover
+    """Suspend the board and attach to the focused agent's session, restoring on return.
+
+    Runs ``mngr connect`` as a child process that takes over the terminal (locally it
+    execs ``tmux attach``), so the board's MainLoop is stopped for the duration and
+    restarted when the user detaches. Connecting in-process is not an option: the
+    connect API replaces the running process via ``execvpe``, which would tear down
+    the board itself.
+    """
+    entry = _get_focused_entry(state)
+    if entry is None:
+        return
+    loop = state.loop
+    if loop is None:
+        return
+
+    # Attaching is an explicit full-screen takeover, so force it through even when
+    # kanpan itself is running inside tmux: `mngr connect` otherwise refuses a
+    # nested attach unless is_nested_tmux_allowed is set. Dropping TMUX from the
+    # child env is a no-op when kanpan runs in a plain terminal.
+    attach_env = {key: value for key, value in os.environ.items() if key not in ("TMUX", "TMUX_PANE")}
+
+    loop.stop()
+    try:
+        # loop.stop() restores the pre-kanpan primary screen (a stale shell prompt);
+        # clear it and show a connecting line so the handoff is not a flash of that
+        # old command line before the agent's session paints over it.
+        write_human_line(f"{CLEAR_SCREEN}  Connecting to {entry.name}...")
+        result = subprocess.run(["mngr", "connect", str(entry.name)], env=attach_env)
+    finally:
+        # The attached session sets its own terminal title; take it back.
+        _write_terminal_title(loop.screen, TERMINAL_TITLE)
+        loop.start()
+        loop.screen.clear()
+        # Force an immediate repaint so the board returns at once instead of waiting for
+        # the next refresh, which would leave the detach output on screen.
+        loop.draw_screen()
+
+    if result.returncode != 0:
+        # The child's own error output went to the terminal the repaint just erased; the
+        # exit code is the only signal left (its output is not captured because the
+        # connect child needs the real TTY for the tmux takeover).
+        _show_transient_message(
+            state, f"  Connect to {entry.name} failed (mngr connect exited with code {result.returncode})"
+        )
+    _start_local_refresh(loop, state)
+
+
+def _find_entry_by_name(state: _KanpanState, name: AgentName | None) -> AgentBoardEntry | None:
+    """Find the board entry with the given name among the currently displayed rows."""
+    if name is None:
+        return None
+    for entry in state.index_to_entry.values():
+        if entry.name == name:
+            return entry
+    return None
+
+
+def _focus_row_by_name(state: _KanpanState, name: AgentName) -> None:
+    """Move the board's list focus to the row for the named agent, if present."""
+    if state.list_walker is None:
+        return
+    for idx, entry in state.index_to_entry.items():
+        if entry.name == name:
+            state.list_walker.set_focus(idx)
+            return
+
+
+def _run_transcript(agent_name: str) -> subprocess.CompletedProcess[str]:  # pragma: no cover
+    """Read the agent's user/assistant messages. Called from a background thread.
+
+    The role filter excludes tool turns, keeping the readable conversation. No
+    ``--tail`` window -- the whole thing is fetched and the panel keeps the tail.
+    """
+    return subprocess.run(
+        ["mngr", "transcript", agent_name, "--role", "user", "--role", "assistant"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+def _run_message(agent_name: str, message: str) -> subprocess.CompletedProcess[str]:  # pragma: no cover
+    """Send a message to the agent. Called from a background thread.
+
+    The timeout sits above ``mngr message``'s own ~90s submission-confirmation
+    wait so a delivered message is not cut off and misreported as a failure.
+    """
+    return subprocess.run(["mngr", "message", agent_name, "-m", message], capture_output=True, text=True, timeout=100)
+
+
+def _ensure_peek_executor(state: _KanpanState) -> ThreadPoolExecutor:
+    """Return the peek executor, creating it on first use."""
+    if state.peek_executor is None:
+        state.peek_executor = ThreadPoolExecutor(max_workers=2)
+    return state.peek_executor
+
+
+def _ensure_peek_reply_executor(state: _KanpanState) -> ThreadPoolExecutor:
+    """Return the single-worker reply executor, creating it on first use.
+
+    One worker serializes replies so several queued sends reach the agent in the
+    order they were typed, without their `mngr message` pastes interleaving.
+    """
+    if state.peek_reply_executor is None:
+        state.peek_reply_executor = ThreadPoolExecutor(max_workers=1)
+    return state.peek_reply_executor
+
+
+@pure
+def _last_nonempty_line(text: str) -> str:
+    """Return the last non-blank line of `text` (mngr errors append pane dumps)."""
+    lines = [line for line in text.strip().splitlines() if line.strip()]
+    return lines[-1] if lines else ""
+
+
+@pure
+def _peek_body_lines(transcript: str, pending: list[str]) -> list[str]:
+    """Assemble the panel's body lines: the clean conversation plus pending replies.
+
+    Pending replies -- sent but not yet echoed back by the transcript -- are appended as
+    ``› `` lines so a reply shows the instant it is sent. Only the trailing
+    ``PEEK_BODY_HEIGHT`` lines are kept (a leading ``⋯`` marks older lines were trimmed)
+    so a long final message shows its end rather than the agent's scrolled-up screen.
+    """
+    body = transcript.strip("\n")
+    lines = body.split("\n") if body else []
+    for reply in pending:
+        if lines:
+            lines.append("")
+        lines.append(f"{PEEK_REPLY_PROMPT}{reply}")
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if len(lines) > PEEK_BODY_HEIGHT:
+        lines = lines[-PEEK_BODY_HEIGHT:]
+        while lines and not lines[0].strip():
+            lines.pop(0)
+        lines = ["⋯", *lines]
+    return lines
+
+
+@pure
+def _is_transcript_header(line: str) -> bool:
+    """True for a ``mngr transcript`` header line, e.g. ``[2026-07-08T02:56:03Z] user:``."""
+    stripped = line.rstrip()
+    return line.startswith("[") and "] " in line and stripped.endswith(":")
+
+
+@pure
+def _short_header(line: str) -> str:
+    """Drop the ISO timestamp from a transcript header, leaving just the role cue.
+
+    ``[2026-07-08T02:56:03Z] assistant:`` -> ``assistant:``. The timestamp is chrome for
+    a live peek; the full value is still available via ``mngr transcript`` itself.
+    """
+    return line.split("] ", 1)[1] if "] " in line else line
+
+
+@pure
+def _peek_body_markup(transcript: str, pending: list[str]) -> list[Any]:
+    """Render the panel body as urwid markup: message text prominent, chrome de-emphasized.
+
+    The transcript's own ``[time] role:`` headers are shortened to a dimmed role cue and
+    the trim ``⋯`` marker is dimmed too, so the conversation reads first; your
+    sent-but-not-yet-echoed replies are accented with the same ``›`` as the reply prompt.
+    """
+    lines = _peek_body_lines(transcript, pending)
+    if not lines:
+        return [("peek_hint", "(no messages yet)")]
+    markup: list[Any] = []
+    for index, line in enumerate(lines):
+        if index > 0:
+            markup.append("\n")
+        if line == "⋯":
+            markup.append(("peek_hint", line))
+        elif _is_transcript_header(line):
+            markup.append(("peek_hint", _short_header(line)))
+        elif line.startswith(PEEK_REPLY_PROMPT):
+            markup.append(("peek_user", line))
+        else:
+            markup.append(line)
+    return markup
+
+
+def _make_reply_edit(caption: tuple[str, str]) -> ReadlineEdit:
+    """A single-line reply input with readline editing from ``urwid_readline``.
+
+    ``ReadlineEdit`` ships the readline keymap (Ctrl-A/E/W/K/U, Meta-B/F/D, etc.)
+    but binds word ops only to Meta+letter and Shift+arrow, not the Option/Ctrl +
+    arrow chords many terminals emit; those are added here so word movement
+    works however the terminal encodes it. ``enter`` and a boundary
+    ``left`` are left unbound so they bubble to the panel (send / return-to-board).
+    """
+    edit = ReadlineEdit(caption=caption, multiline=False)
+    edit.keymap["meta left"] = edit.backward_word
+    edit.keymap["ctrl left"] = edit.backward_word
+    edit.keymap["meta right"] = edit.forward_word
+    edit.keymap["ctrl right"] = edit.forward_word
+    return edit
+
+
+def _legend_markup(
+    bindings: Sequence[tuple[str, str]], key_attr: str, text_attr: str, separator: str
+) -> list[str | tuple[Hashable, str]]:
+    """Text markup for a key legend, one `key: description` unit per binding.
+
+    The key carries ``key_attr`` so it stands out from its description. NBSP inside
+    each unit makes it unwrappable, so a narrow footer breaks between bindings
+    rather than splitting a key from its description.
+    """
+    markup: list[str | tuple[Hashable, str]] = []
+    for key, description in bindings:
+        if markup:
+            markup.append((text_attr, separator))
+        markup.append((key_attr, key))
+        markup.append((text_attr, f":{_LEGEND_NBSP}" + description.replace(" ", _LEGEND_NBSP)))
+    return markup
+
+
+def _build_legend_bindings(
+    commands: dict[str, KanpanCommand],
+) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """(overlay bindings, footer legend) derived from the live command map.
+
+    The `?` overlay lists every binding -- the fixed interactions, every command
+    in the map (builtins and user-configured alike, marks included), and the
+    tail. The footer belt advertises only the command keys one forgets
+    (refresh/mute/delete/execute, named from the map so overrides rename them);
+    the guessable interactions (space peek, enter attach) stay overlay-only.
+    """
+    mark_keys = {_BUILTIN_COMMAND_KEY_UNMARK}
+    mark_bindings = [
+        (key, cmd.name) for key, cmd in commands.items() if _mark_color(cmd) is not None or key in mark_keys
+    ]
+    mark_bindings.append(("U", "unmark all"))
+    action_bindings = [
+        (key, cmd.name) for key, cmd in commands.items() if _mark_color(cmd) is None and key not in mark_keys
+    ]
+    overlay_bindings = [
+        ("space", "peek"),
+        ("enter", "attach"),
+        *action_bindings,
+        *mark_bindings,
+        ("q", "quit"),
+        ("?", "help"),
+    ]
+    footer_command_keys = (
+        _BUILTIN_COMMAND_KEY_REFRESH,
+        _BUILTIN_COMMAND_KEY_MUTE,
+        _BUILTIN_COMMAND_KEY_DELETE,
+        _BUILTIN_COMMAND_KEY_EXECUTE,
+    )
+    footer_legend = [(key, commands[key].name) for key in footer_command_keys if key in commands]
+    footer_legend += [("q", "quit"), ("?", "more keys")]
+    return overlay_bindings, footer_legend
+
+
+def _build_help_overlay(state: _KanpanState) -> Any:
+    """A bordered panel over the board listing every key binding, sized to its content.
+
+    Rendered like the peek panel (default background, thin border) with a blank
+    row above and below the list and the keys right-aligned into an accented
+    column, so it stays readable on light and dark terminals alike.
+    """
+    key_width = max((len(key) for key, _ in state.legend_bindings), default=1)
+    rows: list[Any] = [Divider()]
+    rows.extend(
+        Text([("help_key", key.rjust(key_width)), "   ", description]) for key, description in state.legend_bindings
+    )
+    rows.append(Divider())
+    listbox: ListBox = ListBox(SimpleFocusListWalker(rows))
+    box = LineBox(
+        Padding(listbox, left=2, right=2),
+        title="Keys",
+        title_align="left",
+        tlcorner="╭",
+        trcorner="╮",
+        blcorner="╰",
+        brcorner="╯",
+    )
+    description_width = max((len(description) for _, description in state.legend_bindings), default=1)
+    width = 2 + 2 + key_width + 3 + description_width + 2 + 2
+    height = len(rows) + 2
+    # Anchored to the lower right, springing from the footer's `?: help`; bottom=2
+    # keeps it just above the footer bar and its divider.
+    return Overlay(
+        box,
+        state.frame,
+        align="right",
+        width=width,
+        valign="bottom",
+        height=height,
+        right=1,
+        bottom=2,
+    )
+
+
+def _open_help(state: _KanpanState) -> None:
+    """Show the key-binding overlay (`?`); a second `?` or Esc closes it."""
+    if state.loop is None or state.help_overlay is not None:
+        return
+    state.help_overlay = _build_help_overlay(state)
+    state.loop.widget = state.help_overlay
+
+
+def _close_help(state: _KanpanState) -> None:
+    if state.loop is None or state.help_overlay is None:
+        return
+    state.help_overlay = None
+    state.loop.widget = state.frame
+
+
+def _write_terminal_title(screen: BaseScreen, title: str) -> None:
+    """Set the terminal window/icon title (OSC 0) through the urwid screen."""
+    if isinstance(screen, Screen):
+        screen.write(f"\x1b]0;{title}\x07")
+        screen.flush()
+
+
+def _build_peek_panel(state: _KanpanState) -> LineBox:
+    """Build the peek panel (a bordered box shown in place of the footer) and stash its parts."""
+    state.peek_body_text = Text("", wrap="space")
+    state.peek_input = _make_reply_edit(("peek_user", PEEK_REPLY_PROMPT))
+    hint = Text(
+        [
+            *_legend_markup([("enter", "send"), ("esc", "close")], "help_key", "peek_hint", " \u00b7 "),
+            ("peek_hint", " "),
+        ],
+        align="right",
+    )
+    inner = Pile(
+        [
+            state.peek_body_text,
+            Divider(" "),
+            state.peek_input,
+            hint,
+        ]
+    )
+    # Focus the reply input so typed keys land in it.
+    inner.focus_position = 2
+    box = LineBox(
+        inner,
+        title="Peek",
+        title_align="left",
+        tlcorner="╭",
+        trcorner="╮",
+        blcorner="╰",
+        brcorner="╯",
+    )
+    state.peek_box = box
+    return box
+
+
+def _update_peek_header(state: _KanpanState) -> None:
+    """Refresh the peek box's border title from the currently peeked agent."""
+    if state.peek_box is None:
+        return
+    entry = _find_entry_by_name(state, state.peek_agent_name)
+    if entry is None:
+        state.peek_box.set_title("Peek")
+        return
+    state.peek_box.set_title(f" {entry.name} · {entry.state} · {entry.provider_name} ")
+
+
+def _set_peek_body(state: _KanpanState) -> None:
+    """Render the peek body from the cached transcript, pending replies, and any reply failure."""
+    if state.peek_body_text is None:
+        return
+    markup = _peek_body_markup(state.peek_transcript, state.peek_pending_replies)
+    if state.peek_reply_error:
+        markup = [*markup, "\n", ("peek_hint", f"(reply failed: {state.peek_reply_error})")]
+    state.peek_body_text.set_text(markup)
+
+
+def _cancel_peek_alarm(state: _KanpanState) -> None:
+    """Cancel any pending live-capture alarm for the peek panel."""
+    if state.peek_alarm is not None and state.loop is not None:
+        state.loop.remove_alarm(state.peek_alarm)
+    state.peek_alarm = None
+
+
+def _start_peek_capture(state: _KanpanState) -> None:
+    """Kick off a background transcript read for the peeked agent and poll for it."""
+    if state.peek_agent_name is None or state.loop is None:
+        return
+    executor = _ensure_peek_executor(state)
+    state.peek_capture_future = executor.submit(_run_transcript, str(state.peek_agent_name))
+    state.peek_alarm = state.loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_peek_capture_poll, state)
+
+
+def _on_peek_capture_poll(loop: MainLoop, state: _KanpanState) -> None:
+    """Poll the in-flight transcript read; render it and schedule the next while open."""
+    state.peek_alarm = None
+    future = state.peek_capture_future
+    if future is None or state.peek_agent_name is None:
+        return
+    if not future.done():
+        state.peek_alarm = loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_peek_capture_poll, state)
+        return
+
+    state.peek_capture_future = None
+    try:
+        result = future.result()
+    except (subprocess.SubprocessError, OSError) as e:
+        if state.peek_body_text is not None:
+            state.peek_body_text.set_text(("peek_hint", f"(transcript failed: {e})"))
+    else:
+        if result.returncode != 0:
+            detail = _last_nonempty_line(result.stderr) or f"exited with code {result.returncode}"
+            if state.peek_body_text is not None:
+                state.peek_body_text.set_text(("peek_hint", f"(no transcript: {detail})"))
+        else:
+            state.peek_transcript = result.stdout
+            # A reply the agent has since accepted now appears in the transcript, so drop
+            # its optimistic echo to avoid showing it twice.
+            delivered = set(result.stdout.splitlines())
+            state.peek_pending_replies = [r for r in state.peek_pending_replies if r not in delivered]
+            _set_peek_body(state)
+    if state.peek_agent_name is not None:
+        state.peek_alarm = loop.set_alarm_in(PEEK_REFRESH_SECONDS, _on_peek_capture_tick, state)
+
+
+def _on_peek_capture_tick(loop: MainLoop, state: _KanpanState) -> None:
+    """Alarm callback that starts the next live capture."""
+    state.peek_alarm = None
+    if state.peek_agent_name is not None:
+        _start_peek_capture(state)
+
+
+def _open_peek(state: _KanpanState) -> None:
+    """Open the peek panel for the focused agent."""
+    entry = _get_focused_entry(state)
+    if entry is None:
+        return
+    state.peek_agent_name = entry.name
+    state.focused_agent_name = entry.name
+    state.peek_transcript = ""
+    state.peek_pending_replies = []
+    state.peek_reply_error = ""
+    panel = _build_peek_panel(state)
+    state.saved_footer = state.frame.footer
+    state.frame.footer = panel
+    state.frame.focus_position = "footer"
+    _update_peek_header(state)
+    if state.peek_body_text is not None:
+        state.peek_body_text.set_text(("peek_hint", "(loading...)"))
+    _start_peek_capture(state)
+
+
+def _close_peek(state: _KanpanState) -> None:
+    """Close the peek panel and restore the footer and board focus."""
+    if state.peek_agent_name is None:
+        return
+    closed_name = state.peek_agent_name
+    _cancel_peek_alarm(state)
+    state.peek_capture_future = None
+    state.peek_agent_name = None
+    if state.saved_footer is not None:
+        state.frame.footer = state.saved_footer
+        state.saved_footer = None
+    state.frame.focus_position = "body"
+    state.focused_agent_name = closed_name
+    _focus_row_by_name(state, closed_name)
+    state.peek_box = None
+    state.peek_body_text = None
+    state.peek_input = None
+    state.peek_transcript = ""
+    state.peek_pending_replies = []
+    state.peek_reply_error = ""
+
+
+def _toggle_peek(state: _KanpanState) -> None:
+    """Toggle the peek panel for the focused agent."""
+    if state.peek_agent_name is not None:
+        _close_peek(state)
+    else:
+        _open_peek(state)
+
+
+def _submit_peek_reply(state: _KanpanState) -> None:
+    """Send the reply-input text to the peeked agent and echo it immediately; no-op when empty.
+
+    ``mngr message`` blocks up to ~90s on the agent's submission signal, which a busy
+    agent cannot give until its current turn ends -- so the send runs on the reply
+    executor and is not awaited. The typed text is echoed into the body right away (as a
+    ``›`` line) and, once the agent accepts it and it shows up in the transcript, the
+    echo is dropped in favour of the real message.
+    """
+    if state.peek_agent_name is None or state.peek_input is None:
+        return
+    text = state.peek_input.get_edit_text().strip()
+    if not text:
+        return
+    state.peek_pending_replies = [*state.peek_pending_replies, text]
+    state.peek_reply_error = ""
+    executor = _ensure_peek_reply_executor(state)
+    state.peek_reply_future = executor.submit(_run_message, str(state.peek_agent_name), text)
+    state.peek_input.set_edit_text("")
+    _set_peek_body(state)
+    if state.loop is not None:
+        state.loop.set_alarm_in(
+            SPINNER_INTERVAL_SECONDS,
+            _on_peek_reply_poll,
+            (state, state.peek_reply_future, state.peek_agent_name, text),
+        )
+
+
+def _on_peek_reply_poll(
+    loop: MainLoop,
+    data: tuple[_KanpanState, Future[subprocess.CompletedProcess[str]], AgentName, str],
+) -> None:
+    """Poll a sent reply; on failure drop its optimistic echo and surface the error.
+
+    A successful send needs no action here -- the echo is pruned once the reply shows up
+    in the transcript. A failed send would otherwise leave the echo up forever, showing
+    the message as delivered when it was not.
+    """
+    state, future, agent_name, reply_text = data
+    if not future.done():
+        loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_peek_reply_poll, data)
+        return
+    try:
+        result = future.result()
+    except (subprocess.SubprocessError, OSError) as e:
+        detail = str(e)
+    else:
+        if result.returncode == 0:
+            return
+        detail = _last_nonempty_line(result.stderr) or f"exited with code {result.returncode}"
+    if state.peek_agent_name == agent_name:
+        pending = list(state.peek_pending_replies)
+        if reply_text in pending:
+            pending.remove(reply_text)
+            state.peek_pending_replies = pending
+        state.peek_reply_error = detail
+        _set_peek_body(state)
+    elif state.peek_agent_name is not None:
+        # Another agent's panel now occupies the footer slot (hiding the footer), so its
+        # error line is the only visible surface; name the failed agent to keep the two apart.
+        state.peek_reply_error = f"{agent_name}: {detail}"
+        _set_peek_body(state)
+    else:
+        # The panel has closed, so the restored footer is visible again and is the
+        # right place for the failure notice.
+        _show_transient_message(state, f"  Reply to {agent_name} failed: {detail}")
+
+
+def _handle_peek_key(state: _KanpanState, key: str) -> bool | None:
+    """Route keys while the peek panel is open. Printable keys reach the reply Edit."""
+    if key in ("esc", "ctrl c"):
+        _close_peek(state)
+        return True
+    if key == "enter":
+        _submit_peek_reply(state)
+        return True
+    return None
+
+
 def _dispatch_command(state: _KanpanState, key: str, cmd: KanpanCommand) -> None:
     """Dispatch a command by key."""
     if isinstance(cmd, MarkableBuiltinCommand):
@@ -912,6 +1564,36 @@ def _on_custom_command_poll(
             _start_local_refresh(loop, state)
     else:
         loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_custom_command_poll, data)
+
+
+def _refresh_stamp(seconds_ago: float, fetch_seconds: float | None) -> str:
+    """Relative footer stamp for the last full refresh, e.g. `  Refreshed 5m ago`.
+
+    The fetch duration only shows in the just-now window, so it fades once stale.
+    """
+    if seconds_ago < _STAMP_JUST_NOW_SECONDS:
+        took = f" \u00b7 {fetch_seconds:.1f}s" if fetch_seconds is not None else ""
+        return f"  Refreshed just now{took}"
+    if seconds_ago < 60:
+        return f"  Refreshed {int(seconds_ago)}s ago"
+    if seconds_ago < 3600:
+        return f"  Refreshed {int(seconds_ago // 60)}m ago"
+    return f"  Refreshed {int(seconds_ago // 3600)}h ago"
+
+
+def _update_refresh_stamp(state: _KanpanState) -> None:
+    """Recompute the steady footer text from the time of the last full refresh."""
+    if not state.last_refresh_time:
+        return
+    seconds_ago = time.monotonic() - state.last_refresh_time
+    state.steady_footer_text = _refresh_stamp(seconds_ago, state.last_fetch_seconds)
+
+
+def _on_stamp_tick(loop: MainLoop, state: _KanpanState) -> None:
+    """Alarm callback: age the relative refresh stamp and re-render the footer."""
+    _update_refresh_stamp(state)
+    _render_footer(state)
+    loop.set_alarm_in(_STAMP_TICK_SECONDS, _on_stamp_tick, state)
 
 
 def _marks_footer_text(state: _KanpanState) -> str:
@@ -1117,12 +1799,9 @@ def _finish_refresh(loop: MainLoop, state: _KanpanState) -> None:
     _refresh_display(state)
     _prune_orphaned_marks(state)
 
-    now = datetime.now(tz=timezone.utc).strftime("%H:%M:%S")
-    if state.snapshot is not None:
-        elapsed = f"{state.snapshot.fetch_time_seconds:.1f}s"
-        state.steady_footer_text = f"  Last refresh: {now} (took {elapsed})"
-    else:
-        state.steady_footer_text = f"  Last refresh: {now}"
+    if state.snapshot is not None and not was_local_only:
+        state.last_fetch_seconds = state.snapshot.fetch_time_seconds
+    _update_refresh_stamp(state)
     _render_footer(state)
 
     if failed:
@@ -1598,10 +2277,10 @@ def _refresh_display(state: _KanpanState) -> None:
 
     # Restore focus to the previously focused agent
     if state.focused_agent_name is not None:
-        for idx, entry in state.index_to_entry.items():
-            if entry.name == state.focused_agent_name:
-                walker.set_focus(idx)
-                return
+        _focus_row_by_name(state, state.focused_agent_name)
+
+    # An open peek panel's title shows live state; re-render it from the new entries.
+    _update_peek_header(state)
 
 
 def _schedule_next_refresh(loop: MainLoop, state: _KanpanState) -> None:
@@ -1672,23 +2351,19 @@ def run_kanpan(
     data_sources = collect_data_sources(mngr_ctx)
     initial_cached_fields = load_field_cache(mngr_ctx, data_sources)
 
-    # Build footer keybindings
-    mark_keys = {_BUILTIN_COMMAND_KEY_UNMARK}
-    mark_parts = [
-        f"{key}: {cmd.name}" for key, cmd in commands.items() if _mark_color(cmd) is not None or key in mark_keys
-    ]
-    mark_parts.append("U: unmark all")
-    action_parts = [
-        f"{key}: {cmd.name}" for key, cmd in commands.items() if _mark_color(cmd) is None and key not in mark_keys
-    ]
-    action_parts.append("q: quit")
-    keybindings = "  ".join(mark_parts + ["|"] + action_parts) + "  "
+    legend_bindings, footer_legend = _build_legend_bindings(commands)
 
     footer_left_text = Text("  Loading...")
     footer_left_attr = AttrMap(footer_left_text, "footer")
-    footer_right = Text(keybindings, align="right")
-    footer_items: list[Any] = [("pack", footer_left_attr), AttrMap(footer_right, "footer")]
-    footer_columns = Columns(footer_items, dividechars=1)
+    footer_right = Text(
+        [*_legend_markup(footer_legend, "footer_key", "footer", _LEGEND_SEPARATOR), ("footer", "  ")],
+        align="right",
+        wrap="clip",
+    )
+    footer_items: list[Any] = [("pack", footer_left_attr), footer_right]
+    # One AttrMap over the whole row keeps the belt continuous (no unpainted gap
+    # between the left status and the right legend).
+    footer_columns = AttrMap(Columns(footer_items, dividechars=1), "footer")
     footer = Pile([Divider(), footer_columns])
 
     is_filtered = bool(include_filters or exclude_filters)
@@ -1730,6 +2405,7 @@ def run_kanpan(
         include_filters=include_filters,
         exclude_filters=exclude_filters,
         section_order=section_order,
+        legend_bindings=legend_bindings,
     )
 
     input_handler = _KanpanInputHandler(state=state)
@@ -1745,11 +2421,20 @@ def run_kanpan(
 
         # Initial data load with spinner
         _start_refresh(loop, state)
+        loop.set_alarm_in(_STAMP_TICK_SECONDS, _on_stamp_tick, state)
 
+        screen.write(_TITLE_STACK_PUSH)
+        _write_terminal_title(screen, TERMINAL_TITLE)
         logger.disable("imbue")
         try:
             loop.run()
         finally:
+            screen.write(_TITLE_STACK_POP)
+            screen.flush()
             logger.enable("imbue")
             if state.executor is not None:
                 state.executor.shutdown(wait=False)
+            if state.peek_executor is not None:
+                state.peek_executor.shutdown(wait=False)
+            if state.peek_reply_executor is not None:
+                state.peek_reply_executor.shutdown(wait=False)
