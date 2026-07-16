@@ -70,8 +70,12 @@
           showStatus("Couldn't load your backup history right now.");
           return;
         }
-        total = typeof entry.snapshots_total === 'number' ? entry.snapshots_total : 0;
-        renderPage(entry.snapshots || []);
+        // Fall back to the returned rows if snapshots_total is absent (e.g. an
+        // older backend that predates the count) so a present page never
+        // collapses to the empty "No backups yet" state.
+        var pageSnapshots = entry.snapshots || [];
+        total = typeof entry.snapshots_total === 'number' ? entry.snapshots_total : offset + pageSnapshots.length;
+        renderPage(pageSnapshots);
       })
       .catch(function () {
         showStatus('Could not load backup history.');
