@@ -2331,7 +2331,17 @@ def run_kanpan(
     ]
     legend_bindings = [("space", "peek"), ("enter", "attach"), *action_bindings, *mark_bindings]
     legend_tail = [("q", "quit"), ("?", "help")]
-    footer_legend = [("space", "peek"), ("enter", "attach"), ("q", "quit"), ("?", "more keys")]
+    # The belt advertises the command keys one forgets (refresh/mute/delete/execute,
+    # with names from the live command map so overrides rename them); the guessable
+    # interactions (space peek, enter attach) live in the ? overlay instead.
+    footer_command_keys = (
+        _BUILTIN_COMMAND_KEY_REFRESH,
+        _BUILTIN_COMMAND_KEY_MUTE,
+        _BUILTIN_COMMAND_KEY_DELETE,
+        _BUILTIN_COMMAND_KEY_EXECUTE,
+    )
+    footer_legend = [(key, commands[key].name) for key in footer_command_keys if key in commands]
+    footer_legend += [("q", "quit"), ("?", "more keys")]
 
     footer_left_text = Text("  Loading...")
     footer_left_attr = AttrMap(footer_left_text, "footer")
