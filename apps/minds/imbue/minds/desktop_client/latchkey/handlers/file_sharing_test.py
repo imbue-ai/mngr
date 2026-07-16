@@ -211,10 +211,7 @@ def test_render_request_detail_fragment_has_editable_path_and_browse(tmp_path: P
     assert 'id="file-sharing-browse-file-btn"' in body
     assert 'id="file-sharing-browse-folder-btn"' in body
     assert "browseForSharePath(&#39;file&#39;)" in body or "browseForSharePath('file')" in body
-    assert (
-        "browseForSharePath(&#39;directory&#39;)" in body
-        or "browseForSharePath('directory')" in body
-    )
+    assert "browseForSharePath(&#39;directory&#39;)" in body or "browseForSharePath('directory')" in body
 
 
 def test_render_request_detail_fragment_marks_write_grants_distinctly(tmp_path: Path) -> None:

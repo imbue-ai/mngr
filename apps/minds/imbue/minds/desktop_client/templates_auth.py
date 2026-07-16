@@ -62,9 +62,7 @@ def render_signin_modal_page(return_to: str = "/create", default_to_signup: bool
     False so the sign-in tab shows).
     """
     intro = _SIGNIN_MODAL_CREATE_INTRO if return_to == "/create" else _SIGNIN_MODAL_GENERIC_INTRO
-    return CATALOG.render(
-        "pages.SigninModal", intro=intro, return_to=return_to, default_to_signup=default_to_signup
-    )
+    return CATALOG.render("pages.SigninModal", intro=intro, return_to=return_to, default_to_signup=default_to_signup)
 
 
 def render_check_email_page(email: str) -> str:
