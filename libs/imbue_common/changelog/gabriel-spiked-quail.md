@@ -1,1 +1,0 @@
-`LogAttachmentGroup` gained an optional `base_dir` field: a group with `base_dir` set sweeps that directory instead of the process's log folder, so error reports can attach log files that live outside it (e.g. minds attaching the detached `mngr latchkey forward` daemon's logs). A missing directory simply matches nothing.

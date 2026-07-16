@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-15
+
+The `mngr latchkey forward` daemon now attaches the install's anonymous user id (no PII) to its Sentry events, so its reports count as the same install as the minds backend's in Sentry's per-issue user counts. The id is inherited from the embedder via the new `MNGR_LATCHKEY_SENTRY_USER_ID` environment variable (required alongside the other `MNGR_LATCHKEY_SENTRY_*` infrastructure vars).
+
+- Changed: the `mngr latchkey forward` supervisor now caps its dedicated rotated `events.jsonl` log at 10MB (down from the general mngr default of 100MB), matching the 10MB cap the minds desktop client uses for its own rotated logs. Older rotated copies are still pruned to the newest 10.
+
 ## 2026-07-14
 
 Update Latchkey to include support for GitHub's GraphQL API.
