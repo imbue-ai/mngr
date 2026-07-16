@@ -2017,16 +2017,21 @@ function updateBundleAccentAgentId(bundle, agentId) {
 }
 
 function filterRestorableUrls(state, knownAgentIdsSet) {
-  // If we have no agent list yet, pass everything through.
-  if (!knownAgentIdsSet) return state.slice();
   const results = [];
   for (const entry of state) {
     // Persisted urls are backend-relative; resolve to absolute so
     // ``parseWorkspaceId`` (``new URL``) can read the workspace id rather than
     // throwing on the bare path.
     const agentId = parseWorkspaceId(toAbsoluteUrl(entry.url));
-    if (agentId && !knownAgentIdsSet.has(agentId)) {
-      continue; // workspace no longer exists, skip silently
+    // A workspace window can only be restored if its agent is known to exist
+    // (live workspaces UNION the persisted last-good topology). Drop workspace
+    // entries whose agent isn't in that set -- and, when the set is null
+    // (NOTHING is known: empty live AND empty last-good), drop every workspace
+    // entry, because restoring a workspace URL against an unknown topology can
+    // only render the workspace-recovery "unresponsive" page. Non-workspace
+    // screens (home, settings, ...) carry no agent id and always pass through.
+    if (agentId && (!knownAgentIdsSet || !knownAgentIdsSet.has(agentId))) {
+      continue; // workspace no longer exists (or none are known), skip silently
     }
     results.push(entry);
   }
@@ -3256,8 +3261,10 @@ async function startBackendWithRetry() {
       // incomplete live snapshot is not evidence a workspace was destroyed (the
       // live discovery flow navigates genuinely-destroyed workspaces away later).
       // When nothing is known yet (empty live AND empty last-good -- first launch,
-      // or a wiped topology), pass ``null`` to keep every saved window rather than
-      // drop them all against an empty set.
+      // or a wiped topology), pass ``null``. ``filterRestorableUrls`` then keeps
+      // non-workspace windows (home, settings, ...) but drops workspace windows,
+      // since a workspace URL restored against an unknown topology can only
+      // render the "unresponsive" recovery page.
       const restorableWorkspaceIds = (authenticated && chromeState.restorableWorkspaceIds) || [];
       const knownAgentIdsSet = restorableWorkspaceIds.length > 0
         ? new Set(restorableWorkspaceIds.map(String))
