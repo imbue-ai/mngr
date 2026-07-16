@@ -123,6 +123,18 @@ have to be disabled on native Ubuntu 24.04.
   launching shell exits (that is how the Electron app avoids orphans), so
   `nohup`/`setsid` daemonization does not work. Run it inside tmux.
 
+## After a WSL restart
+
+`wsl --shutdown` (and anything else that stops the distro) kills the Docker
+daemon and every workspace container with it. When bringing workspaces back,
+use `mngr start` (e.g. `uv run mngr start --host <host>` under the activated
+env), never a raw `docker start`: docker only resurrects the container and
+its sshd, while the agent processes (tmux, supervisord, the system
+interface) exist only in tmux sessions that mngr recreates. A raw
+`docker start` leaves the workspace half-up -- reachable at the container
+level but serving nothing -- until minds' health tracker marks it STUCK and
+its recovery flow performs the proper restart a few minutes later.
+
 ## Assorted gotchas
 
 - `wsl -d <distro> -u <user>` over Windows SSH prints
