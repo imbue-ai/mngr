@@ -323,7 +323,12 @@ def _is_backup_tick_in_flight(agent_id):
             lines = fh.readlines()
     except OSError:
         return False
-    started = set()
+    # Ticks run serially in one loop, so only the most recently started tick
+    # can be in flight. A tick killed mid-flight (e.g. by a service restart)
+    # never writes its completion event; treating every started-but-unfinished
+    # tick as in flight would let one such dead tick block operations for
+    # hours, until its line scrolls out of the window.
+    last_started_tick = None
     finished = set()
     for raw in lines[-200:]:
         try:
@@ -337,10 +342,10 @@ def _is_backup_tick_in_flight(agent_id):
             continue
         event_type = event.get("type")
         if event_type == "BACKUP_STARTED":
-            started.add(tick_id)
+            last_started_tick = tick_id
         elif event_type in TICK_COMPLETION_TYPES:
             finished.add(tick_id)
-    return bool(started - finished)
+    return last_started_tick is not None and last_started_tick not in finished
 
 
 def _gate_chats_and_wait_for_tick(agent_id, is_stop_chats):

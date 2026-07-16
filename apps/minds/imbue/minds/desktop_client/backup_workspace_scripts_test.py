@@ -330,6 +330,37 @@ def test_gate_probe_detects_in_flight_backup_tick(tmp_path: Path) -> None:
     assert payload["backup_tick_in_flight"] is True
 
 
+def test_gate_probe_ignores_a_stale_dead_tick_once_a_newer_tick_finished(tmp_path: Path) -> None:
+    # A tick killed mid-flight (e.g. by a service restart) never writes its
+    # completion event. Once a newer tick has started and finished, the dead
+    # tick must not read as in flight -- ticks run serially, so only the most
+    # recently started tick can be.
+    repo = _make_workspace_repo(tmp_path)
+    host_dir = tmp_path / "host"
+    events_path = host_dir / "agents" / "agent-x" / "events" / "backup" / "events.jsonl"
+    events_path.parent.mkdir(parents=True)
+    events_path.write_text(
+        json.dumps({"type": "BACKUP_STARTED", "tick_id": "dead-tick"})
+        + "\n"
+        + json.dumps({"type": "BACKUP_STARTED", "tick_id": "t2"})
+        + "\n"
+        + json.dumps({"type": "RESTIC_BACKUP_SUCCEEDED", "tick_id": "t2"})
+        + "\n"
+    )
+    stub_bin = _make_stub_bin(tmp_path)
+    command = build_workspace_script_command(BACKUP_GATE_PROBE_SCRIPT, ("--agent-id", "agent-x"))
+    env = dict(os.environ)
+    env["PATH"] = f"{stub_bin}:{env['PATH']}"
+    env["MNGR_HOST_DIR"] = str(host_dir)
+    env.pop("MNGR_AGENT_STATE_DIR", None)
+    result = subprocess.run(
+        ["bash", "-c", command], cwd=repo, capture_output=True, text=True, check=False, timeout=120, env=env
+    )
+    payload = extract_marker_json(result.stdout, GATE_RESULT_MARKER)
+    assert payload is not None, result.stdout + result.stderr
+    assert payload["backup_tick_in_flight"] is False
+
+
 # --- apply update script ---
 
 
