@@ -137,13 +137,15 @@ PALETTE = [
     ("check_pending", "yellow", ""),
     ("check_pending_focus", "yellow,standout", ""),
     ("muted", "dark gray", ""),
-    ("muted_focus", "dark gray,standout", ""),
+    # Plain standout (not dark gray + standout): the focused row must be one
+    # continuous highlight band; inverting dim gray would punch dark holes in it.
+    ("muted_focus", "standout", ""),
     ("section_muted", "dark gray", ""),
     # Stale: applied per-cell when a field's `created` is older than
     # `staleness_threshold_seconds`. Same color as muted so the visual
     # language is "this is de-emphasized."
     ("stale", "dark gray", ""),
-    ("stale_focus", "dark gray,standout", ""),
+    ("stale_focus", "standout", ""),
     ("error_text", "light red", ""),
     ("notification", "white", "dark magenta"),
     # Peek panel
