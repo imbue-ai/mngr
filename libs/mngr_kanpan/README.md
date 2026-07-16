@@ -4,6 +4,21 @@ All-seeing agent tracker. The name combines Sino-Japanese 看 (*kan*, "to look",
 
 Launch with `mngr kanpan`. Requires the `gh` CLI to be installed and authenticated.
 
+The footer shows the command keys (`r: refresh  m: mute  d: mark delete  x: execute  q: quit`); press `?` for an overlay listing every binding (`space` peek, `enter` attach, marks, and your configured commands). `Esc` closes it.
+
+## Attach, peek, and reply
+
+Interact with an agent without leaving the board:
+
+- **Attach** (`Enter`): enter the focused agent's full interactive session (equivalent to `mngr connect`). The board suspends while you are attached and restores immediately when you detach (tmux's `Ctrl-b d`), so you return to the board rather than a bare shell. The screen clears to a brief `Connecting to <agent>...` line on the way in, rather than flashing the shell.
+- **Peek** (`Space`): open a live bordered panel below the board showing the focused agent's recent user/assistant conversation (via `mngr transcript --role user --role assistant`), refreshed every couple of seconds, with the board still visible above. Tool calls and framework-injected turns do not appear, so the peek reads like the human conversation. Each message's `[timestamp] role:` header is trimmed to a dim role cue. It shows the newest lines, so a long final message renders its end (the agent's conclusion, or the question it is waiting on) under a `⋯` marker, rather than mirroring the agent's scrolled-up screen. The panel says `(no messages yet)` when there is no readable message.
+  - `Esc` closes the panel. To peek a different agent, close it, move the board selection, and press `Space` again.
+- **Reply**: type into the panel's `›` input and press `Enter` to send the message to that agent (equivalent to `mngr message`); an empty reply does nothing. Your reply is echoed into the panel immediately as a `›` line, so you see it without waiting: `mngr message` blocks up to ~90s on the agent's submission signal (which a busy agent cannot give until its current turn ends), so the send runs in the background and is not awaited. Once the agent accepts the reply and it appears in the transcript, the echo is replaced by the real message. Several replies typed in a row are delivered in the order you sent them.
+  - The input supports readline-style editing: word movement (`Option`/`Ctrl`+`←`/`→`), word delete (`Option`+`Delete`, `Ctrl-W`), start/end (`Ctrl-A`/`Ctrl-E`), and kill to start/end (`Ctrl-U`/`Ctrl-K`).
+- **Selections**: a text reply cannot move a selection cursor, and selection menus (e.g. `/login`) are not part of the transcript, so they do not appear in the peek; attach (`Enter`) to make the choice in the real session.
+
+These are builtins; they do not need any configuration.
+
 ## Filtering
 
 Filter which agents appear on the board using CEL expressions:
