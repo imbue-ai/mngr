@@ -48,8 +48,9 @@ ask your agent to run it, or read it directly -- for the build/run loop.
       `modal token new --profile minds-dev` and select that workspace in the
       browser. Verify with `modal profile list`: the `minds-dev` profile must
       show workspace `minds-dev` -- a profile *named* `minds-dev` that holds a
-      token for another workspace passes `minds env activate --deploy` but
-      misroutes the deploy. Full detail: [environments.md](./environments.md).
+      token for another workspace passes `minds env activate --deploy` but is
+      caught (with a clear error) by `minds env deploy`'s preflight. Full
+      detail: [environments.md](./environments.md).
 
 ## Then: build and run
 

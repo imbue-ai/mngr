@@ -10,8 +10,10 @@ backing store). Both DSNs come from the same per-env Neon project.
 
 from pydantic import SecretStr
 
+from imbue.minds.envs.per_env_deploy import _modal_profile_token_workspace
 from imbue.minds.envs.per_env_deploy import _select_deployed_app_id
 from imbue.minds.envs.per_env_deploy import compute_per_env_overrides
+from imbue.minds.envs.per_env_deploy import modal_token_workspace_mismatch_message
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.envs.providers.neon_db import NeonProjectRecord
 from imbue.minds.envs.providers.supertokens_app import SuperTokensAppRecord
@@ -91,3 +93,38 @@ def test_select_deployed_app_id_returns_none_when_absent_or_empty() -> None:
     rows: list[object] = [{"App ID": "ap-rsc", "Description": "rsc-ci", "State": "deployed"}]
     assert _select_deployed_app_id(rows, "llm-ci") is None
     assert _select_deployed_app_id([], "llm-ci") is None
+
+
+def test_modal_profile_token_workspace_reads_bound_workspace() -> None:
+    # The `minds-dev` profile's token is actually bound to `imbue` -- the misroute.
+    rows: list[object] = [
+        {"name": "imbue", "workspace": "imbue", "active": False},
+        {"name": "minds-dev", "workspace": "imbue", "active": True},
+    ]
+    assert _modal_profile_token_workspace(rows, "minds-dev") == "imbue"
+    assert _modal_profile_token_workspace(rows, "imbue") == "imbue"
+
+
+def test_modal_profile_token_workspace_returns_none_when_absent_or_malformed() -> None:
+    # Profile not listed.
+    assert _modal_profile_token_workspace([{"name": "imbue", "workspace": "imbue"}], "minds-dev") is None
+    # Non-dict rows are skipped.
+    assert _modal_profile_token_workspace([42, "nope"], "minds-dev") is None
+    # Row present but missing / empty workspace.
+    assert _modal_profile_token_workspace([{"name": "minds-dev"}], "minds-dev") is None
+    assert _modal_profile_token_workspace([{"name": "minds-dev", "workspace": ""}], "minds-dev") is None
+
+
+def test_modal_token_workspace_mismatch_message_flags_wrong_workspace() -> None:
+    message = modal_token_workspace_mismatch_message("minds-dev", "imbue")
+    assert message is not None
+    assert "'imbue'" in message
+    assert "'minds-dev'" in message
+    assert "modal token new --profile minds-dev" in message
+
+
+def test_modal_token_workspace_mismatch_message_none_when_matching_or_undetermined() -> None:
+    # Workspaces match -> no problem.
+    assert modal_token_workspace_mismatch_message("minds-dev", "minds-dev") is None
+    # Binding couldn't be determined (best-effort skip) -> no problem.
+    assert modal_token_workspace_mismatch_message("minds-dev", None) is None

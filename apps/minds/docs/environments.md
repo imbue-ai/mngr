@@ -105,10 +105,12 @@ Deploy-mode adds:
   workspace in the browser. Verify with `modal profile list`: the
   `minds-dev` profile must show workspace `minds-dev`. **Watch out:** a
   profile *named* `minds-dev` that actually holds a token for a *different*
-  workspace (e.g. `imbue`) passes the activation-time check -- which only
-  verifies the `[minds-dev]` section exists, not its token's workspace --
-  but then silently misroutes the deploy to the wrong workspace. `modal
-  profile list` is the way to confirm the binding up front.
+  workspace (e.g. `imbue`) passes the activation-time check, which only
+  verifies the `[minds-dev]` section exists, not its token's workspace.
+  `minds env deploy` preflights the token's real workspace (via `modal
+  profile list`) and refuses with a clear error before touching any cloud
+  state, but running `modal profile list` yourself confirms the binding up
+  front.
 
 To deactivate:
 

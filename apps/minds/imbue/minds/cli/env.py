@@ -64,7 +64,9 @@ from imbue.minds.envs.mngr_agent_cleanup import real_destroy_mngr_agents
 from imbue.minds.envs.paths import active_env_name_or_none
 from imbue.minds.envs.paths import client_config_file
 from imbue.minds.envs.paths import env_root_dir
+from imbue.minds.envs.per_env_deploy import active_modal_token_workspace
 from imbue.minds.envs.per_env_deploy import build_per_env_secret_values
+from imbue.minds.envs.per_env_deploy import modal_token_workspace_mismatch_message
 from imbue.minds.envs.per_env_deploy import delete_modal_secret as real_delete_modal_secret
 from imbue.minds.envs.per_env_deploy import deploy_litellm_proxy as real_deploy_litellm_proxy
 from imbue.minds.envs.per_env_deploy import deploy_remote_service_connector as real_deploy_remote_service_connector
@@ -1067,6 +1069,28 @@ def env_list(ctx: click.Context) -> None:
         write_stdout_line(json.dumps(payload, indent=2, default=str))
 
 
+def _preflight_modal_token_workspace(tier: str) -> None:
+    """Refuse a deploy whose pinned Modal profile holds a wrong-workspace token.
+
+    ``minds env activate --deploy`` only checks the ``[<workspace>]`` profile
+    section exists; the token inside is workspace-bound and could belong to a
+    different workspace, silently misrouting every ``modal`` call. Read the
+    actual binding via ``modal profile list`` and fail here -- before any cloud
+    state is created -- rather than after the first (mis-scoped) ``modal
+    deploy``. Best-effort: an undeterminable binding (modal unreachable /
+    non-JSON) falls through to the deploy-time URL assertion in ``provisioning``.
+    Skipped for tiers with no committed ``modal_workspace``.
+    """
+    modal_workspace = modal_profile_for_tier_or_none(tier)
+    if modal_workspace is None:
+        return
+    with ConcurrencyGroup(name=f"minds-modal-profile-preflight-{tier}") as cg:
+        token_workspace = active_modal_token_workspace(modal_workspace, parent_cg=cg)
+    message = modal_token_workspace_mismatch_message(modal_workspace, token_workspace)
+    if message is not None:
+        raise click.ClickException(message)
+
+
 @env.command("deploy")
 @click.option(
     "--yes-i-mean-production",
@@ -1151,6 +1175,7 @@ def env_deploy(
     env_name = require_activated_env_name()
     tier = _tier_for_env_name(env_name)
     require_deploy_mode_activation(env_name=env_name, tier=tier)
+    _preflight_modal_token_workspace(tier)
     _refuse_if_this_env_recover_target_exists(env_name)
 
     if tier == _PRODUCTION_ENV_NAME and not yes_i_mean_production:
