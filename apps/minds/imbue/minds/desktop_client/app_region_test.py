@@ -8,7 +8,6 @@ from imbue.minds.desktop_client.region_preference import GeoLocationCache
 from imbue.minds.desktop_client.workspace_create import persist_region_for_launch_mode
 from imbue.minds.desktop_client.workspace_create import region_provider_key_for_launch_mode
 from imbue.minds.desktop_client.workspace_create import resolve_effective_region
-from imbue.minds.primitives import DEFAULT_AWS_REGION
 from imbue.minds.primitives import LaunchMode
 
 
@@ -19,7 +18,9 @@ def _config(tmp_path: Path) -> MindsConfig:
 def test_region_provider_key_maps_only_region_bearing_modes() -> None:
     assert region_provider_key_for_launch_mode(LaunchMode.IMBUE_CLOUD) == "imbue_cloud"
     assert region_provider_key_for_launch_mode(LaunchMode.VULTR) == "vultr"
-    assert region_provider_key_for_launch_mode(LaunchMode.AWS) == "aws"
+    # The cloud modes are bring-your-own-account with placement pinned per
+    # account entry, so they carry no ambient region key.
+    assert region_provider_key_for_launch_mode(LaunchMode.AWS) is None
     assert region_provider_key_for_launch_mode(LaunchMode.DOCKER) is None
     assert region_provider_key_for_launch_mode(LaunchMode.LIMA) is None
 
@@ -50,11 +51,12 @@ def test_build_region_form_context_covers_all_region_bearing_providers(tmp_path:
     options, selected = _build_region_form_context(_config(tmp_path), GeoLocationCache())
     assert options[LaunchMode.IMBUE_CLOUD.value] == ["US-EAST-VA", "US-WEST-OR"]
     assert "ewr" in options[LaunchMode.VULTR.value]
-    assert DEFAULT_AWS_REGION in options[LaunchMode.AWS.value]
+    # AWS is bring-your-own-account only: no ambient region row (the account's
+    # pinned placement rules; the BYO add-form has its own region list).
+    assert LaunchMode.AWS.value not in options
     # With no stored value and no geo, defaults are the hardcoded per-provider values.
     assert selected[LaunchMode.IMBUE_CLOUD.value] == "US-EAST-VA"
     assert selected[LaunchMode.VULTR.value] == "ewr"
-    assert selected[LaunchMode.AWS.value] == DEFAULT_AWS_REGION
 
 
 def test_persist_region_writes_back_for_region_bearing_provider(tmp_path: Path) -> None:
