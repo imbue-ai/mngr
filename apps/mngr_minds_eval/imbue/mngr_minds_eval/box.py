@@ -167,7 +167,9 @@ def _plugin_tree_hash() -> str:
 
 
 def _tags(user_id: str, ref: str) -> dict[str, str]:
-    return {"minds-eval-box": user_id, "mngr-ref": ref[:12]}
+    # The plugin hash is part of a box's identity (like the image): a box whose baked-in CLI
+    # predates the current plugin must not be reused, or exec'd commands hit an old parser.
+    return {"minds-eval-box": user_id, "mngr-ref": ref[:12], "plugin": _plugin_tree_hash()[:8]}
 
 
 def _modal():
