@@ -696,6 +696,21 @@ def _main():
     if not _os.path.isdir(source_root):
         _shutil.rmtree(staging_dir, ignore_errors=True)
         _fail_and_resume_backups(result, "restored tree is missing the snapshot root %s" % snapshot_root)
+    # On btrfs providers the hourly backup snapshots the whole unified host
+    # volume, so the host dir's contents live one level down in a `host_dir/`
+    # child (next to volume-level `agents/` + `host_state.json`); on plain
+    # docker (and for the pre-restore safety snapshots this script takes) the
+    # snapshot root is the host dir itself. Identify the host dir by its
+    # `code/` checkout and refuse to swap in anything else -- swapping in the
+    # wrong level would wreck the workspace.
+    if not _os.path.isdir(_os.path.join(source_root, "code")):
+        nested_root = _os.path.join(source_root, "host_dir")
+        if _os.path.isdir(_os.path.join(nested_root, "code")):
+            source_root = nested_root
+        else:
+            _shutil.rmtree(staging_dir, ignore_errors=True)
+            detail = "restored tree has no code/ checkout under %s; refusing to swap it in" % snapshot_root
+            _fail_and_resume_backups(result, detail)
 
     # Swap: clear the host dir (except staging) and move the restored entries
     # in. This deletes the dir this process was started from, so leave it

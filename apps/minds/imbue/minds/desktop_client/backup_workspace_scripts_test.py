@@ -553,6 +553,77 @@ def test_restore_script_rewinds_host_dir_and_takes_a_safety_snapshot(tmp_path: P
 
 
 @pytest.mark.timeout(120)
+def test_restore_script_descends_into_the_nested_host_dir_of_a_volume_level_snapshot(tmp_path: Path) -> None:
+    # On btrfs providers the hourly backup snapshots the whole unified host
+    # volume: the snapshot root carries volume-level `agents/` +
+    # `host_state.json` next to a `host_dir/` child that holds the actual
+    # workspace. The restore must swap in that nested host_dir, not the
+    # volume-level entries.
+    host, code, restic_repo = _make_restore_workspace(tmp_path)
+    volume = (tmp_path / "volume").resolve()
+    volume.mkdir()
+    shutil.copytree(host, volume / "host_dir")
+    (volume / "host_dir" / "code" / "file.txt").write_text("volume snapshot content\n")
+    (volume / "agents").mkdir()
+    (volume / "host_state.json").write_text("{}\n")
+    _restic_for_test(restic_repo, "backup", str(volume))
+    snapshot_id = _snapshot_entries(restic_repo)[0]["id"]
+
+    (code / "file.txt").write_text("current content\n")
+    env_path = code / "runtime" / "secrets" / "restic.env"
+    current_env = env_path.read_text()
+
+    stub_bin = _stub_bin_with_restic(tmp_path)
+    run = _run_script(
+        code,
+        BACKUP_RESTORE_SCRIPT,
+        ("--agent-id", "agent-x", "--snapshot-id", snapshot_id),
+        extra_path=stub_bin,
+        env_overrides={"MNGR_HOST_DIR": str(host)},
+    )
+    payload = extract_marker_json(run["stdout"], RESTORE_RESULT_MARKER)
+    assert payload is not None, run
+    assert payload["status"] == "ok", payload
+    assert payload["swapped"] is True
+    # The nested host_dir's content landed at the host dir root...
+    assert (code / "file.txt").read_text() == "volume snapshot content\n"
+    assert env_path.read_text() == current_env
+    # ...and the volume-level entries were discarded, not swapped in.
+    assert not (host / "host_state.json").exists()
+    assert not (host / "host_dir").exists()
+
+
+@pytest.mark.timeout(120)
+def test_restore_script_refuses_a_snapshot_with_no_code_checkout(tmp_path: Path) -> None:
+    host, code, restic_repo = _make_restore_workspace(tmp_path)
+    junk = (tmp_path / "junk").resolve()
+    junk.mkdir()
+    (junk / "unrelated.txt").write_text("not a workspace\n")
+    _restic_for_test(restic_repo, "backup", str(junk))
+    snapshot_id = _snapshot_entries(restic_repo)[0]["id"]
+    (code / "file.txt").write_text("version 2\n")
+
+    stub_bin = _stub_bin_with_restic(tmp_path)
+    run = _run_script(
+        code,
+        BACKUP_RESTORE_SCRIPT,
+        ("--agent-id", "agent-x", "--snapshot-id", snapshot_id),
+        extra_path=stub_bin,
+        env_overrides={"MNGR_HOST_DIR": str(host)},
+    )
+    payload = extract_marker_json(run["stdout"], RESTORE_RESULT_MARKER)
+    assert payload is not None, run
+    assert payload["status"] == "failed"
+    assert payload["swapped"] is False
+    detail = payload["detail"]
+    assert isinstance(detail, str)
+    assert "no code/ checkout" in detail
+    # The host dir was not touched and no staging dir was left behind.
+    assert (code / "file.txt").read_text() == "version 2\n"
+    assert not (host / ".minds-restore-staging").exists()
+
+
+@pytest.mark.timeout(120)
 def test_restore_script_is_blocked_by_running_chats_and_mutates_nothing(tmp_path: Path) -> None:
     host, code, restic_repo = _make_restore_workspace(tmp_path)
     _restic_for_test(restic_repo, "backup", str(host))
