@@ -20,6 +20,8 @@ Reworked the desktop app's titlebar and navigation to match the minds-options mo
 
 - The workspace switcher rows now show the mind's status with the mockup's icons: a closed-eye icon on stopped minds and an alert triangle on minds whose status is unknown (each with a tooltip); running minds show nothing. Uses the liveness already carried by the workspace list for shutdown-capable local workspaces.
 
+- The rotating tips on the workspace-creation loading screen swap every 8 seconds instead of every 3, so each tip can be read comfortably before the next appears.
+
 - On launch the app no longer tries to restore a workspace window whose workspace no longer exists (which showed the "unresponsive" recovery page); when nothing is known to exist yet, workspace windows are dropped and the app lands on the home screen. Non-workspace screens (home, settings) still restore as before.
 
 - The onboarding flow is now a committed choice: while the user is signed out with no workspaces the home route returns to the welcome splash (Sign Up / Log In / Continue without an account) instead of the create form. Only after signing in or explicitly choosing "Continue without an account" (routed through /welcome/skip) does home lead to the workspace list. The choice is per-run, matching the cold-start routing that lands a functionally-empty app on the splash.

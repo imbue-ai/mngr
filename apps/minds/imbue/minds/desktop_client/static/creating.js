@@ -43,6 +43,8 @@
     if (!tipEl) return;
     var idx = 0;
     tipEl.innerHTML = TIPS[0];
+    // 8s per tip: long enough to comfortably read a full sentence before it
+    // swaps (workspace setup takes minutes, so there is no rush).
     tipsInterval = setInterval(function () {
       idx = (idx + 1) % TIPS.length;
       tipEl.style.opacity = '0';
@@ -50,7 +52,7 @@
         tipEl.innerHTML = TIPS[idx];
         tipEl.style.opacity = '1';
       }, 250);
-    }, 3000);
+    }, 8000);
   }
 
   // ---- Failure view ----
