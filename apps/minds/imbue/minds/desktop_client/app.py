@@ -2330,12 +2330,7 @@ def _handle_workspace_settings(
 
 
 def _handle_workspace_backup_history(agent_id: str) -> Response:
-    """Render the full backup-history page for one workspace.
-
-    A thin shell around ``render_workspace_backup_history`` -- the table is
-    filled client-side from the paginated snapshots API, so this route only
-    needs the workspace's display name.
-    """
+    """Render the client-filled backup-history page for one workspace."""
     if not _is_request_authenticated():
         return make_response(status_code=403, content="Not authenticated")
     backend_resolver = get_state().backend_resolver

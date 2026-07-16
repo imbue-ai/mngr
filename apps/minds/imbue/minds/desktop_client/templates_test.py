@@ -95,8 +95,7 @@ def test_render_workspace_settings_data_agent_id_interpolates() -> None:
 
 
 def test_render_workspace_settings_view_all_links_to_backup_history_page() -> None:
-    # The "View all N backups" footer navigates to the paginated full-history
-    # page (workspace_backups.js only toggles its visibility and count).
+    # workspace_backups.js toggles the "View all N backups" link and count.
     html = render_workspace_settings(
         agent_id=str(_AGENT_A),
         ws_name="ws",

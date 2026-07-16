@@ -51,9 +51,6 @@
 
   var RECENT_LIMIT = 5;
 
-  // Plain-language problem descriptions; each ends with what to do about it.
-  // "Update backup software" fixes all of the fixable ones, so they all point
-  // there.
   var PROBLEM_LABELS = {
     NOT_CONFIGURED: 'Backups are turned off for this workspace. Use "Change storage location" to turn them on.',
     CODE_OUTDATED: 'The backup software in this workspace is out of date. Click "Update backup software" to fix this.',
@@ -75,17 +72,9 @@
     errorEl.classList.add('hidden');
   }
 
-  function latestSnapshotTime(snapshots) {
-    var latest = null;
-    (snapshots || []).forEach(function (snapshot) {
-      if (!latest || Date.parse(snapshot.time) > Date.parse(latest)) latest = snapshot.time;
-    });
-    return latest;
-  }
-
   function snapshotText(entry) {
     if (entry.is_backing_up) return 'Backing up now...';
-    var latest = latestSnapshotTime(entry.snapshots);
+    var latest = entry.snapshots && entry.snapshots.length > 0 ? entry.snapshots[0].time : null;
     if (latest) return 'Last backup: ' + new Date(latest).toLocaleString();
     if (!entry.is_configured) return 'Backups are not configured.';
     if (entry.snapshots_error) return 'Backup status unknown.';
@@ -111,7 +100,6 @@
       historyEmptyEl.classList.remove('hidden');
       return;
     }
-    // /backups returns snapshots newest-first.
     var snapshots = entry.snapshots || [];
     if (snapshots.length === 0) {
       historyEmptyEl.textContent = entry.is_backing_up
@@ -126,9 +114,7 @@
       historyEl.appendChild(window.mindsBackupTable.buildSnapshotRow(agentId, snapshot, index === 0, index === 0));
     });
 
-    // The footer only appears when there are more snapshots than rows -- and
-    // then says how many. Visibility is driven via style.display because a
-    // `hidden` class would lose to the anchor's own `flex` display utility.
+    // Use inline display because the anchor's flex utility overrides `hidden`.
     var hasMore = snapshots.length > RECENT_LIMIT;
     viewAllLink.style.display = hasMore ? '' : 'none';
     if (hasMore) viewAllLabel.textContent = 'View all ' + snapshots.length + ' backups';

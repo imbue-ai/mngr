@@ -16,8 +16,6 @@
   var PAGE_SIZE = 20;
   var offset = 0;
   var snapshots = [];
-  var isConfigured = true;
-  var loadError = null;
 
   function setShown(el, isShown) {
     el.classList.toggle('hidden', !isShown);
@@ -33,22 +31,9 @@
   function renderPage() {
     rowsEl.textContent = '';
 
-    if (!isConfigured) {
-      showStatus('Backups are turned off for this workspace.');
-      return;
-    }
-    if (loadError) {
-      showStatus("Couldn't load your backup history right now.");
-      return;
-    }
     if (snapshots.length === 0) {
       showStatus('No backups yet. The first backup runs within the hour.');
       return;
-    }
-
-    // A snapshot pruned after load can leave offset past the end; snap back.
-    if (offset >= snapshots.length) {
-      offset = Math.max(0, Math.floor((snapshots.length - 1) / PAGE_SIZE) * PAGE_SIZE);
     }
 
     var pageSnapshots = snapshots.slice(offset, offset + PAGE_SIZE);
@@ -65,7 +50,7 @@
     rangeEl.textContent = 'Showing ' + first + '-' + last + ' of ' + snapshots.length + ' backups';
     prevBtn.disabled = offset === 0;
     nextBtn.disabled = last >= snapshots.length;
-    setShown(paginationEl, snapshots.length > PAGE_SIZE || offset > 0);
+    setShown(paginationEl, snapshots.length > PAGE_SIZE);
   }
 
   function loadHistory() {
@@ -77,9 +62,14 @@
           showStatus('Could not load backup history.');
           return;
         }
-        isConfigured = !!entry.is_configured;
-        loadError = entry.snapshots_error || null;
-        // /backups returns snapshots newest-first.
+        if (!entry.is_configured) {
+          showStatus('Backups are turned off for this workspace.');
+          return;
+        }
+        if (entry.snapshots_error) {
+          showStatus("Couldn't load your backup history right now.");
+          return;
+        }
         snapshots = entry.snapshots || [];
         offset = 0;
         renderPage();
