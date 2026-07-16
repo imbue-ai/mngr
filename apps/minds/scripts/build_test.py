@@ -818,24 +818,42 @@ def test_assert_upload_fits_todesktop_limit_enforces_the_limit(tmp_path: Path) -
     assert under.returncode == 0, f"700MB of app files must pass an 800MB limit:\nstderr:\n{under.stderr}"
 
 
-def test_todesktop_config_excludes_resources_from_app_files() -> None:
-    """Drift guard: resources/ must stay excluded from the app-files upload.
+def test_todesktop_config_balances_app_files_exclusions_and_sign_paths() -> None:
+    """Drift guard: the appFiles exclusions must keep both failure modes impossible.
 
-    resources/ travels whole via extraResources (which is also the only way
-    its nested latchkey node_modules reaches the builder -- the app-files glob
-    always strips **/node_modules). If the exclusion is dropped, the tree
-    uploads twice and the app-source upload returns to ~700MB against the
-    600MB limit.
+    Two constraints pull in opposite directions and both broke a cloud build
+    in 2026-07: (1) the heavy resources subtrees must be EXCLUDED from the
+    app-files upload or the tree uploads twice (extraResources uploads it
+    whole regardless; 701MB against the 600MB limit); (2) every
+    ``mac.additionalBinariesToSign`` path must remain INCLUDED, because the
+    builder's signing preflight fails with "The following
+    additionalBinariesToSign are missing" when its path is excluded, and
+    nothing recreates lima cloud-side.
     """
     config = _load_todesktop_config()
     app_files = config.get("appFiles")
-    assert app_files is not None and "!resources/**" in app_files, (
-        "todesktop.js appFiles must exclude resources/** -- it already uploads whole "
-        "via extraResources, and without the exclusion the upload doubles (701MB, 2026-07)"
+    assert app_files is not None and "**" in app_files, (
+        "todesktop.js appFiles must include '**' for the app code"
     )
-    assert "**" in app_files, "todesktop.js appFiles must still include '**' for the app code"
+    excluded_prefixes = []
+    for glob in app_files:
+        if glob.startswith("!"):
+            assert glob.endswith("/**"), f"unexpected appFiles exclusion shape: {glob}"
+            excluded_prefixes.append(glob[1:].removesuffix("**"))
+    for heavy_subtree in ("resources/git/", "resources/latchkey/"):
+        assert any(heavy_subtree.startswith(prefix) for prefix in excluded_prefixes), (
+            f"todesktop.js appFiles must exclude {heavy_subtree} -- it already uploads whole "
+            "via extraResources, and double-uploading it is what hit 701MB in 2026-07"
+        )
+    for sign_path in config["mac"]["additionalBinariesToSign"]:
+        covering = [prefix for prefix in excluded_prefixes if sign_path.startswith(prefix)]
+        assert not covering, (
+            f"todesktop.js appFiles exclusions {covering} cover the additionalBinariesToSign "
+            f"path {sign_path}; the builder's signing preflight requires that file in the "
+            "app-files upload and fails the build without it"
+        )
     extra_resource_sources = [entry["from"] for entry in config.get("extraResources", [])]
     assert "resources/" in extra_resource_sources, (
         "todesktop.js must keep uploading resources/ via extraResources; the appFiles "
-        "exclusion assumes that channel delivers the staged binaries to the builder"
+        "exclusions assume that channel delivers the staged binaries to the builder"
     )
