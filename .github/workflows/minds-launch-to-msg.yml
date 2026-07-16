@@ -25,6 +25,10 @@ on:
         type: boolean
         required: false
         default: false
+      runner_label:
+        description: 'Pin the self-hosted build + verify jobs to one runner by label (e.g. `mac-runner-2`). Empty -> the shared `minds-runner` pool (any idle mac runner). Use to isolate a run to a single machine, e.g. to test whether a failure is machine-specific. The target runner must carry the given label.'
+        required: false
+        default: ''
   # Twice-daily health check against both repos' main HEADs. Schedules only
   # fire from the default branch. `check_should_run` skips the expensive
   # jobs when the (mngr, DEFAULT_WORKSPACE_TEMPLATE) pair is unchanged since the last green run,
@@ -155,8 +159,9 @@ jobs:
     # Verify always consumes this job's output, never a released bundle.
     # MUST be macOS: scripts/download-binaries.js uses `xcrun --find git`
     # for the darwin git bundle, and bundling uv/lima needs native arm64
-    # binaries.
-    runs-on: [self-hosted, macOS, minds-runner]
+    # binaries. Third label is pinnable via the `runner_label` dispatch input;
+    # empty -> the shared `minds-runner` pool.
+    runs-on: [self-hosted, macOS, "${{ inputs.runner_label != '' && inputs.runner_label || 'minds-runner' }}"]
     # 85 min = the 70-min `pnpm dist` step budget (below) + ~15 min for the
     # post-failure cancel step to tear an orphaned ToDesktop build down.
     timeout-minutes: 85
@@ -168,7 +173,13 @@ jobs:
       app_zip_url: ${{ steps.existing.outputs.url || steps.parse.outputs.url }}
       build_id:    ${{ steps.existing.outputs.build_id || steps.parse.outputs.build_id }}
       reused:      ${{ steps.existing.outputs.url != '' }}
+      runner_name: ${{ steps.runner_id.outputs.name }}
     steps:
+      - name: record runner name
+        id: runner_id
+        env:
+          RUNNER_NAME: ${{ runner.name }}
+        run: echo "name=$RUNNER_NAME" >> "$GITHUB_OUTPUT"
       # ToDesktop signing/publishing credentials from Vault (migrated off the
       # TODESKTOP_ACCESS_TOKEN / TODESKTOP_EMAIL GitHub Actions secrets). These
       # publish the minds desktop client, so they live under minds/release/*
@@ -371,7 +382,9 @@ jobs:
   launch_to_msg:
     needs: [check_should_run, build]
     if: needs.check_should_run.outputs.should_run == 'true' && needs.build.result == 'success'
-    runs-on: [self-hosted, macOS, minds-runner]
+    # Third label is pinnable via the `runner_label` dispatch input; empty -> the
+    # shared `minds-runner` pool.
+    runs-on: [self-hosted, macOS, "${{ inputs.runner_label != '' && inputs.runner_label || 'minds-runner' }}"]
     timeout-minutes: 40
     outputs:
       # Per-run metrics for the slack message. The e2e prints `[ci-metric]
@@ -380,7 +393,13 @@ jobs:
       launch_to_ready: ${{ steps.timings.outputs.launch_to_ready }}
       w1_create:       ${{ steps.timings.outputs.w1_create }}
       w2_create:       ${{ steps.timings.outputs.w2_create }}
+      runner_name:     ${{ steps.runner_id.outputs.name }}
     steps:
+      - name: record runner name
+        id: runner_id
+        env:
+          RUNNER_NAME: ${{ runner.name }}
+        run: echo "name=$RUNNER_NAME" >> "$GITHUB_OUTPUT"
       # Anthropic key from Vault (migrated off the ANTHROPIC_API_KEY GitHub
       # Actions secret). This self-hosted macOS runner must have curl + jq on
       # PATH, which the use-vault-secrets action shells out to.
@@ -983,6 +1002,9 @@ jobs:
           W2_CREATE_S: ${{ needs.launch_to_msg.outputs.w2_create }}
           # ToDesktop .zip URL; empty when build was skipped.
           APP_ZIP_URL: ${{ needs.build.outputs.app_zip_url }}
+          # Which self-hosted mac runner executed each job (empty if skipped).
+          BUILD_RUNNER:  ${{ needs.build.outputs.runner_name }}
+          LAUNCH_RUNNER: ${{ needs.launch_to_msg.outputs.runner_name }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           TRIGGER: ${{ github.event_name }}
         run: |
@@ -1098,11 +1120,25 @@ jobs:
           default_workspace_template_label="\`${DEFAULT_WORKSPACE_TEMPLATE_SHORT}\`"
           [[ -n "$DEFAULT_WORKSPACE_TEMPLATE_REF" && ! "$DEFAULT_WORKSPACE_TEMPLATE_REF" =~ ^[0-9a-f]{40}$ ]] && default_workspace_template_label="\`${DEFAULT_WORKSPACE_TEMPLATE_REF}\` (\`${DEFAULT_WORKSPACE_TEMPLATE_SHORT}\`)"
           line2="[_mngr_ ${mngr_label} | _DEFAULT_WORKSPACE_TEMPLATE_ ${default_workspace_template_label}]"
-          if [[ -n "$metrics_line" ]]; then
-            text=$(printf '%s\n%s\n%s\n%s' "$line1" "$line2" "$metrics_line" "$links_line")
-          else
-            text=$(printf '%s\n%s\n%s' "$line1" "$line2" "$links_line")
-          fi
+          # Which mac runner(s) executed the self-hosted jobs. build and verify
+          # are separate jobs, so they can land on different runners.
+          runner_inner=""
+          sep=""
+          for kv in "build|$BUILD_RUNNER" "verify|$LAUNCH_RUNNER"; do
+            label="${kv%%|*}"
+            v="${kv##*|}"
+            [[ -z "$v" ]] && continue
+            runner_inner+="${sep}_${label}:_ \`$v\`"
+            sep=" | "
+          done
+          runner_line=""
+          [[ -n "$runner_inner" ]] && runner_line="[_ran on_ ${runner_inner}]"
+          # Assemble non-empty lines in order: verdict, refs, runner, metrics, links.
+          lines=("$line1" "$line2")
+          [[ -n "$runner_line" ]] && lines+=("$runner_line")
+          [[ -n "$metrics_line" ]] && lines+=("$metrics_line")
+          lines+=("$links_line")
+          text=$(printf '%s\n' "${lines[@]}")
           payload=$(printf '%s' "$text" | jq -Rs '{text: .}')
           curl -sS -X POST -H 'Content-type: application/json' \
             --data "$payload" "$WEBHOOK"
