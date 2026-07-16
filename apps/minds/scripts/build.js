@@ -10,7 +10,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execSync, execFileSync } = require('child_process');
-const { downloadGit, downloadUv, downloadRestic, download } = require('./download-binaries.js');
+const { downloadGit, downloadUv, downloadRestic, download, assertTreeFitsUploadBudget } = require('./download-binaries.js');
 
 const ROOT = path.resolve(__dirname, '..');
 const RESOURCES_DIR = path.join(ROOT, 'resources');
@@ -613,6 +613,20 @@ async function main() {
   stageRuntimePyproject(wheelByPackage);
   bundleClientConfig();
   bakeBuildInfo();
+
+  // Fail at build time -- not at ToDesktop upload time -- if the staged
+  // resources would blow the upload budget once a symlink-following zip
+  // materializes them (the launch-to-msg 701MB regression, 2026-07).
+  const uploadSizeLimitMb = require(path.join(ROOT, 'todesktop.js')).uploadSizeLimit;
+  const { realBytes, archivedBytes, symlinkCount } = assertTreeFitsUploadBudget(RESOURCES_DIR, {
+    uploadSizeLimitMb,
+    label: 'resources/',
+  });
+  console.log(
+    `resources/ zips to ${(archivedBytes / (1024 * 1024)).toFixed(1)}MB ` +
+    `(${(realBytes / (1024 * 1024)).toFixed(1)}MB on disk, ${symlinkCount} symlinks) ` +
+    `against the ${uploadSizeLimitMb}MB ToDesktop upload limit`,
+  );
 
   console.log('\nBuild complete!');
   console.log(`Resources directory: ${RESOURCES_DIR}`);

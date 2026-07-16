@@ -12,7 +12,13 @@ exact runtime environment contract that ``electron/backend.js`` exports:
   ``git-remote-https`` helper dispatch and TLS wiring. This is the historical
   failure mode: the dugite-native binaries are built with an empty prefix, so
   without ``GIT_EXEC_PATH`` the exec-path resolves to ``//libexec/git-core`` and
-  https clones fail with "'remote-https' is not a git command".
+  https clones fail with "'remote-https' is not a git command";
+- the same must hold after ``scripts/download-binaries.js`` replaces the
+  payload's symlinks with sh shims (the shape the app actually ships --
+  symlinks would be materialized into ~480MB of binary copies by ToDesktop's
+  app-source zip): zero symlinks remain, an HTTPS clone still works (the
+  ``git-remote-https`` shim), and dashed-form dispatch still works (a
+  ``libexec/git-core/git-fetch`` shim invocation).
 
 Everything is hermetic except obtaining the release asset: the HTTPS clone runs
 against a 127.0.0.1 server on an OS-assigned port, serving a dumb-HTTP bare repo
@@ -33,6 +39,7 @@ import http.server
 import json
 import os
 import platform
+import shutil
 import ssl
 import subprocess
 import sys
@@ -67,6 +74,7 @@ from imbue.imbue_common.logging import log_span
 pytestmark = pytest.mark.acceptance
 
 _MANIFEST_PATH: Final[Path] = Path(__file__).resolve().parent / "scripts" / "git-manifest.json"
+_DOWNLOAD_BINARIES_SCRIPT_PATH: Final[Path] = Path(__file__).resolve().parent / "scripts" / "download-binaries.js"
 
 # Maps (sys.platform, platform.machine()) to a git-manifest.json target key.
 # Anything unmapped (e.g. Windows) skips the test.
@@ -168,6 +176,35 @@ def _run_git(
         f"stderr:\n{result.stderr}"
     )
     return result
+
+
+def _convert_payload_symlinks_to_shims(git_root: Path) -> int:
+    """Run the production shim conversion from scripts/download-binaries.js on an extracted payload.
+
+    Invokes the same exported function the build and the ToDesktop
+    ``beforeInstall`` hook run, so this test exercises the exact payload shape
+    the app ships. Node is a hard requirement of the minds toolchain (the
+    offload image provisions it for exactly this kind of ``node -e`` use).
+    """
+    node_binary = shutil.which("node")
+    assert node_binary is not None, (
+        "node is required to run the shim conversion from scripts/download-binaries.js; "
+        "it is provisioned in the offload image and by the minds dev setup (apps/minds/.nvmrc)"
+    )
+    conversion_script = (
+        "const converted = require(process.argv[1]).convertGitPayloadSymlinksToShims(process.argv[2]);"
+        "console.log(converted);"
+    )
+    result = subprocess.run(
+        [node_binary, "-e", conversion_script, str(_DOWNLOAD_BINARIES_SCRIPT_PATH), str(git_root)],
+        capture_output=True,
+        text=True,
+        timeout=_GIT_COMMAND_TIMEOUT_SECONDS,
+    )
+    assert result.returncode == 0, (
+        f"convertGitPayloadSymlinksToShims failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    return int(result.stdout.strip())
 
 
 def _generate_self_signed_localhost_certificate(certificate_dir: Path) -> tuple[Path, Path]:
@@ -338,4 +375,43 @@ def test_bundled_git_payload_end_to_end(tmp_path: Path) -> None:
     assert https_head == fixture_head, (
         f"HTTPS clone HEAD {https_head} does not match the fixture HEAD {fixture_head}; "
         "the https transport did not deliver the fixture history"
+    )
+
+    # Phase 6: the payload the app actually ships has its symlinks replaced by
+    # sh shims (scripts/download-binaries.js does this at download time, so
+    # ToDesktop's symlink-following app-source zip cannot materialize 142
+    # copies of the git binary). Convert this extracted payload with the real
+    # production function, then prove the shimmed payload end to end: no
+    # symlinks remain, an HTTPS clone still dispatches through the
+    # git-remote-https shim, and the dashed builtin form still dispatches
+    # through a libexec/git-core shim.
+    shim_count = _convert_payload_symlinks_to_shims(git_root)
+    assert shim_count > 0, "expected the dugite-native payload to contain symlinks to convert"
+    remaining_symlinks = [entry for entry in git_root.rglob("*") if entry.is_symlink()]
+    assert remaining_symlinks == [], f"symlinks remain in the payload after shim conversion: {remaining_symlinks}"
+    remote_https_helper = git_root / "libexec" / "git-core" / "git-remote-https"
+    assert remote_https_helper.read_bytes().startswith(b"#!/bin/sh"), (
+        "git-remote-https should be an sh shim after conversion"
+    )
+
+    shimmed_https_clone = tmp_path / "https-clone-shimmed"
+    with _serve_directory_over_https(serve_root, certificate_path, private_key_path) as https_base_url:
+        _run_git(
+            git_binary,
+            ("clone", f"{https_base_url}/fixture.git", str(shimmed_https_clone)),
+            https_environment,
+            tmp_path,
+        )
+        # Dashed-form dispatch through a shim, fetching over https for good
+        # measure: libexec/git-core/git-fetch is one of the ~142 former
+        # symlinks to the multicall binary.
+        _run_git(
+            git_root / "libexec" / "git-core" / "git-fetch",
+            ("origin",),
+            https_environment,
+            shimmed_https_clone,
+        )
+    shimmed_head = _run_git(git_binary, ("rev-parse", "HEAD"), base_environment, shimmed_https_clone).stdout.strip()
+    assert shimmed_head == fixture_head, (
+        f"HTTPS clone through the shimmed payload produced HEAD {shimmed_head}, expected {fixture_head}"
     )

@@ -21,6 +21,7 @@ test so it runs on every branch.
 """
 
 import json
+import os
 import plistlib
 import re
 import shutil
@@ -522,4 +523,192 @@ def test_ensure_binaries_guards_stale_git_payload() -> None:
     assert "git-manifest.json" in text, (
         "ensure-binaries.js must read 'git-manifest.json' to compare the on-disk "
         ".dugite-tag against the pinned dugiteNativeTag (spec: minds-managed-git)."
+    )
+
+
+_DOWNLOAD_BINARIES_PATH: Final[Path] = APP_ROOT / "scripts" / "download-binaries.js"
+
+
+def _run_download_binaries_function(expression: str, *arguments: str) -> subprocess.CompletedProcess[str]:
+    """Run one exported download-binaries.js function via ``node -e``.
+
+    ``expression`` sees the module as ``db`` and the given arguments as
+    ``process.argv[2..]`` (argv[1] is the module path).
+    """
+    assert _NODE_BINARY is not None
+    return subprocess.run(
+        [
+            _NODE_BINARY,
+            "-e",
+            f"const db = require(process.argv[1]); {expression}",
+            str(_DOWNLOAD_BINARIES_PATH),
+            *arguments,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+
+def _make_fake_git_payload(payload_root: Path) -> None:
+    """Lay out a miniature dugite-native-shaped payload with the real link shapes.
+
+    ``libexec/git-core/git`` is an executable script that echoes its argv, so a
+    converted shim can be executed and its dispatch observed directly.
+    """
+    git_core = payload_root / "libexec" / "git-core"
+    git_core.mkdir(parents=True)
+    (payload_root / "bin").mkdir()
+    fake_git = git_core / "git"
+    fake_git.write_text('#!/bin/sh\necho "git-multicall $@"\n')
+    fake_git.chmod(0o755)
+    fake_remote_http = git_core / "git-remote-http"
+    fake_remote_http.write_text('#!/bin/sh\necho "remote-http $@"\n')
+    fake_remote_http.chmod(0o755)
+    (git_core / "git-fetch").symlink_to("git")
+    (git_core / "git-status").symlink_to("git")
+    (git_core / "git-remote-https").symlink_to("git-remote-http")
+
+
+def test_convert_git_payload_symlinks_produces_working_symlink_free_shims(tmp_path: Path) -> None:
+    """The shim conversion must leave zero symlinks and preserve dispatch behavior.
+
+    ToDesktop's app-source zip follows symlinks, so the 142 dugite-native
+    ``libexec/git-core`` links to the multicall git binary would be zipped as
+    ~480MB of copies (the 2026-07 launch-to-msg 701MB upload failure). The
+    conversion replaces each link with an sh shim; this test runs the real
+    exported function on a miniature payload and then executes the shims:
+    a dashed builtin must dispatch as ``git <subcommand>`` and a remote
+    helper must exec its sibling helper unchanged.
+    """
+    payload_root = tmp_path / "git"
+    _make_fake_git_payload(payload_root)
+
+    result = _run_download_binaries_function(
+        "console.log(db.convertGitPayloadSymlinksToShims(process.argv[2]));", str(payload_root)
+    )
+    assert result.returncode == 0, f"conversion failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert result.stdout.strip() == "3", f"expected 3 converted symlinks, got {result.stdout.strip()!r}"
+    assert [entry for entry in payload_root.rglob("*") if entry.is_symlink()] == []
+
+    git_core = payload_root / "libexec" / "git-core"
+    for shim_name in ("git-fetch", "git-status", "git-remote-https"):
+        shim_path = git_core / shim_name
+        assert shim_path.read_text().startswith("#!/bin/sh"), f"{shim_name} is not an sh shim"
+        assert os.access(shim_path, os.X_OK), f"{shim_name} lost its executable bit"
+
+    fetch_output = subprocess.run(
+        [str(git_core / "git-fetch"), "origin", "main"], capture_output=True, text=True, timeout=30
+    )
+    assert fetch_output.returncode == 0 and fetch_output.stdout.strip() == "git-multicall fetch origin main", (
+        f"dashed builtin shim dispatched wrong: stdout={fetch_output.stdout!r} stderr={fetch_output.stderr!r}"
+    )
+    helper_output = subprocess.run(
+        [str(git_core / "git-remote-https"), "origin", "https://example.invalid/repo.git"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert (
+        helper_output.returncode == 0
+        and helper_output.stdout.strip() == "remote-http origin https://example.invalid/repo.git"
+    ), f"remote helper shim dispatched wrong: stdout={helper_output.stdout!r} stderr={helper_output.stderr!r}"
+
+
+def test_convert_git_payload_symlinks_rejects_links_escaping_the_payload(tmp_path: Path) -> None:
+    """A payload symlink pointing outside the payload must abort the conversion.
+
+    Such a link means the upstream payload layout changed (or the archive is
+    malicious); silently shimming it would bake an absolute path to a
+    build-machine file into the shipped app.
+    """
+    payload_root = tmp_path / "git"
+    _make_fake_git_payload(payload_root)
+    outside_file = tmp_path / "outside-the-payload"
+    outside_file.write_text("not payload content\n")
+    (payload_root / "libexec" / "git-core" / "git-escape").symlink_to(outside_file)
+
+    result = _run_download_binaries_function(
+        "db.convertGitPayloadSymlinksToShims(process.argv[2]);", str(payload_root)
+    )
+    assert result.returncode != 0, "conversion must fail on a payload-escaping symlink"
+    assert "escapes the payload" in result.stderr
+
+
+def test_measure_tree_as_archived_prices_symlinks_at_target_size(tmp_path: Path) -> None:
+    """measureTreeAsArchived must model a symlink-following archiver.
+
+    A symlink contributes its target's full size to the archived total (that
+    is exactly what ToDesktop's zip does), while the real total only carries
+    the link entry itself -- the difference is the inflation the build guard
+    alarms on.
+    """
+    tree_root = tmp_path / "tree"
+    tree_root.mkdir()
+    payload_file = tree_root / "payload.bin"
+    payload_file.write_bytes(b"x" * 10_000)
+    (tree_root / "link-one").symlink_to("payload.bin")
+    (tree_root / "link-two").symlink_to("payload.bin")
+
+    result = _run_download_binaries_function(
+        "console.log(JSON.stringify(db.measureTreeAsArchived(process.argv[2])));", str(tree_root)
+    )
+    assert result.returncode == 0, f"measureTreeAsArchived failed:\nstderr:\n{result.stderr}"
+    measurement = json.loads(result.stdout)
+    assert measurement["symlinkCount"] == 2
+    assert measurement["archivedBytes"] == 30_000, "each symlink must count at its target's 10KB"
+    assert measurement["realBytes"] < 11_000, "the real total must not include materialized symlink copies"
+
+
+def test_assert_tree_fits_upload_budget_fails_on_symlink_inflation(tmp_path: Path) -> None:
+    """The build guard must fail a tree whose symlinks materialize past the threshold.
+
+    Uses a sparse 100MB target (instant to create) with two symlinks: 200MB of
+    materialization against a 100MB real payload is exactly the regression
+    signature, and must fail even though the tree is nowhere near the total
+    upload limit. A symlink-free tree of the same size must pass.
+    """
+    tree_root = tmp_path / "tree"
+    tree_root.mkdir()
+    sparse_target = tree_root / "big.bin"
+    sparse_target.touch()
+    os.truncate(sparse_target, 100 * 1024 * 1024)
+    (tree_root / "copy-one").symlink_to("big.bin")
+    (tree_root / "copy-two").symlink_to("big.bin")
+
+    guard_expression = (
+        "db.assertTreeFitsUploadBudget(process.argv[2], { uploadSizeLimitMb: 600, label: 'resources/' });"
+    )
+    inflated = _run_download_binaries_function(guard_expression, str(tree_root))
+    assert inflated.returncode != 0, "the guard must fail on 200MB of symlink materialization"
+    assert "materialize" in inflated.stderr and "uploadSizeLimit" in inflated.stderr
+
+    (tree_root / "copy-one").unlink()
+    (tree_root / "copy-two").unlink()
+    symlink_free = _run_download_binaries_function(guard_expression, str(tree_root))
+    assert symlink_free.returncode == 0, f"symlink-free tree must pass the guard:\nstderr:\n{symlink_free.stderr}"
+
+
+def test_build_pipeline_keeps_payload_shim_and_budget_guards() -> None:
+    """Drift guard: the shim conversion and upload-budget guard must stay wired in.
+
+    ``downloadGit`` must convert payload symlinks BEFORE writing the
+    ``.dugite-tag`` marker (a payload that failed conversion must never be
+    tagged complete, or ensure-binaries.js would skip re-downloading it), and
+    ``build.js`` must run the upload-budget assertion so a symlink regression
+    fails the local build instead of the ToDesktop upload.
+    """
+    download_binaries_text = _DOWNLOAD_BINARIES_PATH.read_text()
+    conversion_call_index = download_binaries_text.find("convertGitPayloadSymlinksToShims(gitDir)")
+    tag_write_index = download_binaries_text.find("'.dugite-tag'")
+    assert conversion_call_index != -1, "downloadGit must call convertGitPayloadSymlinksToShims on the payload"
+    assert tag_write_index != -1, "downloadGit must write the .dugite-tag marker"
+    assert conversion_call_index < tag_write_index, (
+        "downloadGit must convert payload symlinks BEFORE writing .dugite-tag, so a "
+        "failed conversion is never tagged as a complete payload"
+    )
+    build_text = (APP_ROOT / "scripts" / "build.js").read_text()
+    assert "assertTreeFitsUploadBudget(RESOURCES_DIR" in build_text, (
+        "build.js must assert the staged resources fit the ToDesktop upload budget "
+        "(see the 2026-07 launch-to-msg 701MB upload failure)"
     )
