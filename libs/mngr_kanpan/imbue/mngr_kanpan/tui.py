@@ -1214,7 +1214,13 @@ def _build_peek_panel(state: _KanpanState) -> LineBox:
     """Build the peek panel (a bordered box shown in place of the footer) and stash its parts."""
     state.peek_body_text = Text("", wrap="space")
     state.peek_input = _make_reply_edit(("peek_user", PEEK_REPLY_PROMPT))
-    hint = Text(_legend_markup([("enter", "send"), ("esc", "close")], "help_key", "peek_hint", _LEGEND_SEPARATOR))
+    hint = Text(
+        [
+            *_legend_markup([("enter", "send"), ("esc", "close")], "help_key", "peek_hint", " \u00b7 "),
+            ("peek_hint", " "),
+        ],
+        align="right",
+    )
     inner = Pile(
         [
             state.peek_body_text,
