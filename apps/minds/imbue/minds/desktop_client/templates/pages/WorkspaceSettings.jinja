@@ -242,6 +242,30 @@
           </a>
         </div>
 
+        {# Shared operation strip: one tracked operation (restore, update, or
+           storage change) runs per workspace at a time, so its controls --
+           named spinner, Cancel, "Stop chats and try again", progress line,
+           and errors -- live here in one place, next to the table where
+           restores are launched, instead of inside whichever section's
+           button started the operation. workspace_backups.js unhides the
+           strip while an operation is running or has something to report.
+           Conditional buttons are wrapped in plain spans because a `hidden`
+           class loses to the Button component's own inline-flex display (see
+           templates/README.md). #}
+        <div id="backup-operation-strip" class="hidden mb-6">
+          <div class="flex flex-wrap items-center gap-2 mb-2">
+            <span id="backup-op-spinner" class="hidden type-section text-secondary">Working...</span>
+            <span id="backup-stop-chats-btn-wrap" class="hidden">
+              <Button variant="secondary" id="backup-stop-chats-btn">Stop chats and try again</Button>
+            </span>
+            <span id="backup-cancel-btn-wrap" class="hidden">
+              <Button variant="secondary" id="backup-cancel-btn">Cancel</Button>
+            </span>
+          </div>
+          <p id="backup-op-progress" class="hidden type-helper text-tertiary mb-2" aria-live="polite"></p>
+          <p id="backup-error" class="hidden type-body text-important mb-2" role="alert"></p>
+        </div>
+
         {# Setting 1: where backups go. The form element IDs are load-bearing
            (test_sync_e2e.py drives this flow by ID), so relabel freely but do
            not rename them. #}
@@ -297,11 +321,11 @@
         </div>
 
         {# Setting 3: fix/refresh the backup software inside the workspace.
-           Last because it acts on problems the checks above find, and its
-           progress/error output belongs at the bottom of the section.
-           Conditional buttons are wrapped in plain spans because a `hidden`
-           class loses to the Button component's own inline-flex display (see
-           templates/README.md). #}
+           Last because it acts on problems the checks above find. Its
+           progress, Cancel, and errors show in the shared operation strip
+           below the Recent backups table. The conditional button is wrapped
+           in a plain span because a `hidden` class loses to the Button
+           component's own inline-flex display (see templates/README.md). #}
         <div class="mb-2">
           <h3 class="type-label text-secondary mb-2">Fix backup problems</h3>
           <p class="type-helper text-tertiary mb-2 max-w-[560px]">
@@ -311,20 +335,9 @@
           </p>
           <div id="backup-versions" class="hidden type-helper text-tertiary mb-2"></div>
           <ul id="backup-problems" class="hidden type-body text-important mb-2 list-disc pl-4"></ul>
-          <div class="flex flex-wrap items-center gap-2 mb-2">
-            <span id="backup-update-btn-wrap" class="hidden">
-              <Button variant="secondary" id="backup-update-btn">Update backup software</Button>
-            </span>
-            <span id="backup-stop-chats-btn-wrap" class="hidden">
-              <Button variant="secondary" id="backup-stop-chats-btn">Stop chats and try again</Button>
-            </span>
-            <span id="backup-cancel-btn-wrap" class="hidden">
-              <Button variant="secondary" id="backup-cancel-btn">Cancel</Button>
-            </span>
-            <span id="backup-op-spinner" class="hidden type-section text-secondary">Working...</span>
-          </div>
-          <p id="backup-op-progress" class="hidden type-helper text-tertiary mb-2" aria-live="polite"></p>
-          <p id="backup-error" class="hidden type-body text-important mb-2" role="alert"></p>
+          <span id="backup-update-btn-wrap" class="hidden">
+            <Button variant="secondary" id="backup-update-btn">Update backup software</Button>
+          </span>
         </div>
       </div>
 

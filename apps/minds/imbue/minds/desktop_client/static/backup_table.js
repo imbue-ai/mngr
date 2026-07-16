@@ -119,6 +119,8 @@
     restore.type = 'button';
     restore.textContent = 'Restore';
     restore.className = 'backup-restore-btn bg-transparent border-0 p-0 type-body';
+    // Lets the settings page find and relabel the row of an in-flight restore.
+    restore.dataset.snapshotId = snapshot.snapshot_id;
     if (restoreConfig && restoreConfig.onRestore) {
       restore.classList.add('text-accent', 'cursor-pointer', 'disabled:opacity-40', 'disabled:cursor-not-allowed');
       restore.addEventListener('click', function () {
