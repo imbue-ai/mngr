@@ -18,12 +18,15 @@
 //   var btn = window.mindsSidebarRow.buildIconButton(title, pathSvg,
 //                                                    dataAttr, agentId, sizeClass);
 //
-// ``workspace`` is { id, name, accent?, is_stale?, backup_warning? }.
-// ``withOpenNew`` adds the "open in new window" arrow to rows for OTHER
-// workspaces (Electron only -- browser mode has no multi-window concept and
-// omits it); the current row and remote rows carry no action buttons.
-// ``isCurrent`` marks the row selected (highlighted background). Event
-// wiring (click / context-menu) is the caller's job -- this builds DOM only.
+// ``workspace`` is { id, name, accent?, liveness?, is_stale?, backup_warning? }.
+// ``liveness`` (RUNNING / STOPPED / UNKNOWN, present on shutdown-capable local
+// workspaces) renders a status icon on stopped / unknown rows; running rows
+// show nothing. ``withOpenNew`` adds the "open in new window" arrow to rows
+// for OTHER workspaces (Electron only -- browser mode has no multi-window
+// concept and omits it); the current row and remote rows carry no action
+// buttons. ``isCurrent`` marks the row selected (highlighted background).
+// Event wiring (click / context-menu) is the caller's job -- this builds DOM
+// only.
 (function () {
   function buildIconButton(title, pathSvg, dataAttr, agentId, sizeClass) {
     var btn = document.createElement('button');
@@ -44,6 +47,32 @@
   // filled-outline diagonal arrow, shared with the Landing workspace rows.
   var OPEN_NEW_PATH =
     '<path d="M12.9331 10.3336C12.9329 10.6648 12.6646 10.9331 12.3335 10.9333C12.0022 10.9333 11.7331 10.6649 11.7329 10.3336V5.1149L4.09033 12.7575C3.85606 12.9916 3.47695 12.9916 3.24268 12.7575C3.00836 12.5232 3.00836 12.1432 3.24268 11.9088L10.8853 4.26627H5.6665C5.33513 4.26627 5.06689 3.99803 5.06689 3.66666C5.06689 3.33529 5.33513 3.06705 5.6665 3.06705H12.3335C12.6647 3.06722 12.9331 3.33539 12.9331 3.66666V10.3336Z"/>';
+
+  // Mind-status icons from the minds-options mockup (lucide, stroke-based,
+  // 24-unit viewBox): ``eye-closed`` for a stopped mind, ``triangle-alert``
+  // for one whose status can't be determined. A running mind shows nothing
+  // (the mockup's treatment: only non-running states carry an icon).
+  var STATUS_ICON_PATHS = {
+    STOPPED:
+      '<path d="m15 18-.722-3.25"/><path d="M2 8a10.645 10.645 0 0 0 20 0"/><path d="m20 15-1.726-2.05"/><path d="m4 15 1.726-2.05"/><path d="m9 18 .722-3.25"/>',
+    UNKNOWN:
+      '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
+  };
+  var STATUS_TITLES = { STOPPED: 'Stopped', UNKNOWN: 'Status unknown' };
+
+  // Non-interactive liveness indicator (the mockup's compact icon-only
+  // variant: a 16px-wide slot holding a 12px stroke icon with a tooltip).
+  function buildStatusIcon(liveness) {
+    var pathSvg = STATUS_ICON_PATHS[liveness];
+    if (!pathSvg) return null;
+    var span = document.createElement('span');
+    span.className = 'sidebar-status-icon shrink-0 inline-flex w-4 justify-center text-secondary';
+    span.title = STATUS_TITLES[liveness];
+    span.innerHTML =
+      '<svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+      + ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + pathSvg + '</svg>';
+    return span;
+  }
 
   function buildOpenNewBtn(agentId) {
     return buildIconButton('Open in new window', OPEN_NEW_PATH, 'data-open-new', agentId);
@@ -73,6 +102,14 @@
     label.className = 'flex-1 whitespace-nowrap overflow-hidden text-ellipsis';
     label.textContent = workspace.name || workspace.id;
     row.appendChild(label);
+
+    // Mind liveness (present on shutdown-capable local workspaces via the SSE
+    // ``workspaces`` payload): stopped / unknown minds get a status icon;
+    // running minds show nothing.
+    if (!isRemote) {
+      var statusIcon = buildStatusIcon(workspace.liveness);
+      if (statusIcon) row.appendChild(statusIcon);
+    }
 
     // A workspace hosted on another device (known via its synced record):
     // greyed, non-navigable, with a location badge instead of action icons.
