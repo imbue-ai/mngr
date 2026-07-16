@@ -437,9 +437,10 @@ deploy *args:
 # worktree's git state stays as a normal diff.
 #
 # Requires that you've activated a minds env in this shell first --
-# `eval "$(uv run minds env activate <your-user>-dev)"` is the typical
-# dev case. Refuses without activation so the recipe never silently
-# writes to the wrong env's data root.
+# `eval "$(uv run minds env activate dev-<your-user>)"` is the typical
+# dev case (add `--create` on the very first activation of a fresh dev env
+# to make its data root). Refuses without activation so the recipe never
+# silently writes to the wrong env's data root.
 #
 # Install the minds desktop client's node deps (electron, etc.) using the Node
 # version apps/minds pins in apps/minds/.nvmrc -- selected via
@@ -471,8 +472,11 @@ minds-start branch="" default_workspace_template="":
     if [ -z "${MINDS_ROOT_NAME:-}" ]; then
         echo "error: no minds env activated in this shell." >&2
         echo "       Run \`eval \"\$(uv run minds env activate <name>)\"\` first" >&2
-        echo "       (e.g. \`<your-user>-dev\` for your personal dev env), then" >&2
+        echo "       (e.g. \`dev-<your-user>\` for your personal dev env), then" >&2
         echo "       re-run \`just minds-start\` from the same shell." >&2
+        echo "       On the first activation of a fresh dev env, add --create to" >&2
+        echo "       make its data root:" >&2
+        echo "         eval \"\$(uv run minds env activate --create dev-<your-user>)\"" >&2
         echo "" >&2
         echo "       Without activation, an inherited MNGR_HOST_DIR from the parent" >&2
         echo "       shell would silently win and minds would read a different mngr" >&2
