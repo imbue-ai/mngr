@@ -3964,6 +3964,16 @@ def _build_start_agent_shell_command(
     steps.append(
         f"tmux set-hook -t {quoted_exact_agent_window} client-attached[98] {shlex.quote(sigwinch_hook_value)}"
     )
+    if sigwinch_mode == _SIGWINCH_MODE_FIT:
+        # Also re-fit on live terminal resizes. tmux's native "latest" policy follows the
+        # attached client continuously; because the default policy pins the window to "manual",
+        # the client-attached hook alone would only re-fit on attach and a mid-session terminal
+        # resize would be ignored until reattach. The client-resized hook fires with the resized
+        # client as the hook client, so the same fit argv (with #{client_width}/#{client_height})
+        # applies. Distinct slot ([97]) from the attach ([98]) and onboarding ([99]) hooks.
+        steps.append(
+            f"tmux set-hook -t {quoted_exact_agent_window} client-resized[97] {shlex.quote(sigwinch_hook_value)}"
+        )
 
     # Set a one-shot client-attached hook that shows the onboarding popup
     # when the user first attaches to this tmux session. This must happen

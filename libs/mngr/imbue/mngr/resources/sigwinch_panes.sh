@@ -74,14 +74,17 @@ _signal_panes() {
 }
 
 _main() {
-    sleep "${SIGWINCH_DELAY_SECONDS}"
-
     if [ "${MODE}" = fit ]; then
-        # We own the (manual-pinned) window: fit it to the client, then repaint unconditionally.
+        # We own the (manual-pinned) window: fit it to the client immediately so a live attach or
+        # terminal resize is tracked promptly (matching tmux's native continuous "latest"), then
+        # settle before repainting unconditionally.
         _fit_window
+        sleep "${SIGWINCH_DELAY_SECONDS}"
         _signal_panes
         return 0
     fi
+
+    sleep "${SIGWINCH_DELAY_SECONDS}"
 
     # nudge mode: tmux owns resizing. Skip a truly-pinned window -- window-size=manual means it
     # never resizes on attach, so there is nothing to repaint and its fixed dimensions must be

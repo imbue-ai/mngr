@@ -815,6 +815,9 @@ def test_build_start_agent_shell_command_default_sigwinch_hook_is_fit_mode_with_
 
     assert "sigwinch_panes.sh" in result
     assert "fit #{client_width} #{client_height}" in result
+    # The pinned window would otherwise only re-fit on attach; a client-resized hook keeps it
+    # tracking live terminal resizes (matching tmux's native continuous "latest").
+    assert "client-resized[97]" in result
 
 
 def test_build_start_agent_shell_command_explicit_window_size_uses_nudge_hook(
@@ -824,8 +827,9 @@ def test_build_start_agent_shell_command_explicit_window_size_uses_nudge_hook(
 ) -> None:
     """An explicit window_size is honored verbatim and the hook runs in "nudge" mode.
 
-    The caller owns the policy, so we do not pin/resize or pass client geometry; the hook only
-    repaints (and leaves a truly-fixed, explicitly-manual window untouched).
+    The caller owns the policy, so we do not pin/resize, pass client geometry, or install the
+    resize-tracking hook; the attach hook only repaints (and leaves a truly-fixed, explicitly-
+    manual window untouched).
     """
     agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
     options = AgentTmuxOptions(window_size=TmuxWindowSize.LATEST)
@@ -835,6 +839,7 @@ def test_build_start_agent_shell_command_explicit_window_size_uses_nudge_hook(
     assert "sigwinch_panes.sh" in result
     assert "nudge" in result
     assert "#{client_width}" not in result
+    assert "client-resized" not in result
     assert f"resize-window -t =mngr-{agent.name}:agent" not in result
 
 
