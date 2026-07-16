@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 import time
 from collections.abc import Callable
@@ -152,6 +153,9 @@ PALETTE = [
     ("peek_hint", "dark gray", ""),
     # Your own messages/replies, marked with `›`.
     ("peek_user", "dark blue", ""),
+    # Markdown accents in the peek body: code spans/blocks and bold/heading text.
+    ("md_code", "dark cyan", ""),
+    ("md_bold", "default,bold", ""),
 ]
 
 # Display order: most mature first (like Linear), muted always last
@@ -1046,13 +1050,11 @@ def _last_nonempty_line(text: str) -> str:
 
 
 @pure
-def _peek_body_lines(transcript: str, pending: list[str]) -> list[str]:
-    """Assemble the panel's body lines: the clean conversation plus pending replies.
+def _peek_all_lines(transcript: str, pending: list[str]) -> list[str]:
+    """The full, untrimmed panel body: the clean conversation plus pending replies.
 
     Pending replies -- sent but not yet echoed back by the transcript -- are appended as
-    ``› `` lines so a reply shows the instant it is sent. Only the trailing
-    ``PEEK_BODY_HEIGHT`` lines are kept (a leading ``⋯`` marks older lines were trimmed)
-    so a long final message shows its end rather than the agent's scrolled-up screen.
+    ``› `` lines so a reply shows the instant it is sent.
     """
     body = transcript.strip("\n")
     lines = body.split("\n") if body else []
@@ -1064,6 +1066,16 @@ def _peek_body_lines(transcript: str, pending: list[str]) -> list[str]:
         lines.pop(0)
     while lines and not lines[-1].strip():
         lines.pop()
+    return lines
+
+
+def _peek_body_lines(transcript: str, pending: list[str]) -> list[str]:
+    """The visible window of the panel body: the trailing ``PEEK_BODY_HEIGHT`` lines.
+
+    A leading ``⋯`` marks that older lines were trimmed, so a long final message
+    shows its end rather than the agent's scrolled-up screen.
+    """
+    lines = _peek_all_lines(transcript, pending)
     if len(lines) > PEEK_BODY_HEIGHT:
         lines = lines[-PEEK_BODY_HEIGHT:]
         while lines and not lines[0].strip():
@@ -1089,6 +1101,83 @@ def _short_header(line: str) -> str:
     return line.split("] ", 1)[1] if "] " in line else line
 
 
+_INLINE_CODE_RE = re.compile(r"`([^`]+)`")
+_BOLD_RE = re.compile(r"\*\*([^*]+?)\*\*")
+_HEADING_RE = re.compile(r"^(#{1,6} )(.*)$")
+_BULLET_RE = re.compile(r"^(\s*)([-*+] |\d+[.)] )(.*)$")
+
+
+@pure
+def _bold_markup(text: str) -> list[Any]:
+    """Accent ``**bold**`` spans in plain text; the asterisks stay, dimmed."""
+    markup: list[Any] = []
+    pos = 0
+    for match in _BOLD_RE.finditer(text):
+        if match.start() > pos:
+            markup.append(text[pos : match.start()])
+        markup.extend([("peek_hint", "**"), ("md_bold", match.group(1)), ("peek_hint", "**")])
+        pos = match.end()
+    if pos < len(text):
+        markup.append(text[pos:])
+    return markup or [text]
+
+
+@pure
+def _markdown_inline_markup(text: str) -> list[Any]:
+    """Accent inline markdown in one line: `code` spans first, then bold in the rest.
+
+    Syntax characters are kept and dimmed rather than stripped, so a misparse
+    degrades to plain text and nothing ever changes width or meaning.
+    """
+    markup: list[Any] = []
+    pos = 0
+    for match in _INLINE_CODE_RE.finditer(text):
+        if match.start() > pos:
+            markup.extend(_bold_markup(text[pos : match.start()]))
+        markup.extend([("peek_hint", "`"), ("md_code", match.group(1)), ("peek_hint", "`")])
+        pos = match.end()
+    if pos < len(text):
+        markup.extend(_bold_markup(text[pos:]))
+    return markup or [text]
+
+
+@pure
+def _markdown_line_markup(line: str, in_fence: bool) -> tuple[list[Any], bool]:
+    """Markup for one message line with markdown accents, tracking fence state.
+
+    Inside a ``` fence every line renders as code; fence lines themselves are dimmed.
+    Outside, headings and list markers are accented and inline spans styled.
+    """
+    if line.lstrip().startswith("```"):
+        return [("peek_hint", line)], not in_fence
+    if in_fence:
+        return [("md_code", line)], True
+    heading = _HEADING_RE.match(line)
+    if heading is not None:
+        return [("peek_hint", heading.group(1)), ("md_bold", heading.group(2))], False
+    bullet = _BULLET_RE.match(line)
+    if bullet is not None:
+        return [bullet.group(1), ("peek_hint", bullet.group(2)), *_markdown_inline_markup(bullet.group(3))], False
+    return _markdown_inline_markup(line), False
+
+
+@pure
+def _fence_state_after(lines: list[str]) -> bool:
+    """Whether ``` fences left these lines inside a code block (headers reset it).
+
+    Seeds the markdown styler for the visible window: an unmatched fence in the
+    tail is recognized as a block opened above the ``⋯`` cut.
+    """
+    in_fence = False
+    for line in lines:
+        if _is_transcript_header(line):
+            in_fence = False
+            continue
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+    return in_fence
+
+
 @pure
 def _peek_body_markup(transcript: str, pending: list[str]) -> list[Any]:
     """Render the panel body as urwid markup: message text prominent, chrome de-emphasized.
@@ -1097,9 +1186,12 @@ def _peek_body_markup(transcript: str, pending: list[str]) -> list[Any]:
     the trim ``⋯`` marker is dimmed too, so the conversation reads first; your
     sent-but-not-yet-echoed replies are accented with the same ``›`` as the reply prompt.
     """
+    all_lines = _peek_all_lines(transcript, pending)
     lines = _peek_body_lines(transcript, pending)
     if not lines:
         return [("peek_hint", "(no messages yet)")]
+    visible = lines[1:] if lines and lines[0] == "⋯" else lines
+    in_fence = _fence_state_after(all_lines[: len(all_lines) - len(visible)])
     markup: list[Any] = []
     for index, line in enumerate(lines):
         if index > 0:
@@ -1107,11 +1199,13 @@ def _peek_body_markup(transcript: str, pending: list[str]) -> list[Any]:
         if line == "⋯":
             markup.append(("peek_hint", line))
         elif _is_transcript_header(line):
+            in_fence = False
             markup.append(("peek_hint", _short_header(line)))
         elif line.startswith(PEEK_REPLY_PROMPT):
             markup.append(("peek_user", line))
         else:
-            markup.append(line)
+            line_markup, in_fence = _markdown_line_markup(line, in_fence)
+            markup.extend(line_markup)
     return markup
 
 
