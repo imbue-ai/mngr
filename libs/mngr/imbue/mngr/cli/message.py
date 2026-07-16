@@ -48,6 +48,7 @@ class MessageCliOptions(CommonCliOptions):
     message_file: str | None
     on_error: str
     start: bool
+    system_source: str | None
 
 
 @click.command(name="message")
@@ -77,6 +78,17 @@ class MessageCliOptions(CommonCliOptions):
     "--message-file",
     type=click.Path(exists=True),
     help="File containing the message content to send",
+)
+@optgroup.option(
+    "--system-source",
+    "system_source",
+    default=None,
+    help=(
+        "Mark this as an automated (non-human) message from the named source "
+        "(a lowercase slug, e.g. 'browser-fleet'). The message is wrapped in the "
+        "<system-injected> sentinel so the transcript UI renders it collapsed "
+        "instead of as a bare user turn. Omit for genuine human messages."
+    ),
 )
 @optgroup.group("Error Handling")
 @optgroup.option(
@@ -161,6 +173,7 @@ def _message_impl(ctx: click.Context, **kwargs) -> None:
             is_start_desired=opts.start,
             on_success=lambda agent_name: _emit_jsonl_success(agent_name),
             on_error=lambda agent_name, error: _emit_jsonl_error(agent_name, error),
+            system_source=opts.system_source,
         )
         if result.failed_agents:
             ctx.exit(1)
@@ -173,6 +186,7 @@ def _message_impl(ctx: click.Context, **kwargs) -> None:
         agents_to_message=matches,
         error_behavior=error_behavior,
         is_start_desired=opts.start,
+        system_source=opts.system_source,
     )
 
     _emit_output(result, output_opts)

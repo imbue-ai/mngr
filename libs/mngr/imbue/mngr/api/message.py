@@ -16,6 +16,7 @@ from imbue.mngr.api.find import ensure_host_started
 from imbue.mngr.api.find import group_agents_by_host
 from imbue.mngr.api.find import revive_done_agent
 from imbue.mngr.api.providers import get_provider_instance
+from imbue.mngr.api.system_injected import wrap_system_injected
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import HostOfflineError
@@ -50,13 +51,23 @@ def send_message_to_agents(
     is_start_desired: bool = False,
     on_success: Callable[[str], None] | None = None,
     on_error: Callable[[str, str], None] | None = None,
+    system_source: str | None = None,
 ) -> MessageResult:
     """Send a message to a pre-resolved set of agents, grouped by host.
 
     Hosts are resolved and messages are sent concurrently so that one slow host
     or one agent's failure does not block messages to other agents. Callers
     typically obtain ``agents_to_message`` from ``find_all_agents``.
+
+    ``system_source`` marks the message as an automated (non-human) send: the
+    content is wrapped in the ``<system-injected>`` sentinel so the transcript UI
+    renders it collapsed rather than as a bare user turn (see
+    ``system_injected.wrap_system_injected``). Leave it ``None`` for genuine human
+    messages.
     """
+    if system_source is not None:
+        message_content = wrap_system_injected(message_content, system_source)
+
     result = MessageResult()
     result_lock = Lock()
 
