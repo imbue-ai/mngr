@@ -225,6 +225,24 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
       const bundledClientConfig = paths.getBundledClientConfigPath();
       const configFileArgs = bundledClientConfig ? ['--config-file', bundledClientConfig] : [];
 
+      // Env entries the Python backend needs in both spawn modes. Keep every
+      // mode-independent variable here: when the two modes maintained separate
+      // literals, a var added to one was silently missing from the other
+      // (MINDS_RESTIC_BINARY was absent in dev mode this way, breaking backup
+      // status for run-from-source builds).
+      const commonEnv = {
+        ...process.env,
+        MINDS_ELECTRON: '1',
+        MINDS_ROOT_NAME: mindsRootName,
+        MNGR_HOST_DIR: mngrHostDir,
+        MNGR_PREFIX: mngrPrefix,
+        MINDS_LATCHKEY_BINARY: paths.getLatchkeyPath(),
+        MINDS_LATCHKEY_DIRECTORY: paths.getLatchkeyDirectory(),
+        MINDS_RESTIC_BINARY: paths.getResticPath(),
+        MINDS_RELEASE_ID: releaseId,
+        MINDS_GIT_SHA: gitSha,
+      };
+
       if (paths.isDev()) {
         // Dev mode: use system uv with the monorepo workspace venv
         uvBin = 'uv';
@@ -239,18 +257,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           ...configFileArgs,
         ];
         cwd = paths.getMonorepoRoot();
-        env = {
-          ...process.env,
-          MINDS_ELECTRON: '1',
-          MINDS_ROOT_NAME: mindsRootName,
-          MNGR_HOST_DIR: mngrHostDir,
-          MNGR_PREFIX: mngrPrefix,
-          MINDS_LATCHKEY_BINARY: paths.getLatchkeyPath(),
-          MINDS_LATCHKEY_DIRECTORY: paths.getLatchkeyDirectory(),
-          MINDS_RESTIC_BINARY: paths.getResticPath(),
-          MINDS_RELEASE_ID: releaseId,
-          MINDS_GIT_SHA: gitSha,
-        };
+        env = commonEnv;
       } else {
         // Packaged mode: use bundled uv with standalone pyproject
         const uvPath = paths.getUvPath();
@@ -297,25 +304,16 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           ? `${systemPath}:${homebrewPaths}`
           : systemPath;
         env = {
-          ...process.env,
+          ...commonEnv,
           PATH: `${uvBinDir}:${gitBinDir}:${limaBinDir}:${desyncBinDir}:${augmentedSystemPath}`,
           UV_CACHE_DIR: uvCacheDir,
           UV_PYTHON_INSTALL_DIR: uvPythonDir,
-          MINDS_ELECTRON: '1',
-          MINDS_ROOT_NAME: mindsRootName,
-          MNGR_HOST_DIR: mngrHostDir,
-          MNGR_PREFIX: mngrPrefix,
-          MINDS_LATCHKEY_BINARY: paths.getLatchkeyPath(),
-          MINDS_LATCHKEY_DIRECTORY: paths.getLatchkeyDirectory(),
-          MINDS_RESTIC_BINARY: paths.getResticPath(),
           // Tell the packaged latchkey shim which Electron binary to use as Node.
           MINDS_ELECTRON_EXEC_PATH: process.execPath,
           // Set VIRTUAL_ENV to the per-user venv so `uv run --active` uses
           // it. Without this, uv falls back to <project>/.venv which is
           // inside the signed .app bundle (read-only on macOS).
           VIRTUAL_ENV: paths.getVenvDir(),
-          MINDS_RELEASE_ID: releaseId,
-          MINDS_GIT_SHA: gitSha,
         };
       }
 

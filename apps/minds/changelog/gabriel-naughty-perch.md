@@ -1,3 +1,5 @@
 Fixed dev-mode (run-from-source) minds never finding the bundled restic binary: the dev-mode backend spawn in `electron/backend.js` did not pass `MINDS_RESTIC_BINARY`, so the backend fell back to `restic` on PATH and every snapshot listing failed on machines without a system restic install. The workspace settings page then looked as if a workspace had no backups. Dev mode now passes the bundled `resources/restic/restic` path, same as packaged builds.
 
+The dev and packaged backend spawn env blocks in `electron/backend.js` now share a single `commonEnv` object for their mode-independent variables, so a variable added for one mode can no longer be silently missing from the other (the drift that caused the restic bug).
+
 Backup status read failures are now surfaced in the UI instead of being folded into an empty snapshot list: the workspace settings backup section shows the actual error ("Could not read backup status from this machine: ..."), and the sidebar/chrome backup warning badge also fires when the snapshot listing fails, not only on in-workspace service-check problems.
