@@ -240,10 +240,9 @@
           </a>
         </div>
 
-        {# Operation controls shared by the update and storage-change actions.
-           Conditional buttons are wrapped in plain spans because a `hidden`
-           class loses to the Button component's own inline-flex display (see
-           templates/README.md). #}
+        {# Shared operation controls (update + storage change). Conditional buttons use
+          wrapper spans because a `hidden` class loses to the Button's inline-flex
+          display. #}
         <div class="flex flex-wrap items-center gap-2 mb-2">
           <span id="backup-op-spinner" class="hidden type-section text-secondary">Working...</span>
           <span id="backup-stop-chats-btn-wrap" class="hidden">
@@ -255,10 +254,6 @@
         </div>
         <p id="backup-op-progress" class="hidden type-helper text-tertiary mb-2" aria-live="polite"></p>
         <p id="backup-error" class="hidden type-body text-important mb-2" role="alert"></p>
-
-        {# Setting 1: where backups go. The form element IDs are load-bearing
-           (test_sync_e2e.py drives this flow by ID), so relabel freely but do
-           not rename them. #}
         <div id="backup-configure" class="mb-6">
           <h3 class="type-label text-secondary mb-2">Where your backups are stored</h3>
           <p class="type-helper text-tertiary mb-2 max-w-[560px]">
@@ -290,10 +285,6 @@
             </div>
           </div>
         </div>
-
-        {# Setting 2: backup service verification -- the checks that produce the
-           problem/version breakdown in "Fix backup problems" below, so it sits
-           above that section (check first, then fix). #}
         <div class="mb-6">
           <h3 class="type-label text-secondary mb-2">Backup service verification</h3>
           <p class="type-helper text-tertiary mb-2 max-w-[560px]">
@@ -307,9 +298,6 @@
             <span id="backup-verification-spinner" class="hidden type-section text-secondary"></span>
           </div>
         </div>
-
-        {# Setting 3: fix/refresh the backup software inside the workspace. Last
-           because it acts on problems the checks above find. #}
         <div class="mb-2">
           <h3 class="type-label text-secondary mb-2">Fix backup problems</h3>
           <p class="type-helper text-tertiary mb-2 max-w-[560px]">
