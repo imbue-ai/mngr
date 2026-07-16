@@ -45,7 +45,10 @@
     </div>
 
     <h2 class="type-label text-secondary mt-6 mb-3">Access List</h2>
-    <div id="email-list"></div>
+    {# The placeholder holds the list area's space until the status GET
+       confirms the real access list (sharing.js replaces it on first render);
+       the editor chrome around it never hides or moves. #}
+    <div id="email-list"><p class="type-body text-tertiary">Loading access list&hellip;</p></div>
     <div class="flex gap-2 items-center mt-2">
       <TextInput type="email" name="new_email" id="new-email" placeholder="Add email address" extra="flex-1"
                  onkeydown="if (event.key === 'Enter') { event.preventDefault(); addEmail(); }" />

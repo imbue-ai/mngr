@@ -391,12 +391,30 @@
       .then(applyServerState);
   }
 
-  // First paint: show the access list immediately from the server-provided
-  // config, before the status GET resolves.
-  added = proposedEmails.slice();
-  renderACL();
+  // First paint: the editor chrome is visible immediately, with a template-
+  // rendered "Loading access list..." placeholder holding the list area (no
+  // optimistic emails -- the list appears once the status GET confirms it,
+  // and never unloads after that). Share/Update and Disable stay disabled
+  // until that first load so a save can't race the initial state.
+  function setActionsEnabled(enabled) {
+    var actionBtn = document.getElementById('action-btn');
+    var disableBtn = document.getElementById('disable-btn');
+    if (actionBtn) actionBtn.disabled = !enabled;
+    if (disableBtn) disableBtn.disabled = !enabled;
+  }
+  setActionsEnabled(false);
 
-  refreshFromServer().catch(function (err) {
-    showError('Failed to load sharing status: ' + err.message);
-  });
+  refreshFromServer()
+    .then(function () { setActionsEnabled(true); })
+    .catch(function (err) {
+      var container = document.getElementById('email-list');
+      if (container) {
+        container.textContent = '';
+        var failed = document.createElement('p');
+        failed.className = 'type-body text-tertiary';
+        failed.textContent = "Couldn't load the access list.";
+        container.appendChild(failed);
+      }
+      showError('Failed to load sharing status: ' + err.message);
+    });
 })();
