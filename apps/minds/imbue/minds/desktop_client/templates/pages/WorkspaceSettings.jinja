@@ -213,7 +213,7 @@
             {# data-sharing-service lets workspace_settings.js intercept the
                click in Electron and open the centered sharing modal instead;
                the href stays as the browser-mode fallback. #}
-            <ButtonLink href={{ "/sharing/" ~ agent_id ~ "/" ~ server }} data-sharing-service="{{ server }}" variant="secondary">Manage sharing</ButtonLink>
+            <ButtonLink href={{ "/sharing/" ~ agent_id ~ "/" ~ server }} :data-sharing-service="server" variant="secondary">Manage sharing</ButtonLink>
           </Card>
         {% endfor %}
         </div>
