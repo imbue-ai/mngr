@@ -40,9 +40,7 @@
     setShown(statusEl, false);
     setShown(cardEl, true);
     pageSnapshots.forEach(function (snapshot, index) {
-      // "Latest" marks the repository's newest snapshot (only on the first page).
-      var isLatest = offset === 0 && index === 0;
-      rowsEl.appendChild(window.mindsBackupTable.buildSnapshotRow(agentId, snapshot, isLatest, index === 0));
+      rowsEl.appendChild(window.mindsBackupTable.buildSnapshotRow(agentId, snapshot, index === 0));
     });
 
     var first = offset + 1;

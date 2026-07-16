@@ -4,7 +4,7 @@
     var then = Date.parse(iso);
     if (isNaN(then)) return '';
     var s = Math.max(0, Math.floor((Date.now() - then) / 1000));
-    if (s < 45) return 'just now';
+    if (s < 60) return 'just now';
     var m = Math.floor(s / 60);
     if (m < 60) return m + (m === 1 ? ' min ago' : ' mins ago');
     var h = Math.floor(m / 60);
@@ -60,13 +60,12 @@
       });
   }
 
-  // Relative time (+ Latest badge) on the left; Download on the right.
+  // Relative time on the left; Download on the right.
   // ``actions`` is a flex slot so a second action (e.g. Restore) can join later.
-  function buildSnapshotRow(agentId, snapshot, isLatest, isFirst) {
+  function buildSnapshotRow(agentId, snapshot, isFirst) {
     var row = document.createElement('div');
     row.className = 'flex items-center gap-4 px-4 py-3'
-      + (isFirst ? '' : ' border-t border-default')
-      + (isLatest ? ' bg-fill-hover' : '');
+      + (isFirst ? '' : ' border-t border-default');
 
     var timeCell = document.createElement('div');
     timeCell.className = 'flex-1 flex items-center gap-2 min-w-0';
@@ -74,15 +73,7 @@
     var timeEl = document.createElement('span');
     timeEl.className = 'type-body text-primary';
     timeEl.textContent = relativeAgo(snapshot.time);
-    timeEl.title = new Date(snapshot.time).toLocaleString();
     timeCell.appendChild(timeEl);
-
-    if (isLatest) {
-      var latestBadge = document.createElement('span');
-      latestBadge.className = 'inline-flex items-center px-2 py-0.5 rounded-md type-label bg-success/15 text-success';
-      latestBadge.textContent = 'Latest';
-      timeCell.appendChild(latestBadge);
-    }
     row.appendChild(timeCell);
 
     var actions = document.createElement('div');
@@ -90,7 +81,7 @@
 
     var download = document.createElement('a');
     download.href = '#';
-    download.className = 'type-body text-accent cursor-pointer';
+    download.className = 'type-body text-accent hover:underline cursor-pointer';
     download.textContent = 'Download';
     download.addEventListener('click', function (ev) {
       ev.preventDefault();

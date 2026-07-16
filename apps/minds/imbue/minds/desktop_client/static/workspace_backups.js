@@ -111,7 +111,7 @@
 
     setShown(historyCard, true);
     snapshots.slice(0, RECENT_LIMIT).forEach(function (snapshot, index) {
-      historyEl.appendChild(window.mindsBackupTable.buildSnapshotRow(agentId, snapshot, index === 0, index === 0));
+      historyEl.appendChild(window.mindsBackupTable.buildSnapshotRow(agentId, snapshot, index === 0));
     });
 
     // Use inline display because the anchor's flex utility overrides `hidden`.
