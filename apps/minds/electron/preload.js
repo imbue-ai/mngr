@@ -68,9 +68,11 @@ contextBridge.exposeInMainWorld('minds', {
   // modals through the content relay's allowlisted postMessage channels.
   // ``returnTo`` is the local path a successful sign-in lands on (validated
   // by main and the server; defaults to the create screen when omitted).
+  // ``mode`` optionally leads with the sign-in tab when it is the literal
+  // 'signin' (for "Log In" callers); omitted keeps the sign-up default.
   openMindsSettings: () => ipcRenderer.send('open-minds-settings'),
   openAccounts: () => ipcRenderer.send('open-accounts'),
-  openSigninModal: (returnTo) => ipcRenderer.send('open-signin-modal', returnTo),
+  openSigninModal: (returnTo, mode) => ipcRenderer.send('open-signin-modal', returnTo, mode),
 
   // Overlay surface (the always-warm modal WebContentsView host page,
   // /_chrome/overlay). The overlay manager (/_static/overlay.js) receives

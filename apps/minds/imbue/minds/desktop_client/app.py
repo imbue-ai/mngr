@@ -984,8 +984,11 @@ def _handle_landing_page() -> Response:
     # skipped is mid-onboarding, and the titlebar home button (which always
     # navigates "/") must return them to the choice rather than the create
     # form. Gated on completed discovery so a workspace-owning user isn't
-    # bounced while providers are still enumerating, and skipped entirely
-    # when accounts aren't configured (session_store is None).
+    # bounced while providers are still enumerating, skipped entirely when
+    # accounts aren't configured (session_store is None), and skipped when the
+    # account listing itself failed -- an empty list from a transient
+    # subprocess failure must not bounce a just-signed-in user back to the
+    # splash.
     landing_resolver = get_state().backend_resolver
     onboarding_session_store = get_state().session_store
     if (
@@ -994,6 +997,7 @@ def _handle_landing_page() -> Response:
         and landing_resolver.has_completed_initial_discovery()
         and not landing_resolver.list_active_workspace_ids()
         and not onboarding_session_store.list_accounts()
+        and not onboarding_session_store.is_last_identity_read_failed
     ):
         return make_response(status_code=302, headers={"Location": "/welcome"})
 

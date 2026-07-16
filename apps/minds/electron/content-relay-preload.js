@@ -70,10 +70,14 @@ window.addEventListener('message', (event) => {
   // to a conservative local-path shape here AND re-validated in the main
   // process and by the server route (safe_local_redirect_path). Absent, the
   // server defaults to the create screen (the modal's original caller).
+  // ``mode`` optionally picks which tab leads: only the literal 'signin'
+  // (for "Log In" callers) is forwarded; anything else keeps the sign-up
+  // default.
   if (data.type === 'minds:open-signin-modal') {
     const returnTo = data.returnTo;
     if (returnTo !== undefined && (typeof returnTo !== 'string' || !LOCAL_PATH_PATTERN.test(returnTo))) return;
-    ipcRenderer.send('open-signin-modal', typeof returnTo === 'string' ? returnTo : '');
+    const mode = data.mode === 'signin' ? 'signin' : '';
+    ipcRenderer.send('open-signin-modal', typeof returnTo === 'string' ? returnTo : '', mode);
     return;
   }
   // Home-screen launchers: open the centered Minds Settings / Manage Accounts

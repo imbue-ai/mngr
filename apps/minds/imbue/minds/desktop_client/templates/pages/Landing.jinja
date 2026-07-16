@@ -128,9 +128,11 @@
       var isSignedIn = signedIn.signedIn === 'true';
       if (isElectronShell) {
         // ``returnTo: '/'`` lands a successful sign-in back on this home
-        // screen (the server's return_to default is the create screen).
+        // screen (the server's return_to default is the create screen);
+        // ``mode: 'signin'`` leads with the sign-in tab to match the
+        // launcher's "Log in" label.
         if (isSignedIn) window.postMessage({ type: 'minds:open-accounts' }, '*');
-        else window.postMessage({ type: 'minds:open-signin-modal', returnTo: '/' }, '*');
+        else window.postMessage({ type: 'minds:open-signin-modal', returnTo: '/', mode: 'signin' }, '*');
       } else {
         window.location = isSignedIn ? '/accounts' : '/auth/login';
       }

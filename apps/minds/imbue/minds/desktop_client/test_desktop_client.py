@@ -1176,6 +1176,18 @@ def test_auth_page_with_return_to_shows_back_link_and_explainer(tmp_path: Path) 
     assert "run your workspace on Imbue Cloud" in response.text
 
 
+def test_signin_modal_mode_signin_leads_with_signin_tab(tmp_path: Path) -> None:
+    """GET /auth/signin-modal?mode=signin shows the sign-in tab first; the default stays sign-up."""
+    client = _create_test_client_with_auth_routes(tmp_path)
+    default = client.get("/auth/signin-modal")
+    assert default.status_code == 200
+    assert 'id="signin-tab" class="hidden"' in default.text
+    signin = client.get("/auth/signin-modal", query_string={"mode": "signin"})
+    assert signin.status_code == 200
+    assert 'id="signup-tab" class="hidden"' in signin.text
+    assert 'id="signin-tab" class="hidden"' not in signin.text
+
+
 def test_auth_signin_modal_page_renders_overlay_with_auth_form(tmp_path: Path) -> None:
     """GET /auth/signin-modal serves the overlay sign-in page (transparent
     backdrop + the shared auth form) loaded into the shared modal view."""
@@ -1732,6 +1744,56 @@ def test_landing_shows_consent_screen_after_account_choice_when_unanswered(tmp_p
     assert response.status_code == 200
     assert "Help improve Minds" in response.text
     assert "Report unexpected errors" in response.text
+
+
+def test_welcome_signup_login_open_signin_modal_with_page_fallbacks(tmp_path: Path) -> None:
+    """The welcome splash's Sign Up / Log In open the centered sign-in modal in Electron.
+
+    The buttons post through the content relay's allowlisted
+    ``minds:open-signin-modal`` channel (with the tab mode and a home
+    return_to); in a plain browser the links fall back to the full-page
+    /auth/* routes.
+    """
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    welcome = client.get("/welcome")
+    assert welcome.status_code == 200
+    assert "minds:open-signin-modal" in welcome.text
+    assert 'id="welcome-signup-btn"' in welcome.text
+    assert 'id="welcome-login-btn"' in welcome.text
+    assert 'href="/auth/signup"' in welcome.text
+    assert 'href="/auth/login"' in welcome.text
+
+
+def test_welcome_self_advances_when_an_account_appears(tmp_path: Path) -> None:
+    """The splash watches the chrome SSE and lands on home once an account exists.
+
+    A sign-in can complete without the splash navigating (an OAuth flow
+    finished in the external browser after the modal was dismissed), so the
+    page subscribes to /_chrome/events and navigates to "/" when a
+    ``workspaces`` payload reports ``has_accounts``.
+    """
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    welcome = client.get("/welcome")
+    assert welcome.status_code == 200
+    assert "/_chrome/events" in welcome.text
+    assert "has_accounts" in welcome.text
+
+
+def test_landing_does_not_bounce_to_welcome_when_account_listing_fails(tmp_path: Path) -> None:
+    """A transient auth-list failure must not bounce a possibly-signed-in user to the splash.
+
+    ``list_accounts()`` returns empty on an ImbueCloudCliError; the landing
+    bounce distinguishes that from a genuine "no accounts" via
+    ``is_last_identity_read_failed`` and renders the landing normally.
+    """
+    cli = make_fake_imbue_cloud_cli()
+    cli.is_auth_list_failing = True
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
+    _authenticate_client(client, auth_store)
+    response = client.get("/")
+    assert response.status_code == 200
 
 
 def test_welcome_continue_without_account_routes_through_consent(tmp_path: Path) -> None:

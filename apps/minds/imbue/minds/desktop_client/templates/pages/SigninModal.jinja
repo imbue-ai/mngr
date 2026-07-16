@@ -1,12 +1,17 @@
-{#def intro="", return_to="/create" #}
+{#def intro="", return_to="/create", default_to_signup=True #}
 {#
   Sign-in modal page, hosted in the desktop client's shared modal
   WebContentsView -- the same overlay layer as the other centered modals -- so
   it covers the whole window including the title bar (rather than sitting
   inside the content view like an in-page dialog). Opened from the create
   screen when a signed-out user presses "Create" with the Imbue Cloud preset
-  selected, from the home screen's account launcher when signed out, and from
-  the Manage Accounts modal's "Add account".
+  selected, from the welcome splash's Sign Up / Log In buttons, from the home
+  screen's account launcher when signed out, and from the Manage Accounts
+  modal's "Add account".
+
+  ``default_to_signup`` picks which AuthForm tab is visible on first paint
+  (the inline links still flip between them client-side); callers that say
+  "Log In" pass mode=signin through the route so the sign-in tab leads.
 
   Transparent body + a dim backdrop reveal the screen behind it; the
   centered card holds the shared auth form (``auth.AuthForm``). All form
@@ -51,6 +56,20 @@
         if (e.target === backdrop) window.dismissSigninModal();
       });
     }
+
+    // "Forgot password?" must not navigate this overlay iframe: the full-page
+    // auth flow would render inside the modal view (over whatever the content
+    // view shows) and a sign-in completed there would strand the whole app
+    // inside the overlay. Route it through MINDS_AUTH_NAV instead, which
+    // lands the page in the content view and dismisses the modal (or, as a
+    // standalone page, just navigates).
+    var forgotLink = document.querySelector('a[href="/auth/forgot-password"]');
+    if (forgotLink) {
+      forgotLink.addEventListener("click", function (e) {
+        e.preventDefault();
+        window.MINDS_AUTH_NAV("/auth/forgot-password");
+      });
+    }
   })();
 </script>
 {% endset %}
@@ -60,7 +79,7 @@
   <div id="signin-modal-backdrop" class="fixed inset-0 flex items-center justify-center bg-surface-overlay p-4">
     <div class="relative bg-surface-primary rounded-lg shadow-overlay max-w-md w-full p-8 text-left">
       <DialogCloseButton onclick="dismissSigninModal()" />
-      <auth.AuthForm :default_to_signup="True" :intro="intro" />
+      <auth.AuthForm :default_to_signup="default_to_signup" :intro="intro" />
     </div>
   </div>
 </OverlaySurface>

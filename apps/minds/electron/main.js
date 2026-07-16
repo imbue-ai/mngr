@@ -1455,18 +1455,22 @@ function inboxUrlFor(query) {
 // server default (the create screen).
 const SIGNIN_RETURN_TO_PATTERN = /^\/(?!\/)[A-Za-z0-9\-._~/?=&%]*$/;
 
-function signinModalUrlFor(returnTo) {
+function signinModalUrlFor(returnTo, mode) {
   if (!backendBaseUrl) return null;
-  const base = backendBaseUrl + '/auth/signin-modal';
+  const params = new URLSearchParams();
   if (typeof returnTo === 'string' && returnTo && SIGNIN_RETURN_TO_PATTERN.test(returnTo)) {
-    return base + '?return_to=' + encodeURIComponent(returnTo);
+    params.set('return_to', returnTo);
   }
-  return base;
+  // Only the literal 'signin' switches the leading tab (for "Log In"
+  // callers); the server keeps the sign-up default otherwise.
+  if (mode === 'signin') params.set('mode', 'signin');
+  const query = params.toString();
+  return backendBaseUrl + '/auth/signin-modal' + (query ? '?' + query : '');
 }
 
-function openSigninModal(bundle, returnTo) {
+function openSigninModal(bundle, returnTo, mode) {
   if (!bundle || bundle.window.isDestroyed()) return;
-  const url = signinModalUrlFor(returnTo);
+  const url = signinModalUrlFor(returnTo, mode);
   if (!url) return;
   openModal(bundle, url);
 }
@@ -3616,9 +3620,11 @@ ipcMain.on('reload-chrome', (event) => {
 // launcher) and overlay-hosted pages via window.minds (the accounts modal's
 // "Add account"). ``returnTo`` is where a successful sign-in lands; it is
 // validated here (never trust the renderer) and again by the server route.
-ipcMain.on('open-signin-modal', (event, returnTo) => {
+ipcMain.on('open-signin-modal', (event, returnTo, mode) => {
   const sender = getBundleFromEvent(event);
-  if (sender) openSigninModal(sender, typeof returnTo === 'string' ? returnTo : '');
+  if (sender) {
+    openSigninModal(sender, typeof returnTo === 'string' ? returnTo : '', mode === 'signin' ? 'signin' : '');
+  }
 });
 
 // Open the centered Minds Settings / Manage Accounts modals. Senders: the

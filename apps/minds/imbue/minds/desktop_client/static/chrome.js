@@ -229,10 +229,15 @@
     // Browser-mode full-page fallbacks (Electron shows these as modals).
     if (path === '/settings') return { kind: 'page', pageLabel: 'Settings', showBack: true };
     if (path === '/accounts') return { kind: 'page', pageLabel: 'Accounts', showBack: true };
-    // No back arrow on the auth pages: the onboarding flow (welcome splash ->
-    // sign up / log in) is escaped via the titlebar home button, which lands
-    // back on the splash until an account option is chosen.
+    // No back arrow on the auth pages (browser-mode fallbacks; Electron opens
+    // the sign-in modal instead): the titlebar home button is the escape, and
+    // the home route bounces back to the splash until an account option is
+    // chosen.
     if (/^\/auth(?:\/|$)/.test(path)) return { kind: 'page', pageLabel: 'Sign in' };
+    // The welcome splash is the committed first screen: the user must pick
+    // sign up / log in / continue without an account, so the home button is
+    // hidden (there is nowhere else to go yet).
+    if (path === '/welcome') return { kind: 'welcome' };
     if (path === '/help') return { kind: 'page', pageLabel: 'Get help', showBack: true };
     return { kind: 'home' };
   }
@@ -258,6 +263,11 @@
     var wsCrumb = document.getElementById('ws-crumb');
     var pageCrumb = document.getElementById('page-crumb');
     var backBtn = document.getElementById('back-btn');
+    var homeBtn = document.getElementById('home-btn');
+    // The welcome splash hides the home button: the user must resolve the
+    // account choice (sign up / log in / continue without an account) before
+    // there is anywhere else to go.
+    if (homeBtn) homeBtn.hidden = ctx.kind === 'welcome';
     var isWorkspace = ctx.kind === 'workspace';
     var prevCrumbAgentId = currentCrumbAgentId;
     currentCrumbAgentId = isWorkspace ? ctx.agentId : null;

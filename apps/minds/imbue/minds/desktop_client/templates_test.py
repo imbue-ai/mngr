@@ -204,12 +204,13 @@ def test_render_landing_page_signed_out_launcher_signs_in_back_to_home() -> None
     # Signed out (no account email): the bottom-left account launcher reads
     # "Log in", and the Electron path opens the sign-in modal with
     # ``returnTo: '/'`` so a successful sign-in lands back on the home screen
-    # (the server's return_to default is the create screen).
+    # (the server's return_to default is the create screen), leading with the
+    # sign-in tab to match the launcher's label.
     html = render_landing_page(accessible_agent_ids=())
     assert 'id="landing-minds-settings"' in html
     assert 'id="landing-account"' in html
     assert "Log in" in html
-    assert "{ type: 'minds:open-signin-modal', returnTo: '/' }" in html
+    assert "{ type: 'minds:open-signin-modal', returnTo: '/', mode: 'signin' }" in html
 
 
 def test_render_landing_page_signed_in_launcher_shows_email_and_extra_count() -> None:
