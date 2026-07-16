@@ -52,8 +52,9 @@
       })
       .catch(function (err) {
         console.error('Backup export failed:', err);
-        // A snapshot pruned between load and click 404s here; show it briefly
-        // then restore the affordance (a later refresh drops the stale row).
+        // A snapshot pruned between load and click fails the export here; show
+        // it briefly then restore the affordance (a later refresh drops the
+        // stale row).
         link.textContent = 'Download failed';
         setTimeout(function () { restore(original); }, 3000);
       });
