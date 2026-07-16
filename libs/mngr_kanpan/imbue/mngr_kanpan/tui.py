@@ -27,6 +27,7 @@ from urwid.widget.line_box import LineBox
 from urwid.widget.listbox import ListBox
 from urwid.widget.listbox import SimpleFocusListWalker
 from urwid.widget.overlay import Overlay
+from urwid.widget.padding import Padding
 from urwid.widget.pile import Pile
 from urwid.widget.text import Text
 from urwid_readline import ReadlineEdit
@@ -113,6 +114,8 @@ PALETTE = [
     ("footer", "white", "dark blue"),
     # Keys inside legends (`enter: attach`), visually distinct from their descriptions.
     ("footer_key", "yellow,bold", "dark blue"),
+    # Same role as footer_key for default-background contexts (the ? overlay).
+    ("help_key", "dark cyan,bold", ""),
     ("reversed", "standout", ""),
     # Agent states: only RUNNING and WAITING-needing-attention get color
     ("state_running", "light green", ""),
@@ -1212,15 +1215,21 @@ class _LegendText(Text):
 
 
 def _build_help_overlay(state: _KanpanState) -> Any:
-    """A centered box over the board listing every key binding, sized to its content."""
+    """A bordered panel over the board listing every key binding, sized to its content.
+
+    Rendered like the peek panel (default background, thin border) with a blank
+    row above and below the list and the keys right-aligned into an accented
+    column, so it stays readable on light and dark terminals alike.
+    """
     key_width = max((len(key) for key, _ in state.legend_bindings), default=1)
-    rows: list[AttrMap | Text] = [
-        Text([" ", ("footer_key", key), " " * (key_width - len(key) + 2) + description])
-        for key, description in state.legend_bindings
-    ]
+    rows: list[Any] = [Divider()]
+    rows.extend(
+        Text([("help_key", key.rjust(key_width)), "   ", description]) for key, description in state.legend_bindings
+    )
+    rows.append(Divider())
     listbox: ListBox = ListBox(SimpleFocusListWalker(rows))
     box = LineBox(
-        listbox,
+        Padding(listbox, left=2, right=2),
         title="Keys",
         title_align="left",
         tlcorner="╭",
@@ -1229,12 +1238,12 @@ def _build_help_overlay(state: _KanpanState) -> Any:
         brcorner="╯",
     )
     description_width = max((len(description) for _, description in state.legend_bindings), default=1)
-    width = 1 + key_width + 2 + description_width + 1 + 2
+    width = 2 + 2 + key_width + 3 + description_width + 2 + 2
     height = len(rows) + 2
     # Anchored to the lower right, springing from the footer's `?: help`; bottom=2
     # keeps it just above the footer bar and its divider.
     return Overlay(
-        AttrMap(box, "footer"),
+        box,
         state.frame,
         align="right",
         width=width,
