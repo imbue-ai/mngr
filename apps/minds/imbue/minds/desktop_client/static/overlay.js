@@ -88,8 +88,8 @@
       // (workspace list / request count) into it.
       window.minds.overlayModalLoaded(id);
       if (frame === modalFrame) {
-        // The hosted page reloaded itself in place (e.g. the sharing editor
-        // after Update/Disable, the accounts modal after a log-out). Keep it:
+        // The hosted page reloaded itself in place (e.g. the accounts modal
+        // after a log-out). Keep it:
         // destroying here would blank the modal while main still holds the
         // overlay view visible, leaving an invisible layer eating every click.
         return;

@@ -21,11 +21,10 @@
   <Associate :agent_id="agent_id" :accounts="accounts" :redirect_url="redirect_url" />
 {% else %}
 
-  <div id="sharing-editor">
-    <p id="loading-state" class="text-secondary py-4">Loading...</p>
-  </div>
-
-  <div id="editor-content" class="hidden">
+  {# The editor is visible from the first paint (sharing.js seeds the access
+     list from the #sharing-config island below); the status GET reconciles
+     in place once it lands, so there is no loading placeholder. #}
+  <div id="editor-content">
     <div id="url-section" class="hidden mb-4">
       <p class="font-semibold mb-1">Shared URL</p>
       <div id="url-provisioning" class="hidden flex gap-2 items-center type-body text-secondary my-2">
@@ -62,7 +61,9 @@
         {% endif %}
         <Button variant="danger" id="disable-btn" onclick="submitDisable()" extra="hidden">Disable Sharing</Button>
       </div>
-      <Button variant="success" id="action-btn" onclick="submitUpdate()">Update</Button>
+      {# "Share" matches the disabled-state heading rendered by the server;
+         sharing.js relabels to "Update" if the status GET reports enabled. #}
+      <Button variant="success" id="action-btn" onclick="submitUpdate()">Share</Button>
     </div>
     <div id="submit-spinner" class="hidden py-4">
       <span class="text-secondary">Saving changes...</span>

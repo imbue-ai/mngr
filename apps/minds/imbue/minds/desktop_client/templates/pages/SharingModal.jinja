@@ -50,26 +50,29 @@
                 body_style="-webkit-app-region: no-drag;"
                 scripts={{ _scripts }}>
   <div id="sharing-modal-backdrop" data-agent-id="{{ agent_id }}" class="fixed inset-0 flex items-center justify-center bg-surface-overlay p-4">
-    {# Capped height (not fixed like the settings modal): the editor is
-       short, so the card hugs its content and scrolls only if the access
-       list outgrows the window. #}
-    <div class="relative bg-surface-primary rounded-lg shadow-overlay max-w-2xl w-full p-8 max-h-[85vh] overflow-y-auto text-left">
+    {# Fixed height like the settings modal, but proportionate to this
+       smaller editor: the card never resizes as the editor's state changes
+       (share URL appearing, access-list rows, the Associate prompt). The
+       heading is pinned; the body scrolls inside. #}
+    <div class="relative bg-surface-primary rounded-lg shadow-overlay max-w-2xl w-full p-8 h-[70vh] flex flex-col text-left">
       <DialogCloseButton onclick="dismissSharingModal()" />
-      <h1 id="page-heading" data-plain-links="true" class="type-heading-lg text-primary">
+      <h1 id="page-heading" data-plain-links="true" class="type-heading-lg text-primary shrink-0">
         Share <code class="code-pill">{{ service_name }}</code>
         in {{ ws_name or agent_id }}
         {%- if account_email %} ({{ account_email }}){% endif %}?
       </h1>
 
-      <SharingEditor
-        :agent_id="agent_id"
-        :service_name="service_name"
-        :ws_name="ws_name"
-        :account_email="account_email"
-        :initial_emails="initial_emails"
-        :has_account="has_account"
-        :accounts="accounts"
-        :is_modal="True" />
+      <div class="flex-1 min-h-0 overflow-y-auto">
+        <SharingEditor
+          :agent_id="agent_id"
+          :service_name="service_name"
+          :ws_name="ws_name"
+          :account_email="account_email"
+          :initial_emails="initial_emails"
+          :has_account="has_account"
+          :accounts="accounts"
+          :is_modal="True" />
+      </div>
     </div>
   </div>
 </OverlaySurface>

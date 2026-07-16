@@ -99,7 +99,15 @@
     return row;
   }
 
+  var lastAclSignature = null;
+
   function renderACL() {
+    // Skip the rebuild when nothing changed, so the background reconciles
+    // (the initial status GET, the refresh after a save) never touch a
+    // settled list.
+    var signature = JSON.stringify([existing, added, removed]);
+    if (signature === lastAclSignature) return;
+    lastAclSignature = signature;
     var container = document.getElementById('email-list');
     container.textContent = '';
     var rowCount = 0;
@@ -167,8 +175,9 @@
   }
 
   function setSubmitting(submitting) {
-    var actionBtns = document.getElementById('action-buttons');
-    actionBtns.classList.toggle('hidden', submitting);
+    // Everything stays visible while a save is in flight: the action buttons
+    // stay in place (disabled) and the inline "Saving changes..." note shows,
+    // so the editor never blanks or reflows around the request.
     var spinner = document.getElementById('submit-spinner');
     spinner.classList.toggle('hidden', !submitting);
     var inputs = document.querySelectorAll('input, button, select');
@@ -220,27 +229,32 @@
     });
   }
 
+  var statusUrl = '/api/v1/workspaces/' + agentId + '/sharing/' + serviceName;
+
   window.submitUpdate = function () {
     clearError();
     setSubmitting(true);
-    var url = '/api/v1/workspaces/' + agentId + '/sharing/' + serviceName;
-    requestWithErrorCheck(url, {
+    requestWithErrorCheck(statusUrl, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ emails: getFinalEmails() }),
     })
-      // Reload in place (never navigate to the full page URL): this script
-      // also runs inside the sharing modal's overlay iframe, where a
-      // navigation to /sharing/... would strand the app inside the modal.
-      .then(function () { window.location.reload(); })
+      // Refresh the editor in place from the same status GET (never reload,
+      // and never navigate to the full page URL): this script also runs
+      // inside the sharing modal's overlay iframe, where a reload blanks the
+      // popup and a navigation to /sharing/... would strand the app inside
+      // the modal.
+      .then(refreshFromServer)
+      .then(function () { setSubmitting(false); })
       .catch(function (err) { showError('Could not save sharing changes: ' + err.message); setSubmitting(false); });
   };
 
   window.submitDisable = function () {
     clearError();
     setSubmitting(true);
-    requestWithErrorCheck('/api/v1/workspaces/' + agentId + '/sharing/' + serviceName, { method: 'DELETE' })
-      .then(function () { window.location.reload(); })
+    requestWithErrorCheck(statusUrl, { method: 'DELETE' })
+      .then(refreshFromServer)
+      .then(function () { setSubmitting(false); })
       .catch(function (err) { showError('Could not disable sharing: ' + err.message); setSubmitting(false); });
   };
 
@@ -260,6 +274,9 @@
   // timeout with a "may take a moment" note so the user is never stuck.
   var READINESS_POLL_INTERVAL_MS = 2000;
   var READINESS_MAX_ATTEMPTS = 12;
+  // Bumped whenever the shown URL changes or sharing is disabled, so a
+  // stale in-flight poll loop stops driving the url-section.
+  var pollGeneration = 0;
 
   function revealShareUrl(showFallbackNote) {
     document.getElementById('url-provisioning').classList.add('hidden');
@@ -273,14 +290,17 @@
     document.getElementById('url-section').classList.remove('hidden');
     document.getElementById('url-provisioning').classList.remove('hidden');
     document.getElementById('url-ready').classList.add('hidden');
+    var generation = ++pollGeneration;
     var attempts = 0;
     function poll() {
+      if (generation !== pollGeneration) return;
       attempts++;
-      var probeUrl = '/api/v1/workspaces/' + agentId + '/sharing/' + serviceName + '/readiness?url=' + encodeURIComponent(url);
+      var probeUrl = statusUrl + '/readiness?url=' + encodeURIComponent(url);
       fetch(probeUrl)
         .then(function (r) { return r.ok ? r.json() : { ready: false }; })
         .catch(function () { return { ready: false }; })
         .then(function (data) {
+          if (generation !== pollGeneration) return;
           if (data && data.ready) {
             revealShareUrl(false);
           } else if (attempts >= READINESS_MAX_ATTEMPTS) {
@@ -300,57 +320,83 @@
     return policy.emails.slice();
   }
 
-  fetch('/api/v1/workspaces/' + agentId + '/sharing/' + serviceName)
-    .then(function (r) {
-      if (!r.ok) {
-        return r.text().then(function (text) {
-          var detail = text;
-          try {
-            detail = window.normalizeApiError(JSON.parse(text)).message;
-          } catch (_) { /* leave as raw */ }
-          throw new Error(detail || ('HTTP ' + r.status));
-        });
-      }
-      return r.json();
-    })
-    .then(function (data) {
-      document.getElementById('loading-state').classList.add('hidden');
-      document.getElementById('editor-content').classList.remove('hidden');
+  // -- Server-state application -------------------------------------------
+  //
+  // The editor is visible from the first paint, seeded with the config's
+  // initialEmails; the status GET reconciles it in place when it lands, and
+  // the same GET refreshes the editor after Update/Disable. Nothing ever
+  // hides the editor or reloads the page (a reload would blank the sharing
+  // modal's overlay iframe).
 
-      var serverEmails = emailsFromPolicy(data.policy);
+  // The server renders the disabled-state chrome ("Share ...?" heading, a
+  // "Share" action button, no Disable button, no URL section), so this starts
+  // false and setChrome only touches the DOM when the state actually flips.
+  var isEnabled = false;
+  // The URL the visible url-section currently reflects, so a post-save
+  // refresh that returns the same URL leaves the section (and any readiness
+  // poll already running) alone.
+  var shownShareUrl = '';
 
-      if (data.enabled) {
-        existing = serverEmails;
-        document.getElementById('action-btn').textContent = 'Update';
-        setHeading(true);
-        if (data.url) {
-          document.getElementById('share-url').value = data.url;
-          startReadinessPolling(data.url);
-        }
-        var disableBtn = document.getElementById('disable-btn');
-        if (disableBtn) disableBtn.classList.remove('hidden');
-      } else {
-        // Treat the default policy (owner email) as the editor's
-        // initial draft so the user sees their own email pre-populated.
-        serverEmails.forEach(function (e) {
-          if (added.indexOf(e) < 0) added.push(e);
-        });
-        document.getElementById('action-btn').textContent = 'Share';
-        setHeading(false);
-      }
-      proposedEmails.forEach(function (e) {
-        if (existing.indexOf(e) < 0 && added.indexOf(e) < 0) {
-          added.push(e);
-        }
+  function setChrome(enabled) {
+    if (enabled === isEnabled) return;
+    isEnabled = enabled;
+    document.getElementById('action-btn').textContent = enabled ? 'Update' : 'Share';
+    setHeading(enabled);
+    var disableBtn = document.getElementById('disable-btn');
+    if (disableBtn) disableBtn.classList.toggle('hidden', !enabled);
+    if (!enabled) {
+      document.getElementById('url-section').classList.add('hidden');
+      shownShareUrl = '';
+      pollGeneration++;
+    }
+  }
+
+  function applyShareUrl(url) {
+    if (!url || url === shownShareUrl) return;
+    shownShareUrl = url;
+    document.getElementById('share-url').value = url;
+    startReadinessPolling(url);
+  }
+
+  function applyServerState(data) {
+    var serverEmails = emailsFromPolicy(data.policy);
+    if (data.enabled) {
+      existing = serverEmails.slice();
+      // Committed edits fold into the server list; only still-pending
+      // drafts survive as +/- rows.
+      added = added.filter(function (e) { return existing.indexOf(e) < 0; });
+      removed = removed.filter(function (e) { return existing.indexOf(e) >= 0; });
+    } else {
+      existing = [];
+      removed = [];
+      // Treat the default policy (owner email) as the editor's initial
+      // draft so the user sees their own email pre-populated.
+      serverEmails.forEach(function (e) {
+        if (added.indexOf(e) < 0) added.push(e);
       });
-      renderACL();
-    })
-    .catch(function (err) {
-      var state = document.getElementById('loading-state');
-      state.textContent = 'Failed to load sharing status: ' + err.message;
-      state.className = 'text-important py-4';
-      document.getElementById('editor-content').classList.remove('hidden');
-      added = proposedEmails.slice();
-      renderACL();
+    }
+    proposedEmails.forEach(function (e) {
+      if (existing.indexOf(e) < 0 && added.indexOf(e) < 0) {
+        added.push(e);
+      }
     });
+    setChrome(!!data.enabled);
+    if (data.enabled) applyShareUrl(data.url);
+    renderACL();
+  }
+
+  function refreshFromServer() {
+    return requestWithErrorCheck(statusUrl)
+      .then(function (r) { return r.json(); })
+      .then(applyServerState);
+  }
+
+  // First paint: show the access list immediately from the server-provided
+  // config, before the status GET resolves.
+  added = proposedEmails.slice();
+  renderACL();
+
+  refreshFromServer().catch(function (err) {
+    showError('Failed to load sharing status: ' + err.message);
+  });
 })();
