@@ -1,9 +1,11 @@
 # Running minds under WSL2 on Windows (experimental)
 
-minds has no packaged Windows build, but the full stack (backend, mngr, Docker
-workspaces with the gVisor runtime) runs inside WSL2 on Windows. This page
-records the working recipe and every deviation from the standard Linux flow,
-verified on Windows Server 2022 with WSL 2.7.10 and Ubuntu 24.04.
+minds has no packaged Windows build, but the full stack -- the Electron
+desktop app, the backend, mngr, and Docker workspaces with the gVisor
+runtime -- runs inside WSL2 on Windows, with the Electron window displayed
+on the Windows desktop via WSLg. This page records the working recipe and
+every deviation from the standard Linux flow, verified on Windows Server
+2022 with WSL 2.7.10 and Ubuntu 24.04.
 
 Status: experimental. Nothing in CI covers Windows; expect rough edges.
 
@@ -19,10 +21,10 @@ Status: experimental. Nothing in CI covers Windows; expect rough edges.
   inbox `wsl.exe` on Windows Server 2022 is too old. Enable the
   `Microsoft-Windows-Subsystem-Linux` and `VirtualMachinePlatform` Windows
   features and reboot.
-- Windows Server has no WSLg, so the Electron desktop client cannot display
-  from WSL. Run the backend headless (`uv run minds run --no-browser`) and use
-  a Windows browser at `http://localhost:8420` instead -- WSL's localhost
-  forwarding makes the port reachable from Windows.
+- WSLg (Linux GUI apps on the Windows desktop) is NOT in Windows Server's
+  inbox WSL, but the MSI-installed WSL bundles a working WSLg even on
+  Server 2022 -- this is what lets the Electron desktop client display.
+  Verify with `ls /tmp/.X11-unix` (expect `X0`) inside the distro.
 
 ## In-distro setup (Ubuntu 24.04)
 
@@ -60,6 +62,40 @@ Follow the normal from-source flow (clone, `uv sync --all-packages`), plus:
    ```bash
    cd apps/minds && pnpm install && pnpm run build:css
    ```
+
+5. Install `just` (https://just.systems -- not packaged in Ubuntu 24.04) and
+   Electron's GTK/NSS runtime libraries:
+
+   ```bash
+   sudo apt-get install -y libgtk-3-0t64 libnss3 libasound2t64 libatk-bridge2.0-0t64 libgbm1
+   ```
+
+6. Enable lingering so the systemd user session (and `/run/user/<uid>`,
+   which `just` needs as its runtime dir) exists even though WSL's
+   `wsl.exe -u <user>` sessions fail to start one (they print
+   `Failed to start the systemd user session` -- harmless but real):
+
+   ```bash
+   sudo loginctl enable-linger <user>
+   ```
+
+## Launching the desktop app
+
+The normal dev flow works once the display and runtime pieces above are in
+place -- run it under tmux (see the daemonization note below) with the WSLg
+X display:
+
+```bash
+tmux new-session -s minds-electron
+export DISPLAY=:0
+eval "$(uv run minds env activate <env>)"
+just minds-start
+```
+
+The Electron window appears on the Windows desktop (over RDP too). The
+Chromium sandbox works as-is: the WSL2 kernel does not carry Ubuntu's
+`apparmor_restrict_unprivileged_userns` restriction that would otherwise
+have to be disabled on native Ubuntu 24.04.
 
 ## Keeping it running
 
