@@ -30,6 +30,7 @@ from imbue.mngr_minds_eval import launch as launch_mod
 from imbue.mngr_minds_eval import minds_client
 from imbue.mngr_minds_eval import s3_store
 from imbue.mngr_minds_eval import status as status_mod
+from imbue.mngr_minds_eval import workspace
 
 # Set inside every box sandbox (see box._box_env); its absence means we are on the host.
 IN_BOX = bool(os.environ.get("MINDS_EVAL_IN_BOX"))
@@ -92,6 +93,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_box = sub.add_parser("box", help="dev utility: boot a desktop box on an mngr branch tip")
     p_box.add_argument("--mngr-branch", required=True)
     p_box.add_argument("--user-id", default="minh", help="Modal env suffix for this box (default: minh)")
+    p_box.add_argument("--dwt-link", default="", help="also create ONE workspace from this template repo/path")
+    p_box.add_argument("--dwt-branch", default="", help="template branch for --dwt-link (blank = repo default)")
+    p_box.add_argument("--workspace-name", default="", help="host name for the --dwt-link workspace (blank = auto)")
     return parser
 
 
@@ -159,9 +163,29 @@ def main() -> None:
 
     if args.command == "box":
         if IN_BOX:
-            parser.error("run `box` from the host, not inside a box")
+            # The in-box leg of --dwt-link: find the Minds app's API and create the one workspace.
+            if not args.dwt_link:
+                parser.error("run `box` from the host, not inside a box")
+            try:
+                workspace.create_workspace(
+                    port=minds_client.discover_api_port(),
+                    fct_link=args.dwt_link,
+                    fct_branch=args.dwt_branch,
+                    name=args.workspace_name,
+                    anthropic_key=os.environ.get("ANTHROPIC_API_KEY", ""),
+                )
+            except minds_client.CreateError as exc:
+                sys.exit(str(exc))
+            return
+        if args.dwt_link and not os.environ.get("ANTHROPIC_API_KEY"):
+            parser.error("--dwt-link creates an api_key workspace -- set ANTHROPIC_API_KEY")
         sandbox = box_mod.ensure(args.mngr_branch, user_id=box_mod.sanitize_user_id(args.user_id))
         _print_desktop_urls(sandbox)
+        if args.dwt_link:
+            returncode = box_mod.run_in_box(
+                sandbox, sys.argv[1:], {"ANTHROPIC_API_KEY": os.environ.get("ANTHROPIC_API_KEY", "")}
+            )
+            sys.exit(returncode)
         return
 
     if args.command == "launch":

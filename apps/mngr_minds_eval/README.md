@@ -53,8 +53,11 @@ minds-evals visit-batch combined
 # terminate the batch's box sandbox early (its workspaces live on)
 minds-evals stop combined
 
-# dev utility: a desktop box on any mngr branch tip (Modal env minds-staging-<user-id>)
+# dev utility: a desktop box on any mngr branch tip (Modal env minds-staging-<user-id>);
+# add --dwt-link/--dwt-branch to also create one workspace in it (needs ANTHROPIC_API_KEY)
 minds-evals box --mngr-branch main --user-id minh
+ANTHROPIC_API_KEY=... minds-evals box --mngr-branch main --user-id minh \
+    --dwt-link https://github.com/imbue-ai/default-workspace-template.git --dwt-branch main
 ```
 
 `launch` first verifies the eval name is unused (no such S3 batch, no such Modal env — it fails
