@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import tempfile
 import time
 import tomllib
 import urllib.error
@@ -192,8 +193,16 @@ def ensure(mngr_branch: str, *, user_id: str, ref: str = "", minds_env: str = "s
         ),
         flush=True,
     )
+    # Bake branch+ref into the Dockerfile TEXT (not just build args): Modal keys its image cache
+    # on the dockerfile definition, and with args-only variation every branch cache-hit the first
+    # branch's image -- a box would then RUN the wrong mngr while its env claimed the right one.
+    dockerfile = (APP_DIR / "docker" / "Dockerfile").read_text()
+    dockerfile = dockerfile.replace("ARG MNGR_BRANCH=main", "ARG MNGR_BRANCH={}".format(mngr_branch))
+    dockerfile = dockerfile.replace("ARG MNGR_REF=unset", "ARG MNGR_REF={}".format(ref))
+    pinned = Path(tempfile.gettempdir()) / "minds-box-Dockerfile-{}".format(ref[:12])
+    pinned.write_text(dockerfile)
     image = modal.Image.from_dockerfile(
-        path=str(APP_DIR / "docker" / "Dockerfile"),
+        path=str(pinned),
         context_dir=str(APP_DIR),
         build_args={"MNGR_BRANCH": mngr_branch, "MNGR_REF": ref},
     )
