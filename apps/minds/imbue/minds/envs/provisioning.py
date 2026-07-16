@@ -43,6 +43,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Final
 from typing import assert_never
+from urllib.parse import urlparse
 
 from loguru import logger
 from pydantic import AnyUrl
@@ -908,7 +909,9 @@ def _deploy_env_locked(
             deploy_strategy,
             parent_concurrency_group,
         )
-    _assert_deploy_url_matches(actual=litellm_proxy_url, expected=expected_litellm_proxy_url, app=f"llm-{tier}")
+    _assert_deploy_url_matches(
+        actual=litellm_proxy_url, expected=expected_litellm_proxy_url, app=f"llm-{tier}", modal_workspace=modal_workspace
+    )
 
     with info_span(
         "Deploying rsc-{} into env {!r} (min_containers={}, scaledown_window={}, strategy={})",
@@ -927,7 +930,9 @@ def _deploy_env_locked(
             deploy_strategy,
             parent_concurrency_group,
         )
-    _assert_deploy_url_matches(actual=connector_url, expected=expected_connector_url, app=f"rsc-{tier}")
+    _assert_deploy_url_matches(
+        actual=connector_url, expected=expected_connector_url, app=f"rsc-{tier}", modal_workspace=modal_workspace
+    )
 
     # Step 6a: health check -- poll both apps' health endpoints until
     # they return 200. Failure raises ``HealthCheckFailedError`` which
@@ -1411,29 +1416,69 @@ def _read_litellm_master_key(
     return values.get("LITELLM_MASTER_KEY", "")
 
 
-def _assert_deploy_url_matches(*, actual: AnyUrl, expected: AnyUrl, app: str) -> None:
+def _modal_host_workspace_prefix(url_str: str) -> str:
+    """The ``<workspace>[-<name>]`` label before the ``--`` in a Modal host.
+
+    Modal hosts are ``<workspace>--<app>-<function>.modal.run`` (tier) or
+    ``<workspace>-<name>--<app>-<function>.modal.run`` (per-env), so the
+    label before the ``--`` is the only part carrying the workspace.
+    Everything after it (``<app>-<function>``) is computed identically on
+    both the expected and Modal-reported sides, so comparing this prefix
+    isolates a workspace mismatch from a genuine formula / scheme change.
+    """
+    host = urlparse(url_str).hostname or url_str
+    return host.split("--", 1)[0]
+
+
+def _assert_deploy_url_matches(*, actual: AnyUrl, expected: AnyUrl, app: str, modal_workspace: str) -> None:
     """Assert ``modal deploy`` reported the URL we computed up front.
 
     Under the shortened app + function names the natural Modal hostname
     always fits under DNS's 63-char limit, so Modal's URL is exactly
     what ``per_env_*_url`` / ``tier_*_url`` predict. A mismatch means
-    either we miscomputed (bug) or Modal changed its URL scheme on us
-    (real-world signal we need to know about immediately). Raise a
-    ``ModalDeployError`` so the deploy fails loudly rather than
-    silently shipping the wrong URLs into the per-env secrets.
+    either we miscomputed (bug), Modal changed its URL scheme on us, or
+    -- by far the most common cause -- the active Modal token is bound to
+    a different workspace than ``deploy.toml``'s ``modal_workspace``.
+    ``minds env activate --deploy`` only checks that a ``[<workspace>]``
+    section *exists* in ``~/.modal.toml``, not that its token belongs to
+    that workspace, so a mis-scoped token slips through to here. Raise a
+    ``ModalDeployError`` so the deploy fails loudly rather than silently
+    shipping the wrong URLs into the per-env secrets.
 
     Strips any trailing slash that either side may have appended so a
     cosmetic difference doesn't trip the check.
     """
     actual_str = str(actual).rstrip("/")
     expected_str = str(expected).rstrip("/")
-    if actual_str != expected_str:
+    if actual_str == expected_str:
+        return
+    expected_prefix = _modal_host_workspace_prefix(expected_str)
+    actual_prefix = _modal_host_workspace_prefix(actual_str)
+    if actual_prefix != expected_prefix:
+        # Only the workspace can differ (name/app/function are computed
+        # identically on both sides), so recover the token's actual
+        # workspace by stripping the shared ``-<name>`` suffix (empty for
+        # tier deploys, since the expected prefix is then the workspace).
+        name_suffix = expected_prefix.removeprefix(modal_workspace)
+        actual_workspace = actual_prefix.removesuffix(name_suffix)
         raise ModalDeployError(
-            f"`modal deploy` URL mismatch for {app!r}: "
-            f"computed {expected_str!r} but Modal reported {actual_str!r}. "
-            "Either the URL formula in `per_env_deploy.py` is stale or Modal "
-            "changed its hostname scheme; fix before continuing."
+            f"`modal deploy` URL mismatch for {app!r}: computed {expected_str!r} but Modal "
+            f"reported {actual_str!r}. Most likely the active Modal token is bound to "
+            f"workspace {actual_workspace!r}, not deploy.toml's modal_workspace "
+            f"{modal_workspace!r}: `minds env activate --deploy` only checks that a "
+            f"[{modal_workspace}] profile section exists in ~/.modal.toml, not that its "
+            f"token belongs to that workspace. Mint a token for the right workspace with "
+            f"`modal token new --profile {modal_workspace}` (select the {modal_workspace!r} "
+            f"workspace in the browser), then re-activate and re-run. If the workspaces do "
+            f"match, the URL formula in `per_env_deploy.py` is stale or Modal changed its "
+            f"hostname scheme."
         )
+    raise ModalDeployError(
+        f"`modal deploy` URL mismatch for {app!r}: computed {expected_str!r} but Modal "
+        f"reported {actual_str!r}. The workspace prefix matches, so either the URL formula "
+        f"in `per_env_deploy.py` is stale or Modal changed its hostname scheme; fix before "
+        f"continuing."
+    )
 
 
 def list_dev_envs() -> tuple[DevEnvSummary, ...]:

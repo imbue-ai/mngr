@@ -41,11 +41,15 @@ ask your agent to run it, or read it directly -- for the build/run loop.
       imbue HCP `VAULT_ADDR` / `VAULT_NAMESPACE` defaults itself, so login is
       all you need. Install + layout: [vault-setup.md](./vault-setup.md).
 
-- [ ] **Modal account + `~/.modal.toml` profile** for your dev tier's Modal
-      workspace -- `minds env activate --deploy` validates this and, if it's
-      missing, prints the exact `modal token set --profile <workspace>` to run
-      (do `uvx modal token new` first if you have no Modal account on this
-      machine). Background: [environments.md](./environments.md).
+- [ ] **Membership in the `minds-dev` Modal workspace + a matching
+      `~/.modal.toml` profile.** `minds-dev` is a *separate*, workspace-bound
+      Modal workspace (there's no shared dev token in Vault), so ask a
+      `minds-dev` workspace admin for an invite, then
+      `modal token new --profile minds-dev` and select that workspace in the
+      browser. Verify with `modal profile list`: the `minds-dev` profile must
+      show workspace `minds-dev` -- a profile *named* `minds-dev` that holds a
+      token for another workspace passes `minds env activate --deploy` but
+      misroutes the deploy. Full detail: [environments.md](./environments.md).
 
 ## Then: build and run
 
