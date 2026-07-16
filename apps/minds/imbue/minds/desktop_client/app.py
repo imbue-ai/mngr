@@ -140,7 +140,6 @@ from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIV
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
 from imbue.minds.desktop_client.workspace_record_store import is_cloud_provider_kind
-from imbue.minds.errors import InvalidJsonBodyError
 from imbue.minds.errors import SyncCryptoError
 from imbue.minds.errors import WorkspaceSyncError
 from imbue.minds.primitives import CreationId
@@ -862,6 +861,8 @@ def _account_launcher_context(session_store: MultiAccountSessionStore | None) ->
             shown = account
             break
     return str(shown.email), len(accounts) - 1
+
+
 def _compute_cloud_tile_state(
     backend_resolver: BackendResolverInterface,
     record_store: WorkspaceRecordStore,
