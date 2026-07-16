@@ -16,7 +16,7 @@ Reworked the desktop app's titlebar and navigation to match the minds-options mo
 
 - The workspace switcher menu opens shifted left so each row's workspace-name text lines up directly under the breadcrumb's workspace-name text.
 
-- The workspace switcher rows no longer show the "open in new window" arrow; each local row keeps just its settings gear. The right-click context-menu "Open in new window" entry is unchanged.
+- The workspace switcher rows for OTHER workspaces carry an "open in new window" arrow (desktop app only); the current workspace's row and remote rows carry no action buttons. The per-row settings gear is gone -- workspace settings lives in the titlebar's settings tab. The right-click context-menu "Open in new window" entry is unchanged.
 
 - On launch the app no longer tries to restore a workspace window whose workspace no longer exists (which showed the "unresponsive" recovery page); when nothing is known to exist yet, workspace windows are dropped and the app lands on the home screen. Non-workspace screens (home, settings) still restore as before.
 

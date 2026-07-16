@@ -608,20 +608,16 @@
         container.appendChild(header);
       }
       groups[key].forEach(function (w) {
-        // Shared row builder (each local row gets its settings gear). Unlike
-        // the Electron sidebar (delegated listeners) this view wires the click
+        // Shared row builder. Browser mode has no multi-window concept, so
+        // no withOpenNew (rows carry no action buttons here). Unlike the
+        // Electron sidebar (delegated listeners) this view wires the click
         // per-row, so attach it to the built element.
         var row = window.mindsSidebarRow.buildRow(w, {
           isCurrent: w.id === currentCrumbAgentId,
         });
-        row.addEventListener('click', function (e) {
+        row.addEventListener('click', function () {
           // Rows for workspaces on another device are informational only.
           if (w.is_remote) return;
-          if (e.target.closest('[data-open-settings]')) {
-            navigateContent('/workspace/' + w.id + '/settings');
-            closeSidebar();
-            return;
-          }
           selectWorkspace(w.id);
         });
         container.appendChild(row);

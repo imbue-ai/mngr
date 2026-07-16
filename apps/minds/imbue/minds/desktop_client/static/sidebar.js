@@ -19,8 +19,8 @@
   var mngrForwardOrigin = (document.body && document.body.dataset.mngrForwardOrigin) || '';
 
   // The floating sidebar auto-closes after the user makes a selection
-  // (workspace row, settings gear, "New workspace", "Manage account(s)" /
-  // "Log in", and "Open in new window"). The close happens entirely on the
+  // (workspace row, "New workspace", "Manage account(s)" / "Log in", and
+  // "Open in new window"). The close happens entirely on the
   // main process side: `navigate-content` and `open-workspace-in-new-window`
   // in apps/minds/electron/main.js both call closeModal(bundle) before
   // returning, so the renderer must NOT also send a `toggle-sidebar` IPC
@@ -35,8 +35,10 @@
     navigate(mngrForwardOrigin + '/goto/' + agentId + '/');
   }
 
-  function openWorkspaceSettings(agentId) {
-    navigate('/workspace/' + agentId + '/settings');
+  function openInNewWindow(agentId) {
+    if (isElectron && window.minds.openWorkspaceInNewWindow) {
+      window.minds.openWorkspaceInNewWindow(agentId);
+    }
   }
 
   function renderWorkspaces(workspaces) {
@@ -62,12 +64,14 @@
         container.appendChild(header);
       }
       groups[key].forEach(function (w) {
-        // The row markup lives in the shared builder; this view lets the
+        // The row markup lives in the shared builder; this view passes
+        // withOpenNew:true (Electron supports multi-window) and lets the
         // parent container's flex gap own the spacing. Clicks / hover /
         // context-menu are handled by the delegated document listeners below.
         container.appendChild(
           window.mindsSidebarRow.buildRow(w, {
             isCurrent: w.id === (currentScopeAgentId || currentWorkspaceId),
+            withOpenNew: true,
           }),
         );
       });
@@ -79,7 +83,7 @@
     if (!row) return;
     var agentId = row.getAttribute('data-agent-id');
     if (!agentId) return;
-    if (target.closest('[data-open-settings]')) { openWorkspaceSettings(agentId); return; }
+    if (target.closest('[data-open-new]')) { openInNewWindow(agentId); return; }
     selectWorkspace(agentId);
   }
   document.addEventListener('click', function (e) {
