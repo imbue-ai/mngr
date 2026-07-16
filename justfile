@@ -374,7 +374,7 @@ sync-vendor-mngr default_workspace_template="":
         git -C "$default_workspace_template" status --short
         exit 1
     fi
-    branch=$(git rev-parse --abbrev-ref HEAD)
+    branch=$(bash "{{justfile_directory()}}/scripts/current_branch.sh" "{{justfile_directory()}}" || echo HEAD)
     short=$(git rev-parse --short HEAD)
     full=$(git rev-parse HEAD)
     tarball=$(mktemp)
@@ -548,7 +548,7 @@ minds-start branch="" default_workspace_template="":
     if [ -n "{{branch}}" ]; then
         export MINDS_WORKSPACE_BRANCH="{{branch}}"
     else
-        export MINDS_WORKSPACE_BRANCH="$(git -C "$default_workspace_template_wt" rev-parse --abbrev-ref HEAD)"
+        export MINDS_WORKSPACE_BRANCH="$(bash "{{justfile_directory()}}/scripts/current_branch.sh" "$default_workspace_template_wt")"
     fi
     echo "MINDS_WORKSPACE_GIT_URL=$MINDS_WORKSPACE_GIT_URL"
     echo "MINDS_WORKSPACE_BRANCH=$MINDS_WORKSPACE_BRANCH"

@@ -25,25 +25,14 @@ dest="$repo_root/.external_worktrees/default-workspace-template"
 base="${2:-origin/main}"
 
 # Branch for the new checkout. Defaults to the current branch of this mngr
-# checkout. `git rev-parse --abbrev-ref HEAD` returns the literal "HEAD"
-# in detached-HEAD state -- the normal resting state of a jj (jujutsu)
-# colocated repo, which tracks the "current branch" as a bookmark and
-# leaves git's HEAD detached. Fall back to jj's nearest bookmark to the
-# working copy (@) in that case. Pass the branch as arg 1 to skip all this.
+# checkout via scripts/current_branch.sh, which is robust to the detached git
+# HEAD that jj colocated repos normally sit in. Pass the branch as arg 1 to
+# skip detection.
 branch="${1:-}"
 if [ -z "$branch" ]; then
-    branch="$(git -C "$repo_root" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-    if [ -z "$branch" ] || [ "$branch" = "HEAD" ]; then
-        branch=""
-        if command -v jj >/dev/null 2>&1 && jj -R "$repo_root" root >/dev/null 2>&1; then
-            branch="$(jj -R "$repo_root" --ignore-working-copy log --no-graph --color=never \
-                -r 'heads(::@ & bookmarks())' \
-                -T 'local_bookmarks.map(|b| b.name()).join("\n") ++ "\n"' 2>/dev/null || true)"
-            branch="${branch%%$'\n'*}"
-        fi
-    fi
+    branch="$(bash "$repo_root/scripts/current_branch.sh" "$repo_root" || true)"
 fi
-if [ -z "$branch" ] || [ "$branch" = "HEAD" ]; then
+if [ -z "$branch" ]; then
     echo "error: could not determine the current branch of $repo_root" >&2
     echo "       (git HEAD is detached and no jj bookmark points at @)." >&2
     echo "       pass the branch explicitly:  just default-workspace-template-worktree <branch>" >&2
