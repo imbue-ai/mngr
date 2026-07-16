@@ -58,6 +58,7 @@ from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelError
@@ -159,6 +160,13 @@ class LatchkeyDiscoveryHandler(MutableModel):
     arrives before the host SSH event) skip the reverse-tunnel step and
     are expected to reach the gateway via whatever direct route already
     exists.
+
+    An agent whose host discovery reports as not-running (stopped, paused,
+    crashed, ...) instead has its reverse tunnel torn down and skips gateway
+    provisioning, since its container sshd and docker target are gone until it
+    restarts; the shared desktop gateway is still ensured up (it is shared
+    across all agents). A ``None`` host state is treated as unknown and stays
+    on the normal path.
     """
 
     latchkey: Latchkey = Field(description="Latchkey wrapper that owns the shared gateway subprocess")
@@ -191,11 +199,32 @@ class LatchkeyDiscoveryHandler(MutableModel):
     _provisioned_hosts: set[str] = PrivateAttr(default_factory=set)
     _remote_hosts_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
-    def __call__(self, agent_id: AgentId, host_id: HostId, ssh_info: RemoteSSHInfo | None, provider_name: str) -> None:
+    def __call__(
+        self,
+        agent_id: AgentId,
+        host_id: HostId,
+        ssh_info: RemoteSSHInfo | None,
+        provider_name: str,
+        host_state: HostState | None,
+    ) -> None:
         try:
             host_side_port = self.latchkey.start_gateway(self.concurrency_group)
         except LatchkeyError as e:
             logger.opt(exception=e).error("Failed to start shared Latchkey gateway for agent {}: {}", agent_id, e)
+            return
+
+        # A host that discovery reports as explicitly not-running (stopped,
+        # paused, crashed, ...) has no live container sshd or docker daemon
+        # target to act on, so tear down any reverse tunnel we opened while it
+        # was running and skip both the desktop-gateway tunnel and the
+        # VPS-resident gateway provisioning (whose ``docker exec`` would fail
+        # against a stopped container). A ``None`` state is "unknown / not
+        # applicable" (e.g. the local provider, or a discovery event that
+        # arrives before the host snapshot), so it stays on the normal path.
+        # When the host returns to RUNNING, discovery re-fires and everything
+        # is re-established.
+        if host_state is not None and host_state is not HostState.RUNNING:
+            self._tear_down_stopped_agent(agent_id, host_id)
             return
 
         if ssh_info is None:
@@ -262,6 +291,22 @@ class LatchkeyDiscoveryHandler(MutableModel):
             if not is_pending_handed_off:
                 with self._pending_lock:
                     self._pending_remote_agents.discard(str(agent_id))
+
+    def _tear_down_stopped_agent(self, agent_id: AgentId, host_id: HostId) -> None:
+        """Drop a stopped agent's reverse tunnel and mark its host for re-provisioning.
+
+        The per-agent reverse tunnel points at the container's sshd, which is
+        down while the host is stopped; removing it stops the tunnel manager's
+        health-check loop from indefinitely re-dialing a dead endpoint.
+        Forgetting the host's ``_provisioned_hosts`` marker means a later restart
+        re-runs the idempotent VPS-resident gateway provisioning, since a stopped
+        container may be recreated before it comes back.
+        """
+        removed_tunnel_count = self.tunnel_manager.remove_reverse_tunnels_for_agent(str(agent_id))
+        if removed_tunnel_count:
+            logger.debug("Removed {} reverse tunnel(s) for stopped agent {}", removed_tunnel_count, agent_id)
+        with self._remote_hosts_lock:
+            self._provisioned_hosts.discard(str(host_id))
 
     def _setup_desktop_gateway_reachability(
         self, agent_id: AgentId, ssh_info: RemoteSSHInfo, host_side_port: int
