@@ -382,7 +382,8 @@ def _list_workspace_snapshots_safely(
     # restic returns oldest-first; the API documents newest-first so callers
     # (settings recent table, full-history page) do not re-sort.
     ordered = sorted(snapshots, key=lambda snapshot: snapshot.time, reverse=True)
-    window = ordered[offset:] if limit is None else ordered[offset : offset + limit]
+    end = None if limit is None else offset + limit
+    window = ordered[offset:end]
     return _WorkspaceSnapshotListing(
         snapshots=tuple(
             BackupSnapshotSummary(
@@ -439,31 +440,16 @@ def _materialize_env_from_record_if_missing(paths: WorkspacePaths, parsed_id: Ag
 
 
 def _parse_snapshot_limit_offset() -> "tuple[int | None, int] | Response":
-    """Parse the optional ``limit``/``offset`` snapshot-window query params.
+    """Parse the optional non-negative ``limit``/``offset`` snapshot-window params.
 
     ``limit`` absent means "all snapshots" (backward compatible); ``limit=0``
-    means "none". Both must be non-negative integers when present.
+    means "none".
     """
-
-    def _parse(name: str) -> "int | None | Response":
-        raw = request.args.get(name)
-        if raw is None:
-            return None
-        try:
-            value = int(raw)
-        except ValueError:
-            return _json_error(f"'{name}' must be a non-negative integer", 400)
-        if value < 0:
-            return _json_error(f"'{name}' must be a non-negative integer", 400)
-        return value
-
-    limit = _parse("limit")
-    if isinstance(limit, Response):
-        return limit
-    offset = _parse("offset")
-    if isinstance(offset, Response):
-        return offset
-    return limit, offset or 0
+    limit = request.args.get("limit", default=None, type=int)
+    offset = request.args.get("offset", default=0, type=int)
+    if (limit is not None and limit < 0) or offset < 0:
+        return _json_error("'limit' and 'offset' must be non-negative integers", 400)
+    return limit, offset
 
 
 @require_api_or_cookie_auth
