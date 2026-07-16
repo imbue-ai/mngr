@@ -1,13 +1,5 @@
-Adds a read-only backup history UI to the workspace settings page and a dedicated full-history page, plus a per-snapshot Download action.
+Added a read-only backup history UI. The workspace Settings "Backups" section now shows a "Recent backups" table listing the newest snapshots, each with a relative timestamp and a per-snapshot Download action; when a workspace has more than five backups, a "View all N backups" footer opens a dedicated full backup-history page (its own route, template, and JS) that pages through every snapshot with client-side Newer/Older controls.
 
-New "Recent backups" table on the settings page: newest snapshots with relative time and a per-row Download.
+Both surfaces load from the existing `GET /api/v1/workspaces/<id>/backups` response, which now returns snapshots newest-first so neither has to re-sort; the history page pages that list in the browser rather than calling a separate paged snapshots API. Listing and exporting snapshots run restic on this machine, so viewing history and downloading a backup work even while the workspace is offline. A shared row builder (`backup_table.js`) renders both tables so they cannot drift.
 
-New "View all N backups" footer linking to a dedicated full backup-history page (its own route, template, and JS) with client-side Newer/Older paging.
-
-Both surfaces load snapshots from the existing `GET /api/v1/workspaces/<id>/backups` response, which now returns them newest-first so neither surface has to re-sort; the history page pages that list in the browser and there is no separate paged snapshots API.
-
-Listing snapshots and exporting them run restic on this machine, so viewing history and downloading a backup work even when the workspace is offline.
-
-Shared row builder (`backup_table.js`) used by both tables so they cannot drift; Download only.
-
-Removes the stray "download" link from the Landing page now that download lives in the table.
+Per-snapshot download now lives with the backup it belongs to: the stray "download" link on the Landing page workspace rows is removed, and downloading a specific backup happens from the Settings table or the history page.
