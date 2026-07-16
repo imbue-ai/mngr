@@ -360,7 +360,13 @@ class WorkspaceBackupsResponse(FrozenModel):
     agent_id: str = Field(description="The workspace agent id")
     is_configured: bool = Field(description="Whether minds holds a canonical restic.env for this workspace")
     is_backing_up: bool = Field(description="Whether a (non-stale) restic backup is currently running")
-    snapshots: tuple[BackupSnapshotSummary, ...] = Field(default=(), description="All snapshots, newest-first")
+    snapshots: tuple[BackupSnapshotSummary, ...] = Field(
+        default=(),
+        description="The requested window of snapshots, newest-first (all of them when no limit is given)",
+    )
+    snapshots_total: int = Field(
+        default=0, description="Total snapshots available, ignoring limit/offset (for paging the full history)"
+    )
     snapshots_error: str | None = Field(
         default=None, description="Why the snapshot listing failed (e.g. restic error), when it did"
     )

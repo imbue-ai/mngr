@@ -110,14 +110,17 @@
     }
 
     setShown(historyCard, true);
+    // The server already limits the payload to RECENT_LIMIT rows; slice defensively.
     snapshots.slice(0, RECENT_LIMIT).forEach(function (snapshot, index) {
       historyEl.appendChild(window.mindsBackupTable.buildSnapshotRow(agentId, snapshot, index === 0));
     });
 
+    // The total (not the truncated window) drives the "View all N" affordance.
+    var total = typeof entry.snapshots_total === 'number' ? entry.snapshots_total : snapshots.length;
     // Use inline display because the anchor's flex utility overrides `hidden`.
-    var hasMore = snapshots.length > RECENT_LIMIT;
+    var hasMore = total > RECENT_LIMIT;
     viewAllLink.style.display = hasMore ? '' : 'none';
-    if (hasMore) viewAllLabel.textContent = 'View all ' + snapshots.length + ' backups';
+    if (hasMore) viewAllLabel.textContent = 'View all ' + total + ' backups';
   }
 
   function renderEntry(entry) {
@@ -177,7 +180,9 @@
   }
 
   function refreshHealth() {
-    fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backups')
+    // Only the newest RECENT_LIMIT rows are shown here; the total for the
+    // "View all N" link rides along in snapshots_total.
+    fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backups?limit=' + RECENT_LIMIT)
       .then(function (resp) { return resp.ok ? resp.json() : null; })
       .then(function (entry) {
         if (!entry) {
@@ -214,7 +219,7 @@
         }
         // Re-fetching also re-runs the (possibly slow) service check; the
         // spinner keeps showing what we're doing until the fresh state lands.
-        return fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backups')
+        return fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backups?limit=' + RECENT_LIMIT)
           .then(function (entryResp) { return entryResp.ok ? entryResp.json() : null; })
           .then(function (entry) {
             verificationSpinner.classList.add('hidden');

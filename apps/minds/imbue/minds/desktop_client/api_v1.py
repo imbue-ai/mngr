@@ -345,26 +345,34 @@ _BACKUP_DETAIL_EXIT_TIMEOUT_SECONDS: Final[float] = backup_verification.CHECK_EX
 class _WorkspaceSnapshotListing(FrozenModel):
     """The snapshot half of the per-workspace backups response."""
 
-    snapshots: tuple[BackupSnapshotSummary, ...] = Field(description="All snapshots, newest-first")
+    snapshots: tuple[BackupSnapshotSummary, ...] = Field(description="The requested window, newest-first")
+    total: int = Field(description="Total snapshots available, ignoring limit/offset")
     is_backing_up: bool = Field(description="Whether a (non-stale) restic backup is currently running")
     error: str | None = Field(default=None, description="Why the listing failed, when it did")
 
 
-def _list_workspace_snapshots_safely(paths: WorkspacePaths, parsed_id: AgentId) -> _WorkspaceSnapshotListing:
+def _list_workspace_snapshots_safely(
+    paths: WorkspacePaths, parsed_id: AgentId, *, limit: int | None, offset: int
+) -> _WorkspaceSnapshotListing:
     """List a workspace's snapshots + in-progress flag, degrading errors into the payload.
 
     An unconfigured workspace (no canonical env) is an ordinary empty listing,
     not an error -- NOT_CONFIGURED surfaces through the verification half.
+
+    ``restic snapshots`` always reads the full repository index, so ``limit`` /
+    ``offset`` do not save that work; they trim the newest-first window that is
+    serialized into the response (``total`` still reports the full count so the
+    UI can page). ``limit=None`` returns every snapshot from ``offset`` onward.
     """
     if not has_canonical_env(paths, parsed_id):
-        return _WorkspaceSnapshotListing(snapshots=(), is_backing_up=False)
+        return _WorkspaceSnapshotListing(snapshots=(), total=0, is_backing_up=False)
     try:
         snapshots = backup_status.list_workspace_snapshots(
             paths, parsed_id, parent_cg=get_state().root_concurrency_group
         )
     except BackupProvisioningError as e:
         logger.warning("Backup snapshot listing failed for {}: {}", parsed_id, e)
-        return _WorkspaceSnapshotListing(snapshots=(), is_backing_up=False, error=str(e))
+        return _WorkspaceSnapshotListing(snapshots=(), total=0, is_backing_up=False, error=str(e))
     # Whether a backup is running *right now* (non-stale restic lock). The
     # snapshot list alone can't express this, so the landing page reads this
     # flag to show the live "Backing up..." badge.
@@ -374,6 +382,7 @@ def _list_workspace_snapshots_safely(paths: WorkspacePaths, parsed_id: AgentId) 
     # restic returns oldest-first; the API documents newest-first so callers
     # (settings recent table, full-history page) do not re-sort.
     ordered = sorted(snapshots, key=lambda snapshot: snapshot.time, reverse=True)
+    window = ordered[offset:] if limit is None else ordered[offset : offset + limit]
     return _WorkspaceSnapshotListing(
         snapshots=tuple(
             BackupSnapshotSummary(
@@ -385,8 +394,9 @@ def _list_workspace_snapshots_safely(paths: WorkspacePaths, parsed_id: AgentId) 
                 tags=tuple(snapshot.tags),
                 total_size_bytes=snapshot.total_size_bytes,
             )
-            for snapshot in ordered
+            for snapshot in window
         ),
+        total=len(ordered),
         is_backing_up=is_backing_up,
     )
 
@@ -428,6 +438,34 @@ def _materialize_env_from_record_if_missing(paths: WorkspacePaths, parsed_id: Ag
     session_store.record_store.materialize_env_from_record(str(parsed_id))
 
 
+def _parse_snapshot_limit_offset() -> "tuple[int | None, int] | Response":
+    """Parse the optional ``limit``/``offset`` snapshot-window query params.
+
+    ``limit`` absent means "all snapshots" (backward compatible); ``limit=0``
+    means "none". Both must be non-negative integers when present.
+    """
+
+    def _parse(name: str) -> "int | None | Response":
+        raw = request.args.get(name)
+        if raw is None:
+            return None
+        try:
+            value = int(raw)
+        except ValueError:
+            return _json_error(f"'{name}' must be a non-negative integer", 400)
+        if value < 0:
+            return _json_error(f"'{name}' must be a non-negative integer", 400)
+        return value
+
+    limit = _parse("limit")
+    if isinstance(limit, Response):
+        return limit
+    offset = _parse("offset")
+    if isinstance(offset, Response):
+        return offset
+    return limit, offset or 0
+
+
 @require_api_or_cookie_auth
 @API_SPEC.validate(resp=json_response_model(WorkspaceBackupsResponse))
 def _handle_workspace_backups(agent_id: str) -> WorkspaceBackupsResponse | Response:
@@ -440,6 +478,10 @@ def _handle_workspace_backups(agent_id: str) -> WorkspaceBackupsResponse | Respo
     the frontend's job: it fans out one request per workspace.
     """
     parsed_id = AgentId(agent_id)
+    limit_offset = _parse_snapshot_limit_offset()
+    if isinstance(limit_offset, Response):
+        return limit_offset
+    limit, offset = limit_offset
     state = get_state()
     paths: WorkspacePaths | None = state.api_v1_paths
     if paths is None:
@@ -461,7 +503,7 @@ def _handle_workspace_backups(agent_id: str) -> WorkspaceBackupsResponse | Respo
     )
     with cg:
         cg.start_new_thread(target=_run_check_into_results, name=f"backup-check-{parsed_id}")
-        listing = _list_workspace_snapshots_safely(paths, parsed_id)
+        listing = _list_workspace_snapshots_safely(paths, parsed_id, limit=limit, offset=offset)
     check = (
         check_results[0]
         if check_results
@@ -473,6 +515,7 @@ def _handle_workspace_backups(agent_id: str) -> WorkspaceBackupsResponse | Respo
         is_configured=has_canonical_env(paths, parsed_id),
         is_backing_up=listing.is_backing_up,
         snapshots=listing.snapshots,
+        snapshots_total=listing.total,
         snapshots_error=listing.error,
         check_state=check.state.value,
         problems=tuple(problem.value for problem in check.problems),

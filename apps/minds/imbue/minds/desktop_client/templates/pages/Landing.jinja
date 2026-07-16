@@ -506,7 +506,7 @@
           if (pending <= 0) clearBackupChecking();
         }
         renderedIds.forEach(function (agentId) {
-          fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backups').then(function (response) {
+          fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backups?limit=1').then(function (response) {
             return response.ok ? response.json() : null;
           }).catch(function () { return null; }).then(function (data) {
             var snapshots = (data && data.snapshots) || [];

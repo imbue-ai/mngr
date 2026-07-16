@@ -372,6 +372,7 @@ def test_workspace_backups_reports_unconfigured_as_an_ordinary_empty_listing(tmp
     body = json.loads(response.data)
     assert body["is_configured"] is False
     assert body["snapshots"] == []
+    assert body["snapshots_total"] == 0
     assert body["is_backing_up"] is False
     assert body["check_state"] == "OFFLINE"
     assert body["is_verification_enabled"] is True
@@ -400,8 +401,64 @@ def test_workspace_backups_lists_snapshots_newest_first(tmp_path: Path) -> None:
     body = json.loads(client.get(f"/api/v1/workspaces/{agent_id}/backups", headers=_auth_header()).data)
     assert body["is_configured"] is True
     assert len(body["snapshots"]) == 3
+    assert body["snapshots_total"] == 3
     times = [s["time"] for s in body["snapshots"]]
     assert times == sorted(times, reverse=True)
+
+
+@pytest.mark.timeout(120)
+def test_workspace_backups_limit_and_offset_page_the_newest_first_window(tmp_path: Path) -> None:
+    # limit/offset trim the serialized window while snapshots_total keeps the
+    # full count, so the full-history page can page without re-listing.
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    repo = str(tmp_path / "repo")
+    password = "workspace-key"
+    restic_cli.init_repo(repository=repo, backend_env={}, password=password)
+    write_canonical_env(
+        WorkspacePaths(data_dir=tmp_path / "minds"),
+        agent_id,
+        f"RESTIC_REPOSITORY={repo}\nRESTIC_PASSWORD={password}\n",
+    )
+    source = tmp_path / "data.txt"
+    for i in range(3):
+        source.write_text(f"content {i}")
+        restic_backup_a_file(repo, password, source)
+
+    all_times = [
+        s["time"]
+        for s in json.loads(client.get(f"/api/v1/workspaces/{agent_id}/backups", headers=_auth_header()).data)[
+            "snapshots"
+        ]
+    ]
+
+    first_page = json.loads(
+        client.get(f"/api/v1/workspaces/{agent_id}/backups?limit=2", headers=_auth_header()).data
+    )
+    assert first_page["snapshots_total"] == 3
+    assert [s["time"] for s in first_page["snapshots"]] == all_times[:2]
+
+    second_page = json.loads(
+        client.get(f"/api/v1/workspaces/{agent_id}/backups?limit=2&offset=2", headers=_auth_header()).data
+    )
+    assert second_page["snapshots_total"] == 3
+    assert [s["time"] for s in second_page["snapshots"]] == all_times[2:]
+
+    # limit=0 keeps the count but sends no rows (the badge/landing surfaces).
+    none_page = json.loads(
+        client.get(f"/api/v1/workspaces/{agent_id}/backups?limit=0", headers=_auth_header()).data
+    )
+    assert none_page["snapshots"] == []
+    assert none_page["snapshots_total"] == 3
+
+
+def test_workspace_backups_rejects_a_negative_limit(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+
+    response = client.get(f"/api/v1/workspaces/{agent_id}/backups?limit=-1", headers=_auth_header())
+
+    assert response.status_code == 400
 
 
 def test_create_workspace_without_agent_creator_returns_501(tmp_path: Path) -> None:
