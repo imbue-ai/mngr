@@ -180,9 +180,7 @@ def test_stop_blocks_until_in_flight_pass_finishes(tmp_path: Path) -> None:
         assert scheduler._pass_started.wait(timeout=5.0)
 
         stop_returned = threading.Event()
-        stop_thread = threading.Thread(
-            target=lambda: (scheduler.stop(), stop_returned.set()), name="stop-caller"
-        )
+        stop_thread = threading.Thread(target=lambda: (scheduler.stop(), stop_returned.set()), name="stop-caller")
         stop_thread.start()
 
         # stop() must NOT return while the pass is still in flight.
