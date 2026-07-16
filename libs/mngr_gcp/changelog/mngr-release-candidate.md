@@ -1,0 +1,1 @@
+Rolling release-candidate integration branch: latest main plus the current review queue (see the queue manifest in the rolling RC pull request). This entry is synthetic; the real changelog entries ship with the individual queued PRs.
