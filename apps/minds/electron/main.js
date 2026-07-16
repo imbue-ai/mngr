@@ -3298,6 +3298,9 @@ async function startBackendWithRetry() {
         workspaceCount: workspaceList.length,
         restorableCount: restorable.length,
       });
+      console.log(
+        `[startup] route=${startupRoute} authenticated=${authenticated} hasAccounts=${!!(chromeState && chromeState.hasAccounts)} workspaceCount=${workspaceList.length} restorableCount=${restorable.length}`,
+      );
 
       const loadInitialContent = (relativePath) => {
         if (initialBundle.contentView && !initialBundle.contentView.webContents.isDestroyed()) {
