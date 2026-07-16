@@ -2507,7 +2507,6 @@ dependencies = [
     { name = "click" },
     { name = "click-option-group" },
     { name = "imbue-mngr" },
-    { name = "markdown-it-py" },
     { name = "tenacity" },
     { name = "urwid-readline" },
 ]
@@ -2517,7 +2516,6 @@ requires-dist = [
     { name = "click", specifier = ">=8.0" },
     { name = "click-option-group", specifier = ">=0.5.6" },
     { name = "imbue-mngr", editable = "libs/mngr" },
-    { name = "markdown-it-py", specifier = ">=2.2.0" },
     { name = "tenacity", specifier = ">=8.0" },
     { name = "urwid-readline", specifier = ">=0.14" },
 ]

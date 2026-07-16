@@ -9,7 +9,6 @@ dependencies = [
     "click>=8.0",
     "click-option-group>=0.5.6",
     "tenacity>=8.0",
-    "markdown-it-py>=2.2.0",
     "urwid-readline>=0.14",
 ]
 
