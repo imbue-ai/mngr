@@ -50,8 +50,10 @@ just default-workspace-template-worktree   # clones default_workspace_template o
 #    "dev-<your-user>" (convention; the DevEnvName validator requires the
 #    tier prefix FIRST -- "dev-" or "ci-" -- so "dev-josh" is valid but
 #    "josh-dev" is not). --create idempotently mkdirs the env root
-#    ~/.minds-dev-<your-user>/ if it doesn't exist.
-eval "$(uv run minds env activate --create dev-<your-user>)"
+#    ~/.minds-dev-<your-user>/ if it doesn't exist; --deploy pins
+#    MODAL_PROFILE to the tier's Modal workspace, which the following
+#    `minds env deploy` refuses to run without.
+eval "$(uv run minds env activate --create --deploy dev-<your-user>)"
 uv run minds env deploy
 
 # 4. (Every time you start the app, in a fresh shell) Activate the env
