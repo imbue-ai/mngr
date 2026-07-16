@@ -126,6 +126,13 @@ class BackupOperationStatusResponse(FrozenModel):
             "before it starts mutating the workspace (the UI hides Cancel once this goes false)"
         ),
     )
+    snapshot_id: str | None = Field(
+        default=None,
+        description=(
+            "The snapshot a restore is restoring to, so a page loaded mid-restore can mark the right "
+            "table row. None for operations that act on the whole workspace"
+        ),
+    )
 
 
 class BackupServiceUpdateRequest(ApiRequestModel):

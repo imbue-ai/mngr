@@ -74,13 +74,14 @@
     pageSnapshots.forEach(function (snapshot, index) {
       rowsEl.appendChild(window.mindsBackupTable.buildSnapshotRow(agentId, snapshot, index === 0, restoreConfig));
     });
-    // Rows rendered while an operation runs (e.g. paginating mid-restore)
-    // must come out disabled.
+    // Rows rendered while an operation runs (e.g. paginating mid-restore) must
+    // come out disabled, and an in-flight restore must reclaim its row.
     if (opUi.isRunning()) {
       page.querySelectorAll('.backup-restore-btn.text-accent').forEach(function (btn) {
         btn.disabled = true;
       });
     }
+    opUi.syncRows();
 
     var first = offset + 1;
     var last = offset + pageSnapshots.length;

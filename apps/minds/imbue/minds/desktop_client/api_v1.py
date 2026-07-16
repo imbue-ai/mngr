@@ -1157,6 +1157,7 @@ def _dispatch_backup_worker(
     kind: WorkspaceOperationKind,
     target: Callable[..., None],
     worker_kwargs: dict[str, object],
+    operation_target: str | None = None,
 ) -> tuple[OperationHandleResponse, int] | Response:
     """Claim the workspace's single operation slot and spawn the worker that ends it.
 
@@ -1171,7 +1172,7 @@ def _dispatch_backup_worker(
     """
     kind_slug = kind.value.lower()
     label = kind_slug.replace("_", " ")
-    if not registry.start_if_idle(parsed_id, kind, datetime.now(timezone.utc)):
+    if not registry.start_if_idle(parsed_id, kind, datetime.now(timezone.utc), operation_target):
         return _operation_conflict_error(registry.get(parsed_id))
     try:
         parent_cg.start_new_thread(
@@ -1284,6 +1285,7 @@ def _handle_workspace_backup_restore(
             "snapshot_id": snapshot_id,
             "is_stop_chats": _is_stop_chats_requested(),
         },
+        operation_target=snapshot_id,
     )
 
 
@@ -1463,6 +1465,7 @@ def _handle_backup_operation_status(operation_id: str) -> BackupOperationStatusR
         error=record.error,
         blocked_chats=blocked_chats,
         is_cancellable=is_cancellable,
+        snapshot_id=record.target,
     )
 
 

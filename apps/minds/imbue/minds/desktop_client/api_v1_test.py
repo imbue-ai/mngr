@@ -2083,6 +2083,34 @@ def test_backup_operation_status_reports_a_restore(tmp_path: Path) -> None:
     assert body["status"] == "RUNNING"
 
 
+def test_backup_operation_status_reports_the_snapshot_a_restore_targets(tmp_path: Path) -> None:
+    # A restore reports itself on its table row, so a page loaded mid-restore
+    # needs to be told which row: without the snapshot id it would show an idle
+    # table over a busy workspace.
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    registry = get_state(client.application).workspace_operation_registry
+    assert registry.start_if_idle(
+        agent_id, WorkspaceOperationKind.BACKUP_RESTORE, datetime.now(timezone.utc), "abc123"
+    )
+
+    body = json.loads(client.get(f"/api/v1/workspaces/operations/backup/{agent_id}", headers=_auth_header()).data)
+
+    assert body["snapshot_id"] == "abc123"
+
+
+def test_backup_operation_status_reports_no_snapshot_for_a_whole_workspace_operation(tmp_path: Path) -> None:
+    # An update acts on the workspace, not a snapshot, so it claims no row.
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    registry = get_state(client.application).workspace_operation_registry
+    assert registry.start_if_idle(agent_id, WorkspaceOperationKind.BACKUP_UPDATE, datetime.now(timezone.utc))
+
+    body = json.loads(client.get(f"/api/v1/workspaces/operations/backup/{agent_id}", headers=_auth_header()).data)
+
+    assert body["snapshot_id"] is None
+
+
 def test_backup_operation_status_reports_cancellable_only_before_mutation(tmp_path: Path) -> None:
     # The UI drives the Cancel button off is_cancellable: offered while the
     # operation is still waiting, withdrawn the moment its worker claims the

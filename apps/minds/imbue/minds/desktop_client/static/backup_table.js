@@ -117,7 +117,7 @@
     restore.type = 'button';
     restore.textContent = 'Restore';
     restore.className = 'backup-restore-btn bg-transparent border-0 p-0 type-body';
-    // Lets the settings page find and relabel the row of an in-flight restore.
+    // Lets the operation UI find this row's actions while a restore runs.
     restore.dataset.snapshotId = snapshot.snapshot_id;
     if (restoreConfig && restoreConfig.onRestore) {
       restore.classList.add('text-accent', 'cursor-pointer', 'disabled:opacity-40', 'disabled:cursor-not-allowed');
@@ -130,6 +130,19 @@
       restore.title = (restoreConfig && restoreConfig.disabledReason) || 'This backup cannot be restored right now.';
     }
     actions.appendChild(restore);
+
+    // In-row Cancel for a restore of *this* snapshot: an in-flight restore
+    // reports itself on its own row (the Restore action reads "Restoring...")
+    // rather than in a separate strip, so Cancel belongs beside it. Shipped
+    // hidden on every row; backup_operation_ui.js shows it on the one row
+    // whose restore is running and still cancellable.
+    var cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.textContent = 'Cancel';
+    cancel.className = 'backup-cancel-row-btn hidden bg-transparent border-0 p-0 type-body text-accent '
+      + 'hover:underline cursor-pointer';
+    cancel.dataset.snapshotId = snapshot.snapshot_id;
+    actions.appendChild(cancel);
 
     row.appendChild(actions);
     return row;

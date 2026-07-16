@@ -65,6 +65,13 @@ class WorkspaceOperationRecord(FrozenModel):
         default=False,
         description="Whether the operation has started mutating the workspace (a cancel can no longer take effect)",
     )
+    target: str | None = Field(
+        default=None,
+        description=(
+            "What the operation acts on, when it needs one to be identifiable: the snapshot id for a restore, "
+            "so a page loaded mid-restore can find the row it belongs to. None for whole-workspace operations."
+        ),
+    )
 
 
 class WorkspaceOperationRegistryInterface(MutableModel, ABC):
@@ -75,12 +82,16 @@ class WorkspaceOperationRegistryInterface(MutableModel, ABC):
         """Register a new RUNNING operation for ``agent_id``, replacing any prior record."""
 
     @abstractmethod
-    def start_if_idle(self, agent_id: AgentId, kind: WorkspaceOperationKind, now: datetime) -> bool:
+    def start_if_idle(
+        self, agent_id: AgentId, kind: WorkspaceOperationKind, now: datetime, target: str | None = None
+    ) -> bool:
         """Atomically register a new RUNNING operation unless one is already RUNNING.
 
         Returns whether this caller won the claim. Dispatch routes use this
         (instead of a separate get + ``start``) so two concurrent requests
-        cannot both spawn a worker for the same workspace.
+        cannot both spawn a worker for the same workspace. ``target`` records
+        what the operation acts on, for operations that need one (a restore's
+        snapshot id).
         """
 
     @abstractmethod
@@ -150,15 +161,19 @@ class InMemoryWorkspaceOperationRegistry(WorkspaceOperationRegistryInterface):
         with self.lock:
             self._register_locked(agent_id, kind, now)
 
-    def start_if_idle(self, agent_id: AgentId, kind: WorkspaceOperationKind, now: datetime) -> bool:
+    def start_if_idle(
+        self, agent_id: AgentId, kind: WorkspaceOperationKind, now: datetime, target: str | None = None
+    ) -> bool:
         with self.lock:
             existing = self.record_by_agent_id.get(agent_id)
             if existing is not None and existing.status == WorkspaceOperationStatus.RUNNING:
                 return False
-            self._register_locked(agent_id, kind, now)
+            self._register_locked(agent_id, kind, now, target)
             return True
 
-    def _register_locked(self, agent_id: AgentId, kind: WorkspaceOperationKind, now: datetime) -> None:
+    def _register_locked(
+        self, agent_id: AgentId, kind: WorkspaceOperationKind, now: datetime, target: str | None = None
+    ) -> None:
         """Register a fresh RUNNING record; the caller must hold ``self.lock``."""
         self.record_by_agent_id[agent_id] = WorkspaceOperationRecord(
             agent_id=agent_id,
@@ -166,6 +181,7 @@ class InMemoryWorkspaceOperationRegistry(WorkspaceOperationRegistryInterface):
             status=WorkspaceOperationStatus.RUNNING,
             error=None,
             started_at=now,
+            target=target,
         )
         self.log_queue_by_agent_id[agent_id] = queue.Queue()
         self.cancel_event_by_agent_id[agent_id] = threading.Event()

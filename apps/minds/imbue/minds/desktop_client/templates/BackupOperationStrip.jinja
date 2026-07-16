@@ -1,10 +1,16 @@
 {#
-  Shared status strip for tracked backup operations (update / restore /
-  configure), shipped by every page that can dispatch or display one
-  (workspace settings, backup history). The ids are load-bearing:
-  window.mindsBackupOperationUi (backup_operation_ui.js) wires them and
-  drives the spinner, streamed progress, error/success messages, Cancel, and
-  the "Stop chats and try again" retry.
+  Shared status strip for tracked backup operations, shipped by every page
+  that can dispatch or display one (workspace settings, backup history). The
+  ids are load-bearing: window.mindsBackupOperationUi (backup_operation_ui.js)
+  wires them.
+
+  The spinner, progress line and Cancel serve the operations that act on the
+  whole workspace (backup software update, storage change) and so have nothing
+  else to speak from. A restore reports itself on its own table row instead --
+  see backup_table.js -- and only its terminal message lands here.
+
+  Terminal messages are Notices (the styleguide's success/error boxes), filled
+  and unhidden by the operation UI.
 #}
 <div id="backup-operation-strip" class="hidden mb-6">
   <div class="flex flex-wrap items-center gap-2 mb-2">
@@ -17,6 +23,6 @@
     </span>
   </div>
   <p id="backup-op-progress" class="hidden type-helper text-tertiary mb-2" aria-live="polite"></p>
-  <p id="backup-error" class="hidden type-body text-important mb-2" role="alert"></p>
-  <p id="backup-success" class="hidden type-body text-success mb-2" role="status"></p>
+  <Notice variant="error" id="backup-error" class="hidden" role="alert"></Notice>
+  <Notice variant="success" id="backup-success" class="hidden" role="status"></Notice>
 </div>

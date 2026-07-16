@@ -132,8 +132,10 @@
         window.mindsBackupTable.buildSnapshotRow(agentId, snapshot, index === 0, restoreConfig)
       );
     });
-    // Rows rendered while an operation runs must come out disabled.
+    // Rows rendered while an operation runs must come out disabled, and an
+    // in-flight restore must reclaim its row.
     if (opUi.isRunning()) disableLiveRestoreButtons(true);
+    opUi.syncRows();
 
     // The total (not the truncated window) drives the "View all N" affordance.
     var total = typeof entry.snapshots_total === 'number' ? entry.snapshots_total : snapshots.length;
