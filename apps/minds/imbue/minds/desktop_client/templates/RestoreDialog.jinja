@@ -1,0 +1,19 @@
+{#
+  Shared restore-confirmation dialog, shipped by every page that offers a
+  Restore action (workspace settings, backup history). The ids are
+  load-bearing: window.mindsBackupTable.setupRestoreDialog (backup_table.js)
+  wires them and each page decides what a confirmed restore does.
+#}
+<Modal id="restore-dialog">
+  <h2 class="type-heading text-primary mb-3">Restore this backup?</h2>
+  <p class="type-body text-primary mb-4">
+    This workspace will be rewound to the backup from
+    <strong id="restore-dialog-time"></strong>. Everything changed since
+    then will be replaced. A backup of the current state is taken first,
+    so you can undo this by restoring that backup.
+  </p>
+  <div class="flex justify-end gap-3">
+    <Button variant="secondary" id="restore-cancel-btn">Cancel</Button>
+    <Button variant="danger" id="restore-confirm-btn">Restore</Button>
+  </div>
+</Modal>

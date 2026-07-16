@@ -19,6 +19,7 @@
 <script src="/_static/workspace_accent.js" defer></script>
 <script src="/_static/workspace_settings.js" defer></script>
 <script src="/_static/backup_table.js" defer></script>
+<script src="/_static/backup_operation_ui.js" defer></script>
 <script src="/_static/workspace_backups.js" defer></script>
 <script>
   (function() {
@@ -237,20 +238,12 @@
           </a>
         </div>
 
-        {# Shared operation controls (update + storage change). Conditional buttons use
-          wrapper spans because a `hidden` class loses to the Button's inline-flex
-          display. #}
-        <div class="flex flex-wrap items-center gap-2 mb-2">
-          <span id="backup-op-spinner" class="hidden type-section text-secondary">Working...</span>
-          <span id="backup-stop-chats-btn-wrap" class="hidden">
-            <Button variant="secondary" id="backup-stop-chats-btn">Stop chats and try again</Button>
-          </span>
-          <span id="backup-cancel-btn-wrap" class="hidden">
-            <Button variant="secondary" id="backup-cancel-btn">Cancel</Button>
-          </span>
-        </div>
-        <p id="backup-op-progress" class="hidden type-helper text-tertiary mb-2" aria-live="polite"></p>
-        <p id="backup-error" class="hidden type-body text-important mb-2" role="alert"></p>
+        {# Shared operation strip: one tracked operation (restore, update, or
+           storage change) runs per workspace at a time, so its controls live
+           here next to the table. Conditional buttons use wrapper spans
+           because a `hidden` class loses to the Button's inline-flex display. #}
+        <BackupOperationStrip />
+
         <div id="backup-configure" class="mb-6">
           <h3 class="type-label text-secondary mb-2">Where your backups are stored</h3>
           <p class="type-body text-secondary mb-2 max-w-[560px]">
@@ -322,6 +315,9 @@
           <Button variant="danger" id="destroy-confirm-btn">Destroy</Button>
         </div>
       </Modal>
+
+      {# Restore confirmation, opened by a Restore link in the Recent backups table. #}
+      <RestoreDialog />
 
       <div class="mt-8">
         <Link href="/" extra="type-helper">&larr; Back to workspaces</Link>

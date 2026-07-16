@@ -1,6 +1,6 @@
 """Self-contained python3 scripts minds runs inside a workspace via ``mngr exec``.
 
-Three scripts, all stdlib-only (they run under the workspace's system python3
+Four scripts, all stdlib-only (they run under the workspace's system python3
 with no access to minds code), all parameterized via argv and all reporting a
 single marker-prefixed JSON line on stdout so the caller can parse a verdict
 out of arbitrarily noisy output:
@@ -19,6 +19,18 @@ out of arbitrarily noisy output:
   ``libs/host_backup`` at the target tag, commit ``backup-update: <tag>``,
   ``uv sync``, restart the service, verify it comes back, and auto-rollback
   (``git revert``) on failure. Optionally stops running chats first.
+- the *restore* script: rewinds the whole host dir to a chosen restic
+  snapshot -- gate on chats/ticks, stop every supervisord service (they all
+  run from and write into the host dir this restore rewrites), take a
+  ``pre-restore`` safety snapshot (so any restore is undoable), restore the
+  snapshot into a staging dir, swap it into place (preserving the current
+  ``restic.env``), append a ``restored`` snapshot of the swapped-in state
+  (tagged with the source snapshot's time, so the timeline shows the restored
+  version as a new "Restored from ..." entry), ``uv sync``, and restart every
+  supervisord service. Every
+  exit path after the service stop restarts the services (best-effort), and
+  a backup tick orphaned mid-flight (by the stop, or recorded in the restored
+  journal) is completed with a synthetic event so it cannot wedge later gates.
 
 The scripts are shipped base64-encoded through the shell (the base64 alphabet
 contains no shell-significant characters), decoded and piped into ``python3 -``
@@ -33,6 +45,7 @@ from typing import Final
 CHECK_RESULT_MARKER: Final[str] = "MINDS_BACKUP_CHECK_JSON:"
 GATE_RESULT_MARKER: Final[str] = "MINDS_BACKUP_GATE_JSON:"
 UPDATE_RESULT_MARKER: Final[str] = "MINDS_BACKUP_UPDATE_JSON:"
+RESTORE_RESULT_MARKER: Final[str] = "MINDS_BACKUP_RESTORE_JSON:"
 
 # The one repository backup-service code is fetched from. minds owns the
 # ``official`` remote on every workspace: the scripts create it (or repoint it)
@@ -48,12 +61,15 @@ OFFICIAL_REMOTE_URL: Final[str] = "https://github.com/imbue-ai/default-workspace
 # escaping; parameters arrive via sys.argv, never via interpolation.
 _SCRIPT_PREAMBLE: Final[str] = r'''
 import base64 as _b64
+import datetime as _datetime
 import hashlib as _hashlib
 import json as _json
 import os as _os
+import shutil as _shutil
 import subprocess as _subprocess
 import sys as _sys
 import time as _time
+import uuid as _uuid
 
 OFFICIAL_REMOTE_NAME = "official"
 DEFAULT_OFFICIAL_REMOTE_URL = "https://github.com/imbue-ai/default-workspace-template.git"
@@ -67,11 +83,21 @@ TICK_COMPLETION_TYPES = (
     "TICK_ERROR",
     "SNAPSHOT_FAILED",
 )
+# minds already waited (unboundedly, cancellably) for a quiet workspace before
+# dispatching a mutating script; this bounded wait only covers a tick that
+# started in between, and must stay well inside the caller's outer exec
+# timeout so a structured "timed out waiting" payload beats the exec being
+# killed.
+TICK_WAIT_TIMEOUT_SECONDS = 900.0
+TICK_POLL_SECONDS = 5.0
+SERVICE_VERIFY_TIMEOUT_SECONDS = 60.0
 
 
-def _run(argv, timeout=60):
+def _run(argv, timeout=60, cwd=None, env=None):
     try:
-        return _subprocess.run(argv, capture_output=True, text=True, check=False, timeout=timeout)
+        return _subprocess.run(
+            argv, capture_output=True, text=True, check=False, timeout=timeout, cwd=cwd, env=env
+        )
     except (OSError, _subprocess.TimeoutExpired) as e:
         completed = _subprocess.CompletedProcess(argv, returncode=127)
         completed.stdout = ""
@@ -297,16 +323,22 @@ def _backup_events_path(agent_id):
     return _os.path.join(state_dir, "events", "backup", "events.jsonl")
 
 
-def _is_backup_tick_in_flight(agent_id):
+def _last_unfinished_tick_id(agent_id):
+    """Return the tick_id of the most recently started tick lacking a completion event, or None."""
     events_path = _backup_events_path(agent_id)
     if not events_path or not _os.path.isfile(events_path):
-        return False
+        return None
     try:
         with open(events_path, "r", errors="replace") as fh:
             lines = fh.readlines()
     except OSError:
-        return False
-    started = set()
+        return None
+    # Ticks run serially in one loop, so only the most recently started tick
+    # can be in flight. A tick killed mid-flight (e.g. by a service restart)
+    # never writes its completion event; treating every started-but-unfinished
+    # tick as in flight would let one such dead tick block operations for
+    # hours, until its line scrolls out of the window.
+    last_started_tick = None
     finished = set()
     for raw in lines[-200:]:
         try:
@@ -320,10 +352,60 @@ def _is_backup_tick_in_flight(agent_id):
             continue
         event_type = event.get("type")
         if event_type == "BACKUP_STARTED":
-            started.add(tick_id)
+            last_started_tick = tick_id
         elif event_type in TICK_COMPLETION_TYPES:
             finished.add(tick_id)
-    return bool(started - finished)
+    if last_started_tick is not None and last_started_tick not in finished:
+        return last_started_tick
+    return None
+
+
+def _is_backup_tick_in_flight(agent_id):
+    return _last_unfinished_tick_id(agent_id) is not None
+
+
+def _gate_chats_and_wait_for_tick(agent_id, is_stop_chats):
+    """Gate a mutating script: no RUNNING chats (optionally stop them), no in-flight tick.
+
+    Returns (status, extra, detail) with status in ok | blocked | failed;
+    ``extra`` carries payload fields (e.g. running_chats) for the result.
+    """
+    chats, gate_error = _list_running_chats()
+    if chats is None:
+        return "failed", {}, "cannot determine running chats: %s" % gate_error
+    if chats and is_stop_chats:
+        for chat_name in chats:
+            stopped = _run(["uv", "run", "mngr", "stop", chat_name], timeout=180)
+            if stopped.returncode != 0:
+                detail = "could not stop chat %s: %s" % (
+                    chat_name,
+                    (stopped.stderr or stopped.stdout).strip()[-300:],
+                )
+                return "failed", {}, detail
+        chats, gate_error = _list_running_chats()
+        if chats is None:
+            return "failed", {}, "cannot re-check running chats: %s" % gate_error
+    if chats:
+        return "blocked", {"running_chats": chats}, "chat agents are running"
+    wait_deadline = _time.monotonic() + TICK_WAIT_TIMEOUT_SECONDS
+    while _is_backup_tick_in_flight(agent_id):
+        if _time.monotonic() >= wait_deadline:
+            return "failed", {}, "timed out waiting for the in-flight backup tick to finish"
+        _time.sleep(TICK_POLL_SECONDS)
+    return "ok", {}, ""
+
+
+def _wait_for_backup_service_running(timeout_seconds=SERVICE_VERIFY_TIMEOUT_SECONDS):
+    """Poll until the host-backup program reads RUNNING; return "" or an error detail."""
+    deadline = _time.monotonic() + timeout_seconds
+    last_detail = ""
+    while _time.monotonic() < deadline:
+        state, detail = _service_state()
+        last_detail = detail
+        if state == "running":
+            return ""
+        _time.sleep(2.0)
+    return "host-backup did not reach RUNNING: %s" % last_detail
 
 
 def _emit(marker, payload):
@@ -386,14 +468,6 @@ _main()
 BACKUP_APPLY_UPDATE_SCRIPT: Final[str] = (
     _SCRIPT_PREAMBLE
     + r"""
-# minds already waited (unboundedly, cancellably) for a quiet workspace before
-# dispatching this script; this bounded wait only covers a tick that started in
-# between, and must stay well inside the caller's outer exec timeout so the
-# structured "timed out waiting" payload beats the exec being killed.
-_TICK_WAIT_TIMEOUT_SECONDS = 900.0
-_TICK_POLL_SECONDS = 5.0
-_SERVICE_VERIFY_TIMEOUT_SECONDS = 60.0
-
 
 def _git(args, timeout=120):
     return _run(["git"] + GIT_IDENTITY + list(args), timeout=timeout)
@@ -403,15 +477,7 @@ def _restart_and_verify_service():
     restarted = _run(["supervisorctl", "restart", "host-backup"], timeout=120)
     if restarted.returncode != 0:
         return "supervisorctl restart failed: %s" % (restarted.stderr or restarted.stdout).strip()[-500:]
-    deadline = _time.monotonic() + _SERVICE_VERIFY_TIMEOUT_SECONDS
-    last_detail = ""
-    while _time.monotonic() < deadline:
-        state, detail = _service_state()
-        last_detail = detail
-        if state == "running":
-            return ""
-        _time.sleep(2.0)
-    return "host-backup did not reach RUNNING: %s" % last_detail
+    return _wait_for_backup_service_running()
 
 
 def _finish(result, status, detail=""):
@@ -443,29 +509,12 @@ def _main():
         "stash_conflict": False,
     }
 
-    # Gate: no actively-RUNNING chat agents in this work_dir (optionally stop them).
-    chats, gate_error = _list_running_chats()
-    if chats is None:
-        _finish(result, "failed", "cannot determine running chats: %s" % gate_error)
-    if chats and is_stop_chats:
-        for chat_name in chats:
-            stopped = _run(["uv", "run", "mngr", "stop", chat_name], timeout=180)
-            if stopped.returncode != 0:
-                _finish(result, "failed", "could not stop chat %s: %s" % (chat_name, (stopped.stderr or stopped.stdout).strip()[-300:]))
-        chats, gate_error = _list_running_chats()
-        if chats is None:
-            _finish(result, "failed", "cannot re-check running chats: %s" % gate_error)
-    if chats:
-        result["running_chats"] = chats
-        _finish(result, "blocked", "chat agents are running")
-
-    # Wait out any in-flight backup tick (minds already waited; this is a
-    # bounded belt against a tick starting between its poll and this run).
-    wait_deadline = _time.monotonic() + _TICK_WAIT_TIMEOUT_SECONDS
-    while _is_backup_tick_in_flight(agent_id):
-        if _time.monotonic() >= wait_deadline:
-            _finish(result, "failed", "timed out waiting for the in-flight backup tick to finish")
-        _time.sleep(_TICK_POLL_SECONDS)
+    # Gate: no actively-RUNNING chat agents in this work_dir (optionally
+    # stopping them first), then wait out any in-flight backup tick.
+    gate_status, gate_extra, gate_detail = _gate_chats_and_wait_for_tick(agent_id, is_stop_chats)
+    result.update(gate_extra)
+    if gate_status != "ok":
+        _finish(result, gate_status, gate_detail)
 
     # Resolve the target tag before touching anything.
     tag, tag_error = _resolve_target_tag(version)
@@ -537,6 +586,301 @@ def _main():
     _finish(result, "ok")
 
 
+_main()
+"""
+)
+
+
+# Rewinds the whole host dir (/mngr) to one restic snapshot, in place.
+# Parameterized via argv: --agent-id, --snapshot-id, and optionally
+# --stop-chats. Verdict statuses: ok | blocked (running chats) | failed.
+BACKUP_RESTORE_SCRIPT: Final[str] = (
+    _SCRIPT_PREAMBLE
+    + r"""
+_RESTIC_TIMEOUT_SECONDS = 3000.0
+_STAGING_DIR_NAME = ".minds-restore-staging"
+# Mirrors the host_backup service's default excludes: the safety snapshot must
+# look like every hourly snapshot (regenerable trees excluded), or it would be
+# slower and larger than any backup ever taken. Mirrored by hand (host_backup
+# lives in the workspace-template repo); drift only affects the safety
+# snapshot's size and speed, never what a restore can recover.
+_SAFETY_SNAPSHOT_EXCLUDES = (
+    "**/.venv",
+    "**/node_modules",
+    "**/__pycache__",
+    "**/.pytest_cache",
+    "**/.ruff_cache",
+    "**/target",
+    "**/dist",
+    "**/build",
+    "**/.next",
+    "**/.cache",
+    "**/" + _STAGING_DIR_NAME,
+)
+
+
+# Cleanup obligations of the current run. Every side effect the restore takes
+# registers its cleanup here, and _finish pays the debts (best-effort) before
+# reporting -- so no individual failure path can forget to bring the services
+# back or leave a staged download behind. `is_resume_owed` flips on right
+# after `stop all` and off once the success path has run its own verified
+# restart; `staging_dir` is set while a staged download may exist on disk.
+_DEBTS = {"is_resume_owed": False, "staging_dir": ""}
+
+def _finish(result, status, detail=""):
+    if _DEBTS["staging_dir"]:
+        _shutil.rmtree(_DEBTS["staging_dir"], ignore_errors=True)
+        _DEBTS["staging_dir"] = ""
+    if _DEBTS["is_resume_owed"]:
+        restarted = _run(["supervisorctl", "restart", "all"], timeout=300)
+        result["services_restarted"] = restarted.returncode == 0
+        _DEBTS["is_resume_owed"] = False
+    result["status"] = status
+    if detail:
+        result["detail"] = detail
+    _emit("MINDS_BACKUP_RESTORE_JSON:", result)
+    _sys.exit(0)
+
+
+def _parse_env_lines(content):
+    env_map = {}
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, _, value = stripped.partition("=")
+        env_map[key.strip()] = value.strip()
+    return env_map
+
+
+def _restic(args, env_map, timeout=_RESTIC_TIMEOUT_SECONDS):
+    env = dict(_os.environ)
+    env.update(env_map)
+    return _run(["restic"] + list(args), timeout=timeout, env=env)
+
+
+# A tick killed mid-flight never writes its completion event, and the gate
+# logic treats the last started-but-unfinished tick as in flight -- one
+# orphaned BACKUP_STARTED line would block every later update/restore gate
+# (for the tick-wait timeout per attempt) until the next hourly tick
+# completes. This script creates such orphans in two ways: the `stop all`
+# kills any tick that started after the gate passed, and the restored journal
+# usually ends mid-tick (hourly snapshots are taken *by* a tick, so the
+# snapshot's copy of the journal predates that tick's completion event).
+# While the backup service is stopped no live tick can exist, so a synthetic
+# completion event -- shaped like the service's own TICK_ERROR events --
+# discharges the orphan without ever racing a real writer. Best-effort: a
+# journal that cannot be appended to must not abort the restore. (Once the
+# service restarts, its startup tick supersedes and completes past orphans
+# anyway, so this heal chiefly protects the paths where that restart fails
+# or a gate runs before the startup tick completes.)
+def _heal_interrupted_tick(agent_id, reason):
+    tick_id = _last_unfinished_tick_id(agent_id)
+    if tick_id is None:
+        return False
+    event = {
+        "timestamp": _datetime.datetime.now(_datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f") + "000Z",
+        "type": "TICK_ERROR",
+        "event_id": "evt-" + _uuid.uuid4().hex,
+        "source": "backup",
+        "tick_id": tick_id,
+        "error_type": "BackupTickInterrupted",
+        "error_message": reason,
+        "traceback": "",
+    }
+    try:
+        with open(_backup_events_path(agent_id), "a") as fh:
+            fh.write(_json.dumps(event) + "\n")
+    except OSError:
+        return False
+    return True
+
+
+def _main():
+    agent_id = _arg_value("--agent-id")
+    snapshot_id = _arg_value("--snapshot-id")
+    is_stop_chats = _has_flag("--stop-chats")
+    result = {
+        "schema": 1,
+        "safety_snapshot_taken": False,
+        "swapped": False,
+        "services_restarted": False,
+        "restored_snapshot_taken": False,
+    }
+    if not snapshot_id:
+        _finish(result, "failed", "no --snapshot-id provided")
+
+    # Everything that needs the current workspace code (`uv run mngr`) must
+    # run before the swap replaces the code dir this process started in.
+    gate_status, gate_extra, gate_detail = _gate_chats_and_wait_for_tick(agent_id, is_stop_chats)
+    result.update(gate_extra)
+    if gate_status != "ok":
+        _finish(result, gate_status, gate_detail)
+
+    code_dir = _os.path.realpath(_os.getcwd())
+    host_dir = _os.path.realpath(_os.environ.get("MNGR_HOST_DIR", "/mngr"))
+    env_path = _os.path.join(code_dir, RESTIC_ENV_PATH)
+    try:
+        with open(env_path, "rb") as env_file:
+            env_content = env_file.read()
+    except OSError as e:
+        _finish(result, "failed", "cannot read %s: %s" % (RESTIC_ENV_PATH, e))
+    env_map = _parse_env_lines(env_content.decode("utf-8", "replace"))
+    if not env_map.get("RESTIC_REPOSITORY"):
+        _finish(result, "failed", "%s has no RESTIC_REPOSITORY" % RESTIC_ENV_PATH)
+
+    # Quiesce the workspace: every supervisord service runs from (and writes
+    # into) the host dir this restore rewrites, so a service left running
+    # could recreate files mid-swap and break the delete/rename pass. Stop
+    # them all -- the exec channel this script runs through is not
+    # supervisord-managed, so it survives. Best-effort: already-stopped (or
+    # missing) services must not abort the restore. From here on, every exit
+    # owes a `restart all` -- registered as a debt that _finish itself pays,
+    # so no failure path can forget it.
+    _run(["supervisorctl", "stop", "all"], timeout=300)
+    _DEBTS["is_resume_owed"] = True
+    # The stop kills any backup tick that started after the gate passed; heal
+    # its orphaned journal entry before it can wedge later gates.
+    _heal_interrupted_tick(agent_id, "backup tick interrupted by the service stop before a workspace restore")
+
+    # Resolve the chosen snapshot's recorded root before mutating anything.
+    listed = _restic(["snapshots", snapshot_id, "--json"], env_map, timeout=120)
+    if listed.returncode != 0:
+        detail = "restic could not find snapshot %s: %s" % (snapshot_id, (listed.stderr or listed.stdout).strip()[-500:])
+        _finish(result, "failed", detail)
+    try:
+        entries = _json.loads(listed.stdout)
+    except ValueError:
+        entries = None
+    if not isinstance(entries, list) or not entries or not entries[0].get("paths"):
+        _finish(result, "failed", "restic returned no usable metadata for snapshot %s" % snapshot_id)
+    snapshot_root = entries[0]["paths"][0]
+    # The chosen snapshot's own timestamp, recorded as lineage on the restored
+    # snapshot below so the UI can label it "Restored from <this time>".
+    source_time = entries[0].get("time")
+
+    # Safety snapshot of the current state, so this restore is itself undoable.
+    backup_args = ["backup", host_dir, "--tag", "pre-restore"]
+    for pattern in _SAFETY_SNAPSHOT_EXCLUDES:
+        backup_args += ["--exclude", pattern]
+    backed_up = _restic(backup_args, env_map)
+    if backed_up.returncode != 0:
+        detail = "pre-restore safety snapshot failed: %s" % (backed_up.stderr or backed_up.stdout).strip()[-500:]
+        _finish(result, "failed", detail)
+    result["safety_snapshot_taken"] = True
+
+    # Restore into a staging dir first: nothing is deleted until the whole
+    # snapshot has downloaded successfully. Clearing stale leftovers from a
+    # prior run happens here; from then on the staging dir is a registered
+    # debt that _finish removes on every exit.
+    staging_dir = _os.path.join(host_dir, _STAGING_DIR_NAME)
+    _shutil.rmtree(staging_dir, ignore_errors=True)
+    _DEBTS["staging_dir"] = staging_dir
+    restored = _restic(["restore", snapshot_id, "--target", staging_dir], env_map)
+    if restored.returncode != 0:
+        detail = "restic restore failed: %s" % (restored.stderr or restored.stdout).strip()[-500:]
+        _finish(result, "failed", detail)
+    source_root = _os.path.join(staging_dir, snapshot_root.lstrip("/"))
+    if not _os.path.isdir(source_root):
+        _finish(result, "failed", "restored tree is missing the snapshot root %s" % snapshot_root)
+    # On btrfs providers the hourly backup snapshots the whole unified host
+    # volume, so the host dir's contents live one level down in a `host_dir/`
+    # child (next to volume-level `agents/` + `host_state.json`); on plain
+    # docker (and for the pre-restore safety snapshots this script takes) the
+    # snapshot root is the host dir itself. Identify the host dir by its
+    # `code/` checkout and refuse to swap in anything else -- swapping in the
+    # wrong level would wreck the workspace.
+    if not _os.path.isdir(_os.path.join(source_root, "code")):
+        nested_root = _os.path.join(source_root, "host_dir")
+        if _os.path.isdir(_os.path.join(nested_root, "code")):
+            source_root = nested_root
+        else:
+            detail = "restored tree has no code/ checkout under %s; refusing to swap it in" % snapshot_root
+            _finish(result, "failed", detail)
+
+    # Swap: clear the host dir (except staging) and move the restored entries
+    # in. This deletes the dir this process was started from, so leave it
+    # first; rename within one filesystem is instant, keeping the
+    # inconsistent window to the deletes.
+    _os.chdir("/")
+    try:
+        for name in _os.listdir(host_dir):
+            if name == _STAGING_DIR_NAME:
+                continue
+            path = _os.path.join(host_dir, name)
+            if _os.path.islink(path) or not _os.path.isdir(path):
+                _os.remove(path)
+            else:
+                _shutil.rmtree(path)
+        for name in _os.listdir(source_root):
+            _os.rename(_os.path.join(source_root, name), _os.path.join(host_dir, name))
+    except OSError as e:
+        detail = (
+            "the in-place swap failed midway (%s); the workspace may be incomplete -- "
+            "run the restore again (a pre-restore safety snapshot was already taken)" % e
+        )
+        _finish(result, "failed", detail)
+    result["swapped"] = True
+
+    # Hourly snapshots are taken *by* a backup tick, so the restored journal
+    # usually ends with that tick's BACKUP_STARTED and no completion; heal it
+    # now (the service is still stopped) or it wedges every later gate.
+    _heal_interrupted_tick(agent_id, "backup tick was in flight when this snapshot was taken; completed by the restore")
+
+    # The snapshot carries whatever restic.env it had at backup time (possibly
+    # none); the current credentials must keep working, so write them back.
+    try:
+        _os.makedirs(_os.path.dirname(env_path), exist_ok=True)
+        with open(env_path, "wb") as env_file:
+            env_file.write(env_content)
+    except OSError as e:
+        _finish(result, "failed", "restored, but could not re-write %s: %s" % (RESTIC_ENV_PATH, e))
+
+    # Append a snapshot of the restored state, tagged with its lineage, so the
+    # backup timeline shows the restored version as a new entry ("Restored
+    # from <source time>") sitting above the pre-restore safety backup. Nearly
+    # free: restic dedups against the source snapshot's blobs, so only new
+    # metadata is written. Taken now, while the services are still stopped, so
+    # nothing is writing to the tree. Best-effort: the restore itself already
+    # succeeded and the next backup tick would capture this state anyway, so a
+    # failure here must not fail the operation.
+    restored_backup_args = ["backup", host_dir, "--tag", "restored"]
+    if source_time:
+        restored_backup_args += ["--tag", "restored-from:%s" % source_time]
+    for pattern in _SAFETY_SNAPSHOT_EXCLUDES:
+        restored_backup_args += ["--exclude", pattern]
+    restored_snapshot = _restic(restored_backup_args, env_map)
+    result["restored_snapshot_taken"] = restored_snapshot.returncode == 0
+
+    # Backups exclude regenerable trees (.venv etc.), so rebuild dependencies
+    # before the services come back.
+    synced = _run(["uv", "sync"], timeout=900, cwd=code_dir)
+    if synced.returncode != 0:
+        detail = "restored, but uv sync failed: %s" % (synced.stderr or synced.stdout).strip()[-800:]
+        _finish(result, "failed", detail)
+
+    # Every supervisord service was stopped before the swap; bounce them all
+    # onto the restored tree (`restart all` starts stopped programs too).
+    # This pays the resume debt directly (and clears it first, so a failed
+    # restart is not blindly retried by _finish) because the success path
+    # must also verify the service actually came back.
+    _DEBTS["is_resume_owed"] = False
+    restarted = _run(["supervisorctl", "restart", "all"], timeout=300)
+    result["services_restarted"] = restarted.returncode == 0
+    if restarted.returncode != 0:
+        detail = "restored, but restarting services failed: %s" % (restarted.stderr or restarted.stdout).strip()[-500:]
+        _finish(result, "failed", detail)
+    verify_detail = _wait_for_backup_service_running()
+    if verify_detail:
+        _finish(result, "failed", "restored, but %s" % verify_detail)
+    _finish(result, "ok")
+
+
+# No catch-all here: an unexpected crash prints its traceback to stderr and
+# produces no marker, which the desktop side treats as "script died" -- it
+# surfaces the stderr tail and dispatches its own best-effort
+# `supervisorctl restart all` (the same backstop that covers an exec timeout,
+# which no in-script handler could survive anyway).
 _main()
 """
 )

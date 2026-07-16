@@ -1,6 +1,16 @@
-// Full backup-history page: one GET /api/v1/workspaces/<id>/backups per page,
-// paging server-side with limit/offset so the payload stays a single page.
-// Row markup is shared via backup_table.js.
+// Full backup-history page: fills the table one page at a time from
+// GET /api/v1/workspaces/<id>/backups?limit=&offset= (newest-first, paginated
+// server-side so a long history is never loaded all at once, using the
+// snapshots_total count to drive the Newer/Older pagination controls).
+//
+// The row markup (including the per-snapshot Download flow) and the restore
+// confirmation dialog are shared with the settings page's "Recent backups"
+// table via window.mindsBackupTable (backup_table.js); the tracked-operation
+// strip (progress, Cancel, "Stop chats and try again", success/error) is the
+// same BackupOperationStrip + backup_operation_ui.js pair the settings page
+// uses. A confirmed restore runs in place on this page, and because the
+// backend tracks one operation per workspace, an operation started on either
+// page shows live on both (each reattaches on load).
 (function () {
   var page = document.getElementById('backup-history-page');
   if (!page) return;
@@ -29,6 +39,25 @@
     setShown(paginationEl, false);
   }
 
+  // The shared operation-strip driver: restores dispatched here run in place,
+  // and an operation already running (started on any page) is reattached to
+  // on load. While one runs, this page's live Restore buttons are disabled;
+  // when one succeeds, the table refreshes (the new pre-restore safety
+  // snapshot appears).
+  var opUi = window.mindsBackupOperationUi.setup({
+    agentId: agentId,
+    onRunningChange: function (isRunning) {
+      page.querySelectorAll('.backup-restore-btn.text-accent').forEach(function (btn) {
+        btn.disabled = isRunning;
+      });
+    },
+    onSuccess: function () { loadPage(); },
+  });
+
+  var openRestoreDialog = window.mindsBackupTable.setupRestoreDialog(function (snapshot) {
+    opUi.startRestore(snapshot.snapshot_id, false, new Date(snapshot.time).toLocaleString());
+  });
+
   function renderPage(pageSnapshots) {
     rowsEl.textContent = '';
 
@@ -40,8 +69,22 @@
     setShown(statusEl, false);
     setShown(cardEl, true);
     pageSnapshots.forEach(function (snapshot, index) {
-      rowsEl.appendChild(window.mindsBackupTable.buildSnapshotRow(agentId, snapshot, index === 0));
+      // "Latest" marks the repository's newest snapshot, which only appears
+      // on the first page.
+      var isLatest = offset === 0 && index === 0;
+      rowsEl.appendChild(
+        window.mindsBackupTable.buildSnapshotRow(agentId, snapshot, isLatest, index === 0, {
+          onRestore: openRestoreDialog,
+        })
+      );
     });
+    // Rows rendered while an operation runs (e.g. paginating mid-restore)
+    // must come out disabled.
+    if (opUi.isRunning()) {
+      page.querySelectorAll('.backup-restore-btn.text-accent').forEach(function (btn) {
+        btn.disabled = true;
+      });
+    }
 
     var first = offset + 1;
     var last = offset + pageSnapshots.length;
@@ -91,5 +134,6 @@
     loadPage();
   });
 
+  opUi.reattach();
   loadPage();
 })();

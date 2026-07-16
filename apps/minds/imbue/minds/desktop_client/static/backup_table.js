@@ -60,9 +60,16 @@
       });
   }
 
-  // Relative time on the left; Download on the right.
-  // ``actions`` is a flex slot so a second action (e.g. Restore) can join later.
-  function buildSnapshotRow(agentId, snapshot, isFirst) {
+  // One table row: relative time (exact local time on hover) plus a "Latest"
+  // badge on the left, Download / Restore actions on the right. Rows after the
+  // first carry a top divider; the latest row is tinted.
+  //
+  // restoreConfig controls the Restore action:
+  //   { onRestore: fn }          -- live button; fn(snapshot) runs on click
+  //   { disabledReason: string } -- disabled, with the reason as tooltip
+  //   null/undefined             -- disabled (defensive default; every
+  //                                 current caller passes one of the above)
+  function buildSnapshotRow(agentId, snapshot, isLatest, isFirst, restoreConfig) {
     var row = document.createElement('div');
     row.className = 'flex items-center gap-4 px-4 py-3'
       + (isFirst ? '' : ' border-t border-default');
@@ -74,6 +81,30 @@
     timeEl.className = 'type-body text-primary';
     timeEl.textContent = relativeAgo(snapshot.time);
     timeCell.appendChild(timeEl);
+
+    if (isLatest) {
+      var latestBadge = document.createElement('span');
+      latestBadge.className = 'inline-flex items-center px-2 py-0.5 rounded-md type-label bg-success/15 text-success';
+      latestBadge.textContent = 'Latest';
+      timeCell.appendChild(latestBadge);
+    }
+    // A completed restore appends a snapshot of the restored state, tagged
+    // `restored` plus `restored-from:<source-iso>`. Labeling it "Restored from
+    // <source time>" makes the timeline read like a version history: this row
+    // is the restored version, and the source it came from is named inline.
+    var tags = snapshot.tags || [];
+    if (tags.indexOf('restored') !== -1) {
+      var lineageTag = tags.filter(function (tag) { return tag.indexOf('restored-from:') === 0; })[0];
+      var restoredLabel = document.createElement('span');
+      restoredLabel.className = 'inline-flex items-center px-2 py-0.5 rounded-md type-label bg-fill-hover text-secondary';
+      if (lineageTag) {
+        var sourceIso = lineageTag.slice('restored-from:'.length);
+        restoredLabel.textContent = 'Restored from ' + new Date(sourceIso).toLocaleString();
+      } else {
+        restoredLabel.textContent = 'Restored';
+      }
+      timeCell.appendChild(restoredLabel);
+    }
     row.appendChild(timeCell);
 
     var actions = document.createElement('div');
@@ -89,11 +120,59 @@
     });
     actions.appendChild(download);
 
+    var restore = document.createElement('button');
+    restore.type = 'button';
+    restore.textContent = 'Restore';
+    restore.className = 'backup-restore-btn bg-transparent border-0 p-0 type-body';
+    // Lets the settings page find and relabel the row of an in-flight restore.
+    restore.dataset.snapshotId = snapshot.snapshot_id;
+    if (restoreConfig && restoreConfig.onRestore) {
+      restore.classList.add('text-accent', 'cursor-pointer', 'disabled:opacity-40', 'disabled:cursor-not-allowed');
+      restore.addEventListener('click', function () {
+        restoreConfig.onRestore(snapshot);
+      });
+    } else {
+      restore.disabled = true;
+      restore.classList.add('text-tertiary', 'cursor-not-allowed');
+      restore.title = (restoreConfig && restoreConfig.disabledReason) || 'Restore from the settings page';
+    }
+    actions.appendChild(restore);
+
     row.appendChild(actions);
     return row;
   }
 
+  // Wire the shared restore-confirmation dialog (markup shipped by every
+  // page that offers Restore, via the RestoreDialog template component) and
+  // return the function that opens it for one snapshot. What a confirmed
+  // restore *does* is the caller's business: the settings page runs the
+  // tracked operation in place; the history page dispatches it and hands off
+  // to the settings page.
+  function setupRestoreDialog(onConfirm) {
+    var dialog = document.getElementById('restore-dialog');
+    var timeEl = document.getElementById('restore-dialog-time');
+    var cancelBtn = document.getElementById('restore-cancel-btn');
+    var confirmBtn = document.getElementById('restore-confirm-btn');
+    // The snapshot the open dialog is about.
+    var pendingSnapshot = null;
+    function close() { dialog.classList.add('hidden'); }
+    cancelBtn.addEventListener('click', close);
+    dialog.addEventListener('click', function (e) {
+      if (e.target === dialog) close();
+    });
+    confirmBtn.addEventListener('click', function () {
+      close();
+      if (pendingSnapshot) onConfirm(pendingSnapshot);
+    });
+    return function (snapshot) {
+      pendingSnapshot = snapshot;
+      timeEl.textContent = new Date(snapshot.time).toLocaleString();
+      dialog.classList.remove('hidden');
+    };
+  }
+
   window.mindsBackupTable = {
     buildSnapshotRow: buildSnapshotRow,
+    setupRestoreDialog: setupRestoreDialog,
   };
 })();

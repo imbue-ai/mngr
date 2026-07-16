@@ -6,6 +6,7 @@
 #}
 {% set _scripts %}
 <script src="/_static/backup_table.js" defer></script>
+<script src="/_static/backup_operation_ui.js" defer></script>
 <script src="/_static/workspace_backup_history.js" defer></script>
 {% endset %}
 <Base title={{ "Backups: " ~ ws_name }}
@@ -24,6 +25,10 @@
         <div id="history-rows"></div>
       </div>
 
+      {# Restores run in place on this page through the same tracked-operation
+         strip as the settings page; either page shows the live status. #}
+      <BackupOperationStrip />
+
       {# Pagination footer: JS fills the range text and drives the buttons;
          hidden entirely when everything fits on one page. #}
       <div id="history-pagination" class="hidden flex items-center justify-between">
@@ -33,6 +38,9 @@
           <Button variant="secondary" id="history-next-btn">Older &rarr;</Button>
         </div>
       </div>
+
+      {# Restore confirmation, opened by a Restore link in the table rows. #}
+      <RestoreDialog />
 
       <div class="mt-8">
         <Link href={{ "/workspace/" ~ agent_id ~ "/settings" }} extra="type-helper">&larr; Back to settings</Link>

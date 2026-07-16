@@ -1942,7 +1942,7 @@ def test_backup_service_update_conflicts_with_a_running_operation(
     response = client.post(f"/api/v1/workspaces/{agent_id}/backup-service/update", headers=_auth_header(), json={})
 
     assert response.status_code == 409
-    assert "RESTART" in json.loads(response.data)["error"]
+    assert "restart is already in progress" in json.loads(response.data)["error"]
     # The dispatch did not replace the running record.
     record = registry.get(agent_id)
     assert record is not None
@@ -1971,7 +1971,7 @@ def test_workspace_restart_conflicts_with_a_running_backup_operation(
     )
 
     assert response.status_code == 409
-    assert "BACKUP_UPDATE" in json.loads(response.data)["error"]
+    assert "backup software update is already in progress" in json.loads(response.data)["error"]
     # The running backup operation's record was not replaced.
     record = registry.get(agent_id)
     assert record is not None
@@ -2004,6 +2004,134 @@ def test_backup_service_update_cancel_flags_a_running_update(tmp_path: Path) -> 
 
     assert response.status_code == 200
     assert registry.is_cancel_requested(agent_id) is True
+
+
+def test_backup_restore_unknown_workspace_returns_404(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    resolver = make_resolver_with_data(make_agents_json(AgentId()))
+    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
+
+    response = client.post(f"/api/v1/workspaces/{AgentId()}/backups/abc123/restore", headers=_auth_header(), json={})
+
+    assert response.status_code == 404
+
+
+def test_backup_restore_unconfigured_workspace_returns_409(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    # Without a canonical restic.env there is no repository to restore from,
+    # so the dispatch is rejected up front instead of spawning a worker.
+    agent_id = AgentId()
+    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
+
+    response = client.post(f"/api/v1/workspaces/{agent_id}/backups/abc123/restore", headers=_auth_header(), json={})
+
+    assert response.status_code == 409
+    assert "not configured" in json.loads(response.data)["error"]
+    # No operation record was created.
+    assert get_state(client.application).workspace_operation_registry.get(agent_id) is None
+
+
+def test_backup_restore_conflicts_with_a_running_operation(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    # Any RUNNING operation (including a double-pressed restore) makes a
+    # second dispatch a 409 instead of stacking a second worker.
+    agent_id = AgentId()
+    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
+    write_canonical_env(
+        WorkspacePaths(data_dir=tmp_path / "minds"),
+        agent_id,
+        "RESTIC_REPOSITORY=/tmp/repo\nRESTIC_PASSWORD=pw\n",
+    )
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.BACKUP_RESTORE, datetime.now(timezone.utc))
+
+    response = client.post(f"/api/v1/workspaces/{agent_id}/backups/abc123/restore", headers=_auth_header(), json={})
+
+    assert response.status_code == 409
+    assert "restore is already in progress" in json.loads(response.data)["error"]
+    record = registry.get(agent_id)
+    assert record is not None
+    assert record.kind == WorkspaceOperationKind.BACKUP_RESTORE
+
+
+def test_backup_service_update_cancel_flags_a_running_restore(tmp_path: Path) -> None:
+    # The shared cancel route also covers a waiting restore (same slot, same
+    # cancellable waiting phase).
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.BACKUP_RESTORE, datetime.now(timezone.utc))
+
+    response = client.post(f"/api/v1/workspaces/{agent_id}/backup-service/update/cancel", headers=_auth_header())
+
+    assert response.status_code == 200
+    assert registry.is_cancel_requested(agent_id) is True
+
+
+def test_backup_operation_status_reports_a_restore(tmp_path: Path) -> None:
+    # A BACKUP_RESTORE record is visible through the shared backup operations
+    # endpoint (the settings page polls it with the same code as update).
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.BACKUP_RESTORE, datetime.now(timezone.utc))
+
+    body = json.loads(client.get(f"/api/v1/workspaces/operations/backup/{agent_id}", headers=_auth_header()).data)
+
+    assert body["kind"] == "backup_restore"
+    assert body["status"] == "RUNNING"
+
+
+def test_backup_operation_status_reports_cancellable_only_before_mutation(tmp_path: Path) -> None:
+    # The UI drives the Cancel button off is_cancellable: offered while the
+    # operation is still waiting, withdrawn the moment its worker claims the
+    # point of no return.
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.BACKUP_RESTORE, datetime.now(timezone.utc))
+
+    waiting = json.loads(client.get(f"/api/v1/workspaces/operations/backup/{agent_id}", headers=_auth_header()).data)
+    assert waiting["is_cancellable"] is True
+
+    assert registry.begin_mutation(agent_id) is True
+    mutating = json.loads(client.get(f"/api/v1/workspaces/operations/backup/{agent_id}", headers=_auth_header()).data)
+    assert mutating["is_cancellable"] is False
+    assert mutating["status"] == "RUNNING"
+
+
+def test_backup_operation_status_reports_configure_as_never_cancellable(tmp_path: Path) -> None:
+    # Configure operations have no waiting phase, so a Cancel would always be
+    # a lie; the status must never offer it.
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.BACKUP_CONFIGURE, datetime.now(timezone.utc))
+
+    body = json.loads(client.get(f"/api/v1/workspaces/operations/backup/{agent_id}", headers=_auth_header()).data)
+
+    assert body["is_cancellable"] is False
+
+
+def test_backup_service_update_cancel_rejects_a_too_late_cancel(tmp_path: Path) -> None:
+    # Once the operation started mutating, a cancel must fail loudly (409)
+    # instead of pretending it took effect while the restore runs on.
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.BACKUP_RESTORE, datetime.now(timezone.utc))
+    assert registry.begin_mutation(agent_id) is True
+
+    response = client.post(f"/api/v1/workspaces/{agent_id}/backup-service/update/cancel", headers=_auth_header())
+
+    assert response.status_code == 409
+    assert "no longer be cancelled" in json.loads(response.data)["error"]
+    assert registry.is_cancel_requested(agent_id) is False
 
 
 def test_backup_service_configure_rejects_configure_later_and_invalid_providers(
