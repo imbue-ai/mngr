@@ -17,6 +17,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostState
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelError
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
@@ -904,7 +905,7 @@ def test_discovery_handler_spawns_shared_gateway_for_every_provider(
             )
             for provider_name in ("local", "docker", "lima", "vultr", "modal"):
                 # ssh_info=None is fine here -- it keeps the test off the SSH path.
-                handler(AgentId(), HostId(), None, provider_name)
+                handler(AgentId(), HostId(), None, provider_name, HostState.RUNNING)
             assert manager.is_gateway_running
             # Same shared gateway across all five callbacks; ensure it actually came up.
             # ``start_gateway`` is idempotent and returns the bound port even
@@ -976,7 +977,7 @@ def test_discovery_handler_sets_up_reverse_tunnel_when_ssh_info_given(
             concurrency_group=cg,
             mngr_ctx=temp_mngr_ctx,
         )
-        handler(agent_id, HostId(), ssh_info, "local")
+        handler(agent_id, HostId(), ssh_info, "local", HostState.RUNNING)
 
         assert manager.is_gateway_running
         # ``start_gateway`` is idempotent and returns the bound port even
@@ -1021,7 +1022,7 @@ def test_discovery_handler_skips_reverse_tunnel_when_ssh_info_missing(
             concurrency_group=cg,
             mngr_ctx=temp_mngr_ctx,
         )
-        handler(AgentId(), HostId(), None, "local")
+        handler(AgentId(), HostId(), None, "local", HostState.RUNNING)
 
         assert manager.is_gateway_running
         assert tunnel_manager._calls == []
@@ -1045,7 +1046,7 @@ def test_discovery_handler_swallows_gateway_errors(tmp_path: Path, temp_mngr_ctx
             concurrency_group=cg,
             mngr_ctx=temp_mngr_ctx,
         )
-        handler(AgentId(), HostId(), None, "local")
+        handler(AgentId(), HostId(), None, "local", HostState.RUNNING)
     assert not manager.is_gateway_running
     assert tunnel_manager._calls == []
 
@@ -1094,7 +1095,7 @@ def test_discovery_handler_dispatches_vps_provisioning_in_addition_to_desktop_tu
             concurrency_group=cg,
             mngr_ctx=temp_mngr_ctx,
         )
-        handler(agent_id, host_id, ssh_info, "imbue_cloud")
+        handler(agent_id, host_id, ssh_info, "imbue_cloud", HostState.RUNNING)
         host_side_port = manager.start_gateway(cg)
 
         # Provisioning runs on its own fire-and-forget CG thread; poll for it.
@@ -1133,7 +1134,7 @@ def test_discovery_handler_dispatches_vps_provisioning_when_desktop_tunnel_fails
             concurrency_group=cg,
             mngr_ctx=temp_mngr_ctx,
         )
-        handler(agent_id, host_id, ssh_info, "imbue_cloud")
+        handler(agent_id, host_id, ssh_info, "imbue_cloud", HostState.RUNNING)
 
         # Provisioning runs on its own fire-and-forget CG thread; poll for it.
         poll_event = threading.Event()
@@ -1143,6 +1144,72 @@ def test_discovery_handler_dispatches_vps_provisioning_when_desktop_tunnel_fails
 
         # The desktop tunnel raised, yet the VPS provisioning was still dispatched.
         assert handler._provisioned == [(agent_id, host_id)]
+        manager.stop_gateway()
+
+
+def test_discovery_handler_tears_down_tunnel_for_stopped_host(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
+    """A host discovered as STOPPED has its reverse tunnel torn down and no new one set up.
+
+    A stopped container has no live sshd, so keeping the reverse tunnel would
+    leave the tunnel manager's health-check loop re-dialing a dead endpoint
+    forever. The shared desktop gateway still stays up (it outlives any single
+    agent).
+    """
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
+    tunnel_manager = _RecordingTunnelManager()
+    agent_id = AgentId()
+    ssh_info = RemoteSSHInfo(user="root", host="192.0.2.1", port=22, key_path=tmp_path / "k")
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = LatchkeyDiscoveryHandler(
+            latchkey=manager,
+            tunnel_manager=tunnel_manager,
+            concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
+        )
+        handler(agent_id, HostId(), ssh_info, "local", HostState.STOPPED)
+
+        assert manager.is_gateway_running
+        assert tunnel_manager._calls == []
+        assert tunnel_manager._removed_agent_ids == [str(agent_id)]
+        manager.stop_gateway()
+
+
+def test_stopped_host_skips_provisioning_and_clears_provisioned_marker(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A STOPPED VPS host skips provisioning and is dropped from the provisioned set.
+
+    Dispatching provisioning against a stopped container is exactly what raised
+    the ``container ... is not running`` error; gating on the host state prevents
+    it. Clearing the provisioned marker means a later restart re-runs the
+    idempotent provisioning (the container may be recreated while stopped).
+    """
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
+    tunnel_manager = _RecordingTunnelManager()
+    agent_id = AgentId()
+    host_id = HostId()
+    ssh_info = RemoteSSHInfo(user="root", host="192.0.2.1", port=2222, key_path=tmp_path / "k")
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = _ProvisionRecordingHandler(
+            latchkey=manager,
+            tunnel_manager=tunnel_manager,
+            concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
+        )
+        # The host was provisioned earlier this session, while it was running.
+        with handler._remote_hosts_lock:
+            handler._provisioned_hosts.add(str(host_id))
+
+        handler(agent_id, host_id, ssh_info, "imbue_cloud", HostState.STOPPED)
+
+        assert handler._provisioned == []
+        assert tunnel_manager._removed_agent_ids == [str(agent_id)]
+        with handler._remote_hosts_lock:
+            assert str(host_id) not in handler._provisioned_hosts
         manager.stop_gateway()
 
 
