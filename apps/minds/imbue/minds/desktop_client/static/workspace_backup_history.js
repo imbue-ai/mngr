@@ -13,7 +13,7 @@
   var prevBtn = document.getElementById('history-prev-btn');
   var nextBtn = document.getElementById('history-next-btn');
 
-  var PAGE_SIZE = 20;
+  var PAGE_SIZE = 15;
   var offset = 0;
   var snapshots = [];
 
