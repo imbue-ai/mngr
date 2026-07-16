@@ -31,7 +31,6 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
-from imbue.imbue_common.primitives import NonNegativeInt
 from imbue.imbue_common.pure import pure
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.base_agent import quote_agent_args
@@ -326,16 +325,16 @@ class ClaudeAgentConfig(AgentTypeConfig):
         description="When True, adds `--disallowed-tools AskUserQuestion` to the agent invocation to "
         "prevent it from ever asking questions (which can cause the agent to get blocked)",
     )
-    auto_accept_prompt_depth: NonNegativeInt = Field(
-        default=NonNegativeInt(0),
+    auto_accept_prompt_depth: Annotated[int, Field(ge=0)] = Field(
+        default=0,
         description="After a message is delivered, if it opened a blocking interactive selector (e.g. the "
         "/model confirmation), auto-accept the highlighted default by pressing Enter up to this many times "
         "(clearing chained dialogs). 0 (the default) disables auto-accept: a blocking selector instead makes "
         "the send report that the message was delivered but the agent is now blocked. Each auto-accept is "
         "logged and recorded as an agent event.",
     )
-    auto_accept_preflight_prompt_depth: NonNegativeInt = Field(
-        default=NonNegativeInt(0),
+    auto_accept_preflight_prompt_depth: Annotated[int, Field(ge=0)] = Field(
+        default=0,
         description="If a blocking dialog is already present when a send starts (or when the agent is coming "
         "up), auto-accept its highlighted default by pressing Enter up to this many times before giving up. "
         "0 (the default) disables it: a pre-existing blocking dialog aborts the send. Independent of "
