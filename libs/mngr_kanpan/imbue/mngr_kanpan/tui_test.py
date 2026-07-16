@@ -44,6 +44,7 @@ from imbue.mngr_kanpan.data_types import KanpanCommand
 from imbue.mngr_kanpan.data_types import KanpanPluginConfig
 from imbue.mngr_kanpan.data_types import MarkableBuiltinCommand
 from imbue.mngr_kanpan.data_types import MarkableBuiltinRole
+from imbue.mngr_kanpan.markdown_render import flatten_markup_line
 from imbue.mngr_kanpan.testing import make_board_snapshot
 from imbue.mngr_kanpan.testing import make_mngr_ctx_with_config
 from imbue.mngr_kanpan.testing import make_pr_field
@@ -102,8 +103,6 @@ from imbue.mngr_kanpan.tui import _last_nonempty_line
 from imbue.mngr_kanpan.tui import _legend_markup
 from imbue.mngr_kanpan.tui import _load_user_commands
 from imbue.mngr_kanpan.tui import _make_reply_edit
-from imbue.mngr_kanpan.tui import _markdown_inline_markup
-from imbue.mngr_kanpan.tui import _markdown_line_markup
 from imbue.mngr_kanpan.tui import _on_batch_item_poll
 from imbue.mngr_kanpan.tui import _on_peek_capture_poll
 from imbue.mngr_kanpan.tui import _on_peek_reply_poll
@@ -1870,7 +1869,7 @@ def test_last_nonempty_line_all_blank_returns_empty() -> None:
 
 def test_peek_body_lines_tails_to_window_with_marker() -> None:
     transcript = "\n".join(f"line{i}" for i in range(30)) + "\n\n\n"
-    lines = _peek_body_lines(transcript, [])
+    lines = [flatten_markup_line(line) for line in _peek_body_lines(transcript, [])]
     # Trailing blanks dropped; only the newest PEEK_BODY_HEIGHT lines show, under a ⋯ marker.
     assert lines[0] == "⋯"
     assert lines[-1] == "line29"
@@ -1879,7 +1878,7 @@ def test_peek_body_lines_tails_to_window_with_marker() -> None:
 
 def test_peek_body_lines_short_message_has_no_marker() -> None:
     transcript = "[2026-07-07T00:14:35Z] assistant:\nall done, tests pass\n"
-    lines = _peek_body_lines(transcript, [])
+    lines = [flatten_markup_line(line) for line in _peek_body_lines(transcript, [])]
     assert "⋯" not in lines
     assert lines[-1] == "all done, tests pass"
 
@@ -1889,7 +1888,7 @@ def test_peek_body_lines_empty_transcript_is_empty() -> None:
 
 
 def test_peek_body_lines_appends_pending_reply() -> None:
-    lines = _peek_body_lines("[..] assistant:\nhi", ["my reply"])
+    lines = [flatten_markup_line(line) for line in _peek_body_lines("[..] assistant:\nhi", ["my reply"])]
     # A sent-but-not-yet-echoed reply is appended as a `›` line so it shows immediately.
     assert lines[-1] == "› my reply"
 
@@ -2012,53 +2011,12 @@ def test_write_terminal_title_emits_osc_zero() -> None:
     assert out.getvalue() == "\x1b]0;kanpan\x07"
 
 
-def test_markdown_inline_code_span_accented() -> None:
-    assert _markdown_inline_markup("run `mngr list` now") == [
-        "run ",
-        ("peek_hint", "`"),
-        ("md_code", "mngr list"),
-        ("peek_hint", "`"),
-        " now",
-    ]
-
-
-def test_markdown_inline_bold_accented() -> None:
-    assert _markdown_inline_markup("a **big** deal") == [
-        "a ",
-        ("peek_hint", "**"),
-        ("md_bold", "big"),
-        ("peek_hint", "**"),
-        " deal",
-    ]
-
-
-def test_markdown_inline_plain_and_unmatched_backtick_pass_through() -> None:
-    assert _markdown_inline_markup("nothing special") == ["nothing special"]
-    assert _markdown_inline_markup("stray ` tick") == ["stray ` tick"]
-    assert _markdown_inline_markup("") == [""]
-
-
-def test_markdown_line_heading_and_bullet_accented() -> None:
-    heading, in_fence = _markdown_line_markup("## Results", False)
-    assert heading == [("peek_hint", "## "), ("md_bold", "Results")]
-    assert in_fence is False
-    bullet, in_fence = _markdown_line_markup("- fix the `bug`", False)
-    assert bullet[0] == ""
-    assert bullet[1] == ("peek_hint", "- ")
-    assert ("md_code", "bug") in bullet
-    assert in_fence is False
-
-
-def test_markdown_line_fence_toggles_and_renders_code() -> None:
-    fence, in_fence = _markdown_line_markup("```python", False)
-    assert fence == [("peek_hint", "```python")]
-    assert in_fence is True
-    code, in_fence = _markdown_line_markup("# a comment, not a heading", True)
-    assert code == [("md_code", "# a comment, not a heading")]
-    assert in_fence is True
-    closing, in_fence = _markdown_line_markup("```", True)
-    assert closing == [("peek_hint", "```")]
-    assert in_fence is False
+def test_peek_body_markup_styles_message_markdown() -> None:
+    transcript = "[2026-07-15T00:00:00Z] assistant:\nrun `mngr list` and see [the PR](https://github.com/x/y/pull/1)"
+    markup = _peek_body_markup(transcript, [])
+    assert ("md_code", "mngr list") in markup
+    assert ("md_link", "the PR") in markup
+    assert not any("https://" in seg for seg in markup if isinstance(seg, str))
 
 
 def test_peek_body_markup_fence_cut_by_window_still_renders_code() -> None:
@@ -2070,10 +2028,11 @@ def test_peek_body_markup_fence_cut_by_window_still_renders_code() -> None:
     assert ("peek_hint", "```") in markup
 
 
-def test_peek_body_markup_header_resets_fence_state() -> None:
-    transcript = "[2026-07-15T00:00:00Z] assistant:\n```\n[2026-07-15T00:00:01Z] user:\nplain text"
+def test_peek_body_markup_fence_does_not_leak_across_messages() -> None:
+    transcript = "[2026-07-15T00:00:00Z] assistant:\n```\ncode\n[2026-07-15T00:00:01Z] user:\nplain text"
     markup = _peek_body_markup(transcript, [])
     assert "plain text" in markup
+    assert ("peek_hint", "user:") in markup
 
 
 def test_legend_bindings_overlay_includes_user_custom_commands() -> None:

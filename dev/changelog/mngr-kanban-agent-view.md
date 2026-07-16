@@ -1,1 +1,1 @@
-The monorepo lockfile (`uv.lock`) now pins `urwid-readline`, a new dependency the kanpan board uses for readline-style editing in its agent-reply input.
+The monorepo lockfile (`uv.lock`) now pins two new kanpan dependencies: `urwid-readline` (readline-style editing in the agent-reply input) and `markdown-it-py` (markdown rendering in the peek panel).
