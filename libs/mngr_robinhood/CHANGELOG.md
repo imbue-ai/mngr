@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Claude Fable family pricing ($10 / $50 per 1M input / output tokens, cache write $12.50, cache read $1.00) in the Agent SDK per-model price table, so `ResultMessage.total_cost_usd` is populated for `claude-fable-5` sessions instead of being left unset.
+
 ## [v0.1.6] - 2026-06-18
 
 ### Changed

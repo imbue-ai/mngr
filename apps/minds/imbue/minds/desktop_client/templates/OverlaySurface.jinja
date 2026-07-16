@@ -1,0 +1,30 @@
+{#def title="Minds", body_class="bg-transparent text-primary font-sans antialiased", body_style="", body_attrs="", head="", scripts="" #}
+{#
+  Base variant for edge-to-edge transparent surfaces loaded into the shared
+  overlay WebContentsView: the overlay host and the modal pages it hosts
+  (workspace menu / inbox / help / sign-in), plus any future overlay surface.
+
+  The contract these pages share: they paint fixed full-viewport layers
+  (their own dim backdrop or measured bubbles), never scroll at the document
+  level, and must paint all the way to the window's right edge. That last
+  part is why this wrapper exists -- it pins ``no-scrollbar-gutter`` on the
+  html element so the global ``scrollbar-gutter: stable`` rule (app.css)
+  cannot reserve a classic-scrollbar gutter that nothing paints, which
+  clipped tooltips mid-label and left modal dim backdrops short of the
+  window edge. New overlay surfaces get that opt-out by wrapping in this
+  component instead of remembering an html_class.
+
+  The chrome titlebar page is edge-to-edge too but NOT a transparent
+  overlay (it paints the titlebar background), so it stays on Base with an
+  explicit ``html_class="no-scrollbar-gutter"``.
+
+  Args mirror Base (title / body_style / body_attrs / head / scripts);
+  ``body_class`` defaults to the shared transparent overlay body.
+#}
+<Base title={{ title }}
+      html_class="no-scrollbar-gutter"
+      body_class={{ body_class }}
+      body_style={{ body_style }}
+      body_attrs={{ body_attrs }}
+      head={{ head }}
+      scripts={{ scripts }}>{{ content }}</Base>

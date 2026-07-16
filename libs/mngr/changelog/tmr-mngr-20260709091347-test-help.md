@@ -1,1 +1,0 @@
-Fixed the fresh-install test fixture (`isolated_mngr_venv`) to install the `overlay` workspace package, which mngr now declares as a dependency. Without it, the isolated venv failed to import `imbue.overlay`, breaking every `test_install.py` command (including `mngr --help`).

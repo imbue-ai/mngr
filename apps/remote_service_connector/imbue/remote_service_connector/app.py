@@ -26,6 +26,7 @@ import threading
 import time
 from collections.abc import Callable
 from collections.abc import Iterator
+from enum import Enum
 from typing import Any
 from typing import NoReturn
 from typing import Protocol
@@ -64,8 +65,9 @@ from supertokens_python.recipe.emailpassword.syncio import send_reset_password_e
 from supertokens_python.recipe.emailpassword.syncio import sign_in as ep_sign_in
 from supertokens_python.recipe.emailpassword.syncio import sign_up as ep_sign_up
 from supertokens_python.recipe.emailpassword.syncio import update_email_or_password
-from supertokens_python.recipe.emailverification import EmailVerificationClaim
+from supertokens_python.recipe.emailverification.interfaces import CreateEmailVerificationTokenOkResult
 from supertokens_python.recipe.emailverification.interfaces import VerifyEmailUsingTokenOkResult
+from supertokens_python.recipe.emailverification.syncio import create_email_verification_token
 from supertokens_python.recipe.emailverification.syncio import is_email_verified
 from supertokens_python.recipe.emailverification.syncio import send_email_verification_email
 from supertokens_python.recipe.emailverification.syncio import verify_email_using_token
@@ -1617,13 +1619,12 @@ def _authenticate_supertokens(
 
     try:
         # Pass ``override_global_claim_validators=lambda *_: []`` so the
-        # session getter does NOT auto-reject unverified-email tokens at
-        # the validator step. We want our own explicit
-        # ``if not is_verified: raise "Email not verified"`` below to
-        # fire instead, so the operator-facing error message tells the
-        # user what to fix (the SDK's default rejection surfaces as a
-        # generic ``SuperTokensSessionError`` → "Invalid token", which
-        # is misleading).
+        # session getter does NOT auto-reject based on the token's
+        # email-verification claim. We determine verification ourselves from a
+        # live core lookup below (see the ``email_getter`` call), and raise a
+        # clear "Email not verified" only when the email is genuinely
+        # unverified (the SDK's default rejection surfaces as a generic
+        # ``SuperTokensSessionError`` → "Invalid token", which is misleading).
         session = session_getter(
             access_token=token,
             anti_csrf_check=False,
@@ -1635,16 +1636,22 @@ def _authenticate_supertokens(
     if session is None:
         raise HTTPException(status_code=401, detail="Invalid or expired SuperTokens session")
 
-    # Reject tokens where the email is not verified
-    payload = session.get_access_token_payload()
-    is_verified = EmailVerificationClaim.get_value_from_payload(payload)
-    if not is_verified:
-        raise HTTPException(status_code=401, detail="Email not verified")
-
     user_id = session.get_user_id()
     # Derive 16-char hex prefix from UUID
     user_id_prefix = user_id.replace("-", "")[:_USER_ID_PREFIX_LENGTH]
+
+    # Resolve the verified email live from the core rather than trusting the
+    # token's cached email-verification claim. That claim is baked into the
+    # access token at login and cannot reflect a verification that happened
+    # afterwards -- e.g. a user who was just added to the paid list (and thus
+    # auto-verified) would keep getting rejected until their token refreshed.
+    # ``email_getter`` returns an email only for a *verified* login method, so a
+    # ``None`` result means "no verified email" and we reject. The core lookup
+    # already ran here on every authenticated request, so gating on it instead
+    # of on the token claim adds no extra round trip on the success path.
     email = email_getter(user_id)
+    if email is None:
+        raise HTTPException(status_code=401, detail="Email not verified")
 
     return AdminAuth(username=user_id_prefix, email=email)
 
@@ -2912,6 +2919,10 @@ def add_paid_email(request: Request, body: PaidListEntryRequest) -> dict[str, ob
         require_paid_admin_key(request)
         email = _normalize_paid_email(body.value)
         _activate_paid_entry("paid_emails", "email", email)
+        # If this email already has an account, verify it now so the just-granted
+        # paid access is not blocked by an unverified email. Best-effort: never
+        # let a verification hiccup fail the paid-list write.
+        _mark_paid_email_verified_best_effort(email)
         return {"status": "added", "email": email}
 
 
@@ -3504,6 +3515,458 @@ def delete_bucket_key_endpoint(request: Request, access_key_id: str) -> dict[str
 
 
 # ---------------------------------------------------------------------------
+# Workspace sync endpoints (records + account key bundles)
+#
+# Per-account workspace records: plaintext metadata (name, color, provider,
+# location, lifecycle state) plus an opaque, client-side-encrypted secrets
+# blob the server can never read. Writes are compare-and-swap on a per-row
+# revision counter. The account key bundle holds the argon2id inputs and the
+# password-wrapped data-encryption key (also opaque). All endpoints require
+# admin (SuperTokens) auth but are NOT paid-gated -- sync is a free feature.
+# ---------------------------------------------------------------------------
+
+
+# Hard caps on what one sync row may carry. These exist to bound a row's size
+# (the server can never read the blobs, so it cannot validate their contents)
+# -- not to police the payload's shape. Today's payload uses a small fraction
+# of each, and the headroom is deliberate: the secrets blob is an opaque,
+# client-versioned envelope, so adding another secret to it later must not
+# require a connector deploy to raise a limit.
+#
+# Client-encrypted secrets blob, decoded bytes. Today: an SSH private key +
+# known_hosts + a canonical restic env (a few KiB).
+_MAX_ENCRYPTED_SECRETS_BYTES = 2560 * 1024
+# Each binary key-bundle field: the password-wrapped DEK (a 32-byte key +
+# nonce + tag) and the argon2id salt. Today: under 100 bytes each.
+_MAX_KEY_BUNDLE_FIELD_BYTES = 40960
+# Each plaintext metadata field (names, ids, device labels).
+_MAX_SYNC_TEXT_FIELD_LENGTH = 5120
+
+
+class WorkspaceRecordState(str, Enum):
+    """Lifecycle state of a synced workspace record (lowercase wire/DB values)."""
+
+    ACTIVE = "active"
+    DESTROYED = "destroyed"
+
+
+class WorkspaceRecordModel(BaseModel):
+    """Wire form of one synced workspace record (also the PUT body)."""
+
+    host_id: str = Field(min_length=1, max_length=_MAX_SYNC_TEXT_FIELD_LENGTH, description="Host the workspace is on")
+    agent_id: str = Field(min_length=1, max_length=_MAX_SYNC_TEXT_FIELD_LENGTH, description="Logical workspace id")
+    display_name: str = Field(max_length=_MAX_SYNC_TEXT_FIELD_LENGTH, description="Workspace display name")
+    color: str | None = Field(default=None, max_length=64, description="Workspace accent color (#rrggbb)")
+    provider_kind: str = Field(
+        max_length=_MAX_SYNC_TEXT_FIELD_LENGTH,
+        description="mngr provider backend kind; empty when not yet known (create-path seed records)",
+    )
+    hosting_device_id: str | None = Field(
+        default=None,
+        max_length=_MAX_SYNC_TEXT_FIELD_LENGTH,
+        description="Install that hosts a local workspace (None for cloud rows)",
+    )
+    device_label: str = Field(
+        default="", max_length=_MAX_SYNC_TEXT_FIELD_LENGTH, description="Human-readable device name"
+    )
+    state: WorkspaceRecordState = Field(description="Lifecycle state; 'destroyed' is a tombstone")
+    restored_from_host_id: str | None = Field(
+        default=None, max_length=_MAX_SYNC_TEXT_FIELD_LENGTH, description="Lineage link for restored workspaces"
+    )
+    encrypted_secrets: str | None = Field(
+        default=None, description="Base64 of the client-encrypted secrets blob (opaque to the server)"
+    )
+    revision: int = Field(ge=1, description="Per-row monotonic revision; PUT is CAS on this")
+    created_at: str = Field(default="", description="Server timestamp (response only)")
+    updated_at: str = Field(default="", description="Server timestamp (response only)")
+
+
+class AccountKeyBundleModel(BaseModel):
+    """Wire form of the per-account password-wrapped data key (also the PUT body)."""
+
+    kdf_salt: str = Field(min_length=1, description="Base64 argon2id salt")
+    kdf_time_cost: int = Field(gt=0, description="argon2id iteration count")
+    kdf_memory_kib: int = Field(gt=0, description="argon2id memory (KiB)")
+    kdf_parallelism: int = Field(gt=0, description="argon2id lane count")
+    wrapped_dek: str = Field(min_length=1, description="Base64 password-wrapped DEK (opaque to the server)")
+    key_epoch: int = Field(ge=1, description="Bumped only on compromise recovery")
+    updated_at: str = Field(default="", description="Server timestamp (response only)")
+
+
+class SyncRevisionConflictError(Exception):
+    """CAS failure: the stored revision does not precede the pushed one."""
+
+    def __init__(self, stored_record: dict[str, Any]) -> None:
+        super().__init__("workspace record revision conflict")
+        self.stored_record = stored_record
+
+
+class SyncActiveAgentConflictError(Exception):
+    """A second ACTIVE record for the same (user_id, agent_id) was rejected."""
+
+
+class SyncStoreConsistencyError(RuntimeError):
+    """The store violated one of its own invariants (e.g. a write returned no row)."""
+
+
+_WORKSPACE_RECORD_COLUMNS = (
+    "host_id, agent_id, display_name, color, provider_kind, hosting_device_id, device_label, "
+    "state, restored_from_host_id, encrypted_secrets, revision, created_at, updated_at"
+)
+
+# Must match the index name in migrations/013_workspace_sync.sql; used to tell
+# an active-agent conflict apart from a primary-key insert race.
+_ONE_ACTIVE_PER_AGENT_INDEX_NAME = "workspace_records_one_active_per_agent_idx"
+
+
+def _workspace_record_row_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
+    encrypted_secrets = row[9]
+    return {
+        "host_id": row[0],
+        "agent_id": row[1],
+        "display_name": row[2],
+        "color": row[3],
+        "provider_kind": row[4],
+        "hosting_device_id": row[5],
+        "device_label": row[6],
+        "state": row[7],
+        "restored_from_host_id": row[8],
+        "encrypted_secrets": (
+            base64.b64encode(bytes(encrypted_secrets)).decode("ascii") if encrypted_secrets is not None else None
+        ),
+        "revision": row[10],
+        "created_at": str(row[11]) if row[11] is not None else "",
+        "updated_at": str(row[12]) if row[12] is not None else "",
+    }
+
+
+class SyncStore(Protocol):
+    """Abstraction over the workspace_records + account_key_bundles tables."""
+
+    def list_records(self, user_id: str) -> list[dict[str, Any]]: ...
+    def put_record(self, user_id: str, record: dict[str, Any]) -> dict[str, Any]: ...
+    def delete_record(self, user_id: str, host_id: str) -> None: ...
+    def scrub_secrets(self, user_id: str) -> int: ...
+    def get_bundle(self, user_id: str) -> dict[str, Any] | None: ...
+    def put_bundle(self, user_id: str, bundle: dict[str, Any]) -> None: ...
+    def delete_bundle(self, user_id: str) -> None: ...
+
+
+class PostgresSyncStore:
+    """SyncStore backed by the connector's existing Neon DB (same DB as pool_hosts)."""
+
+    def list_records(self, user_id: str) -> list[dict[str, Any]]:
+        conn = _get_pool_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {_WORKSPACE_RECORD_COLUMNS} FROM workspace_records "
+                    "WHERE user_id = %s ORDER BY created_at",
+                    (user_id,),
+                )
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+        return [_workspace_record_row_to_dict(row) for row in rows]
+
+    def put_record(self, user_id: str, record: dict[str, Any]) -> dict[str, Any]:
+        """Insert or CAS-update one record; returns the stored row after the write.
+
+        An update requires ``record["revision"] == stored revision + 1``;
+        otherwise :class:`SyncRevisionConflictError` carries the stored row so
+        the client can merge and retry. The partial unique index on
+        ``(user_id, agent_id) WHERE state = 'active'`` surfaces as
+        :class:`SyncActiveAgentConflictError`. Two concurrent *first* pushes
+        of the same host_id both pass the FOR UPDATE probe and the loser's
+        INSERT hits the primary key instead; by then the winner's row is
+        committed, so one retry reports that race through the regular CAS
+        path (409 + stored row) rather than as an agent conflict.
+        """
+        try:
+            return self._put_record_once(user_id, record)
+        except psycopg2.errors.UniqueViolation:
+            return self._put_record_once(user_id, record)
+
+    def _put_record_once(self, user_id: str, record: dict[str, Any]) -> dict[str, Any]:
+        conn = _get_pool_db_connection()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"SELECT {_WORKSPACE_RECORD_COLUMNS} FROM workspace_records "
+                        "WHERE user_id = %s AND host_id = %s FOR UPDATE",
+                        (user_id, record["host_id"]),
+                    )
+                    existing = cur.fetchone()
+                    encrypted = record["encrypted_secrets"]
+                    encrypted_bytes = psycopg2.Binary(encrypted) if encrypted is not None else None
+                    try:
+                        if existing is None:
+                            cur.execute(
+                                "INSERT INTO workspace_records (user_id, host_id, agent_id, display_name, color, "
+                                "provider_kind, hosting_device_id, device_label, state, restored_from_host_id, "
+                                "encrypted_secrets, revision) "
+                                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                                f"RETURNING {_WORKSPACE_RECORD_COLUMNS}",
+                                (
+                                    user_id,
+                                    record["host_id"],
+                                    record["agent_id"],
+                                    record["display_name"],
+                                    record["color"],
+                                    record["provider_kind"],
+                                    record["hosting_device_id"],
+                                    record["device_label"],
+                                    record["state"],
+                                    record["restored_from_host_id"],
+                                    encrypted_bytes,
+                                    record["revision"],
+                                ),
+                            )
+                        else:
+                            stored = _workspace_record_row_to_dict(existing)
+                            if record["revision"] != stored["revision"] + 1:
+                                raise SyncRevisionConflictError(stored)
+                            cur.execute(
+                                "UPDATE workspace_records SET agent_id = %s, display_name = %s, color = %s, "
+                                "provider_kind = %s, hosting_device_id = %s, device_label = %s, state = %s, "
+                                "restored_from_host_id = %s, encrypted_secrets = %s, "
+                                "revision = %s, updated_at = NOW() "
+                                "WHERE user_id = %s AND host_id = %s "
+                                f"RETURNING {_WORKSPACE_RECORD_COLUMNS}",
+                                (
+                                    record["agent_id"],
+                                    record["display_name"],
+                                    record["color"],
+                                    record["provider_kind"],
+                                    record["hosting_device_id"],
+                                    record["device_label"],
+                                    record["state"],
+                                    record["restored_from_host_id"],
+                                    encrypted_bytes,
+                                    record["revision"],
+                                    user_id,
+                                    record["host_id"],
+                                ),
+                            )
+                        written = cur.fetchone()
+                    except psycopg2.errors.UniqueViolation as exc:
+                        if exc.diag.constraint_name == _ONE_ACTIVE_PER_AGENT_INDEX_NAME:
+                            raise SyncActiveAgentConflictError(
+                                f"another ACTIVE record already exists for agent {record['agent_id']}"
+                            ) from exc
+                        # Any other unique violation (the primary key) is a
+                        # concurrent-insert race; the caller retries once.
+                        raise
+        finally:
+            conn.close()
+        if written is None:
+            # INSERT/UPDATE ... RETURNING on a locked, existing row always
+            # yields a row; reaching here means the store broke its own
+            # invariant, which must surface as a server error -- not as a 409
+            # whose "stored" row would be the pushed record (whose secrets are
+            # raw bytes at this point, not wire-shaped base64).
+            raise SyncStoreConsistencyError(f"workspace record write for host {record['host_id']} returned no row")
+        return _workspace_record_row_to_dict(written)
+
+    def delete_record(self, user_id: str, host_id: str) -> None:
+        conn = _get_pool_db_connection()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM workspace_records WHERE user_id = %s AND host_id = %s",
+                        (user_id, host_id),
+                    )
+        finally:
+            conn.close()
+
+    def scrub_secrets(self, user_id: str) -> int:
+        conn = _get_pool_db_connection()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE workspace_records SET encrypted_secrets = NULL, updated_at = NOW() "
+                        "WHERE user_id = %s AND encrypted_secrets IS NOT NULL",
+                        (user_id,),
+                    )
+                    scrubbed = cur.rowcount
+        finally:
+            conn.close()
+        return scrubbed
+
+    def get_bundle(self, user_id: str) -> dict[str, Any] | None:
+        conn = _get_pool_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT kdf_salt, kdf_time_cost, kdf_memory_kib, kdf_parallelism, wrapped_dek, key_epoch, "
+                    "updated_at FROM account_key_bundles WHERE user_id = %s",
+                    (user_id,),
+                )
+                row = cur.fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return None
+        return {
+            "kdf_salt": base64.b64encode(bytes(row[0])).decode("ascii"),
+            "kdf_time_cost": row[1],
+            "kdf_memory_kib": row[2],
+            "kdf_parallelism": row[3],
+            "wrapped_dek": base64.b64encode(bytes(row[4])).decode("ascii"),
+            "key_epoch": row[5],
+            "updated_at": str(row[6]) if row[6] is not None else "",
+        }
+
+    def put_bundle(self, user_id: str, bundle: dict[str, Any]) -> None:
+        conn = _get_pool_db_connection()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO account_key_bundles (user_id, kdf_salt, kdf_time_cost, kdf_memory_kib, "
+                        "kdf_parallelism, wrapped_dek, key_epoch) VALUES (%s, %s, %s, %s, %s, %s, %s) "
+                        "ON CONFLICT (user_id) DO UPDATE SET kdf_salt = EXCLUDED.kdf_salt, "
+                        "kdf_time_cost = EXCLUDED.kdf_time_cost, kdf_memory_kib = EXCLUDED.kdf_memory_kib, "
+                        "kdf_parallelism = EXCLUDED.kdf_parallelism, wrapped_dek = EXCLUDED.wrapped_dek, "
+                        "key_epoch = EXCLUDED.key_epoch, updated_at = NOW()",
+                        (
+                            user_id,
+                            psycopg2.Binary(bundle["kdf_salt"]),
+                            bundle["kdf_time_cost"],
+                            bundle["kdf_memory_kib"],
+                            bundle["kdf_parallelism"],
+                            psycopg2.Binary(bundle["wrapped_dek"]),
+                            bundle["key_epoch"],
+                        ),
+                    )
+        finally:
+            conn.close()
+
+    def delete_bundle(self, user_id: str) -> None:
+        conn = _get_pool_db_connection()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM account_key_bundles WHERE user_id = %s", (user_id,))
+        finally:
+            conn.close()
+
+
+@functools.cache
+def get_sync_store() -> SyncStore:
+    return PostgresSyncStore()
+
+
+def _decode_size_capped_base64(field_name: str, encoded: str, max_bytes: int) -> bytes:
+    """Decode a base64 request field, 400ing on malformed input or an oversized payload."""
+    try:
+        decoded = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"{field_name} is not valid base64") from exc
+    if len(decoded) > max_bytes:
+        raise HTTPException(status_code=400, detail=f"{field_name} exceeds the {max_bytes}-byte limit")
+    return decoded
+
+
+def _sync_caller_user_id(request: Request) -> str:
+    """Authenticate a sync endpoint call and return the caller's full user_id."""
+    auth = authenticate_request(request, get_ctx().ops)
+    require_admin(auth)
+    return _get_user_id_from_access_token(request.headers.get("authorization", "")[7:])
+
+
+@web_app.get("/sync/records")
+def list_workspace_records_endpoint(request: Request) -> dict[str, object]:
+    """List all of the caller's workspace records (metadata + opaque secrets)."""
+    with handle_endpoint_errors():
+        user_id = _sync_caller_user_id(request)
+        records = get_sync_store().list_records(user_id)
+        return {"records": [WorkspaceRecordModel(**record).model_dump() for record in records]}
+
+
+@web_app.put("/sync/records/{host_id}")
+def put_workspace_record_endpoint(request: Request, host_id: str, body: WorkspaceRecordModel) -> dict[str, object]:
+    """Insert or CAS-update one workspace record; 409 (with the stored row) on conflict."""
+    with handle_endpoint_errors():
+        user_id = _sync_caller_user_id(request)
+        if body.host_id != host_id:
+            raise HTTPException(status_code=400, detail="host_id in the path and body must match")
+        record = body.model_dump(mode="json")
+        record["encrypted_secrets"] = (
+            _decode_size_capped_base64("encrypted_secrets", body.encrypted_secrets, _MAX_ENCRYPTED_SECRETS_BYTES)
+            if body.encrypted_secrets is not None
+            else None
+        )
+        try:
+            stored = get_sync_store().put_record(user_id, record)
+        except SyncRevisionConflictError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "revision conflict",
+                    "stored": WorkspaceRecordModel(**exc.stored_record).model_dump(),
+                },
+            ) from exc
+        except SyncActiveAgentConflictError as exc:
+            raise HTTPException(status_code=409, detail={"message": str(exc)}) from exc
+        return WorkspaceRecordModel(**stored).model_dump()
+
+
+@web_app.delete("/sync/records/{host_id}")
+def delete_workspace_record_endpoint(request: Request, host_id: str) -> dict[str, str]:
+    """Remove one workspace record outright (disassociation; idempotent)."""
+    with handle_endpoint_errors():
+        user_id = _sync_caller_user_id(request)
+        get_sync_store().delete_record(user_id, host_id)
+        return {"status": "deleted"}
+
+
+@web_app.post("/sync/scrub-secrets")
+def scrub_sync_secrets_endpoint(request: Request) -> dict[str, object]:
+    """Strip encrypted_secrets from all the caller's records (the clear-password flow)."""
+    with handle_endpoint_errors():
+        user_id = _sync_caller_user_id(request)
+        return {"scrubbed": get_sync_store().scrub_secrets(user_id)}
+
+
+@web_app.get("/sync/bundle")
+def get_key_bundle_endpoint(request: Request) -> dict[str, object]:
+    """Fetch the caller's password-wrapped key bundle (404 when none is stored)."""
+    with handle_endpoint_errors():
+        user_id = _sync_caller_user_id(request)
+        bundle = get_sync_store().get_bundle(user_id)
+        if bundle is None:
+            raise HTTPException(status_code=404, detail="No key bundle stored for this account")
+        return AccountKeyBundleModel(**bundle).model_dump()
+
+
+@web_app.put("/sync/bundle")
+def put_key_bundle_endpoint(request: Request, body: AccountKeyBundleModel) -> dict[str, str]:
+    """Store (replace) the caller's password-wrapped key bundle."""
+    with handle_endpoint_errors():
+        user_id = _sync_caller_user_id(request)
+        bundle = body.model_dump()
+        bundle["kdf_salt"] = _decode_size_capped_base64("kdf_salt", body.kdf_salt, _MAX_KEY_BUNDLE_FIELD_BYTES)
+        bundle["wrapped_dek"] = _decode_size_capped_base64(
+            "wrapped_dek", body.wrapped_dek, _MAX_KEY_BUNDLE_FIELD_BYTES
+        )
+        get_sync_store().put_bundle(user_id, bundle)
+        return {"status": "ok"}
+
+
+@web_app.delete("/sync/bundle")
+def delete_key_bundle_endpoint(request: Request) -> dict[str, str]:
+    """Delete the caller's key bundle (idempotent; part of the clear-password flow)."""
+    with handle_endpoint_errors():
+        user_id = _sync_caller_user_id(request)
+        get_sync_store().delete_bundle(user_id)
+        return {"status": "deleted"}
+
+
+# ---------------------------------------------------------------------------
 # SuperTokens auth proxy endpoints
 #
 # These endpoints front the SuperTokens core so that clients (e.g. the minds
@@ -3614,6 +4077,47 @@ def _build_session_tokens(user_id: str) -> SessionTokens:
     )
 
 
+def _mark_email_verified(recipe_user_id: RecipeUserId, email: str) -> None:
+    """Force-verify an email without the user clicking a link.
+
+    Mints a verification token and immediately consumes it. A no-op when the
+    email is already verified (the SDK then returns an already-verified result
+    that carries no token to consume).
+    """
+    token_result = create_email_verification_token(
+        tenant_id=_AUTH_TENANT_ID,
+        recipe_user_id=recipe_user_id,
+        email=email,
+    )
+    if isinstance(token_result, CreateEmailVerificationTokenOkResult):
+        verify_email_using_token(tenant_id=_AUTH_TENANT_ID, token=token_result.token)
+
+
+def _mark_paid_email_verified_best_effort(email: str) -> None:
+    """Mark any existing account for ``email`` verified, swallowing failures.
+
+    Called when an email is added to the paid list so a user who already signed
+    up (but never verified) is not left locked out of the paid access they were
+    just granted. Purely best-effort: SuperTokens being unconfigured or
+    unreachable must never fail the paid-list write, and an email with no
+    account yet is simply a no-op (that user is auto-verified at signup
+    instead).
+    """
+    if not os.environ.get("SUPERTOKENS_CONNECTION_URI"):
+        return
+    try:
+        users = list_users_by_account_info(
+            tenant_id=_AUTH_TENANT_ID,
+            account_info=AccountInfoInput(email=email),
+        )
+        for user in users:
+            for login_method in user.login_methods:
+                if login_method.email == email and not login_method.verified:
+                    _mark_email_verified(recipe_user_id=login_method.recipe_user_id, email=email)
+    except (SuperTokensSessionError, SuperTokensGeneralError) as exc:
+        logger.warning("Failed to auto-verify paid email %s: %s", email, exc)
+
+
 def _require_supertokens_configured() -> None:
     if not os.environ.get("SUPERTOKENS_CONNECTION_URI"):
         raise HTTPException(status_code=503, detail="SuperTokens not configured on the server")
@@ -3645,13 +4149,30 @@ def auth_signup(body: SignUpRequest) -> AuthResponse:
 
             user = result.user
             recipe_user_id = user.login_methods[0].recipe_user_id if user.login_methods else RecipeUserId(user.id)
+
+            # Paid users skip the email-verification round trip: mark the new
+            # account verified up front (before minting the session, so its very
+            # first token already carries the verified claim) and don't send a
+            # verification email. A paid-list lookup failure falls back to the
+            # normal verify-by-email flow rather than failing the signup.
+            # ``KeyError`` covers an unset ``DATABASE_URL`` (pool DB not
+            # configured); ``psycopg2.Error`` covers a connect/query failure.
+            try:
+                is_paid = is_email_paid(email)
+            except (psycopg2.Error, KeyError) as exc:
+                logger.warning("Paid-list lookup failed during signup for %s; treating as not paid: %s", email, exc)
+                is_paid = False
+            if is_paid:
+                _mark_email_verified(recipe_user_id=recipe_user_id, email=email)
+
             tokens = _build_session_tokens(user.id)
-            send_email_verification_email(
-                tenant_id=_AUTH_TENANT_ID,
-                user_id=user.id,
-                recipe_user_id=recipe_user_id,
-                email=email,
-            )
+            if not is_paid:
+                send_email_verification_email(
+                    tenant_id=_AUTH_TENANT_ID,
+                    user_id=user.id,
+                    recipe_user_id=recipe_user_id,
+                    email=email,
+                )
         except (SuperTokensSessionError, SuperTokensGeneralError) as exc:
             logger.error("SuperTokens SDK error during signup", exc_info=exc)
             return AuthResponse(status="ERROR", message="Auth backend unavailable")
@@ -3659,7 +4180,7 @@ def auth_signup(body: SignUpRequest) -> AuthResponse:
             status="OK",
             user=AuthUser(user_id=user.id, email=email),
             tokens=tokens,
-            needs_email_verification=True,
+            needs_email_verification=not is_paid,
         )
 
 

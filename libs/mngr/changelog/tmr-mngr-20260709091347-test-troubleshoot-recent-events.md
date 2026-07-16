@@ -1,1 +1,0 @@
-Fixed: removed the superfluous `@pytest.mark.rsync` from the `test_troubleshoot_recent_events` e2e tutorial test. The test exercises `mngr event` against a locally created `command` agent, which uses tmux but never invokes rsync, so the resource guard flipped the otherwise-passing test to failed. The `@pytest.mark.tmux` mark is retained.

@@ -1,4 +1,4 @@
-{#def git_url, branch, host_name, launch_modes, selected_launch_mode, ai_providers, selected_ai_provider, docker_runtimes, selected_docker_runtime, backup_providers, selected_backup_provider, backup_api_key_env, has_saved_backup_password, is_master_password_set, accounts, default_account_id, anthropic_api_key, error_message, region_options_by_launch_mode, region_selected_by_launch_mode, selected_preset="remote", start_advanced=False, color="#0b292b" #}
+{#def git_url, branch, host_name, launch_modes, selected_launch_mode, ai_providers, selected_ai_provider, docker_runtimes, selected_docker_runtime, backup_providers, selected_backup_provider, backup_api_key_env, accounts, default_account_id, anthropic_api_key, error_message, region_options_by_launch_mode, region_selected_by_launch_mode, selected_preset="remote", start_advanced=False, color="#0b292b" #}
 {#
   Workspace creation form.
 
@@ -23,6 +23,7 @@
 {% set _default_restic_env = "# see docs linked above for available options\n# for example:\nRESTIC_REPOSITORY=s3:s3.amazonaws.com/<bucket_name>\nAWS_ACCESS_KEY_ID=\nAWS_SECRET_ACCESS_KEY=\n" %}
 {% set _scripts %}
 <script src="/_static/api_errors.js"></script>
+<script src="/_static/sync_status_banner.js" defer></script>
 <script>
   (function() {
     // The remote (Imbue Cloud) preset needs an Imbue account. When a signed-out
@@ -56,8 +57,6 @@
     var aiProviderError = document.getElementById('ai-provider-account-error');
     var backupSelect = document.getElementById('backup_provider');
     var backupApiKeyRow = document.getElementById('backup-api-key-row');
-    var backupMasterPasswordRow = document.getElementById('backup-master-password-row');
-    var backupMasterPasswordInput = document.getElementById('backup_master_password');
     var backupProviderError = document.getElementById('backup-provider-account-error');
     var submitBtn = document.getElementById('create-submit');
     var regionRow = document.getElementById('region-row');
@@ -73,7 +72,6 @@
     var hostNameError = document.getElementById('host-name-error');
     var colorInput = document.getElementById('create-color-input');
     var backupApiKeyEnvInput = document.getElementById('backup_api_key_env');
-    var backupSavePasswordInput = document.getElementById('backup_save_password');
     var createError = document.getElementById('create-error');
     // The field highlighted by the last create error, cleared before the next try.
     var lastErrorField = null;
@@ -341,8 +339,6 @@
         anthropic_api_key: fieldValue(apiKeyInput).trim(),
         backup_provider: backupSelect.value,
         backup_api_key_env: fieldValue(backupApiKeyEnvInput),
-        backup_master_password: fieldValue(backupMasterPasswordInput),
-        backup_save_password: backupSavePasswordInput ? backupSavePasswordInput.checked : false,
         region: fieldValue(regionSelect),
         // The container runtime only applies to the local Docker provider; the
         // select is disabled for every other compute provider, so omit it then
@@ -483,15 +479,8 @@
       apiKeyInput.required = isApiKey;
 
       var backupValue = backupSelect.value;
-      var isBackupConfigured = backupValue === 'IMBUE_CLOUD' || backupValue === 'API_KEY';
       var isBackupApiKey = backupValue === 'API_KEY';
       backupApiKeyRow.classList.toggle('hidden', !isBackupApiKey);
-
-      // The master password field shows for any real backup provider. It is
-      // never required: blank means "use the saved password, else the empty
-      // password" -- the server validates whichever value results against the
-      // stored hash.
-      if (backupMasterPasswordRow) backupMasterPasswordRow.classList.toggle('hidden', !isBackupConfigured);
 
       var launchInvalid = !hasAccount && launchSelect.value === 'IMBUE_CLOUD';
       var aiInvalid = !hasAccount && aiProviderSelect.value === 'IMBUE_CLOUD';
@@ -698,23 +687,6 @@
                     :value="backup_api_key_env if backup_api_key_env else _default_restic_env" />
         </div>
 
-        {% if is_master_password_set %}
-        {# Only rendered when a non-empty master password exists (it is needed
-           to initialize the repository); the JS shows it only while a real
-           backup provider is selected. #}
-        <div id="backup-master-password-row" class="mt-2 hidden">
-          <FormLabel target="backup_master_password">Backup master password</FormLabel>
-          <TextInput type="password" name="backup_master_password" id="backup_master_password"
-                     placeholder="the shared backup master password" />
-          {% if has_saved_backup_password %}
-            <p class="mt-1 type-helper text-secondary">Leave blank to use your saved password.</p>
-          {% endif %}
-          <label class="mt-2 flex items-center gap-2 type-helper text-secondary">
-            <input type="checkbox" id="backup_save_password" name="backup_save_password" value="1" />
-            Save this password so you don't have to retype it
-          </label>
-        </div>
-        {% endif %}
       </div>
 
       <div id="region-row" class="hidden">

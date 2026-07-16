@@ -1,1 +1,0 @@
-Made the `test_create_command_custom_script` tutorial e2e test robust to environments where an unreachable cloud provider backend (e.g. `aws`) is installed but has no credentials: its verification now scopes `mngr list` to `--provider local` (matching the sibling codex/yolo tests), since the created `command` agent lives on the local provider.

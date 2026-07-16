@@ -21,6 +21,7 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
+from imbue.minds.desktop_client.agent_creator import CreationErrorKind
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
@@ -55,6 +56,7 @@ from imbue.minds.primitives import LaunchMode
 from imbue.minds.testing import stub_mngr_host_dir
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 _TEST_KEY = "test-minds-api-key"
@@ -109,7 +111,7 @@ class _RecordingAgentCreator(AgentCreator):
         branch_or_tag: str = "",
         region: str = "",
         anthropic_api_key: str = "",
-        on_created: Callable[[AgentId], None] | None = None,
+        on_created: Callable[[AgentId, HostId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
         color: str | None = None,
         docker_runtime: DockerRuntime = DockerRuntime.RUNC,
@@ -515,6 +517,44 @@ def test_create_operation_status_includes_status_text(
     assert body["kind"] == "create"
     assert body["status_text"] == status_text_for(str(AgentCreationStatus.INITIALIZING), launch_mode=LaunchMode.DOCKER)
     assert body["status_text"]
+    # An in-flight (non-failed) creation carries no failure classification.
+    assert body["error_kind"] is None
+
+
+def test_create_operation_status_carries_error_kind_for_classified_failures(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    # A failed creation whose error was classified (e.g. a private GitHub repo
+    # the local git credentials cannot see) reports the machine-readable kind
+    # alongside the error message; the creating page gates its static sign-in
+    # guidance on it.
+    creation_id = CreationId()
+    creator = _StatusReportingAgentCreator(
+        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+        system_interface_health_tracker=SystemInterfaceHealthTracker(),
+        fixed_info=AgentCreationInfo(
+            creation_id=creation_id,
+            status=AgentCreationStatus.FAILED,
+            launch_mode=LaunchMode.DOCKER,
+            error="git clone failed:\nfatal: could not read Username for 'https://github.com'",
+            error_kind=CreationErrorKind.GITHUB_AUTH_REQUIRED,
+        ),
+    )
+    client = _client_with_agent_creator(
+        tmp_path, root_concurrency_group, notification_dispatcher, agent_creator=creator
+    )
+
+    response = client.get(f"/api/v1/workspaces/operations/create/{creation_id}", headers=_auth_header())
+
+    assert response.status_code == 200
+    body = json.loads(response.data)
+    assert body["status"] == "FAILED"
+    assert body["error"]
+    assert body["error_kind"] == "GITHUB_AUTH_REQUIRED"
 
 
 def test_create_workspace_full_surface_returns_202_and_threads_fields(
@@ -913,7 +953,14 @@ def _associated_session_store(
     """Build a session store with one signed-in account that owns ``agent_id``."""
     cli.add_account(user_id=user_id, email=email)
     store = make_session_store_for_test(tmp_path / "sessions", cli=cli)
-    store.associate_workspace(user_id, str(agent_id))
+    store.associate_created_workspace(
+        user_id=user_id,
+        agent_id=str(agent_id),
+        host_id=str(HostId.generate()),
+        display_name="",
+        color=None,
+        is_cloud_row=False,
+    )
     return store
 
 

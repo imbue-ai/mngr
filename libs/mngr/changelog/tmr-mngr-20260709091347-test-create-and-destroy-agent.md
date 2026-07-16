@@ -1,3 +1,0 @@
-Fixed the e2e tutorial test suite so non-cloud tests are not broken by providers that are enabled by default in the monorepo checkout but are unreachable or irrelevant to the test. The e2e fixture now disables the credential-requiring cloud providers the suite never exercises (aws, azure, gcp, vultr, ovh, imbue_cloud), disables Docker when no daemon socket is present, and only enables Modal for tests that opt in via `@pytest.mark.modal`. This stops a plain `mngr list` from exiting non-zero (provider inaccessible) or surfacing leftover agents from the shared Modal account.
-
-Also removed a stale `@pytest.mark.rsync` marker from `test_create_and_destroy_agent`, which creates a local command agent transferred via git worktree and therefore never invokes rsync.

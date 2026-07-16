@@ -15,7 +15,6 @@ documented contract and the enforced contract can never drift.
 
 from pydantic import ConfigDict
 from pydantic import Field
-from pydantic import SecretStr
 from pydantic import StrictBool
 
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -79,6 +78,13 @@ class CreateOperationStatusResponse(FrozenModel):
     agent_id: str | None = Field(default=None, description="The created workspace agent id, once known")
     redirect_url: str | None = Field(default=None, description="Absolute /goto/<agent>/ URL to navigate to when done")
     error: str | None = Field(default=None, description="Failure message, when the creation failed")
+    error_kind: str | None = Field(
+        default=None,
+        description=(
+            "Machine-readable failure classification (e.g. GITHUB_AUTH_REQUIRED), set when the "
+            "failure is recognized; the creating page gates extra static guidance on it"
+        ),
+    )
 
 
 class DestroyOperationStatusResponse(FrozenModel):
@@ -128,20 +134,6 @@ class BackupServiceConfigureRequest(ApiRequestModel):
     """Body for enabling backups or changing a workspace's backup destination."""
 
     backup_provider: str = Field(description="'IMBUE_CLOUD' or 'API_KEY'")
-    master_password: SecretStr = Field(
-        default=SecretStr(""),
-        description=(
-            "The master password, validated against the stored hash. Blank falls back to the saved "
-            "plaintext copy when one exists, else means the empty password."
-        ),
-    )
-    save_password: bool = Field(
-        default=False,
-        description=(
-            "Persist the typed (and just-validated) master password locally so later flows don't require retyping. "
-            "Never establishes or changes the master password."
-        ),
-    )
     api_key_env: str = Field(default="", description="For API_KEY: KEY=VALUE block (RESTIC_REPOSITORY + creds)")
 
 
@@ -205,17 +197,6 @@ class CreateWorkspaceRequest(ApiRequestModel):
     region: str | None = Field(default=None, description="Provider region")
     backup_provider: BackupProvider | None = Field(
         default=None, description="Restic backup provider (default CONFIGURE_LATER)"
-    )
-    backup_master_password: SecretStr | None = Field(
-        default=None,
-        description=(
-            "Master/recovery passphrase, validated against the stored hash. Blank/absent falls back to the "
-            "saved copy when one exists, else means the empty password. Agents should always create with "
-            "backups unconfigured and never ask the user for this."
-        ),
-    )
-    backup_save_password: bool | None = Field(
-        default=None, description="Persist the typed (just-validated) master password locally for later flows"
     )
     backup_api_key_env: str | None = Field(default=None, description="KEY=VALUE block for an API_KEY backup provider")
 

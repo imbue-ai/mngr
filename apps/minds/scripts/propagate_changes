@@ -30,7 +30,7 @@ TEMPLATE_DIR="${MNGR_REPO_ROOT}/.external_worktrees/default-workspace-template"
 
 if [[ ! -d "${TEMPLATE_DIR}" ]]; then
     echo "ERROR: Template directory not found: ${TEMPLATE_DIR}" >&2
-    echo "       Create it with: cd ~/project/default-workspace-template && git worktree add ${TEMPLATE_DIR} -b <branch> main" >&2
+    echo "       Create it with: just default-workspace-template-worktree" >&2
     exit 1
 fi
 

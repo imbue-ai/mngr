@@ -1,1 +1,0 @@
-Re-trimmed the inline-function ratchet count from 9 to 7 after a shared-checker bug fix stopped double-counting a doubly-nested function. No minds source changed; the two removed counts were the same function counted once per enclosing function.

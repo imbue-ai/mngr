@@ -149,6 +149,15 @@ test-offload-minds-snapshot snapshot_image_id args="":
     if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
         EXTRA_ENV_ARGS+=(--env "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}")
     fi
+    # Forward the sync e2e connector-env coordinates when present (only the
+    # run_minds_release_tests CI path exports them; see apps/minds/test_sync_e2e.py).
+    # Secret values are masked in CI logs by the Vault use-vault-secrets action.
+    for sync_e2e_var in MINDS_SYNC_E2E_CONNECTOR_URL MINDS_SYNC_E2E_LITELLM_URL \
+        MINDS_SYNC_E2E_SUPERTOKENS_CONNECTION_URI MINDS_SYNC_E2E_SUPERTOKENS_API_KEY; do
+        if [ -n "${!sync_e2e_var:-}" ]; then
+            EXTRA_ENV_ARGS+=(--env "${sync_e2e_var}=${!sync_e2e_var}")
+        fi
+    done
     offload -c offload-modal-minds-snapshot.toml run --trace \
         --override-image-id "{{snapshot_image_id}}" \
         --env "GITHUB_HEAD_REF=${GITHUB_HEAD_REF:-}" \
@@ -313,6 +322,18 @@ minds-test-electron-flow *args: minds-css
 minds-css:
   bash -c '. apps/minds/scripts/select_node_version.sh && cd apps/minds && pnpm run build:css'
 
+alias dwt-worktree := default-workspace-template-worktree
+# Create an independent default-workspace-template checkout nested in the
+# current mngr checkout at .external_worktrees/default-workspace-template -- the
+# CLAUDE.md convention for developing default_workspace_template alongside mngr. Defaults the default_workspace_template branch
+# to the current mngr branch; override with a positional arg. Errors if a checkout
+# already exists or the branch is already on default_workspace_template. It is a full clone (survives
+# deletion of any other clone/cache) and needs no configuration.
+# Set DEFAULT_WORKSPACE_TEMPLATE_DIR (gitignored apps/minds/.env or your shell) to a local default_workspace_template clone to
+# make the clone fast -- purely a speed hint, no lasting dependency is created.
+default-workspace-template-worktree branch="" base="origin/main":
+    bash scripts/default_workspace_template_worktree.sh "{{branch}}" "{{base}}"
+
 # Sync vendor/mngr in default-workspace-template to this repo's HEAD and commit
 # in DEFAULT_WORKSPACE_TEMPLATE. The DEFAULT_WORKSPACE_TEMPLATE checkout path comes from the positional arg, else DEFAULT_WORKSPACE_TEMPLATE_DIR read
 # from a gitignored apps/minds/.env (minds-scoped per-user config -- see
@@ -396,8 +417,7 @@ deploy *args:
 # "branch":
 #   MINDS_WORKSPACE_GIT_URL = .external_worktrees/default-workspace-template/
 #       (REQUIRED -- recipe fails if missing; create the worktree with
-#       `git -C ~/project/default-workspace-template worktree add` before
-#       running minds-start).
+#       `just default-workspace-template-worktree` before running minds-start).
 #   MINDS_WORKSPACE_BRANCH  = the DEFAULT_WORKSPACE_TEMPLATE worktree's current branch.
 # The workspace name is never prefilled: the create form generates a `mind-N`
 # name -- matching a shipped binary -- unless you type one into the form's
@@ -469,8 +489,8 @@ minds-start branch="" default_workspace_template="":
     fi
     if [ ! -e "$default_workspace_template_wt/.git" ]; then
         echo "error: no DEFAULT_WORKSPACE_TEMPLATE worktree at $default_workspace_template_wt" >&2
-        echo "       run \`git -C ~/project/default-workspace-template worktree add -b <branch> $default_workspace_template_wt <base>\`" >&2
-        echo "       (e.g. base = origin/main) before re-running minds-start." >&2
+        echo "       run \`just default-workspace-template-worktree\` to create it (or pass a custom default_workspace_template path)," >&2
+        echo "       then re-run minds-start." >&2
         exit 2
     fi
     vendor_mngr="$default_workspace_template_wt/vendor/mngr"
@@ -856,7 +876,6 @@ create-new-mind-repo repo_name parent_dir="$HOME/project":
     set -ueo pipefail
     repo="{{repo_name}}"
     parent="{{parent_dir}}"
-    default_workspace_template="$HOME/project/default-workspace-template"
 
     if ! command -v gh >/dev/null 2>&1; then
         echo "error: gh CLI not found on PATH" >&2; exit 2
@@ -867,9 +886,6 @@ create-new-mind-repo repo_name parent_dir="$HOME/project":
     owner=$(gh api user --jq .login)
     if [ -z "$owner" ]; then
         echo "error: could not determine GitHub username from 'gh api user'" >&2; exit 2
-    fi
-    if [ ! -d "$default_workspace_template/.git" ]; then
-        echo "error: $default_workspace_template is not a git repo (skill expects default-workspace-template here)" >&2; exit 2
     fi
     if [ ! -d "$parent" ]; then
         echo "error: parent directory '$parent' does not exist" >&2; exit 2
@@ -983,11 +999,29 @@ create-new-mind-repo repo_name parent_dir="$HOME/project":
 # slots and is not region-filtered today, so the box must have a free slot.
 
 # Dev slice bake from a working tree (identity = its origin remote + current branch).
-bake-slice-dev region workspace_dir="$HOME/project/default-workspace-template" count="1" *extra_args:
+# workspace_dir resolves: explicit arg, else DEFAULT_WORKSPACE_TEMPLATE_DIR (shell or gitignored
+# apps/minds/.env), else the .external_worktrees/default-workspace-template checkout
+# that `just default-workspace-template-worktree` creates. No personal path baked in.
+bake-slice-dev region workspace_dir="" count="1" *extra_args:
+    #!/usr/bin/env bash
+    set -ueo pipefail
+    wd="{{workspace_dir}}"
+    if [ -z "$wd" ]; then
+        [ -f apps/minds/.env ] && { set -a; . apps/minds/.env; set +a; }
+        # $PWD is the repo root (just runs recipes from the justfile dir); keeps
+        # the fallback absolute, which minds pool create's --workspace-dir wants.
+        wd="${DEFAULT_WORKSPACE_TEMPLATE_DIR:-$PWD/.external_worktrees/default-workspace-template}"
+    fi
+    if [ ! -d "$wd/.git" ]; then
+        echo "error: no default_workspace_template checkout at $wd" >&2
+        echo "       run 'just default-workspace-template-worktree' to create it, or set DEFAULT_WORKSPACE_TEMPLATE_DIR (apps/minds/.env or shell)" >&2
+        echo "       to your default_workspace_template clone." >&2
+        exit 2
+    fi
     uv run minds pool create \
         --count "{{count}}" \
         --region "{{region}}" \
-        --workspace-dir "{{workspace_dir}}" \
+        --workspace-dir "$wd" \
         --skip-deferred-install-wait \
         {{extra_args}}
 

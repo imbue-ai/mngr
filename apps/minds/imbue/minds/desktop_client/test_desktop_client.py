@@ -15,6 +15,7 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.app import _build_requests_payload
 from imbue.minds.desktop_client.app import _build_workspace_list
+from imbue.minds.desktop_client.app import _collect_remote_workspace_tiles
 from imbue.minds.desktop_client.app import _destroying_agent_ids
 from imbue.minds.desktop_client.app import _resolve_destroying_for_landing
 from imbue.minds.desktop_client.app import _ssh_command_for_agent
@@ -24,9 +25,6 @@ from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
-from imbue.minds.desktop_client.backup_password_store import read_saved_backup_password
-from imbue.minds.desktop_client.backup_password_store import verify_backup_password
-from imbue.minds.desktop_client.backup_password_store import write_backup_password_hash
 from imbue.minds.desktop_client.conftest import DEFAULT_SERVICE_NAME
 from imbue.minds.desktop_client.conftest import make_agents_json
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
@@ -35,6 +33,10 @@ from imbue.minds.desktop_client.conftest import make_service_log
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
+from imbue.minds.desktop_client.dek_store import bundle_mirror_path
+from imbue.minds.desktop_client.dek_store import is_account_unlocked
+from imbue.minds.desktop_client.dek_store import set_master_password_for_account
+from imbue.minds.desktop_client.dek_store import verify_master_password_for_account
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.discovery_health import ProducerRemediator
 from imbue.minds.desktop_client.help_modal_requests import OpenHelpRequest
@@ -53,6 +55,7 @@ from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServiceName
@@ -925,10 +928,12 @@ def _write_dead_destroy_dir(paths: WorkspacePaths, agent_id: AgentId, host_id: H
 
 
 def test_resolve_destroying_for_landing_finalizes_when_host_gone(tmp_path: Path) -> None:
-    """A finished destroy whose host is gone is DONE: disassociated + record deleted.
+    """A finished destroy whose host is gone is DONE: the record is tombstoned.
 
-    This is the Fix for the silent-orphan bug -- finalization (disassociation)
-    happens only once the host is actually gone, not synchronously on click.
+    Finalization happens only once the host is actually gone, not
+    synchronously on click. The record is kept (state=DESTROYED, secrets
+    intact) so the workspace's backups stay reachable, but it no longer
+    reads as the workspace's owner.
     """
     paths = WorkspacePaths(data_dir=tmp_path)
     agent_id = AgentId.generate()
@@ -936,7 +941,14 @@ def test_resolve_destroying_for_landing_finalizes_when_host_gone(tmp_path: Path)
     cli = make_fake_imbue_cloud_cli()
     cli.add_account(user_id="user-1", email="a@b.com")
     session_store = make_session_store_for_test(tmp_path, cli=cli)
-    session_store.associate_workspace("user-1", str(agent_id))
+    session_store.associate_created_workspace(
+        user_id="user-1",
+        agent_id=str(agent_id),
+        host_id=str(HostId.generate()),
+        display_name="doomed",
+        color=None,
+        is_cloud_row=False,
+    )
     # Resolver knows no active agents and reports no host state -> the host is
     # gone -> the destroy is DONE.
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
@@ -946,6 +958,11 @@ def test_resolve_destroying_for_landing_finalizes_when_host_gone(tmp_path: Path)
     assert marker == {}
     assert not (paths.data_dir / "destroying" / str(agent_id)).exists()
     assert session_store.get_account_for_workspace(str(agent_id)) is None
+    # The tombstone survives (with its metadata) for future backup access.
+    assert session_store.record_store is not None
+    records = session_store.record_store.list_records("user-1")
+    assert len(records) == 1
+    assert records[0].state == "destroyed"
 
 
 def test_resolve_destroying_for_landing_keeps_failed_when_host_still_up(tmp_path: Path) -> None:
@@ -960,7 +977,14 @@ def test_resolve_destroying_for_landing_keeps_failed_when_host_still_up(tmp_path
     cli = make_fake_imbue_cloud_cli()
     cli.add_account(user_id="user-1", email="a@b.com")
     session_store = make_session_store_for_test(tmp_path, cli=cli)
-    session_store.associate_workspace("user-1", str(agent_id))
+    session_store.associate_created_workspace(
+        user_id="user-1",
+        agent_id=str(agent_id),
+        host_id=str(HostId.generate()),
+        display_name="kept",
+        color=None,
+        is_cloud_row=False,
+    )
     # Resolver still lists the workspace agent as active -> host still up -> FAILED.
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={str(agent_id): {}})
 
@@ -969,6 +993,32 @@ def test_resolve_destroying_for_landing_keeps_failed_when_host_still_up(tmp_path
     assert marker == {str(agent_id): "failed"}
     assert (paths.data_dir / "destroying" / str(agent_id)).exists()
     assert session_store.get_account_for_workspace(str(agent_id)) is not None
+
+
+def test_remote_tiles_wait_for_the_initial_discovery_snapshot(tmp_path: Path) -> None:
+    """No record renders as a remote tile until discovery has produced its first snapshot.
+
+    Before that, local knowledge is empty and every record -- including this
+    device's own workspaces -- would misclassify as a greyed remote tile.
+    """
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    session_store = make_session_store_for_test(tmp_path, cli=cli)
+    session_store.associate_created_workspace(
+        user_id="user-1",
+        agent_id="agent-elsewhere",
+        host_id="host-elsewhere",
+        display_name="remote-ws",
+        color=None,
+        is_cloud_row=False,
+    )
+
+    undiscovered_resolver = MngrCliBackendResolver()
+    assert _collect_remote_workspace_tiles(undiscovered_resolver, session_store) == []
+
+    discovered_resolver = make_resolver_with_data(agents_json=make_agents_json(AgentId.generate()))
+    tiles = _collect_remote_workspace_tiles(discovered_resolver, session_store)
+    assert [tile.agent_id for tile in tiles] == ["agent-elsewhere"]
 
 
 class _AllAgentsKnownStaticResolver(StaticBackendResolver):
@@ -1717,50 +1767,113 @@ def test_backup_password_change_requires_auth(tmp_path: Path) -> None:
     client, _ = _create_test_client_with_stores(tmp_path)
     response = client.post("/_chrome/backup-password", json={"new_password": "x", "new_password_confirm": "x"})
     assert response.status_code == 403
-    # The hash authority was not touched (still the startup empty-password seed).
-    assert verify_backup_password(WorkspacePaths(data_dir=tmp_path), SecretStr("")) is True
 
 
 def test_backup_password_change_rejects_mismatched_confirmation(tmp_path: Path) -> None:
-    client, auth_store = _create_test_client_with_stores(tmp_path)
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
     _authenticate_client(client, auth_store)
     response = client.post("/_chrome/backup-password", json={"new_password": "one", "new_password_confirm": "two"})
     assert response.status_code == 400
     assert "match" in response.get_json()["error"]
-    assert verify_backup_password(WorkspacePaths(data_dir=tmp_path), SecretStr("")) is True
+    assert not bundle_mirror_path(WorkspacePaths(data_dir=tmp_path), "user-1").exists()
 
 
-def test_backup_password_change_updates_the_hash_and_optionally_saves(tmp_path: Path) -> None:
-    # No workspaces exist, so the rotation itself is a no-op; the flow still
-    # updates the hash authority and (when asked) the plaintext copy.
+def test_backup_password_change_requires_a_signed_in_account(tmp_path: Path) -> None:
     client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    response = client.post("/_chrome/backup-password", json={"new_password": "x", "new_password_confirm": "x"})
+    assert response.status_code == 400
+    assert "Sign in" in response.get_json()["error"]
+
+
+def test_backup_password_change_wraps_the_dek_and_pushes_the_bundle(tmp_path: Path) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
     _authenticate_client(client, auth_store)
     paths = WorkspacePaths(data_dir=tmp_path)
 
     response = client.post(
         "/_chrome/backup-password",
-        json={"new_password": "brand-new", "new_password_confirm": "brand-new", "save_password": True},
+        json={"new_password": "brand-new", "new_password_confirm": "brand-new"},
     )
 
     assert response.status_code == 200
     body = response.get_json()
     assert body["ok"] is True
-    assert body["results"] == []
-    assert verify_backup_password(paths, SecretStr("brand-new")) is True
-    assert verify_backup_password(paths, SecretStr("")) is False
-    assert read_saved_backup_password(paths) == "brand-new"
+    assert body["results"] == [{"account": "a@b.com", "is_ok": True, "error": None}]
+    assert verify_master_password_for_account(paths, "user-1", SecretStr("brand-new")) is True
+    assert verify_master_password_for_account(paths, "user-1", SecretStr("")) is False
+    # The wrapped bundle was pushed to the (fake) connector.
+    assert "a@b.com" in cli.sync_bundle_by_email
 
 
 def test_backup_password_change_may_return_to_the_empty_password(tmp_path: Path) -> None:
-    client, auth_store = _create_test_client_with_stores(tmp_path)
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
     _authenticate_client(client, auth_store)
     paths = WorkspacePaths(data_dir=tmp_path)
-    write_backup_password_hash(paths, SecretStr("something"))
+    assert (
+        client.post(
+            "/_chrome/backup-password", json={"new_password": "temp", "new_password_confirm": "temp"}
+        ).status_code
+        == 200
+    )
 
     response = client.post("/_chrome/backup-password", json={"new_password": "", "new_password_confirm": ""})
 
     assert response.status_code == 200
-    assert verify_backup_password(paths, SecretStr("")) is True
+    assert verify_master_password_for_account(paths, "user-1", SecretStr("")) is True
+    # Clearing scrubs the server: no bundle remains on the (fake) connector.
+    assert "a@b.com" not in cli.sync_bundle_by_email
+
+
+def test_backup_password_change_refuses_accounts_locked_on_this_device(tmp_path: Path) -> None:
+    """Rewrapping a locked account would mint a fresh DEK and overwrite the
+    server bundle wrapping the real one, orphaning every synced secret -- the
+    change endpoint must report a failure and touch nothing instead."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    # Another device set a password and synced a secrets-carrying record; this
+    # device has no DEK for the account (it is locked here).
+    other_device = WorkspacePaths(data_dir=tmp_path / "other-device")
+    bundle = set_master_password_for_account(other_device, "user-1", SecretStr("hunter2"))
+    assert bundle is not None
+    cli.sync_bundle_push("a@b.com", bundle)
+    remote = ReplicaRecord(
+        host_id="host-remote-1",
+        agent_id=str(AgentId.generate()),
+        display_name="remote-ws",
+        provider_kind="lima",
+        hosting_device_id="device-other",
+        device_label="other-device",
+        encrypted_secrets="b3BhcXVl",
+    )
+    cli.sync_records_by_email["a@b.com"] = {"host-remote-1": remote.to_wire(1)}
+
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
+    _authenticate_client(client, auth_store)
+    session_store = get_state(client.application).session_store
+    assert session_store is not None and session_store.record_store is not None
+    session_store.record_store.pull("user-1", "a@b.com")
+    bundle_before = dict(cli.sync_bundle_by_email["a@b.com"])
+
+    response = client.post(
+        "/_chrome/backup-password", json={"new_password": "new-pass", "new_password_confirm": "new-pass"}
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["ok"] is False
+    assert body["results"] == [{"account": "a@b.com", "is_ok": False, "error": body["results"][0]["error"]}]
+    assert "locked" in body["results"][0]["error"]
+    # The server bundle (wrapping the real DEK) is untouched and no divergent
+    # local DEK was minted.
+    assert cli.sync_bundle_by_email["a@b.com"] == bundle_before
+    assert not is_account_unlocked(WorkspacePaths(data_dir=tmp_path), "user-1")
 
 
 # -- get-help / report-a-bug tests --
@@ -2355,3 +2468,84 @@ def _create_readiness_test_client(
         http_client=http_client,
     )
     return client, auth_store, probed
+
+
+# -- sync unlock / remove-record tests --
+
+
+def test_sync_unlock_installs_the_dek_for_a_locked_account(tmp_path: Path) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    # Another device set a password and synced a workspace with secrets: the
+    # bundle + a secret-carrying record exist on the (fake) connector, but
+    # this device has no DEK file.
+    other_device = WorkspacePaths(data_dir=tmp_path / "other-device")
+    bundle = set_master_password_for_account(other_device, "user-1", SecretStr("hunter2"))
+    assert bundle is not None
+    cli.sync_bundle_push("a@b.com", bundle)
+    remote = ReplicaRecord(
+        host_id="host-remote-1",
+        agent_id=str(AgentId.generate()),
+        display_name="remote-ws",
+        provider_kind="lima",
+        hosting_device_id="device-other",
+        device_label="other-device",
+        encrypted_secrets="b3BhcXVl",
+    )
+    cli.sync_records_by_email["a@b.com"] = {"host-remote-1": remote.to_wire(1)}
+
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
+    _authenticate_client(client, auth_store)
+    # The reconcile normally pulls on startup; do it directly for the test.
+    session_store = get_state(client.application).session_store
+    assert session_store is not None and session_store.record_store is not None
+    session_store.record_store.pull("user-1", "a@b.com")
+
+    wrong = client.post("/_chrome/sync-unlock", json={"password": "nope"})
+    assert wrong.status_code == 200
+    assert wrong.get_json()["ok"] is False
+
+    response = client.post("/_chrome/sync-unlock", json={"password": "hunter2"})
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["ok"] is True
+    assert body["unlocked"] == ["a@b.com"]
+    assert is_account_unlocked(WorkspacePaths(data_dir=tmp_path), "user-1")
+
+
+def test_sync_unlock_requires_auth(tmp_path: Path) -> None:
+    client, _ = _create_test_client_with_stores(tmp_path)
+    assert client.post("/_chrome/sync-unlock", json={"password": "x"}).status_code == 403
+
+
+def test_remove_workspace_record_deletes_the_row(tmp_path: Path) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
+    _authenticate_client(client, auth_store)
+    session_store = get_state(client.application).session_store
+    assert session_store is not None
+    session_store.associate_created_workspace(
+        user_id="user-1",
+        agent_id=str(AgentId.generate()),
+        host_id="host-remove-me",
+        display_name="stale",
+        color=None,
+        is_cloud_row=False,
+    )
+    assert "host-remove-me" in cli.sync_records_by_email["a@b.com"]
+
+    response = client.post("/_chrome/workspaces/remove-record", json={"host_id": "host-remove-me"})
+
+    assert response.status_code == 200
+    assert "host-remove-me" not in cli.sync_records_by_email["a@b.com"]
+    assert session_store.record_store is not None
+    assert session_store.record_store.list_records("user-1") == []
+
+
+def test_remove_workspace_record_unknown_host_is_404(tmp_path: Path) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
+    _authenticate_client(client, auth_store)
+    assert client.post("/_chrome/workspaces/remove-record", json={"host_id": "host-nope"}).status_code == 404

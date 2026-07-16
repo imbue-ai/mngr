@@ -1,1 +1,0 @@
-Fixed the `test_event_follow_filter_source` tutorial e2e test: removed the incorrect `@pytest.mark.rsync` mark. A local command agent created in a git repo uses the `git-worktree` transfer mode, which never invokes `rsync`, so the mark was superfluous and the resource guard was (correctly) failing the otherwise-passing test.
