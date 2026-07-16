@@ -402,7 +402,6 @@ class _KanpanState(MutableModel):
     retry_cooldown_seconds: float = 60.0
     staleness_threshold_seconds: float = DEFAULT_STALENESS_THRESHOLD_SECONDS
     # When true, Left on an empty reply closes the peek panel (Agent-View back gesture).
-    peek_left_returns_to_board: bool = False
     # Palette attr names for mark indicators (e.g. "mark_d", "mark_p")
     mark_attr_names: tuple[str, ...] = ()
     # Column definitions (from data sources)
@@ -1486,13 +1485,6 @@ def _handle_peek_key(state: _KanpanState, key: str) -> bool | None:
     if key == "enter":
         _submit_peek_reply(state)
         return True
-    # Optional Agent-View back gesture: Left on an empty reply returns to the board.
-    # (Left only reaches here when the reply Edit is at column 0, which can also
-    # happen with text present -- hence the explicit emptiness check.)
-    if key == "left" and state.peek_left_returns_to_board:
-        if state.peek_input is not None and not state.peek_input.get_edit_text():
-            _close_peek(state)
-            return True
     return None
 
 
@@ -2406,7 +2398,6 @@ def run_kanpan(
         refresh_interval_seconds=plugin_config.refresh_interval_seconds,
         retry_cooldown_seconds=plugin_config.retry_cooldown_seconds,
         staleness_threshold_seconds=plugin_config.effective_staleness_threshold_seconds(),
-        peek_left_returns_to_board=plugin_config.peek_left_returns_to_board,
         mark_attr_names=mark_attr_names,
         column_defs=column_defs,
         data_sources=data_sources,

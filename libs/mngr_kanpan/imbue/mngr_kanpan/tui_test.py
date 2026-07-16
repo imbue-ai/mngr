@@ -2320,28 +2320,11 @@ def test_make_reply_edit_defers_enter_and_boundary_left() -> None:
     assert edit.keypress((40,), "left") == "left"
 
 
-def test_handle_peek_key_left_returns_to_board_when_enabled() -> None:
-    entry = _make_entry(name="agent-a")
-    state = _make_state_with_walker((entry,))
-    _build_peek_panel(state)
-    original_footer = Text("bar")
-    state.saved_footer = original_footer
-    state.frame.footer = Text("panel")
-    state.peek_agent_name = AgentName("agent-a")
-    state.peek_left_returns_to_board = True
-    assert _handle_peek_key(state, "left") is True
-    assert state.peek_agent_name is None
-
-
-def test_handle_peek_key_left_ignored_when_disabled_or_nonempty() -> None:
+def test_handle_peek_key_left_falls_through_to_reply_edit() -> None:
     entry = _make_entry(name="agent-a")
     state = _make_state_with_walker((entry,))
     _build_peek_panel(state)
     state.peek_agent_name = AgentName("agent-a")
-    # Disabled by default: Left falls through to the Edit.
-    assert _handle_peek_key(state, "left") is None
-    # Enabled but reply has text: Left stays cursor movement, not a return.
-    state.peek_left_returns_to_board = True
-    state.peek_input.set_edit_text("draft")
+    # Left is cursor movement in the reply Edit, never a board return.
     assert _handle_peek_key(state, "left") is None
     assert state.peek_agent_name == AgentName("agent-a")

@@ -8,8 +8,6 @@ Added agent-view style interaction to the kanpan board, so you can work with an 
 
 - The reply input supports readline-style editing (via the `urwid_readline` library, with the Option/Ctrl+arrow chords added): word movement (`Option`/`Ctrl`+`←`/`→`, `Meta-B`/`F`), word delete (`Option`+`Delete`, `Ctrl-W`, `Meta-D`), jump to start/end (`Ctrl-A`/`Ctrl-E`), and kill to start/end (`Ctrl-U`/`Ctrl-K`).
 
-- Optional `peek_left_returns_to_board` setting (under `[plugins.kanpan]`, off by default): when on, pressing `←` on an empty reply closes the peek panel and returns to the board. `←` still moves the cursor when the reply has text.
-
 - The footer is a single continuous blue belt (no gap between its two sides): on the left a relative refresh stamp -- `Refreshed just now · 3.2s` right after a refresh, aging to `Refreshed 32s ago` / `Refreshed 5m ago` (the fetch duration only shows while fresh) -- and on the right the command keys one forgets -- `r: refresh  m: mute  d: mark delete  x: execute  q: quit  ?: more keys` -- with the keys highlighted. Everything else (`space` peek, `enter` attach, marks, configured shell commands) is listed by the `?` overlay: a bordered, padded panel anchored above the footer's `?`, keys accented in their own column; `Esc` (or `?` again) closes it. The peek panel's `enter: send · esc: close` hint is quiet in-panel text, tucked into the bottom right, with the same key accent.
 
 - Fixed: the row focus highlight is now one continuous band across muted and stale cells; inverting their dim gray used to punch dark holes in it.

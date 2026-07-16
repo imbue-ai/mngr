@@ -19,8 +19,6 @@ Interact with an agent without leaving the board:
 
 These are builtins; they do not need any configuration.
 
-To make `←` on an empty reply close the panel and return to the board (Agent View's back gesture), set `peek_left_returns_to_board = true` under `[plugins.kanpan]` in your mngr settings (off by default). Even when enabled, `←` still moves the cursor whenever the reply has text — it returns to the board only when the reply is empty.
-
 ## Filtering
 
 Filter which agents appear on the board using CEL expressions:

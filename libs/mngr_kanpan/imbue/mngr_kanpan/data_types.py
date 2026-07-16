@@ -222,13 +222,6 @@ class KanpanPluginConfig(PluginConfig):
         default=600.0,
         description="Seconds between periodic full refreshes (default 10 minutes)",
     )
-    peek_left_returns_to_board: bool = Field(
-        default=False,
-        description="When true, pressing Left on an empty reply in the peek panel closes it and "
-        "returns to the board (mirrors Claude Agent View's back gesture). Left still moves the "
-        "cursor whenever the reply has text; it returns to the board only when the reply is empty. "
-        "Off by default (opt-in).",
-    )
     retry_cooldown_seconds: float = Field(
         default=60.0,
         description="Minimum seconds before retrying after a failed full refresh",
