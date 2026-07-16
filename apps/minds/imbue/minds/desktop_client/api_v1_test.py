@@ -18,10 +18,10 @@ from pydantic import SecretStr
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.desktop_client import restic_cli
 from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
-from imbue.minds.desktop_client import restic_cli
 from imbue.minds.desktop_client.agent_creator import CreationErrorKind
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
@@ -432,9 +432,7 @@ def test_workspace_backups_limit_and_offset_page_the_newest_first_window(tmp_pat
         ]
     ]
 
-    first_page = json.loads(
-        client.get(f"/api/v1/workspaces/{agent_id}/backups?limit=2", headers=_auth_header()).data
-    )
+    first_page = json.loads(client.get(f"/api/v1/workspaces/{agent_id}/backups?limit=2", headers=_auth_header()).data)
     assert first_page["snapshots_total"] == 3
     assert [s["time"] for s in first_page["snapshots"]] == all_times[:2]
 
@@ -445,9 +443,7 @@ def test_workspace_backups_limit_and_offset_page_the_newest_first_window(tmp_pat
     assert [s["time"] for s in second_page["snapshots"]] == all_times[2:]
 
     # limit=0 keeps the count but sends no rows (the badge/landing surfaces).
-    none_page = json.loads(
-        client.get(f"/api/v1/workspaces/{agent_id}/backups?limit=0", headers=_auth_header()).data
-    )
+    none_page = json.loads(client.get(f"/api/v1/workspaces/{agent_id}/backups?limit=0", headers=_auth_header()).data)
     assert none_page["snapshots"] == []
     assert none_page["snapshots_total"] == 3
 

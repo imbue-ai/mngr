@@ -60,16 +60,15 @@
       });
   }
 
-  // One table row: relative time (exact local time on hover) plus a "Latest"
-  // badge on the left, Download / Restore actions on the right. Rows after the
-  // first carry a top divider; the latest row is tinted.
+  // One table row: relative time on the left, Download / Restore actions on
+  // the right. Rows after the first carry a top divider.
   //
   // restoreConfig controls the Restore action:
   //   { onRestore: fn }          -- live button; fn(snapshot) runs on click
   //   { disabledReason: string } -- disabled, with the reason as tooltip
   //   null/undefined             -- disabled (defensive default; every
   //                                 current caller passes one of the above)
-  function buildSnapshotRow(agentId, snapshot, isLatest, isFirst, restoreConfig) {
+  function buildSnapshotRow(agentId, snapshot, isFirst, restoreConfig) {
     var row = document.createElement('div');
     row.className = 'flex items-center gap-4 px-4 py-3'
       + (isFirst ? '' : ' border-t border-default');
@@ -82,12 +81,6 @@
     timeEl.textContent = relativeAgo(snapshot.time);
     timeCell.appendChild(timeEl);
 
-    if (isLatest) {
-      var latestBadge = document.createElement('span');
-      latestBadge.className = 'inline-flex items-center px-2 py-0.5 rounded-md type-label bg-success/15 text-success';
-      latestBadge.textContent = 'Latest';
-      timeCell.appendChild(latestBadge);
-    }
     // A completed restore appends a snapshot of the restored state, tagged
     // `restored` plus `restored-from:<source-iso>`. Labeling it "Restored from
     // <source time>" makes the timeline read like a version history: this row
@@ -134,7 +127,7 @@
     } else {
       restore.disabled = true;
       restore.classList.add('text-tertiary', 'cursor-not-allowed');
-      restore.title = (restoreConfig && restoreConfig.disabledReason) || 'Restore from the settings page';
+      restore.title = (restoreConfig && restoreConfig.disabledReason) || 'This backup cannot be restored right now.';
     }
     actions.appendChild(restore);
 
@@ -142,12 +135,22 @@
     return row;
   }
 
+  // The Restore action's config for one /backups entry, shared by both tables
+  // so they cannot disagree about when Restore is offered. A restore execs
+  // into the workspace, so it needs the workspace reachable; Download works
+  // regardless, because restic runs on this machine against the repository.
+  function restoreConfigFor(entry, onRestore) {
+    if (entry.check_state === 'OFFLINE') {
+      return { disabledReason: 'This workspace is offline; start it to restore a backup.' };
+    }
+    return { onRestore: onRestore };
+  }
+
   // Wire the shared restore-confirmation dialog (markup shipped by every
   // page that offers Restore, via the RestoreDialog template component) and
   // return the function that opens it for one snapshot. What a confirmed
-  // restore *does* is the caller's business: the settings page runs the
-  // tracked operation in place; the history page dispatches it and hands off
-  // to the settings page.
+  // restore *does* is the caller's business, though both current callers run
+  // the tracked operation in place through the shared operation strip.
   function setupRestoreDialog(onConfirm) {
     var dialog = document.getElementById('restore-dialog');
     var timeEl = document.getElementById('restore-dialog-time');
@@ -173,6 +176,7 @@
 
   window.mindsBackupTable = {
     buildSnapshotRow: buildSnapshotRow,
+    restoreConfigFor: restoreConfigFor,
     setupRestoreDialog: setupRestoreDialog,
   };
 })();

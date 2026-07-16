@@ -28,6 +28,7 @@ on the caller's host".
 import json
 import queue
 import shlex
+from collections.abc import Callable
 from collections.abc import Iterator
 from datetime import datetime
 from datetime import timezone
@@ -136,6 +137,7 @@ from imbue.minds.desktop_client.workspace_lifecycle import perform_mind_host_act
 from imbue.minds.desktop_client.workspace_operations import OPERATION_LOG_SENTINEL
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationRecord
+from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationRegistryInterface
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
 from imbue.minds.desktop_client.workspace_recovery import RestartWorkerFailureHandler
 from imbue.minds.desktop_client.workspace_recovery import probe_workspace_health
@@ -1147,6 +1149,60 @@ def _resolve_backup_route_context(agent_id: str) -> "tuple[AgentId, WorkspacePat
     return parsed_id, paths, parent_cg
 
 
+def _dispatch_backup_worker(
+    *,
+    parsed_id: AgentId,
+    parent_cg: ConcurrencyGroup,
+    registry: WorkspaceOperationRegistryInterface,
+    kind: WorkspaceOperationKind,
+    target: Callable[..., None],
+    worker_kwargs: dict[str, object],
+) -> tuple[OperationHandleResponse, int] | Response:
+    """Claim the workspace's single operation slot and spawn the worker that ends it.
+
+    Shared by the update and restore routes, whose dispatch differs only in the
+    worker and its extra kwargs. The claim is atomic (``start_if_idle``, like
+    restart's ``mark_restarting``): two concurrent requests must not both spawn
+    workers mutating the same workspace, and a request that loses to a running
+    operation of any kind is rejected rather than stacked.
+
+    The kind's name is the single source of the wire kind, the thread name and
+    the operator-facing label, so they cannot drift apart.
+    """
+    kind_slug = kind.value.lower()
+    label = kind_slug.replace("_", " ")
+    if not registry.start_if_idle(parsed_id, kind, datetime.now(timezone.utc)):
+        return _operation_conflict_error(registry.get(parsed_id))
+    try:
+        parent_cg.start_new_thread(
+            target=target,
+            kwargs={
+                "agent_id": parsed_id,
+                "registry": registry,
+                "parent_cg": parent_cg,
+                **worker_kwargs,
+            },
+            name=f"{kind_slug.replace('_', '-')}-{parsed_id}",
+            daemon=True,
+            is_checked=False,
+            on_failure=backup_update_module.BackupWorkerFailureHandler(
+                workspace_agent_id=parsed_id, registry=registry
+            ),
+        )
+    except (OSError, RuntimeError, ConcurrencyGroupError) as exc:
+        logger.warning("Failed to spawn {} worker for {}: {}", label, parsed_id, exc)
+        message = f"Could not start the {label} worker: {exc}"
+        registry.fail(parsed_id, message)
+        return _json_error(message, 503)
+    return OperationHandleResponse(operation_id=str(parsed_id), kind=kind_slug), 202
+
+
+def _is_stop_chats_requested() -> bool:
+    """Read the shared ``{"stop_chats"?: bool}`` body of the update/restore routes."""
+    body = request.get_json(silent=True, force=True) or {}
+    return bool(body.get("stop_chats", False))
+
+
 @require_api_or_cookie_auth
 @API_SPEC.validate(json=BackupServiceUpdateRequest, resp=json_response_model(OperationHandleResponse, status_code=202))
 def _handle_backup_service_update(agent_id: str) -> tuple[OperationHandleResponse, int] | Response:
@@ -1163,38 +1219,18 @@ def _handle_backup_service_update(agent_id: str) -> tuple[OperationHandleRespons
         return context
     parsed_id, paths, parent_cg = context
     state = get_state()
-    registry = state.workspace_operation_registry
-
-    body = request.get_json(silent=True, force=True) or {}
-    is_stop_chats = bool(body.get("stop_chats", False))
-    # Atomic check-and-claim (like restart's mark_restarting): two concurrent
-    # requests must not both spawn workers mutating the same workspace.
-    if not registry.start_if_idle(parsed_id, WorkspaceOperationKind.BACKUP_UPDATE, datetime.now(timezone.utc)):
-        return _operation_conflict_error(registry.get(parsed_id))
-    try:
-        parent_cg.start_new_thread(
-            target=backup_update_module.run_backup_update_sequence,
-            kwargs={
-                "agent_id": parsed_id,
-                "paths": paths,
-                "resolver": state.backend_resolver,
-                "registry": registry,
-                "parent_cg": parent_cg,
-                "is_stop_chats": is_stop_chats,
-            },
-            name=f"backup-update-{parsed_id}",
-            daemon=True,
-            is_checked=False,
-            on_failure=backup_update_module.BackupWorkerFailureHandler(
-                workspace_agent_id=parsed_id, registry=registry
-            ),
-        )
-    except (OSError, RuntimeError, ConcurrencyGroupError) as exc:
-        logger.warning("Failed to spawn backup update worker for {}: {}", parsed_id, exc)
-        message = f"Could not start the backup update worker: {exc}"
-        registry.fail(parsed_id, message)
-        return _json_error(message, 503)
-    return OperationHandleResponse(operation_id=str(parsed_id), kind="backup_update"), 202
+    return _dispatch_backup_worker(
+        parsed_id=parsed_id,
+        parent_cg=parent_cg,
+        registry=state.workspace_operation_registry,
+        kind=WorkspaceOperationKind.BACKUP_UPDATE,
+        target=backup_update_module.run_backup_update_sequence,
+        worker_kwargs={
+            "paths": paths,
+            "resolver": state.backend_resolver,
+            "is_stop_chats": _is_stop_chats_requested(),
+        },
+    )
 
 
 @require_api_or_cookie_auth
@@ -1208,7 +1244,7 @@ def _handle_backup_service_update_cancel(agent_id: str) -> EmptyResponse | Respo
         WorkspaceOperationKind.BACKUP_UPDATE,
         WorkspaceOperationKind.BACKUP_RESTORE,
     ):
-        return _json_error(f"No backup update operation for {agent_id}", 404)
+        return _json_error(f"No cancellable backup operation for {agent_id}", 404)
     # A cancel after the point of no return must fail loudly rather than
     # pretend it took effect -- the operation will run to completion.
     if record.status == WorkspaceOperationStatus.RUNNING and record.is_mutating:
@@ -1222,7 +1258,9 @@ def _handle_backup_service_update_cancel(agent_id: str) -> EmptyResponse | Respo
 
 @require_api_or_cookie_auth
 @API_SPEC.validate(json=BackupServiceUpdateRequest, resp=json_response_model(OperationHandleResponse, status_code=202))
-def _handle_workspace_backup_restore(agent_id: str, snapshot_id: str) -> tuple[OperationHandleResponse, int] | Response:
+def _handle_workspace_backup_restore(
+    agent_id: str, snapshot_id: str
+) -> tuple[OperationHandleResponse, int] | Response:
     """Dispatch an in-place restore of the workspace to one snapshot; return a handle to poll.
 
     Body: ``{"stop_chats"?: bool}`` -- same contract as the update route. One
@@ -1233,37 +1271,20 @@ def _handle_workspace_backup_restore(agent_id: str, snapshot_id: str) -> tuple[O
     if isinstance(context, Response):
         return context
     parsed_id, paths, parent_cg = context
-    state = get_state()
-    registry = state.workspace_operation_registry
     if not has_canonical_env(paths, parsed_id):
         return _json_error(f"Backups are not configured for {agent_id}", 409)
-
-    body = request.get_json(silent=True, force=True) or {}
-    is_stop_chats = bool(body.get("stop_chats", False))
-    if not registry.start_if_idle(parsed_id, WorkspaceOperationKind.BACKUP_RESTORE, datetime.now(timezone.utc)):
-        return _operation_conflict_error(registry.get(parsed_id))
-    try:
-        parent_cg.start_new_thread(
-            target=backup_update_module.run_backup_restore_sequence,
-            kwargs={
-                "agent_id": parsed_id,
-                "paths": paths,
-                "registry": registry,
-                "parent_cg": parent_cg,
-                "snapshot_id": snapshot_id,
-                "is_stop_chats": is_stop_chats,
-            },
-            name=f"backup-restore-{parsed_id}",
-            daemon=True,
-            is_checked=False,
-            on_failure=backup_update_module.BackupWorkerFailureHandler(workspace_agent_id=parsed_id, registry=registry),
-        )
-    except (OSError, RuntimeError, ConcurrencyGroupError) as exc:
-        logger.warning("Failed to spawn backup restore worker for {}: {}", parsed_id, exc)
-        message = f"Could not start the backup restore worker: {exc}"
-        registry.fail(parsed_id, message)
-        return _json_error(message, 503)
-    return OperationHandleResponse(operation_id=str(parsed_id), kind="backup_restore"), 202
+    return _dispatch_backup_worker(
+        parsed_id=parsed_id,
+        parent_cg=parent_cg,
+        registry=get_state().workspace_operation_registry,
+        kind=WorkspaceOperationKind.BACKUP_RESTORE,
+        target=backup_update_module.run_backup_restore_sequence,
+        worker_kwargs={
+            "paths": paths,
+            "snapshot_id": snapshot_id,
+            "is_stop_chats": _is_stop_chats_requested(),
+        },
+    )
 
 
 @require_api_or_cookie_auth

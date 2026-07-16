@@ -126,14 +126,10 @@
 
     setShown(historyCard, true);
     // The server already limits the payload to RECENT_LIMIT rows; slice defensively.
-    // Restore execs into the workspace, so it needs the workspace running;
-    // downloads work regardless (restic runs on this machine).
-    var restoreConfig = entry.check_state === 'OFFLINE'
-      ? { disabledReason: 'This workspace is offline; start it to restore a backup.' }
-      : { onRestore: openRestoreDialog };
+    var restoreConfig = window.mindsBackupTable.restoreConfigFor(entry, openRestoreDialog);
     snapshots.slice(0, RECENT_LIMIT).forEach(function (snapshot, index) {
       historyEl.appendChild(
-        window.mindsBackupTable.buildSnapshotRow(agentId, snapshot, index === 0, index === 0, restoreConfig)
+        window.mindsBackupTable.buildSnapshotRow(agentId, snapshot, index === 0, restoreConfig)
       );
     });
     // Rows rendered while an operation runs must come out disabled.

@@ -36,6 +36,8 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.build_info import resolve_release_id
 from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.desktop_client import backup_status
+from imbue.minds.desktop_client import restic_cli
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backup_env_store import has_canonical_env
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
@@ -91,6 +93,10 @@ _RESTORE_EXEC_TIMEOUT_SECONDS: Final[float] = 9000.0
 # restore exec dies without reporting; restarting every service can take a
 # couple of minutes on a loaded workspace.
 _SERVICE_RESUME_TIMEOUT_SECONDS: Final[float] = 360.0
+# Listing snapshots to resolve the restore target reads the whole repository
+# index, so it gets a longer ceiling than the status route's snappy default
+# (nothing is rendering behind this -- the operation is already dispatched).
+_SNAPSHOT_RESOLVE_TIMEOUT_SECONDS: Final[float] = 120.0
 
 # Problems that mean the update itself did not converge (operation fails).
 # NOT_CONFIGURED is deliberately absent: enabling backups is the configure
@@ -318,6 +324,33 @@ def run_backup_restore_sequence(
         registry.fail(agent_id, str(exc))
 
 
+def _resolve_restore_snapshot(
+    *,
+    agent_id: AgentId,
+    paths: WorkspacePaths,
+    snapshot_id: str,
+    parent_cg: ConcurrencyGroup | None,
+) -> restic_cli.ResticSnapshot:
+    """Resolve the snapshot to restore, from minds' own view of the repository.
+
+    minds holds the canonical restic.env, so it can read the snapshot's
+    recorded root and timestamp here -- the in-workspace script does not need
+    to re-query restic for metadata minds already has. Doing it before the
+    workspace is touched also means a bad snapshot id fails the operation
+    outright, rather than after the services are stopped and a safety snapshot
+    has been taken for nothing.
+    """
+    snapshots = backup_status.list_workspace_snapshots(
+        paths, agent_id, parent_cg=parent_cg, timeout_seconds=_SNAPSHOT_RESOLVE_TIMEOUT_SECONDS
+    )
+    for snapshot in snapshots:
+        if snapshot_id in (snapshot.snapshot_id, snapshot.short_id):
+            if not snapshot.paths:
+                raise BackupProvisioningError(f"Snapshot {snapshot_id} records no paths; it cannot be restored")
+            return snapshot
+    raise BackupProvisioningError(f"No backup {snapshot_id} exists for this workspace")
+
+
 def _run_restore_phases(
     *,
     agent_id: AgentId,
@@ -327,6 +360,10 @@ def _run_restore_phases(
     snapshot_id: str,
     is_stop_chats: bool,
 ) -> None:
+    # Phase 0: resolve the snapshot before anything waits or mutates, so an
+    # unknown id fails fast and cheaply.
+    snapshot = _resolve_restore_snapshot(agent_id=agent_id, paths=paths, snapshot_id=snapshot_id, parent_cg=parent_cg)
+
     # Phase 1: gate + wait (cancellable; nothing has been mutated yet).
     registry.append_log(agent_id, "Checking for running chats and in-progress backups...")
     if not _wait_for_quiet_workspace(
@@ -356,7 +393,19 @@ def _run_restore_phases(
     )
     restore_command = build_workspace_script_command(
         BACKUP_RESTORE_SCRIPT,
-        ("--agent-id", str(agent_id), "--snapshot-id", snapshot_id) + (("--stop-chats",) if is_stop_chats else ()),
+        (
+            "--agent-id",
+            str(agent_id),
+            "--snapshot-id",
+            snapshot_id,
+            # Resolved above from minds' own view of the repository, so the
+            # script never re-queries restic for this metadata.
+            "--snapshot-root",
+            snapshot.paths[0],
+            "--source-time",
+            snapshot.time.isoformat(),
+        )
+        + (("--stop-chats",) if is_stop_chats else ()),
     )
     restore_result = run_mngr_exec_on_agent(
         agent_id, restore_command, parent_cg=parent_cg, timeout_seconds=_RESTORE_EXEC_TIMEOUT_SECONDS
@@ -390,7 +439,9 @@ def _run_restore_phases(
     if status != "ok":
         detail = str(payload.get("detail", "unknown failure"))
         safety_note = (
-            " A safety backup of the pre-restore state was taken first." if payload.get("safety_snapshot_taken") else ""
+            " A safety backup of the pre-restore state was taken first."
+            if payload.get("safety_snapshot_taken")
+            else ""
         )
         registry.fail(agent_id, f"{detail}{safety_note}")
         return

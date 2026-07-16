@@ -27,10 +27,10 @@ out of arbitrarily noisy output:
   ``restic.env``), append a ``restored`` snapshot of the swapped-in state
   (tagged with the source snapshot's time, so the timeline shows the restored
   version as a new "Restored from ..." entry), ``uv sync``, and restart every
-  supervisord service. Every
-  exit path after the service stop restarts the services (best-effort), and
-  a backup tick orphaned mid-flight (by the stop, or recorded in the restored
-  journal) is completed with a synthetic event so it cannot wedge later gates.
+  supervisord service. Every exit path after the service stop restarts the
+  services (best-effort). The snapshot's root and timestamp are resolved by
+  minds and passed in via argv, so the script never queries restic for
+  metadata minds already holds.
 
 The scripts are shipped base64-encoded through the shell (the base64 alphabet
 contains no shell-significant characters), decoded and piped into ``python3 -``
@@ -61,7 +61,6 @@ OFFICIAL_REMOTE_URL: Final[str] = "https://github.com/imbue-ai/default-workspace
 # escaping; parameters arrive via sys.argv, never via interpolation.
 _SCRIPT_PREAMBLE: Final[str] = r'''
 import base64 as _b64
-import datetime as _datetime
 import hashlib as _hashlib
 import json as _json
 import os as _os
@@ -69,7 +68,6 @@ import shutil as _shutil
 import subprocess as _subprocess
 import sys as _sys
 import time as _time
-import uuid as _uuid
 
 OFFICIAL_REMOTE_NAME = "official"
 DEFAULT_OFFICIAL_REMOTE_URL = "https://github.com/imbue-ai/default-workspace-template.git"
@@ -323,21 +321,23 @@ def _backup_events_path(agent_id):
     return _os.path.join(state_dir, "events", "backup", "events.jsonl")
 
 
-def _last_unfinished_tick_id(agent_id):
-    """Return the tick_id of the most recently started tick lacking a completion event, or None."""
+def _is_backup_tick_in_flight(agent_id):
+    """Return whether a backup tick is running right now, per the event journal."""
     events_path = _backup_events_path(agent_id)
     if not events_path or not _os.path.isfile(events_path):
-        return None
+        return False
     try:
         with open(events_path, "r", errors="replace") as fh:
             lines = fh.readlines()
     except OSError:
-        return None
+        return False
     # Ticks run serially in one loop, so only the most recently started tick
-    # can be in flight. A tick killed mid-flight (e.g. by a service restart)
-    # never writes its completion event; treating every started-but-unfinished
-    # tick as in flight would let one such dead tick block operations for
-    # hours, until its line scrolls out of the window.
+    # can be in flight. A tick killed mid-flight (e.g. by a service restart, or
+    # by the stop a restore does) never writes its completion event; treating
+    # every started-but-unfinished tick as in flight would let one such dead
+    # tick block operations for hours, until its line scrolls out of the
+    # window. Scoping to the last started tick means the next tick to start
+    # supersedes any orphan a restore leaves behind.
     last_started_tick = None
     finished = set()
     for raw in lines[-200:]:
@@ -355,13 +355,7 @@ def _last_unfinished_tick_id(agent_id):
             last_started_tick = tick_id
         elif event_type in TICK_COMPLETION_TYPES:
             finished.add(tick_id)
-    if last_started_tick is not None and last_started_tick not in finished:
-        return last_started_tick
-    return None
-
-
-def _is_backup_tick_in_flight(agent_id):
-    return _last_unfinished_tick_id(agent_id) is not None
+    return last_started_tick is not None and last_started_tick not in finished
 
 
 def _gate_chats_and_wait_for_tick(agent_id, is_stop_chats):
@@ -592,8 +586,9 @@ _main()
 
 
 # Rewinds the whole host dir (/mngr) to one restic snapshot, in place.
-# Parameterized via argv: --agent-id, --snapshot-id, and optionally
-# --stop-chats. Verdict statuses: ok | blocked (running chats) | failed.
+# Parameterized via argv: --agent-id, --snapshot-id, --snapshot-root and
+# --source-time (both resolved by minds from its own view of the repository),
+# and optionally --stop-chats. Verdict: ok | blocked (running chats) | failed.
 BACKUP_RESTORE_SCRIPT: Final[str] = (
     _SCRIPT_PREAMBLE
     + r"""
@@ -659,46 +654,13 @@ def _restic(args, env_map, timeout=_RESTIC_TIMEOUT_SECONDS):
     return _run(["restic"] + list(args), timeout=timeout, env=env)
 
 
-# A tick killed mid-flight never writes its completion event, and the gate
-# logic treats the last started-but-unfinished tick as in flight -- one
-# orphaned BACKUP_STARTED line would block every later update/restore gate
-# (for the tick-wait timeout per attempt) until the next hourly tick
-# completes. This script creates such orphans in two ways: the `stop all`
-# kills any tick that started after the gate passed, and the restored journal
-# usually ends mid-tick (hourly snapshots are taken *by* a tick, so the
-# snapshot's copy of the journal predates that tick's completion event).
-# While the backup service is stopped no live tick can exist, so a synthetic
-# completion event -- shaped like the service's own TICK_ERROR events --
-# discharges the orphan without ever racing a real writer. Best-effort: a
-# journal that cannot be appended to must not abort the restore. (Once the
-# service restarts, its startup tick supersedes and completes past orphans
-# anyway, so this heal chiefly protects the paths where that restart fails
-# or a gate runs before the startup tick completes.)
-def _heal_interrupted_tick(agent_id, reason):
-    tick_id = _last_unfinished_tick_id(agent_id)
-    if tick_id is None:
-        return False
-    event = {
-        "timestamp": _datetime.datetime.now(_datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f") + "000Z",
-        "type": "TICK_ERROR",
-        "event_id": "evt-" + _uuid.uuid4().hex,
-        "source": "backup",
-        "tick_id": tick_id,
-        "error_type": "BackupTickInterrupted",
-        "error_message": reason,
-        "traceback": "",
-    }
-    try:
-        with open(_backup_events_path(agent_id), "a") as fh:
-            fh.write(_json.dumps(event) + "\n")
-    except OSError:
-        return False
-    return True
-
-
 def _main():
     agent_id = _arg_value("--agent-id")
     snapshot_id = _arg_value("--snapshot-id")
+    # Resolved by minds from its own view of the repository and passed in, so
+    # this script never queries restic for snapshot metadata.
+    snapshot_root = _arg_value("--snapshot-root")
+    source_time = _arg_value("--source-time")
     is_stop_chats = _has_flag("--stop-chats")
     result = {
         "schema": 1,
@@ -709,6 +671,8 @@ def _main():
     }
     if not snapshot_id:
         _finish(result, "failed", "no --snapshot-id provided")
+    if not snapshot_root:
+        _finish(result, "failed", "no --snapshot-root provided")
 
     # Everything that needs the current workspace code (`uv run mngr`) must
     # run before the swap replaces the code dir this process started in.
@@ -739,25 +703,6 @@ def _main():
     # so no failure path can forget it.
     _run(["supervisorctl", "stop", "all"], timeout=300)
     _DEBTS["is_resume_owed"] = True
-    # The stop kills any backup tick that started after the gate passed; heal
-    # its orphaned journal entry before it can wedge later gates.
-    _heal_interrupted_tick(agent_id, "backup tick interrupted by the service stop before a workspace restore")
-
-    # Resolve the chosen snapshot's recorded root before mutating anything.
-    listed = _restic(["snapshots", snapshot_id, "--json"], env_map, timeout=120)
-    if listed.returncode != 0:
-        detail = "restic could not find snapshot %s: %s" % (snapshot_id, (listed.stderr or listed.stdout).strip()[-500:])
-        _finish(result, "failed", detail)
-    try:
-        entries = _json.loads(listed.stdout)
-    except ValueError:
-        entries = None
-    if not isinstance(entries, list) or not entries or not entries[0].get("paths"):
-        _finish(result, "failed", "restic returned no usable metadata for snapshot %s" % snapshot_id)
-    snapshot_root = entries[0]["paths"][0]
-    # The chosen snapshot's own timestamp, recorded as lineage on the restored
-    # snapshot below so the UI can label it "Restored from <this time>".
-    source_time = entries[0].get("time")
 
     # Safety snapshot of the current state, so this restore is itself undoable.
     backup_args = ["backup", host_dir, "--tag", "pre-restore"]
@@ -821,11 +766,6 @@ def _main():
         )
         _finish(result, "failed", detail)
     result["swapped"] = True
-
-    # Hourly snapshots are taken *by* a backup tick, so the restored journal
-    # usually ends with that tick's BACKUP_STARTED and no completion; heal it
-    # now (the service is still stopped) or it wedges every later gate.
-    _heal_interrupted_tick(agent_id, "backup tick was in flight when this snapshot was taken; completed by the restore")
 
     # The snapshot carries whatever restic.env it had at backup time (possibly
     # none); the current credentials must keep working, so write them back.

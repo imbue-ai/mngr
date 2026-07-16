@@ -590,6 +590,26 @@ def _snapshot_entries(restic_repo: Path) -> list[dict]:
     return entries
 
 
+def _restore_args(restic_repo: Path, snapshot_id: str, *, extra: tuple[str, ...] = ()) -> tuple[str, ...]:
+    """Build the restore script's argv, standing in for what minds resolves and passes.
+
+    In production the snapshot's root and time come from minds' own view of
+    the repository (``backup_update._resolve_restore_snapshot``); the script
+    only consumes them, so these tests read them straight from restic.
+    """
+    entry = next(item for item in _snapshot_entries(restic_repo) if item["id"] == snapshot_id)
+    return (
+        "--agent-id",
+        "agent-x",
+        "--snapshot-id",
+        snapshot_id,
+        "--snapshot-root",
+        entry["paths"][0],
+        "--source-time",
+        entry["time"],
+    ) + extra
+
+
 @pytest.mark.timeout(120)
 def test_restore_script_rewinds_host_dir_and_takes_a_safety_snapshot(tmp_path: Path) -> None:
     host, code, restic_repo = _make_restore_workspace(tmp_path)
@@ -610,7 +630,7 @@ def test_restore_script_rewinds_host_dir_and_takes_a_safety_snapshot(tmp_path: P
     run = _run_script(
         code,
         BACKUP_RESTORE_SCRIPT,
-        ("--agent-id", "agent-x", "--snapshot-id", snapshot_id),
+        _restore_args(restic_repo, snapshot_id),
         extra_path=stub_bin,
         env_overrides={"MNGR_HOST_DIR": str(host)},
     )
@@ -667,7 +687,7 @@ def test_restore_script_descends_into_the_nested_host_dir_of_a_volume_level_snap
     run = _run_script(
         code,
         BACKUP_RESTORE_SCRIPT,
-        ("--agent-id", "agent-x", "--snapshot-id", snapshot_id),
+        _restore_args(restic_repo, snapshot_id),
         extra_path=stub_bin,
         env_overrides={"MNGR_HOST_DIR": str(host)},
     )
@@ -697,7 +717,7 @@ def test_restore_script_refuses_a_snapshot_with_no_code_checkout(tmp_path: Path)
     run = _run_script(
         code,
         BACKUP_RESTORE_SCRIPT,
-        ("--agent-id", "agent-x", "--snapshot-id", snapshot_id),
+        _restore_args(restic_repo, snapshot_id),
         extra_path=stub_bin,
         env_overrides={"MNGR_HOST_DIR": str(host)},
     )
@@ -724,7 +744,7 @@ def test_restore_script_is_blocked_by_running_chats_and_mutates_nothing(tmp_path
     run = _run_script(
         code,
         BACKUP_RESTORE_SCRIPT,
-        ("--agent-id", "agent-x", "--snapshot-id", snapshot_id),
+        _restore_args(restic_repo, snapshot_id),
         extra_path=stub_bin,
         env_overrides={"MNGR_HOST_DIR": str(host)},
     )
@@ -767,7 +787,7 @@ def test_restore_script_stops_all_services_before_the_swap_and_restarts_them_aft
     run = _run_script(
         code,
         BACKUP_RESTORE_SCRIPT,
-        ("--agent-id", "agent-x", "--snapshot-id", snapshot_id),
+        _restore_args(restic_repo, snapshot_id),
         extra_path=stub_bin,
         env_overrides={"MNGR_HOST_DIR": str(host)},
     )
@@ -791,13 +811,11 @@ def test_restore_script_resumes_services_when_the_restic_restore_fails(tmp_path:
     (code / "file.txt").write_text("version 2\n")
     call_log = tmp_path / "supervisorctl-calls.log"
 
-    stub_bin = _stub_bin_with_restic(
-        tmp_path, supervisorctl_call_log=call_log, failing_restic_subcommand="restore"
-    )
+    stub_bin = _stub_bin_with_restic(tmp_path, supervisorctl_call_log=call_log, failing_restic_subcommand="restore")
     run = _run_script(
         code,
         BACKUP_RESTORE_SCRIPT,
-        ("--agent-id", "agent-x", "--snapshot-id", snapshot_id),
+        _restore_args(restic_repo, snapshot_id),
         extra_path=stub_bin,
         env_overrides={"MNGR_HOST_DIR": str(host)},
     )
@@ -833,7 +851,7 @@ def test_restore_script_resumes_services_when_uv_sync_fails_after_the_swap(tmp_p
     run = _run_script(
         code,
         BACKUP_RESTORE_SCRIPT,
-        ("--agent-id", "agent-x", "--snapshot-id", snapshot_id),
+        _restore_args(restic_repo, snapshot_id),
         extra_path=stub_bin,
         env_overrides={"MNGR_HOST_DIR": str(host)},
     )
@@ -873,7 +891,7 @@ def test_restore_script_resumes_services_when_the_swap_fails_midway(tmp_path: Pa
         run = _run_script(
             code,
             BACKUP_RESTORE_SCRIPT,
-            ("--agent-id", "agent-x", "--snapshot-id", snapshot_id),
+            _restore_args(restic_repo, snapshot_id),
             extra_path=stub_bin,
             env_overrides={"MNGR_HOST_DIR": str(host)},
         )
@@ -895,97 +913,9 @@ def test_restore_script_resumes_services_when_the_swap_fails_midway(tmp_path: Pa
 
 
 @pytest.mark.timeout(120)
-def test_restore_script_heals_a_tick_orphaned_by_the_service_stop(tmp_path: Path) -> None:
-    # A backup tick can start between the script's gate check and its
-    # `stop all`; the stop then kills it mid-flight, leaving a BACKUP_STARTED
-    # with no completion event -- which would block every later update or
-    # restore gate. Simulated deterministically: the supervisorctl stub
-    # appends the orphan journal line at the exact moment `stop all` arrives
-    # (a barrier, not a sleep). The journal lives outside the host dir (the
-    # btrfs layout) so the swap does not replace it and the healing is
-    # observable end to end.
-    host, code, restic_repo = _make_restore_workspace(tmp_path)
-    _restic_for_test(restic_repo, "backup", str(host))
-    snapshot_id = _snapshot_entries(restic_repo)[0]["id"]
-    state_dir = tmp_path / "agent-state"
-    events_path = state_dir / "events" / "backup" / "events.jsonl"
-    events_path.parent.mkdir(parents=True)
-    events_path.write_text("")
-    orphan_line = json.dumps({"type": "BACKUP_STARTED", "tick_id": "race-tick"})
-    hook = f'if [ "$1" = "stop" ] && [ "$2" = "all" ]; then echo \'{orphan_line}\' >> "{events_path}"; fi'
-    env_overrides = {"MNGR_HOST_DIR": str(host), "MNGR_AGENT_STATE_DIR": str(state_dir)}
-
-    stub_bin = _stub_bin_with_restic(tmp_path, supervisorctl_hook=hook)
-    run = _run_script(
-        code,
-        BACKUP_RESTORE_SCRIPT,
-        ("--agent-id", "agent-x", "--snapshot-id", snapshot_id),
-        extra_path=stub_bin,
-        env_overrides=env_overrides,
-    )
-    payload = extract_marker_json(run["stdout"], RESTORE_RESULT_MARKER)
-    assert payload is not None, run
-    assert payload["status"] == "ok", payload
-
-    events = [json.loads(line) for line in events_path.read_text().splitlines()]
-    assert [event["type"] for event in events] == ["BACKUP_STARTED", "TICK_ERROR"]
-    healed = events[-1]
-    assert healed["tick_id"] == "race-tick"
-    # The synthetic completion matches the service's own event envelope.
-    assert healed["source"] == "backup"
-    assert str(healed["event_id"]).startswith("evt-")
-    assert str(healed["timestamp"]).endswith("Z")
-    assert healed["error_type"] == "BackupTickInterrupted"
-    # The gate reads quiet again: a follow-up update/restore is not wedged.
-    probe = _run_script(
-        code, BACKUP_GATE_PROBE_SCRIPT, ("--agent-id", "agent-x"), extra_path=stub_bin, env_overrides=env_overrides
-    )
-    probe_payload = extract_marker_json(probe["stdout"], GATE_RESULT_MARKER)
-    assert probe_payload is not None, probe
-    assert probe_payload["backup_tick_in_flight"] is False
-
-
-@pytest.mark.timeout(120)
-def test_restore_script_heals_a_mid_tick_journal_carried_by_the_snapshot(tmp_path: Path) -> None:
-    # Hourly snapshots are taken *by* a backup tick, so the snapshot's copy of
-    # the journal typically ends with that tick's BACKUP_STARTED and no
-    # completion (the completion is only written after restic finishes). Once
-    # swapped in, that journal would read as an in-flight tick and wedge every
-    # later gate; the script must complete it synthetically after the swap.
-    host, code, restic_repo = _make_restore_workspace(tmp_path)
-    events_path = host / "agents" / "agent-x" / "events" / "backup" / "events.jsonl"
-    events_path.parent.mkdir(parents=True)
-    events_path.write_text(json.dumps({"type": "BACKUP_STARTED", "tick_id": "snap-tick"}) + "\n")
-    _restic_for_test(restic_repo, "backup", str(host))
-    snapshot_id = _snapshot_entries(restic_repo)[0]["id"]
-    # The live journal has since completed normally, so the gate passes.
-    events_path.write_text(
-        json.dumps({"type": "BACKUP_STARTED", "tick_id": "snap-tick"})
-        + "\n"
-        + json.dumps({"type": "RESTIC_BACKUP_SUCCEEDED", "tick_id": "snap-tick"})
-        + "\n"
-    )
-
-    stub_bin = _stub_bin_with_restic(tmp_path)
-    run = _run_script(
-        code,
-        BACKUP_RESTORE_SCRIPT,
-        ("--agent-id", "agent-x", "--snapshot-id", snapshot_id),
-        extra_path=stub_bin,
-        env_overrides={"MNGR_HOST_DIR": str(host)},
-    )
-    payload = extract_marker_json(run["stdout"], RESTORE_RESULT_MARKER)
-    assert payload is not None, run
-    assert payload["status"] == "ok", payload
-
-    # The swapped-in journal is the snapshot's copy plus a synthetic completion.
-    events = [json.loads(line) for line in events_path.read_text().splitlines()]
-    assert [event["type"] for event in events] == ["BACKUP_STARTED", "TICK_ERROR"]
-    assert events[-1]["tick_id"] == "snap-tick"
-
-
-@pytest.mark.timeout(120)
-def test_restore_script_fails_cleanly_for_an_unknown_snapshot(tmp_path: Path) -> None:
+def test_restore_script_fails_cleanly_without_a_snapshot_root(tmp_path: Path) -> None:
+    # minds resolves the snapshot root and passes it in; a dispatch that omits
+    # it must fail before anything is stopped or mutated, rather than guessing.
     host, code, restic_repo = _make_restore_workspace(tmp_path)
     _restic_for_test(restic_repo, "backup", str(host))
     (code / "file.txt").write_text("version 2\n")
@@ -1002,8 +932,6 @@ def test_restore_script_fails_cleanly_for_an_unknown_snapshot(tmp_path: Path) ->
     assert payload is not None, run
     assert payload["status"] == "failed"
     assert payload["safety_snapshot_taken"] is False
-    detail = payload["detail"]
-    assert isinstance(detail, str)
-    assert "ffffffff" in detail
+    assert "--snapshot-root" in str(payload["detail"])
     # Nothing was mutated.
     assert (code / "file.txt").read_text() == "version 2\n"

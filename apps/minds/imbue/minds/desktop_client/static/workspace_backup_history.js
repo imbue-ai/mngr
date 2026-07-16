@@ -58,7 +58,7 @@
     opUi.startRestore(snapshot.snapshot_id, false, new Date(snapshot.time).toLocaleString());
   });
 
-  function renderPage(pageSnapshots) {
+  function renderPage(entry, pageSnapshots) {
     rowsEl.textContent = '';
 
     if (total === 0) {
@@ -68,15 +68,11 @@
 
     setShown(statusEl, false);
     setShown(cardEl, true);
+    // Same gate as the settings table: an offline workspace can be downloaded
+    // from but not restored into.
+    var restoreConfig = window.mindsBackupTable.restoreConfigFor(entry, openRestoreDialog);
     pageSnapshots.forEach(function (snapshot, index) {
-      // "Latest" marks the repository's newest snapshot, which only appears
-      // on the first page.
-      var isLatest = offset === 0 && index === 0;
-      rowsEl.appendChild(
-        window.mindsBackupTable.buildSnapshotRow(agentId, snapshot, isLatest, index === 0, {
-          onRestore: openRestoreDialog,
-        })
-      );
+      rowsEl.appendChild(window.mindsBackupTable.buildSnapshotRow(agentId, snapshot, index === 0, restoreConfig));
     });
     // Rows rendered while an operation runs (e.g. paginating mid-restore)
     // must come out disabled.
@@ -118,7 +114,7 @@
         // collapses to the empty "No backups yet" state.
         var pageSnapshots = entry.snapshots || [];
         total = typeof entry.snapshots_total === 'number' ? entry.snapshots_total : offset + pageSnapshots.length;
-        renderPage(pageSnapshots);
+        renderPage(entry, pageSnapshots);
       })
       .catch(function () {
         showStatus('Could not load backup history.');
