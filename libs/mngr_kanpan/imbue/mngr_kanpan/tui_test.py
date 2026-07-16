@@ -50,6 +50,7 @@ from imbue.mngr_kanpan.testing import make_pr_field
 from imbue.mngr_kanpan.tui import BOARD_SECTION_ORDER
 from imbue.mngr_kanpan.tui import PEEK_BODY_HEIGHT
 from imbue.mngr_kanpan.tui import _BUILTIN_COLUMN_DEFS
+from imbue.mngr_kanpan.tui import _BUILTIN_COMMANDS
 from imbue.mngr_kanpan.tui import _BUILTIN_COMMAND_KEY_DELETE
 from imbue.mngr_kanpan.tui import _BUILTIN_COMMAND_KEY_EXECUTE
 from imbue.mngr_kanpan.tui import _BUILTIN_COMMAND_KEY_PUSH
@@ -69,6 +70,7 @@ from imbue.mngr_kanpan.tui import _build_board_widgets
 from imbue.mngr_kanpan.tui import _build_command_map
 from imbue.mngr_kanpan.tui import _build_data_source_column_defs
 from imbue.mngr_kanpan.tui import _build_field_color_palette
+from imbue.mngr_kanpan.tui import _build_legend_bindings
 from imbue.mngr_kanpan.tui import _build_mark_palette
 from imbue.mngr_kanpan.tui import _build_peek_panel
 from imbue.mngr_kanpan.tui import _cancel_peek_alarm
@@ -2006,6 +2008,28 @@ def test_write_terminal_title_emits_osc_zero() -> None:
     out = io.StringIO()
     _write_terminal_title(Screen(output=out), "kanpan")
     assert out.getvalue() == "\x1b]0;kanpan\x07"
+
+
+def test_legend_bindings_overlay_includes_user_custom_commands() -> None:
+    commands: dict[str, KanpanCommand] = {
+        **_BUILTIN_COMMANDS,
+        "z": CustomCommand(name="zap logs"),
+        "b": CustomCommand(name="backup", markable="light red"),
+    }
+    overlay_bindings, footer_legend = _build_legend_bindings(commands)
+    assert ("z", "zap logs") in overlay_bindings
+    assert ("b", "backup") in overlay_bindings
+    overlay_keys = [key for key, _ in overlay_bindings]
+    assert overlay_keys[:2] == ["space", "enter"]
+    assert overlay_keys[-2:] == ["q", "?"]
+    footer_keys = [key for key, _ in footer_legend]
+    assert footer_keys == ["r", "m", "d", "x", "q", "?"]
+
+
+def test_legend_bindings_footer_follows_command_overrides() -> None:
+    commands: dict[str, KanpanCommand] = {**_BUILTIN_COMMANDS, "m": CustomCommand(name="silence")}
+    _, footer_legend = _build_legend_bindings(commands)
+    assert ("m", "silence") in footer_legend
 
 
 def test_refresh_stamp_just_now_includes_fetch_duration() -> None:

@@ -1150,6 +1150,44 @@ def _legend_markup(
     return markup
 
 
+def _build_legend_bindings(
+    commands: dict[str, KanpanCommand],
+) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """(overlay bindings, footer legend) derived from the live command map.
+
+    The `?` overlay lists every binding -- the fixed interactions, every command
+    in the map (builtins and user-configured alike, marks included), and the
+    tail. The footer belt advertises only the command keys one forgets
+    (refresh/mute/delete/execute, named from the map so overrides rename them);
+    the guessable interactions (space peek, enter attach) stay overlay-only.
+    """
+    mark_keys = {_BUILTIN_COMMAND_KEY_UNMARK}
+    mark_bindings = [
+        (key, cmd.name) for key, cmd in commands.items() if _mark_color(cmd) is not None or key in mark_keys
+    ]
+    mark_bindings.append(("U", "unmark all"))
+    action_bindings = [
+        (key, cmd.name) for key, cmd in commands.items() if _mark_color(cmd) is None and key not in mark_keys
+    ]
+    overlay_bindings = [
+        ("space", "peek"),
+        ("enter", "attach"),
+        *action_bindings,
+        *mark_bindings,
+        ("q", "quit"),
+        ("?", "help"),
+    ]
+    footer_command_keys = (
+        _BUILTIN_COMMAND_KEY_REFRESH,
+        _BUILTIN_COMMAND_KEY_MUTE,
+        _BUILTIN_COMMAND_KEY_DELETE,
+        _BUILTIN_COMMAND_KEY_EXECUTE,
+    )
+    footer_legend = [(key, commands[key].name) for key in footer_command_keys if key in commands]
+    footer_legend += [("q", "quit"), ("?", "more keys")]
+    return overlay_bindings, footer_legend
+
+
 def _build_help_overlay(state: _KanpanState) -> Any:
     """A bordered panel over the board listing every key binding, sized to its content.
 
@@ -2321,29 +2359,7 @@ def run_kanpan(
     data_sources = collect_data_sources(mngr_ctx)
     initial_cached_fields = load_field_cache(mngr_ctx, data_sources)
 
-    # The footer legend shows only the core bindings; everything else (builtin
-    # commands, marks, configured shell commands) is listed by the `?` overlay.
-    mark_keys = {_BUILTIN_COMMAND_KEY_UNMARK}
-    mark_bindings = [
-        (key, cmd.name) for key, cmd in commands.items() if _mark_color(cmd) is not None or key in mark_keys
-    ]
-    mark_bindings.append(("U", "unmark all"))
-    action_bindings = [
-        (key, cmd.name) for key, cmd in commands.items() if _mark_color(cmd) is None and key not in mark_keys
-    ]
-    legend_bindings = [("space", "peek"), ("enter", "attach"), *action_bindings, *mark_bindings]
-    legend_tail = [("q", "quit"), ("?", "help")]
-    # The belt advertises the command keys one forgets (refresh/mute/delete/execute,
-    # with names from the live command map so overrides rename them); the guessable
-    # interactions (space peek, enter attach) live in the ? overlay instead.
-    footer_command_keys = (
-        _BUILTIN_COMMAND_KEY_REFRESH,
-        _BUILTIN_COMMAND_KEY_MUTE,
-        _BUILTIN_COMMAND_KEY_DELETE,
-        _BUILTIN_COMMAND_KEY_EXECUTE,
-    )
-    footer_legend = [(key, commands[key].name) for key in footer_command_keys if key in commands]
-    footer_legend += [("q", "quit"), ("?", "more keys")]
+    legend_bindings, footer_legend = _build_legend_bindings(commands)
 
     footer_left_text = Text("  Loading...")
     footer_left_attr = AttrMap(footer_left_text, "footer")
@@ -2398,7 +2414,7 @@ def run_kanpan(
         include_filters=include_filters,
         exclude_filters=exclude_filters,
         section_order=section_order,
-        legend_bindings=[*legend_bindings, *legend_tail],
+        legend_bindings=legend_bindings,
     )
 
     input_handler = _KanpanInputHandler(state=state)
