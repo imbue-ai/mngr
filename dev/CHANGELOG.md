@@ -12,7 +12,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Changed
 
-- Changed: `test-minds-snapshot` CI job (on `run_minds_release_tests` runs) now resolves the per-run CI env's coordinates and SuperTokens admin secrets and forwards them into the offload sandbox as `MINDS_SYNC_E2E_*` env vars so the new workspace-sync e2e tests can target the real connector. Snapshot offload per-test timeout raised to 2400s for the lifecycle test.
+- Changed: `test-minds-snapshot` CI job (on `run_minds_release_tests` runs) now resolves the per-run CI env's coordinates and SuperTokens admin secrets and forwards them into the offload sandbox as `MINDS_SYNC_E2E_*` env vars so the new workspace-sync e2e tests can target the real connector.
 
 ## 2026-07-14
 
