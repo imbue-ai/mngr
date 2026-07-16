@@ -27,22 +27,24 @@ from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 from pathlib import Path
-from typing import Any
 from typing import Final
 
 import pytest
 from google.api_core import exceptions as google_api_exceptions
-from google.cloud import compute_v1
 from loguru import logger
 
 from imbue.mngr.utils.plugin_testing import register_plugin_test_fixtures
 from imbue.mngr.utils.testing import setup_mngr_test_environment
+from imbue.mngr_gcp.cleanup import gcp_test_created_at
 from imbue.mngr_gcp.client import GCP_PYTEST_LAUNCHED_LABEL
-from imbue.mngr_gcp.testing import GCP_DEFAULT_ZONE
 from imbue.mngr_gcp.testing import GCP_RELEASE_TESTS_OPT_IN
 from imbue.mngr_gcp.testing import GCP_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS
 from imbue.mngr_gcp.testing import gcp_credentials_available
 from imbue.mngr_gcp.testing import get_default_project
+from imbue.mngr_gcp.testing import make_gcp_reaper_client
+from imbue.mngr_vps.errors import VpsError
+from imbue.mngr_vps.leak_cleanup import destroy_leaked_instances
+from imbue.mngr_vps.leak_cleanup import find_old_test_instances
 
 register_plugin_test_fixtures(globals())
 
@@ -83,81 +85,77 @@ def setup_test_mngr_env(
 _TEST_LEAK_TTL: Final[timedelta] = timedelta(seconds=GCP_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS)
 
 
-def _force_delete_instances(instances_client: Any, project: str, zone: str, instance_names: list[str]) -> None:
-    for instance_name in instance_names:
-        try:
-            # GCE delete() returns an async operation; await it (like production
-            # destroy_instance) so a server-side failure is caught here rather
-            # than silently dropped after a fire-and-forget call.
-            operation = instances_client.delete(project=project, zone=zone, instance=instance_name)
-            operation.result()
-        except google_api_exceptions.GoogleAPICallError as e:
-            logger.warning("Failed to delete leaked GCE instance {}: {}", instance_name, e)
+def _mark_session_failed(session: pytest.Session) -> None:
+    """Fail the session, but only if it was otherwise passing.
 
-
-def _find_orphan_test_instances(instances_client: Any, project: str, zone: str) -> list[str]:
-    """Return names of instances labeled ``mngr-pytest-launched=true`` older than the TTL.
-
-    ``GcpVpsClient.create_instance`` adds the label to every GCE instance
-    launched while ``PYTEST_CURRENT_TEST`` is set, so this scanner only matches
-    instances we created here. Younger instances are intentionally skipped so
-    this never races a parallel worker's in-flight test.
+    Raising from ``pytest_sessionfinish`` is silently dropped by pytest, so
+    setting ``session.exitstatus`` is the supported way to signal failure.
+    Only overwrite a successful (0) status: a non-zero status
+    (INTERRUPTED=2, INTERNAL_ERROR=3, USAGE_ERROR=4, NO_TESTS_COLLECTED=5)
+    carries strictly more diagnostic information than TESTS_FAILED=1, so
+    downgrading would hide the real reason CI failed.
     """
-    cutoff = datetime.now(timezone.utc) - _TEST_LEAK_TTL
-    leaked: list[str] = []
-    request = compute_v1.ListInstancesRequest(
-        project=project, zone=zone, filter=f"labels.{GCP_PYTEST_LAUNCHED_LABEL}=true"
-    )
-    try:
-        page_result = instances_client.list(request=request)
-        for instance in page_result:
-            created_at = datetime.fromisoformat(instance.creation_timestamp)
-            if created_at < cutoff:
-                leaked.append(instance.name)
-    except google_api_exceptions.GoogleAPICallError as e:
-        logger.warning("Failed to scan for orphaned GCE test instances: {}", e)
-    return leaked
+    if session.exitstatus == 0:
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     """Detect and clean up leaked GCP resources at session end.
 
     Implemented as a pytest hook (not a fixture) so it runs after every
-    session-scoped fixture teardown. Skips silently unless release tests were
-    actually opted into (``MNGR_GCP_RELEASE_TESTS=1``) and ADC is available --
-    the same conjunction that gates the release-test ``pytestmark`` -- so the
-    cleanup hook never makes a live GCE API call from a run that did not opt
-    into GCP-using tests. If leaks are found, force-deletes them and sets
-    ``session.exitstatus`` to ``TESTS_FAILED`` -- but only when the session was
-    otherwise passing, so a more-specific failure is preserved.
+    session-scoped fixture teardown. No-ops when release tests were not opted
+    into (``MNGR_GCP_RELEASE_TESTS`` is unset) -- an ordinary run that never
+    touches GCE. When the opt-in *is* set but ADC cannot be resolved (or no
+    default project is configured, or the client cannot be built), the session
+    is *failed* rather than skipped: a release run that cannot authenticate is
+    a misconfiguration, not a benign skip, and skipping would silently green a
+    run that could not have scanned for leaks. If leaks are found they are
+    force-deleted and the session fails. All failure paths set
+    ``session.exitstatus`` only when the session was otherwise passing, so a
+    more-specific failure is preserved.
     """
     del exitstatus
-    if not (GCP_RELEASE_TESTS_OPT_IN and gcp_credentials_available()):
+    if not GCP_RELEASE_TESTS_OPT_IN:
+        return
+    if not gcp_credentials_available():
+        logger.error(
+            "MNGR_GCP_RELEASE_TESTS=1 is set but GCP Application Default Credentials could not be "
+            "resolved, so the session-end leak scan cannot run. Configure ADC, or unset "
+            "MNGR_GCP_RELEASE_TESTS to skip the GCP release tests."
+        )
+        _mark_session_failed(session)
         return
     project = get_default_project()
     if project is None:
+        logger.error(
+            "MNGR_GCP_RELEASE_TESTS=1 is set but no default GCP project could be resolved, so the "
+            "session-end leak scan cannot run. Configure a project, or unset MNGR_GCP_RELEASE_TESTS."
+        )
+        _mark_session_failed(session)
         return
 
     try:
-        instances_client = compute_v1.InstancesClient()
-    except google_api_exceptions.GoogleAPICallError as e:
-        logger.warning("Failed to build InstancesClient for session-end leak scan: {}", e)
+        client = make_gcp_reaper_client(project)
+        instances = client.list_instances()
+    except (VpsError, google_api_exceptions.GoogleAPICallError) as e:
+        # A scan that cannot run must fail the session, not silently report "no leaks".
+        logger.error("Failed to scan for leaked GCE test instances: {}", e)
+        _mark_session_failed(session)
         return
 
-    orphans = _find_orphan_test_instances(instances_client, project, GCP_DEFAULT_ZONE)
+    orphans = find_old_test_instances(instances, gcp_test_created_at, _TEST_LEAK_TTL, datetime.now(timezone.utc))
     if not orphans:
         return
 
-    _force_delete_instances(instances_client, project, GCP_DEFAULT_ZONE, orphans)
+    destroy_leaked_instances(client, orphans)
     message = (
         "=" * 70
         + "\nGCP SESSION CLEANUP FOUND LEAKED RESOURCES!\n"
         + "=" * 70
         + f"\n\nLeaked GCE instances labeled {GCP_PYTEST_LAUNCHED_LABEL}=true and "
         + f"older than {GCP_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS // 60} minutes:\n  "
-        + "\n  ".join(orphans)
+        + "\n  ".join(inst["id"] for inst in orphans)
         + "\n\nInstances have been force-deleted, but tests should not leak.\n"
     )
     logger.error(message)
-    if session.exitstatus == 0:
-        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+    _mark_session_failed(session)

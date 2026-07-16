@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Script to clean up old Modal test environments.
 
-This script is designed to be run in CI to periodically clean up Modal test
-environments that are older than a specified age. This helps prevent accumulation
-of stale environments when test processes crash without proper cleanup.
+This script is run by a CI job (on every push to main and pull request) to clean
+up Modal test environments that are older than a specified age. This helps prevent
+accumulation of stale environments when test processes crash without proper cleanup.
 
 Usage:
     uv run python scripts/cleanup_old_modal_test_environments.py [--max-age-hours HOURS]
