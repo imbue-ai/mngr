@@ -223,12 +223,9 @@
       <div id="backup-section">
         <p id="backup-status-line" class="type-body text-secondary mb-4">Loading backup status...</p>
 
-        {# Recent backups: renderHistory in workspace_backups.js builds the rows
-           inside #backup-history from the /backups response's snapshot list
-           (works even when the workspace is offline). The "View all backups"
-           footer only appears when there are more snapshots than the table
-           shows (JS drives it via style.display) and navigates to the paginated
-           full-history page. #}
+        {# Recent backups: workspace_backups.js fills #backup-history from
+           /backups (newest-first). "View all" appears when there are more
+           than five and opens the full-history page. #}
         <h3 class="type-label text-secondary mb-2">Recent backups</h3>
         <p id="backup-history-empty" class="hidden type-body text-secondary mb-4"></p>
         <div id="backup-history-card" class="minds-card hidden overflow-hidden mb-6 p-0">

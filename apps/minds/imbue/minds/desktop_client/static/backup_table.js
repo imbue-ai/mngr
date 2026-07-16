@@ -1,9 +1,4 @@
-// Shared row builder for the backup tables: the "Recent backups" table on the
-// workspace settings page (workspace_backups.js) and the paginated full-history
-// page (workspace_backup_history.js). One place so the two cannot drift apart.
-//
-// Exposed as window.mindsBackupTable; include this script before the page
-// script that uses it.
+// Shared backup-table row builder (settings + full-history). window.mindsBackupTable.
 (function () {
   function relativeAgo(iso) {
     var then = Date.parse(iso);
@@ -22,9 +17,7 @@
     return y + (y === 1 ? ' year ago' : ' years ago');
   }
 
-  // Download one snapshot as a zip. The export route restores the snapshot on
-  // this machine and streams it back, so this works even for an offline
-  // workspace.
+  // Export restores the snapshot on this machine and streams a zip (works offline).
   function downloadSnapshot(agentId, link, snapshotId) {
     if (link.getAttribute('data-exporting') === '1') return;
     link.setAttribute('data-exporting', '1');
@@ -66,9 +59,8 @@
       });
   }
 
-  // One table row: relative time (exact local time on hover) plus a "Latest"
-  // badge on the newest snapshot on the left, a Download action on the right.
-  // Rows after the first carry a top divider; the latest row is tinted.
+  // Relative time (+ Latest badge) on the left; Download on the right.
+  // ``actions`` is a flex slot so a second action (e.g. Restore) can join later.
   function buildSnapshotRow(agentId, snapshot, isLatest, isFirst) {
     var row = document.createElement('div');
     row.className = 'flex items-center gap-4 px-4 py-3'

@@ -94,12 +94,8 @@
 
   // -- Backup history list --------------------------------------------------
 
-  // Render the "Recent backups" table from the /backups entry. Independent of
-  // the verification check_state -- the snapshot list comes from restic run on
-  // this machine, so it renders even when the workspace is offline. Only the
-  // newest RECENT_LIMIT snapshots are shown; the "View all backups" footer
-  // links to the paginated full-history page and only appears when there are
-  // more snapshots than the table shows.
+  // Render the "Recent backups" table from the /backups entry. Newest
+  // RECENT_LIMIT rows; "View all" links to the full-history page when needed.
   function renderHistory(entry) {
     historyEl.textContent = '';
     setShown(historyCard, false);
@@ -115,10 +111,8 @@
       historyEmptyEl.classList.remove('hidden');
       return;
     }
-    // restic lists snapshots oldest first; the table wants newest at the top.
-    var snapshots = (entry.snapshots || []).slice().sort(function (a, b) {
-      return Date.parse(b.time) - Date.parse(a.time);
-    });
+    // /backups returns snapshots newest-first.
+    var snapshots = entry.snapshots || [];
     if (snapshots.length === 0) {
       historyEmptyEl.textContent = entry.is_backing_up
         ? 'Backing up now... the first backup will appear shortly.'

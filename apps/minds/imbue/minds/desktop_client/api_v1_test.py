@@ -378,27 +378,10 @@ def test_workspace_backups_reports_unconfigured_as_an_ordinary_empty_listing(tmp
     assert body["update_target_version"].startswith("minds-v")
 
 
-def test_workspace_backup_snapshots_page_unconfigured_returns_empty_page(tmp_path: Path) -> None:
-    # The paged history route mirrors the full /backups route's treatment of
-    # an unconfigured workspace: an ordinary empty page, not an error.
-    agent_id = AgentId()
-    client = _client_with_workspace(tmp_path, agent_id)
-
-    response = client.get(f"/api/v1/workspaces/{agent_id}/backups/snapshots", headers=_auth_header())
-
-    assert response.status_code == 200
-    body = json.loads(response.data)
-    assert body["is_configured"] is False
-    assert body["snapshots"] == []
-    assert body["total"] == 0
-    assert body["error"] is None
-
-
 @pytest.mark.timeout(120)
-def test_workspace_backup_snapshots_paginates_newest_first(tmp_path: Path) -> None:
-    # Against a real local restic repo with three snapshots: pages are
-    # newest-first, offset/limit slice the same ordering, and out-of-range
-    # params are clamped rather than rejected.
+def test_workspace_backups_lists_snapshots_newest_first(tmp_path: Path) -> None:
+    # Against a real local restic repo with three snapshots: /backups returns
+    # them newest-first so settings and the full-history page need not re-sort.
     agent_id = AgentId()
     client = _client_with_workspace(tmp_path, agent_id)
     repo = str(tmp_path / "repo")
@@ -414,38 +397,11 @@ def test_workspace_backup_snapshots_paginates_newest_first(tmp_path: Path) -> No
         source.write_text(f"content {i}")
         restic_backup_a_file(repo, password, source)
 
-    first_page = json.loads(
-        client.get(
-            f"/api/v1/workspaces/{agent_id}/backups/snapshots?offset=0&limit=2", headers=_auth_header()
-        ).data
-    )
-    assert first_page["is_configured"] is True
-    assert first_page["total"] == 3
-    assert first_page["limit"] == 2
-    assert len(first_page["snapshots"]) == 2
-    assert first_page["snapshots"][0]["time"] >= first_page["snapshots"][1]["time"]
-
-    second_page = json.loads(
-        client.get(
-            f"/api/v1/workspaces/{agent_id}/backups/snapshots?offset=2&limit=2", headers=_auth_header()
-        ).data
-    )
-    assert len(second_page["snapshots"]) == 1
-    # The two pages tile the full newest-first ordering without overlap.
-    all_ids = [s["snapshot_id"] for s in first_page["snapshots"] + second_page["snapshots"]]
-    assert len(set(all_ids)) == 3
-    assert first_page["snapshots"][1]["time"] >= second_page["snapshots"][0]["time"]
-
-    # Nonsense params are clamped: negative offset -> 0, limit 0 -> at least 1.
-    clamped = json.loads(
-        client.get(
-            f"/api/v1/workspaces/{agent_id}/backups/snapshots?offset=-5&limit=0", headers=_auth_header()
-        ).data
-    )
-    assert clamped["offset"] == 0
-    assert clamped["limit"] == 1
-    assert len(clamped["snapshots"]) == 1
-    assert clamped["snapshots"][0]["snapshot_id"] == first_page["snapshots"][0]["snapshot_id"]
+    body = json.loads(client.get(f"/api/v1/workspaces/{agent_id}/backups", headers=_auth_header()).data)
+    assert body["is_configured"] is True
+    assert len(body["snapshots"]) == 3
+    times = [s["time"] for s in body["snapshots"]]
+    assert times == sorted(times, reverse=True)
 
 
 def test_create_workspace_without_agent_creator_returns_501(tmp_path: Path) -> None:

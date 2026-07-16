@@ -347,24 +347,6 @@ class BackupSnapshotSummary(FrozenModel):
     total_size_bytes: int | None = Field(default=None, description="Total snapshot size in bytes, when known")
 
 
-class WorkspaceBackupSnapshotsPageResponse(FrozenModel):
-    """One page of a workspace's backup snapshots, newest-first.
-
-    The paged sibling of ``WorkspaceBackupsResponse``: it carries only the
-    snapshot listing (no backup-service verification), so paging through a
-    long history costs one restic listing per request and never execs into
-    the workspace.
-    """
-
-    agent_id: str = Field(description="The workspace agent id")
-    is_configured: bool = Field(description="Whether minds holds a canonical restic.env for this workspace")
-    total: int = Field(description="Total number of snapshots in the repository (0 when unconfigured or errored)")
-    offset: int = Field(description="Index of the first returned snapshot within the newest-first ordering")
-    limit: int = Field(description="The (clamped) page size this response was computed with")
-    snapshots: tuple[BackupSnapshotSummary, ...] = Field(default=(), description="This page's snapshots, newest-first")
-    error: str | None = Field(default=None, description="Why the snapshot listing failed, when it did")
-
-
 class WorkspaceBackupsResponse(FrozenModel):
     """A workspace's full backup picture: snapshots plus the backup-service verification result.
 
