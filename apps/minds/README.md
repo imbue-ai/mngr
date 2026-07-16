@@ -22,6 +22,17 @@ eval "$(uv run minds env activate <name>)"   # e.g. dev-<your-user>
 just minds-start
 ```
 
+> **macOS: install GNU rsync first.** `just minds-start` syncs your working
+> tree into the default-workspace-template worktree using
+> `rsync --filter=':- .gitignore'`, a GNU rsync feature. Recent macOS ships
+> Apple's `openrsync` as `/usr/bin/rsync`, which doesn't support it, so the
+> sync fails. Install GNU rsync and make sure it comes first on `PATH`:
+>
+> ```bash
+> brew install rsync
+> rsync --version | head -1   # must NOT say "openrsync"
+> ```
+
 Then visit the login URL printed in the terminal to create your first agent.
 
 ## How it works

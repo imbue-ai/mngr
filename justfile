@@ -499,6 +499,18 @@ minds-start branch="" default_workspace_template="":
     fi
     vendor_mngr="$default_workspace_template_wt/vendor/mngr"
     mkdir -p "$vendor_mngr"
+    # The vendor/mngr sync below uses `rsync --filter=':- .gitignore'`, a GNU
+    # rsync feature. Recent macOS ships Apple's openrsync at /usr/bin/rsync,
+    # which doesn't support it and fails the sync with a confusing error --
+    # fail fast here with the fix. See apps/minds/README.md (Getting started).
+    if rsync --version 2>&1 | grep -qi openrsync; then
+        echo "error: your 'rsync' is Apple's openrsync, which lacks the" >&2
+        echo "       --filter=':- .gitignore' support minds-start needs." >&2
+        echo "       Install GNU rsync and put it ahead of /usr/bin on PATH:" >&2
+        echo "         brew install rsync" >&2
+        echo "         rsync --version | head -1   # must NOT say 'openrsync'" >&2
+        exit 2
+    fi
     echo "Syncing $(pwd) -> $vendor_mngr (rsync, uncommitted-friendly, no DEFAULT_WORKSPACE_TEMPLATE commit)"
     # Exclusions must match _RSYNC_MANUAL_EXCLUDES + _GITIGNORE_RSYNC_FILTER
     # in libs/mngr_imbue_cloud/.../cli/admin.py and apps/minds/.../cli/pool.py,
