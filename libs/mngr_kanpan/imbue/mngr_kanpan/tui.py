@@ -113,7 +113,6 @@ PALETTE = [
     ("footer", "white", "dark blue"),
     # Keys inside legends (`enter: attach`), visually distinct from their descriptions.
     ("footer_key", "yellow,bold", "dark blue"),
-    ("peek_hint_key", "yellow,bold", ""),
     ("reversed", "standout", ""),
     # Agent states: only RUNNING and WAITING-needing-attention get color
     ("state_running", "light green", ""),
@@ -1213,10 +1212,10 @@ class _LegendText(Text):
 
 
 def _build_help_overlay(state: _KanpanState) -> Any:
-    """A centered box over the board listing every key binding."""
+    """A centered box over the board listing every key binding, sized to its content."""
     key_width = max((len(key) for key, _ in state.legend_bindings), default=1)
     rows: list[AttrMap | Text] = [
-        Text([("footer_key", key.ljust(key_width)), ("peek_hint", "  "), description])
+        Text([" ", ("footer_key", key), " " * (key_width - len(key) + 2) + description])
         for key, description in state.legend_bindings
     ]
     listbox: ListBox = ListBox(SimpleFocusListWalker(rows))
@@ -1229,8 +1228,21 @@ def _build_help_overlay(state: _KanpanState) -> Any:
         blcorner="╰",
         brcorner="╯",
     )
-    height = min(len(rows) + 2, 20)
-    return Overlay(box, state.frame, align="center", width=("relative", 50), valign="middle", height=height)
+    description_width = max((len(description) for _, description in state.legend_bindings), default=1)
+    width = 1 + key_width + 2 + description_width + 1 + 2
+    height = len(rows) + 2
+    # Anchored to the lower right, springing from the footer's `?: help`; bottom=2
+    # keeps it just above the footer bar and its divider.
+    return Overlay(
+        AttrMap(box, "footer"),
+        state.frame,
+        align="right",
+        width=width,
+        valign="bottom",
+        height=height,
+        right=1,
+        bottom=2,
+    )
 
 
 def _open_help(state: _KanpanState) -> None:
@@ -1259,7 +1271,10 @@ def _build_peek_panel(state: _KanpanState) -> LineBox:
     """Build the peek panel (a bordered box shown in place of the footer) and stash its parts."""
     state.peek_body_text = Text("", wrap="space")
     state.peek_input = _make_reply_edit(("peek_user", PEEK_REPLY_PROMPT))
-    hint = Text(_legend_markup([("enter", "send"), ("esc", "close")], "peek_hint_key", "peek_hint", _LEGEND_SEPARATOR))
+    hint = AttrMap(
+        Text(_legend_markup([("enter", "send"), ("esc", "close")], "footer_key", "footer", _LEGEND_SEPARATOR)),
+        "footer",
+    )
     inner = Pile(
         [
             state.peek_body_text,
