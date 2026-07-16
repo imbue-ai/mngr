@@ -3,7 +3,19 @@ import pytest
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.utils.sentry.frontend import FrontendSentryConfig
 from imbue.minds.utils.sentry.frontend import frontend_sentry_browser_payload
+from imbue.minds.utils.sentry.frontend import frontend_sentry_ingest_origins
 from imbue.minds.utils.sentry.frontend import resolve_frontend_sentry_config
+
+
+def test_frontend_sentry_ingest_origins_are_https_scheme_only() -> None:
+    origins = frontend_sentry_ingest_origins()
+    # Every configured DSN yields at least one origin, and each is a bare
+    # https://<host> with no key, path, or trailing slash (CSP connect-src form).
+    assert origins
+    for origin in origins:
+        assert origin.startswith("https://")
+        assert origin.count("/") == 2
+        assert "@" not in origin
 
 
 def test_to_browser_payload_is_none_when_disabled() -> None:

@@ -34,6 +34,7 @@ jitter; documented in ``specs/detached-destroy-flow/spec.md``.
 """
 
 import os
+import shlex
 import shutil
 import subprocess
 from collections.abc import Callable
@@ -213,7 +214,14 @@ def _build_destroy_command(host_id: HostId, mngr_binary: str = MNGR_BINARY) -> l
     """
     # ``mngr list ... --ids`` writes one id per line; ``mngr destroy -f -`` reads
     # ids from stdin. The pipe handles host-mates fanout in one shot.
-    shell_command = f"{mngr_binary} list --include 'host.id == \"{host_id}\"' --ids | {mngr_binary} destroy -f -"
+    # ``host_id`` is resolver-derived today, but shell-quote the whole
+    # ``--include`` filter as defense-in-depth so a hostile value cannot break
+    # out into the surrounding ``bash -c`` command (CASA 5.1.9). Quoting the
+    # complete argument (rather than the bare interpolation) is where
+    # ``shlex.quote``'s guarantee actually holds; for a well-formed host id it
+    # reproduces the original ``'host.id == "<id>"'`` token unchanged.
+    include_filter = shlex.quote(f'host.id == "{host_id}"')
+    shell_command = f"{mngr_binary} list --include {include_filter} --ids | {mngr_binary} destroy -f -"
     return ["bash", "-c", shell_command]
 
 

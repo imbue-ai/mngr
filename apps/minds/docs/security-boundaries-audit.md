@@ -78,7 +78,7 @@ The bare-origin `minds_session` cookie is never sent to `agent-X.localhost` subd
 | Component | Current state | Risk |
 |-----------|--------------|------|
 | WebContentsView session | Content views use `persist:workspace-content` partition; chrome and modal use default session | Secure -- cookie jars separated between content and chrome |
-| Content Security Policy | Not explicitly set by desktop client | Low -- agents control their own CSP |
+| Content Security Policy | Restrictive CSP set on first-party chrome responses only (via an ``after_request`` hook); proxied ``<agent-id>.localhost`` responses are left untouched | Secure -- first-party chrome is locked down while agents still control their own CSP |
 | contextIsolation | Enabled on all views | Secure |
 | nodeIntegration | Disabled on all views | Secure |
 | Preload script | Only on chrome and modal views, NOT on contentView | Secure |

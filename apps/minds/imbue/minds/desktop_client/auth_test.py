@@ -1,10 +1,15 @@
+import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from datetime import timedelta
+from datetime import timezone
 from pathlib import Path
 
 import pytest
 
 from imbue.minds.desktop_client.auth import FileAuthStore
+from imbue.minds.desktop_client.auth import _CODES_FILENAME
 from imbue.minds.errors import SigningKeyError
 from imbue.minds.primitives import OneTimeCode
 
@@ -86,6 +91,59 @@ def test_add_and_validate_one_time_code(tmp_path: Path) -> None:
 
     is_valid = store.validate_and_consume_code(code=code)
     assert is_valid is True
+
+
+def _write_stored_code(auth_dir: Path, code: str, status: str, created_at: datetime | None) -> None:
+    """Persist a single one-time code record directly, bypassing minting.
+
+    Lets a test control ``created_at`` (including omitting it entirely to mimic
+    a record persisted before expiry tracking existed).
+    """
+    auth_dir.mkdir(parents=True, exist_ok=True)
+    entry: dict[str, str] = {"code": code, "status": status}
+    if created_at is not None:
+        entry["created_at"] = created_at.isoformat()
+    (auth_dir / _CODES_FILENAME).write_text(json.dumps([entry]))
+
+
+def test_validate_accepts_fresh_code(tmp_path: Path) -> None:
+    store = _make_auth_store(tmp_path)
+    code = OneTimeCode("fresh-code-55501")
+
+    store.add_one_time_code(code=code)
+
+    assert store.validate_and_consume_code(code=code) is True
+
+
+def test_validate_rejects_expired_code(tmp_path: Path) -> None:
+    auth_dir = tmp_path / "auth"
+    stale_time = datetime.now(timezone.utc) - timedelta(hours=1)
+    _write_stored_code(auth_dir, "expired-code-55502", "VALID", stale_time)
+    store = FileAuthStore(data_directory=auth_dir)
+
+    assert store.validate_and_consume_code(OneTimeCode("expired-code-55502")) is False
+    # The rejected code is marked so a second attempt still fails -- an expired
+    # code is never resurrectable.
+    assert store.validate_and_consume_code(OneTimeCode("expired-code-55502")) is False
+
+
+def test_validate_rejects_code_without_timestamp(tmp_path: Path) -> None:
+    # A record persisted before expiry tracking existed has no created_at; it is
+    # treated as expired rather than honored forever.
+    auth_dir = tmp_path / "auth"
+    _write_stored_code(auth_dir, "legacy-code-55503", "VALID", None)
+    store = FileAuthStore(data_directory=auth_dir)
+
+    assert store.validate_and_consume_code(OneTimeCode("legacy-code-55503")) is False
+
+
+def test_validate_accepts_code_just_within_ttl(tmp_path: Path) -> None:
+    auth_dir = tmp_path / "auth"
+    recent_time = datetime.now(timezone.utc) - timedelta(minutes=1)
+    _write_stored_code(auth_dir, "recent-code-55504", "VALID", recent_time)
+    store = FileAuthStore(data_directory=auth_dir)
+
+    assert store.validate_and_consume_code(OneTimeCode("recent-code-55504")) is True
 
 
 def test_validate_rejects_unknown_code(tmp_path: Path) -> None:

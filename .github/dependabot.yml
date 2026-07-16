@@ -1,0 +1,49 @@
+# Dependabot dependency/security updates (CASA 6.1.1).
+# See https://docs.github.com/code-security/dependabot/dependabot-version-updates
+# uv support is GA since 2025-03; it reads the committed root uv.lock to
+# determine current versions. Minor/patch bumps are grouped into a single PR
+# per ecosystem to keep PR noise down; majors still open individually.
+version: 2
+updates:
+  # Python workspace: the root uv.lock covers every workspace member under
+  # libs/ and apps/, so a single "uv" entry at the repo root suffices.
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      python-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # Node/Electron app. Its package.json + pnpm-lock.yaml live under apps/minds.
+  - package-ecosystem: "npm"
+    directory: "/apps/minds"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # GitHub Actions used across .github/workflows and .github/actions.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      actions-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"

@@ -46,6 +46,7 @@ from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
+from imbue.minds.desktop_client.cookie_manager import clear_session_cookie
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
 from imbue.minds.desktop_client.dek_store import is_master_password_set_for_account
@@ -148,6 +149,7 @@ from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.minds.utils.sentry.core import latchkey_forward_sentry_consent_path
 from imbue.minds.utils.sentry.core import write_latchkey_forward_sentry_consent
+from imbue.minds.utils.sentry.frontend import frontend_sentry_ingest_origins
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
@@ -2262,7 +2264,11 @@ def _handle_account_logout(
         return make_response(status_code=403, content="Not authenticated")
     if get_state().session_store is not None:
         signout_user_via_plugin(user_id)
-    return make_response(status_code=303, headers={"Location": "/accounts"})
+    response = make_response(status_code=303, headers={"Location": "/accounts"})
+    # Drop the local bare-origin session cookie so it does not outlive the
+    # revoked SuperTokens session (CASA 2.2.1 / 6.6.1).
+    clear_session_cookie(response)
+    return response
 
 
 # -- Workspace settings routes --
@@ -2717,6 +2723,83 @@ def _handle_request_event_callback(agent_id_str: str, raw_line: str) -> None:
                 backend_resolver.notify_change()
 
 
+# -- Security response headers --
+
+# CSP for the desktop client's OWN chrome pages. Deliberately permissive on
+# inline script/style (the server-rendered chrome relies on inline handlers and
+# styles) but pins every fetchable resource to the first-party origin so a
+# compromised template cannot exfiltrate to, or pull code from, a third-party
+# host. Applied ONLY to first-party responses -- proxied per-agent content on
+# ``<agent-id>.localhost`` subdomains keeps its own CSP (agents control theirs).
+#
+# ``connect-src`` allows: the first-party origin (``'self'``); loopback
+# websockets (the chrome UI streams from the desktop client and the local
+# ``mngr forward`` proxy, which live on other loopback ports -- different origins
+# ``'self'`` would not cover -- while still barring exfiltration to any
+# non-loopback host); and the Sentry ingest origin(s) the browser error-reporting
+# SDK POSTs to when the user has opted in (derived from the DSN table so there is
+# one source of truth).
+_LOOPBACK_WEBSOCKET_SOURCES: Final[str] = "ws://localhost:* wss://localhost:* ws://127.0.0.1:* wss://127.0.0.1:*"
+
+
+def _build_first_party_csp() -> str:
+    connect_src = " ".join(("'self'", _LOOPBACK_WEBSOCKET_SOURCES, *frontend_sentry_ingest_origins()))
+    return (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        f"connect-src {connect_src}; "
+        "object-src 'none'; "
+        "base-uri 'self'; "
+        "frame-ancestors 'self'"
+    )
+
+
+_FIRST_PARTY_CSP: Final[str] = _build_first_party_csp()
+
+
+def _is_first_party_host(host: str | None) -> bool:
+    """Return whether ``host`` addresses the first-party desktop chrome origin.
+
+    Agent content is proxied on ``<agent-id>.localhost`` subdomains; the
+    desktop client's own pages are served on the bare ``localhost`` (or
+    loopback) origin. Only the latter should receive the restrictive first-party
+    CSP -- clamping a CSP onto proxied agent responses would break agent web
+    apps. A ``*.localhost`` host is therefore treated as *not* first-party.
+    """
+    if not host:
+        # Absent Host header: default to first-party (this is our own server).
+        return True
+    hostname = host.split(":", 1)[0].lower()
+    if hostname.endswith(".localhost"):
+        return False
+    return True
+
+
+def _apply_security_headers(response: Response, host: str | None) -> Response:
+    """Add first-party security headers without clobbering handler-set ones.
+
+    ``setdefault`` semantics ensure a handler that deliberately set its own
+    ``Content-Security-Policy`` or ``X-Content-Type-Options`` wins. Proxied
+    agent responses (non-first-party hosts) do not receive the restrictive CSP.
+    """
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    if _is_first_party_host(host):
+        response.headers.setdefault("Content-Security-Policy", _FIRST_PARTY_CSP)
+    return response
+
+
+def _security_headers_after_request(response: Response) -> Response:
+    """Flask ``after_request`` hook adding first-party security headers.
+
+    Registered on the app in ``create_desktop_client``. Reads the active
+    request's host from Flask's request context to distinguish first-party
+    chrome responses from proxied ``<agent-id>.localhost`` agent content.
+    """
+    return _apply_security_headers(response, request.host)
+
+
 # -- App factory --
 
 
@@ -2789,6 +2872,11 @@ def create_desktop_client(
             return exc
         logger.opt(exception=exc).error("Unhandled exception on {} {}", request.method, request.path)
         return make_response(status_code=500, content=f"Internal Server Error: {exc}")
+
+    # Adds X-Content-Type-Options: nosniff and (first-party only) a CSP to the
+    # desktop client's own responses. Proxied agent content on
+    # <agent-id>.localhost subdomains keeps its own CSP.
+    app.after_request(_security_headers_after_request)
 
     state = DesktopClientState(
         auth_store=auth_store,

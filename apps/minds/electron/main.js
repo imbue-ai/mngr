@@ -1862,10 +1862,17 @@ function restoreWindowBounds(bundle, entry) {
 // surfaces again.
 let discoveryBlockedShown = false;
 
+// One-shot guard so the authenticated -> unauthenticated boundary (sign-out or
+// session expiry) clears browser storage exactly once, not on every SSE
+// reconnect that re-emits `auth_required`. Reset when we re-authenticate.
+let hasClearedStorageForSignout = false;
+
 function handleChromeSSEEvent(evt) {
   if (evt.type === 'workspaces' && Array.isArray(evt.workspaces)) {
     const oldIds = new Set(workspaceList.map((w) => w.id));
     latestChromeState.workspaces = evt.workspaces;
+    // We are authenticated again; re-arm the sign-out storage clear.
+    hasClearedStorageForSignout = false;
     workspaceList = evt.workspaces.map((w) => ({
       id: String(w.id),
       name: w.name ? String(w.name) : '',
@@ -1941,6 +1948,14 @@ function handleChromeSSEEvent(evt) {
       for (const b of bundles) {
         if (b.window.isDestroyed()) continue;
         updateBundleAccentAgentId(b, null);
+      }
+      // Clear session cookies and web storage on sign-out / session expiry so a
+      // revoked session leaves nothing reusable behind (CASA 2.2.1 / 6.6.1).
+      // Guarded so the repeated `auth_required` events from SSE reconnects don't
+      // re-clear on every tick.
+      if (!hasClearedStorageForSignout) {
+        hasClearedStorageForSignout = true;
+        clearSessionStorageOnSignout();
       }
     }
   } else if (evt.type === 'auth_status') {
@@ -2664,6 +2679,22 @@ if (!gotLock) {
 // process SSE and chrome/sidebar views use the default session. We sync
 // minds_session cookies from the content partition to the default session
 // so that chrome-level auth checks work.
+
+// Clear the session cookie and web storage from both the default session and
+// the workspace-content partition when the user signs out (or the session
+// expires). The backend also expires the bare-origin `minds_session` cookie on
+// its sign-out response, but the content partition and any cached web storage
+// are only reachable from the main process, so we wipe them here.
+function clearSessionStorageOnSignout() {
+  const sessionsToClear = [session.defaultSession, session.fromPartition(CONTENT_PARTITION)];
+  for (const targetSession of sessionsToClear) {
+    targetSession
+      .clearStorageData({ storages: ['cookies', 'localstorage', 'indexdb', 'websql', 'serviceworkers', 'cachestorage'] })
+      .catch((err) => {
+        console.warn('[signout] Failed to clear session storage:', err);
+      });
+  }
+}
 
 function setupContentPartitionCookieSync() {
   const contentSession = session.fromPartition(CONTENT_PARTITION);

@@ -27,6 +27,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.bootstrap import set_imbue_cloud_provider_for_account
 from imbue.minds.bootstrap import unset_imbue_cloud_provider_for_account
+from imbue.minds.desktop_client.cookie_manager import clear_session_cookie
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthSession
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
@@ -424,7 +425,11 @@ def _handle_signout_api() -> Response:
         return _json_response({"status": "ERROR", "message": "user_id is required"}, 400)
 
     signout_user_via_plugin(str(user_id))
-    return _json_response({"status": "OK"})
+    response = _json_response({"status": "OK"})
+    # Drop the local bare-origin session cookie so it does not outlive the
+    # revoked SuperTokens session (CASA 2.2.1 / 6.6.1).
+    clear_session_cookie(response)
+    return response
 
 
 def _handle_status_api() -> Response:

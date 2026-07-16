@@ -1,0 +1,86 @@
+# Scheduled dependency/CVE audit (CASA 6.1.1). Complements Dependabot
+# (.github/dependabot.yml, which opens update PRs) by surfacing known
+# vulnerabilities in the currently resolved dependency set on a weekly cadence
+# and on demand. The audit steps are informational (continue-on-error): a fresh
+# advisory should not wedge unrelated work, but findings are printed in the job
+# log and the job still reports which audits found issues in its summary step.
+name: Dependency Audit
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly, Monday 09:00 UTC.
+    - cron: "0 9 * * 1"
+
+jobs:
+  python-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+
+      - name: Install Python dependencies
+        run: uv sync --all-packages
+
+      # pip-audit runs against the resolved workspace environment. `--with`
+      # pulls pip-audit into the run without adding it to any manifest.
+      # `--skip-editable` skips the local editable imbue workspace packages
+      # (no PyPI advisories exist for them) so the result reflects real
+      # third-party CVEs rather than skipped-local-package noise.
+      - name: Audit Python dependencies (pip-audit)
+        id: pip_audit
+        continue-on-error: true
+        run: uv run --with pip-audit pip-audit --skip-editable
+
+      - name: Summarize Python audit result
+        if: always()
+        run: |
+          if [ "${{ steps.pip_audit.outcome }}" = "success" ]; then
+            echo "pip-audit: no known vulnerabilities found." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "pip-audit: findings reported (see the Audit Python dependencies step log)." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  minds-npm-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: setup node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24.15.0'
+
+      - name: setup pnpm
+        run: |
+          npm install -g pnpm@10.33.4
+          pnpm --version
+
+      - name: pnpm install
+        working-directory: apps/minds
+        run: pnpm install --frozen-lockfile
+
+      # Audit production dependencies for the shipped Electron app.
+      - name: Audit npm dependencies (pnpm audit)
+        id: pnpm_audit
+        continue-on-error: true
+        working-directory: apps/minds
+        run: pnpm audit --prod
+
+      - name: Summarize npm audit result
+        if: always()
+        run: |
+          if [ "${{ steps.pnpm_audit.outcome }}" = "success" ]; then
+            echo "pnpm audit --prod: no known vulnerabilities found." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "pnpm audit --prod: findings reported (see the Audit npm dependencies step log)." >> "$GITHUB_STEP_SUMMARY"
+          fi

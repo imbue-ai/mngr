@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import json
+import urllib.parse
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,7 @@ from imbue.remote_service_connector.app import _MAX_BUCKETS_PER_ACCOUNT
 from imbue.remote_service_connector.app import _MAX_ENCRYPTED_SECRETS_BYTES
 from imbue.remote_service_connector.app import _MAX_KEY_BUNDLE_FIELD_BYTES
 from imbue.remote_service_connector.app import _authenticate_supertokens
+from imbue.remote_service_connector.app import _authorize_url_with_state
 from imbue.remote_service_connector.app import _default_email_getter
 from imbue.remote_service_connector.app import cf_check
 from imbue.remote_service_connector.app import cf_list_all_pages
@@ -1195,6 +1197,64 @@ def test_auth_oauth_authorize_unknown_provider_returns_error(monkeypatch: pytest
     )
     assert resp.status_code == 200
     assert resp.json()["status"] == "ERROR"
+
+
+def test_auth_oauth_authorize_reflects_state_into_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A supplied ``state`` is embedded verbatim in the authorize URL (CSRF defense)."""
+    backend = _install_fake_supertokens(monkeypatch)
+    backend.register_provider("google", email="oa@e.com")
+    client = TestClient(web_app, raise_server_exceptions=False)
+    resp = client.post(
+        "/auth/oauth/authorize",
+        json={
+            "provider_id": "google",
+            "callback_url": "http://127.0.0.1:9999/cb",
+            "state": "csrf-state-token-abc",
+        },
+    )
+    assert resp.status_code == 200
+    query = urllib.parse.parse_qs(urllib.parse.urlparse(resp.json()["url"]).query)
+    assert query["state"] == ["csrf-state-token-abc"]
+
+
+def test_authorize_url_with_state_overrides_any_provider_state() -> None:
+    """A ``state`` the provider already placed on the URL is replaced by the client's, exactly once."""
+    result = _authorize_url_with_state("https://provider.example/auth?state=old&scope=email", "client-state")
+    query = urllib.parse.parse_qs(urllib.parse.urlparse(result).query)
+    assert query["state"] == ["client-state"]
+    assert query["scope"] == ["email"]
+
+
+def test_auth_oauth_authorize_returns_pkce_code_verifier(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The verifier the provider mints at authorize time is returned to the client."""
+    backend = _install_fake_supertokens(monkeypatch)
+    backend.register_provider("google", email="oa@e.com", pkce_code_verifier="verifier-from-authorize")
+    client = TestClient(web_app, raise_server_exceptions=False)
+    resp = client.post(
+        "/auth/oauth/authorize",
+        json={"provider_id": "google", "callback_url": "http://127.0.0.1:9999/cb", "state": "s"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["pkce_code_verifier"] == "verifier-from-authorize"
+
+
+def test_auth_oauth_callback_forwards_pkce_code_verifier(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The verifier the client returns on the callback reaches the token exchange."""
+    backend = _install_fake_supertokens(monkeypatch)
+    backend.register_provider("google", email="cb@e.com", pkce_code_verifier="verifier-xyz")
+    client = TestClient(web_app, raise_server_exceptions=False)
+    resp = client.post(
+        "/auth/oauth/callback",
+        json={
+            "provider_id": "google",
+            "callback_url": "http://127.0.0.1:9999/cb",
+            "query_params": {"code": "abc", "state": "s"},
+            "pkce_code_verifier": "verifier-xyz",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "OK"
+    assert backend.registered_providers["google"].received_pkce_code_verifier == "verifier-xyz"
 
 
 def test_auth_oauth_callback_creates_user_and_returns_session(monkeypatch: pytest.MonkeyPatch) -> None:

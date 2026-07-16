@@ -201,10 +201,16 @@ class ImbueCloudConnectorClient(MutableModel):
         )
         return AuthRawResponse.model_validate(self._check(response, ImbueCloudAuthError))
 
-    def auth_oauth_authorize(self, provider_id: str, callback_url: str) -> dict[str, Any]:
+    def auth_oauth_authorize(self, provider_id: str, callback_url: str, state: str) -> dict[str, Any]:
+        """Returns ``{status, url, pkce_code_verifier}``.
+
+        ``state`` is a CSRF token the caller generates and later verifies against
+        the value the provider echoes back on the callback. ``pkce_code_verifier``
+        (when non-null) must be held and passed back to ``auth_oauth_callback``.
+        """
         response = httpx.post(
             self._url("/auth/oauth/authorize"),
-            json={"provider_id": provider_id, "callback_url": callback_url},
+            json={"provider_id": provider_id, "callback_url": callback_url, "state": state},
             timeout=self.timeout_seconds,
         )
         return self._check(response, ImbueCloudAuthError)
@@ -214,6 +220,8 @@ class ImbueCloudConnectorClient(MutableModel):
         provider_id: str,
         callback_url: str,
         query_params: dict[str, str],
+        # PKCE verifier from ``auth_oauth_authorize``; None when the provider did not use PKCE.
+        pkce_code_verifier: str | None,
     ) -> AuthRawResponse:
         response = httpx.post(
             self._url("/auth/oauth/callback"),
@@ -221,6 +229,7 @@ class ImbueCloudConnectorClient(MutableModel):
                 "provider_id": provider_id,
                 "callback_url": callback_url,
                 "query_params": query_params,
+                "pkce_code_verifier": pkce_code_verifier,
             },
             timeout=self.timeout_seconds,
         )

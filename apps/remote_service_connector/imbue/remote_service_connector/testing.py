@@ -427,6 +427,12 @@ class FakeProvider:
     third_party_user_id: str
     display_name: str | None
     is_verified: bool
+    # PKCE verifier this provider mints at authorize time (None mimics a
+    # confidential client without PKCE). ``received_pkce_code_verifier`` records
+    # what the handler passed back on the exchange so tests can assert the
+    # verifier round-tripped.
+    pkce_code_verifier: str | None
+    received_pkce_code_verifier: str | None
 
     async def get_authorisation_redirect_url(
         self,
@@ -435,11 +441,13 @@ class FakeProvider:
     ) -> Any:
         class _Redirect:
             url_with_query_params: str
+            pkce_code_verifier: str | None
 
         redirect = _Redirect()
         redirect.url_with_query_params = (
-            f"https://{self.provider_id}.example.com/auth?redirect_uri={redirect_uri_on_provider_dashboard}&state=s"
+            f"https://{self.provider_id}.example.com/auth?redirect_uri={redirect_uri_on_provider_dashboard}"
         )
+        redirect.pkce_code_verifier = self.pkce_code_verifier
         return redirect
 
     async def exchange_auth_code_for_oauth_tokens(
@@ -447,6 +455,7 @@ class FakeProvider:
         redirect_uri_info: RedirectUriInfo,
         user_context: dict[str, Any],
     ) -> dict[str, str]:
+        self.received_pkce_code_verifier = redirect_uri_info.pkce_code_verifier
         return {"access_token": "oauth-at"}
 
     async def get_user_info(
@@ -530,6 +539,7 @@ class FakeSuperTokensBackend:
         third_party_user_id: str = "tp-user-1",
         display_name: str | None = "OAuth User",
         is_verified: bool = True,
+        pkce_code_verifier: str | None = None,
     ) -> None:
         """Register an OAuth provider so ``get_provider`` returns it."""
         provider = FakeProvider()
@@ -538,6 +548,8 @@ class FakeSuperTokensBackend:
         provider.third_party_user_id = third_party_user_id
         provider.display_name = display_name
         provider.is_verified = is_verified
+        provider.pkce_code_verifier = pkce_code_verifier
+        provider.received_pkce_code_verifier = None
         self.registered_providers[provider_id] = provider
 
     def mark_email_verified(self, user_id: str) -> None:

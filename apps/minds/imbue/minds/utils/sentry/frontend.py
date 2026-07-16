@@ -27,6 +27,7 @@ backend via :mod:`imbue.minds.utils.sentry.core`, so the backend and the
 frontend report under the same environment, release, and ``git_sha`` tag.
 """
 
+import urllib.parse
 from collections.abc import Mapping
 
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -52,6 +53,25 @@ _FRONTEND_DSN_BY_ENVIRONMENT: Mapping[SentryDeployEnvironment, str] = {
     SentryDeployEnvironment.STAGING: SENTRY_FRONTEND_DSN_STAGING,
     SentryDeployEnvironment.DEVELOPMENT: SENTRY_FRONTEND_DSN_DEV,
 }
+
+
+def frontend_sentry_ingest_origins() -> tuple[str, ...]:
+    """Return the distinct ``https://<host>`` origins the browser Sentry SDK POSTs events to.
+
+    The ``@sentry/browser`` transport sends captured events to the ingest host
+    embedded in the DSN (``https://<key>@<host>/<project>``). The desktop
+    client's first-party Content-Security-Policy pins ``connect-src`` to the
+    first-party origin, so it must additionally allow these ingest origins or the
+    browser blocks error reporting. Derived from the DSN table so there is a
+    single source of truth: all environments currently share one ingest host, so
+    this returns one origin, but it stays correct if a future DSN moves hosts.
+    """
+    origins: dict[str, None] = {}
+    for dsn in _FRONTEND_DSN_BY_ENVIRONMENT.values():
+        hostname = urllib.parse.urlsplit(dsn).hostname
+        if hostname is not None:
+            origins[f"https://{hostname}"] = None
+    return tuple(origins)
 
 
 class FrontendSentryConfig(FrozenModel):

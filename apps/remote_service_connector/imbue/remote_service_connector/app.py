@@ -24,6 +24,7 @@ import re
 import shlex
 import threading
 import time
+import urllib.parse
 from collections.abc import Callable
 from collections.abc import Iterator
 from enum import Enum
@@ -4044,11 +4045,20 @@ class ResetPasswordRequest(BaseModel):
 class OAuthAuthorizeRequest(BaseModel):
     provider_id: str = Field(description="Third-party provider ID (e.g. 'google', 'github')")
     callback_url: str = Field(description="Callback URL registered with the provider")
+    # CSRF token the client generated. When set, it is reflected into the
+    # authorize URL's ``state`` query param so the provider echoes it back on
+    # the callback for the client to verify. None keeps the legacy behaviour.
+    state: str | None = Field(default=None, description="CSRF state to embed in the authorize URL")
 
 
 class OAuthAuthorizeResponse(BaseModel):
     status: str = Field(description="OK or ERROR")
     url: str | None = Field(default=None, description="URL to redirect the user to when status is OK")
+    # PKCE verifier the provider minted alongside the authorize URL, if any. It
+    # is stateless on the connector side, so the client must hold it and send it
+    # back on the callback to complete the exchange. None when the provider did
+    # not generate a PKCE challenge (e.g. a confidential client without PKCE).
+    pkce_code_verifier: str | None = Field(default=None, description="PKCE verifier to return on the callback")
     message: str | None = Field(default=None, description="Error detail if status is not OK")
 
 
@@ -4056,6 +4066,10 @@ class OAuthCallbackRequest(BaseModel):
     provider_id: str = Field(description="Third-party provider ID")
     callback_url: str = Field(description="Same callback URL used when starting the flow")
     query_params: dict[str, str] = Field(description="Query params the provider sent back to the callback URL")
+    # PKCE verifier returned by ``/auth/oauth/authorize``; echoed back so the
+    # token exchange can prove possession of the challenge. None when PKCE was
+    # not used for this provider.
+    pkce_code_verifier: str | None = Field(default=None, description="PKCE verifier from the authorize step")
 
 
 class UserProviderInfo(BaseModel):
@@ -4393,6 +4407,22 @@ def auth_reset_password(body: ResetPasswordRequest) -> dict[str, str]:
         return {"status": "OK", "message": "Password has been reset"}
 
 
+def _authorize_url_with_state(authorize_url: str, state: str) -> str:
+    """Return ``authorize_url`` with the CSRF ``state`` query parameter set.
+
+    Any ``state`` the provider already placed on the URL is dropped so the
+    value the client generated is the one the provider echoes back, which is
+    what the client later verifies to defend against CSRF on the callback.
+    """
+    parsed = urllib.parse.urlparse(authorize_url)
+    preserved_params = [
+        (key, value) for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True) if key != "state"
+    ]
+    preserved_params.append(("state", state))
+    new_query = urllib.parse.urlencode(preserved_params)
+    return urllib.parse.urlunparse(parsed._replace(query=new_query))
+
+
 @web_app.post("/auth/oauth/authorize", response_model=OAuthAuthorizeResponse)
 def auth_oauth_authorize(body: OAuthAuthorizeRequest) -> OAuthAuthorizeResponse:
     """Return the URL to which the user should be redirected to begin OAuth."""
@@ -4414,7 +4444,17 @@ def auth_oauth_authorize(body: OAuthAuthorizeRequest) -> OAuthAuthorizeResponse:
                 user_context={},
             )
         )
-        return OAuthAuthorizeResponse(status="OK", url=redirect.url_with_query_params)
+        # Reflect the client's CSRF state into the authorize URL when supplied.
+        authorize_url = (
+            _authorize_url_with_state(redirect.url_with_query_params, body.state)
+            if body.state is not None
+            else redirect.url_with_query_params
+        )
+        return OAuthAuthorizeResponse(
+            status="OK",
+            url=authorize_url,
+            pkce_code_verifier=redirect.pkce_code_verifier,
+        )
 
 
 @web_app.post("/auth/oauth/callback", response_model=AuthResponse)
@@ -4437,7 +4477,7 @@ def auth_oauth_callback(body: OAuthCallbackRequest) -> AuthResponse:
                     redirect_uri_info=RedirectUriInfo(
                         redirect_uri_on_provider_dashboard=body.callback_url,
                         redirect_uri_query_params=dict(body.query_params),
-                        pkce_code_verifier=None,
+                        pkce_code_verifier=body.pkce_code_verifier,
                     ),
                     user_context={},
                 )
@@ -4582,12 +4622,25 @@ def _build_oauth_providers() -> list[ProviderInput]:
                         ProviderClientConfig(
                             client_id=google_client_id,
                             client_secret=google_client_secret,
+                            # Force PKCE even though this is a confidential client
+                            # (client secret present). Google supports and
+                            # recommends PKCE alongside a client secret, so the
+                            # authorization code is bound to this session's
+                            # verifier -- a stolen code cannot be redeemed
+                            # without it. The verifier round-trips through the
+                            # CLI (the connector is stateless per request).
+                            force_pkce=True,
                         )
                     ],
                 ),
             )
         )
     if github_client_id and github_client_secret:
+        # GitHub OAuth Apps do not officially support PKCE, so ``force_pkce`` is
+        # deliberately left off here: enabling it would add a ``code_challenge``
+        # GitHub ignores, giving no real protection while risking the flow if
+        # GitHub ever rejects the unexpected parameter. The client-secret
+        # confidential flow remains the protection for GitHub.
         providers.append(
             ProviderInput(
                 config=ProviderConfig(

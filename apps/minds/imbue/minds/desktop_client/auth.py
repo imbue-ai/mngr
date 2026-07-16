@@ -3,6 +3,9 @@ import secrets
 import threading
 from abc import ABC
 from abc import abstractmethod
+from datetime import datetime
+from datetime import timedelta
+from datetime import timezone
 from enum import auto
 from pathlib import Path
 from typing import Final
@@ -26,6 +29,11 @@ _SIGNING_KEY_FILENAME: Final[str] = "signing_key"
 
 _CODES_FILENAME: Final[str] = "one_time_codes.json"
 
+# A minted one-time login code is only valid for this long after creation. An
+# unused code past this window is rejected exactly like an invalid one, so a
+# code that leaks (or is never consumed) cannot be redeemed indefinitely.
+_CODE_TTL: Final[timedelta] = timedelta(minutes=15)
+
 
 class OneTimeCodeStatus(UpperCaseStrEnum):
     """Status of a one-time authentication code."""
@@ -33,6 +41,7 @@ class OneTimeCodeStatus(UpperCaseStrEnum):
     VALID = auto()
     USED = auto()
     REVOKED = auto()
+    EXPIRED = auto()
 
 
 class StoredOneTimeCode(FrozenModel):
@@ -40,6 +49,10 @@ class StoredOneTimeCode(FrozenModel):
 
     code: OneTimeCode = Field(description="The one-time code value")
     status: OneTimeCodeStatus = Field(description="Current status of this code")
+    # Timezone-aware UTC creation timestamp used to enforce ``_CODE_TTL``.
+    # Optional so pre-existing persisted records (minted before expiry existed)
+    # still deserialize; a missing timestamp is treated as already expired.
+    created_at: datetime | None = Field(default=None, description="UTC time the code was minted")
 
 
 class AuthStoreInterface(MutableModel, ABC):
@@ -101,15 +114,40 @@ class FileAuthStore(AuthStoreInterface):
                 logger.debug("Rejected already-{} code", matched.status)
                 return False
 
-            # Mark as used
-            updated_codes = list(stored_codes)
-            updated_codes[matching_code_idx] = StoredOneTimeCode(
-                code=matched.code,
-                status=OneTimeCodeStatus.USED,
-            )
-            self._save_codes(tuple(updated_codes))
+            # Reject (and mark) a code whose TTL has elapsed. A missing
+            # ``created_at`` (a pre-expiry persisted record) is treated as
+            # expired rather than silently honored forever.
+            if self._is_expired(matched.created_at):
+                logger.debug("Rejected expired code")
+                self._mark_code_status(stored_codes, matching_code_idx, OneTimeCodeStatus.EXPIRED)
+                return False
+
+            self._mark_code_status(stored_codes, matching_code_idx, OneTimeCodeStatus.USED)
             logger.debug("Accepted and consumed code")
             return True
+
+    @staticmethod
+    def _is_expired(created_at: datetime | None) -> bool:
+        """Return whether a code minted at ``created_at`` is past its TTL."""
+        if created_at is None:
+            return True
+        return datetime.now(timezone.utc) - created_at > _CODE_TTL
+
+    def _mark_code_status(
+        self,
+        stored_codes: tuple[StoredOneTimeCode, ...],
+        idx: int,
+        status: OneTimeCodeStatus,
+    ) -> None:
+        """Persist ``stored_codes`` with the code at ``idx`` set to ``status``."""
+        matched = stored_codes[idx]
+        updated_codes = list(stored_codes)
+        updated_codes[idx] = StoredOneTimeCode(
+            code=matched.code,
+            status=status,
+            created_at=matched.created_at,
+        )
+        self._save_codes(tuple(updated_codes))
 
     def get_signing_key(self) -> CookieSigningKey:
         key_path = self.data_directory / _SIGNING_KEY_FILENAME
@@ -166,6 +204,7 @@ class FileAuthStore(AuthStoreInterface):
             new_code = StoredOneTimeCode(
                 code=code,
                 status=OneTimeCodeStatus.VALID,
+                created_at=datetime.now(timezone.utc),
             )
             self._save_codes(existing_codes + (new_code,))
 

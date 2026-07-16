@@ -8,6 +8,7 @@ the status table without any live mngr state.
 """
 
 import os
+import shlex
 import shutil
 import time
 from collections.abc import Iterator
@@ -88,6 +89,18 @@ def test_build_destroy_command_fans_out_over_the_whole_host() -> None:
     # down the whole host (workspace agent + system-services).
     assert f'host.id == "{host_id}"' in command[2]
     assert "destroy -f -" in command[2]
+
+
+def test_build_destroy_command_quotes_include_filter_as_single_token() -> None:
+    # Defense-in-depth (CASA 5.1.9): the ``--include`` filter is shell-quoted so
+    # the whole ``host.id == "<id>"`` expression survives ``bash -c`` word
+    # splitting as exactly one argument. Reparsing the command with shlex proves
+    # the quoting is well-formed and behavior-preserving.
+    host_id = HostId.generate()
+    command = _build_destroy_command(host_id)
+    tokens = shlex.split(command[2])
+    include_index = tokens.index("--include")
+    assert tokens[include_index + 1] == f'host.id == "{host_id}"'
 
 
 def test_start_destroy_writes_pid_log_and_host_id(tmp_path: Path) -> None:

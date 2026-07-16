@@ -7,12 +7,18 @@ Covers the OAuth localhost callback listener's handler. The handler must:
   with no query params. Before the fix, those secondary GETs erased the
   captured params and the CLI then hung until the 300s OAuth timeout.
 
+Also covers the CSRF ``state`` verification the CLI runs before exchanging the
+OAuth code.
+
 The ``running_callback_server`` fixture lives in ``cli/conftest.py``.
 """
 
 import urllib.request
 
+import pytest
+
 from imbue.mngr_imbue_cloud.cli.auth import _OAuthCaptureBox
+from imbue.mngr_imbue_cloud.cli.auth import _verify_oauth_callback_state
 
 
 def _get(port: int, path: str) -> int:
@@ -60,3 +66,26 @@ def test_callback_handler_ignores_query_params_on_wrong_path(
     box, port = running_callback_server
     assert _get(port, "/some-other-path?code=should_be_ignored") == 200
     assert box.get() is None
+
+
+def test_verify_oauth_callback_state_accepts_matching_state() -> None:
+    """A callback that echoes the exact state proceeds without raising."""
+    _verify_oauth_callback_state("expected-state", {"code": "abc", "state": "expected-state"})
+
+
+def test_verify_oauth_callback_state_rejects_mismatched_state() -> None:
+    """A forged/replayed callback with the wrong state aborts before the code is exchanged."""
+    with pytest.raises(SystemExit):
+        _verify_oauth_callback_state("expected-state", {"code": "abc", "state": "forged"})
+
+
+def test_verify_oauth_callback_state_rejects_missing_state() -> None:
+    """A callback with no state at all is rejected (never trust a stateless callback)."""
+    with pytest.raises(SystemExit):
+        _verify_oauth_callback_state("expected-state", {"code": "abc"})
+
+
+def test_verify_oauth_callback_state_rejects_non_ascii_state() -> None:
+    """A non-ASCII forged state is a clean mismatch, not an uncaught TypeError from compare_digest."""
+    with pytest.raises(SystemExit):
+        _verify_oauth_callback_state("expected-state", {"code": "abc", "state": "stäte"})

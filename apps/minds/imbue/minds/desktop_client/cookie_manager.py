@@ -9,6 +9,7 @@ Minds keeps only its own bare-origin session cookie — origin-scoped to
 
 from typing import Final
 
+from flask import Response
 from itsdangerous import BadSignature
 from itsdangerous import URLSafeTimedSerializer
 
@@ -44,3 +45,14 @@ def verify_session_cookie(
     except BadSignature:
         return False
     return payload == _SESSION_PAYLOAD
+
+
+def clear_session_cookie(response: Response) -> None:
+    """Expire the bare-origin minds session cookie on ``response``.
+
+    Emits a ``Set-Cookie`` for ``minds_session`` with an empty value and a
+    past expiry so the browser drops it. Used on sign-out so the local
+    session cookie does not outlive the revoked SuperTokens session. Scoped to
+    ``path="/"`` to match how the cookie is set on the bare origin.
+    """
+    response.delete_cookie(SESSION_COOKIE_NAME, path="/")

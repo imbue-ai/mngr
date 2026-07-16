@@ -2,12 +2,15 @@
 
 import getpass
 import http.server
+import secrets
 import socket
 import threading
 import time
 import urllib.parse
 import webbrowser
+from collections.abc import Mapping
 from typing import Any
+from typing import Final
 
 import click
 
@@ -28,6 +31,9 @@ from imbue.mngr_imbue_cloud.primitives import SuperTokensUserId
 
 _OAUTH_LISTEN_TIMEOUT_SECONDS = 300.0
 _OAUTH_CALLBACK_PATH = "/oauth/callback"
+# Byte length of the CSRF state token. 32 bytes -> ~43 url-safe chars, well
+# above the entropy needed to make the value unguessable.
+_OAUTH_STATE_TOKEN_BYTES: Final[int] = 32
 
 
 @click.group(name="auth")
@@ -379,6 +385,29 @@ def _free_localhost_port() -> int:
     return port
 
 
+def _verify_oauth_callback_state(expected_state: str, callback_query_params: Mapping[str, str]) -> None:
+    """Fail the flow unless the callback echoed back the exact CSRF state.
+
+    Compared in constant time so a forged callback cannot probe the expected
+    value byte-by-byte. A missing or mismatched state aborts before the code is
+    ever exchanged -- this is the CSRF defense for the browser OAuth flow.
+    """
+    returned_state = callback_query_params.get("state")
+    # ``expected_state`` is a url-safe (ASCII) token; a non-ASCII returned value
+    # cannot match it and would make ``compare_digest`` raise TypeError, so treat
+    # it as a mismatch rather than letting a forged callback surface a traceback.
+    is_match = (
+        returned_state is not None
+        and returned_state.isascii()
+        and secrets.compare_digest(returned_state, expected_state)
+    )
+    if not is_match:
+        fail_with_json(
+            "OAuth state mismatch; aborting sign-in to prevent CSRF",
+            error_class="OAuthStateMismatch",
+        )
+
+
 @auth.command(name="oauth")
 @click.argument("provider_id", type=click.Choice(["google", "github"], case_sensitive=False))
 @click.option(
@@ -426,10 +455,20 @@ def oauth(
     client = make_connector_client(connector_url)
     store = make_session_store()
 
-    authorize_response = client.auth_oauth_authorize(provider_id.lower(), callback_url)
+    # Generate a fresh CSRF state for this sign-in. The connector reflects it
+    # into the authorize URL; the provider echoes it back on the callback, and
+    # we verify it below before exchanging the code.
+    oauth_state = secrets.token_urlsafe(_OAUTH_STATE_TOKEN_BYTES)
+
+    authorize_response = client.auth_oauth_authorize(provider_id.lower(), callback_url, oauth_state)
     authorize_url = authorize_response.get("url") or authorize_response.get("authorize_url")
     if not isinstance(authorize_url, str) or not authorize_url:
         fail_with_json("Connector did not return an authorize URL", error_class="OAuthFailed")
+    # PKCE verifier the connector minted for this flow (None when the provider
+    # does not use PKCE). Held in memory only for the duration of the flow and
+    # never logged or persisted.
+    pkce_code_verifier_raw = authorize_response.get("pkce_code_verifier")
+    pkce_code_verifier = pkce_code_verifier_raw if isinstance(pkce_code_verifier_raw, str) else None
 
     capture_box = _OAuthCaptureBox()
     handler_class = _make_callback_handler_class(capture_box)
@@ -465,10 +504,15 @@ def oauth(
     if not captured:
         fail_with_json("Timed out waiting for OAuth callback", error_class="OAuthTimeout")
 
+    # Verify the CSRF state before exchanging the code -- a forged or replayed
+    # callback with the wrong state must never reach the token exchange.
+    _verify_oauth_callback_state(oauth_state, captured)
+
     callback_response = client.auth_oauth_callback(
         provider_id=provider_id.lower(),
         callback_url=callback_url,
         query_params=captured,
+        pkce_code_verifier=pkce_code_verifier,
     )
     payload = _persist_auth_response(callback_response, parsed_account, store)
     emit_json(payload)

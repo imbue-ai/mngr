@@ -2,6 +2,13 @@
 default_install_hook_types: [pre-commit, pre-push, post-checkout]
 
 repos:
+-   repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+    -   id: gitleaks
+#        Secrets scanning (CASA 6.1.1). Scans staged changes for committed
+#        secrets/credentials at commit time and blocks the commit on a match.
+        stages: [pre-commit]
 -   repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
