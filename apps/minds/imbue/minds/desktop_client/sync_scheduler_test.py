@@ -5,9 +5,13 @@ into the shared in-memory fake connector; device B signs in fresh and pulls.
 """
 
 import json
+import threading
 from pathlib import Path
 from uuid import uuid4
 
+from pydantic import PrivateAttr
+
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
@@ -134,6 +138,17 @@ def test_signed_out_account_entry_dropped_on_next_pass(tmp_path: Path) -> None:
     assert scheduler.list_initial_sync_statuses() == []
 
 
+class _BlockingPassScheduler(WorkspaceSyncScheduler):
+    """Scheduler whose pass blocks until released, to exercise stop() ordering."""
+
+    _pass_started: threading.Event = PrivateAttr(default_factory=threading.Event)
+    _pass_release: threading.Event = PrivateAttr(default_factory=threading.Event)
+
+    def run_one_pass(self) -> None:
+        self._pass_started.set()
+        self._pass_release.wait(timeout=5.0)
+
+
 def test_brand_new_account_resolves_to_done_with_zero_workspaces(tmp_path: Path) -> None:
     user_id = uuid4().hex
     email = f"user-{uuid4().hex}@example.com"
@@ -148,3 +163,33 @@ def test_brand_new_account_resolves_to_done_with_zero_workspaces(tmp_path: Path)
     assert len(statuses) == 1
     assert statuses[0].state == InitialSyncState.DONE
     assert statuses[0].workspace_count == 0
+
+
+def test_stop_blocks_until_in_flight_pass_finishes(tmp_path: Path) -> None:
+    # Regression test for the shutdown race: stop() must not return while a
+    # pass is mid-flight, so the caller can safely tear down the shared mngr
+    # caller the pass runs through without racing it.
+    cli = make_fake_imbue_cloud_cli()
+    record_store, session_store = _make_device(tmp_path, f"blocking-{uuid4().hex}", cli)
+    resolver = make_resolver_with_data(agents_json=json.dumps({"agents": []}))
+    scheduler = _BlockingPassScheduler(record_store=record_store, session_store=session_store, resolver=resolver)
+
+    with ConcurrencyGroup(name="test-sync-stop") as concurrency_group:
+        scheduler.start(concurrency_group)
+        # Wait for the loop to enter a pass and block inside it.
+        assert scheduler._pass_started.wait(timeout=5.0)
+
+        stop_returned = threading.Event()
+        stop_thread = threading.Thread(
+            target=lambda: (scheduler.stop(), stop_returned.set()), name="stop-caller"
+        )
+        stop_thread.start()
+
+        # stop() must NOT return while the pass is still in flight.
+        assert not stop_returned.wait(timeout=0.5)
+
+        # Releasing the pass lets the loop observe the stop signal and exit,
+        # at which point stop() returns.
+        scheduler._pass_release.set()
+        assert stop_returned.wait(timeout=5.0)
+        stop_thread.join(timeout=5.0)
