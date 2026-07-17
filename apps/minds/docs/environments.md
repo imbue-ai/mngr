@@ -99,8 +99,8 @@ Deploy-mode adds:
   workspace from `imbue`. Modal tokens are workspace-bound and there is no
   shared dev token in Vault (nothing lives under `secrets/minds/dev/` for
   this), so each developer provisions their own: you must be a member of
-  the `minds-dev` Modal workspace (ask a `minds-dev` workspace admin, or in
-  the team's minds channel, for an invite), then run
+  the `minds-dev` Modal workspace (ask in #project-minds-internal-product for
+  an invite), then run
   `modal token new --profile minds-dev` and select the `minds-dev`
   workspace in the browser. Verify with `modal profile list`: the
   `minds-dev` profile must show workspace `minds-dev`. **Watch out:** a
