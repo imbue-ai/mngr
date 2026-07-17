@@ -496,7 +496,9 @@ class SliceVpsDockerProvider(VpsProvider):
         wait=wait_exponential(multiplier=1, min=1, max=10),
         reraise=True,
     )
-    def _build_cloakbrowser_derived_image(self, *, outer: OuterHostInterface, base_image: str, target_tag: str) -> None:
+    def _build_cloakbrowser_derived_image(
+        self, *, outer: OuterHostInterface, base_image: str, target_tag: str
+    ) -> None:
         """Build target_tag as base_image + a baked CloakBrowser layer (and the done markers).
 
         CloakBrowser is deliberately not in the DEFAULT_WORKSPACE_TEMPLATE Dockerfile (it is shared with the
