@@ -96,6 +96,50 @@ def test_collect_external_attachments_groups_logs_by_configured_glob(tmp_path: P
     assert len(callbacks) == 3
 
 
+def test_collect_external_attachments_globs_group_base_dir_over_logs_folder(tmp_path: Path) -> None:
+    # A group with a base_dir sweeps that directory (even with no process log folder);
+    # groups without one keep sweeping the log folder. A missing base_dir matches nothing.
+    logs_folder = tmp_path / "logs"
+    logs_folder.mkdir()
+    (logs_folder / "events.jsonl").write_text("live\n")
+    external_dir = tmp_path / "external"
+    external_dir.mkdir()
+    (external_dir / "daemon.log").write_text("daemon\n")
+    external_group = LogAttachmentGroup(
+        group_name="daemon_logs",
+        glob="*.log",
+        max_file_count=10,
+        is_compressed=True,
+        is_immutable=False,
+        base_dir=external_dir,
+    )
+    missing_dir_group = LogAttachmentGroup(
+        group_name="absent_logs",
+        glob="*.log",
+        max_file_count=10,
+        is_compressed=True,
+        is_immutable=False,
+        base_dir=tmp_path / "does-not-exist",
+    )
+
+    uploader = ErrorAttachmentsS3Uploader(log_attachment_groups=(_LIVE_LOG_GROUP, external_group, missing_dir_group))
+    try:
+        raise ValueError("boom")
+    except ValueError as exception:
+        groups, callbacks = uploader.collect_external_attachments(exception=exception, logs_folder=logs_folder)
+
+    assert set(groups) == {"", "live_logs", "daemon_logs"}
+    assert len(groups["daemon_logs"]) == 1
+    assert len(callbacks) == 3
+
+    # base_dir groups are swept even when the process has no log folder at all.
+    try:
+        raise ValueError("boom again")
+    except ValueError as exception:
+        groups, _callbacks = uploader.collect_external_attachments(exception=exception, logs_folder=None)
+    assert set(groups) == {"", "daemon_logs"}
+
+
 def test_collect_external_attachments_without_logs_folder_only_uploads_traceback() -> None:
     uploader = ErrorAttachmentsS3Uploader(log_attachment_groups=(_LIVE_LOG_GROUP,))
     try:

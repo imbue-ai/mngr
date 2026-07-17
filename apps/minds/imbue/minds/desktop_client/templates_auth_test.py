@@ -65,6 +65,15 @@ def test_render_signin_modal_page_embeds_auth_form_in_overlay() -> None:
     assert "dismissSigninModal()" in html
 
 
+def test_render_signin_modal_page_opts_out_of_scrollbar_gutter() -> None:
+    # Regression: the modal is an edge-to-edge overlay surface; without the
+    # ``no-scrollbar-gutter`` opt-out on the html element, classic scrollbars
+    # reserve a 15px gutter that the dim backdrop never paints, leaving an
+    # un-dimmed strip at the window's right edge.
+    html = render_signin_modal_page()
+    assert '<html lang="en" class="no-scrollbar-gutter">' in html
+
+
 def test_render_signin_modal_page_shows_imbue_cloud_intro() -> None:
     # The intro copy explains why signing in is required (Imbue Cloud needs an
     # account) and that closing the modal falls back to running locally.

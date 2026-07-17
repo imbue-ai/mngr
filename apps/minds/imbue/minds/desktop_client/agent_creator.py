@@ -602,6 +602,56 @@ def checkout_branch(
         )
 
 
+def checkout_existing_branch(
+    repo_dir: Path,
+    branch: GitBranch,
+    on_output: OutputCallback | None = None,
+    *,
+    parent_cg: ConcurrencyGroup | None = None,
+) -> None:
+    """Check out ``branch`` by name in a repo that was NOT just fetched into.
+
+    Used for plain local-directory sources, where :func:`checkout_branch`'s
+    ``git checkout -B <branch> FETCH_HEAD`` would be wrong twice over: a fresh
+    clone has no FETCH_HEAD at all (the checkout fails with "'FETCH_HEAD' is
+    not a commit"), and a *stale* FETCH_HEAD left by an unrelated earlier fetch
+    would silently reset the user's branch tip to that old commit. This is the
+    user's own checkout, not a scratch clone, so the branch tip must never be
+    moved.
+
+    A no-op when the repo is already on ``branch``. Otherwise a plain
+    ``git checkout <branch>`` (git's remote-branch DWIM applies).
+
+    Raises GitOperationError if the checkout fails (e.g. no such branch).
+    """
+    cg = _make_child_cg("git-checkout-existing", parent_cg)
+    with cg:
+        head_result = cg.run_process_to_completion(
+            command=["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=repo_dir,
+            is_checked_after=False,
+            on_output=on_output,
+        )
+        if head_result.returncode == 0 and head_result.stdout.strip() == str(branch):
+            logger.debug("Repo {} is already on branch {}; skipping checkout", repo_dir, branch)
+            return
+        logger.debug("Checking out existing branch {} in {}", branch, repo_dir)
+        result = cg.run_process_to_completion(
+            command=["git", "checkout", str(branch)],
+            cwd=repo_dir,
+            is_checked_after=False,
+            on_output=on_output,
+        )
+    if result.returncode != 0:
+        raise GitOperationError(
+            "git checkout failed for branch '{}' (exit code {}):\n{}".format(
+                branch,
+                result.returncode,
+                result.stderr.strip() if result.stderr.strip() else result.stdout.strip(),
+            )
+        )
+
+
 def _rsync_worktree_over_clone(
     worktree_dir: Path,
     clone_dir: Path,
@@ -1765,8 +1815,10 @@ class AgentCreator(MutableModel):
                             parent_cg=self.root_concurrency_group,
                         )
                         workspace_dir = clone_target
+                        is_workspace_dir_scratch_clone = True
                     else:
                         workspace_dir = resolved_path
+                        is_workspace_dir_scratch_clone = False
                         log_queue.put("[minds] Using local directory: {}".format(workspace_dir))
                 else:
                     repo_name = extract_repo_name(repo_source)
@@ -1793,17 +1845,29 @@ class AgentCreator(MutableModel):
                         parent_cg=self.root_concurrency_group,
                     )
                     workspace_dir = clone_target
+                    is_workspace_dir_scratch_clone = True
 
                 if branch:
                     with self._lock:
                         self._statuses[cid_str] = AgentCreationStatus.CHECKING_OUT_BRANCH
                     log_queue.put("[minds] Checking out branch '{}'...".format(branch))
-                    checkout_branch(
-                        workspace_dir,
-                        GitBranch(branch),
-                        on_output=emit_log,
-                        parent_cg=self.root_concurrency_group,
-                    )
+                    # Scratch clones were just fetched into, so FETCH_HEAD is the
+                    # requested ref; a plain local directory has no such fetch, and
+                    # is the user's own checkout whose branch tip must not be reset.
+                    if is_workspace_dir_scratch_clone:
+                        checkout_branch(
+                            workspace_dir,
+                            GitBranch(branch),
+                            on_output=emit_log,
+                            parent_cg=self.root_concurrency_group,
+                        )
+                    else:
+                        checkout_existing_branch(
+                            workspace_dir,
+                            GitBranch(branch),
+                            on_output=emit_log,
+                            parent_cg=self.root_concurrency_group,
+                        )
 
                 # Resolve the Anthropic credentials according to the AI
                 # provider choice. IMBUE_CLOUD mints a fresh LiteLLM key;

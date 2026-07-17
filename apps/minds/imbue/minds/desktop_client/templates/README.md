@@ -25,6 +25,7 @@ root of `templates/`. Auth-flow components live under `templates/auth/`.
 | Component | Role |
 |---|---|
 | `Base` | Universal HTML scaffold (html/head/body, compiled Tailwind v4 sheet `app.min.css`). Every page wraps in this. |
+| `OverlaySurface` | Base variant for edge-to-edge transparent pages in the shared overlay WebContentsView (the overlay host + the hosted modals). Pins the `no-scrollbar-gutter` opt-out and the transparent body so overlays always paint to the window edge; new overlay surfaces should wrap in this, not `Base`. |
 | `PageContainer` | Centered `max-w-[720px]` body wrapper. Default for in-app settings-style pages (Landing, Accounts, WorkspaceSettings, Sharing, Destroying). |
 | `PageNarrowContainer` | Centered, narrow page layout for auth flow + form pages. Width/padding only -- no surface chrome. `padding="default"` (`p-8`, auth) or `"form"` (`p-6`, Create); `max_width` is a Tailwind utility. |
 | `Card` | Card surface with `layout`/`padding`/`interactive`/`tag`/`href` props. Pulls `.minds-card` from `app.css` for the shared shell. |

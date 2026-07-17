@@ -4,6 +4,16 @@ A concise, human-friendly summary of changes for repo-level dev tooling: CI work
 
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
+## 2026-07-15
+
+### Added
+
+- Added: `specs/workspace-sync/spec.md` — design record for end-to-end-encrypted cross-device sync of workspace metadata and secrets (workspace records on the connector, per-account DEKs wrapped by the master password, metadata-only tier for empty passwords, and the one-shot migration off the legacy local files). Plus `specs/workspace-sync/remote-access.md` (how synced SSH material is materialized so cloud workspaces are fully accessible from any unlocked installation) and the planning blueprint at `blueprint/remote-workspace-ssh-access/`.
+
+### Changed
+
+- Changed: `test-minds-snapshot` CI job (on `run_minds_release_tests` runs) now resolves the per-run CI env's coordinates and SuperTokens admin secrets and forwards them into the offload sandbox as `MINDS_SYNC_E2E_*` env vars so the new workspace-sync e2e tests can target the real connector.
+
 ## 2026-07-14
 
 ### Added
