@@ -73,6 +73,22 @@ contextBridge.exposeInMainWorld('minds', {
   openMindsSettings: () => ipcRenderer.send('open-minds-settings'),
   openAccounts: () => ipcRenderer.send('open-accounts'),
   openSigninModal: (returnTo, mode) => ipcRenderer.send('open-signin-modal', returnTo, mode),
+  // Open the sharing editor as a centered overlay modal, called by the
+  // workspace-settings page's "Manage sharing" buttons (a trusted local page on
+  // the chrome surface). main re-validates both ids before building the URL.
+  openSharingModal: (agentId, serviceName) =>
+    ipcRenderer.send('open-sharing-modal', agentId, serviceName),
+
+  // Landing-page Stop button: ask main to show a native stop confirmation and
+  // issue the host stop itself (the SSE drives the row). Trusted local page on
+  // the chrome surface; main re-validates the agent id.
+  confirmStopMind: (agentId, name) => ipcRenderer.send('confirm-stop-mind', agentId, name),
+
+  // Workspace-settings color picker: optimistically repaint THIS window's
+  // titlebar accent while the PATCH -> mngr label -> SSE round-trip lands. main
+  // re-validates the agent id + accent and only paints the sending bundle.
+  previewWorkspaceAccent: (agentId, accent) =>
+    ipcRenderer.send('preview-workspace-accent', agentId, accent),
 
   // Overlay surface (the always-warm modal WebContentsView host page,
   // /_chrome/overlay). The overlay manager (/_static/overlay.js) receives

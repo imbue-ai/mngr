@@ -1159,11 +1159,23 @@ _RECOVERY_SCRIPT: Final[str] = """\
         // status (e.g. restart_failed) means we reload to render that state.
         // While the status stays 'restarting' we leave the page -- and any
         // focused overlay -- untouched and just poll again.
+        // Go back to the now-recovered workspace. On the desktop shell this
+        // recovery screen renders on the trusted chrome surface, whose guard
+        // blocks agent-content navigations -- so hand return_to (an agent URL)
+        // to the shell bridge, which loads it into the caged content view. In a
+        // plain browser (no bridge) follow the server's healthy 302 as before.
+        function goToWorkspace() {
+          if (window.minds && window.minds.navigateContent && returnTo) {
+            window.minds.navigateContent(returnTo);
+          } else {
+            window.location.assign(pollUrl());
+          }
+        }
         function scheduleRefresh() {
           setTimeout(function () {
             fetch(pollUrl(), { credentials: 'same-origin', redirect: 'manual', cache: 'no-store' }).then(function (resp) {
               if (resp.type === 'opaqueredirect' || (resp.status >= 300 && resp.status < 400)) {
-                window.location.assign(pollUrl());
+                goToWorkspace();
                 return;
               }
               if ((resp.headers.get('X-Recovery-Status') || '') === 'restarting') {
@@ -1189,7 +1201,7 @@ _RECOVERY_SCRIPT: Final[str] = """\
           setTimeout(function () {
             fetch(pollUrl(), { credentials: 'same-origin', redirect: 'manual' }).then(function (resp) {
               if (resp.type === 'opaqueredirect' || (resp.status >= 300 && resp.status < 400)) {
-                window.location.assign(pollUrl());
+                goToWorkspace();
                 return;
               }
               scheduleHealthyPoll();
