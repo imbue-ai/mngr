@@ -2403,12 +2403,14 @@ def test_recovery_page_renders_for_authenticated_user(tmp_path: Path) -> None:
     assert "/api/v1/workspaces/" in response.text
     assert "/health" in response.text
     assert "/restart" in response.text
-    # The recovery page offers an in-page report button that opens the get-help modal
-    # via the ``minds:open-help`` relay message. It renders hidden by default so it
-    # never shows on the transient "Loading workspace" spinner; the recovery JS
-    # reveals it only on the terminal restart/retry states.
+    # The recovery page offers an in-page report button that opens the get-help
+    # modal. The recovery screen renders on the trusted chrome surface, so it
+    # calls the window.minds.openHelp bridge directly (falling back to /help in a
+    # plain browser). It renders hidden by default so it never shows on the
+    # transient "Loading workspace" spinner; the recovery JS reveals it only on
+    # the terminal restart/retry states.
     assert '<button type="button" id="recovery-report-btn" class="hidden">' in response.text
-    assert "minds:open-help" in response.text
+    assert "window.minds.openHelp(agentId)" in response.text
 
 
 def test_recovery_page_drops_open_redirect_return_to(tmp_path: Path) -> None:
