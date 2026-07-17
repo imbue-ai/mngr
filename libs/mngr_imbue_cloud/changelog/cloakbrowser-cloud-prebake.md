@@ -1,0 +1,1 @@
+Cloud slice pre-baking now bakes CloakBrowser (a stealth-patched Chromium fork) instead of vanilla Playwright-managed Chromium into the box image, matching the engine swap in default-workspace-template's browser fleet. The deferred-install marker split in two (`done.playwright_deps`, `done.cloakbrowser`) so loaded slices still skip the real install correctly.
