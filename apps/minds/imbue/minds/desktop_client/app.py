@@ -107,8 +107,8 @@ from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.templates import RemoteWorkspaceTile
-from imbue.minds.desktop_client.templates import _chrome_is_mac
-from imbue.minds.desktop_client.templates import _chrome_mngr_forward_origin
+from imbue.minds.desktop_client.templates import chrome_is_mac
+from imbue.minds.desktop_client.templates import chrome_mngr_forward_origin
 from imbue.minds.desktop_client.templates import render_accounts_page
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
@@ -228,7 +228,7 @@ def _get_mngr_forward_origin() -> str:
     ``/goto/<agent>/`` URLs that target the plugin (which owns subdomain
     forwarding) rather than minds.
     """
-    return _chrome_mngr_forward_origin()
+    return chrome_mngr_forward_origin()
 
 
 def _get_is_mac() -> bool:
@@ -238,7 +238,7 @@ def _get_is_mac() -> bool:
     ChromeShell's catalog global). Used by templates that gate macOS-specific
     styling (traffic-light padding, hidden window controls).
     """
-    return _chrome_is_mac()
+    return chrome_is_mac()
 
 
 def _int_query_param(name: str, default: int) -> int:

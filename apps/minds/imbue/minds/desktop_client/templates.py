@@ -183,7 +183,7 @@ def _frontend_sentry_browser_payload() -> dict[str, str] | None:
     return frontend_sentry_browser_payload(is_error_reporting_enabled, anonymous_user_id)
 
 
-def _chrome_is_mac() -> bool:
+def chrome_is_mac() -> bool:
     """Resolve whether the request's User-Agent indicates macOS.
 
     Canonical implementation shared by the ChromeShell catalog global (below) and
@@ -201,7 +201,7 @@ def _chrome_is_mac() -> bool:
     return "Macintosh" in user_agent or "Mac OS" in user_agent
 
 
-def _chrome_mngr_forward_origin() -> str:
+def chrome_mngr_forward_origin() -> str:
     """Resolve the bare origin of the ``mngr forward`` plugin.
 
     Canonical implementation shared by the ChromeShell catalog global (below) and
@@ -251,8 +251,8 @@ def _build_catalog() -> Catalog:
             # Resolved per render so any trusted page's ChromeShell titlebar can
             # derive its macOS styling + workspace-link origin from the live
             # request, without threading them through every render function.
-            "chrome_is_mac": _chrome_is_mac,
-            "chrome_mngr_forward_origin": _chrome_mngr_forward_origin,
+            "chrome_is_mac": chrome_is_mac,
+            "chrome_mngr_forward_origin": chrome_mngr_forward_origin,
         },
     )
     catalog.add_folder(str(TEMPLATE_DIR))
