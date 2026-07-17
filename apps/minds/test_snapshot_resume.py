@@ -229,8 +229,8 @@ def _wait_for_services_registered(container_name: str, service_names: tuple[str,
     return _exec_in_container(container_name, poll, timeout=_SERVICES_REGISTERED_TIMEOUT_SECONDS + 30).stdout
 
 
-def _browser_memory_shed_evidence(container_name: str) -> str | None:
-    """Return diagnostic evidence that ``browser`` was shed under memory pressure, or None.
+def _gather_browser_shed_diagnostics(container_name: str) -> tuple[bool, str]:
+    """Return ``(was_shed, diagnostics)`` for an absent ``browser`` registration.
 
     The ``browser`` supervisord program registers into applications.toml (via
     ``forward_port.py``) *before* it launches the memory-heavy
@@ -251,9 +251,11 @@ def _browser_memory_shed_evidence(container_name: str) -> str | None:
       an ordinary code or never spawns at all (no signal kill recorded). This is
       a real failure and must NOT be excused.
 
-    Returns the gathered evidence text when the browser program shows a signal
-    kill (the shed signal), else None. earlyoom's shed ledger and service log are
-    included in the dump purely as human-facing corroboration.
+    ``was_shed`` is True iff supervisord recorded the browser program dying on an
+    OOM signal (the decisive, browser-specific shed signal). The ``diagnostics``
+    text (supervisorctl status, the matched signal-exit lines, earlyoom's shed
+    ledger, and earlyoom's service log) is always returned so the caller can
+    surface it whether the outcome is a tolerated shed or a hard failure.
     """
     diagnostic = (
         # Decisive, browser-specific shed signal, computed shell-side: did
@@ -271,8 +273,8 @@ def _browser_memory_shed_evidence(container_name: str) -> str | None:
         "echo '=== earlyoom service log tail ==='; "
         "tail -20 /var/log/supervisor/earlyoom-stderr.log 2>/dev/null"
     )
-    evidence = _exec_in_container(container_name, diagnostic, timeout=30).stdout
-    return evidence if "BROWSER_SIGNAL_KILLED=yes" in evidence else None
+    diagnostics = _exec_in_container(container_name, diagnostic, timeout=30).stdout
+    return "BROWSER_SIGNAL_KILLED=yes" in diagnostics, diagnostics
 
 
 def _wait_for_system_interface_down(container_name: str) -> bool:
@@ -476,16 +478,16 @@ def test_resumed_workspace_registered_expected_services(running_workspace: _Resu
         return
     # browser is absent: pass only with positive evidence it was shed under
     # memory pressure; otherwise it genuinely failed to re-register.
-    shed_evidence = _browser_memory_shed_evidence(running_workspace.container_name)
-    assert shed_evidence is not None, (
+    was_shed, diagnostics = _gather_browser_shed_diagnostics(running_workspace.container_name)
+    assert was_shed, (
         "browser did not re-register in applications.toml after resume, and there is no evidence it was "
         "shed under memory pressure (supervisord shows no OOM-signal kill of the browser program) -- so it "
-        f"genuinely failed to re-register.\napplications.toml:\n{applications_toml}"
+        f"genuinely failed to re-register.\napplications.toml:\n{applications_toml}\ndiagnostics:\n{diagnostics}"
     )
     logger.info(
         "browser did not re-register after resume but was shed under memory pressure "
-        "(expected: it is the most OOM-expendable service); evidence:\n{}",
-        shed_evidence,
+        "(expected: it is the most OOM-expendable service); diagnostics:\n{}",
+        diagnostics,
     )
 
 
