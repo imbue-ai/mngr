@@ -202,7 +202,8 @@ def test_render_landing_page_discovering_shows_auto_refresh() -> None:
 
 def test_render_landing_page_signed_out_launcher_signs_in_back_to_home() -> None:
     # Signed out (no account email): the bottom-left account launcher reads
-    # "Log in", and the Electron path opens the sign-in modal with
+    # "Log in", and (the Landing page being a trusted local page on the chrome
+    # surface) it opens the sign-in modal via the shell bridge with
     # ``returnTo: '/'`` so a successful sign-in lands back on the home screen
     # (the server's return_to default is the create screen), leading with the
     # sign-in tab to match the launcher's label.
@@ -210,7 +211,7 @@ def test_render_landing_page_signed_out_launcher_signs_in_back_to_home() -> None
     assert 'id="landing-minds-settings"' in html
     assert 'id="landing-account"' in html
     assert "Log in" in html
-    assert "{ type: 'minds:open-signin-modal', returnTo: '/', mode: 'signin' }" in html
+    assert "window.minds.openSigninModal('/', 'signin')" in html
 
 
 def test_render_landing_page_signed_in_launcher_shows_email_and_extra_count() -> None:
@@ -284,15 +285,16 @@ def test_render_create_form_shows_preset_cards() -> None:
     assert "Advanced Configuration" in html
 
 
-def test_render_create_form_opens_signin_modal_via_overlay_relay() -> None:
+def test_render_create_form_opens_signin_modal_via_overlay_bridge() -> None:
     # Choosing Imbue Cloud while signed out opens the sign-in modal in the
     # desktop client's shared overlay layer (so it covers the title bar), not an
     # in-page dialog. The create page therefore no longer embeds the auth form
-    # or loads auth.js itself; it asks the Electron main process to open the
-    # /auth/signin-modal page via an allowlisted postMessage relay (falling back
-    # to navigating there directly in the browser).
+    # or loads auth.js itself; being a trusted local page on the chrome surface,
+    # it asks the Electron main process to open the /auth/signin-modal page via
+    # the window.minds shell bridge (falling back to navigating there directly in
+    # the browser).
     html = render_create_form(accounts=[])
-    assert "minds:open-signin-modal" in html
+    assert "window.minds.openSigninModal()" in html
     assert "/auth/signin-modal" in html
     # The auth form + its script now live in the overlay page, not here.
     assert 'id="signin-modal"' not in html
@@ -1870,16 +1872,16 @@ def test_oauth_button_github_uses_github_label_and_glyph() -> None:
 
 def test_page_narrow_container_default_padding_and_max_width() -> None:
     html = CATALOG.render("PageNarrowContainer", title="x", _content="<p>body</p>")
-    # Width/padding only: p-8 + max-w-[420px] + w-full, no surface chrome.
+    # The narrow column itself is width/padding only: p-8 + max-w-[420px] +
+    # w-full, no surface chrome (it is a plain width container, not a card).
     assert "p-8" in html
     assert "max-w-[420px]" in html
     assert "w-full" in html
     assert "<p>body</p>" in html
-    # No border/rounding/shadow -- this is a plain width container, not a card.
-    assert "rounded-lg" not in html
-    assert "shadow-raised" not in html
-    assert "border border-default" not in html
-    # The body is flex-centered around the column.
+    # PageNarrowContainer now renders via the shared ChromeShell layout, so a
+    # trusted local page reached through it (auth flow, create form) carries the
+    # app titlebar; the body is flex-centered around the column below it.
+    assert 'id="minds-titlebar"' in html
     assert "flex items-center justify-center min-h-screen" in html
 
 

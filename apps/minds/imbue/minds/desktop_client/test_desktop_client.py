@@ -1824,16 +1824,16 @@ def test_landing_shows_consent_screen_after_account_choice_when_unanswered(tmp_p
 def test_welcome_signup_login_open_signin_modal_with_page_fallbacks(tmp_path: Path) -> None:
     """The welcome splash's Sign Up / Log In open the centered sign-in modal in Electron.
 
-    The buttons post through the content relay's allowlisted
-    ``minds:open-signin-modal`` channel (with the tab mode and a home
-    return_to); in a plain browser the links fall back to the full-page
-    /auth/* routes.
+    The splash is a trusted local page on the chrome surface, so the buttons call
+    the ``openSigninModal`` shell bridge (with the tab mode and a home
+    return_to); in a plain browser (no bridge) the links fall back to the
+    full-page /auth/* routes.
     """
     client, auth_store = _create_test_client_with_stores(tmp_path)
     _authenticate_client(client, auth_store)
     welcome = client.get("/welcome")
     assert welcome.status_code == 200
-    assert "minds:open-signin-modal" in welcome.text
+    assert "window.minds.openSigninModal('/', mode)" in welcome.text
     assert 'id="welcome-signup-btn"' in welcome.text
     assert 'id="welcome-login-btn"' in welcome.text
     assert 'href="/auth/signup"' in welcome.text

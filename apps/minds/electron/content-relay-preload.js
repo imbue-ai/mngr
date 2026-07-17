@@ -7,6 +7,14 @@
 // from the page and forwards them to the main process over fixed IPC channels.
 // The page can therefore trigger a small set of benign shell affordances (e.g.
 // opening a permission-request modal) but can never reach arbitrary IPC.
+//
+// The allowlist is deliberately tiny: only the affordances foreign agent content
+// (and the content view's own crash page) legitimately needs. Every trusted
+// local/native page (Landing, Create, Settings, workspace settings, ...) now
+// renders on the CHROME surface with the full window.minds bridge, so their
+// launchers (sign-in / settings / accounts / sharing / stop-mind / open-in-new /
+// accent-preview) are shell-bridge calls, unreachable from -- and no longer
+// relayed for -- agent content.
 const { ipcRenderer } = require('electron');
 
 // Request ids are server-issued (`evt-<uuid hex>`). Accept only a conservative
@@ -17,26 +25,8 @@ const REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
 // Agent ids are server-issued (`agent-<hex>`). Accept only that conservative
 // shape so a malicious page cannot smuggle path/query characters into the
-// stop-host URL the main process builds. The main process re-validates.
+// help URL the main process builds. The main process re-validates.
 const AGENT_ID_PATTERN = /^agent-[a-f0-9]{1,64}$/i;
-
-// Sharing-server names come from the workspace-settings page's server list
-// (mngr-discovered service names). Accept only a conservative charset +
-// length so a malicious page cannot smuggle path or query characters into
-// the `/sharing/<agent>/<service>/modal` URL the main process builds. The
-// main process re-validates with the same pattern.
-const SERVICE_NAME_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
-
-// #rrggbb lowercase hex (the canonical form ``normalize_workspace_color``
-// emits). Accepts only the strict shape so a malicious page can't paint
-// the titlebar with arbitrary CSS values via the preview channel.
-const ACCENT_HEX_PATTERN = /^#[0-9a-f]{6}$/;
-
-// Local path for the sign-in modal's post-auth landing: must start with a
-// single '/' (never '//', which browsers treat as scheme-relative) and stay
-// within a conservative charset. The server re-validates with
-// safe_local_redirect_path (never trust the renderer).
-const LOCAL_PATH_PATTERN = /^\/(?!\/)[A-Za-z0-9\-._~/?=&%]*$/;
 
 window.addEventListener('message', (event) => {
   // Only honour messages posted by this same top-level page, never by a
@@ -50,7 +40,7 @@ window.addEventListener('message', (event) => {
     ipcRenderer.send('open-request-modal', requestId);
     return;
   }
-  // Error pages (e.g. the workspace-recovery page) ask the shell to open the
+  // Error pages (the workspace-content crash page) ask the shell to open the
   // get-help / report-a-bug modal. ``agentId`` is optional -- when present it
   // scopes the report to that workspace; it is validated to the server-issued
   // shape (or accepted as empty) so a foreign page can't smuggle path/query
@@ -69,80 +59,6 @@ window.addEventListener('message', (event) => {
   // URL, so a foreign page can't smuggle a navigation target through this channel.
   if (data.type === 'minds:reload-crashed-view') {
     ipcRenderer.send('reload-crashed-view');
-    return;
-  }
-  // Sign-in: open the shared modal overlay loaded with the sign-in page (so
-  // it covers the whole window, including the title bar). ``returnTo`` is an
-  // optional local path a successful sign-in should land on; it is validated
-  // to a conservative local-path shape here AND re-validated in the main
-  // process and by the server route (safe_local_redirect_path). Absent, the
-  // server defaults to the create screen (the modal's original caller).
-  // ``mode`` optionally picks which tab leads: only the literal 'signin'
-  // (for "Log In" callers) is forwarded; anything else keeps the sign-up
-  // default.
-  if (data.type === 'minds:open-signin-modal') {
-    const returnTo = data.returnTo;
-    if (returnTo !== undefined && (typeof returnTo !== 'string' || !LOCAL_PATH_PATTERN.test(returnTo))) return;
-    const mode = data.mode === 'signin' ? 'signin' : '';
-    ipcRenderer.send('open-signin-modal', typeof returnTo === 'string' ? returnTo : '', mode);
-    return;
-  }
-  // Home-screen launchers: open the centered Minds Settings / Manage Accounts
-  // modals in the shared overlay. No payload -- the main process builds the
-  // fixed URLs.
-  if (data.type === 'minds:open-minds-settings') {
-    ipcRenderer.send('open-minds-settings');
-    return;
-  }
-  if (data.type === 'minds:open-accounts') {
-    ipcRenderer.send('open-accounts');
-    return;
-  }
-  // Workspace-settings "Manage sharing": open the sharing editor as a
-  // centered modal in the shared overlay. Both ids are validated to
-  // conservative server-issued shapes so a foreign page can't smuggle
-  // path/query characters into the /sharing URL the main process builds.
-  if (data.type === 'minds:open-sharing-modal') {
-    const agentId = data.agentId;
-    const serviceName = data.serviceName;
-    if (typeof agentId !== 'string' || !AGENT_ID_PATTERN.test(agentId)) return;
-    if (typeof serviceName !== 'string' || !SERVICE_NAME_PATTERN.test(serviceName)) return;
-    ipcRenderer.send('open-sharing-modal', agentId, serviceName);
-    return;
-  }
-  // Landing-page Stop button: ask the main process to show a native
-  // confirmation dialog and (on confirm) issue the host stop itself.
-  if (data.type === 'minds:confirm-stop-mind') {
-    const agentId = data.agentId;
-    if (typeof agentId !== 'string' || !AGENT_ID_PATTERN.test(agentId)) return;
-    const name = typeof data.name === 'string' ? data.name : agentId;
-    ipcRenderer.send('confirm-stop-mind', agentId, name);
-    return;
-  }
-  // Landing-page "open in new window" button: ask the main process to open
-  // (or focus) a dedicated window for this workspace. Same IPC channel the
-  // sidebar uses; the agent id is validated to the server-issued shape so a
-  // foreign page can't smuggle path/query chars into the URL main builds.
-  if (data.type === 'minds:open-workspace-in-new-window') {
-    const agentId = data.agentId;
-    if (typeof agentId !== 'string' || !AGENT_ID_PATTERN.test(agentId)) return;
-    ipcRenderer.send('open-workspace-in-new-window', agentId);
-    return;
-  }
-  // Settings-page color picker: paint the chrome titlebar optimistically
-  // *in this bundle's chrome view* so the user sees the picked color
-  // immediately, without waiting for the POST -> mngr label subprocess
-  // -> SSE round-trip. The actual persistence still goes through the
-  // POST endpoint; this just shortcuts the local-window UI feedback.
-  // Validated narrowly (agent id shape, #rrggbb lowercase hex, fixed
-  // foreground triples) so a foreign workspace page can't smuggle
-  // arbitrary CSS through.
-  if (data.type === 'minds:preview-workspace-accent') {
-    const agentId = data.agentId;
-    const accent = data.accent;
-    if (typeof agentId !== 'string' || !AGENT_ID_PATTERN.test(agentId)) return;
-    if (typeof accent !== 'string' || !ACCENT_HEX_PATTERN.test(accent)) return;
-    ipcRenderer.send('preview-workspace-accent', agentId, accent);
     return;
   }
 });

@@ -45,6 +45,10 @@ contextBridge.exposeInMainWorld('minds', {
   // ``assistAvailable`` marks the workspace healthy enough to host an /assist
   // chat, gating the "have an agent help" option (see chrome.js).
   toggleHelp: (agentId, assistAvailable) => ipcRenderer.send('toggle-help', agentId, assistAvailable),
+  // Open the get-help / report-a-bug modal scoped to a workspace. Used by the
+  // recovery page (a trusted local page on the chrome surface); main re-validates
+  // the agent id.
+  openHelp: (agentId) => ipcRenderer.send('open-help', agentId),
 
   // One-shot bug report from the full-app error takeover (shell.html) when the
   // backend is down and the normal /help flow is unreachable. Reports the

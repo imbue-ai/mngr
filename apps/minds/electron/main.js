@@ -3597,11 +3597,12 @@ ipcMain.on('reload-chrome', (event) => {
   reloadCrashedChromeView(getBundleFromEvent(event));
 });
 
-// Open the sign-in modal in the shared overlay. Senders: the content relay
-// (the create screen's signed-out "Create" press, the home screen's "Log in"
-// launcher) and overlay-hosted pages via window.minds (the accounts modal's
-// "Add account"). ``returnTo`` is where a successful sign-in lands; it is
-// validated here (never trust the renderer) and again by the server route.
+// Open the sign-in modal in the shared overlay. Senders are all trusted pages
+// calling window.minds: local pages on the chrome surface (the create screen's
+// signed-out "Create" press, the home screen's "Log in" launcher, the welcome
+// splash) and overlay-hosted pages (the accounts modal's "Add account").
+// ``returnTo`` is where a successful sign-in lands; it is validated here (never
+// trust the renderer) and again by the server route.
 ipcMain.on('open-signin-modal', (event, returnTo, mode) => {
   const sender = getBundleFromEvent(event);
   if (sender) {
@@ -3609,10 +3610,10 @@ ipcMain.on('open-signin-modal', (event, returnTo, mode) => {
   }
 });
 
-// Open the centered Minds Settings / Manage Accounts modals. Senders: the
-// content relay (home-screen launchers) and overlay-hosted pages via
-// window.minds (the workspace switcher's account entry). No payload; the
-// URLs are fixed server routes.
+// Open the centered Minds Settings / Manage Accounts modals. Senders are all
+// trusted pages calling window.minds: local pages on the chrome surface (the
+// home-screen launchers) and overlay-hosted pages (the workspace switcher's
+// account entry). No payload; the URLs are fixed server routes.
 ipcMain.on('open-minds-settings', (event) => {
   const sender = getBundleFromEvent(event);
   if (sender) openMindsSettingsModal(sender);
@@ -3623,10 +3624,9 @@ ipcMain.on('open-accounts', (event) => {
   if (sender) openAccountsModal(sender);
 });
 
-// Open the sharing-editor modal on behalf of the (otherwise unprivileged)
-// workspace-settings page in the content view. Only content-relay-preload.js
-// can emit this channel (for an allowlisted `minds:open-sharing-modal`
-// postMessage); openSharingModal re-validates both ids.
+// Open the sharing-editor modal. The workspace-settings page -- a trusted local
+// page on the chrome surface -- calls this via window.minds; openSharingModal
+// re-validates both ids (never trust the renderer).
 ipcMain.on('open-sharing-modal', (event, agentId, serviceName) => {
   const sender = getBundleFromEvent(event);
   if (sender) openSharingModal(sender, agentId, serviceName);
@@ -3725,10 +3725,10 @@ ipcMain.on('overlay-set-bounds', (event, spec) => {
 // without waiting for the PATCH -> mngr label subprocess -> SSE
 // round-trip. The actual persistence still goes through the
 // PATCH /api/v1/workspaces/<id> endpoint (color field); this just
-// shortcuts the local-window UI feedback. Only content-relay-preload.js can emit
-// this channel, and it validates the agent id + accent shape there;
-// we re-validate here defensively and only forward to the *sending
-// bundle's* chrome view so a stray sender can't paint another
+// shortcuts the local-window UI feedback. The workspace-settings page -- a
+// trusted local page on the chrome surface -- calls this via window.minds; we
+// re-validate the agent id + accent shape here defensively and only forward to
+// the *sending bundle's* chrome view so a stray sender can't paint another
 // window's titlebar.
 ipcMain.on('preview-workspace-accent', (event, agentId, accent) => {
   if (typeof agentId !== 'string' || !/^agent-[a-f0-9]{1,64}$/i.test(agentId)) return;
@@ -3873,9 +3873,9 @@ ipcMain.on('open-log-file', () => {
 
 // Landing-page Stop button: show a native confirmation, then issue the host
 // stop ourselves. The SSE drives the row from running -> stopped once it lands.
-// Only content-relay-preload.js can emit this channel (for an allowlisted
-// `minds:confirm-stop-mind` postMessage); we re-validate the id here against the
-// same conservative agent-id shape (never trust the renderer).
+// The Landing page -- a trusted local page on the chrome surface -- calls this
+// via window.minds; we re-validate the id here against the conservative agent-id
+// shape (never trust the renderer).
 ipcMain.on('confirm-stop-mind', async (event, agentId, name) => {
   if (typeof agentId !== 'string' || !/^agent-[a-f0-9]{1,64}$/i.test(agentId)) return;
   const bundle = getBundleFromEvent(event) || getMostRecentWindow();
