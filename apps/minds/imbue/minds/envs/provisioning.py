@@ -911,7 +911,10 @@ def _deploy_env_locked(
             parent_concurrency_group,
         )
     _assert_deploy_url_matches(
-        actual=litellm_proxy_url, expected=expected_litellm_proxy_url, app=f"llm-{tier}", modal_workspace=modal_workspace
+        actual=litellm_proxy_url,
+        expected=expected_litellm_proxy_url,
+        app=f"llm-{tier}",
+        modal_workspace=modal_workspace,
     )
 
     with info_span(

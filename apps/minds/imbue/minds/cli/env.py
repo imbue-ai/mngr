@@ -66,12 +66,12 @@ from imbue.minds.envs.paths import client_config_file
 from imbue.minds.envs.paths import env_root_dir
 from imbue.minds.envs.per_env_deploy import active_modal_token_workspace
 from imbue.minds.envs.per_env_deploy import build_per_env_secret_values
-from imbue.minds.envs.per_env_deploy import modal_token_workspace_mismatch_message
 from imbue.minds.envs.per_env_deploy import delete_modal_secret as real_delete_modal_secret
 from imbue.minds.envs.per_env_deploy import deploy_litellm_proxy as real_deploy_litellm_proxy
 from imbue.minds.envs.per_env_deploy import deploy_remote_service_connector as real_deploy_remote_service_connector
 from imbue.minds.envs.per_env_deploy import ensure_modal_env as real_ensure_modal_env
 from imbue.minds.envs.per_env_deploy import get_modal_app_latest_version as real_get_modal_app_latest_version
+from imbue.minds.envs.per_env_deploy import modal_token_workspace_mismatch_message
 from imbue.minds.envs.per_env_deploy import push_per_env_modal_secret as real_push_per_env_modal_secret
 from imbue.minds.envs.per_env_deploy import rollback_modal_app as real_rollback_modal_app
 from imbue.minds.envs.per_env_deploy import stop_modal_app as real_stop_modal_app
