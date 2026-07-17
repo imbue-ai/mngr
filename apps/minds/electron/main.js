@@ -18,6 +18,7 @@ const {
   parseAccentSourceAgentId,
   selectSurfaceForUrl,
   SURFACE_CONTENT,
+  SURFACE_CHROME,
 } = require('./surface-routing');
 
 // Tee console output into ~/.minds/logs/electron.log and record uncaught
@@ -590,6 +591,11 @@ function createBundle() {
     // the full-window modal bounds.
     tooltipVisible: false,
     inboxListReloadTimer: null,
+    // Which surface is currently shown to the user: SURFACE_CHROME (the chrome
+    // view renders a trusted local page) or SURFACE_CONTENT (the content view
+    // floats a workspace over the /_chrome wrapper). navigateBundle is the single
+    // authority; the content view starts hidden, so the chrome view is active.
+    activeSurface: SURFACE_CHROME,
     currentContentUrl: null,
     currentWorkspaceId: null,
     // Whether the content view is currently displaying a REACHABLE workspace
@@ -950,8 +956,12 @@ function registerShortcutsFor(bundle, wc) {
       (!isMac && input.control && input.shift && input.code === 'KeyC');
     if (devTools) {
       event.preventDefault();
-      if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
-        bundle.contentView.webContents.toggleDevTools();
+      // Toggle DevTools on the surface the user is actually looking at (the chrome
+      // view on a local page, the content view on a workspace) -- not always the
+      // content view, which is hidden + parked on about:blank on local pages.
+      const view = activeSurfaceView(bundle);
+      if (view && !view.webContents.isDestroyed()) {
+        view.webContents.toggleDevTools();
       }
       return;
     }
@@ -1524,8 +1534,27 @@ function navigateBundle(bundle, url) {
     updateBundleAccentAgentId(bundle, parseAccentSourceAgentId(url));
     ensureBundleChromeWrapper(bundle);
     showBundleContentView(bundle);
+    bundle.activeSurface = SURFACE_CONTENT;
     if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
-      bundle.contentView.webContents.loadURL(url);
+      const wc = bundle.contentView.webContents;
+      // Skip the reload when the content view is already on this exact workspace
+      // (e.g. backing out of a quit, which only collapsed the content bounds and
+      // left the live page running): reloading would tear down its websockets /
+      // terminal sessions and lose in-page state. A parked (about:blank) or
+      // different-workspace view still reloads.
+      if (wc.getURL() !== url) {
+        wc.loadURL(url);
+        // Start this workspace with fresh back/forward history so a titlebar Back
+        // can't walk into the parked about:blank (or a previously-shown workspace)
+        // this content view carried -- surface transitions must never be Back
+        // stops. Cleared once the new page commits (navigationHistory is Electron
+        // >= 34; feature-detected so an older runtime just keeps the old behavior).
+        wc.once('did-navigate', () => {
+          if (!wc.isDestroyed() && wc.navigationHistory && typeof wc.navigationHistory.clear === 'function') {
+            wc.navigationHistory.clear();
+          }
+        });
+      }
     }
   } else {
     // Trusted local page: the chrome view IS the content. A local page never
@@ -1544,6 +1573,7 @@ function navigateBundle(bundle, url) {
     updateOsTitle(bundle);
     updateBundleAccentAgentId(bundle, parseAccentSourceAgentId(url));
     hideBundleContentView(bundle);
+    bundle.activeSurface = SURFACE_CHROME;
     if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
       bundle.chromeView.webContents.loadURL(url);
     }
@@ -2936,15 +2966,16 @@ function installApplicationMenu() {
       submenu: [
         {
           label: 'Toggle Developer Tools',
-          // role: 'toggleDevTools' targets a BrowserWindow; we use BaseWindow,
-          // so toggle the focused bundle's content view explicitly.
+          // role: 'toggleDevTools' targets a BrowserWindow; we use BaseWindow, so
+          // toggle the focused bundle's currently-shown surface explicitly (the
+          // chrome view on a local page, the content view on a workspace).
           accelerator: 'Alt+Cmd+I',
           click: () => {
             const bundle = getMostRecentWindow();
             if (!bundle || bundle.window.isDestroyed()) return;
-            const cv = bundle.contentView;
-            if (cv && !cv.webContents.isDestroyed()) {
-              cv.webContents.toggleDevTools();
+            const view = activeSurfaceView(bundle);
+            if (view && !view.webContents.isDestroyed()) {
+              view.webContents.toggleDevTools();
             }
           },
         },
@@ -2975,9 +3006,12 @@ function installApplicationMenu() {
           },
         },
         { type: 'separator' },
-        { role: 'resetZoom' },
-        { role: 'zoomIn' },
-        { role: 'zoomOut' },
+        // Zoom the workspace content view only (see stepWorkspaceZoom) -- the
+        // default zoom roles act on the focused webContents, which on a local page
+        // is the chrome view and would scale the fixed titlebar.
+        { label: 'Actual Size', accelerator: 'CmdOrCtrl+0', click: () => resetWorkspaceZoom() },
+        { label: 'Zoom In', accelerator: 'CmdOrCtrl+Plus', click: () => stepWorkspaceZoom(1) },
+        { label: 'Zoom Out', accelerator: 'CmdOrCtrl+-', click: () => stepWorkspaceZoom(-1) },
         { type: 'separator' },
         { role: 'togglefullscreen' },
       ],
@@ -3356,7 +3390,14 @@ function handleAuthEvent(event) {
   if (event.event === 'auth_success') {
     for (const b of bundles) {
       if (b.window.isDestroyed()) continue;
-      if (b.chromeView && !b.chromeView.webContents.isDestroyed()) {
+      if (!b.chromeView || b.chromeView.webContents.isDestroyed()) continue;
+      // The chrome view now hosts the trusted local pages themselves, so a blanket
+      // reload on auth change would wipe in-progress page state (e.g. a half-filled
+      // Create form in another window). Only reload the titlebar-only /_chrome
+      // wrapper (a workspace is showing there -- no user data); a local page keeps
+      // its state, and the visible (modal) sidebar reflects the new sign-in through
+      // its own auth-status refresh.
+      if (b.activeSurface === SURFACE_CONTENT) {
         b.chromeView.webContents.reload();
       }
     }
@@ -3404,12 +3445,42 @@ ipcMain.on('navigate-content', (event, url) => {
   closeModal(bundle);
 });
 
-// Back/forward act on whichever surface is currently showing: the content view
-// while it displays agent content (currentWorkspaceId set), else the chrome view
-// (which navigates full-page among trusted local pages). Back/forward is a
+// The surface currently shown to the user: the content view while it displays a
+// workspace, else the chrome view (which renders the trusted local pages). Set
+// authoritatively by navigateBundle -- the single place that shows/hides the two
+// surfaces -- so history / devtools target the VISIBLE view rather than inferring
+// it from currentWorkspaceId, which other handlers clear independently of
+// visibility (leaving Back/devtools driving the hidden view).
+function activeSurfaceView(bundle) {
+  if (!bundle) return null;
+  return bundle.activeSurface === SURFACE_CONTENT ? bundle.contentView : bundle.chromeView;
+}
+
+// Back/forward act on whichever surface is currently showing. Back/forward is a
 // safety-net affordance, not load-bearing -- real navigation is always explicit.
 function surfaceViewForHistory(bundle) {
-  return bundle && bundle.currentWorkspaceId ? bundle.contentView : (bundle ? bundle.chromeView : null);
+  return activeSurfaceView(bundle);
+}
+
+// Zoom affects the workspace CONTENT view only, never the chrome view: the fixed
+// titlebar is aligned to the content view's 38px inset, so page-zooming the chrome
+// view would scale the titlebar out of alignment -- and, being per-origin on the
+// default session, would leak the zoom to /_chrome and the overlays. On a local
+// page (no workspace shown) the menu's zoom items are a no-op.
+function stepWorkspaceZoom(delta) {
+  const bundle = getMostRecentWindow();
+  if (!bundle || bundle.window.isDestroyed() || bundle.activeSurface !== SURFACE_CONTENT) return;
+  const cv = bundle.contentView;
+  if (!cv || cv.webContents.isDestroyed()) return;
+  cv.webContents.setZoomLevel(cv.webContents.getZoomLevel() + delta);
+}
+
+function resetWorkspaceZoom() {
+  const bundle = getMostRecentWindow();
+  if (!bundle || bundle.window.isDestroyed() || bundle.activeSurface !== SURFACE_CONTENT) return;
+  const cv = bundle.contentView;
+  if (!cv || cv.webContents.isDestroyed()) return;
+  cv.webContents.setZoomLevel(0);
 }
 
 ipcMain.on('content-go-back', (event) => {
