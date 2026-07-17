@@ -252,22 +252,27 @@ def _gather_browser_shed_diagnostics(container_name: str) -> tuple[bool, str]:
       a real failure and must NOT be excused.
 
     ``was_shed`` is True iff supervisord recorded the browser program dying on an
-    OOM signal (the decisive, browser-specific shed signal). The ``diagnostics``
-    text (supervisorctl status, the matched signal-exit lines, earlyoom's shed
-    ledger, and earlyoom's service log) is always returned so the caller can
-    surface it whether the outcome is a tolerated shed or a hard failure.
+    OOM signal. Crucially it is scoped to the CURRENT (post-resume) supervisord
+    instance: supervisord.log is append-only and survives the snapshot, so a
+    browser signal-kill logged by the snapshot's own build or ``docker stop``
+    shutdown must not count -- an ``awk`` pass resets its match on every
+    ``supervisord started with pid`` marker so only a kill logged after the last
+    (post-resume) start is considered. If that marker is somehow absent, the pass
+    yields "not shed", so a missing marker can never mask a regression -- it just
+    makes an absent browser a hard failure. The ``diagnostics`` text is always
+    returned so the caller can surface it whether the outcome is a tolerated shed
+    or a hard failure.
     """
     diagnostic = (
-        # Decisive, browser-specific shed signal, computed shell-side: did
-        # supervisord record the browser program dying on an OOM signal?
-        "if grep -aqE 'browser.*(terminated by (SIGKILL|SIGTERM)|exit status (137|143))' "
-        f"{_SUPERVISORD_LOG_PATH} 2>/dev/null; "
-        "then echo 'BROWSER_SIGNAL_KILLED=yes'; else echo 'BROWSER_SIGNAL_KILLED=no'; fi; "
-        "echo '=== supervisorctl status browser ==='; "
-        "supervisorctl status browser 2>&1 | head -5; "
-        "echo '=== browser signal-exit lines (supervisord.log) ==='; "
-        "grep -aE 'browser.*(terminated by (SIGKILL|SIGTERM)|exit status (137|143))' "
-        f"{_SUPERVISORD_LOG_PATH} 2>/dev/null | tail -20; "
+        # Decide shed-vs-regression shell-side, scoped to the current supervisord
+        # instance: reset the match on each "supervisord started" marker so only a
+        # browser OOM-signal kill logged after the last (post-resume) start counts.
+        f"log={_SUPERVISORD_LOG_PATH}; "
+        "awk '/supervisord started with pid/{seen=1;killed=0} "
+        "seen&&/exited: browser/&&/terminated by SIGKILL|terminated by SIGTERM|exit status 137|exit status 143/{killed=1} "
+        'END{print (killed?"BROWSER_SIGNAL_KILLED=yes":"BROWSER_SIGNAL_KILLED=no")}\' "$log" 2>/dev/null; '
+        "echo '=== supervisorctl status browser ==='; supervisorctl status browser 2>&1 | head -5; "
+        "echo '=== browser lines in supervisord.log (tail) ==='; grep -aE browser \"$log\" 2>/dev/null | tail -30; "
         "echo '=== earlyoom shed ledger ==='; "
         f"tail -50 {_SHED_LEDGER_PATH} 2>/dev/null; "
         "echo '=== earlyoom service log tail ==='; "
