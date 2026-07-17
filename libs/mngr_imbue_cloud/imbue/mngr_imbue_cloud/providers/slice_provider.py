@@ -71,6 +71,14 @@ _CLOAKBROWSER_CTX_DIR: Final[str] = "/tmp/default-workspace-template-cloakbrowse
 # scripts/deferred_install.sh (_CLOAKBROWSER_VERSION / _CLOAKBROWSER_SHA256_X64).
 # Cloud slices are x86_64 bare metal only (see DEFAULT_IMAGE_URL_X86_64), so this
 # bakes the x64 asset only -- no arch branching needed here.
+#
+# Full context (where CloakBrowser came from, why it replaced Fortress/vanilla
+# Chromium, exact variable-by-variable ownership incl. the Playwright-vs-
+# browser-use `executable_path` distinction, and step-by-step version-bump /
+# engine-swap instructions) lives in default-workspace-template, not here:
+# libs/browser/CHROMIUM_ENGINE_DESCRIPTION_AND_FUTURE_GUIDELINES.md
+# These constants are that doc's row 7 -- a manually-kept-in-sync mirror.
+# Bump one, bump the other.
 _CLOAKBROWSER_VERSION: Final[str] = "chromium-v146.0.7680.177.4"
 _CLOAKBROWSER_RELEASE_URL: Final[str] = (
     f"https://github.com/CloakHQ/CloakBrowser/releases/download/{_CLOAKBROWSER_VERSION}"
