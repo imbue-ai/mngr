@@ -628,6 +628,38 @@ def test_find_replay_offset_finds_legacy_full_snapshot(tmp_path: Path) -> None:
     assert offset == len(leading_line.encode("utf-8"))
 
 
+def test_find_replay_offset_ignores_legacy_full_when_provider_snapshots_exist(tmp_path: Path) -> None:
+    """A stale legacy DISCOVERY_FULL line must not pin the replay window once per-provider snapshots exist.
+
+    Regression: an install upgraded across the per-provider migration keeps its last
+    pre-migration DISCOVERY_FULL line forever (nothing writes that type anymore), so
+    letting it participate in the window minimum replayed days of stale events -- ghost
+    workspaces, destroys, renames -- at every attach.
+    """
+    events_path = tmp_path / "events.jsonl"
+    stale_full = (
+        '{"timestamp":"2026-01-01T00:00:00Z","type":"DISCOVERY_FULL","event_id":"evt-full",'
+        '"source":"mngr/discovery","agents":[],"hosts":[]}'
+    )
+    old_agent = (
+        '{"timestamp":"2026-01-02T00:00:00Z","type":"AGENT_DISCOVERED","event_id":"evt-old",'
+        '"source":"mngr/discovery","agent":{}}'
+    )
+    fresh_provider = (
+        '{"timestamp":"2026-01-05T00:00:01Z","type":"DISCOVERY_PROVIDER","event_id":"evt-prov",'
+        '"source":"mngr/discovery","provider_name":"local","agents":[],"hosts":[],'
+        '"discovery_started_at":"2026-01-05T00:00:00Z","discovery_finished_at":"2026-01-05T00:00:01Z"}'
+    )
+    prefix = f"{stale_full}\n{old_agent}\n"
+    events_path.write_text(f"{prefix}{fresh_provider}\n")
+
+    offset = find_discovery_snapshot_replay_offset(events_path)
+
+    # The replay starts at the provider snapshot's own line (the first event at or after
+    # its discovery_started_at), skipping the stale full snapshot and the old event.
+    assert offset == len(prefix.encode("utf-8"))
+
+
 def test_find_replay_offset_returns_min_of_per_provider_latest(temp_config: MngrConfig) -> None:
     """The offset is the earliest among each provider's latest per-provider snapshot."""
     now = datetime.now(timezone.utc)

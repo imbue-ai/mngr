@@ -34,7 +34,10 @@ from imbue.mngr.api.discovery_events import make_provider_discovery_snapshot_eve
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SSHInfo
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
@@ -53,6 +56,7 @@ class _DiscoveredCall(FrozenModel):
     host_id: HostId
     ssh_info: RemoteSSHInfo | None
     provider_name: str
+    host_state: HostState | None
 
 
 class _RecordingHandlers:
@@ -76,10 +80,17 @@ class _RecordingHandlers:
         host_id: HostId,
         ssh_info: RemoteSSHInfo | None,
         provider_name: str,
+        host_state: HostState | None,
     ) -> None:
         with self._lock:
             self._discovered_calls.append(
-                _DiscoveredCall(agent_id=agent_id, host_id=host_id, ssh_info=ssh_info, provider_name=provider_name)
+                _DiscoveredCall(
+                    agent_id=agent_id,
+                    host_id=host_id,
+                    ssh_info=ssh_info,
+                    provider_name=provider_name,
+                    host_state=host_state,
+                )
             )
 
     def on_destroyed(self, agent_id: AgentId) -> None:
@@ -230,6 +241,33 @@ def _provider_error(provider_name: str) -> DiscoveryError:
 
 def _make_ssh_info(host: str, port: int, key_path: Path) -> SSHInfo:
     return SSHInfo(user="root", host=host, port=port, key_path=key_path, command="ssh")
+
+
+def _make_host(
+    host_id: HostId, host_state: HostState, provider_name: ProviderInstanceName = _PROVIDER_NAME
+) -> DiscoveredHost:
+    return DiscoveredHost(
+        host_id=host_id,
+        host_name=HostName("h1"),
+        provider_name=provider_name,
+        host_state=host_state,
+    )
+
+
+def _provider_snapshot_line_with_hosts(
+    agents: Sequence[DiscoveredAgent],
+    hosts: Sequence[DiscoveredHost],
+    provider_name: ProviderInstanceName = _PROVIDER_NAME,
+) -> str:
+    """Build a single-provider snapshot JSONL line carrying both agents and hosts."""
+    return make_provider_discovery_snapshot_event(
+        provider_name=provider_name,
+        agents=tuple(agents),
+        hosts=tuple(hosts),
+        discovery_started_at=_SNAPSHOT_STARTED_AT,
+        discovery_finished_at=_SNAPSHOT_FINISHED_AT,
+        error=None,
+    ).model_dump_json()
 
 
 # -- Tests --------------------------------------------------------------------
@@ -419,6 +457,47 @@ def test_provider_snapshot_does_not_drop_other_providers_agents(tmp_path: Path) 
         consumer._on_observe_output(_provider_snapshot_line((), provider_name=alpha), is_stdout=True)
 
     assert handlers.destroyed_calls == (agent_alpha.agent_id,)
+
+
+def test_discovery_callback_carries_running_host_state_from_snapshot(tmp_path: Path) -> None:
+    """A snapshot host's ``host_state`` is threaded through to the discovery callback."""
+    del tmp_path
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        consumer, handlers = _make_consumer(cg)
+        host_id = HostId.generate()
+        agent = _make_agent(host_id, "a1")
+        consumer._on_observe_output(
+            _provider_snapshot_line_with_hosts((agent,), (_make_host(host_id, HostState.RUNNING),)),
+            is_stdout=True,
+        )
+    assert len(handlers.discovered_calls) == 1
+    assert handlers.discovered_calls[0].host_state == HostState.RUNNING
+
+
+def test_discovery_callback_carries_stopped_host_state_from_snapshot(tmp_path: Path) -> None:
+    """A stopped host's state reaches the callback so the handler can tear tunnels down."""
+    del tmp_path
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        consumer, handlers = _make_consumer(cg)
+        host_id = HostId.generate()
+        agent = _make_agent(host_id, "a1")
+        consumer._on_observe_output(
+            _provider_snapshot_line_with_hosts((agent,), (_make_host(host_id, HostState.STOPPED),)),
+            is_stdout=True,
+        )
+    assert len(handlers.discovered_calls) == 1
+    assert handlers.discovered_calls[0].host_state == HostState.STOPPED
+
+
+def test_discovery_callback_host_state_is_none_when_host_absent_from_snapshot(tmp_path: Path) -> None:
+    """An agent whose host was never carried in a snapshot fires with ``host_state=None``."""
+    del tmp_path
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        consumer, handlers = _make_consumer(cg)
+        agent = _make_agent(HostId.generate(), "a1")
+        consumer._on_observe_output(_agent_discovery_line(agent), is_stdout=True)
+    assert len(handlers.discovered_calls) == 1
+    assert handlers.discovered_calls[0].host_state is None
 
 
 def test_malformed_line_is_ignored(tmp_path: Path) -> None:

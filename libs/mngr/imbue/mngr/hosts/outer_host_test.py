@@ -6,6 +6,7 @@ from typing import Any
 from typing import cast
 
 import pytest
+from paramiko import ChannelException
 from paramiko import SSHException
 from pyinfra.api.exceptions import ConnectError
 from pyinfra.api.host import Host as PyinfraHost
@@ -15,11 +16,12 @@ from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.outer_host import OuterHost
-from imbue.mngr.hosts.outer_host import _is_transient_ssh_error
+from imbue.mngr.hosts.outer_host import _is_transient_ssh_connect_error
 from imbue.mngr.hosts.outer_host import _prepend_env_exports
 from imbue.mngr.hosts.outer_host import _sftp_walk
 from imbue.mngr.hosts.outer_host import create_local_pyinfra_host
 from imbue.mngr.hosts.outer_host import create_ssh_pyinfra_host_using_user_config
+from imbue.mngr.hosts.outer_host import is_transient_ssh_error
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.host import OuterHostInterface
@@ -442,28 +444,150 @@ def test_ensure_connected_classifies_unrelated_connect_errors_as_connection_erro
     assert not isinstance(excinfo.value, HostAuthenticationError)
 
 
+class _FakePyinfraHostRecoveringOnConnect:
+    """Pyinfra-host stand-in whose ``connect()`` fails a configured number of times, then succeeds.
+
+    Just enough surface for ``OuterHost._ensure_connected`` to exercise its
+    transient-connect-failure retry without touching the network or paramiko.
+    """
+
+    def __init__(self, failure_count: int, message: str) -> None:
+        self.connected = False
+        self.name = "fake-ssh-host"
+        self.connector_cls = type("SSHConnector", (), {})
+        self.connect_call_count = 0
+        self._failure_count = failure_count
+        self._message = message
+
+    def connect(self, raise_exceptions: bool = False) -> None:
+        self.connect_call_count += 1
+        if self.connect_call_count <= self._failure_count:
+            raise ConnectError(self._message)
+        self.connected = True
+
+
+def test_ensure_connected_retries_banner_read_connect_failures(temp_mngr_ctx: MngrContext) -> None:
+    """A banner-read ConnectError is retried, and the connect succeeds on the next attempt.
+
+    Regression test for ``mngr create`` failing on freshly booted Modal
+    sandboxes/VPSs: the host accepts TCP before sshd answers the SSH
+    handshake, paramiko gives up with "Error reading SSH protocol banner",
+    and treating that first failed connect as fatal surfaced a spurious
+    "Create agent failed" (and a flaky ``test_snapshot_create_then_list_on_modal``).
+    """
+    fake = _FakePyinfraHostRecoveringOnConnect(
+        failure_count=1,
+        message="SSH error (Error reading SSH protocol banner)",
+    )
+    outer = OuterHost(
+        id=HostId.generate(),
+        connector=PyinfraConnector(cast(PyinfraHost, fake)),
+        mngr_ctx=temp_mngr_ctx,
+    )
+
+    outer._ensure_connected()
+
+    assert fake.connected is True
+    assert fake.connect_call_count == 2
+
+
+def test_ensure_connected_gives_up_after_two_banner_read_attempts(temp_mngr_ctx: MngrContext) -> None:
+    """A persistent banner-read failure makes exactly two attempts before surfacing.
+
+    Each attempt already blocks for paramiko's ~15s banner timeout, so capping
+    at two attempts bounds the worst case (a host that accepts TCP but never
+    speaks SSH) at ~30 seconds.
+    """
+    fake = _FakePyinfraHostRecoveringOnConnect(
+        failure_count=5,
+        message="SSH error (Error reading SSH protocol banner)",
+    )
+    outer = OuterHost(
+        id=HostId.generate(),
+        connector=PyinfraConnector(cast(PyinfraHost, fake)),
+        mngr_ctx=temp_mngr_ctx,
+    )
+
+    with pytest.raises(HostConnectionError):
+        outer._ensure_connected()
+
+    assert fake.connect_call_count == 2
+
+
+def test_ensure_connected_does_not_retry_non_transient_connect_failures(temp_mngr_ctx: MngrContext) -> None:
+    """A refused connection is not retried: genuinely-down hosts must keep failing fast."""
+    fake = _FakePyinfraHostRecoveringOnConnect(
+        failure_count=5,
+        message="Could not connect (Connection refused)",
+    )
+    outer = OuterHost(
+        id=HostId.generate(),
+        connector=PyinfraConnector(cast(PyinfraHost, fake)),
+        mngr_ctx=temp_mngr_ctx,
+    )
+
+    with pytest.raises(HostConnectionError):
+        outer._ensure_connected()
+
+    assert fake.connect_call_count == 1
+
+
+@pytest.mark.parametrize(
+    ("exception", "expected"),
+    [
+        (ConnectError("SSH error (Error reading SSH protocol banner)"), True),
+        (ConnectError("Could not connect (Connection refused)"), False),
+        (ConnectError("Authentication error (username=alice): bad password"), False),
+        (SSHException("Error reading SSH protocol banner"), False),
+    ],
+    ids=["banner-read", "refused", "auth", "raw-ssh-exception"],
+)
+def test_is_transient_ssh_connect_error_matches_only_banner_read_connect_errors(
+    exception: BaseException, expected: bool
+) -> None:
+    """Only pyinfra ``ConnectError``s wrapping paramiko's banner-read failure are transient.
+
+    The raw ``SSHException`` case must stay False: at connect time pyinfra
+    always wraps it in ``ConnectError``, and mid-command banner problems are
+    handled by the separate ``is_transient_ssh_error`` classifier.
+    """
+    assert _is_transient_ssh_connect_error(exception) is expected
+
+
 @pytest.mark.parametrize(
     ("exception", "expected"),
     [
         (OSError("Socket is closed"), True),
         (OSError("No such file or directory"), False),
+        (ValueError("Socket is closed"), False),
         (SSHException("SSH session not active"), True),
+        (ChannelException(2, "open failed"), True),
         (EOFError(), True),
         (TimeoutError("Timed out reading output"), True),
         (ValueError("not transient"), False),
     ],
-    ids=["socket-closed", "other-os-error", "ssh-exception", "eof-error", "timeout-error", "non-os-error"],
+    ids=[
+        "socket-closed",
+        "other-os-error",
+        "non-os-value-error",
+        "ssh-exception",
+        "channel-exception",
+        "eof-error",
+        "timeout-error",
+        "non-os-error",
+    ],
 )
-def test_is_transient_ssh_error_classifies_timeout_as_transient(exception: BaseException, expected: bool) -> None:
-    """Regression: ``TimeoutError`` from pyinfra's ``read_output_buffers`` must be classified transient.
+def test_is_transient_ssh_error(exception: BaseException, expected: bool) -> None:
+    """The classifier accepts each transient SSH error kind and rejects everything else.
 
-    pyinfra raises a bare ``TimeoutError`` (Python builtin) when an SSH
+    The TimeoutError case is a regression guard: pyinfra raises a bare
+    ``TimeoutError`` (Python builtin) when an SSH
     command's response doesn't arrive within the per-command read
     timeout -- for example, when the remote sshd is reloaded mid-read
     during cloud-init. Without TimeoutError in the transient set, the
     retry loop didn't fire and the exception propagated all the way out
     of host creation. ``TimeoutError`` is an ``OSError`` subclass on
-    Python 3, so the classifier's ordering matters: the TimeoutError
-    branch must precede the narrow "Socket is closed" OSError check.
+    Python 3, but the classifier's OSError branch only matches on the
+    "Socket is closed" message, so bare timeouts need their own branch.
     """
-    assert _is_transient_ssh_error(exception) is expected
+    assert is_transient_ssh_error(exception) is expected

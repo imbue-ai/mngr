@@ -109,8 +109,8 @@ def test_codex_agent_advertises_tui_ready_indicator() -> None:
     assert CodexAgent.TUI_READY_INDICATOR == "/model to change"
 
 
-def test_codex_agent_implements_send_enter_and_validate() -> None:
-    assert "_send_enter_and_validate" not in CodexAgent.__abstractmethods__
+def test_codex_agent_implements_submission_evidence_probes() -> None:
+    assert "_build_submission_evidence_probes" not in CodexAgent.__abstractmethods__
 
 
 def test_register_agent_type_returns_codex_class_and_config() -> None:

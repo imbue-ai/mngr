@@ -31,11 +31,16 @@ import os
 import threading
 from collections.abc import Callable
 from pathlib import Path
+from typing import Final
 
 import paramiko
 from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
+from watchdog.events import FileCreatedEvent
+from watchdog.events import FileDeletedEvent
+from watchdog.events import FileModifiedEvent
+from watchdog.events import FileMovedEvent
 from watchdog.events import FileSystemEvent
 from watchdog.events import FileSystemEventHandler
 from watchdog.events import FileSystemMovedEvent
@@ -53,6 +58,7 @@ from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelError
@@ -72,6 +78,28 @@ from imbue.mngr_latchkey.store import permissions_path_for_host
 # giving up (it is a daemon thread, so the process can exit regardless).
 _OBSERVER_STOP_TIMEOUT_SECONDS: float = 5.0
 
+# The only watchdog event types that represent an actual mutation of a file
+# (its content or its presence). This is an allowlist rather than a blocklist
+# because watchdog dispatches more than mutations: on Linux (inotify) it also
+# emits read-lifecycle events -- ``FileOpenedEvent`` (IN_OPEN) and
+# ``FileClosedNoWriteEvent`` (IN_CLOSE_NOWRITE) -- for every *read* of a
+# watched file. The sync callbacks themselves read the watched files
+# (``sync_permissions`` reads the host permissions file; ``sync_credentials``
+# re-reads it and spawns latchkey CLI subprocesses that open the credentials
+# store), so reacting to read events created a self-sustaining feedback loop
+# of full VPS re-syncs, one every ~6s, for the lifetime of the supervisor.
+# Restricting dispatch to these mutation events makes the watcher's own reads
+# (and any other process's reads) inert. ``FileClosedEvent`` (IN_CLOSE_WRITE)
+# is deliberately absent: a write that changes content always also emits
+# ``FileModifiedEvent``, so including it would only double-fire syncs.
+# Directory events (``Dir*``) are separate classes and are excluded too.
+_MUTATION_EVENT_TYPES: Final[tuple[type[FileSystemEvent], ...]] = (
+    FileCreatedEvent,
+    FileDeletedEvent,
+    FileModifiedEvent,
+    FileMovedEvent,
+)
+
 
 class _LatchkeyStateChangeHandler(FrozenModel, FileSystemEventHandler):
     """watchdog handler that routes credential / per-host-permission file changes to sync callbacks.
@@ -84,7 +112,10 @@ class _LatchkeyStateChangeHandler(FrozenModel, FileSystemEventHandler):
     filesystem event; it matches the changed path against the local credentials
     file and each currently-known remote host's permissions file and fires the
     corresponding callback. Unrelated paths (gateway logs, ``.tmp`` atomic-write
-    siblings, unknown hosts) are ignored.
+    siblings, unknown hosts) are ignored, and so are all non-mutation event
+    types (see ``_MUTATION_EVENT_TYPES``) -- in particular the read-lifecycle
+    events inotify emits when the sync itself reads these files, which would
+    otherwise re-trigger the sync forever.
     """
 
     credentials_path: Path = Field(description="Absolute path of the local encrypted credentials file")
@@ -98,7 +129,10 @@ class _LatchkeyStateChangeHandler(FrozenModel, FileSystemEventHandler):
     )
 
     def dispatch(self, event: FileSystemEvent) -> None:
-        if event.is_directory:
+        # Allowlist of genuine mutations; everything else (read-lifecycle
+        # events, close-after-write duplicates, directory events) is inert.
+        # See ``_MUTATION_EVENT_TYPES`` for why this must be an allowlist.
+        if not isinstance(event, _MUTATION_EVENT_TYPES):
             return
         # A move reports both src and dest; an atomic write (tmp -> rename)
         # surfaces the real file as the move dest, so consider both.
@@ -126,6 +160,13 @@ class LatchkeyDiscoveryHandler(MutableModel):
     arrives before the host SSH event) skip the reverse-tunnel step and
     are expected to reach the gateway via whatever direct route already
     exists.
+
+    An agent whose host discovery reports as not-running (stopped, paused,
+    crashed, ...) instead has its reverse tunnel torn down and skips gateway
+    provisioning, since its container sshd and docker target are gone until it
+    restarts; the shared desktop gateway is still ensured up (it is shared
+    across all agents). A ``None`` host state is treated as unknown and stays
+    on the normal path.
     """
 
     latchkey: Latchkey = Field(description="Latchkey wrapper that owns the shared gateway subprocess")
@@ -158,11 +199,32 @@ class LatchkeyDiscoveryHandler(MutableModel):
     _provisioned_hosts: set[str] = PrivateAttr(default_factory=set)
     _remote_hosts_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
-    def __call__(self, agent_id: AgentId, host_id: HostId, ssh_info: RemoteSSHInfo | None, provider_name: str) -> None:
+    def __call__(
+        self,
+        agent_id: AgentId,
+        host_id: HostId,
+        ssh_info: RemoteSSHInfo | None,
+        provider_name: str,
+        host_state: HostState | None,
+    ) -> None:
         try:
             host_side_port = self.latchkey.start_gateway(self.concurrency_group)
         except LatchkeyError as e:
             logger.opt(exception=e).error("Failed to start shared Latchkey gateway for agent {}: {}", agent_id, e)
+            return
+
+        # A host that discovery reports as explicitly not-running (stopped,
+        # paused, crashed, ...) has no live container sshd or docker daemon
+        # target to act on, so tear down any reverse tunnel we opened while it
+        # was running and skip both the desktop-gateway tunnel and the
+        # VPS-resident gateway provisioning (whose ``docker exec`` would fail
+        # against a stopped container). A ``None`` state is "unknown / not
+        # applicable" (e.g. the local provider, or a discovery event that
+        # arrives before the host snapshot), so it stays on the normal path.
+        # When the host returns to RUNNING, discovery re-fires and everything
+        # is re-established.
+        if host_state is not None and host_state is not HostState.RUNNING:
+            self._tear_down_stopped_agent(agent_id, host_id)
             return
 
         if ssh_info is None:
@@ -229,6 +291,22 @@ class LatchkeyDiscoveryHandler(MutableModel):
             if not is_pending_handed_off:
                 with self._pending_lock:
                     self._pending_remote_agents.discard(str(agent_id))
+
+    def _tear_down_stopped_agent(self, agent_id: AgentId, host_id: HostId) -> None:
+        """Drop a stopped agent's reverse tunnel and mark its host for re-provisioning.
+
+        The per-agent reverse tunnel points at the container's sshd, which is
+        down while the host is stopped; removing it stops the tunnel manager's
+        health-check loop from indefinitely re-dialing a dead endpoint.
+        Forgetting the host's ``_provisioned_hosts`` marker means a later restart
+        re-runs the idempotent VPS-resident gateway provisioning, since a stopped
+        container may be recreated before it comes back.
+        """
+        removed_tunnel_count = self.tunnel_manager.remove_reverse_tunnels_for_agent(str(agent_id))
+        if removed_tunnel_count:
+            logger.debug("Removed {} reverse tunnel(s) for stopped agent {}", removed_tunnel_count, agent_id)
+        with self._remote_hosts_lock:
+            self._provisioned_hosts.discard(str(host_id))
 
     def _setup_desktop_gateway_reachability(
         self, agent_id: AgentId, ssh_info: RemoteSSHInfo, host_side_port: int
@@ -387,11 +465,19 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 # credentials/permissions in sync from now on.
                 with self._remote_hosts_lock:
                     self._remote_host_provider_by_id[str(host_id)] = provider_name
+                # The reverse tunnel runs *on the outer host*, so it needs the
+                # port the container's sshd is published on from the outer host's
+                # own loopback -- not ``ssh_info.port``, which is how a remote
+                # client reaches the container (a box-forwarded port for slices).
+                # Providers whose topology splits publish from connect surface the
+                # loopback port here; otherwise the two coincide and we fall back.
+                loopback_ssh_port = provider.get_container_loopback_ssh_port(host_id)
+                container_ssh_port = loopback_ssh_port if loopback_ssh_port is not None else ssh_info.port
                 provision_remote_gateway(
                     outer,
                     host_id=host_id,
                     container_ssh_user=ssh_info.user,
-                    container_ssh_port=ssh_info.port,
+                    container_ssh_port=container_ssh_port,
                     latchkey_directory=self.latchkey.latchkey_directory,
                     gateway_password=self.latchkey.derive_gateway_password(),
                 )
@@ -422,9 +508,12 @@ class LatchkeyDiscoveryHandler(MutableModel):
         First syncs every currently-known remote host (permissions, then
         credentials -- order matters). Then starts a ``watchdog`` observer that
         pushes credentials to every known remote host whenever the local
-        credentials file changes, and pushes a single host's permissions
-        whenever that host's permissions file changes. (Newly-provisioned hosts
-        get their initial sync inline in the provisioning path.)
+        credentials file changes, and pushes a single host's full state
+        (permissions, then credentials) whenever that host's permissions file
+        changes -- the permissions determine which services' credentials ship,
+        so a permissions change must re-sync the credentials too. (Newly-
+        provisioned hosts get their initial sync inline in the provisioning
+        path.)
 
         The observer's health is supervised on a *checked* CG strand: if it
         stops for any reason other than ``shutdown_event`` being set, that is a
@@ -444,7 +533,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
             plugin_data_dir=data_dir,
             known_remote_host_ids=self._known_remote_host_ids,
             on_credentials_changed=self._sync_credentials_to_all_known_hosts,
-            on_host_permissions_changed=self._sync_permissions_to_host,
+            on_host_permissions_changed=self._sync_full_state_to_host,
         )
         observer = Observer()
         # The credentials file sits at the latchkey-directory root; the per-host
@@ -507,12 +596,22 @@ class LatchkeyDiscoveryHandler(MutableModel):
         for host_id_str, provider_name in remote_hosts.items():
             self._sync_state_to_host(host_id_str, provider_name, do_permissions=False, do_credentials=True)
 
-    def _sync_permissions_to_host(self, host_id_str: str) -> None:
+    def _sync_full_state_to_host(self, host_id_str: str) -> None:
+        """Sync one host's permissions *and* credentials (used on a permissions change).
+
+        A permissions change does not just alter the file that gets copied to
+        the VPS -- it also changes which services' credentials the host may
+        hold (``sync_credentials`` resolves the shipped subset from the
+        permissions file). Syncing only the permissions would leave the VPS
+        credential store stale: a newly-granted service's credentials would be
+        missing, and a revoked service's credentials would linger. So a
+        permissions change triggers the full sync, permissions first.
+        """
         with self._remote_hosts_lock:
             provider_name = self._remote_host_provider_by_id.get(host_id_str)
         if provider_name is None:
             return
-        self._sync_state_to_host(host_id_str, provider_name, do_permissions=True, do_credentials=False)
+        self._sync_state_to_host(host_id_str, provider_name, do_permissions=True, do_credentials=True)
 
     def _sync_state_to_host(
         self,

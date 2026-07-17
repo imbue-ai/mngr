@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `anthropic/claude-fable-5` pricing ($10 / $50 per 1M input / output tokens) in the usage pricing table, so token-only usage sources report cost for Claude Fable 5 instead of showing it as unpriced.
+
 ## [v0.1.6] - 2026-06-18
 
 ## [v0.1.5] - 2026-06-16

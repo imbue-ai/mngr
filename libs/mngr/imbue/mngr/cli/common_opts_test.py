@@ -532,6 +532,35 @@ def test_parse_output_options_verbose_2_sets_trace(mngr_test_prefix: str) -> Non
     assert logging_config.console_level == LogLevel.TRACE
 
 
+def test_parse_output_options_max_log_size_default_uses_config(mngr_test_prefix: str) -> None:
+    """parse_output_options should inherit config.logging.max_log_size_mb when no override is given."""
+    config = MngrConfig(prefix=mngr_test_prefix)
+    _output_opts, logging_config = parse_output_options(
+        output_format="human",
+        quiet=False,
+        verbose=0,
+        log_file=None,
+        log_commands=None,
+        config=config,
+    )
+    assert logging_config.max_log_size_mb == config.logging.max_log_size_mb
+
+
+def test_parse_output_options_max_log_size_override(mngr_test_prefix: str) -> None:
+    """parse_output_options should honor an explicit max_log_size_mb override over the config value."""
+    config = MngrConfig(prefix=mngr_test_prefix)
+    _output_opts, logging_config = parse_output_options(
+        output_format="human",
+        quiet=False,
+        verbose=0,
+        log_file=None,
+        log_commands=None,
+        config=config,
+        max_log_size_mb=10,
+    )
+    assert logging_config.max_log_size_mb == 10
+
+
 def test_parse_output_options_format_template(mngr_test_prefix: str) -> None:
     """parse_output_options should recognize a non-builtin format as a template string."""
     config = MngrConfig(prefix=mngr_test_prefix)

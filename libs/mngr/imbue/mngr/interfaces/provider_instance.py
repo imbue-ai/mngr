@@ -217,6 +217,8 @@ def _build_agent_details_from_online_agent(
     # Compute plugin-specific fields from field generators
     plugin_data = _compute_plugin_fields(field_generators, agent, host)
 
+    lifecycle = agent.probe_lifecycle()
+
     return AgentDetails(
         id=agent.id,
         name=agent.name,
@@ -226,7 +228,8 @@ def _build_agent_details_from_online_agent(
         initial_branch=agent.get_created_branch_name(),
         create_time=agent.create_time,
         start_on_boot=agent.get_is_start_on_boot(),
-        state=agent.get_lifecycle_state(),
+        state=lifecycle.state,
+        pid=lifecycle.pid,
         url=agent.get_reported_url(),
         start_time=start_time,
         runtime_seconds=runtime_seconds,
@@ -579,6 +582,25 @@ class ProviderInstanceInterface(MutableModel, ABC):
         local). Providers whose host has a separate outer/management sshd on a
         non-obvious port (e.g. a slice's VM-root sshd reached via a box-forwarded
         port) override this so ``mngr create --format json`` can report it.
+        """
+        return None
+
+    def get_container_loopback_ssh_port(self, host_id: HostId) -> int | None:
+        """Port at which the agent's container sshd is reachable from the *outer host's own loopback*.
+
+        Distinct from the externally-routable port in ``get_ssh_connection_info``:
+        that one is how a remote client reaches the container (e.g. a slice's
+        box-forwarded port), whereas this is the port the container's sshd is
+        published on from the outer host's perspective (``127.0.0.1:<port>`` on
+        the VPS/VM). The two coincide for a plain docker-on-VPS host but differ
+        for a slice, where the container is published in the VM on a fixed port
+        while reached from outside via a box-forwarded port.
+
+        Returns ``None`` by default, meaning the externally-routable port is also
+        the outer-host-loopback port (callers fall back to that). Providers whose
+        topology splits publish from connect (e.g. imbue_cloud slices) override
+        this so a service running *on the outer host* (the VPS-resident latchkey
+        gateway) can reverse-tunnel into the container on the correct port.
         """
         return None
 

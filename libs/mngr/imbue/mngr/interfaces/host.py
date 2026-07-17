@@ -26,6 +26,7 @@ from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.data_types import PyinfraConnector
+from imbue.mngr.interfaces.data_types import SizeBytes
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import VolumeFile
 from imbue.mngr.primitives import ActivitySource
@@ -426,6 +427,26 @@ class OuterHostInterface(HostFileReadInterface, HostFileWriteInterface, ABC):
         if self.is_local:
             return path.exists()
         return self.execute_idempotent_command(f"test -e {shlex.quote(str(path))}", timeout_seconds=5.0).success
+
+    def get_directory_size(self, path: Path) -> SizeBytes:
+        """Disk space used by ``path`` and its contents, or 0 if it is not a directory.
+
+        Measured with POSIX ``du -sk``: totals are whole kibibytes, since ``-k`` is
+        the only block size POSIX defines. The trailing slash resolves a symlinked
+        ``path`` to its target directory, and ``du``'s non-zero exit after skipping
+        an unreadable entry is tolerated, since it still prints a correct total.
+        """
+        quoted_path = shlex.quote(f"{path}/")
+        result = self.execute_idempotent_command(
+            f"test -d {quoted_path} && {{ du -sk {quoted_path} 2>/dev/null || true; }}",
+            timeout_seconds=30.0,
+        )
+        if not result.success or not result.stdout.strip():
+            return SizeBytes(0)
+        kibibytes = result.stdout.split()[0]
+        if not kibibytes.isdigit():
+            return SizeBytes(0)
+        return SizeBytes(int(kibibytes) * 1024)
 
 
 class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):

@@ -38,6 +38,10 @@
   {% set _body_class = (body_class if body_class else "bg-surface-primary text-primary font-sans antialiased") ~ " pt-[38px]" %}
   {% set _body_style = body_style %}
 {% endif %}
+{# The agent content surface (pages.Chrome) is edge-to-edge, so it opts out of
+   the global stable scrollbar gutter; scrolling local pages keep the gutter to
+   avoid a sideways layout shift when a classic scrollbar appears. #}
+{% set _html_class = "no-scrollbar-gutter" if is_agent_content_surface else "" %}
 {% set _head %}
 <style>
   /* Things that can't easily be expressed as Tailwind utilities. */
@@ -70,6 +74,7 @@
 {%- endif %}
 {% endset %}
 <Base :title="title"
+      :html_class="_html_class"
       :body_class="_body_class"
       :body_style="_body_style"
       head={{ _head }}
@@ -100,7 +105,7 @@
       <span id="page-title" class="text-primary type-label whitespace-nowrap overflow-hidden text-ellipsis">Minds</span>
     </div>
     <div class="flex-1 flex items-center justify-end min-w-0">
-      <TitlebarButton id="help-toggle" aria-label="Get help" data-tooltip="Get help"><Icon16 name="help-circle" /></TitlebarButton>
+      <TitlebarButton id="help-toggle" aria-label="Ran into a bug?" data-tooltip="Ran into a bug?"><Icon16 name="bug" /></TitlebarButton>
       <TitlebarButton id="requests-toggle" aria-label="Requests" data-tooltip="Requests" extra="gap-[3px]">
         <Icon16 name="inbox" />
         <Badge :count="0" id="requests-badge" hidden />

@@ -74,8 +74,8 @@ Assuming the agent's [host](./hosts.md) is in the "running" state, an agent can 
 - **stopped**: the agent folder exists (but there is no tmux session)
 - **running**: tmux session exists and the expected process exists in pane 0
 - **waiting**: the agent is waiting (e.g., for user input or an external event)
-- **replaced**: tmux session exists and a different process in pane 0
-- **done**: the tmux session exists and there is no process under the shell for that pane
+- **replaced**: tmux session exists and a different program is running in the pane's foreground
+- **done**: the tmux session exists and the pane's foreground has dropped back to a shell prompt (the agent process exited; background helper processes may still be running under the pane)
 
 If the host's state is not "running", then the agent inherits it state from the host (ex: paused, crashed, etc, see [host lifecycle](./hosts.md#Lifecycle) for more details)
 

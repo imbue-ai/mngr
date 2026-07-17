@@ -249,10 +249,9 @@ def _build_scenarios() -> list[Scenario]:
             builder=lambda: render_create_form(launch_mode=LaunchMode.LIMA, ai_provider=AIProvider.SUBSCRIPTION),
         ),
         Scenario(
-            name="create_with_master_password",
+            name="create_with_imbue_cloud_backups",
             builder=lambda: render_create_form(
                 backup_provider=BackupProvider.IMBUE_CLOUD,
-                has_saved_backup_password=False,
                 accounts=(account_a,),
                 default_account_id="user-aaaaaa",
             ),

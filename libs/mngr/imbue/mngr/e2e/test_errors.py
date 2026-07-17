@@ -9,6 +9,12 @@ from imbue.skitwright.expect import expect
 
 
 @pytest.mark.release
+# This test runs two full `mngr` subprocesses (`create` then `list`). Each
+# invocation pays a fixed ~10s+ interpreter startup cost (importing the provider
+# backend SDKs registered at import time), which alone can exceed the default
+# 10s per-test timeout even though the command logic itself fails fast. Allow
+# extra headroom so the timeout reflects real misbehavior, not startup overhead.
+@pytest.mark.timeout(120)
 def test_invalid_provider_fails(e2e: E2eSession) -> None:
     """`mngr create` with an unknown --provider fails, names the offending provider in
     stderr, and registers no agent (a failed create leaves nothing half-created behind).
@@ -30,7 +36,6 @@ def test_invalid_provider_fails(e2e: E2eSession) -> None:
     expect(list_result.stdout).not_to_contain("my-task")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 # This test creates a live local agent and then runs `mngr list`, which
@@ -61,8 +66,11 @@ def test_create_duplicate_name_fails(e2e: E2eSession) -> None:
     expect(duplicate_result.stderr).to_contain("already exists")
 
     # The rejected duplicate must leave the original agent untouched: exactly
-    # one agent named "my-task" should remain.
-    list_result = e2e.run("mngr list --format json", comment="Verify the original agent is intact")
+    # one agent named "my-task" should remain. Scope the query to the local
+    # provider (the agents are created locally): an unrelated remote provider
+    # being unreachable (e.g. AWS without credentials in CI) would otherwise
+    # make `mngr list` exit non-zero for a reason outside this test's scope.
+    list_result = e2e.run("mngr list --provider local --format json", comment="Verify the original agent is intact")
     expect(list_result).to_succeed()
     agent_names = [agent["name"] for agent in json.loads(list_result.stdout)["agents"]]
     assert agent_names == ["my-task"], f"Expected only the original 'my-task', got {agent_names}"

@@ -56,9 +56,10 @@ def test_send_message_does_not_raise_dialog_detected_when_no_dialog(
     the important thing is that it gets past the dialog check.
     """
     agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
-    # Use a short submission timeout so the test does not block for 60s waiting
-    # for a tmux wait-for signal that will never arrive (no real Claude process)
-    agent.enter_submission_timeout_seconds = 1.0
+    # Use a short confirmation window so the test does not block for 90s
+    # polling for submission evidence that will never appear (no real Claude
+    # process)
+    agent.confirmation_timeout_seconds = 1.0
     session_name = agent.session_name
     window_name = agent.mngr_ctx.config.tmux.primary_window_name
 
@@ -85,8 +86,8 @@ def test_send_message_does_not_raise_dialog_detected_when_no_dialog(
         # send_message proceeds to the paste/submit phase. With no real Claude
         # process, that phase deterministically times out -- either
         # wait_for_paste_visible ("Timeout waiting for pasted content to
-        # appear") or the per-session submit hook in _send_enter_and_validate
-        # ("Timeout waiting for message submission signal"). Both raise the
+        # appear") or the evidence-confirmation window ("Timeout waiting for
+        # message submission evidence"). Both raise the
         # base SendMessageError with a "Timeout waiting for" reason, which a
         # DialogDetectedError ("A dialog is blocking the agent's input ...")
         # never contains. Matching that substring therefore proves the failure

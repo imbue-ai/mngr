@@ -29,11 +29,6 @@ from pydantic import Field
 from pydantic import ValidationError
 from pyinfra.api.command import StringCommand
 from pyinfra.connectors.util import CommandOutput
-from tenacity import retry
-from tenacity import retry_if_exception
-from tenacity import stop_after_attempt
-from tenacity import wait_chain
-from tenacity import wait_fixed
 
 from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.errors import ProcessTimeoutError
@@ -56,6 +51,7 @@ from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostDataSchemaError
 from imbue.mngr.errors import HostError
 from imbue.mngr.errors import InvalidActivityTypeError
+from imbue.mngr.errors import LockLostError
 from imbue.mngr.errors import LockNotHeldError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NoCommandDefinedError
@@ -68,7 +64,10 @@ from imbue.mngr.hosts.common import get_ssh_known_hosts_file
 from imbue.mngr.hosts.file_upload import upload_files_in_bulk
 from imbue.mngr.hosts.offline_host import BaseHost
 from imbue.mngr.hosts.offline_host import apply_rename_to_agent_data
+from imbue.mngr.hosts.outer_host import ActiveRemoteLock
 from imbue.mngr.hosts.outer_host import OuterHost
+from imbue.mngr.hosts.outer_host import is_transient_ssh_error
+from imbue.mngr.hosts.outer_host import retry_on_transient_ssh_error
 from imbue.mngr.hosts.tmux import TmuxSessionTarget
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -159,46 +158,18 @@ def _try_acquire_flock(lock_file: io.TextIOWrapper) -> bool:
         return False
 
 
-@pure
-def _is_transient_ssh_error(exception: BaseException) -> bool:
-    """Check if the exception is a transient SSH connection error worth retrying.
+def _increment_local_generation_counter(generation_file_path: Path) -> None:
+    """Increment the acquisition counter on the local filesystem while the host lock is held.
 
-    Matches:
-    - OSError with "Socket is closed" (stale socket from pyinfra)
-    - SSHException (e.g. "SSH session not active" when transport dies),
-      including ChannelException (server refused to open a new channel,
-      e.g. MaxSessions limit -- the transport may still be alive)
-    - EOFError (remote end closed connection)
-    - TimeoutError (pyinfra read_output_buffers timeout when the remote
-      sshd is reloaded mid-command, e.g. during cloud-init bootstrap).
-      Note: ``TimeoutError`` is an OSError subclass on Python 3, so this
-      check must precede any narrower OSError handling.
+    Mirrors the remote lock command's counter increment: reads the current value
+    (defaulting to 0 when absent or non-integer), writes back the incremented value.
+    Must be called only while holding the flock so the read-modify-write is serialized.
     """
-    if isinstance(exception, OSError) and "Socket is closed" in str(exception):
-        return True
-    if isinstance(exception, SSHException):
-        return True
-    if isinstance(exception, EOFError):
-        return True
-    if isinstance(exception, TimeoutError):
-        return True
-    return False
-
-
-# Shared retry decorator for file operations that encounter transient SSH
-# connection errors.  Retries after (0, 1, 3, 6) seconds for a total
-# backoff window of ~10 seconds.
-_retry_on_transient_ssh_error = retry(
-    retry=retry_if_exception(_is_transient_ssh_error),
-    stop=stop_after_attempt(5),
-    wait=wait_chain(
-        wait_fixed(0),
-        wait_fixed(1),
-        wait_fixed(3),
-        wait_fixed(6),
-    ),
-    reraise=True,
-)
+    try:
+        current_counter = int(generation_file_path.read_text().strip())
+    except (FileNotFoundError, ValueError):
+        current_counter = 0
+    generation_file_path.write_text(f"{current_counter + 1}\n")
 
 
 def _get_ssh_transport(pyinfra_host: Any) -> Transport | None:
@@ -220,6 +191,16 @@ def _get_ssh_transport(pyinfra_host: Any) -> Transport | None:
 # the idle-shutdown watcher and ``is_lock_held`` detect it via a flock probe, not
 # via file existence.
 _HOST_LOCK_FILENAME: Final[str] = "host_lock"
+
+# A monotonic acquisition counter kept beside the lock file. Every actor that
+# acquires the flock to mutate the host increments it by exactly one *under the
+# flock*, so it is a fencing/generation token: a holder that reconnects after a
+# dropped connection re-acquires the lock and checks whether the counter advanced
+# by more than its own single re-acquire, which reveals whether another actor
+# acquired the lock in the gap. It must be a *separate* file from the lock file
+# because the lock file is opened with ``exec 9>lockfile``, which truncates it on
+# every acquire and so cannot hold durable state.
+_HOST_LOCK_GENERATION_FILENAME: Final[str] = "host_lock.generation"
 
 # Default timeout for callers that want a bounded wait (e.g. gc). ``create`` and
 # ``start`` pass ``None`` to block indefinitely until the lock is acquired.
@@ -243,23 +224,47 @@ def _is_retain_lock_for_debug_enabled() -> bool:
 
 
 @pure
+def _build_generation_increment_fragment(quoted_generation_file_path: str) -> str:
+    """Build the shell fragment that bumps the acquisition counter under the held flock.
+
+    Reads the current counter (defaulting to 0 when the file is absent), writes
+    back the incremented value, and leaves it in the shell variable ``gen`` for
+    the caller to report. It must run *while the flock is held* so the
+    read-modify-write is serialized against other acquirers. Every actor that
+    acquires ``host_lock`` to mutate the host runs an equivalent fragment (the
+    remote holder here, the in-host idle watcher), so the counter reflects every
+    acquisition regardless of which actor made it.
+    """
+    return (
+        f"gen=$(( $(cat {quoted_generation_file_path} 2>/dev/null || echo 0) + 1 )) && "
+        f"printf '%s\\n' \"$gen\" > {quoted_generation_file_path}"
+    )
+
+
+@pure
 def _build_remote_lock_command(lock_file_path: Path, timeout_seconds: float | None) -> str:
     """Build the remote shell command that holds a flock(2) until stdin closes.
 
     Opens the lock fd, tries a non-blocking acquire first (printing a "waiting"
     marker if it must block), waits for the lock (bounded by ``timeout_seconds``
-    when given), prints the acquired marker, then reads stdin until EOF. Closing
-    the controlling channel sends EOF, so the shell exits, the fd closes, and the
-    lock releases. A bounded-wait timeout prints the timeout marker and exits 1;
-    any other failure (e.g. ``flock`` missing) exits without printing a marker so
-    the local side surfaces it as an unexpected error rather than a timeout.
+    when given), increments the acquisition counter under the flock, prints the
+    acquired marker followed by the new counter value, then reads stdin until
+    EOF. Closing the controlling channel sends EOF, so the shell exits, the fd
+    closes, and the lock releases. A bounded-wait timeout prints the timeout
+    marker and exits 1; any other failure (e.g. ``flock`` missing) exits without
+    printing a marker so the local side surfaces it as an unexpected error rather
+    than a timeout.
     """
     quoted_path = shlex.quote(str(lock_file_path))
     quoted_dir = shlex.quote(str(lock_file_path.parent))
+    quoted_generation_path = shlex.quote(str(lock_file_path.parent / _HOST_LOCK_GENERATION_FILENAME))
     acquired = shlex.quote(_LOCK_ACQUIRED_MARKER)
     timed_out = shlex.quote(_LOCK_TIMED_OUT_MARKER)
     waiting = shlex.quote(_LOCK_WAITING_MARKER)
-    hold = f"printf '%s\\n' {acquired} && while IFS= read -r _; do :; done"
+    # Bump the counter under the flock, then report the acquired marker with the
+    # new value so the local side records this acquisition's token.
+    increment = _build_generation_increment_fragment(quoted_generation_path)
+    hold = f"{increment} && printf '%s %s\\n' {acquired} \"$gen\" && while IFS= read -r _; do :; done"
     if timeout_seconds is None:
         # Block indefinitely. ``flock -n`` first so we only emit the waiting marker
         # under genuine contention; ``flock 9`` then blocks until released.
@@ -278,19 +283,44 @@ def _build_remote_lock_command(lock_file_path: Path, timeout_seconds: float | No
     )
 
 
-def _wait_for_remote_lock_acquired(channel: Any) -> None:
-    """Block until the remote lock holder reports it has acquired the lock.
+@pure
+def _parse_acquired_generation_token(buffer: bytes) -> int | None:
+    """Parse the acquisition counter token from a complete acquired-marker line.
+
+    The remote holder prints ``<marker> <token>\\n`` once it holds the flock. This
+    returns the integer token, or None when the marker's full line (through its
+    terminating newline) has not yet arrived -- the caller keeps reading. Raises
+    HostError if the line is present but the token is not an integer.
+    """
+    marker_bytes = _LOCK_ACQUIRED_MARKER.encode()
+    marker_index = buffer.find(marker_bytes)
+    if marker_index == -1:
+        return None
+    remainder = buffer[marker_index + len(marker_bytes) :]
+    newline_index = remainder.find(b"\n")
+    if newline_index == -1:
+        # The token may still be arriving; wait for the terminating newline.
+        return None
+    token_text = remainder[:newline_index].strip()
+    try:
+        return int(token_text)
+    except ValueError as e:
+        raise HostError(f"Remote host lock reported a malformed acquisition token: {token_text!r}") from e
+
+
+def _wait_for_remote_lock_acquired(channel: Any) -> int:
+    """Block until the remote lock holder reports acquisition, returning the acquisition counter token.
 
     Raises LockNotHeldError if a bounded wait timed out. Raises HostError if the
     channel closes before any result marker (e.g. ``flock`` missing on the host),
     which should never happen and must not be mistaken for a timeout.
     """
-    acquired_bytes = _LOCK_ACQUIRED_MARKER.encode()
     timed_out_bytes = _LOCK_TIMED_OUT_MARKER.encode()
     waiting_bytes = _LOCK_WAITING_MARKER.encode()
     buffer = b""
     is_waiting_logged = False
-    while acquired_bytes not in buffer:
+    token = _parse_acquired_generation_token(buffer)
+    while token is None:
         if timed_out_bytes in buffer:
             raise LockNotHeldError("Timed out waiting to acquire the host lock")
         if waiting_bytes in buffer and not is_waiting_logged:
@@ -300,6 +330,8 @@ def _wait_for_remote_lock_acquired(channel: Any) -> None:
         if not chunk:
             raise HostError("Remote host lock command exited before acquiring the lock (is flock installed?)")
         buffer += chunk
+        token = _parse_acquired_generation_token(buffer)
+    return token
 
 
 def install_packaged_script_on_host(
@@ -855,6 +887,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                         )
                     except TimeoutError as e:
                         raise LockNotHeldError(str(e)) from e
+            # Record this acquisition in the shared counter while the flock is held, so a
+            # remote holder (which contends on the same host_lock file when mngr also runs
+            # locally on the host) can detect an in-host acquisition across a reconnect.
+            _increment_local_generation_counter(lock_file_path.parent / _HOST_LOCK_GENERATION_FILENAME)
             yield
         finally:
             try:
@@ -878,6 +914,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         hosts at once (e.g. the mapreduce orchestrator launching one agent per task):
         the failure is a structured ``MngrError`` it can catch and isolate per host.
         """
+        generation_file_path = lock_file_path.parent / _HOST_LOCK_GENERATION_FILENAME
         with (
             self._notify_on_connection_error(),
             self._translate_ssh_errors(
@@ -885,9 +922,22 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 closed="Connection was closed while acquiring host lock",
             ),
         ):
-            channel = self._open_remote_lock_channel(lock_file_path, timeout_seconds)
+            channel, token = self._open_remote_lock_channel(lock_file_path, timeout_seconds)
+        # Record the active lock so reconnects/channel-death mid-critical-section
+        # re-verify ownership instead of silently proceeding unlocked.
+        self._active_lock = ActiveRemoteLock(
+            lock_file_path=lock_file_path,
+            generation_file_path=generation_file_path,
+            token=token,
+            channel=channel,
+        )
         try:
             yield
+            # Release backstop (enforcement completeness guarantee): every exit of the
+            # block passes through here, so no critical section can be reported
+            # successful while the lock was silently lost -- regardless of which
+            # operation (paramiko, rsync, or a future backend) ran inside.
+            self._verify_lock_still_held_at_release()
         except BaseException:
             # If an operation that held the lock fails, optionally keep the host
             # alive for debugging: launch a detached holder that re-grabs the flock
@@ -900,21 +950,27 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 self._launch_detached_lock_holder(lock_file_path)
             raise
         finally:
-            try:
-                channel.shutdown_write()
-            except (OSError, EOFError) as shutdown_error:
-                # Best-effort EOF to release the remote flock; the channel.close()
-                # below tears it down regardless. Log so a wedged teardown is visible.
-                logger.debug("Failed to send EOF when releasing remote host lock: {}", shutdown_error)
-            channel.close()
+            # Release the *current* lock channel (a re-acquire may have replaced the
+            # original) and clear the active-lock state.
+            active_lock = self._active_lock
+            self._active_lock = None
+            if active_lock is not None:
+                try:
+                    active_lock.channel.shutdown_write()
+                except (OSError, EOFError) as shutdown_error:
+                    # Best-effort EOF to release the remote flock; the channel.close()
+                    # below tears it down regardless. Log so a wedged teardown is visible.
+                    logger.debug("Failed to send EOF when releasing remote host lock: {}", shutdown_error)
+                active_lock.channel.close()
             logger.trace("Released host lock (over SSH)")
 
-    @_retry_on_transient_ssh_error
-    def _open_remote_lock_channel(self, lock_file_path: Path, timeout_seconds: float | None) -> Channel:
+    @retry_on_transient_ssh_error
+    def _open_remote_lock_channel(self, lock_file_path: Path, timeout_seconds: float | None) -> tuple[Channel, int]:
         """Open an SSH channel that holds the remote host flock, retrying transient SSH failures.
 
-        Returns only once the lock has actually been acquired; the caller owns the
-        returned channel and releases the lock by closing it.
+        Returns the live lock channel and the acquisition counter token reported by
+        the remote holder, only once the lock has actually been acquired; the caller
+        owns the returned channel and releases the lock by closing it.
 
         Mirrors ``_run_shell_command_with_transient_retry``: a dropped connection
         leaves a dead transport whose ``open_session`` raises ``SSHException("SSH
@@ -932,7 +988,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         try:
             channel = transport.open_session()
         except (OSError, EOFError, SSHException) as e:
-            if _is_transient_ssh_error(e):
+            if is_transient_ssh_error(e):
                 logger.debug("Transient SSH error opening host-lock channel: {}, disconnecting for retry", e)
                 self.connector.host.disconnect()
             raise
@@ -940,10 +996,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         try:
             with log_span("acquiring host lock at {} (over SSH)", lock_file_path):
                 channel.exec_command(_build_remote_lock_command(lock_file_path, timeout_seconds))
-                _wait_for_remote_lock_acquired(channel)
+                token = _wait_for_remote_lock_acquired(channel)
             is_lock_acquired = True
         except (OSError, EOFError, SSHException) as e:
-            if _is_transient_ssh_error(e):
+            if is_transient_ssh_error(e):
                 logger.debug("Transient SSH error acquiring host lock: {}, disconnecting for retry", e)
                 self.connector.host.disconnect()
             raise
@@ -953,7 +1009,123 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             # The retry decorator or the caller sees the original exception.
             if not is_lock_acquired:
                 channel.close()
-        return channel
+        return channel, token
+
+    def _read_remote_generation_counter(self, generation_file_path: Path) -> int | None:
+        """Read the acquisition counter from the remote host, or None if the file is absent."""
+        quoted_generation_path = shlex.quote(str(generation_file_path))
+        command = f"if [ -e {quoted_generation_path} ]; then cat {quoted_generation_path}; else echo MISSING; fi"
+        result = self.execute_idempotent_command(command)
+        counter_text = result.stdout.strip()
+        if counter_text in ("", "MISSING"):
+            return None
+        try:
+            return int(counter_text)
+        except ValueError as e:
+            raise HostError(f"Remote host reported a malformed acquisition counter: {counter_text!r}") from e
+
+    def _reacquire_and_verify_lock(self) -> None:
+        """Re-acquire the held cooperative lock and verify no other actor acquired it in the gap.
+
+        Called only when the current lock channel is confirmed dead (a reconnect
+        replaced the transport, or the lock channel itself died), so the flock has
+        been released and a blocking re-acquire will not deadlock behind our own
+        hold. If the acquisition counter advanced by exactly one -- our own
+        re-acquire -- the momentary loss was uncontended and we transparently
+        continue; otherwise another actor acquired in the gap and we raise
+        ``LockLostError``.
+        """
+        active_lock = self._active_lock
+        if active_lock is None:
+            return
+        self._is_reacquiring_lock = True
+        try:
+            # Fast-fail: if the counter already advanced past our token, someone
+            # acquired since we last held (or the file was reset) -- lost, without
+            # blocking behind a current holder.
+            observed_counter = self._read_remote_generation_counter(active_lock.generation_file_path)
+            if observed_counter is None or observed_counter != active_lock.token:
+                raise LockLostError(
+                    f"Host lock was lost while the connection was dropped: acquisition counter is "
+                    f"{observed_counter}, expected {active_lock.token} (another actor acquired the lock)"
+                )
+            # Authoritative: re-open the lock channel (blocks until the flock is
+            # free), which increments the counter and returns the new value.
+            new_channel, new_token = self._open_remote_lock_channel(active_lock.lock_file_path, timeout_seconds=None)
+            if new_token != active_lock.token + 1:
+                new_channel.close()
+                raise LockLostError(
+                    f"Host lock was lost across the reconnect: acquisition counter advanced from "
+                    f"{active_lock.token} to {new_token} (another actor acquired the lock in the gap)"
+                )
+            self._active_lock = active_lock.model_copy_update(
+                to_update(active_lock.field_ref().token, new_token),
+                to_update(active_lock.field_ref().channel, new_channel),
+            )
+            logger.debug("Re-acquired host lock after reconnect with no intervening acquisition (token {})", new_token)
+        finally:
+            self._is_reacquiring_lock = False
+
+    def _is_lock_channel_live(self, active_lock: ActiveRemoteLock) -> bool:
+        """Cheap, local check of whether we still hold the flock.
+
+        The remote lock shell holds fd 9 (and thus the flock) until it exits, which
+        closes the lock channel; so an open lock channel on a still-active transport
+        means we still hold the lock. A closed channel or a dead transport means the
+        flock has (or is about to have) been released.
+        """
+        if active_lock.channel.closed:
+            return False
+        transport = _get_ssh_transport(self.connector.host)
+        return transport is not None and transport.is_active()
+
+    def _reverify_lock_if_channel_died(self) -> None:
+        """Re-acquire the held lock if the lock channel is no longer live (enforcement points 2 and 3).
+
+        SSH multiplexes many channels over one transport, so the lock shell can die
+        (OOM/kill, a spurious stdin EOF) while the transport is fine, and a transport
+        can drop with no paramiko op to observe it (e.g. before an rsync, which uses
+        a separate connection). Either way the flock is released, so re-acquire and
+        verify no actor intervened. Called at operation boundaries in the retry
+        primitives and before each rsync.
+        """
+        active_lock = self._active_lock
+        if active_lock is None or self._is_reacquiring_lock:
+            return
+        if not self._is_lock_channel_live(active_lock):
+            logger.debug("Host lock channel no longer live; re-acquiring and verifying")
+            self._reacquire_and_verify_lock()
+
+    def _verify_lock_still_held_at_release(self) -> None:
+        """Verify the held lock was not silently lost during the critical section (release backstop).
+
+        Every exit of the lock block passes through here, so no critical section can
+        be reported successful while the lock was silently lost. When the lock channel
+        is still live we provably still hold the flock and return cheaply; otherwise
+        we read the acquisition counter -- if it still equals our token, no other actor
+        acquired while we held (the counter is monotonic and every acquire bumps it),
+        so the section ran exclusively; if it advanced we raise ``LockLostError``.
+        This is the completeness net beneath the per-operation checks -- it also covers
+        an rsync-only section whose transport drop no paramiko operation observed.
+        """
+        active_lock = self._active_lock
+        if active_lock is None:
+            return
+        if self._is_lock_channel_live(active_lock):
+            return
+        # The lock channel is not live: determine whether the loss was uncontended
+        # (safe) or another actor acquired in the gap. Guard against the counter read
+        # re-triggering re-acquire (we are exiting, not recovering).
+        self._is_reacquiring_lock = True
+        try:
+            observed_counter = self._read_remote_generation_counter(active_lock.generation_file_path)
+        finally:
+            self._is_reacquiring_lock = False
+        if observed_counter is None or observed_counter != active_lock.token:
+            raise LockLostError(
+                f"Host lock was lost during the critical section: acquisition counter is "
+                f"{observed_counter}, expected {active_lock.token} (another actor acquired the lock)"
+            )
 
     def _launch_detached_lock_holder(self, lock_file_path: Path) -> None:
         """Launch a detached on-host process that holds the host-lock flock indefinitely.
@@ -2138,6 +2310,9 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         - If source and target are different remote hosts, sync via a local
           temp directory as intermediary (pull from source, then push to target)
         """
+        # rsync bypasses the paramiko transport, so re-verify a held lock first: a
+        # loss that happened before this rsync would otherwise go undetected here.
+        self._reverify_lock_if_channel_died()
         same_machine = _is_same_machine(source_host, self)
 
         # Build rsync arguments

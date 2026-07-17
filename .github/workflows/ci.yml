@@ -753,7 +753,21 @@ jobs:
       # The Anthropic key (for live checks) is always needed; masked in the logs
       # and forwarded into the offload sandbox by the just recipe below. Read via
       # the minds-scoped minds_ci_test_gh role.
+      # HCP Vault's performance replicas intermittently 412 ("required index
+      # state not present"); one spaced retry absorbs the burst.
       - name: Fetch Anthropic key from Vault
+        id: anthropic_key_fetch
+        continue-on-error: true
+        uses: imbue-ai/use-vault-secrets@main
+        with:
+          role: minds_ci_test_gh
+          secrets: |
+            minds/ci/litellm/ANTHROPIC_API_KEY
+      - name: Pause before the Vault retry
+        if: ${{ steps.anthropic_key_fetch.outcome == 'failure' }}
+        run: sleep 15
+      - name: Fetch Anthropic key from Vault (retry)
+        if: ${{ steps.anthropic_key_fetch.outcome == 'failure' }}
         uses: imbue-ai/use-vault-secrets@main
         with:
           role: minds_ci_test_gh
@@ -807,6 +821,67 @@ jobs:
             cargo install offload@0.9.10 --force
           fi
 
+      # -- Sync e2e env plumbing (opt-in, same gate as build-minds-ci-env) --
+      # The workspace-sync e2e tests (apps/minds/test_sync_e2e.py) run INSIDE
+      # the offload sandbox but against the per-run ci env's real connector.
+      # On opt-in runs, resolve the env's coordinates from the env-config
+      # artifact and its SuperTokens admin secrets from Vault, and export them
+      # as MINDS_SYNC_E2E_* so the just recipe forwards them into the sandbox
+      # (the tests skip when the vars are absent). Secret values are masked by
+      # the use-vault-secrets action even though offload --trace echoes args.
+      # `!cancelled()` keeps the artifact available to the later
+      # minds_services step even when an unrelated earlier step failed
+      # (matching that step's own `!cancelled()` gate).
+      - name: Download deployment env config for the sync e2e tests
+        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.run_minds_release_tests }}
+        uses: actions/download-artifact@v7
+        with:
+          name: minds-ci-env-config
+          path: .minds
+      - name: Resolve sync e2e env coordinates
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_minds_release_tests }}
+        id: sync_e2e_env
+        run: |
+          set -euo pipefail
+          CONFIG=.minds/iterate-default.json
+          {
+            echo "env_name=$(jq -er '.shared_envs.default.env_name' "$CONFIG")"
+            echo "connector_url=$(jq -er '.shared_envs.default.connector_url' "$CONFIG")"
+            echo "litellm_url=$(jq -er '.shared_envs.default.litellm_proxy_url' "$CONFIG")"
+          } >> "$GITHUB_OUTPUT"
+      - name: Fetch sync e2e env secrets from Vault
+        id: sync_e2e_secrets
+        continue-on-error: true
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_minds_release_tests }}
+        uses: imbue-ai/use-vault-secrets@main
+        with:
+          role: minds_ci_test_gh
+          secrets: |
+            minds/ci/runs/${{ steps.sync_e2e_env.outputs.env_name }}/shared-default/SUPERTOKENS_CONNECTION_URI
+            minds/ci/runs/${{ steps.sync_e2e_env.outputs.env_name }}/shared-default/SUPERTOKENS_API_KEY
+      - name: Pause before the sync e2e Vault retry
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_minds_release_tests && steps.sync_e2e_secrets.outcome == 'failure' }}
+        run: sleep 15
+      - name: Fetch sync e2e env secrets from Vault (retry)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_minds_release_tests && steps.sync_e2e_secrets.outcome == 'failure' }}
+        uses: imbue-ai/use-vault-secrets@main
+        with:
+          role: minds_ci_test_gh
+          secrets: |
+            minds/ci/runs/${{ steps.sync_e2e_env.outputs.env_name }}/shared-default/SUPERTOKENS_CONNECTION_URI
+            minds/ci/runs/${{ steps.sync_e2e_env.outputs.env_name }}/shared-default/SUPERTOKENS_API_KEY
+      - name: Export sync e2e env vars for the offload stage
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_minds_release_tests }}
+        run: |
+          set -euo pipefail
+          test -n "${SUPERTOKENS_CONNECTION_URI:-}" || { echo "Vault secrets missing after retry" >&2; exit 1; }
+          {
+            echo "MINDS_SYNC_E2E_CONNECTOR_URL=${{ steps.sync_e2e_env.outputs.connector_url }}"
+            echo "MINDS_SYNC_E2E_LITELLM_URL=${{ steps.sync_e2e_env.outputs.litellm_url }}"
+            echo "MINDS_SYNC_E2E_SUPERTOKENS_CONNECTION_URI=${SUPERTOKENS_CONNECTION_URI}"
+            echo "MINDS_SYNC_E2E_SUPERTOKENS_API_KEY=${SUPERTOKENS_API_KEY}"
+          } >> "$GITHUB_ENV"
+
       - name: Run minds snapshot-resume tests via offload
         id: tests
         run: just test-offload-minds-snapshot "${{ needs.build-minds-snapshot.outputs.image_id }}"
@@ -835,12 +910,8 @@ jobs:
           VAULT_TOKEN=$(vault write -field=token auth/jwt_github_actions/login role=minds_ci_test_gh jwt="$OIDC")
           echo "::add-mask::$VAULT_TOKEN"
           printf '%s' "$VAULT_TOKEN" > "$HOME/.vault-token"
-      - name: Download deployment env config
-        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.run_minds_release_tests }}
-        uses: actions/download-artifact@v7
-        with:
-          name: minds-ci-env-config
-          path: .minds
+      # The env config was already downloaded to .minds/ by the sync-e2e
+      # plumbing step before the offload run (same opt-in gate).
       - name: Run minds_services tests against the per-run ci env
         id: services_tests
         if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.run_minds_release_tests }}
@@ -1050,6 +1121,15 @@ jobs:
       - name: Install Playwright Chromium (for the SSE-redirect release test)
         if: ${{ !cancelled() }}
         run: uv run playwright install --with-deps chromium
+      # test_latchkey_e2e runs a throwaway root sshd on the runner (its fake
+      # "VPS" is the runner itself reached as root over loopback SSH), so it
+      # needs the sshd binary. The runner image does not guarantee
+      # openssh-server, so install it explicitly (idempotent when present).
+      - name: Install openssh-server (for the latchkey e2e release test)
+        if: ${{ !cancelled() }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openssh-server
       - name: Run plain minds release tests (no ci env needed)
         if: ${{ !cancelled() }}
         # Clear apps/minds's addopts (pytest picks up apps/minds/pyproject.toml
@@ -1057,4 +1137,12 @@ jobs:
         # too tight for these release tests (test_sse_redirect launches a browser
         # and waits on an SSE redirect; the version-alignment test does a network
         # fetch). Set an explicit, generous per-test timeout instead.
+        #
+        # MNGR_LATCHKEY_E2E_TESTS opts in test_latchkey_e2e (it runs a root
+        # sshd and installs packages on the machine, so it never runs
+        # un-opted-in on a developer box; the throwaway runner is exactly the
+        # environment it wants). Per-test @pytest.mark.timeout markers
+        # override the --timeout=300 CLI value where a test needs more.
+        env:
+          MNGR_LATCHKEY_E2E_TESTS: "1"
         run: uv run pytest apps/minds --override-ini='addopts=' --no-cov -p no:xdist --timeout=300 -v -m 'release and not minds_deployment and not minds_services and not minds_snapshot_resume'

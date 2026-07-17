@@ -8,12 +8,13 @@
 // The page can therefore trigger a small set of benign shell affordances (e.g.
 // opening a permission-request modal) but can never reach arbitrary IPC.
 //
-// The allowlist is exactly the two affordances that content-surface pages
+// The allowlist is exactly the affordances that content-surface pages
 // legitimately need: `open-request-modal` (the workspace app opens a pending
-// permission request) and `open-help` (the agent-origin loading / recovery
-// page opens the report-a-bug modal). Everything the trusted local pages used
-// to relay through here -- sign-in modal, stop-mind confirm, open-in-new-window,
-// titlebar accent preview -- now renders on the CHROME surface and calls the
+// permission request), `open-help` (the agent-origin loading / recovery page
+// opens the report-a-bug modal), and `reload-crashed-view` (the content-view
+// crash page's Reload button). Everything the trusted local pages used to relay
+// through here -- sign-in modal, stop-mind confirm, open-in-new-window, titlebar
+// accent preview -- now renders on the CHROME surface and calls the
 // `window.minds` bridge directly, so it must NOT be reachable from foreign
 // agent content and is deliberately absent below.
 const { ipcRenderer } = require('electron');
@@ -52,6 +53,14 @@ window.addEventListener('message', (event) => {
       return;
     }
     ipcRenderer.send('open-help', typeof agentId === 'string' ? agentId : '');
+    return;
+  }
+  // Crash page (crashed.html) Reload button: ask the main process to re-load the
+  // workspace URL that was showing when this content view's renderer died,
+  // spawning a fresh renderer. No payload -- the main process holds the pre-crash
+  // URL, so a foreign page can't smuggle a navigation target through this channel.
+  if (data.type === 'minds:reload-crashed-view') {
+    ipcRenderer.send('reload-crashed-view');
     return;
   }
 });

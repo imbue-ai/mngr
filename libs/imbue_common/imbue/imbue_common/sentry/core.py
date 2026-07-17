@@ -6,6 +6,7 @@ import sys
 import threading
 import time
 import traceback
+import uuid
 from collections import defaultdict
 from collections.abc import Callable
 from collections.abc import Collection
@@ -34,6 +35,7 @@ from sentry_sdk import get_current_scope
 from sentry_sdk.consts import EndpointType
 from sentry_sdk.envelope import Envelope
 from sentry_sdk.integrations import Integration
+from sentry_sdk.integrations.logging import ignore_logger
 from sentry_sdk.integrations.stdlib import StdlibIntegration
 from sentry_sdk.types import Event
 from sentry_sdk.types import Hint
@@ -503,6 +505,19 @@ def _before_send_wrapper(
         raise
 
 
+def _register_ignored_loggers(ignored_loggers: Sequence[str]) -> None:
+    """Tell the default ``LoggingIntegration`` to drop records from the given stdlib loggers.
+
+    ``ignore_logger`` mutates a module-level registry the integration reads live (via ``fnmatch``),
+    so each name may be a glob and the effect applies to both events and breadcrumbs. Needed because
+    the integration patches ``logging.Logger.callHandlers`` at the class level and thus captures a
+    logger's ERROR records as events even when that logger has ``propagate=False`` -- which would
+    otherwise flood Sentry with handled third-party noise (e.g. paramiko SSH banner errors).
+    """
+    for ignored_logger in ignored_loggers:
+        ignore_logger(ignored_logger)
+
+
 def fixup_release_id(release_id: str) -> str:
     """
     For pre-release release candidate versions, Sentry requires the release ID to be in the semver format.
@@ -511,6 +526,56 @@ def fixup_release_id(release_id: str) -> str:
 
     """
     return re.sub(r"(\d+\.\d+\.\d+)rc(\d+)", r"\1-rc.\2", release_id)
+
+
+# A persisted anonymous user id is a 32-char lowercase hex string (``uuid4().hex``). Kept opaque and
+# free of any PII: it exists only so Sentry can count distinct affected installs per issue.
+_ANONYMOUS_USER_ID_PATTERN = re.compile(r"[0-9a-f]{32}")
+
+
+def get_or_create_anonymous_user_id(id_file_path: Path) -> str:
+    """Read (or create-and-persist) a stable, random anonymous user id at ``id_file_path``.
+
+    The id is a random ``uuid4`` hex string carrying no PII. It is attached to every Sentry event
+    (via ``sentry_sdk.set_user``) so Sentry can report the number of distinct installs affected by a
+    given issue -- letting us tell a rare bug that hits many users apart from a noisy one that hits a
+    single user.
+
+    When the file is absent it is created atomically with ``O_EXCL`` so two processes racing on first
+    launch (e.g. the minds backend and the Electron main process) converge on a single id: the loser
+    of the race sees ``FileExistsError`` and reads the winner's value. A file that exists but holds a
+    blank/malformed value is overwritten atomically (temp file + rename) with a freshly generated id.
+    """
+    for _attempt in range(2):
+        try:
+            existing = id_file_path.read_text().strip()
+            does_file_exist = True
+        except OSError:
+            existing = ""
+            does_file_exist = False
+        if _ANONYMOUS_USER_ID_PATTERN.fullmatch(existing):
+            return existing
+        new_id = uuid.uuid4().hex
+        id_file_path.parent.mkdir(parents=True, exist_ok=True)
+        if does_file_exist:
+            # The file exists but holds a corrupt/blank value: overwrite it atomically. (This is not a
+            # first-launch race -- the file already existed -- so there is no id to converge on.)
+            tmp_path = id_file_path.with_suffix(".tmp")
+            tmp_path.write_text(new_id)
+            tmp_path.rename(id_file_path)
+            return new_id
+        try:
+            # File absent: ``x`` (O_EXCL) fails if another process created it first; then we loop and
+            # read that process's value so racing processes converge on a single id.
+            with open(id_file_path, "x") as id_file:
+                id_file.write(new_id)
+            return new_id
+        except FileExistsError:
+            continue
+    # Extremely unlikely: the file kept appearing/vanishing between our read and create on both
+    # attempts. Fall back to an in-memory id so reporting still carries *some* user rather than
+    # crashing setup.
+    return uuid.uuid4().hex
 
 
 def setup_sentry(
@@ -527,6 +592,12 @@ def setup_sentry(
     # ``mngr-latchkey-forward``). Recorded as the ``service`` tag and the event
     # ``server_name``.
     service_name: str,
+    # A stable, randomly-generated anonymous user id (no PII) attached to every event via
+    # ``sentry_sdk.set_user`` so Sentry can count the distinct installs affected by each issue. The
+    # caller persists this (see ``get_or_create_anonymous_user_id``) and shares one value across all
+    # processes of a single install (the minds backend, the ``mngr latchkey forward`` daemon, and the
+    # JS frontends) so an install is counted once regardless of which process reported the event.
+    user_id: str,
     log_attachment_groups: Sequence[LogAttachmentGroup],
     integrations: Sequence[Integration],
     is_error_reporting_enabled: Callable[[], bool],
@@ -537,6 +608,13 @@ def setup_sentry(
     # ``is_log_inclusion_enabled``.
     s3_attachment_bucket: str | None = None,
     extra_tags: Mapping[str, str] | None = None,
+    # Glob patterns (matched via ``fnmatch``) for stdlib logger names whose records must never
+    # become Sentry events or breadcrumbs. The default ``LoggingIntegration`` patches
+    # ``logging.Logger.callHandlers`` at the class level, so it captures ERROR-level stdlib records
+    # as events even for loggers whose ``propagate`` is disabled. Callers that already route a noisy
+    # third-party logger's output elsewhere (e.g. mngr redirects paramiko/pyinfra into loguru) pass
+    # those logger names here so Sentry drops the raw records instead of flooding on handled noise.
+    ignored_loggers: Sequence[str] = (),
 ) -> None:
     """Sets up the main Sentry instance for this process.
 
@@ -613,6 +691,8 @@ def setup_sentry(
     )
     logger.info("Sentry initialized")
 
+    _register_ignored_loggers(ignored_loggers)
+
     # The S3 attachment uploader is initialized whenever a bucket is configured. Whether
     # logs/tracebacks are actually collected and uploaded is decided live per-event by
     # ``is_log_inclusion_enabled`` (in ``add_extra_info_hook``); with no bucket, nothing is uploaded.
@@ -622,8 +702,11 @@ def setup_sentry(
     else:
         logger.info("Sentry S3 attachment uploads disabled (no bucket configured)")
 
-    # We deliberately do not call ``sentry_sdk.set_user`` (and keep
-    # ``send_default_pii=False``) so error reports carry no user PII for now.
+    # Attach the anonymous user id to every event. It is a random, opaque id (no PII), so
+    # ``send_default_pii`` stays False (no IP / cookies / real identity collected); only this id is
+    # sent, purely so Sentry can count the number of distinct installs affected by each issue.
+    scope = get_current_scope()
+    scope.set_user({"id": user_id})
 
     # Bind the log-attachment uploader for this process's log layout, and register it (so manual bug
     # reports can reach it) plus the loguru handler that turns errors/exceptions into Sentry events.
@@ -655,7 +738,6 @@ def setup_sentry(
         diagnose=False,
         format=SENTRY_LOG_FORMAT,
     )
-    scope = get_current_scope()
     scope.set_context(
         _SENTRY_CONFIG_CONTEXT_KEY,
         # need to cast to `dict` to make PyCharm happy
@@ -763,8 +845,9 @@ class ErrorAttachmentsS3Uploader(MutableModel):
     """Collects (and uploads) the log files + traceback attached to an error report.
 
     The set of log files is driven by ``log_attachment_groups``: each group's glob
-    is matched under the process's log folder, the newest matches are kept, and
-    immutable groups (e.g. rotated logs) are uploaded once and their S3 key cached.
+    is matched under the process's log folder (or the group's ``base_dir``, when
+    set), the newest matches are kept, and immutable groups (e.g. rotated logs)
+    are uploaded once and their S3 key cached.
     """
 
     # The per-process log layout to attach. Empty means only the (logsite)
@@ -810,9 +893,11 @@ class ErrorAttachmentsS3Uploader(MutableModel):
             key = get_s3_upload_key("logsite_traceback_with_vars", ".txt")
             uploads[("", key)] = partial(self._upload_traceback_cb, key=key, exception=exception)
 
-        if logs_folder:
-            for group in self.log_attachment_groups:
-                self._collect_group_uploads(uploads, logs_folder, group)
+        for group in self.log_attachment_groups:
+            group_folder = group.base_dir if group.base_dir is not None else logs_folder
+            if group_folder is None:
+                continue
+            self._collect_group_uploads(uploads, group_folder, group)
 
         grouped_uris: defaultdict[str, list[str | None]] = defaultdict(list)
         for group_name, key in uploads.keys():
@@ -824,11 +909,11 @@ class ErrorAttachmentsS3Uploader(MutableModel):
     def _collect_group_uploads(
         self,
         uploads: dict[tuple[str, str], _UploadCallback | None],
-        logs_folder: Path,
+        group_folder: Path,
         group: LogAttachmentGroup,
     ) -> None:
         key_suffix = f".{COMPRESSED_LOG_EXTENSION}" if group.is_compressed else ""
-        for log_file in _n_newest_files(logs_folder.glob(group.glob), n=group.max_file_count):
+        for log_file in _n_newest_files(group_folder.glob(group.glob), n=group.max_file_count):
             if group.is_immutable:
                 with self._lock:
                     existing_key = self._immutable_logs_keys.get(log_file)

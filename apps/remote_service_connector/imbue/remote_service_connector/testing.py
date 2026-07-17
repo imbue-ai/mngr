@@ -4,10 +4,15 @@ import base64
 import json
 import secrets
 import uuid
+from types import SimpleNamespace
 from typing import Any
 from typing import Final
 from uuid import UUID
 
+# Note: psycopg2.errors is reachable through the base import, matching app.py;
+# an explicit ``import psycopg2.errors`` makes ty resolve the module and then
+# reject its dynamically-generated members (UniqueViolation) as unknown.
+import psycopg2
 import pytest
 from supertokens_python.recipe.emailpassword.interfaces import ConsumePasswordResetTokenOkResult
 from supertokens_python.recipe.emailpassword.interfaces import EmailAlreadyExistsError
@@ -15,6 +20,10 @@ from supertokens_python.recipe.emailpassword.interfaces import SignInOkResult as
 from supertokens_python.recipe.emailpassword.interfaces import SignUpOkResult as EPSignUpOkResult
 from supertokens_python.recipe.emailpassword.interfaces import UpdateEmailOrPasswordOkResult
 from supertokens_python.recipe.emailpassword.interfaces import WrongCredentialsError
+from supertokens_python.recipe.emailverification.interfaces import (
+    CreateEmailVerificationTokenEmailAlreadyVerifiedError,
+)
+from supertokens_python.recipe.emailverification.interfaces import CreateEmailVerificationTokenOkResult
 from supertokens_python.recipe.emailverification.interfaces import VerifyEmailUsingTokenOkResult
 from supertokens_python.recipe.emailverification.types import EmailVerificationUser
 from supertokens_python.recipe.thirdparty.interfaces import ManuallyCreateOrUpdateUserOkResult
@@ -34,6 +43,10 @@ from imbue.remote_service_connector.app import ForwardingCtx
 from imbue.remote_service_connector.app import PoolHostCleanupError
 from imbue.remote_service_connector.app import R2BucketNotEmptyError
 from imbue.remote_service_connector.app import R2BucketNotFoundError
+from imbue.remote_service_connector.app import SyncActiveAgentConflictError
+from imbue.remote_service_connector.app import SyncRevisionConflictError
+from imbue.remote_service_connector.app import _ONE_ACTIVE_PER_AGENT_INDEX_NAME
+from imbue.remote_service_connector.app import _WORKSPACE_RECORD_COLUMNS
 
 
 class FakeCloudflareOps:
@@ -501,6 +514,7 @@ class FakeSuperTokensBackend:
             "send_reset_password_email": self.send_reset_password_email,
             "consume_password_reset_token": self.consume_password_reset_token,
             "update_email_or_password": self.update_email_or_password,
+            "create_email_verification_token": self.create_email_verification_token,
             "verify_email_using_token": self.verify_email_using_token,
             "get_provider": self.get_provider,
             "manually_create_or_update_user": self.manually_create_or_update_user,
@@ -755,6 +769,24 @@ class FakeSuperTokensBackend:
             account.password = password
         return UpdateEmailOrPasswordOkResult()
 
+    def create_email_verification_token(
+        self,
+        *,
+        tenant_id: str,
+        recipe_user_id: RecipeUserId,
+        email: str,
+        user_context: dict[str, Any] | None = None,
+    ) -> CreateEmailVerificationTokenOkResult | CreateEmailVerificationTokenEmailAlreadyVerifiedError:
+        del tenant_id, user_context
+        self._raise_if_configured("create_email_verification_token")
+        user_id = recipe_user_id.get_as_string()
+        account = self.accounts_by_id.get(user_id)
+        if account is not None and account.is_verified:
+            return CreateEmailVerificationTokenEmailAlreadyVerifiedError()
+        token = f"verify-{secrets.token_hex(8)}"
+        self.verification_tokens[token] = (user_id, email)
+        return CreateEmailVerificationTokenOkResult(token=token)
+
     def verify_email_using_token(
         self,
         *,
@@ -951,16 +983,45 @@ def _make_pool_row(
     return row
 
 
+# Fixed timestamps for fake workspace-sync rows; list order stands in for
+# ORDER BY created_at (rows are only ever appended).
+_SYNC_ROW_CREATED_AT: Final[str] = "2026-01-01T00:00:00+00:00"
+_SYNC_ROW_UPDATED_AT: Final[str] = "2026-01-02T00:00:00+00:00"
+
+# Derived from the production column list so the fake's tuple order can never
+# drift from what PostgresSyncStore SELECTs.
+_WORKSPACE_RECORD_COLUMN_NAMES: Final[tuple[str, ...]] = tuple(
+    name.strip() for name in _WORKSPACE_RECORD_COLUMNS.split(",")
+)
+
+
+def _adapted_bytes(value: Any) -> bytes | None:
+    """Unwrap a psycopg2.Binary bind parameter back to the raw bytes (None passes through)."""
+    if value is None:
+        return None
+    return bytes(value.adapted)
+
+
+class _OneActivePerAgentViolation(psycopg2.errors.UniqueViolation):
+    """UniqueViolation whose diagnostics carry the partial-index name, as postgres reports it."""
+
+    @property
+    def diag(self) -> Any:
+        return SimpleNamespace(constraint_name=_ONE_ACTIVE_PER_AGENT_INDEX_NAME)
+
+
 class FakeCursor:
     """In-memory cursor that simulates psycopg2 cursor behavior against FakePoolBackend."""
 
     _backend: "FakePoolBackend"
     _results: list[tuple[Any, ...]]
+    rowcount: int
 
     def execute(self, query: str, params: tuple[Any, ...] = ()) -> None:
         """Route SQL queries to the in-memory store."""
         self._results = []
         self._result_idx = 0
+        self.rowcount = 0
         query_lower = query.strip().lower()
 
         if "from pool_hosts" in query_lower and "status = 'available'" in query_lower:
@@ -1129,6 +1190,66 @@ class FakeCursor:
             host_id = UUID(raw_host_id) if isinstance(raw_host_id, str) else raw_host_id
             self._backend.pool_rows = [r for r in self._backend.pool_rows if r.host_id != host_id]
 
+        elif "from workspace_records" in query_lower and "for update" in query_lower:
+            record_row = self._backend.find_sync_record(params[0], params[1])
+            if record_row is not None:
+                self._results = [self._backend.sync_record_tuple(record_row)]
+
+        elif "from workspace_records" in query_lower and "order by created_at" in query_lower:
+            self._results = [
+                self._backend.sync_record_tuple(row)
+                for row in self._backend.sync_record_rows
+                if row["user_id"] == params[0]
+            ]
+
+        elif query_lower.startswith("insert into workspace_records"):
+            self._results = [self._backend.sync_record_tuple(self._backend.insert_sync_record(params))]
+
+        elif query_lower.startswith("update workspace_records set encrypted_secrets = null"):
+            self.rowcount = self._backend.scrub_sync_secrets(params[0])
+
+        elif query_lower.startswith("update workspace_records"):
+            updated_row = self._backend.update_sync_record(params)
+            if updated_row is not None:
+                self._results = [self._backend.sync_record_tuple(updated_row)]
+
+        elif query_lower.startswith("delete from workspace_records"):
+            user_id, record_host_id = params
+            self._backend.sync_record_rows = [
+                row
+                for row in self._backend.sync_record_rows
+                if not (row["user_id"] == user_id and row["host_id"] == record_host_id)
+            ]
+
+        elif query_lower.startswith("select") and "from account_key_bundles" in query_lower:
+            bundle = self._backend.sync_bundle_by_user.get(params[0])
+            if bundle is not None:
+                self._results = [
+                    (
+                        bundle["kdf_salt"],
+                        bundle["kdf_time_cost"],
+                        bundle["kdf_memory_kib"],
+                        bundle["kdf_parallelism"],
+                        bundle["wrapped_dek"],
+                        bundle["key_epoch"],
+                        _SYNC_ROW_UPDATED_AT,
+                    )
+                ]
+
+        elif query_lower.startswith("insert into account_key_bundles"):
+            user_id, kdf_salt, kdf_time_cost, kdf_memory_kib, kdf_parallelism, wrapped_dek, key_epoch = params
+            self._backend.sync_bundle_by_user[user_id] = {
+                "kdf_salt": _adapted_bytes(kdf_salt),
+                "kdf_time_cost": kdf_time_cost,
+                "kdf_memory_kib": kdf_memory_kib,
+                "kdf_parallelism": kdf_parallelism,
+                "wrapped_dek": _adapted_bytes(wrapped_dek),
+                "key_epoch": key_epoch,
+            }
+
+        elif query_lower.startswith("delete from account_key_bundles"):
+            self._backend.sync_bundle_by_user.pop(params[0], None)
+
         else:
             pass
 
@@ -1197,6 +1318,17 @@ class FakePoolBackend:
     # Paid-list stores: value -> {"is_paid", "created_at", "updated_at"}.
     paid_domains: dict[str, dict[str, Any]]
     paid_emails: dict[str, dict[str, Any]]
+    # Workspace-sync stores: rows keyed by (user_id, host_id) held as dicts in
+    # insertion order; bundles keyed by user_id. Secrets/salts are raw bytes.
+    sync_record_rows: list[dict[str, Any]]
+    sync_bundle_by_user: dict[str, dict[str, Any]]
+    # Failure-injection knobs for PostgresSyncStore tests. When set, the next
+    # workspace_records INSERT commits this "winner" row and then raises the
+    # primary-key UniqueViolation, simulating a concurrent first push.
+    sync_insert_race_winner: dict[str, Any] | None
+    # When true, workspace_records UPDATEs return no row, simulating the
+    # RETURNING invariant breaking.
+    sync_update_returns_no_row: bool
 
     def add_paid_domain(self, domain: str, is_paid: bool = True) -> None:
         """Seed a paid-domains row (lowercased), defaulting to active."""
@@ -1254,6 +1386,122 @@ class FakePoolBackend:
 
     def get_connection(self) -> FakeConnection:
         return _make_fake_connection(self)
+
+    def find_sync_record(self, user_id: str, host_id: str) -> dict[str, Any] | None:
+        """Return the workspace-record row for (user_id, host_id), or None."""
+        for row in self.sync_record_rows:
+            if row["user_id"] == user_id and row["host_id"] == host_id:
+                return row
+        return None
+
+    def sync_record_tuple(self, row: dict[str, Any]) -> tuple[Any, ...]:
+        """Project a stored row into the SELECT column order PostgresSyncStore uses."""
+        return tuple(row[name] for name in _WORKSPACE_RECORD_COLUMN_NAMES)
+
+    def check_one_active_sync_record_per_agent(self, user_id: str, host_id: str, agent_id: str, state: str) -> None:
+        """Enforce the partial unique index on (user_id, agent_id) WHERE state = 'active'."""
+        if state != "active":
+            return
+        for row in self.sync_record_rows:
+            if (
+                row["user_id"] == user_id
+                and row["host_id"] != host_id
+                and row["agent_id"] == agent_id
+                and row["state"] == "active"
+            ):
+                raise _OneActivePerAgentViolation(f"duplicate active workspace record for agent {agent_id}")
+
+    def insert_sync_record(self, params: tuple[Any, ...]) -> dict[str, Any]:
+        """Simulate the workspace_records INSERT, including its unique-violation modes."""
+        (
+            user_id,
+            host_id,
+            agent_id,
+            display_name,
+            color,
+            provider_kind,
+            hosting_device_id,
+            device_label,
+            state,
+            restored_from_host_id,
+            encrypted_secrets,
+            revision,
+        ) = params
+        if self.sync_insert_race_winner is not None:
+            winner = dict(self.sync_insert_race_winner)
+            self.sync_insert_race_winner = None
+            winner.setdefault("created_at", _SYNC_ROW_CREATED_AT)
+            winner.setdefault("updated_at", _SYNC_ROW_CREATED_AT)
+            self.sync_record_rows.append(winner)
+            raise psycopg2.errors.UniqueViolation("concurrent insert won the primary key")
+        if self.find_sync_record(user_id, host_id) is not None:
+            raise psycopg2.errors.UniqueViolation(f"duplicate primary key ({user_id}, {host_id})")
+        self.check_one_active_sync_record_per_agent(user_id, host_id, agent_id, state)
+        row = {
+            "user_id": user_id,
+            "host_id": host_id,
+            "agent_id": agent_id,
+            "display_name": display_name,
+            "color": color,
+            "provider_kind": provider_kind,
+            "hosting_device_id": hosting_device_id,
+            "device_label": device_label,
+            "state": state,
+            "restored_from_host_id": restored_from_host_id,
+            "encrypted_secrets": _adapted_bytes(encrypted_secrets),
+            "revision": revision,
+            "created_at": _SYNC_ROW_CREATED_AT,
+            "updated_at": _SYNC_ROW_CREATED_AT,
+        }
+        self.sync_record_rows.append(row)
+        return row
+
+    def update_sync_record(self, params: tuple[Any, ...]) -> dict[str, Any] | None:
+        """Simulate the workspace_records CAS UPDATE; returns the updated row or None."""
+        (
+            agent_id,
+            display_name,
+            color,
+            provider_kind,
+            hosting_device_id,
+            device_label,
+            state,
+            restored_from_host_id,
+            encrypted_secrets,
+            revision,
+            user_id,
+            host_id,
+        ) = params
+        if self.sync_update_returns_no_row:
+            return None
+        row = self.find_sync_record(user_id, host_id)
+        if row is None:
+            return None
+        self.check_one_active_sync_record_per_agent(user_id, host_id, agent_id, state)
+        row.update(
+            agent_id=agent_id,
+            display_name=display_name,
+            color=color,
+            provider_kind=provider_kind,
+            hosting_device_id=hosting_device_id,
+            device_label=device_label,
+            state=state,
+            restored_from_host_id=restored_from_host_id,
+            encrypted_secrets=_adapted_bytes(encrypted_secrets),
+            revision=revision,
+            updated_at=_SYNC_ROW_UPDATED_AT,
+        )
+        return row
+
+    def scrub_sync_secrets(self, user_id: str) -> int:
+        """Null out every non-null encrypted_secrets for the user; returns the row count."""
+        scrubbed = 0
+        for row in self.sync_record_rows:
+            if row["user_id"] == user_id and row["encrypted_secrets"] is not None:
+                row["encrypted_secrets"] = None
+                row["updated_at"] = _SYNC_ROW_UPDATED_AT
+                scrubbed += 1
+        return scrubbed
 
     def clean_up_slice_on_box(
         self,
@@ -1382,4 +1630,90 @@ def make_fake_pool_backend() -> FakePoolBackend:
     backend.slice_teardown_should_fail = False
     backend.paid_domains = {}
     backend.paid_emails = {}
+    backend.sync_record_rows = []
+    backend.sync_bundle_by_user = {}
+    backend.sync_insert_race_winner = None
+    backend.sync_update_returns_no_row = False
     return backend
+
+
+class InMemorySyncStore:
+    """In-memory SyncStore implementation for testing the workspace-sync endpoints.
+
+    Mirrors PostgresSyncStore's semantics: CAS on revision for updates, at
+    most one ACTIVE record per (user_id, agent_id), scrub, and the per-user
+    key bundle. Records are keyed (user_id, host_id); secrets are raw bytes.
+    """
+
+    def __init__(self) -> None:
+        self.records_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+        self.bundle_by_user_id: dict[str, dict[str, Any]] = {}
+        self._created_counter = 0
+
+    def _next_timestamp(self) -> str:
+        self._created_counter += 1
+        return f"2026-01-01T00:00:{self._created_counter:02d}+00:00"
+
+    def _encode_secrets(self, record: dict[str, Any]) -> dict[str, Any]:
+        encoded = dict(record)
+        secrets_bytes = record.get("encrypted_secrets")
+        encoded["encrypted_secrets"] = (
+            base64.b64encode(secrets_bytes).decode("ascii") if secrets_bytes is not None else None
+        )
+        return encoded
+
+    def list_records(self, user_id: str) -> list[dict[str, Any]]:
+        rows = [self._encode_secrets(record) for (uid, _), record in self.records_by_key.items() if uid == user_id]
+        return sorted(rows, key=lambda record: record["created_at"])
+
+    def put_record(self, user_id: str, record: dict[str, Any]) -> dict[str, Any]:
+        key = (user_id, record["host_id"])
+        existing = self.records_by_key.get(key)
+        if existing is not None and record["revision"] != existing["revision"] + 1:
+            raise SyncRevisionConflictError(self._encode_secrets(existing))
+        if record["state"] == "active":
+            for (uid, host_id), other in self.records_by_key.items():
+                is_other_row = uid == user_id and host_id != record["host_id"]
+                if is_other_row and other["agent_id"] == record["agent_id"] and other["state"] == "active":
+                    raise SyncActiveAgentConflictError(
+                        f"another ACTIVE record already exists for agent {record['agent_id']}"
+                    )
+        stored = dict(record)
+        stored["created_at"] = existing["created_at"] if existing is not None else self._next_timestamp()
+        stored["updated_at"] = self._next_timestamp()
+        self.records_by_key[key] = stored
+        return self._encode_secrets(stored)
+
+    def delete_record(self, user_id: str, host_id: str) -> None:
+        self.records_by_key.pop((user_id, host_id), None)
+
+    def scrub_secrets(self, user_id: str) -> int:
+        scrubbed = 0
+        for (uid, _), record in self.records_by_key.items():
+            if uid == user_id and record.get("encrypted_secrets") is not None:
+                record["encrypted_secrets"] = None
+                record["updated_at"] = self._next_timestamp()
+                scrubbed += 1
+        return scrubbed
+
+    def get_bundle(self, user_id: str) -> dict[str, Any] | None:
+        bundle = self.bundle_by_user_id.get(user_id)
+        if bundle is None:
+            return None
+        encoded = dict(bundle)
+        encoded["kdf_salt"] = base64.b64encode(bundle["kdf_salt"]).decode("ascii")
+        encoded["wrapped_dek"] = base64.b64encode(bundle["wrapped_dek"]).decode("ascii")
+        return encoded
+
+    def put_bundle(self, user_id: str, bundle: dict[str, Any]) -> None:
+        stored = dict(bundle)
+        stored["updated_at"] = self._next_timestamp()
+        self.bundle_by_user_id[user_id] = stored
+
+    def delete_bundle(self, user_id: str) -> None:
+        self.bundle_by_user_id.pop(user_id, None)
+
+
+def make_fake_sync_store() -> InMemorySyncStore:
+    """Construct an empty in-memory SyncStore for tests."""
+    return InMemorySyncStore()
