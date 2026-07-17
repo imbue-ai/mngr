@@ -197,6 +197,7 @@ MINDS_GOOGLE_OAUTH_SERVICES: Final[frozenset[str]] = frozenset(
         "google-drive",
         "google-docs",
         "google-sheets",
+        "google-slides",
         "google-people",
         "google-analytics",
     }
