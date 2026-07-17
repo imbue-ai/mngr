@@ -60,8 +60,8 @@ NORMALIZED_PROBE_MAX_LENGTH: Final[int] = 60
 # How long to keep observing the pane after a send has been confirmed delivered before
 # concluding that no blocking dialog appeared -- a selector (e.g. Claude's /model
 # confirmation) can render a beat after the input is accepted. Also used as the per-accept
-# poll window while clearing chained dialogs. A module-level constant for now; may become
-# user-configurable later.
+# poll window while clearing chained dialogs. Serves as the default for the Claude agent's
+# per-agent ``post_submit_dialog_observe_seconds`` config field (which overrides it at runtime).
 POST_SUBMIT_DIALOG_OBSERVE_SECONDS: Final[float] = 2.0
 
 # Markers printed by the remote confirmation script and parsed by

@@ -17,6 +17,7 @@ from uuid import UUID
 import pluggy
 import pytest
 from pydantic import Field
+from pydantic import ValidationError
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -24,6 +25,7 @@ from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.tui_utils import POST_SUBMIT_DIALOG_OBSERVE_SECONDS
 from imbue.mngr.agents.tui_utils import SubmissionConfirmationPolicy
 from imbue.mngr.agents.tui_utils import SubmissionEvidenceProbe
 from imbue.mngr.agents.update_policy import AgentUpdatePolicy
@@ -1642,6 +1644,29 @@ def test_accept_dialogs_exhausts_depth_and_returns_still_blocking(
     remaining = agent._accept_dialogs_up_to_depth(_TARGET, depth=2, detect_dialog=extract_blocking_selector_block)
     assert remaining is not None
     assert agent.enter_press_count == 2
+
+
+def test_post_submit_dialog_observe_seconds_defaults_to_module_constant() -> None:
+    """The observe window defaults to the shared module constant when unset."""
+    config = ClaudeAgentConfig()
+    assert config.post_submit_dialog_observe_seconds == POST_SUBMIT_DIALOG_OBSERVE_SECONDS
+
+
+def test_post_submit_dialog_observe_seconds_rejects_non_positive() -> None:
+    """A non-positive observe window is rejected at config validation time."""
+    with pytest.raises(ValidationError):
+        ClaudeAgentConfig(post_submit_dialog_observe_seconds=0)
+
+
+def test_dialog_observe_window_uses_configured_value(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """The observe window fed to the dialog polls comes from the per-agent config, not the constant."""
+    config = ClaudeAgentConfig(
+        check_installation=False, preserve_sessions_on_destroy=False, post_submit_dialog_observe_seconds=0.25
+    )
+    agent = _make_scripted_agent(local_provider, tmp_path, temp_mngr_ctx, [_CLEARED_PANE], config)
+    assert agent._dialog_observe_window_seconds() == 0.25
 
 
 def test_post_submit_check_raises_when_selector_persists_at_depth_zero(

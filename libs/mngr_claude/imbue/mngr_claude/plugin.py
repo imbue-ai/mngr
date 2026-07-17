@@ -341,6 +341,14 @@ class ClaudeAgentConfig(AgentTypeConfig):
         "auto_accept_prompt_depth (which governs dialogs opened by the just-sent message) and of "
         "auto_dismiss_dialogs. Permission prompts are never auto-accepted by this knob.",
     )
+    post_submit_dialog_observe_seconds: Annotated[float, Field(gt=0)] = Field(
+        default=POST_SUBMIT_DIALOG_OBSERVE_SECONDS,
+        description="How long (seconds) to keep observing the pane after a message is delivered before "
+        "concluding that no blocking selector appeared -- a selector (e.g. the /model confirmation) can "
+        "render a beat after the input is accepted. Also used as the per-accept poll window while clearing "
+        "chained dialogs and while auto-accepting a pre-existing dialog during startup. Raise it on slow or "
+        "high-latency hosts where dialogs take longer to render.",
+    )
     settings_overrides: Annotated[dict[str, Any], SettingsPatchField()] = Field(
         default_factory=dict,
         description="A patch merged onto your home Claude settings at provisioning. A bare key assigns "
@@ -2502,6 +2510,15 @@ class ClaudeAgent(
                 return indicator.get_description()
         return None
 
+    def _dialog_observe_window_seconds(self) -> float:
+        """The per-agent window (seconds) used to observe the pane for blocking dialogs.
+
+        Governs the post-submit selector-appearance wait, the per-accept re-check window while
+        clearing chained dialogs, and the post-clear startup grace. Defaults to
+        POST_SUBMIT_DIALOG_OBSERVE_SECONDS but is user-configurable per agent.
+        """
+        return float(self.agent_config.post_submit_dialog_observe_seconds)
+
     def _run_post_submit_dialog_check(self, tmux_target: TmuxWindowTarget) -> None:
         """Detect a selector opened by the just-delivered message; auto-accept it or raise.
 
@@ -2519,7 +2536,7 @@ class ClaudeAgent(
         # column-0 glyph on screen while the selector is still drawing).
         poll_until(
             lambda: self._blocking_selector_present(tmux_target),
-            timeout=POST_SUBMIT_DIALOG_OBSERVE_SECONDS,
+            timeout=self._dialog_observe_window_seconds(),
         )
         content = self._capture_pane_content(tmux_target)
         if (
@@ -2593,7 +2610,7 @@ class ClaudeAgent(
             # dialog is not double-counted against the depth budget.
             poll_until(
                 lambda prev=previous_description: self._dialog_description_differs(tmux_target, prev, detect_dialog),
-                timeout=POST_SUBMIT_DIALOG_OBSERVE_SECONDS,
+                timeout=self._dialog_observe_window_seconds(),
             )
         # Unreachable: the accepts_done == depth pass always returns above. Return None defensively
         # (meaning "no dialog blocks") to keep the function total for the type checker.
@@ -2664,7 +2681,7 @@ class ClaudeAgent(
             # A blocking dialog (if any) was cleared; give the session a short grace to signal.
             if poll_until(
                 lambda: self._check_file_exists(session_started_path),
-                timeout=POST_SUBMIT_DIALOG_OBSERVE_SECONDS,
+                timeout=self._dialog_observe_window_seconds(),
                 poll_interval=0.05,
             ):
                 return

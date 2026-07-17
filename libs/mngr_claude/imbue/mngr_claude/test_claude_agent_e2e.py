@@ -40,6 +40,7 @@ otherwise. Release-marked, so it does not run in CI.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -50,9 +51,12 @@ import pytest
 
 from imbue.mngr.agents.agent_release_testing import AgentReleaseContext
 from imbue.mngr.agents.agent_release_testing import AgentReleaseProfile
+from imbue.mngr.agents.agent_release_testing import _agent_state_dir_by_name
 from imbue.mngr.agents.agent_release_testing import run_agent_release_lifecycle
 from imbue.mngr.agents.agent_release_testing import run_concurrent_message_delivery
 from imbue.mngr.agents.agent_release_testing import run_message_delivery_journey
+from imbue.mngr.cli.exit_codes import EXIT_CODE_MESSAGE_DELIVERED_BUT_BLOCKED
+from imbue.mngr.utils.testing import get_short_random_string
 from imbue.mngr.utils.testing import get_subprocess_test_env
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import run_git_command
@@ -212,3 +216,142 @@ def test_claude_concurrent_message_delivery(tmp_path: Path) -> None:
     cross-talk, via latched tmux wait-for signals on a shared server).
     """
     run_concurrent_message_delivery(_ClaudeReleaseProfile(), tmp_path)
+
+
+# Timeouts for the model-switch dialog tests. Create can provision a real claude; the send is a
+# single relaxed slash command whose post-submit dialog check observes for a few seconds.
+_MODEL_SWITCH_CREATE_TIMEOUT_SECONDS = 600.0
+_MODEL_SWITCH_SEND_TIMEOUT_SECONDS = 120.0
+_MODEL_SWITCH_DESTROY_TIMEOUT_SECONDS = 150.0
+
+# The user-observed scenario: with a different model already active, ``/model <name>`` opens
+# Claude Code's "Switch model?" confirmation -- a numbered selector (a ──── rule followed by an
+# indented ❯ default option) that the hardening must auto-accept or surface as blocked. ``fable``
+# resolves to a model distinct from the pinned ``haiku``, so the confirmation is shown rather than
+# a no-op. (If the account lacks that model the confirmation would not appear and these tests
+# would fail loudly rather than pass vacuously -- which is the point.)
+_MODEL_SWITCH_COMMAND = "/model fable"
+
+# Bump the post-submit observe window above the 2s default so a real host that renders the
+# confirmation a beat late is still caught -- and, incidentally, exercise the configurable
+# post_submit_dialog_observe_seconds knob end to end against a live agent.
+_MODEL_SWITCH_OBSERVE_SECONDS = 4.0
+
+
+def _setup_ctx_with_auto_accept_depth(
+    profile: _ClaudeReleaseProfile, tmp_path: Path, auto_accept_prompt_depth: int
+) -> AgentReleaseContext:
+    """Set up a release ctx whose project config enables (or disables) post-submit auto-accept.
+
+    Reuses the profile's standard setup, then appends an ``[agent_types.claude]`` section so the
+    created agent's config carries the requested depth and a slightly widened observe window.
+    """
+    ctx = profile.setup(tmp_path)
+    settings_path = Path(ctx.env["MNGR_PROJECT_CONFIG_DIR"]) / "settings.local.toml"
+    with settings_path.open("a") as settings_file:
+        settings_file.write(
+            f"\n[agent_types.claude]\n"
+            f"auto_accept_prompt_depth = {auto_accept_prompt_depth}\n"
+            f"post_submit_dialog_observe_seconds = {_MODEL_SWITCH_OBSERVE_SECONDS}\n"
+        )
+    return ctx
+
+
+def _create_model_switch_agent(profile: _ClaudeReleaseProfile, ctx: AgentReleaseContext) -> str:
+    """Create a real haiku claude agent from ``ctx`` and return its name."""
+    agent_name = f"claude-modelswitch-{get_short_random_string()}"
+    create = profile.run_mngr(
+        ctx,
+        "create",
+        agent_name,
+        profile.agent_type,
+        "--no-connect",
+        "--yes",
+        *profile.create_extra_args(ctx),
+        timeout=_MODEL_SWITCH_CREATE_TIMEOUT_SECONDS,
+    )
+    assert create.returncode == 0, f"create failed:\n{create.stdout}\n{create.stderr}"
+    return agent_name
+
+
+def _read_auto_accepted_dialog_events(host_dir: Path, agent_name: str) -> list[dict[str, object]]:
+    """Return the agent's recorded ``auto_accepted_dialog`` message-delivery events (may be empty)."""
+    events_path = _agent_state_dir_by_name(host_dir, agent_name) / "events" / "messages" / "events.jsonl"
+    if not events_path.exists():
+        return []
+    events = [json.loads(line) for line in events_path.read_text().splitlines() if line.strip()]
+    return [event for event in events if event.get("type") == "auto_accepted_dialog"]
+
+
+@pytest.mark.release
+@pytest.mark.tmux
+@pytest.mark.rsync
+@pytest.mark.timeout(1500)
+def test_claude_model_switch_dialog_is_auto_accepted(tmp_path: Path) -> None:
+    """With auto-accept enabled, a ``/model`` switch confirmation is dismissed and the send exits 0.
+
+    Creates a real haiku claude agent with ``auto_accept_prompt_depth`` > 0, then sends
+    ``/model fable``. Claude opens the "Switch model?" numbered selector; the post-submit dialog
+    check must detect it, press Enter to accept the highlighted default, and let ``mngr message``
+    exit 0. The recorded ``auto_accepted_dialog`` event is the load-bearing proof that a blocking
+    selector actually appeared and was accepted -- so an exit 0 here cannot pass vacuously (e.g. if
+    no dialog had opened at all).
+    """
+    profile = _ClaudeReleaseProfile()
+    reason = profile.unavailable_reason()
+    if reason is not None:
+        pytest.skip(reason)
+
+    ctx = _setup_ctx_with_auto_accept_depth(profile, tmp_path, auto_accept_prompt_depth=5)
+    agent_name = _create_model_switch_agent(profile, ctx)
+    try:
+        result = profile.run_mngr(
+            ctx, "message", agent_name, "--message", _MODEL_SWITCH_COMMAND, timeout=_MODEL_SWITCH_SEND_TIMEOUT_SECONDS
+        )
+        assert result.returncode == 0, (
+            f"expected the auto-accepted /model switch to exit 0, got {result.returncode}:\n"
+            f"{result.stdout}\n{result.stderr}"
+        )
+        accepted_events = _read_auto_accepted_dialog_events(ctx.host_dir, agent_name)
+        assert len(accepted_events) >= 1, (
+            "expected at least one recorded auto_accepted_dialog event proving the switch "
+            f"confirmation appeared and was accepted, found none:\n{result.stdout}\n{result.stderr}"
+        )
+    finally:
+        profile.run_mngr(ctx, "destroy", agent_name, "--force", timeout=_MODEL_SWITCH_DESTROY_TIMEOUT_SECONDS)
+
+
+@pytest.mark.release
+@pytest.mark.tmux
+@pytest.mark.rsync
+@pytest.mark.timeout(1500)
+def test_claude_model_switch_dialog_blocks_when_auto_accept_disabled(tmp_path: Path) -> None:
+    """With auto-accept disabled, a ``/model`` switch confirmation surfaces as delivered-but-blocked.
+
+    Same scenario as the auto-accept test but with ``auto_accept_prompt_depth = 0``. The send still
+    delivers the ``/model fable`` slash command, but the confirmation selector it opens is left
+    standing, so ``mngr message`` exits with the distinct delivered-but-blocked code (7) rather than
+    hanging or silently succeeding. No dialog is accepted, so no auto_accepted_dialog event is
+    recorded. This proves both that the selector genuinely appears and that the exit-code separation
+    works end to end against a real agent.
+    """
+    profile = _ClaudeReleaseProfile()
+    reason = profile.unavailable_reason()
+    if reason is not None:
+        pytest.skip(reason)
+
+    ctx = _setup_ctx_with_auto_accept_depth(profile, tmp_path, auto_accept_prompt_depth=0)
+    agent_name = _create_model_switch_agent(profile, ctx)
+    try:
+        result = profile.run_mngr(
+            ctx, "message", agent_name, "--message", _MODEL_SWITCH_COMMAND, timeout=_MODEL_SWITCH_SEND_TIMEOUT_SECONDS
+        )
+        assert result.returncode == EXIT_CODE_MESSAGE_DELIVERED_BUT_BLOCKED, (
+            f"expected the blocked /model switch to exit {EXIT_CODE_MESSAGE_DELIVERED_BUT_BLOCKED} "
+            f"(delivered-but-blocked), got {result.returncode}:\n{result.stdout}\n{result.stderr}"
+        )
+        assert _read_auto_accepted_dialog_events(ctx.host_dir, agent_name) == [], (
+            "expected no auto_accepted_dialog event when auto-accept is disabled"
+        )
+    finally:
+        profile.run_mngr(ctx, "destroy", agent_name, "--force", timeout=_MODEL_SWITCH_DESTROY_TIMEOUT_SECONDS)
