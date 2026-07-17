@@ -135,4 +135,9 @@ contextBridge.exposeInMainWorld('minds', {
   minimize: () => ipcRenderer.send('window-minimize'),
   maximize: () => ipcRenderer.send('window-maximize'),
   close: () => ipcRenderer.send('window-close'),
+
+  // Raise the window to the front after OAuth sign-in finished in the external
+  // browser (which stole OS focus). The main process only pulls focus if the
+  // window isn't already focused.
+  focusWindow: () => ipcRenderer.send('focus-window'),
 });

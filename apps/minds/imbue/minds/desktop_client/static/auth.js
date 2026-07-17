@@ -125,47 +125,102 @@
   var oauthPollInterval = null;
   var oauthPollDeadline = 0;
 
-  function oauthShowWaiting(provider) {
-    var nameMap = { google: 'Google', github: 'GitHub' };
-    var providerLabel = nameMap[provider] || provider;
-    document.querySelectorAll('.oauth-btn').forEach(function (b) { b.disabled = true; });
-    var msg = 'Waiting for you to finish signing in with ' + providerLabel + ' in the browser...';
+  var OAUTH_PROVIDER_LABELS = { google: 'Google', github: 'GitHub' };
+
+  // The two shared classNames for the status box (the "blue box"). The waiting
+  // variant carries the staged progress messages; the error variant matches
+  // ``Notice variant="error"`` so a failure reads the same as every other
+  // in-page error. Kept as literals so Tailwind's source scan emits them.
+  var OAUTH_STATUS_CLASS = 'text-accent type-body mb-3 px-3 py-2 bg-accent/12 rounded-md border border-accent/30';
+  var OAUTH_ERROR_CLASS = 'text-important type-body mb-3 px-3 py-2 bg-[var(--c-important-surface)] rounded-md';
+
+  // The status box is the (repurposed) error Notice on whichever tab is
+  // visible; update both so it shows regardless of which one the user is on.
+  function oauthSetMessage(msg, className) {
     ['signup-error', 'signin-error'].forEach(function (id) {
       var el = document.getElementById(id);
       if (!el) return;
       el.textContent = msg;
+      el.className = className;
       el.classList.remove('hidden');
-      el.className = 'text-accent type-body mb-3 px-3 py-2 bg-accent/12 rounded-md border border-accent/30';
     });
   }
 
+  // Fade + disable every OAuth button for the duration of the flow, and reveal
+  // the spinner only on the button whose provider the user clicked.
+  function oauthSetButtonsBusy(provider) {
+    document.querySelectorAll('.oauth-btn').forEach(function (b) {
+      b.disabled = true;
+      b.classList.add('opacity-60');
+      var spinner = b.querySelector('.oauth-btn-spinner');
+      if (spinner) spinner.classList.toggle('hidden', b.getAttribute('data-oauth') !== provider);
+    });
+  }
+
+  function oauthResetButtons() {
+    document.querySelectorAll('.oauth-btn').forEach(function (b) {
+      b.disabled = false;
+      b.classList.remove('opacity-60');
+      var spinner = b.querySelector('.oauth-btn-spinner');
+      if (spinner) spinner.classList.add('hidden');
+    });
+  }
+
+  // Terminal failure: un-fade the buttons, stop the spinner, and surface the
+  // reason in the status box (styled as an error) instead of a browser alert().
+  function oauthFail(msg) {
+    oauthResetButtons();
+    oauthSetMessage(msg, OAUTH_ERROR_CLASS);
+  }
+
+  // Sign-in just completed in the external browser, which stole OS focus. Ask
+  // the shell to raise the Minds window so the user doesn't have to alt-tab
+  // back. On the standalone /auth page (content view) there is no window.minds
+  // bridge, so we post an allowlisted message the content-relay preload
+  // forwards; in the sign-in modal (overlay view) the bridge is present.
+  function requestWindowFocus() {
+    try {
+      if (window.minds && typeof window.minds.focusWindow === 'function') {
+        window.minds.focusWindow();
+      } else {
+        window.postMessage({ type: 'minds:focus-window' }, '*');
+      }
+    } catch (e) { /* focus is best-effort; never block sign-in on it */ }
+  }
+
   async function oauthSignIn(provider) {
+    var providerLabel = OAUTH_PROVIDER_LABELS[provider] || provider;
+    // Immediate feedback the moment the button is clicked, before the browser
+    // has even been asked to open.
+    oauthSetButtonsBusy(provider);
+    oauthSetMessage('Opening your browser...', OAUTH_STATUS_CLASS);
     var flowId = null;
     try {
       var res = await fetch('/auth/oauth/' + provider);
       var data = await res.json();
       if (data.status !== 'OK') {
-        alert('Failed to start OAuth: ' + (data.error || data.message));
+        oauthFail('Could not start sign-in: ' + (data.error || data.message || 'unknown error'));
         return;
       }
       flowId = data.flow_id;
       if (!flowId) {
-        alert('Failed to start OAuth: server did not return a flow_id');
+        oauthFail('Could not start sign-in: the server did not return a flow id.');
         return;
       }
     } catch (err) {
-      alert('Failed to start OAuth: ' + err.message);
+      oauthFail('Could not start sign-in: ' + err.message);
       return;
     }
-    oauthShowWaiting(provider);
+    // The flow is live and the browser is up: now we are genuinely waiting on
+    // the user to finish in the browser.
+    oauthSetMessage('Waiting for you to finish signing in with ' + providerLabel + ' in the browser...', OAUTH_STATUS_CLASS);
     if (oauthPollInterval) clearInterval(oauthPollInterval);
     oauthPollDeadline = Date.now() + 3 * 60 * 1000;
     oauthPollInterval = setInterval(async function () {
       if (Date.now() > oauthPollDeadline) {
         clearInterval(oauthPollInterval);
         oauthPollInterval = null;
-        document.querySelectorAll('.oauth-btn').forEach(function (b) { b.disabled = false; });
-        alert('Sign-in timed out. Try again.');
+        oauthFail('Sign-in timed out. Try again.');
         return;
       }
       try {
@@ -175,21 +230,23 @@
           // Server forgot the flow (e.g. desktop server restart). Stop polling.
           clearInterval(oauthPollInterval);
           oauthPollInterval = null;
-          document.querySelectorAll('.oauth-btn').forEach(function (b) { b.disabled = false; });
-          alert('Sign-in lost track of this flow. Try again.');
+          oauthFail('Sign-in lost track of this flow. Try again.');
           return;
         }
         if (s.state === 'done') {
           clearInterval(oauthPollInterval);
           oauthPollInterval = null;
+          // Final step before the page navigates onward, plus the window raise
+          // so the user lands back in Minds rather than the browser.
+          oauthSetMessage('Signing you in...', OAUTH_STATUS_CLASS);
+          requestWindowFocus();
           onAuthSuccess();
           return;
         }
         if (s.state === 'error') {
           clearInterval(oauthPollInterval);
           oauthPollInterval = null;
-          document.querySelectorAll('.oauth-btn').forEach(function (b) { b.disabled = false; });
-          alert('Sign-in failed: ' + (s.error || 'unknown error'));
+          oauthFail('Sign-in failed: ' + (s.error || 'unknown error'));
           return;
         }
         // state === 'running' -- keep polling.

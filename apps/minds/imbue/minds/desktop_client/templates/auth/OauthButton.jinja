@@ -9,8 +9,11 @@
 
   The ``oauth-btn`` class hook on the rendered button is load-bearing:
   ``static/auth.js`` finds every OAuth button across the page via
-  ``document.querySelectorAll('.oauth-btn')`` to enable/disable them as
-  a group during an OAuth flow.
+  ``document.querySelectorAll('.oauth-btn')`` to enable/disable and fade them
+  as a group during an OAuth flow. The ``oauth-btn-spinner`` span sits (hidden)
+  in front of the brand glyph; auth.js reveals it on the button the user
+  clicked so there is immediate "something is happening" feedback while the
+  browser round-trip runs.
 
   ``extra`` is for one-off layout shims (``mb-2`` to space buttons in a
   vertical stack).
@@ -18,5 +21,5 @@
 {%- set _label = {"google": "Continue with Google", "github": "Continue with GitHub"}[provider] -%}
 <button data-oauth="{{ provider }}"
         class="oauth-btn w-full py-2 px-3 bg-surface-primary border border-default rounded-lg type-body cursor-pointer flex items-center justify-center gap-2 text-primary hover:bg-fill-hover {{ extra }}">
-  <auth.OauthIcon :provider="provider" /> {{ _label }}
+  <Spinner size="sm" extra="oauth-btn-spinner hidden" /><auth.OauthIcon :provider="provider" /> {{ _label }}
 </button>

@@ -42,6 +42,13 @@ def test_render_auth_page_includes_oauth_buttons() -> None:
     assert "Continue with GitHub" in html
 
 
+def test_render_auth_page_oauth_buttons_carry_click_spinner() -> None:
+    # auth.js reveals ``.oauth-btn-spinner`` on the clicked provider's button as
+    # immediate feedback; the (hidden) spinner span must be present to reveal.
+    html = render_auth_page()
+    assert "oauth-btn-spinner" in html
+
+
 def test_render_auth_page_includes_toggle_links() -> None:
     html = render_auth_page()
     assert "Already have an account?" in html

@@ -100,4 +100,12 @@ window.addEventListener('message', (event) => {
     ipcRenderer.send('preview-workspace-accent', agentId, accent);
     return;
   }
+  // Login page: OAuth sign-in just finished in the external browser (which
+  // stole OS focus). Ask the shell to raise this window so the user lands back
+  // in Minds. No payload -- the main process focuses the window that owns this
+  // view, and only if it isn't already focused.
+  if (data.type === 'minds:focus-window') {
+    ipcRenderer.send('focus-window');
+    return;
+  }
 });
