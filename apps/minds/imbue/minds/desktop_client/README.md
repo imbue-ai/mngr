@@ -17,7 +17,7 @@ Authentication is global (one session grants access to all agents). The desktop 
 
 - **Signing key**: generated once on first server start, stored at `{data_directory}/signing_key`. Used to sign all auth cookies.
 - **One-time codes**: a login code is generated and printed to the terminal when the server starts. Codes are stored in `{data_directory}/one_time_codes.json` and can only be used once.
-- **Session cookie**: after successful authentication, the server sets a signed `minds_session` cookie. It is issued with `Domain=localhost` when the request host is `localhost` or an `<agent-id>.localhost` subdomain, so the browser carries it across all workspace subdomains with a single sign-in.
+- **Session cookie**: after successful authentication, the server sets a signed `minds_session` cookie. The cookie is host-only (no `Domain` attribute): browsers treat `localhost` as a public suffix and refuse to send `Domain=localhost` cookies to subdomains. Workspace subdomains instead get their own session via the forward server's `/goto/<agent-id>/` auth bridge, so a single bare-origin sign-in still covers every workspace.
 
 ## Local desktop client routes
 
@@ -34,9 +34,10 @@ Authentication is global (one session grants access to all agents). The desktop 
 `/` route is special:
     if you don't have a valid session cookie, shows a login prompt
     if you are authenticated:
-        if exactly 1 agent is known, redirects directly to that agent
-        if 2+ agents are known, shows links to each agent
-        if no agents exist, shows the agent creation form
+        while the error-reporting consent question is unanswered, shows the consent screen
+        if any workspaces are known (discovered locally or synced from other devices), lists them all -- even when there is exactly one
+        if none are known and the initial discovery is still running, shows a self-refreshing "Discovering agents" page
+        once discovery completes with no workspaces, shows the agent creation form
 
 `/create` route (requires auth):
     GET: shows a form to enter a git URL for creating a new workspace

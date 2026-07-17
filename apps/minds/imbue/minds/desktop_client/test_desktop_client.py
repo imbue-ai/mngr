@@ -113,19 +113,16 @@ def _authenticate_client(
 ) -> None:
     """Authenticate a test client by minting a signed session cookie and adding it to the jar.
 
-    The production path (GET /authenticate?one_time_code=...) returns a
-    ``Set-Cookie`` with ``Domain=localhost`` so the cookie is valid on both
-    ``localhost`` and ``<agent-id>.localhost`` subdomains. The test client's
-    cookie jar is stricter than real browsers about Domain=localhost and
-    silently drops that cookie on subsequent requests, so we set the cookie
-    directly on the jar here instead of round-tripping through /authenticate.
-    The server-side logic the test is exercising is independent of the
-    Set-Cookie emission path; the bare presence/signature of the cookie is
+    The production path (GET /authenticate?one_time_code=...) sets a host-only
+    ``minds_session`` cookie on the bare origin (workspace subdomains get their
+    own session via the forward server's /goto/ auth bridge, not this cookie).
+    Setting the cookie directly on the jar skips the /authenticate round-trip
+    and its one-time-code bookkeeping in tests that only care about being
+    signed in. The server-side logic the test is exercising is independent of
+    the Set-Cookie emission path; the bare presence/signature of the cookie is
     what ``_is_authenticated`` checks.
     """
     cookie_value = create_session_cookie(signing_key=auth_store.get_signing_key())
-    # Intentionally no Domain=: the test client cookie jar is strict about
-    # Domain=localhost cookies on subsequent requests.
     client.set_cookie(SESSION_COOKIE_NAME, cookie_value)
 
 

@@ -381,15 +381,15 @@ repo-relative; `dc/` abbreviates `apps/minds/imbue/minds/desktop_client/` and
 | INV-7 | (gap) partially witnessed by `dc/test_desktop_client.py::test_login_redirects_to_authenticate_via_js`; no test fetches the login URL and asserts the code is still spendable |
 | INV-8 | `fw/server_test.py::test_subdomain_forward_strips_session_cookie_before_proxying_to_backend`, `::test_subdomain_forward_strips_session_cookie_when_only_session_cookie_present` |
 
-### Known divergences found while writing this spec
+### Notes from authoring
 
-- `dc/README.md` says the session cookie is issued with `Domain=localhost` and
-  that the landing page redirects straight to a sole agent. Both statements
-  describe older behavior: the cookie is host-only (browsers treat `localhost`
-  as a public suffix) with subdomain access provided by the goto bridge, and the
-  landing page now lists workspaces even when there is exactly one.
-- The docstring of `_authenticate_client` in `dc/test_desktop_client.py` repeats
-  the stale `Domain=localhost` claim.
+- Writing this spec surfaced documentation drift, fixed alongside it:
+  `dc/README.md` claimed the session cookie was issued with `Domain=localhost`
+  and that the landing page redirected straight to a sole agent, and a
+  test-helper docstring repeated the cookie claim. All described older
+  behavior (the cookie is host-only, with subdomain access provided by the
+  goto bridge, and the landing page lists workspaces even when there is
+  exactly one).
 - `SKIP_AUTH=1` (an environment variable) bypasses every session check. It is a
   development escape hatch, intentionally unspecified here, and has no covering
   test.
