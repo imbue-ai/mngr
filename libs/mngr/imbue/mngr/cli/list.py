@@ -1003,20 +1003,40 @@ def _format_value_as_string(value: Any) -> str:
 _BRACKET_PATTERN = re.compile(r"^([^\[]+)(?:\[([^\]]+)\])?$")
 
 
+# Value-key placeholder for a None sort result. It is never compared against a
+# present value's key (the outer present/absent flag always differs first), so its
+# contents are arbitrary and exist only to keep the sort-key tuple shape uniform.
+_NONE_SORT_KEY: tuple[int, float | str] = (0, "")
+
+
+def _sort_value_key(value: Any) -> tuple[int, float | str]:
+    """Return a natively comparable sort key for a CEL sort value.
+
+    Numbers (celpy Int/Double subclass int/float) sort numerically in bucket 0;
+    every other value sorts lexicographically by its string form in bucket 1. The
+    bucket prefix keeps a heterogeneous key (different value types across agents
+    for one expression) from raising at comparison time, and orders numbers ahead
+    of non-numbers.
+    """
+    if isinstance(value, (int, float)):
+        return (0, float(value))
+    return (1, str(value))
+
+
 class _CelSortKeyExtractor:
     """Extracts a sort key from an (agent, cel_context) pair for a single CEL expression."""
 
     program: Any
     is_descending: bool
 
-    def __call__(self, pair: tuple[AgentDetails, dict[str, Any]]) -> tuple[int, str]:
+    def __call__(self, pair: tuple[AgentDetails, dict[str, Any]]) -> tuple[int, tuple[int, float | str]]:
         _, ctx = pair
         value = evaluate_cel_sort_key(self.program, ctx)
         if value is None:
-            # For ascending: (1, "") puts None at end
-            # For descending (reverse=True): (0, "") puts None at end
-            return (1, "") if not self.is_descending else (0, "")
-        return (0, str(value)) if not self.is_descending else (1, str(value))
+            # None sorts last in both directions; reverse=True flips the flag back.
+            return (1, _NONE_SORT_KEY) if not self.is_descending else (0, _NONE_SORT_KEY)
+        value_key = _sort_value_key(value)
+        return (0, value_key) if not self.is_descending else (1, value_key)
 
 
 def _sort_agents_by_cel(

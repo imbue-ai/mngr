@@ -4,6 +4,7 @@ import json
 import threading
 from collections.abc import Callable
 from datetime import datetime
+from datetime import timedelta
 from datetime import timezone
 from io import StringIO
 from typing import Any
@@ -37,6 +38,7 @@ from imbue.mngr.cli.list import _render_format_template
 from imbue.mngr.cli.list import _render_list_errors_block
 from imbue.mngr.cli.list import _should_use_streaming_mode
 from imbue.mngr.cli.list import _sort_agents_by_cel
+from imbue.mngr.cli.list import _sort_value_key
 from imbue.mngr.cli.list import _truncate_to_width
 from imbue.mngr.cli.list import list_command
 from imbue.mngr.colors import ERROR_COLOR
@@ -585,6 +587,45 @@ def test_sort_agents_by_cel_nested_field() -> None:
     compiled = compile_cel_sort_keys("host.provider")
     result = _sort_agents_by_cel(agents, compiled)
     assert [str(a.name) for a in result] == ["agent-a", "agent-b"]
+
+
+def test_sort_value_key_orders_numbers_numerically() -> None:
+    """_sort_value_key keys numbers into a numeric bucket and strings into a text bucket."""
+    assert _sort_value_key(9.5) == (0, 9.5)
+    assert _sort_value_key(100) == (0, 100.0)
+    assert _sort_value_key(True) == (0, 1.0)
+    assert _sort_value_key("charlie") == (1, "charlie")
+    # Sorting numeric values by this key is numeric, not lexicographic ("100" < "9").
+    assert sorted([9.5, 10.2, 100.7, 2.3], key=_sort_value_key) == [2.3, 9.5, 10.2, 100.7]
+
+
+def test_sort_agents_by_cel_numeric_field_sorts_numerically() -> None:
+    """A numeric synthesized field sorts by value, not by its string form (da-9bl9).
+
+    `age` (like `idle`) is seconds as a float and shares the same sort path. A
+    lexicographic order would place 100 before 9; the numeric order must not.
+    """
+    now = datetime.now(timezone.utc)
+    agents = [
+        make_test_agent_details(name="age-100", create_time=now - timedelta(seconds=100)),
+        make_test_agent_details(name="age-2", create_time=now - timedelta(seconds=2)),
+        make_test_agent_details(name="age-20", create_time=now - timedelta(seconds=20)),
+        make_test_agent_details(name="age-9", create_time=now - timedelta(seconds=9)),
+    ]
+    result = _sort_agents_by_cel(agents, compile_cel_sort_keys("age asc"))
+    assert [str(a.name) for a in result] == ["age-2", "age-9", "age-20", "age-100"]
+
+
+def test_sort_agents_by_cel_numeric_field_descending() -> None:
+    """Descending numeric sort reverses the numeric order (largest value first)."""
+    now = datetime.now(timezone.utc)
+    agents = [
+        make_test_agent_details(name="age-2", create_time=now - timedelta(seconds=2)),
+        make_test_agent_details(name="age-100", create_time=now - timedelta(seconds=100)),
+        make_test_agent_details(name="age-9", create_time=now - timedelta(seconds=9)),
+    ]
+    result = _sort_agents_by_cel(agents, compile_cel_sort_keys("age desc"))
+    assert [str(a.name) for a in result] == ["age-100", "age-9", "age-2"]
 
 
 # =============================================================================
