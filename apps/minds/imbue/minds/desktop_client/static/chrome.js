@@ -5,6 +5,15 @@
 (function () {
   var isElectron = !!window.minds;
 
+  // A trusted local/native page (Landing, Create, Settings, ...) now renders its
+  // own body directly under the titlebar via ChromeShell and has NO
+  // #content-frame -- it IS the main frame, so navigation is full-page rather
+  // than driving a child iframe (browser) or the content WebContentsView. The
+  // agent-wrapper page (pages.Chrome) and the Electron chrome view both carry a
+  // #content-frame; a local page does not. This holds in both browser and
+  // Electron mode, so it is the single signal for "am I a local page".
+  var isLocalPage = !document.getElementById('content-frame');
+
   // ``mngr forward`` plugin's bare origin (e.g. ``http://localhost:8421``).
   // Workspace links (``/goto/<agent>/``) target the plugin, not minds.
   var mngrForwardOrigin = (document.body && document.body.dataset.mngrForwardOrigin) || '';
@@ -44,10 +53,12 @@
     lastContentUrl = url;
     applyTitlebarContext();
     if (isElectron) window.minds.navigateContent(url);
+    else if (isLocalPage) window.location = url;
     else document.getElementById('content-frame').src = url;
   }
   function goBack() {
     if (isElectron) window.minds.contentGoBack();
+    else if (isLocalPage) window.history.back();
     else { try { document.getElementById('content-frame').contentWindow.history.back(); } catch (e) {} }
   }
 
@@ -427,7 +438,10 @@
     document.getElementById('min-btn').onclick = function () { window.minds.minimize(); };
     document.getElementById('max-btn').onclick = function () { window.minds.maximize(); };
     document.getElementById('close-btn').onclick = function () { window.minds.close(); };
-    document.getElementById('content-frame').style.display = 'none';
+    // The agent-wrapper page hides its iframe in Electron (the content is a
+    // separate WebContentsView); a local page has no #content-frame to hide.
+    var electronContentFrame = document.getElementById('content-frame');
+    if (electronContentFrame) electronContentFrame.style.display = 'none';
     document.getElementById('sidebar-backdrop').style.display = 'none';
   } else {
     // Browser mode: backdrop click outside the panel + Escape close the
@@ -446,7 +460,20 @@
   // by Chrome.jinja), which is the same script the overlay's modal pages use.
 
   // -- Title + URL tracking -------------------------------------------------
-  if (isElectron) {
+  if (isLocalPage) {
+    // A trusted local page IS the chrome view/page's own document (there is no
+    // #content-frame and no separate content WebContentsView). Derive the
+    // titlebar breadcrumb + accent from OUR OWN location: main pushes
+    // ``content-url-changed`` only for the agent content surface, and a local
+    // page never displays a workspace, so the displayed-workspace /
+    // recovery-redirect lock stays null. Runs identically in Electron and the
+    // browser; each full-page navigation among local routes re-runs this
+    // script, and (in Electron) the SSE ``workspaces`` tick replays the accent
+    // once its color cache is primed (see handleChromeEvent).
+    lastContentUrl = window.location.pathname;
+    applyTitlebarContext();
+    applyTitleAccent(accentSourceFromPath(window.location.pathname));
+  } else if (isElectron) {
     // The titlebar's breadcrumb / icon-tabs / contextual back arrow track the
     // content view's URL, which main pushes on every navigation (and replays
     // when this chrome view (re)loads, via primeViewWithCachedChromeState).

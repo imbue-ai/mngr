@@ -43,7 +43,6 @@
     // pre-action liveness) does not clobber the transient back. Cleared once the
     // authoritative state reaches the target or the action fails.
     var pendingMindActionByAgent = {};
-    var isElectronShell = navigator.userAgent.indexOf('Electron') !== -1;
 
     function getRow(agentId) {
       return document.querySelector('[data-agent-id="' + (window.CSS && CSS.escape ? CSS.escape(agentId) : agentId) + '"]');
@@ -95,7 +94,14 @@
         // back to the loader instead of dispatching the restart.
         window.location = '/agents/' + encodeURIComponent(agentId)
           + '/recovery?return_to=' + encodeURIComponent(ret) + '&intent=restart';
+      } else if (window.minds && window.minds.navigateContent) {
+        // Trusted local page on the chrome surface: hand the workspace (agent)
+        // URL to the shell bridge so it opens in the caged content view (and
+        // focuses an existing window already on this workspace) instead of
+        // navigating the chrome view's OWN frame into untrusted agent content.
+        window.minds.navigateContent(ret);
       } else {
+        // Plain browser (no shell): full-page navigate to the workspace URL.
         window.location = ret;
       }
     };
@@ -111,13 +117,13 @@
 
     // -- Bottom-left app-level launchers --
     //
-    // In the desktop shell these open the centered overlay modals through the
-    // content relay's allowlisted postMessage channels (the content view has
-    // no window.minds bridge); in a plain browser they navigate the page to
-    // the full-page fallbacks.
+    // The Landing page is a trusted local page on the chrome surface, so these
+    // open the centered overlay modals via the window.minds shell bridge
+    // directly; in a plain browser (no bridge) they navigate the page to the
+    // full-page fallbacks.
     window.landingOpenMindsSettings = function () {
-      if (isElectronShell) {
-        window.postMessage({ type: 'minds:open-minds-settings' }, '*');
+      if (window.minds && window.minds.openMindsSettings) {
+        window.minds.openMindsSettings();
       } else {
         window.location = '/settings';
       }
@@ -126,13 +132,13 @@
     window.landingOpenAccounts = function () {
       var signedIn = (document.getElementById('landing-account') || {}).dataset || {};
       var isSignedIn = signedIn.signedIn === 'true';
-      if (isElectronShell) {
+      if (window.minds && window.minds.openAccounts && window.minds.openSigninModal) {
         // ``returnTo: '/'`` lands a successful sign-in back on this home
         // screen (the server's return_to default is the create screen);
         // ``mode: 'signin'`` leads with the sign-in tab to match the
         // launcher's "Log in" label.
-        if (isSignedIn) window.postMessage({ type: 'minds:open-accounts' }, '*');
-        else window.postMessage({ type: 'minds:open-signin-modal', returnTo: '/', mode: 'signin' }, '*');
+        if (isSignedIn) window.minds.openAccounts();
+        else window.minds.openSigninModal('/', 'signin');
       } else {
         window.location = isSignedIn ? '/accounts' : '/auth/login';
       }
@@ -142,11 +148,10 @@
       var row = button.closest('[data-agent-id]');
       if (!row) return;
       var agentId = row.dataset.agentId;
-      if (isElectronShell) {
-        // Route through the content relay -> main process, which opens (or
-        // focuses) a dedicated window for this workspace. Same channel the
-        // sidebar's open-in-new arrow uses.
-        window.postMessage({ type: 'minds:open-workspace-in-new-window', agentId: agentId }, '*');
+      if (window.minds && window.minds.openWorkspaceInNewWindow) {
+        // Trusted local page on the chrome surface: call the shell bridge
+        // directly (opens/focuses a dedicated window for this workspace).
+        window.minds.openWorkspaceInNewWindow(agentId);
       } else {
         // Plain browser: no native windows, so open the workspace URL in a
         // new tab instead.
@@ -237,13 +242,14 @@
       if (!row) return;
       var agentId = row.dataset.agentId;
       var name = row.dataset.mindName || agentId;
-      // In the desktop shell, route through the relay so the main process can
-      // show a native confirmation dialog and issue the stop itself (no in-page
-      // optimistic flip -- the user may still cancel that dialog, and the result
-      // arrives over the SSE). In a plain browser there is no shell, so confirm
-      // in-page and stop via fetch with an optimistic transient.
-      if (isElectronShell) {
-        window.postMessage({ type: 'minds:confirm-stop-mind', agentId: agentId, name: name }, '*');
+      // The Landing page is a trusted local page on the chrome surface: ask the
+      // main process (via the shell bridge) to show a native confirmation dialog
+      // and issue the stop itself (no in-page optimistic flip -- the user may
+      // still cancel that dialog, and the result arrives over the SSE). In a
+      // plain browser there is no shell, so confirm in-page and stop via fetch
+      // with an optimistic transient.
+      if (window.minds && window.minds.confirmStopMind) {
+        window.minds.confirmStopMind(agentId, name);
         return;
       }
       var ok = window.confirm('Stop "' + name + '"? Its agents will stop and its services become inaccessible. '
@@ -732,7 +738,7 @@
   })();
 </script>
 {% endset %}
-<Base title="Workspaces" scripts={{ _scripts }}>
+<ChromeShell title="Workspaces" scripts={{ _scripts }}>
   <PageContainer>
     {% if agent_ids or remote_workspaces %}
       <div class="flex items-center justify-between mb-4" data-landing-agent-ids="{{ ((agent_ids | map('string') | list) + (remote_workspaces | map(attribute='agent_id') | list)) | join(',') }}" data-landing-remote-states="{% for remote in remote_workspaces %}{{ remote.agent_id }}={{ remote.state }}{% if not loop.last %},{% endif %}{% endfor %}">
@@ -949,4 +955,4 @@
       <span>{% if account_email %}{{ account_email }}{% if extra_account_count > 0 %} (+{{ extra_account_count }}){% endif %}{% else %}Log in{% endif %}</span>
     </button>
   </div>
-</Base>
+</ChromeShell>

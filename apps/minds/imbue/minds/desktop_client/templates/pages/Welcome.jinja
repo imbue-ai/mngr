@@ -7,11 +7,11 @@
   skip was chosen.
 
   Sign Up / Log In open the centered sign-in modal on the shared overlay
-  surface (posted through the content relay's allowlisted
-  ``minds:open-signin-modal`` channel; the content view has no window.minds
-  bridge). ``mode`` picks which AuthForm tab leads; ``returnTo: '/'`` lands a
-  successful sign-in on the home screen. In a plain browser the links fall
-  back to the full-page /auth/* routes.
+  surface. The splash is a trusted local page on the chrome surface, so it
+  calls the ``openSigninModal`` shell bridge directly. ``mode`` picks which
+  AuthForm tab leads; ``returnTo: '/'`` lands a successful sign-in on the home
+  screen. In a plain browser (no bridge) the links fall back to the full-page
+  /auth/* routes.
 
   The skip link goes through "/welcome/skip" (which records the choice, then
   redirects to "/") rather than straight to "/create": recording the choice
@@ -24,10 +24,12 @@
 {% set _scripts %}
 <script>
   (function () {
-    var isElectronShell = navigator.userAgent.indexOf('Electron') !== -1;
-    if (isElectronShell) {
+    // Trusted local page on the chrome surface: open the shared sign-in modal
+    // via the shell bridge. In a plain browser (no bridge) the ButtonLinks
+    // navigate to the full-page /auth/* routes on their own.
+    if (window.minds && window.minds.openSigninModal) {
       var openModal = function (mode) {
-        window.postMessage({ type: 'minds:open-signin-modal', returnTo: '/', mode: mode }, '*');
+        window.minds.openSigninModal('/', mode);
       };
       var signup = document.getElementById('welcome-signup-btn');
       var login = document.getElementById('welcome-login-btn');
@@ -55,8 +57,8 @@
   })();
 </script>
 {% endset %}
-<Base title="Welcome to Minds" scripts={{ _scripts }}>
-  <div class="min-h-screen flex items-center justify-center">
+<ChromeShell title="Welcome to Minds" scripts={{ _scripts }}>
+  <div class="min-h-[calc(100dvh_-_38px)] flex items-center justify-center">
     <div class="max-w-sm w-full px-6 text-center">
       <h1 class="type-heading-lg text-primary mb-2">Welcome to Minds</h1>
       <p class="text-secondary type-body mb-8">Run persistent, autonomous AI agents</p>
@@ -72,4 +74,4 @@
       </ButtonLink>
     </div>
   </div>
-</Base>
+</ChromeShell>

@@ -106,7 +106,16 @@
     }
     if (creationDone && redirectUrl) {
       if (fill) fill.style.width = '100%';
-      window.location.href = redirectUrl;
+      // redirectUrl is the /goto/<agent>/ workspace (agent) URL. On a trusted
+      // local page on the chrome surface, hand it to the shell bridge so the new
+      // workspace opens in the caged content view instead of navigating this
+      // (chrome) frame into untrusted agent content. Plain browser (no shell)
+      // full-page navigates as before.
+      if (window.minds && window.minds.navigateContent) {
+        window.minds.navigateContent(redirectUrl);
+      } else {
+        window.location.href = redirectUrl;
+      }
       return;
     }
     var elapsed = ((window.performance && performance.now) ? performance.now() : Date.now()) - startTime;

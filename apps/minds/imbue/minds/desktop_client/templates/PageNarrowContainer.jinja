@@ -24,10 +24,10 @@
   and overlay dialogs go outside both.
 #}
 {%- set _padding_cls = "p-8" if padding == "default" else "p-6" -%}
-<Base title={{ title }}
+<ChromeShell title={{ title }}
       body_class="bg-surface-primary text-primary font-sans antialiased flex items-center justify-center min-h-screen p-4"
       scripts={{ scripts }}>
   <div class="{{ _padding_cls }} {{ max_width }} w-full">
     {{ content }}
   </div>
-</Base>
+</ChromeShell>

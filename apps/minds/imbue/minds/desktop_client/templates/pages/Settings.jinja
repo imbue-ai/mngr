@@ -11,7 +11,7 @@
 {% set _scripts %}
 <script src="/_static/app_settings.js" defer></script>
 {% endset %}
-<Base title="Settings" scripts={{ _scripts }}>
+<ChromeShell title="Settings" scripts={{ _scripts }}>
   <PageContainer>
     <h1 class="type-heading-lg text-primary mb-8">Settings</h1>
     <AppSettingsSections
@@ -24,4 +24,4 @@
       :is_master_password_set="is_master_password_set" />
     <div class="mt-8"><Link href="/" extra="type-helper">&larr; Back to workspaces</Link></div>
   </PageContainer>
-</Base>
+</ChromeShell>

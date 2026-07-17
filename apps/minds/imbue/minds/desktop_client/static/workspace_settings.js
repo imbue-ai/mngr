@@ -87,23 +87,19 @@
     }
 
     function previewChromeAccent(hex) {
-      // Optimistic local repaint: the content-relay-preload watches for
-      // ``minds:preview-workspace-accent`` postMessages and forwards
-      // them to main, which retargets the bundle's chrome view. Cross-
-      // machine sync still happens via the normal SSE flow; this just
-      // shortcuts the local-window paint so the user sees their pick
-      // immediately instead of waiting for ``mngr label`` + the SSE
-      // round-trip. Falls through silently in browser mode (no
-      // postMessage listener) -- the SSE path still updates the bar
-      // a tick later.
+      // Optimistic local repaint: the workspace-settings page is a trusted local
+      // page on the chrome surface, so it calls the shell bridge directly; main
+      // retargets this bundle's chrome view. Cross-machine sync still happens via
+      // the normal SSE flow; this just shortcuts the local-window paint so the
+      // user sees their pick immediately instead of waiting for ``mngr label`` +
+      // the SSE round-trip. Falls through silently in browser mode (no bridge) --
+      // the SSE path still updates the bar a tick later.
       if (typeof hex !== 'string') return;
       // Only the accent is sent; the chrome derives the contrasting titlebar
       // foreground from it in pure CSS (see .titlebar-surface in app.css).
-      window.postMessage({
-        type: 'minds:preview-workspace-accent',
-        agentId: agentId,
-        accent: hex,
-      }, '*');
+      if (window.minds && window.minds.previewWorkspaceAccent) {
+        window.minds.previewWorkspaceAccent(agentId, hex);
+      }
     }
 
     function saveColor(normalized) {
@@ -224,20 +220,16 @@
   // -- Manage sharing -------------------------------------------------------
   //
   // In the desktop shell the sharing editor opens as a centered overlay modal
-  // (via the content relay's allowlisted postMessage channel -- this page runs
-  // in the content view, which has no window.minds bridge); the links' hrefs
-  // stay as the browser-mode full-page fallback.
-  if (navigator.userAgent.indexOf('Electron') !== -1) {
+  // via the shell bridge -- the workspace-settings page is a trusted local page
+  // on the chrome surface; the links' hrefs stay as the browser-mode full-page
+  // fallback.
+  if (window.minds && window.minds.openSharingModal) {
     var sharingLinks = document.querySelectorAll('a[data-sharing-service]');
     for (var j = 0; j < sharingLinks.length; j++) {
       (function (link) {
         link.addEventListener('click', function (event) {
           event.preventDefault();
-          window.postMessage({
-            type: 'minds:open-sharing-modal',
-            agentId: agentId,
-            serviceName: link.getAttribute('data-sharing-service'),
-          }, '*');
+          window.minds.openSharingModal(agentId, link.getAttribute('data-sharing-service'));
         });
       })(sharingLinks[j]);
     }
