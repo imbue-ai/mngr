@@ -517,14 +517,24 @@ def latchkey_shim() -> Path:
 
 
 def latchkey_env() -> dict[str, str]:
-    """Env the bundled latchkey shim needs: encryption key + Electron exec path."""
+    """Env the bundled latchkey shim needs: encryption key + Electron exec path.
+
+    Precedence matches ``load_or_create_encryption_key``: ``LATCHKEY_ENCRYPTION_KEY``
+    wins over the per-directory ``encryption_key`` file. The env-var override
+    suppresses the file's creation, so a set env var must not require the file.
+    """
+    env_key = os.environ.get("LATCHKEY_ENCRYPTION_KEY")
     key_file = LATCHKEY_DIR / "encryption_key"
-    if not key_file.exists():
-        raise E2EFailure(f"latchkey encryption_key missing at {key_file}")
+    if env_key:
+        encryption_key = env_key
+    elif key_file.exists():
+        encryption_key = key_file.read_text().strip()
+    else:
+        raise E2EFailure(f"latchkey encryption_key missing at {key_file} and LATCHKEY_ENCRYPTION_KEY unset")
     return {
         **os.environ,
         "LATCHKEY_DIRECTORY": str(LATCHKEY_DIR),
-        "LATCHKEY_ENCRYPTION_KEY": key_file.read_text().strip(),
+        "LATCHKEY_ENCRYPTION_KEY": encryption_key,
         "MINDS_ELECTRON_EXEC_PATH": str(MINDS_APP_PATH),
     }
 

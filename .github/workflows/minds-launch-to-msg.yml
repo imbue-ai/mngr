@@ -1132,7 +1132,7 @@ jobs:
             sep=" | "
           done
           runner_line=""
-          [[ -n "$runner_inner" ]] && runner_line="[_ran on_ ${runner_inner}]"
+          [[ -n "$runner_inner" ]] && runner_line="$runner_inner"
           # Assemble non-empty lines in order: verdict, refs, runner, metrics, links.
           lines=("$line1" "$line2")
           [[ -n "$runner_line" ]] && lines+=("$runner_line")
