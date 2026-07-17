@@ -70,10 +70,6 @@
   --c-surface-primary: #ffffff;
   --c-surface-inverse: #000000;
   --c-surface-overlay: rgb(0 0 0 / 0.20);
-  /* neutral titlebar well -- a subtle chrome grey (matching the standard macOS
-     titlebar material rather than pure white) so the native inactive traffic
-     lights keep their designed contrast when no workspace accent is set. */
-  --c-titlebar-neutral: #e8e8ed;
   /* fills -- translucent resting / state tints over a surface (Figma 4/6/10%) */
   --c-fill-subtle: rgb(0 0 0 / 0.04);
   --c-fill-hover: rgb(0 0 0 / 0.06);
@@ -98,9 +94,6 @@
   --c-surface-primary: #000000;
   --c-surface-inverse: #ffffff;
   --c-surface-overlay: rgb(255 255 255 / 0.20);
-  /* neutral titlebar well -- see the light-mode note; a slightly-raised grey so
-     the native dark-grey inactive traffic lights don't vanish against pure black. */
-  --c-titlebar-neutral: #2b2b2e;
   /* fills -- white at slightly higher alpha in dark (Figma 6/10/14%) */
   --c-fill-subtle: rgb(255 255 255 / 0.06);
   --c-fill-hover: rgb(255 255 255 / 0.10);

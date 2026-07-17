@@ -28,8 +28,6 @@ Reworked the desktop app's titlebar and navigation to match the minds-options mo
 
 - The welcome splash's Sign Up / Log In now open the centered sign-in modal on the shared overlay surface (Sign Up leads with the sign-up tab, Log In with the sign-in tab via a new mode parameter) instead of navigating to the full-page /auth routes, and the titlebar home button is hidden on the splash -- the user must pick one of the three options to move on. The /auth pages remain as browser-mode fallbacks (without a titlebar back arrow), and the home screen's signed-out "Log in" launcher now also leads with the sign-in tab.
 
-- On screens with no workspace accent (home, settings, sign-in) the titlebar now uses a subtle neutral grey instead of pure white/black, so the inactive (unfocused) macOS traffic lights stay visible instead of washing out against a same-colored strip. Accent-tinted workspace titlebars are unchanged.
-
 - The home screen's "Minds Settings" and account launchers now open their modals. They post through the content relay, but the main process didn't recognize the shell view (which renders the home screen over a parked workspace) as an event source, so the IPC was silently dropped; the shell view is now included when resolving a sender's window.
 
 - The workspace switcher now highlights the workspace you're currently in even on that workspace's own settings or sharing screens (it keys the current-row marker off the active workspace scope, not just the workspace whose content is displayed).
