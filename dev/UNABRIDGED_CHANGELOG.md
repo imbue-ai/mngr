@@ -4,6 +4,20 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-16
+
+`ci.yml`'s `test-minds-release` job now installs `openssh-server` before the plain-minds-release step and sets `MNGR_LATCHKEY_E2E_TESTS=1` on it, opting in the new `apps/minds/test_latchkey_e2e.py` release test (it runs a throwaway root sshd on the runner to fake a VPS outer host so it needs the sshd binary and is gated behind an explicit opt-in that only this throwaway-runner job sets).
+
+The monorepo lockfile (`uv.lock`) now pins `urwid-readline`, a new dependency the kanpan board uses for readline-style editing in its agent-reply input.
+
+## 2026-07-15
+
+Added `specs/workspace-sync/spec.md`: the design record for end-to-end-encrypted cross-device sync of workspace metadata and secrets (workspace records on the connector, per-account DEKs wrapped by the master password, metadata-only tier for empty passwords, and the one-shot migration off the legacy local files).
+
+The `test-minds-snapshot` CI job now (on `run_minds_release_tests` runs) resolves the per-run CI env's coordinates and SuperTokens admin secrets and forwards them into the offload sandbox as `MINDS_SYNC_E2E_*` env vars, so the new workspace-sync e2e tests can target the real connector; the snapshot offload per-test timeout was raised to 2400s for the lifecycle test.
+
+Added the workspace-sync remote-access design record: `specs/workspace-sync/remote-access.md` (how synced SSH material is materialized so cloud workspaces are fully accessible from any unlocked installation), linked from `specs/workspace-sync/spec.md`, plus the planning blueprint under `blueprint/remote-workspace-ssh-access/`.
+
 ## 2026-07-14
 
 Added a blueprint plan (`blueprint/electron-log-and-crash-page/`) for persisting Electron main-process logs to a new rotated/gzipped `electron.log` (uploaded with bug reports alongside a newly-rotated `minds.log`) and for recovering from renderer death across all three per-window views: a Chrome-style crash page for the workspace content view, a miniaturized in-titlebar error strip with a Reload button for the chrome view, and a silent warm reload for the overlay view. The plan also closes an observability gap by reporting abnormal renderer deaths (`crashed`/`oom`, labeled by view) to Sentry while deliberately not reporting sleep/external kills (`killed`).

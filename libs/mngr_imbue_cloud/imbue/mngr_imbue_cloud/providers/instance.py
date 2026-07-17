@@ -537,11 +537,20 @@ class ImbueCloudProvider(BaseProviderInstance):
         # it from an occasional full ``mngr list``. The leases are already cached from the
         # discovery pass above, so this is a cheap lookup, not a second connector round-trip.
         discovered_host_ids = {host.host_id for host in agents_by_host}
-        host_ssh_infos = [
-            (HostId(lease.host_id), self._build_lease_ssh_info(HostId(lease.host_id), lease))
-            for lease in self._list_leased_hosts_cached()
-            if HostId(lease.host_id) in discovered_host_ids
-        ]
+        host_ssh_infos: list[tuple[HostId, SSHInfo]] = []
+        for lease in self._list_leased_hosts_cached():
+            host_id = HostId(lease.host_id)
+            if host_id not in discovered_host_ids:
+                continue
+            # The advertised endpoint is the container's inner sshd
+            # (vps_address:container_ssh_port), so pin that sshd's host key now.
+            # Unlike the full get_host path this streaming pass never opens the
+            # container over SSH, so nothing else pins it; without this a
+            # consumer that opens a strict SSH connection to the advertised
+            # endpoint (the desktop latchkey reverse tunnel) rejects it as
+            # "not found in known_hosts".
+            self._ensure_container_host_key_known(lease)
+            host_ssh_infos.append((host_id, self._build_lease_ssh_info(host_id, lease)))
         return bounded_result_from_agents_by_host(agents_by_host, host_ssh_infos=host_ssh_infos)
 
     def discover_hosts_and_agents(
@@ -799,6 +808,34 @@ class ImbueCloudProvider(BaseProviderInstance):
         except OSError as exc:
             logger.warning(
                 "imbue_cloud[{}] could not update known_hosts for host {} (vps {}): {}",
+                self.name,
+                host_id,
+                lease.vps_address,
+                exc,
+            )
+
+    def _ensure_container_host_key_known(self, lease: LeasedHostInfo) -> None:
+        """Pin the container sshd's host key the connector recorded, if not already present.
+
+        The streaming discovery path advertises each host's *container* endpoint
+        (``vps_address:container_ssh_port``) as its SSHInfo but, unlike the full
+        ``get_host`` path, never opens that container over SSH -- so nothing else
+        pins the container host key there. A consumer that opens a strict paramiko
+        connection to the advertised endpoint (the desktop latchkey reverse
+        tunnel) would then reject it as ``not found in known_hosts`` whenever the
+        per-host known_hosts file already exists from the outer VPS-root pin but
+        carries no container-port entry. Pinning here keeps the advertised
+        endpoint verifiable. Add-if-absent, and a None key (connector too old) is
+        a no-op, exactly mirroring ``_ensure_outer_host_key_known``.
+        """
+        host_id = HostId(lease.host_id)
+        try:
+            self._ensure_host_key_pinned(
+                host_id, lease.vps_address, lease.container_ssh_port, lease.container_host_public_key
+            )
+        except OSError as exc:
+            logger.warning(
+                "imbue_cloud[{}] could not update known_hosts for container endpoint of host {} (vps {}): {}",
                 self.name,
                 host_id,
                 lease.vps_address,

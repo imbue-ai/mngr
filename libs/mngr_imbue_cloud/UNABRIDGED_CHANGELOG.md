@@ -4,6 +4,16 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-16
+
+Fixed a bug where the streaming discovery path (which feeds `mngr observe` and, through it, the desktop-side Latchkey reverse tunnel) advertised each leased host's inner-container SSH endpoint (`vps_address:container_ssh_port`) without pinning that container sshd's host key in the per-host `known_hosts` file.
+
+Because the same discovery pass already pins the outer VPS-root key (creating the `known_hosts` file), a consumer opening a strict host-key-checked SSH connection to the advertised container endpoint could fail with `Server '[<vps_address>]:<container_ssh_port>' not found in known_hosts` (surfaced as recurring Sentry events from `mngr latchkey forward`). Streaming discovery now pins the connector-recorded container host key for the advertised endpoint (add-if-absent, and a no-op when the connector did not provide the key), matching the full `get_host` path.
+
+## 2026-07-15
+
+Added the `mngr imbue_cloud sync ...` transport CLI (records pull/push/delete, scrub-secrets, bundle pull/push/delete) plus the matching connector-client methods and wire models. Pure transport for the minds workspace-sync feature: the plugin never encrypts, decrypts, or interprets the secret payloads. Push commands accept `--input-file` so payloads never ride a command line.
+
 ## 2026-07-14
 
 Agent listings from this provider now populate `AgentDetails.pid` (the agent's main process PID in the remote host's PID namespace), extracted from the same already-collected tmux/ps probe data.

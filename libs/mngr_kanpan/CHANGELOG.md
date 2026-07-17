@@ -6,9 +6,18 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Attach, peek, and reply to the focused agent from the kanpan board. `Enter` attaches to the agent's tmux session and restores the board on detach (`Ctrl-b d`). `Space` opens a live bordered peek panel below the board showing the agent's recent user/assistant conversation via `mngr transcript --role user --role assistant`, refreshed every couple of seconds; tool calls and framework-injected turns don't appear, so the peek reads like the human conversation. Type into the panel's `›` input and press `Enter` to send a message to the agent (the send runs in the background via `mngr message`; your reply is echoed as a `›` line immediately and replaced by the real message once the agent accepts it, so several replies typed in a row deliver in order; a failed send drops the echo and renders a `(reply failed: ...)` line). The reply input supports readline-style editing via `urwid_readline` (word movement/delete, jump-to-start/end, kill-to-start/end). A `?` overlay lists the full keymap; the footer shows a relative refresh stamp on the left and the core keys on the right.
+
 ### Changed
 
 - Changed: `[plugins.kanpan]`'s six dict fields (`commands`, `data_sources`, `shell_commands`, `columns`, `on_before_refresh`, `on_after_refresh`) no longer auto-union across config scopes (user < project < local). A higher-precedence scope assigns by default and raises the standard flag-gated settings-narrowing error when it would drop a lower-scope key. Use `__extend` to merge additively, or `key__assign` / `allow_settings_key_assignment_narrowing = true` to opt out of the guard. Purely additive cross-scope overrides still load unchanged.
+- Changed: Kanpan sets the terminal title (`kanpan`) while running, re-takes it after you detach from an attached agent session, and restores the previous title on exit in terminals that support the title stack.
+
+### Fixed
+
+- Fixed: Row focus highlight is now one continuous band across muted and stale cells (previously inverting their dim gray punched dark holes in it).
 
 ## [v0.2.17] - 2026-06-18
 

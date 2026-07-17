@@ -15,6 +15,7 @@ from pydantic import Field
 from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostNotFoundError
@@ -33,6 +34,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ImageReference
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.providers.ssh_utils import format_as_known_hosts_address
 from imbue.mngr_imbue_cloud.config import ImbueCloudProviderConfig
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
 from imbue.mngr_imbue_cloud.data_types import LeasedHostInfo
@@ -596,6 +598,42 @@ def test_discover_within_timeouts_attaches_lease_ssh_info(temp_mngr_ctx: MngrCon
     assert ssh_info.host == lease.vps_address
     assert ssh_info.port == lease.container_ssh_port
     assert ssh_info.user == lease.ssh_user
+
+
+def test_discover_within_timeouts_pins_container_host_key(temp_mngr_ctx: MngrContext) -> None:
+    """Streaming discovery pins the advertised container endpoint's host key into the per-host
+    known_hosts. Without this the desktop latchkey reverse tunnel opens a strict SSH connection
+    to vps_address:container_ssh_port and rejects it as 'not found in known_hosts'."""
+    host_id = HostId.generate()
+    base_lease = _make_lease(host_id)
+    lease = base_lease.model_copy_update(
+        to_update(base_lease.field_ref().container_host_public_key, "ssh-ed25519 AAAAcontainerkey"),
+    )
+    discovered_host = DiscoveredHost(
+        host_id=host_id,
+        host_name=HostName(lease.host_name),
+        provider_name=ProviderInstanceName("imbue-cloud-test"),
+        host_state=HostState.RUNNING,
+    )
+    provider = _HostSshInfoProvider.model_construct(
+        name=ProviderInstanceName("imbue-cloud-test"),
+        mngr_ctx=temp_mngr_ctx,
+        _lease=lease,
+        _discovered_host=discovered_host,
+    )
+
+    provider.discover_hosts_and_agents_within_timeouts(
+        cg=temp_mngr_ctx.concurrency_group,
+        host_discovery_timeout_seconds=30.0,
+        agent_discovery_timeout_seconds=30.0,
+    )
+
+    # The advertised container endpoint ([vps_address]:container_ssh_port) must have a matching
+    # known_hosts entry carrying the connector-recorded container host key.
+    contents = provider._host_known_hosts_path(host_id).read_text()
+    container_entry_prefix = format_as_known_hosts_address(lease.vps_address, lease.container_ssh_port)
+    assert any(line.startswith(f"{container_entry_prefix} ") for line in contents.splitlines())
+    assert "AAAAcontainerkey" in contents
 
 
 class _CannedListingProvider(ImbueCloudProvider):

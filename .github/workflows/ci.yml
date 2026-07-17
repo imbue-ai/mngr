@@ -1121,6 +1121,15 @@ jobs:
       - name: Install Playwright Chromium (for the SSE-redirect release test)
         if: ${{ !cancelled() }}
         run: uv run playwright install --with-deps chromium
+      # test_latchkey_e2e runs a throwaway root sshd on the runner (its fake
+      # "VPS" is the runner itself reached as root over loopback SSH), so it
+      # needs the sshd binary. The runner image does not guarantee
+      # openssh-server, so install it explicitly (idempotent when present).
+      - name: Install openssh-server (for the latchkey e2e release test)
+        if: ${{ !cancelled() }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openssh-server
       - name: Run plain minds release tests (no ci env needed)
         if: ${{ !cancelled() }}
         # Clear apps/minds's addopts (pytest picks up apps/minds/pyproject.toml
@@ -1128,4 +1137,12 @@ jobs:
         # too tight for these release tests (test_sse_redirect launches a browser
         # and waits on an SSE redirect; the version-alignment test does a network
         # fetch). Set an explicit, generous per-test timeout instead.
+        #
+        # MNGR_LATCHKEY_E2E_TESTS opts in test_latchkey_e2e (it runs a root
+        # sshd and installs packages on the machine, so it never runs
+        # un-opted-in on a developer box; the throwaway runner is exactly the
+        # environment it wants). Per-test @pytest.mark.timeout markers
+        # override the --timeout=300 CLI value where a test needs more.
+        env:
+          MNGR_LATCHKEY_E2E_TESTS: "1"
         run: uv run pytest apps/minds --override-ini='addopts=' --no-cov -p no:xdist --timeout=300 -v -m 'release and not minds_deployment and not minds_services and not minds_snapshot_resume'
