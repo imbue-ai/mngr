@@ -4,6 +4,26 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-16
+
+Fixed a shutdown race where the background workspace-record sync loop could crash with `MngrCallerNotInitializedError`. During graceful shutdown the shared mngr caller was torn down while the sync loop was still running, so a pass that was mid-`mngr` call raced the teardown. Shutdown now stops the sync loop and waits for any in-flight pass to finish before tearing down the mngr caller.
+
+Add `apps/minds/test_latchkey_e2e.py`, an opt-in (`MNGR_LATCHKEY_E2E_TESTS=1`) release test that exercises the full Latchkey remote-workspace auth flow end to end without any cloud credentials. It fakes a VPS by running a throwaway root sshd on the local machine and pointing a `[providers.docker]` block at `ssh://root@127.0.0.1:<port>`, which makes the workspace's outer host genuinely "remote" from latchkey's perspective and drives all the real code paths: VPS gateway provisioning, the VPS->container reverse tunnel, and the credential/permission remote-state sync.
+
+The test asserts, from inside the workspace via `mngr exec`: (a) the desktop latchkey gateway answers `GET /permissions/self` on `LATCHKEY_GATEWAY`; (b) the secondary (VPS-resident) gateway is reachable on `LATCHKEY_GATEWAY_SECONDARY` and enforces the shared desktop-derived password; and (c) editing the workspace's local `latchkey_permissions.json` (granting `slack-api` with slack credentials pre-seeded) automatically syncs both `permissions.json` and the filtered `credentials.json.enc` onto the VPS outer host.
+
+The test runs in CI only via the manual `run_minds_release_tests` workflow dispatch (the plain-minds-release step of the `test-minds-release` job), which opts it in explicitly.
+
+Fixed: dev-mode launches (`pnpm start` / `just minds-start`) now pass `MINDS_RESTIC_BINARY` to the Python backend, pointing at the pinned restic that the prestart hook already downloads into `apps/minds/resources/restic/`. Previously only packaged builds set it, so from-source backends fell back to `restic` on PATH and backup provisioning failed on any machine without a system restic (macOS devs were masked by brew's).
+
+Fixed: `scripts/ensure-binaries.js` now includes desync in its required-binaries check, so a partially populated `resources/` directory (e.g. from a checkout that predates the desync bundling) gets desync downloaded instead of being skipped.
+
+Fixed: creating a workspace from a plain local directory (a non-worktree clone) with an explicit branch no longer runs `git checkout -B <branch> FETCH_HEAD` in the user's own template checkout. On a fresh clone (no FETCH_HEAD) this failed with "'FETCH_HEAD' is not a commit", and with a stale FETCH_HEAD it would silently reset the user's branch tip. Plain local directories now use a new `checkout_existing_branch` (no-op when already on the branch, plain `git checkout <branch>` otherwise); scratch clones keep the FETCH_HEAD-based path.
+
+Added: `docs/wsl.md`, a verified recipe for running the full minds stack (the Electron desktop app via WSLg, the backend, mngr, and Docker workspaces under gVisor) inside WSL2 on Windows, including the `just minds-start` launch flow (loginctl lingering for the `just` runtime dir, WSLg display) and the WSL-specific gotchas: distro auto-termination (keepalive task), the headless latchkey install, the runsc `--overlay2=none` registration, the grandparent-death watcher vs daemonization, and the CSS build.
+
+Added: `scripts/install-wsl.sh`, an idempotent one-line bring-up of the minds desktop app inside a WSL2 distro: preflight checks with actionable errors (WSL1, missing systemd, non-apt distro, low disk, `/mnt/` install dirs, Docker Desktop integration), installation of every dependency (apt basics + Electron libraries, Docker CE, lingering, uv, just, nvm/node/pnpm/latchkey at the repo's pins), a clone of mngr at the latest `minds-v*` tag (`--version`/`--dev` for development), a generated `minds-wsl-start` launcher, a "Minds (WSL)" Windows desktop shortcut, and a final launch. The launcher defaults new workspaces to the `runc` Docker runtime under WSL (via the existing `MINDS_DOCKER_RUNTIME_DEFAULT` override) -- the WSL2 VM is the container/Windows isolation boundary, matching the macOS posture -- with gVisor remaining a per-create opt-in. `docs/wsl.md` was restructured around the one-liner.
+
 ## 2026-07-15
 
 Fixed tooltips being clipped on their right side and modal overlays (get help, inbox, workspace menu, sign-in) leaving an un-dimmed strip at the window's right edge on Macs with always-visible ("classic") scrollbars.
