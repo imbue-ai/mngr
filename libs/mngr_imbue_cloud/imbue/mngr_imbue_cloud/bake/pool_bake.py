@@ -76,9 +76,10 @@ _SENTINEL_WAIT_TIMEOUT_SECONDS: Final[int] = 480
 # Exit code GNU ``timeout`` returns when it kills the wrapped command on timeout.
 _COMMAND_TIMEOUT_EXIT_CODE: Final[int] = 124
 
-# The DEFAULT_WORKSPACE_TEMPLATE ``deferred-install`` service writes this marker on success; the bake waits
-# for it (see ``wait_for_deferred_install``) before stopping the services agent.
-_DEFERRED_INSTALL_MARKER: Final[str] = "/var/lib/minds/deferred-install/done.playwright"
+# The DEFAULT_WORKSPACE_TEMPLATE ``deferred-install`` service writes this marker on success (the final one --
+# CloakBrowser itself, after the apt-deps marker); the bake waits for it (see
+# ``wait_for_deferred_install``) before stopping the services agent.
+_DEFERRED_INSTALL_MARKER: Final[str] = "/var/lib/minds/deferred-install/done.cloakbrowser"
 # Cap on how long the bake blocks for the deferred install (heavy apt + browser
 # download) to finish; on timeout the bake proceeds and the install retries on lease.
 _DEFERRED_INSTALL_WAIT_TIMEOUT_SECONDS: Final[int] = 900

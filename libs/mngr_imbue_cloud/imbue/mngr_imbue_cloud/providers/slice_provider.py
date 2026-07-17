@@ -60,22 +60,35 @@ _SLICE_PLAN: str = "slice"
 # DEFAULT_WORKSPACE_TEMPLATE image tar -- the box boot disk is shared, so fail early rather than fill it.
 _ESTIMATED_DEFAULT_WORKSPACE_TEMPLATE_IMAGE_BYTES: Final[int] = 15 * 1024**3
 # Generous cap for the seeding slice's base DEFAULT_WORKSPACE_TEMPLATE image build (the inner create budget
-# is 45 min; the build is the long pole, the Playwright derive + save the rest).
+# is 45 min; the build is the long pole, the CloakBrowser derive + save the rest).
 _SEED_BASE_BUILD_TIMEOUT_SECONDS: Final[float] = 1800.0
-# The Playwright-derived image RUNs a chromium download + apt; retry transient
-# failures a few times before hard-failing the seed.
-_PLAYWRIGHT_BUILD_ATTEMPTS: Final[int] = 3
-_PLAYWRIGHT_BUILD_TIMEOUT_SECONDS: Final[float] = 900.0
-_PLAYWRIGHT_CTX_DIR: Final[str] = "/tmp/default-workspace-template-playwright-ctx"
+# The CloakBrowser-derived image RUNs an apt install + a pinned binary download; retry
+# transient failures a few times before hard-failing the seed.
+_CLOAKBROWSER_BUILD_ATTEMPTS: Final[int] = 3
+_CLOAKBROWSER_BUILD_TIMEOUT_SECONDS: Final[float] = 900.0
+_CLOAKBROWSER_CTX_DIR: Final[str] = "/tmp/default-workspace-template-cloakbrowser-ctx"
+# Pinned CloakBrowser release -- keep in sync with default-workspace-template's
+# scripts/deferred_install.sh (_CLOAKBROWSER_VERSION / _CLOAKBROWSER_SHA256_X64).
+# Cloud slices are x86_64 bare metal only (see DEFAULT_IMAGE_URL_X86_64), so this
+# bakes the x64 asset only -- no arch branching needed here.
+_CLOAKBROWSER_VERSION: Final[str] = "chromium-v146.0.7680.177.4"
+_CLOAKBROWSER_RELEASE_URL: Final[str] = (
+    f"https://github.com/CloakHQ/CloakBrowser/releases/download/{_CLOAKBROWSER_VERSION}"
+)
+_CLOAKBROWSER_SHA256_X64: Final[str] = "5af027faafb1fef9933eb784c094b764706de22a372a2cee84bc117fc4ab537f"
+_CLOAKBROWSER_INSTALL_DIR: Final[str] = "/opt/cloakbrowser"
 _BUILDER_PRUNE_TIMEOUT_SECONDS: Final[float] = 120.0
 # The DEFAULT_WORKSPACE_TEMPLATE Dockerfile relocates the built workspace here (off the /mngr volume mount)
-# before first boot; the Playwright derive runs ``uv run`` from it. This is a DEFAULT_WORKSPACE_TEMPLATE image
+# before first boot; the CloakBrowser derive runs ``uv run`` from it. This is a DEFAULT_WORKSPACE_TEMPLATE image
 # contract -- if DEFAULT_WORKSPACE_TEMPLATE moves it, the derive's guard fails fast with a clear message.
 _DEFAULT_WORKSPACE_TEMPLATE_BUILD_CODE_DIR: Final[str] = "/docker_build_code"
-# Where the DEFAULT_WORKSPACE_TEMPLATE deferred-install service writes its success marker; baking it into
-# the seeded image makes ``[program:deferred-install]`` a no-op on every loaded slice.
+# Where the DEFAULT_WORKSPACE_TEMPLATE deferred-install service writes its success markers; baking both
+# into the seeded image makes ``[program:deferred-install]`` a no-op on every loaded slice.
+# Two markers, matching default-workspace-template's scripts/deferred_install.sh split:
+# apt libs, then the CloakBrowser binary itself (the one deferred_install_ready() gates on).
 _DEFERRED_INSTALL_MARKER_DIR: Final[str] = "/var/lib/minds/deferred-install"
-_DEFERRED_INSTALL_MARKER: Final[str] = f"{_DEFERRED_INSTALL_MARKER_DIR}/done.playwright"
+_DEFERRED_INSTALL_DEPS_MARKER: Final[str] = f"{_DEFERRED_INSTALL_MARKER_DIR}/done.playwright_deps"
+_DEFERRED_INSTALL_MARKER: Final[str] = f"{_DEFERRED_INSTALL_MARKER_DIR}/done.cloakbrowser"
 
 
 class SliceVpsDockerProviderConfig(VpsProviderConfig):
@@ -444,7 +457,7 @@ class SliceVpsDockerProvider(VpsProvider):
         image_tag: str,
         build_args: Sequence[str] | None,
     ) -> None:
-        """Build the DEFAULT_WORKSPACE_TEMPLATE image (+ baked Playwright) and seed the box tar; this slice runs that image too."""
+        """Build the DEFAULT_WORKSPACE_TEMPLATE image (+ baked CloakBrowser) and seed the box tar; this slice runs that image too."""
         logger.info("Building + seeding box tar {} (first slice on this box for this tag)", image_tag)
         parsed = self._parse_build_args(build_args)
         # Build the base DEFAULT_WORKSPACE_TEMPLATE image via the same shared helper the realizer's build path
@@ -461,7 +474,7 @@ class SliceVpsDockerProvider(VpsProvider):
             builder=self.config.builder,
             build_timeout_seconds=_SEED_BASE_BUILD_TIMEOUT_SECONDS,
         )
-        self._build_playwright_derived_image(outer=outer, base_image=base_image, target_tag=image_tag)
+        self._build_cloakbrowser_derived_image(outer=outer, base_image=base_image, target_tag=image_tag)
         cache.check_free_disk(_ESTIMATED_DEFAULT_WORKSPACE_TEMPLATE_IMAGE_BYTES)
         with self._transfer_key_authorized(cache, outer) as transfer_key:
             cache.save_image_from_slice(image_tag, vm_ssh_port=vm_ssh_port, transfer_key=transfer_key)
@@ -471,58 +484,73 @@ class SliceVpsDockerProvider(VpsProvider):
 
     @retry(
         retry=retry_if_exception_type(MngrError),
-        stop=stop_after_attempt(_PLAYWRIGHT_BUILD_ATTEMPTS),
+        stop=stop_after_attempt(_CLOAKBROWSER_BUILD_ATTEMPTS),
         wait=wait_exponential(multiplier=1, min=1, max=10),
         reraise=True,
     )
-    def _build_playwright_derived_image(self, *, outer: OuterHostInterface, base_image: str, target_tag: str) -> None:
-        """Build target_tag as base_image + a baked Playwright/Chromium layer (and the done marker).
+    def _build_cloakbrowser_derived_image(self, *, outer: OuterHostInterface, base_image: str, target_tag: str) -> None:
+        """Build target_tag as base_image + a baked CloakBrowser layer (and the done markers).
 
-        Playwright is deliberately not in the DEFAULT_WORKSPACE_TEMPLATE Dockerfile (it is shared with the
+        CloakBrowser is deliberately not in the DEFAULT_WORKSPACE_TEMPLATE Dockerfile (it is shared with the
         desktop Lima path); baking it cloud-side here keeps the desktop path
-        unchanged while letting every loaded slice skip the deferred install. The
-        browser cache lands in /root/.cache/ms-playwright -- outside the /mngr volume
-        and untouched by default-workspace-template-seed, so it survives into every container.
+        unchanged while letting every loaded slice skip the deferred install. It
+        lands at /opt/cloakbrowser -- outside the /mngr volume and untouched by
+        default-workspace-template-seed, so it survives into every container.
 
         The RUN first guards that the DEFAULT_WORKSPACE_TEMPLATE build-code dir exists, so a future DEFAULT_WORKSPACE_TEMPLATE image
         that relocates it fails fast with a clear message instead of a confusing
         ``cd``-not-found build failure buried in retries.
 
-        Playwright is invoked as ``python -m playwright`` (not the ``playwright``
-        console script) on purpose: the DEFAULT_WORKSPACE_TEMPLATE Dockerfile builds the uv venv at
-        ``/mngr/code`` and then ``mv``\\s the workspace to ``/docker_build_code``. A uv
-        venv is path-bound -- its console-script shebangs hardcode
-        ``/mngr/code/.venv/bin/python``, which does not exist here, so ``uv run
-        playwright`` would fail with ``Failed to spawn: playwright``. ``python -m``
-        goes through the venv's interpreter symlink (location-independent), so it works
-        from the relocated path. (DEFAULT_WORKSPACE_TEMPLATE's own deferred-install runs the console script,
-        but only at runtime after default-workspace-template-seed restores the workspace to ``/mngr/code``.)
+        Playwright's own apt-only ``install-deps`` step is invoked as ``python -m
+        playwright`` (not the ``playwright`` console script) on purpose: the
+        DEFAULT_WORKSPACE_TEMPLATE Dockerfile builds the uv venv at ``/mngr/code`` and then ``mv``\\s the
+        workspace to ``/docker_build_code``. A uv venv is path-bound -- its
+        console-script shebangs hardcode ``/mngr/code/.venv/bin/python``, which does
+        not exist here, so ``uv run playwright`` would fail with ``Failed to spawn:
+        playwright``. ``python -m`` goes through the venv's interpreter symlink
+        (location-independent), so it works from the relocated path.
+        (DEFAULT_WORKSPACE_TEMPLATE's own deferred-install runs the console script, but only at runtime
+        after default-workspace-template-seed restores the workspace to ``/mngr/code``.) CloakBrowser
+        itself is a plain pinned-release curl + sha256 + tar, no venv involved.
         """
         guard = (
             f"test -d {_DEFAULT_WORKSPACE_TEMPLATE_BUILD_CODE_DIR} || "
             f"{{ echo 'DEFAULT_WORKSPACE_TEMPLATE build-code dir {_DEFAULT_WORKSPACE_TEMPLATE_BUILD_CODE_DIR} missing; DEFAULT_WORKSPACE_TEMPLATE image layout changed -- "
             "update _DEFAULT_WORKSPACE_TEMPLATE_BUILD_CODE_DIR' >&2; exit 1; }"
         )
+        # Cloud slices are x86_64 bare metal only -- one asset, no arch branching
+        # (contrast default-workspace-template's own deferred_install.sh, which also covers desktop arm64).
+        asset = "cloakbrowser-linux-x64.tar.gz"
+        install_cloakbrowser = (
+            f"curl -fsSL -o /tmp/{asset} {_CLOAKBROWSER_RELEASE_URL}/{asset} "
+            f"&& echo '{_CLOAKBROWSER_SHA256_X64}  /tmp/{asset}' | sha256sum -c - "
+            f"&& mkdir -p {_CLOAKBROWSER_INSTALL_DIR} "
+            f"&& tar xzf /tmp/{asset} -C {_CLOAKBROWSER_INSTALL_DIR} "
+            f"&& chmod +x {_CLOAKBROWSER_INSTALL_DIR}/chrome "
+            f"&& rm /tmp/{asset}"
+        )
         dockerfile = (
             f"FROM {base_image}\n"
             f"RUN {guard} "
-            f"&& cd {_DEFAULT_WORKSPACE_TEMPLATE_BUILD_CODE_DIR} && uv run python -m playwright install --with-deps chromium "
-            f"&& mkdir -p {_DEFERRED_INSTALL_MARKER_DIR} && touch {_DEFERRED_INSTALL_MARKER}\n"
+            f"&& cd {_DEFAULT_WORKSPACE_TEMPLATE_BUILD_CODE_DIR} && uv run python -m playwright install-deps chromium "
+            f"&& mkdir -p {_DEFERRED_INSTALL_MARKER_DIR} && touch {_DEFERRED_INSTALL_DEPS_MARKER} "
+            f"&& {install_cloakbrowser} "
+            f"&& touch {_DEFERRED_INSTALL_MARKER}\n"
         )
         encoded_dockerfile = base64.b64encode(dockerfile.encode()).decode()
         stage_command = (
-            f"rm -rf {_PLAYWRIGHT_CTX_DIR} && mkdir -p {_PLAYWRIGHT_CTX_DIR} && "
-            f"echo {shlex.quote(encoded_dockerfile)} | base64 -d > {_PLAYWRIGHT_CTX_DIR}/Dockerfile"
+            f"rm -rf {_CLOAKBROWSER_CTX_DIR} && mkdir -p {_CLOAKBROWSER_CTX_DIR} && "
+            f"echo {shlex.quote(encoded_dockerfile)} | base64 -d > {_CLOAKBROWSER_CTX_DIR}/Dockerfile"
         )
         stage_result = outer.execute_idempotent_command(stage_command, timeout_seconds=30.0)
         if not stage_result.success:
             raise BoxImageCacheError(
-                f"failed to stage the Playwright Dockerfile on the slice: {stage_result.stderr.strip()}"
+                f"failed to stage the CloakBrowser Dockerfile on the slice: {stage_result.stderr.strip()}"
             )
         run_docker(
             outer,
-            ["build", "-t", target_tag, "-f", f"{_PLAYWRIGHT_CTX_DIR}/Dockerfile", _PLAYWRIGHT_CTX_DIR],
-            timeout_seconds=_PLAYWRIGHT_BUILD_TIMEOUT_SECONDS,
+            ["build", "-t", target_tag, "-f", f"{_CLOAKBROWSER_CTX_DIR}/Dockerfile", _CLOAKBROWSER_CTX_DIR],
+            timeout_seconds=_CLOAKBROWSER_BUILD_TIMEOUT_SECONDS,
         )
 
     @contextmanager

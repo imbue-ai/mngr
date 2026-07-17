@@ -80,7 +80,7 @@ def test_wait_for_deferred_install_polls_for_marker_or_finished_process() -> Non
     assert [label for label, _cmd in runner.calls] == ["deferred-install-wait"]
     command = runner.calls[0][1]
     # The poll checks the success marker and uses a bracketed pgrep pattern (self-match guard).
-    assert "done.playwright" in command
+    assert "done.cloakbrowser" in command
     assert "[d]eferred_install.sh" in command
     assert "timeout 5" in command
 

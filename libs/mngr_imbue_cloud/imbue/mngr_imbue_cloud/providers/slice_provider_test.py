@@ -16,9 +16,10 @@ from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
 from imbue.mngr_imbue_cloud.errors import BoxImageCacheError
 from imbue.mngr_imbue_cloud.providers.slice_provider import SliceVpsDockerProvider
+from imbue.mngr_imbue_cloud.providers.slice_provider import _CLOAKBROWSER_CTX_DIR
 from imbue.mngr_imbue_cloud.providers.slice_provider import _DEFAULT_WORKSPACE_TEMPLATE_BUILD_CODE_DIR
+from imbue.mngr_imbue_cloud.providers.slice_provider import _DEFERRED_INSTALL_DEPS_MARKER
 from imbue.mngr_imbue_cloud.providers.slice_provider import _DEFERRED_INSTALL_MARKER
-from imbue.mngr_imbue_cloud.providers.slice_provider import _PLAYWRIGHT_CTX_DIR
 from imbue.mngr_imbue_cloud.slices.box_image_cache import BoxImageCacheInterface
 from imbue.mngr_imbue_cloud.slices.mock_box_image_cache_test import MockBoxImageCache
 
@@ -134,14 +135,14 @@ class _RecordingOuter(MutableModel):
         return CommandResult(stdout="", stderr="", success=True)
 
 
-def test_build_playwright_derived_image_renders_marker_and_build_command() -> None:
+def test_build_cloakbrowser_derived_image_renders_marker_and_build_command() -> None:
     provider = SliceVpsDockerProvider.model_construct()
     outer = _RecordingOuter()
-    provider._build_playwright_derived_image(
+    provider._build_cloakbrowser_derived_image(
         outer=cast(OuterHostInterface, outer), base_image="mngr-build-xyz", target_tag=_TAG
     )
     # The staged context Dockerfile is shipped base64-encoded; decode it and assert the
-    # baked-Playwright + deferred-install-marker contract every loaded slice relies on.
+    # baked-CloakBrowser + deferred-install-marker contract every loaded slice relies on.
     stage_command = next(c for c in outer.recorded if "base64 -d" in c)
     encoded = stage_command.split("echo ")[1].split(" | base64 -d")[0].strip().strip("'")
     dockerfile = base64.b64decode(encoded).decode()
@@ -149,8 +150,11 @@ def test_build_playwright_derived_image_renders_marker_and_build_command() -> No
     # Must invoke playwright via ``python -m`` (not the ``playwright`` console script): the DEFAULT_WORKSPACE_TEMPLATE
     # venv is built at /mngr/code and ``mv``\\d to /docker_build_code, so the script's hardcoded
     # shebang is broken here -- only the interpreter (reached via ``python -m``) is relocatable.
-    assert "uv run python -m playwright install --with-deps chromium" in dockerfile
+    assert "uv run python -m playwright install-deps chromium" in dockerfile
+    assert _DEFERRED_INSTALL_DEPS_MARKER in dockerfile
     assert _DEFERRED_INSTALL_MARKER in dockerfile
+    assert "cloakbrowser-linux-x64.tar.gz" in dockerfile
+    assert "sha256sum -c -" in dockerfile
     # Guards the DEFAULT_WORKSPACE_TEMPLATE build-code path so a relocated layout fails fast with a clear message.
     assert f"test -d {_DEFAULT_WORKSPACE_TEMPLATE_BUILD_CODE_DIR}" in dockerfile
     # The RUN body must be valid shell -- catches f-string brace-escaping bugs in the guard.
@@ -159,7 +163,7 @@ def test_build_playwright_derived_image_renders_marker_and_build_command() -> No
     assert syntax_check.returncode == 0, syntax_check.stderr
     build_command = next(c for c in outer.recorded if "docker build" in c)
     assert _TAG in build_command
-    assert f"{_PLAYWRIGHT_CTX_DIR}/Dockerfile" in build_command
+    assert f"{_CLOAKBROWSER_CTX_DIR}/Dockerfile" in build_command
 
 
 def test_transfer_key_authorize_and_deauthorize_render_expected_commands() -> None:
