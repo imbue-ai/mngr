@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Final
 
 from flask import has_app_context
+from flask import has_request_context
 from flask import request
 from jinja2 import Environment
 from jinja2 import select_autoescape
@@ -183,32 +184,39 @@ def _frontend_sentry_browser_payload() -> dict[str, str] | None:
 
 
 def _chrome_is_mac() -> bool:
-    """Catalog-global resolving whether the request's User-Agent indicates macOS.
+    """Resolve whether the request's User-Agent indicates macOS.
 
-    The shared ChromeShell titlebar (now on every trusted page, not just the
-    chrome shell) gates its macOS styling (traffic-light spacer, hidden window
-    controls) on this. Resolved per render from the live request rather than
-    threaded through every page's render function. Outside a request (e.g.
-    template unit tests) it defaults to False.
+    Canonical implementation shared by the ChromeShell catalog global (below) and
+    ``app.py``'s ``_get_is_mac`` -- keep them from drifting by having both go
+    through here. The shared ChromeShell titlebar (now on every trusted page, not
+    just the chrome shell) gates its macOS styling (traffic-light spacer, hidden
+    window controls) on this. Reads ``request.headers``, so it guards on
+    ``has_request_context()`` (NOT ``has_app_context()`` -- inside an app context
+    without a request, ``request`` access raises RuntimeError); outside a request
+    (e.g. template unit tests) it defaults to False.
     """
-    if not has_app_context():
+    if not has_request_context():
         return False
     user_agent = request.headers.get("user-agent", "")
     return "Macintosh" in user_agent or "Mac OS" in user_agent
 
 
 def _chrome_mngr_forward_origin() -> str:
-    """Catalog-global resolving the bare origin of the ``mngr forward`` plugin.
+    """Resolve the bare origin of the ``mngr forward`` plugin.
 
-    Exposed to ChromeShell so any trusted page's titlebar carries the
-    ``data-mngr-forward-origin`` attribute chrome.js reads to build
-    ``/goto/<agent>/`` links, without threading it through each render function.
-    Outside a request (e.g. template unit tests) it defaults to an empty string.
+    Canonical implementation shared by the ChromeShell catalog global (below) and
+    ``app.py``'s ``_get_mngr_forward_origin``. Exposed to ChromeShell so any
+    trusted page's titlebar carries the ``data-mngr-forward-origin`` attribute
+    chrome.js reads to build ``/goto/<agent>/`` links, without threading it through
+    each render function. minds always runs the proxy with TLS + HTTP/2, so the
+    scheme is ``https`` and the rendered links reach it rather than failing a
+    plaintext request against the TLS listener. Outside an app context (e.g.
+    template unit tests) it defaults to an empty string.
     """
     if not has_app_context():
         return ""
     port = get_state().mngr_forward_port or 8421
-    return f"http://localhost:{port}"
+    return f"https://localhost:{port}"
 
 
 def _build_catalog() -> Catalog:

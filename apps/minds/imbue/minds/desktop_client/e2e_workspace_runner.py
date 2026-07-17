@@ -974,10 +974,9 @@ _TERMINAL_IFRAME_SELECTOR: Final[str] = 'iframe[src*="/service/terminal/"]'
 _CHAT_INPUT_TIMEOUT_SECONDS: Final[int] = 240
 _CHAT_REPLY_TIMEOUT_SECONDS: Final[int] = 240
 _DESTROY_TIMEOUT_SECONDS: Final[int] = 300
-# The chrome Home button's handler is attached by chrome.js after the chrome
-# view loads (and that view reloads several times during the flow); an early
-# click can land before the handler is wired and silently no-op, so we re-pick
-# the chrome view and retry, allowing _NAV_SETTLE_SECONDS for each click to take.
+# The titlebar Home button's handler is attached by chrome.js after each local
+# page loads; an early click can land before the handler is wired and silently
+# no-op, so we retry, allowing _NAV_SETTLE_SECONDS for each click to take.
 _HOME_CLICK_ATTEMPTS: Final[int] = 6
 _NAV_SETTLE_SECONDS: Final[int] = 12
 
@@ -995,22 +994,6 @@ def _flow_screenshot(page: Page, name: str) -> None:
         logger.info("Saved screenshot {}", path)
     except (PlaywrightError, OSError) as exc:
         logger.warning("Could not screenshot {}: {!r}", name, exc)
-
-
-def _pick_chrome_page(browser: Browser, timeout_seconds: int) -> Page:
-    """Return the Electron chrome WebContentsView (the ``/_chrome`` page)."""
-    deadline = time.monotonic() + timeout_seconds
-    observed: list[str] = []
-    while time.monotonic() < deadline:
-        observed = []
-        for context in browser.contexts:
-            for page in context.pages:
-                observed.append(page.url)
-                if _CHROME_PATH_PATTERN.match(page.url):
-                    logger.info("Picked Electron chrome page at {}", page.url)
-                    return page
-        threading.Event().wait(timeout=0.5)
-    raise WorkspaceFlowError(f"No /_chrome page within {timeout_seconds}s; observed: {observed}")
 
 
 def drive_create_docker_imbue_workspace(
@@ -1168,20 +1151,22 @@ def _verify_v1_lifecycle(content_page: Page, backend_origin: str, agent_id: str)
     _flow_screenshot(content_page, "05b-lifecycle")
 
 
-def _navigate_home(browser: Browser, content_page: Page, backend_origin: str, workspace_name: str) -> None:
-    """Click the chrome Home button (re-picking the chrome view + retrying) and confirm the content view lands home.
+def _navigate_home(content_page: Page, backend_origin: str, workspace_name: str) -> None:
+    """Click the titlebar Home button on the chrome-view page and confirm it lands home.
 
-    The chrome view is a separate WebContentsView whose ``#home-btn`` handler is
-    wired by chrome.js after load, and the chrome view reloads several times
-    during the flow -- so we re-pick it fresh each attempt and retry the click,
-    polling the content view's URL for the landing navigation.
+    After the content-in-chrome split the chrome view IS ``content_page`` -- it
+    hosts the trusted local pages and the ChromeShell titlebar, so there is no
+    separate ``/_chrome`` page for local screens to re-pick (the only ``/_chrome``
+    page left is the always-warm modal overlay, which has no ``#home-btn``). The
+    ``#home-btn`` handler is wired by chrome.js after each local page loads, so an
+    early click can no-op -- retry, polling ``content_page``'s URL for the landing
+    navigation.
     """
     landing_targets = (backend_origin + "/", backend_origin)
     for attempt in range(1, _HOME_CLICK_ATTEMPTS + 1):
-        chrome_page = _pick_chrome_page(browser, 15)
         try:
-            chrome_page.wait_for_selector("#home-btn", state="visible", timeout=10_000)
-            chrome_page.click("#home-btn")
+            content_page.wait_for_selector("#home-btn", state="visible", timeout=10_000)
+            content_page.click("#home-btn")
         except (PlaywrightError, TimeoutError) as exc:
             logger.warning("Home-button click attempt {} failed: {!r}", attempt, exc)
             continue
@@ -1201,7 +1186,7 @@ def _navigate_home(browser: Browser, content_page: Page, backend_origin: str, wo
                 return
             threading.Event().wait(timeout=0.5)
         logger.warning("Home click attempt {} did not navigate content (at {}); retrying", attempt, content_page.url)
-    raise WorkspaceFlowError(f"Content view did not navigate home after {_HOME_CLICK_ATTEMPTS} Home-button clicks")
+    raise WorkspaceFlowError(f"Chrome view did not navigate home after {_HOME_CLICK_ATTEMPTS} Home-button clicks")
 
 
 def _resolve_workspace_agent_id(content_page: Page, workspace_name: str) -> str:
@@ -1329,7 +1314,7 @@ def run_full_workspace_flow(
                     results,
                     "STEP 5 home",
                     content_page,
-                    lambda: _navigate_home(browser, content_page, backend_origin, workspace_name),
+                    lambda: _navigate_home(content_page, backend_origin, workspace_name),
                 )
                 try:
                     landing_id = _resolve_workspace_agent_id(content_page, workspace_name)

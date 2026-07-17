@@ -28,9 +28,20 @@
     h.appendChild(document.createTextNode(isEnabled ? ' shared in ' : ' in '));
 
     var link = document.createElement('a');
-    link.href = mngrForwardOrigin + '/goto/' + agentId + '/';
+    var gotoHref = mngrForwardOrigin + '/goto/' + agentId + '/';
+    link.href = gotoHref;
     link.className = 'text-accent hover:underline';
     link.textContent = wsName;
+    // The sharing page is a trusted local page on the chrome surface. Open the
+    // workspace through the shell bridge (which routes it to the caged content
+    // view) rather than frame-navigating this chrome view to the agent URL; a
+    // plain browser (no bridge) falls through to the href.
+    if (window.minds && window.minds.navigateContent) {
+      link.addEventListener('click', function (e) {
+        e.preventDefault();
+        window.minds.navigateContent(gotoHref);
+      });
+    }
     h.appendChild(link);
 
     if (accountEmail) {

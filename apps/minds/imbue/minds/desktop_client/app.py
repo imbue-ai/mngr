@@ -107,6 +107,8 @@ from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.templates import RemoteWorkspaceTile
+from imbue.minds.desktop_client.templates import _chrome_is_mac
+from imbue.minds.desktop_client.templates import _chrome_mngr_forward_origin
 from imbue.minds.desktop_client.templates import render_accounts_page
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
@@ -217,26 +219,26 @@ def _read_json_body() -> Any:
 
 
 def _get_mngr_forward_origin() -> str:
-    """Build the bare-origin URL of the ``mngr forward`` plugin.
+    """Build the bare-origin URL of the ``mngr forward`` plugin (TLS ``https``).
 
-    Used by templates to construct ``/goto/<agent>/`` URLs that target the
-    plugin (which owns subdomain forwarding) rather than minds. minds always
-    runs the proxy with TLS + HTTP/2, so the scheme is ``https`` and the
-    rendered links reach it rather than failing a plaintext request against
-    the TLS listener.
+    Delegates to the canonical resolver in ``templates.py`` so the value the
+    render functions thread in stays identical to the one ChromeShell's catalog
+    global emits (a past copy-paste drifted to plaintext ``http`` and broke
+    browser-mode workspace links). Used by templates to construct
+    ``/goto/<agent>/`` URLs that target the plugin (which owns subdomain
+    forwarding) rather than minds.
     """
-    port = get_state().mngr_forward_port or 8421
-    return f"https://localhost:{port}"
+    return _chrome_mngr_forward_origin()
 
 
 def _get_is_mac() -> bool:
     """Return True if the request's User-Agent indicates macOS.
 
-    Used by templates that gate macOS-specific styling (traffic-light
-    padding, hidden window controls).
+    Delegates to the canonical resolver in ``templates.py`` (shared with
+    ChromeShell's catalog global). Used by templates that gate macOS-specific
+    styling (traffic-light padding, hidden window controls).
     """
-    user_agent = request.headers.get("user-agent", "")
-    return "Macintosh" in user_agent or "Mac OS" in user_agent
+    return _chrome_is_mac()
 
 
 def _int_query_param(name: str, default: int) -> int:

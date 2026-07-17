@@ -680,21 +680,31 @@ function createBundle() {
   chromeView.webContents.on('did-navigate', (_e, url) => onChromeNavigate(url));
   chromeView.webContents.on('did-navigate-in-page', (_e, url) => onChromeNavigate(url));
 
-  // Defense in depth: the chrome view hosts ONLY trusted local pages served from
-  // the backend origin. It must never navigate to untrusted agent content -- an
-  // ``agent-<id>.localhost`` subdomain or the ``/goto/<id>/`` auth bridge -- which
-  // belongs on the content view (caged relay preload, workspace-content session).
-  // The trusted flow always hands agent URLs to navigateBundle via the
-  // navigate-content bridge (sidebar rows, Landing rows, the create-complete
-  // redirect), so a chrome-view attempt to reach one is a bug or a compromised
-  // trusted page; block it. Mirrors the content view's will-navigate guard, which
-  // blocks the opposite direction (trusted pages off the untrusted surface).
-  chromeView.webContents.on('will-navigate', (event, url) => {
-    if (selectSurfaceForUrl(url) === SURFACE_CONTENT) {
-      event.preventDefault();
-      console.warn('[chrome-guard] Blocked an agent-content navigation in the chrome view:', url);
-    }
-  });
+  // Defense in depth + recovery routing: the chrome view hosts ONLY trusted local
+  // pages served from the backend origin. If a navigation would take it to
+  // untrusted agent content (an ``agent-<id>.localhost`` subdomain or the
+  // ``/goto/<id>/`` auth bridge), cancel it and REROUTE that URL onto the content
+  // surface via navigateBundle. This fires for both in-page navigations
+  // (``will-navigate``) and SERVER redirects (``will-redirect``) -- the latter is
+  // how the recovery page reaches the workspace: /agents/<id>/recovery 302s to the
+  // /goto URL once the workspace is healthy, and without catching the redirect the
+  // untrusted workspace would load in the trusted chrome view (full window.minds
+  // bridge, default session). Rerouting means a legitimately-reached agent URL
+  // still opens the workspace -- on the correct caged content surface -- instead of
+  // dead-ending, while a compromised trusted page still cannot surface agent
+  // content here. Deferred to a later tick: navigating synchronously inside a
+  // navigation event can crash (electron#19887).
+  const rerouteAgentNavOffChromeView = (event, url) => {
+    if (selectSurfaceForUrl(url) !== SURFACE_CONTENT) return;
+    event.preventDefault();
+    console.warn('[chrome-guard] Rerouting an agent-content navigation off the chrome view:', url);
+    setImmediate(() => {
+      if (bundle.window.isDestroyed()) return;
+      navigateBundle(bundle, url);
+    });
+  };
+  chromeView.webContents.on('will-navigate', (event, url) => rerouteAgentNavOffChromeView(event, url));
+  chromeView.webContents.on('will-redirect', (event, url) => rerouteAgentNavOffChromeView(event, url));
 
   // When the chrome (titlebar) view's renderer dies -- it runs in a separate
   // process from the content view and can be reaped independently over a long
@@ -895,6 +905,18 @@ function wireContentViewEvents(bundle, contentView) {
     if (isBackendOriginUrl(url)) {
       event.preventDefault();
       console.warn('[content-guard] Blocked a trusted backend-origin navigation in the content view:', url);
+    }
+  });
+  // Server redirects (302) fire will-redirect, not will-navigate, so the
+  // backend-origin block above would miss a compromised agent page that navigates
+  // to an agent-origin endpoint which then 302s to a trusted minds page. Block the
+  // redirect too (no reroute -- a foreign page must not get to choose which trusted
+  // screen surfaces). The normal /goto -> agent-subdomain redirect is left alone:
+  // both hops are off the backend origin (the plugin port / the agent subdomain).
+  contentView.webContents.on('will-redirect', (event, url) => {
+    if (isBackendOriginUrl(url)) {
+      event.preventDefault();
+      console.warn('[content-guard] Blocked a trusted backend-origin redirect in the content view:', url);
     }
   });
 
@@ -1541,24 +1563,36 @@ function reloadCrashedContentView(bundle) {
   // as a normal content navigation.
   bundle.isContentCrashed = false;
   bundle.crashedFromUrl = null;
-  loadUrlIntoBundleContentView(bundle, target);
+  // Route through navigateBundle so the pre-crash URL lands on the right surface
+  // (an agent URL re-shows + reloads the content view under the /_chrome wrapper;
+  // a local fallback renders in the chrome view). ``loadUrlIntoBundleContentView``
+  // was removed in the content-in-chrome split -- navigateBundle is its successor.
+  navigateBundle(bundle, target);
 }
 
 // Reload the chrome (titlebar) view after its renderer crashed, spawning a fresh
 // renderer. Driven by chrome-crashed.html's Reload button via the reload-chrome
-// IPC. Reloads /_chrome (or shell.html before the backend is up, matching the
-// normal chrome-load choice); the chrome view's did-finish-load re-primes it from
-// the cached chrome state, so the bar returns fully populated. Stateless: if the
-// reload crashes again, the crash strip reappears.
+// IPC. The chrome view's did-finish-load re-primes it from the cached chrome
+// state, so the bar returns fully populated. Stateless: if the reload crashes
+// again, the crash strip reappears. Only the chrome view is reloaded -- the
+// content view (if any) did not crash and must be left running.
 function reloadCrashedChromeView(bundle) {
   if (!bundle || bundle.window.isDestroyed()) return;
   if (!bundle.chromeView || bundle.chromeView.webContents.isDestroyed()) return;
   bundle.isChromeCrashed = false;
-  if (backendBaseUrl) {
-    bundle.chromeView.webContents.loadURL(backendBaseUrl + '/_chrome');
-  } else {
+  if (!backendBaseUrl) {
     bundle.chromeView.webContents.loadFile(path.join(__dirname, 'shell.html'));
+    return;
   }
+  // Post content-in-chrome split the chrome view hosts two things: on an agent
+  // path it is the /_chrome wrapper (the content view floats the workspace over
+  // it), and on a local page it is the page itself. Hardcoding /_chrome would
+  // leave a local-page window showing the empty agent wrapper over a blank body,
+  // so restore whichever it was -- without touching the (uncrashed) content view.
+  const target = bundle.currentWorkspaceId
+    ? backendBaseUrl + '/_chrome'
+    : (bundle.currentContentUrl || backendBaseUrl + '/');
+  bundle.chromeView.webContents.loadURL(target);
 }
 
 function openOrFocusWorkspace(agentId, url) {
@@ -3230,12 +3264,22 @@ function handleNotification(event) {
     const agentId = parseWorkspaceId(absolute);
     if (agentId) {
       openOrFocusWorkspace(agentId, absolute);
-    } else {
-      const mru = getMostRecentWindow();
-      if (mru) {
-        focusBundle(mru);
-        navigateBundle(mru, absolute);
-      }
+      return;
+    }
+    // Not a workspace URL. ``event.url`` is agent-controlled, so it must never be
+    // loaded into a trusted minds surface: after the content-in-chrome split a
+    // non-workspace URL routes to the privileged chrome view (full window.minds
+    // bridge, default session). Only a bare backend-origin minds page (e.g. the
+    // inbox or a settings screen) may navigate a window; an off-localhost link
+    // goes to the user's browser; anything else just focuses the window.
+    const mru = getMostRecentWindow();
+    if (mru) focusBundle(mru);
+    if (isBackendOriginUrl(absolute)) {
+      if (mru) navigateBundle(mru, absolute);
+    } else if (isExternalUrl(absolute)) {
+      shell.openExternal(absolute).catch((err) => {
+        console.warn('[notification] Failed to open external URL:', err && err.message);
+      });
     }
   });
   notification.show();
