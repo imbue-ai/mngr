@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-16
+
+`ci.yml`'s `test-minds-release` job now installs `openssh-server` before the plain-minds-release step and sets `MNGR_LATCHKEY_E2E_TESTS=1` on it, opting in the new `apps/minds/test_latchkey_e2e.py` release test (it runs a throwaway root sshd on the runner to fake a VPS outer host so it needs the sshd binary and is gated behind an explicit opt-in that only this throwaway-runner job sets).
+
+The monorepo lockfile (`uv.lock`) now pins `urwid-readline`, a new dependency the kanpan board uses for readline-style editing in its agent-reply input.
+
 ## 2026-07-15
 
 Added `specs/workspace-sync/spec.md`: the design record for end-to-end-encrypted cross-device sync of workspace metadata and secrets (workspace records on the connector, per-account DEKs wrapped by the master password, metadata-only tier for empty passwords, and the one-shot migration off the legacy local files).

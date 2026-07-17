@@ -4,6 +4,16 @@ A concise, human-friendly summary of changes for repo-level dev tooling: CI work
 
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
+## 2026-07-16
+
+### Added
+
+- Added: `uv.lock` pins `urwid-readline`, a new dependency the kanpan board uses for readline-style editing in its agent-reply input.
+
+### Changed
+
+- Changed: `ci.yml`'s `test-minds-release` job installs `openssh-server` and sets `MNGR_LATCHKEY_E2E_TESTS=1` before the plain-minds-release step, opting in the new `apps/minds/test_latchkey_e2e.py` release test (which runs a throwaway root sshd on the runner to fake a VPS outer host; gated behind an explicit opt-in that only this throwaway-runner job sets).
+
 ## 2026-07-15
 
 ### Added
