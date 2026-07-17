@@ -11,8 +11,12 @@
   to toggle visibility.
   ``card_extra`` -- extra classes for the inner card (e.g. ``text-left``
   to override the inherited text alignment).
+
+  z-[110] sits above the ChromeShell fixed titlebar (z-[100]) so the dimming
+  backdrop covers the titlebar too and its buttons are not clickable while the
+  modal is open (pages like Settings / WorkspaceSettings render both).
 #}
-<div {% if id %}id="{{ id }}"{% endif %} class="hidden fixed inset-0 z-50 flex items-center justify-center bg-surface-overlay">
+<div {% if id %}id="{{ id }}"{% endif %} class="hidden fixed inset-0 z-[110] flex items-center justify-center bg-surface-overlay">
   <div class="bg-surface-primary rounded-lg shadow-overlay border border-default max-w-sm w-full mx-4 p-6 {{ card_extra }}">
     {{ content }}
   </div>

@@ -2215,7 +2215,10 @@ def test_dialog_close_button_id_optional() -> None:
 def test_modal_renders_hidden_overlay_with_default_card() -> None:
     html = CATALOG.render("Modal", id="my-dialog", _content="<p>body</p>")
     assert 'id="my-dialog"' in html
-    assert "hidden fixed inset-0 z-50" in html
+    # z-[110] keeps the dimming backdrop above the ChromeShell titlebar (z-[100])
+    # on pages that render both (Settings / WorkspaceSettings), so the titlebar is
+    # covered and its buttons are not clickable while the modal is open.
+    assert "hidden fixed inset-0 z-[110]" in html
     assert "bg-surface-overlay" in html
     assert "<p>body</p>" in html
 

@@ -36,8 +36,11 @@
     // an in-flow element cannot reliably span the top. A fixed strip is
     // layout-independent and the banner is transient, so briefly overlaying
     // the page's top padding is fine.
+    // top: 38px sits just below the fixed ChromeShell titlebar (h-[38px], z-[100])
+    // so the strip is visible on the trusted local pages that render it (Landing /
+    // Create / Accounts) instead of being hidden behind the titlebar.
     banner.style.cssText =
-      'position: fixed; top: 0; left: 0; right: 0; z-index: 50; display: none; align-items: center; gap: 8px;' +
+      'position: fixed; top: 38px; left: 0; right: 0; z-index: 50; display: none; align-items: center; gap: 8px;' +
       'padding: 8px 16px; background: var(--c-surface-secondary, #f0f0f0);' +
       'border-bottom: 1px solid var(--c-border-primary, rgba(128,128,128,0.25));' +
       'box-shadow: 0 1px 4px rgba(0,0,0,0.08);';
