@@ -1467,13 +1467,19 @@ _RECOVERY_SCRIPT: Final[str] = """\
         }
         if (reportBtn) {
           reportBtn.addEventListener('click', function () {
-            // Ask the shell to open the get-help / report-a-bug modal, scoped to this
-            // workspace. ``window.parent`` works for both runtimes: in Electron this page
-            // is top-level so parent === self and the content-relay preload (which listens
-            // on window) forwards it to the main process as an overlay; in browser mode the
-            // page is in the chrome iframe, so parent is the chrome shell, which navigates
-            // the content frame to /help.
-            window.parent.postMessage({ type: 'minds:open-help', agentId: agentId }, '*');
+            // Open the get-help / report-a-bug modal, scoped to this workspace. The
+            // recovery page now renders on the CHROME surface (trusted preload.js),
+            // so call the window.minds bridge directly -- the workspace is stuck, so
+            // pass assistAvailable=false. In browser mode inside the /_chrome iframe
+            // there is no bridge, so postMessage to the parent shell (which opens
+            // /help); a bare browser page navigates to /help itself.
+            if (window.minds && window.minds.toggleHelp) {
+              window.minds.toggleHelp(agentId, false);
+            } else if (window.parent !== window) {
+              window.parent.postMessage({ type: 'minds:open-help', agentId: agentId }, '*');
+            } else {
+              window.location = '/help' + (agentId ? '?workspace=' + encodeURIComponent(agentId) : '');
+            }
           });
         }
         if (copySshBtn) {
