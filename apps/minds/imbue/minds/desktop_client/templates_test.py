@@ -981,6 +981,46 @@ def test_render_recovery_page_script_branches_on_dispatch_tier() -> None:
     assert "renderReconnecting" in html
 
 
+def test_render_recovery_page_offline_restart_shows_informative_state() -> None:
+    """The auto-dispatched host_offline restart names the offline condition.
+
+    Rather than the generic first-open "Loading workspace" spinner (or the
+    "Reconnecting" state), the host_offline branch dispatches the unattended
+    cold-boot with ``renderRestartingOffline``, whose copy tells the user the
+    workspace was offline and is being brought back. A manual restart (and a
+    page load that lands on the RESTARTING tracker state) falls back to the
+    generic ``renderRestarting`` state, which still names the restart instead of
+    reusing the "Loading workspace" spinner.
+    """
+    html = render_recovery_page(
+        agent_id=_AGENT_A,
+        return_to="",
+        initial_status="stuck",
+        initial_error="",
+    )
+    # The host_offline branch passes the offline pending-render to postRestart, so
+    # the in-flight cold boot shows the offline copy rather than the generic spinner.
+    apply_start = html.find("function applyHealth(")
+    apply_block = html[apply_start : html.find("function ", apply_start + 1)]
+    assert "postRestart({ scope: 'host', host_already_stopped: true }, renderRestartingOffline)" in apply_block
+    # The offline render names the offline condition (so the wait reads as
+    # recovery) over the spinner.
+    offline_start = html.find("function renderRestartingOffline")
+    offline_block = html[offline_start : html.find("function ", offline_start + 1)]
+    assert "was offline" in offline_block
+    assert "show(spinnerEl, true)" in offline_block
+    # postRestart defaults to the generic restarting state (the manual restart click).
+    post_start = html.find("function postRestart(")
+    post_block = html[post_start : html.find("function ", post_start + 1)]
+    assert "(renderPending || renderRestarting)()" in post_block
+    # A page load that lands on the RESTARTING tracker state renders the generic
+    # restarting state, not the generic first-open "Loading workspace" spinner.
+    entry = html[html.rfind("if (initialStatus === 'restarting')") :]
+    restarting_entry = entry[: entry.find("else if")]
+    assert "renderRestarting()" in restarting_entry
+    assert "renderLoading()" not in restarting_entry
+
+
 def test_render_recovery_page_indeterminate_renders_reconnecting_not_a_verdict() -> None:
     """The INDETERMINATE tier keeps checking instead of rendering a verdict.
 

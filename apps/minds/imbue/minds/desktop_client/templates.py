@@ -1199,6 +1199,49 @@ _RECOVERY_SCRIPT: Final[str] = """\
           if (providerReasonEl) { providerReasonEl.textContent = ''; show(providerReasonEl, false); }
           latestHealth = null;
         }
+        // A restart is in flight -- either a manual "Restart workspace" click or
+        // the page reloaded while the tracker was already RESTARTING. Names the
+        // action instead of the generic first-open "Loading workspace" spinner so
+        // the wait reads as a deliberate restart, not a hang. The RESTARTING
+        // tracker state carries no reason, so a reload mid-restart lands here even
+        // for an offline cold-boot; the generic wording still fits. scheduleRefresh
+        // (armed by the caller) sends the user home the moment the tracker flips
+        // HEALTHY, so this state needs no separate homeward poll.
+        function renderRestarting() {
+          titleEl.textContent = 'Restarting your workspace';
+          messageEl.textContent =
+            'We\\'ll return you to your workspace automatically as soon as it is back.';
+          show(spinnerEl, true);
+          show(errorEl, false);
+          show(hostBtn, false);
+          show(retryBtn, false);
+          show(reportBtn, false);
+          show(debugDetailsEl, false);
+          if (debugContentEl) debugContentEl.innerHTML = '';
+          if (providerReasonEl) { providerReasonEl.textContent = ''; show(providerReasonEl, false); }
+          latestHealth = null;
+        }
+        // The auto-dispatched host_offline restart: the container was observed
+        // fully stopped, so minds cold-boots it unattended (no live work to
+        // interrupt). Unlike the generic restarting state this names what
+        // happened -- the workspace was offline and we are bringing it back -- so
+        // the (possibly long) cold boot reads as recovery rather than a fresh open
+        // that is taking too long.
+        function renderRestartingOffline() {
+          titleEl.textContent = 'Bringing your workspace back online';
+          messageEl.textContent =
+            'This workspace was offline. We\\'re starting it back up and will '
+            + 'return you to it automatically.';
+          show(spinnerEl, true);
+          show(errorEl, false);
+          show(hostBtn, false);
+          show(retryBtn, false);
+          show(reportBtn, false);
+          show(debugDetailsEl, false);
+          if (debugContentEl) debugContentEl.innerHTML = '';
+          if (providerReasonEl) { providerReasonEl.textContent = ''; show(providerReasonEl, false); }
+          latestHealth = null;
+        }
         // The shared "Workspace unresponsive" state -- shown after a restart
         // failure and for the host_unresponsive tier (container observed
         // running but unreachable: bouncing it would interrupt user agents, so
@@ -1290,8 +1333,12 @@ _RECOVERY_SCRIPT: Final[str] = """\
           armHealthyPoll();
         }
 
-        function postRestart(body) {
-          renderLoading();
+        // ``renderPending`` is the spinner state to show while the dispatch is in
+        // flight; defaults to the generic ``renderRestarting`` (the manual
+        // "Restart workspace" click), and the host_offline auto-dispatch passes
+        // ``renderRestartingOffline`` so the user sees the workspace was offline.
+        function postRestart(body, renderPending) {
+          (renderPending || renderRestarting)();
           // The endpoint returns a 202 operation handle once the tracker is
           // RESTARTING; any other status means the dispatch did not start, so
           // surface an error instead of refreshing into a re-probe loop. The
@@ -1373,7 +1420,7 @@ _RECOVERY_SCRIPT: Final[str] = """\
             // even if the workspace self-recovered while the slow host-health
             // probe was in flight: the resulting mngr start only targets
             // STOPPED agents, so a live workspace makes it a no-op.
-            postRestart({ scope: 'host', host_already_stopped: true });
+            postRestart({ scope: 'host', host_already_stopped: true }, renderRestartingOffline);
             return;
           }
           // 'host_unresponsive' or anything else: require explicit user consent for a host restart.
@@ -1440,7 +1487,7 @@ _RECOVERY_SCRIPT: Final[str] = """\
         }
 
         if (initialStatus === 'restarting') {
-          renderLoading();
+          renderRestarting();
           scheduleRefresh();
         } else if (initialStatus === 'restart_failed') {
           // Show the failure reason AND the diagnostic together: re-run the probe
