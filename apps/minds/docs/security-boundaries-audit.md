@@ -114,7 +114,7 @@ Cons:
 
 ### Option C (variant): Content session partitioning -- IMPLEMENTED
 
-Rather than per-agent partitions (which would require complex cookie re-synchronization), a single shared content partition (`persist:workspace-content`) is used for all content views. The chrome and modal views (the modal hosts the sidebar and inbox pages) continue to use the default Electron session. A cookie sync mechanism copies `minds_session` cookies from the content partition to the default session so that chrome-level auth checks work.
+Rather than per-agent partitions (which would require complex cookie re-synchronization), a single shared content partition (`persist:workspace-content`) is used for all content views. The chrome and modal views (the modal hosts the sidebar and inbox pages) continue to use the default Electron session. Since the content-in-chrome split, sign-in happens on the trusted default session (the login page and sign-in modal render on the chrome/modal surfaces), so the `minds_session` cookie is minted there; the only cross-partition copy that remains pushes that authenticated cookie *from* the default session *to* the content partition so `/goto` subdomain forwarding stays authenticated. (The earlier content-partition-to-default watcher was removed.)
 
 This separates the content cookie jar from the chrome cookie jar, adding defense-in-depth. Agents remain origin-isolated within the content partition via standard Chromium same-origin policy.
 

@@ -24,10 +24,11 @@ root of `templates/`. Auth-flow components live under `templates/auth/`.
 
 | Component | Role |
 |---|---|
-| `Base` | Universal HTML scaffold (html/head/body, compiled Tailwind v4 sheet `app.min.css`). Every page wraps in this. |
+| `Base` | Universal HTML scaffold (html/head/body, compiled Tailwind v4 sheet `app.min.css`). The lowest layer; trusted local pages wrap in `ChromeShell` (which wraps `Base`), overlay pages wrap in `OverlaySurface`. |
+| `ChromeShell` | The trusted app shell: the fixed titlebar + browser-mode floating sidebar + accent / `chrome.js` wiring, wrapping a page body in its content slot. Every trusted local page (Landing, Create, Settings, ...) wraps in this so the titlebar travels with the page on the chrome surface; `Chrome.jinja` passes `is_agent_content_surface=True` to fill the slot with the agent-content iframe instead. |
 | `OverlaySurface` | Base variant for edge-to-edge transparent pages in the shared overlay WebContentsView (the overlay host + the hosted modals). Pins the `no-scrollbar-gutter` opt-out and the transparent body so overlays always paint to the window edge; new overlay surfaces should wrap in this, not `Base`. |
 | `PageContainer` | Centered `max-w-[720px]` body wrapper. Default for in-app settings-style pages (Landing, Accounts, WorkspaceSettings, Sharing, Destroying). |
-| `PageNarrowContainer` | Centered, narrow page layout for auth flow + form pages. Width/padding only -- no surface chrome. `padding="default"` (`p-8`, auth) or `"form"` (`p-6`, Create); `max_width` is a Tailwind utility. |
+| `PageNarrowContainer` | Centered, narrow content column (width/padding only) for auth flow + form pages, wrapped in `ChromeShell` so the page carries the titlebar. `padding="default"` (`p-8`, auth) or `"form"` (`p-6`, Create); `max_width` is a Tailwind utility. |
 | `Card` | Card surface with `layout`/`padding`/`interactive`/`tag`/`href` props. Pulls `.minds-card` from `app.css` for the shared shell. |
 | `PresetCard` | Selectable `<button role="radio">` card (the create page's "where to run" presets). Pure Tailwind: dashed neutral border by default, accent border + tint via `aria-checked:` variants when selected, `hover:shadow-raised` lift. Props: `preset` (the `data-preset` value), `selected`, `extra` (parent-owned sizing). |
 | `Modal` | Overlay dialog with backdrop. Used for confirmation dialogs (e.g. WorkspaceSettings' destroy modal). |

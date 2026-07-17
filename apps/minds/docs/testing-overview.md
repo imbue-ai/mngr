@@ -63,8 +63,11 @@ excludes the whole `apps/minds` tree by path.
 
 ### 1.4 JS / Electron tests (`apps/minds/test/`)
 
-- **Node unit** (`test/unit/startup-routing.test.js`): 7 `node --test` cases for
-  startup routing. Run via `pnpm test:unit`. **Not in any CI workflow.**
+- **Node unit** (`test/unit/*.test.js`): `node --test` cases for the pure Electron
+  helpers -- `startup-routing.test.js` (startup routing) and
+  `surface-routing.test.js` (the chrome-vs-content surface classifier that decides
+  which WebContentsView renders a URL). Run via `pnpm test:unit`. **Not in any CI
+  workflow.**
 - **Playwright e2e** (`test/e2e/`, `playwright.config.js`, `pnpm test:e2e`):
   - `macos-launch.spec.js` -- launches the installed `/Applications/Minds.app`
     via the `mindsApp` fixture. **The only JS spec wired into CI** (in

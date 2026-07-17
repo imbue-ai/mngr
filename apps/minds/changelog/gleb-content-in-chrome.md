@@ -19,3 +19,15 @@ Trusted local pages in the desktop client now render the app titlebar directly, 
 - Updated the Electron e2e workspace runner for the surface split: after the create form is submitted (driven on the chrome view), the ready workspace now opens on the separate content view, so the runner waits for that content page to reach the workspace URL (racing the failure view on the chrome view) and drives the dockview / chat / terminal steps on it, rather than on the chrome view that returns to the `/_chrome` wrapper.
 
 - Simplified the desktop auth-cookie handling: sign-in now happens entirely on the trusted default session (login page + sign-in modal on the chrome/modal surfaces), so the old content-partition-to-default `minds_session` watcher was removed; the authenticated cookie is still pushed to the content partition so `/goto` forwarding stays authenticated.
+
+- Hardened and completed the split after a review pass:
+
+  - Fixed a crash where the workspace-crash "Reload" button called a function the split had deleted; both crash-recovery reloads now route through the surface router (the chrome-crash reload no longer strands a local-page window on the empty agent wrapper).
+
+  - The chrome-view guard now also catches server redirects (`will-redirect`) and reroutes agent URLs onto the content surface, so the recovery page's "workspace is healthy" redirect opens the workspace on the caged content view instead of loading agent content into the trusted chrome view; the content-view guard blocks backend-origin redirects too.
+
+  - Agent-controlled notification URLs and the sharing page's workspace link can no longer load agent/foreign content into the privileged chrome view; the recovery page's "Report a problem" button (which had gone dead on the chrome surface) works again.
+
+  - Fixed the workspace-link scheme (the plugin proxy is TLS, so links are now `https`), a Flask request-context guard, three titlebar CSS regressions (in-page modals rendering under the titlebar, the Settings sticky nav, and the post-sign-in sync banner), DevTools / zoom / auth-reload / back-forward now following the visible surface, and backing out of a quit no longer force-reloading a live workspace.
+
+  - Remaining follow-ups (tracked in the spec's open questions): the recovery page still renders without the titlebar during a restart, and browser (non-Electron) mode still needs its agent routes wrapped so opening a workspace keeps the app chrome.

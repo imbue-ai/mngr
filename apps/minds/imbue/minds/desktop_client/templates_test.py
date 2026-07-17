@@ -16,8 +16,10 @@ from imbue.minds.desktop_client.templates import make_unique_host_name
 from imbue.minds.desktop_client.templates import render_accounts_page
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
+from imbue.minds.desktop_client.templates import render_consent_page
 from imbue.minds.desktop_client.templates import render_create_form
 from imbue.minds.desktop_client.templates import render_creating_page
+from imbue.minds.desktop_client.templates import render_destroying_page
 from imbue.minds.desktop_client.templates import render_dev_styleguide_page
 from imbue.minds.desktop_client.templates import render_help_page
 from imbue.minds.desktop_client.templates import render_inbox_page
@@ -842,6 +844,7 @@ def test_local_pages_render_the_chromeshell_titlebar() -> None:
     # titlebar, offsets its body below the fixed 38px titlebar (pt-[38px]), loads
     # chrome.js, and carries NO content iframe -- that belongs only to the agent
     # content surface (pages.Chrome).
+    _creation_id = CreationId()
     renders = {
         "Landing": render_landing_page(accessible_agent_ids=()),
         "Settings": render_settings_page(),
@@ -849,6 +852,22 @@ def test_local_pages_render_the_chromeshell_titlebar() -> None:
         "Welcome": render_welcome_page(),
         "Create": render_create_form(),
         "Login": render_login_page(),
+        "Creating": render_creating_page(
+            creation_id=_creation_id,
+            info=AgentCreationInfo(
+                creation_id=_creation_id,
+                status=AgentCreationStatus.INITIALIZING,
+                launch_mode=LaunchMode.DOCKER,
+            ),
+        ),
+        "Destroying": render_destroying_page(agent_id=_AGENT_A, agent_name="ws", pid=123, status="destroying"),
+        "Consent": render_consent_page(report_unexpected_errors=False, include_logs=False),
+        "Sharing": render_sharing_editor(
+            agent_id=str(_AGENT_A), service_name="svc", title="Share", mngr_forward_origin="http://localhost:8421"
+        ),
+        "WorkspaceSettings": render_workspace_settings(
+            agent_id=str(_AGENT_A), ws_name="ws", current_account=None, accounts=(), servers=()
+        ),
     }
     for name, html in renders.items():
         assert html.count("<html") == 1, f"{name}: expected exactly one document"
@@ -867,11 +886,17 @@ def test_chrome_shell_local_mode_differs_from_agent_content_surface() -> None:
     agent = CATALOG.render("ChromeShell", is_agent_content_surface=True, _content="<i>x</i>")
     local = CATALOG.render("ChromeShell", _content="<i>x</i>")
     assert "overflow: hidden" in agent
-    assert "var(--titlebar-bg" in agent
     assert "pt-[38px]" not in agent
     assert "overflow: hidden" not in local
     assert "pt-[38px]" in local
     assert "bg-surface-primary text-primary" in local
+    # The agent surface bleeds the workspace accent through the <body> background
+    # (var(--titlebar-bg) on the body, in addition to the titlebar), so the token
+    # appears twice; a local page uses the neutral page surface, so it appears only
+    # once -- on the titlebar itself. (Asserting merely "in agent" was vacuous: the
+    # titlebar carries that var in both modes.)
+    assert agent.count("var(--titlebar-bg") == 2
+    assert local.count("var(--titlebar-bg") == 1
 
 
 def test_edge_to_edge_surfaces_opt_out_of_scrollbar_gutter() -> None:
