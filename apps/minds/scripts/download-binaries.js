@@ -376,13 +376,14 @@ function buildShimScript(relativeTargetPath, gitSubcommand) {
  * Replace every symlink in the extracted dugite-native payload with a tiny
  * executable sh shim that execs the link's target.
  *
- * Why: the payload ships libexec/git-core mostly as symlinks (142 point at
- * the ~3.4MB multicall `git` binary). Packaging steps between here and the
- * user's disk follow symlinks and materialize a full copy per link -- most
- * acutely ToDesktop's app-source zip, which inflated the upload by ~480MB
- * and blew through todesktop.js's `uploadSizeLimit`. Shims keep the payload
- * behaviorally identical but symlink-free, so its size is stable no matter
- * how it is copied, zipped, or signed.
+ * Why: the payload ships libexec/git-core mostly as symlinks to the multicall
+ * `git` binary, and the packaging steps between here and the user's disk
+ * handle symlinks in two hostile ways: ToDesktop's app-files glob silently
+ * DROPS them (the payload would arrive on the build servers missing every
+ * builtin, including git-remote-https), while symlink-dereferencing copiers
+ * (electron-builder's extraResources copy) materialize a full copy per link.
+ * Shims keep the payload behaviorally identical but symlink-free, so it is
+ * complete and size-stable no matter how it is copied, zipped, or signed.
  *
  * Dispatch shape:
  * - `git-<subcommand>` -> `git` becomes `exec git <subcommand> "$@"`.
@@ -556,14 +557,12 @@ function measureTreeAsArchived(rootDir) {
   return { realBytes, archivedBytes, symlinkCount };
 }
 
-// Symlink materialization above this is treated as a regression of the class
-// that hit the 2026-07 launch-to-msg builds. ToDesktop itself prices
-// symlinks harmlessly (its app-files glob drops them; get-folder-size lstats
-// them), but symlink-DEREFERENCING copiers downstream -- electron-builder's
-// extraResources copy into the final .app, naive cpSync/rsync mirrors --
-// would materialize a full copy per link (~480MB for the raw dugite payload).
-// Legitimate symlinks in resources/ are tiny (lima's share/doc templates
-// dir), so a generous threshold keeps false positives out.
+// ToDesktop itself prices symlinks harmlessly (its app-files glob drops
+// them; get-folder-size lstats them), but symlink-DEREFERENCING copiers
+// downstream -- electron-builder's extraResources copy into the final .app,
+// naive cpSync/rsync mirrors -- materialize a full copy per link. Legitimate
+// symlinks in resources/ are tiny (lima's share/doc templates dir), so a
+// generous threshold keeps false positives out.
 const MAX_SYMLINK_INFLATION_BYTES = 64 * 1024 * 1024;
 
 /**

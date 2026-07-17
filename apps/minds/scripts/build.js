@@ -614,11 +614,9 @@ async function main() {
   bundleClientConfig();
   bakeBuildInfo();
 
-  // Fail at build time -- not at ToDesktop upload time -- if the app-source
-  // upload would blow todesktop.js's uploadSizeLimit. The estimate mirrors
-  // the CLI's composition (appFiles glob + extraResources priced whole; see
-  // estimateToDesktopUploadBytes), which is what actually hit 701MB in the
-  // 2026-07 launch-to-msg runs when resources/ uploaded twice.
+  // Fail at build time -- not tens of cloud-build minutes later at ToDesktop
+  // upload time -- if the app-source upload would blow todesktop.js's
+  // uploadSizeLimit.
   const todesktopConfig = require(path.join(ROOT, 'todesktop.js'));
   const { appFilesBytes, extraBytes, totalBytes } = assertUploadFitsToDesktopLimit(ROOT, todesktopConfig);
   console.log(

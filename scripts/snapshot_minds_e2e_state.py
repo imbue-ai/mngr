@@ -405,8 +405,6 @@ def _build_snapshot_image(staged_repo: Path, default_workspace_template_worktree
         # does not retry a streamed-body abort, so a single network blip would
         # otherwise fail the whole image build. Re-running pnpm install only
         # re-runs the postinstalls that did not complete, so a retry is cheap.
-        # Mirrors the curl retry loop the mngr Dockerfile uses for the
-        # dugite-native asset.
         #
         # build:css then runs (it needs the tailwindcss binary pnpm install
         # provides) and produces the gitignored Tailwind stylesheet app.min.css:
