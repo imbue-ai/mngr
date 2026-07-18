@@ -10,7 +10,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execSync, execFileSync } = require('child_process');
-const { downloadGit, downloadUv, downloadRestic, download } = require('./download-binaries.js');
+const { downloadGit, downloadUv, downloadRestic, download, lipoCreate, DARWIN_UNIVERSAL_ARCHS } = require('./download-binaries.js');
 
 const ROOT = path.resolve(__dirname, '..');
 const RESOURCES_DIR = path.join(ROOT, 'resources');
@@ -374,18 +374,50 @@ function getLimaDownloadUrl({ platform, arch }) {
   return `https://github.com/lima-vm/lima/releases/download/v${LIMA_VERSION}/lima-${LIMA_VERSION}-${osLabel}-${archLabel}.tar.gz`;
 }
 
-async function downloadLima({ platform, arch }) {
+async function downloadLima(resourcesDir, { platform, arch }) {
   // We keep the full extracted layout (bin/ + share/ + libexec/) because
   // limactl resolves its templates and guest-agent payloads via paths
   // relative to its own executable.
-  const limaDir = path.join(RESOURCES_DIR, 'lima');
-  await downloadAndExtractTarball({
-    destDir: limaDir,
-    url: getLimaDownloadUrl({ platform, arch }),
-    archiveName: 'lima.tar.gz',
-    binaryPath: path.join(limaDir, 'bin', 'limactl'),
-    label: 'Lima',
-  });
+  const limaDir = path.join(resourcesDir, 'lima');
+  const limactlPath = path.join(limaDir, 'bin', 'limactl');
+
+  if (arch === 'universal') {
+    // Fetch both slices and lipo limactl into a universal binary. share/ +
+    // libexec/ hold Linux guest payloads and templates, which are
+    // host-arch-agnostic, so the primary slice's tree suffices.
+    const [primaryArch, ...otherArchs] = DARWIN_UNIVERSAL_ARCHS;
+    await downloadAndExtractTarball({
+      destDir: limaDir,
+      url: getLimaDownloadUrl({ platform, arch: primaryArch }),
+      archiveName: 'lima.tar.gz',
+      binaryPath: limactlPath,
+      label: `Lima (${primaryArch})`,
+    });
+    const sliceBinaries = [limactlPath];
+    for (const sliceArch of otherArchs) {
+      const sliceDir = path.join(limaDir, `_${sliceArch}`);
+      await downloadAndExtractTarball({
+        destDir: sliceDir,
+        url: getLimaDownloadUrl({ platform, arch: sliceArch }),
+        archiveName: 'lima.tar.gz',
+        binaryPath: path.join(sliceDir, 'bin', 'limactl'),
+        label: `Lima (${sliceArch})`,
+      });
+      sliceBinaries.push(path.join(sliceDir, 'bin', 'limactl'));
+    }
+    lipoCreate(sliceBinaries, limactlPath);
+    for (const sliceArch of otherArchs) {
+      fs.rmSync(path.join(limaDir, `_${sliceArch}`), { recursive: true });
+    }
+  } else {
+    await downloadAndExtractTarball({
+      destDir: limaDir,
+      url: getLimaDownloadUrl({ platform, arch }),
+      archiveName: 'lima.tar.gz',
+      binaryPath: limactlPath,
+      label: 'Lima',
+    });
+  }
 
   // Strip Darwin guest-agents. Each one is a gzipped arm64/x86_64 Mach-O,
   // and Apple's notarytool unzips it and rejects the inner binary because
@@ -602,7 +634,7 @@ async function main() {
   // Download binaries and copy pyproject in parallel
   await Promise.all([
     downloadUv(RESOURCES_DIR, { platform, arch }),
-    downloadLima({ platform, arch }),
+    downloadLima(RESOURCES_DIR, { platform, arch }),
     downloadGit(RESOURCES_DIR, { platform }),
     downloadRestic(RESOURCES_DIR, { platform, arch }),
   ]);
@@ -618,7 +650,11 @@ async function main() {
   console.log(`Resources directory: ${RESOURCES_DIR}`);
 }
 
-main().catch((err) => {
-  console.error('Build failed:', err);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    console.error('Build failed:', err);
+    process.exit(1);
+  });
+}
+
+module.exports = { downloadLima, getPlatformArch, getLimaDownloadUrl };

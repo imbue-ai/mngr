@@ -183,41 +183,98 @@ function verifyChecksum(buffer, filename) {
   console.log(`[download-binaries] ${filename} SHA256 OK`);
 }
 
+// The two macOS slices. Each build downloads its own target arch (the afterPack
+// hook passes it); `arch: 'universal'` fuses both slices with lipo as a fallback
+// for callers that want a single fat binary.
+const DARWIN_UNIVERSAL_ARCHS = ['aarch64', 'x86_64'];
+
+// Apple's `lipo`; combines per-arch Mach-O slices into one universal binary. A
+// single input is copied verbatim, so this is also a no-op wrapper for the
+// one-slice case.
+function lipoCreate(inputBinaries, outputBinary) {
+  const inputs = inputBinaries.map((p) => `"${p}"`).join(' ');
+  execSync(`lipo -create ${inputs} -output "${outputBinary}"`, { stdio: 'inherit' });
+  fs.chmodSync(outputBinary, 0o755);
+}
+
+async function extractUvSlice(destDir, { platform, arch }) {
+  fs.mkdirSync(destDir, { recursive: true });
+  const url = getUvDownloadUrl({ platform, arch });
+  const filename = path.basename(new URL(url).pathname);
+  console.log(`[download-binaries] Downloading uv (${arch}) from ${url}...`);
+  const archive = await download(url);
+  verifyChecksum(archive, filename);
+  const tarPath = path.join(destDir, 'uv.tar.gz');
+  fs.writeFileSync(tarPath, archive);
+  execSync(`tar xzf "${tarPath}" -C "${destDir}" --strip-components=1`, { stdio: 'inherit' });
+  fs.unlinkSync(tarPath);
+  const uvBinary = path.join(destDir, 'uv');
+  if (!fs.existsSync(uvBinary)) {
+    throw new Error(`uv binary not found at ${uvBinary} after extraction`);
+  }
+  return uvBinary;
+}
+
 async function downloadUv(resourcesDir, { platform, arch }) {
   const uvDir = path.join(resourcesDir, 'uv');
   if (fs.existsSync(uvDir)) fs.rmSync(uvDir, { recursive: true });
   fs.mkdirSync(uvDir, { recursive: true });
 
-  const url = getUvDownloadUrl({ platform, arch });
-  const filename = path.basename(new URL(url).pathname);
-  console.log(`[download-binaries] Downloading uv from ${url}...`);
-
-  const archive = await download(url);
-  verifyChecksum(archive, filename);
-
   if (platform === 'win32') {
+    const url = getUvDownloadUrl({ platform, arch });
+    const filename = path.basename(new URL(url).pathname);
+    console.log(`[download-binaries] Downloading uv from ${url}...`);
+    const archive = await download(url);
+    verifyChecksum(archive, filename);
     const zipPath = path.join(uvDir, 'uv.zip');
     fs.writeFileSync(zipPath, archive);
     execSync(`powershell -Command "Expand-Archive -Path '${zipPath}' -DestinationPath '${uvDir}'"`, { stdio: 'inherit' });
     fs.unlinkSync(zipPath);
-  } else {
-    const tarPath = path.join(uvDir, 'uv.tar.gz');
-    fs.writeFileSync(tarPath, archive);
-    execSync(`tar xzf "${tarPath}" -C "${uvDir}" --strip-components=1`, { stdio: 'inherit' });
-    fs.unlinkSync(tarPath);
+    const uvExe = path.join(uvDir, 'uv.exe');
+    if (!fs.existsSync(uvExe)) {
+      throw new Error(`uv binary not found at ${uvExe} after extraction`);
+    }
+    // The runtime resolves uv as 'uv' (no .exe). Copy so both names work.
+    fs.copyFileSync(uvExe, path.join(uvDir, 'uv'));
+    console.log(`[download-binaries] uv installed at ${uvExe}`);
+    return;
   }
 
-  const uvBinary = path.join(uvDir, platform === 'win32' ? 'uv.exe' : 'uv');
-  if (!fs.existsSync(uvBinary)) {
-    throw new Error(`uv binary not found at ${uvBinary} after extraction`);
+  if (arch === 'universal') {
+    const sliceBinaries = [];
+    for (const sliceArch of DARWIN_UNIVERSAL_ARCHS) {
+      sliceBinaries.push(await extractUvSlice(path.join(uvDir, `_${sliceArch}`), { platform, arch: sliceArch }));
+    }
+    lipoCreate(sliceBinaries, path.join(uvDir, 'uv'));
+    for (const sliceArch of DARWIN_UNIVERSAL_ARCHS) {
+      fs.rmSync(path.join(uvDir, `_${sliceArch}`), { recursive: true });
+    }
+    console.log(`[download-binaries] universal uv installed at ${path.join(uvDir, 'uv')}`);
+    return;
   }
-  if (platform === 'win32') {
-    // The runtime resolves uv as 'uv' (no .exe). Copy so both names work.
-    fs.copyFileSync(uvBinary, path.join(uvDir, 'uv'));
-  } else {
-    fs.chmodSync(uvBinary, 0o755);
-  }
+
+  const uvBinary = await extractUvSlice(uvDir, { platform, arch });
+  fs.chmodSync(uvBinary, 0o755);
   console.log(`[download-binaries] uv installed at ${uvBinary}`);
+}
+
+async function extractResticSlice(destDir, { platform, arch }) {
+  // restic ships its bz2 as the bare binary (no tar wrapper). bunzip2 is
+  // available on macOS (BSD) and Linux by default.
+  fs.mkdirSync(destDir, { recursive: true });
+  const url = getResticDownloadUrl({ platform, arch });
+  const filename = path.basename(new URL(url).pathname);
+  console.log(`[download-binaries] Downloading restic (${arch}) from ${url}...`);
+  const archive = await download(url);
+  verifyChecksum(archive, filename);
+  const bzPath = path.join(destDir, 'restic.bz2');
+  fs.writeFileSync(bzPath, archive);
+  execSync(`bunzip2 -f "${bzPath}"`, { stdio: 'inherit' });
+  const resticPath = path.join(destDir, 'restic');
+  if (!fs.existsSync(resticPath)) {
+    throw new Error(`restic binary not found at ${resticPath} after bunzip2`);
+  }
+  return resticPath;
 }
 
 async function downloadRestic(resourcesDir, { platform, arch }) {
@@ -225,17 +282,13 @@ async function downloadRestic(resourcesDir, { platform, arch }) {
   if (fs.existsSync(resticDir)) fs.rmSync(resticDir, { recursive: true });
   fs.mkdirSync(resticDir, { recursive: true });
 
-  const url = getResticDownloadUrl({ platform, arch });
-  const filename = path.basename(new URL(url).pathname);
-  console.log(`[download-binaries] Downloading restic from ${url}...`);
-
-  const archive = await download(url);
-  verifyChecksum(archive, filename);
-
-  const resticName = platform === 'win32' ? 'restic.exe' : 'restic';
-  const resticPath = path.join(resticDir, resticName);
-
   if (platform === 'win32') {
+    const url = getResticDownloadUrl({ platform, arch });
+    const filename = path.basename(new URL(url).pathname);
+    console.log(`[download-binaries] Downloading restic from ${url}...`);
+    const archive = await download(url);
+    verifyChecksum(archive, filename);
+    const resticPath = path.join(resticDir, 'restic.exe');
     const zipPath = path.join(resticDir, 'restic.zip');
     fs.writeFileSync(zipPath, archive);
     execSync(`powershell -Command "Expand-Archive -Path '${zipPath}' -DestinationPath '${resticDir}'"`, { stdio: 'inherit' });
@@ -249,21 +302,44 @@ async function downloadRestic(resourcesDir, { platform, arch }) {
     }
     // Runtime resolves restic as 'restic' (no .exe); duplicate so both names work.
     fs.copyFileSync(resticPath, path.join(resticDir, 'restic'));
-  } else {
-    // restic ships its bz2 as the bare binary (no tar wrapper). bunzip2 is
-    // available on macOS (BSD) and Linux by default; we stage the archive
-    // to a temp .bz2 and decompress in place.
-    const bzPath = path.join(resticDir, 'restic.bz2');
-    fs.writeFileSync(bzPath, archive);
-    execSync(`bunzip2 -f "${bzPath}"`, { stdio: 'inherit' });
-    // bunzip2 strips the .bz2 suffix, leaving resticDir/restic.
-    if (!fs.existsSync(resticPath)) {
-      throw new Error(`restic binary not found at ${resticPath} after bunzip2`);
-    }
-    fs.chmodSync(resticPath, 0o755);
+    console.log(`[download-binaries] restic installed at ${resticPath}`);
+    return;
   }
 
+  if (arch === 'universal') {
+    const sliceBinaries = [];
+    for (const sliceArch of DARWIN_UNIVERSAL_ARCHS) {
+      sliceBinaries.push(await extractResticSlice(path.join(resticDir, `_${sliceArch}`), { platform, arch: sliceArch }));
+    }
+    lipoCreate(sliceBinaries, path.join(resticDir, 'restic'));
+    for (const sliceArch of DARWIN_UNIVERSAL_ARCHS) {
+      fs.rmSync(path.join(resticDir, `_${sliceArch}`), { recursive: true });
+    }
+    console.log(`[download-binaries] universal restic installed at ${path.join(resticDir, 'restic')}`);
+    return;
+  }
+
+  const resticPath = await extractResticSlice(resticDir, { platform, arch });
+  fs.chmodSync(resticPath, 0o755);
   console.log(`[download-binaries] restic installed at ${resticPath}`);
+}
+
+async function extractDesyncSlice(destDir, { platform, arch }) {
+  fs.mkdirSync(destDir, { recursive: true });
+  const url = getDesyncDownloadUrl({ platform, arch });
+  const filename = path.basename(new URL(url).pathname);
+  console.log(`[download-binaries] Downloading desync (${arch}) from ${url}...`);
+  const archive = await download(url);
+  verifyChecksum(archive, filename);
+  const tarPath = path.join(destDir, 'desync.tar.gz');
+  fs.writeFileSync(tarPath, archive);
+  execSync(`tar xzf "${tarPath}" -C "${destDir}"`, { stdio: 'inherit' });
+  fs.unlinkSync(tarPath);
+  const desyncBinary = path.join(destDir, 'desync');
+  if (!fs.existsSync(desyncBinary)) {
+    throw new Error(`desync binary not found at ${desyncBinary} after extraction`);
+  }
+  return desyncBinary;
 }
 
 async function downloadDesync(resourcesDir, { platform, arch }) {
@@ -277,22 +353,20 @@ async function downloadDesync(resourcesDir, { platform, arch }) {
   if (fs.existsSync(desyncDir)) fs.rmSync(desyncDir, { recursive: true });
   fs.mkdirSync(desyncDir, { recursive: true });
 
-  const url = getDesyncDownloadUrl({ platform, arch });
-  const filename = path.basename(new URL(url).pathname);
-  console.log(`[download-binaries] Downloading desync from ${url}...`);
-
-  const archive = await download(url);
-  verifyChecksum(archive, filename);
-
-  const tarPath = path.join(desyncDir, 'desync.tar.gz');
-  fs.writeFileSync(tarPath, archive);
-  execSync(`tar xzf "${tarPath}" -C "${desyncDir}"`, { stdio: 'inherit' });
-  fs.unlinkSync(tarPath);
-
-  const desyncBinary = path.join(desyncDir, 'desync');
-  if (!fs.existsSync(desyncBinary)) {
-    throw new Error(`desync binary not found at ${desyncBinary} after extraction`);
+  if (arch === 'universal') {
+    const sliceBinaries = [];
+    for (const sliceArch of DARWIN_UNIVERSAL_ARCHS) {
+      sliceBinaries.push(await extractDesyncSlice(path.join(desyncDir, `_${sliceArch}`), { platform, arch: sliceArch }));
+    }
+    lipoCreate(sliceBinaries, path.join(desyncDir, 'desync'));
+    for (const sliceArch of DARWIN_UNIVERSAL_ARCHS) {
+      fs.rmSync(path.join(desyncDir, `_${sliceArch}`), { recursive: true });
+    }
+    console.log(`[download-binaries] universal desync installed at ${path.join(desyncDir, 'desync')}`);
+    return;
   }
+
+  const desyncBinary = await extractDesyncSlice(desyncDir, { platform, arch });
   fs.chmodSync(desyncBinary, 0o755);
   console.log(`[download-binaries] desync installed at ${desyncBinary}`);
 }
@@ -459,6 +533,8 @@ beforeInstall.downloadUv = downloadUv;
 beforeInstall.downloadRestic = downloadRestic;
 beforeInstall.downloadDesync = downloadDesync;
 beforeInstall.download = download;
+beforeInstall.lipoCreate = lipoCreate;
+beforeInstall.DARWIN_UNIVERSAL_ARCHS = DARWIN_UNIVERSAL_ARCHS;
 module.exports = beforeInstall;
 
 if (require.main === module) {
