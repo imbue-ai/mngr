@@ -20,7 +20,7 @@ on:
 
 jobs:
   intel_launch:
-    runs-on: macos-13   # GitHub-hosted Intel (x86_64) runner
+    runs-on: macos-15-intel   # GitHub-hosted Intel x86_64 (macos-13 retired Dec 2025)
     timeout-minutes: 30
     env:
       BUILD_ID: ${{ github.event.inputs.build_id || '260718n3rfjcn9z' }}
