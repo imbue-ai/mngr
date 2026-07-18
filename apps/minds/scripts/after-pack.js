@@ -22,18 +22,26 @@ const ARCH_BY_ENUM = { 1: 'x86_64', 3: 'aarch64', 4: 'universal' };
 
 function findAppResources(appOutDir) {
   const app = fs.readdirSync(appOutDir).find((entry) => entry.endsWith('.app'));
-  if (!app) {
-    throw new Error(`after-pack: no .app bundle found in ${appOutDir}`);
-  }
-  return path.join(appOutDir, app, 'Contents', 'Resources');
+  return app ? path.join(appOutDir, app, 'Contents', 'Resources') : null;
 }
 
-module.exports = async function afterPack({ appOutDir, arch }) {
+module.exports = async function afterPack({ appOutDir, arch, electronPlatformName }) {
+  // The native-helper arch split only matters on macOS (Intel vs Apple Silicon).
+  // Linux/Windows are single-arch and are staged by the beforeInstall hook; they
+  // also have no .app bundle, so skip them rather than break their builds.
+  if (electronPlatformName && electronPlatformName !== 'darwin') {
+    console.log(`[after-pack] skipping platform ${electronPlatformName} (macOS-only hook).`);
+    return;
+  }
+  const resourcesDir = findAppResources(appOutDir);
+  if (!resourcesDir) {
+    console.log(`[after-pack] no .app bundle in ${appOutDir}; skipping (non-macOS build).`);
+    return;
+  }
   const archName = ARCH_BY_ENUM[arch];
   if (!archName) {
     throw new Error(`after-pack: unsupported arch enum ${arch} (expected x64=1, arm64=3, universal=4)`);
   }
-  const resourcesDir = findAppResources(appOutDir);
   const platform = 'darwin';
   console.log(`[after-pack] staging ${archName} native helpers into ${resourcesDir}`);
   await Promise.all([
