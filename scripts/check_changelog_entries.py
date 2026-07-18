@@ -39,8 +39,10 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Branch prefixes exempt from the changelog requirement. The consolidation
 # agent's own PRs rewrite the consolidated changelogs and would otherwise be
-# caught requiring an entry for every project they touch.
-_EXEMPT_BRANCH_PREFIXES: tuple[str, ...] = ("mngr/changelog-consolidation",)
+# caught requiring an entry for every project they touch. The release-candidate
+# branch is a rolling integration branch (latest main plus the review queue),
+# not a feature, so it has no user-visible change to describe.
+_EXEMPT_BRANCH_PREFIXES: tuple[str, ...] = ("mngr/changelog-consolidation", "mngr/release-candidate")
 
 
 def detect_branch(repo_root: Path) -> str | None:

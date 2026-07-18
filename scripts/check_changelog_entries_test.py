@@ -128,4 +128,17 @@ def test_main_skips_on_main_branch(tmp_path: Path) -> None:
 
 def test_is_exempt_branch() -> None:
     assert is_exempt_branch("mngr/changelog-consolidation-2026-06-13")
+    assert is_exempt_branch("mngr/release-candidate")
     assert not is_exempt_branch("mngr/some-feature")
+
+
+def test_main_skips_on_release_candidate_branch(tmp_path: Path) -> None:
+    """The rolling release-candidate branch touches projects without adding
+    entries; the gate must exempt it rather than fail."""
+    repo = _init_repo(tmp_path)
+    run_git_command(repo, "checkout", "-b", "mngr/release-candidate")
+    (repo / "libs" / "mngr" / "thing.py").write_text("x = 1\n")
+    run_git_command(repo, "add", "-A")
+    run_git_command(repo, "commit", "-m", "integration change without entry")
+
+    assert main(repo) == 0
