@@ -1484,6 +1484,23 @@ _MODEL_SELECTOR_PANE = (
     "  ❯ 1. Yes, switch to Fable 5\n"
     "    2. No, go back"
 )
+# Claude Code's interactive model picker (bare /model). Its rule line uses the upper-eighth block
+# glyph (▔, U+2594) rather than the box-drawing dash (─) of the confirmation dialog above, and the
+# highlighted default is the current model. Captured from a real claude 2.1.212 agent.
+_MODEL_PICKER_PANE = (
+    "❯ /model\n"
+    "\n" + ("▔" * 40) + "\n"
+    "   Select model\n"
+    "   Switch between Claude models. Your pick becomes the default for new sessions.\n"
+    "\n"
+    "     1. Default (recommended)  Use the default model (currently Opus 4.8 (1M context))\n"
+    "     2. Opus                   Opus 4.8 with 1M context\n"
+    "     3. Fable                  Fable 5\n"
+    "     4. Sonnet                 Sonnet 5\n"
+    "   ❯ 5. Haiku ✔                Haiku 4.5 · Fastest for quick answers\n"
+    "\n"
+    "   Enter to set as default · s to use this session only · Esc to cancel"
+)
 _SELECTOR_A = "────\n  Question A?\n  ❯ 1. Yes\n    2. No"
 _SELECTOR_B = "────\n  Question B?\n  ❯ 1. Ok\n    2. Cancel"
 _CLEARED_PANE = "● all done\n❯ "
@@ -1499,6 +1516,21 @@ def test_extract_blocking_selector_block_detects_model_switch_dialog() -> None:
     assert "2. No, go back" in block
     # The command echo above the rule line is not part of the block.
     assert "/model fable" not in block
+
+
+def test_extract_blocking_selector_block_detects_model_picker() -> None:
+    """The bare-/model picker (▔-ruled) is detected even though its rule glyph differs from ─."""
+    block = extract_blocking_selector_block(_MODEL_PICKER_PANE)
+    assert block is not None
+    assert block.startswith("▔")
+    assert "❯ 5. Haiku ✔" in block
+    # The command echo above the rule line is not part of the block.
+    assert "/model" not in block
+
+
+def test_numbered_selector_indicator_matches_model_picker() -> None:
+    """The picker also registers as a dialog indicator (so the preflight check catches it)."""
+    assert NumberedSelectorDialogIndicator().matches(_MODEL_PICKER_PANE) is True
 
 
 def test_extract_blocking_selector_block_ignores_input_row_and_bare_arrows() -> None:

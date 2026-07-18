@@ -1442,9 +1442,11 @@ def _has_api_credentials_available(
 # BEGINS with it (column 0, no leading whitespace) is the input box; the same glyph indented
 # (`  ❯ 1. ...`) marks the highlighted option of a multiple-choice selector instead.
 _INPUT_PROMPT_GLYPH: Final[str] = "❯"
-# A line consisting of a horizontal rule (box-drawing dashes). Claude renders one just above a
-# confirmation selector's body.
-_SELECTOR_RULE_RE: Final[re.Pattern[str]] = re.compile(r"^\s*─{4,}")
+# A line consisting of a horizontal rule. Claude renders one just above a selector's body. Two
+# rule glyphs occur in practice: confirmation dialogs (e.g. "Switch model?") use box-drawing
+# dashes (─, U+2500), while the model picker (bare /model) uses an upper-eighth block (▔, U+2594).
+# Match either so both selector styles are recognized.
+_SELECTOR_RULE_RE: Final[re.Pattern[str]] = re.compile(r"^\s*[─▔]{4,}")
 # The highlighted (default) option of a selector: indented, arrow, number, dot -- e.g. "  ❯ 1.".
 # The required leading whitespace is what distinguishes it from the column-0 input prompt.
 _SELECTOR_HIGHLIGHTED_OPTION_RE: Final[re.Pattern[str]] = re.compile(r"^[ \t]+❯[ \t]*\d+\.")
@@ -1465,11 +1467,12 @@ def extract_blocking_selector_block(pane_content: str) -> str | None:
     """Return the text block of a blocking numbered selector if one is open, else None.
 
     Recognizes Claude Code's interactive multiple-choice dialog: a horizontal-rule line
-    (``────``) followed below by an indented, highlighted ``❯``-arrow numbered
-    option (``  ❯ 1. ...``). The leading indentation on the option distinguishes a real
-    selector from the input prompt row (glyph at column 0), and requiring a preceding rule
-    line guards against ordinary output that merely contains an arrow. Returns the block from
-    the rule line through the last option line, for logging / diagnostics.
+    (``────`` for confirmation dialogs, ``▔▔▔▔`` for the model picker) followed below by an
+    indented, highlighted ``❯``-arrow numbered option (``  ❯ 1. ...``). The leading indentation
+    on the option distinguishes a real selector from the input prompt row (glyph at column 0),
+    and requiring a preceding rule line guards against ordinary output that merely contains an
+    arrow. Returns the block from the rule line through the last option line, for logging /
+    diagnostics.
     """
     lines = pane_content.splitlines()
     highlighted_option_idx: int | None = None
