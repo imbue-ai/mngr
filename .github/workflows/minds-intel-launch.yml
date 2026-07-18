@@ -1,0 +1,79 @@
+name: minds Intel launch screenshot
+
+# Installs a ToDesktop x64 (Intel) minds build on a GitHub Intel runner and
+# screenshots it loading into the main screen. Runs natively on Intel, so
+# lima's "running under rosetta" guard never fires (unlike a local Rosetta
+# test). Triggered by pushing the wz/intel-launch-screenshot branch, or
+# dispatched with a specific build id.
+
+on:
+  push:
+    branches: [wz/intel-launch-screenshot]
+  workflow_dispatch:
+    inputs:
+      build_id:
+        description: ToDesktop build id to install
+        default: '260718n3rfjcn9z'
+      arch:
+        description: mac arch (x64 for Intel, arm64 for Apple Silicon)
+        default: 'x64'
+
+jobs:
+  intel_launch:
+    runs-on: macos-13   # GitHub-hosted Intel (x86_64) runner
+    timeout-minutes: 30
+    env:
+      BUILD_ID: ${{ github.event.inputs.build_id || '260718n3rfjcn9z' }}
+      ARCH: ${{ github.event.inputs.arch || 'x64' }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: confirm Intel runner
+        run: |
+          echo "runner arch: $(uname -m)"
+          sysctl -n machdep.cpu.brand_string || true
+
+      - name: install minds.app from ToDesktop
+        run: |
+          URL="https://dl.todesktop.com/26032588hqdzk/builds/${BUILD_ID}/mac/zip/${ARCH}"
+          echo "downloading $URL"
+          TMP=$(mktemp -d)
+          curl -fSL --silent --show-error -o "$TMP/minds.zip" "$URL"
+          unzip -q -d "$TMP" "$TMP/minds.zip"
+          sudo cp -R "$TMP/Minds.app" /Applications/Minds.app
+          sudo xattr -dr com.apple.quarantine /Applications/Minds.app || true
+          echo "shell arch:   $(file -b /Applications/Minds.app/Contents/MacOS/Minds)"
+          echo "bundled uv:   $(file -b /Applications/Minds.app/Contents/Resources/uv/uv)"
+          echo "bundled lima: $(file -b /Applications/Minds.app/Contents/Resources/lima/bin/limactl)"
+          defaults read /Applications/Minds.app/Contents/Info.plist CFBundleVersion
+
+      - name: setup node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.15.0'
+
+      - name: setup pnpm
+        run: npm install -g pnpm@10.33.4 && pnpm --version
+
+      - name: pnpm install (apps/minds dev deps incl. playwright)
+        working-directory: apps/minds
+        run: pnpm install --frozen-lockfile
+
+      - name: run Intel launch spec (screenshots the main screen)
+        working-directory: apps/minds
+        run: |
+          pnpm exec playwright test \
+            --config=test/e2e/playwright.config.js \
+            intel-launch.spec.js \
+            --reporter=list,html
+
+      - name: upload report + screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minds-intel-launch-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: |
+            apps/minds/test-results/
+            apps/minds/playwright-report/
+          retention-days: 7
+          if-no-files-found: ignore
