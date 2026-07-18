@@ -46,6 +46,7 @@ Then visit the login URL printed in the terminal to create your first agent.
 
 ## Learn more
 
+- [Architecture overview](./docs/overview.md)
 - [Architecture and design](./docs/design.md)
 - [Desktop client internals](./imbue/minds/desktop_client/README.md)
 - [Glossary of key concepts](./docs/workspace/glossary.md)
