@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-17
+
+Bump Latchkey to v2.21.0.
+
 ## 2026-07-16
 
 Fixed a shutdown race where the background workspace-record sync loop could crash with `MngrCallerNotInitializedError`. During graceful shutdown the shared mngr caller was torn down while the sync loop was still running, so a pass that was mid-`mngr` call raced the teardown. Shutdown now stops the sync loop and waits for any in-flight pass to finish before tearing down the mngr caller.
