@@ -4,6 +4,7 @@ import json
 import threading
 from collections.abc import Callable
 from datetime import datetime
+from datetime import timedelta
 from datetime import timezone
 from io import StringIO
 from typing import Any
@@ -15,6 +16,7 @@ from click.testing import CliRunner
 from imbue.mngr.api.list import ErrorInfo
 from imbue.mngr.api.list import ListResult
 from imbue.mngr.api.list import ProviderErrorInfo
+from imbue.mngr.api.list import build_agent_cel_context
 from imbue.mngr.cli.exit_codes import EXIT_CODE_ERROR
 from imbue.mngr.cli.exit_codes import EXIT_CODE_PROVIDER_INACCESSIBLE
 from imbue.mngr.cli.exit_codes import EXIT_CODE_SUCCESS
@@ -585,6 +587,57 @@ def test_sort_agents_by_cel_nested_field() -> None:
     compiled = compile_cel_sort_keys("host.provider")
     result = _sort_agents_by_cel(agents, compiled)
     assert [str(a.name) for a in result] == ["agent-a", "agent-b"]
+
+
+def _agent_with_idle(name: str, idle_seconds: float) -> AgentDetails:
+    """Build an agent whose computed `idle` field is approximately `idle_seconds`."""
+    now = datetime.now(timezone.utc)
+    return make_test_agent_details(name=name, user_activity_time=now - timedelta(seconds=idle_seconds))
+
+
+def test_sort_agents_by_cel_numeric_idle_ascending() -> None:
+    """Sorting by a numeric CEL field must order numerically, not lexicographically.
+
+    The values span an order of magnitude (2.4, 14040.2, 111044) -- exactly the
+    spread a string comparator gets wrong, since "111044" < "14040" < "2.4"
+    lexicographically. The input is arranged in that wrong (string) order.
+    """
+    agents = [
+        _agent_with_idle("large", 111044),
+        _agent_with_idle("medium", 14040.2),
+        _agent_with_idle("small", 2.4),
+    ]
+    compiled = compile_cel_sort_keys("idle asc")
+    result = _sort_agents_by_cel(agents, compiled)
+    assert [str(a.name) for a in result] == ["small", "medium", "large"]
+    idle_values = [float(build_agent_cel_context(agent)["idle"]) for agent in result]
+    assert idle_values == sorted(idle_values)
+
+
+def test_sort_agents_by_cel_numeric_idle_descending() -> None:
+    """Sorting a numeric CEL field descending must order numerically."""
+    agents = [
+        _agent_with_idle("small", 2.4),
+        _agent_with_idle("medium", 14040.2),
+        _agent_with_idle("large", 111044),
+    ]
+    compiled = compile_cel_sort_keys("idle desc")
+    result = _sort_agents_by_cel(agents, compiled)
+    assert [str(a.name) for a in result] == ["large", "medium", "small"]
+    idle_values = [float(build_agent_cel_context(agent)["idle"]) for agent in result]
+    assert idle_values == sorted(idle_values, reverse=True)
+
+
+def test_sort_agents_by_cel_numeric_missing_sorts_last() -> None:
+    """Agents whose numeric CEL field is absent sort to the end in either direction."""
+    with_idle = _agent_with_idle("has-idle", 2.4)
+    without_idle = make_test_agent_details(name="no-idle")
+
+    ascending = _sort_agents_by_cel([without_idle, with_idle], compile_cel_sort_keys("idle asc"))
+    assert [str(a.name) for a in ascending] == ["has-idle", "no-idle"]
+
+    descending = _sort_agents_by_cel([without_idle, with_idle], compile_cel_sort_keys("idle desc"))
+    assert [str(a.name) for a in descending] == ["has-idle", "no-idle"]
 
 
 # =============================================================================
