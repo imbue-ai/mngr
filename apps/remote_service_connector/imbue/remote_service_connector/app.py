@@ -4679,6 +4679,18 @@ def _connector_secrets() -> list[modal.Secret]:
     # high so the no-warm-pool connector stays hot across a dev session.
     scaledown_window=_SCALEDOWN_WINDOW or None,
 )
+# Without this, Modal delivers ONE request per container at a time, so a
+# single slow request (a lease's SSH provisioning, a cold sync pull) makes
+# every other caller queue behind it or wait out a fresh container's cold
+# boot -- even with a warm pool. The app is safe to run concurrently: routes
+# are sync ``def`` (FastAPI runs them on its threadpool), every route opens
+# its own psycopg2 connection and closes it in ``finally``, the lease
+# selection uses ``FOR UPDATE SKIP LOCKED``, the shared Cloudflare
+# ``httpx.Client`` is thread-safe, and the only module-level mutable state
+# (the paid-status cache) is lock-guarded. ``max_inputs`` is kept modest
+# because each concurrent request holds one direct Neon connection and one
+# threadpool thread for its duration.
+@modal.concurrent(max_inputs=8)
 @modal.asgi_app()
 def fastapi_app() -> FastAPI:
     _init_supertokens()
