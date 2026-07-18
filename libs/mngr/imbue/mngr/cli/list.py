@@ -1006,12 +1006,10 @@ _BRACKET_PATTERN = re.compile(r"^([^\[]+)(?:\[([^\]]+)\])?$")
 def _typed_cel_sort_key(value: Any) -> tuple[int, Any]:
     """Return a ``(type_rank, comparable)`` key that orders ``value`` within its type.
 
-    The leading type rank keeps values of different types from being compared to
-    one another (which would raise), so a homogeneous field sorts naturally:
-    numbers numerically, strings lexicographically. Anything else falls back to
-    its string form. ``bool`` is an ``int`` subclass and sorts as 0/1 among the
-    numbers; celpy's ``IntType``/``DoubleType``/``StringType`` are ``int`` /
-    ``float`` / ``str`` subclasses, so they match here too.
+    The leading rank groups values by type so values of different types are never
+    compared to one another (which would raise). celpy's ``IntType`` / ``DoubleType``
+    / ``StringType`` are ``int`` / ``float`` / ``str`` subclasses, so CEL values
+    match the ``isinstance`` checks here.
     """
     if isinstance(value, (int, float)):
         return (0, value)
