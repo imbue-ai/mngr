@@ -49,7 +49,7 @@ minds run
 ## Accessing your agent
 
 After creation, the agent is accessible at:
-- **Local**: `https://{agent_id}.localhost:8421/` -- served by the `mngr forward` child process (not the desktop client), which byte-forwards the subdomain to the workspace's system interface, which serves the dockview UI. The port is chosen by the desktop client and defaults to 8421.
+- **Local**: `https://{agent_id}.localhost:8421/` -- served by the `mngr forward` child process (not the desktop client), which byte-forwards the subdomain to the workspace's system interface, which serves the dockview UI. The port is chosen by the `mngr forward` plugin itself (its default is 8421) and reported back to the desktop client.
 - **Individual service**: `https://{agent_id}.localhost:8421/service/{service_name}/` (e.g. `.../service/web/`, `.../service/terminal/`)
 - **Global** (if Cloudflare configured): `https://{service}--{agent_id}--{username}.{domain}`
 

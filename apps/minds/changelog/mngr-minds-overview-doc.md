@@ -15,6 +15,7 @@ same subdomain-port claim in `docs/workspace/getting_started.md`:
 - Corrected the subdomain-access claim. Agent subdomains
   (`<agent-id>.localhost/...`) are served by the `mngr forward` child process
   over HTTPS, not by the desktop client on port 8420 (which is the desktop
-  client's own bare-origin UI). The forwarding port is chosen by the desktop
-  client and defaults to 8421, so the docs describe the mechanism rather than
-  asserting a fixed port.
+  client's own bare-origin UI). The forwarding port is owned by the `mngr
+  forward` plugin (its default is 8421) and reported back to the desktop
+  client, so the docs describe the mechanism rather than asserting a fixed
+  port.

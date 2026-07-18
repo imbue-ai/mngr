@@ -74,11 +74,13 @@ a **Flask** app served by a synchronous cheroot WSGI server
   `libs/mngr_forward/`). This is what actually serves the per-workspace
   `https://<agent-id>.localhost/` origins, byte-forwarding HTTP and WebSocket
   traffic to each workspace's own `system_interface` over TLS + HTTP/2. The
-  desktop client chooses the port `mngr forward` binds and passes it in,
-  falling back to 8421 only when unset (`desktop_client/app.py:228`,
-  `mngr_forward/config.py`), so treat 8421 as a default rather than a fixed
-  address. The desktop client itself has no subdomain-forwarding or proxy route
-  -- it byte-forwards nothing.
+  `mngr forward` plugin owns its bind port: it uses its own default of 8421
+  (`mngr_forward/config.py`), or an OS-assigned fallback when that port is
+  taken, and reports the port it actually bound back to the desktop client via
+  a `listening` envelope (`desktop_client/forward_cli.py`) -- the desktop
+  client passes no `--port` and simply reads the reported value, so treat 8421
+  as a default rather than a fixed address. The desktop client itself has no
+  subdomain-forwarding or proxy route -- it byte-forwards nothing.
 - **Spawns / adopts a `mngr latchkey forward` supervisor** that owns the shared
   Latchkey gateway, a single `mngr observe` discovery producer, and the
   per-agent reverse SSH tunnels. It is restarted on every `minds run` and
