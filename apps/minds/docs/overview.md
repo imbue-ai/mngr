@@ -35,7 +35,7 @@ flowchart TB
     subgraph machine["Your machine"]
         browser["Browser / Electron shell"]
         ui["minds desktop client -- Flask<br/>bare origin localhost:8420<br/>UI + /api/v1 + create + sharing"]
-        fwd["mngr forward plugin<br/>agent-id.localhost:8421<br/>HTTP/WS byte-forwarding, TLS + HTTP/2"]
+        fwd["mngr forward plugin<br/>serves agent-id.localhost<br/>HTTP/WS byte-forwarding, TLS + HTTP/2"]
         latch["mngr latchkey forward<br/>Latchkey gateway, mngr observe, SSH tunnels"]
     end
 
@@ -47,7 +47,7 @@ flowchart TB
     end
 
     browser -->|localhost:8420| ui
-    browser -->|agent-id.localhost:8421| fwd
+    browser -->|agent-id.localhost| fwd
     fwd -->|forwards to| si
     ui -. spawns .-> fwd
     ui -. spawns .-> latch
@@ -71,11 +71,14 @@ a **Flask** app served by a synchronous cheroot WSGI server
   account and settings pages, the sharing editor, and the `/api/v1` JSON API
   (`desktop_client/app.py`).
 - **Spawns `mngr forward`** as a subprocess (the `mngr_forward` plugin,
-  `libs/mngr_forward/`). This is what actually byte-forwards HTTP and WebSocket
-  traffic from `https://<agent-id>.localhost:8421/*` to each workspace's own
-  `system_interface`, over TLS + HTTP/2 (default port 8421,
-  `mngr_forward/config.py`). The desktop client itself has no
-  subdomain-forwarding or proxy route -- it byte-forwards nothing.
+  `libs/mngr_forward/`). This is what actually serves the per-workspace
+  `https://<agent-id>.localhost/` origins, byte-forwarding HTTP and WebSocket
+  traffic to each workspace's own `system_interface` over TLS + HTTP/2. The
+  desktop client chooses the port `mngr forward` binds and passes it in,
+  falling back to 8421 only when unset (`desktop_client/app.py:228`,
+  `mngr_forward/config.py`), so treat 8421 as a default rather than a fixed
+  address. The desktop client itself has no subdomain-forwarding or proxy route
+  -- it byte-forwards nothing.
 - **Spawns / adopts a `mngr latchkey forward` supervisor** that owns the shared
   Latchkey gateway, a single `mngr observe` discovery producer, and the
   per-agent reverse SSH tunnels. It is restarted on every `minds run` and
@@ -186,8 +189,9 @@ Creation walks these status phases:
 `INITIALIZING -> CLONING_REPO -> [CHECKING_OUT_BRANCH] -> [PROVISIONING_AI] ->
 CREATING_WORKSPACE -> WAITING_FOR_READY -> DONE` (or `FAILED`), where the
 bracketed phases run only when a branch/tag was given or the AI provider is
-Imbue Cloud. When an account is associated, a post-create step also provisions a
-Cloudflare tunnel and injects its token (see [Global access](#global-access)).
+Imbue Cloud. When the workspace is associated with an account, a post-create
+step also provisions its Cloudflare tunnel -- which exposes nothing on its own
+(see [Global access](#global-access)).
 
 ## Launch modes
 
@@ -224,22 +228,34 @@ exports that point the whole stack at one env's data root. See
 
 ## Global access
 
-A workspace associated with an account gets a Cloudflare tunnel (created via
-`mngr imbue_cloud tunnels create`); its token is written to
-`runtime/secrets/cloudflare_tunnel.env`, which the in-container `cloudflared`
-service picks up. Each shared service is then reachable at a global URL of the
-form `https://<service>--<short-agent-id>--<user-id>.<domain>` (the agent and
-user components are 16-hex-character prefixes, not human-readable names).
-Visitors authenticate through **Cloudflare Access** using the account's
-configured identity providers (for example Google OAuth or an emailed one-time
-PIN), matched against an email allowlist -- this is independent of the minds
+By default nothing about a workspace is reachable from the public internet.
+Exposure is opt-in, per-service, and even then never openly public.
+
+When a workspace is associated with an account, minds provisions a Cloudflare
+tunnel for it after creation (`mngr imbue_cloud tunnels create`) and writes the
+token to `runtime/secrets/cloudflare_tunnel.env`, which the in-container
+`cloudflared` service picks up. That only establishes the tunnel; on its own it
+exposes no service.
+
+To reach a service from outside, you share it explicitly from the desktop
+client's sharing flow (`/sharing/<agent-id>/<service-name>`, reached from
+Workspace Settings). **Sharing requires at least one email**: an empty allowlist
+is rejected up front (`desktop_client/sharing_handler.py` raises
+`SharingError("Sharing requires at least one email ... an empty list would
+expose the service publicly.")`), because sharing installs a **Cloudflare Access
+policy** scoped to those emails. A visitor to the shared URL must first
+authenticate through Cloudflare Access using the account's configured identity
+providers (for example Google OAuth or an emailed one-time PIN) and match the
+email allowlist, so a shared service is always gated -- never anonymously
+public. This Access gate is separate from, and independent of, the minds
 SuperTokens session.
 
-The source of truth for all tunnel, service, and access state is the
-**remote-service connector** (a Modal-deployed service); minds keeps no local
-copy. You manage per-service sharing from the desktop client's sharing editor
-(`/sharing/<agent-id>/<service-name>`, reached from Workspace Settings), which
-reads from and writes to the connector.
+A shared service is reachable at a global URL of the form
+`https://<service>--<short-agent-id>--<user-id>.<domain>` (the agent and user
+components are 16-hex-character prefixes, not human-readable names). The
+remote-service connector (a Modal-deployed service) owns all tunnel, service,
+and Access state; minds keeps no local copy, and the sharing editor reads from
+and writes to the connector.
 
 ## Where to go next
 

@@ -1,28 +1,20 @@
-Rewrote `docs/overview.md` into an accurate, top-level architecture overview of
-minds and linked it from the README's "Learn more" section (it was previously
-unreferenced there).
+Fixed stale, misleading claims in `docs/overview.md` (ticket da-i0go), and the
+same subdomain-port claim in `docs/workspace/getting_started.md`:
 
-The prior overview had drifted from the code on several load-bearing points; the
-new version is grounded in the current source, covering:
+- Removed the phantom `global = true` key from the `runtime/applications.toml`
+  description. `forward_port.py` only ever stores a service's `name` and `url`;
+  there is no `global` flag, so nothing in a workspace toggles public exposure
+  by editing that file.
 
-- the desktop client as a Flask app served by cheroot, which serves the
-  bare-origin UI on `localhost:8420` and spawns the separate `mngr forward`
-  plugin (default port 8421) that does the actual `<agent-id>.localhost`
-  HTTP/WebSocket forwarding;
+- Rewrote the Cloudflare section to state loudly that nothing is publicly
+  reachable by default. Provisioning a workspace's tunnel exposes no service on
+  its own; exposing a service is an explicit, opt-in share that requires at
+  least one email and installs a Cloudflare Access policy, so a shared service
+  is always gated behind Cloudflare Access -- never anonymously public.
 
-- the three independent local credentials (`minds_session`,
-  `mngr_forward_session`, `MINDS_API_KEY`) versus SuperTokens as Imbue Cloud
-  account identity;
-
-- the workspace container model (the `system-services` primary agent, separate
-  chat agents, bootstrap + supervisord, and the actual background services);
-
-- the creation flow (`POST /api/v1/workspaces`, the `system-services@<host>`
-  address, status phases);
-
-- the six `LaunchMode` members (DOCKER, VULTR, LIMA, IMBUE_CLOUD, AWS, MODAL);
-
-- client-config selection and the environment tiers; and
-
-- global access via the Cloudflare tunnel, Cloudflare Access, and the
-  remote-service connector.
+- Corrected the subdomain-access claim. Agent subdomains
+  (`<agent-id>.localhost/...`) are served by the `mngr forward` child process
+  over HTTPS, not by the desktop client on port 8420 (which is the desktop
+  client's own bare-origin UI). The forwarding port is chosen by the desktop
+  client and defaults to 8421, so the docs describe the mechanism rather than
+  asserting a fixed port.
