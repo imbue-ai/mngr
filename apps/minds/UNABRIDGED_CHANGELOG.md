@@ -4,6 +4,16 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-18
+
+Added `apps/minds/docs/dev-setup.md`, a canonical "set up minds for development" guide: an install-these-first prerequisites checklist -- uv/just/git, Docker, Node 24.15.0 + pnpm 10.33.4, GNU rsync (recent macOS ships Apple's openrsync, which lacks the `--filter=':- .gitignore'` GNU feature the vendor/mngr sync needs), GitHub access to the private default-workspace-template, Vault CLI + `vault login`, and a `~/.modal.toml` Modal profile -- that then hands off to the `minds-dev-workflow` skill for bootstrap and launch. `apps/minds/README.md`'s Getting started now points to this guide instead of carrying ad-hoc setup notes inline (the earlier GNU rsync note moved into the checklist).
+
+Relatedly, `just minds-start` fails fast with an actionable message (the same `brew install rsync` fix) when it detects openrsync, instead of erroring partway through the vendor/mngr sync.
+
+`minds env deploy`'s "URL mismatch" failure now names the most likely cause -- the active Modal token is bound to a different workspace than the tier's `modal_workspace`. A profile named e.g. `minds-dev` can hold a token for another workspace, pass the activation-time section-exists check, and then misroute the deploy; the error now extracts and compares the reported-vs-computed workspace and prints the fix (`modal token new --profile <workspace>`). `apps/minds/docs/environments.md` and the dev-setup checklist now document how to obtain `minds-dev` workspace access -- it's a separate, workspace-bound Modal workspace with no shared token in Vault: get an invite, `modal token new --profile minds-dev` selecting that workspace, and verify with `modal profile list`.
+
+`minds env deploy` now also **preflights** the pinned profile's real workspace before touching any cloud state: it reads `modal profile list --json` and refuses (with the same `modal token new --profile <workspace>` fix) when the token is bound to a different workspace than the tier's `modal_workspace`. So the misroute is caught up front instead of after the first `modal deploy` has already shipped to the wrong workspace. The check is best-effort -- if `modal profile list` can't be read it's skipped, and the deploy-time URL assertion remains the backstop.
+
 ## 2026-07-17
 
 Bump Latchkey to v2.21.0.
