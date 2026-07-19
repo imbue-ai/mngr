@@ -832,9 +832,7 @@ def test_todesktop_config_balances_app_files_exclusions_and_sign_paths() -> None
     """
     config = _load_todesktop_config()
     app_files = config.get("appFiles")
-    assert app_files is not None and "**" in app_files, (
-        "todesktop.js appFiles must include '**' for the app code"
-    )
+    assert app_files is not None and "**" in app_files, "todesktop.js appFiles must include '**' for the app code"
     excluded_prefixes = []
     for glob in app_files:
         if glob.startswith("!"):
