@@ -12,9 +12,14 @@ on top via the ``card_extra`` / ``style_extra`` / ``body_extra`` hooks.
 
 from typing import Final
 
-# The shared stylesheet. ``body`` centers a single ``.card`` in the viewport;
-# ``.row`` lays the spinner beside the heading/message block.
-LOADING_PAGE_CSS: Final[str] = """\
+# The shared stylesheet, split so a consumer that renders the card inside its own
+# shell (e.g. the minds recovery page under the desktop titlebar) can pull in only
+# the card-scoped rules (``LOADING_PAGE_CARD_CSS``) and supply its own body layout,
+# without the full-viewport ``body`` centering fighting a fixed titlebar. The proxy
+# loader uses ``LOADING_PAGE_CSS`` (both halves) exactly as before.
+#
+# ``_LOADING_PAGE_BODY_CSS`` centers a single ``.card`` in the viewport.
+_LOADING_PAGE_BODY_CSS: Final[str] = """\
       html, body { height: 100%; margin: 0; }
       body {
         background: #fafafa;
@@ -26,6 +31,11 @@ LOADING_PAGE_CSS: Final[str] = """\
         padding: 24px;
         box-sizing: border-box;
       }
+"""
+
+# ``LOADING_PAGE_CARD_CSS`` styles the card itself; ``.row`` lays the spinner
+# beside the heading/message block. Safe to inject into any host document's head.
+LOADING_PAGE_CARD_CSS: Final[str] = """\
       .card {
         background: #fff;
         border: 1px solid #e4e4e7;
@@ -54,6 +64,8 @@ LOADING_PAGE_CSS: Final[str] = """\
       @keyframes spin { to { transform: rotate(360deg); } }
 """
 
+LOADING_PAGE_CSS: Final[str] = _LOADING_PAGE_BODY_CSS + LOADING_PAGE_CARD_CSS
+
 # The default heading/message. A consumer may override these at runtime (via
 # its own script) for non-loading states, but the initial render -- and the
 # proxy loader always -- shows this. The loading state has no message; the
@@ -61,6 +73,29 @@ LOADING_PAGE_CSS: Final[str] = """\
 # other states.
 _LOADING_TITLE: Final[str] = "Loading workspace"
 _LOADING_MESSAGE: Final[str] = ""
+
+
+def render_loading_card(*, card_attrs: str = "", card_extra: str = "") -> str:
+    """Render just the loading ``.card`` fragment (no document wrapper).
+
+    Used by ``render_loading_page`` for the full proxy-loader document, and by
+    consumers that place the card inside their own shell (e.g. the minds recovery
+    page under the desktop titlebar). Pair it with ``LOADING_PAGE_CARD_CSS`` in the
+    host document's head.
+
+    ``card_attrs``   -- extra attributes on the ``.card`` element (e.g. ``data-*``).
+    ``card_extra``   -- extra markup appended inside the ``.card`` (e.g. buttons).
+    """
+    return f"""    <div class="card"{card_attrs}>
+      <div class="row">
+        <div id="loading-spinner" class="spinner" aria-hidden="true"></div>
+        <div>
+          <h1 id="loading-title">{_LOADING_TITLE}</h1>
+          <p id="loading-message">{_LOADING_MESSAGE}</p>
+        </div>
+      </div>
+{card_extra}    </div>
+"""
 
 
 def render_loading_page(
@@ -90,15 +125,6 @@ def render_loading_page(
 {LOADING_PAGE_CSS}{style_extra}    </style>
   </head>
   <body>
-    <div class="card"{card_attrs}>
-      <div class="row">
-        <div id="loading-spinner" class="spinner" aria-hidden="true"></div>
-        <div>
-          <h1 id="loading-title">{_LOADING_TITLE}</h1>
-          <p id="loading-message">{_LOADING_MESSAGE}</p>
-        </div>
-      </div>
-{card_extra}    </div>
-{body_extra}  </body>
+{render_loading_card(card_attrs=card_attrs, card_extra=card_extra)}{body_extra}  </body>
 </html>
 """

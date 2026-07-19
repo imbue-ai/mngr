@@ -27,6 +27,7 @@ from flask import request
 from jinja2 import Environment
 from jinja2 import select_autoescape
 from jinjax import Catalog
+from markupsafe import Markup
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -47,7 +48,8 @@ from imbue.minds.utils.sentry.frontend import frontend_sentry_browser_payload
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import InvalidName
-from imbue.mngr_forward.loading_page import render_loading_page
+from imbue.mngr_forward.loading_page import LOADING_PAGE_CARD_CSS
+from imbue.mngr_forward.loading_page import render_loading_card
 
 TEMPLATE_DIR: Final[Path] = Path(__file__).resolve().parent / "templates"
 
@@ -831,21 +833,33 @@ def render_inbox_unavailable_fragment(message: str = "") -> str:
 _RECOVERY_STYLE: Final[str] = """\
       .hidden { display: none; }
 
-      /* Keep the whole card within the viewport and lay it out as a vertical
-         stack: the header row and the restart button stay pinned at the top,
-         and only the troubleshooting block scrolls when its disclosures are
-         expanded. Without this the card grows past the viewport as dropdowns
-         open and -- because the body flex-centers it -- the heading and button
-         slide off the top, out of reach of the page scrollbar. This overrides
-         the shared ``.card`` from LOADING_PAGE_CSS (appended after it, so it
-         wins); the proxy loader never pulls in this style, so it is unaffected.
-         The 48px subtracted matches the body's 24px top+bottom padding. */
+      /* Keep the whole card within the region below the titlebar and lay it out
+         as a vertical stack: the header row and the restart button stay pinned at
+         the top, and only the troubleshooting block scrolls when its disclosures
+         are expanded. Without this the card grows past the viewport as dropdowns
+         open and -- because .recovery-shell-center flex-centers it -- the heading
+         and button slide off the top, out of reach of the page scrollbar. This
+         overrides the shared ``.card`` from LOADING_PAGE_CARD_CSS (appended after
+         it, so it wins). The 86px subtracted = the wrapper's 24px top+bottom
+         padding (48px) plus the fixed 38px ChromeShell titlebar. */
       .card {
         display: flex;
         flex-direction: column;
-        max-height: calc(100vh - 48px);
+        max-height: calc(100vh - 86px);
       }
       .row { flex-shrink: 0; }
+
+      /* Center the loading card in the region below the fixed 38px ChromeShell
+         titlebar (the recovery page renders on the chrome surface). Mirrors the
+         proxy loader's full-viewport body-centering, offset for the titlebar. */
+      .recovery-shell-center {
+        min-height: calc(100dvh - 38px);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        box-sizing: border-box;
+      }
 
       /* Primary action. The restart and retry buttons are the page's focal
          point: full width, prominent, directly under the message. They are
@@ -1521,7 +1535,6 @@ _RECOVERY_SCRIPT: Final[str] = """\
 """
 
 
-@pure
 def render_recovery_page(
     agent_id: AgentId,
     return_to: str,
@@ -1531,8 +1544,12 @@ def render_recovery_page(
 ) -> str:
     """Render the workspace-recovery page shown when the system interface is unresponsive.
 
-    Built on the shared ``render_loading_page`` so the recovery page's loading
-    state is identical to the mngr_forward proxy loader. ``initial_status`` is
+    Renders on the chrome surface through ``ChromeShell`` so the window keeps its
+    titlebar (Home / window controls) during a restart, with the shared
+    ``render_loading_card`` fragment centered below it -- the loading state is
+    still visually identical to the mngr_forward proxy loader. (Not ``@pure``: it
+    reads the request via ChromeShell's is-mac catalog global.) ``initial_status``
+    is
     one of ``"stuck"``/``"restarting"``/``"restart_failed"``/``"healthy"`` and
     governs the page's initial UI state. ``initial_error`` is the failure
     reason shown (collapsed) when ``initial_status`` is ``"restart_failed"``.
@@ -1593,11 +1610,27 @@ def render_recovery_page(
         f' data-return-to="{html.escape(return_to)}"'
         f' data-initial-status="{html.escape(initial_status)}"'
     )
-    return render_loading_page(
-        style_extra=_RECOVERY_STYLE,
-        card_attrs=card_attrs,
-        card_extra=card_extra,
-        body_extra="    <script>\n" + _RECOVERY_SCRIPT + "    </script>\n",
+    # Render the loading card on the chrome surface via ChromeShell so the window
+    # keeps its titlebar during recovery. The card-scoped CSS (LOADING_PAGE_CARD_CSS)
+    # + the recovery overrides go in the head slot; the recovery script in the
+    # scripts slot (after chrome.js, which wires the titlebar); the card, centered
+    # below the titlebar by .recovery-shell-center, in the content slot.
+    # Markup-wrap so JinjaX does not autoescape these trusted HTML/CSS/JS strings
+    # into the head / scripts slots (agent_id, return_to, and the error are already
+    # html.escape'd into card_attrs / card_extra above).
+    head = Markup(f"    <style>\n{LOADING_PAGE_CARD_CSS}{_RECOVERY_STYLE}    </style>\n")
+    scripts = Markup("    <script>\n" + _RECOVERY_SCRIPT + "    </script>\n")
+    content = Markup(
+        '  <div class="recovery-shell-center">\n'
+        + render_loading_card(card_attrs=card_attrs, card_extra=card_extra)
+        + "  </div>\n"
+    )
+    return CATALOG.render(
+        "ChromeShell",
+        title="Reconnecting to workspace",
+        head=head,
+        scripts=scripts,
+        _content=content,
     )
 
 

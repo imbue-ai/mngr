@@ -868,6 +868,14 @@ def test_local_pages_render_the_chromeshell_titlebar() -> None:
         "WorkspaceSettings": render_workspace_settings(
             agent_id=str(_AGENT_A), ws_name="ws", current_account=None, accounts=(), servers=()
         ),
+        # The recovery page renders the loading card on the chrome surface via
+        # ChromeShell so the window keeps its titlebar during a restart.
+        "Recovery": render_recovery_page(
+            agent_id=_AGENT_A,
+            return_to=f"http://localhost:8421/goto/{_AGENT_A}/",
+            initial_status="stuck",
+            initial_error="",
+        ),
     }
     for name, html in renders.items():
         assert html.count("<html") == 1, f"{name}: expected exactly one document"

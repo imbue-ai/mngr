@@ -30,4 +30,6 @@ Trusted local pages in the desktop client now render the app titlebar directly, 
 
   - Fixed the workspace-link scheme (the plugin proxy is TLS, so links are now `https`), a Flask request-context guard, three titlebar CSS regressions (in-page modals rendering under the titlebar, the Settings sticky nav, and the post-sign-in sync banner), DevTools / zoom / auth-reload / back-forward now following the visible surface, and backing out of a quit no longer force-reloading a live workspace.
 
-  - Remaining follow-ups (tracked in the spec's open questions): the recovery page still renders without the titlebar during a restart, and browser (non-Electron) mode still needs its agent routes wrapped so opening a workspace keeps the app chrome.
+  - The workspace-recovery page now renders under the app titlebar too: it wraps the shared loading card (split out of the `mngr_forward` proxy loader, which is unchanged) in the ChromeShell layout, so the window keeps Home / drag / window controls while a workspace restarts.
+
+  - Remaining follow-up (tracked in the spec's open questions): browser (non-Electron) mode still needs its agent routes wrapped so opening a workspace keeps the app chrome.
