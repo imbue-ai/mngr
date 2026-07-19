@@ -39,7 +39,9 @@ def test_render_auth_page_without_return_to_has_no_back_link() -> None:
 def test_render_auth_page_includes_oauth_buttons() -> None:
     html = render_auth_page()
     assert "Continue with Google" in html
-    assert "Continue with GitHub" in html
+    # GitHub OAuth is not enabled in production, so its login button was removed
+    # from the auth page (the underlying provider support is left intact).
+    assert "Continue with GitHub" not in html
 
 
 def test_render_auth_page_oauth_buttons_carry_click_spinner() -> None:
