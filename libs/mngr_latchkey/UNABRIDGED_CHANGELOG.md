@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-17
+
+Bump Latchkey to v2.21.0.
+
 ## 2026-07-16
 
 Fixed: `mngr latchkey forward` no longer treats a stopped (but not destroyed) workspace as if it were still running. Previously, when a workspace's container was stopped -- via an app restart, an idle-shutdown, or a VPS reboot -- discovery kept reporting the agent, so the supervisor would repeatedly try to provision the VPS-resident gateway against the stopped container (raising `container ... is not running`) and would keep the agent's reverse tunnel alive, leaving the tunnel health-check loop re-dialing a dead endpoint indefinitely.

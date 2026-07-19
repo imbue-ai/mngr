@@ -9,11 +9,10 @@ USER=$(whoami)
 HOST=$(hostname -s)
 DIR=$(pwd)
 
-# Get current git branch
-BRANCH=""
-if git rev-parse --git-dir > /dev/null 2>&1; then
-    BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
-fi
+# Get current git branch (robust to the detached HEAD of jj colocated repos;
+# see scripts/current_branch.sh, a sibling of this script). Empty when the
+# branch can't be determined or we're not in a repo.
+BRANCH=$(bash "$(dirname "$0")/current_branch.sh" 2>/dev/null || echo "")
 
 # Get PR URL from .reviewer/outputs/pr_url (if exists)
 PR_URL=""
