@@ -44,20 +44,24 @@
   // from the accent in pure CSS (``.titlebar-surface`` in app.css), not here.
 
   // -- Navigation adapter ---------------------------------------------------
+  // Browser mode is now always full-page navigation: every trusted local page
+  // renders its own ChromeShell page, and a workspace opens inside the agent
+  // wrapper via selectWorkspace (below). The wrapper's #content-frame iframe is
+  // only ever driven by the server (the /_chrome ?workspace= param) or the
+  // workspace app itself -- chrome.js never navigates it -- so the old
+  // iframe.src / iframe.history branches are gone (they belonged to the retired
+  // persistent-chrome model where every page loaded inside one shell's iframe).
   function navigateContent(url) {
     if (isElectron) window.minds.navigateContent(url);
-    else if (isLocalPage) window.location = url;
-    else document.getElementById('content-frame').src = url;
+    else window.location = url;
   }
   function goBack() {
     if (isElectron) window.minds.contentGoBack();
-    else if (isLocalPage) window.history.back();
-    else { try { document.getElementById('content-frame').contentWindow.history.back(); } catch (e) {} }
+    else window.history.back();
   }
   function goForward() {
     if (isElectron) window.minds.contentGoForward();
-    else if (isLocalPage) window.history.forward();
-    else { try { document.getElementById('content-frame').contentWindow.history.forward(); } catch (e) {} }
+    else window.history.forward();
   }
 
   // -- Sidebar toggle -------------------------------------------------------
@@ -123,7 +127,14 @@
   }
 
   function selectWorkspace(agentId) {
-    navigateContent(mngrForwardOrigin + '/goto/' + agentId + '/');
+    if (isElectron) {
+      window.minds.navigateContent(mngrForwardOrigin + '/goto/' + agentId + '/');
+    } else {
+      // Browser: open the workspace inside the agent wrapper (ChromeShell + the
+      // #content-frame iframe pointed at the workspace) so the titlebar/sidebar
+      // persist, instead of full-navigating to the bare agent origin.
+      window.location = '/_chrome?workspace=' + encodeURIComponent(agentId);
+    }
     closeSidebar();
   }
 

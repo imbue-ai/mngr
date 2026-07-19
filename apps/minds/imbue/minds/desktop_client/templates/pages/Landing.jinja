@@ -94,8 +94,10 @@
         // navigating the chrome view's OWN frame into untrusted agent content.
         window.minds.navigateContent(ret);
       } else {
-        // Plain browser (no shell): full-page navigate to the workspace URL.
-        window.location = ret;
+        // Plain browser (no shell): open the workspace inside the agent wrapper
+        // (/_chrome?workspace=<id>) so the app titlebar/sidebar persist, rather
+        // than full-navigating to the bare agent origin.
+        window.location = '/_chrome?workspace=' + encodeURIComponent(agentId);
       }
     };
 
@@ -117,9 +119,9 @@
         // directly (opens/focuses a dedicated window for this workspace).
         window.minds.openWorkspaceInNewWindow(agentId);
       } else {
-        // Plain browser: no native windows, so open the workspace URL in a
-        // new tab instead.
-        window.open(row.dataset.defaultHref, '_blank', 'noopener');
+        // Plain browser: no native windows, so open the workspace (inside the
+        // agent wrapper so the app chrome persists) in a new tab instead.
+        window.open('/_chrome?workspace=' + encodeURIComponent(agentId), '_blank', 'noopener');
       }
     };
 

@@ -29,6 +29,10 @@ const STOPPED_ID = 'agent-' + 'a'.repeat(32);
 const RUNNING_ID = 'agent-' + 'b'.repeat(32);
 
 const gotoHref = (agentId) => ORIGIN + '/goto/' + agentId + '/';
+// In a plain browser, opening a running workspace routes through the agent
+// wrapper (/_chrome?workspace=<id>) so the app chrome persists, rather than
+// full-navigating to the bare /goto agent origin.
+const wrapperHref = (agentId) => ORIGIN + '/_chrome?workspace=' + agentId;
 const expectedRecoveryUrl = (agentId) =>
   ORIGIN + '/agents/' + agentId + '/recovery?return_to=' +
   encodeURIComponent(gotoHref(agentId)) + '&intent=restart';
@@ -99,10 +103,10 @@ test.describe('landing page stopped-mind click-through (landingRowClick contract
     expect(nav).toBe(expectedRecoveryUrl(STOPPED_ID));
   });
 
-  test('a RUNNING mind navigates to its normal /goto/ loader', async ({ page }) => {
+  test('a RUNNING mind opens inside the agent wrapper (keeps the app chrome)', async ({ page }) => {
     const captured = [];
     await loadLanding(page, captured);
     const nav = await clickRowAndCaptureNav(page, RUNNING_ID, captured);
-    expect(nav).toBe(gotoHref(RUNNING_ID));
+    expect(nav).toBe(wrapperHref(RUNNING_ID));
   });
 });

@@ -32,4 +32,4 @@ Trusted local pages in the desktop client now render the app titlebar directly, 
 
   - The workspace-recovery page now renders under the app titlebar too: it wraps the shared loading card (split out of the `mngr_forward` proxy loader, which is unchanged) in the ChromeShell layout, so the window keeps Home / drag / window controls while a workspace restarts.
 
-  - Remaining follow-up (tracked in the spec's open questions): browser (non-Electron) mode still needs its agent routes wrapped so opening a workspace keeps the app chrome.
+  - Reconciled browser (non-Electron) mode: opening a workspace now routes through the agent wrapper `/_chrome?workspace=<agent-id>` (the app titlebar + sidebar wrap the workspace iframe) instead of full-navigating to the bare agent origin and losing the app chrome. The `/_chrome` wrapper's iframe defaults to `about:blank` (no longer `/`, which used to render a second titlebar inside it); the requested workspace id is validated before it's used to build the iframe's `/goto` URL. In browser mode chrome.js is now always full-page navigation (the retired persistent-iframe navigation was removed).

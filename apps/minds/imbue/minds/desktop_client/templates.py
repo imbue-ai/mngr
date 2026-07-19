@@ -1667,8 +1667,9 @@ def render_chrome_page(
     is_authenticated: bool = False,
     mngr_forward_origin: str = "",
     initial_workspaces: Sequence[dict[str, str]] | None = None,
+    agent_iframe_src: str = "about:blank",
 ) -> str:
-    """Render the persistent chrome page (title bar + sidebar + content iframe).
+    """Render the agent-content wrapper page (title bar + sidebar + content iframe).
 
     is_mac controls whether macOS-specific styling is applied (traffic light padding,
     hidden window controls).
@@ -1676,6 +1677,12 @@ def render_chrome_page(
     ``mngr_forward_origin`` is exposed to the page-level JS via a
     ``data-mngr-forward-origin`` attribute on the body so chrome.js can build
     workspace links that target the plugin's port directly.
+
+    ``agent_iframe_src`` is the URL the browser-mode content iframe shows -- a
+    ``/goto/<agent>/`` workspace URL when this wrapper is served for a specific
+    workspace, else ``about:blank`` (never a trusted local page, which would double
+    the titlebar). The ``/_chrome`` route validates the requested agent id and
+    builds the URL.
 
     In Electron mode, the iframe and browser sidebar are hidden via JS; the content
     is handled by a separate WebContentsView, and the sidebar page is loaded into
@@ -1687,6 +1694,7 @@ def render_chrome_page(
         is_authenticated=is_authenticated,
         mngr_forward_origin=mngr_forward_origin,
         initial_workspaces=initial_workspaces or [],
+        agent_iframe_src=agent_iframe_src,
     )
 
 

@@ -761,6 +761,33 @@ def test_chrome_page_includes_sidebar_toggle(tmp_path: Path) -> None:
     assert "sidebar-menu" in response.text
 
 
+def test_chrome_page_iframe_targets_a_workspace_only_for_a_valid_agent_id(tmp_path: Path) -> None:
+    """Browser mode reaches a workspace through ``/_chrome?workspace=<agent-id>``: the
+    content iframe then points at that workspace's ``/goto`` URL, so the app chrome
+    persists around it. The id is validated (never reflected into the iframe ``src``
+    unvalidated), and the iframe never defaults to a trusted local page like ``/``
+    (which would render a second ChromeShell titlebar inside the wrapper)."""
+    client, _, _ = _setup_test_server(tmp_path)
+
+    valid_agent_id = "agent-00000000000000000000000000000001"
+
+    # No workspace -> inert iframe, and never "/".
+    bare = client.get("/_chrome")
+    assert 'src="about:blank"' in bare.text
+    assert 'src="/"' not in bare.text
+
+    # A valid workspace -> the iframe points at its /goto URL.
+    with_ws = client.get(f"/_chrome?workspace={valid_agent_id}")
+    assert f"/goto/{valid_agent_id}/" in with_ws.text
+    assert 'src="about:blank"' not in with_ws.text
+
+    # A bogus id is rejected -- no /goto smuggled into the iframe src.
+    bad = client.get("/_chrome?workspace=..%2Fevil")
+    assert 'src="about:blank"' in bad.text
+    assert "/goto/" not in bad.text
+    assert "evil" not in bad.text
+
+
 def test_chrome_titlebar_buttons_have_tooltips(tmp_path: Path) -> None:
     """Titlebar buttons carry data-tooltip labels (rendered as custom tooltips on
     the overlay surface) rather than native title= attributes, plus an aria-label

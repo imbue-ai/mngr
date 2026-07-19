@@ -1,6 +1,6 @@
-{#def is_mac, is_authenticated, mngr_forward_origin, initial_workspaces #}
+{#def is_mac, is_authenticated, mngr_forward_origin, initial_workspaces, agent_iframe_src="about:blank" #}
 {#
-  Persistent chrome page (titlebar + sidebar + content iframe).
+  Agent-content wrapper page (titlebar + sidebar + content iframe).
 
   The titlebar + browser-mode sidebar + accent / chrome.js wiring live in the
   shared ChromeShell layout; this page fills ChromeShell's content slot with the
@@ -8,6 +8,14 @@
   mirror). In Electron mode the iframe and embedded browser-mode sidebar are
   hidden via JS; the content is a separate WebContentsView, and the sidebar page
   is loaded into the shared modal WebContentsView when opened.
+
+  ``agent_iframe_src`` is the workspace (agent) URL the iframe shows in BROWSER
+  mode -- the server passes the ``/goto/<agent>/`` URL when this wrapper is
+  requested for a specific workspace (``/_chrome?workspace=<agent-id>``), else
+  ``about:blank``. It is NEVER a trusted local page like ``/`` (which would render
+  its own ChromeShell titlebar inside the iframe -- a doubled titlebar). In
+  Electron the iframe is hidden (the real content is a separate WebContentsView),
+  so the value is inert there.
 
   is_mac controls macOS-specific styling (traffic-light padding, hidden window
   controls). mngr_forward_origin is exposed to page-level JS via a data attribute
@@ -40,7 +48,7 @@
        style="width: calc(100% - 8px); height: calc(100% - 42px);"></div>
 
   <iframe id="content-frame"
-          src="/"
+          src="{{ agent_iframe_src }}"
           class="fixed left-[4px] top-[38px] border-0 rounded-[12px] bg-surface-primary"
           style="width: calc(100% - 8px); height: calc(100% - 42px); box-shadow: 0 1px 0 rgba(255,255,255,0.05) inset;"></iframe>
 </ChromeShell>

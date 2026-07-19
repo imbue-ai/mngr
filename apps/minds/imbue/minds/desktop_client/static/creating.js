@@ -112,7 +112,10 @@
       if (window.minds && window.minds.navigateContent) {
         window.minds.navigateContent(redirectUrl);
       } else {
-        window.location.href = redirectUrl;
+        // Plain browser: open the workspace inside the agent wrapper
+        // (/_chrome?workspace=<id>) so the app titlebar/sidebar persist, rather
+        // than full-navigating to the bare agent origin.
+        window.location.href = '/_chrome?workspace=' + encodeURIComponent(agentId);
       }
       return;
     }

@@ -1289,11 +1289,28 @@ def _handle_chrome_page() -> Response:
     backend_resolver = get_state().backend_resolver
     initial_workspaces = _build_workspace_list(backend_resolver) if authenticated else []
 
+    # Browser mode reaches a specific workspace through this wrapper (so the app
+    # chrome persists around it) via ``/_chrome?workspace=<agent-id>``; the content
+    # iframe then shows that workspace's ``/goto`` URL. Validate the id -- never
+    # build the iframe src from an unvalidated param -- and fall back to
+    # ``about:blank`` when absent or invalid. In Electron the iframe is hidden, so
+    # the param is unused there.
+    agent_iframe_src = "about:blank"
+    workspace_param = request.args.get("workspace", "").strip()
+    if workspace_param:
+        try:
+            agent_id = AgentId(workspace_param)
+        except ValueError:
+            agent_id = None
+        if agent_id is not None:
+            agent_iframe_src = f"{_get_mngr_forward_origin()}/goto/{agent_id}/"
+
     html = render_chrome_page(
         is_mac=is_mac,
         is_authenticated=authenticated,
         mngr_forward_origin=_get_mngr_forward_origin(),
         initial_workspaces=initial_workspaces,
+        agent_iframe_src=agent_iframe_src,
     )
     return make_html_response(content=html)
 
