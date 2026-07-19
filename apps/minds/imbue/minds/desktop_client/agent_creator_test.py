@@ -37,6 +37,7 @@ from imbue.minds.desktop_client.agent_creator import _redact_url_credentials
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials_in_text
 from imbue.minds.desktop_client.agent_creator import _rsync_worktree_over_clone
 from imbue.minds.desktop_client.agent_creator import checkout_branch
+from imbue.minds.desktop_client.agent_creator import checkout_existing_branch
 from imbue.minds.desktop_client.agent_creator import classify_creation_error
 from imbue.minds.desktop_client.agent_creator import clone_git_repo
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
@@ -52,6 +53,7 @@ from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.errors import GitCloneError
+from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupProvider
@@ -1526,3 +1528,71 @@ def test_start_creation_api_key_ai_without_key_fails_with_clear_message(tmp_path
     assert info is not None
     assert info.status is AgentCreationStatus.FAILED
     assert info.error is not None and "API_KEY" in info.error
+
+
+def test_checkout_existing_branch_is_noop_when_already_on_branch_without_fetch_head(tmp_path: Path) -> None:
+    """A plain local-directory source is often a fresh clone with NO FETCH_HEAD.
+
+    Regression: the create flow used to run ``git checkout -B <branch>
+    FETCH_HEAD`` on plain local directories, which fails on a fresh clone
+    ("'FETCH_HEAD' is not a commit") and, with a stale FETCH_HEAD, silently
+    resets the user's branch. Already-on-branch must be a no-op.
+    """
+    origin = tmp_path / "origin"
+    _make_origin_repo_with_branch(origin, "other-31875")
+
+    dest = tmp_path / "clone"
+    subprocess.run(["git", "clone", "-q", str(origin), str(dest)], check=True, capture_output=True)
+    assert not (dest / ".git" / "FETCH_HEAD").exists()
+    tip_before = _git(dest, "rev-parse", "HEAD")
+
+    checkout_existing_branch(dest, GitBranch("main"))
+
+    assert _git(dest, "rev-parse", "--abbrev-ref", "HEAD") == "main"
+    assert _git(dest, "rev-parse", "HEAD") == tip_before
+
+
+def test_checkout_existing_branch_does_not_reset_branch_to_stale_fetch_head(tmp_path: Path) -> None:
+    """A stale FETCH_HEAD (from some earlier unrelated fetch) must never move the
+    user's branch tip -- the old ``checkout -B ... FETCH_HEAD`` behavior did."""
+    origin = tmp_path / "origin"
+    _make_origin_repo_with_branch(origin, "other-59313")
+
+    dest = tmp_path / "clone"
+    subprocess.run(["git", "clone", "-q", str(origin), str(dest)], check=True, capture_output=True)
+    # Manufacture a stale FETCH_HEAD pointing at a different commit than main's tip.
+    stale_sha = _git(dest, "rev-parse", "origin/other-59313")
+    (dest / ".git" / "FETCH_HEAD").write_text("{}\t\t'other-59313' of {}\n".format(stale_sha, origin))
+    tip_before = _git(dest, "rev-parse", "main")
+    assert stale_sha != tip_before
+
+    checkout_existing_branch(dest, GitBranch("main"))
+
+    assert _git(dest, "rev-parse", "main") == tip_before
+    assert _git(dest, "rev-parse", "--abbrev-ref", "HEAD") == "main"
+
+
+def test_checkout_existing_branch_checks_out_remote_branch_via_dwim(tmp_path: Path) -> None:
+    origin = tmp_path / "origin"
+    _make_origin_repo_with_branch(origin, "feature-74102")
+
+    dest = tmp_path / "clone"
+    subprocess.run(["git", "clone", "-q", str(origin), str(dest)], check=True, capture_output=True)
+
+    checkout_existing_branch(dest, GitBranch("feature-74102"))
+
+    assert _git(dest, "rev-parse", "--abbrev-ref", "HEAD") == "feature-74102"
+    assert (dest / "f").read_text() == "on branch\n"
+
+
+def test_checkout_existing_branch_raises_for_missing_branch(tmp_path: Path) -> None:
+    origin = tmp_path / "origin"
+    _make_origin_repo_with_branch(origin, "other-90211")
+
+    dest = tmp_path / "clone"
+    subprocess.run(["git", "clone", "-q", str(origin), str(dest)], check=True, capture_output=True)
+
+    with pytest.raises(GitOperationError) as excinfo:
+        checkout_existing_branch(dest, GitBranch("no-such-branch-55307"))
+
+    assert "no-such-branch-55307" in str(excinfo.value)

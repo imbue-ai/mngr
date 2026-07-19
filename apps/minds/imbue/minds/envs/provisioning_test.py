@@ -32,6 +32,7 @@ from imbue.minds.envs.providers.supertokens_app import SuperTokensAppRecord
 from imbue.minds.envs.providers.supertokens_app import SuperTokensProviderError
 from imbue.minds.envs.provisioning import ProviderCredentials
 from imbue.minds.envs.provisioning import Providers
+from imbue.minds.envs.provisioning import _assert_deploy_url_matches
 from imbue.minds.envs.provisioning import deploy_env
 from imbue.minds.envs.provisioning import destroy_env
 from imbue.minds.envs.provisioning import list_dev_envs
@@ -1422,3 +1423,52 @@ def test_f4_recover_target_write_failure_logs_but_propagates_when_cleanup_also_f
     # The cleanup attempt fired even though it ultimately failed.
     step_names = [c[0] for c in call_log["calls"]]
     assert "delete_neon_branch" in step_names
+
+
+# -- _assert_deploy_url_matches (workspace-mismatch diagnosis) --
+
+
+def test_assert_deploy_url_matches_passes_on_identical_url() -> None:
+    url = AnyUrl("https://minds-dev-dev-danver--rsc-dev-api.modal.run")
+    # No raise: the deployed URL is exactly what we computed.
+    _assert_deploy_url_matches(actual=url, expected=url, app="rsc-dev", modal_workspace="minds-dev")
+
+
+def test_assert_deploy_url_matches_flags_per_env_workspace_mismatch() -> None:
+    # Same env / app / function, but the token deployed under the `imbue`
+    # workspace instead of deploy.toml's `minds-dev` -- the exact misroute a
+    # `minds-dev`-named profile holding an `imbue`-workspace token produces.
+    expected = AnyUrl("https://minds-dev-dev-danver--rsc-dev-api.modal.run")
+    actual = AnyUrl("https://imbue-dev-danver--rsc-dev-api.modal.run")
+    with pytest.raises(ModalDeployError) as excinfo:
+        _assert_deploy_url_matches(actual=actual, expected=expected, app="rsc-dev", modal_workspace="minds-dev")
+    message = str(excinfo.value)
+    assert "bound to workspace 'imbue'" in message
+    assert "modal_workspace 'minds-dev'" in message
+    assert "modal token new --profile minds-dev" in message
+
+
+def test_assert_deploy_url_matches_flags_tier_workspace_mismatch() -> None:
+    # Tier URLs carry no `-<name>` segment, so the whole prefix is the workspace.
+    expected = AnyUrl("https://minds-production--rsc-production-api.modal.run")
+    actual = AnyUrl("https://imbue--rsc-production-api.modal.run")
+    with pytest.raises(ModalDeployError) as excinfo:
+        _assert_deploy_url_matches(
+            actual=actual, expected=expected, app="rsc-production", modal_workspace="minds-production"
+        )
+    message = str(excinfo.value)
+    assert "bound to workspace 'imbue'" in message
+    assert "modal token new --profile minds-production" in message
+
+
+def test_assert_deploy_url_matches_non_workspace_mismatch_keeps_formula_hint() -> None:
+    # Prefixes (and thus workspaces) match; only the app / function segment
+    # differs -- a genuine formula / hostname-scheme drift, not a misroute.
+    expected = AnyUrl("https://minds-dev-dev-danver--rsc-dev-api.modal.run")
+    actual = AnyUrl("https://minds-dev-dev-danver--rsc-dev-apiv2.modal.run")
+    with pytest.raises(ModalDeployError) as excinfo:
+        _assert_deploy_url_matches(actual=actual, expected=expected, app="rsc-dev", modal_workspace="minds-dev")
+    message = str(excinfo.value)
+    assert "workspace prefix matches" in message
+    assert "hostname scheme" in message
+    assert "bound to workspace" not in message
