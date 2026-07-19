@@ -22,8 +22,22 @@ DEFAULT_WORKSPACE_TEMPLATE_REMOTE="https://github.com/imbue-ai/default-workspace
 
 repo_root="$(git rev-parse --show-toplevel)"
 dest="$repo_root/.external_worktrees/default-workspace-template"
-branch="${1:-$(git -C "$repo_root" rev-parse --abbrev-ref HEAD)}"
 base="${2:-origin/main}"
+
+# Branch for the new checkout. Defaults to the current branch of this mngr
+# checkout via scripts/current_branch.sh, which is robust to the detached git
+# HEAD that jj colocated repos normally sit in. Pass the branch as arg 1 to
+# skip detection.
+branch="${1:-}"
+if [ -z "$branch" ]; then
+    branch="$(bash "$repo_root/scripts/current_branch.sh" "$repo_root" || true)"
+fi
+if [ -z "$branch" ]; then
+    echo "error: could not determine the current branch of $repo_root" >&2
+    echo "       (git HEAD is detached and no jj bookmark points at @)." >&2
+    echo "       pass the branch explicitly:  just default-workspace-template-worktree <branch>" >&2
+    exit 1
+fi
 
 # Reject rather than silently reuse a stale checkout from an earlier task.
 if [ -e "$dest" ]; then
