@@ -146,6 +146,7 @@ from imbue.mngr_codex.codex_config import COMMON_TRANSCRIPT_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import MARKER_LOCK_DIRNAME
 from imbue.mngr_codex.codex_config import MARKER_STATE_LIB_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import PERMISSIONS_WAITING_FILENAME
+from imbue.mngr_codex.codex_config import PROCESS_STARTED_MARKER_FILENAME
 from imbue.mngr_codex.codex_config import RAW_TRANSCRIPT_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import ROOT_ACTIVE_FILENAME
 from imbue.mngr_codex.codex_config import ROOT_SESSION_FILENAME
@@ -972,10 +973,16 @@ class CodexAgent(
             f'rm -rf "{state}/{ACTIVE_MARKER_FILENAME}" "{state}/{ROOT_ACTIVE_FILENAME}" '
             f'"{state}/{SUBAGENTS_DIRNAME}" "{state}/{MARKER_LOCK_DIRNAME}" 2>/dev/null || true'
         )
+        # Stamp the process-start boundary on every launch/resume. The system_interface
+        # activity tracker compares transcript timestamps against this marker's mtime to
+        # ignore a tail left over from a turn a prior process abandoned mid-flight (which
+        # would otherwise pin "Running.../Thinking..." forever after a restart). Mirrors
+        # mngr_claude's `claude_process_started`. `|| true` so it can't block the launch.
+        process_started_cmd = f'touch "{state}/{PROCESS_STARTED_MARKER_FILENAME}" 2>/dev/null || true'
 
         return CommandString(
             f"{background_cmd} {mkdir_cmd} && {cd_cmd} "
-            f'&& {{ {reset_marker_cmd}; {resume_prelude}; {codex_invocation} "$@"{extra_str} ; }}'
+            f'&& {{ {reset_marker_cmd}; {process_started_cmd}; {resume_prelude}; {codex_invocation} "$@"{extra_str} ; }}'
         )
 
     def on_after_provisioning(

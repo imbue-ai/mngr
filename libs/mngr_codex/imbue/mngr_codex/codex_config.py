@@ -154,6 +154,14 @@ def get_codex_version_cache_path(codex_home: Path) -> Path:
 # scripts touch/remove.
 ACTIVE_MARKER_FILENAME: str = "active"
 
+# Marker file (in ``$MNGR_AGENT_STATE_DIR``) touched on every launch/resume by
+# ``assemble_command``. Its mtime is the boundary the system_interface activity
+# tracker compares transcript timestamps against: a transcript tail older than this
+# belongs to a turn a prior process abandoned mid-flight (e.g. a container restart
+# killed codex mid-tool), so the "Running.../Thinking..." indicator must not treat
+# that stale tail as live work. Mirrors mngr_claude's ``claude_process_started``.
+PROCESS_STARTED_MARKER_FILENAME: str = "codex_process_started"
+
 # Marker file (in ``$MNGR_AGENT_STATE_DIR``) present while codex is blocked on a
 # tool-approval dialog. The ``PermissionRequest`` hook touches it; ``PostToolUse``
 # (the tool ran after approval) and the root ``Stop`` (a stranded dialog at turn
