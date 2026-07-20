@@ -85,7 +85,9 @@ a:hover { text-decoration: underline; }
 .agent-card:hover { border-left-color: var(--border-strong); text-decoration: none; }
 .agent-card .row1 { display: flex; align-items: center; gap: 8px; }
 .agent-card .name { font-weight: 600; }
-.agent-card .row2 { color: var(--fg-dim); font-size: 12px; margin-top: 4px; display: flex; gap: 12px; flex-wrap: wrap; }
+.agent-card .row2 { color: var(--fg-dim); font-size: 12px; margin-top: 4px; display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+.agent-card .host-shell { color: var(--link); cursor: pointer; }
+.agent-card .host-shell:hover { text-decoration: underline; }
 .chip {
   font-size: 11px;
   padding: 1px 7px;

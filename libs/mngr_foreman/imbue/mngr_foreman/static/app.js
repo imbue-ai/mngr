@@ -258,6 +258,15 @@
       row2.appendChild(el("span", null, a.type));
       row2.appendChild(el("span", null, a.host_name + " · " + a.provider));
       if (a.activity_time) row2.appendChild(el("span", null, relTime(a.activity_time)));
+      // A plain shell on this host (VS-Code-Remote style). The card is itself an
+      // <a>, so this is a span that navigates on click and stops the card link.
+      const shell = el("span", "host-shell", "shell ›");
+      shell.addEventListener("click", function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        location.href = "/h/" + encodeURIComponent(a.host_name) + "/terminal";
+      });
+      row2.appendChild(shell);
       card.appendChild(row2);
       return card;
     }
@@ -1038,6 +1047,11 @@
       const name = decodeURIComponent(m[1]);
       return { kind: "agent", name: name, wsPath: "/ws/agents/" + encodeURIComponent(name) + "/terminal", back: "/a/" + encodeURIComponent(name), label: name };
     }
+    const h = location.pathname.match(/^\/h\/(.+)\/terminal$/);
+    if (h) {
+      const host = decodeURIComponent(h[1]);
+      return { kind: "host", name: host, wsPath: "/ws/hosts/" + encodeURIComponent(host) + "/terminal", back: "/", label: "shell · " + host };
+    }
     return { kind: "orchestrator", name: "", wsPath: "/ws/terminal", back: "/", label: "orchestrator (this box)" };
   }
 
@@ -1051,7 +1065,10 @@
   function initTerminal() {
     const tgt = terminalTarget();
     document.getElementById("agent-name").textContent = tgt.label;
-    document.title = tgt.kind === "agent" ? tgt.name + " — terminal" : "foreman — terminal";
+    document.title =
+      tgt.kind === "agent" ? tgt.name + " — terminal"
+      : tgt.kind === "host" ? "[shell] " + tgt.name + " — terminal"
+      : "foreman — terminal";
     const back = document.getElementById("back");
     if (back) back.href = tgt.back;
 

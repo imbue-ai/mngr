@@ -37,6 +37,7 @@ from imbue.mngr_foreman.interrupt import InterruptError
 from imbue.mngr_foreman.interrupt import send_interrupt_to_agent
 from imbue.mngr_foreman.messaging import MessageSendError
 from imbue.mngr_foreman.messaging import send_message_to_agent
+from imbue.mngr_foreman.terminal import handle_host_shell_ws
 from imbue.mngr_foreman.terminal import handle_orchestrator_ws
 from imbue.mngr_foreman.terminal import handle_terminal_ws
 from imbue.mngr_foreman.transcript_images import externalize_event_images
@@ -139,6 +140,12 @@ def create_app(
     @app.route("/a/<name>/terminal")
     def terminal_page(name: str) -> Response:
         # The terminal page is a static shell; it reads <name> from the URL.
+        return _serve_static_or_404("terminal.html")
+
+    @app.route("/h/<host>/terminal")
+    def host_terminal_page(host: str) -> Response:
+        # Host shell: same static shell; JS reads the /h/<host>/ path and opens
+        # the /ws/hosts/<host>/terminal websocket (a plain login shell on that box).
         return _serve_static_or_404("terminal.html")
 
     @app.route("/terminal")
@@ -316,18 +323,32 @@ def create_app(
             return jsonify({"ok": False, "error": str(e)}), 400
         return jsonify({"ok": True})
 
-    # ---- terminal websocket (phase 2) -------------------------------------
+    # ---- terminal websocket ----------------------------------------------
 
     @sock.route("/ws/agents/<name>/terminal")
     def terminal_ws(ws: object, name: str) -> None:
-        # Bridge the socket to a `mngr connect <name>` pty. Any agent type works
-        # here -- the terminal is a raw tmux attach, not transcript-specific.
-        handle_terminal_ws(ws, name)
+        # Bridge the socket to the agent's tmux (direct ssh, mngr-connect fallback).
+        handle_terminal_ws(ws, name, pool)
+
+    @sock.route("/ws/hosts/<host>/terminal")
+    def host_shell_ws(ws: object, host: str) -> None:
+        # A plain login shell on a known host (resolved via any agent on it).
+        # Resolve to any agent on this host; handle_host_shell_ws closes the ws
+        # itself if the host can't be reached, so a missing agent is the only case
+        # we short-circuit here (pass a sentinel the handler treats as unavailable).
+        agent_name = _first_agent_on_host(host) or ""
+        handle_host_shell_ws(ws, agent_name, host, pool)
 
     @sock.route("/ws/terminal")
     def orchestrator_ws(ws: object) -> None:
         # Bridge the socket to a plain `bash -l` on the foreman server machine.
         handle_orchestrator_ws(ws)
+
+    def _first_agent_on_host(host_name: str) -> str | None:
+        for card in registry.snapshot():
+            if card.get("host_name") == host_name:
+                return str(card["name"])
+        return None
 
     return app
 

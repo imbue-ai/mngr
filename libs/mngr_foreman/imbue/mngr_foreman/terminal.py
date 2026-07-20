@@ -27,16 +27,25 @@ import json
 import os
 import pty
 import select
+import shlex
 import signal
 import struct
 import termios
 import threading
 import time
+from pathlib import Path
 from typing import Any
 from typing import Final
 
 from loguru import logger
 
+from imbue.mngr.api.connect import _build_ssh_activity_wrapper_script
+from imbue.mngr.api.connect import build_attach_argv
+from imbue.mngr.api.connect import build_ssh_base_args
+from imbue.mngr.hosts.tmux import TmuxSessionTarget
+from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr_foreman.connection_pool import ConnectionPool
 from imbue.mngr_foreman.mngr_bin import resolve_mngr_binary
 
 _READ_CHUNK: Final[int] = 65536
@@ -44,6 +53,102 @@ _READ_CHUNK: Final[int] = 65536
 _TERM_GRACE_SECONDS: Final[float] = 2.0
 # select() timeout on the pty read loop, so the reader notices shutdown promptly.
 _SELECT_TIMEOUT_SECONDS: Final[float] = 0.5
+
+# SSH ControlMaster: the FIRST direct terminal open to a host makes a persistent
+# master socket; subsequent opens (and host shells) within ControlPersist reuse
+# it, so the handshake is paid once. %C is a short per-connection hash.
+_CTL_DIR: Final[Path] = Path.home() / ".mngr" / "foreman-ctl"
+_CONTROL_PERSIST: Final[str] = "10m"
+
+
+def _control_master_opts() -> list[str]:
+    try:
+        _CTL_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError as e:  # noqa: BLE001 - a missing ctl dir just disables multiplexing
+        logger.trace("could not create ssh control dir {}: {}", _CTL_DIR, e)
+        return []
+    return [
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        f"ControlPath={_CTL_DIR}/%C",
+        "-o",
+        f"ControlPersist={_CONTROL_PERSIST}",
+    ]
+
+
+def _ssh_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env.pop("TMUX", None)  # a foreman server inside tmux must not nest-attach
+    env.setdefault("TERM", "xterm-256color")
+    # kitty's TERM isn't known on remote hosts; fall back like mngr connect does.
+    if env.get("TERM") == "xterm-kitty":
+        env["TERM"] = "xterm-256color"
+    return env
+
+
+def build_agent_terminal_argv(pool: ConnectionPool, agent_name: str) -> tuple[list[str], dict[str, str]] | None:
+    """Build the argv to attach to ``agent_name``'s tmux, direct (no `mngr connect`).
+
+    Reuses mngr's own ssh/attach builders off the *pooled* (warm) host, so we skip
+    the ~11s ``mngr connect`` python startup + discovery. Returns ``(argv, env)`` or
+    ``None`` on any failure (caller falls back to spawning ``mngr connect``).
+    """
+    attach_args = pool.mngr_ctx.config.tmux.attach_args
+
+    def _build(agent: AgentInterface, host: OnlineHostInterface) -> list[str]:
+        session_name = agent.session_name
+        if host.is_local:
+            # Plain local attach -- no ssh at all.
+            return build_attach_argv(TmuxSessionTarget(session_name=session_name), attach_args)
+        ssh_args = build_ssh_base_args(host)
+        ssh_args[1:1] = _control_master_opts()  # after "ssh", before user@host
+        wrapper = _build_ssh_activity_wrapper_script(session_name, host.host_dir, attach_args)
+        ssh_args.extend(["-t", "bash -c " + shlex.quote(wrapper)])
+        return ssh_args
+
+    try:
+        argv = pool.run_on_host(agent_name, _build)
+    except Exception as e:  # noqa: BLE001 - any failure -> fall back to mngr connect
+        logger.info("direct-ssh terminal build failed for {} (falling back to mngr connect): {}", agent_name, e)
+        return None
+    return argv, _ssh_env()
+
+
+def build_host_shell_argv(pool: ConnectionPool, agent_on_host: str) -> tuple[list[str], dict[str, str]] | None:
+    """Build the argv for a plain login shell on the host of ``agent_on_host``.
+
+    A VS-Code-Remote-style shell on the machine itself (no tmux, no agent). Rides
+    the same warm ControlMaster socket as the agent terminals. Returns ``(argv,
+    env)`` or ``None`` on failure.
+    """
+
+    def _build(_agent: AgentInterface, host: OnlineHostInterface) -> list[str]:
+        if host.is_local:
+            return ["bash", "-l"]
+        ssh_args = build_ssh_base_args(host)
+        ssh_args[1:1] = _control_master_opts()
+        ssh_args.extend(["-t", "bash -l"])
+        return ssh_args
+
+    try:
+        argv = pool.run_on_host(agent_on_host, _build)
+    except Exception as e:  # noqa: BLE001
+        logger.info("host-shell build failed via agent {}: {}", agent_on_host, e)
+        return None
+    return argv, _ssh_env()
+
+
+def _spawn_argv_pty(argv: list[str], env: dict[str, str]) -> tuple[int, int]:
+    """Fork a child running ``argv`` on a fresh pty. Returns ``(child_pid, master_fd)``."""
+    child_pid, master_fd = pty.fork()
+    if child_pid == 0:
+        # --- child ---
+        try:
+            os.execvpe(argv[0], argv, env)
+        except OSError:
+            os._exit(127)
+    return child_pid, master_fd
 
 
 def _spawn_connect_pty(agent_name: str) -> tuple[int, int]:
@@ -192,12 +297,47 @@ def _bridge_pty_to_ws(ws: Any, child_pid: int, master_fd: int, label: str) -> No
         _teardown(child_pid, master_fd)
 
 
-def handle_terminal_ws(ws: Any, agent_name: str) -> None:
-    """Bridge a websocket to a ``mngr connect <agent_name>`` pty until either closes."""
-    logger.info("Opening terminal to agent {}", agent_name)
-    child_pid, master_fd = _spawn_connect_pty(agent_name)
+def handle_terminal_ws(ws: Any, agent_name: str, pool: ConnectionPool) -> None:
+    """Bridge a websocket to the agent's tmux until either closes.
+
+    Fast path: build the ssh/tmux argv in-process off the warm pool and exec ssh
+    directly (skips the ~11s ``mngr connect`` python startup; ControlMaster makes
+    repeat opens instant). Falls back to spawning ``mngr connect`` if the build
+    fails, so the terminal never breaks.
+    """
+    built = build_agent_terminal_argv(pool, agent_name)
+    if built is not None:
+        logger.info("Opening terminal to agent {} (direct ssh)", agent_name)
+        argv, env = built
+        child_pid, master_fd = _spawn_argv_pty(argv, env)
+    else:
+        logger.info("Opening terminal to agent {} (mngr connect fallback)", agent_name)
+        child_pid, master_fd = _spawn_connect_pty(agent_name)
     _bridge_pty_to_ws(ws, child_pid, master_fd, label=agent_name)
     logger.info("Closed terminal to agent {}", agent_name)
+
+
+def handle_host_shell_ws(ws: Any, agent_on_host: str, host_label: str, pool: ConnectionPool) -> None:
+    """Bridge a websocket to a plain login shell on a known host (VS-Code-style).
+
+    Resolves the host via any agent on it (``agent_on_host``) and execs
+    ``ssh -t … bash -l`` directly (local host -> plain ``bash -l``). No tmux, no
+    agent. There is no ``mngr connect`` equivalent, so a build failure ends the
+    session.
+    """
+    built = build_host_shell_argv(pool, agent_on_host)
+    if built is None:
+        logger.info("Host shell to {} unavailable (could not build ssh argv)", host_label)
+        try:
+            ws.close()
+        except Exception:  # noqa: BLE001
+            pass
+        return
+    logger.info("Opening host shell to {}", host_label)
+    argv, env = built
+    child_pid, master_fd = _spawn_argv_pty(argv, env)
+    _bridge_pty_to_ws(ws, child_pid, master_fd, label=f"shell:{host_label}")
+    logger.info("Closed host shell to {}", host_label)
 
 
 def handle_orchestrator_ws(ws: Any) -> None:
