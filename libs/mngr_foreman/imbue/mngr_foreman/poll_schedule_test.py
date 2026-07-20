@@ -1,5 +1,8 @@
 """Tests for the adaptive transcript-poll cadence."""
 
+import threading
+import time
+
 from imbue.mngr_foreman.poll_schedule import ActivityTracker
 from imbue.mngr_foreman.poll_schedule import FAST_POLL_SECONDS
 from imbue.mngr_foreman.poll_schedule import FAST_WINDOW_SECONDS
@@ -44,3 +47,33 @@ def test_tracker_unknown_agent_uses_state_default() -> None:
     tracker = ActivityTracker()
     assert tracker.next_interval("never-poked", "RUNNING", now=1.0) == STEADY_POLL_SECONDS
     assert tracker.next_interval("never-poked", "WAITING", now=1.0) == IDLE_POLL_SECONDS
+
+
+def test_poke_wakes_a_waiting_loop_early() -> None:
+    # A WAITING agent would otherwise sleep IDLE_POLL_SECONDS (~4s); a poke must
+    # cut that short so a just-sent message is polled promptly.
+    tracker = ActivityTracker()
+    returned_after: list[float] = []
+
+    def waiter() -> None:
+        start = time.monotonic()
+        tracker.wait_for_next_poll("a", "WAITING")
+        returned_after.append(time.monotonic() - start)
+
+    thread = threading.Thread(target=waiter)
+    thread.start()
+    time.sleep(0.05)
+    tracker.poke("a")
+    thread.join(timeout=2.0)
+    assert not thread.is_alive()
+    assert returned_after and returned_after[0] < IDLE_POLL_SECONDS  # woke well before idle timeout
+
+
+def test_mark_running_sets_fast_without_waking() -> None:
+    tracker = ActivityTracker()
+    tracker.mark_running("a", now=100.0)
+    # Fast cadence now applies...
+    assert tracker.next_interval("a", "WAITING", now=100.0) == FAST_POLL_SECONDS
+    # ...but no waker was set (mark_running must not wake the loop about to wait).
+    waker = tracker._wakers.get("a")
+    assert waker is None or not waker.is_set()

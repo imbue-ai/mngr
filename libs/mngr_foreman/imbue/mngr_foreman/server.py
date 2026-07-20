@@ -520,9 +520,12 @@ def _transcript_stream(
         state = _agent_state(registry, agent_name)
         # A working agent is emitting events; keep it in fast mode (and leave a
         # short fast tail after it stops, so the final message lands promptly).
+        # mark_running (not poke) so we don't wake the very loop about to wait.
         if state == "RUNNING":
-            activity.poke(agent_name)
-        time.sleep(activity.next_interval(agent_name, state))
+            activity.mark_running(agent_name)
+        # Interruptible sleep: a send poke returns us early so the user's message
+        # surfaces without waiting out a (possibly multi-second) idle interval.
+        activity.wait_for_next_poll(agent_name, state)
         try:
             new_lines = tailer.poll()
         except Exception as e:  # noqa: BLE001
