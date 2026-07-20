@@ -237,6 +237,15 @@ from the repo root):
   scenario outline, or rule), carrying coordinate, unit kind, and location.
 - `query` - the same records, filtered structurally (by tag, name, or step
   text).
+- `export` - enriched JSONL records: everything around each unit a
+  test-writing consumer needs (effective steps with Background folded in,
+  Examples rows, descriptions, prose, and the applicable invariants resolved
+  root -> folder -> file).
+- `plan --for-tmr` - emits one TMR task packet per unit (scenarios and
+  scenario outlines by default; `--include-rules` adds rules) for fanning
+  out witness-test-writing agents via `mngr tmr-tasks`.
+- `check-witnesses` - fails on any `witnesses` marker whose coordinate no
+  corpus unit claims.
 
 `uv run minds specs --help` is authoritative for invocation detail. For
 AST-level needs beyond the CLI, `gherkin-official` (a dependency of

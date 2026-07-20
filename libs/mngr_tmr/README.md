@@ -32,3 +32,27 @@ Variant definitions live in the caller, not in a registry inside this package.
 The canonical flag sets are the root `justfile` recipes `tmr-mngr` / `tmr-minds`
 (which the `.github/workflows/tmr.yml` workflow inputs mirror). The minds variant
 ships a minds-tailored mapper prompt at `apps/minds/tmr/mapper.j2`.
+
+## Task-file runs (`mngr tmr-tasks`)
+
+`mngr tmr-tasks` is a sibling command that fans out an explicit JSONL task file
+instead of pytest collection. Each line is a task packet with `schema_version`,
+`id`, optional `display_id` (used for agent/branch slugs), `kind`, and a
+free-form `context` object. The file is validated up front (line-numbered
+errors, duplicate ids, unsupported schema versions), one agent is launched per
+task, and mapper/reducer branches come back as bundles exactly as in `mngr tmr`.
+
+There are no packaged prompt defaults: the task semantics live with the
+producer of the task file, so `--mapper-prompt` and `--reducer-prompt` are
+required. The mapper template renders with `task_id`, `kind`, `context_json`
+(the packet's context as pretty-printed JSON), `outcome_filename`, and
+`publish_snippet`; the reducer template renders with the same context as the
+packaged reducer. Mapper agents must write the same
+`testing_agent_outcome.json` contract as `mngr tmr` mappers so the shared HTML
+report can read it.
+
+The canonical producer is the minds behavioral-spec corpus:
+`minds specs plan --for-tmr` emits one packet per spec unit, and
+`apps/minds/tmr/specs_mapper.j2` / `specs_reducer.j2` anchor agents on writing
+witness tests for their unit (see `apps/minds/docs/behavioral-specs.md`). The
+root `justfile` recipe `tmr-minds-specs` wraps the pair.

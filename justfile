@@ -249,6 +249,17 @@ tmr-mngr *args:
 tmr-minds *args:
   uv run --project libs/mngr_tmr mngr tmr apps/minds --name tmr-minds --mapper-prompt apps/minds/tmr/mapper.j2 {{args}} -- -m 'release and not minds_deployment and not minds_services and not minds_snapshot_resume'
 
+# Spec-witnessing variant: one agent per behavioral-spec unit, writing the
+# cheapest sufficient witness test for it (see apps/minds/docs/behavioral-specs.md).
+# Extra map-reduce flags pass through, e.g.
+#   just tmr-minds-specs --provider modal --max-parallel-agents 8
+tmr-minds-specs *args:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  TASKS_FILE=$(mktemp /tmp/minds-spec-tasks.XXXXXX.jsonl)
+  uv run minds specs plan --for-tmr > "$TASKS_FILE"
+  uv run --project libs/mngr_tmr mngr tmr-tasks --tasks-file "$TASKS_FILE" --name tmr-minds-specs --mapper-prompt apps/minds/tmr/specs_mapper.j2 --reducer-prompt apps/minds/tmr/specs_reducer.j2 {{args}}
+
 # === minds deployment / services test orchestrator ===
 # Wraps apps/minds/scripts/test_deployments.py. See specs/minds-deployment-tests.md
 # and apps/minds/deployment_tests/README.md for the full design + usage.

@@ -1,0 +1,13 @@
+Added three `minds specs` subcommands that turn the behavioral-spec corpus into a producer for test-writing agents:
+
+- `export` emits enriched JSONL unit records (schema_version 1): beyond the `list` fields, each record carries the unit's description, raw_steps and effective_steps (Background folded in), Examples rows for Scenario Outlines, the Feature name/description, the enclosing Rule's summary, the relevant prose (folder overview.md files from the corpus root down, then the file's sidecar), and the applicable invariants resolved root -> folder -> file (corpus invariants.feature, ancestor folder invariants.feature files, and file-scoped Rules). Stdout stays pure JSONL; unit-omitting violations go to stderr with a nonzero exit, matching `list`/`query`.
+
+- `plan --for-tmr` wraps each exported unit in a TMR task packet (id = coordinate, display_id = coordinate with dots replaced by dashes, kind, and the enriched record as context) for consumption by the new `mngr tmr-tasks` task-file recipe. Scenarios and scenario outlines are planned by default; `--include-rules` opts invariant Rules in.
+
+- `check-witnesses [PATHS...]` (default `apps/minds`) scans Python sources for `@pytest.mark.witnesses` markers (decorator and pytestmark forms) and fails on any marker naming a coordinate no corpus unit claims, or with a non-literal (uncheckable) coordinate. It refuses to run when the corpus itself omits units, since the coordinate set would be incomplete.
+
+The enrichment and invariant-scope resolution live in `imbue.minds.core.behavioral_specs.export` (with the gherkin AST mirrors extracted into a package-private `_gherkin.py` shared with the scanner); the witnesses check lives in `imbue.minds.core.behavioral_specs.witnesses`. `list`/`query` output is unchanged.
+
+Added the minds spec-witnessing prompt variants `apps/minds/tmr/specs_mapper.j2` and `apps/minds/tmr/specs_reducer.j2`: the mapper anchors each agent on one spec unit from its packet (specs are read-only; write the cheapest sufficient witness test; every touched test gets `@pytest.mark.witnesses("<coordinate>", partial=...)`; Scenario Outlines become parametrized tests; tests-only by default, with spec-vs-implementation gaps recorded as BLOCKED outcomes and FIXME(tmr) comments). The reducer integrates qualifying mapper branches and gates the tree: nothing under `apps/minds/specs/` may change, `minds specs validate` and `minds specs check-witnesses` must pass, duplicate generated tests are deduplicated, and the blast-radius pytest subset must pass.
+
+Documented the new subcommands and the TMR fan-out flow in `docs/behavioral-specs.md`, and updated the `minds-behavioral-specs` skill's tooling list.
