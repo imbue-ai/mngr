@@ -1312,7 +1312,11 @@ def _handle_chrome_page() -> Response:
     # never loads the iframe) or the ``?workspace=<id>`` the browser wrapper
     # already carries. Resolved to the workspace's stored color; DEFAULT when
     # unknown. Both are validated agent ids -- never reflected raw.
+    # Also seed the workspace title inline so the first paint shows "<name> -- Minds"
+    # instead of the hardcoded "Minds" placeholder chrome.js later rewrites (matches
+    # ``computeTitleFor`` in electron/main.js).
     initial_accent = ""
+    chrome_title = "Minds"
     accent_param = request.args.get("accent", "").strip() or workspace_param
     if accent_param:
         try:
@@ -1321,6 +1325,9 @@ def _handle_chrome_page() -> Response:
             accent_agent_id = None
         if accent_agent_id is not None:
             initial_accent = _resolved_workspace_color(backend_resolver, accent_agent_id)
+            workspace_name = backend_resolver.get_workspace_name(accent_agent_id)
+            if workspace_name:
+                chrome_title = f"{workspace_name} — Minds"
 
     html = render_chrome_page(
         is_mac=is_mac,
@@ -1329,6 +1336,7 @@ def _handle_chrome_page() -> Response:
         initial_workspaces=initial_workspaces,
         agent_iframe_src=agent_iframe_src,
         initial_accent=initial_accent,
+        title=chrome_title,
     )
     return make_html_response(content=html)
 

@@ -910,6 +910,28 @@ def test_chrome_shell_local_mode_differs_from_agent_content_surface() -> None:
     assert local.count("var(--titlebar-bg") == 2
 
 
+def test_chrome_shell_seeds_accent_and_title_on_first_paint() -> None:
+    # When the workspace is known at render time, ChromeShell paints the right
+    # titlebar on the FIRST frame instead of flashing: it seeds --titlebar-bg inline
+    # (background), adds the .titlebar-surface class (foreground contrast off that
+    # bg), and renders the real title into the page-title span (not a hardcoded
+    # "Minds").
+    seeded = CATALOG.render("ChromeShell", initial_accent="#123456", title="ws-1 — Minds", _content="<i>x</i>")
+    assert "<style>:root { --titlebar-bg: #123456; }</style>" in seeded
+    titlebar = re.search(r'<div id="minds-titlebar"[^>]*class="([^"]*)"', seeded).group(1)
+    assert "titlebar-surface" in titlebar
+    page_title = re.search(r'<span id="page-title"[^>]*>([^<]*)</span>', seeded).group(1)
+    assert page_title == "ws-1 — Minds"
+
+    # Without a known accent: no :root seed rule (only the var() usages remain), no
+    # contrast class, and the default title.
+    plain = CATALOG.render("ChromeShell", _content="<i>x</i>")
+    assert "<style>:root {" not in plain
+    plain_titlebar = re.search(r'<div id="minds-titlebar"[^>]*class="([^"]*)"', plain).group(1)
+    assert "titlebar-surface" not in plain_titlebar
+    assert re.search(r'<span id="page-title"[^>]*>([^<]*)</span>', plain).group(1) == "Minds"
+
+
 def test_edge_to_edge_surfaces_opt_out_of_scrollbar_gutter() -> None:
     """Regression: with classic (always-visible) scrollbars on macOS, the
     global ``html { scrollbar-gutter: stable }`` rule reserved a 15px gutter

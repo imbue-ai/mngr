@@ -800,18 +800,23 @@ def test_chrome_page_seeds_the_titlebar_accent_inline_for_a_workspace(tmp_path: 
     valid_agent_id = "agent-00000000000000000000000000000001"
     seed_marker = "<style>:root {"
 
-    # ?accent seeds the inline titlebar-bg block WITHOUT loading the iframe.
+    # ?accent seeds the inline titlebar-bg block AND the foreground-contrast class
+    # (titlebar-surface), WITHOUT loading the iframe.
     accented = client.get(f"/_chrome?accent={valid_agent_id}")
     assert seed_marker in accented.text
+    assert "titlebar-surface" in accented.text
     # The accent path never points the iframe at agent content.
     assert 'src="about:blank"' in accented.text
 
     # The browser's ?workspace path seeds the accent too (alongside the iframe).
     with_ws = client.get(f"/_chrome?workspace={valid_agent_id}")
     assert seed_marker in with_ws.text
+    assert "titlebar-surface" in with_ws.text
 
-    # No workspace / a bogus id -> no inline accent seed.
-    assert seed_marker not in client.get("/_chrome").text
+    # No workspace / a bogus id -> no inline accent seed and no seeded contrast class.
+    bare = client.get("/_chrome").text
+    assert seed_marker not in bare
+    assert "titlebar-surface" not in bare
     assert seed_marker not in client.get("/_chrome?accent=..%2Fevil").text
 
 

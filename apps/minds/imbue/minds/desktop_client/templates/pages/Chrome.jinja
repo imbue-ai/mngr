@@ -1,4 +1,4 @@
-{#def is_mac, is_authenticated, mngr_forward_origin, initial_workspaces, agent_iframe_src="about:blank", initial_accent="" #}
+{#def is_mac, is_authenticated, mngr_forward_origin, initial_workspaces, agent_iframe_src="about:blank", initial_accent="", title="Minds" #}
 {#
   Agent-content wrapper page (titlebar + sidebar + content iframe).
 
@@ -9,14 +9,13 @@
   hidden via JS; the content is a separate WebContentsView, and the sidebar page
   is loaded into the shared modal WebContentsView when opened.
 
-  ``initial_accent`` (a #rrggbb, when this wrapper is loaded for a specific
-  workspace) seeds ``--titlebar-bg`` inline in the head so the FIRST paint of a
-  freshly (re)loaded wrapper already carries the workspace accent. Without it the
-  new renderer paints a neutral titlebar until chrome.js is primed on
-  did-finish-load -- so navigating landing->workspace or settings->workspace
-  flashed the titlebar white->accent->white->accent instead of a single
-  white->accent. chrome.js's later ``documentElement.style`` set (same value)
-  overrides this inline rule seamlessly.
+  ``initial_accent`` (a #rrggbb) and ``title`` (``<name> -- Minds``), when this
+  wrapper is loaded for a specific workspace, are forwarded to ChromeShell so the
+  FIRST paint of a freshly (re)loaded wrapper already carries the workspace accent
+  (background + foreground contrast) and title. Without them the new renderer
+  paints a neutral titlebar with "Minds" until chrome.js is primed on
+  did-finish-load -- so navigating to a workspace flashed the titlebar
+  white->accent (with dark-on-dark text) and "Minds"->name.
 
   ``agent_iframe_src`` is the workspace (agent) URL the iframe shows in BROWSER
   mode -- the server passes the ``/goto/<agent>/`` URL when this wrapper is
@@ -36,17 +35,12 @@
    (Electron mode) both reveal accent color through the curve. Falls back to the
    neutral app surface (surface-primary -- white in light, black in dark) when no
    workspace is active. #}
-{# Seed the accent inline (before chrome.js runs) so the first paint isn't
-   neutral. Forwarded through ChromeShell's ``head`` slot. #}
-{% set _accent_head %}{% if initial_accent %}<style>:root {
-        --titlebar-bg: {{ initial_accent }};
-      }</style>{% endif %}{% endset %}
-<ChromeShell title="Minds"
+<ChromeShell :title="title"
              :is_mac="is_mac"
              :is_authenticated="is_authenticated"
              :mngr_forward_origin="mngr_forward_origin"
              :is_agent_content_surface="True"
-             head={{ _accent_head }}>
+             :initial_accent="initial_accent">
   {# White "mirror" sized exactly like the Electron contentView (left:4
      / top:38 / right:4 / bottom:4 / radius:12 -- matches CONTENT_INSET
      and CONTENT_CORNER_RADIUS in electron/main.js). Sits behind the

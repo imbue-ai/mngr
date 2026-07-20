@@ -1,4 +1,4 @@
-{#def title="Minds", is_mac=None, is_authenticated=False, mngr_forward_origin=None, is_agent_content_surface=False, body_class="", body_style="", head="", scripts="" #}
+{#def title="Minds", is_mac=None, is_authenticated=False, mngr_forward_origin=None, is_agent_content_surface=False, body_class="", body_style="", head="", scripts="", initial_accent="" #}
 {#
   Shared trusted app shell: the fixed titlebar + browser-mode floating sidebar
   + accent / chrome.js wiring, wrapping a page body passed in the content slot.
@@ -28,6 +28,13 @@
   exposes IPC adapters. ``head`` / ``scripts`` let a page append its own head
   tags / script tags after the shell's own (workspace_accent.js,
   backup_health.js, sidebar_workspace_row.js, chrome.js).
+
+  ``title`` is rendered into the visible titlebar (``#page-title``) as well as the
+  document title, so the first paint shows the real title rather than a hardcoded
+  placeholder that chrome.js then rewrites. ``initial_accent`` (a ``#rrggbb``, when
+  the workspace is known at render time) seeds the titlebar's background AND
+  foreground-contrast (``.titlebar-surface``) on the first frame -- see the head /
+  titlebar blocks below.
 #}
 {% set _is_mac = is_mac if is_mac is not none else chrome_is_mac() %}
 {% set _mngr_forward_origin = mngr_forward_origin if mngr_forward_origin is not none else chrome_mngr_forward_origin() %}
@@ -57,6 +64,13 @@
      ``modal-open`` body class accordingly. */
   body.modal-open #minds-titlebar { -webkit-app-region: no-drag; }
 </style>
+{%- if initial_accent %}
+{# Seed the workspace accent on :root before chrome.js runs so the first paint of
+   a freshly (re)loaded wrapper already carries it (the titlebar background AND --
+   via the .titlebar-surface class below -- its contrasting foreground). chrome.js's
+   later documentElement.style set (same value) overrides this rule seamlessly. #}
+<style>:root { --titlebar-bg: {{ initial_accent }}; }</style>
+{%- endif %}
 {%- if head %}
 {{ head }}
 {%- endif %}
@@ -89,9 +103,13 @@
      section, which ``min-w-0`` lets shrink to its 1/4 flex share, so both
      sides keep equal width and the center stays truly centered. Non-mac draws
      its own min/max/close at the right. #}
+  {# ``titlebar-surface`` (foreground-contrast re-basing off --titlebar-bg) is
+     seeded here when an accent is known at render time so the icons/text paint
+     with the right contrast on the first frame; chrome.js keeps toggling it as the
+     accent changes. #}
   <div id="minds-titlebar"
        style="background-color: var(--titlebar-bg, var(--c-surface-primary));"
-       class="fixed top-0 left-0 right-0 h-[38px] flex items-center select-none z-[100] px-1">
+       class="fixed top-0 left-0 right-0 h-[38px] flex items-center select-none z-[100] px-1{% if initial_accent %} titlebar-surface{% endif %}">
     <div class="flex-1 flex items-center gap-0.5 min-w-0">
       {% if _is_mac %}<div class="w-[72px] shrink-0" aria-hidden="true"></div>{% endif %}
       <TitlebarButton id="sidebar-toggle" aria-label="Main Menu" data-tooltip="Main Menu"><Icon16 name="menu" /></TitlebarButton>
@@ -100,7 +118,10 @@
       <TitlebarButton id="forward-btn" aria-label="Forward" data-tooltip="Forward"><Icon16 name="chevron-right" /></TitlebarButton>
     </div>
     <div class="flex-[2] flex items-center justify-center px-2 min-w-0">
-      <span id="page-title" class="text-primary type-label whitespace-nowrap overflow-hidden text-ellipsis">Minds</span>
+      {# Rendered inline (from the same value that becomes the document title) so
+         the first paint shows the real title instead of a hardcoded "Minds" that
+         chrome.js then rewrites. chrome.js keeps it in sync on later navigations. #}
+      <span id="page-title" class="text-primary type-label whitespace-nowrap overflow-hidden text-ellipsis">{{ title }}</span>
     </div>
     <div class="flex-1 flex items-center justify-end min-w-0">
       <TitlebarButton id="help-toggle" aria-label="Ran into a bug?" data-tooltip="Ran into a bug?"><Icon16 name="bug" /></TitlebarButton>
