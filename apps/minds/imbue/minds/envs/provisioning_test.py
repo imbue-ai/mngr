@@ -16,6 +16,7 @@ from imbue.minds.config.data_types import DeploySecretsConfig
 from imbue.minds.config.data_types import MinContainersConfig
 from imbue.minds.config.data_types import ModalEnvStrategy
 from imbue.minds.config.data_types import PaidDefaultsConfig
+from imbue.minds.config.data_types import PlanQuotasConfig
 from imbue.minds.config.data_types import ScaledownWindowConfig
 from imbue.minds.envs.docker_cleanup import DockerCleanupError
 from imbue.minds.envs.local_store import client_config_exists
@@ -95,6 +96,7 @@ def _deploy_config(
     min_containers: MinContainersConfig | None = None,
     scaledown_window: ScaledownWindowConfig | None = None,
     paid: PaidDefaultsConfig | None = None,
+    plans: dict[str, PlanQuotasConfig] | None = None,
     lifecycle: DeployLifecycleConfig | None = None,
 ) -> DeployEnvConfig:
     if lifecycle is None:
@@ -109,6 +111,7 @@ def _deploy_config(
         min_containers=min_containers if min_containers is not None else MinContainersConfig(),
         scaledown_window=scaledown_window if scaledown_window is not None else ScaledownWindowConfig(),
         paid=paid if paid is not None else PaidDefaultsConfig(),
+        plans=plans if plans is not None else {},
     )
 
 
@@ -269,9 +272,7 @@ def _build_fake_providers(
         )
 
     def write_plan_defaults(host_pool_dsn, plan_rows_by_name, cg):
-        call_log["calls"].append(
-            ("write_plan_defaults", host_pool_dsn.get_secret_value(), tuple(sorted(plan_rows_by_name)))
-        )
+        call_log["calls"].append(("write_plan_defaults", host_pool_dsn.get_secret_value(), dict(plan_rows_by_name)))
 
     # Tracks deployed app versions across deploy + recover cycles. Lets
     # the fake `get_modal_app_latest_version` return None for the first
@@ -924,6 +925,61 @@ def test_deploy_env_skips_paid_seed_when_no_defaults(_isolated_home: Path, _root
         parent_concurrency_group=_root_cg,
     )
     assert not [c for c in call_log["calls"] if c[0] == "seed_paid_list_defaults"]
+
+
+def _explorer_plan_quotas() -> PlanQuotasConfig:
+    """The committed explorer-plan values (mirrors the deploy.toml [plans.explorer] block)."""
+    return PlanQuotasConfig(
+        max_remote_workspaces=NonNegativeInt(2),
+        max_tunnels=NonNegativeInt(50),
+        max_services_per_tunnel=NonNegativeInt(10),
+        max_buckets=NonNegativeInt(5),
+        max_total_bucket_gb=NonNegativeInt(50),
+        monthly_llm_spend_usd=0.0,
+        max_active_synced_workspaces=NonNegativeInt(200),
+    )
+
+
+def test_deploy_env_writes_plan_definitions(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
+    """``[plans]`` blocks from deploy.toml are written (as converted rows) after migrations.
+
+    Mirrors the paid-seed test above: the write must carry the connector-table
+    row shape (storage converted from GB to bytes) and run after
+    apply_pool_hosts_migrations, since the plans table must exist first.
+    """
+    call_log = _make_call_log()
+    providers = _build_fake_providers(call_log)
+    deploy_env(
+        DevEnvName("dev-josh"),
+        tier="dev",
+        deploy_config=_deploy_config(plans={"explorer": _explorer_plan_quotas()}),
+        credentials=_credentials(),
+        providers=providers,
+        parent_concurrency_group=_root_cg,
+    )
+    write_calls = [c for c in call_log["calls"] if c[0] == "write_plan_defaults"]
+    assert len(write_calls) == 1
+    # Tuple shape: (name, dsn, plan_rows_by_name).
+    rows_by_name = write_calls[0][2]
+    assert sorted(rows_by_name) == ["explorer"]
+    assert rows_by_name["explorer"]["max_total_bucket_bytes"] == 50 * 1024**3
+    assert rows_by_name["explorer"]["monthly_llm_spend_usd"] == 0.0
+    assert _step_position(call_log, "write_plan_defaults") > _step_position(call_log, "apply_pool_hosts_migrations")
+
+
+def test_deploy_env_skips_plan_write_when_no_plans(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
+    """A tier with no ``[plans]`` blocks performs no plan write."""
+    call_log = _make_call_log()
+    providers = _build_fake_providers(call_log)
+    deploy_env(
+        DevEnvName("dev-josh"),
+        tier="dev",
+        deploy_config=_deploy_config(),
+        credentials=_credentials(),
+        providers=providers,
+        parent_concurrency_group=_root_cg,
+    )
+    assert not [c for c in call_log["calls"] if c[0] == "write_plan_defaults"]
 
 
 def test_destroy_env_tier_stops_apps_deletes_secrets_and_removes_env_root(
