@@ -230,6 +230,51 @@ def _check_step_keywords(
             )
 
 
+class _ClaimSite(FrozenModel):
+    """Where a coordinate was first claimed (for duplicate-claim reporting)."""
+
+    file: Path = Field(description="File containing the first claiming tag")
+    line: int = Field(description="1-based line of the first claiming tag")
+
+
+def _claim_coordinate(
+    coordinate: str,
+    file: Path,
+    line: int,
+    claims: dict[str, _ClaimSite],
+    violations: list[SpecViolation],
+) -> None:
+    """Record a coordinate claim, reporting a violation when it was already claimed."""
+    existing = claims.get(coordinate)
+    if existing is None:
+        claims[coordinate] = _ClaimSite(file=file, line=line)
+        return
+    violations.append(
+        SpecViolation(
+            file=file,
+            line=line,
+            message=(
+                f"coordinate '{coordinate}' is already claimed at {existing.file}:{existing.line}; "
+                "no coordinate may be claimed twice"
+            ),
+            is_unit_omitted=False,
+        )
+    )
+
+
+def _claim_block_tags(
+    tags: tuple[_GherkinTag, ...],
+    file: Path,
+    folder_parts: tuple[str, ...],
+    claims: dict[str, _ClaimSite],
+    violations: list[SpecViolation],
+) -> None:
+    """Claim a coordinate for every tag on a Feature or Examples block."""
+    for tag in tags:
+        coordinate = _coordinate_for(folder_parts, _strip_tag_sigil(tag.name))
+        _claim_coordinate(coordinate, file, tag.location.line, claims, violations)
+
+
 def _missing_tag_violation(file: Path, line: int, unit_keyword: str, unit_name: str) -> SpecViolation:
     return SpecViolation(
         file=file,
@@ -248,6 +293,7 @@ def _unit_from_scenario(
     folder_parts: tuple[str, ...],
     parent: str | None,
     violations: list[SpecViolation],
+    claims: dict[str, _ClaimSite],
 ) -> SpecUnit | None:
     _check_declaration_keyword(scenario.keyword, _ALLOWED_SCENARIO_KEYWORDS, file, scenario.location.line, violations)
     _check_step_keywords(scenario.steps, file, violations)
@@ -259,9 +305,13 @@ def _unit_from_scenario(
     if not tags:
         violations.append(_missing_tag_violation(file, scenario.location.line, scenario.keyword, scenario.name))
         return None
+    coordinate = _coordinate_for(folder_parts, tags[0])
+    _claim_coordinate(coordinate, file, scenario.tags[0].location.line, claims, violations)
+    for examples in scenario.examples:
+        _claim_block_tags(examples.tags, file, folder_parts, claims, violations)
     kind = SpecUnitKind.SCENARIO_OUTLINE if scenario.keyword in _OUTLINE_KEYWORDS else SpecUnitKind.SCENARIO
     return SpecUnit(
-        coordinate=_coordinate_for(folder_parts, tags[0]),
+        coordinate=coordinate,
         kind=kind,
         name=scenario.name,
         file=file,
@@ -277,6 +327,7 @@ def _unit_from_rule(
     file: Path,
     folder_parts: tuple[str, ...],
     violations: list[SpecViolation],
+    claims: dict[str, _ClaimSite],
 ) -> SpecUnit | None:
     _check_declaration_keyword(rule.keyword, _ALLOWED_RULE_KEYWORDS, file, rule.location.line, violations)
     _check_tags_are_kebab_case(rule.tags, file, violations)
@@ -284,8 +335,10 @@ def _unit_from_rule(
     if not tags:
         violations.append(_missing_tag_violation(file, rule.location.line, rule.keyword, rule.name))
         return None
+    coordinate = _coordinate_for(folder_parts, tags[0])
+    _claim_coordinate(coordinate, file, rule.tags[0].location.line, claims, violations)
     return SpecUnit(
-        coordinate=_coordinate_for(folder_parts, tags[0]),
+        coordinate=coordinate,
         kind=SpecUnitKind.RULE,
         name=rule.name,
         file=file,
@@ -301,6 +354,7 @@ def _extract_units_from_document(
     file: Path,
     folder_parts: tuple[str, ...],
     violations: list[SpecViolation],
+    claims: dict[str, _ClaimSite],
 ) -> list[SpecUnit]:
     units: list[SpecUnit] = []
     if document.feature is None:
@@ -328,6 +382,7 @@ def _extract_units_from_document(
     feature = document.feature
     _check_declaration_keyword(feature.keyword, _ALLOWED_FEATURE_KEYWORDS, file, feature.location.line, violations)
     _check_tags_are_kebab_case(feature.tags, file, violations)
+    _claim_block_tags(feature.tags, file, folder_parts, claims, violations)
     for child in document.feature.children:
         if child.background is not None:
             _check_declaration_keyword(
@@ -335,11 +390,13 @@ def _extract_units_from_document(
             )
             _check_step_keywords(child.background.steps, file, violations)
         elif child.scenario is not None:
-            scenario_unit = _unit_from_scenario(child.scenario, file, folder_parts, parent=None, violations=violations)
+            scenario_unit = _unit_from_scenario(
+                child.scenario, file, folder_parts, parent=None, violations=violations, claims=claims
+            )
             if scenario_unit is not None:
                 units.append(scenario_unit)
         elif child.rule is not None:
-            rule_unit = _unit_from_rule(child.rule, file, folder_parts, violations=violations)
+            rule_unit = _unit_from_rule(child.rule, file, folder_parts, violations=violations, claims=claims)
             if rule_unit is not None:
                 units.append(rule_unit)
             # Children of an untagged Rule are still representable units of their
@@ -357,7 +414,12 @@ def _extract_units_from_document(
                     _check_step_keywords(rule_child.background.steps, file, violations)
                 elif rule_child.scenario is not None:
                     child_unit = _unit_from_scenario(
-                        rule_child.scenario, file, folder_parts, parent=parent_coordinate, violations=violations
+                        rule_child.scenario,
+                        file,
+                        folder_parts,
+                        parent=parent_coordinate,
+                        violations=violations,
+                        claims=claims,
                     )
                     if child_unit is not None:
                         units.append(child_unit)
@@ -504,6 +566,7 @@ def scan_corpus(corpus_root: Path) -> CorpusScan:
         raise SpecCorpusRootNotFoundError(f"Spec corpus root is not a directory: {corpus_root}")
     units: list[SpecUnit] = []
     violations: list[SpecViolation] = []
+    claims: dict[str, _ClaimSite] = {}
     feature_files = _scan_corpus_structure(corpus_root, violations)
     for feature_file in feature_files:
         folder_parts = feature_file.relative_to(corpus_root).parent.parts
@@ -512,6 +575,6 @@ def scan_corpus(corpus_root: Path) -> CorpusScan:
         document = _parse_feature_file(feature_file, source_text, violations)
         if document is None:
             continue
-        units.extend(_extract_units_from_document(document, feature_file, folder_parts, violations))
+        units.extend(_extract_units_from_document(document, feature_file, folder_parts, violations, claims))
 
     return CorpusScan(units=tuple(units), violations=tuple(violations), feature_file_count=len(feature_files))

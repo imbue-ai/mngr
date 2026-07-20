@@ -347,6 +347,113 @@ def test_scan_corpus_rejects_english_synonym_keywords_outside_the_language_const
     ]
 
 
+def test_scan_corpus_rejects_duplicate_coordinate_claims_within_a_folder(tmp_path: Path) -> None:
+    root = write_spec_corpus(
+        tmp_path / "specs",
+        {
+            # a.feature: the first claim of auth.dup-tag (unit identity).
+            "auth/a.feature": ("Feature: A\n\n  @dup-tag\n  Scenario: first claimant\n    Given a\n"),
+            # b.feature: a Feature-block tag re-claims auth.dup-tag; an
+            # auxiliary tag repeating dup-tag is exempt from uniqueness; an
+            # Examples tag re-claims auth.uniq-tag (already the identity of
+            # the unit right above it).
+            "auth/b.feature": (
+                "@dup-tag\n"
+                "Feature: B\n"
+                "\n"
+                "  @uniq-tag @dup-tag\n"
+                "  Scenario Outline: outline\n"
+                "    Given <a>\n"
+                "\n"
+                "    @uniq-tag\n"
+                "    Examples:\n"
+                "      | a |\n"
+                "      | 1 |\n"
+            ),
+            # Same raw tag in a different folder claims a different coordinate.
+            "other/c.feature": ("Feature: C\n\n  @dup-tag\n  Scenario: unrelated folder\n    Given a\n"),
+        },
+    )
+
+    scan = scan_corpus(root)
+
+    duplicate_messages = sorted(
+        (violation.file.name, violation.line, violation.message)
+        for violation in scan.violations
+        if "claimed" in violation.message
+    )
+    assert len(duplicate_messages) == 2
+    assert duplicate_messages[0][0] == "b.feature"
+    assert duplicate_messages[0][1] == 1
+    assert "'auth.dup-tag'" in duplicate_messages[0][2]
+    assert "a.feature:3" in duplicate_messages[0][2]
+    assert duplicate_messages[1][0] == "b.feature"
+    assert duplicate_messages[1][1] == 8
+    assert "'auth.uniq-tag'" in duplicate_messages[1][2]
+    assert "b.feature:4" in duplicate_messages[1][2]
+    # No other violations: the auxiliary repeat and the cross-folder repeat are fine.
+    assert len(scan.violations) == 2
+
+
+def test_scan_corpus_accepts_a_rich_fully_valid_corpus(tmp_path: Path) -> None:
+    root = write_spec_corpus(
+        tmp_path / "specs",
+        {
+            "overview.md": "corpus-wide context\n",
+            "invariants.feature": (
+                "Feature: Corpus invariants\n"
+                "\n"
+                "  @no-plaintext-secrets\n"
+                "  Rule: Secrets never appear in plain text\n"
+                "    Rationale prose.\n"
+            ),
+            "authentication/overview.md": "authentication context\n",
+            "authentication/signin.feature": (
+                "@signin-surface\n"
+                "Feature: Sign-in with a one-time login code\n"
+                "  Free prose description.\n"
+                "\n"
+                "  Background:\n"
+                "    Given a running desktop client\n"
+                "\n"
+                "  @fresh-code\n"
+                "  Scenario: Opening a fresh login URL signs the user in\n"
+                "    Given the user is not signed in\n"
+                '    When the user opens the login URL with payload:\n'
+                '      """\n'
+                "      any doc string\n"
+                '      """\n'
+                "    Then the user is signed in\n"
+                "    And a table is fine:\n"
+                "      | key | value |\n"
+                "      | a   | 1     |\n"
+                "    But nothing else happens\n"
+                "\n"
+                "  @missing-code\n"
+                "  Scenario Outline: Requests without a code are malformed\n"
+                '    When a request is made to "<path>"\n'
+                "    Then it is rejected\n"
+                "\n"
+                "    @missing-code-paths\n"
+                "    Examples:\n"
+                "      | path   |\n"
+                "      | /login |\n"
+            ),
+            "authentication/signin.md": "sidecar prose for signin.feature\n",
+        },
+    )
+
+    scan = scan_corpus(root)
+
+    assert scan.violations == ()
+    assert scan.feature_file_count == 2
+    assert [unit.coordinate for unit in scan.units] == [
+        "authentication.fresh-code",
+        "authentication.missing-code",
+        "no-plaintext-secrets",
+    ]
+
+
 def test_scan_corpus_reports_untagged_unit_and_omits_it_from_records(tmp_path: Path) -> None:
     root = write_spec_corpus(
         tmp_path / "specs",
