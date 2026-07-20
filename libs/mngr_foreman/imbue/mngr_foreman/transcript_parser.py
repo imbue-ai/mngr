@@ -1,8 +1,8 @@
 """Parse raw Claude session JSONL into diff-capable transcript events.
 
 Vendored and modified from
-``default-workspace-template/apps/system_interface/imbue/system_interface/claude_session_parser.py``
-(see static/vendor/VENDORED.md for provenance). Changes versus the original:
+``default-workspace-template/apps/system_interface/imbue/system_interface/claude_session_parser.py``.
+Changes versus the original:
 
 1. **Diff-capable tool inputs.** For file-editing tools (Edit/Write/MultiEdit/
    NotebookEdit) the full, untruncated ``input`` dict is attached under

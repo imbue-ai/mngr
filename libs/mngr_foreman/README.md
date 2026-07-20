@@ -53,8 +53,15 @@ Foreman shows **every agent in mngr's view** — chat (live transcript + send) f
 - A blocking TUI dialog on an agent (unanswered permission or `/login`) makes a
   send fail; the error is surfaced inline. Phase 2's terminal page is how you
   clear it.
-- `marked` (markdown renderer) is vendored under `static/vendor/`; raw HTML in
-  assistant output is escaped, not rendered.
+- **Frontend libs are fetched on first run, not vendored.** marked, xterm,
+  highlight.js, KaTeX, mermaid, and the Atkinson Hyperlegible fonts are pinned
+  (exact URL + sha256) in `assets.py` and downloaded into
+  `<host_dir>/plugin/foreman/assets` at startup, then served from there — see
+  [`ASSETS.md`](ASSETS.md). An offline box degrades gracefully: chat + terminal
+  need marked/xterm (a loud log line names them if unreachable; markdown falls
+  back to escaped text), while highlighting/math/diagrams/custom fonts are
+  optional and simply stay off. Raw HTML in assistant markdown is always escaped,
+  never rendered.
 - **Warm connection pool & idle-stop:** `mngr foreman` keeps a warm SSH connection to
   every host with a RUNNING/WAITING agent (a periodic `true` ping every ~25s) so
   sends/reads/dialog-probes are fast. That ping registers as SSH activity in

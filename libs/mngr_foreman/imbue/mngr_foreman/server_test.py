@@ -60,7 +60,9 @@ def test_static_js_revalidate_and_gzip() -> None:
 
 
 def test_vendor_asset_immutable_cache() -> None:
-    resp = _client().get("/static/vendor/VENDORED.md")
+    # atkinson.css is the one vendor/ file that still ships in the package (the
+    # rest are fetched at runtime); it exercises the immutable-cache header path.
+    resp = _client().get("/static/vendor/atkinson.css")
     assert resp.status_code == 200
     assert "immutable" in resp.headers["Cache-Control"]
 

@@ -32,6 +32,8 @@ from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr_foreman.agent_registry import AgentRegistry
+from imbue.mngr_foreman.assets import ensure_assets
+from imbue.mngr_foreman.assets import get_asset_dir
 from imbue.mngr_foreman.connection_pool import ConnectionPool
 from imbue.mngr_foreman.input_state import detect_blocking_dialog
 from imbue.mngr_foreman.input_state import is_busy_state
@@ -68,14 +70,27 @@ _TARGET_REFRESH_SECONDS: Final[float] = 30.0
 _HEARTBEAT_SECONDS: Final[float] = 15.0
 
 
-def _read_static(rel_path: str) -> tuple[bytes, str] | None:
-    """Read a bundled static asset by relative path, or None if missing/escaping."""
+def _read_static(rel_path: str, asset_dir: Path | None) -> tuple[bytes, str] | None:
+    """Read a static asset by relative path, or None if missing/escaping.
+
+    ``vendor/*`` third-party libs are served from the fetched asset cache
+    (``asset_dir``, populated by ``ensure_assets``); ``vendor/atkinson.css`` and
+    every non-vendor page/script ship in the package. A ``vendor/*`` file that is
+    neither cached nor packaged returns None (404) -- the frontend degrades.
+    """
     # Guard against path traversal: only allow simple forward-slashed names.
     if rel_path.startswith("/") or ".." in rel_path.split("/"):
         return None
     parts = [p for p in rel_path.split("/") if p]
     if not parts:
         return None
+    if parts[0] == "vendor" and asset_dir is not None and len(parts) > 1:
+        cached = asset_dir.joinpath(*parts[1:])
+        try:
+            if cached.is_file():
+                return cached.read_bytes(), _content_type_for(parts[-1])
+        except OSError:
+            return None
     try:
         resource = resources.files(_STATIC_PACKAGE)
         for part in parts:
@@ -120,6 +135,7 @@ def create_app(
     registry: AgentRegistry,
     pool: ConnectionPool,
     max_tool_output_chars: int,
+    asset_dir: Path | None = None,
 ) -> Flask:
     # static_folder=None: foreman serves its own bundled assets via importlib
     # resources (see _read_static), so Flask's default /static route would only
@@ -163,7 +179,7 @@ def create_app(
         return _serve_static_or_404(rel_path)
 
     def _serve_static_or_404(rel_path: str) -> Response:
-        result = _read_static(rel_path)
+        result = _read_static(rel_path, asset_dir)
         if result is None:
             return Response("Not found", status=404, mimetype="text/plain")
         data, content_type = result
@@ -496,11 +512,16 @@ def run_server(
     max_tool_output_chars: int,
 ) -> None:
     """Start the registry + warm connection pool and serve forever (blocking)."""
+    # Fetch pinned frontend libs into the local cache before serving (a no-op
+    # once cached). Never fatal: missing assets degrade the UI, they don't stop
+    # the server -- see ensure_assets.
+    asset_dir = get_asset_dir(mngr_ctx)
+    ensure_assets(asset_dir)
     registry = AgentRegistry(mngr_ctx)
     registry.start()
     pool = ConnectionPool(mngr_ctx)
     pool.start_maintainer(registry)
-    app = create_app(mngr_ctx, registry, pool, max_tool_output_chars)
+    app = create_app(mngr_ctx, registry, pool, max_tool_output_chars, asset_dir=asset_dir)
     # threaded=True so SSE connections (one long-lived generator each) don't
     # block the list/message endpoints; use_reloader=False (single process).
     app.run(host=host, port=port, threaded=True, use_reloader=False, debug=False)
