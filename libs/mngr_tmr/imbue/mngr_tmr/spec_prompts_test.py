@@ -155,11 +155,11 @@ def test_committed_minds_specs_mapper_template_renders() -> None:
         testing_flags=(),
         template_path=minds_template,
     )
-    # The variant's blocks are filled with minds specifics...
+    # The variant's blocks are filled with minds specifics (its placement
+    # frame also speaks of the repo taxonomy, so that phrase stays present).
     assert "minds app" in prompt
     assert "minds_snapshot_resume" in prompt
-    # ...the generic placement default is replaced...
-    assert "test taxonomy" in prompt  # the minds block also speaks of the repo taxonomy
+    assert "test taxonomy" in prompt
     assert "@pytest.mark.release" in prompt
     # ...and the packaged contract body is inherited, not duplicated.
     assert "READ-ONLY" in prompt
