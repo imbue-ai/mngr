@@ -541,6 +541,28 @@ def test_admin_account_endpoints_use_admin_paths(monkeypatch: pytest.MonkeyPatch
     ]
 
 
+def test_admin_account_path_percent_encodes_reserved_email_characters(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An email with URL-reserved characters ('#', '?') stays one intact path segment.
+
+    Without percent-encoding, '?' would start a query string and '#' a
+    fragment, silently addressing the wrong path.
+    """
+    email = "al#i?ce@imbue.com"
+    seen: list[httpx.URL] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url)
+        return httpx.Response(200, json={"plan_name": "ally", "entitlements": {}})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    client.admin_set_account_plan(SecretStr("adm"), email, "ally")
+    assert len(seen) == 1
+    # httpx exposes the percent-decoded path: the full email survives intact.
+    assert seen[0].path == f"/admin/accounts/{email}/plan"
+    assert seen[0].query == b""
+    assert seen[0].fragment == ""
+
+
 # -- Paid lists (admin-key authenticated) --
 
 

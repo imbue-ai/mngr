@@ -13,6 +13,7 @@ Authentication semantics:
 
 import time
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 from loguru import logger
@@ -779,10 +780,20 @@ class ImbueCloudConnectorClient(MutableModel):
     # Account admin (email-addressed, MINDS_PAID_ADMIN_KEY authenticated)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _admin_account_path(email: str) -> str:
+        """The /admin/accounts path segment for an email, percent-encoded.
+
+        Email local parts may legally contain URL-reserved characters like
+        ``?`` or ``#``; encoding (keeping ``@`` literal) stops them from
+        splitting the URL. FastAPI decodes the path param server-side.
+        """
+        return f"/admin/accounts/{quote(email, safe='@')}"
+
     def admin_get_account(self, admin_api_key: SecretStr, email: str) -> AccountInfo:
         response = self._send(
             "GET",
-            self._url(f"/admin/accounts/{email}"),
+            self._url(self._admin_account_path(email)),
             exc_cls=ImbueCloudAccountError,
             headers=self._bearer(admin_api_key),
             timeout=KEY_OP_TIMEOUT_SECONDS,
@@ -794,7 +805,7 @@ class ImbueCloudConnectorClient(MutableModel):
         # the same state (safe to retry on transport errors).
         response = self._send(
             "POST",
-            self._url(f"/admin/accounts/{email}/plan"),
+            self._url(f"{self._admin_account_path(email)}/plan"),
             exc_cls=ImbueCloudAccountError,
             headers=self._bearer(admin_api_key),
             json={"plan": plan},
@@ -809,7 +820,7 @@ class ImbueCloudConnectorClient(MutableModel):
         # transport errors).
         response = self._send(
             "POST",
-            self._url(f"/admin/accounts/{email}/quota"),
+            self._url(f"{self._admin_account_path(email)}/quota"),
             exc_cls=ImbueCloudAccountError,
             headers=self._bearer(admin_api_key),
             json={"entitlement": entitlement, "value": value},
