@@ -30,12 +30,13 @@ from imbue.mngr_mapreduce.data_types import MapReduceRecipe
 from imbue.mngr_mapreduce.data_types import MapReduceTask
 from imbue.mngr_mapreduce.data_types import MapperInfo
 from imbue.mngr_mapreduce.data_types import ReducerInfo
+from imbue.mngr_tmr.branch_bundles import apply_agent_branch_bundle_if_present
+from imbue.mngr_tmr.branch_bundles import finalize_reducer_branch
+from imbue.mngr_tmr.branch_bundles import reducer_branch_applied
 from imbue.mngr_tmr.prompts import build_integrator_prompt
 from imbue.mngr_tmr.prompts import build_test_agent_prompt
 from imbue.mngr_tmr.report import generate_html_report
 from imbue.mngr_tmr.report_upload import maybe_upload_report
-
-_BRANCH_BUNDLE_NAME = "branch.bundle"
 
 _DEFAULT_RECIPE_NAME = "tmr"
 
@@ -84,61 +85,6 @@ def collect_tests(
 
     logger.info("Collected {} test(s)", len(test_ids))
     return test_ids
-
-
-def _apply_branch_bundle(
-    source_dir: Path,
-    bundle_path: Path,
-    branch_name: str,
-    agent_name: str,
-    cg: ConcurrencyGroup,
-) -> bool:
-    """Fetch a branch from a bundle into the local source_dir repo.
-
-    The bundle was created with ``git bundle create ... <base>..<branch>``,
-    so it carries the ref under its branch name; the fetch refspec maps
-    that ref onto the same local branch name. Idempotent for repeated
-    invocations. Returns True on success.
-    """
-    result = cg.run_process_to_completion(
-        ["git", "fetch", "--no-tags", str(bundle_path), f"+{branch_name}:{branch_name}"],
-        cwd=source_dir,
-        is_checked_after=False,
-    )
-    if result.returncode != 0:
-        logger.warning(
-            "Failed to apply branch bundle for agent '{}' (branch {}): {}",
-            agent_name,
-            branch_name,
-            result.stderr.strip(),
-        )
-        return False
-    logger.info("Applied branch bundle for agent '{}' onto branch '{}'", agent_name, branch_name)
-    return True
-
-
-def _has_local_branch(source_dir: Path, branch_name: str, cg: ConcurrencyGroup) -> bool:
-    """Check whether a git branch exists in the local source_dir repo."""
-    result = cg.run_process_to_completion(
-        ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch_name}"],
-        cwd=source_dir,
-        is_checked_after=False,
-    )
-    return result.returncode == 0
-
-
-def _reducer_branch_applied(
-    ctx: MapReduceContext,
-    reducer: AgentMetadata | None,
-) -> bool:
-    """Did the reducer succeed and land a usable local branch?
-
-    Read from git rather than recipe-side state so the recipe stays stateless
-    (and ``render_report`` is safe to call repeatedly during polling).
-    """
-    if reducer is None or reducer.branch_name is None or reducer.error_summary is not None:
-        return False
-    return _has_local_branch(ctx.source_dir, reducer.branch_name, ctx.cg)
 
 
 class TestMapReduceRecipe(MapReduceRecipe, FrozenModel):
@@ -220,19 +166,10 @@ class TestMapReduceRecipe(MapReduceRecipe, FrozenModel):
         return build_integrator_prompt(template_path=self.reducer_prompt_path)
 
     def on_mapper_finalized(self, ctx: MapReduceContext, agent_dir: Path, info: MapperInfo) -> None:
-        bundle = agent_dir / _BRANCH_BUNDLE_NAME
-        if bundle.is_file():
-            _apply_branch_bundle(ctx.source_dir, bundle, info.branch_name, str(info.agent_name), ctx.cg)
+        apply_agent_branch_bundle_if_present(ctx.source_dir, agent_dir, info.branch_name, str(info.agent_name), ctx.cg)
 
     def on_reducer_finalized(self, ctx: MapReduceContext, agent_dir: Path, info: ReducerInfo) -> None:
-        bundle = agent_dir / _BRANCH_BUNDLE_NAME
-        if not bundle.is_file():
-            logger.warning("Reducer agent '{}' did not produce a branch bundle", info.agent_name)
-            return
-        if not _apply_branch_bundle(ctx.source_dir, bundle, info.branch_name, str(info.agent_name), ctx.cg):
-            return
-        if _has_local_branch(ctx.source_dir, info.branch_name, ctx.cg):
-            _emit_reducer_branch(info.branch_name, ctx.output_opts)
+        finalize_reducer_branch(ctx, agent_dir, info)
 
     def render_report(
         self,
@@ -243,7 +180,7 @@ class TestMapReduceRecipe(MapReduceRecipe, FrozenModel):
         # Only surface a "Push integrated branch" hint when the reducer's
         # bundle actually landed locally; otherwise the command would
         # reference a nonexistent branch.
-        applied = _reducer_branch_applied(ctx, reducer)
+        applied = reducer_branch_applied(ctx.source_dir, reducer, ctx.cg)
         run_commands = _build_run_commands(
             ctx.run_name,
             recipe_name=self.name,
@@ -277,17 +214,6 @@ def _build_run_commands(
     if integrated_branch is not None:
         commands.append(("Push integrated branch", f"git push origin {integrated_branch}"))
     return commands
-
-
-def _emit_reducer_branch(branch_name: str, output_opts: OutputOptions) -> None:
-    """Emit the integrator branch name as a structured event when applicable."""
-    match output_opts.output_format:
-        case OutputFormat.JSON | OutputFormat.JSONL:
-            emit_event("integrator_branch", {"branch_name": branch_name}, output_opts.output_format)
-        case OutputFormat.HUMAN:
-            pass
-        case _ as unreachable:
-            assert_never(unreachable)
 
 
 def _emit_report_url(url: str | None, output_opts: OutputOptions) -> None:
