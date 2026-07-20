@@ -4422,8 +4422,10 @@ def run_r2_quota_sweep(
     Fails loudly (raises) when the account-wide usage query fails -- a sweep
     that cannot see usage must not look like a clean pass. Per-user failures
     (email lookup, a Cloudflare token update) are logged and skip only that
-    user/key, and skipping never *downgrades* anything: unknown limits or
-    unknown usage always leave keys as they are.
+    user/key, and an unknown limit skips the user entirely. Missing data never
+    *downgrades* a key: a bucket absent from the analytics snapshot counts as
+    zero usage, which can only restore (a wrong restore self-corrects on the
+    next pass, once the bucket's snapshot lands).
     """
     counters = {
         "extra_keys_revoked": 0,
